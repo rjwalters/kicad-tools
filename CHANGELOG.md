@@ -7,398 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **The pure-Python fallback A* is now pairwise (HV-isolation) aware at search time** (#4507, epic #4431 Phase 2) — the hot-loop bitmap, `_is_trace_blocked`/`_is_via_blocked` kernels and the C++ backend's fallback-router threading now mirror the C++ `cross_domain_*` search kernels (same domain projection, per-pair widened radius, layer-scoped #4506 attach-zone waiver, out-of-bounds-is-empty ring dilation), so a net that falls back on an HV board converges instead of thrashing against the Phase-1 post-route gate; fully dormant without `--voltage-map`.
-
-- **`kct ipc push-routes` can now actually read a board** (#4788) — the
-  handler imported the nonexistent `kicad_tools.pcb.parser` (dead since
-  #2363) behind an `except ImportError`, so every invocation exited 1 with
-  "PCB parser not available." It now loads boards via the first-party
-  `kicad_tools.schema.pcb.PCB.load()` (unguarded, so wiring regressions fail
-  loudly), reads the real model attributes (`segments`, `start`/`end`/
-  `position` tuples, `net_number`) instead of `getattr(..., 0)` fallbacks
-  that would have pushed zero-length tracks at the origin on net 0, and the
-  `--net` filter matches by net name against `PCB.nets`; an unknown net name
-  or unparseable board is now a clear error (exit 1) in both text and JSON
-  modes.
-
-- **A single relief-rescue transaction is now proportionally bounded** (#4781)
-  — a rescue (including its depth-1 nested rescues, which share the parent's
-  allowance) may spend at most `max(25% of the remaining stage budget, 90 s)`
-  before rolling back verbatim at the existing `_past_deadline()` check sites;
-  previously one board-07 transaction burned 279 s (46% of the 600 s stage)
-  and still rolled back, starving the rip-up iteration that lands the 26th
-  net. No-deadline stages (board 06's deterministic regen, the two-phase
-  stall-relief hook) are byte-identical; a `Relief-rescue transaction bound:`
-  log line records which arm was live.
-
-- **The copper-moving `--lattice-optimize` post-passes now consult the pairwise
-  HV creepage predicate before accepting a move** (#4766, epic #4431) — PR
-  #4756 widened the post-route pairwise audit but left the geometric
-  post-passes pairwise-*blind*: `TraceOptimizer` (via
-  `optimize_routes_grid_synced`) gates its moves only on
-  `CollisionChecker.path_is_clear`, and both checker implementations resolve
-  clearance as the **scalar** `grid.rules.trace_clearance`, while
-  `drc_verify_and_nudge` translates segments by up to 0.2 mm with the same
-  scalar model. Either pass could therefore close a creepage gap the search had
-  deliberately opened, leaving the audit to fail a run the optimizer had just
-  broken. Both now run the same layer-scoped predicate the search and the #4588
-  gate run: the optimizer gets a route-level accept hook on
-  `apply_route_transform_grid_synced` that vetoes an optimized route
-  (`route_pairwise_violation` against `grid.routes`) **before** the grid
-  transaction is entered, and the nudge brackets itself with a board-level
-  `find_pairwise_violations` scan and reverts every route named in a net pair
-  that is present after but not before, using the entry snapshot it already
-  takes for the #3507 resync. Both gates only undo what the pass would
-  *introduce* — an inherited shortfall on the same net pair keeps its
-  optimization and stays the audit's to report, so the passes never mask copper
-  the gate exists to fail on. Collinear consolidation is deliberately **not**
-  gated and now says why in its module docstring: its merged segment is the
-  exact union of the segments it replaces, so no gap to foreign copper can
-  shrink. The veto is coarse (a route loses its whole optimization for one bad
-  move), so the counts are surfaced — vetoed routes on stderr after the
-  optimize pass and `pairwise_reverts` in the DRC-nudge summary — and the nudge
-  re-reports `remaining_violations` post-revert rather than the flattering
-  pre-revert count. Both passes derive their context through the **single**
-  router resolver #4785 landed for exactly this — `PairwisePathChecker.
-  from_router` (`rules.pairwise_clearance`, `_pairwise_attach_zones_cache`,
-  `net_names` + `_net_name_to_id()`, `grid.routes`) — so the two post-passes,
-  the path-level predicate and the #4588 audit cannot resolve the table, the
-  id→name map or the #4506 zones differently; that resolver picks up three
-  fixes in the process (dormant on a table that widens nothing, `sorted()`
-  net-name tie-break so an id collision is deterministic, and it now arms on a
-  grid-less router by falling back to `router.routes`). All eight CLI call
-  sites are untouched. Fully dormant without `--voltage-map`: no table means no
-  checker, no gate and no scan, and no board under `boards/` uses that flag. No
-  C++ change (`ROUTER_CPP_BUILD_VERSION` stays 19).
-- **The C++ router's HV attach-zone waiver is now layer-scoped, so the search
-  stops proposing copper the pairwise gate rejects** (#4507, epic #4431 Phase
-  2) — PR #4756 narrowed the #4506 rated-footprint exemption on the Python side
-  (a zone waives the pairwise creepage widening only on layers where *both*
-  nets have pad copper) but deliberately left the C++ `Grid3D` zone halo
-  layer-agnostic, with the layer-scoped Python `route_pairwise_violation` as
-  the acceptance check. That left the C++ search and the Python gate
-  disagreeing exactly where it hurts: the search would neck an HV net through a
-  rated part's pad field on a layer that part has no copper on, its own
-  `validate_route` waived it, and the layer-scoped post-check then rejected the
-  result — burning the net's resume budget and dropping it into the 10-100x
-  slower pure-Python fallback. `AttachZone` gains a per-net `net_layers` map
-  (net id -> grid layer indices), `Grid3D::attach_zone_exempts` gains a `layer`
-  argument, and every consult in `validate_route` and the search-time kernels
-  (`cross_domain_trace_blocked`, `cross_domain_via_blocked`) passes the layer
-  the compared copper actually shares — via-vs-via, where no single layer
-  applies, stays agnostic, matching the lattice engine's `exempt_pt_pt`
-  convention. The segment-vs-pad branch keys on the *pad's* layer: that loop
-  already filters mismatched layers before the zone consult, so the only shape
-  where the two candidate keys differ is a through-hole pad, which keeps waiving
-  on every layer because the barrel spans every layer. On a two-domain fixture
-  whose only cheap path threads a rated part's pad field on a layer it does not occupy,
-  the layer-agnostic baseline exhausts 5 resume attempts, falls back to the
-  Python A* and **fails to route**; the layer-scoped search dives to the layer
-  the part actually licences and converges on the first attempt, gate-clean.
-  The layer projection now has a single implementation
-  (`pairwise_clearance.project_zone_layers`) shared by the lattice and C++
-  paths, so no engine can drift from the gate. Fully dormant without
-  `--voltage-map`; a zone with no layer data keeps the previous agnostic
-  verdict. `ROUTER_CPP_BUILD_VERSION` 18 -> 19 (run `kct build-native`).
-- **`DETERMINISTIC_RESCUE_DEFAULT`'s docblock now records *why* board 07
-  regressed instead of naming the investigation as future work** (#4770) —
-  documentation only; the constant's value is unchanged (`False`) and no
-  DRC allowlist or reach floor moved. The A/B was re-mined from the three
-  recorded CI runs and re-run locally at `HEAD` with the C++ backend built,
-  and both halves of the intuitive reading turn out to be wrong. **No net's
-  rescue flips commit-vs-rollback**: on board 07 the deterministic bound is a
-  straight reach *loss* in the negotiated pass (26/31 → 24/31), because a
-  single `DQ3` relief transaction that gives up in 2.6 s under the 10 s wall
-  clock instead runs **279.1 s — 46 % of the 600 s stage budget** and rolls
-  back anyway, so the pass completes 2 rip-up iterations instead of 5 and
-  never reaches the one that produces board 07's 26th net. The advertised
-  `+1 net` is then produced downstream by `PlacementDeltaFeedbackLoop`'s
-  `run_delta`, whose accept-gate is *relative* (`new_count > pre_count`): the
-  depressed baseline admits the `U3 translate` placement delta that `main`
-  refuses at 25 → 25, and that delta — not the rescue — carries the `+5 DRC`
-  (4× `clearance_pad_segment` at 0.094 mm on `DQ1`/`DQ2` and 0.076 mm on
-  `DQ4`/`DQS_N`, 2× `clearance_segment_via` at 0.049 mm on `DQ1`/`DQ2`, 1×
-  `match_group_length_skew` with `ADDR_BUS` at 11.030 mm instead of 0.000 mm,
-  less the `DQS_N`/`DQS_P` diff-pair pair that stops firing only because
-  `DQS_N` went unrouted). Five of the seven new errors sit on copper with no
-  connection to the reach delta at all. Recommendation recorded on #4730:
-  keep the opt-in permanently. The full journal (per-pass rescue tables,
-  per-violation attribution, reproduction recipe) lands in
-  `boards/07-matchgroup-test/diagnostic-runs/README.md`;
-  `_normalize_deterministic_budget`'s docstring and board 07's README are
-  updated in lockstep, and a new `TestPlacementDeltaFeedbackCaveat` pins the
-  two structural claims the finding rests on — that
-  `PlacementDeltaFeedbackLoop.run_delta` threads no `deterministic_rescue`
-  (so "flip the constant, not the CLI" stays true) and that
-  `Autorouter._post_negotiation_sweep_bounds` cannot see the flag (so the
-  #4159 sweep stays excluded as a confound).
-- **Nine polish fixes from the 2026-08-08/09 sweep's judge nits** (#4765) —
-  each a small correctness defect in code that shipped last sweep; none
-  changes routed copper or an exit code. (A) The `kct route` banner decided
-  its `UNBOUNDED` line from the raw `--timeout`/`--per-net-timeout` flags, so
-  `--complete --per-net-timeout 0` announced an unbounded lattice negotiation
-  while `_apply_complete_localization`'s 60 s per-link backstop was already
-  armed; it now keys off the resolved `_resolve_lattice_link_budget` /
-  `_lattice_absolute_deadline` values and reports the budget actually in
-  force. (B) `--quiet` silently discarded an explicitly-requested
-  `--report-stage-quality` table; the opt-in now wins (the `recorder is None`
-  guard already carried the entire "not requested" case). (C) The
-  "lazy" `StageQualityRecorder` import was a bare `sys.modules` hit — the
-  module is already executed by the eager stage-constant import — and is
-  hoisted to module scope with an accurate comment. (D) The `45deg%`
-  denominator moves from the renderer to a read-only
-  `RoutingQualityMetrics.diagonal_45_fraction` property, beside the
-  `fragment_fraction` / `staircase_fraction` contract (no new dataclass
-  field: `to_dict()` is a stable JSON contract). (E) A DRC finding that mixes
-  a pad with a ref-less track item normalizes to a smaller ref set than
-  "exact-set" suggests, so a one-ref waiver covers a *class* of findings; the
-  behaviour is kept (narrowing it would retroactively un-waive shipped
-  sidecars) but is now documented on `apply_waivers_to_report` and in
-  `docs/reference/cli.md`, pinned by regression tests, with `nets` as the
-  documented narrowing remedy. (F) `kct drc boards/NN/output/drc.json` never
-  probed `boards/NN/` for `.kct_waivers.json` (all three of the shared
-  discovery probes collapse into the report's own directory); report input
-  now falls back to the report directory's parent. (H) The documented
-  "4+ trailing tokens are never trimmed" path of `_sync_at_angle` gets its
-  first test. (I) The residual #3441 lattice-rescue `UserWarning`
-  ("quantisation margin is reduced at fine-pitch pads") predicts a grid-only
-  failure mode and is demoted to INFO for `--route-engine mesh|lattice`,
-  completing #4761's gate on the sibling branch; every `GridAutoSelection`
-  field stays engine-invariant. (J) All ~16 `args.route_engine` reads in
-  `route_cmd.py` now go through one `_resolve_route_engine` helper, so a
-  `route_engine=None` namespace can no longer resolve to `"grid"` at ten
-  sites and `None` at six (including three `strategy=` arguments to
-  `load_pcb_for_routing`). (K) The non-grid "Fine-pitch grid analysis:
-  skipped" line printed even on boards where the grid path prints nothing;
-  it is now gated on the same `has_warnings` predicate the grid path uses.
-- **`PCB.import_from_schematic()` no longer drops a `*-netlist.kicad_net`
-  beside the user's schematic** (#4763) — the same defect #4750 fixed in
-  `pcb sync-netlist`, at the second call site. `export_netlist` defaults
-  `output_path` to `<schematic dir>/<stem>-netlist.kicad_net` and leaves the
-  file in place after parsing, so a bare call from `import_from_schematic`
-  (and from `PCB.from_schematic()`, which delegates to it) littered an
-  unrequested export byproduct into the project directory on every import
-  where kicad-cli is installed. The export now goes to an explicit path inside
-  a `tempfile.TemporaryDirectory`, which is torn down before the call returns;
-  `export_netlist` returns a fully parsed `Netlist`, so nothing downstream
-  re-reads the file and import results are unchanged. This also stops the test
-  suite from rewriting a **tracked** fixture: `TestImportFromSchematicIntegration`
-  runs the real kicad-cli against `tests/fixtures/simple_rc.kicad_sch`, so every
-  developer with kicad-cli got a dirty working tree from ` M
-  tests/fixtures/simple_rc-netlist.kicad_net` after a test run. That fixture —
-  an orphaned byproduct with zero consumers, committed by this very bug and
-  carrying an absolute developer path in its `(source ...)` line — is deleted.
-  New byproduct-location tests (a guard that the stubbed kicad-cli path really
-  runs, plus project-dir-listing, temp-cleanup, `str`-path, Python-fallback,
-  and export-failure cases) pin the behavior, and the integration tests now
-  assert the fixtures directory is unchanged across the call.
-- **The mypy baseline gate now runs cold, so a stale `.mypy_cache/` can no
-  longer invent a "NEW type error"** (#4767) —
-  `scripts/ci/check_mypy_baseline.py` invoked a bare `mypy src/` with no cache
-  control of any kind (no `--cache-dir`, no `cache_dir` in `[tool.mypy]`, no
-  `MYPY_CACHE_DIR` anywhere in the tree), so every local run reused the
-  incremental cache at `<cwd>/.mypy_cache`. CI is structurally the opposite —
-  there is no `actions/cache` in `.github/workflows/` and the Type Check job
-  pins `astral-sh/setup-uv` with `enable-cache: false` — so CI is always cold
-  and local is always warm, and only the local verdict was untrustworthy. The
-  cache outlives the tree it was computed from: `.mypy_cache/` is gitignored,
-  so `git reset --hard`, `git clean -fd` (ignored paths need `-x`), a rebase,
-  a force-push, and a Loom worktree reuse all leave it in place. Because the
-  gate diffs a signature multiset over all of `src/`, one replayed cached
-  error anywhere trips exit 2 and prints a filename unrelated to the diff —
-  which is what cost two independent PR reviews a cycle each during the
-  2026-08-08/09 sweep (PRs #4746, #4762), both on a phantom error in
-  `recovery/strategy.py`, a file neither PR touched. `run_mypy()` now passes
-  `--no-incremental` by default, and `--incremental` (alias `--warm-cache`)
-  is the documented opt-in for a tight burn-down loop. Measured cost of the
-  default: ~20 s vs ~0.5 s warm on `src/` — a price CI already paid on every
-  push. Exit-code semantics (0 within baseline / 1 tool failure / 2 new
-  errors), `diff_against_baseline`, `write_baseline`, and the #4558
-  version-drift guard are all unchanged, and `.github/mypy-baseline.txt` is
-  byte-identical (a new test pins both nanobind signatures so a future
-  `--update` cannot silently drop one). `pnpm typecheck` / `pnpm check:all`
-  still run a bare incremental `uv run mypy src/`, so the trap and its
-  `rm -rf .mypy_cache` remedy are now documented in `CLAUDE.md`, `README.md`'s
-  fresh-worktree checklist, and `docs/contributing/development.md`.
-- **Guide source citations are symbol-anchored, and a test now keeps them
-  that way** (#4764) — a follow-up to #4749 measured 20 of 32 `<file>.py:NNN`
-  citations under `docs/guides/` wrong (62.5%), the worst off by 8,569 lines
-  (`docs/guides/diff-pairs/04-length-matching.md` sent readers to
-  `router/core.py:6926` for `update_diffpair_skew`, which lives at 15495).
-  Two could not be repaired by refreshing a number at all — the guides cited
-  `_collect_explicit_match_groups`, renamed to `_gather_explicit_groups`, and
-  claimed `detect_match_groups` records the reference policy verbatim on
-  `MatchGroup.length_match_reference`, when `_resolve_reference` actually
-  resolves it into a concrete `MatchGroup.reference_net_id`. All 32 citations
-  in the diff-pair / match-group guides are now `symbol` + file-path anchors
-  (the convention PR #4753 established), as are the three rotten ones in
-  `docs/reference/api.md`, `docs/reference/cli.md`, and
-  `boards/03-usb-joystick/README.md`, plus the equally stale `Line` /
-  `Source line` table columns in `02-clearance-and-classes.md`,
-  `03-impedance-and-sizing.md`, and `04-cascade-safety.md`. Because the rot
-  reaccumulated across 8 files even after #4749 was filed, the fix is not
-  just the sweep: `tests/test_diffpair_docs.py` and
-  `tests/test_match_group_docs.py` each gain `test_no_line_number_citations`
-  (bans `\.py:\d+` outright in their guide tree) and `test_cited_symbols_exist`
-  (whole-word checks each anchored symbol in **both** the guide and the source
-  file it names, so a doc rewrite that drops the anchor and a source-side
-  rename both go red). A third suite, `tests/test_docs_source_citations.py`,
-  runs the same two checks over the docs the per-subtree suites cannot see —
-  `docs/reference/*.md`, `boards/*/README.md`, and the top-level
-  `docs/guides/*.md` — which is exactly where an unguarded rewrite of
-  `docs/reference/api.md` invented a `Footprint.to_sexp` that has never
-  existed (the real round-trip path is `Footprint.__setattr__` →
-  `Footprint._sync_attr_node`). That sweep also corrected two further false
-  claims the new coverage exposed: `api.md` said `locked` is emitted inside
-  `(attr ...)` when KiCad 10 requires the top-level `(locked yes)` form
-  (#3457), and `cli.md` attributed the `kct route` exit-code epilog to a
-  `build_parser` that does not exist in `route_cmd.py` (both it and the
-  `# Exit codes:` block live in `_main_impl`). The 26 citations under
-  `docs/investigations/`,
-  `docs/research/`, and `boards/07-matchgroup-test/diagnostic-runs/` are
-  deliberately untouched — those are dated forensic records where the line
-  number *is* the evidence.
-- **Host resource exhaustion aborts a route instead of silently changing
-  one, and the post-negotiation rescue sweep stops using a wall clock in
-  deterministic mode** (#4724) — the residual, load-correlated divergence
-  left over from #4536: one board-06 regen taken on a host at load-average
-  ~90 re-landed one fewer net in stagnation recovery (`restored 5 / rerouted
-  6`) than five same-code runs on a quiet host (`restored 4 / rerouted 7`),
-  then diverged chaotically. Both artifacts were valid and passed every
-  gate, so nothing failed loudly — the run was simply not the run the same
-  command produces on a quiet machine. Two environment-sensitive decision
-  points are closed. **(1) Exception transparency:** the router's broad
-  `except Exception` handlers exist so a malformed board or a fixture grid
-  cannot abort a route, but they also absorbed `MemoryError` — converting a
-  *host* failure into a routing *decision* ("this Steiner cell is free",
-  "this component has no pitch", "this rip-up did not fire", "use the
-  10-100x slower Python backend"). A new `router/resource_guard.py`
-  re-raises resource exhaustion (`MemoryError`, `RecursionError`, `ENOMEM`
-  `OSError`, and a native `bad_alloc` rethrown as `RuntimeError`) with a
-  named `[resource-exhaustion]` line, applied to the seven broad handlers on
-  the negotiated reroute path; every ordinary exception keeps its historical
-  fallback byte-for-byte. The C++ grid-mirror fallback also now names the
-  failing exception type in its log instead of reporting "unknown reason".
-  **(2) Sweep budget semantics:** the #4159 post-negotiation rescue sweep
-  applied its 60 s whole-pass / 10 s per-net wall clocks even to callers
-  running unbudgeted (`timeout=None` / `per_net_timeout=None`) in the
-  deterministic-budget mode #4536 established precisely so no wall clock
-  decides anything — and a per-net search that runs to its 1M-expansion cap
-  costs ~11 s on a CI runner, so the 10 s bound straddled it the same way
-  the relief rescue's 10 s sub-search budget did. `_post_negotiation_sweep`
-  now selects its bounds through `_post_negotiation_sweep_bounds`, which
-  hands an unbudgeted run with an active node-expansion cap to the cap
-  (keeping 600 s / 120 s as non-binding Python-fallback backstops) and logs
-  which bound is live, mirroring #4536's evidence discipline. The arm
-  self-scopes by construction: every caller that passes a `timeout`, and
-  every capless run, keeps the historical numbers exactly. Also: the gated
-  board-06 determinism smoke test now prints host load-average before,
-  between and after its regens (and in its failure message) so a flake is
-  attributable to load rather than argued about. No board recipe, DRC
-  allowlist or reach floor is touched; reproducing the load-90 divergence
-  itself remains out of reach by construction.
-- **The relief rescue's deterministic sub-search bound stays opt-in — the
-  fleet-default flip is withdrawn** (#4730) — #4536 gave
-  `Autorouter.route_all_negotiated` a `deterministic_rescue=` opt-in that
-  bounds the rescue's probe / displaced-victim re-land sub-searches by the
-  per-net node-expansion cap instead of the 10 s wall clock, taking machine
-  speed out of a decision that determines routed reach. The follow-up proposed
-  making it the fleet default; the A/B says no. With the bound on by default,
-  board 07 — routed through the **negotiated** entry point, not two-phase —
-  came back with a changed copper-LVS open set (`DQ3, DQ4, MIPI_DAT0_N` →
-  `DQS_N, MIPI_DAT0_P`, breaking the `--expect-opens` drift guard) and
-  routed-DRC 8 → 13 against an allowlist main sits exactly at, for +1 net of
-  reach. Measured twice, on two heads and two runners. Per the issue's own
-  acceptance criteria that is not absorbable, so nothing was re-baselined (no
-  DRC tolerance raised, no expected-opens set rewritten, no reach floor
-  lowered) and `DETERMINISTIC_RESCUE_DEFAULT` is `False`. **What did ship is
-  the switch**: `deterministic_rescue=` is now a per-call parameter on every
-  entry point that can reach a rescue — `route_all_negotiated`,
-  `route_all_two_phase`, `_create_two_phase_router`, `route_with_escape`,
-  `route_with_escape_and_diffpairs`, and the `hierarchical=True` delegation
-  (which previously dropped an explicit opt-in on the way to the path that
-  actually runs the rescue). The #3471 two-phase stall-relief hook calls
-  `_relief_rescue` with 8 **positional** arguments, so the value rides on a
-  `functools.partial` bound in `_create_two_phase_router`; before this that
-  path had no switch at all. Both paths log which bound is live, so a future
-  A/B has its evidence line on every board. Board 06 keeps its explicit
-  `deterministic_rescue=True`, which is again the only thing switching the
-  bound on for its 21/21 reach gate. Behavior on every board is unchanged;
-  reattempting the flip means first understanding why board 07's rescues keep
-  copper that carries +5 DRC.
-- **`--timeout` / `--per-net-timeout` now actually bound the lattice
-  engine** (#4697) — `kct route --route-engine lattice` was time-bounded
-  **only** under `--complete`. Everywhere else both flags were accepted,
-  echoed in the routing banner, and silently discarded, producing
-  observed 60+ minute unbounded runs on `--strategy basic` — the only
-  strategy the #4280 gate allows on the lattice. Root cause: the lattice
-  negotiates the whole netset in a single `route_netset()` call, so
-  `route_all()`'s between-nets `timeout` check can never fire mid-run,
-  and the negotiation's only bound (`deadline`) was derived solely from
-  `args._complete_link_budget_s`, which nothing but `--complete` stamps.
-  Fixed at that seam: `--per-net-timeout` now supplies the per-link
-  budget on **every** lattice run (same `budget x link-count` scaling
-  `--complete` already used), and `--timeout` supplies an absolute
-  monotonic ceiling threaded through `load_pcb_for_routing(...,
-  lattice_deadline=)`; when both are present the tighter bound wins.
-  `--complete`'s existing stamp still wins verbatim (#4472 semantics
-  unchanged), and `--per-net-timeout 0` (e.g. under
-  `--deterministic-budget`, where a wall-clock bound would destroy
-  reproducibility) still yields an unbudgeted negotiation. A truncated
-  run reports partial results with the existing `deadline-exceeded`
-  decline reason rather than dying silently. Also: the six bare
-  `router.route_all()` CLI dispatch sites now forward the user's budgets
-  (binding them on the grid engine and silencing the #2794 no-timeout
-  guard that fired pointing straight back at those lines), and the
-  routing banner no longer claims a budget the dispatched engine does
-  not enforce — on the lattice it labels `--per-net-timeout` as the
-  per-link budget it really is, labels `--timeout` as a hard cap, and
-  says loudly when a run is unbounded.
-- **Board-06 regen is same-host run-to-run deterministic again** (#4536) —
-  two same-seed flag-OFF regens could differ by thousands of lines,
-  making the "flag-OFF run must produce a byte-identical committed
-  artifact" scope-guard convention undecidable for board-06. Two
-  instrumented run matrices localized two sources. **Dominant:** the
-  negotiated stage's `timeout=360.0` wall-clock backstop straddled the
-  phase's natural runtime (363–367 s) and fired mid-iteration at a
-  load-dependent net boundary in every run (different copper counts,
-  1599–1602 segments); with any finite stage timeout the #3989
-  remaining-budget per-net wall-clock caps also stayed active. Fixed:
-  `boards/06-diffpair-test/generate_design.py` now runs the negotiated
-  stage with `timeout=None` — bounded by its deterministic iteration
-  exits (per-net node-expansion budget, memory backstop, a
-  `max_iterations=3` count bound that reproduces where the wall clock
-  empirically cut, best-stall patience, #4463 zero-overflow
-  fixed-point) instead of wall clock — and pins `PYTHONHASHSEED=42` by
-  construction (one-shot re-exec at the entry point). **Reach-deciding:**
-  the relief rescue's probe / displaced-victim re-land sub-searches were
-  bounded by a flat 10 s wall clock that straddles their 8–12 s natural
-  time on CI runners; because a rescue rolls back entirely when a victim
-  does not re-land, that value decided routed reach on machine speed
-  alone (board-06 seed-42 landed 21/21 on one runner and 20/21 on
-  another from line-identical logs). `Autorouter.route_all_negotiated`
-  gained `deterministic_rescue=` (default off), which bounds those
-  sub-searches by the deterministic per-net node-expansion cap instead;
-  board 06 opts in. **Residual:** with
-  the wall clock removed, runs still serialized ~2300 differing lines
-  from *identical* copper multisets, because `kicad-cli` (invoked by
-  every `kct zones fill` round) re-saves the board with tracks ordered
-  by UUID and the stitch/pour-repair emitters minted random
-  `uuid.uuid4()` values. Fixed: `kct stitch` now mints content-derived
-  uuid5 values for its vias/stub segments, and board-06's pour-repair
-  `_generate_uuid` mints sequence-derived uuid5 values — all copper
-  UUIDs are deterministic, so file order is stable under kicad-cli
-  refills. A gated determinism smoke test
-  (`tests/test_board06_determinism.py`, enabled via
-  `KCT_BOARD06_DETERMINISM=1`; two ~12-minute regens) asserts two
-  consecutive same-seed runs produce identical uuid-normalized
-  artifacts; the normalization + scope-guard convention is documented in
-  `boards/06-diffpair-test/README.md`. A residual load-correlated
-  sensitivity (a stagnation-recovery reroute can flip under extreme
-  concurrent host load) is tracked separately as #4724.
-
 ### Added
 
 - **`--format json` on the 5 environment/integration singles** (part of
@@ -987,6 +595,396 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intended beyond the runtime bump.
 
 ### Fixed
+
+- **The pure-Python fallback A* is now pairwise (HV-isolation) aware at search time** (#4507, epic #4431 Phase 2) — the hot-loop bitmap, `_is_trace_blocked`/`_is_via_blocked` kernels and the C++ backend's fallback-router threading now mirror the C++ `cross_domain_*` search kernels (same domain projection, per-pair widened radius, layer-scoped #4506 attach-zone waiver, out-of-bounds-is-empty ring dilation), so a net that falls back on an HV board converges instead of thrashing against the Phase-1 post-route gate; fully dormant without `--voltage-map`.
+
+- **`kct ipc push-routes` can now actually read a board** (#4788) — the
+  handler imported the nonexistent `kicad_tools.pcb.parser` (dead since
+  #2363) behind an `except ImportError`, so every invocation exited 1 with
+  "PCB parser not available." It now loads boards via the first-party
+  `kicad_tools.schema.pcb.PCB.load()` (unguarded, so wiring regressions fail
+  loudly), reads the real model attributes (`segments`, `start`/`end`/
+  `position` tuples, `net_number`) instead of `getattr(..., 0)` fallbacks
+  that would have pushed zero-length tracks at the origin on net 0, and the
+  `--net` filter matches by net name against `PCB.nets`; an unknown net name
+  or unparseable board is now a clear error (exit 1) in both text and JSON
+  modes.
+
+- **A single relief-rescue transaction is now proportionally bounded** (#4781)
+  — a rescue (including its depth-1 nested rescues, which share the parent's
+  allowance) may spend at most `max(25% of the remaining stage budget, 90 s)`
+  before rolling back verbatim at the existing `_past_deadline()` check sites;
+  previously one board-07 transaction burned 279 s (46% of the 600 s stage)
+  and still rolled back, starving the rip-up iteration that lands the 26th
+  net. No-deadline stages (board 06's deterministic regen, the two-phase
+  stall-relief hook) are byte-identical; a `Relief-rescue transaction bound:`
+  log line records which arm was live.
+
+- **The copper-moving `--lattice-optimize` post-passes now consult the pairwise
+  HV creepage predicate before accepting a move** (#4766, epic #4431) — PR
+  #4756 widened the post-route pairwise audit but left the geometric
+  post-passes pairwise-*blind*: `TraceOptimizer` (via
+  `optimize_routes_grid_synced`) gates its moves only on
+  `CollisionChecker.path_is_clear`, and both checker implementations resolve
+  clearance as the **scalar** `grid.rules.trace_clearance`, while
+  `drc_verify_and_nudge` translates segments by up to 0.2 mm with the same
+  scalar model. Either pass could therefore close a creepage gap the search had
+  deliberately opened, leaving the audit to fail a run the optimizer had just
+  broken. Both now run the same layer-scoped predicate the search and the #4588
+  gate run: the optimizer gets a route-level accept hook on
+  `apply_route_transform_grid_synced` that vetoes an optimized route
+  (`route_pairwise_violation` against `grid.routes`) **before** the grid
+  transaction is entered, and the nudge brackets itself with a board-level
+  `find_pairwise_violations` scan and reverts every route named in a net pair
+  that is present after but not before, using the entry snapshot it already
+  takes for the #3507 resync. Both gates only undo what the pass would
+  *introduce* — an inherited shortfall on the same net pair keeps its
+  optimization and stays the audit's to report, so the passes never mask copper
+  the gate exists to fail on. Collinear consolidation is deliberately **not**
+  gated and now says why in its module docstring: its merged segment is the
+  exact union of the segments it replaces, so no gap to foreign copper can
+  shrink. The veto is coarse (a route loses its whole optimization for one bad
+  move), so the counts are surfaced — vetoed routes on stderr after the
+  optimize pass and `pairwise_reverts` in the DRC-nudge summary — and the nudge
+  re-reports `remaining_violations` post-revert rather than the flattering
+  pre-revert count. Both passes derive their context through the **single**
+  router resolver #4785 landed for exactly this — `PairwisePathChecker.
+  from_router` (`rules.pairwise_clearance`, `_pairwise_attach_zones_cache`,
+  `net_names` + `_net_name_to_id()`, `grid.routes`) — so the two post-passes,
+  the path-level predicate and the #4588 audit cannot resolve the table, the
+  id→name map or the #4506 zones differently; that resolver picks up three
+  fixes in the process (dormant on a table that widens nothing, `sorted()`
+  net-name tie-break so an id collision is deterministic, and it now arms on a
+  grid-less router by falling back to `router.routes`). All eight CLI call
+  sites are untouched. Fully dormant without `--voltage-map`: no table means no
+  checker, no gate and no scan, and no board under `boards/` uses that flag. No
+  C++ change (`ROUTER_CPP_BUILD_VERSION` stays 19).
+- **The C++ router's HV attach-zone waiver is now layer-scoped, so the search
+  stops proposing copper the pairwise gate rejects** (#4507, epic #4431 Phase
+  2) — PR #4756 narrowed the #4506 rated-footprint exemption on the Python side
+  (a zone waives the pairwise creepage widening only on layers where *both*
+  nets have pad copper) but deliberately left the C++ `Grid3D` zone halo
+  layer-agnostic, with the layer-scoped Python `route_pairwise_violation` as
+  the acceptance check. That left the C++ search and the Python gate
+  disagreeing exactly where it hurts: the search would neck an HV net through a
+  rated part's pad field on a layer that part has no copper on, its own
+  `validate_route` waived it, and the layer-scoped post-check then rejected the
+  result — burning the net's resume budget and dropping it into the 10-100x
+  slower pure-Python fallback. `AttachZone` gains a per-net `net_layers` map
+  (net id -> grid layer indices), `Grid3D::attach_zone_exempts` gains a `layer`
+  argument, and every consult in `validate_route` and the search-time kernels
+  (`cross_domain_trace_blocked`, `cross_domain_via_blocked`) passes the layer
+  the compared copper actually shares — via-vs-via, where no single layer
+  applies, stays agnostic, matching the lattice engine's `exempt_pt_pt`
+  convention. The segment-vs-pad branch keys on the *pad's* layer: that loop
+  already filters mismatched layers before the zone consult, so the only shape
+  where the two candidate keys differ is a through-hole pad, which keeps waiving
+  on every layer because the barrel spans every layer. On a two-domain fixture
+  whose only cheap path threads a rated part's pad field on a layer it does not occupy,
+  the layer-agnostic baseline exhausts 5 resume attempts, falls back to the
+  Python A* and **fails to route**; the layer-scoped search dives to the layer
+  the part actually licences and converges on the first attempt, gate-clean.
+  The layer projection now has a single implementation
+  (`pairwise_clearance.project_zone_layers`) shared by the lattice and C++
+  paths, so no engine can drift from the gate. Fully dormant without
+  `--voltage-map`; a zone with no layer data keeps the previous agnostic
+  verdict. `ROUTER_CPP_BUILD_VERSION` 18 -> 19 (run `kct build-native`).
+- **`DETERMINISTIC_RESCUE_DEFAULT`'s docblock now records *why* board 07
+  regressed instead of naming the investigation as future work** (#4770) —
+  documentation only; the constant's value is unchanged (`False`) and no
+  DRC allowlist or reach floor moved. The A/B was re-mined from the three
+  recorded CI runs and re-run locally at `HEAD` with the C++ backend built,
+  and both halves of the intuitive reading turn out to be wrong. **No net's
+  rescue flips commit-vs-rollback**: on board 07 the deterministic bound is a
+  straight reach *loss* in the negotiated pass (26/31 → 24/31), because a
+  single `DQ3` relief transaction that gives up in 2.6 s under the 10 s wall
+  clock instead runs **279.1 s — 46 % of the 600 s stage budget** and rolls
+  back anyway, so the pass completes 2 rip-up iterations instead of 5 and
+  never reaches the one that produces board 07's 26th net. The advertised
+  `+1 net` is then produced downstream by `PlacementDeltaFeedbackLoop`'s
+  `run_delta`, whose accept-gate is *relative* (`new_count > pre_count`): the
+  depressed baseline admits the `U3 translate` placement delta that `main`
+  refuses at 25 → 25, and that delta — not the rescue — carries the `+5 DRC`
+  (4× `clearance_pad_segment` at 0.094 mm on `DQ1`/`DQ2` and 0.076 mm on
+  `DQ4`/`DQS_N`, 2× `clearance_segment_via` at 0.049 mm on `DQ1`/`DQ2`, 1×
+  `match_group_length_skew` with `ADDR_BUS` at 11.030 mm instead of 0.000 mm,
+  less the `DQS_N`/`DQS_P` diff-pair pair that stops firing only because
+  `DQS_N` went unrouted). Five of the seven new errors sit on copper with no
+  connection to the reach delta at all. Recommendation recorded on #4730:
+  keep the opt-in permanently. The full journal (per-pass rescue tables,
+  per-violation attribution, reproduction recipe) lands in
+  `boards/07-matchgroup-test/diagnostic-runs/README.md`;
+  `_normalize_deterministic_budget`'s docstring and board 07's README are
+  updated in lockstep, and a new `TestPlacementDeltaFeedbackCaveat` pins the
+  two structural claims the finding rests on — that
+  `PlacementDeltaFeedbackLoop.run_delta` threads no `deterministic_rescue`
+  (so "flip the constant, not the CLI" stays true) and that
+  `Autorouter._post_negotiation_sweep_bounds` cannot see the flag (so the
+  #4159 sweep stays excluded as a confound).
+- **Nine polish fixes from the 2026-08-08/09 sweep's judge nits** (#4765) —
+  each a small correctness defect in code that shipped last sweep; none
+  changes routed copper or an exit code. (A) The `kct route` banner decided
+  its `UNBOUNDED` line from the raw `--timeout`/`--per-net-timeout` flags, so
+  `--complete --per-net-timeout 0` announced an unbounded lattice negotiation
+  while `_apply_complete_localization`'s 60 s per-link backstop was already
+  armed; it now keys off the resolved `_resolve_lattice_link_budget` /
+  `_lattice_absolute_deadline` values and reports the budget actually in
+  force. (B) `--quiet` silently discarded an explicitly-requested
+  `--report-stage-quality` table; the opt-in now wins (the `recorder is None`
+  guard already carried the entire "not requested" case). (C) The
+  "lazy" `StageQualityRecorder` import was a bare `sys.modules` hit — the
+  module is already executed by the eager stage-constant import — and is
+  hoisted to module scope with an accurate comment. (D) The `45deg%`
+  denominator moves from the renderer to a read-only
+  `RoutingQualityMetrics.diagonal_45_fraction` property, beside the
+  `fragment_fraction` / `staircase_fraction` contract (no new dataclass
+  field: `to_dict()` is a stable JSON contract). (E) A DRC finding that mixes
+  a pad with a ref-less track item normalizes to a smaller ref set than
+  "exact-set" suggests, so a one-ref waiver covers a *class* of findings; the
+  behaviour is kept (narrowing it would retroactively un-waive shipped
+  sidecars) but is now documented on `apply_waivers_to_report` and in
+  `docs/reference/cli.md`, pinned by regression tests, with `nets` as the
+  documented narrowing remedy. (F) `kct drc boards/NN/output/drc.json` never
+  probed `boards/NN/` for `.kct_waivers.json` (all three of the shared
+  discovery probes collapse into the report's own directory); report input
+  now falls back to the report directory's parent. (H) The documented
+  "4+ trailing tokens are never trimmed" path of `_sync_at_angle` gets its
+  first test. (I) The residual #3441 lattice-rescue `UserWarning`
+  ("quantisation margin is reduced at fine-pitch pads") predicts a grid-only
+  failure mode and is demoted to INFO for `--route-engine mesh|lattice`,
+  completing #4761's gate on the sibling branch; every `GridAutoSelection`
+  field stays engine-invariant. (J) All ~16 `args.route_engine` reads in
+  `route_cmd.py` now go through one `_resolve_route_engine` helper, so a
+  `route_engine=None` namespace can no longer resolve to `"grid"` at ten
+  sites and `None` at six (including three `strategy=` arguments to
+  `load_pcb_for_routing`). (K) The non-grid "Fine-pitch grid analysis:
+  skipped" line printed even on boards where the grid path prints nothing;
+  it is now gated on the same `has_warnings` predicate the grid path uses.
+- **`PCB.import_from_schematic()` no longer drops a `*-netlist.kicad_net`
+  beside the user's schematic** (#4763) — the same defect #4750 fixed in
+  `pcb sync-netlist`, at the second call site. `export_netlist` defaults
+  `output_path` to `<schematic dir>/<stem>-netlist.kicad_net` and leaves the
+  file in place after parsing, so a bare call from `import_from_schematic`
+  (and from `PCB.from_schematic()`, which delegates to it) littered an
+  unrequested export byproduct into the project directory on every import
+  where kicad-cli is installed. The export now goes to an explicit path inside
+  a `tempfile.TemporaryDirectory`, which is torn down before the call returns;
+  `export_netlist` returns a fully parsed `Netlist`, so nothing downstream
+  re-reads the file and import results are unchanged. This also stops the test
+  suite from rewriting a **tracked** fixture: `TestImportFromSchematicIntegration`
+  runs the real kicad-cli against `tests/fixtures/simple_rc.kicad_sch`, so every
+  developer with kicad-cli got a dirty working tree from ` M
+  tests/fixtures/simple_rc-netlist.kicad_net` after a test run. That fixture —
+  an orphaned byproduct with zero consumers, committed by this very bug and
+  carrying an absolute developer path in its `(source ...)` line — is deleted.
+  New byproduct-location tests (a guard that the stubbed kicad-cli path really
+  runs, plus project-dir-listing, temp-cleanup, `str`-path, Python-fallback,
+  and export-failure cases) pin the behavior, and the integration tests now
+  assert the fixtures directory is unchanged across the call.
+- **The mypy baseline gate now runs cold, so a stale `.mypy_cache/` can no
+  longer invent a "NEW type error"** (#4767) —
+  `scripts/ci/check_mypy_baseline.py` invoked a bare `mypy src/` with no cache
+  control of any kind (no `--cache-dir`, no `cache_dir` in `[tool.mypy]`, no
+  `MYPY_CACHE_DIR` anywhere in the tree), so every local run reused the
+  incremental cache at `<cwd>/.mypy_cache`. CI is structurally the opposite —
+  there is no `actions/cache` in `.github/workflows/` and the Type Check job
+  pins `astral-sh/setup-uv` with `enable-cache: false` — so CI is always cold
+  and local is always warm, and only the local verdict was untrustworthy. The
+  cache outlives the tree it was computed from: `.mypy_cache/` is gitignored,
+  so `git reset --hard`, `git clean -fd` (ignored paths need `-x`), a rebase,
+  a force-push, and a Loom worktree reuse all leave it in place. Because the
+  gate diffs a signature multiset over all of `src/`, one replayed cached
+  error anywhere trips exit 2 and prints a filename unrelated to the diff —
+  which is what cost two independent PR reviews a cycle each during the
+  2026-08-08/09 sweep (PRs #4746, #4762), both on a phantom error in
+  `recovery/strategy.py`, a file neither PR touched. `run_mypy()` now passes
+  `--no-incremental` by default, and `--incremental` (alias `--warm-cache`)
+  is the documented opt-in for a tight burn-down loop. Measured cost of the
+  default: ~20 s vs ~0.5 s warm on `src/` — a price CI already paid on every
+  push. Exit-code semantics (0 within baseline / 1 tool failure / 2 new
+  errors), `diff_against_baseline`, `write_baseline`, and the #4558
+  version-drift guard are all unchanged, and `.github/mypy-baseline.txt` is
+  byte-identical (a new test pins both nanobind signatures so a future
+  `--update` cannot silently drop one). `pnpm typecheck` / `pnpm check:all`
+  still run a bare incremental `uv run mypy src/`, so the trap and its
+  `rm -rf .mypy_cache` remedy are now documented in `CLAUDE.md`, `README.md`'s
+  fresh-worktree checklist, and `docs/contributing/development.md`.
+- **Guide source citations are symbol-anchored, and a test now keeps them
+  that way** (#4764) — a follow-up to #4749 measured 20 of 32 `<file>.py:NNN`
+  citations under `docs/guides/` wrong (62.5%), the worst off by 8,569 lines
+  (`docs/guides/diff-pairs/04-length-matching.md` sent readers to
+  `router/core.py:6926` for `update_diffpair_skew`, which lives at 15495).
+  Two could not be repaired by refreshing a number at all — the guides cited
+  `_collect_explicit_match_groups`, renamed to `_gather_explicit_groups`, and
+  claimed `detect_match_groups` records the reference policy verbatim on
+  `MatchGroup.length_match_reference`, when `_resolve_reference` actually
+  resolves it into a concrete `MatchGroup.reference_net_id`. All 32 citations
+  in the diff-pair / match-group guides are now `symbol` + file-path anchors
+  (the convention PR #4753 established), as are the three rotten ones in
+  `docs/reference/api.md`, `docs/reference/cli.md`, and
+  `boards/03-usb-joystick/README.md`, plus the equally stale `Line` /
+  `Source line` table columns in `02-clearance-and-classes.md`,
+  `03-impedance-and-sizing.md`, and `04-cascade-safety.md`. Because the rot
+  reaccumulated across 8 files even after #4749 was filed, the fix is not
+  just the sweep: `tests/test_diffpair_docs.py` and
+  `tests/test_match_group_docs.py` each gain `test_no_line_number_citations`
+  (bans `\.py:\d+` outright in their guide tree) and `test_cited_symbols_exist`
+  (whole-word checks each anchored symbol in **both** the guide and the source
+  file it names, so a doc rewrite that drops the anchor and a source-side
+  rename both go red). A third suite, `tests/test_docs_source_citations.py`,
+  runs the same two checks over the docs the per-subtree suites cannot see —
+  `docs/reference/*.md`, `boards/*/README.md`, and the top-level
+  `docs/guides/*.md` — which is exactly where an unguarded rewrite of
+  `docs/reference/api.md` invented a `Footprint.to_sexp` that has never
+  existed (the real round-trip path is `Footprint.__setattr__` →
+  `Footprint._sync_attr_node`). That sweep also corrected two further false
+  claims the new coverage exposed: `api.md` said `locked` is emitted inside
+  `(attr ...)` when KiCad 10 requires the top-level `(locked yes)` form
+  (#3457), and `cli.md` attributed the `kct route` exit-code epilog to a
+  `build_parser` that does not exist in `route_cmd.py` (both it and the
+  `# Exit codes:` block live in `_main_impl`). The 26 citations under
+  `docs/investigations/`,
+  `docs/research/`, and `boards/07-matchgroup-test/diagnostic-runs/` are
+  deliberately untouched — those are dated forensic records where the line
+  number *is* the evidence.
+- **Host resource exhaustion aborts a route instead of silently changing
+  one, and the post-negotiation rescue sweep stops using a wall clock in
+  deterministic mode** (#4724) — the residual, load-correlated divergence
+  left over from #4536: one board-06 regen taken on a host at load-average
+  ~90 re-landed one fewer net in stagnation recovery (`restored 5 / rerouted
+  6`) than five same-code runs on a quiet host (`restored 4 / rerouted 7`),
+  then diverged chaotically. Both artifacts were valid and passed every
+  gate, so nothing failed loudly — the run was simply not the run the same
+  command produces on a quiet machine. Two environment-sensitive decision
+  points are closed. **(1) Exception transparency:** the router's broad
+  `except Exception` handlers exist so a malformed board or a fixture grid
+  cannot abort a route, but they also absorbed `MemoryError` — converting a
+  *host* failure into a routing *decision* ("this Steiner cell is free",
+  "this component has no pitch", "this rip-up did not fire", "use the
+  10-100x slower Python backend"). A new `router/resource_guard.py`
+  re-raises resource exhaustion (`MemoryError`, `RecursionError`, `ENOMEM`
+  `OSError`, and a native `bad_alloc` rethrown as `RuntimeError`) with a
+  named `[resource-exhaustion]` line, applied to the seven broad handlers on
+  the negotiated reroute path; every ordinary exception keeps its historical
+  fallback byte-for-byte. The C++ grid-mirror fallback also now names the
+  failing exception type in its log instead of reporting "unknown reason".
+  **(2) Sweep budget semantics:** the #4159 post-negotiation rescue sweep
+  applied its 60 s whole-pass / 10 s per-net wall clocks even to callers
+  running unbudgeted (`timeout=None` / `per_net_timeout=None`) in the
+  deterministic-budget mode #4536 established precisely so no wall clock
+  decides anything — and a per-net search that runs to its 1M-expansion cap
+  costs ~11 s on a CI runner, so the 10 s bound straddled it the same way
+  the relief rescue's 10 s sub-search budget did. `_post_negotiation_sweep`
+  now selects its bounds through `_post_negotiation_sweep_bounds`, which
+  hands an unbudgeted run with an active node-expansion cap to the cap
+  (keeping 600 s / 120 s as non-binding Python-fallback backstops) and logs
+  which bound is live, mirroring #4536's evidence discipline. The arm
+  self-scopes by construction: every caller that passes a `timeout`, and
+  every capless run, keeps the historical numbers exactly. Also: the gated
+  board-06 determinism smoke test now prints host load-average before,
+  between and after its regens (and in its failure message) so a flake is
+  attributable to load rather than argued about. No board recipe, DRC
+  allowlist or reach floor is touched; reproducing the load-90 divergence
+  itself remains out of reach by construction.
+- **The relief rescue's deterministic sub-search bound stays opt-in — the
+  fleet-default flip is withdrawn** (#4730) — #4536 gave
+  `Autorouter.route_all_negotiated` a `deterministic_rescue=` opt-in that
+  bounds the rescue's probe / displaced-victim re-land sub-searches by the
+  per-net node-expansion cap instead of the 10 s wall clock, taking machine
+  speed out of a decision that determines routed reach. The follow-up proposed
+  making it the fleet default; the A/B says no. With the bound on by default,
+  board 07 — routed through the **negotiated** entry point, not two-phase —
+  came back with a changed copper-LVS open set (`DQ3, DQ4, MIPI_DAT0_N` →
+  `DQS_N, MIPI_DAT0_P`, breaking the `--expect-opens` drift guard) and
+  routed-DRC 8 → 13 against an allowlist main sits exactly at, for +1 net of
+  reach. Measured twice, on two heads and two runners. Per the issue's own
+  acceptance criteria that is not absorbable, so nothing was re-baselined (no
+  DRC tolerance raised, no expected-opens set rewritten, no reach floor
+  lowered) and `DETERMINISTIC_RESCUE_DEFAULT` is `False`. **What did ship is
+  the switch**: `deterministic_rescue=` is now a per-call parameter on every
+  entry point that can reach a rescue — `route_all_negotiated`,
+  `route_all_two_phase`, `_create_two_phase_router`, `route_with_escape`,
+  `route_with_escape_and_diffpairs`, and the `hierarchical=True` delegation
+  (which previously dropped an explicit opt-in on the way to the path that
+  actually runs the rescue). The #3471 two-phase stall-relief hook calls
+  `_relief_rescue` with 8 **positional** arguments, so the value rides on a
+  `functools.partial` bound in `_create_two_phase_router`; before this that
+  path had no switch at all. Both paths log which bound is live, so a future
+  A/B has its evidence line on every board. Board 06 keeps its explicit
+  `deterministic_rescue=True`, which is again the only thing switching the
+  bound on for its 21/21 reach gate. Behavior on every board is unchanged;
+  reattempting the flip means first understanding why board 07's rescues keep
+  copper that carries +5 DRC.
+- **`--timeout` / `--per-net-timeout` now actually bound the lattice
+  engine** (#4697) — `kct route --route-engine lattice` was time-bounded
+  **only** under `--complete`. Everywhere else both flags were accepted,
+  echoed in the routing banner, and silently discarded, producing
+  observed 60+ minute unbounded runs on `--strategy basic` — the only
+  strategy the #4280 gate allows on the lattice. Root cause: the lattice
+  negotiates the whole netset in a single `route_netset()` call, so
+  `route_all()`'s between-nets `timeout` check can never fire mid-run,
+  and the negotiation's only bound (`deadline`) was derived solely from
+  `args._complete_link_budget_s`, which nothing but `--complete` stamps.
+  Fixed at that seam: `--per-net-timeout` now supplies the per-link
+  budget on **every** lattice run (same `budget x link-count` scaling
+  `--complete` already used), and `--timeout` supplies an absolute
+  monotonic ceiling threaded through `load_pcb_for_routing(...,
+  lattice_deadline=)`; when both are present the tighter bound wins.
+  `--complete`'s existing stamp still wins verbatim (#4472 semantics
+  unchanged), and `--per-net-timeout 0` (e.g. under
+  `--deterministic-budget`, where a wall-clock bound would destroy
+  reproducibility) still yields an unbudgeted negotiation. A truncated
+  run reports partial results with the existing `deadline-exceeded`
+  decline reason rather than dying silently. Also: the six bare
+  `router.route_all()` CLI dispatch sites now forward the user's budgets
+  (binding them on the grid engine and silencing the #2794 no-timeout
+  guard that fired pointing straight back at those lines), and the
+  routing banner no longer claims a budget the dispatched engine does
+  not enforce — on the lattice it labels `--per-net-timeout` as the
+  per-link budget it really is, labels `--timeout` as a hard cap, and
+  says loudly when a run is unbounded.
+- **Board-06 regen is same-host run-to-run deterministic again** (#4536) —
+  two same-seed flag-OFF regens could differ by thousands of lines,
+  making the "flag-OFF run must produce a byte-identical committed
+  artifact" scope-guard convention undecidable for board-06. Two
+  instrumented run matrices localized two sources. **Dominant:** the
+  negotiated stage's `timeout=360.0` wall-clock backstop straddled the
+  phase's natural runtime (363–367 s) and fired mid-iteration at a
+  load-dependent net boundary in every run (different copper counts,
+  1599–1602 segments); with any finite stage timeout the #3989
+  remaining-budget per-net wall-clock caps also stayed active. Fixed:
+  `boards/06-diffpair-test/generate_design.py` now runs the negotiated
+  stage with `timeout=None` — bounded by its deterministic iteration
+  exits (per-net node-expansion budget, memory backstop, a
+  `max_iterations=3` count bound that reproduces where the wall clock
+  empirically cut, best-stall patience, #4463 zero-overflow
+  fixed-point) instead of wall clock — and pins `PYTHONHASHSEED=42` by
+  construction (one-shot re-exec at the entry point). **Reach-deciding:**
+  the relief rescue's probe / displaced-victim re-land sub-searches were
+  bounded by a flat 10 s wall clock that straddles their 8–12 s natural
+  time on CI runners; because a rescue rolls back entirely when a victim
+  does not re-land, that value decided routed reach on machine speed
+  alone (board-06 seed-42 landed 21/21 on one runner and 20/21 on
+  another from line-identical logs). `Autorouter.route_all_negotiated`
+  gained `deterministic_rescue=` (default off), which bounds those
+  sub-searches by the deterministic per-net node-expansion cap instead;
+  board 06 opts in. **Residual:** with
+  the wall clock removed, runs still serialized ~2300 differing lines
+  from *identical* copper multisets, because `kicad-cli` (invoked by
+  every `kct zones fill` round) re-saves the board with tracks ordered
+  by UUID and the stitch/pour-repair emitters minted random
+  `uuid.uuid4()` values. Fixed: `kct stitch` now mints content-derived
+  uuid5 values for its vias/stub segments, and board-06's pour-repair
+  `_generate_uuid` mints sequence-derived uuid5 values — all copper
+  UUIDs are deterministic, so file order is stable under kicad-cli
+  refills. A gated determinism smoke test
+  (`tests/test_board06_determinism.py`, enabled via
+  `KCT_BOARD06_DETERMINISM=1`; two ~12-minute regens) asserts two
+  consecutive same-seed runs produce identical uuid-normalized
+  artifacts; the normalization + scope-guard convention is documented in
+  `boards/06-diffpair-test/README.md`. A residual load-correlated
+  sensitivity (a stagnation-recovery reroute can flip under extreme
+  concurrent host load) is tracked separately as #4724.
 
 - **Connectivity `validate(reconcile_native=True)` no longer discards the
   internal classification** (#4551) — the native reconciliation path used to
