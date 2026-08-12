@@ -858,10 +858,17 @@ class PairwisePathChecker:
     each route before mutating it and re-marks it after, so a snapshot taken at
     construction time would go stale mid-pass.
 
-    Instances only exist when a voltage map is active --
-    :meth:`from_router` returns ``None`` otherwise (the dormancy contract every
-    pairwise consumer follows), so callers guard with a single ``is None``
-    check and the scalar-only path stays byte-identical.
+    Instances only exist when a voltage map is active *and* the table it
+    installed actually widens some pair -- :meth:`from_router` returns ``None``
+    otherwise (the dormancy contract every pairwise consumer follows), so
+    callers guard with a single ``is None`` check and the scalar-only path
+    stays byte-identical.
+
+    This is the one resolver for router-derived pairwise context: the #4766
+    copper-moving post-passes build their route-level gates from these same
+    four fields (:attr:`table`, :attr:`id_to_name`, :attr:`attach_zones` and
+    :meth:`foreign_routes`), so no pass can drift into a different verdict
+    from the path-level predicate or from the #4588 audit.
     """
 
     table: PairwiseClearanceTable
@@ -884,16 +891,21 @@ class PairwisePathChecker:
         ``add_component``), and the #4506 zones from the CLI resolver's
         memoised ``_pairwise_attach_zones_cache`` hand-off (#4602 precedent).
 
-        Returns ``None`` when no voltage map installed a table (or the router
-        has no grid) -- the caller's signal to skip pairwise consultation
-        entirely.
+        Returns ``None`` when no voltage map installed a table, **or** when the
+        installed table widens nothing (``required_by_pair`` empty) -- either
+        way the caller's signal to skip pairwise consultation entirely.  A
+        table that asks for no widening can only ever answer "clear", so
+        arming a scan for it would be pure cost (#4766).
+
+        A router **without a grid** still yields a checker: ``foreign_routes``
+        then falls back to ``router.routes``.  The copper-moving post-passes
+        (#4766) are driven in unit tests by stub routers that carry routes but
+        no grid, and the pathfinder-facing consumers pass a real router where
+        the two are the same live list anyway.
         """
         rules = getattr(router, "rules", None)
         table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
-        if table is None:
-            return None
-        grid = getattr(router, "grid", None)
-        if grid is None:
+        if table is None or not getattr(table, "required_by_pair", None):
             return None
 
         id_to_name: dict[int, str] = {
@@ -903,13 +915,17 @@ class PairwisePathChecker:
         }
         name_to_id_fn = getattr(router, "_net_name_to_id", None)
         if callable(name_to_id_fn):
-            for name, net_id in name_to_id_fn().items():
+            # Sorted so a name collision on one id resolves deterministically
+            # (#4766): an unsorted walk lets dict order pick the winner.
+            for name, net_id in sorted(name_to_id_fn().items()):
                 id_to_name.setdefault(int(net_id), name)
 
         zones = getattr(router, "_pairwise_attach_zones_cache", None) or ()
+        grid = getattr(router, "grid", None)
+        source: object = router if grid is None else grid
         return cls(
             table=table,
-            foreign_routes=lambda: grid.routes,
+            foreign_routes=lambda: getattr(source, "routes", None) or (),
             id_to_name=id_to_name or None,
             attach_zones=tuple(zones),
         )
@@ -1010,75 +1026,15 @@ def find_pairwise_violations(
     return out
 
 
-class RouterPairwiseContext(NamedTuple):
-    """Everything a post-route pass needs to run the pairwise predicate (#4766).
+def normalize_net_key(name: str) -> str:
+    """Public form of the pairwise net-name normaliser (#4766).
 
-    The copper-*moving* post-passes (``TraceOptimizer`` via
-    :func:`~kicad_tools.router.optimizer.trace.optimize_routes_grid_synced`,
-    and :func:`~kicad_tools.router.drc_nudge.drc_verify_and_nudge`) were
-    pairwise-blind: their only hazard gate resolves clearance as the scalar
-    ``grid.rules.trace_clearance``, so they could close an HV creepage gap the
-    search had deliberately opened.  Both now consult the SAME predicate the
-    search and the #4588 audit use -- and they resolve it identically, through
-    this one context, so no pass can drift into a different verdict.
-
-    Attributes:
-        table: The installed ``rules.pairwise_clearance`` requirement table.
-        attach_zones: The #4506 rated-footprint necking regions, layer-scoped
-            per #4699 (``AttachZone.net_layers``).
-        id_to_name: Net id -> board net name, for routes whose ``net_name``
-            string is unset mid-pipeline (ids are authoritative there).
+    Consumers outside this module (the DRC nudge's revert gate) need to key
+    routes the same way :func:`violation_pair_key` keys violations; exporting
+    the normaliser keeps them from reaching across a module boundary for the
+    private :func:`_norm_net_key`.
     """
-
-    table: PairwiseClearanceTable
-    attach_zones: tuple[AttachZone, ...]
-    id_to_name: dict[int, str]
-
-
-def router_pairwise_context(router: object) -> RouterPairwiseContext | None:
-    """Derive the pairwise predicate context from a router (issue #4766).
-
-    Returns ``None`` -- the dormant signal that keeps every post-pass
-    byte-identical to the pre-#4766 path -- when no ``--voltage-map`` table is
-    installed, or when the installed table needs no widening for any pair.
-
-    Everything is read off the ``Autorouter`` itself, exactly as
-    :meth:`~kicad_tools.router.core.Autorouter._lattice_pairwise_projection`
-    already does for the lattice search:
-
-    * ``router.rules.pairwise_clearance`` -- the table
-      ``_apply_pairwise_clearance`` installs from ``--voltage-map``;
-    * ``router._pairwise_attach_zones_cache`` -- the memoised #4506 zone set the
-      CLI's ``_pairwise_attach_zones`` resolver warms (unset -> **no**
-      exemptions, i.e. the conservative "veto rather than silently waive"
-      direction, never an unsafe accept);
-    * ``router._net_name_to_id()`` (plus ``router.net_names``) inverted for
-      ``id_to_name``.
-
-    Deriving the context here rather than threading it through parameters is
-    what keeps the post-pass call sites (four for the optimizer, four for the
-    nudge, all in ``cli/route_cmd.py``) untouched.
-    """
-    rules = getattr(router, "rules", None)
-    table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
-    if table is None or not getattr(table, "required_by_pair", None):
-        return None
-
-    zones = tuple(getattr(router, "_pairwise_attach_zones_cache", None) or ())
-
-    id_to_name: dict[int, str] = {}
-    net_names = getattr(router, "net_names", None) or {}
-    if hasattr(net_names, "items"):
-        for net_id, name in net_names.items():
-            if name:
-                id_to_name.setdefault(int(net_id), str(name))
-    resolver = getattr(router, "_net_name_to_id", None)
-    if callable(resolver):
-        # Sorted so a name collision on one id resolves deterministically.
-        for name, net_id in sorted(resolver().items()):
-            id_to_name.setdefault(int(net_id), name)
-
-    return RouterPairwiseContext(table=table, attach_zones=zones, id_to_name=id_to_name)
+    return _norm_net_key(name)
 
 
 def violation_pair_key(violation: PairwiseViolation) -> tuple[str, str]:

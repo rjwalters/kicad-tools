@@ -42,8 +42,8 @@ from kicad_tools.router.optimizer import (
 from kicad_tools.router.pairwise_clearance import (
     AttachZone,
     PairwiseClearanceTable,
+    PairwisePathChecker,
     find_pairwise_violations,
-    router_pairwise_context,
     violation_pair_keys,
 )
 from kicad_tools.router.primitives import Route, Segment
@@ -165,11 +165,18 @@ def _arm(router: Autorouter, *, zones: tuple[AttachZone, ...] = ()) -> None:
 
 
 class TestRouterPairwiseContext:
-    """The single context resolver both post-passes share."""
+    """The ONE router-derived context resolver every pairwise consumer shares.
+
+    Both post-passes here and #4507's path-level predicate resolve their table,
+    id->name map and #4506 zones through ``PairwisePathChecker.from_router``.
+    A second resolver would be free to drift into a different verdict on the
+    same router, so this class pins the resolver's contract rather than a
+    per-pass copy of it.
+    """
 
     def test_dormant_without_a_voltage_map_table(self):
         router, _ = _optimize_fixture()
-        assert router_pairwise_context(router) is None
+        assert PairwisePathChecker.from_router(router) is None
         assert pairwise_route_gate(router) is None
 
     def test_dormant_when_the_table_needs_no_widening(self):
@@ -177,26 +184,53 @@ class TestRouterPairwiseContext:
         router.rules.pairwise_clearance = PairwiseClearanceTable(
             dru=0.2, net_voltages={"HV": 3.3}, required_by_pair={}
         )
-        assert router_pairwise_context(router) is None
+        assert PairwisePathChecker.from_router(router) is None
+        assert pairwise_route_gate(router) is None
 
     def test_context_carries_table_zones_and_id_map(self):
         router, _ = _optimize_fixture()
         zone = AttachZone(0.0, 0.0, 1.0, 1.0, frozenset({"HV", "LV"}))
         _arm(router, zones=(zone,))
-        context = router_pairwise_context(router)
-        assert context is not None
-        assert context.table is TABLE
-        assert context.attach_zones == (zone,)
-        assert context.id_to_name[1] == "HV"
-        assert context.id_to_name[2] == "LV"
+        checker = PairwisePathChecker.from_router(router)
+        assert checker is not None
+        assert checker.table is TABLE
+        assert checker.attach_zones == (zone,)
+        assert checker.id_to_name is not None
+        assert checker.id_to_name[1] == "HV"
+        assert checker.id_to_name[2] == "LV"
 
     def test_unset_zone_cache_degrades_to_no_exemptions(self):
         """Never an unsafe accept: no cache means nothing is waived."""
         router, _ = _optimize_fixture()
         router.rules.pairwise_clearance = TABLE
-        context = router_pairwise_context(router)
-        assert context is not None
-        assert context.attach_zones == ()
+        checker = PairwisePathChecker.from_router(router)
+        assert checker is not None
+        assert checker.attach_zones == ()
+
+    def test_id_collision_resolves_deterministically(self):
+        """Two names on one id must not depend on the mapping's iteration order."""
+        rules = DesignRules(trace_clearance=0.2)
+        rules.pairwise_clearance = TABLE
+        forward = _StubRouter(rules=rules)
+        forward._net_name_to_id = lambda: {"HV": 1, "AAA": 1}  # type: ignore[attr-defined]
+        reverse = _StubRouter(rules=rules)
+        reverse._net_name_to_id = lambda: {"AAA": 1, "HV": 1}  # type: ignore[attr-defined]
+
+        a = PairwisePathChecker.from_router(forward)
+        b = PairwisePathChecker.from_router(reverse)
+        assert a is not None and b is not None
+        assert a.id_to_name == b.id_to_name == {1: "AAA"}
+
+    def test_a_router_without_a_grid_still_arms_on_its_own_routes(self):
+        """The nudge's stub-router shape: routes but no grid (see AC6)."""
+        rules = DesignRules(trace_clearance=0.2)
+        rules.pairwise_clearance = TABLE
+        route = _route(1, "HV", [(5.0, 10.0), (25.0, 10.0)])
+        stub = _StubRouter(routes=[route], rules=rules, net_names=dict(ID_TO_NAME))
+
+        checker = PairwisePathChecker.from_router(stub)
+        assert checker is not None
+        assert list(checker.foreign_routes()) == [route]
 
 
 class TestOptimizePairwiseGate:

@@ -46,13 +46,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   move), so the counts are surfaced — vetoed routes on stderr after the
   optimize pass and `pairwise_reverts` in the DRC-nudge summary — and the nudge
   re-reports `remaining_violations` post-revert rather than the flattering
-  pre-revert count. Both passes derive their context from the router
-  (`rules.pairwise_clearance`, `_pairwise_attach_zones_cache`,
-  `_net_name_to_id()`) exactly as `Autorouter._lattice_pairwise_projection`
-  does, so all eight CLI call sites are untouched. Fully dormant without
-  `--voltage-map`: no table means no context, no gate and no scan, and no board
-  under `boards/` uses that flag. No C++ change (`ROUTER_CPP_BUILD_VERSION`
-  stays 19).
+  pre-revert count. Both passes derive their context through the **single**
+  router resolver #4785 landed for exactly this — `PairwisePathChecker.
+  from_router` (`rules.pairwise_clearance`, `_pairwise_attach_zones_cache`,
+  `net_names` + `_net_name_to_id()`, `grid.routes`) — so the two post-passes,
+  the path-level predicate and the #4588 audit cannot resolve the table, the
+  id→name map or the #4506 zones differently; that resolver picks up three
+  fixes in the process (dormant on a table that widens nothing, `sorted()`
+  net-name tie-break so an id collision is deterministic, and it now arms on a
+  grid-less router by falling back to `router.routes`). All eight CLI call
+  sites are untouched. Fully dormant without `--voltage-map`: no table means no
+  checker, no gate and no scan, and no board under `boards/` uses that flag. No
+  C++ change (`ROUTER_CPP_BUILD_VERSION` stays 19).
 - **The C++ router's HV attach-zone waiver is now layer-scoped, so the search
   stops proposing copper the pairwise gate rejects** (#4507, epic #4431 Phase
   2) — PR #4756 narrowed the #4506 rated-footprint exemption on the Python side

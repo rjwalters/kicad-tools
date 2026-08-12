@@ -7,10 +7,9 @@ from collections.abc import Callable
 
 from ..layers import Layer
 from ..pairwise_clearance import (
+    PairwisePathChecker,
     PairwiseViolation,
-    RouterPairwiseContext,
     route_pairwise_violation,
-    router_pairwise_context,
     violation_pair_key,
 )
 from ..primitives import Route, Segment
@@ -62,14 +61,26 @@ class PairwiseRouteGate:
     :func:`apply_route_transform_grid_synced`, so a vetoed route never enters
     the unmark/mark window at all.
 
+    Its context comes from the single
+    :meth:`~kicad_tools.router.pairwise_clearance.PairwisePathChecker.from_router`
+    resolver (#4507), the same one the path-level predicate uses, so the two
+    copper-moving post-passes and the predicate cannot resolve the table, the
+    id->name map or the #4506 zones differently.
+
     Two properties worth stating plainly:
 
     * **The veto is coarse.**  A single bad move costs the whole route its
       optimization, not just the offending segment.  That is the
       correctness-first choice; the count is recorded (and reported) so the
-      loss is measurable rather than silent.  Segment-level granularity would
-      have to widen the R-tree broad phase first (``_rtree_clearance_inflation``
-      is cached pre-pairwise -- #4507/#4511 territory), so it is a follow-up.
+      loss is measurable rather than silent.  Segment-level granularity is a
+      follow-up and is *reachable today*: the checker's
+      :meth:`~kicad_tools.router.pairwise_clearance.PairwisePathChecker.path_is_clear`
+      is signature-compatible with :class:`~kicad_tools.router.optimizer.
+      collision.CollisionChecker` and walks ``grid.routes`` directly, so it can
+      be ``AND``-composed with the scalar checker inside ``TraceOptimizer``
+      with no R-tree broad-phase change.  What it needs is a decision on the
+      per-segment cost (an O(routes x segments) walk per candidate path,
+      un-pruned by the R-tree), not a new primitive.
     * **It only vetoes what the pass would INTRODUCE.**  A route that already
       violates the same net pair before optimization keeps its optimization:
       inherited shortfalls are the audit's to report, and vetoing them would
@@ -78,36 +89,34 @@ class PairwiseRouteGate:
       already-dirty route -- is vetoed.
     """
 
-    def __init__(self, router, context: RouterPairwiseContext) -> None:
-        self.router = router
-        self.context = context
+    def __init__(self, checker: PairwisePathChecker) -> None:
+        self.checker = checker
         self.vetoes = 0
         self.worst: PairwiseViolation | None = None
 
     def _foreign_routes(self) -> list[Route]:
         """Committed copper to judge against.
 
-        ``grid.routes`` is what the grid ``Pathfinder``'s own route validator
-        uses, and at route *i* it holds post-optimize copper for ``0..i-1`` and
-        pre-optimize copper for ``i+1..n`` -- the same incremental-visibility
+        Comes from the checker's live ``foreign_routes`` view, i.e.
+        ``grid.routes`` -- what the grid ``Pathfinder``'s own route validator
+        uses.  At route *i* it holds post-optimize copper for ``0..i-1`` and
+        pre-optimize copper for ``i+1..n``, the same incremental-visibility
         contract the pass already documents for its collision checker.  A stub
-        router without a grid falls back to ``router.routes``.
+        router without a grid falls back to ``router.routes`` inside
+        :meth:`PairwisePathChecker.from_router`.
         """
-        grid = getattr(self.router, "grid", None)
-        routes = getattr(grid, "routes", None)
-        if routes is None:
-            routes = getattr(self.router, "routes", None)
-        return list(routes) if routes is not None else []
+        return list(self.checker.foreign_routes())
 
     def _violation(self, route: Route, net: int, foreign: list[Route]) -> PairwiseViolation | None:
         return route_pairwise_violation(
             route,
             net,
             foreign,
-            self.context.table,
-            id_to_name=self.context.id_to_name,
-            dru=self.context.table.dru,
-            attach_zones=self.context.attach_zones,
+            self.checker.table,
+            id_to_name=self.checker.id_to_name,
+            dru=self.checker.dru,
+            attach_zones=self.checker.attach_zones,
+            tolerance=self.checker.tolerance,
         )
 
     def __call__(self, original: Route, optimized: Route) -> bool:
@@ -153,12 +162,12 @@ class PairwiseRouteGate:
             print(line, file=sys.stderr)
 
 
-def pairwise_route_gate(router) -> PairwiseRouteGate | None:
+def pairwise_route_gate(router: object) -> PairwiseRouteGate | None:
     """Build the #4766 accept gate for ``router``, or ``None`` when dormant."""
-    context = router_pairwise_context(router)
-    if context is None:
+    checker = PairwisePathChecker.from_router(router)
+    if checker is None:
         return None
-    return PairwiseRouteGate(router, context)
+    return PairwiseRouteGate(checker)
 
 
 def optimize_routes_grid_synced(

@@ -44,10 +44,10 @@ from .geometry import (
 from .io import ClearanceViolation, validate_routes
 from .layers import Layer
 from .pairwise_clearance import (
-    RouterPairwiseContext,
-    _norm_net_key,
+    PairwisePathChecker,
+    PairwiseViolation,
     find_pairwise_violations,
-    router_pairwise_context,
+    normalize_net_key,
     violation_pair_keys,
 )
 from .primitives import Pad, Route, Segment, Via
@@ -1641,14 +1641,15 @@ def _find_segment(
 _PAIRWISE_REVERT_ROUNDS = 3
 
 
-def _pairwise_scan(router: Autorouter, context: RouterPairwiseContext) -> list:
+def _pairwise_scan(router: Autorouter, checker: PairwisePathChecker) -> list[PairwiseViolation]:
     """Board-level pairwise scan over ``router.routes`` (issue #4766)."""
     return find_pairwise_violations(
         router.routes,
-        context.table,
-        id_to_name=context.id_to_name,
-        dru=context.table.dru,
-        attach_zones=context.attach_zones,
+        checker.table,
+        id_to_name=checker.id_to_name,
+        dru=checker.dru,
+        attach_zones=checker.attach_zones,
+        tolerance=checker.tolerance,
     )
 
 
@@ -1668,7 +1669,7 @@ def _restore_route_geometry(live: Route, snapshot: Route) -> bool:
 
 def _revert_new_pairwise_violations(
     router: Autorouter,
-    context: RouterPairwiseContext,
+    checker: PairwisePathChecker,
     before_keys: set[tuple[str, str]],
     snapshot: list[tuple[Route, Route]],
 ) -> int:
@@ -1682,6 +1683,14 @@ def _revert_new_pairwise_violations(
     resync -- every route named in a net pair that is present *after* but not
     *before*.
 
+    The revert is **net**-granular, not route-granular: ``offending`` is a set
+    of net *names*, so every route this pass touched on an offending net is
+    restored, including routes that had no part in the new pair.  That is
+    deliberate (the pass mutates in place and cannot attribute a board-level
+    shortfall to one route), conservative, and bounded by the pass's own
+    snapshot -- but a reader costing this out should model it as "all touched
+    copper on the two nets", not "the two offending routes".
+
     Pre-existing (inherited) shortfalls are deliberately left alone: they are
     the #4588 audit's to report, and "fixing" them here would mask copper the
     gate is supposed to fail the run on.  Keying the comparison by net *pair*
@@ -1694,7 +1703,7 @@ def _revert_new_pairwise_violations(
     reverted = 0
 
     for _ in range(_PAIRWISE_REVERT_ROUNDS):
-        new_keys = violation_pair_keys(_pairwise_scan(router, context)) - before_keys
+        new_keys = violation_pair_keys(_pairwise_scan(router, checker)) - before_keys
         if not new_keys:
             break
         offending = {name for key in new_keys for name in key}
@@ -1703,7 +1712,7 @@ def _revert_new_pairwise_violations(
             snap = by_route.get(id(route))
             if snap is None:
                 continue
-            name = _norm_net_key(_resolve_route_net_name(route, context))
+            name = _resolve_route_net_key(route, checker)
             if name not in offending:
                 continue
             if _restore_route_geometry(route, snap):
@@ -1716,9 +1725,15 @@ def _revert_new_pairwise_violations(
     return reverted
 
 
-def _resolve_route_net_name(route: Route, context: RouterPairwiseContext) -> str:
-    """Net name a pairwise scan would report for ``route``."""
-    return context.id_to_name.get(route.net) or route.net_name or ""
+def _resolve_route_net_key(route: Route, checker: PairwisePathChecker) -> str:
+    """Normalised net key a pairwise scan would report for ``route``.
+
+    Same normalisation :func:`~kicad_tools.router.pairwise_clearance.
+    violation_pair_key` applies to the scan's output, so the two key spaces
+    compare directly.
+    """
+    id_to_name = checker.id_to_name or {}
+    return normalize_net_key(id_to_name.get(route.net) or route.net_name or "")
 
 
 # ---------------------------------------------------------------------------
@@ -1777,10 +1792,13 @@ def drc_verify_and_nudge(
     intact for the #4588 audit to report.  Without a voltage map no scan runs
     and this wrapper is byte-identical to the pre-#4766 path.
     """
-    # Issue #4766: the HV pairwise (creepage) predicate, derived from the
-    # router.  ``None`` without a ``--voltage-map`` table -- the dormant case,
-    # in which this wrapper behaves exactly as it did before #4766.
-    _pairwise = router_pairwise_context(router)
+    # Issue #4766: the HV pairwise (creepage) context, resolved through the one
+    # shared router resolver (#4507's ``PairwisePathChecker.from_router``) that
+    # the optimizer's route-level gate and the path-level predicate also use,
+    # so no pass can resolve the table or the zones differently.  ``None``
+    # without a ``--voltage-map`` table -- the dormant case, in which this
+    # wrapper behaves exactly as it did before #4766.
+    _pairwise = PairwisePathChecker.from_router(router)
 
     # Issue #3507: snapshot pre-mutation geometry for the exit resync.
     # Defensive getattr: unit tests drive this pass with stub routers
