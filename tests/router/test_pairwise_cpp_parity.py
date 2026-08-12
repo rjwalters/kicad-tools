@@ -1144,40 +1144,71 @@ def test_validate_route_layer_scoped_zone_agrees_with_python_gate() -> None:
 
 @requires_cpp
 def test_pad_branch_keys_the_waiver_on_the_pads_own_layer() -> None:
-    """The layer-BLIND pad loop must not lose a waiver it physically deserves.
+    """Only the through-hole sub-case makes the pad branch's key choice visible.
 
-    ``validate_route``'s segment-vs-pad loop compares against every pad on
-    every layer (so a through-hole barrel is never missed).  Keying the zone
-    consult on the *candidate segment's* layer would therefore invent
-    violations for cross-layer seg-vs-SMD-pad pairs that are not in conflict at
-    all, so the consult keys on the PAD's own layer -- and a through-hole pad
-    (``layer_idx < 0``) stays layer-agnostic.
+    ``validate_route``'s segment-vs-pad loop is **not** layer-blind: ~40 lines
+    above the zone consult it already drops mismatched layers (``grid.cpp:768``,
+    ``Skip pads on different layers``: ``if (pad.layer_idx != -1 &&
+    pad.layer_idx != seg.layer) continue;``).  Only two shapes survive that
+    filter and reach the consult:
+
+    * a **same-layer SMD pad**, where ``pad.layer_idx == seg.layer`` -- the two
+      candidate keys are the same value there, so cases (a) and (b) pin that the
+      pad branch consults the zone at all and honours its layer scoping, but
+      they cannot distinguish the keys; and
+    * a **through-hole pad** (``layer_idx == -1``), where the pad's own layer
+      keeps the consult layer-agnostic because the barrel really does span every
+      copper layer.  Case (c) is the ONLY case that changes verdict if the key
+      is switched to ``seg.layer``, so it alone pins the design decision.
+
+    A cross-layer seg-vs-SMD-pad pair can never reach the consult -- the filter
+    above drops it first -- so a case built on that shape passes with this fix
+    fully reverted, and with no zone installed at all.  An earlier revision of
+    this test used exactly that shape for case (a); it is deliberately gone.
     """
     zone_ids = [HV_NET, LV_NET]
     # LV pad copper on B.Cu (index 1) only.
     scoping = {HV_NET: [1], LV_NET: [1]}
 
-    # (a) B.Cu SMD pad: the zone covers that layer -> waived, even though the
-    #     candidate segment being validated runs on F.Cu.
-    smd = _cpp_grid()
-    _install_domains(smd)
-    smd.set_attach_zones([_cpp_zone(0.0, -1.0, 5.0, 1.0, zone_ids, scoping)])
-    smd.add_pad(2.5, 0.4, 0.2, 0.2, LV_NET, 1, 0, DRU, False)
-    assert _validate(smd, [_cpp_segment(0.0, 0.0, 5.0, 0.0, HV_NET, layer=0)]).valid
+    def _pad_case(pad_layer: int, seg_layer: int, zone_layers=None) -> bool:
+        """Validate one HV segment against one LV pad; ``None`` installs no zone."""
+        grid = _cpp_grid()
+        _install_domains(grid)
+        if zone_layers is not None:
+            grid.set_attach_zones([_cpp_zone(0.0, -1.0, 5.0, 1.0, zone_ids, zone_layers)])
+        grid.add_pad(2.5, 0.4, 0.2, 0.2, LV_NET, pad_layer, 0, DRU, False)
+        return bool(
+            _validate(grid, [_cpp_segment(0.0, 0.0, 5.0, 0.0, HV_NET, layer=seg_layer)]).valid
+        )
 
-    # (b) F.Cu SMD pad: a layer the zone does NOT cover -> full widening.
-    other = _cpp_grid()
-    _install_domains(other)
-    other.set_attach_zones([_cpp_zone(0.0, -1.0, 5.0, 1.0, zone_ids, scoping)])
-    other.add_pad(2.5, 0.4, 0.2, 0.2, LV_NET, 0, 0, DRU, False)
-    assert not _validate(other, [_cpp_segment(0.0, 0.0, 5.0, 0.0, HV_NET, layer=0)]).valid
+    # (a) Same-layer SMD pad on a layer the zone covers -> waived.  The two
+    #     controls are what keep this non-vacuous: with no zone the identical
+    #     geometry is rejected, so the waiver is what flips the verdict, and a
+    #     zone scoped to the other layer does not waive it.
+    assert _pad_case(pad_layer=1, seg_layer=1, zone_layers=scoping) is True
+    assert _pad_case(pad_layer=1, seg_layer=1, zone_layers=None) is False
+    assert _pad_case(pad_layer=1, seg_layer=1, zone_layers={HV_NET: [0], LV_NET: [0]}) is False
 
-    # (c) Through-hole pad (layer_idx = -1): no single layer applies -> the
-    #     zone keeps its layer-agnostic waiver, as the barrel requires.
+    # (b) Same-layer SMD pad on a layer the zone does NOT cover -> full
+    #     widening.  This fails if the consult is layer-agnostic (the pre-#4507
+    #     shape, which waives here), so it pins layer scoping reaching the pad
+    #     branch at all -- but not the key choice, since the keys are equal.
+    assert _pad_case(pad_layer=0, seg_layer=0, zone_layers=scoping) is False
+
+    # (c) Through-hole pad (``layer_idx == -1``) against an F.Cu candidate: the
+    #     only case where the two candidate keys differ, so the only one that
+    #     pins the decision.  Keying on ``seg.layer`` (0 = F.Cu, a layer the
+    #     zone does not cover) would deny the waiver; the pad's own -1 keeps the
+    #     layer-agnostic verdict the barrel deserves.
     barrel = _cpp_grid()
     _install_domains(barrel)
     barrel.set_attach_zones([_cpp_zone(0.0, -1.0, 5.0, 1.0, zone_ids, scoping)])
     barrel.add_pad(2.5, 0.4, 0.2, 0.2, LV_NET, -1, 0, DRU, False)
+    # The gap point is the pad-centre/closest-approach midpoint, (2.5, 0.2).
+    # The two candidate keys genuinely disagree there ...
+    assert barrel.attach_zone_exempts(2.5, 0.2, HV_NET, LV_NET, 0) is False
+    assert barrel.attach_zone_exempts(2.5, 0.2, HV_NET, LV_NET, -1) is True
+    # ... and the pad branch takes the pad's own layer, so the pair is waived.
     assert _validate(barrel, [_cpp_segment(0.0, 0.0, 5.0, 0.0, HV_NET, layer=0)]).valid
 
 

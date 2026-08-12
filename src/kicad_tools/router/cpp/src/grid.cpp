@@ -826,14 +826,34 @@ ValidationResult Grid3D::validate_route(
             // is the midpoint between the pad centre and the closest point on
             // the candidate segment's centreline -- the pad analogue of the
             // Python validator's closest-approach midpoint.
-            // #4507: this loop is deliberately layer-BLIND (it compares the
-            // candidate against every pad, so a through-hole barrel is never
-            // missed), which makes the segment's layer the wrong key here: a
-            // spurious cross-layer seg-vs-SMD-pad pair would lose a waiver it
-            // physically deserves.  The pad's OWN layer is the copper layer
-            // this comparison is about, and it is the same layer the zone's
-            // per-net projection was derived from -- so an SMD pad keys on it
-            // and a through-hole pad (``layer_idx < 0``) stays layer-agnostic.
+            // #4507: the zone consult keys on the PAD's own layer rather than
+            // on ``seg.layer``.  This loop is NOT layer-blind -- the guard at
+            // the top of it (line 768, ``Skip pads on different layers``:
+            // ``if (pad.layer_idx != -1 && pad.layer_idx != seg.layer)
+            // continue;``) already drops mismatched layers, so a cross-layer
+            // seg-vs-SMD-pad pair can never reach this line.  Only two shapes
+            // survive that filter:
+            //
+            //   (i)  a same-layer SMD pad, where ``pad.layer_idx == seg.layer``
+            //        -- the two candidate keys are literally the same value, so
+            //        the choice is a no-op; and
+            //   (ii) a through-hole pad (``layer_idx == -1``), where passing -1
+            //        keeps the consult layer-agnostic because the barrel really
+            //        does span every copper layer.
+            //
+            // So (ii) is the asymmetry's ONLY behavioural effect, and it is the
+            // whole reason for it.  ``tests/router/test_pairwise_cpp_parity.py::
+            // test_pad_branch_keys_the_waiver_on_the_pads_own_layer`` case (c)
+            // is correspondingly the only case that can distinguish the keys.
+            //
+            // One consequence worth naming: in case (ii) the -1 also exempts
+            // the CANDIDATE's net from the layer check, so this branch can
+            // waive on layers where ``AttachZone.exempts`` would not.  That is
+            // unchanged v18 behaviour and has no Python counterpart to disagree
+            // with -- ``route_pairwise_violation`` / ``find_pairwise_violations``
+            // are segment-vs-segment only and never compare a segment against a
+            // pad -- so it cannot produce the search<->gate thrash #4507 exists
+            // to remove.
             const int pad_zone_layer = pad.layer_idx;
             required_clearance = widen(required_clearance, pad.net, pad_zone_layer, [&]() {
                 const auto cp = closest_point_on_segment(

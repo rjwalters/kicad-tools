@@ -26,11 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`cross_domain_trace_blocked`, `cross_domain_via_blocked`) passes the layer
   the compared copper actually shares — via-vs-via, where no single layer
   applies, stays agnostic, matching the lattice engine's `exempt_pt_pt`
-  convention. The segment-vs-pad branch keys on the *pad's* layer (that loop is
-  deliberately layer-blind, so keying on the candidate segment would invent
-  violations for cross-layer pairs that are not in conflict), and a through-hole
-  pad keeps waiving on every layer. On a two-domain fixture whose only cheap
-  path threads a rated part's pad field on a layer the part does not occupy,
+  convention. The segment-vs-pad branch keys on the *pad's* layer: that loop
+  already filters mismatched layers before the zone consult, so the only shape
+  where the two candidate keys differ is a through-hole pad, which keeps waiving
+  on every layer because the barrel spans every layer. On a two-domain fixture
+  whose only cheap path threads a rated part's pad field on a layer it does not occupy,
   the layer-agnostic baseline exhausts 5 resume attempts, falls back to the
   Python A* and **fails to route**; the layer-scoped search dives to the layer
   the part actually licences and converges on the first attempt, gate-clean.
