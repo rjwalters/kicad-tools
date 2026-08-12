@@ -337,6 +337,70 @@ changed hands. And it is not a re-land *ordering* effect inside
 victims either. The rescue layer's only contribution to the delta is the
 *time* it spends.
 
+## Proportional relief-rescue transaction bound: A/B measurement (#4781)
+
+**What changed.** Issue #4781 (carved from the #4770 measurement above)
+bounds a single `_relief_rescue` transaction -- including its depth-1
+nested rescues, which SHARE the parent's allowance -- to
+`max(25% of the remaining stage budget, 90 s)`
+(`RELIEF_RESCUE_TXN_FRACTION` / `RELIEF_RESCUE_TXN_FLOOR_S` in
+`router/core.py`), evaluated only at the existing `_past_deadline()`
+check sites. The 90 s floor was calibrated against this file's #4770
+tables: the longest transaction the healthy `main` arm ever completes is
+70.6 s (`DQ4`, initial pass, CI), so on a main-shaped trajectory the
+bound never fires; the pathological `DQ3` transaction (279.1 s at ~337 s
+remaining) would be cut at 90 s, returning ~189 s to the rip-up loop.
+With no stage deadline (`timeout=None`) the bound is structurally inert.
+
+**What was compared.** Same-host local A/B (Apple Silicon, 28 cores),
+both arms `PYTHONHASHSEED=42 uv run python generate_design.py --step
+route --seed 42`: **B** = `main` @ `3a37d414`, **A** = the #4781 bound on
+top of the same head. The A arm's log prints the new evidence banner 3x
+(once per negotiated pass):
+
+```
+  Relief-rescue transaction bound: proportional -- one rescue transaction (nested rescues share the parent's allowance) may spend at most max(25% of the remaining stage budget, 90s) before rolling back verbatim (issue #4781)
+```
+
+**The measured outcome: a clean null on the healthy trajectory,
+identical to design intent.**
+
+| | B (`main`) | A (#4781 bound) |
+|---|---|---|
+| final reach | 26/31 | 26/31 |
+| copper-LVS opens | `DQ3, DQ4, MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N` | identical (`check_copper_lvs.py --expect-opens` passes both) |
+| blocking DRC (`check_routed_drc.py`, jlcpcb) | **8** (== allowlist) | **8** (== allowlist) |
+| deltas proposed / kept | 10 / 0 | 10 / 0 |
+| transaction-allowance aborts | n/a | **0** |
+| normalized PCB md5 (uuid-stripped, sorted) | `797984ea...` | `797984ea...` -- **identical artifact** |
+
+Per-pass rescue-transaction tables (same elapsed-marker method as the
+#4770 tables; durations include nested rescues):
+
+| pass | B: transactions / total s / longest | A: transactions / total s / longest |
+|---|---|---|
+| initial | 31 / 419.4 s / 56.9 s (`DQ4`) | 31 / 376.6 s / 46.1 s (`DQ4`) |
+| probe 0 | 48 / 388.2 s / 29.5 s (`MIPI_DAT1_P`) | 48 / 444.5 s / 30.7 s (`TMDS_D1_N`) |
+| probe 1 | 33 / 389.2 s / 48.7 s (`DQS_N`) | 33 / 397.9 s / 48.7 s (`DQS_N`) |
+
+Same transaction counts per pass (31/48/33), same commits per pass
+(4/5/2), and every transaction sits well under the 90 s floor on this
+host -- the differences are wall-clock jitter under load, and the
+committed geometry is bit-identical after uuid normalization. The
+pathological arm (a 279 s transaction) is exercised by the injected-clock
+unit tests in `tests/router/test_relief_rescue.py`
+(`TestReliefRescueProportionalBound`) rather than by this fixture, which
+does not produce one on `main`'s sub-search bound (`DQ3` gives up in
+seconds here -- see the #4770 section above for why the deterministic
+bound was what made it pathological).
+
+**Board 06 cross-check** (the board that needs rescues to *complete*):
+`check_diffpair_coverage.py boards/06-diffpair-test --seed 42` on the A
+arm passes -- signal reach 21/21 (required 21), pour connectivity OK, all
+3 diff-pair rules exercised, 18 errors within the 18 allowlist. Board 06
+routes with `timeout=None`, so `relief_deadline is None` and the bound is
+structurally inert there (the byte-identical no-deadline arm).
+
 The mechanism is **budget displacement**:
 
 1. the deterministic bound lets relief sub-searches run far longer (the

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A single relief-rescue transaction is now proportionally bounded** (#4781)
+  — a rescue (including its depth-1 nested rescues, which share the parent's
+  allowance) may spend at most `max(25% of the remaining stage budget, 90 s)`
+  before rolling back verbatim at the existing `_past_deadline()` check sites;
+  previously one board-07 transaction burned 279 s (46% of the 600 s stage)
+  and still rolled back, starving the rip-up iteration that lands the 26th
+  net. No-deadline stages (board 06's deterministic regen, the two-phase
+  stall-relief hook) are byte-identical; a `Relief-rescue transaction bound:`
+  log line records which arm was live.
+
 - **The C++ router's HV attach-zone waiver is now layer-scoped, so the search
   stops proposing copper the pairwise gate rejects** (#4507, epic #4431 Phase
   2) — PR #4756 narrowed the #4506 rated-footprint exemption on the Python side

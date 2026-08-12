@@ -189,6 +189,53 @@ RELIEF_SUBSEARCH_BUDGET_S = 10.0
 # for minutes inside a rescue, per the #3989 lesson.
 RELIEF_SUBSEARCH_SAFETY_BACKSTOP_S = 120.0
 
+# Issue #4781: proportional bound on a single relief-rescue TRANSACTION.  The
+# sub-search budgets above bound each stage of a rescue (probe rounds, victim
+# re-lands, nested rescues), but their PRODUCT is unbounded -- the #3413 defect
+# one level up.  Measured on board 07 (#4770, CI run 31281260812): one ``DQ3``
+# transaction spent 279.1 s -- 46% of the whole 600 s stage -- ripping 9
+# blockers and then rolling back verbatim, and the rip-up iteration that
+# produces the board's 26th net is the one that time starved.
+#
+# The bound: a transaction (INCLUDING its depth-1 nested rescues, which share
+# the parent's allowance -- the parent's commit gate depends on them, so a
+# separate allowance would just rebuild the unbounded product) may spend at
+# most ``max(RELIEF_RESCUE_TXN_FRACTION * remaining, RELIEF_RESCUE_TXN_FLOOR_S)``
+# where ``remaining = deadline - transaction_start`` is the stage budget left
+# when the transaction begins.  It is evaluated ONLY at the existing
+# ``_past_deadline()`` check sites (top of each probe round, per victim
+# re-land, before each nested rescue) -- never inside the A* sub-searches --
+# so a single sub-search can still legally overshoot the allowance by up to
+# one sub-search budget (120 s worst case under ``deterministic_rescue``).
+# On breach the transaction rolls back verbatim via the existing
+# ``_rollback()``; aborting early is free by construction (the board is
+# restored either way) -- it can only cost rescues that would have succeeded.
+#
+# Calibration, from the #4770 per-pass rescue tables
+# (``boards/07-matchgroup-test/diagnostic-runs/README.md``):
+#
+#   * The FLOOR (90 s) sits above the longest transaction the healthy `main`
+#     arm ever completes (70.6 s, ``DQ4``, board 07 initial pass) -- so on a
+#     main-shaped trajectory the bound never fires and board 07's A/B inputs
+#     are unchanged.  Near the stage end the stage deadline is checked first,
+#     so the floor never EXTENDS a transaction past ``deadline``.
+#   * The FRACTION (25%) caps an early-stage pathological transaction: the
+#     ``DQ3`` rescue began with ~337 s of stage remaining, so its allowance
+#     becomes max(84.3, 90) = 90 s instead of the 279.1 s it actually spent,
+#     returning ~189 s to the rip-up loop that produces reach.
+#
+# The bound is FLAT, not scaled by how much the rescue has already achieved:
+# ``DQ3`` had "achieved" 9 rips and 7/9 re-lands at 279 s and still rolled
+# back -- progress through the rescue pipeline is not a predictor of commit,
+# so paying more for it just re-opens the hole.
+#
+# When the stage has no deadline (``timeout=None`` -> ``relief_deadline is
+# None``: board 06's deterministic regen, the two-phase stall-relief hook)
+# there is no denominator and the bound is structurally inert -- behavior is
+# byte-identical to pre-#4781.
+RELIEF_RESCUE_TXN_FRACTION = 0.25
+RELIEF_RESCUE_TXN_FLOOR_S = 90.0
+
 # Issue #4730: the default for the relief-rescue sub-search bound, shared by
 # every entry point that can reach a rescue -- :meth:`Autorouter._relief_rescue`,
 # :meth:`Autorouter.route_all_negotiated`, :meth:`Autorouter.route_all_two_phase`,
@@ -9156,6 +9203,12 @@ class Autorouter:
         # the default (#4730).
         flush_print(self._relief_subsearch_bound_line(per_net_timeout, deterministic_rescue))
 
+        # Issue #4781: record the relief-rescue TRANSACTION bound too -- it
+        # decides how much of the stage one rescue can burn before rolling
+        # back (i.e. how many rip-up iterations the stage can afford), so an
+        # A/B log must show which arm was live.
+        flush_print(self._relief_txn_bound_line(timeout))
+
         # Issue #2587 / Epic #2556 Phase 1C-cont: Activate diff-pair partner
         # threading before negotiated routing begins.  This is the default
         # path for ``kct route`` (negotiated strategy is enabled by default
@@ -12724,6 +12777,38 @@ class Autorouter:
             "deterministic_rescue=True; issue #4730)"
         )
 
+    def _relief_txn_bound_line(self, timeout: float | None) -> str:
+        """Routing-log line recording the relief-rescue TRANSACTION bound in force.
+
+        Issue #4781.  Same evidence discipline as
+        :meth:`_relief_subsearch_bound_line` (#4536): the bound decides how
+        much of the stage budget a single rescue can burn before rolling
+        back -- i.e. it decides how many rip-up iterations the stage can
+        afford, which decides reach -- so any routing log used as A/B
+        evidence has to say which arm was live.  The
+        ``Relief-rescue transaction bound:`` prefix is the greppable
+        evidence token; do not reword it.
+
+        Args:
+            timeout: The stage wall-clock budget of the calling loop, or
+                ``None`` when the stage runs without a deadline (then
+                ``relief_deadline is None`` and the bound is structurally
+                inert -- there is no "remaining stage budget" denominator).
+        """
+        if timeout is not None:
+            return (
+                "  Relief-rescue transaction bound: proportional -- one rescue "
+                "transaction (nested rescues share the parent's allowance) may "
+                f"spend at most max({RELIEF_RESCUE_TXN_FRACTION:.0%} of the "
+                f"remaining stage budget, {RELIEF_RESCUE_TXN_FLOOR_S:.0f}s) "
+                "before rolling back verbatim (issue #4781)"
+            )
+        return (
+            "  Relief-rescue transaction bound: none -- the stage has no "
+            "wall-clock deadline, so transactions are bounded by their "
+            "sub-search caps only (issue #4781)"
+        )
+
     def _post_negotiation_sweep_bounds(
         self,
         timeout: float | None,
@@ -12851,6 +12936,7 @@ class Autorouter:
         depth: int = 0,
         deadline: float | None = None,
         deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
+        txn_deadline: float | None = None,
     ) -> bool:
         """Transactional relief rescue for a zero-overflow hard failure.
 
@@ -12878,7 +12964,14 @@ class Autorouter:
                 and blew the loop's whole wall budget on one hopeless
                 rescue.  When the deadline passes mid-rescue the
                 transaction rolls back verbatim and returns False, so
-                the bound costs nothing in correctness.
+                the bound costs nothing in correctness.  Issue #4781:
+                the stage deadline alone is NOT a per-transaction
+                allowance -- a rescue finishing at 544 s of a 600 s
+                stage never trips it, having already spent the budget
+                the rip-up loop needed (board 07's ``DQ3``: 279.1 s,
+                46% of the stage, rolled back).  When ``deadline`` is
+                set, the transaction is additionally bounded by the
+                proportional allowance below.
             deterministic_rescue: Issue #4536 / #4730 -- bound the
                 rescue's SUB-searches (probe rounds, victim re-lands) by
                 the deterministic per-net NODE-EXPANSION cap instead of
@@ -12893,6 +12986,19 @@ class Autorouter:
                 the wall clock is kept either way.  See
                 :meth:`_relief_subsearch_budget` for the measurement that
                 motivates it and the load-bearing consequences.
+            txn_deadline: Issue #4781: the absolute ``time.time()`` bound
+                on THIS transaction's proportional allowance.  Callers
+                leave it ``None``; a depth-0 transaction with a
+                ``deadline`` derives it as ``transaction_start +
+                max(RELIEF_RESCUE_TXN_FRACTION * remaining,
+                RELIEF_RESCUE_TXN_FLOOR_S)`` and passes it down to its
+                depth-1 nested rescues so the whole transaction --
+                nested rescues INCLUDED -- shares one allowance (a
+                nested rescue is part of the parent's commit gate, so a
+                fresh allowance per nesting level would rebuild the
+                unbounded product this bound removes).  Evaluated only
+                at the existing ``_past_deadline()`` check sites; see
+                :data:`RELIEF_RESCUE_TXN_FRACTION` for the calibration.
 
         Returns:
             True when the failed net is now routed and no sibling was
@@ -12900,8 +13006,41 @@ class Autorouter:
         """
         import time as _time
 
+        # Issue #4781: proportional per-transaction allowance.  Derived
+        # only when the stage has a deadline -- with ``deadline=None``
+        # (board 06's deterministic regen, the two-phase stall-relief
+        # hook) there is no "remaining stage budget" denominator and this
+        # arm is byte-identical to pre-#4781 behavior.  Nested rescues
+        # (depth > 0) inherit the parent's ``txn_deadline`` instead of
+        # deriving their own.
+        if deadline is not None and txn_deadline is None:
+            _txn_start = _time.time()
+            _txn_remaining = deadline - _txn_start
+            txn_deadline = _txn_start + max(
+                RELIEF_RESCUE_TXN_FRACTION * _txn_remaining,
+                RELIEF_RESCUE_TXN_FLOOR_S,
+            )
+
         def _past_deadline() -> bool:
-            return deadline is not None and _time.time() >= deadline
+            if deadline is None:
+                return False
+            now = _time.time()
+            if now >= deadline:
+                return True
+            return txn_deadline is not None and now >= txn_deadline
+
+        def _deadline_reason() -> str:
+            # Only called after ``_past_deadline()`` returned True.  The
+            # stage-deadline arm keeps the historical wording; the
+            # transaction-allowance arm is the #4781 greppable evidence
+            # token for an A/B log.
+            if deadline is not None and _time.time() >= deadline:
+                return "deadline exceeded"
+            return (
+                "transaction allowance exhausted "
+                f"(max({RELIEF_RESCUE_TXN_FRACTION:.0%} of remaining stage "
+                f"budget, {RELIEF_RESCUE_TXN_FLOOR_S:.0f}s); issue #4781)"
+            )
 
         subsearch_budget = self._relief_subsearch_budget(per_net_timeout, deterministic_rescue)
         max_rounds = 4
@@ -12978,7 +13117,7 @@ class Autorouter:
         for round_idx in range(max_rounds):
             if _past_deadline():
                 flush_print_fn(
-                    f"  Relief rescue: {failed_name} deadline exceeded "
+                    f"  Relief rescue: {failed_name} {_deadline_reason()} "
                     f"(round {round_idx + 1}) -- rolling back ({elapsed_fn()})"
                 )
                 _rollback()
@@ -13126,6 +13265,11 @@ class Autorouter:
                     depth=depth + 1,
                     deadline=deadline,
                     deterministic_rescue=deterministic_rescue,
+                    # Issue #4781: nested rescues SHARE the parent
+                    # transaction's proportional allowance -- they are
+                    # part of the parent's commit gate, so a fresh
+                    # allowance here would rebuild the unbounded product.
+                    txn_deadline=txn_deadline,
                 ):
                     relanded += 1
                 else:
@@ -14354,6 +14498,16 @@ class Autorouter:
             # signature default.  Without the partial the two-phase path had no
             # switch at all -- it silently inherited whatever
             # ``_relief_rescue``'s signature said.
+            #
+            # Issue #4781: no ``deadline`` is bound here, so rescues on this
+            # path run with ``deadline=None`` and the proportional
+            # per-transaction bound is structurally EXEMPT (it is a fraction
+            # of the REMAINING stage budget, which does not exist without a
+            # deadline).  Deliberate: binding the stage deadline here would
+            # newly arm the #3413 mid-transaction abort on the default
+            # ``kct route`` path -- a behavior change to boards that route
+            # through ``route_all_two_phase``, out of #4781's measured scope.
+            # ``route_all_two_phase`` logs the exemption as evidence.
             relief_rescue=functools.partial(
                 self._relief_rescue, deterministic_rescue=deterministic_rescue
             ),
@@ -14424,6 +14578,28 @@ class Autorouter:
             _banner_per_net_timeout = derive_per_net_cap(per_net_timeout, timeout)
         flush_print(
             self._relief_subsearch_bound_line(_banner_per_net_timeout, deterministic_rescue)
+        )
+
+        # Issue #4781: the proportional TRANSACTION bound is structurally
+        # EXEMPT on this path.  The #3471 stall-relief hook calls
+        # ``_relief_rescue`` positionally with 8 arguments (see
+        # ``_create_two_phase_router``) and threads no ``deadline``, so
+        # ``relief_deadline is None`` inside every rescue this path runs and
+        # the proportional allowance has no "remaining stage budget"
+        # denominator.  Threading the stage deadline into the hook would
+        # newly arm the #3413 mid-transaction stage-deadline abort on the
+        # default ``kct route`` path (boards 04/05 route through here) -- a
+        # separate behavior change from #4781's measured defect, which lives
+        # on the negotiated entry point.  The line reports the exemption so
+        # A/B logs state which arm was live (evidence discipline of #4536).
+        # Worded specifically (not via ``_relief_txn_bound_line(None)``):
+        # this STAGE may well have a ``timeout``; it is the rescues that
+        # never receive it.
+        flush_print(
+            "  Relief-rescue transaction bound: exempt -- the two-phase "
+            "stall-relief hook (#3471) carries no stage deadline into its "
+            "rescues, so the proportional bound has no remaining-budget "
+            "denominator on this path (issue #4781)"
         )
 
         tp_router = self._create_two_phase_router(deterministic_rescue=deterministic_rescue)

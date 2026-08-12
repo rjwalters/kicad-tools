@@ -709,3 +709,308 @@ class TestReliefRescueDiffPairAtomicTransaction:
         assert rip_spy.call_args.args[0] == [1], "no partner may be folded into the rip"
         assert net_routes[1] == [committed]
         assert committed in router.routes
+
+
+class _FakeClock:
+    """Injected ``time.time`` replacement -- advances only when told to.
+
+    Issue #4781 tests drive ``_relief_rescue``'s deadline checks with this
+    instead of wall-clock sleeps, so the proportionality abort is
+    deterministic on any machine.
+    """
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestReliefRescueProportionalBound:
+    """Issue #4781: proportional per-transaction allowance.
+
+    A single rescue transaction (including its depth-1 nested rescues,
+    which SHARE the parent's allowance) may spend at most
+    ``max(RELIEF_RESCUE_TXN_FRACTION * remaining_stage_budget,
+    RELIEF_RESCUE_TXN_FLOOR_S)``, evaluated only at the existing
+    ``_past_deadline()`` check sites.  On breach the transaction rolls
+    back verbatim (the no-net-loss guarantee is untouched); with no
+    stage deadline the bound is structurally inert.
+    """
+
+    def _fixture(self, *, extra_net3_route: bool = False):
+        """Net 1 failed; net 2 (and optionally net 3) routed victims."""
+        router = _make_simple_router(num_nets=3)
+        neg_router = NegotiatedRouter(
+            grid=router.grid,
+            router=router.router,
+            rules=router.rules,
+            net_class_map={},
+        )
+        route2 = _seg_route(2, "N2", 8.0)
+        router._mark_route(route2)
+        router.grid.mark_route_usage(route2)
+        router.routes.append(route2)
+        net_routes: dict[int, list[Route]] = {1: [], 2: [route2]}
+        route3 = None
+        if extra_net3_route:
+            route3 = _seg_route(3, "N3", 12.0)
+            router._mark_route(route3)
+            router.grid.mark_route_usage(route3)
+            router.routes.append(route3)
+            net_routes[3] = [route3]
+        pads_by_net = {
+            net_id: [router.pads[p] for p in pad_ids] for net_id, pad_ids in router.nets.items()
+        }
+        return router, neg_router, net_routes, pads_by_net, route2, route3
+
+    def test_exceeding_allowance_aborts_and_restores_verbatim(self):
+        """(a) A transaction past its allowance aborts at a check site.
+
+        Stage: 1000 s remaining -> allowance = max(25% * 1000, 90) = 250 s.
+        Round 1 rips a victim and 'costs' 300 s; the round-2 check site
+        must abort on the TRANSACTION allowance (the stage deadline, 1000 s
+        away, has not passed) and restore the board verbatim.
+        """
+        router, neg_router, net_routes, pads_by_net, route2, _ = self._fixture()
+        clock = _FakeClock(start=1000.0)
+        probe = _seg_route(1, "N1", 4.0)
+        msgs: list[str] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None):
+            clock.now += 300.0  # round 1 burns past the 250 s allowance
+            return ([probe], {2})
+
+        with (
+            patch("time.time", clock),
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=msgs.append,
+                elapsed_fn=lambda: "0s",
+                deadline=1000.0 + 1000.0,
+            )
+
+        assert ok is False
+        joined = "\n".join(msgs)
+        assert "transaction allowance exhausted" in joined, (
+            "the abort must be attributed to the #4781 allowance, not the stage deadline"
+        )
+        assert "deadline exceeded" not in joined
+        # Verbatim restore: the EXACT original Route objects, both maps.
+        assert net_routes[2] == [route2]
+        assert route2 in router.routes
+        assert net_routes[1] == []
+
+    def test_within_allowance_is_unaffected(self):
+        """(b) A transaction inside its allowance commits normally."""
+        router, neg_router, net_routes, pads_by_net, route2, _ = self._fixture()
+        clock = _FakeClock(start=1000.0)
+        probe_conflicted = _seg_route(1, "N1", 4.0)
+        probe_free = _seg_route(1, "N1", 4.0)
+        committed_1 = _seg_route(1, "N1", 4.0)
+        relanded_2 = _seg_route(2, "N2", 8.0)
+        probe_calls: list[int] = []
+        msgs: list[str] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None):
+            probe_calls.append(net_id)
+            clock.now += 40.0  # well inside the 250 s allowance
+            if len(probe_calls) == 1:
+                return ([probe_conflicted], {2})
+            return ([probe_free], set())
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None):
+            return [committed_1] if net_id == 1 else [relanded_2]
+
+        with (
+            patch("time.time", clock),
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=msgs.append,
+                elapsed_fn=lambda: "0s",
+                deadline=1000.0 + 1000.0,
+            )
+
+        assert ok is True
+        assert net_routes[1] == [committed_1]
+        assert net_routes[2] == [relanded_2]
+        joined = "\n".join(msgs)
+        assert "transaction allowance exhausted" not in joined
+        assert "deadline exceeded" not in joined
+
+    def test_nested_rescue_shares_parent_allowance(self):
+        """(c) A depth-1 nested rescue inherits the PARENT's allowance.
+
+        The parent starts with 1000 s remaining (allowance 250 s) and has
+        spent 240 s when the nested rescue for its stranded victim begins.
+        If the nested rescue derived its OWN allowance it would get
+        max(25% * 760, 90) = 190 s (deadline ~ t0+430) and sail past the
+        t0+260 probe; sharing the parent's t0+250 allowance, it must abort
+        at its round-2 check site instead -- which then fails the parent's
+        commit gate and rolls the whole transaction back verbatim.
+        """
+        router, neg_router, net_routes, pads_by_net, route2, route3 = self._fixture(
+            extra_net3_route=True
+        )
+        clock = _FakeClock(start=1000.0)
+        probe_a = _seg_route(1, "N1", 4.0)
+        probe_free = _seg_route(1, "N1", 4.0)
+        committed_1 = _seg_route(1, "N1", 4.0)
+        probe_nested = _seg_route(2, "N2", 8.0)
+        probe_calls: list[int] = []
+        msgs: list[str] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None):
+            probe_calls.append(net_id)
+            if len(probe_calls) == 1:
+                clock.now = 1000.0 + 240.0  # parent spends 240 s of its 250 s
+                return ([probe_a], {2})
+            if len(probe_calls) == 2:
+                return ([probe_free], set())
+            # Nested rescue's round-1 probe (net 2): crosses net 3 and
+            # pushes the SHARED allowance (t0+250) past, while staying far
+            # inside what a freshly-derived nested allowance would permit.
+            clock.now = 1000.0 + 260.0
+            return ([probe_nested], {3})
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None):
+            if net_id == 1:
+                return [committed_1]
+            return []  # victim 2 never re-lands via plain A*
+
+        with (
+            patch("time.time", clock),
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=msgs.append,
+                elapsed_fn=lambda: "0s",
+                deadline=1000.0 + 1000.0,
+            )
+
+        assert ok is False
+        # The nested rescue (for N2) aborted on the SHARED allowance...
+        nested_aborts = [m for m in msgs if "N2" in m and "transaction allowance exhausted" in m]
+        assert nested_aborts, (
+            f"nested rescue must abort on the parent's allowance (messages: {msgs})"
+        )
+        # ...and the whole outer transaction rolled back verbatim.
+        assert net_routes[1] == []
+        assert net_routes[2] == [route2]
+        assert net_routes[3] == [route3]
+        assert route2 in router.routes
+        assert route3 in router.routes
+        assert committed_1 not in router.routes
+
+    def test_no_deadline_arm_is_unchanged(self):
+        """(d) With no stage deadline the bound is structurally inert."""
+        router, neg_router, net_routes, pads_by_net, _route2, _ = self._fixture()
+        clock = _FakeClock(start=1000.0)
+        probe_conflicted = _seg_route(1, "N1", 4.0)
+        probe_free = _seg_route(1, "N1", 4.0)
+        committed_1 = _seg_route(1, "N1", 4.0)
+        relanded_2 = _seg_route(2, "N2", 8.0)
+        probe_calls: list[int] = []
+        msgs: list[str] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None):
+            probe_calls.append(net_id)
+            clock.now += 10_000_000.0  # absurd elapsed time; must not matter
+            if len(probe_calls) == 1:
+                return ([probe_conflicted], {2})
+            return ([probe_free], set())
+
+        def route_side_effect(net_id, present_cost_factor, per_net_timeout=None):
+            return [committed_1] if net_id == 1 else [relanded_2]
+
+        with (
+            patch("time.time", clock),
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+            patch.object(Autorouter, "_route_net_negotiated", side_effect=route_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=msgs.append,
+                elapsed_fn=lambda: "0s",
+                deadline=None,
+            )
+
+        assert ok is True
+        assert net_routes[1] == [committed_1]
+        joined = "\n".join(msgs)
+        assert "transaction allowance exhausted" not in joined
+        assert "deadline exceeded" not in joined
+
+    def test_stage_deadline_wording_is_preserved(self):
+        """The historical stage-deadline abort keeps its exact wording."""
+        router, neg_router, net_routes, pads_by_net, route2, _ = self._fixture()
+        clock = _FakeClock(start=1000.0)
+        probe = _seg_route(1, "N1", 4.0)
+        msgs: list[str] = []
+
+        def probe_side_effect(net_id, present_factor, per_net_timeout=None):
+            clock.now += 60.0  # past the 50 s stage deadline, inside the 90 s floor
+            return ([probe], {2})
+
+        with (
+            patch("time.time", clock),
+            patch.object(Autorouter, "_relief_probe", side_effect=probe_side_effect),
+        ):
+            ok = router._relief_rescue(
+                failed_net=1,
+                neg_router=neg_router,
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=1.0,
+                per_net_timeout=2.0,
+                flush_print_fn=msgs.append,
+                elapsed_fn=lambda: "0s",
+                deadline=1000.0 + 50.0,
+            )
+
+        assert ok is False
+        joined = "\n".join(msgs)
+        assert "deadline exceeded (round 2)" in joined, (
+            "when the STAGE deadline trips, the pre-#4781 wording must be kept"
+        )
+        assert "transaction allowance exhausted" not in joined
+        assert net_routes[2] == [route2]
+
+    def test_bound_evidence_lines(self):
+        """AC 4: greppable evidence line states the bound in force."""
+        router = _make_simple_router()
+        armed = router._relief_txn_bound_line(600.0)
+        assert armed.startswith("  Relief-rescue transaction bound: proportional")
+        assert "25%" in armed
+        assert "90s" in armed
+        assert "#4781" in armed
+        inert = router._relief_txn_bound_line(None)
+        assert inert.startswith("  Relief-rescue transaction bound: none")
+        assert "#4781" in inert
