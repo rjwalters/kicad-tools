@@ -26,9 +26,11 @@ from kicad_tools.router.layers import Layer
 from kicad_tools.router.pairwise_clearance import (
     AttachZone,
     PairwiseClearanceTable,
+    PairwisePathChecker,
     build_attach_zones,
     build_pairwise_clearance_table,
     find_pairwise_violations,
+    path_pairwise_violation,
     route_pairwise_violation,
     segment_pair_violation,
 )
@@ -617,3 +619,237 @@ def test_apply_pairwise_clearance_noop_without_voltage_map() -> None:
     args = SimpleNamespace(_pairwise_voltages=None, _pairwise_required=None)
     _apply_pairwise_clearance(router, args, quiet=True)
     assert rules.pairwise_clearance is None
+
+
+# ---------------------------------------------------------------------------
+# Path-level predicate + bound checker (#4507; consumed by #4766)
+# ---------------------------------------------------------------------------
+
+
+def _foreign_gnd_route(y: float = 0.4, layer: Layer = Layer.F_CU) -> Route:
+    return Route(net=2, net_name="/GND", segments=[_seg(0, y, 5, y, 2, "/GND", layer=layer)])
+
+
+def test_path_predicate_flags_hv_lv_below_requirement() -> None:
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    v = path_pairwise_violation(
+        0.0,
+        0.0,
+        5.0,
+        0.0,
+        Layer.F_CU,
+        0.2,
+        1,
+        [_foreign_gnd_route()],
+        table,
+        net_name="/AC_LINE",
+    )
+    assert v is not None
+    assert v.required_mm == pytest.approx(IEC_150V_PD2_IIIA_MM)
+    assert v.actual_mm == pytest.approx(0.2, abs=1e-6)
+    assert (v.net_a, v.net_b) == ("/AC_LINE", "/GND")
+
+
+def test_path_predicate_accepts_same_domain_at_dru() -> None:
+    table = _table({"/AC_LINE": 150.0, "/AC_LINE_TAP": 150.0})
+    tap = Route(net=2, net_name="/AC_LINE_TAP", segments=[_seg(0, 0.4, 5, 0.4, 2, "/AC_LINE_TAP")])
+    assert (
+        path_pairwise_violation(
+            0.0, 0.0, 5.0, 0.0, Layer.F_CU, 0.2, 1, [tap], table, net_name="/AC_LINE"
+        )
+        is None
+    )
+
+
+def test_path_predicate_ignores_other_layer_copper() -> None:
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    assert (
+        path_pairwise_violation(
+            0.0,
+            0.0,
+            5.0,
+            0.0,
+            Layer.F_CU,
+            0.2,
+            1,
+            [_foreign_gnd_route(layer=Layer.B_CU)],
+            table,
+            net_name="/AC_LINE",
+        )
+        is None
+    )
+
+
+def test_path_predicate_skips_own_net_copper() -> None:
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    own = Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0.3, 5, 0.3, 1, "/AC_LINE")])
+    assert (
+        path_pairwise_violation(
+            0.0, 0.0, 5.0, 0.0, Layer.F_CU, 0.2, 1, [own], table, net_name="/AC_LINE"
+        )
+        is None
+    )
+
+
+def test_path_predicate_resolves_moving_name_from_ids() -> None:
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    anonymous = Route(net=2, net_name="", segments=[_seg(0, 0.4, 5, 0.4, 2, "")])
+    v = path_pairwise_violation(
+        0.0,
+        0.0,
+        5.0,
+        0.0,
+        Layer.F_CU,
+        0.2,
+        1,
+        [anonymous],
+        table,
+        id_to_name={1: "/AC_LINE", 2: "/GND"},
+    )
+    assert v is not None
+    assert (v.net_a, v.net_b) == ("/AC_LINE", "/GND")
+
+
+def test_path_predicate_unresolvable_moving_net_matches_gate_semantics() -> None:
+    """An unnamed moving net resolves no pair -- exactly the gate's verdict."""
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    foreign = [_foreign_gnd_route()]
+    assert path_pairwise_violation(0.0, 0.0, 5.0, 0.0, Layer.F_CU, 0.2, 1, foreign, table) is None
+    # The gate reaches the same verdict for a route whose net_name is unset.
+    unnamed = Route(net=1, net_name="", segments=[_seg(0, 0, 5, 0, 1, "")])
+    assert route_pairwise_violation(unnamed, 1, foreign, table) is None
+
+
+def test_path_predicate_dormant_without_table() -> None:
+    assert (
+        path_pairwise_violation(
+            0.0,
+            0.0,
+            5.0,
+            0.0,
+            Layer.F_CU,
+            0.2,
+            1,
+            [_foreign_gnd_route()],
+            None,
+            net_name="/AC_LINE",
+        )
+        is None
+    )
+
+
+def test_path_predicate_agrees_with_route_gate() -> None:
+    """Predicate and acceptance gate return the SAME finding on the same copper.
+
+    They share ``_segments_pairwise_violation`` by construction; this pins the
+    contract #4766 relies on -- a moved segment the predicate accepts cannot be
+    flagged by the audit backstop, and vice versa.
+    """
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    foreign = [_foreign_gnd_route()]
+    for y in (0.0, 2.5):  # violating and clean geometries
+        as_route = Route(net=1, net_name="/AC_LINE", segments=[_seg(0, y, 5, y, 1, "/AC_LINE")])
+        assert path_pairwise_violation(
+            0.0, y, 5.0, y, Layer.F_CU, 0.2, 1, foreign, table, net_name="/AC_LINE"
+        ) == route_pairwise_violation(as_route, 1, foreign, table)
+
+
+def test_path_predicate_honours_layer_scoped_attach_zone() -> None:
+    """The #4506/#4699 layer-scoped waiver applies to candidate paths too."""
+    table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    zone = _smd_zone()  # pads on F.Cu only
+    # On the pad layer the zone waives the (above-DRU) proximity...
+    assert (
+        path_pairwise_violation(
+            0.0,
+            0.0,
+            5.0,
+            0.0,
+            Layer.F_CU,
+            0.2,
+            1,
+            [_foreign_gnd_route(y=0.5)],
+            table,
+            net_name="/AC_LINE",
+            attach_zones=(zone,),
+        )
+        is None
+    )
+    # ...but the same XY geometry on an inner layer stays a violation.
+    assert (
+        path_pairwise_violation(
+            0.0,
+            0.0,
+            5.0,
+            0.0,
+            Layer.IN1_CU,
+            0.2,
+            1,
+            [_foreign_gnd_route(y=0.5, layer=Layer.IN1_CU)],
+            table,
+            net_name="/AC_LINE",
+            attach_zones=(zone,),
+        )
+        is not None
+    )
+
+
+def test_checker_from_router_dormant_without_table() -> None:
+    router = SimpleNamespace(rules=DesignRules(), grid=SimpleNamespace(routes=[]))
+    assert PairwisePathChecker.from_router(router) is None
+
+
+def test_checker_from_router_builds_live_checker() -> None:
+    rules = DesignRules(trace_clearance=DRU)
+    rules.pairwise_clearance = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    grid = SimpleNamespace(routes=[])
+    router = SimpleNamespace(
+        rules=rules,
+        grid=grid,
+        net_names={1: "/AC_LINE", 2: "/GND"},
+        _pairwise_attach_zones_cache=None,
+    )
+    checker = PairwisePathChecker.from_router(router)
+    assert checker is not None
+    # No foreign copper yet -> clear.
+    assert checker.path_is_clear(0.0, 0.0, 5.0, 0.0, Layer.F_CU, 0.2, 1)
+    # The checker sees copper committed AFTER construction (live view): the
+    # grid-synced optimize loop unmarks/re-marks routes mid-pass, so a
+    # construction-time snapshot would go stale.
+    grid.routes.append(_foreign_gnd_route())
+    assert not checker.path_is_clear(0.0, 0.0, 5.0, 0.0, Layer.F_CU, 0.2, 1)
+    v = checker.path_violation(0.0, 0.0, 5.0, 0.0, Layer.F_CU, 0.2, 1)
+    assert v is not None and (v.net_a, v.net_b) == ("/AC_LINE", "/GND")
+    # Own-net copper never conflicts.
+    assert checker.path_is_clear(0.0, 0.0, 5.0, 0.0, Layer.F_CU, 0.2, 2)
+
+
+def test_checker_from_router_uses_pad_derived_name_fallback() -> None:
+    """A router with an empty ``net_names`` map still resolves via its pads."""
+    rules = DesignRules(trace_clearance=DRU)
+    rules.pairwise_clearance = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+    router = SimpleNamespace(
+        rules=rules,
+        grid=SimpleNamespace(routes=[_foreign_gnd_route()]),
+        net_names={},
+        _net_name_to_id=lambda: {"/AC_LINE": 1, "/GND": 2},
+    )
+    checker = PairwisePathChecker.from_router(router)
+    assert checker is not None
+    assert not checker.path_is_clear(0.0, 0.0, 5.0, 0.0, Layer.F_CU, 0.2, 1)
+
+
+def test_checker_matches_collision_checker_protocol_signature() -> None:
+    """``path_is_clear`` stays call-compatible with the optimizer protocol.
+
+    #4766 composes this checker with ``make_collision_checker``'s output; if
+    either side renames or reorders a parameter the composition breaks, so pin
+    the positional shape here.
+    """
+    import inspect
+
+    from kicad_tools.router.optimizer.collision import CollisionChecker
+
+    protocol_params = list(inspect.signature(CollisionChecker.path_is_clear).parameters)
+    checker_params = list(inspect.signature(PairwisePathChecker.path_is_clear).parameters)
+    assert checker_params == protocol_params

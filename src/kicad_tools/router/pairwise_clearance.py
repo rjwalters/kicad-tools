@@ -41,11 +41,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable, Mapping, NamedTuple, Sequence
+from typing import TYPE_CHECKING, Callable, Iterable, Mapping, NamedTuple, Sequence
 
 from kicad_tools.core.geometry import segment_to_segment_distance
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.router.layers import Layer
     from kicad_tools.router.primitives import Route, Segment
     from kicad_tools.schema.pcb import Footprint
 
@@ -711,6 +712,40 @@ def route_pairwise_violation(
     # ``exclude_net`` is the route's own net id and is authoritative mid-route
     # (``route.net``/``route.net_name`` may be unset before finalisation).
     moving_name = _resolve_net_name(id_to_name, exclude_net, route.net_name)
+    return _segments_pairwise_violation(
+        route.segments,
+        moving_name,
+        exclude_net,
+        foreign_routes,
+        table,
+        id_to_name=id_to_name,
+        floor=floor,
+        attach_zones=attach_zones,
+        tolerance=tolerance,
+    )
+
+
+def _segments_pairwise_violation(
+    segments: Sequence[Segment],
+    moving_name: str,
+    exclude_net: int,
+    foreign_routes: Iterable[Route],
+    table: PairwiseClearanceTable,
+    *,
+    id_to_name: Mapping[int, str] | None,
+    floor: float,
+    attach_zones: Sequence[AttachZone],
+    tolerance: float,
+) -> PairwiseViolation | None:
+    """Shared moving-copper-vs-foreign-routes walk (issue #4507).
+
+    ONE implementation backs both :func:`route_pairwise_violation` (the
+    post-route acceptance gate) and :func:`path_pairwise_violation` (the
+    candidate-path predicate), so a copper-moving pass that consults the
+    predicate can never disagree with the gate that audits its output --
+    the same single-implementation discipline :func:`project_zone_layers`
+    enforces for the #4506 layer scoping.
+    """
     for other in foreign_routes:
         if other.net == exclude_net:
             continue
@@ -720,7 +755,7 @@ def route_pairwise_violation(
         required = table.required_clearance(moving_name, foreign_name)
         if required <= floor + tolerance:
             continue
-        for seg in route.segments:
+        for seg in segments:
             for oseg in other.segments:
                 violation = segment_pair_violation(
                     seg,
@@ -735,6 +770,189 @@ def route_pairwise_violation(
                 if violation is not None:
                     return violation
     return None
+
+
+def path_pairwise_violation(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    layer: Layer,
+    width: float,
+    exclude_net: int,
+    foreign_routes: Iterable[Route],
+    table: PairwiseClearanceTable | None,
+    *,
+    net_name: str | None = None,
+    id_to_name: Mapping[int, str] | None = None,
+    dru: float | None = None,
+    attach_zones: Sequence[AttachZone] = (),
+    tolerance: float = _PASS_TOLERANCE,
+) -> PairwiseViolation | None:
+    """Check ONE candidate path against the pairwise (HV) requirement (#4507).
+
+    The coordinate-level form of :func:`route_pairwise_violation`: instead of
+    a finished :class:`~kicad_tools.router.primitives.Route` it takes the
+    ``(x1, y1) -> (x2, y2)`` path a copper-moving pass is *about to commit* --
+    the exact shape the optimizer's
+    :meth:`~kicad_tools.router.optimizer.collision.CollisionChecker.path_is_clear`
+    hook already speaks (the first seven parameters match it positionally on
+    purpose).  Issue #4766 consults this before accepting a moved segment, so
+    the ``--lattice-optimize`` post-passes stop proposing copper the pairwise
+    audit backstop then flags.
+
+    Scope matches the audit exactly (trace-to-trace, same copper layer, #4506
+    attach-zone exemption included): both delegate to the same
+    :func:`_segments_pairwise_violation` walk, so predicate and gate agree by
+    construction.  Pad/via geometry remains the scalar checks' and the
+    ``kct creepage`` census' remit.
+
+    The moving net's name resolves from ``net_name`` when supplied, else from
+    ``id_to_name[exclude_net]``.  An unresolvable moving net returns ``None``
+    -- identical to the gate's empty ``route.net_name`` fallback, where an
+    unmatchable name can participate in no widening pair.  ``table=None`` (no
+    ``--voltage-map``) is likewise a strict no-op.
+    """
+    if table is None:
+        return None
+    moving_name = (
+        net_name if net_name is not None else _resolve_net_name(id_to_name, exclude_net, "")
+    )
+    if not moving_name:
+        return None
+    floor = table.dru if dru is None else dru
+
+    # Lazy import mirrors the module's TYPE_CHECKING-only primitives import
+    # (this module stays importable without the router package loaded).
+    from kicad_tools.router.primitives import Segment
+
+    candidate = Segment(x1, y1, x2, y2, width, layer, net=exclude_net, net_name=moving_name)
+    return _segments_pairwise_violation(
+        (candidate,),
+        moving_name,
+        exclude_net,
+        foreign_routes,
+        table,
+        id_to_name=id_to_name,
+        floor=floor,
+        attach_zones=attach_zones,
+        tolerance=tolerance,
+    )
+
+
+@dataclass(frozen=True)
+class PairwisePathChecker:
+    """Bound pairwise (HV) path predicate for copper-moving passes (#4507).
+
+    Packages everything :func:`path_pairwise_violation` needs -- the resolved
+    :class:`PairwiseClearanceTable`, a **live view** of the board's committed
+    foreign copper, the id->name map and the #4506 attach zones -- behind the
+    optimizer's ``path_is_clear(x1, y1, x2, y2, layer, width, exclude_net)``
+    calling convention (:class:`~kicad_tools.router.optimizer.collision.
+    CollisionChecker`), so issue #4766 can compose it with the existing scalar
+    collision checker: a moved segment is acceptable only when the scalar
+    checker AND this predicate both pass.
+
+    ``foreign_routes`` is a zero-argument callable re-evaluated on every query
+    (typically ``lambda: grid.routes``): the grid-synced optimize loop unmarks
+    each route before mutating it and re-marks it after, so a snapshot taken at
+    construction time would go stale mid-pass.
+
+    Instances only exist when a voltage map is active --
+    :meth:`from_router` returns ``None`` otherwise (the dormancy contract every
+    pairwise consumer follows), so callers guard with a single ``is None``
+    check and the scalar-only path stays byte-identical.
+    """
+
+    table: PairwiseClearanceTable
+    foreign_routes: Callable[[], Iterable[Route]]
+    id_to_name: Mapping[int, str] | None = None
+    attach_zones: Sequence[AttachZone] = ()
+    dru: float | None = None
+    tolerance: float = _PASS_TOLERANCE
+
+    @classmethod
+    def from_router(cls, router: object) -> PairwisePathChecker | None:
+        """Build the checker from a live ``Autorouter``; ``None`` when dormant.
+
+        Reads the same authorities the acceptance gate reads: the table from
+        ``router.rules.pairwise_clearance``, foreign copper live from
+        ``router.grid.routes`` (the same foreign-copper source the pathfinder's
+        ``Router._validate_route_clearance`` gate walks), names from
+        ``router.net_names`` (plus the pad-derived fallback
+        ``Autorouter._net_name_to_id`` adds for routers assembled without
+        ``add_component``), and the #4506 zones from the CLI resolver's
+        memoised ``_pairwise_attach_zones_cache`` hand-off (#4602 precedent).
+
+        Returns ``None`` when no voltage map installed a table (or the router
+        has no grid) -- the caller's signal to skip pairwise consultation
+        entirely.
+        """
+        rules = getattr(router, "rules", None)
+        table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
+        if table is None:
+            return None
+        grid = getattr(router, "grid", None)
+        if grid is None:
+            return None
+
+        id_to_name: dict[int, str] = {
+            int(net_id): name
+            for net_id, name in (getattr(router, "net_names", None) or {}).items()
+            if name
+        }
+        name_to_id_fn = getattr(router, "_net_name_to_id", None)
+        if callable(name_to_id_fn):
+            for name, net_id in name_to_id_fn().items():
+                id_to_name.setdefault(int(net_id), name)
+
+        zones = getattr(router, "_pairwise_attach_zones_cache", None) or ()
+        return cls(
+            table=table,
+            foreign_routes=lambda: grid.routes,
+            id_to_name=id_to_name or None,
+            attach_zones=tuple(zones),
+        )
+
+    def path_violation(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer: Layer,
+        width: float,
+        exclude_net: int,
+    ) -> PairwiseViolation | None:
+        """First pairwise shortfall for the candidate path, or ``None``."""
+        return path_pairwise_violation(
+            x1,
+            y1,
+            x2,
+            y2,
+            layer,
+            width,
+            exclude_net,
+            self.foreign_routes(),
+            self.table,
+            id_to_name=self.id_to_name,
+            dru=self.dru,
+            attach_zones=self.attach_zones,
+            tolerance=self.tolerance,
+        )
+
+    def path_is_clear(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer: Layer,
+        width: float,
+        exclude_net: int,
+    ) -> bool:
+        """``CollisionChecker``-shaped verdict: True when no pair falls short."""
+        return self.path_violation(x1, y1, x2, y2, layer, width, exclude_net) is None
 
 
 def find_pairwise_violations(

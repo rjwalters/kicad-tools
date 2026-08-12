@@ -340,6 +340,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`docs/research/kipy-ipc-api-evaluation.md`** (#4779) — evaluation of `kipy` (official KiCad IPC-API bindings) and `kicad-mcp-kipy` as a parser cross-check; verdict: adopt nothing (live-editor-only RPC client, no offline path, cannot run DRC); also corrects the `README.md` "Related Projects" `kipy` entry to the canonical GitLab URL with the live-editor constraint stated.
 
+- **A path-level pairwise (HV) clearance predicate the copper-moving post-passes
+  can consult** (#4507, epic #4431 Phase 2) — `pairwise_clearance` gains
+  `path_pairwise_violation(x1, y1, x2, y2, layer, width, exclude_net, …)` (the
+  coordinate-level form of the `route_pairwise_violation` acceptance gate; both
+  now delegate to one shared walk, so predicate and gate agree by construction)
+  and `PairwisePathChecker` — a bound checker whose `path_is_clear` matches the
+  optimizer's `CollisionChecker` calling convention positionally, built from a
+  live router via `PairwisePathChecker.from_router` (returns `None` without a
+  `--voltage-map`, the standard dormancy contract). This is the API surface the
+  `--lattice-optimize` pairwise-blindness fix (#4766) composes with the scalar
+  collision checker; no existing behavior changes in this slice.
 - **`--format json` on the 10 prose-only holdouts inside the `datasheet`,
   `lib`, `parts` and `pcb` families** (part of #4674, third batch of the
   #4543 machine-output sweep) — `datasheet cache`, `datasheet convert`,
