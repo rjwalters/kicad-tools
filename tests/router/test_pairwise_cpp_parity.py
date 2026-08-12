@@ -93,12 +93,17 @@ def _cpp_via(x, y, net, layer_from=0, layer_to=1, drill=0.3, diameter=0.6):
     return via
 
 
-def _cpp_zone(min_x, min_y, max_x, max_y, net_ids):
+def _cpp_zone(min_x, min_y, max_x, max_y, net_ids, net_layers=None):
     from kicad_tools.router import router_cpp
 
     zone = router_cpp.AttachZone()
     zone.min_x, zone.min_y, zone.max_x, zone.max_y = min_x, min_y, max_x, max_y
     zone.net_ids = list(net_ids)
+    # Issue #4507: ``net_layers`` maps a net id to the grid layer indices it has
+    # PAD copper on here.  Leaving it empty is the layer-agnostic (pre-#4507)
+    # verdict, which is what every pre-existing fixture in this module wants.
+    if net_layers:
+        zone.net_layers = {net: sorted(layers) for net, layers in net_layers.items()}
     return zone
 
 
@@ -452,7 +457,9 @@ def test_attach_zones_to_net_ids_translates_and_drops_unresolvable() -> None:
         AttachZone(9.0, 9.0, 10.0, 10.0, frozenset({"AC_LINE", "NOT_ON_BOARD"})),
     )
     translated = attach_zones_to_net_ids(zones, NET_NAMES)
-    assert translated == [(0.0, -1.0, 5.0, 1.0, [HV_NET, LV_NET])]
+    # Issue #4507: the trailing slot is the per-net layer projection; ``None``
+    # here because these hand-built zones record no pad layers.
+    assert translated == [(0.0, -1.0, 5.0, 1.0, [HV_NET, LV_NET], None)]
 
 
 def test_attach_zones_to_net_ids_preserves_multi_net_zones() -> None:
@@ -995,3 +1002,359 @@ def test_no_voltage_map_route_leaves_grid_dormant() -> None:
     assert route is not None
     assert cpp_grid._impl.pairwise_active is False
     assert cpp_grid._impl.max_pairwise_clearance == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 (#4507): the attach-zone waiver is LAYER-SCOPED on the C++ path too
+# ---------------------------------------------------------------------------
+#
+# PR #4756 (issue #4699) narrowed the #4506 exemption on the PYTHON side: a
+# rated footprint waives the pairwise widening only on the copper layers its
+# own pads occupy, so copper merely passing *under* an SMD part is no longer
+# exempted by an XY box it never touches.  That PR deliberately left the C++
+# ``Grid3D`` zone halo layer-agnostic (strictly more permissive), with the
+# layer-scoped Python ``route_pairwise_violation`` as the acceptance check.
+#
+# The residual is a search<->gate DISAGREEMENT, and disagreement is exactly the
+# thrash this phase exists to remove: the C++ search proposes copper its own
+# validator waives, the layer-scoped Python post-check rejects it, the router
+# boosts and retries, and the net either burns its resume budget into the slow
+# Python fallback or fails outright.  These tests pin the mirror.
+
+# A rated part whose pads sit on B.Cu only -> its waiver must not reach F.Cu.
+_B_CU_ONLY = frozenset({("AC_LINE", frozenset({"B.Cu"})), ("GND", frozenset({"B.Cu"}))})
+_LAYER_INDICES = {"F.Cu": 0, "B.Cu": 1}
+
+
+@requires_cpp
+def test_attach_zone_waiver_is_layer_scoped() -> None:
+    """A zone waives only on layers where BOTH nets have pad copper."""
+    grid = _cpp_grid()
+    _install_domains(grid)
+    grid.set_attach_zones(
+        [_cpp_zone(0.0, 0.0, 20.0, 20.0, [HV_NET, LV_NET], {HV_NET: [1], LV_NET: [1]})]
+    )
+    # Layer 1 (B.Cu) -- the part's own pad layer -- still waives.
+    assert grid.attach_zone_exempts(5.0, 5.0, HV_NET, LV_NET, 1) is True
+    # Layer 0 (F.Cu) -- copper merely passing over the pad field -- does not.
+    assert grid.attach_zone_exempts(5.0, 5.0, HV_NET, LV_NET, 0) is False
+    # No layer context (via-vs-via) keeps the layer-agnostic verdict, which is
+    # also the pre-#4507 answer the defaulted argument preserves.
+    assert grid.attach_zone_exempts(5.0, 5.0, HV_NET, LV_NET, -1) is True
+    assert grid.attach_zone_exempts(5.0, 5.0, HV_NET, LV_NET) is True
+
+
+@requires_cpp
+def test_attach_zone_without_layer_data_stays_layer_agnostic() -> None:
+    """Backward compat: an empty ``net_layers`` map waives on every layer."""
+    grid = _cpp_grid()
+    _install_domains(grid)
+    grid.set_attach_zones([_cpp_zone(0.0, 0.0, 20.0, 20.0, [HV_NET, LV_NET])])
+    for layer in (-1, 0, 1):
+        assert grid.attach_zone_exempts(5.0, 5.0, HV_NET, LV_NET, layer) is True
+
+
+@requires_cpp
+def test_layer_scoped_zone_still_requires_both_nets_to_reach_the_layer() -> None:
+    """One net short of the layer is enough to withhold the waiver."""
+    grid = _cpp_grid()
+    _install_domains(grid)
+    # HV reaches both layers (through-hole-ish), LV only B.Cu.
+    grid.set_attach_zones(
+        [_cpp_zone(0.0, 0.0, 20.0, 20.0, [HV_NET, LV_NET], {HV_NET: [0, 1], LV_NET: [1]})]
+    )
+    assert grid.attach_zone_exempts(5.0, 5.0, HV_NET, LV_NET, 1) is True
+    assert grid.attach_zone_exempts(5.0, 5.0, HV_NET, LV_NET, 0) is False
+
+
+@requires_cpp
+def test_through_hole_zone_net_is_unrestricted_on_every_layer() -> None:
+    """A net ABSENT from ``net_layers`` is unrestricted (``*.Cu`` barrels)."""
+    grid = _cpp_grid()
+    _install_domains(grid)
+    # Only LV is layer-restricted; HV is a through-hole pad, so Python omits it
+    # from the projection and the C++ side must read that as "any layer".
+    grid.set_attach_zones([_cpp_zone(0.0, 0.0, 20.0, 20.0, [HV_NET, LV_NET], {LV_NET: [0, 1]})])
+    assert grid.attach_zone_exempts(5.0, 5.0, HV_NET, LV_NET, 0) is True
+    assert grid.attach_zone_exempts(5.0, 5.0, HV_NET, LV_NET, 1) is True
+
+
+def test_attach_zones_to_net_ids_projects_pad_layers() -> None:
+    """The Python->C++ translation carries the #4699 per-net pad layers."""
+    zone = AttachZone(0.0, 0.0, 5.0, 5.0, frozenset({"AC_LINE", "GND"}), _B_CU_ONLY)
+    (translated,) = attach_zones_to_net_ids((zone,), NET_NAMES, _LAYER_INDICES)
+    assert translated[:5] == (0.0, 0.0, 5.0, 5.0, [HV_NET, LV_NET])
+    assert translated[5] == {HV_NET: frozenset({1}), LV_NET: frozenset({1})}
+
+    # No layer map supplied -> layer-agnostic (the pre-#4507 verdict).
+    (agnostic,) = attach_zones_to_net_ids((zone,), NET_NAMES)
+    assert agnostic[5] is None
+
+
+def test_attach_zones_to_net_ids_drops_through_hole_nets_from_projection() -> None:
+    """``*.Cu`` pad copper is omitted so the barrel keeps waiving everywhere."""
+    zone = AttachZone(
+        0.0,
+        0.0,
+        5.0,
+        5.0,
+        frozenset({"AC_LINE", "GND"}),
+        frozenset({("AC_LINE", frozenset({"*.Cu"})), ("GND", frozenset({"F.Cu"}))}),
+    )
+    (translated,) = attach_zones_to_net_ids((zone,), NET_NAMES, _LAYER_INDICES)
+    assert translated[5] == {LV_NET: frozenset({0})}
+
+
+def test_lattice_and_cpp_projections_share_one_implementation() -> None:
+    """The lattice and C++ zone projections cannot drift (#4507).
+
+    ``lattice.pairwise._project_zone_layers`` now delegates to the shared
+    ``pairwise_clearance.project_zone_layers`` helper, so a single edit governs
+    what every engine -- and the #4588 gate -- considers layer-covered.
+    """
+    from kicad_tools.router.lattice.pairwise import _project_zone_layers
+    from kicad_tools.router.pairwise_clearance import project_zone_layers
+
+    zone = AttachZone(0.0, 0.0, 5.0, 5.0, frozenset({"AC_LINE", "GND"}), _B_CU_ONLY)
+    ids_by_key = {"AC_LINE": [HV_NET], "GND": [LV_NET]}
+    assert _project_zone_layers(zone, ids_by_key, _LAYER_INDICES) == project_zone_layers(
+        zone, ids_by_key, _LAYER_INDICES
+    )
+
+
+@requires_cpp
+def test_validate_route_layer_scoped_zone_agrees_with_python_gate() -> None:
+    """``validate_route`` and ``AttachZone.exempts`` waive on the same layers."""
+    zone_py = AttachZone(0.0, -1.0, 5.0, 1.0, frozenset({"AC_LINE", "GND"}), _B_CU_ONLY)
+    (translated,) = attach_zones_to_net_ids((zone_py,), NET_NAMES, _LAYER_INDICES)
+    cpp_zone = _cpp_zone(*translated[:5], translated[5])
+
+    for layer_idx, layer_name, waived in ((1, "B.Cu", True), (0, "F.Cu", False)):
+        grid = _cpp_grid()
+        _install_domains(grid)
+        grid.set_attach_zones([cpp_zone])
+        # A pair 0.2 mm apart -- at the DRU floor, far below the 1.6 mm HV
+        # requirement, so only the zone can make it legal.
+        grid.add_stored_segment(0.0, 0.4, 5.0, 0.4, TRACE_WIDTH, layer_idx, LV_NET)
+        candidate = [_cpp_segment(0.0, 0.0, 5.0, 0.0, HV_NET, layer=layer_idx)]
+        assert _validate(grid, candidate).valid is waived
+        # The Python acceptance check reaches the identical verdict.
+        assert zone_py.exempts(2.5, 0.2, "AC_LINE", "GND", layer_name) is waived
+
+
+@requires_cpp
+def test_pad_branch_keys_the_waiver_on_the_pads_own_layer() -> None:
+    """Only the through-hole sub-case makes the pad branch's key choice visible.
+
+    ``validate_route``'s segment-vs-pad loop is **not** layer-blind: ~40 lines
+    above the zone consult it already drops mismatched layers (``grid.cpp:768``,
+    ``Skip pads on different layers``: ``if (pad.layer_idx != -1 &&
+    pad.layer_idx != seg.layer) continue;``).  Only two shapes survive that
+    filter and reach the consult:
+
+    * a **same-layer SMD pad**, where ``pad.layer_idx == seg.layer`` -- the two
+      candidate keys are the same value there, so cases (a) and (b) pin that the
+      pad branch consults the zone at all and honours its layer scoping, but
+      they cannot distinguish the keys; and
+    * a **through-hole pad** (``layer_idx == -1``), where the pad's own layer
+      keeps the consult layer-agnostic because the barrel really does span every
+      copper layer.  Case (c) is the ONLY case that changes verdict if the key
+      is switched to ``seg.layer``, so it alone pins the design decision.
+
+    A cross-layer seg-vs-SMD-pad pair can never reach the consult -- the filter
+    above drops it first -- so a case built on that shape passes with this fix
+    fully reverted, and with no zone installed at all.  An earlier revision of
+    this test used exactly that shape for case (a); it is deliberately gone.
+    """
+    zone_ids = [HV_NET, LV_NET]
+    # LV pad copper on B.Cu (index 1) only.
+    scoping = {HV_NET: [1], LV_NET: [1]}
+
+    def _pad_case(pad_layer: int, seg_layer: int, zone_layers=None) -> bool:
+        """Validate one HV segment against one LV pad; ``None`` installs no zone."""
+        grid = _cpp_grid()
+        _install_domains(grid)
+        if zone_layers is not None:
+            grid.set_attach_zones([_cpp_zone(0.0, -1.0, 5.0, 1.0, zone_ids, zone_layers)])
+        grid.add_pad(2.5, 0.4, 0.2, 0.2, LV_NET, pad_layer, 0, DRU, False)
+        return bool(
+            _validate(grid, [_cpp_segment(0.0, 0.0, 5.0, 0.0, HV_NET, layer=seg_layer)]).valid
+        )
+
+    # (a) Same-layer SMD pad on a layer the zone covers -> waived.  The two
+    #     controls are what keep this non-vacuous: with no zone the identical
+    #     geometry is rejected, so the waiver is what flips the verdict, and a
+    #     zone scoped to the other layer does not waive it.
+    assert _pad_case(pad_layer=1, seg_layer=1, zone_layers=scoping) is True
+    assert _pad_case(pad_layer=1, seg_layer=1, zone_layers=None) is False
+    assert _pad_case(pad_layer=1, seg_layer=1, zone_layers={HV_NET: [0], LV_NET: [0]}) is False
+
+    # (b) Same-layer SMD pad on a layer the zone does NOT cover -> full
+    #     widening.  This fails if the consult is layer-agnostic (the pre-#4507
+    #     shape, which waives here), so it pins layer scoping reaching the pad
+    #     branch at all -- but not the key choice, since the keys are equal.
+    assert _pad_case(pad_layer=0, seg_layer=0, zone_layers=scoping) is False
+
+    # (c) Through-hole pad (``layer_idx == -1``) against an F.Cu candidate: the
+    #     only case where the two candidate keys differ, so the only one that
+    #     pins the decision.  Keying on ``seg.layer`` (0 = F.Cu, a layer the
+    #     zone does not cover) would deny the waiver; the pad's own -1 keeps the
+    #     layer-agnostic verdict the barrel deserves.
+    barrel = _cpp_grid()
+    _install_domains(barrel)
+    barrel.set_attach_zones([_cpp_zone(0.0, -1.0, 5.0, 1.0, zone_ids, scoping)])
+    barrel.add_pad(2.5, 0.4, 0.2, 0.2, LV_NET, -1, 0, DRU, False)
+    # The gap point is the pad-centre/closest-approach midpoint, (2.5, 0.2).
+    # The two candidate keys genuinely disagree there ...
+    assert barrel.attach_zone_exempts(2.5, 0.2, HV_NET, LV_NET, 0) is False
+    assert barrel.attach_zone_exempts(2.5, 0.2, HV_NET, LV_NET, -1) is True
+    # ... and the pad branch takes the pad's own layer, so the pair is waived.
+    assert _validate(barrel, [_cpp_segment(0.0, 0.0, 5.0, 0.0, HV_NET, layer=0)]).valid
+
+
+@requires_cpp
+def test_search_attach_zone_waiver_is_layer_scoped() -> None:
+    """The search-time annulus honours the same layer scoping as the validator."""
+    grid = _cpp_grid()
+    _install_domains(grid)
+    grid.set_attach_zones(
+        [_cpp_zone(0.0, 0.0, 20.0, 20.0, [HV_NET, LV_NET], {HV_NET: [1], LV_NET: [1]})]
+    )
+    pf = _pathfinder(grid)
+    grid.mark_blocked(100, 108, 0, LV_NET, False, False)
+    grid.mark_blocked(100, 108, 1, LV_NET, False, False)
+    # B.Cu (the rated part's pad layer): the pair may neck down -> not blocked.
+    assert pf.cross_domain_trace_blocked(100, 100, 1, HV_NET, SCALAR_RADIUS) is False
+    # F.Cu: copper merely crossing the pad field gets no waiver -> blocked.
+    assert pf.cross_domain_trace_blocked(100, 100, 0, HV_NET, SCALAR_RADIUS) is True
+
+
+@requires_cpp
+def test_backend_projects_zone_pad_layers_into_cpp_grid() -> None:
+    """``_sync_pairwise_domains_to_cpp`` carries the layer scoping across."""
+    py_grid, rules = _backend_grid_and_rules()
+    rules.pairwise_clearance = _table()
+    cpp_grid = CppGrid.from_routing_grid(py_grid)
+    backend = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+    backend.set_net_name_to_id(dict(NET_NAMES))
+    backend.set_attach_zones(
+        (AttachZone(0.0, -1.0, 5.0, 1.0, frozenset({"AC_LINE", "GND"}), _B_CU_ONLY),)
+    )
+
+    # The grid's own index map is the authority for name -> index.
+    assert backend._grid_layer_indices() == {"F.Cu": 0, "B.Cu": 1}
+
+    backend._sync_pairwise_domains_to_cpp()
+    _, _, cpp_zones = backend._pairwise_cpp_payload
+    assert [dict(z.net_layers) for z in cpp_zones] == [{HV_NET: [1], LV_NET: [1]}]
+    assert cpp_grid._impl.attach_zone_exempts(2.5, 0.0, HV_NET, LV_NET, 0) is False
+    assert cpp_grid._impl.attach_zone_exempts(2.5, 0.0, HV_NET, LV_NET, 1) is True
+
+
+# ---------------------------------------------------------------------------
+# Headline (#4507): layer scoping is what lets this board converge
+# ---------------------------------------------------------------------------
+
+# The convergence fixture's own net names (plain ``HV`` / ``LV``, no leading
+# slash) scoped to the rated part's B.Cu pad copper.
+_HV_LV_B_CU_ONLY = frozenset({("HV", frozenset({"B.Cu"})), ("LV", frozenset({"B.Cu"}))})
+
+
+def _route_through_a_rated_gap(layer_scoped: bool):
+    """Route one HV net whose only cheap path threads a rated part's pad field.
+
+    An LV wall spans the full board height on F.Cu with a single 3 mm gap, and
+    a rated footprint's attach zone straddles that gap -- but the part's pads
+    are on **B.Cu**, so the waiver does not licence F.Cu copper necking through
+    the gap.  The legal answer is to dive to B.Cu (where the waiver does
+    apply) and cross there.
+
+    ``layer_scoped=False`` reconstructs the pre-#4507 C++ shape exactly: the
+    zone crosses the Python/C++ boundary layer-AGNOSTIC (no layer map) while
+    the Python acceptance check stays layer-scoped.
+
+    Returns ``(route, gate_violation, layers_used, used_python_fallback)``.
+    """
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.pairwise_clearance import route_pairwise_violation
+    from kicad_tools.router.primitives import Pad as PyPad
+    from kicad_tools.router.primitives import Route as PyRoute
+
+    zone = AttachZone(13.0, 7.0, 17.0, 13.0, frozenset({"HV", "LV"}), _HV_LV_B_CU_ONLY)
+    rules = DesignRules(
+        trace_width=TRACE_WIDTH,
+        trace_clearance=DRU,
+        via_diameter=0.6,
+        via_clearance=DRU,
+        grid_resolution=0.1,
+    )
+    rules.pairwise_clearance = build_pairwise_clearance_table({"HV": 150.0, "LV": 0.0}, dru=DRU)
+    grid = RoutingGrid(width=30.0, height=20.0, rules=rules, layer_stack=LayerStack.two_layer())
+    start = PyPad(x=3.0, y=10.0, width=0.6, height=0.6, net=1, net_name="HV", layer=Layer.F_CU)
+    end = PyPad(x=27.0, y=10.0, width=0.6, height=0.6, net=1, net_name="HV", layer=Layer.F_CU)
+    grid.add_pad(start)
+    grid.add_pad(end)
+    for y1, y2 in ((0.2, 8.5), (11.5, 19.8)):
+        wall = PyRoute(
+            net=2,
+            net_name="LV",
+            segments=[Segment(15.0, y1, 15.0, y2, TRACE_WIDTH, Layer.F_CU, net=2, net_name="LV")],
+        )
+        grid.mark_route(wall)
+        grid.routes.append(wall)
+
+    nc = NetClassRouting(name="HV", trace_width=TRACE_WIDTH, clearance=DRU)
+    cpp_grid = CppGrid.from_routing_grid(grid)
+    pf = CppPathfinder(cpp_grid, rules, diagonal_routing=True, net_class_map={"HV": nc})
+    pf.set_net_name_to_id({"HV": 1, "LV": 2})
+    pf.set_attach_zones((zone,))
+    if not layer_scoped:
+        pf._grid_layer_indices = lambda: None
+
+    fallback = {"used": False}
+    original = pf._try_python_fallback
+
+    def _spy(*args, **kwargs):
+        fallback["used"] = True
+        return original(*args, **kwargs)
+
+    pf._try_python_fallback = _spy
+    route = pf.route(start, end, net_class=nc)
+    violation = None
+    layers: set[str] = set()
+    if route is not None:
+        violation = route_pairwise_violation(
+            route,
+            1,
+            grid.routes,
+            rules.pairwise_clearance,
+            id_to_name={1: "HV", 2: "LV"},
+            attach_zones=(zone,),
+        )
+        layers = {seg.layer.name for seg in route.segments}
+    return route, violation, layers, fallback["used"]
+
+
+@requires_cpp
+def test_layer_scoped_zone_converges_where_layer_agnostic_thrashes() -> None:
+    """Headline (#4507): the layer-scoped search converges; the agnostic one does not.
+
+    Same board, same geometry, same C++ search -- only the zone's layer scoping
+    differs.  Layer-AGNOSTIC (the pre-#4507 C++ shape) the search keeps
+    proposing the F.Cu gap the layer-scoped Python post-check rejects, exhausts
+    its resume budget, drops into the pure-Python fallback and fails.
+    Layer-SCOPED, the search knows the F.Cu gap is illegal from the first
+    expansion, dives to the rated part's own B.Cu layer, and converges.
+    """
+    route, violation, layers, fallback = _route_through_a_rated_gap(layer_scoped=True)
+    assert route is not None, "layer-scoped search failed to converge"
+    assert violation is None, f"converged route still violates the gate: {violation}"
+    assert fallback is False, "convergence must come from the C++ search, not the fallback"
+    # It found the legal answer: cross on the layer the rated part licences.
+    assert "B_CU" in layers
+
+    blind_route, _, _, blind_fallback = _route_through_a_rated_gap(layer_scoped=False)
+    # The pre-#4507 shape cannot get there: it burns the resume budget on routes
+    # the layer-scoped gate rejects and ends up in the slow Python fallback.
+    assert blind_fallback is True, "the agnostic baseline is expected to thrash into fallback"
+    assert blind_route is None

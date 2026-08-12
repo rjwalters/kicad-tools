@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The C++ router's HV attach-zone waiver is now layer-scoped, so the search
+  stops proposing copper the pairwise gate rejects** (#4507, epic #4431 Phase
+  2) — PR #4756 narrowed the #4506 rated-footprint exemption on the Python side
+  (a zone waives the pairwise creepage widening only on layers where *both*
+  nets have pad copper) but deliberately left the C++ `Grid3D` zone halo
+  layer-agnostic, with the layer-scoped Python `route_pairwise_violation` as
+  the acceptance check. That left the C++ search and the Python gate
+  disagreeing exactly where it hurts: the search would neck an HV net through a
+  rated part's pad field on a layer that part has no copper on, its own
+  `validate_route` waived it, and the layer-scoped post-check then rejected the
+  result — burning the net's resume budget and dropping it into the 10-100x
+  slower pure-Python fallback. `AttachZone` gains a per-net `net_layers` map
+  (net id -> grid layer indices), `Grid3D::attach_zone_exempts` gains a `layer`
+  argument, and every consult in `validate_route` and the search-time kernels
+  (`cross_domain_trace_blocked`, `cross_domain_via_blocked`) passes the layer
+  the compared copper actually shares — via-vs-via, where no single layer
+  applies, stays agnostic, matching the lattice engine's `exempt_pt_pt`
+  convention. The segment-vs-pad branch keys on the *pad's* layer: that loop
+  already filters mismatched layers before the zone consult, so the only shape
+  where the two candidate keys differ is a through-hole pad, which keeps waiving
+  on every layer because the barrel spans every layer. On a two-domain fixture
+  whose only cheap path threads a rated part's pad field on a layer it does not occupy,
+  the layer-agnostic baseline exhausts 5 resume attempts, falls back to the
+  Python A* and **fails to route**; the layer-scoped search dives to the layer
+  the part actually licences and converges on the first attempt, gate-clean.
+  The layer projection now has a single implementation
+  (`pairwise_clearance.project_zone_layers`) shared by the lattice and C++
+  paths, so no engine can drift from the gate. Fully dormant without
+  `--voltage-map`; a zone with no layer data keeps the previous agnostic
+  verdict. `ROUTER_CPP_BUILD_VERSION` 18 -> 19 (run `kct build-native`).
 - **Nine polish fixes from the 2026-08-08/09 sweep's judge nits** (#4765) —
   each a small correctness defect in code that shipped last sweep; none
   changes routed copper or an exit code. (A) The `kct route` banner decided

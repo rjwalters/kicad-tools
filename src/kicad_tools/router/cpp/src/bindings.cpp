@@ -89,7 +89,12 @@ NB_MODULE(router_cpp, m) {
         .def_rw("min_y", &AttachZone::min_y)
         .def_rw("max_x", &AttachZone::max_x)
         .def_rw("max_y", &AttachZone::max_y)
-        .def_rw("net_ids", &AttachZone::net_ids);
+        .def_rw("net_ids", &AttachZone::net_ids)
+        // Issue #4507: net id -> grid layer indices that net has PAD copper on
+        // here.  A net absent from the map is unrestricted (through-hole);
+        // leaving the whole map empty keeps the pre-#4507 layer-agnostic
+        // waiver, which is what hand-built zones produce.
+        .def_rw("net_layers", &AttachZone::net_layers);
 
     // PadBounds struct
     nb::class_<PadBounds>(m, "PadBounds")
@@ -302,9 +307,12 @@ NB_MODULE(router_cpp, m) {
              "Required pairwise clearance (mm) between two net ids; 0.0 when "
              "dormant or when either net has no domain.")
         .def("attach_zone_exempts", &Grid3D::attach_zone_exempts,
-             "x"_a, "y"_a, "net_a"_a, "net_b"_a,
+             "x"_a, "y"_a, "net_a"_a, "net_b"_a, "layer"_a = -1,
              "True when an installed attach zone contains (x, y) and lists BOTH "
-             "net ids among its members.")
+             "net ids among its members.  Issue #4507: when ``layer`` is a real "
+             "grid layer index the zone must also reach it for BOTH nets "
+             "(AttachZone.net_layers); ``layer = -1`` (the default) or a zone "
+             "with an empty net_layers map keeps the layer-agnostic verdict.")
         .def_prop_ro("max_pairwise_clearance", &Grid3D::max_pairwise_clearance,
              "Issue #4511: the widest widening (mm) in the installed domain "
              "matrix, 0.0 when dormant.  Sizes the search-time widened kernel.")

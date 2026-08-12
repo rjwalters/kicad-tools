@@ -189,7 +189,17 @@ namespace router {
 // byte-identically to version 17.  Old .so files lack both bindings, so the
 // Python plumbing in ``cpp_backend.py`` would silently no-op against a stale
 // build; the version bump forces a rebuild via ``kct build-native``.
-constexpr int ROUTER_CPP_BUILD_VERSION = 18;
+//
+// Version 19 (Issue #4507, Phase 2 of epic #4431): the attach-zone exemption
+// becomes LAYER-SCOPED.  ``AttachZone`` gains a ``net_layers`` map and
+// ``Grid3D::attach_zone_exempts`` gains a trailing ``layer`` argument, so the
+// C++ search and ``validate_route`` waive the pairwise widening on exactly the
+// layers the layer-scoped Python acceptance check (#4699 /
+// ``route_pairwise_violation``) waives it on.  A zone with an empty
+// ``net_layers`` map keeps the layer-agnostic version-18 verdict, so old
+// callers are unaffected -- but the struct field and the defaulted argument
+// are both new binding surface, hence the bump.
+constexpr int ROUTER_CPP_BUILD_VERSION = 19;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -559,20 +569,33 @@ struct StoredVia {
 
 // Rated-footprint attach zone for pairwise clearance (Issue #4510 / #4506).
 //
-// Layer-agnostic axis-aligned bounding box plus the set of net ids that
-// terminate on the rated footprint.  Mirrors the frozen ``AttachZone``
-// dataclass in ``src/kicad_tools/router/pairwise_clearance.py``, except the
-// net *names* of the Python shape are translated to integer net ids by
-// ``cpp_backend.py`` before crossing the boundary (``Grid3D`` has no string
-// table).  A zone may legitimately span more than two nets (a 3-pad rated
-// connector), so membership is tested per-candidate-pair: BOTH nets of the
-// pair must be members for the widening to be waived.
+// Axis-aligned bounding box plus the set of net ids that terminate on the
+// rated footprint.  Mirrors the frozen ``AttachZone`` dataclass in
+// ``src/kicad_tools/router/pairwise_clearance.py``, except the net *names* of
+// the Python shape are translated to integer net ids by ``cpp_backend.py``
+// before crossing the boundary (``Grid3D`` has no string table).  A zone may
+// legitimately span more than two nets (a 3-pad rated connector), so
+// membership is tested per-candidate-pair: BOTH nets of the pair must be
+// members for the widening to be waived.
+//
+// Issue #4507 (epic #4431 Phase 2): the exemption is also LAYER-SCOPED, in
+// exact mirror of the #4699 Python narrowing.  ``net_layers`` maps a net id to
+// the grid layer indices on which that net has PAD copper on this footprint;
+// a pair is waived on a layer only when BOTH nets reach it.  Two escape
+// hatches preserve the old verdict where it is still correct:
+//
+//   * a net ABSENT from the map is unrestricted -- that is how a through-hole
+//     pad (``*.Cu``) keeps waiving on every layer, as the barrel requires;
+//   * an EMPTY map makes the whole zone layer-agnostic, i.e. byte-identical to
+//     the pre-#4507 (version 18) verdict, which is what hand-built zones and
+//     callers that never supply a layer map produce.
 struct AttachZone {
     float min_x = 0.0f;
     float min_y = 0.0f;
     float max_x = 0.0f;
     float max_y = 0.0f;
     std::vector<int> net_ids;
+    std::unordered_map<int, std::vector<int>> net_layers;
 };
 
 // Validation result (Issue #2439)

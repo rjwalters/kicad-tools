@@ -436,28 +436,80 @@ def build_cpp_domain_matrix(
     return CppDomainMatrix(net_to_domain=net_to_domain, matrix=matrix)
 
 
+def project_zone_layers(
+    zone: AttachZone,
+    ids_by_key: Mapping[str, Sequence[int]],
+    layer_indices: Mapping[str, int] | None,
+) -> dict[int, frozenset[int]] | None:
+    """Project a zone's per-net pad layers into engine layer indices (#4699).
+
+    Shared by every id-space consumer of the #4506 exemption -- the lattice
+    projection (``lattice/pairwise.py``) and the C++ ``Grid3D`` projection
+    (:func:`attach_zones_to_net_ids`, issue #4507) -- so no engine can drift
+    into a different layer verdict than the ``AttachZone.exempts`` acceptance
+    check the #4588 gate runs.
+
+    Returns ``None`` -- the layer-agnostic verdict -- when no layer map was
+    supplied or the zone records no pad layers (older / hand-built zones).  A
+    net whose pads carry the :data:`ALL_COPPER_LAYERS` wildcard (through-hole)
+    is omitted from the result, which every consumer reads as "unrestricted",
+    so a through-hole rated part keeps waiving on every layer.
+    """
+    if layer_indices is None or not zone.net_layers:
+        return None
+    projected: dict[int, frozenset[int]] = {}
+    for key, layer_names in zone.net_layers:
+        if ALL_COPPER_LAYERS in layer_names:
+            continue  # through-hole pad copper exists on every layer
+        indices = frozenset(
+            idx for name in layer_names if (idx := layer_indices.get(name)) is not None
+        )
+        if not indices:
+            continue
+        for net_id in ids_by_key.get(key, ()):
+            projected[net_id] = indices
+    return projected or None
+
+
 def attach_zones_to_net_ids(
     zones: Sequence[AttachZone],
     net_name_to_id: Mapping[str, int],
-) -> list[tuple[float, float, float, float, list[int]]]:
+    layer_indices: Mapping[str, int] | None = None,
+) -> list[tuple[float, float, float, float, list[int], dict[int, frozenset[int]] | None]]:
     """Translate net-name-keyed attach zones to net-id tuples (Issue #4510).
 
     ``Grid3D`` works in integer net ids, so :attr:`AttachZone.net_names` must be
     resolved through the router's reverse map before crossing into C++.  A zone
     may legitimately span more than two nets (a 3-pad rated connector); zones
     that resolve to fewer than two ids cannot exempt any pair and are dropped.
+
+    ``layer_indices`` (issue #4507) maps KiCad copper-layer names to the C++
+    grid's layer indices, so each zone's per-net pad layers
+    (:attr:`AttachZone.net_layers`) project into the integer layer space
+    ``Grid3D::attach_zone_exempts`` speaks.  Omitting it -- or supplying a zone
+    that records no pad layers -- yields ``None`` in the trailing slot, the
+    layer-agnostic verdict the C++ side used before #4507.
     """
     ids_by_key: dict[str, list[int]] = {}
     for name, net_id in net_name_to_id.items():
         if int(net_id) >= 0:
             ids_by_key.setdefault(_norm_net_key(name), []).append(int(net_id))
 
-    out: list[tuple[float, float, float, float, list[int]]] = []
+    out: list[tuple[float, float, float, float, list[int], dict[int, frozenset[int]] | None]] = []
     for zone in zones:
         net_ids = sorted({nid for key in zone.net_names for nid in ids_by_key.get(key, ())})
         if len(net_ids) < 2:
             continue
-        out.append((zone.min_x, zone.min_y, zone.max_x, zone.max_y, net_ids))
+        out.append(
+            (
+                zone.min_x,
+                zone.min_y,
+                zone.max_x,
+                zone.max_y,
+                net_ids,
+                project_zone_layers(zone, ids_by_key, layer_indices),
+            )
+        )
     return out
 
 

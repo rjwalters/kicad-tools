@@ -225,25 +225,12 @@ def _project_zone_layers(
 ) -> ZoneLayers | None:
     """Project a zone's per-net pad layers into lattice layer indices (#4699).
 
-    Returns ``None`` -- the layer-agnostic verdict -- when no layer map was
-    supplied or the zone records no pad layers (older/hand-built zones).  A net
-    whose pads carry the ``*.Cu`` wildcard (through-hole) is omitted from the
-    result, which the exemption reads as "unrestricted", so a through-hole
-    rated part keeps waiving on every layer exactly as before.
+    Thin delegation to the shared
+    :func:`~kicad_tools.router.pairwise_clearance.project_zone_layers` helper
+    (issue #4507 lifted the body there): the lattice, the C++ ``Grid3D`` and the
+    #4588 gate must all read the SAME layer scoping, so there is exactly one
+    implementation of it.  ``None`` is the layer-agnostic verdict.
     """
-    from ..pairwise_clearance import ALL_COPPER_LAYERS
+    from ..pairwise_clearance import project_zone_layers
 
-    if layer_indices is None or not zone.net_layers:
-        return None
-    projected: dict[int, frozenset[int]] = {}
-    for key, layer_names in zone.net_layers:
-        if ALL_COPPER_LAYERS in layer_names:
-            continue  # through-hole pad copper exists on every layer
-        indices = frozenset(
-            idx for name in layer_names if (idx := layer_indices.get(name)) is not None
-        )
-        if not indices:
-            continue
-        for net_id in ids_by_key.get(key, ()):
-            projected[net_id] = indices
-    return projected or None
+    return project_zone_layers(zone, ids_by_key, layer_indices)

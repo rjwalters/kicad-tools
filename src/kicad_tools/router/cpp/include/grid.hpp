@@ -288,7 +288,10 @@ public:
     // partner relaxation keeps precedence (it *tightens within* a pair; the
     // matrix *widens across* domains), and an installed attach zone
     // (``set_attach_zones``) covering the gap point waives the widening --
-    // never the scalar floor.
+    // never the scalar floor.  Issue #4507: the zone consult is layer-scoped,
+    // keyed on the layer the compared copper shares (via-vs-via, where no
+    // single layer applies, stays layer-agnostic; the segment-vs-pad branch
+    // keys on the pad's own layer, so a through-hole pad stays agnostic too).
     ValidationResult validate_route(
         const std::vector<Segment>& segments,
         const std::vector<Via>& vias,
@@ -347,7 +350,28 @@ public:
 
     // True when an installed attach zone contains ``(x, y)`` AND has BOTH
     // ``net_a`` and ``net_b`` among its member net ids.
-    bool attach_zone_exempts(float x, float y, int net_a, int net_b) const;
+    //
+    // Issue #4507: ``layer`` is the grid layer index the two conflicting
+    // objects share; a zone waives the pair there only when BOTH nets have pad
+    // copper on that layer (``AttachZone::net_layers``).  Pass ``-1`` -- the
+    // default -- when no single layer applies (a through-via against a
+    // through-via, or a caller with no layer context), which keeps the
+    // layer-agnostic pre-#4507 verdict.  This mirrors the ``layer=None``
+    // convention of ``AttachZone.exempts`` in ``pairwise_clearance.py`` and of
+    // ``LatticePairwise.exempt`` in ``lattice/pairwise.py``, so the three
+    // engines waive on the same layers for every comparison they all perform
+    // (segment-vs-segment, segment-vs-via, via-vs-via).
+    //
+    // The one place they cannot be compared is ``validate_route``'s
+    // segment-vs-pad branch: it passes a through-hole pad's ``layer_idx ==
+    // -1``, waiving on layers ``AttachZone.exempts`` would not, but it has no
+    // Python counterpart to disagree with -- ``route_pairwise_violation`` and
+    // ``find_pairwise_violations`` are segment-vs-segment only and never
+    // compare a segment against a pad.  That asymmetry is unchanged v18
+    // behaviour; see the comment at the ``pad_zone_layer`` assignment in
+    // ``grid.cpp``.
+    bool attach_zone_exempts(float x, float y, int net_a, int net_b,
+                             int layer = -1) const;
 
     // Accessors for validation data sizes (for testing/debugging)
     size_t pad_count() const { return pads_.size(); }
