@@ -52,13 +52,13 @@ below is issue **#4674** and should build on these helpers.
 Measured by programmatic introspection of the real argparse tree
 (`create_parser()`, recursive walk of `_SubParsersAction` leaves) — not grep:
 
-| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 b1 | b2 | b3 |
-|---|---|---|---|---|---|
-| `--format` with a `json` choice | 124 | 124 | 148 | 164 | 174 |
-| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 | 2 | 2 |
-| `--json` boolean only | 2 | **0** | 0 | 0 | 0 |
-| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** | 0 | 0 |
-| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 | 33 | 23 |
+| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 b1 | b2 | b3 | b4 |
+|---|---|---|---|---|---|---|
+| `--format` with a `json` choice | 124 | 124 | 148 | 164 | 174 | 179 |
+| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 | 2 | 2 | 2 |
+| `--json` boolean only | 2 | **0** | 0 | 0 | 0 | 0 |
+| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** | 0 | 0 | 0 |
+| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 | 33 | 23 | 18 |
 
 The first #4674 batch swept the grouped-subcommand families -- `mfr` (7),
 `spec` (5), `placement fix/nudge/snap/align/distribute` (5), `zones
@@ -69,9 +69,13 @@ The second batch swept the 16 mutating `sch` leaves.
 
 The third batch finished the four families that already spoke JSON on most
 of their leaves but still had prose-only holdouts -- `datasheet` (3), `lib`
-(3), `parts` (2), `pcb` (2). The remaining 23 prose-only leaves (`stitch`
-and the long tail of single commands, plus the 4 exempt and the deferred
-`route`) stay on the #4674 backlog below.
+(3), `parts` (2), `pcb` (2).
+
+The fourth batch swept the environment/integration singles -- `config`,
+`ipc status/connect/push-routes`, `mcp setup` (5) -- finishing the `ipc`
+family outright and finishing `mcp` (`mcp serve` is exempt). The remaining
+18 prose-only leaves (`stitch` and the long tail of single commands, plus
+the 4 exempt and the deferred `route`) stay on the #4674 backlog below.
 
 Issue #4543 closed the `--json`-only bucket by adding `--format {text,json}`
 alongside the existing `--json` on both commands (outer parser, forwarding
@@ -203,13 +207,45 @@ handler, so — like the `sch` shim in batch 2 — it now emits the same
 that already had `--format json`. `tests/test_format_json_sweep_families.py`
 guards these 10 surfaces.
 
-**Remaining actionable (18)** — the audit's `prose-only` bucket reads 23
+**Done (fourth #4674 batch, 5 surfaces):** the environment/integration
+singles — the leaves that report on or configure `kct`'s *surroundings*
+rather than a board file: `config`, `ipc status/connect/push-routes`,
+`mcp setup`. This finishes the `ipc` family outright and finishes `mcp`
+(`mcp serve` is exempt, above). Shapes:
+
+| Command | Document |
+|---|---|
+| `config` | `{"command": "config", "action": "show"\|"paths"\|"init"\|"get"\|"set", …}` — `show` carries `sections` (`{section: {key: {value, source}}}`) plus `native_backends` (`{backend: {available, version}}`); `paths` carries `project_config`/`user_config` (`{path, exists}`, project also `search_filenames`); `init` carries `path`/`scope`/`created`; `get` carries `key`/`section`/`option`/`value`/`source`; `set` carries the same plus `applied: false` and the `toml` snippet to paste |
+| `ipc status` | `{"command": "status", "socket", "connected", "kicad_version", "instances", "open_documents", "success"}` |
+| `ipc connect` | `{"command": "connect", "socket", "connected", "kicad_version", "success"}` |
+| `ipc push-routes` | `{"command": "push-routes", "pcb", "net_filter", "tracks", "vias", "dry_run", "pushed", "success"}` (`socket` once resolved) |
+| `mcp setup` | `{"command": "setup", "client", "config_path", "dry_run", "written", "replaced", "server", "success"}` |
+
+Two conventions this batch establishes for the remaining long tail:
+
+- **`set`-style commands that only *advise*** (`kct config set` prints the
+  TOML to paste rather than writing it) must say so structurally —
+  `"applied": false` — so a machine caller cannot mistake exit 0 for a
+  persisted change.
+- **Text-mode prose is preserved verbatim**, including the several `ipc`
+  failure paths that print *without* an `Error:` prefix. The shared
+  `_fail(...)` helper in `commands/ipc.py` takes a `text_lines` override
+  for exactly that reason; copy it rather than normalizing prose in a
+  formatting-only batch.
+
+`kct ipc push-routes` reaches its "PCB parser not available." branch for
+every existing board, because it imports `kicad_tools.pcb.parser` — a
+module that has never existed (dead since #2363). The JSON path turns that
+into a visible `{"error": …, "success": false}` document; the underlying
+wiring bug is tracked separately in #4788 and is out of scope for this
+sweep. `tests/test_format_json_sweep_env.py` guards these 5 surfaces and is
+written to pass both before and after #4788 is fixed.
+
+**Remaining actionable (13)** — the audit's `prose-only` bucket reads 18
 because it also counts the 4 exempt commands and the deferred `route`
 (sections above):
 
-- `board-metrics`, `build`, `config`, `create-pcb`, `creepage-export-rules`
-- `ipc connect`, `ipc push-routes`, `ipc status`
-- `mcp setup`
+- `board-metrics`, `build`, `create-pcb`, `creepage-export-rules`
 - `optimize-placement`, `optimize-traces`
 - `panel`
 - `pipeline`

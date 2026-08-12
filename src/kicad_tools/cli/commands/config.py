@@ -8,6 +8,8 @@ def run_config_command(args) -> int:
     from ..config_cmd import main as config_main
 
     sub_argv = []
+    if getattr(args, "format", "text") != "text":
+        sub_argv.extend(["--format", args.format])
     if args.show:
         sub_argv.append("--show")
     if args.init:

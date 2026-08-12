@@ -1,10 +1,20 @@
-"""MCP server command handlers."""
+"""MCP server command handlers.
+
+Machine output (``--format json``, issue #4674): ``mcp setup`` prints exactly
+one JSON document describing the client, the config file it targets, the
+server entry it resolved, and whether it wrote (``written`` / ``replaced``) or
+only previewed (``dry_run``).  ``mcp serve`` is exempt -- it is a long-running
+server whose machine contract *is* the MCP protocol.  See
+``docs/reference/machine-output.md``.
+"""
 
 import json
 import os
 import shutil
 import sys
 from pathlib import Path
+
+from ..format_options import FORMAT_JSON, emit_json
 
 __all__ = ["run_mcp_command"]
 
@@ -145,6 +155,7 @@ def _run_setup(args) -> int:
     """
     client = getattr(args, "client", "claude-code")
     dry_run = getattr(args, "dry_run", False)
+    as_json = getattr(args, "format", "text") == FORMAT_JSON
 
     command, cmd_args = _find_kct_command()
 
@@ -160,12 +171,27 @@ def _run_setup(args) -> int:
         config_path = _get_claude_desktop_config_path()
 
     # Show what we'll do
-    print(f"MCP client: {client}")
-    print(f"Config file: {config_path}")
-    print(f"Command: {command} {' '.join(cmd_args)}")
-    print()
+    if not as_json:
+        print(f"MCP client: {client}")
+        print(f"Config file: {config_path}")
+        print(f"Command: {command} {' '.join(cmd_args)}")
+        print()
 
     if dry_run:
+        if as_json:
+            emit_json(
+                {
+                    "command": "setup",
+                    "client": client,
+                    "config_path": str(config_path),
+                    "dry_run": True,
+                    "written": False,
+                    "replaced": False,
+                    "server": server_config,
+                    "success": True,
+                }
+            )
+            return 0
         print("Dry run — no changes made.")
         print()
         print("Would write:")
@@ -184,13 +210,14 @@ def _run_setup(args) -> int:
     if "mcpServers" not in existing:
         existing["mcpServers"] = {}
 
-    if "kicad-tools" in existing["mcpServers"]:
+    replaced = "kicad-tools" in existing["mcpServers"]
+    if replaced and not as_json:
         old = existing["mcpServers"]["kicad-tools"]
         old_cmd = f"{old.get('command', '')} {' '.join(old.get('args', []))}"
         print("Replacing existing kicad-tools config:")
         print(f"  was: {old_cmd}")
         print(f"  now: {command} {' '.join(cmd_args)}")
-    else:
+    elif not replaced and not as_json:
         print("Adding kicad-tools MCP server config.")
 
     existing["mcpServers"]["kicad-tools"] = server_config
@@ -198,6 +225,21 @@ def _run_setup(args) -> int:
     # Write config
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(existing, indent=2) + "\n")
+
+    if as_json:
+        emit_json(
+            {
+                "command": "setup",
+                "client": client,
+                "config_path": str(config_path),
+                "dry_run": False,
+                "written": True,
+                "replaced": replaced,
+                "server": server_config,
+                "success": True,
+            }
+        )
+        return 0
 
     print()
     print(f"Wrote {config_path}")

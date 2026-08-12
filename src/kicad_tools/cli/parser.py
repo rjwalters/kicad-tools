@@ -5829,6 +5829,7 @@ def _add_config_parser(subparsers) -> None:
         nargs="?",
         help="Value to set",
     )
+    add_format_flag(config_parser)
 
 
 def _add_optimize_placement_parser(subparsers) -> None:
@@ -7265,6 +7266,7 @@ def _add_mcp_parser(subparsers) -> None:
         action="store_true",
         help="Show what would be written without making changes",
     )
+    add_format_flag(setup_parser)
 
 
 def _add_ipc_parser(subparsers) -> None:
@@ -7290,6 +7292,7 @@ def _add_ipc_parser(subparsers) -> None:
         "-s",
         help="Explicit path to KiCad IPC socket (auto-discovered if not provided)",
     )
+    add_format_flag(status_parser)
 
     # ipc connect subcommand
     connect_parser = ipc_subparsers.add_parser(
@@ -7302,6 +7305,7 @@ def _add_ipc_parser(subparsers) -> None:
         "-s",
         help="Explicit path to KiCad IPC socket (auto-discovered if not provided)",
     )
+    add_format_flag(connect_parser)
 
     # ipc push-routes subcommand
     push_parser = ipc_subparsers.add_parser(
@@ -7332,6 +7336,7 @@ def _add_ipc_parser(subparsers) -> None:
         action="store_true",
         help="Show what would be pushed without actually connecting to KiCad",
     )
+    add_format_flag(push_parser)
 
 
 def _add_init_parser(subparsers) -> None:

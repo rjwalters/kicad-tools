@@ -348,6 +348,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--format json` on the 5 environment/integration singles** (part of
+  #4674, fourth batch of the #4543 machine-output sweep) — `config`,
+  `ipc status`, `ipc connect`, `ipc push-routes` and `mcp setup` now accept
+  the canonical `--format json` and emit one deterministic document on
+  stdout instead of prose. This finishes the `ipc` family outright and
+  finishes `mcp` (`mcp serve` stays exempt: it is a long-running server
+  whose machine contract *is* the MCP protocol). `config` covers all five
+  modes — `show` (a `sections` map of `{value, source}` per key, plus
+  `native_backends`), `paths`, `init`, `get` and `set`; because `config set`
+  only *advises* the TOML to paste rather than writing it, its document says
+  so structurally with `"applied": false` and carries the `toml` snippet.
+  `ipc status`/`connect` report `socket`/`connected`/`kicad_version` (status
+  also `instances` and sorted `open_documents`); `ipc push-routes` reports
+  `tracks`/`vias`/`net_filter`/`dry_run`/`pushed`; `mcp setup` reports
+  `client`/`config_path`/`written`/`replaced` plus the resolved `server`
+  entry. Failure paths emit `{"error": ..., "success": false}` documents
+  with exit codes unchanged, and text-mode output is byte-identical to
+  before (including the several `ipc` failure paths that deliberately print
+  without an `Error:` prefix). Audit
+  (`scripts/audit_machine_output.py`): prose-only 23 → 18, format-json
+  174 → 179. `tests/test_format_json_sweep_env.py` guards the new surfaces;
+  `docs/reference/machine-output.md` records the per-command shapes.
+
 - **`docs/research/kipy-ipc-api-evaluation.md`** (#4779) — evaluation of `kipy` (official KiCad IPC-API bindings) and `kicad-mcp-kipy` as a parser cross-check; verdict: adopt nothing (live-editor-only RPC client, no offline path, cannot run DRC); also corrects the `README.md` "Related Projects" `kipy` entry to the canonical GitLab URL with the live-editor constraint stated.
 
 - **`--format json` on the 10 prose-only holdouts inside the `datasheet`,
