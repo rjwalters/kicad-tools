@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`kct ipc push-routes` can now actually read a board** (#4788) — the
+  handler imported the nonexistent `kicad_tools.pcb.parser` (dead since
+  #2363) behind an `except ImportError`, so every invocation exited 1 with
+  "PCB parser not available." It now loads boards via the first-party
+  `kicad_tools.schema.pcb.PCB.load()` (unguarded, so wiring regressions fail
+  loudly), reads the real model attributes (`segments`, `start`/`end`/
+  `position` tuples, `net_number`) instead of `getattr(..., 0)` fallbacks
+  that would have pushed zero-length tracks at the origin on net 0, and the
+  `--net` filter matches by net name against `PCB.nets`; an unknown net name
+  or unparseable board is now a clear error (exit 1) in both text and JSON
+  modes.
+
 - **A single relief-rescue transaction is now proportionally bounded** (#4781)
   — a rescue (including its depth-1 nested rescues, which share the parent's
   allowance) may spend at most `max(25% of the remaining stage budget, 90 s)`

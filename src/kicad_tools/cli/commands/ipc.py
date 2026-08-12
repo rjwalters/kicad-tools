@@ -10,9 +10,14 @@ See ``docs/reference/machine-output.md``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..format_options import FORMAT_JSON, emit_json
+
+if TYPE_CHECKING:
+    from kicad_tools.ipc.proto.messages import TrackSegment as IPCTrack
+    from kicad_tools.ipc.proto.messages import Via as IPCVia
+    from kicad_tools.schema.pcb import Segment, Via
 
 __all__ = ["run_ipc_command"]
 
@@ -54,6 +59,41 @@ def _fail(
     for line in text_lines if text_lines is not None else [f"Error: {message}"]:
         print(line)
     return 1
+
+
+def _to_ipc_routes(tracks: list[Segment], vias: list[Via]) -> tuple[list[IPCTrack], list[IPCVia]]:
+    """Convert schema :class:`Segment`/:class:`Via` objects to IPC messages.
+
+    Reads the real ``kicad_tools.schema.pcb`` model attributes directly
+    (``start``/``end``/``position`` tuples in mm, ``net_number``) — no
+    ``getattr(..., default)`` fallbacks, which previously masked a total
+    attribute-name mismatch by emitting zero-length tracks at the origin on
+    net 0 (#4788).
+    """
+    from kicad_tools.ipc.proto.messages import TrackSegment as IPCTrackMsg
+    from kicad_tools.ipc.proto.messages import Vector2
+    from kicad_tools.ipc.proto.messages import Via as IPCViaMsg
+
+    ipc_tracks = [
+        IPCTrackMsg(
+            start=Vector2(x_nm=int(t.start[0] * 1e6), y_nm=int(t.start[1] * 1e6)),
+            end=Vector2(x_nm=int(t.end[0] * 1e6), y_nm=int(t.end[1] * 1e6)),
+            width_nm=int(t.width * 1e6),
+            layer=t.layer,
+            net=t.net_number,
+        )
+        for t in tracks
+    ]
+    ipc_vias = [
+        IPCViaMsg(
+            position=Vector2(x_nm=int(v.position[0] * 1e6), y_nm=int(v.position[1] * 1e6)),
+            diameter_nm=int(v.size * 1e6),
+            drill_nm=int(v.drill * 1e6),
+            net=v.net_number,
+        )
+        for v in vias
+    ]
+    return ipc_tracks, ipc_vias
 
 
 def run_ipc_command(args) -> int:
@@ -344,35 +384,42 @@ def _run_push_routes(args) -> int:
         print(f"Error: PCB file not found: {pcb_file}")
         return 1
 
-    # Read tracks from the PCB file using existing kicad-tools parsing
+    # Read tracks from the PCB file using the same board loader the other
+    # `kct pcb` handlers use.  This is a first-party core import, so it is
+    # deliberately NOT wrapped in ``except ImportError`` — a wiring
+    # regression here must fail loudly instead of masquerading as a missing
+    # optional extra (#4788: the previous import targeted the nonexistent
+    # ``kicad_tools.pcb.parser`` and the guard hid that for three releases).
+    from kicad_tools.schema.pcb import PCB
+
     try:
-        from kicad_tools.pcb.parser import parse_pcb
-    except ImportError:
-        if output_format == FORMAT_JSON:
+        board = PCB.load(pcb_file)
+    except (OSError, ValueError) as exc:
+        return _fail(
+            "push-routes",
+            output_format,
+            f"Failed to parse PCB: {exc}",
+            pcb=str(pcb_file),
+            pushed=0,
+        )
+
+    tracks = list(board.segments)
+    vias = list(board.vias)
+
+    if net_filter:
+        # Filter to a specific net by name (PCB.nets is a dict[int, Net]).
+        net = board.get_net_by_name(net_filter)
+        if net is None:
             return _fail(
                 "push-routes",
                 output_format,
-                "PCB parser not available.",
+                f"Net not found in {pcb_file.name}: {net_filter}",
                 pcb=str(pcb_file),
+                net_filter=net_filter,
                 pushed=0,
             )
-        print("Error: PCB parser not available.")
-        return 1
-
-    board = parse_pcb(pcb_file)
-    tracks = board.tracks if hasattr(board, "tracks") else []
-    vias = board.vias if hasattr(board, "vias") else []
-
-    if net_filter:
-        # Filter to specific net
-        net_code = None
-        for net in board.nets if hasattr(board, "nets") else []:
-            if hasattr(net, "name") and net.name == net_filter:
-                net_code = net.number if hasattr(net, "number") else None
-                break
-        if net_code is not None:
-            tracks = [t for t in tracks if hasattr(t, "net") and t.net == net_code]
-            vias = [v for v in vias if hasattr(v, "net") and v.net == net_code]
+        tracks = [t for t in tracks if t.net_number == net.number]
+        vias = [v for v in vias if v.net_number == net.number]
 
     # Summary fields shared by every terminal state below.
     summary: dict[str, Any] = {
@@ -416,45 +463,12 @@ def _run_push_routes(args) -> int:
 
     try:
         from kicad_tools.ipc.board import BoardOperations
-        from kicad_tools.ipc.proto.messages import TrackSegment as IPCTrack
-        from kicad_tools.ipc.proto.messages import Vector2
-        from kicad_tools.ipc.proto.messages import Via as IPCVia
 
         with IPCClient(str(resolved)) as client:
             board_ops = BoardOperations(client)
 
             # Convert kicad-tools track format to IPC format
-            ipc_tracks = []
-            for t in tracks:
-                ipc_tracks.append(
-                    IPCTrack(
-                        start=Vector2(
-                            x_nm=int(getattr(t, "start_x", 0) * 1e6),
-                            y_nm=int(getattr(t, "start_y", 0) * 1e6),
-                        ),
-                        end=Vector2(
-                            x_nm=int(getattr(t, "end_x", 0) * 1e6),
-                            y_nm=int(getattr(t, "end_y", 0) * 1e6),
-                        ),
-                        width_nm=int(getattr(t, "width", 0.25) * 1e6),
-                        layer=getattr(t, "layer", "F.Cu"),
-                        net=getattr(t, "net", 0),
-                    )
-                )
-
-            ipc_vias = []
-            for v in vias:
-                ipc_vias.append(
-                    IPCVia(
-                        position=Vector2(
-                            x_nm=int(getattr(v, "x", 0) * 1e6),
-                            y_nm=int(getattr(v, "y", 0) * 1e6),
-                        ),
-                        diameter_nm=int(getattr(v, "size", 0.8) * 1e6),
-                        drill_nm=int(getattr(v, "drill", 0.4) * 1e6),
-                        net=getattr(v, "net", 0),
-                    )
-                )
+            ipc_tracks, ipc_vias = _to_ipc_routes(tracks, vias)
 
             created = board_ops.push_routes(
                 tracks=ipc_tracks,

@@ -63,7 +63,6 @@ src/kicad_tools/cli/commands/benchmark.py	var-annotated	Need type annotation for
 src/kicad_tools/cli/commands/benchmark.py	var-annotated	Need type annotation for "by_case" (hint: "by_case: dict[<type>, <type>] = ...")
 src/kicad_tools/cli/commands/impedance.py	index	Value of type "tuple[str, str] | None" is not indexable
 src/kicad_tools/cli/commands/impedance.py	operator	Cannot call function of unknown type
-src/kicad_tools/cli/commands/ipc.py	import-not-found	Cannot find implementation or library stub for module named "kicad_tools.pcb.parser"
 src/kicad_tools/cli/commands/parts.py	attr-defined	"Collection[str]" has no attribute "append"
 src/kicad_tools/cli/commands/pcb.py	attr-defined	"object" has no attribute "append"
 src/kicad_tools/cli/commands/spec.py	arg-type	Argument "completed" to "add_task" of "Progress" has incompatible type "float"; expected "int"

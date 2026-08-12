@@ -468,11 +468,9 @@ class TestIpcPushRoutesEmission:
     def test_dry_run_document(self, capsys):
         """A real board yields one well-formed document either way.
 
-        ``push-routes`` imports ``kicad_tools.pcb.parser``, a module that does
-        not exist (dead since #2363), so today every existing board short-
-        circuits into the "PCB parser not available." branch -- which this
-        batch turns from prose into a structured document.  The assertions are
-        written to hold both before and after that unrelated bug is fixed.
+        Written during the dead-import era (#2363's ``kicad_tools.pcb.parser``
+        import, fixed by #4788) to hold both before and after the fix: since
+        #4788 the success branch is the one taken.
         """
         rc, out = _run_ipc(
             ["ipc", "push-routes", str(BOARD), "--dry-run", "--format", "json"], capsys
@@ -497,35 +495,39 @@ class TestIpcPushRoutesEmission:
         _, second = _run_ipc(argv, capsys)
         assert first == second
 
-    def test_parser_unavailable_is_error_document(self, capsys):
-        """The pre-parse failure path is a document, not prose (#4674)."""
-        with patch.dict("sys.modules", {"kicad_tools.pcb.parser": None}):
-            rc, out = _run_ipc(["ipc", "push-routes", str(BOARD), "--format", "json"], capsys)
+    def test_unparseable_board_is_error_document(self, tmp_path, capsys):
+        """The pre-push parse-failure path is a document, not prose (#4674).
+
+        Replaces the dead-import-era ``parser_unavailable`` test: since #4788
+        the board loader is the first-party ``kicad_tools.schema.pcb.PCB``
+        (imported unguarded), so the surviving pre-push failure mode is a
+        board that fails to parse.
+        """
+        bad = tmp_path / "garbage.kicad_pcb"
+        bad.write_text("this is not a board")
+        rc, out = _run_ipc(["ipc", "push-routes", str(bad), "--format", "json"], capsys)
         assert rc == 1
         payload = json.loads(out)
         assert payload["command"] == "push-routes"
         assert payload["success"] is False
         assert payload["pushed"] == 0
-        assert "PCB parser not available" in payload["error"]
+        assert "Failed to parse PCB" in payload["error"]
 
     def test_no_socket_is_error_document(self, capsys):
-        """With tracks in hand but no socket, the failure is still a document."""
-        board = MagicMock()
-        board.tracks = [MagicMock()]
-        board.vias = []
-        board.nets = []
-        parser_module = MagicMock()
-        parser_module.parse_pcb.return_value = board
-        with (
-            patch.dict("sys.modules", {"kicad_tools.pcb.parser": parser_module}),
-            patch("kicad_tools.ipc.discovery.discover_socket", return_value=None),
-        ):
-            rc, out = _run_ipc(["ipc", "push-routes", str(BOARD), "--format", "json"], capsys)
+        """With tracks in hand but no socket, the failure is still a document.
+
+        Uses ``stale_nets.kicad_pcb`` (2 real segments + 1 via) — the
+        routing-diagnostic board is deliberately unrouted, and an empty push
+        succeeds before socket discovery is ever attempted.
+        """
+        routed = FIXTURES / "stale_nets.kicad_pcb"
+        with patch("kicad_tools.ipc.discovery.discover_socket", return_value=None):
+            rc, out = _run_ipc(["ipc", "push-routes", str(routed), "--format", "json"], capsys)
         assert rc == 1
         payload = json.loads(out)
         assert payload["success"] is False
         assert payload["pushed"] == 0
-        assert payload["tracks"] == 1
+        assert payload["tracks"] == 2
         assert "No KiCad IPC socket found" in payload["error"]
 
     def test_dry_run_text_mode_is_not_json(self, capsys):
