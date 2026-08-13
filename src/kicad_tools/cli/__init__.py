@@ -748,6 +748,9 @@ def _run_screenshot_command(args) -> int:
         sub_argv.append("--bw")
     if hasattr(args, "screenshot_theme") and args.screenshot_theme:
         sub_argv.extend(["--theme", args.screenshot_theme])
+    # Machine output (#4674): forward the canonical flag to the inner parser.
+    if getattr(args, "format", "text") != "text":
+        sub_argv.extend(["--format", args.format])
 
     return screenshot_cmd(sub_argv)
 
@@ -784,6 +787,9 @@ def _run_report_command(args) -> int:
             sub_argv.append("--skip-erc")
         if getattr(args, "report_skip_collect", False):
             sub_argv.append("--skip-collect")
+        # Machine output (#4674): forward the canonical flag to the inner parser.
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
 
     return report_cmd(sub_argv)
 

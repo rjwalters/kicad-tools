@@ -5,15 +5,28 @@ Usage:
     kct report generate board.kicad_pcb --mfr jlcpcb --data-dir data/
     kct report generate board.kicad_pcb --mfr jlcpcb --no-figures
     kct report generate board.kicad_pcb --mfr jlcpcb --sch path/to/root.kicad_sch
+
+Machine output (``--format json``, issue #4674): ``report generate`` prints one
+document naming the ``report_path`` it wrote, the ``pdf_path`` when PDF
+rendering succeeded, the ``data_source`` it used (``auto-collect`` /
+``data-dir`` / ``skeleton``) and a ``figures`` block recording whether figures
+were generated or why they were skipped.  Progress prose is suppressed and
+third-party stdout chatter is diverted to stderr so stdout carries exactly one
+document; warnings keep going to stderr either way.  See
+``docs/reference/machine-output.md``.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from .format_options import FORMAT_JSON, add_format_flag, emit_json
 
 if TYPE_CHECKING:
     from kicad_tools.report.figures import FigureEntry
@@ -81,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip auto-collection; generate skeleton report (legacy behavior)",
     )
+    add_format_flag(gen_parser)
 
     # --- Interactive DRC report sub-command ---
     int_parser = sub.add_parser(
@@ -118,13 +132,58 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+@contextlib.contextmanager
+def _stdout_to_stderr_when(active: bool):
+    """Divert stdout to stderr while *active* (i.e. JSON mode owns stdout).
+
+    Report generation calls into code that writes progress chatter to stdout
+    and is not this module's to change -- the data collector, the figure
+    generator, and WeasyPrint (which prints a multi-line "install my native
+    libraries" banner on stdout when they are missing).  Under ``--format
+    json`` that would corrupt the single-document contract, so it is captured
+    and replayed on stderr: the diagnostics survive, the JSON stream stays
+    parseable.
+    """
+    if not active:
+        yield
+        return
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            yield
+    finally:
+        if buffer.getvalue():
+            print(buffer.getvalue(), end="", file=sys.stderr)
+
+
 def _run_generate(args: argparse.Namespace) -> int:
     """Execute the ``generate`` sub-command."""
+    as_json = getattr(args, "format", "text") == FORMAT_JSON
+
+    def say(message: str) -> None:
+        """Print progress prose unless JSON mode owns stdout."""
+        if not as_json:
+            print(message)
+
+    def fail(message: str) -> int:
+        """Report a failure as a document (JSON) or on stderr (text)."""
+        if as_json:
+            emit_json(
+                {
+                    "command": "generate",
+                    "input": str(args.input),
+                    "error": message,
+                    "success": False,
+                }
+            )
+        else:
+            print(message, file=sys.stderr)
+        return 1
+
     try:
         from kicad_tools.report import ReportData, ReportGenerator
     except ImportError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        return fail(str(exc))
 
     input_path = Path(args.input)
     project_name = input_path.stem
@@ -134,29 +193,29 @@ def _run_generate(args: argparse.Namespace) -> int:
     if input_path.suffix == ".kicad_pro":
         pcb_path = input_path.with_suffix(".kicad_pcb")
         if not pcb_path.exists():
-            print(
-                f"Error: PCB file not found: {pcb_path}",
-                file=sys.stderr,
-            )
-            return 1
+            return fail(f"Error: PCB file not found: {pcb_path}")
         input_path = pcb_path
 
     # Determine data source: explicit --data-dir, auto-collection, or skeleton
     version_dir: Path | None = None
+    data_source = "auto-collect"
     if args.data_dir:
+        data_source = "data-dir"
         data_kwargs = _load_data_dir(args.data_dir)
     elif args.skip_collect:
+        data_source = "skeleton"
         data_kwargs = {}
     else:
         # Auto-collect: write snapshots into the versioned output directory.
         # This pre-determines the version directory so figures land in the same vN/.
-        version_dir, data_kwargs = _auto_collect(
-            pcb_path=input_path,
-            output_dir=Path(args.output),
-            manufacturer=args.mfr,
-            quantity=getattr(args, "quantity", 5),
-            skip_erc=getattr(args, "skip_erc", False),
-        )
+        with _stdout_to_stderr_when(as_json):
+            version_dir, data_kwargs = _auto_collect(
+                pcb_path=input_path,
+                output_dir=Path(args.output),
+                manufacturer=args.mfr,
+                quantity=getattr(args, "quantity", 5),
+                skip_erc=getattr(args, "skip_erc", False),
+            )
 
     data = ReportData(
         project_name=project_name,
@@ -175,40 +234,71 @@ def _run_generate(args: argparse.Namespace) -> int:
     # --- Figure generation ---
     # Only attempt when: no --data-dir (pre-collected data path), no --no-figures,
     # and the input is a .kicad_pcb file.
-    if not args.no_figures and not args.data_dir and input_path.suffix == ".kicad_pcb":
+    if args.no_figures:
+        figures: dict = {"generated": False, "skipped_reason": "disabled by --no-figures"}
+    elif args.data_dir:
+        figures = {"generated": False, "skipped_reason": "pre-collected via --data-dir"}
+    elif input_path.suffix != ".kicad_pcb":
+        figures = {
+            "generated": False,
+            "skipped_reason": f"unsupported input type {input_path.suffix}",
+        }
+    else:
         if version_dir is None:
             version_dir = generator.next_version_dir(Path(args.output))
         figures_dir = version_dir / "figures"
-        _generate_figures(args, input_path, figures_dir, data)
+        with _stdout_to_stderr_when(as_json):
+            figures = _generate_figures(args, input_path, figures_dir, data)
 
     try:
         report_path = generator.generate(data, Path(args.output), version_dir=version_dir)
     except FileExistsError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
+        return fail(f"Error: {exc}")
 
-    print(f"Report written to {report_path}")
+    say(f"Report written to {report_path}")
 
-    # Attempt to render Markdown to HTML then PDF
-    try:
-        from kicad_tools.report.renderers import render_html, render_pdf
+    # Attempt to render Markdown to HTML then PDF.
+    pdf_path: Path | None = None
+    with _stdout_to_stderr_when(as_json):
+        try:
+            from kicad_tools.report.renderers import render_html, render_pdf
 
-        md_content = report_path.read_text(encoding="utf-8")
-        figures_dir = version_dir / "figures" if version_dir is not None else None
-        html_content = render_html(
-            md_content,
-            figures_dir=(figures_dir if figures_dir is not None and figures_dir.is_dir() else None),
+            md_content = report_path.read_text(encoding="utf-8")
+            figures_dir = version_dir / "figures" if version_dir is not None else None
+            html_content = render_html(
+                md_content,
+                figures_dir=(
+                    figures_dir if figures_dir is not None and figures_dir.is_dir() else None
+                ),
+            )
+            pdf_path = report_path.with_suffix(".pdf")
+            render_pdf(html_content, pdf_path)
+            say(f"PDF report written to {pdf_path}")
+        except ImportError:
+            pdf_path = None
+            print(
+                "Hint: install 'kicad-tools[report]' for automatic PDF generation",
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            pdf_path = None
+            print(f"Warning: PDF rendering failed: {exc}", file=sys.stderr)
+
+    if as_json:
+        emit_json(
+            {
+                "command": "generate",
+                "input": str(input_path),
+                "manufacturer": args.mfr,
+                "output_dir": str(args.output),
+                "project_name": project_name,
+                "report_path": str(report_path),
+                "pdf_path": str(pdf_path) if pdf_path is not None else None,
+                "data_source": data_source,
+                "figures": figures,
+                "success": True,
+            }
         )
-        pdf_path = report_path.with_suffix(".pdf")
-        render_pdf(html_content, pdf_path)
-        print(f"PDF report written to {pdf_path}")
-    except ImportError:
-        print(
-            "Hint: install 'kicad-tools[report]' for automatic PDF generation",
-            file=sys.stderr,
-        )
-    except Exception as exc:
-        print(f"Warning: PDF rendering failed: {exc}", file=sys.stderr)
 
     return 0
 
@@ -232,21 +322,27 @@ def _generate_figures(
     input_path: Path,
     figures_dir: Path,
     data: ReportData,
-) -> None:
+) -> dict:
     """Attempt figure generation, populating *data* in place.
 
     Handles graceful degradation: prints a warning to stderr and
     continues without figures if dependencies (kicad-cli / cairosvg)
     are absent.
+
+    Returns the ``figures`` block of the ``--format json`` document
+    (``{"generated": bool, "skipped_reason": str | None}``).  The caller
+    diverts stdout in JSON mode (see :func:`_stdout_to_stderr_when`), so the
+    progress line needs no special handling here.
     """
+
+    def skipped(reason: str) -> dict:
+        print(f"Warning: figure generation skipped — {reason}", file=sys.stderr)
+        return {"generated": False, "skipped_reason": reason}
+
     try:
         from kicad_tools.report import ReportFigureGenerator
     except ImportError as exc:
-        print(
-            f"Warning: figure generation skipped — {exc}",
-            file=sys.stderr,
-        )
-        return
+        return skipped(str(exc))
 
     if args.sch:
         sch_path: Path | None = Path(args.sch)
@@ -256,12 +352,7 @@ def _generate_figures(
         sch_path = find_schematic(input_path)
 
     if sch_path is None:
-        print(
-            "Warning: figure generation skipped — no schematic found. "
-            "Use --sch to specify explicitly.",
-            file=sys.stderr,
-        )
-        return
+        return skipped("no schematic found. Use --sch to specify explicitly.")
 
     try:
         fig_gen = ReportFigureGenerator()
@@ -278,10 +369,9 @@ def _generate_figures(
                 " but failed — try: DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib"
                 " kct report generate ...)"
             )
-        print(
-            f"Warning: figure generation skipped — {exc}{hint}",
-            file=sys.stderr,
-        )
+        return skipped(f"{exc}{hint}")
+
+    return {"generated": True, "skipped_reason": None}
 
 
 def _entries_to_pcb_figures(entries: list[FigureEntry]) -> dict | None:

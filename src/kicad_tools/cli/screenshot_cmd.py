@@ -5,6 +5,12 @@ Usage:
     kct screenshot board.kicad_pcb -o board.png
     kct screenshot board.kicad_pcb --layers copper --bw
     kct screenshot schematic.kicad_sch -o schematic.png
+
+Machine output (``--format json``, issue #4674): one document carrying the
+resolved ``input``/``output`` paths, the captured ``width_px``/``height_px``
+and (for PCBs) ``layers_rendered`` in render order; failures emit
+``{"error": ..., "success": false}`` with the exit code unchanged.  See
+``docs/reference/machine-output.md``.
 """
 
 from __future__ import annotations
@@ -12,6 +18,24 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+
+from .format_options import FORMAT_JSON, add_format_flag, emit_json
+
+
+def _fail(as_json: bool, source: str, message: str) -> int:
+    """Report a screenshot failure as a document (JSON) or prose (text)."""
+    if as_json:
+        emit_json(
+            {
+                "command": "screenshot",
+                "input": source,
+                "error": message,
+                "success": False,
+            }
+        )
+    else:
+        print(f"Error: {message}", file=sys.stderr)
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -56,13 +80,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="KiCad color theme name",
     )
+    add_format_flag(parser)
 
     args = parser.parse_args(argv)
+    as_json = args.format == FORMAT_JSON
 
     input_path = Path(args.input)
     if not input_path.exists():
-        print(f"Error: File not found: {args.input}", file=sys.stderr)
-        return 1
+        return _fail(as_json, args.input, f"File not found: {args.input}")
 
     # Determine output path
     output_path = args.output
@@ -90,16 +115,29 @@ def main(argv: list[str] | None = None) -> int:
             theme=args.theme,
         )
     else:
-        print(
-            f"Error: Unsupported file type: {input_path.suffix} "
-            "(expected .kicad_pcb or .kicad_sch)",
-            file=sys.stderr,
+        return _fail(
+            as_json,
+            args.input,
+            f"Unsupported file type: {input_path.suffix} (expected .kicad_pcb or .kicad_sch)",
         )
-        return 1
 
     if not result["success"]:
-        print(f"Error: {result['error_message']}", file=sys.stderr)
-        return 1
+        return _fail(as_json, args.input, str(result["error_message"]))
+
+    if as_json:
+        document = {
+            "command": "screenshot",
+            "input": args.input,
+            "output": str(result["output_path"]),
+            "width_px": result["width_px"],
+            "height_px": result["height_px"],
+            # Render order is meaningful (bottom-to-top compositing) and
+            # deterministic for a given input, so it is preserved, not sorted.
+            "layers_rendered": list(result.get("layers_rendered") or []),
+            "success": True,
+        }
+        emit_json(document)
+        return 0
 
     print(f"Screenshot saved to {result['output_path']}")
     print(f"  Size: {result['width_px']}x{result['height_px']} px")

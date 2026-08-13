@@ -4,6 +4,10 @@ Thin shim that re-serializes the unified-parser args back into an argv list for
 the standalone :mod:`kicad_tools.cli.board_metrics_cmd` module, mirroring the
 pattern used by :func:`run_fleet_command`. This keeps behavior in sync between
 ``kct board-metrics`` and ``python -m kicad_tools.cli.board_metrics_cmd``.
+
+Machine output (``--format json``, issue #4674) is forwarded to the inner
+parser like every other flag; the document shape is described in
+``board_metrics_cmd`` and ``docs/reference/machine-output.md``.
 """
 
 __all__ = ["run_board_metrics_command"]
@@ -31,5 +35,8 @@ def run_board_metrics_command(args) -> int:
 
     if getattr(args, "board_metrics_dry_run", False):
         sub_argv.append("--dry-run")
+
+    if getattr(args, "format", "text") != "text":
+        sub_argv.extend(["--format", args.format])
 
     return board_metrics_main(sub_argv)

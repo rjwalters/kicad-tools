@@ -69,6 +69,14 @@ absent or unparseable.
 Schema versioning policy: this schema is the Phase 2 (Astro site) data contract.
 Field additions must be additive — no renames, no type changes. Bump
 ``schema_version`` only for breaking changes. See ``docs/board-json-schema.md``.
+
+Machine output (``--format json``, issue #4674): the *command* prints one
+envelope document describing the run — ``{"command": "board-metrics", "mode":
+"single"|"all", "dry_run", "boards": [...], "success"}`` — where each entry in
+``boards`` carries ``slug``/``status``/``output_path`` plus the board's full
+``metrics`` (the board.json above).  That envelope is deliberately distinct
+from the ``board.json`` artifact itself, which keeps its own schema.  See
+``docs/reference/machine-output.md``.
 """
 
 from __future__ import annotations
@@ -80,6 +88,8 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .format_options import FORMAT_JSON, add_format_flag, emit_json
 
 logger = logging.getLogger(__name__)
 
@@ -476,51 +486,110 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print board.json to stdout without writing any file",
     )
+    add_format_flag(parser)
     args = parser.parse_args(argv)
+    as_json = args.format == FORMAT_JSON
 
     if args.all:
-        return _run_all(Path(args.boards_dir), dry_run=args.dry_run)
+        return _run_all(Path(args.boards_dir), dry_run=args.dry_run, as_json=as_json)
 
     if not args.board:
         parser.error("a board directory is required (or use --all)")
 
     board_dir = Path(args.board)
     if not board_dir.is_dir():
-        print(f"error: board directory not found: {board_dir}")
+        message = f"error: board directory not found: {board_dir}"
+        if as_json:
+            emit_json(_envelope("single", args.dry_run, [], error=message))
+        else:
+            print(message)
         return 1
 
-    if args.dry_run:
-        metrics = extract_board_metrics(board_dir)
-        print(json.dumps(metrics, indent=2))
+    entry = _process_board(board_dir, Path(args.output) if args.output else None, args.dry_run)
+
+    if as_json:
+        emit_json(_envelope("single", args.dry_run, [entry]))
         return 0
 
-    output_path = Path(args.output) if args.output else None
-    written = emit_board_json(board_dir, output_path)
-    metrics = json.loads(written.read_text())
-    print(f"{metrics['slug']:30s} {metrics['status']:13s} -> {written}")
+    if args.dry_run:
+        print(json.dumps(entry["metrics"], indent=2))
+        return 0
+
+    print(f"{entry['slug']:30s} {entry['status']:13s} -> {entry['output_path']}")
     return 0
 
 
-def _run_all(boards_dir: Path, dry_run: bool) -> int:
+def _envelope(
+    mode: str,
+    dry_run: bool,
+    boards: list[dict],
+    *,
+    error: str | None = None,
+) -> dict:
+    """Build the ``--format json`` envelope for one ``board-metrics`` run."""
+    payload: dict = {
+        "command": "board-metrics",
+        "mode": mode,
+        "dry_run": dry_run,
+        "boards": boards,
+        "success": error is None,
+    }
+    if error is not None:
+        payload["error"] = error
+    return payload
+
+
+def _process_board(board_dir: Path, output_path: Path | None, dry_run: bool) -> dict:
+    """Extract (and, unless *dry_run*, write) one board's metrics.
+
+    Returns the per-board entry used by both the prose and the JSON paths, so
+    the two can never report different slugs/statuses for the same run.
+    """
+    if dry_run:
+        metrics = extract_board_metrics(board_dir)
+        written: Path | None = None
+    else:
+        written = emit_board_json(board_dir, output_path)
+        metrics = json.loads(written.read_text())
+    return {
+        "slug": metrics.get("slug", board_dir.name),
+        "status": metrics.get("status"),
+        "output_path": str(written) if written is not None else None,
+        "metrics": metrics,
+    }
+
+
+def _run_all(boards_dir: Path, dry_run: bool, as_json: bool = False) -> int:
     """Process every board under ``boards_dir`` in sorted order."""
     if not boards_dir.is_dir():
-        print(f"error: boards directory not found: {boards_dir}")
+        message = f"error: boards directory not found: {boards_dir}"
+        if as_json:
+            emit_json(_envelope("all", dry_run, [], error=message))
+        else:
+            print(message)
         return 1
 
-    any_board = False
+    entries: list[dict] = []
     for board_dir in _iter_board_dirs(boards_dir):
-        any_board = True
-        if dry_run:
-            metrics = extract_board_metrics(board_dir)
-            print(json.dumps(metrics, indent=2))
+        entry = _process_board(board_dir, None, dry_run)
+        entries.append(entry)
+        if as_json:
             continue
-        written = emit_board_json(board_dir)
-        metrics = json.loads(written.read_text())
-        print(f"{metrics['slug']:30s} {metrics['status']:13s} -> {written}")
+        if dry_run:
+            print(json.dumps(entry["metrics"], indent=2))
+            continue
+        print(f"{entry['slug']:30s} {entry['status']:13s} -> {entry['output_path']}")
 
-    if not any_board:
-        print(f"error: no board subdirectories found under {boards_dir}")
+    if not entries:
+        message = f"error: no board subdirectories found under {boards_dir}"
+        if as_json:
+            emit_json(_envelope("all", dry_run, [], error=message))
+        else:
+            print(message)
         return 1
+
+    if as_json:
+        emit_json(_envelope("all", dry_run, entries))
     return 0
 
 

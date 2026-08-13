@@ -1,11 +1,37 @@
-"""Panel (panel) CLI command handler."""
+"""Panel (panel) CLI command handler.
+
+Machine output (``--format json``, issue #4674): ``kct panel`` prints exactly
+one document describing the panel it built -- the resolved ``input``/``output``
+paths, the ``grid`` geometry, ``board_count``, ``tabs``, ``cut_method`` and the
+optional frame features -- or ``{"error": ..., "success": false}`` on any
+failure, with the exit code unchanged.  See
+``docs/reference/machine-output.md``.
+"""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
+from ..format_options import FORMAT_JSON, emit_json
+
 __all__ = ["run_panel_command"]
+
+
+def _fail(as_json: bool, board: str, message: str, *, text: str | None = None) -> int:
+    """Report a panel failure as a document (JSON) or prose (text)."""
+    if as_json:
+        emit_json(
+            {
+                "command": "panel",
+                "input": board,
+                "error": message,
+                "success": False,
+            }
+        )
+    else:
+        print(text if text is not None else f"Error: {message}", file=sys.stderr)
+    return 1
 
 
 def run_panel_command(args) -> int:
@@ -13,10 +39,11 @@ def run_panel_command(args) -> int:
 
     Creates a manufacturing panel from a source board PCB.
     """
+    as_json = getattr(args, "format", "text") == FORMAT_JSON
+
     board_path = Path(args.panel_input)
     if not board_path.exists():
-        print(f"Error: File not found: {board_path}", file=sys.stderr)
-        return 1
+        return _fail(as_json, str(board_path), f"File not found: {board_path}")
 
     output_path = args.panel_output
     if output_path is None:
@@ -34,13 +61,13 @@ def run_panel_command(args) -> int:
             VCutConfig,
         )
     except ImportError as exc:
-        print(
-            f"Error: {exc}\n"
+        return _fail(
+            as_json,
+            str(board_path),
+            f"{exc}\n"
             "Panelization requires Shapely. Install with: "
             "pip install kicad-tools[geometry]",
-            file=sys.stderr,
         )
-        return 1
 
     # Build config from CLI args
     cut_method = CutMethod.MOUSEBITE
@@ -90,11 +117,40 @@ def run_panel_command(args) -> int:
     try:
         panel = Panel.from_config(board_path, config)
         result_path = panel.save(output_path)
-        print(f"Panel created: {result_path}")
-        print(f"  Grid: {config.rows}x{config.cols} ({panel.board_count} boards)")
-        print(f"  Tabs: {len(panel.tabs)}")
-        print(f"  Cut method: {config.cut_method.value}")
-        return 0
     except Exception as exc:
-        print(f"Error creating panel: {exc}", file=sys.stderr)
-        return 1
+        return _fail(
+            as_json,
+            str(board_path),
+            f"creating panel: {exc}",
+            text=f"Error creating panel: {exc}",
+        )
+
+    if as_json:
+        emit_json(
+            {
+                "command": "panel",
+                "input": str(board_path),
+                "output": str(result_path),
+                "grid": {
+                    "rows": config.rows,
+                    "cols": config.cols,
+                    "spacing_mm": config.spacing,
+                },
+                "board_count": panel.board_count,
+                "tabs": len(panel.tabs),
+                "cut_method": config.cut_method.value,
+                "tab_width_mm": config.tabs.width,
+                "tab_count": config.tabs.count,
+                "frame": config.frame is not None,
+                "tooling_holes": config.tooling_holes is not None,
+                "fiducials": config.fiducials is not None,
+                "success": True,
+            }
+        )
+        return 0
+
+    print(f"Panel created: {result_path}")
+    print(f"  Grid: {config.rows}x{config.cols} ({panel.board_count} boards)")
+    print(f"  Tabs: {len(panel.tabs)}")
+    print(f"  Cut method: {config.cut_method.value}")
+    return 0

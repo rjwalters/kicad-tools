@@ -6781,6 +6781,7 @@ def _add_board_metrics_parser(subparsers) -> None:
         action="store_true",
         help="Print board.json to stdout without writing any file",
     )
+    add_format_flag(bm_parser)
 
 
 def _add_fleet_parser(subparsers) -> None:
@@ -7513,6 +7514,7 @@ def _add_panel_parser(subparsers) -> None:
         action="store_true",
         help="Add fiducial marks to the panel frame",
     )
+    add_format_flag(panel_parser)
 
 
 def _add_pipeline_parser(subparsers) -> None:
@@ -7820,6 +7822,7 @@ def _add_create_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Show what would be done without saving",
     )
+    add_format_flag(create_pcb_parser)
 
 
 def _add_build_parser(subparsers) -> None:
@@ -8763,6 +8766,7 @@ def _add_screenshot_parser(subparsers) -> None:
         default=None,
         help="KiCad color theme name",
     )
+    add_format_flag(screenshot_parser)
 
 
 def _add_report_parser(subparsers) -> None:
@@ -8835,6 +8839,7 @@ def _add_report_parser(subparsers) -> None:
         action="store_true",
         help="Skip auto-collection; generate skeleton report (legacy behavior)",
     )
+    add_format_flag(gen_parser)
 
 
 def _add_export_parser(subparsers) -> None:

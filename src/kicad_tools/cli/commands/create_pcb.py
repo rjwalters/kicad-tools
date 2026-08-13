@@ -42,4 +42,8 @@ def run_create_pcb_command(args) -> int:
     if getattr(args, "create_pcb_dry_run", False):
         sub_argv.append("--dry-run")
 
+    # Machine output (#4674): forward the canonical flag to the inner parser.
+    if getattr(args, "format", "text") != "text":
+        sub_argv.extend(["--format", args.format])
+
     return create_pcb_main(sub_argv)

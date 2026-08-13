@@ -52,13 +52,13 @@ below is issue **#4674** and should build on these helpers.
 Measured by programmatic introspection of the real argparse tree
 (`create_parser()`, recursive walk of `_SubParsersAction` leaves) — not grep:
 
-| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 b1 | b2 | b3 | b4 |
-|---|---|---|---|---|---|---|
-| `--format` with a `json` choice | 124 | 124 | 148 | 164 | 174 | 179 |
-| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 | 2 | 2 | 2 |
-| `--json` boolean only | 2 | **0** | 0 | 0 | 0 | 0 |
-| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** | 0 | 0 | 0 |
-| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 | 33 | 23 | 18 |
+| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 b1 | b2 | b3 | b4 | b5 |
+|---|---|---|---|---|---|---|---|
+| `--format` with a `json` choice | 124 | 124 | 148 | 164 | 174 | 179 | 184 |
+| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 | 2 | 2 | 2 | 2 |
+| `--json` boolean only | 2 | **0** | 0 | 0 | 0 | 0 | 0 |
+| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** | 0 | 0 | 0 | 0 |
+| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 | 33 | 23 | 18 | 13 |
 
 The first #4674 batch swept the grouped-subcommand families -- `mfr` (7),
 `spec` (5), `placement fix/nudge/snap/align/distribute` (5), `zones
@@ -73,9 +73,12 @@ of their leaves but still had prose-only holdouts -- `datasheet` (3), `lib`
 
 The fourth batch swept the environment/integration singles -- `config`,
 `ipc status/connect/push-routes`, `mcp setup` (5) -- finishing the `ipc`
-family outright and finishing `mcp` (`mcp serve` is exempt). The remaining
-18 prose-only leaves (`stitch` and the long tail of single commands, plus
-the 4 exempt and the deferred `route`) stay on the #4674 backlog below.
+family outright and finishing `mcp` (`mcp serve` is exempt).
+
+The fifth batch swept the board-artifact producers -- `board-metrics`,
+`create-pcb`, `panel`, `report generate`, `screenshot` (5). The remaining
+13 prose-only leaves (`stitch` and the rest of the long tail, plus the 4
+exempt and the deferred `route`) stay on the #4674 backlog below.
 
 Issue #4543 closed the `--json`-only bucket by adding `--format {text,json}`
 alongside the existing `--json` on both commands (outer parser, forwarding
@@ -241,16 +244,52 @@ wiring bug is tracked separately in #4788 and is out of scope for this
 sweep. `tests/test_format_json_sweep_env.py` guards these 5 surfaces and is
 written to pass both before and after #4788 is fixed.
 
-**Remaining actionable (13)** — the audit's `prose-only` bucket reads 18
+**Done (fifth #4674 batch, 5 surfaces):** the board-artifact producers — the
+singles that turn a board or schematic into a *file on disk*:
+`board-metrics`, `create-pcb`, `panel`, `report generate`, `screenshot`.
+Shapes:
+
+| Command | Document |
+|---|---|
+| `board-metrics` | `{"command": "board-metrics", "mode": "single"\|"all", "dry_run", "boards": [{"slug", "status", "output_path", "metrics"}], "success"}` — `metrics` is the board's full `board.json`; `output_path` is `null` under `--dry-run` |
+| `create-pcb` | `{"command": "create-pcb", "schematic", "output", "board": {width_mm, height_mm, layers}, "components_found", "placement": {skipped, placed, failed[], warnings[]}, "nets": {assigned, missing_footprints[]}, "summary", "dry_run", "saved", "success"}` |
+| `panel` | `{"command": "panel", "input", "output", "grid": {rows, cols, spacing_mm}, "board_count", "tabs", "cut_method", "tab_width_mm", "tab_count", "frame", "tooling_holes", "fiducials", "success"}` |
+| `report generate` | `{"command": "generate", "input", "manufacturer", "output_dir", "project_name", "report_path", "pdf_path", "data_source": "auto-collect"\|"data-dir"\|"skeleton", "figures": {generated, skipped_reason}, "success"}` |
+| `screenshot` | `{"command": "screenshot", "input", "output", "width_px", "height_px", "layers_rendered", "success"}` |
+
+Three conventions this batch adds:
+
+- **The envelope is not the artifact.** `board-metrics` already printed a
+  JSON *artifact* (`board.json`) under `--dry-run`; `--format json` wraps a
+  distinct run envelope around it (`boards[].metrics`) rather than
+  overloading the artifact's schema, and text mode still prints the bare
+  artifact. A command whose normal output is already JSON should do the
+  same — the document describes the *run*, the artifact keeps its own
+  contract. `metrics.generated_at` is the one deliberately volatile field
+  (it belongs to the board.json contract), so determinism is asserted
+  modulo that key.
+- **Producers say whether they produced.** Anything that can run without
+  writing (`--dry-run`) reports it structurally: `saved`/`output_path`
+  rather than exit 0 alone.
+- **Third-party stdout chatter must be diverted, not trusted.**
+  `report generate` calls into a data collector, a figure generator, and
+  WeasyPrint — the last of which prints a multi-line "install my native
+  libraries" banner *on stdout* when they are missing, which would corrupt
+  the single-document contract on any machine without them. The
+  `_stdout_to_stderr_when(as_json)` helper in `report_cmd.py` captures those
+  regions and replays them on stderr; copy it for any leaf that calls
+  third-party code it does not own.
+
+`tests/test_format_json_sweep_artifacts.py` guards these 5 surfaces.
+
+**Remaining actionable (8)** — the audit's `prose-only` bucket reads 13
 because it also counts the 4 exempt commands and the deferred `route`
 (sections above):
 
-- `board-metrics`, `build`, `create-pcb`, `creepage-export-rules`
+- `build`, `creepage-export-rules`
 - `optimize-placement`, `optimize-traces`
-- `panel`
 - `pipeline`
-- `reason`, `report generate`, `route-auto`
-- `screenshot`
+- `reason`, `route-auto`
 - `stitch` (single command, but its 6k-line inner module has a bespoke
   multi-phase report — batch it alone)
 

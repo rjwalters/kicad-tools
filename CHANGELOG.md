@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--format json` on the 5 board-artifact producers** (part of #4674,
+  fifth batch of the #4543 machine-output sweep) — `board-metrics`,
+  `create-pcb`, `panel`, `report generate` and `screenshot` now accept the
+  canonical `--format json` and emit one deterministic document on stdout
+  instead of prose, wired end-to-end (outer parser → shim → inner
+  parser/handler). Each document describes the artifact the command
+  produced: `board-metrics` wraps a run envelope
+  (`mode`/`dry_run`/`boards[]`) around each board's full `board.json` under
+  `boards[].metrics` rather than overloading that artifact's own schema
+  (text mode still prints the bare artifact); `create-pcb` reports
+  `board` geometry, `components_found`, `placement` (with sorted `failed`
+  and `warnings`), `nets` and the workflow `summary`; `panel` reports
+  `grid`/`board_count`/`tabs`/`cut_method` plus the frame features;
+  `report generate` reports `report_path`, `pdf_path`, the `data_source`
+  it used and a `figures` block naming why figures were skipped;
+  `screenshot` reports `output`, `width_px`/`height_px` and
+  `layers_rendered`. Commands that can run without writing say so
+  structurally (`saved` / `output_path: null` under `--dry-run`) so exit 0
+  cannot be mistaken for a written file. Failure paths emit
+  `{"error": ..., "success": false}` documents with exit codes unchanged,
+  and text-mode output is unchanged. `report generate` additionally
+  diverts stdout to stderr around the collector / figure / PDF stages,
+  because WeasyPrint prints a multi-line installation banner **on stdout**
+  when its native libraries are missing — which would otherwise corrupt the
+  single-document contract. Audit (`scripts/audit_machine_output.py`):
+  prose-only 18 → 13, format-json 179 → 184.
+  `tests/test_format_json_sweep_artifacts.py` guards the new surfaces;
+  `docs/reference/machine-output.md` records the per-command shapes.
+
 - **`--format json` on the 5 environment/integration singles** (part of
   #4674, fourth batch of the #4543 machine-output sweep) — `config`,
   `ipc status`, `ipc connect`, `ipc push-routes` and `mcp setup` now accept
