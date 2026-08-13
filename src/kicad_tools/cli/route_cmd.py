@@ -230,8 +230,12 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
     sets ``per_net_timeout = 0.0``, which is falsy in
     ``Autorouter._relief_subsearch_budget`` and therefore selects the same
     ``RELIEF_SUBSEARCH_BUDGET_S`` branch ``None`` does -- so it is invariant
-    across both arms of that A/B and cannot explain the delta (it does bite
-    the post-negotiation sweep; that is issue #4776).  Read the
+    across both arms of that A/B and cannot explain the delta.  It used to
+    bite the post-negotiation sweep (``min(0.0, 10 s)`` made it a no-op on
+    placement-feedback re-routes); issue #4776 fixed that by normalizing the
+    sentinel at the placement-feedback call sites (``or None``) and by
+    treating a falsy per-net budget as absent in
+    ``Autorouter._post_negotiation_sweep_bounds``.  Read the
     ``DETERMINISTIC_RESCUE_DEFAULT`` docblock in ``router/core.py`` and
     ``boards/07-matchgroup-test/diagnostic-runs/README.md`` before touching
     the constant.
@@ -2965,7 +2969,13 @@ def _run_placement_feedback(
     # for a fresh ``args.timeout`` slot.  Falls back to ``args.timeout``
     # when no deadline is configured.
     timeout = _budgeted_timeout(args)
-    per_net_timeout = getattr(args, "per_net_timeout", None)
+    # Issue #4776: ``or None`` normalizes the ``--deterministic-budget``
+    # sentinel (``per_net_timeout = 0.0``, "wall-clock cutoff disabled") the
+    # same way every direct ``route_all_negotiated`` call site in this file
+    # does.  Passing the literal ``0.0`` through made the #4159
+    # post-negotiation rescue sweep compute ``min(0.0, 10.0)`` and hand every
+    # stranded net a zero-second solo budget -- a silent no-op.
+    per_net_timeout = getattr(args, "per_net_timeout", None) or None
 
     # Issue #2606: stagnation + outer-timeout guards.  Defaults match
     # the parser: patience=3, outer_timeout=None.
@@ -3123,7 +3133,10 @@ def _run_placement_delta_feedback(
     max_movement = float(getattr(args, "placement_feedback_max_movement", 5.0) or 5.0)
     use_negotiated = getattr(args, "strategy", "negotiated") == "negotiated"
     timeout = loop_timeout if loop_timeout is not None else _budgeted_timeout(args)
-    per_net_timeout = getattr(args, "per_net_timeout", None)
+    # Issue #4776: ``or None`` normalizes the ``--deterministic-budget``
+    # ``0.0`` sentinel away, matching every other call site (see
+    # ``_run_placement_feedback``).
+    per_net_timeout = getattr(args, "per_net_timeout", None) or None
     loop_verbose = (not quiet) and bool(getattr(args, "verbose", False))
 
     # Pour/plane nets are carried by copper fill, not traces; the classifier

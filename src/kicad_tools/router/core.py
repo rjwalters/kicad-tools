@@ -12875,7 +12875,14 @@ class Autorouter:
             sweep_budget = POST_NEGOTIATION_SWEEP_BUDGET_S
 
         sweep_per_net = per_net_timeout
-        if sweep_per_net is None:
+        if not sweep_per_net:
+            # Issue #4776: a literal ``0.0`` is the ``--deterministic-budget``
+            # "wall-clock cutoff disabled" sentinel.  Treat it the way
+            # :meth:`_relief_subsearch_budget` already does (falsy == absent);
+            # taking ``min(0.0, 10 s)`` instead handed every stranded net a
+            # zero-second solo budget and silently no-op'd the sweep.  The
+            # ``is None`` gate on the safety-backstop arm above is
+            # deliberately unchanged.
             sweep_per_net = POST_NEGOTIATION_SWEEP_PER_NET_S
         else:
             sweep_per_net = min(sweep_per_net, POST_NEGOTIATION_SWEEP_PER_NET_S)

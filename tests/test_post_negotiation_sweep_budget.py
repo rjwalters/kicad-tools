@@ -145,6 +145,40 @@ class TestBudgetedCallerIsUnchanged:
         assert per_net == POST_NEGOTIATION_SWEEP_PER_NET_S
 
 
+class TestZeroPerNetSentinel:
+    """Issue #4776: the ``--deterministic-budget`` ``0.0`` per-net sentinel.
+
+    ``_normalize_deterministic_budget`` sets ``per_net_timeout = 0.0``
+    ("wall-clock cutoff disabled").  Two placement-feedback call sites used
+    to pass that literal through, and ``min(0.0, 10 s)`` handed every
+    stranded net a zero-second solo budget -- the sweep became a silent
+    no-op.  The consumer now treats a falsy per-net budget as absent, the
+    same way ``_relief_subsearch_budget`` always has.
+    """
+
+    def test_zero_per_net_no_longer_collapses_the_sweep(self):
+        """The board-04/board-07 shape: ``--timeout 600`` + sentinel ``0.0``."""
+        budget, per_net = _capped()._post_negotiation_sweep_bounds(600.0, 0.0, 10.0, False)
+        assert budget == POST_NEGOTIATION_SWEEP_BUDGET_S
+        assert per_net == POST_NEGOTIATION_SWEEP_PER_NET_S
+
+    def test_zero_per_net_does_not_flip_the_backstop_arm(self):
+        """The safety-backstop arm keeps its ``is None`` gate.
+
+        A literal ``0.0`` without a stage timeout stays on the historical
+        60 s / 10 s arm; it does NOT masquerade as a fully-unbudgeted caller
+        and claim the 600 s / 120 s iteration-bounded backstops.
+        """
+        budget, per_net = _capped()._post_negotiation_sweep_bounds(None, 0.0, 0.0, False)
+        assert budget == POST_NEGOTIATION_SWEEP_BUDGET_S
+        assert per_net == POST_NEGOTIATION_SWEEP_PER_NET_S
+
+    def test_bound_line_reports_the_real_per_net_budget(self):
+        line = _capped()._post_negotiation_sweep_bound_line(600.0, 0.0, 10.0, False)
+        assert "/ 10.0s per-net" in line
+        assert "/ 0.0s per-net" not in line
+
+
 class TestBoundLine:
     """The routing log must say which bound was live (#4536 evidence rule)."""
 

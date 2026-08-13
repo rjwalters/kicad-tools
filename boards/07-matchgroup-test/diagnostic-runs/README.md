@@ -118,9 +118,62 @@ byte-identical between arms; where the whole-sweep term does differ
 time), the sweep is already inert. Either way #4776 cannot produce the
 delta -- and it is invisible to `Autorouter._relief_subsearch_budget`
 anyway, where `0.0` is falsy and selects the same branch `None` does.
-This investigation was deliberately run against a tree where #4776 is
-**unfixed**; fixing it activates board 07's currently-no-op sweep in
-*both* arms and would re-baseline these numbers.
+This investigation was run against a tree where #4776 was still
+**unfixed**; that is a property of these two recorded runs, not a live
+confound. #4776 is now **FIXED** (see the next section) and the fix was
+measured to leave every number in this file unchanged.
+
+### #4776 is fixed -- and it re-baselined nothing (2026-08-13)
+
+#4776 normalized the `0.0` sentinel at both placement-feedback call sites
+(`_run_placement_feedback`, `_run_placement_delta_feedback`) and hardened
+`Autorouter._post_negotiation_sweep_bounds` to treat a falsy per-net budget
+as absent. Board 07's placement-delta re-routes therefore now print
+`60.0s whole-sweep / 10.0s per-net` where they used to print `0.0s per-net`,
+i.e. **the sweep is live on those passes for the first time**.
+
+Because activating a reach-deciding code path is exactly the shape that got
+#4730 withdrawn (PR #4748, `6d8e9bd8`), the fix was gated on a back-to-back
+host A/B, `origin/main` @ `fe662585` vs. the fix, C++ backend build 19,
+`PYTHONHASHSEED=42`, `--seed 42`, same machine, sequential (load average
+9-17 throughout -- this host was NOT quiet; CI remains authoritative):
+
+| | base (`fe662585`) | fix |
+|---|---|---|
+| `Post-negotiation sweep bound:` (initial CLI pass) | `60.0s / 10.0s` | `60.0s / 10.0s` |
+| `Post-negotiation sweep bound:` (both PDF re-routes) | **`60.0s / 0.0s`** | **`60.0s / 10.0s`** |
+| nets recovered by the sweep, all passes | 0 | 0 |
+| final reach | 26/31 | 26/31 |
+| LVS open set (by name) | `DQ3, DQ4, MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N` | *identical* |
+| blocking DRC (`--mfr jlcpcb`, advisory-filtered) | **8** (floor 8) | **8** (floor 8) |
+| blocking DRC by rule id | `diffpair_length_skew` 4, `diffpair_routing_continuity` 4 | *identical* |
+| deltas proposed / kept | 10 / 0 | 10 / 0 |
+| routed segments / vias | 826 / 206 | 826 / 206 |
+| final routed copper (segments+vias, UUIDs stripped) | — | **byte-identical to base** |
+
+The activated sweep rescues **nothing** on this board: the 5 open nets are
+the seed-invariant #3438/#4012 set, and one solo 10 s re-attempt on the live
+grid does not close any of them. So the historical numbers above stand
+as-is.
+
+Two *probe-level* numbers did move, and neither changes the outcome -- both
+probes are refused in both arms, so the final board is the initial pass's:
+
+* probe 0 `U2 mirror`: base `25 -> 23`, fix `25 -> 22` (reverted in both).
+* probe 1 `U3 translate`: base `25 -> 26` (refused by the clearance-regression
+  guard), fix `25 -> 25` (refused for no strict routed-net increase).
+
+That spread is the documented host nondeterminism, not the fix: the
+`--timeout 600` stage budget is a *wall clock*, so a re-route's iteration
+count depends on machine load (base's probe passes exited at 502.4 s /
+335.6 s, the fix's at 601.3 s / 600.4 s under different instantaneous load).
+The fix cannot influence the negotiated loop at all -- it only changes a
+budget consumed *after* the loop returns.
+
+Wall-clock cost of the route step: 28m00s base vs 33m58s fix on this host
+(the sweep is now allowed to spend up to 60 s per placement-feedback pass
+instead of being instantly inert). The board-07 CI job carries a 90-minute
+allowance.
 
 The two recorded CI runs predate `Autorouter._post_negotiation_sweep_bound_line`
 (added by PR #4775), so that line does not appear in their logs at all --

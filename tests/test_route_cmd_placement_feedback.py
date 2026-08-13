@@ -1351,3 +1351,117 @@ class TestPlacementFeedbackVerboseGating:
         out = capsys.readouterr().out
         assert "Feedback iterations: 1" in out
         assert "Exit reason:" in out
+
+
+class TestDeterministicBudgetSentinelNormalization:
+    """Issue #4776: both placement-feedback helpers must forward ``None``,
+    not the literal ``0.0``, when ``--deterministic-budget`` has set the
+    ``per_net_timeout = 0.0`` "wall-clock cutoff disabled" sentinel.
+
+    These were the only two ``route_all_negotiated``-reaching call sites in
+    route_cmd.py without the ``or None`` normalization; the literal ``0.0``
+    made ``Autorouter._post_negotiation_sweep_bounds`` compute
+    ``min(0.0, 10 s)`` and silently no-op the #4159 rescue sweep on every
+    placement-feedback re-route (boards 04 and 07 in CI).
+    """
+
+    def test_run_placement_feedback_forwards_none_for_zero(self):
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.cli.route_cmd import _run_placement_feedback
+
+        args = _pf_args(per_net_timeout=0.0)
+        router = MagicMock()
+        router.get_failed_nets.return_value = [1]
+        router.route_with_placement_feedback.return_value = MagicMock(
+            iterations=1,
+            exit_reason="pf_converged",
+            total_components_moved=0,
+            failed_nets=[],
+            placement_diff=[],
+        )
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb),
+            patch("pathlib.Path.write_text", return_value=None),
+        ):
+            _run_placement_feedback(
+                router=router,
+                pcb_path=Path("/tmp/does_not_matter.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+
+        kwargs = router.route_with_placement_feedback.call_args.kwargs
+        assert kwargs["per_net_timeout"] is None
+
+    def test_run_placement_feedback_keeps_a_real_per_net_timeout(self):
+        """An explicit positive ``--per-net-timeout`` is not relaxed."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.cli.route_cmd import _run_placement_feedback
+
+        args = _pf_args(per_net_timeout=4.0)
+        router = MagicMock()
+        router.get_failed_nets.return_value = [1]
+        router.route_with_placement_feedback.return_value = MagicMock(
+            iterations=1,
+            exit_reason="pf_converged",
+            total_components_moved=0,
+            failed_nets=[],
+            placement_diff=[],
+        )
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb),
+            patch("pathlib.Path.write_text", return_value=None),
+        ):
+            _run_placement_feedback(
+                router=router,
+                pcb_path=Path("/tmp/does_not_matter.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+
+        assert router.route_with_placement_feedback.call_args.kwargs["per_net_timeout"] == 4.0
+
+    def _run_delta(self, per_net_timeout):
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.cli.route_cmd import _run_placement_delta_feedback
+
+        args = _pf_args(
+            per_net_timeout=per_net_timeout,
+            placement_delta_feedback_budget=3,
+            placement_delta_feedback_timeout=None,
+            skip_nets=None,
+        )
+        router = MagicMock()
+        router.route_with_placement_delta_feedback.return_value = MagicMock(
+            iterations=1,
+            exit_reason="pdf_converged",
+            applied_deltas=[],
+            failed_nets=[],
+        )
+        stub_pcb = MagicMock()
+        stub_pcb.footprints = []
+
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=stub_pcb):
+            _run_placement_delta_feedback(
+                router=router,
+                pcb_path=Path("/tmp/does_not_matter.kicad_pcb"),
+                output_path=Path("/tmp/does_not_matter_routed.kicad_pcb"),
+                args=args,
+                quiet=True,
+            )
+        return router.route_with_placement_delta_feedback.call_args.kwargs
+
+    def test_run_placement_delta_feedback_forwards_none_for_zero(self):
+        assert self._run_delta(0.0)["per_net_timeout"] is None
+
+    def test_run_placement_delta_feedback_keeps_a_real_per_net_timeout(self):
+        assert self._run_delta(4.0)["per_net_timeout"] == 4.0
