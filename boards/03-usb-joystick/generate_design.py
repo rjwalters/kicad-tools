@@ -233,7 +233,7 @@ def fill_zones_in_routed_pcb(routed_path: Path) -> int:
     copper is computed by KiCad's fill engine -- without this step the
     routed PCB ships with empty zones, and DRC reports the power-net pads
     as stranded.  Mirrors board-05's ``fill_zones_in_routed_pcb`` at
-    ``boards/05-bldc-motor-controller/design.py:2233``.
+    ``boards/05-bldc-motor-controller/design.py``.
 
     Returns the number of zones in the routed PCB after fill.
     """

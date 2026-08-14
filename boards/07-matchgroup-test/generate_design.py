@@ -1280,7 +1280,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
       (``scripts/ci/check_matchgroup_coverage.py``) re-invokes this
       script with ``--step route --seed 42`` and asserts a byte-stable
       re-route across PRs.  ``kct route`` honours ``--seed`` by
-      seeding the global ``random`` module (route_cmd.py:5296-5299).
+      seeding the global ``random`` module (the ``random.seed(args.seed)``
+      call in ``route_cmd.py``).
       This is the issue's stated HARD LIMIT and is preserved.
     - ``--timeout 600``: outer wall-clock budget; per-net timeout
       defaults to 30 s.  600 s gives the pure-Python fallback path on
@@ -1407,7 +1408,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     skip_nets = list(POUR_NETS)
 
     # Emit the JSON sidecar BEFORE invoking the subprocess.  The CI
-    # gate (scripts/ci/check_matchgroup_coverage.py:223-235) requires
+    # gate (``find_net_class_map_sidecar`` in
+    # scripts/ci/check_matchgroup_coverage.py) requires
     # the sidecar to exist on disk after the route step completes,
     # even when ``kct route`` exits non-zero (partial routing).  The
     # sidecar is the single source of truth for the group / diff-pair
@@ -1440,11 +1442,12 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # Issue #3012 (CLOSED via PR #3022, 2026-05-18): added the
     # ``min_spacing_cells`` floor in ``CoupledPathfinder`` so coupled
     # routing now consults
-    # ``net_class.effective_intra_pair_clearance()`` (see
-    # ``src/kicad_tools/router/diffpair_routing.py:700-704, :769-774,
-    # :828-830``).  Prior to PR #3022, ``--differential-pairs`` on
-    # board 07 produced ~459 ``diffpair_clearance_intra`` violations
-    # because both centerlines were laid at ``pair.rules.spacing``
+    # ``net_class.effective_intra_pair_clearance()`` (see the
+    # ``min_spacing_cells`` handling in
+    # ``src/kicad_tools/router/diffpair_routing.py``).  Prior to PR
+    # #3022, ``--differential-pairs`` on board 07 produced ~459
+    # ``diffpair_clearance_intra`` violations because both
+    # centerlines were laid at ``pair.rules.spacing``
     # without consulting the per-pair intra-clearance override.
     #
     # Re-enable attempt (refresh tracker #3295, 2026-06-07):
@@ -1457,7 +1460,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     #
     #   - With ``--differential-pairs`` added to the command line,
     #     the ``route_all_with_diffpairs`` pre-pass
-    #     (route_cmd.py:7253-7295) enters the ``CoupledPathfinder``
+    #     (``Autorouter.route_all_with_diffpairs``, invoked from
+    #     ``_main_impl`` in route_cmd.py) enters the ``CoupledPathfinder``
     #     loop and pegs CPU at 99.7% for >40 minutes without emitting
     #     any per-pair progress (no "Routing pair ..." lines, no
     #     "coupled pathfinder" diagnostics).  The ``--timeout 600``

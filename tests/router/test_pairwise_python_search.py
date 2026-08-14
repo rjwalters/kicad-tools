@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.pairwise_clearance import (
@@ -74,6 +76,7 @@ def _router_with_lv_wall(
     wall_net_name: str = "LV",
     wall_layers: tuple[Layer, ...] = (Layer.F_CU,),
     name_map: dict[str, int] | None = None,
+    net_class_map: dict[str, NetClassRouting] | None = None,
 ) -> tuple[Router, RoutingGrid]:
     """A 30x20 board with a 6 x 0.6 mm foreign wall centred at (15, 10)."""
     rules = _rules(with_table)
@@ -90,7 +93,7 @@ def _router_with_lv_wall(
                 layer=layer,
             )
         )
-    router = Router(grid, rules, diagonal_routing=True)
+    router = Router(grid, rules, diagonal_routing=True, net_class_map=net_class_map)
     router.set_net_name_to_id(dict(NET_NAMES) if name_map is None else name_map)
     return router, grid
 
@@ -267,6 +270,119 @@ def test_bitmap_attach_zone_clears_pairwise_contribution_layer_scoped() -> None:
     gx, gy = _grid_pos(grid, 15.0, 9.0)  # inside the zone bbox
     assert bool(extra[0, gy, gx]) is False  # waived on the licensed layer
     assert bool(extra[1, gy, gx]) is True  # NOT waived on B.Cu
+
+
+# ---------------------------------------------------------------------------
+# Per-net-class copper extents (Issue #4793)
+# ---------------------------------------------------------------------------
+#
+# The widened radius is measured from the ROUTED net's own copper half-extent:
+# ``pair_r = ceil((half_mm + required) / res)``.  Taking ``half_mm`` from the
+# global ``rules`` under-widens a wide class, so the Python search proposes
+# cells the (authoritative) post-route gate then rejects -- rip-up/retry churn
+# on exactly the HV boards the search-time gate exists to converge.  The C++
+# kernels have always measured from the per-net extents ``cpp_backend`` pushes
+# in via ``set_search_pair_widths``; these fixtures pin the Python mirror.
+#
+# Geometry (0.1 mm cells, HV<->LV requirement 1.6 mm, wall blocked out to
+# y = 9.4 once its DRU halo is counted):
+#
+#   trace, global 0.2 mm width -> pair_r = ceil((0.10 + 1.6)/0.1) = 17 cells
+#   trace, class  1.0 mm width -> pair_r = ceil((0.50 + 1.6)/0.1) = 21 cells
+#   via,   global 0.6 mm diam  -> pair_r = ceil((0.30 + 1.6)/0.1) = 19 cells
+#   via,   class  1.2 mm diam  -> pair_r = ceil((0.60 + 1.6)/0.1) = 22 cells
+#
+# so y = 7.5 (19 cells out) and y = 7.3 (21 cells out) sit in the band that
+# only the class-width radius reaches.
+
+WIDE_TRACE_WIDTH = 1.0  # 5x the 0.2 mm global default
+WIDE_VIA_SIZE = 1.2  # 2x the 0.6 mm global default
+_WIDE_TRACE_PROBE_Y = 7.5  # 19 cells: inside class-r 21, outside global-r 17
+_WIDE_VIA_PROBE_Y = 7.3  # 21 cells: inside class-r 22, outside global-r 19
+
+
+def _wide_class() -> dict[str, NetClassRouting]:
+    return {
+        "HV": NetClassRouting(
+            name="HV",
+            trace_width=WIDE_TRACE_WIDTH,
+            clearance=DRU,
+            via_size=WIDE_VIA_SIZE,
+        )
+    }
+
+
+def _default_width_class() -> dict[str, NetClassRouting]:
+    """A class that merely restates the global widths (must be a no-op)."""
+    return {"HV": NetClassRouting(name="HV", trace_width=TRACE_WIDTH, clearance=DRU, via_size=0.6)}
+
+
+def test_trace_annulus_uses_net_class_trace_width() -> None:
+    """A wide-class HV net blocks a cell the global width would let through."""
+    global_router, grid = _router_with_lv_wall()
+    gx, gy = _grid_pos(grid, 15.0, _WIDE_TRACE_PROBE_Y)
+    assert global_router._cross_domain_trace_blocked(gx, gy, 0, HV_NET, 3) is False
+
+    wide_router, _grid = _router_with_lv_wall(net_class_map=_wide_class())
+    assert wide_router._cross_domain_trace_blocked(gx, gy, 0, HV_NET, 3) is True
+
+
+def test_via_annulus_uses_net_class_via_size() -> None:
+    """Same defect, via analogue: ``via_size`` overrides ``via_diameter``."""
+    global_router, grid = _router_with_lv_wall()
+    gx, gy = _grid_pos(grid, 15.0, _WIDE_VIA_PROBE_Y)
+    assert global_router._cross_domain_via_blocked(gx, gy, 0, HV_NET, 3) is False
+
+    wide_router, _grid = _router_with_lv_wall(net_class_map=_wide_class())
+    assert wide_router._cross_domain_via_blocked(gx, gy, 0, HV_NET, 3) is True
+
+
+def test_bitmap_uses_net_class_trace_width() -> None:
+    """The hot-loop dilation bitmap widens by the class width too."""
+    global_router, grid = _router_with_lv_wall()
+    gx, gy = _grid_pos(grid, 15.0, _WIDE_TRACE_PROBE_Y)
+    global_extra = global_router._pairwise_expanded_blocked(HV_NET, 3)
+    assert global_extra is not None
+    assert bool(global_extra[0, gy, gx]) is False
+
+    wide_router, _grid = _router_with_lv_wall(net_class_map=_wide_class())
+    wide_extra = wide_router._pairwise_expanded_blocked(HV_NET, 3)
+    assert wide_extra is not None
+    assert bool(wide_extra[0, gy, gx]) is True
+
+
+def test_class_width_equal_to_global_is_a_no_op() -> None:
+    """No behaviour change when the class merely restates the global widths."""
+    plain_router, grid = _router_with_lv_wall()
+    same_router, _grid = _router_with_lv_wall(net_class_map=_default_width_class())
+    for y in (7.3, 7.5, 7.7, 7.9, 9.0):
+        gx, gy = _grid_pos(grid, 15.0, y)
+        assert plain_router._cross_domain_trace_blocked(
+            gx, gy, 0, HV_NET, 3
+        ) == same_router._cross_domain_trace_blocked(gx, gy, 0, HV_NET, 3)
+        assert plain_router._cross_domain_via_blocked(
+            gx, gy, 0, HV_NET, 3
+        ) == same_router._cross_domain_via_blocked(gx, gy, 0, HV_NET, 3)
+
+    plain_extra = plain_router._pairwise_expanded_blocked(HV_NET, 3)
+    same_extra = same_router._pairwise_expanded_blocked(HV_NET, 3)
+    assert plain_extra is not None and same_extra is not None
+    assert bool(np.array_equal(plain_extra, same_extra))
+
+
+def test_unmapped_net_id_falls_back_to_global_width() -> None:
+    """An id with no name in the projection keeps the pre-#4793 extent.
+
+    ``state.id_to_name`` is the only bridge from net *id* to the class map;
+    when it has no entry the resolver must degrade to ``rules.trace_width``
+    (the same default the C++ kernels use before ``set_search_pair_widths``).
+    """
+    router, grid = _router_with_lv_wall(net_class_map=_wide_class(), name_map=dict(NET_NAMES))
+    # HV_TAP is in the projection but carries no net class -> global width.
+    gx, gy = _grid_pos(grid, 15.0, _WIDE_TRACE_PROBE_Y)
+    assert router._cross_domain_trace_blocked(gx, gy, 0, HV_TAP_NET, 3) is False
+    near = _grid_pos(grid, 15.0, 7.9)  # 15 cells: inside the global 17
+    assert router._cross_domain_trace_blocked(*near, 0, HV_TAP_NET, 3) is True
 
 
 # ---------------------------------------------------------------------------

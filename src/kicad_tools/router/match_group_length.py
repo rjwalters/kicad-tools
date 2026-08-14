@@ -26,13 +26,13 @@ Design notes
   paths that legitimately use match groups.  Phase 1B keeps the legacy
   :func:`~kicad_tools.router.length.create_match_group`,
   :meth:`~kicad_tools.router.core.Autorouter.add_match_group`, and
-  ``tune_match_group`` (``router/optimizer/serpentine.py:438``) code paths
+  ``tune_match_group`` (``router/optimizer/serpentine.py``) code paths
   untouched.
 
 * **Reuse, do not duplicate.**  The single source of truth for
   segment-length summation is
   :meth:`~kicad_tools.router.length.LengthTracker.calculate_route_length`
-  at ``length.py:138-153``.  The single source of truth for combined
+  in ``length.py``.  The single source of truth for combined
   segment + via length on a router-internal Route is
   :class:`DiffPairLengthTracker._measure_route`; this module reuses it
   via the private indirection :meth:`MatchGroupTracker._measure_route_total`
@@ -45,7 +45,7 @@ Design notes
 
 * **PCB-side measurement primitive delegates** to
   :meth:`DiffPairLengthTracker.measure_net_from_pcb` (the Phase 2.5c
-  sister primitive, ``diffpair_length.py:308``).  The math is genuinely
+  sister primitive in ``diffpair_length.py``).  The math is genuinely
   net-scoped (sum of segments + drilled via length for one net id),
   identical whether the net belongs to a diff pair or to an N-trace
   match group -- duplicating the body would re-introduce the exact
@@ -68,7 +68,7 @@ Design notes
   is keyed on this string (not on a tuple of net names like the
   diff-pair tracker), mirroring the existing
   :attr:`~kicad_tools.router.length.LengthTracker.match_groups`
-  ``dict[str, list[int]]`` keying at ``length.py:94``.
+  ``dict[str, list[int]]`` keying in ``length.py``.
 
 * **Reference policy.**  :meth:`get_reference_length` implements the
   Phase 1A ``length_match_reference`` semantic:
@@ -109,7 +109,7 @@ if TYPE_CHECKING:
 
 
 # =============================================================================
-# Source provenance enum (mirrors DetectionSource at diffpair_detection.py:49)
+# Source provenance enum (mirrors DetectionSource in diffpair_detection.py)
 # =============================================================================
 
 
@@ -117,7 +117,7 @@ class MatchGroupSource(Enum):
     """Where a match group came from in the Phase 1C layered detector.
 
     Mirrors :class:`~kicad_tools.router.diffpair_detection.DetectionSource`
-    at ``router/diffpair_detection.py:49-54``.  The member names align
+    in ``router/diffpair_detection.py``.  The member names align
     byte-for-byte with the diff-pair source enum for cross-detector
     consistency (``SUFFIX``, not ``SUFFIX_INFERRED``).
 
@@ -260,7 +260,7 @@ class MatchGroupTracker:
               and rebuild the name-keyed skew cache from scratch.
             * The implementation reuses
               :meth:`LengthTracker.calculate_route_length`
-              (``length.py:138-153``) as the single source of truth for
+              (in ``length.py``) as the single source of truth for
               segment summation -- no segment math lives in this module.
         """
         # Collect the set of member net ids cheaply so non-member routes
@@ -346,10 +346,11 @@ class MatchGroupTracker:
         """Return the geometric length of a route in mm, including via drill.
 
         Delegates to :meth:`LengthTracker.calculate_route_length` for the
-        segment portion (single source of truth -- see ``length.py:138-153``)
+        segment portion (single source of truth -- see
+        ``LengthTracker.calculate_route_length`` in ``length.py``)
         and to :meth:`DiffPairLengthTracker._via_length` for the per-via
         drilled-length policy (the Phase 3H formula at
-        ``diffpair_length.py:190-223``).
+        ``DiffPairLengthTracker._via_length`` in ``diffpair_length.py``).
 
         Keeping the math in the diff-pair tracker (rather than duplicating
         it here) preserves single source of truth: a future change to the
@@ -376,7 +377,7 @@ class MatchGroupTracker:
         # Via portion.  When the caller did not supply board_thickness_mm
         # (or the stack has fewer than 2 layers) we cannot compute a
         # drilled length and document that vias contribute 0.0.  Mirrors
-        # DiffPairLengthTracker._measure_route at diffpair_length.py:183.
+        # DiffPairLengthTracker._measure_route in diffpair_length.py.
         if board_thickness_mm is None or num_copper_layers <= 1:
             return total
 
@@ -442,7 +443,7 @@ class MatchGroupTracker:
 
         - ``group.reference_net_id is None`` -> the longest routed length
           among the group's members (matches the legacy ``tune_match_group``
-          longest-as-target semantics at ``serpentine.py:438``).  Returns
+          longest-as-target semantics in ``serpentine.py``).  Returns
           ``None`` when no members are routed.
         - ``group.reference_net_id`` is set -> the recorded length of that
           specific net (the "pace-car" semantic).  Returns ``None`` when
@@ -494,7 +495,7 @@ class MatchGroupTracker:
 
         Delegates byte-for-byte to
         :meth:`DiffPairLengthTracker.measure_net_from_pcb`
-        (``diffpair_length.py:308``).  The math is genuinely net-scoped
+        (in ``diffpair_length.py``).  The math is genuinely net-scoped
         (sum of segments + drilled via length for one net id) and is
         identical whether the net belongs to a differential pair or to an
         N-trace match group -- duplicating the body would re-introduce

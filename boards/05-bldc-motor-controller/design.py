@@ -420,8 +420,8 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # schematic) reports the parts the PCB actually places. Strings must
     # mirror the PCB-side hard-codes in ``generate_d2pak`` /
     # ``generate_cap_0805`` / ``generate_inductor_smd`` /
-    # ``generate_diode_sma`` (see design.py:1433, 1758, 1851, 1870) so the
-    # schematic↔PCB drift checker stays clean. Without these, the
+    # ``generate_diode_sma`` (all four nested in ``create_bldc_pcb`` in this
+    # file) so the schematic↔PCB drift checker stays clean. Without these, the
     # manufacturing preflight ``bom_fields`` check fails with "missing
     # footprint" warnings on U1/C3/C4/L1/D2 (issue #3211).
     cascade.buck.regulator.footprint = "Package_TO_SOT_SMD:TO-263-5_TabPin3"
@@ -3299,7 +3299,7 @@ def emit_phase1_diagnostics(routed_path: Path) -> None:
 
     # Board-05's effective routing clearance is 0.15mm (the value the router
     # enforces and warns about: "grid 0.1mm > clearance/2 (0.075mm)", see
-    # route_pcb() around design.py:3040 and io.py's validate_grid_resolution
+    # ``route_pcb`` in this file and io.py's ``validate_grid_resolution``
     # warning).  This is the board's DesignRules clearance, tighter than the
     # jlcpcb-tier1 mfr floor (0.127mm) does not govern here -- use the value the
     # route actually applied so the report describes the real grid.  The grid

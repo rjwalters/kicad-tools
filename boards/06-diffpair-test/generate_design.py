@@ -2357,11 +2357,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     #
     #   1. ``DesignRules`` now declares ``min_trace_width=0.10`` and the
     #      escape router already uses that width for fine-pitch BGA-49 /
-    #      QFN escape segments (escape.py:3303-3304, Issue #1778), so the
-    #      escape geometry succeeds even when the corridor trace is
-    #      ~0.39 mm wide.
+    #      QFN escape segments (``EscapeRouter._create_fine_pitch_row_escapes``
+    #      in escape.py, Issue #1778), so the escape geometry succeeds
+    #      even when the corridor trace is ~0.39 mm wide.
     #
-    #   2. ``DesignRules.get_neck_down_width`` (rules.py:498) now accepts
+    #   2. ``DesignRules.get_neck_down_width`` (rules.py) now accepts
     #      a ``base_width`` parameter, and the pathfinder passes the
     #      per-net-class ``trace_width`` (the impedance-resolved width)
     #      as the corridor base.  Segments taper from the impedance
@@ -2720,7 +2720,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # ``None`` disables the deadline entirely.  This mirrors the CLI, which
         # sets args.per_net_timeout = 0.0 but forwards
         # ``getattr(args, "per_net_timeout", None) or None`` -> None
-        # (route_cmd.py:3272 etc.).
+        # (the ``getattr(args, "per_net_timeout", None) or None`` forwarding
+        # in route_cmd.py).
         #
         # ``timeout=None`` (#4536): this stage previously carried a
         # ``timeout=360.0`` wall-clock SAFETY BACKSTOP with a comment claiming
@@ -2863,8 +2864,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # candidates and nudges segments perpendicular to repair them.  Without
     # this call the post-route ``kct check`` is the first thing that sees
     # the violations -- by which point the routed PCB is already serialised.
-    # See also the equivalent invocations in ``kct route`` (route_cmd.py:1985
-    # and 2511) and ``kct optimize`` (route_cmd.py:5184).
+    # See also the equivalent invocations in
+    # ``src/kicad_tools/cli/route_cmd.py``: the escalation helpers
+    # ``route_with_layer_escalation`` / ``route_with_rule_relaxation`` /
+    # ``route_with_combined_escalation``, plus the post-optimization DRC
+    # nudge pass in ``_main_impl``.
     from kicad_tools.router.drc_nudge import drc_verify_and_nudge
 
     print("\n6. DRC verify-and-nudge pass...")
@@ -3521,8 +3525,9 @@ def main() -> int:
             routed_path = output_dir / "diffpair_test_routed.kicad_pcb"
             route_success = route_pcb(pcb_path, routed_path)
 
-            # route_success fast-fail gate (#4066, mirrors board 03's gate at
-            # boards/03-usb-joystick/generate_design.py:838).  route_pcb runs
+            # route_success fast-fail gate (#4066, mirrors board 03's
+            # ``route_success`` gate after ``route_pcb`` in
+            # boards/03-usb-joystick/generate_design.py).  route_pcb runs
             # under a wall-clock ``--timeout`` SAFETY backstop layered above
             # the load-independent per-net ``--deterministic-budget`` iteration
             # cap, so on a loaded machine that outer deadline can fire before

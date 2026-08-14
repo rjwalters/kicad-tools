@@ -1189,3 +1189,206 @@ class TestCmdExportFallbackHandling:
         assert result == 0
         captured = capsys.readouterr()
         assert "Exported KiCad netlist to:" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Netlist byproduct location (#4795)
+# ---------------------------------------------------------------------------
+
+MINIMAL_SCHEMATIC = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402" (at 100 100 0) (effects (hide yes)))
+  )
+  (symbol
+    (lib_id "Device:C")
+    (at 120 100 0)
+    (uuid "00000000-0000-0000-0000-000000000003")
+    (property "Reference" "C1" (at 120 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "100n" (at 120 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Capacitor_SMD:C_0402" (at 120 100 0) (effects (hide yes)))
+  )
+)
+"""
+
+# Minimal kicad-cli-shaped netlist matching MINIMAL_SCHEMATIC (R1 + C1).
+FAKE_EXPORTED_NETLIST = """(export (version "E")
+  (design (source "test.kicad_sch") (tool "Eeschema"))
+  (components
+    (comp (ref "R1") (value "10k") (footprint "Resistor_SMD:R_0402"))
+    (comp (ref "C1") (value "100n") (footprint "Capacitor_SMD:C_0402")))
+  (nets
+    (net (code "1") (name "/N1")
+      (node (ref "R1") (pin "1"))
+      (node (ref "C1") (pin "1")))))
+"""
+
+
+class TestNetlistByproductLocation:
+    """``kct netlist`` analysis subcommands must not litter the project dir (#4795).
+
+    ``export_netlist`` defaults ``output_path`` to
+    ``<schematic dir>/<stem>-netlist.kicad_net`` and never deletes it, so a
+    bare call from ``cmd_analyze`` / ``cmd_list`` / ``cmd_show`` /
+    ``cmd_check`` / ``cmd_compare`` dropped an unrequested netlist file
+    beside the user's schematic on every invocation.  ``cmd_export`` is the
+    one call site where that file *is* the requested product -- it is
+    covered here too, to prove the fix did not sweep it into temp routing.
+    """
+
+    @pytest.fixture
+    def schematic(self, tmp_path: Path) -> Path:
+        """A schematic in its own 'project' directory."""
+        proj = tmp_path / "project"
+        proj.mkdir()
+        sch = proj / "design.kicad_sch"
+        sch.write_text(MINIMAL_SCHEMATIC)
+        return sch
+
+    @pytest.fixture
+    def fake_kicad_cli(self, monkeypatch) -> list[Path]:
+        """Force the kicad-cli export path with a stubbed subprocess.
+
+        The stub writes a real netlist file to whatever ``--output`` path it
+        is handed, exactly like kicad-cli does -- so the byproduct lands
+        wherever ``export_netlist`` decided it should, which is the behavior
+        under test.  Returns the list of captured output paths.
+        """
+        import subprocess as _subprocess
+
+        captured_outputs: list[Path] = []
+
+        monkeypatch.setattr(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            lambda: Path("/fake/kicad-cli"),
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            out = Path(cmd[cmd.index("--output") + 1])
+            captured_outputs.append(out)
+            out.write_text(FAKE_EXPORTED_NETLIST)
+            return _subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("kicad_tools.operations.netlist.subprocess.run", fake_run)
+        return captured_outputs
+
+    def test_kicad_cli_path_is_actually_exercised(self, schematic, fake_kicad_cli, capsys):
+        """Guard: the stub really runs, so the assertions below mean something."""
+        assert netlist_cmd.cmd_analyze(schematic, "json") == 0
+        assert fake_kicad_cli, "kicad-cli export path was never taken"
+
+    @pytest.mark.parametrize(
+        "invoke",
+        [
+            pytest.param(lambda sch: netlist_cmd.cmd_analyze(sch, "json"), id="analyze"),
+            pytest.param(lambda sch: netlist_cmd.cmd_list(sch, "json", "connections"), id="list"),
+            pytest.param(lambda sch: netlist_cmd.cmd_show(sch, "/N1", "json"), id="show"),
+            pytest.param(lambda sch: netlist_cmd.cmd_check(sch, "json"), id="check"),
+        ],
+    )
+    def test_no_byproduct_beside_schematic(self, schematic, fake_kicad_cli, capsys, invoke):
+        """No ``*-netlist.kicad_net`` is left in the schematic's directory."""
+        before = {p.name for p in schematic.parent.iterdir()}
+
+        assert invoke(schematic) == 0
+
+        assert fake_kicad_cli, "kicad-cli export path was never taken"
+        stray = sorted(p.name for p in schematic.parent.glob("*-netlist.kicad_net"))
+        assert not stray, f"subcommand left byproducts beside the schematic: {stray}"
+        assert {p.name for p in schematic.parent.iterdir()} == before
+
+    @pytest.mark.parametrize(
+        "invoke",
+        [
+            pytest.param(lambda sch: netlist_cmd.cmd_analyze(sch, "json"), id="analyze"),
+            pytest.param(lambda sch: netlist_cmd.cmd_list(sch, "json", "connections"), id="list"),
+            pytest.param(lambda sch: netlist_cmd.cmd_show(sch, "/N1", "json"), id="show"),
+            pytest.param(lambda sch: netlist_cmd.cmd_check(sch, "json"), id="check"),
+        ],
+    )
+    def test_temp_export_is_cleaned_up(self, schematic, fake_kicad_cli, capsys, invoke):
+        """The temp directory is torn down before the subcommand returns."""
+        assert invoke(schematic) == 0
+
+        assert fake_kicad_cli
+        for out in fake_kicad_cli:
+            assert out.parent != schematic.parent, f"export wrote into the project dir: {out}"
+            assert not out.exists(), f"temp netlist survived the command: {out}"
+            assert not out.parent.exists(), f"temp dir survived the command: {out.parent}"
+
+    def test_compare_leaves_no_byproduct_in_either_dir(self, tmp_path, fake_kicad_cli, capsys):
+        """``cmd_compare`` must not litter *either* schematic's directory."""
+        old_dir = tmp_path / "old_project"
+        new_dir = tmp_path / "new_project"
+        old_dir.mkdir()
+        new_dir.mkdir()
+        old_path = old_dir / "rev_a.kicad_sch"
+        new_path = new_dir / "rev_b.kicad_sch"
+        old_path.write_text(MINIMAL_SCHEMATIC)
+        new_path.write_text(MINIMAL_SCHEMATIC)
+
+        before_old = {p.name for p in old_dir.iterdir()}
+        before_new = {p.name for p in new_dir.iterdir()}
+
+        assert netlist_cmd.cmd_compare(old_path, new_path, "json") == 0
+
+        assert len(fake_kicad_cli) == 2, "both schematics should have been exported"
+        assert not sorted(old_dir.glob("*-netlist.kicad_net")), "old dir gained a netlist file"
+        assert not sorted(new_dir.glob("*-netlist.kicad_net")), "new dir gained a netlist file"
+        assert {p.name for p in old_dir.iterdir()} == before_old
+        assert {p.name for p in new_dir.iterdir()} == before_new
+        for out in fake_kicad_cli:
+            assert not out.exists()
+
+    def test_compare_temp_paths_do_not_collide(self, tmp_path, fake_kicad_cli, capsys):
+        """Same-stem schematics in different dirs get distinct temp outputs."""
+        old_dir = tmp_path / "v1"
+        new_dir = tmp_path / "v2"
+        old_dir.mkdir()
+        new_dir.mkdir()
+        old_path = old_dir / "design.kicad_sch"
+        new_path = new_dir / "design.kicad_sch"
+        old_path.write_text(MINIMAL_SCHEMATIC)
+        new_path.write_text(MINIMAL_SCHEMATIC)
+
+        assert netlist_cmd.cmd_compare(old_path, new_path, "json") == 0
+
+        assert len(fake_kicad_cli) == 2
+        assert fake_kicad_cli[0] != fake_kicad_cli[1], "compare reused one temp output path"
+
+    def test_netlist_data_survives_temp_routing(self, schematic, fake_kicad_cli, capsys):
+        """The parsed netlist still reaches the command output."""
+        assert netlist_cmd.cmd_list(schematic, "json", "name") == 0
+
+        data = json.loads(capsys.readouterr().out)
+        assert [net["name"] for net in data] == ["/N1"]
+        assert data[0]["connections"] == 2
+
+    def test_export_still_writes_its_product_at_default_location(
+        self, schematic, fake_kicad_cli, capsys
+    ):
+        """``kct netlist export`` is the product site -- it must still litter."""
+        assert netlist_cmd.cmd_export(schematic, None, "kicad") == 0
+
+        product = schematic.parent / "design-netlist.kicad_net"
+        assert product.exists(), "export no longer writes the netlist the user asked for"
+        assert "Exported KiCad netlist to:" in capsys.readouterr().out
+
+    def test_export_still_writes_its_product_at_requested_location(
+        self, schematic, tmp_path, fake_kicad_cli, capsys
+    ):
+        """``kct netlist export -o`` still writes to the requested path."""
+        requested = tmp_path / "custom.net"
+
+        assert netlist_cmd.cmd_export(schematic, requested, "kicad") == 0
+
+        assert requested.exists(), "export -o no longer writes the requested file"
+        assert "Exported KiCad netlist to:" in capsys.readouterr().out

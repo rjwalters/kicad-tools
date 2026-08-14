@@ -1367,3 +1367,115 @@ def test_layer_scoped_zone_converges_where_layer_agnostic_thrashes() -> None:
     assert blind_route is not None, "the pairwise-aware Python fallback should rescue the net"
     assert blind_violation is None
     assert "B_CU" in blind_layers
+
+
+# ---------------------------------------------------------------------------
+# Per-net-class search extents (Issue #4793): Python <-> C++ parity
+# ---------------------------------------------------------------------------
+#
+# The widened radius is measured from the ROUTED net's copper half-extent.  The
+# C++ kernels read ``search_trace_half_width_mm_`` / ``search_via_half_diam_mm_``
+# (pushed once per net by ``cpp_backend`` via ``set_search_pair_widths``); the
+# Python fallback resolves the same extent from the net's ``NetClassRouting``.
+# Before #4793 the Python side used the GLOBAL ``rules`` widths, so on a board
+# with a wide class the two backends disagreed over a 4-cell-deep band -- the
+# fallback under-blocked, proposed a path, and the post-route gate rejected it.
+# This fixture sweeps the whole band and pins cell-for-cell agreement.
+
+_WIDE_TRACE_WIDTH = 1.0  # vs the 0.2 mm global default
+_WIDE_VIA_SIZE = 1.2  # vs the 0.6 mm global default
+
+
+def _py_router_with_foreign_cell(dy: int, net_class_map):
+    """A Python Router on a 20x20 board with ONE foreign LV cell ``dy`` above.
+
+    Cell-exact mirror of the C++ fixtures' ``Grid3D.mark_blocked`` (there is no
+    public single-cell setter on ``RoutingGrid``; the search kernels read these
+    arrays directly).
+    """
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.pathfinder import Router
+
+    rules = DesignRules(
+        trace_width=TRACE_WIDTH,
+        trace_clearance=DRU,
+        via_diameter=0.6,
+        via_clearance=DRU,
+        grid_resolution=0.1,
+    )
+    rules.pairwise_clearance = _table()
+    grid = RoutingGrid(width=20.0, height=20.0, rules=rules, layer_stack=LayerStack.two_layer())
+    grid._blocked[0, 100 + dy, 100] = True
+    grid._net[0, 100 + dy, 100] = LV_NET
+    router = Router(grid, rules, diagonal_routing=True, net_class_map=net_class_map)
+    router.set_net_name_to_id(dict(NET_NAMES))
+    return router
+
+
+def _cpp_pathfinder_with_foreign_cell(dy: int, half_trace_mm: float, half_via_mm: float):
+    grid = _cpp_grid()
+    _install_domains(grid)
+    from kicad_tools.router import router_cpp
+
+    pf = router_cpp.Pathfinder(grid, _cpp_rules(), True)
+    pf.set_search_pair_widths(half_trace_mm, half_via_mm)
+    grid.mark_blocked(100, 100 + dy, 0, LV_NET, False, False)
+    return pf
+
+
+# Trace: global half 0.10 -> r 17 cells; class half 0.50 -> r 21 cells.
+# Via:   global half 0.30 -> r 19 cells; class half 0.60 -> r 22 cells.
+# The sweep straddles every one of those thresholds.
+_PARITY_DISTANCES = tuple(range(15, 25))
+
+
+@requires_cpp
+@pytest.mark.parametrize(
+    ("net_class_map", "half_trace_mm", "half_via_mm"),
+    [
+        (None, TRACE_WIDTH / 2.0, 0.3),
+        (
+            {"/AC_LINE": NetClassRouting(name="HV", trace_width=_WIDE_TRACE_WIDTH, clearance=DRU)},
+            _WIDE_TRACE_WIDTH / 2.0,
+            0.3,
+        ),
+    ],
+    ids=["global-width", "wide-class-width"],
+)
+def test_trace_annulus_class_width_parity(net_class_map, half_trace_mm, half_via_mm) -> None:
+    """Python fallback and C++ agree cell-for-cell on the class-width band."""
+    verdicts = []
+    for dy in _PARITY_DISTANCES:
+        py = _py_router_with_foreign_cell(dy, net_class_map)
+        cpp = _cpp_pathfinder_with_foreign_cell(dy, half_trace_mm, half_via_mm)
+        py_blocked = py._cross_domain_trace_blocked(100, 100, 0, HV_NET, SCALAR_RADIUS)
+        cpp_blocked = cpp.cross_domain_trace_blocked(100, 100, 0, HV_NET, SCALAR_RADIUS)
+        assert py_blocked == cpp_blocked, f"backends disagree at dy={dy}"
+        verdicts.append(py_blocked)
+    # The sweep must actually straddle the boundary (otherwise agreement is
+    # vacuous -- e.g. every probe outside both radii).
+    assert True in verdicts and False in verdicts
+
+
+@requires_cpp
+def test_via_annulus_class_size_parity() -> None:
+    """Same parity for the via analogue (``via_size`` vs ``via_diameter``).
+
+    The C++ via kernel derives its own scalar radius and scans every layer;
+    the probes here sit far outside any scalar disc and the foreign cell is on
+    a single layer, so the two shapes are directly comparable.
+    """
+    wide = {
+        "/AC_LINE": NetClassRouting(
+            name="HV", trace_width=TRACE_WIDTH, clearance=DRU, via_size=_WIDE_VIA_SIZE
+        )
+    }
+    verdicts = []
+    for dy in _PARITY_DISTANCES:
+        py = _py_router_with_foreign_cell(dy, wide)
+        cpp = _cpp_pathfinder_with_foreign_cell(dy, TRACE_WIDTH / 2.0, _WIDE_VIA_SIZE / 2.0)
+        py_blocked = py._cross_domain_via_blocked(100, 100, 0, HV_NET, SCALAR_RADIUS)
+        cpp_blocked = cpp.cross_domain_via_blocked(100, 100, HV_NET)
+        assert py_blocked == cpp_blocked, f"backends disagree at dy={dy}"
+        verdicts.append(py_blocked)
+    assert True in verdicts and False in verdicts

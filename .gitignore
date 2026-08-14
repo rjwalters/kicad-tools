@@ -123,3 +123,9 @@ boards/*/*/output/*.kct.json
 # Local routing-benchmark artifact rewritten by tests/test_router_integration.py
 # on every run (untracked in #4684 — timing noise, no reader)
 tests/benchmark_results.json
+
+# Corpus-probe output (scripts/corpus/probe_open_schematics.py, #4830).
+# Holds taxonomy reports and, with --keep-sources, third-party CC-BY-4.0 KiCad
+# payloads sampled from Hugging Face. NEVER commit these — the corpus stays
+# referenced by URL, not vendored.
+scripts/corpus/.cache/

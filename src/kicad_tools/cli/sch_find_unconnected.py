@@ -42,6 +42,7 @@ import argparse
 import fnmatch
 import json
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -278,8 +279,20 @@ def _cross_check_netlist(
     # consumer (pcbnew, KiCad, exported BOMs, fabrication outputs)
     # actually sees.  The Python fallback would *hide* the bug by
     # walking the hierarchy correctly.
+    #
+    # The export itself is a byproduct of this cross-check, not something
+    # the user asked for, so its ``output_path`` is routed into a temp
+    # directory -- a bare call would leave ``<stem>-netlist.kicad_net``
+    # beside the user's schematic (#4750, #4763, #4795).  Only the parsed
+    # ``Netlist`` object is consumed below; the file is never re-read.
+    root = Path(root_path)
     try:
-        netlist = export_netlist(root_path, fallback=False)
+        with tempfile.TemporaryDirectory(prefix="kct-unconnected-netlist-") as tmpdir:
+            netlist = export_netlist(
+                root_path,
+                output_path=Path(tmpdir) / f"{root.stem}-netlist.kicad_net",
+                fallback=False,
+            )
     except FileNotFoundError as e:
         return [], f"kicad-cli not available, netlist cross-check skipped: {e}"
     except RuntimeError as e:

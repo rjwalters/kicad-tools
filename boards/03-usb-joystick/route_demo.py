@@ -8,9 +8,9 @@ skipped, ``route_all_with_diffpairs(enabled=True)`` -- which had
 drifted from the canonical recipe in ``generate_design.py:route_pcb()``
 that produced the committed routed PCB.  The drift caused
 ``kct build --step route`` (which invokes ``route_demo.py``, see
-``src/kicad_tools/cli/build_cmd.py:1189``) to produce strictly worse
-output than the committed artifact even when nothing in the router
-itself had regressed.
+``_run_step_route`` in ``src/kicad_tools/cli/build_cmd.py``) to produce
+strictly worse output than the committed artifact even when nothing in
+the router itself had regressed.
 
 Fix (Option 1a from the issue):
 ``route_demo.py`` now DELEGATES to ``generate_design.py:route_pcb()``
@@ -124,7 +124,8 @@ def main():
 
     Issue #3308: delegate to ``generate_design.py:route_pcb()`` so the
     demo cannot drift from the end-to-end recipe.  ``kct build --step
-    route`` runs this script (per ``src/kicad_tools/cli/build_cmd.py:1189``);
+    route`` runs this script (per ``_run_step_route`` in
+    ``src/kicad_tools/cli/build_cmd.py``);
     using the same code path that produced the committed routed PCB
     guarantees a fresh ``kct build`` reproduces the shipped artifact.
     """
