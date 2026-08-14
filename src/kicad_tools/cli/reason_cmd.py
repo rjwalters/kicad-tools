@@ -6,14 +6,74 @@ Provides command-line access to the reasoning module for LLM-assisted layout:
     kct reason board.kicad_pcb --export-state
     kct reason board.kicad_pcb --interactive
     kct reason board.kicad_pcb --analyze
+
+Machine output (``--format json``, issue #4674): one document carrying the
+board summary, the DRC block and the selected ``mode``'s own payload
+(``state`` / ``analysis`` / ``auto_route`` / ``prompt``), or
+``{"error": ..., "success": false}`` on failure with the exit code unchanged.
+``--interactive`` is a stdin/stdout dialogue with no single-document form, so
+combining it with ``--format json`` is refused structurally rather than
+half-emitted.  See ``docs/reference/machine-output.md``.
 """
 
 import argparse
+import contextlib
+import io
 import json
 import sys
 from pathlib import Path
 
+from kicad_tools.cli.format_options import FORMAT_JSON, add_format_flag, emit_json
 from kicad_tools.manufacturers import get_manufacturer_ids
+
+
+@contextlib.contextmanager
+def _stdout_to_stderr_when(active: bool):
+    """Divert stdout to stderr while *active* (i.e. JSON mode owns stdout).
+
+    ``--auto-route`` drives the router, which prints a multi-line progress log
+    on **stdout** that this module does not own; under ``--format json`` that
+    would corrupt the single-document contract, so it is captured and replayed
+    on stderr.  Same helper as ``report_cmd._stdout_to_stderr_when`` (batch 5
+    of #4674).
+    """
+    if not active:
+        yield
+        return
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            yield
+    finally:
+        if buffer.getvalue():
+            print(buffer.getvalue(), end="", file=sys.stderr)
+
+
+def _fail(
+    as_json: bool,
+    pcb: str,
+    message: str,
+    *,
+    text: str | None = None,
+    code: int = 1,
+) -> int:
+    """Report a reason failure as a document (JSON) or prose (text).
+
+    ``text`` overrides the conventional ``Error: <message>`` prose for the
+    paths that word themselves differently, so text mode stays byte-identical.
+    """
+    if as_json:
+        emit_json(
+            {
+                "command": "reason",
+                "pcb": pcb,
+                "error": message,
+                "success": False,
+            }
+        )
+    else:
+        print(text if text is not None else f"Error: {message}", file=sys.stderr)
+    return code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -92,17 +152,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Show what would be done without writing output",
     )
+    add_format_flag(parser)
 
     args = parser.parse_args(argv)
+    as_json = args.format == FORMAT_JSON
 
     # Validate input
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _fail(as_json, str(pcb_path), f"File not found: {pcb_path}")
 
+    warnings: list[str] = []
     if pcb_path.suffix != ".kicad_pcb":
-        print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
+        message = f"Expected .kicad_pcb file, got {pcb_path.suffix}"
+        warnings.append(message)
+        if not as_json:
+            print(f"Warning: {message}")
 
     # Determine output path
     if args.output:
@@ -110,29 +175,47 @@ def main(argv: list[str] | None = None) -> int:
     else:
         output_path = pcb_path.with_stem(pcb_path.stem + "_reasoned")
 
+    # --interactive is a stdin/stdout dialogue: there is no single document to
+    # emit, so refuse the combination rather than printing a half-truth.
+    if as_json and args.interactive:
+        return _fail(
+            as_json,
+            str(pcb_path),
+            "--interactive is a stdin/stdout dialogue and has no single-document "
+            "form; use --export-state, --analyze or --auto-route with --format json",
+            code=2,
+        )
+
     # Import reasoning module
     from kicad_tools.reasoning import PCBReasoningAgent
 
     # Print header
-    print("=" * 60)
-    print("KiCad LLM-Driven PCB Reasoning")
-    print("=" * 60)
-    print(f"Input: {pcb_path}")
+    if not as_json:
+        print("=" * 60)
+        print("KiCad LLM-Driven PCB Reasoning")
+        print("=" * 60)
+        print(f"Input: {pcb_path}")
 
-    # Create agent
-    print("\n--- Loading PCB ---")
+        # Create agent
+        print("\n--- Loading PCB ---")
     try:
         agent = PCBReasoningAgent.from_pcb(
             str(pcb_path),
             drc_path=args.drc,
         )
     except Exception as e:
-        print(f"Error loading PCB: {e}", file=sys.stderr)
-        return 1
+        return _fail(
+            as_json,
+            str(pcb_path),
+            f"loading PCB: {e}",
+            text=f"Error loading PCB: {e}",
+        )
 
     # Run automatic DRC checks if no external DRC report provided
+    drc_block: dict = {"ran": False, "source": "report" if args.drc else "skipped"}
     if not args.drc and not args.no_drc:
-        print("\n--- Running DRC Checks ---")
+        if not as_json:
+            print("\n--- Running DRC Checks ---")
         try:
             from kicad_tools.schema.pcb import PCB
             from kicad_tools.validate import DRCChecker
@@ -141,44 +224,81 @@ def main(argv: list[str] | None = None) -> int:
             checker = DRCChecker(pcb, manufacturer=args.mfr, layers=args.layers)
             drc_results = checker.check_all()
             agent.update_violations_from_checker(drc_results)
-            print(f"  Manufacturer: {args.mfr.upper()}")
-            print(f"  Rules checked: {drc_results.rules_checked}")
+            drc_block = {
+                "ran": True,
+                "source": "checker",
+                "manufacturer": args.mfr,
+                "layers": args.layers,
+                "rules_checked": drc_results.rules_checked,
+            }
+            if not as_json:
+                print(f"  Manufacturer: {args.mfr.upper()}")
+                print(f"  Rules checked: {drc_results.rules_checked}")
         except Exception as e:
+            drc_block = {"ran": False, "source": "checker", "error": str(e)}
             print(f"  Warning: DRC check failed: {e}", file=sys.stderr)
-            print("  Use --no-drc to skip DRC checks")
+            if not as_json:
+                print("  Use --no-drc to skip DRC checks")
 
     state = agent.get_state()
-    print("\n--- Board Summary ---")
-    print(f"  Board size: {state.outline.width:.1f}mm x {state.outline.height:.1f}mm")
-    print(f"  Components: {len(state.components)}")
-    print(f"  Nets total: {len(state.routed_nets) + len(state.unrouted_nets)}")
-    print(f"  Nets routed: {len(state.routed_nets)}")
-    print(f"  Nets unrouted: {len(state.unrouted_nets)}")
-    print(f"  Violations: {len(state.violations)}")
+    if not as_json:
+        print("\n--- Board Summary ---")
+        print(f"  Board size: {state.outline.width:.1f}mm x {state.outline.height:.1f}mm")
+        print(f"  Components: {len(state.components)}")
+        print(f"  Nets total: {len(state.routed_nets) + len(state.unrouted_nets)}")
+        print(f"  Nets routed: {len(state.routed_nets)}")
+        print(f"  Nets unrouted: {len(state.unrouted_nets)}")
+        print(f"  Violations: {len(state.violations)}")
+
+    envelope = {
+        "command": "reason",
+        "pcb": str(pcb_path),
+        "output": str(output_path),
+        "dry_run": bool(args.dry_run),
+        "warnings": warnings,
+        "drc": drc_block,
+        "board": {
+            "width_mm": state.outline.width,
+            "height_mm": state.outline.height,
+            "components": len(state.components),
+            "nets_total": len(state.routed_nets) + len(state.unrouted_nets),
+            "nets_routed": len(state.routed_nets),
+            "nets_unrouted": len(state.unrouted_nets),
+            "violations": len(state.violations),
+        },
+    }
 
     # Handle different modes
     if args.export_state:
-        return _export_state(agent, args)
-
-    if args.analyze:
-        return _analyze(agent, args)
-
-    if args.interactive:
+        rc, payload = _export_state(agent, args, as_json=as_json)
+    elif args.analyze:
+        rc, payload = _analyze(agent, args, as_json=as_json)
+    elif args.interactive:
+        # Unreachable under --format json (refused above).
         return _interactive_loop(agent, output_path, args)
+    elif args.auto_route:
+        rc, payload = _auto_route(agent, output_path, args, as_json=as_json)
+    else:
+        # Default: show the prompt and exit
+        payload = {"mode": "prompt", "prompt": agent.get_prompt()}
+        rc = 0
+        if not as_json:
+            print("\n--- Current State Prompt ---")
+            print(agent.get_prompt())
+            print("\n" + "=" * 60)
+            print("Use --export-state, --interactive, --analyze, or --auto-route")
 
-    if args.auto_route:
-        return _auto_route(agent, output_path, args)
-
-    # Default: show prompt and exit
-    print("\n--- Current State Prompt ---")
-    print(agent.get_prompt())
-    print("\n" + "=" * 60)
-    print("Use --export-state, --interactive, --analyze, or --auto-route")
-    return 0
+    if as_json:
+        emit_json({**envelope, **payload, "success": rc == 0})
+    return rc
 
 
-def _export_state(agent, args) -> int:
-    """Export state as JSON for external LLM processing."""
+def _export_state(agent, args, *, as_json: bool = False) -> tuple[int, dict]:
+    """Export state as JSON for external LLM processing.
+
+    Returns ``(exit_code, payload)``; the payload is merged into the
+    ``--format json`` envelope by :func:`main` (issue #4674).
+    """
     state = agent.get_state()
 
     # Build state dictionary
@@ -225,18 +345,28 @@ def _export_state(agent, args) -> int:
 
     if args.state_output:
         Path(args.state_output).write_text(json_str)
-        print(f"\n--- State exported to {args.state_output} ---")
-    else:
+        if not as_json:
+            print(f"\n--- State exported to {args.state_output} ---")
+    elif not as_json:
         print("\n--- State JSON ---")
         print(json_str)
 
-    return 0
+    # The exported state is the artifact; the envelope carries it under
+    # ``state`` (and names the file it was written to) rather than making the
+    # caller parse a second document out of the stream.
+    return 0, {
+        "mode": "export-state",
+        "state": state_dict,
+        "state_output": args.state_output,
+    }
 
 
-def _analyze(agent, args) -> int:
-    """Print detailed analysis of PCB state."""
-    print("\n" + agent.analyze_current_state())
-    return 0
+def _analyze(agent, args, *, as_json: bool = False) -> tuple[int, dict]:
+    """Print detailed analysis of PCB state (prose), or return it as data."""
+    analysis = agent.analyze_current_state()
+    if not as_json:
+        print("\n" + analysis)
+    return 0, {"mode": "analyze", "analysis": analysis}
 
 
 def _interactive_loop(agent, output_path: Path, args) -> int:
@@ -305,28 +435,68 @@ def _interactive_loop(agent, output_path: Path, args) -> int:
     return 0
 
 
-def _auto_route(agent, output_path: Path, args) -> int:
-    """Auto-route priority nets without LLM."""
-    print(f"\n--- Auto-routing up to {args.max_nets} priority nets ---")
+def _auto_route(agent, output_path: Path, args, *, as_json: bool = False) -> tuple[int, dict]:
+    """Auto-route priority nets without LLM.
 
-    results = agent.route_priority_nets(max_nets=args.max_nets)
+    Returns ``(exit_code, payload)``; the payload names every attempted net and
+    whether the result was written, so a machine caller never has to infer
+    "did it save?" from the exit code alone (issue #4674).
+    """
+    if not as_json:
+        print(f"\n--- Auto-routing up to {args.max_nets} priority nets ---")
+
+    # ``route_priority_nets`` walks the unrouted nets in priority order and
+    # returns one result per net in that same order, but ``CommandResult``
+    # itself carries no net name -- so capture the target order up front to
+    # label the per-net entries (missing labels degrade to ``null`` rather
+    # than mis-attributing a result).
+    targets = [
+        net.name for net in sorted(agent.get_state().unrouted_nets, key=lambda n: n.priority)
+    ][: args.max_nets]
+
+    with _stdout_to_stderr_when(as_json):
+        results = agent.route_priority_nets(max_nets=args.max_nets)
 
     successful = sum(1 for r in results if r.success)
-    print(f"\nRouted {successful}/{len(results)} nets")
+    if not as_json:
+        print(f"\nRouted {successful}/{len(results)} nets")
 
-    # Show final progress
-    progress = agent.get_progress()
-    print(progress.to_prompt())
+        # Show final progress
+        progress = agent.get_progress()
+        print(progress.to_prompt())
 
     # Save
     if args.dry_run:
-        print("\n--- Dry run - not saving ---")
+        if not as_json:
+            print("\n--- Dry run - not saving ---")
     else:
-        print(f"\n--- Saving to {output_path} ---")
+        if not as_json:
+            print(f"\n--- Saving to {output_path} ---")
         agent.save(str(output_path))
-        print(f"Saved to {output_path}")
+        if not as_json:
+            print(f"Saved to {output_path}")
 
-    return 0 if successful == len(results) else 1
+    payload = {
+        "mode": "auto-route",
+        "auto_route": {
+            "max_nets": args.max_nets,
+            "attempted": len(results),
+            "routed": successful,
+            "nets": [
+                {
+                    "net": targets[i] if i < len(targets) else None,
+                    "success": bool(r.success),
+                    "message": r.message,
+                    "vias_added": getattr(r, "vias_added", 0),
+                    "trace_length_mm": getattr(r, "trace_length", 0.0),
+                }
+                for i, r in enumerate(results)
+            ],
+        },
+        "saved": not args.dry_run,
+        "written_to": None if args.dry_run else str(output_path),
+    }
+    return (0 if successful == len(results) else 1), payload
 
 
 if __name__ == "__main__":

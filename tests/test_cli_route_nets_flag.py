@@ -372,9 +372,10 @@ def test_route_auto_nets_loop_aggregates_exit_code(monkeypatch):
 
     calls: list[str] = []
 
-    def fake_one(args, net_name, pcb_path, output_path):
+    def fake_one(args, net_name, pcb_path, output_path, **kwargs):
+        # Issue #4674: the helper now returns (exit_code, per-net document).
         calls.append(net_name)
-        return 0 if net_name == "/A" else 1  # /B "fails"
+        return (0 if net_name == "/A" else 1), {"net": net_name}  # /B "fails"
 
     monkeypatch.setattr(routing, "_route_auto_one", fake_one)
 
@@ -388,7 +389,7 @@ def test_route_auto_nets_loop_aggregates_exit_code(monkeypatch):
 def test_route_auto_nets_all_success_returns_zero(monkeypatch):
     from kicad_tools.cli.commands import routing
 
-    monkeypatch.setattr(routing, "_route_auto_one", lambda *a, **k: 0)
+    monkeypatch.setattr(routing, "_route_auto_one", lambda *a, **k: (0, {}))
 
     args = _auto_args(nets="/A,/B", dry_run=False, output=None, pcb="board.kicad_pcb")
     assert routing.run_route_auto_command(args) == 0
@@ -400,9 +401,9 @@ def test_route_auto_nets_chains_output(monkeypatch):
 
     sources: list[str] = []
 
-    def fake_one(args, net_name, pcb_path, output_path):
+    def fake_one(args, net_name, pcb_path, output_path, **kwargs):
         sources.append(pcb_path)
-        return 0
+        return 0, {"net": net_name}
 
     monkeypatch.setattr(routing, "_route_auto_one", fake_one)
 

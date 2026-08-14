@@ -1,4 +1,18 @@
-"""Routing command handlers (route, route-auto, zones, optimize-traces)."""
+"""Routing command handlers (route, route-auto, zones, optimize-traces).
+
+Machine output (``--format json``, issue #4674): ``route-auto`` emits exactly
+one document describing the run -- the resolved board/output paths and a
+``nets`` array with one entry per requested net (its strategy, metrics,
+written copper and warnings, or the failure that stopped it) -- and
+``optimize-traces`` forwards the canonical flag to its inner parser.  Exit
+codes are unchanged in both cases.  See ``docs/reference/machine-output.md``.
+"""
+
+import contextlib
+import io
+import sys
+
+from ..format_options import FORMAT_JSON, emit_json
 
 __all__ = [
     "run_route_command",
@@ -6,6 +20,29 @@ __all__ = [
     "run_zones_command",
     "run_optimize_command",
 ]
+
+
+@contextlib.contextmanager
+def _stdout_to_stderr_when(active: bool):
+    """Divert stdout to stderr while *active* (i.e. JSON mode owns stdout).
+
+    ``route_net_auto`` drives the negotiated router, which prints a multi-line
+    per-iteration progress log on **stdout** that this module does not own.
+    Under ``--format json`` that would corrupt the single-document contract, so
+    it is captured and replayed on stderr: the log survives, the JSON stream
+    stays parseable.  Same helper as ``report_cmd._stdout_to_stderr_when``
+    (batch 5 of #4674).
+    """
+    if not active:
+        yield
+        return
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            yield
+    finally:
+        if buffer.getvalue():
+            print(buffer.getvalue(), end="", file=sys.stderr)
 
 
 def run_zones_command(args) -> int:
@@ -161,14 +198,25 @@ def _print_effective_via_geometry(
     print(f"  Via diameter: {_fmt(eff_diameter, override_diameter)}")
 
 
-def _route_auto_one(args, net_name: str, pcb_path: str, output_path: str | None) -> int:
-    """Route a single net via RoutingOrchestrator and print the result.
+def _route_auto_one(
+    args,
+    net_name: str,
+    pcb_path: str,
+    output_path: str | None,
+    *,
+    as_json: bool = False,
+) -> tuple[int, dict]:
+    """Route a single net via RoutingOrchestrator and report the result.
 
     Extracted from ``run_route_auto_command`` (Issue #4322) so the ``--net``
     single-net path and each iteration of the ``--nets`` multi-net loop share
     identical routing + reporting.  ``pcb_path`` / ``output_path`` are passed
     explicitly so the loop can chain outputs (route net N+1 from net N's
-    output, accumulating copper).  Returns the per-net exit code.
+    output, accumulating copper).
+
+    Returns ``(exit_code, document)``.  The document is the per-net entry of
+    the ``--format json`` payload (issue #4674); prose is printed only when
+    *as_json* is false, so text output stays byte-identical.
     """
     import sys
 
@@ -177,36 +225,73 @@ def _route_auto_one(args, net_name: str, pcb_path: str, output_path: str | None)
 
     from kicad_tools.mcp.tools.routing import route_net_auto
 
+    def _error_doc(message: str) -> dict:
+        return {
+            "net": net_name,
+            "success": False,
+            "partial": False,
+            "error": message,
+            "source": pcb_path,
+        }
+
     try:
-        result = route_net_auto(
-            pcb_path=pcb_path,
-            net_name=net_name,
-            output_path=output_path,
-            strategy=args.strategy,
-            enable_repair=not args.no_repair,
-            enable_via_resolution=not args.no_via_resolution,
-            # Issue #4148: spatial routing bound.  Confines the routed net to the
-            # board-relative box and fails if the net has an endpoint outside it.
-            region=getattr(args, "region", None),
-            # Issue #4165: persist partial multi-pad copper only when opted in.
-            allow_partial=getattr(args, "allow_partial", False),
-            # Issue #4247: explicit via-geometry overrides (None => board-derived).
-            via_drill=via_drill,
-            via_diameter=via_diameter,
-        )
+        # The negotiated router logs its per-iteration progress on stdout;
+        # under --format json that chatter is replayed on stderr instead.
+        with _stdout_to_stderr_when(as_json):
+            result = route_net_auto(
+                pcb_path=pcb_path,
+                net_name=net_name,
+                output_path=output_path,
+                strategy=args.strategy,
+                enable_repair=not args.no_repair,
+                enable_via_resolution=not args.no_via_resolution,
+                # Issue #4148: spatial routing bound.  Confines the routed net to
+                # the board-relative box and fails if the net has an endpoint
+                # outside it.
+                region=getattr(args, "region", None),
+                # Issue #4165: persist partial multi-pad copper only when opted in.
+                allow_partial=getattr(args, "allow_partial", False),
+                # Issue #4247: explicit via-geometry overrides (None => board-derived).
+                via_drill=via_drill,
+                via_diameter=via_diameter,
+            )
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+        if not as_json:
+            print(f"Error: {e}", file=sys.stderr)
+        return 1, _error_doc(str(e))
     except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+        if not as_json:
+            print(f"Error: {e}", file=sys.stderr)
+        return 1, _error_doc(str(e))
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        if not as_json:
+            print(f"Error: {e}", file=sys.stderr)
         if getattr(args, "verbose", False):
             import traceback
 
             traceback.print_exc()
-        return 1
+        return 1, _error_doc(str(e))
+
+    doc = {
+        "net": result.get("net_name", net_name),
+        "success": bool(result["success"]),
+        "partial": bool(result.get("partial", False)),
+        "strategy_used": result.get("strategy_used"),
+        "metrics": result.get("metrics", {}),
+        "segments_written": result.get("segments_written"),
+        "vias_written": result.get("vias_written"),
+        "warnings": list(result.get("warnings", [])),
+        "output_path": result.get("output_path"),
+        "pads_connected": result.get("pads_connected"),
+        "pads_total": result.get("pads_total"),
+        "error": result.get("error_message"),
+        "alternative_strategies": list(result.get("alternative_strategies", [])),
+        "source": pcb_path,
+    }
+
+    if as_json:
+        # The caller prints the single document; per-net prose is suppressed.
+        return (0 if result["success"] else 1), doc
 
     # Print result
     if result["success"]:
@@ -235,7 +320,7 @@ def _route_auto_one(args, net_name: str, pcb_path: str, output_path: str | None)
             print(f"  Warning: {warning}")
         if result.get("output_path"):
             print(f"  Saved to: {result['output_path']}")
-        return 0
+        return 0, doc
     elif result.get("partial"):
         # Issue #4165: routing produced copper but left some pads of a
         # multi-pad net unconnected.  Report the honest k/n and exit non-zero;
@@ -269,7 +354,7 @@ def _route_auto_one(args, net_name: str, pcb_path: str, output_path: str | None)
             )
         for warning in result.get("warnings", []):
             print(f"  Warning: {warning}", file=sys.stderr)
-        return 1
+        return 1, doc
     else:
         print(f"Routing failed for net '{result['net_name']}'", file=sys.stderr)
         if result.get("error_message"):
@@ -278,53 +363,87 @@ def _route_auto_one(args, net_name: str, pcb_path: str, output_path: str | None)
             strategy_name = alt.get("strategy", "unknown")
             reason = alt.get("reason", "")
             print(f"  Try: {strategy_name} - {reason}", file=sys.stderr)
-        return 1
+        return 1, doc
 
 
-def _route_auto_dry_run(args, net_name: str) -> None:
-    """Print the strategy-selection preview for one net (no routing)."""
+def _route_auto_dry_run(args, net_name: str, *, as_json: bool = False) -> dict:
+    """Preview the strategy selection for one net (no routing).
+
+    Prints the human preview unless *as_json*, and returns the same content as
+    the per-net entry of the ``--format json`` document (issue #4674).
+    """
     via_drill = getattr(args, "via_drill", None)
     via_diameter = getattr(args, "via_diameter", None)
-    print(f"[dry-run] Would route net '{net_name}' on '{args.pcb}' using RoutingOrchestrator")
-    print(f"  Strategy override: {args.strategy}")
-    print(f"  Repair enabled: {not args.no_repair}")
-    print(f"  Via resolution enabled: {not args.no_via_resolution}")
     # Report the effective via geometry that would be used (Issue #4247):
     # an explicit CLI override, or the value derived from the board's
     # net-class via constraints.
     eff_drill, eff_diameter = _effective_via_geometry(args.pcb, via_drill, via_diameter)
-    _print_effective_via_geometry(eff_drill, via_drill, eff_diameter, via_diameter)
-    if args.output:
-        print(f"  Output: {args.output}")
+
+    if not as_json:
+        print(f"[dry-run] Would route net '{net_name}' on '{args.pcb}' using RoutingOrchestrator")
+        print(f"  Strategy override: {args.strategy}")
+        print(f"  Repair enabled: {not args.no_repair}")
+        print(f"  Via resolution enabled: {not args.no_via_resolution}")
+        _print_effective_via_geometry(eff_drill, via_drill, eff_diameter, via_diameter)
+        if args.output:
+            print(f"  Output: {args.output}")
+
+    def _source(value: float | None, override: float | None) -> str | None:
+        if value is None:
+            return None
+        return "explicit override" if override is not None else "board-derived"
+
+    return {
+        "net": net_name,
+        "would_route": True,
+        "strategy": args.strategy,
+        "repair_enabled": not args.no_repair,
+        "via_resolution_enabled": not args.no_via_resolution,
+        "via_drill_mm": eff_drill,
+        "via_drill_source": _source(eff_drill, via_drill),
+        "via_diameter_mm": eff_diameter,
+        "via_diameter_source": _source(eff_diameter, via_diameter),
+        "output_path": args.output,
+    }
 
 
-def _parse_route_auto_targets(args) -> tuple[list[str] | None, int]:
+def _parse_route_auto_targets(args, *, as_json: bool = False) -> tuple[list[str] | None, int]:
     """Resolve the net(s) route-auto should route -- Issue #4322.
 
     Exactly one of ``--net`` (single) / ``--nets`` (comma-separated list) must
     be given.  Returns ``(net_list, rc)``: on success ``net_list`` is the
     ordered, de-duplicated, whitespace-trimmed list of nets and ``rc`` is 0; on
     a usage error ``net_list`` is ``None`` and ``rc`` is a non-zero exit code
-    (an error has already been printed).
+    (the error has already been reported -- as prose, or as the single
+    ``{"error": ...}`` document under *as_json*, issue #4674).
     """
     import sys
+
+    def _usage_error(message: str) -> tuple[None, int]:
+        if as_json:
+            emit_json(
+                {
+                    "command": "route-auto",
+                    "pcb": getattr(args, "pcb", None),
+                    "error": message,
+                    "nets": [],
+                    "success": False,
+                }
+            )
+        else:
+            print(f"Error: {message}", file=sys.stderr)
+        return None, 2
 
     net = getattr(args, "net", None)
     nets_raw = getattr(args, "nets", None)
 
     if net and nets_raw:
-        print(
-            "Error: --net and --nets are mutually exclusive (use --net for a "
-            "single net or --nets for a comma-separated list).",
-            file=sys.stderr,
+        return _usage_error(
+            "--net and --nets are mutually exclusive (use --net for a "
+            "single net or --nets for a comma-separated list)."
         )
-        return None, 2
     if not net and not nets_raw:
-        print(
-            "Error: route-auto requires --net NAME or --nets NAME[,NAME...].",
-            file=sys.stderr,
-        )
-        return None, 2
+        return _usage_error("route-auto requires --net NAME or --nets NAME[,NAME...].")
 
     if net:
         return [net], 0
@@ -333,12 +452,10 @@ def _parse_route_auto_targets(args) -> tuple[list[str] | None, int]:
     # net / neither cases); ``or ""`` keeps the type checker happy.
     parsed = [n.strip() for n in (nets_raw or "").split(",") if n.strip()]
     if not parsed:
-        print(
-            "Error: --nets was given but lists no net names "
-            '(expected a comma-separated list, e.g. --nets "/A,/B").',
-            file=sys.stderr,
+        return _usage_error(
+            "--nets was given but lists no net names "
+            '(expected a comma-separated list, e.g. --nets "/A,/B").'
         )
-        return None, 2
     # De-duplicate while preserving first-seen order.
     seen: set[str] = set()
     ordered: list[str] = []
@@ -357,29 +474,57 @@ def run_route_auto_command(args) -> int:
     the exit code is non-zero if ANY net fails or is left partial; when an
     output path is given, copper accumulates (net N+1 routes from net N's
     output).  The single-net ``--net`` path is unchanged.
+
+    Under ``--format json`` (issue #4674) the per-net prose is replaced by a
+    single document whose ``nets`` array carries one entry per requested net,
+    in request order; the exit code is unchanged.
     """
-    net_list, rc = _parse_route_auto_targets(args)
+    as_json = getattr(args, "format", "text") == FORMAT_JSON
+
+    net_list, rc = _parse_route_auto_targets(args, as_json=as_json)
     if rc != 0:
         return rc
     assert net_list is not None  # rc == 0 guarantees a list
 
+    def _emit(nets: list[dict], overall_rc: int) -> None:
+        emit_json(
+            {
+                "command": "route-auto",
+                "pcb": args.pcb,
+                "output": args.output,
+                "strategy": args.strategy,
+                "dry_run": bool(args.dry_run),
+                "nets": nets,
+                "nets_requested": len(net_list),
+                "nets_routed": sum(1 for entry in nets if entry.get("success")),
+                "success": overall_rc == 0,
+            }
+        )
+
     # Dry-run: preview strategy selection without routing (per net).
     if args.dry_run:
-        for net_name in net_list:
-            _route_auto_dry_run(args, net_name)
+        previews = [_route_auto_dry_run(args, net_name, as_json=as_json) for net_name in net_list]
+        if as_json:
+            # A preview routes nothing, so nets_routed stays 0 while success
+            # reports that the preview itself completed.
+            _emit(previews, 0)
         return 0
 
     output_path = args.output
     overall_rc = 0
+    net_docs: list[dict] = []
     for i, net_name in enumerate(net_list):
         # Chain outputs so multi-net copper accumulates: the first net routes
         # from the original board; subsequent nets route from the prior output
         # (only possible when an output path was given -- otherwise nothing is
         # persisted and each net routes independently against the input).
         source = args.pcb if (i == 0 or not output_path) else output_path
-        net_rc = _route_auto_one(args, net_name, source, output_path)
+        net_rc, net_doc = _route_auto_one(args, net_name, source, output_path, as_json=as_json)
+        net_docs.append(net_doc)
         if net_rc != 0:
             overall_rc = 1
+    if as_json:
+        _emit(net_docs, overall_rc)
     return overall_rc
 
 
@@ -862,4 +1007,7 @@ def run_optimize_command(args) -> int:
         sub_argv.extend(["--layers", str(args.layers)])
     if getattr(args, "copper", 1.0) != 1.0:
         sub_argv.extend(["--copper", str(args.copper)])
+    # Machine output (#4674): forward the canonical flag to the inner parser.
+    if getattr(args, "format", "text") != "text":
+        sub_argv.extend(["--format", args.format])
     return optimize_main(sub_argv)

@@ -9,11 +9,19 @@ Usage:
     kct optimize-placement board.kicad_pcb --strategy cmaes --max-iterations 500
     kct optimize-placement board.kicad_pcb --dry-run
     kct optimize-placement board.kicad_pcb --checkpoint ./checkpoints
+
+Machine output (``--format json``, issue #4674): one document carrying the
+board summary, the ``initial``/``final`` score breakdowns, the iteration count
+and whether the result was written -- or ``{"error": ..., "success": false}``
+on failure, with every exit code (0 / 1 / 2-on-interrupt) unchanged.
+``wall_time_s`` is the one deliberately volatile field.  See
+``docs/reference/machine-output.md``.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import signal
@@ -23,6 +31,7 @@ import time
 from pathlib import Path
 from typing import Sequence
 
+from kicad_tools.cli.format_options import emit_json
 from kicad_tools.placement.cost import (
     BoardOutline,
     ComponentPlacement,
@@ -407,6 +416,36 @@ def _generate_seed(
         raise ValueError(f"Unknown seed method: {seed_method!r}. Available: force-directed, random")
 
 
+def _score_document(score: PlacementScore) -> dict:
+    """Render a :class:`PlacementScore` as the JSON score block (issue #4674).
+
+    The breakdown is taken straight from the dataclass, so a new cost axis
+    appears in the machine output without another edit here.
+    """
+    return {
+        "total": score.total,
+        "feasible": bool(score.is_feasible),
+        "breakdown": dataclasses.asdict(score.breakdown),
+    }
+
+
+def _placement_error(pcb_path: str, message: str, *, as_json: bool, text: str | None = None) -> int:
+    """Report an optimize-placement failure as a document (JSON) or prose."""
+    if as_json:
+        emit_json(
+            {
+                "command": "optimize-placement",
+                "pcb": pcb_path,
+                "error": message,
+                "saved": False,
+                "success": False,
+            }
+        )
+    else:
+        print(text if text is not None else f"Error: {message}", file=sys.stderr)
+    return 1
+
+
 def _print_score(label: str, score: PlacementScore) -> None:
     """Print a score summary line."""
     b = score.breakdown
@@ -683,6 +722,7 @@ def run_optimize_placement(
     pollution_degree: int = 2,
     material_group: str = "IIIa",
     hv_threshold: float = 30.0,
+    as_json: bool = False,
 ) -> int:
     """Run placement optimization.
 
@@ -727,6 +767,10 @@ def run_optimize_placement(
         hv_threshold: Minimum cross-domain ``|ΔV|`` (volts) that triggers a
             creepage keepout; lower-difference domain pairs rely on normal DRC
             clearance (avoids over-segregating low-voltage nets).
+        as_json: Emit one machine-readable document on stdout instead of the
+            prose report (issue #4674). Progress/summary chatter is suppressed;
+            exit codes and the ``FATAL:``/``ERROR:`` stderr diagnostics are
+            unchanged.
 
     Returns:
         Exit code:
@@ -738,17 +782,20 @@ def run_optimize_placement(
     # Validate PCB file exists
     pcb_file = Path(pcb_path)
     if not pcb_file.exists():
-        print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _placement_error(pcb_path, f"PCB file not found: {pcb_path}", as_json=as_json)
     if pcb_file.suffix != ".kicad_pcb":
-        print(f"Error: expected .kicad_pcb file, got: {pcb_file.suffix}", file=sys.stderr)
-        return 1
-    if anchor_weight < 0.0:
-        print(
-            f"Error: --anchor-weight must be >= 0 (got {anchor_weight})",
-            file=sys.stderr,
+        return _placement_error(
+            pcb_path, f"expected .kicad_pcb file, got: {pcb_file.suffix}", as_json=as_json
         )
-        return 1
+    if anchor_weight < 0.0:
+        return _placement_error(
+            pcb_path, f"--anchor-weight must be >= 0 (got {anchor_weight})", as_json=as_json
+        )
+
+    # JSON mode owns stdout: every prose site below is already gated on
+    # ``quiet``, so folding as_json into it suppresses the report while
+    # leaving the stderr diagnostics untouched.
+    quiet = quiet or as_json
 
     if output_path is None:
         output_path = pcb_path
@@ -777,16 +824,20 @@ def run_optimize_placement(
             anchor_weight=anchor_weight,
         )
     except Exception as e:
-        print(f"Error reading PCB: {e}", file=sys.stderr)
+        rc = _placement_error(
+            pcb_path,
+            f"reading PCB: {e}",
+            as_json=as_json,
+            text=f"Error reading PCB: {e}",
+        )
         if verbose:
             import traceback
 
             traceback.print_exc()
-        return 1
+        return rc
 
     if not components:
-        print("Error: no components found in PCB", file=sys.stderr)
-        return 1
+        return _placement_error(pcb_path, "no components found in PCB", as_json=as_json)
 
     # Update interrupt state so handler can save intermediate results
     _interrupt_state["components"] = components
@@ -814,8 +865,7 @@ def run_optimize_placement(
             quiet=quiet,
         )
     except (ValueError, FileNotFoundError) as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+        return _placement_error(pcb_path, str(e), as_json=as_json)
 
     # Derived-tap auto-exemption (issue #4373 Phase 3, auto). Only the
     # voltage-map path carries the per-net voltages the detector needs; the
@@ -841,6 +891,23 @@ def run_optimize_placement(
 
     # Compute bounds
     placement_bounds = bounds(board_outline, components)
+
+    # The run-level fields every JSON document carries, whichever path exits.
+    base_document = {
+        "command": "optimize-placement",
+        "pcb": pcb_path,
+        "output": output_path,
+        "strategy": strategy_name,
+        "seed_method": seed_method,
+        "max_iterations": max_iterations,
+        "board": {
+            "width_mm": board_outline.width,
+            "height_mm": board_outline.height,
+            "components": len(components),
+            "nets": len(nets),
+        },
+        "dry_run": bool(dry_run),
+    }
 
     # --dry-run: evaluate the CURRENT on-disk placement (issue #3940).
     # Previously this generated a fresh force-directed seed and scored that,
@@ -879,14 +946,30 @@ def run_optimize_placement(
                 "bbox-clearance DRC), NOT the `kct placement check` metric "
                 "(courtyard polygons / KiCad DRC). See docs/placement-scoring.md."
             )
+        if as_json:
+            emit_json(
+                {
+                    **base_document,
+                    "mode": "evaluate",
+                    "scores": {"current": _score_document(score)},
+                    "feasible": bool(score.is_feasible),
+                    "saved": False,
+                    "written_to": None,
+                    "objective": (
+                        "optimizer objective (bbox overlap area / bbox-clearance DRC), "
+                        "NOT the `kct placement check` metric "
+                        "(courtyard polygons / KiCad DRC)"
+                    ),
+                    "success": True,
+                }
+            )
         return 0
 
     # Create strategy
     try:
         strategy = _create_strategy(strategy_name)
     except (ValueError, ImportError) as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+        return _placement_error(pcb_path, str(e), as_json=as_json)
 
     # Check for checkpoint to resume from
     resumed = False
@@ -1067,8 +1150,9 @@ def run_optimize_placement(
             best_vec_now, _ = strategy.best()
             _interrupt_state["best_vector"] = best_vec_now
 
-            # Progress reporting
-            if progress_interval > 0 and iteration % progress_interval == 0:
+            # Progress reporting (suppressed in JSON mode: stdout carries
+            # exactly one document)
+            if progress_interval > 0 and iteration % progress_interval == 0 and not as_json:
                 best_vec, best_score = strategy.best()
                 elapsed = time.monotonic() - start_time
                 print(f"  [{iteration:>5d}] score={best_score:.4f} elapsed={elapsed:.1f}s")
@@ -1203,19 +1287,51 @@ def run_optimize_placement(
             pcb_path, output_path, best_vector, components, board_origin
         )
     except Exception as e:
-        print(f"Error writing output: {e}", file=sys.stderr)
+        rc = _placement_error(
+            pcb_path,
+            f"writing output: {e}",
+            as_json=as_json,
+            text=f"Error writing output: {e}",
+        )
         if verbose:
             import traceback
 
             traceback.print_exc()
-        return 1
+        return rc
 
     if not quiet:
         print("Done.")
 
+    def _finish(rc: int, *, infeasible_detail: str | None = None) -> int:
+        """Emit the single JSON document (if asked) and return *rc* unchanged."""
+        if as_json:
+            emit_json(
+                {
+                    **base_document,
+                    "mode": "optimize",
+                    "scores": {
+                        "initial": _score_document(seed_score),
+                        "final": _score_document(final_score),
+                    },
+                    "feasible": bool(final_score.is_feasible),
+                    "infeasible_detail": infeasible_detail,
+                    "iterations": iteration,
+                    "wall_time_s": elapsed,
+                    "interrupted": bool(_interrupt_state["interrupted"]),
+                    "overlaps_remaining": (
+                        post_slide_result.overlaps_remaining if post_slide_result is not None else 0
+                    ),
+                    "allow_infeasible": bool(allow_infeasible),
+                    "saved": True,
+                    "written_to": output_path,
+                    "success": rc == 0,
+                }
+            )
+        return rc
+
     # Exit code 2 when interrupted (partial result saved).
     if _interrupt_state["interrupted"]:
-        return 2
+        return _finish(2)
 
     # Issue #2821: gate exit code on full feasibility, not just pad-pad
     # slide-off failures. If the final placement has overlap > 0 OR
@@ -1248,7 +1364,11 @@ def run_optimize_placement(
                 f"Pass --allow-infeasible to suppress this error.",
                 file=sys.stderr,
             )
-            return 1
+            # ``detail`` is the joined string built above; ``str(...)`` only
+            # satisfies the type checker, which still types this name from the
+            # earlier ``for detail in ...overlap_details`` loop (the shadowing
+            # is a pre-existing baseline entry, not something to fix here).
+            return _finish(1, infeasible_detail=str(detail))
         elif not quiet:
             print(
                 f"\n  WARNING: final placement is infeasible ({detail}); "
@@ -1265,6 +1385,6 @@ def run_optimize_placement(
     if has_unresolved_overlaps and not allow_infeasible:
         pad_overlaps = [d for d in post_slide_result.overlap_details if d.actual_clearance_mm < 0]
         if pad_overlaps:
-            return 1
+            return _finish(1, infeasible_detail=f"{len(pad_overlaps)} pad-pad overlap(s) remain")
 
-    return 0
+    return _finish(0)

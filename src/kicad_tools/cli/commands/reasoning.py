@@ -1,4 +1,9 @@
-"""Reasoning command handler (LLM-driven PCB layout)."""
+"""Reasoning command handler (LLM-driven PCB layout).
+
+Machine output (``--format json``, issue #4674) is forwarded to the inner
+parser like every other flag; the document shape is described in
+``reason_cmd`` and ``docs/reference/machine-output.md``.
+"""
 
 __all__ = ["run_reason_command"]
 
@@ -28,4 +33,7 @@ def run_reason_command(args) -> int:
         sub_argv.append("--verbose")
     if args.dry_run:
         sub_argv.append("--dry-run")
+    # Machine output (#4674): forward the canonical flag to the inner parser.
+    if getattr(args, "format", "text") != "text":
+        sub_argv.extend(["--format", args.format])
     return reason_main(sub_argv)

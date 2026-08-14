@@ -52,13 +52,13 @@ below is issue **#4674** and should build on these helpers.
 Measured by programmatic introspection of the real argparse tree
 (`create_parser()`, recursive walk of `_SubParsersAction` leaves) — not grep:
 
-| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 b1 | b2 | b3 | b4 | b5 |
-|---|---|---|---|---|---|---|---|
-| `--format` with a `json` choice | 124 | 124 | 148 | 164 | 174 | 179 | 184 |
-| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 | 2 | 2 | 2 | 2 |
-| `--json` boolean only | 2 | **0** | 0 | 0 | 0 | 0 | 0 |
-| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** | 0 | 0 | 0 | 0 |
-| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 | 33 | 23 | 18 | 13 |
+| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 b1 | b2 | b3 | b4 | b5 | b6 |
+|---|---|---|---|---|---|---|---|---|
+| `--format` with a `json` choice | 124 | 124 | 148 | 164 | 174 | 179 | 184 | 189 |
+| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 | 2 | 2 | 2 | 2 | 2 |
+| `--json` boolean only | 2 | **0** | 0 | 0 | 0 | 0 | 0 | 0 |
+| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** | 0 | 0 | 0 | 0 | 0 |
+| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 | 33 | 23 | 18 | 13 | 8 |
 
 The first #4674 batch swept the grouped-subcommand families -- `mfr` (7),
 `spec` (5), `placement fix/nudge/snap/align/distribute` (5), `zones
@@ -76,9 +76,13 @@ The fourth batch swept the environment/integration singles -- `config`,
 family outright and finishing `mcp` (`mcp serve` is exempt).
 
 The fifth batch swept the board-artifact producers -- `board-metrics`,
-`create-pcb`, `panel`, `report generate`, `screenshot` (5). The remaining
-13 prose-only leaves (`stitch` and the rest of the long tail, plus the 4
-exempt and the deferred `route`) stay on the #4674 backlog below.
+`create-pcb`, `panel`, `report generate`, `screenshot` (5).
+
+The sixth batch swept the board-improvement / rule-derivation drivers --
+`optimize-placement`, `optimize-traces`, `route-auto`, `reason`,
+`creepage-export-rules` (5). The remaining 8 prose-only leaves (`build`,
+`pipeline`, `stitch`, plus the 4 exempt and the deferred `route`) stay on the
+#4674 backlog below.
 
 Issue #4543 closed the `--json`-only bucket by adding `--format {text,json}`
 alongside the existing `--json` on both commands (outer parser, forwarding
@@ -282,14 +286,44 @@ Three conventions this batch adds:
 
 `tests/test_format_json_sweep_artifacts.py` guards these 5 surfaces.
 
-**Remaining actionable (8)** — the audit's `prose-only` bucket reads 13
+**Done (sixth #4674 batch, 5 surfaces):** the board-improvement /
+rule-derivation drivers — the singles that take an existing board and derive
+an improvement or an enforceable rule set from it: `optimize-placement`,
+`optimize-traces`, `route-auto`, `reason`, `creepage-export-rules`. Shapes:
+
+| Command | Document |
+|---|---|
+| `optimize-placement` | `{"command": "optimize-placement", "pcb", "output", "strategy", "seed_method", "max_iterations", "board": {width_mm, height_mm, components, nets}, "mode": "evaluate"\|"optimize", "scores": {…}, "feasible", "infeasible_detail", "iterations", "wall_time_s", "interrupted", "overlaps_remaining", "allow_infeasible", "dry_run", "saved", "written_to", "success"}` — `scores` is `{"current": …}` under `--dry-run` and `{"initial", "final"}` otherwise; each score is `{total, feasible, breakdown}` with the breakdown taken straight off the cost dataclass |
+| `optimize-traces` | `{"command": "optimize-traces", "pcb", "output", "net_filter", "optimizations": {merge_collinear, eliminate_zigzags, convert_45_corners, chamfer_size_mm}, "drc_aware", "manufacturer", "layers", "copper_oz", "stats": {segments_before/after, corners_before/after, length_before_mm/after_mm, …}, "dry_run", "saved", "written_to", "success"}` |
+| `route-auto` | `{"command": "route-auto", "pcb", "output", "strategy", "dry_run", "nets": [...], "nets_requested", "nets_routed", "success"}` — one `nets[]` entry per requested net in request order: routed entries carry `success`/`partial`/`strategy_used`/`metrics`/`segments_written`/`warnings`/`pads_connected`/`pads_total`/`error`/`alternative_strategies`, `--dry-run` entries carry the preview (`would_route`, `via_drill_mm` + `via_drill_source`, …) |
+| `reason` | `{"command": "reason", "pcb", "output", "dry_run", "warnings", "drc": {ran, source, …}, "board": {…}, "mode": "prompt"\|"analyze"\|"export-state"\|"auto-route", …, "success"}` — plus the mode's own payload: `prompt`, `analysis`, `state` + `state_output`, or `auto_route` (`attempted`/`routed`/`nets[]`) with `saved`/`written_to` |
+| `creepage-export-rules` | `{"command": "creepage-export-rules", "project", "pcb", "dru", "voltage_map", "standard", "pollution_degree", "material_group", "hv_threshold_v", "dru_floor_mm", "domains", "net_domains", "nets_assigned", "rules": [{name, condition, min_mm}], "bridging_exemptions", "dru_block", "dry_run", "written", "skipped_reason", "success"}` — `dru_block` is carried only on the `--dry-run` path (mirroring the prose that prints it instead of writing it) |
+
+Three conventions this batch adds or reinforces:
+
+- **A mode with no single-document form is refused, not half-emitted.**
+  `kct reason --interactive` is a stdin/stdout dialogue; combining it with
+  `--format json` emits `{"error": …}` and exits 2 rather than pretending
+  to have a payload. Prefer this over silently ignoring the flag when only
+  *part* of a command is interactive (a whole-command exemption belongs in
+  the table above instead).
+- **Volatile fields are named, not hidden.** `optimize-placement` reports
+  `wall_time_s`; like `board-metrics`'s `generated_at` it is the one field
+  determinism is asserted modulo.
+- **The `_stdout_to_stderr_when` diversion is now the standard treatment**
+  (third use, after `report generate`): `route-auto` and `reason --auto-route`
+  drive the negotiated router, whose per-iteration progress log goes to
+  **stdout**. It is captured and replayed on stderr so the JSON stream stays
+  parseable. Any leaf that calls the router, a collector or third-party code
+  needs it.
+
+`tests/test_format_json_sweep_drivers.py` guards these 5 surfaces.
+
+**Remaining actionable (3)** — the audit's `prose-only` bucket reads 8
 because it also counts the 4 exempt commands and the deferred `route`
 (sections above):
 
-- `build`, `creepage-export-rules`
-- `optimize-placement`, `optimize-traces`
-- `pipeline`
-- `reason`, `route-auto`
+- `build`, `pipeline` (multi-stage orchestrators)
 - `stitch` (single command, but its 6k-line inner module has a bespoke
   multi-phase report — batch it alone)
 

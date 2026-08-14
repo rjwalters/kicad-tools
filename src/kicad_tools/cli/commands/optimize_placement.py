@@ -1,4 +1,12 @@
-"""optimize-placement command handler."""
+"""optimize-placement command handler.
+
+Machine output (``--format json``, issue #4674): this shim calls the inner
+function directly (no argv re-serialization), so the canonical flag is passed
+through as the ``as_json`` keyword; the document shape lives in
+``optimize_placement_cmd`` and ``docs/reference/machine-output.md``.
+"""
+
+from ..format_options import FORMAT_JSON
 
 __all__ = ["run_optimize_placement_command"]
 
@@ -29,4 +37,5 @@ def run_optimize_placement_command(args) -> int:
         pollution_degree=getattr(args, "pollution_degree", 2),
         material_group=getattr(args, "material_group", "IIIa"),
         hv_threshold=getattr(args, "hv_threshold", 30.0),
+        as_json=getattr(args, "format", "text") == FORMAT_JSON,
     )

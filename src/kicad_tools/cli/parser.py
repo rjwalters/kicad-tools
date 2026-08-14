@@ -677,6 +677,7 @@ def _add_creepage_export_rules_parser(subparsers) -> None:
         action="store_true",
         help="Print the derived netclasses + rules without writing any files.",
     )
+    add_format_flag(p)
 
 
 def _add_check_parser(subparsers) -> None:
@@ -4752,6 +4753,7 @@ def _add_route_auto_parser(subparsers) -> None:
         action="store_true",
         help="Show full traceback on error",
     )
+    add_format_flag(route_auto_parser)
 
 
 def _add_reason_parser(subparsers) -> None:
@@ -4789,6 +4791,7 @@ def _add_reason_parser(subparsers) -> None:
     reason_parser.add_argument("--drc", help="Path to DRC report file")
     reason_parser.add_argument("-v", "--verbose", action="store_true")
     reason_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
+    add_format_flag(reason_parser)
 
 
 def _add_optimize_parser(subparsers) -> None:
@@ -4839,6 +4842,7 @@ def _add_optimize_parser(subparsers) -> None:
         default=1.0,
         help="Copper weight in oz for DRC checks (default: 1.0)",
     )
+    add_format_flag(optimize_parser)
 
 
 def _add_validate_footprints_parser(subparsers) -> None:
@@ -6005,6 +6009,7 @@ def _add_optimize_placement_parser(subparsers) -> None:
     )
     op_parser.add_argument("-v", "--verbose", action="store_true")
     op_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
+    add_format_flag(op_parser)
 
 
 def _add_interactive_parser(subparsers) -> None:

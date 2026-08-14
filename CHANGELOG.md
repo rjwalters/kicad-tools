@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--format json` on the 5 board-improvement drivers** (part of #4674,
+  sixth batch of the #4543 machine-output sweep) — `optimize-placement`,
+  `optimize-traces`, `route-auto`, `reason` and `creepage-export-rules` now
+  accept the canonical `--format json` and emit one deterministic document on
+  stdout instead of prose, wired end-to-end (outer parser → shim → inner
+  parser/handler). `optimize-placement` reports the `board` summary, the
+  `initial`/`final` score breakdowns (taken straight off the cost dataclass),
+  `iterations`, `feasible` + `infeasible_detail` and `written_to`;
+  `optimize-traces` reports the enabled `optimizations` and the before/after
+  `stats`; `route-auto` reports one `nets[]` entry per requested net (metrics,
+  written copper, warnings, partial `pads_connected`/`pads_total`, or the
+  failure and its `alternative_strategies`); `reason` reports the board
+  summary, the DRC block and the selected `mode`'s payload (`prompt` /
+  `analysis` / `state` / `auto_route`); `creepage-export-rules` reports the
+  derived `domains`, `rules` and `bridging_exemptions` plus `written`.
+  Commands that can run without writing say so structurally (`saved` /
+  `written` / `written_to: null` under `--dry-run`), failure paths emit
+  `{"error": ..., "success": false}` documents with **exit codes unchanged**
+  (including `route-auto`'s usage exit 2 and `optimize-placement`'s
+  interrupt exit 2), and text-mode output is byte-identical. Two behaviours
+  worth calling out: `kct reason --interactive --format json` is **refused**
+  (exit 2, error document) because a stdin/stdout dialogue has no
+  single-document form; and `route-auto` / `reason --auto-route` now divert
+  the negotiated router's stdout progress log to stderr in JSON mode so the
+  document stays parseable. Audit (`scripts/audit_machine_output.py`):
+  prose-only 13 → 8, format-json 184 → 189 (only `build`, `pipeline` and
+  `stitch` remain actionable). `tests/test_format_json_sweep_drivers.py`
+  guards the new surfaces; `docs/reference/machine-output.md` records the
+  per-command shapes.
+
 - **Placement pad-anchoring audit** (`docs/placement-pad-anchoring-audit.md`,
   part of #4831) — a docs-only, symbol-anchored survey of where the placement
   stack measures distance between component **centres** versus real **pad**

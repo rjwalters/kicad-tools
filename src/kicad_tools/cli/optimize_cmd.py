@@ -6,11 +6,41 @@ Usage:
     kct optimize-traces board.kicad_pcb --net "NET8"
     kct optimize-traces board.kicad_pcb -o optimized.kicad_pcb
     kct optimize-traces board.kicad_pcb --drc-aware --mfr jlcpcb --layers 4
+
+Machine output (``--format json``, issue #4674): one deterministic document
+describing the run -- the resolved ``pcb``/``output`` paths, the enabled
+``optimizations``, the before/after ``stats`` and whether the result was
+``saved`` -- or ``{"error": ..., "success": false}`` on any failure, with the
+exit code unchanged.  See ``docs/reference/machine-output.md``.
 """
 
 import argparse
 import sys
 from pathlib import Path
+
+from kicad_tools.cli.format_options import FORMAT_JSON, add_format_flag, emit_json
+
+
+def _fail(as_json: bool, pcb: str, message: str, *, text: str | None = None) -> int:
+    """Report an optimize-traces failure as a document (JSON) or prose (text).
+
+    ``text`` overrides the conventional ``Error: <message>`` prose for the one
+    failure path that deliberately words itself differently (``Error during
+    optimization: ...``); text-mode output stays byte-identical.
+    """
+    if as_json:
+        emit_json(
+            {
+                "command": "optimize-traces",
+                "pcb": pcb,
+                "error": message,
+                "saved": False,
+                "success": False,
+            }
+        )
+    else:
+        print(text if text is not None else f"Error: {message}", file=sys.stderr)
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -103,23 +133,23 @@ Examples:
         default=1.0,
         help="Copper weight in oz for DRC checks (default: 1.0)",
     )
+    add_format_flag(parser)
 
     args = parser.parse_args(argv)
+    as_json = args.format == FORMAT_JSON
 
     # Validate DRC-aware arguments
     if args.drc_aware and not args.mfr:
-        print(
-            "Error: --drc-aware requires --mfr to specify the manufacturer profile "
-            "(e.g., --mfr jlcpcb)",
-            file=sys.stderr,
+        return _fail(
+            as_json,
+            args.pcb,
+            "--drc-aware requires --mfr to specify the manufacturer profile (e.g., --mfr jlcpcb)",
         )
-        return 1
 
     # Check input file exists
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return _fail(as_json, str(pcb_path), f"PCB file not found: {pcb_path}")
 
     # Validate manufacturer ID if provided
     if args.mfr:
@@ -127,11 +157,11 @@ Examples:
 
         valid_ids = get_manufacturer_ids()
         if args.mfr not in valid_ids:
-            print(
-                f"Error: Unknown manufacturer '{args.mfr}'. Valid options: {', '.join(valid_ids)}",
-                file=sys.stderr,
+            return _fail(
+                as_json,
+                str(pcb_path),
+                f"Unknown manufacturer '{args.mfr}'. Valid options: {', '.join(valid_ids)}",
             )
-            return 1
 
     # Import here to avoid circular imports
     from kicad_tools.cli.progress import spinner
@@ -140,7 +170,9 @@ Examples:
         TraceOptimizer,
     )
 
-    quiet = args.quiet
+    # JSON mode owns stdout: the banner, the spinner and the results table are
+    # all suppressed so exactly one document is printed.
+    quiet = args.quiet or as_json
 
     # Configure optimizer
     config = OptimizationConfig(
@@ -190,8 +222,51 @@ Examples:
                 dry_run=args.dry_run,
             )
     except Exception as e:
-        print(f"Error during optimization: {e}", file=sys.stderr)
-        return 1
+        return _fail(
+            as_json,
+            str(pcb_path),
+            f"during optimization: {e}",
+            text=f"Error during optimization: {e}",
+        )
+
+    if as_json:
+        emit_json(
+            {
+                "command": "optimize-traces",
+                "pcb": str(pcb_path),
+                "output": args.output,
+                "net_filter": args.net,
+                "optimizations": {
+                    "merge_collinear": config.merge_collinear,
+                    "eliminate_zigzags": config.eliminate_zigzags,
+                    "convert_45_corners": config.convert_45_corners,
+                    "chamfer_size_mm": config.corner_chamfer_size,
+                },
+                "drc_aware": args.drc_aware,
+                "manufacturer": args.mfr,
+                "layers": args.layers,
+                "copper_oz": args.copper,
+                "stats": {
+                    "nets_optimized": stats.nets_optimized,
+                    "nets_rolled_back": stats.nets_rolled_back,
+                    "segments_before": stats.segments_before,
+                    "segments_after": stats.segments_after,
+                    "segment_reduction_pct": stats.segment_reduction,
+                    "corners_before": stats.corners_before,
+                    "corners_after": stats.corners_after,
+                    "length_before_mm": stats.length_before,
+                    "length_after_mm": stats.length_after,
+                    "length_reduction_pct": stats.length_reduction,
+                    "drc_errors_before": stats.drc_errors_before,
+                    "drc_errors_after": stats.drc_errors_after,
+                },
+                "dry_run": args.dry_run,
+                "saved": not args.dry_run,
+                "written_to": None if args.dry_run else (args.output or str(pcb_path)),
+                "success": True,
+            }
+        )
+        return 0
 
     if not quiet:
         # Display results
