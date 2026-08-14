@@ -30,6 +30,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer, LayerStack
@@ -383,6 +384,228 @@ def test_unmapped_net_id_falls_back_to_global_width() -> None:
     assert router._cross_domain_trace_blocked(gx, gy, 0, HV_TAP_NET, 3) is False
     near = _grid_pos(grid, 15.0, 7.9)  # 15 cells: inside the global 17
     assert router._cross_domain_trace_blocked(*near, 0, HV_TAP_NET, 3) is True
+
+
+# ---------------------------------------------------------------------------
+# Soft cross-domain avoidance gradient (``_pairwise_avoidance_cost``)
+# ---------------------------------------------------------------------------
+#
+# The hard kernels above restore the search<->gate mirror; the soft gradient
+# is what keeps the search from HUGGING that hard limit.  The C++ search has
+# priced the margin since #4511 (``Pathfinder::pairwise_avoidance_cost``);
+# these pin the Python mirror's geometry.  At the 1.6 mm requirement and
+# 0.1 mm resolution: hard radius 17 cells, band ceil(1.6 * 0.5 / 0.1) = 8,
+# so the gradient is priced over cells 18..25 and decays linearly to zero.
+
+_GRADIENT_HARD_R = 17
+_GRADIENT_BAND = 8
+
+
+def _router_with_foreign_cell(
+    dy: int,
+    *,
+    foreign_net: int = LV_NET,
+    with_table: bool = True,
+    net_class_map: dict[str, NetClassRouting] | None = None,
+    layer: int = 0,
+) -> Router:
+    """A 20x20 board carrying ONE foreign cell ``dy`` cells below (100, 100).
+
+    Cell-exact fixture (there is no public single-cell setter on
+    ``RoutingGrid``; the search kernels read these arrays directly) -- the
+    same idiom the C++ parity suite's ``mark_blocked`` fixtures use, so the
+    two can be compared probe-for-probe.
+    """
+    rules = _rules(with_table)
+    grid = RoutingGrid(width=20.0, height=20.0, rules=rules, layer_stack=LayerStack.two_layer())
+    grid._blocked[layer, 100 + dy, 100] = True
+    grid._net[layer, 100 + dy, 100] = foreign_net
+    router = Router(grid, rules, diagonal_routing=True, net_class_map=net_class_map)
+    router.set_net_name_to_id(dict(NET_NAMES))
+    return router
+
+
+def test_gradient_dormant_without_table() -> None:
+    """No voltage map -> no soft cost anywhere (byte-identical g-scores)."""
+    router = _router_with_foreign_cell(20, with_table=False)
+    assert router._pairwise_avoidance_cost(100, 100, 0, HV_NET) == 0.0
+    assert router._pairwise_gradient_band(HV_NET) is None
+
+
+def test_gradient_dormant_for_a_net_in_no_widening_pair() -> None:
+    """A net whose every pair sits at the scalar floor is never priced."""
+    router = _router_with_foreign_cell(20, foreign_net=HV_TAP_NET)
+    assert router._pairwise_avoidance_cost(100, 100, 0, HV_NET) == 0.0
+    assert router._pairwise_gradient_band(HV_NET) is None
+
+
+def test_gradient_decays_linearly_across_the_band() -> None:
+    """Strongest just outside the hard block, zero at the band edge."""
+    costs = {
+        dy: _router_with_foreign_cell(dy)._pairwise_avoidance_cost(100, 100, 0, HV_NET)
+        for dy in range(_GRADIENT_HARD_R, _GRADIENT_HARD_R + _GRADIENT_BAND + 3)
+    }
+    # Inside the hard radius: the BLOCKING kernel's job, not the gradient's.
+    assert costs[_GRADIENT_HARD_R] == 0.0
+    # First band cell carries (band - 1) / band of the full step cost.
+    assert costs[18] == pytest.approx(7.0 / 8.0)
+    # Strictly decreasing across the band, zero at (and beyond) its edge.
+    band = [costs[dy] for dy in range(18, 25)]
+    assert band == sorted(band, reverse=True)
+    assert all(cost > 0.0 for cost in band)
+    assert costs[25] == 0.0
+    assert costs[26] == 0.0
+    assert costs[27] == 0.0
+
+
+def test_gradient_is_bounded_by_one_straight_step() -> None:
+    """The nudge can never dominate the route cost (mirror invariant)."""
+    for dy in range(_GRADIENT_HARD_R, _GRADIENT_HARD_R + _GRADIENT_BAND + 1):
+        cost = _router_with_foreign_cell(dy)._pairwise_avoidance_cost(100, 100, 0, HV_NET)
+        assert 0.0 <= cost <= _rules().cost_straight
+
+
+def test_gradient_ignores_same_domain_and_net0_copper() -> None:
+    """Only copper whose pair actually widens is priced."""
+    same = _router_with_foreign_cell(20, foreign_net=HV_TAP_NET)
+    assert same._pairwise_avoidance_cost(100, 100, 0, HV_NET) == 0.0
+    pour = _router_with_foreign_cell(20, foreign_net=0)
+    assert pour._pairwise_avoidance_cost(100, 100, 0, HV_NET) == 0.0
+
+
+def test_gradient_scans_its_own_layer_only() -> None:
+    """Surface creepage: B.Cu copper never prices an F.Cu candidate."""
+    router = _router_with_foreign_cell(20, layer=1)
+    assert router._pairwise_avoidance_cost(100, 100, 0, HV_NET) == 0.0
+    assert router._pairwise_avoidance_cost(100, 100, 1, HV_NET) > 0.0
+
+
+def test_gradient_uses_net_class_trace_width() -> None:
+    """The band tracks the ROUTED net's class width (#4793 parity).
+
+    Class half-extent 0.5 mm -> hard radius 21, band edge 29.  A cell 26
+    cells out is priced for the wide class and free for the global width;
+    18 cells out is the reverse (inside the wide class's hard radius).
+    """
+    assert _router_with_foreign_cell(26)._pairwise_avoidance_cost(100, 100, 0, HV_NET) == 0.0
+    wide = _router_with_foreign_cell(26, net_class_map=_wide_class())
+    assert wide._pairwise_avoidance_cost(100, 100, 0, HV_NET) == pytest.approx(3.0 / 8.0)
+
+    assert _router_with_foreign_cell(18)._pairwise_avoidance_cost(100, 100, 0, HV_NET) > 0.0
+    wide_near = _router_with_foreign_cell(18, net_class_map=_wide_class())
+    assert wide_near._pairwise_avoidance_cost(100, 100, 0, HV_NET) == 0.0
+
+
+def test_gradient_band_gate_flags_every_priced_cell() -> None:
+    """The hot-loop band bitmap is a strict superset of the priced cells.
+
+    ``_route_impl`` consults the exact kernel only where this bitmap is set,
+    so a cell the bitmap misses would silently lose its gradient.
+    """
+    router = _router_with_foreign_cell(0)  # foreign cell AT (100, 100)
+    band = router._pairwise_gradient_band(HV_NET)
+    assert band is not None
+    for dy in range(-30, 31):
+        cost = router._pairwise_avoidance_cost(100, 100 + dy, 0, HV_NET)
+        if cost > 0.0:
+            assert bool(band[0, 100 + dy, 100]) is True, f"band gate misses dy={dy}"
+
+
+def test_gradient_prices_the_first_cell_in_scan_order() -> None:
+    """Mirror wart, pinned: the C++ kernel BREAKS at its first band cell.
+
+    Row-major scan order runs from the topmost row of the window, so the
+    cell 24 cells ABOVE wins over the (much nearer) cell 18 cells below --
+    "one cross-domain neighbour is enough to establish the gradient".  The
+    Python mirror reproduces the same cell so the two engines cannot price a
+    candidate differently; see ``test_avoidance_gradient_parity_*`` in
+    ``test_pairwise_cpp_parity.py`` for the cross-engine proof.
+    """
+    rules = _rules()
+    grid = RoutingGrid(width=20.0, height=20.0, rules=rules, layer_stack=LayerStack.two_layer())
+    for dy in (-24, 18):
+        grid._blocked[0, 100 + dy, 100] = True
+        grid._net[0, 100 + dy, 100] = LV_NET
+    router = Router(grid, rules, diagonal_routing=True)
+    router.set_net_name_to_id(dict(NET_NAMES))
+    assert router._pairwise_avoidance_cost(100, 100, 0, HV_NET) == pytest.approx(1.0 / 8.0)
+
+
+# ---------------------------------------------------------------------------
+# Headline: the priced margin reaches the routed copper
+# ---------------------------------------------------------------------------
+
+# A horizontal LV bar (x in [5, 25], y in [9.7, 10.3]) with the HV pads placed
+# so that the straight run between them sits EXACTLY at the hard limit: the
+# gradient is the only thing that can buy margin, and the detour it has to pay
+# for is real (up and back over a 24 mm span).
+_BAR_TOP_Y = 9.7
+_BAR_BOTTOM_Y = 10.3
+_HV_PAD_Y = 12.0  # 12.0 - 10.3 - 0.1 = 1.6 mm == the requirement
+
+
+def _route_over_lv_bar(gradient: bool):
+    rules = _rules(with_table=True)
+    grid = RoutingGrid(width=30.0, height=20.0, rules=rules, layer_stack=LayerStack.two_layer())
+    start = Pad(
+        x=3.0, y=_HV_PAD_Y, width=0.6, height=0.6, net=HV_NET, net_name="HV", layer=Layer.F_CU
+    )
+    end = Pad(
+        x=27.0, y=_HV_PAD_Y, width=0.6, height=0.6, net=HV_NET, net_name="HV", layer=Layer.F_CU
+    )
+    grid.add_pad(start)
+    grid.add_pad(end)
+    for layer in (Layer.F_CU, Layer.B_CU):
+        grid.add_pad(
+            Pad(x=15.0, y=10.0, width=20.0, height=0.6, net=LV_NET, net_name="LV", layer=layer)
+        )
+    nc = NetClassRouting(name="HV", trace_width=TRACE_WIDTH, clearance=DRU)
+    router = Router(grid, rules, diagonal_routing=True, net_class_map={"HV": nc})
+    router.set_net_name_to_id({"HV": HV_NET, "LV": LV_NET})
+    if not gradient:
+        # Same board, same hard blocking -- only the soft pricing differs.
+        router._pairwise_avoidance_cost = lambda *args, **kwargs: 0.0  # type: ignore[method-assign]
+    return router, router.route(start, end, net_class=nc)
+
+
+def _mid_span_gap(route) -> float:
+    """Smallest bar-edge gap of the copper crossing the middle of the bar."""
+    best = float("inf")
+    for seg in route.segments:
+        for i in range(201):
+            t = i / 200.0
+            px = seg.x1 + t * (seg.x2 - seg.x1)
+            py = seg.y1 + t * (seg.y2 - seg.y1)
+            if abs(px - 15.0) <= 0.5:
+                best = min(best, py - _BAR_BOTTOM_Y - TRACE_WIDTH / 2.0)
+    return best
+
+
+def test_gradient_buys_margin_over_the_hard_limit() -> None:
+    """The soft cost reaches the routed copper: more margin, still gate-clean.
+
+    Both arms enforce the same 1.6 mm hard block (both are pairwise-armed),
+    so the difference is purely the priced margin -- the search declines to
+    run flush against the limit when a bounded detour buys slack.
+    """
+    blind_router, blind_route = _route_over_lv_bar(gradient=False)
+    armed_router, armed_route = _route_over_lv_bar(gradient=True)
+    assert blind_route is not None and armed_route is not None
+
+    id_to_name = {HV_NET: "HV", LV_NET: "LV"}
+    for router, route in ((blind_router, blind_route), (armed_router, armed_route)):
+        assert (
+            route_pairwise_violation(
+                route,
+                HV_NET,
+                router.grid.routes,
+                router.rules.pairwise_clearance,
+                id_to_name=id_to_name,
+            )
+            is None
+        )
+    assert _mid_span_gap(armed_route) > _mid_span_gap(blind_route)
+    assert _mid_span_gap(blind_route) >= IEC_150V_PD2_IIIA_MM - 1e-3
 
 
 # ---------------------------------------------------------------------------

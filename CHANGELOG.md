@@ -61,6 +61,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guards the new surfaces; `docs/reference/machine-output.md` records the
   per-command shapes.
 
+- **Soft HV-avoidance gradient in the pure-Python fallback A\*** (part of
+  #4507, epic #4431 Phase 2b) — `Router._pairwise_avoidance_cost` mirrors the
+  C++ `Pathfinder::pairwise_avoidance_cost` (#4511 Scope 2) cell-for-cell, so
+  both engines now price the same bounded nudge just beyond the hard
+  cross-domain block instead of only the C++ search doing so. The fallback's
+  hard blocking landed in #4791; without the soft term it ran flush against
+  the pairwise limit, and copper that merely *meets* a creepage requirement is
+  one rip-up or one `--lattice-optimize` nudge away from violating it. The A\*
+  hot loop consults a pre-dilated band bitmap (one bool lookup per neighbour)
+  and calls the exact kernel only for cells near cross-domain copper. Strictly
+  dormant without `--voltage-map` (one `is None` test per neighbour,
+  byte-identical g-scores). The mirror reproduces the reference's **two-level**
+  break, including the conditional outer one (`if (cost > 0.0f) break;`): a
+  qualifying cell exactly on the halo circle prices `frac == 0` and lets the
+  scan run on into later rows rather than ending it, which matters because the
+  first cell every scan visits (`dy = -halo_r, dx = 0`) always sits on that
+  circle. New Python↔C++ parity tests pin the *value*, not just the sign: the
+  whole band, off-axis distances, board-edge-clipped scan windows,
+  per-net-class widths, the multi-cell case that proves both engines stop on
+  the same candidate cell, and the zero-`frac` cases (an on-circle cell paired
+  with a later priced one, and a single contiguous foreign bar whose topmost
+  row touches the halo).
+
 - **Placement pad-anchoring audit** (`docs/placement-pad-anchoring-audit.md`,
   part of #4831) — a docs-only, symbol-anchored survey of where the placement
   stack measures distance between component **centres** versus real **pad**

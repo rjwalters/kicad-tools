@@ -470,6 +470,20 @@ class Router:
         self._pairwise_extra_cache: dict[tuple[int, int], np.ndarray | None] = {}
         self._pairwise_extra_cache_stamp: tuple[object, object, int] | None = None
 
+        # Issue #4507: memo for the per-domain "which foreign net ids widen
+        # against me" lists the soft-gradient kernel and its hot-loop band
+        # gate share.  Identity-checked against the ``_PairwiseSearchState``
+        # it was built from, so it expires with the projection above.
+        self._pairwise_widening_ids_cache: (
+            tuple[_PairwiseSearchState, dict[int, tuple[list[int], np.ndarray]]] | None
+        ) = None
+        # Cached ``(dist_sq, band_mask)`` scan window for the soft gradient,
+        # keyed by ``(hard_radius, band)`` -- pure geometry, so it survives
+        # every copper change.
+        self._pairwise_band_kernel_cache: tuple[tuple[int, int], np.ndarray, np.ndarray] | None = (
+            None
+        )
+
         # Issue #2929: Per-A*-call wall-clock instrumentation.  When
         # ``_per_call_timing_enabled`` is True, every ``route()`` invocation
         # appends a dict to ``_per_call_timings`` recording the elapsed wall
@@ -2373,6 +2387,224 @@ class Router:
                         expanded |= padded[:, dy : dy + rows, dx : dx + cols]
             return expanded
 
+    # ------------------------------------------------------------------
+    # Soft cross-domain (HV) avoidance gradient (Issue #4507)
+    # ------------------------------------------------------------------
+    #
+    # Python mirror of ``Pathfinder::pairwise_avoidance_cost`` (#4511
+    # Scope 2).  The hard kernels above restore the search<->gate mirror;
+    # this bounded *soft* cost is what stops the search from hugging the
+    # hard limit: a candidate cell that clears the widened radius by a hair
+    # is legal but fragile -- the next rip-up/re-route or a
+    # ``--lattice-optimize`` nudge pushes it back under, and the negotiator
+    # thrashes.  The C++ search has priced that margin since #4511; the
+    # pure-Python fallback (#4791 armed only its hard blocking) did not, so
+    # the two engines converged on measurably different HV routes.
+    #
+    # Mirror notes vs. ``Pathfinder::pairwise_avoidance_cost``:
+    # * Same band geometry: ``[hard_radius, hard_radius + band]`` where
+    #   ``band = ceil(max_widen * 0.5 / res)`` -- half the widest pairwise
+    #   requirement of slack beyond the hard block.
+    # * Same linear decay scaled to ``cost_straight`` (strongest just
+    #   outside the hard radius, zero at the band edge), so a cell hugging
+    #   the limit costs about one extra step of detour -- enough to steer,
+    #   not enough to distort the optimum away from a clean lane.
+    # * Same "one cross-domain neighbour is enough" rule, and same TWO-LEVEL
+    #   break -- the detail #4849's review caught.  The C++ kernel's inner
+    #   ``break`` fires at the first qualifying cell of a ROW (so a cell
+    #   flanked by a long HV run is not over-penalised), but the outer break
+    #   is CONDITIONAL: ``if (cost > 0.0f) break;``.  A qualifying cell
+    #   sitting exactly on the halo circle (``dist_sq == halo_r^2``) prices
+    #   ``frac == 0``, leaves ``cost`` at zero, and so lets the scan run on
+    #   into later rows and price a different cell.  That is not exotic: the
+    #   very first cell the scan visits (``dy = -halo_r, dx = 0``) is always
+    #   exactly on the circle, so any foreign copper whose topmost band cell
+    #   lands in the candidate's own column trips it.  An unconditional
+    #   return at the first qualifying cell would return 0.0 where C++
+    #   returns a full-magnitude cost, so the mirror below tracks the row it
+    #   priced (skipping that row's remaining cells, the inner break) and
+    #   stops only once the accumulated cost is strictly positive.  Because
+    #   every pre-stop contribution is exactly zero, accumulating and
+    #   returning at the first positive term is identical to the C++ sum.
+    #   ``np.nonzero`` yields C (row-major) order, so the entry it stops on
+    #   is the same cell the C++ scan stops on (clipping the scan window at
+    #   the board edge removes whole leading rows/columns and so preserves
+    #   row-major order among the remaining cells).  Scan-order dependence is
+    #   a wart of the reference implementation, mirrored deliberately: parity
+    #   first -- two engines agreeing on an arbitrary-but-bounded nudge beats
+    #   two engines disagreeing about which candidate is cheap.  Changing the
+    #   semantics is #4848's job (both engines together, with a
+    #   ``ROUTER_CPP_BUILD_VERSION`` bump), never a silent divergence here.
+    # * ``half_mm`` is the ROUTED net's class trace width (#4793), exactly as
+    #   in the hard kernels.
+    # * NO #4506 attach-zone waiver, mirroring the C++ kernel: this is a
+    #   soft nudge, never a block, so a rated footprint's attach path stays
+    #   reachable -- it is merely priced.
+
+    def _pairwise_widening_net_ids(
+        self, state: _PairwiseSearchState, dom: int
+    ) -> tuple[list[int], np.ndarray]:
+        """Foreign net ids whose domain pair with ``dom`` requires widening.
+
+        Returns both forms the two consumers want: the id list (for the
+        once-per-route ``np.isin`` band mask) and a boolean lookup array
+        indexed by net id (for the per-cell kernel, where a fancy-index of
+        the scan window is much cheaper than ``np.isin``).  Net 0 is excluded
+        -- the pour / unconnected convention never carries a domain, mirroring
+        the C++ kernels' ``cell.net == 0`` skip.  Memoised per domain against
+        the projection identity (the projection is pure net-id data, so it
+        cannot go stale while copper moves).
+        """
+        cached = self._pairwise_widening_ids_cache
+        if cached is None or cached[0] is not state:
+            cached = (state, {})
+            self._pairwise_widening_ids_cache = cached
+        entry = cached[1].get(dom)
+        if entry is None:
+            row = state.matrix[dom] if 0 <= dom < len(state.matrix) else []
+            ids = [
+                net_id
+                for net_id, domain in enumerate(state.net_to_domain)
+                if net_id != 0 and 0 <= domain < len(row) and row[domain] > 0.0
+            ]
+            lut = np.zeros(max(1, len(state.net_to_domain)), dtype=np.bool_)
+            if ids:
+                lut[ids] = True
+            entry = (ids, lut)
+            cached[1][dom] = entry
+        return entry
+
+    def _pairwise_gradient_geometry(self, net: int) -> tuple[_PairwiseSearchState, int, int] | None:
+        """``(state, hard_radius, band)`` for ``net``, or ``None`` when dormant.
+
+        Shared by the per-cell gradient kernel and the hot-loop band gate so
+        the two can never size the band differently.
+        """
+        table = getattr(self.rules, "pairwise_clearance", None)
+        if table is None:
+            return None
+        state = self._pairwise_search_state(table)
+        if state is None:
+            return None
+        net_to_domain = state.net_to_domain
+        dom = net_to_domain[net] if 0 <= net < len(net_to_domain) else -1
+        if dom < 0:
+            return None
+        res = self.grid.resolution
+        own_name = state.id_to_name.get(net, "")
+        half_mm = self._get_trace_width_for_net(own_name) / 2.0
+        # Issue #864 rounding idiom (round before ceil), as in the hard kernels.
+        hard_r = max(1, math.ceil(round((half_mm + state.max_widen) / res, 6)))
+        band = max(1, math.ceil(round(state.max_widen * 0.5 / res, 6)))
+        return state, hard_r, band
+
+    def _pairwise_avoidance_cost(self, gx: int, gy: int, layer: int, net: int) -> float:
+        """Soft HV-avoidance cost for one candidate cell (0.0 when dormant).
+
+        Python mirror of ``Pathfinder::pairwise_avoidance_cost``; see the
+        block comment above for the mirror contract.  Returns a bounded
+        additive A* cost in ``cost_straight`` units.
+        """
+        geometry = self._pairwise_gradient_geometry(net)
+        if geometry is None:
+            return 0.0
+        state, hard_r, band = geometry
+        dom = state.net_to_domain[net]
+        foreign_ids, widen_lut = self._pairwise_widening_net_ids(state, dom)
+        if not foreign_ids:
+            return 0.0
+
+        halo_r = hard_r + band
+        x1 = max(0, gx - halo_r)
+        y1 = max(0, gy - halo_r)
+        x2 = min(self.grid.cols, gx + halo_r + 1)
+        y2 = min(self.grid.rows, gy + halo_r + 1)
+        if x1 >= x2 or y1 >= y2:
+            return 0.0
+
+        blocked_region = self.grid._blocked[layer, y1:y2, x1:x2]
+        if not bool(np.any(blocked_region)):
+            return 0.0
+        net_region = self.grid._net[layer, y1:y2, x1:x2]
+
+        # The scan window's squared-distance / band geometry depends only on
+        # the radii, so it is built once and sliced here (the window is the
+        # full kernel unless the board edge clipped it).
+        dist_full, band_full = self._pairwise_band_kernel(hard_r, band)
+        off_y = y1 - (gy - halo_r)
+        off_x = x1 - (gx - halo_r)
+        dist_sq = dist_full[off_y : off_y + (y2 - y1), off_x : off_x + (x2 - x1)]
+        band_mask = band_full[off_y : off_y + (y2 - y1), off_x : off_x + (x2 - x1)]
+
+        candidates = blocked_region & band_mask & (net_region != net)
+        if not bool(np.any(candidates)):
+            return 0.0
+
+        # Mirror the C++ kernel's TWO-LEVEL break (see the block comment
+        # above).  ``np.nonzero`` yields C (row-major) order, so walking it
+        # visits cells in the reference's scan order; ``priced_row`` replays
+        # the inner ``break`` (the rest of a row is skipped once that row has
+        # priced a cell) and the ``cost > 0.0`` test replays the CONDITIONAL
+        # outer break -- a cell exactly on the halo circle prices 0.0 and the
+        # scan continues into later rows, exactly as the C++ scan does.
+        cost = 0.0
+        priced_row = -1  # no row index is negative, so this never matches
+        for row, col in zip(*np.nonzero(candidates), strict=True):
+            if row == priced_row:
+                continue  # the C++ inner break already left this row
+            foreign_net = int(net_region[row, col])
+            if foreign_net <= 0 or foreign_net >= widen_lut.size:
+                continue
+            if not widen_lut[foreign_net]:
+                continue  # same domain / no widening for this pair
+            priced_row = int(row)
+            distance = math.sqrt(float(dist_sq[row, col]))
+            # Linear decay: strongest just outside the hard radius, zero at
+            # the band edge, scaled to ``cost_straight``.
+            frac = (halo_r - distance) / band
+            frac = min(1.0, max(0.0, frac))
+            cost += self.rules.cost_straight * frac
+            if cost > 0.0:
+                break
+        return cost
+
+    def _pairwise_band_kernel(self, hard_r: int, band: int) -> tuple[np.ndarray, np.ndarray]:
+        """Cached ``(dist_sq, band_mask)`` window for the gradient scan."""
+        cached = self._pairwise_band_kernel_cache
+        if cached is not None and cached[0] == (hard_r, band):
+            return cached[1], cached[2]
+        halo_r = hard_r + band
+        offsets = np.arange(-halo_r, halo_r + 1)
+        dist_sq = (offsets * offsets)[:, None] + (offsets * offsets)[None, :]
+        band_mask = (dist_sq > hard_r * hard_r) & (dist_sq <= halo_r * halo_r)
+        self._pairwise_band_kernel_cache = ((hard_r, band), dist_sq, band_mask)
+        return dist_sq, band_mask
+
+    def _pairwise_gradient_band(self, net: int) -> np.ndarray | None:
+        """Cells where :meth:`_pairwise_avoidance_cost` can be non-zero.
+
+        Issue #4507: the Python A* hot loop cannot afford a band scan per
+        neighbour, so ``_route_impl`` pre-computes this conservative superset
+        (foreign widening copper dilated by the halo radius) and consults the
+        exact kernel only for cells it flags.  ``None`` when dormant -- the
+        hot loop then adds no cost at all and stays byte-identical to
+        pre-#4507 behaviour.
+        """
+        geometry = self._pairwise_gradient_geometry(net)
+        if geometry is None:
+            return None
+        state, hard_r, band = geometry
+        dom = state.net_to_domain[net]
+        foreign_ids, _widen_lut = self._pairwise_widening_net_ids(state, dom)
+        if not foreign_ids:
+            return None
+        foreign_mask = self.grid._blocked & np.isin(self.grid._net, foreign_ids)
+        if not bool(np.any(foreign_mask)):
+            return None
+        # Out-of-bounds is EMPTY here for the same reason the widening ring
+        # uses it (#4791): the C++ band scan skips out-of-bounds cells.
+        return self._dilate_zero_padded(foreign_mask, hard_r + band)
+
     def _grid_layer_object(self, layer: int) -> Layer | None:
         """Grid layer index -> :class:`Layer` enum member (or ``None``).
 
@@ -3168,6 +3400,18 @@ class Router:
         if pairwise_extra is not None:
             expanded_blocked = expanded_blocked | pairwise_extra
 
+        # Issue #4507: soft cross-domain (HV) avoidance gradient -- the C++
+        # ``pairwise_avoidance_cost`` mirror.  The band gate is a cheap
+        # superset bitmap (one bool lookup per neighbour); the exact kernel
+        # runs only for the handful of cells near HV copper.  ``None`` when
+        # dormant, so a board without a voltage map pays one ``is None``
+        # test per neighbour and keeps byte-identical g-scores.
+        pairwise_band = self._pairwise_gradient_band(start.net)
+        # Per-call memo: the copper the gradient measures against cannot move
+        # during one A* call (the same assumption ``expanded_blocked`` makes),
+        # and a cell is typically relaxed from several parents.
+        pairwise_cost_cache: dict[tuple[int, int, int], float] = {}
+
         # Issue #2430: Build crossing grid index if routed segments exist.
         if self.rules.crossing_penalty > 0.0 and self._routed_segments:
             self._build_crossing_grid()
@@ -3619,6 +3863,22 @@ class Router:
                     self.rules.cost_corridor_attractor,
                 )
 
+                # Issue #4507: soft cross-domain (HV) avoidance gradient
+                # (mirrors ``Pathfinder::pairwise_avoidance_cost``).  Zero
+                # unless a widening pairwise matrix is installed AND foreign
+                # HV copper sits in the thin band just beyond the hard-block
+                # radius -- steers A* to keep isolation margin before the
+                # hard block bites, so an HV board converges instead of
+                # hugging the limit and thrashing the negotiator.
+                pairwise_cost = 0.0
+                if pairwise_band is not None and pairwise_band[nlayer, ny, nx]:
+                    cache_key = (nlayer, ny, nx)
+                    cached_cost = pairwise_cost_cache.get(cache_key)
+                    if cached_cost is None:
+                        cached_cost = self._pairwise_avoidance_cost(nx, ny, nlayer, start.net)
+                        pairwise_cost_cache[cache_key] = cached_cost
+                    pairwise_cost = cached_cost
+
                 positive_step_cost = (
                     neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
                     + turn_cost
@@ -3628,6 +3888,7 @@ class Router:
                     + crossing_cost
                     + layer_util_cost
                     + corridor_cost
+                    + pairwise_cost
                 )
                 if attractor_bonus > 0.0:
                     positive_step_cost = max(0.0, positive_step_cost - attractor_bonus)
