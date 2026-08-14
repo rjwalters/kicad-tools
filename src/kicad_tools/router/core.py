@@ -9501,6 +9501,10 @@ class Autorouter:
                 self.grid._pad_blocked = old_grid._pad_blocked.copy()
                 self.grid._original_net = old_grid._original_net.copy()
                 self.grid._pads = old_grid._pads.copy()
+                # Issue #4794: the occupancy planes were replaced wholesale
+                # after construction -- bump so occupancy-derived caches
+                # (e.g. the pairwise widening bitmaps) recompute.
+                self.grid.bump_occupancy_generation()
                 # Update router to use new grid
                 self.router.grid = self.grid
                 neg_router = NegotiatedRouter(
@@ -19200,11 +19204,15 @@ class Autorouter:
                     fine_grid._blocked = blocked_snapshot
                     fine_grid._net = net_snapshot
                     fine_grid.routes = routes_snapshot
+                    # Issue #4794: a rollback changes occupancy just as much
+                    # as a commit does -- invalidate derived caches.
+                    fine_grid.bump_occupancy_generation()
                 else:
                     # Trial produced no improvement: roll back
                     fine_grid._blocked = blocked_snapshot
                     fine_grid._net = net_snapshot
                     fine_grid.routes = routes_snapshot
+                    fine_grid.bump_occupancy_generation()  # Issue #4794
 
             if best_routes:
                 fine_grid_nets_count += 1

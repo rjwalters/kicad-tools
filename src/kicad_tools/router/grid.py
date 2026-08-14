@@ -491,6 +491,7 @@ class RoutedNetsUnblocker:
         # Clear those cells
         self._grid._blocked[routed_mask] = False
         self._grid._net[routed_mask] = 0
+        self._grid.bump_occupancy_generation()  # Issue #4794
 
         return self
 
@@ -500,6 +501,9 @@ class RoutedNetsUnblocker:
             np.copyto(self._grid._blocked, self._saved_blocked)
         if self._saved_net is not None:
             np.copyto(self._grid._net, self._saved_net)
+        # Issue #4794: the restore is itself an occupancy change (the grid
+        # inside the ``with`` body was NOT the grid outside it).
+        self._grid.bump_occupancy_generation()
 
 
 class _CellView:
@@ -532,6 +536,11 @@ class _CellView:
     @blocked.setter
     def blocked(self, value: bool) -> None:
         self._grid._blocked[self._layer, self._y, self._x] = value
+        # Issue #4794: this setter is THE per-cell choke point for
+        # ``mark_route``/``unmark_route``/``add_pad`` -- bump inline (rather
+        # than calling ``bump_occupancy_generation``) to keep the marking
+        # loops free of an extra Python-level call.
+        self._grid._occupancy_generation += 1
 
     @property
     def net(self) -> int:
@@ -540,6 +549,7 @@ class _CellView:
     @net.setter
     def net(self, value: int) -> None:
         self._grid._net[self._layer, self._y, self._x] = value
+        self._grid._occupancy_generation += 1  # Issue #4794
 
     @property
     def cost(self) -> float:
@@ -1021,6 +1031,41 @@ class RoutingGrid:
         # sub-clearance copper (routing-diagnostic fixture: NET3 through
         # J1-1's halo at 0.127mm actual vs 0.200mm required).
         self._static_blocked: np.ndarray | None = None
+        # Issue #4794: monotonic occupancy generation.  Allocating (or
+        # re-allocating) the planes is itself an occupancy change -- the new
+        # buffers share none of the old contents -- so bump rather than reset,
+        # which keeps the counter strictly monotonic for the lifetime of the
+        # grid object (a consumer that stamped a cache with the pre-realloc
+        # value can never see its stamp again).
+        self._occupancy_generation: int = getattr(self, "_occupancy_generation", 0) + 1
+
+    @property
+    def occupancy_generation(self) -> int:
+        """Monotonic counter bumped by every ``_blocked``/``_net`` write (#4794).
+
+        Consumers that cache a value *derived* from grid occupancy (e.g.
+        ``Router._pairwise_expanded_blocked``'s dilated foreign-domain
+        bitmaps) stamp their entry with this counter and recompute whenever
+        it has advanced.  The counter is deliberately **global** (any write
+        anywhere invalidates every derived cache) rather than per-net or
+        per-domain: a missed bump is a silent staleness bug, so the cheap,
+        mechanically auditable option wins.
+
+        Invariant enforced by ``tests/router/test_grid_occupancy_generation.py``:
+        every site in ``src/`` that assigns into ``_blocked``/``_net`` sits in
+        a function that also bumps this counter.  Code that mutates those
+        arrays directly (test fixtures poking ``grid._blocked[...] = True``)
+        must call :meth:`bump_occupancy_generation` itself.
+        """
+        return self._occupancy_generation
+
+    def bump_occupancy_generation(self) -> None:
+        """Record that ``_blocked``/``_net`` changed (Issue #4794).
+
+        Public so out-of-module writers (test fixtures, ad-hoc tooling that
+        pokes the occupancy planes) can keep occupancy-derived caches honest.
+        """
+        self._occupancy_generation += 1
 
     def _ensure_static_blockage_snapshot(self) -> None:
         """Capture the static blocked bitmap before the first route mark.
@@ -1093,6 +1138,7 @@ class RoutingGrid:
         self._via_rtree = None
         self._via_rtree_items = {}
         self._via_rtree_count = 0
+        self.bump_occupancy_generation()  # Issue #4794 (planes replaced)
 
     def sync_to_cpu(self) -> None:
         """Transfer GPU arrays to CPU for A* operations.
@@ -1122,6 +1168,10 @@ class RoutingGrid:
         self._gpu_dirty = False
         self._backend_type = BackendType.CPU
         self._backend = np
+        # Issue #4794: the ``_blocked``/``_net`` attributes now point at
+        # different array objects (host copies) -- any cache holding a
+        # derived bitmap must recompute.
+        self.bump_occupancy_generation()
 
     def sync_to_gpu(self) -> None:
         """Transfer CPU arrays to GPU for bulk operations.
@@ -1168,6 +1218,9 @@ class RoutingGrid:
             self._backend = backend
         except Exception as e:
             logger.warning(f"Failed to sync to GPU: {e}")
+        # Issue #4794: bump unconditionally -- a partial transfer that raised
+        # midway still leaves ``_blocked``/``_net`` pointing at new arrays.
+        self.bump_occupancy_generation()
 
     @property
     def backend_type(self) -> BackendType:
@@ -2263,6 +2316,7 @@ class RoutingGrid:
                         # pathfinder ``_is_trace_blocked`` and
                         # ``allow_sharing`` paths).
                         self._blocked[layer_idx, gy, gx] = True
+                        self.bump_occupancy_generation()  # Issue #4794
                     else:
                         # Cell already owned by a routable signal net
                         # (almost certainly a neighbour pad's clearance
@@ -2535,6 +2589,7 @@ class RoutingGrid:
                             # checks).  Preserve cell.net.
                             self._blocked[layer_idx, gy, gx] = True
                             self._is_obstacle[layer_idx, gy, gx] = True
+                            self.bump_occupancy_generation()  # Issue #4794
                         elif cell_net == 0:
                             # Bucket B: unclaimed cell.  Re-block it
                             # with the standard static-obstacle
@@ -2549,6 +2604,7 @@ class RoutingGrid:
                             # nuance for the negotiated-mode shared
                             # net flow).
                             self._blocked[layer_idx, gy, gx] = True
+                            self.bump_occupancy_generation()  # Issue #4794
                         else:
                             # Bucket C: foreign component / foreign
                             # net already owns this cell.  Leave it
@@ -2698,6 +2754,7 @@ class RoutingGrid:
 
                         # Unblock the cell so A* can route through
                         self._blocked[layer_idx, gy, gx] = False
+                        self.bump_occupancy_generation()  # Issue #4794
                         # Issue #3545: record that this component's
                         # corridor was relaxed so the same-component
                         # validator carve-out stays available for it
@@ -5864,6 +5921,7 @@ class RoutingGrid:
 
                 # Clear nets where applicable
                 self._net[layer_idx] = np.where(clear_net_mask, 0, self._net[layer_idx])
+                self.bump_occupancy_generation()  # Issue #4794
 
                 # Clear zone flags
                 self._is_zone[layer_idx] = False
@@ -6329,6 +6387,10 @@ class RoutingGrid:
             if 0 <= center_gx < self.cols and 0 <= center_gy < self.rows:
                 self._net[layer_idx, center_gy, center_gx] = pad.net
                 self._original_net[layer_idx, center_gy, center_gx] = pad.net
+
+            # Issue #4794: one bump per layer covers the three writes above
+            # (``_blocked`` halo, ``_net`` metal, ``_net`` centre cell).
+            self.bump_occupancy_generation()
 
     def get_grid_statistics(self) -> dict:
         """Get statistics about grid usage and memory.

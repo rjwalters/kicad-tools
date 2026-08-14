@@ -537,6 +537,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The pure-Python router's pairwise (HV-isolation) widening bitmap is now
+  cached across `route()` calls** (#4794) —
+  `Router._pairwise_expanded_blocked` (the search-time bitmap the pure-Python
+  fallback A* ORs into its hot-loop mask) recomputed a **full-grid `np.isin`
+  plus a full-grid `binary_dilation` per non-dormant foreign domain, on every
+  single `route()` call**, even when nothing about the foreign copper had
+  changed since the previous call. The per-domain dilated masks are now
+  memoized per `(foreign_dom, pair_r)`. The routed net's own class width
+  needs no separate key component because it is already folded into `pair_r`
+  (post-#4793 the width is resolved per net class), so two classes that widen
+  to the same cell radius share a byte-identical mask and two that do not
+  land on different keys. The #4506 attach-zone waiver is re-applied per call
+  on a copy, never baked into a cached entry, and a result that would alias a
+  cache entry is copied before it is returned, so no caller can mutate cached
+  state. C++-backed routing is unaffected — the C++ kernels walk a bounded
+  annulus per query and never materialize a whole-grid bitmap, so there is
+  nothing to cache there.
+
+  **Invalidation** uses a new global monotonic counter,
+  `RoutingGrid.occupancy_generation` (public, with
+  `RoutingGrid.bump_occupancy_generation()` for code that writes the planes
+  directly): every write to `grid._blocked` / `grid._net` anywhere advances
+  it, and a cache entry is discarded when the counter, the grid object, or
+  the pairwise projection has changed since it was computed. This is the
+  deliberately conservative option — any write anywhere invalidates every
+  entry, mirroring the safety property the existing `_via_cache` already
+  relies on — because a stale mask means the search treats committed foreign
+  copper as absent, which is strictly worse than the recomputation the cache
+  removes. Completeness is enforced mechanically:
+  `tests/router/test_grid_occupancy_generation.py` AST-scans all of
+  `src/kicad_tools` for assignments into `_blocked`/`_net` (plus `np.copyto`
+  into them) and fails when any enclosing function does not bump. That scan
+  found two write sites outside `grid.py` that this change also fixes —
+  `Autorouter.route_all_negotiated`'s thread-safe grid rebuild and
+  `route_all_multi_resolution`'s trial-ordering rollback, both of which
+  replace the occupancy planes wholesale.
+
+  Measured on a 2-domain (150 V vs 0 V) 40×30 mm board at 0.1 mm with the
+  pure-Python fallback, 24 `_pairwise_expanded_blocked` calls (full-grid
+  dilation count is the deterministic figure; wall clock is the noisier
+  one): a burst of `route()` attempts with no intervening commit (retries,
+  `route_bidirectional`, negotiated iterations) goes **144 → 6 dilations,
+  1.8 s → 0.07 s (~25×)**; a mixed session committing copper every fourth
+  call goes **144 → 42 dilations, ~1.9 s → 0.7-1.5 s (1.4-2.9×)**. A session
+  that commits after *every* call sees no benefit (144 → 138) by design —
+  that is the known ceiling of a global counter, and the per-domain counters
+  that would lift it are deliberately left as a follow-up rather than shipped
+  with a silent-staleness risk.
+
 - **`kct route` now runs a topology-preserving collinear consolidation pass
   after the DRC nudge** (#4732, slice 2 — follows the slice-1
   `--report-stage-quality` instrumentation in #4746) — the post-route

@@ -39,7 +39,7 @@ from kicad_tools.router.pairwise_clearance import (
     route_pairwise_violation,
 )
 from kicad_tools.router.pathfinder import Router
-from kicad_tools.router.primitives import Pad
+from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
 # IEC 60664-1, PD2, material group IIIa @ 150 V -> 1.6 mm (same constant the
@@ -484,3 +484,184 @@ def test_cpp_backend_setter_forwards_name_map_to_fallback_router() -> None:
     backend._py_router = router
     CppPathfinder.set_net_name_to_id(backend, NET_NAMES)
     assert router._net_name_to_id == NET_NAMES
+
+
+# ---------------------------------------------------------------------------
+# Hot-loop bitmap cache (Issue #4794)
+# ---------------------------------------------------------------------------
+#
+# ``_pairwise_expanded_blocked`` used to pay a full-grid ``np.isin`` plus a
+# full-grid dilation *per non-dormant foreign domain, per route() call*, even
+# though nothing about the foreign copper had changed between calls.  The
+# masks are now memoized per ``(foreign_dom, pair_r)`` and stamped with
+# ``RoutingGrid.occupancy_generation``, which every write to
+# ``grid._blocked``/``grid._net`` advances.
+#
+# The tests below pin the three things that make that safe: the cache is a
+# real hit (no recompute), it is DROPPED the moment foreign copper is
+# committed through the production commit path, and its key separates net
+# classes whose resolved widths differ.
+
+
+class _DilationCounter:
+    """Wrap ``Router._dilate_zero_padded`` to count real recomputations."""
+
+    def __init__(self, router: Router) -> None:
+        self.calls = 0
+        self._inner = router._dilate_zero_padded
+        router._dilate_zero_padded = self._wrapped  # type: ignore[method-assign]
+
+    def _wrapped(self, mask: np.ndarray, radius: int) -> np.ndarray:
+        self.calls += 1
+        return self._inner(mask, radius)
+
+
+def _lv_trace(y: float = 5.0) -> Route:
+    """A committed LV trace far from the wall, at ``y`` on F.Cu."""
+    return Route(
+        net=LV_NET,
+        net_name="LV",
+        segments=[
+            Segment(
+                x1=3.0,
+                y1=y,
+                x2=7.0,
+                y2=y,
+                width=TRACE_WIDTH,
+                layer=Layer.F_CU,
+                net=LV_NET,
+                net_name="LV",
+            )
+        ],
+    )
+
+
+def test_bitmap_cache_serves_repeat_calls_without_recomputing() -> None:
+    router, _grid = _router_with_lv_wall()
+    radius = router._trace_half_width_cells
+    counter = _DilationCounter(router)
+
+    first = router._pairwise_expanded_blocked(HV_NET, radius)
+    assert first is not None
+    assert counter.calls == 1
+
+    second = router._pairwise_expanded_blocked(HV_NET, radius)
+    assert second is not None
+    assert counter.calls == 1, "second call recomputed instead of hitting the cache"
+    assert bool(np.array_equal(first, second))
+
+
+def test_bitmap_cache_is_invalidated_by_a_foreign_route_commit() -> None:
+    """Stale-mask regression guard -- the whole point of Issue #4794.
+
+    Commits go through ``grid.mark_route`` (what ``Autorouter._mark_route``
+    calls in production), NOT a hand-poked array write, so this test fails on
+    a cache with no invalidation and passes on the shipped one.
+    """
+    router, grid = _router_with_lv_wall()
+    radius = router._trace_half_width_cells
+    probe_x, probe_y = _grid_pos(grid, 5.0, 5.0)  # ~11 mm from the wall
+
+    before = router._pairwise_expanded_blocked(HV_NET, radius)
+    assert before is not None
+    assert bool(before[0, probe_y, probe_x]) is False
+
+    generation_before = grid.occupancy_generation
+    grid.mark_route(_lv_trace())
+    assert grid.occupancy_generation > generation_before
+
+    after = router._pairwise_expanded_blocked(HV_NET, radius)
+    assert after is not None
+    assert bool(after[0, probe_y, probe_x]) is True, "served a stale pairwise mask"
+    assert not bool(np.array_equal(before, after))
+
+
+def test_bitmap_cache_key_separates_two_classes_in_one_domain() -> None:
+    """HV (1.0 mm class) and HV_TAP (global 0.2 mm) share a domain, not a mask."""
+    gx, gy = _grid_pos(_router_with_lv_wall()[1], 15.0, _WIDE_TRACE_PROBE_Y)
+
+    router, _grid = _router_with_lv_wall(net_class_map=_wide_class())
+    wide = router._pairwise_expanded_blocked(HV_NET, 3)
+    narrow = router._pairwise_expanded_blocked(HV_TAP_NET, 3)
+    assert wide is not None and narrow is not None
+    assert bool(wide[0, gy, gx]) is True
+    assert bool(narrow[0, gy, gx]) is False
+
+    # Order must not matter: whichever class populates the cache first, the
+    # other still gets its own radius.
+    reversed_router, _g = _router_with_lv_wall(net_class_map=_wide_class())
+    narrow_first = reversed_router._pairwise_expanded_blocked(HV_TAP_NET, 3)
+    wide_second = reversed_router._pairwise_expanded_blocked(HV_NET, 3)
+    assert narrow_first is not None and wide_second is not None
+    assert bool(np.array_equal(narrow, narrow_first))
+    assert bool(np.array_equal(wide, wide_second))
+
+
+def test_bitmap_cache_matches_a_forced_recompute_across_a_full_sequence() -> None:
+    """Parity over hit / class-miss / invalidation, cached vs uncached."""
+    cached_router, cached_grid = _router_with_lv_wall(net_class_map=_wide_class())
+    plain_router, plain_grid = _router_with_lv_wall(net_class_map=_wide_class())
+    # Force every call on ``plain_router`` to recompute from the live grid.
+    plain_router._pairwise_mask_cache = lambda state: None  # type: ignore[assignment,method-assign]
+
+    def _compare(net: int, radius: int) -> None:
+        cached = cached_router._pairwise_expanded_blocked(net, radius)
+        plain = plain_router._pairwise_expanded_blocked(net, radius)
+        assert cached is not None and plain is not None
+        assert bool(np.array_equal(cached, plain))
+
+    _compare(HV_NET, 3)  # cold
+    _compare(HV_NET, 3)  # cache hit
+    _compare(HV_TAP_NET, 3)  # miss: different resolved class width
+    _compare(HV_NET, 4)  # miss: different scalar radius
+    for grid in (cached_grid, plain_grid):
+        grid.mark_route(_lv_trace())
+    _compare(HV_NET, 3)  # invalidated by the commit above
+    _compare(HV_TAP_NET, 3)
+
+
+def test_bitmap_cache_is_untouched_on_the_dormant_paths() -> None:
+    """``pairwise_clearance is None`` (and friends) add zero bookkeeping."""
+    no_table, _grid = _router_with_lv_wall(with_table=False)
+    assert no_table._pairwise_expanded_blocked(HV_NET, no_table._trace_half_width_cells) is None
+    assert no_table._pairwise_extra_cache == {}
+    assert no_table._pairwise_extra_cache_stamp is None
+
+    domainless, _g2 = _router_with_lv_wall(name_map={"HV": HV_NET, "LV": LV_NET, "OTHER": 7})
+    assert domainless._pairwise_expanded_blocked(7, domainless._trace_half_width_cells) is None
+    assert domainless._pairwise_extra_cache == {}
+    assert domainless._pairwise_extra_cache_stamp is None
+
+
+def test_bitmap_result_is_never_a_live_cache_entry() -> None:
+    """A caller mutating the returned bitmap must not poison the cache."""
+    router, _grid = _router_with_lv_wall()
+    radius = router._trace_half_width_cells
+    first = router._pairwise_expanded_blocked(HV_NET, radius)
+    assert first is not None
+    first[:] = True
+
+    second = router._pairwise_expanded_blocked(HV_NET, radius)
+    assert second is not None
+    assert not bool(np.all(second))
+
+
+def test_bitmap_cache_does_not_bake_in_the_attach_zone_waiver() -> None:
+    """The zone waiver is per-net; the cached base mask is not.
+
+    HV and HV_TAP share a domain AND (no class map) a resolved width, so they
+    share a cache entry -- but only HV is named in the zone, so only HV may
+    see the widening waived.
+    """
+    router, grid = _router_with_lv_wall()
+    router.set_attach_zones((_zone(),))  # licenses HV <-> LV only
+    radius = router._trace_half_width_cells
+    gx, gy = _grid_pos(grid, 15.0, 9.0)
+
+    waived = router._pairwise_expanded_blocked(HV_NET, radius)
+    assert waived is not None
+    assert bool(waived[0, gy, gx]) is False
+
+    unwaived = router._pairwise_expanded_blocked(HV_TAP_NET, radius)
+    assert unwaived is not None
+    assert bool(unwaived[0, gy, gx]) is True

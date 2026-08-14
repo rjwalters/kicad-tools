@@ -95,6 +95,16 @@ class _PairwiseSearchState:
     id_to_name: dict[int, str]
 
 
+# Issue #4794: hard cap on ``Router._pairwise_extra_cache`` entries.  Each
+# entry is a full-grid bool bitmap, so an unbounded cache would trade a CPU
+# problem for a memory one.  The natural population is
+# ``non-dormant foreign domains x distinct pair radii`` -- single digits on
+# every board in the fleet -- so the cap only ever bites on a pathological
+# table, where it degrades to the pre-#4794 recompute-every-call behaviour
+# rather than growing without bound.
+_PAIRWISE_MASK_CACHE_MAX = 64
+
+
 @dataclass(frozen=True)
 class _SegmentAdapter:
     """Adapter exposing :class:`Segment` with the ``start_x/start_y/end_x/end_y``
@@ -444,6 +454,21 @@ class Router:
         # invalidated by ``set_net_name_to_id`` (the projection is keyed by
         # net id).
         self._pairwise_search_cache: tuple[object, _PairwiseSearchState | None] | None = None
+
+        # Issue #4794: dilated foreign-domain bitmaps for
+        # ``_pairwise_expanded_blocked``, keyed by ``(foreign_dom, pair_r)``
+        # -- everything else that shapes a per-domain mask is either in that
+        # key (the routed net's class width folds into ``pair_r``) or in the
+        # validity stamp below.  ``None`` values memoize "this domain has no
+        # copper on the grid right now", which is just as cache-worthy as a
+        # mask.  The stamp is ``(grid, state, occupancy_generation)``: the
+        # entries are discarded wholesale when the grid object changes, when
+        # the pairwise projection is rebuilt, or when ANY write to
+        # ``grid._blocked`` / ``grid._net`` advances the generation counter.
+        # Strong references (``is`` comparison, not ``id()``) so a recycled
+        # address can never impersonate a live object.
+        self._pairwise_extra_cache: dict[tuple[int, int], np.ndarray | None] = {}
+        self._pairwise_extra_cache_stamp: tuple[object, object, int] | None = None
 
         # Issue #2929: Per-A*-call wall-clock instrumentation.  When
         # ``_per_call_timing_enabled`` is True, every ``route()`` invocation
@@ -2164,6 +2189,22 @@ class Router:
         more permissive than the per-cell kernel, the post-route
         ``route_pairwise_violation`` gate stays authoritative.
 
+        Issue #4794 (caching): the per-foreign-domain dilated masks are the
+        expensive part (a full-grid ``np.isin`` plus a full-grid dilation per
+        non-dormant domain, every ``route()`` call) and they depend on only
+        three things -- the foreign domain's net-id set, the pair radius, and
+        the current grid occupancy.  They are therefore memoized in
+        ``_pairwise_extra_cache`` keyed by ``(foreign_dom, pair_r)`` and
+        stamped with ``(grid, state, grid.occupancy_generation)``; ANY write
+        to ``grid._blocked``/``grid._net`` advances that counter and discards
+        the whole cache (see ``RoutingGrid.occupancy_generation``).  The
+        routed net's own class width does not need its own key component
+        because it is already folded into ``pair_r``: two classes that widen
+        to the same cell radius produce byte-identical masks, two that do not
+        land on different keys.  The #4506 attach-zone clearing is applied
+        per-call on a COPY, never baked into (or mutated into) a cached
+        entry, so a board with zones still gets a per-net-correct waiver.
+
         Returns ``None`` when dormant (no table, no projection, or ``net``
         participates in no widening pair) -- the caller then uses the scalar
         bitmap unchanged, byte-identical to pre-#4507 behaviour.
@@ -2193,7 +2234,12 @@ class Router:
             if domain >= 0:
                 net_ids_by_domain.setdefault(domain, []).append(net_id)
 
+        cache = self._pairwise_mask_cache(state)
         extra: np.ndarray | None = None
+        # True while ``extra`` still ALIASES a cache entry -- such a result is
+        # copied before it leaves this method so no caller can mutate a
+        # cached mask in place.
+        extra_aliases_cache = False
         for foreign_dom, required in enumerate(state.matrix[dom]):
             if foreign_dom == dom or required <= 0.0:
                 continue
@@ -2203,10 +2249,27 @@ class Router:
             foreign_ids = net_ids_by_domain.get(foreign_dom)
             if not foreign_ids:
                 continue
-            foreign_mask = self.grid._blocked & np.isin(self.grid._net, foreign_ids)
-            if not bool(np.any(foreign_mask)):
+            cache_key = (foreign_dom, pair_r)
+            pair_base: np.ndarray | None
+            if cache is not None and cache_key in cache:
+                pair_base = cache[cache_key]
+            else:
+                foreign_mask = self.grid._blocked & np.isin(self.grid._net, foreign_ids)
+                # ``None`` memoizes "this domain has no copper on the grid at
+                # this generation" -- as reusable as a mask, and it is the
+                # common case early in a routing session.
+                pair_base = (
+                    self._dilate_zero_padded(foreign_mask, pair_r)
+                    if bool(np.any(foreign_mask))
+                    else None
+                )
+                if cache is not None and len(cache) < _PAIRWISE_MASK_CACHE_MAX:
+                    cache[cache_key] = pair_base
+            if pair_base is None:
                 continue
-            pair_extra = self._dilate_zero_padded(foreign_mask, pair_r)
+            # The cached entry is the PRE-waiver base; the attach-zone
+            # clearing below is per-net, so it must land on a copy.
+            pair_extra = pair_base.copy() if self._attach_zones else pair_base
             if self._attach_zones:
                 foreign_keys = {
                     _norm_net_key(state.id_to_name.get(net_id, "")) for net_id in foreign_ids
@@ -2237,8 +2300,38 @@ class Router:
                         if not any(zone.covers_layer(key, layer_obj) for key in member_keys):
                             continue
                         pair_extra[layer_idx, gy1 : gy2 + 1, gx1 : gx2 + 1] = False
-            extra = pair_extra if extra is None else (extra | pair_extra)
+            if extra is None:
+                extra = pair_extra
+                extra_aliases_cache = pair_extra is pair_base and cache is not None
+            else:
+                extra = extra | pair_extra  # fresh array; no longer an alias
+                extra_aliases_cache = False
+        if extra is not None and extra_aliases_cache:
+            return np.array(extra, copy=True)
         return extra
+
+    def _pairwise_mask_cache(
+        self, state: _PairwiseSearchState
+    ) -> dict[tuple[int, int], np.ndarray | None] | None:
+        """Return the live ``(foreign_dom, pair_r)`` mask cache, or ``None``.
+
+        Issue #4794.  The cache is valid only for one
+        ``(grid, pairwise projection, occupancy generation)`` triple; any
+        change to any of the three drops every entry.  Returns ``None`` --
+        caching disabled, always recompute -- when the grid does not expose
+        an ``occupancy_generation`` counter (a stand-in / stub grid in a
+        test), so an object that cannot report mutation can never serve a
+        stale mask.
+        """
+        grid = self.grid
+        generation = getattr(grid, "occupancy_generation", None)
+        if not isinstance(generation, int):
+            return None
+        stamp = self._pairwise_extra_cache_stamp
+        if stamp is None or stamp[0] is not grid or stamp[1] is not state or stamp[2] != generation:
+            self._pairwise_extra_cache = {}
+            self._pairwise_extra_cache_stamp = (grid, state, generation)
+        return self._pairwise_extra_cache
 
     def _dilate_zero_padded(self, mask: np.ndarray, radius: int) -> np.ndarray:
         """Euclidean-disc dilation of ``mask`` treating out-of-bounds as EMPTY.
