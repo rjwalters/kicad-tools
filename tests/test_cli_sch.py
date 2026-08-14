@@ -3671,3 +3671,156 @@ class TestSchValidateMissingProjectInstances:
             f"validate reported {validator_count} errors but "
             f"repair-instances dry-run reported {repair_count}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Netlist byproduct location (#4795)
+# ---------------------------------------------------------------------------
+
+# Minimal kicad-cli-shaped netlist matching TestConnectionsSubGridTolerance._SCH_EXACT
+# (a single resistor R1 with both pins wired).
+_FAKE_EXPORTED_NETLIST = """(export (version "E")
+  (design (source "exact.kicad_sch") (tool "Eeschema"))
+  (components
+    (comp (ref "R1") (value "10k")))
+  (nets
+    (net (code "1") (name "/N1")
+      (node (ref "R1") (pin "1")))
+    (net (code "2") (name "/N2")
+      (node (ref "R1") (pin "2")))))
+"""
+
+
+class TestNetlistByproductLocation:
+    """``sch unconnected``'s netlist cross-check must not litter the project dir (#4795).
+
+    ``export_netlist`` defaults ``output_path`` to
+    ``<schematic dir>/<stem>-netlist.kicad_net`` and never deletes it, so
+    the bare call in ``_cross_check_netlist`` dropped an unrequested netlist
+    file beside the user's schematic on every ``kct sch unconnected`` run.
+    The export here is purely a diagnostic byproduct -- the user asked for
+    a report, not a netlist file.
+    """
+
+    @pytest.fixture
+    def schematic(self, tmp_path: Path) -> Path:
+        """A schematic in its own 'project' directory."""
+        proj = tmp_path / "project"
+        proj.mkdir()
+        sch = proj / "exact.kicad_sch"
+        sch.write_text(TestConnectionsSubGridTolerance._SCH_EXACT)
+        return sch
+
+    @pytest.fixture
+    def fake_kicad_cli(self, monkeypatch) -> list[Path]:
+        """Force the kicad-cli export path with a stubbed subprocess.
+
+        The stub writes a real netlist file to whatever ``--output`` path it
+        is handed, exactly like kicad-cli does -- so the byproduct lands
+        wherever ``export_netlist`` decided it should, which is the behavior
+        under test.  Returns the list of captured output paths.
+        """
+        import subprocess as _subprocess
+
+        captured_outputs: list[Path] = []
+
+        monkeypatch.setattr(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            lambda: Path("/fake/kicad-cli"),
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            out = Path(cmd[cmd.index("--output") + 1])
+            captured_outputs.append(out)
+            out.write_text(_FAKE_EXPORTED_NETLIST)
+            return _subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("kicad_tools.operations.netlist.subprocess.run", fake_run)
+        return captured_outputs
+
+    def test_kicad_cli_path_is_actually_exercised(self, schematic, fake_kicad_cli, capsys):
+        """Guard: the stub really runs, so the assertions below mean something."""
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        main([str(schematic), "--format", "json"])
+
+        assert fake_kicad_cli, "kicad-cli export path was never taken"
+
+    def test_no_byproduct_beside_schematic(self, schematic, fake_kicad_cli, capsys):
+        """No ``*-netlist.kicad_net`` is left in the schematic's directory."""
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        before = {p.name for p in schematic.parent.iterdir()}
+
+        main([str(schematic), "--format", "json"])
+
+        assert fake_kicad_cli, "kicad-cli export path was never taken"
+        stray = sorted(p.name for p in schematic.parent.glob("*-netlist.kicad_net"))
+        assert not stray, f"cross-check left byproducts beside the schematic: {stray}"
+        assert {p.name for p in schematic.parent.iterdir()} == before
+
+    def test_temp_export_is_cleaned_up(self, schematic, fake_kicad_cli, capsys):
+        """The temp directory is torn down before the cross-check returns."""
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        main([str(schematic), "--format", "json"])
+
+        assert fake_kicad_cli
+        for out in fake_kicad_cli:
+            assert out.parent != schematic.parent, f"export wrote into the project dir: {out}"
+            assert not out.exists(), f"temp netlist survived the cross-check: {out}"
+            assert not out.parent.exists(), f"temp dir survived the cross-check: {out.parent}"
+
+    def test_cross_check_still_consumes_the_netlist(self, schematic, fake_kicad_cli, capsys):
+        """The parsed netlist still drives the cross-check (no false findings)."""
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        main([str(schematic), "--format", "json"])
+        data = json.loads(capsys.readouterr().out)
+
+        # Both R1 pins are in the fake netlist -> no missing-from-netlist findings.
+        assert data["summary"]["missing_from_netlist_count"] == 0
+
+    def test_fallback_false_is_preserved(self, schematic, monkeypatch, capsys):
+        """The cross-check must keep asking for kicad-cli output only.
+
+        ``fallback=False`` is load-bearing: the Python fallback walks the
+        hierarchy correctly and would hide exactly the bug this cross-check
+        exists to catch.  Routing the byproduct to a temp dir must not drop it.
+        """
+        import kicad_tools.operations.netlist as netlist_mod
+        from kicad_tools.operations.netlist import Netlist
+
+        seen: list[dict] = []
+
+        def _spy(sch_path, *args, **kwargs):
+            seen.append(kwargs)
+            return Netlist()
+
+        monkeypatch.setattr(netlist_mod, "export_netlist", _spy)
+
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        main([str(schematic), "--format", "json"])
+
+        assert seen, "export_netlist was never called"
+        assert seen[0].get("fallback") is False, "fallback=False was dropped"
+        assert "output_path" in seen[0], "byproduct was not routed to an explicit path"
+
+    def test_export_errors_still_skip_gracefully(self, schematic, monkeypatch, capsys):
+        """kicad-cli failures inside the temp-dir block keep their messages."""
+        import kicad_tools.operations.netlist as netlist_mod
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("kicad-cli failed: synthetic")
+
+        monkeypatch.setattr(netlist_mod, "export_netlist", _boom)
+
+        from kicad_tools.cli.sch_find_unconnected import main
+
+        main([str(schematic), "--format", "json"])
+        out = capsys.readouterr()
+
+        data = json.loads(out.out)
+        assert data["summary"]["missing_from_netlist_count"] == 0
+        assert "skipped" in out.err.lower()

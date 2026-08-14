@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 from kicad_tools.operations.netlist import (
@@ -25,6 +26,34 @@ from kicad_tools.operations.netlist import (
     NetlistNet,
     export_netlist,
 )
+
+
+def _export_netlist_to_temp(schematic_path: Path, prefix: str) -> Netlist:
+    """Export a netlist without leaving a byproduct beside the schematic.
+
+    ``export_netlist`` defaults ``output_path`` to
+    ``<schematic dir>/<stem>-netlist.kicad_net`` and never deletes it, so a
+    bare call drops an unrequested netlist file into the user's project
+    directory (#4750, #4763, #4795).  Every ``kct netlist`` subcommand except
+    ``export`` only needs the parsed :class:`Netlist` object, so the exported
+    file is routed into a temp directory that is torn down immediately.
+
+    ``kct netlist export`` deliberately does *not* use this helper -- there
+    the netlist file *is* the requested product.
+
+    Args:
+        schematic_path: Path to the .kicad_sch file to export.
+        prefix: Temp-directory prefix identifying the calling subcommand.
+
+    Returns:
+        Parsed Netlist object.
+    """
+    sch = Path(schematic_path)
+    with tempfile.TemporaryDirectory(prefix=prefix) as tmpdir:
+        return export_netlist(
+            schematic_path,
+            output_path=Path(tmpdir) / f"{sch.stem}-netlist.kicad_net",
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -126,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def cmd_analyze(schematic_path: Path, format: str) -> int:
     """Show connectivity statistics."""
-    netlist = export_netlist(schematic_path)
+    netlist = _export_netlist_to_temp(schematic_path, "kct-netlist-analyze-")
     stats = netlist.summary()
 
     # Additional analysis
@@ -177,7 +206,7 @@ def print_analyze_text(stats: dict, netlist: Netlist) -> None:
 
 def cmd_list(schematic_path: Path, format: str, sort: str) -> int:
     """List all nets with connection counts."""
-    netlist = export_netlist(schematic_path)
+    netlist = _export_netlist_to_temp(schematic_path, "kct-netlist-list-")
 
     if sort == "connections":
         sorted_nets = sorted(netlist.nets, key=lambda n: -n.connection_count)
@@ -238,7 +267,7 @@ def print_list_table(nets: list[NetlistNet], netlist: Netlist) -> None:
 
 def cmd_show(schematic_path: Path, net_name: str, format: str) -> int:
     """Show specific net details."""
-    netlist = export_netlist(schematic_path)
+    netlist = _export_netlist_to_temp(schematic_path, "kct-netlist-show-")
     net = netlist.get_net(net_name)
 
     if not net:
@@ -309,7 +338,7 @@ def print_show_text(net: NetlistNet, netlist: Netlist) -> None:
 
 def cmd_check(schematic_path: Path, format: str) -> int:
     """Find connectivity issues."""
-    netlist = export_netlist(schematic_path)
+    netlist = _export_netlist_to_temp(schematic_path, "kct-netlist-check-")
 
     # Find issues
     single_pin_nets = find_single_pin_nets(netlist)
@@ -376,8 +405,8 @@ def print_check_text(result: dict, power_nets: list[NetlistNet]) -> None:
 
 def cmd_compare(old_path: Path, new_path: Path, format: str) -> int:
     """Compare two netlists."""
-    old_netlist = export_netlist(old_path)
-    new_netlist = export_netlist(new_path)
+    old_netlist = _export_netlist_to_temp(old_path, "kct-netlist-compare-old-")
+    new_netlist = _export_netlist_to_temp(new_path, "kct-netlist-compare-new-")
 
     # Compare components
     old_refs = {c.reference for c in old_netlist.components}

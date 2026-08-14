@@ -1165,8 +1165,14 @@ class TestReconcilerApplyIntegration:
         assert len(changes) == 1
         assert changes[0].applied is True
         # Verify export_netlist was called (for smart placement and net assignment)
-        mock_export.assert_called_with(sch_path)
         assert mock_export.call_count >= 1
+        # The schematic is still the first positional argument, but the
+        # kicad-cli byproduct is now routed into a temp dir (#4795) rather
+        # than landing beside the user's schematic.
+        call_args, call_kwargs = mock_export.call_args
+        assert call_args[0] == sch_path
+        byproduct = Path(call_kwargs["output_path"])
+        assert byproduct.parent != Path(sch_path).parent
         mock_pcb.assign_nets_from_netlist.assert_called_once_with(mock_netlist)
 
         Path(sch_path).unlink()
@@ -2787,3 +2793,181 @@ class TestComputePlacementStart:
         assert x == pytest.approx(10.0)
         assert y == pytest.approx(10.0)
         assert col == 0
+
+
+# ---------------------------------------------------------------------------
+# Netlist byproduct location (#4795)
+# ---------------------------------------------------------------------------
+
+_MINIMAL_SCHEMATIC = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402" (at 100 100 0) (effects (hide yes)))
+  )
+  (symbol
+    (lib_id "Device:C")
+    (at 120 100 0)
+    (uuid "00000000-0000-0000-0000-000000000003")
+    (property "Reference" "C1" (at 120 97 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "100n" (at 120 103 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Capacitor_SMD:C_0402" (at 120 100 0) (effects (hide yes)))
+  )
+)
+"""
+
+# Minimal kicad-cli-shaped netlist matching _MINIMAL_SCHEMATIC (R1 + C1).
+_FAKE_EXPORTED_NETLIST = """(export (version "E")
+  (design (source "design.kicad_sch") (tool "Eeschema"))
+  (components
+    (comp (ref "R1") (value "10k") (footprint "Resistor_SMD:R_0402"))
+    (comp (ref "C1") (value "100n") (footprint "Capacitor_SMD:C_0402")))
+  (nets
+    (net (code "1") (name "/N1")
+      (node (ref "R1") (pin "1"))
+      (node (ref "C1") (pin "1")))))
+"""
+
+
+class TestNetlistByproductLocation:
+    """``Reconciler`` must not litter the user's project dir (#4795).
+
+    ``export_netlist`` defaults ``output_path`` to
+    ``<schematic dir>/<stem>-netlist.kicad_net`` and never deletes it, so
+    the bare calls in ``_build_net_adjacency`` and ``_assign_nets`` dropped
+    an unrequested netlist file beside the user's schematic on every sync.
+    Both sites consume the parsed ``Netlist`` object only, never the file.
+    """
+
+    @pytest.fixture
+    def schematic(self, tmp_path: Path) -> Path:
+        """A schematic in its own 'project' directory."""
+        proj = tmp_path / "project"
+        proj.mkdir()
+        sch = proj / "design.kicad_sch"
+        sch.write_text(_MINIMAL_SCHEMATIC)
+        return sch
+
+    @pytest.fixture
+    def fake_kicad_cli(self, monkeypatch) -> list[Path]:
+        """Force the kicad-cli export path with a stubbed subprocess.
+
+        The stub writes a real netlist file to whatever ``--output`` path it
+        is handed, exactly like kicad-cli does -- so the byproduct lands
+        wherever ``export_netlist`` decided it should, which is the behavior
+        under test.  Returns the list of captured output paths.
+        """
+        import subprocess as _subprocess
+
+        captured_outputs: list[Path] = []
+
+        monkeypatch.setattr(
+            "kicad_tools.operations.netlist.find_kicad_cli",
+            lambda: Path("/fake/kicad-cli"),
+        )
+
+        def fake_run(cmd, *args, **kwargs):
+            out = Path(cmd[cmd.index("--output") + 1])
+            captured_outputs.append(out)
+            out.write_text(_FAKE_EXPORTED_NETLIST)
+            return _subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr("kicad_tools.operations.netlist.subprocess.run", fake_run)
+        return captured_outputs
+
+    def _make_reconciler(self, schematic: Path) -> Reconciler:
+        """Create a Reconciler bound to ``schematic`` without file validation."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = schematic
+        reconciler._pcb_path = schematic.with_suffix(".kicad_pcb")
+        return reconciler
+
+    def test_build_net_adjacency_leaves_no_byproduct(self, schematic, fake_kicad_cli):
+        """``_build_net_adjacency`` must not write beside the schematic."""
+        reconciler = self._make_reconciler(schematic)
+        before = {p.name for p in schematic.parent.iterdir()}
+
+        adjacency = reconciler._build_net_adjacency({"C1"})
+
+        assert fake_kicad_cli, "kicad-cli export path was never taken"
+        # The netlist was really consumed: C1 is new, R1 is placed.
+        assert adjacency == {"C1": {"R1"}}
+        stray = sorted(p.name for p in schematic.parent.glob("*-netlist.kicad_net"))
+        assert not stray, f"adjacency build left byproducts beside the schematic: {stray}"
+        assert {p.name for p in schematic.parent.iterdir()} == before
+
+    def test_build_net_adjacency_temp_export_is_cleaned_up(self, schematic, fake_kicad_cli):
+        """The temp directory is torn down before ``_build_net_adjacency`` returns."""
+        reconciler = self._make_reconciler(schematic)
+
+        reconciler._build_net_adjacency({"C1"})
+
+        assert fake_kicad_cli
+        for out in fake_kicad_cli:
+            assert out.parent != schematic.parent, f"export wrote into the project dir: {out}"
+            assert not out.exists(), f"temp netlist survived the call: {out}"
+            assert not out.parent.exists(), f"temp dir survived the call: {out.parent}"
+
+    def test_build_net_adjacency_still_swallows_failures(self, schematic, monkeypatch):
+        """Export failures still degrade to an empty adjacency map, not a raise."""
+        import kicad_tools.operations.netlist as netlist_mod
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("kicad-cli failed: synthetic")
+
+        monkeypatch.setattr(netlist_mod, "export_netlist", _boom)
+
+        reconciler = self._make_reconciler(schematic)
+        assert reconciler._build_net_adjacency({"C1"}) == {}
+
+    def test_assign_nets_leaves_no_byproduct(self, schematic, fake_kicad_cli):
+        """``_assign_nets`` must not write beside the schematic."""
+        reconciler = self._make_reconciler(schematic)
+        pcb = MagicMock()
+        before = {p.name for p in schematic.parent.iterdir()}
+
+        reconciler._assign_nets(pcb)
+
+        assert fake_kicad_cli, "kicad-cli export path was never taken"
+        # The netlist was really consumed (best-effort path swallows errors,
+        # so this assertion is what proves the call actually succeeded).
+        pcb.add_net.assert_called_once_with("/N1")
+        pcb.assign_nets_from_netlist.assert_called_once()
+        stray = sorted(p.name for p in schematic.parent.glob("*-netlist.kicad_net"))
+        assert not stray, f"net assignment left byproducts beside the schematic: {stray}"
+        assert {p.name for p in schematic.parent.iterdir()} == before
+
+    def test_assign_nets_temp_export_is_cleaned_up(self, schematic, fake_kicad_cli):
+        """The temp directory is torn down before ``_assign_nets`` returns."""
+        reconciler = self._make_reconciler(schematic)
+
+        reconciler._assign_nets(MagicMock())
+
+        assert fake_kicad_cli
+        for out in fake_kicad_cli:
+            assert out.parent != schematic.parent, f"export wrote into the project dir: {out}"
+            assert not out.exists(), f"temp netlist survived the call: {out}"
+            assert not out.parent.exists(), f"temp dir survived the call: {out.parent}"
+
+    def test_assign_nets_still_swallows_failures(self, schematic, monkeypatch):
+        """Net assignment stays best-effort when the export fails."""
+        import kicad_tools.operations.netlist as netlist_mod
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("kicad-cli failed: synthetic")
+
+        monkeypatch.setattr(netlist_mod, "export_netlist", _boom)
+
+        reconciler = self._make_reconciler(schematic)
+        pcb = MagicMock()
+
+        reconciler._assign_nets(pcb)  # must not raise
+
+        pcb.assign_nets_from_netlist.assert_not_called()

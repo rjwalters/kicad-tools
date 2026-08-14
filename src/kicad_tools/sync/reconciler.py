@@ -24,6 +24,7 @@ import json
 import math
 import re
 import shutil
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -812,7 +813,24 @@ class Reconciler:
         try:
             from kicad_tools.operations.netlist import export_netlist
 
-            netlist = export_netlist(str(self._schematic_path))
+            # Route the kicad-cli byproduct into a temp directory.
+            #
+            # ``export_netlist`` defaults ``output_path`` to
+            # ``<schematic dir>/<stem>-netlist.kicad_net`` and never deletes
+            # it, so a bare call would drop an unrequested netlist file
+            # beside the user's schematic (#4750, #4763, #4795).  The parsed
+            # ``Netlist`` is returned in memory and the adjacency map below
+            # never re-reads the file, so the temp dir can be torn down
+            # immediately.
+            # ``str()`` first: ``_schematic_path`` is ``Path | None`` and a
+            # ``None`` path must keep degrading through the ``except`` below
+            # (as it did before this call site grew an explicit output path).
+            sch = Path(str(self._schematic_path))
+            with tempfile.TemporaryDirectory(prefix="kct-sync-adjacency-netlist-") as tmpdir:
+                netlist = export_netlist(
+                    str(sch),
+                    output_path=Path(tmpdir) / f"{sch.stem}-netlist.kicad_net",
+                )
         except Exception:
             return {}
 
@@ -1165,7 +1183,19 @@ class Reconciler:
         try:
             from kicad_tools.operations.netlist import export_netlist
 
-            netlist = export_netlist(str(self._schematic_path))
+            # Route the kicad-cli byproduct into a temp directory -- a bare
+            # call would leave ``<stem>-netlist.kicad_net`` beside the user's
+            # schematic on every sync (#4750, #4763, #4795).  The netlist is
+            # consumed as an in-memory object below, never re-read from disk.
+            # ``str()`` first: ``_schematic_path`` is ``Path | None`` and a
+            # ``None`` path must keep degrading through the ``except`` below
+            # (as it did before this call site grew an explicit output path).
+            sch = Path(str(self._schematic_path))
+            with tempfile.TemporaryDirectory(prefix="kct-sync-assign-netlist-") as tmpdir:
+                netlist = export_netlist(
+                    str(sch),
+                    output_path=Path(tmpdir) / f"{sch.stem}-netlist.kicad_net",
+                )
 
             # Add all nets from the netlist to the PCB
             for net in netlist.nets:

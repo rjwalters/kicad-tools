@@ -648,6 +648,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`kct netlist`, `kct sch unconnected` and `kct sync` no longer leave a
+  netlist file beside the user's schematic** (#4795, third installment after
+  #4750 and #4763) — `export_netlist()` defaults `output_path` to
+  `<schematic dir>/<stem>-netlist.kicad_net` and never deletes it, so every
+  *byproduct* call site silently dropped an unrequested `*-netlist.kicad_net`
+  into the user's project directory. The nine remaining bare calls now route
+  that byproduct through a `tempfile.TemporaryDirectory()` that is torn down
+  before the caller returns: `Reconciler._build_net_adjacency` and
+  `Reconciler._assign_nets` (both consume the parsed `Netlist` in memory only),
+  `sch_find_unconnected`'s netlist cross-check (which keeps its load-bearing
+  `fallback=False` — the Python fallback would hide the very bug that check
+  exists to catch), and the `analyze` / `list` / `show` / `check` / `compare`
+  subcommands of `kct netlist` (`compare` exports *two* schematics, so neither
+  the old nor the new project directory gains a file). `kct netlist export` is
+  deliberately unchanged: there the netlist file **is** the product the user
+  asked for. Exception semantics at every site are preserved (the reconciler's
+  best-effort swallowing, the cross-check's three specific `except` messages).
+  Per-file `TestNetlistByproductLocation` regression classes in
+  `tests/test_sync.py`, `tests/test_cli_sch.py` and `tests/test_cli_netlist.py`
+  stub `kicad-cli` and assert the schematic's directory listing is byte-for-byte
+  unchanged across each call — plus a guard that `kct netlist export` still
+  writes its file at both the default and `-o` locations.
+
 - **`CLAUDE.md`'s `## Releasing` section no longer ends mid-sentence** (#4797) —
   the dangling "(the tag must point at a commit that" clause is completed with
   the reason `RELEASING.md` gives: the tag must reference the commit as it
