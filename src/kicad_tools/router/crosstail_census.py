@@ -377,6 +377,20 @@ def write_report(
     return target
 
 
+def _existing_report_has_records(target: Path) -> bool:
+    """Does *target* already hold a report that measured something?
+
+    Used by :func:`flush_report` for the no-clobber rule below.  Any read or
+    parse problem answers ``False`` -- an unreadable or foreign file is not a
+    measurement worth protecting.
+    """
+    try:
+        payload = json.loads(target.read_text())
+        return int(payload["summary"]["crossovers_scanned"]) > 0
+    except Exception:
+        return False
+
+
 def flush_report(
     collector: CrossingTailCensusCollector | None = None,
     *,
@@ -384,6 +398,14 @@ def flush_report(
     stream: Any = None,
 ) -> Path | None:
     """Write the report iff :data:`REPORT_ENV_VAR` names a path.
+
+    **An empty report never clobbers a non-empty one.**  Board scripts shell
+    out (``kicad-cli``, helper ``python`` invocations), and every child
+    inherits the environment -- so each child would otherwise flush its own
+    "0 crossovers scanned" document over the parent's real measurement,
+    silently, since the child's stderr is usually captured.  A flush with no
+    records therefore stands down when the target already holds a report that
+    measured something.  A run that DID measure always writes.
 
     Never raises: a diagnostic that can abort a 25-minute route because its
     output directory is read-only would be worse than no diagnostic (the
@@ -397,6 +419,13 @@ def flush_report(
         return None
     sink = collector or CENSUS_COLLECTOR
     out = stream if stream is not None else sys.stderr
+    if not sink.records and target.exists() and _existing_report_has_records(target):
+        print(
+            f"[crosstail-census] report at {target} kept: this process scanned "
+            f"0 crossover(s) and will not overwrite a report that has records",
+            file=out,
+        )
+        return None
     try:
         written = write_report(target, sink)
     except Exception as exc:  # pragma: no cover - defensive, see docstring

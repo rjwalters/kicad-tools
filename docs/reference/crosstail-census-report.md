@@ -46,17 +46,28 @@ KCT_BOARD06_SHADOW=1 PYTHONHASHSEED=42 \
 * `KCT_CROSSTAIL_CENSUS_REPORT=<path>` — writes the JSON document to `<path>`
   at interpreter exit (parent directories are created). Unset ⇒ no file.
 
+Board scripts shell out (`kicad-cli`, helper `python` runs) and every child
+process inherits the environment, so each child reaches the same exit hook with
+nothing measured. **An empty flush never overwrites a report that has
+records** — the child stands down and says so on stderr, leaving the parent's
+measurement intact. A run that measured something always writes.
+
 The human-readable summary is printed at the end of the diff-pair phase
-whenever the census is on, with or without the report path:
+whenever the census is on, with or without the report path. Verbatim from
+board-06 at seed 42 (2026-08-14, shadow-ON):
 
 ```
 [crosstail-census-summary] 166 crossover(s) scanned, verdict=saturated
 [crosstail-census-summary]   saturated (legal=0): 150/166 (90.4%)
-[crosstail-census-summary]   no ordering lever (legal>0, distinct_v1<=1): 12/16 (75.0%)
-[crosstail-census-summary]   inert (no ordering key could change the outcome): 97.6%
-[crosstail-census-summary]   distinct_v1 max=4 credited census_s total=1.2800
-[crosstail-census-summary]   advisory: inert >= 90.0% -- ordering levers are inert; …
+[crosstail-census-summary]   no ordering lever (legal>0, distinct_v1<=1): 7/16 (43.8% of unsaturated)
+[crosstail-census-summary]   inert (no ordering key could change the outcome): 94.6%
+[crosstail-census-summary]   distinct_v1 max=6 credited census_s total=1.2800
+[crosstail-census-summary]   advisory: inert >= 90.0% -- ordering levers are inert; the constraint is upstream in placement / escape planning (non-blocking)
 ```
+
+Both headline figures match what `boards/06-diffpair-test/README.md` already
+documented from the free-text census (150/166 saturated, 1.28 s credited) —
+reproduced through the report path rather than re-derived by inspection.
 
 ### Why an environment variable, not `kct route --census-report`
 

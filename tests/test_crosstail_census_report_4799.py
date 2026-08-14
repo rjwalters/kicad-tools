@@ -365,6 +365,44 @@ def test_flush_writes_and_announces_the_report(tmp_path, capsys):
     assert "1 crossover(s) scanned" in err
 
 
+def test_empty_flush_does_not_clobber_a_report_with_records(tmp_path, capsys):
+    """Child processes inherit the env var; their empty flush must stand down.
+
+    A board script shells out to ``kicad-cli`` and helper ``python`` runs, each
+    of which would otherwise overwrite the parent's real measurement with its
+    own "0 crossovers scanned" document -- invisibly, because the child's
+    stderr is captured.  Observed while measuring board-06 for #4799.
+    """
+    target = tmp_path / "census.json"
+    measured = CrossingTailCensusCollector()
+    measured.add(_record(legal=0, distinct_v1=0))
+    flush_report(measured, env={REPORT_ENV_VAR: str(target)})
+    capsys.readouterr()
+
+    assert flush_report(CrossingTailCensusCollector(), env={REPORT_ENV_VAR: str(target)}) is None
+    assert json.loads(target.read_text())["summary"]["crossovers_scanned"] == 1
+    assert "kept" in capsys.readouterr().err
+
+
+def test_empty_flush_still_writes_when_the_existing_report_is_empty(tmp_path, capsys):
+    """The no-clobber rule protects measurements, not stale empty files."""
+    target = tmp_path / "census.json"
+    write_report(target, CrossingTailCensusCollector())
+
+    assert flush_report(CrossingTailCensusCollector(), env={REPORT_ENV_VAR: str(target)}) == target
+    assert json.loads(target.read_text())["summary"]["verdict"] == VERDICT_NOT_APPLICABLE
+
+
+def test_a_run_with_records_always_overwrites(tmp_path, capsys):
+    target = tmp_path / "census.json"
+    write_report(target, CrossingTailCensusCollector())
+    measured = CrossingTailCensusCollector()
+    measured.add(_record(legal=4, distinct_v1=3))
+
+    assert flush_report(measured, env={REPORT_ENV_VAR: str(target)}) == target
+    assert json.loads(target.read_text())["summary"]["crossovers_scanned"] == 1
+
+
 def test_flush_never_raises_when_the_path_is_unwritable(tmp_path, capsys):
     """Report-only means non-blocking: a bad path must not abort a 25-min route."""
     unwritable = tmp_path / "census.json" / "nope.json"

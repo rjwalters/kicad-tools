@@ -27,8 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and no exit code, and costs ~1.1 µs per crossover. A board that never
   synthesizes a shadow-constructed crossover (boards 05 and 07 today) reports
   `crossovers_scanned: 0` / `verdict: "not-applicable"` rather than a
-  fabricated 0% saturation. New reference doc:
-  `docs/reference/crosstail-census-report.md`.
+  fabricated 0% saturation — and, since board scripts shell out and children
+  inherit the environment, an empty flush never overwrites a report that has
+  records. New reference doc: `docs/reference/crosstail-census-report.md`.
 
 - **`--format json` on the 5 board-improvement drivers** (part of #4674,
   sixth batch of the #4543 machine-output sweep) — `optimize-placement`,
