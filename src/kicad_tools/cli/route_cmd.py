@@ -2972,9 +2972,17 @@ def _run_placement_feedback(
     # Issue #4776: ``or None`` normalizes the ``--deterministic-budget``
     # sentinel (``per_net_timeout = 0.0``, "wall-clock cutoff disabled") the
     # same way every direct ``route_all_negotiated`` call site in this file
-    # does.  Passing the literal ``0.0`` through made the #4159
-    # post-negotiation rescue sweep compute ``min(0.0, 10.0)`` and hand every
-    # stranded net a zero-second solo budget -- a silent no-op.
+    # does.  The literal ``0.0`` is NOT falsy-safe on the way down, and it
+    # bit more than the rescue sweep:
+    #   * ``derive_iter_per_net_cap(0.0, remaining)`` -> ``min(0.0, cap)`` =
+    #     ``0.0`` at every rip-up-loop reroute site;
+    #   * ``NegotiatedRouter.route_net_negotiated``'s cumulative net deadline
+    #     is gated on ``per_net_timeout is not None``, so ``0.0`` produced an
+    #     already-expired deadline and short-circuited every RSMT edge of
+    #     every >=3-pad net before a single ``router.route()`` call (2-pad
+    #     nets survived: the C++ backend reads ``0.0`` as "no deadline");
+    #   * ``Autorouter._post_negotiation_sweep_bounds`` computed
+    #     ``min(0.0, 10.0)``, so the #4159 rescue sweep was a no-op too.
     per_net_timeout = getattr(args, "per_net_timeout", None) or None
 
     # Issue #2606: stagnation + outer-timeout guards.  Defaults match
