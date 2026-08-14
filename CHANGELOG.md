@@ -702,6 +702,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged across each call — plus a guard that `kct netlist export` still
   writes its file at both the default and `-o` locations.
 
+- **Rotted `.py:NNN` citations in board scripts and `match_group_length.py`**
+  (#4796) — every cross-file line-number citation in the nine `boards/**`
+  generator scripts and in `src/kicad_tools/router/match_group_length.py` is
+  re-anchored on a symbol plus a bare file path, the convention #4774
+  established for markdown. Each sampled citation was stale: five board scripts
+  pointed at `boards/03-usb-joystick/generate_design.py:838` for a
+  `route_success` fast-fail gate that has since moved to 849, and
+  `escape.py:3303-3304` (cited as "QFN escape segments") now lands in
+  `_group_pads_by_ring`, unrelated ring-distance code — that one was re-derived
+  from scratch to `EscapeRouter._create_fine_pitch_row_escapes`. Every
+  replacement symbol was AST/grep-verified to exist before landing. A new
+  `tests/test_py_citation_rot.py` guards the class from regrowing: a fixed
+  ten-file allowlist (deliberately not a glob) is scanned for `.py:NNN` in
+  comments, docstrings and string literals, and a `CITED_SYMBOLS` table checks
+  each anchor in both directions so a rename on either side goes red. ~85
+  further citations across 29 other `src/` files (`router/core.py`,
+  `cli/route_cmd.py`, `validate/**`, …) are out of scope here and remain a
+  follow-up; comments and docstrings only, no behavior change.
+
 - **`CLAUDE.md`'s `## Releasing` section no longer ends mid-sentence** (#4797) —
   the dangling "(the tag must point at a commit that" clause is completed with
   the reason `RELEASING.md` gives: the tag must reference the commit as it

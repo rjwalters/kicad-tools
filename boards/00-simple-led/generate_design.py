@@ -970,7 +970,8 @@ def main() -> int:
         route_success = route_pcb(pcb_path, routed_path)
 
         # Step 5.5: route_success fast-fail gate (#4066, mirrors board 03's
-        # gate at boards/03-usb-joystick/generate_design.py:838).  ``route_pcb``
+        # ``route_success`` gate after ``route_pcb`` in
+        # boards/03-usb-joystick/generate_design.py).  ``route_pcb``
         # returns ``False`` when at least one trace-routable SIGNAL net failed
         # to land (``nets_routed`` < the pour-net-excluded ``total_nets``; see
         # the count accounting in ``route_pcb``).  If we fall through, the

@@ -139,7 +139,9 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # up, for GND) to its rail endpoint so the symbol pin meets a real wire
     # endpoint (silences ``pin_not_connected``) AND so the symbol's global
     # net publication unifies with the rail's labelled net.  Mirrors sister
-    # board 05's fix (PR #3004 / design.py:108-216); see issue #3149.
+    # board 05's fix (PR #3004 -- the ``add_power`` / ``PWR_FLAG`` rail
+    # bridging in ``create_bldc_controller``,
+    # boards/05-bldc-motor-controller/design.py); see issue #3149.
     #
     # +5V: the +5V rail has no genuine ``power_output`` source -- the only
     # consumer is the AMS1117 VI pin, which is a ``power_input``.  Without
@@ -2024,7 +2026,8 @@ def main() -> int:
         route_success = route_pcb(pcb_path, routed_path)
 
         # Step 5.5a: route_success fast-fail gate (#4066, mirrors board 03's
-        # gate at boards/03-usb-joystick/generate_design.py:838).  route_pcb
+        # ``route_success`` gate after ``route_pcb`` in
+        # boards/03-usb-joystick/generate_design.py).  route_pcb
         # runs under a wall-clock ``--timeout`` SAFETY backstop layered above
         # the load-independent per-net ``--deterministic-budget`` iteration
         # cap, so on a loaded machine that outer deadline can fire before every
