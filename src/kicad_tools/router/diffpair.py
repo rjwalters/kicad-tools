@@ -686,43 +686,88 @@ class DifferentialPairConfig:
     #      board 06: zero ``OffAngleSegmentWarning`` across all 9 pairs
     #      (#4461, closed already-satisfied).
     #
-    # WALL-CLOCK (re-measured 2026-08-02 under #4463; the old "~150 s
-    # shadow-OFF vs >1200 s shadow-ON" figures in this comment were stale
-    # and framed against the wrong budget).  The real envelope is the
-    # ``diffpair-routing-regression`` CI job's 30-minute ``timeout-minutes``
-    # ceiling, against which a GREEN shadow-OFF run historically lands at
-    # 14m22s-20m42s TOTAL job wall-clock -- roughly half of that budget is
-    # the post-route pipeline (pour fill/stitch/repair/re-fill, copper-union
-    # audit, DRC, mfg export), not diff-pair routing.  On this machine,
-    # ``generate_design.py --step route --seed 42`` measures (one machine,
-    # one build; ``KCT_CORRIDOR_YIELD=0`` reproduces the "before" row):
+    # FLIP EVALUATION (#4800, re-measured 2026-08-14 on main @ fa18a25b --
+    # i.e. AFTER the #4791 pairwise-HV fallback and its #4840 per-net-class
+    # width fix).  All five correctness gates the flip was waiting on are
+    # closed (#4579/#4581/#4582/#4604 merged; #4580 a documented negative
+    # result), so this run is the decision measurement, not another gate.
+    # VERDICT: the default STAYS FALSE.  Shadow-ON buys +5 coupled pairs and
+    # loses the board.
     #
-    #     shadow OFF          : 587.9 s total, negotiated 361.5 s, 21/21
-    #     shadow ON, pre-#4463: 770.4 s total, negotiated 362.3 s, 18/21
-    #     shadow ON, post     : 1351.2 s total, negotiated 148.1 s +
-    #                           50.6 s planning + 300.5 s capped re-run,
-    #                           19/21
+    # Method: two repeats per arm, ``PYTHONHASHSEED=42 ... --seed 42``,
+    # C++ backend built; board quality read with the CI gate itself
+    # (``scripts/ci/check_diffpair_coverage.py --skip-route``) and
+    # cross-checked with ``kicad-cli pcb drc --refill-zones``.  Both arms
+    # were byte-identical across their two repeats modulo ``(uuid ...)``
+    # (424 uuid lines, zero geometry lines), so these are single-mode
+    # figures, not a mode-A-vs-mode-B accident.
     #
-    # So the negotiated phase itself is now WELL inside the 2x-of-shadow-OFF
-    # target (148.1 s vs 361.5 s; 448.6 s counting the recovery re-run), but
-    # the TOTAL shadow-ON job grew: the two pairs that yield stop being
-    # diff-pair nets, so they re-enter the optimizer / nudge / repair passes
-    # the shadow path excludes them from.  22.5 min of local wall-clock has
-    # no headroom against the job's 30-minute ceiling on a slower CI runner
-    # -- which is itself a reason the default stays OFF.  CI never runs this
-    # path today (the board-06 recipe gates it behind ``KCT_BOARD06_SHADOW``
-    # and CI does not set it).
+    #                            shadow OFF (default)   shadow ON
+    #     coupled-ok              0/9                    5/9
+    #     [coupled-follow] decl.  n/a                    46
+    #     signal reach            21/21                  18/21
+    #     kct check DRC errors    18 (allowlist 18)      35
+    #     diff-pair violations    18 (baseline 18)       31
+    #     pour-connectivity       PASS                   FAIL (+3V3 3 groups,
+    #                                                    GND 5 groups)
+    #     kicad-cli errors        444 (11 clearance)     639-646 (169-176)
+    #     kicad-cli unconnected   0                      9
+    #     total wall-clock        745.2 s / 739.9 s      1649.8 s / 1570.6 s
+    #     negotiated phase        491.6 s / 485.3 s      789.6 s + 59.2 s
+    #                                                    planning + 187.4 s
+    #                                                    re-run
     #
-    # Enabling this by default is therefore still blocked on: the
-    # remaining corridor contention (USB_CC1 is not recoverable by
-    # yielding, measured 2026-08-02 under #4463) and the total shadow-ON
-    # wall-clock above.  The other blockers this list once carried are
-    # resolved: the skew/continuity residuals #4570/#4574/#4575/#4577 all
-    # CLOSED by 2026-08-04, and the shadow-aware by-construction dogleg
-    # exists since #3988 (item B above; #3907/#3975 likewise closed).
+    # The 5 pairs that DO couple are stable by name across repeats --
+    # MIPI_CLK, PCIE_RX, USB2_D, USB3_TX1, USB3_TX2 -- and the four that
+    # do not are MIPI_D0 (guide-missing) plus PCIE_TX / USB3_RX1 /
+    # USB3_RX2 (shadow-declined-blockage).  Count the pairs BY NAME: the
+    # 5/9 headline has not moved since 2026-08-02, so the two blockers
+    # below are not a stale reading of an improved constructor.
+    #
+    # Blocker 1 -- USB_CC1 corridor contention (RE-VERIFIED, unchanged).
+    # The corridor-yield planner says so in its own words on both repeats:
+    # ``[corridor-yield] USB_CC1 stays unroutable with every coupled
+    # corridor lifted -- not a corridor-competition failure``.  Worse, the
+    # recovery that used to buy back MIPI_D0 no longer does: it yields
+    # MIPI_CLK, re-runs, measures ``reach 18 -> 18 of 21`` and reverts, so
+    # shadow-ON now lands at 18/21 (MIPI_D0+, MIPI_D0-, USB_CC1 stranded)
+    # rather than the 19/21 recorded under #4463 -- a REGRESSION against
+    # the 2026-08-02 figure, and 3 nets short of the board's
+    # ``REQUIRED_SIGNAL_REACH``.
+    #
+    # Blocker 2 -- wall-clock (RE-VERIFIED, and the CI margin has SHRUNK).
+    # Shadow-ON costs 2.16x shadow-OFF locally (1610 s vs 743 s, mean of
+    # two repeats).  The envelope is still the ``diffpair-routing-regression``
+    # CI job's 30-minute ``timeout-minutes`` ceiling (``.github/workflows/
+    # ci.yml``), but the "14m22s-20m42s" figure this comment used to quote
+    # is stale: ten consecutive GREEN runs on main (2026-08-14) measure the
+    # job at 17.9-25.2 min, median 24.5 min, of which the single
+    # ``Re-route board + check diff-pair coverage`` step is 23m30s.  That is
+    # ~5.5 min of margin at shadow-OFF.  Scaling the measured 2.16x onto
+    # that step puts shadow-ON near 51 min -- roughly 21 min PAST the
+    # ceiling.  Raising ``timeout-minutes`` is not the fix; the job would
+    # still be shipping a board that fails its own gate.
+    #
+    # Blocker 3 -- pour connectivity (NEW; not on the 2026-08-02 list).
+    # The stranded nets break the copper-union audit
+    # (``REQUIRE_POUR_CONNECTIVITY``, #3509): +3V3 splits into 3 disjoint
+    # pad groups (largest 9/11) and GND into 5 (largest 118/122).  The CI
+    # gate fails on this independently of DRC count and reach.
+    #
+    # Net effect on the CI gate: shadow-OFF exits 0; shadow-ON exits 2 on
+    # FOUR separate assertions (reach, pour connectivity, diff-pair
+    # violation baseline, total DRC allowlist).  The trade is not close,
+    # and it is not a tuning question -- +5 coupled pairs cost 3 signal
+    # nets, 17 extra DRC errors, 158+ extra kicad-cli clearance errors,
+    # 9 unconnected items and 2.16x the wall-clock.
+    #
     # Set ``KCT_BOARD06_SHADOW=1`` on the board-06 recipe to reproduce the
     # shadow-ON run.  Default False keeps recipes on their pre-#3508
     # budget-exit behaviour (0/9 coupled, 21/21 single-ended reach).
+    # A future flip needs USB_CC1 routable with the coupled corridors in
+    # place (not merely yielded) AND the total job back inside the CI
+    # ceiling -- re-run the A/B above before proposing one.  See #4409
+    # (epic) and #4800 for the full tables.
     enable_shadow_construction: bool = False
 
     def get_rules(self, pair_type: DifferentialPairType) -> DifferentialPairRules:

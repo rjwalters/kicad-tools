@@ -796,12 +796,16 @@ def test_shadow_construction_flag_defaults_off():
     and parallel-offset feasibility -> #4460 (closed 2026-07-31 via
     #4512/#4526), lifting board-06 construction to 6/9.
 
-    The flag still stays OFF for the two reasons measured 2026-08-02
-    under #4463: corridor competition strands single-ended nets (3 nets
-    strand, 18/21 reach on seed 42; USB_CC1 is not recoverable even by
-    corridor yielding), and total shadow-ON wall-clock (~22.5 min local)
-    has no headroom against the diff-pair regression CI job's 30-minute
-    ceiling.  The comment block above
+    The flag nonetheless stays OFF.  #4800 re-ran the full A/B on
+    2026-08-14 (main @ fa18a25b, two repeats per arm, seed 42) now that
+    all five correctness gates are closed, and the trade got *worse*, not
+    better: shadow-ON buys 5/9 coupled pairs but drops signal reach to
+    18/21 (MIPI_D0+, MIPI_D0-, USB_CC1 -- the #4463 corridor-yield
+    recovery now reverts instead of recovering MIPI_D0), raises DRC from
+    18 to 35, fails the copper-union pour audit, and costs 2.16x the
+    wall-clock against a CI job that already runs 24.5 min of a 30-min
+    ceiling.  The ``diffpair-routing-regression`` gate exits 0 shadow-OFF
+    and 2 shadow-ON on four separate assertions.  The comment block above
     ``DifferentialPairConfig.enable_shadow_construction`` in
     ``kicad_tools/router/diffpair.py`` is the canonical, dated history.
     """

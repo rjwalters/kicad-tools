@@ -3815,6 +3815,14 @@ class DiffPairRouter:
         # measurements that keep this defaulted OFF).  Set from the
         # config by ``route_all_with_diffpairs``; tests may set it
         # directly.
+        #
+        # Issue #4800 (2026-08-14) re-ran the flip evaluation now that all
+        # five correctness gates are closed and kept the default OFF: on
+        # board 06 shadow-ON trades 0/9 -> 5/9 coupled pairs for 21/21 ->
+        # 18/21 signal reach, 18 -> 35 DRC errors, a copper-union
+        # pour-connectivity failure and 2.16x wall-clock (the CI gate exits
+        # 0 shadow-OFF and 2 shadow-ON).  The dated A/B table lives with the
+        # config field; do not flip this without re-running it.
         self.enable_shadow_construction: bool = False
 
     def _collect_existing_drills(self) -> list[tuple[float, float, float]]:

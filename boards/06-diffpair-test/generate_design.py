@@ -2656,19 +2656,57 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # (shadow-OFF measures 361.5 s / 21/21 / 587.9 s total on the same
     # machine; shadow-ON totals 1351.2 s post-fix, so the total job -- not
     # the negotiated phase -- is now the wall-clock problem).
+    #
+    # Issue #4800 (2026-08-14 FLIP EVALUATION, main @ fa18a25b, i.e. after
+    # #4791 + #4840): all five correctness gates the flip was waiting on are
+    # closed, so this was the decision run.  DECISION: the env default STAYS
+    # "0".  Two repeats per arm, seed 42 / PYTHONHASHSEED=42, C++ backend
+    # built; both arms byte-identical across their repeats modulo ``(uuid …)``
+    # (so these are single-mode figures).  Board quality read with the CI gate
+    # itself, ``scripts/ci/check_diffpair_coverage.py --skip-route``:
+    #
+    #                            shadow OFF (this default)  shadow ON
+    #     coupled-ok              0/9                        5/9
+    #     [coupled-follow] decl.  n/a                        46
+    #     signal reach            21/21                      18/21
+    #     kct check DRC errors    18 (allowlist 18)          35
+    #     diff-pair violations    18 (baseline 18)           31
+    #     pour connectivity       PASS                       FAIL
+    #     kicad-cli errors        444 (11 clearance)         639-646 (169-176)
+    #     kicad-cli unconnected   0                          9
+    #     wall-clock (--step route) 745.2 / 739.9 s          1649.8 / 1570.6 s
+    #     CI gate exit code       0                          2
+    #
     # Shadow-ON is still not shippable here:
-    #   * Convergence is 5/9 (post-#4576).  The 0.225-0.275 mm coupled widths
-    #     make the geometric parallel offset infeasible for the rest
-    #     (self-check overlap; mid-route blockage; #4574 guide-missing).
-    #   * USB_CC1 still strands -- its corridor is contested even with the
-    #     coupled bodies gone.
-    #   * The surviving shadow segments are off-angle (#3975
-    #     OffAngleSegmentWarning; the post-route quantization pass repairs
-    #     them, #3907 is the by-construction fix) and skew/continuity
-    #     residuals (#4570/#4575/#4577) are still open.
-    # Enabling by default needs those to close.  When they do, flip the env
-    # default and the optimizer/nudge diff-pair protections below together.
-    # See #4409 (epic) and #4463 for the current data.
+    #   * Convergence is 5/9 -- unchanged since 2026-08-02, and stable BY
+    #     NAME across repeats: MIPI_CLK, PCIE_RX, USB2_D, USB3_TX1, USB3_TX2
+    #     couple; MIPI_D0 is guide-missing and PCIE_TX / USB3_RX1 / USB3_RX2
+    #     are shadow-declined-blockage.  The 0.225-0.275 mm coupled widths
+    #     make the geometric parallel offset infeasible for the rest.
+    #   * USB_CC1 still strands -- and the #4463 corridor-yield recovery no
+    #     longer buys back MIPI_D0: it yields MIPI_CLK, re-runs, measures
+    #     ``reach 18 -> 18 of 21`` and REVERTS.  Shadow-ON therefore lands at
+    #     18/21 (MIPI_D0+, MIPI_D0-, USB_CC1), a regression against the 19/21
+    #     recorded under #4463 and 3 short of ``REQUIRED_SIGNAL_REACH``.  The
+    #     planner's own verdict, on both repeats: "[corridor-yield] USB_CC1
+    #     stays unroutable with every coupled corridor lifted -- not a
+    #     corridor-competition failure".
+    #   * NEW blocker: the stranded nets break the copper-union pour audit
+    #     (``REQUIRE_POUR_CONNECTIVITY``, #3509) -- +3V3 splits into 3 disjoint
+    #     pad groups (largest 9/11), GND into 5 (largest 118/122).
+    #   * Wall-clock: 2.16x shadow-OFF locally.  Ten consecutive green main
+    #     runs (2026-08-14) put the ``diffpair-routing-regression`` job at
+    #     17.9-25.2 min (median 24.5) against its 30-min ``timeout-minutes``,
+    #     with the re-route step alone at 23m30s -- ~5.5 min of margin.  2.16x
+    #     on that step is ~51 min, ~21 min past the ceiling.
+    #   * The skew/continuity residuals (#4570/#4575/#4577) and the
+    #     by-construction dogleg (#3907/#3975/#3988) that this list used to
+    #     carry ARE closed; they are no longer what blocks the flip.
+    # Enabling by default needs USB_CC1 routable with the coupled corridors in
+    # place (not merely yielded) and the total job back inside the CI ceiling.
+    # When they do, flip the env default and the optimizer/nudge diff-pair
+    # protections below together, and re-run the A/B above first.
+    # See #4409 (epic), #4463 and #4800 for the current data.
     import os as _os
 
     ENABLE_COUPLED_SHADOW = _os.environ.get("KCT_BOARD06_SHADOW", "0") == "1"

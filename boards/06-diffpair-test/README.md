@@ -226,6 +226,11 @@ across the 9 pairs). The #4582 Judge independently reproduced the same
 323 figure across four separate runs spanning both downstream modes
 below. The nondeterminism is entirely downstream of this phase.
 
+The **decline count is now 46**, not 47 --- [#4604] retired one decline.
+Re-confirmed 2026-08-14 under [#4800] at 46 declines / 33 `[coupled-tail]`
+lines on two independent runs, so use 46 as the baseline any new
+measurement is compared against.
+
 Reproduce the shadow phase and its debug trace:
 
 ```bash
@@ -250,6 +255,13 @@ continuum:
 |---|---|---|---|
 | Mode A | 32 | 7 | 19 of 21 |
 | Mode B | 35 | 19 | 18 of 21 |
+
+Both [#4800] repeats (2026-08-14, main @ `fa18a25b`) landed in **Mode B**
+and were byte-identical to each other modulo `(uuid …)` --- 424 uuid lines
+changed, zero geometry lines --- so on the current tree a shadow-ON pair of
+runs is not guaranteed to sample both modes.  Sample enough repeats to
+*identify* your mode before comparing; do not assume a single run of each
+side straddles them.
 
 `coupled-ok` is 5/9 in both modes --- the shadow-ON convergence figure
 recorded in the recipe comments ("Convergence is 5/9 (post-#4576)").  A
@@ -302,6 +314,38 @@ change that knocks a pair from coupled to declined removes it from
 skew-checking entirely --- the error count can drop while the change is
 a regression, not a win.  Always read `coupled-ok` and reach alongside
 the raw error count, never the error count alone.
+
+### Why the default is shadow-OFF (measured, [#4800], 2026-08-14)
+
+The obvious question --- "5/9 coupled beats 0/9, why is this off?" --- has
+a measured answer.  Two repeats per arm on main @ `fa18a25b`
+(`PYTHONHASHSEED=42 … --seed 42`, C++ backend built), board quality read
+with the CI gate itself (`scripts/ci/check_diffpair_coverage.py
+--skip-route`) and cross-checked with `kicad-cli pcb drc --refill-zones`:
+
+| | shadow OFF (default) | shadow ON |
+|---|---|---|
+| `coupled-ok` | 0/9 | 5/9 |
+| `[coupled-follow] declined` | n/a | 46 |
+| signal reach | **21/21** | **18/21** |
+| `kct check` DRC errors | **18** (allowlist 18) | **35** |
+| diff-pair violations | 18 (baseline 18) | 31 |
+| pour connectivity | PASS | **FAIL** (+3V3 3 groups, GND 5 groups) |
+| `kicad-cli` errors | 444 (11 clearance) | 639–646 (169–176 clearance) |
+| `kicad-cli` unconnected | 0 | **9** |
+| `--step route` wall-clock | 745.2 s / 739.9 s | 1649.8 s / 1570.6 s |
+| CI gate exit code | **0** | **2** (4 assertions) |
+
+The 5 pairs that couple are stable by name --- MIPI_CLK, PCIE_RX, USB2_D,
+USB3_TX1, USB3_TX2.  The three stranded nets are MIPI_D0+, MIPI_D0- and
+USB_CC1; the [#4463] corridor-yield recovery yields MIPI_CLK, re-runs,
+measures `reach 18 -> 18 of 21` and **reverts**, so shadow-ON no longer
+reaches the 19/21 recorded on 2026-08-02.  USB_CC1 is still not a
+corridor-competition failure --- the planner says so itself:
+`[corridor-yield] USB_CC1 stays unroutable with every coupled corridor
+lifted`.  Wall-clock is 2.16x, against a CI job already running a median
+24.5 min of its 30-minute ceiling (ten consecutive green main runs,
+2026-08-14; the re-route step alone is 23m30s).
 
 ### The crossover legality census (`KCT_CROSSTAIL_CENSUS=1`)
 
@@ -363,6 +407,7 @@ lattice the picture reverses — a synthetic fixture whose first legal candidate
 is at rank 0 pays ~3.9 ms of a ~4.0 ms census, ~39x the un-instrumented
 0.10 ms.)
 
+[#4463]: https://github.com/rjwalters/kicad-tools/issues/4463
 [#4536]: https://github.com/rjwalters/kicad-tools/issues/4536
 [#4570]: https://github.com/rjwalters/kicad-tools/issues/4570
 [#4574]: https://github.com/rjwalters/kicad-tools/issues/4574
@@ -372,8 +417,10 @@ is at rank 0 pays ~3.9 ms of a ~4.0 ms census, ~39x the un-instrumented
 [#4580]: https://github.com/rjwalters/kicad-tools/issues/4580
 [#4581]: https://github.com/rjwalters/kicad-tools/issues/4581
 [#4582]: https://github.com/rjwalters/kicad-tools/issues/4582
+[#4604]: https://github.com/rjwalters/kicad-tools/issues/4604
 [#4611]: https://github.com/rjwalters/kicad-tools/pull/4611
 [#4635]: https://github.com/rjwalters/kicad-tools/issues/4635
+[#4800]: https://github.com/rjwalters/kicad-tools/issues/4800
 
 ## CI Gate (Phase 4N, #2660)
 

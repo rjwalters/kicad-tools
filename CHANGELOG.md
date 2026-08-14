@@ -589,6 +589,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The diff-pair shadow constructor stays default-OFF — measured, not
+  assumed** (#4800, part of #4409) — all five correctness gates the
+  `DifferentialPairConfig.enable_shadow_construction` flip was waiting on
+  closed on 2026-08-04 (#4579/#4581/#4582/#4604 merged, #4580 a documented
+  negative result), so the flip evaluation was finally run. **Verdict:
+  the default stays `False`**, and the code comments that carried the stale
+  2026-08-02 numbers now carry the fresh ones. Method: two repeats per arm
+  on board 06 (`PYTHONHASHSEED=42 … --seed 42`, C++ backend built, main @
+  `fa18a25b` — i.e. *after* #4791 and #4840), board quality read with the CI
+  gate itself (`scripts/ci/check_diffpair_coverage.py --skip-route`) and
+  cross-checked with `kicad-cli pcb drc --refill-zones`; both arms were
+  byte-identical across their repeats modulo `(uuid …)`, so these are
+  single-mode figures rather than a Mode-A-vs-Mode-B accident (#4536).
+  Shadow-ON buys `coupled-ok` 0/9 → 5/9 (stable **by name**: MIPI_CLK,
+  PCIE_RX, USB2_D, USB3_TX1, USB3_TX2) and pays for it with signal reach
+  21/21 → **18/21**, DRC 18 → **35**, diff-pair violations 18 → 31, a
+  **copper-union pour-connectivity failure** (+3V3 in 3 disjoint groups,
+  GND in 5 — a blocker not on the previous list), `kicad-cli` clearance
+  errors 11 → 169–176 with 0 → **9 unconnected items**, and **2.16x**
+  wall-clock. The `diffpair-routing-regression` gate exits 0 shadow-OFF and
+  **2 shadow-ON, on four separate assertions**. Both previously-named
+  blockers are re-verified rather than refuted: the corridor-yield planner
+  still reports `USB_CC1 stays unroutable with every coupled corridor
+  lifted`, and its MIPI_D0 recovery now *reverts* (`reach 18 -> 18 of 21`),
+  so shadow-ON has **regressed** from the 19/21 recorded under #4463; on
+  wall-clock the CI margin has shrunk, with ten consecutive green `main`
+  runs putting the job at 17.9–25.2 min (median 24.5, re-route step 23m30s)
+  against its 30-minute ceiling. The decline-count baseline is re-confirmed
+  at **46** (the board-06 README's `47` was pre-#4604). Comments/docs only —
+  no behaviour, defaults or artifacts change.
+
 - **The pure-Python router's pairwise (HV-isolation) widening bitmap is now
   cached across `route()` calls** (#4794) —
   `Router._pairwise_expanded_blocked` (the search-time bitmap the pure-Python
