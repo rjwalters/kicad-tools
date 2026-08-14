@@ -1366,6 +1366,25 @@ class Router:
             return net_class.trace_width
         return self.rules.trace_width
 
+    def _get_via_size_for_net(self, net_name: str) -> float:
+        """Get the via diameter for a net based on its net class (Issue #4793).
+
+        Via sibling of :meth:`_get_trace_width_for_net`, wrapping the
+        ``net_class.via_size if net_class else rules.via_diameter`` idiom used
+        inline by :meth:`route` so callers that only hold a net *name* can
+        resolve the same per-class extent.
+
+        Args:
+            net_name: Name of the net
+
+        Returns:
+            Via diameter in mm
+        """
+        net_class = self._get_net_class(net_name)
+        if net_class is not None:
+            return net_class.via_size
+        return self.rules.via_diameter
+
     def _get_pad_metal_bounds(self, pad: Pad) -> tuple[int, int, int, int]:
         """Calculate the grid coordinate bounds of a pad's metal area.
 
@@ -1935,8 +1954,12 @@ class Router:
     #   (scalar disc is the scalar kernel's job; only the ring out to the
     #   widest pair is scanned), same per-pair radius arithmetic, same
     #   layer-scoped #4506 attach-zone waiver at the gap midpoint.
-    # * ``half_mm`` uses the global ``rules`` widths (the C++ default when
-    #   ``set_search_pair_widths`` has not supplied per-net extents).
+    # * ``half_mm`` is the ROUTED net's class trace width / via size (#4793),
+    #   resolved from ``state.id_to_name`` -- the Python equivalent of the
+    #   per-net extents ``cpp_backend`` pushes into the C++ kernels via
+    #   ``set_search_pair_widths`` once per ``route()`` call.  Nets with no
+    #   class (or an unmapped id) fall back to the global ``rules`` widths,
+    #   which is also the C++ default when the setter has never run.
     # * The diagonal-corner probe is NOT separately widened here: both
     #   endpoints of a diagonal step already consult the annulus via
     #   ``_is_trace_blocked``, and the ceil-rounded pair radius keeps the
@@ -1986,8 +2009,19 @@ class Router:
         state = self._pairwise_search_state(table)
         if state is None:
             return False
+        # Issue #4793: measure the widening from the ROUTED net's class trace
+        # width (the C++ kernels read ``search_trace_half_width_mm_``, which
+        # ``cpp_backend`` sets per net) -- the global default under-widens a
+        # wide class (e.g. POWER at 0.5 mm vs a 0.2 mm default).
+        own_name = state.id_to_name.get(net, "")
         return self._cross_domain_annulus_blocked(
-            gx, gy, layer, net, scalar_radius, self.rules.trace_width / 2.0, state
+            gx,
+            gy,
+            layer,
+            net,
+            scalar_radius,
+            self._get_trace_width_for_net(own_name) / 2.0,
+            state,
         )
 
     def _cross_domain_via_blocked(
@@ -2006,8 +2040,17 @@ class Router:
         state = self._pairwise_search_state(table)
         if state is None:
             return False
+        # Issue #4793: per-net-class via size, mirroring the C++
+        # ``search_via_half_diam_mm_`` extent.
+        own_name = state.id_to_name.get(net, "")
         return self._cross_domain_annulus_blocked(
-            gx, gy, layer, net, scalar_radius, self.rules.via_diameter / 2.0, state
+            gx,
+            gy,
+            layer,
+            net,
+            scalar_radius,
+            self._get_via_size_for_net(own_name) / 2.0,
+            state,
         )
 
     def _cross_domain_annulus_blocked(
@@ -2139,8 +2182,12 @@ class Router:
         from .pairwise_clearance import _norm_net_key
 
         res = self.grid.resolution
-        half_mm = self.rules.trace_width / 2.0
-        own_key = _norm_net_key(state.id_to_name.get(net, ""))
+        # Issue #4793: the dilation radius measures from the ROUTED net's
+        # class trace width, not the global default (same extent the C++
+        # bitmap-free kernels get from ``set_search_pair_widths``).
+        own_name = state.id_to_name.get(net, "")
+        half_mm = self._get_trace_width_for_net(own_name) / 2.0
+        own_key = _norm_net_key(own_name)
         net_ids_by_domain: dict[int, list[int]] = {}
         for net_id, domain in enumerate(net_to_domain):
             if domain >= 0:

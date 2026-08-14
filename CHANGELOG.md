@@ -648,6 +648,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The pure-Python pairwise (HV-isolation) search gate now measures from the
+  per-net-class copper width** (#4793) — the three Python search kernels added
+  by #4791 (`Router._cross_domain_trace_blocked`,
+  `Router._cross_domain_via_blocked` and the hot-loop bitmap widener
+  `Router._pairwise_expanded_blocked`) computed their widened radius
+  `ceil((half_mm + required) / res)` from the **global** `rules.trace_width / 2`
+  and `rules.via_diameter / 2`, even though the caller had already resolved a
+  per-net-class `scalar_radius`. On a board with a wide class (e.g. a 0.5 mm
+  `POWER`/HV class against a 0.2 mm global default) the search-time annulus was
+  therefore narrower than the net's real copper warrants, so the fallback A\*
+  accepted cells the (authoritative) post-route `route_pairwise_violation` gate
+  then rejected — no DRC escape, but exactly the search-proposes /
+  validation-rejects thrash #4791 exists to remove, burning the net's budget on
+  rip-up/retry or dropping it into negotiated mode instead of converging first
+  try. All three sites now resolve the routed net's name from
+  `state.id_to_name` and take the extent from `_get_trace_width_for_net` (or the
+  new `_get_via_size_for_net` sibling, wrapping the
+  `net_class.via_size if net_class else rules.via_diameter` idiom `route()`
+  already used inline), falling back to the global rules for nets with no class
+  or no name mapping. This brings the fallback into parity with the C++ backend,
+  which has always read the per-net `search_trace_half_width_mm_` /
+  `search_via_half_diam_mm_` extents `cpp_backend` pushes in via
+  `set_search_pair_widths` once per `route()`. Only reachable with a pairwise
+  voltage-map table installed **and** a non-default class width **and** the
+  pure-Python fallback in use (`--no-cpp-router`, or a worktree where the native
+  extension is not built); boards whose classes share the global width are
+  byte-identical. `tests/router/test_pairwise_python_search.py` pins the
+  class-width band (and that an equal-to-global class is a no-op), and
+  `tests/router/test_pairwise_cpp_parity.py` sweeps the whole band asserting
+  cell-for-cell Python↔C++ agreement.
+
 - **`kct netlist`, `kct sch unconnected` and `kct sync` no longer leave a
   netlist file beside the user's schematic** (#4795, third installment after
   #4750 and #4763) — `export_netlist()` defaults `output_path` to
@@ -676,6 +707,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the reason `RELEASING.md` gives: the tag must reference the commit as it
   landed on `main` (squash-merge gives it a different SHA), never a pre-merge
   `release/vX.Y.Z` branch commit.
+
 - **Multi-pin nets are no longer skipped outright on `--deterministic-budget`
   placement-feedback re-routes** (#4776) — `--deterministic-budget` sets
   `args.per_net_timeout = 0.0` as its "wall-clock cutoff disabled" sentinel, and
