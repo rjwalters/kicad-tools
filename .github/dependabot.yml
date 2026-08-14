@@ -1,0 +1,36 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["tier:maintenance"]
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: ["major", "minor", "patch"]
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["tier:maintenance"]
+    groups:
+      pip-minor-patch:
+        patterns: ["*"]
+        # native-toolchain / ABI coupling: these get their own reviewable PRs
+        exclude-patterns: ["nanobind", "cmake", "numpy"]
+        update-types: ["minor", "patch"]
+    # majors deliberately ungrouped: one reviewable PR each
+
+  - package-ecosystem: "npm"
+    directory: "/site"
+    schedule:
+      interval: "weekly"
+    labels: ["tier:maintenance"]
+    groups:
+      site-minor-patch:
+        patterns: ["*"]
+        # site framework: its own reviewable PRs
+        exclude-patterns: ["astro"]
+        update-types: ["minor", "patch"]
