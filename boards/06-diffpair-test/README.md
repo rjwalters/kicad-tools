@@ -323,6 +323,16 @@ singleton in `v1` carries the same barrel on every legal route, so no ordering
 key can move the result and the constraint lives upstream in placement / escape
 planning.
 
+Add `KCT_CROSSTAIL_CENSUS_REPORT=<path>`
+([#4799](https://github.com/rjwalters/kicad-tools/issues/4799)) to get the same measurement
+as **data** instead of scraped stdout: a JSON document with one record per
+crossover plus the aggregate the per-crossover headers cannot give you
+(`saturated_pct`, `no_ordering_lever_pct`, `inert_pct`, an advisory `verdict`).
+The diff-pair phase also closes with a `[crosstail-census-summary]` block
+whenever the census is on.  It is report-only and costs ~1 µs per crossover on
+top of the census itself; schema and interpretation live in
+[`docs/reference/crosstail-census-report.md`](../../docs/reference/crosstail-census-report.md).
+
 **State-neutral is not the same as budget-neutral ([#4635]).** PR [#4611]'s
 prose claimed the census "cannot" change the route because it is
 "observation-only by construction".  That is true of router **state** — every

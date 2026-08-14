@@ -36,6 +36,11 @@ from kicad_tools.core.geometry import (
     segment_to_segment_distance as _segment_to_segment_distance,
 )
 
+from .crosstail_census import (
+    CENSUS_COLLECTOR,
+    CrossingTailCensusRecord,
+    CrossingTailCensusSummary,
+)
 from .diffpair import (
     DifferentialPair,
     DifferentialPairConfig,
@@ -3763,6 +3768,15 @@ class DiffPairRouter:
         # deadline computation.  Exactly ``0.0`` whenever the census is off, so
         # the default path's timing arithmetic is bit-identical.
         self._census_elapsed_s: float = 0.0
+        # Issue #4799: structured capture of the #4580 census.  One
+        # ``CrossingTailCensusRecord`` per crossover the census scanned, in
+        # scan order, for THIS router instance (the process-wide twin lives in
+        # ``crosstail_census.CENSUS_COLLECTOR``, which is what the JSON report
+        # is written from).  Appended to only when the census is on, and only
+        # AFTER the #4635 credit has been stamped -- so, like the census's own
+        # ``print`` calls, it is outside every budgeted window and cannot move
+        # a deadline.  Never read by a routing decision.
+        self._census_records: list[CrossingTailCensusRecord] = []
         # Issue #3089: True iff the most-recent call to
         # ``route_differential_pair_coupled`` returned because the
         # inner ``CoupledPathfinder.route_coupled`` exceeded its
@@ -6190,11 +6204,54 @@ class DiffPairRouter:
             # the ``census_s=`` field it prints self-referential.
             census_extra_s = 0.0 if census_extra_t0 is None else time.monotonic() - census_extra_t0
             self._census_elapsed_s += census_extra_s
+            # Issue #4799: capture the same numbers the header prints into a
+            # structured record, for the aggregate report.  Deliberately AFTER
+            # the credit above -- this append is part of the census's
+            # uncredited, bounded per-crossover tail, exactly like the prints.
+            self._collect_crossing_tail_census(
+                head, goal, census_legal, len(candidate_pairs), census_extra_s
+            )
             self._report_crossing_tail_census(
                 head, goal, census_legal, len(candidate_pairs), census_extra_s
             )
             return census_first  # observation only: the first legal candidate
         return None
+
+    def _collect_crossing_tail_census(
+        self,
+        head: Pad,
+        goal: Pad,
+        legal: list[tuple[int, int, float, _XY, _XY]],
+        total: int,
+        census_s: float = 0.0,
+    ) -> CrossingTailCensusRecord:
+        """Record one crossover's census result for the aggregate report (#4799).
+
+        The free-text header printed by :meth:`_report_crossing_tail_census`
+        answers one crossover at a time; a board's actual question is a
+        distribution ("what fraction of crossovers had nothing legal at all?").
+        Reconstructing that from stdout means scraping, so the same figures are
+        captured here as data, on the router instance *and* in the process-wide
+        :data:`~kicad_tools.router.crosstail_census.CENSUS_COLLECTOR` the JSON
+        report is written from.
+
+        Report-only: the returned record is never consulted by a routing
+        decision, and this method is only reached on the census path, which
+        already returns the first legal candidate regardless.
+        """
+        record = CrossingTailCensusRecord(
+            net_name=head.net_name or "",
+            head=(head.x, head.y),
+            goal=(goal.x, goal.y),
+            legal=len(legal),
+            total=total,
+            # Same expression the header prints, so the two can never disagree.
+            distinct_v1=len({site[3] for site in legal}),
+            census_s=census_s,
+        )
+        self._census_records.append(record)
+        CENSUS_COLLECTOR.add(record)
+        return record
 
     @staticmethod
     def _report_crossing_tail_census(
@@ -11911,6 +11968,11 @@ class DiffPairRouter:
         # Issue #4463: pairs that yielded their corridor to unblock a
         # single-ended net (empty unless the corridor guard fired).
         self._last_corridor_yield_pair_names: list[str] = []
+        # Issue #4799: same "latest invocation only" contract for the
+        # per-instance census capture.  The process-wide collector behind the
+        # JSON report is deliberately NOT reset here -- a run that routes in
+        # several passes should report every crossover it scanned.
+        self._census_records = []
 
         if diffpair_config is None or not diffpair_config.enabled:
             return self.autorouter.route_all(net_order), []
@@ -12310,6 +12372,12 @@ class DiffPairRouter:
                 considered,
                 ", ".join(deduped_names),
             )
+
+        # Issue #4799: with the census on, close the phase with the aggregate
+        # the per-crossover headers cannot give you.  Report-only: printed
+        # after every routing decision in this phase has already been made.
+        if _CROSSTAIL_CENSUS:
+            print(CrossingTailCensusSummary.from_records(self._census_records).format_human())
 
         print("\n=== Differential Pair Routing Complete ===")
         print(f"  Total routes: {len(all_routes)}")

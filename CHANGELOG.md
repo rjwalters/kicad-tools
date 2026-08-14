@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Structured crossing-tail census report** (part of #4799) — the #4580
+  diff-pair crossover legality census now also captures what it prints as
+  data. Each censused crossover produces a `CrossingTailCensusRecord`
+  (`net_name`, `head`, `goal`, `legal`, `total`, `distinct_v1`, `census_s`)
+  on the router (`DiffPairRouter._census_records`) and in a process-wide
+  collector; `KCT_CROSSTAIL_CENSUS_REPORT=<path>` writes a
+  `--format json`-shaped document (`schema_version`, `generated_at`, summary +
+  per-crossover detail) at interpreter exit, and the diff-pair phase closes
+  with a `[crosstail-census-summary]` block whenever `KCT_CROSSTAIL_CENSUS=1`
+  is set. The summary aggregates `saturated_pct` (crossovers with nothing
+  legal), `no_ordering_lever_pct` (legal sets confined to a single `v1` site,
+  taken over the *unsaturated* set) and `inert_pct` (their union — the share
+  where no ordering key could have changed the outcome), plus an advisory
+  `verdict` against a documented 90% threshold. **Report-only**: the capture
+  runs after the #4635 budget credit is stamped, changes no routing decision
+  and no exit code, and costs ~1.1 µs per crossover. A board that never
+  synthesizes a shadow-constructed crossover (boards 05 and 07 today) reports
+  `crossovers_scanned: 0` / `verdict: "not-applicable"` rather than a
+  fabricated 0% saturation. New reference doc:
+  `docs/reference/crosstail-census-report.md`.
+
 - **`--format json` on the 5 board-improvement drivers** (part of #4674,
   sixth batch of the #4543 machine-output sweep) — `optimize-placement`,
   `optimize-traces`, `route-auto`, `reason` and `creepage-export-rules` now

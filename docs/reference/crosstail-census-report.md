@@ -1,0 +1,211 @@
+# Crossing-tail census report (`KCT_CROSSTAIL_CENSUS_REPORT`)
+
+A **report-only**, machine-readable aggregate of the diff-pair crossing-tail
+legality census. It answers one question about a board — *how much of the
+crossover via-site lattice is legal at all?* — as data rather than as scraped
+stdout.
+
+Issue [#4799]. The measurement itself is older ([#4580], budget-corrected in
+[#4635]); this document covers the structured capture layered on top of it.
+
+## What is being measured
+
+`DiffPairRouter._synthesize_crossing_tail` builds each layer-crossing tail of a
+shadow-constructed differential pair by enumerating a **225-entry lattice** of
+`(v1, v2)` via-site candidates and shipping the **first legal one** in sorted
+order. That first-legal loop says nothing about the rest of the lattice, so two
+very different worlds look identical from the outside:
+
+* an **ordering** problem — many sites are legal, and a better sort key could
+  pick a kinder one; versus
+* a **saturation** problem — almost nothing is legal, and no key can help.
+
+With `KCT_CROSSTAIL_CENSUS=1` the loop scans the whole lattice instead of
+stopping at the first legal candidate, and prints one header per crossover:
+
+```
+[crosstail-census] net=MIPI_CLK- head=(…) goal=(…) legal=2/225 distinct_v1=1 census_s=0.0164
+```
+
+The route that ships is unchanged (still the first legal candidate); the census
+credits its own incremental wall clock back to the shadow phase's budget so a
+census-on run and a census-off run get the same effective downstream deadlines
+([#4635]).
+
+## Enabling the report
+
+```bash
+KCT_CROSSTAIL_CENSUS=1 \
+KCT_CROSSTAIL_CENSUS_REPORT=/tmp/census.json \
+KCT_BOARD06_SHADOW=1 PYTHONHASHSEED=42 \
+  uv run python boards/06-diffpair-test/generate_design.py --step route --seed 42
+```
+
+* `KCT_CROSSTAIL_CENSUS=1` — turns the underlying census on. Without it nothing
+  is measured and the report is an honest *not applicable*.
+* `KCT_CROSSTAIL_CENSUS_REPORT=<path>` — writes the JSON document to `<path>`
+  at interpreter exit (parent directories are created). Unset ⇒ no file.
+
+The human-readable summary is printed at the end of the diff-pair phase
+whenever the census is on, with or without the report path:
+
+```
+[crosstail-census-summary] 166 crossover(s) scanned, verdict=saturated
+[crosstail-census-summary]   saturated (legal=0): 150/166 (90.4%)
+[crosstail-census-summary]   no ordering lever (legal>0, distinct_v1<=1): 12/16 (75.0%)
+[crosstail-census-summary]   inert (no ordering key could change the outcome): 97.6%
+[crosstail-census-summary]   distinct_v1 max=4 credited census_s total=1.2800
+[crosstail-census-summary]   advisory: inert >= 90.0% -- ordering levers are inert; …
+```
+
+### Why an environment variable, not `kct route --census-report`
+
+The census only fires under `DiffPairRouter` with shadow construction enabled,
+and the only caller that does that today is `boards/06-diffpair-test`'s
+`generate_design.py --step route` — a board script driving the router API
+directly, not `kct route`. A CLI flag would be unreachable from the one run
+that produces data, while an env var composes with the two flags that already
+gate this measurement. The document itself follows the `--format json`
+conventions in [machine-output.md](machine-output.md) (single document, sorted
+keys, `schema_version` / `generated_at`), so a future CLI surface can emit it
+unchanged.
+
+## Document schema (v1)
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-14T22:37:32.773075+00:00",
+  "report": "crosstail-census",
+  "census_enabled": true,
+  "summary": {
+    "applicable": true,
+    "crossovers_scanned": 166,
+    "saturated": 150,
+    "saturated_pct": 90.4,
+    "unsaturated": 16,
+    "no_ordering_lever": 12,
+    "no_ordering_lever_pct": 75.0,
+    "inert_pct": 97.6,
+    "distinct_v1_max": 4,
+    "census_s_total": 1.28,
+    "verdict": "saturated",
+    "saturated_threshold_pct": 90.0
+  },
+  "crossovers": [
+    {
+      "net_name": "MIPI_CLK-",
+      "head": [12.7, 44.45],
+      "goal": [15.24, 46.99],
+      "legal": 2,
+      "total": 225,
+      "distinct_v1": 1,
+      "census_s": 0.0164,
+      "saturated": false,
+      "no_ordering_lever": true
+    }
+  ]
+}
+```
+
+### Per-crossover record
+
+| Field | Meaning |
+|-------|---------|
+| `net_name` | Net of the crossover's head pad |
+| `head` / `goal` | `[x, y]` mm of the tail's endpoints |
+| `legal` / `total` | Size of the legal set / lattice size (225) |
+| `distinct_v1` | Distinct first-barrel sites among the legal candidates |
+| `census_s` | Incremental seconds this crossover's scan cost — the [#4635] credit |
+| `saturated` | `legal == 0` |
+| `no_ordering_lever` | `legal > 0 and distinct_v1 <= 1` |
+
+`legal`, `total`, `distinct_v1` and `census_s` are the same values the
+`[crosstail-census]` header prints, computed once and rendered twice.
+
+### Summary
+
+| Field | Meaning |
+|-------|---------|
+| `applicable` | `crossovers_scanned > 0` — see "Not applicable" below |
+| `crossovers_scanned` | Records collected in this process |
+| `saturated` / `saturated_pct` | Crossovers with nothing legal, as a share of all scanned |
+| `unsaturated` | `crossovers_scanned - saturated` |
+| `no_ordering_lever` / `_pct` | Legal-but-single-site crossovers; the percentage's **denominator is `unsaturated`** ("of the crossovers that had a choice, how many had no real choice") |
+| `inert_pct` | `(saturated + no_ordering_lever) / crossovers_scanned` — the share where **no ordering key could have changed the outcome** |
+| `distinct_v1_max` | Largest legal-set site count seen (the best ordering lever on the board) |
+| `census_s_total` | Sum of the per-crossover credits |
+| `verdict` | See below |
+| `saturated_threshold_pct` | The threshold the verdict used (default 90.0) |
+
+## Interpreting it (advisory, non-blocking)
+
+| Verdict | Condition | Reading |
+|---------|-----------|---------|
+| `not-applicable` | nothing scanned | This run never synthesized a shadow-constructed crossover. **Not** a 0%-saturation clean bill of health. |
+| `saturated` | `saturated_pct >= saturated_threshold_pct` | The lattice offers almost nothing. Ordering keys are inert; the constraint lives upstream in placement / escape planning. |
+| `no-ordering-lever` | `inert_pct >= saturated_threshold_pct` (but not saturated) | Legal sets exist but each has a single site — same conclusion, different mechanism. |
+| `ordering-levers-available` | otherwise | Enough crossovers have a real choice that a better sort key could plausibly move results. |
+
+The default threshold is **90%** (`SATURATED_PCT_ADVISORY_THRESHOLD`), taken
+from the board-06 precedent: its measured saturation sits in the 90–95% band,
+while an open synthetic lattice measures near 0%.
+
+**This is documentation, not a gate.** No code branches on `verdict`, no exit
+code reflects it, and nothing about routing changes when it flips. Wiring
+saturation into an actual go/no-go or steering decision is deliberate follow-up
+work, as is a genuine *pre*-routing predictor (the census's legality checks
+consult order-dependent state — drills already placed by earlier crossovers,
+the escape-channel registry keyed on which nets are still unrouted, and the
+pair's own guide route — so it cannot simply be hoisted ahead of the first A*
+expansion).
+
+## Not applicable ≠ zero
+
+Only board-06 exercises this path today. Board-05 has no differential pairs;
+board-07 never calls `route_all_with_diffpairs`. Running either with the report
+enabled produces a valid document with `crossovers_scanned: 0`,
+`applicable: false` and `verdict: "not-applicable"` — deliberately distinct
+from a `0.0` saturation figure, which would read as a clean result for a board
+that was never measured. Board-07's own routing failure mode (#3438, pad-array
+bundle congestion) is structurally different and **outside** what this census
+can see.
+
+## Cost
+
+The capture is a dataclass construction and two list appends per crossover,
+performed *after* the census has stamped and credited its incremental cost —
+i.e. in the same uncredited, bounded tail as the census's own `print` calls.
+Measured overhead is a few microseconds per crossover against a per-crossover
+census cost measured in milliseconds, so the report is free relative to the
+census it aggregates, and the census remains the only meaningful cost
+(`census_s_total` in the report; ~1.3 s across a whole board-06 shadow phase).
+The JSON document is written once, at exit.
+
+If the report cannot be written (unwritable path, read-only directory), the
+flush prints a diagnostic line to stderr and returns — it never raises, on the
+`_offboard_preflight` precedent that report-only surfaces must not block a
+route that already succeeded.
+
+## API
+
+```python
+from kicad_tools.router.crosstail_census import (
+    CENSUS_COLLECTOR,  # process-wide collector
+    CrossingTailCensusRecord,  # one crossover
+    CrossingTailCensusSummary,  # the aggregate
+    write_report,  # write the JSON document explicitly
+)
+
+summary = CENSUS_COLLECTOR.summary()
+print(summary.saturated_pct, summary.verdict)
+write_report("census.json")
+```
+
+`DiffPairRouter._census_records` holds the same records for a single router
+instance, reset at the start of every `route_all_with_diffpairs` call.
+
+[#3438]: https://github.com/rjwalters/kicad-tools/issues/3438
+[#4580]: https://github.com/rjwalters/kicad-tools/issues/4580
+[#4635]: https://github.com/rjwalters/kicad-tools/issues/4635
+[#4799]: https://github.com/rjwalters/kicad-tools/issues/4799
