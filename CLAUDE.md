@@ -63,6 +63,9 @@ Releases go through a **PR-based flow** — see [`RELEASING.md`](RELEASING.md) f
 the canonical process. Never push the version-bump commit directly to `main`;
 the version is bumped on a branch, merged via PR, and the `vX.Y.Z` tag is
 created **only after** the bump PR merges (the tag must point at a commit that
+is actually on `main`, never a pre-merge `release/vX.Y.Z` branch commit —
+`main` squash-merges, so the commit that lands has a different SHA than the
+one on the release branch).
 
 <!-- BEGIN LOOM ORCHESTRATION -->
 This repository uses [Loom](https://github.com/rjwalters/loom) for AI-powered development orchestration — see the Loom repository for the full guide (roles, labels, worktrees, configuration). When installed, Loom also writes a locally-substituted copy of that guide to `.loom/CLAUDE.md`.

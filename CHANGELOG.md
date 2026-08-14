@@ -625,6 +625,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`CLAUDE.md`'s `## Releasing` section no longer ends mid-sentence** (#4797) —
+  the dangling "(the tag must point at a commit that" clause is completed with
+  the reason `RELEASING.md` gives: the tag must reference the commit as it
+  landed on `main` (squash-merge gives it a different SHA), never a pre-merge
+  `release/vX.Y.Z` branch commit.
 - **Multi-pin nets are no longer skipped outright on `--deterministic-budget`
   placement-feedback re-routes** (#4776) — `--deterministic-budget` sets
   `args.per_net_timeout = 0.0` as its "wall-clock cutoff disabled" sentinel, and
