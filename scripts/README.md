@@ -32,6 +32,24 @@ end-to-end checks, the mypy baseline, and route determinism:
 `check_mypy_baseline.py`, `check_net_status.py`, `check_routed_drc.py`,
 `net_class_map_resolver.py`.
 
+### `corpus/`
+
+Opt-in, **local-only** probes of external KiCad corpora (network I/O; never
+invoked from CI, never imported by `tests/`). See
+[`corpus/README.md`](corpus/README.md) for flags, output layout, the failure
+taxonomy, and the CC-BY-4.0 attribution requirement.
+
+`probe_open_schematics.py` — sample N random records from the Hugging Face
+`bshada/open-schematics` dataset (87,931 real KiCad designs, CC-BY-4.0), parse
+them with this repo's own `Schematic.load` / `PCB.load`, and report a parser
+failure taxonomy (JSON + human-readable) under the gitignored
+`scripts/corpus/.cache/` (#4830):
+
+```bash
+uv run python scripts/corpus/probe_open_schematics.py --n 50 --seed 1234
+uv run python scripts/corpus/probe_open_schematics.py --dry-run   # offline path
+```
+
 ### `research/`
 
 FOM-calibration and corpus-generation scripts (pair with `data/research/`):
