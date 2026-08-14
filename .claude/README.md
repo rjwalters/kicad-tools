@@ -205,7 +205,7 @@ result = Task(
     description="Builder phase for issue #123",
     prompt="Implement issue #123",
     subagent_type="loom-builder",
-    run_in_background=False
+    run_in_background=False,
 )
 ```
 
@@ -221,7 +221,7 @@ result = Task(
     description="Builder phase for issue #123",
     prompt="/loom:builder 123",
     subagent_type="general-purpose",
-    run_in_background=False
+    run_in_background=False,
 )
 ```
 

@@ -26,13 +26,13 @@ board = Polygon.rectangle(center_x, center_y, width, height)
 
 # Configure physics parameters
 config = PlacementConfig(
-    charge_density=30.0,       # Edge-to-edge repulsion strength
-    spring_stiffness=10.0,     # Net attraction (Hooke's law k)
-    boundary_charge=80.0,      # Board edge repulsion multiplier
+    charge_density=30.0,  # Edge-to-edge repulsion strength
+    spring_stiffness=10.0,  # Net attraction (Hooke's law k)
+    boundary_charge=80.0,  # Board edge repulsion multiplier
     rotation_stiffness=100.0,  # Torsion spring for 90° alignment
-    edge_samples=3,            # Samples per edge for force integration
-    damping=0.92,              # Linear velocity damping
-    angular_damping=0.75,      # Rotational velocity damping
+    edge_samples=3,  # Samples per edge for force integration
+    damping=0.92,  # Linear velocity damping
+    angular_damping=0.75,  # Rotational velocity damping
 )
 
 optimizer = PlacementOptimizer(board, config)

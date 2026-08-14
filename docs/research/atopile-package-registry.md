@@ -23,22 +23,22 @@ The registry API provides:
 
 ```python
 class PackageReleaseInfo:
-    identifier: str          # e.g., "atopile/addressable-leds"
-    version: str             # semver: "1.2.3"
-    repository: str          # GitHub repo URL
-    authors: list[Author]    # name + email
-    license: str             # SPDX license identifier
-    summary: str             # Short description
-    homepage: str | None     # Project homepage
-    readme_url: str | None   # README location
-    requires_atopile: str    # Version spec (e.g., "^0.3.0")
-    stats: PackageStats      # Download counts
-    hashes: FileHashes       # SHA256 integrity hash
+    identifier: str  # e.g., "atopile/addressable-leds"
+    version: str  # semver: "1.2.3"
+    repository: str  # GitHub repo URL
+    authors: list[Author]  # name + email
+    license: str  # SPDX license identifier
+    summary: str  # Short description
+    homepage: str | None  # Project homepage
+    readme_url: str | None  # README location
+    requires_atopile: str  # Version spec (e.g., "^0.3.0")
+    stats: PackageStats  # Download counts
+    hashes: FileHashes  # SHA256 integrity hash
     dependencies: PackageDependencies  # Transitive deps
-    artifacts: ArtifactsInfo | None    # Build artifacts (gerbers, etc.)
-    layouts: LayoutsInfo | None        # KiCAD layouts
-    builds: list[str] | None           # Available build targets
-    yanked_at: str | None    # If package was yanked
+    artifacts: ArtifactsInfo | None  # Build artifacts (gerbers, etc.)
+    layouts: LayoutsInfo | None  # KiCAD layouts
+    builds: list[str] | None  # Available build targets
+    yanked_at: str | None  # If package was yanked
 ```
 
 ### 3. Package Configuration (`ato.yaml`)

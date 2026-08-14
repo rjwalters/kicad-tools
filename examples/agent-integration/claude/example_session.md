@@ -44,7 +44,7 @@ Now I'll add the USB-C connector for power input:
     "x": 40.0,
     "y": 80.0,
     "reference": "J1",
-    "value": "USB_C"
+    "value": "USB_C",
 }
 # Result: Added USB-C connector J1 at (40, 80)
 ```
@@ -58,7 +58,7 @@ Add the ATtiny85 microcontroller:
     "x": 100.0,
     "y": 80.0,
     "reference": "U1",
-    "value": "ATtiny85"
+    "value": "ATtiny85",
 }
 # Result: Added ATtiny85 U1 at (100, 80)
 ```
@@ -67,13 +67,7 @@ Add the LED indicator circuit (LED + current limiting resistor):
 
 ```python
 # Tool call: add_led_indicator
-{
-    "x": 150.0,
-    "y": 80.0,
-    "ref_prefix": "D1",
-    "label": "STATUS",
-    "resistor_value": "330R"
-}
+{"x": 150.0, "y": 80.0, "ref_prefix": "D1", "label": "STATUS", "resistor_value": "330R"}
 # Result: Added LED D1 with resistor R1 (330R) at (150, 80)
 # Ports: VCC at (150, 72.5), GND at (150, 95)
 ```
@@ -82,12 +76,7 @@ Add decoupling capacitors for the MCU:
 
 ```python
 # Tool call: add_decoupling_caps
-{
-    "x": 85.0,
-    "y": 60.0,
-    "ref_start": "C1",
-    "values": ["10uF", "100nF"]
-}
+{"x": 85.0, "y": 60.0, "ref_start": "C1", "values": ["10uF", "100nF"]}
 # Result: Added capacitors C1 (10uF) and C2 (100nF) at (85, 60)
 ```
 
@@ -97,12 +86,7 @@ Connect USB power to VCC rail:
 
 ```python
 # Tool call: wire_components
-{
-    "from_ref": "J1",
-    "from_pin": "VBUS",
-    "to_ref": "VCC",
-    "to_pin": "1"
-}
+{"from_ref": "J1", "from_pin": "VBUS", "to_ref": "VCC", "to_pin": "1"}
 # Result: Connected J1:VBUS to VCC
 ```
 
@@ -110,12 +94,7 @@ Connect USB ground:
 
 ```python
 # Tool call: wire_components
-{
-    "from_ref": "J1",
-    "from_pin": "GND",
-    "to_ref": "GND",
-    "to_pin": "1"
-}
+{"from_ref": "J1", "from_pin": "GND", "to_ref": "GND", "to_pin": "1"}
 # Result: Connected J1:GND to GND
 ```
 
@@ -135,12 +114,7 @@ Connect LED to GPIO (using PB0):
 
 ```python
 # Tool call: wire_components
-{
-    "from_ref": "U1",
-    "from_pin": "PB0",
-    "to_ref": "D1",
-    "to_pin": "A"
-}
+{"from_ref": "U1", "from_pin": "PB0", "to_ref": "D1", "to_pin": "A"}
 # Result: Connected U1:PB0 to D1 (via LED indicator block)
 ```
 
@@ -148,11 +122,7 @@ Add a net label for the LED signal:
 
 ```python
 # Tool call: add_net_label
-{
-    "label": "LED_OUT",
-    "x": 130.0,
-    "y": 72.5
-}
+{"label": "LED_OUT", "x": 130.0, "y": 72.5}
 # Result: Added net label "LED_OUT" at (130, 72.5)
 ```
 
@@ -198,12 +168,7 @@ Place the USB connector at the edge:
 
 ```python
 # Tool call: place_component
-{
-    "ref": "J1",
-    "x": 5.0,
-    "y": 10.0,
-    "rotation": 90
-}
+{"ref": "J1", "x": 5.0, "y": 10.0, "rotation": 90}
 # Result: Placed J1 at (5, 10) rotated 90°
 ```
 
@@ -211,12 +176,7 @@ Place the MCU centrally:
 
 ```python
 # Tool call: place_component
-{
-    "ref": "U1",
-    "x": 15.0,
-    "y": 10.0,
-    "rotation": 0
-}
+{"ref": "U1", "x": 15.0, "y": 10.0, "rotation": 0}
 # Result: Placed U1 at (15, 10)
 ```
 
@@ -250,11 +210,7 @@ Route power nets first with wider traces:
 
 ```python
 # Tool call: route_net
-{
-    "net": "VCC",
-    "prefer_layer": "F.Cu",
-    "trace_width": 0.5
-}
+{"net": "VCC", "prefer_layer": "F.Cu", "trace_width": 0.5}
 # Result: Routed VCC - 3 connections, length: 28.5mm, 0 vias
 ```
 
@@ -262,19 +218,11 @@ Route ground and add ground plane:
 
 ```python
 # Tool call: route_net
-{
-    "net": "GND",
-    "prefer_layer": "B.Cu",
-    "trace_width": 0.5
-}
+{"net": "GND", "prefer_layer": "B.Cu", "trace_width": 0.5}
 # Result: Routed GND - 4 connections, length: 35.2mm, 2 vias
 
 # Tool call: define_zone
-{
-    "net": "GND",
-    "layer": "B.Cu",
-    "priority": 0
-}
+{"net": "GND", "layer": "B.Cu", "priority": 0}
 # Result: Created GND zone on B.Cu covering entire board
 ```
 
@@ -282,11 +230,7 @@ Route signal net:
 
 ```python
 # Tool call: route_net
-{
-    "net": "LED_OUT",
-    "prefer_layer": "F.Cu",
-    "minimize_vias": true
-}
+{"net": "LED_OUT", "prefer_layer": "F.Cu", "minimize_vias": true}
 # Result: Routed LED_OUT - 1 connection, length: 12.3mm, 0 vias
 ```
 
@@ -311,10 +255,7 @@ Route signal net:
 # Result: PCB saved
 
 # Tool call: export_gerbers
-{
-    "output_dir": "./gerbers",
-    "manufacturer": "jlcpcb"
-}
+{"output_dir": "./gerbers", "manufacturer": "jlcpcb"}
 # Result: Exported Gerber files to ./gerbers/
 # - led_blinker-F_Cu.gbr
 # - led_blinker-B_Cu.gbr
@@ -325,10 +266,7 @@ Route signal net:
 # - led_blinker.drl
 
 # Tool call: export_assembly
-{
-    "output_dir": "./assembly",
-    "manufacturer": "jlcpcb"
-}
+{"output_dir": "./assembly", "manufacturer": "jlcpcb"}
 # Result: Exported assembly files:
 # - BOM_led_blinker.csv
 # - CPL_led_blinker.csv

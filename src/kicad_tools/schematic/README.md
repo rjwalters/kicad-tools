@@ -33,16 +33,16 @@ Junctions (`add_junction()`) serve **visual purposes only**:
 
 ```python
 # WRONG: Junction without endpoint connectivity
-sch.add_wire((0, 50), (200, 50))    # One continuous wire
+sch.add_wire((0, 50), (200, 50))  # One continuous wire
 sch.add_wire((100, 0), (100, 100))  # Vertical wire passes through
-sch.add_junction(100, 50)           # Junction is visual only - NO CONNECTION!
+sch.add_junction(100, 50)  # Junction is visual only - NO CONNECTION!
 
 # CORRECT: Endpoints meet, junction for visual clarity
-sch.add_wire((0, 50), (100, 50))    # Segment 1 ends at intersection
+sch.add_wire((0, 50), (100, 50))  # Segment 1 ends at intersection
 sch.add_wire((100, 50), (200, 50))  # Segment 2 starts at intersection
-sch.add_wire((100, 0), (100, 50))   # Vertical connects at same point
-sch.add_wire((100, 50), (100, 100)) # Continues from intersection
-sch.add_junction(100, 50)           # Visual indicator of the connection
+sch.add_wire((100, 0), (100, 50))  # Vertical connects at same point
+sch.add_wire((100, 50), (100, 100))  # Continues from intersection
+sch.add_junction(100, 50)  # Visual indicator of the connection
 ```
 
 ## Common Patterns
@@ -55,14 +55,14 @@ To create a T-connection (e.g., component tapping off a power rail):
 # Scenario: Vertical wire needs to connect to horizontal rail at x=100
 
 # WRONG: Single rail wire, vertical just touches it
-rail_wire = sch.add_wire((0, 50), (200, 50))      # Continuous rail
-sch.add_wire((100, 50), (100, 100))               # Vertical - NOT CONNECTED!
+rail_wire = sch.add_wire((0, 50), (200, 50))  # Continuous rail
+sch.add_wire((100, 50), (100, 100))  # Vertical - NOT CONNECTED!
 
 # CORRECT: Split rail at connection point
-sch.add_wire((0, 50), (100, 50))                  # Rail segment 1 ends at x=100
-sch.add_wire((100, 50), (200, 50))                # Rail segment 2 starts at x=100
-sch.add_wire((100, 50), (100, 100))               # Vertical meets at x=100
-sch.add_junction(100, 50)                         # Visual indicator
+sch.add_wire((0, 50), (100, 50))  # Rail segment 1 ends at x=100
+sch.add_wire((100, 50), (200, 50))  # Rail segment 2 starts at x=100
+sch.add_wire((100, 50), (100, 100))  # Vertical meets at x=100
+sch.add_junction(100, 50)  # Visual indicator
 ```
 
 ### Power Rail with Multiple Taps
@@ -84,7 +84,7 @@ for i in range(len(all_x) - 1):
 # Add vertical connections and junctions at tap points
 for x in tap_points:
     sch.add_wire((x, rail_y), (x, component_y))  # Vertical to component
-    sch.add_junction(x, rail_y)                   # Visual indicator
+    sch.add_junction(x, rail_y)  # Visual indicator
 ```
 
 ### Using the High-Level Helper
@@ -177,12 +177,12 @@ r1 = sch.add_symbol("Device:R", x=100, y=60, ref="R1", value="10k", rotation=0)
 r2 = sch.add_symbol("Device:R", x=100, y=110, ref="R2", value="10k", rotation=0)
 
 # Wire +5V to R1 top (endpoints meet)
-sch.add_wire((100, 20), (100, 50))   # Power symbol to R1 pin 1
+sch.add_wire((100, 20), (100, 50))  # Power symbol to R1 pin 1
 
 # Wire R1 bottom to R2 top - this is where the output tap is
 # Create the connection with proper segmentation for the output tap
 r1_bottom = r1.pin_position("2")  # (100, 70)
-r2_top = r2.pin_position("1")     # (100, 100)
+r2_top = r2.pin_position("1")  # (100, 100)
 
 # Vertical wire from R1 to junction point
 sch.add_wire(r1_bottom, (100, 85))

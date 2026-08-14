@@ -126,8 +126,8 @@ def _build_document(uri: str, text: str) -> None:
         match ctx:
             case ap.AtoParser.BlockdefContext():
                 # Build single node first (for partial builds)
-                GRAPHS[uri][TypeRef.from_one("__node_" + str(ref))] = (
-                    front_end.bob.build_node(text, file_path, ref)
+                GRAPHS[uri][TypeRef.from_one("__node_" + str(ref))] = front_end.bob.build_node(
+                    text, file_path, ref
                 )
                 # Then build full module
                 GRAPHS[uri][ref] = front_end.bob.build_text(text, file_path, ref)
@@ -142,9 +142,7 @@ with DowngradedExceptionCollector(UserException) as collector:
     try:
         front_end.bob.try_build_all_from_text(source_text, file_path)
     except* UserException as e:
-        exc_diagnostics = [
-            _convert_exc_to_diagnostic(error) for error in iter_leaf_exceptions(e)
-        ]
+        exc_diagnostics = [_convert_exc_to_diagnostic(error) for error in iter_leaf_exceptions(e)]
 
     warning_diagnostics = [
         _convert_exc_to_diagnostic(error, severity=lsp.DiagnosticSeverity.Warning)

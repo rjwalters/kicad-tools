@@ -236,17 +236,17 @@ from agent_integration.claude.tools import KICAD_TOOLS
 
 # OpenAI integration
 import json
+
 with open("agent-integration/openai/tools.json") as f:
     functions = json.load(f)["functions"]
 
 # Common wrapper for any LLM
 from agent_integration.common.kicad_tools_wrapper import KiCadAgent
+
 agent = KiCadAgent()
-result = agent.execute("add_schematic_symbol", {
-    "lib_id": "Device:R",
-    "x": 100, "y": 80,
-    "reference": "R1"
-})
+result = agent.execute(
+    "add_schematic_symbol", {"lib_id": "Device:R", "x": 100, "y": 80, "reference": "R1"}
+)
 ```
 
 ## CLI Commands

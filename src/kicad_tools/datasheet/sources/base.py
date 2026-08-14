@@ -15,6 +15,11 @@ from typing import TYPE_CHECKING, Any, Callable, TypeVar
 from kicad_tools.utils import ensure_parent_dir
 
 if TYPE_CHECKING:
+    # ``requests`` is an optional runtime dependency (imported lazily inside the
+    # methods that need it), but it ships inline types, so a type-checking-only
+    # import is enough to annotate the cached session attribute.
+    import requests
+
     from ..models import DatasheetResult
 
 logger = logging.getLogger(__name__)
@@ -271,7 +276,7 @@ class HTTPDatasheetSource(DatasheetSource):
             timeout: Request timeout in seconds
         """
         self.timeout = timeout
-        self._session = None
+        self._session: requests.Session | None = None
 
     @abstractmethod
     def _get_default_headers(self) -> dict[str, str]:

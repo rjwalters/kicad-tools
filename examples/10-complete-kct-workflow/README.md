@@ -260,7 +260,7 @@ spec = load_spec("project.kct")
 
 # Access requirements
 trace_width = spec.requirements.manufacturing.min_trace  # "0.3mm"
-target_fab = spec.requirements.manufacturing.target_fab   # "jlcpcb"
+target_fab = spec.requirements.manufacturing.target_fab  # "jlcpcb"
 
 # Access design decisions
 for decision in spec.decisions:

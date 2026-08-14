@@ -82,10 +82,16 @@ import os
 import secrets
 import time
 from datetime import datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from .lcsc import _categorize_part, _guess_package_type
 from .models import Part, PartPrice
+
+if TYPE_CHECKING:
+    # ``requests`` is an optional runtime dependency (imported lazily in
+    # ``_get_session``), but it ships inline types, so a type-checking-only
+    # import is enough to annotate the cached session attribute.
+    import requests
 
 logger = logging.getLogger(__name__)
 
@@ -302,12 +308,12 @@ class JLCOpenAPIClient:
         self.credentials = credentials
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._session = None
+        self._session: requests.Session | None = None
 
     def _get_session(self):
         """Get or create the underlying ``requests`` session."""
         if self._session is None:
-            import requests  # type: ignore[import-untyped]
+            import requests
 
             self._session = requests.Session()
         return self._session

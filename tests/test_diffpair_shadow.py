@@ -4019,7 +4019,7 @@ def test_planar_preference_keeps_the_dive_when_no_planar_tail_is_legal(monkeypat
     monkeypatch.setattr(
         dpr,
         "_route_pad_violation",
-        lambda route: ((0.5, (1.0, 1.0)) if not route.vias else (0.0, None)),
+        lambda route: (0.5, (1.0, 1.0)) if not route.vias else (0.0, None),
         raising=False,
     )
     head, goal = _tail_pads((0.0, 0.0), (4.0, 0.5))

@@ -51,8 +51,7 @@ query = sch.symbols.query()
 
 # Chain operations
 power_ics = (
-    query
-    .filter(reference__startswith="U")
+    query.filter(reference__startswith="U")
     .exclude(lib_id__startswith="power:")
     .order_by("reference")
     .all()
@@ -142,54 +141,32 @@ smd_caps = sch.symbols.filter(
 )
 
 # Chain filters (same effect)
-smd_caps = (
-    sch.symbols
-    .filter(reference__startswith="C")
-    .filter(lib_id__contains="SMD")
-)
+smd_caps = sch.symbols.filter(reference__startswith="C").filter(lib_id__contains="SMD")
 ```
 
 ### Excluding Results
 
 ```python
 # Exclude power symbols
-active_components = (
-    sch.symbols
-    .exclude(lib_id__startswith="power:")
-    .exclude(lib_id__contains=":PWR_")
+active_components = sch.symbols.exclude(lib_id__startswith="power:").exclude(
+    lib_id__contains=":PWR_"
 )
 
 # Combine filter and exclude
-non_power_ics = (
-    sch.symbols
-    .filter(reference__startswith="U")
-    .exclude(lib_id__contains="power:")
-)
+non_power_ics = sch.symbols.filter(reference__startswith="U").exclude(lib_id__contains="power:")
 ```
 
 ## Sorting Results
 
 ```python
 # Sort by reference (ascending)
-sorted_caps = (
-    sch.symbols
-    .filter(reference__startswith="C")
-    .order_by("reference")
-)
+sorted_caps = sch.symbols.filter(reference__startswith="C").order_by("reference")
 
 # Sort descending
-reverse_sorted = (
-    sch.symbols
-    .filter(reference__startswith="C")
-    .order_by("-reference")
-)
+reverse_sorted = sch.symbols.filter(reference__startswith="C").order_by("-reference")
 
 # Multiple sort keys
-by_value_then_ref = (
-    sch.symbols
-    .filter(reference__startswith="R")
-    .order_by("value", "reference")
-)
+by_value_then_ref = sch.symbols.filter(reference__startswith="R").order_by("value", "reference")
 ```
 
 ## Query Results
@@ -249,8 +226,8 @@ smd_parts = pcb.footprints.filter(layer="F.Cu")
 qfp_packages = pcb.footprints.filter(footprint__contains="QFP")
 
 # Shortcuts
-all_smd = pcb.footprints.smd()      # Top layer SMD
-all_tht = pcb.footprints.tht()      # Through-hole
+all_smd = pcb.footprints.smd()  # Top layer SMD
+all_tht = pcb.footprints.tht()  # Through-hole
 ```
 
 ### Position-Based Queries
@@ -282,7 +259,7 @@ sch = Schematic.load("project.kicad_sch")
 # Count component types
 types = Counter()
 for symbol in sch.symbols:
-    prefix = ''.join(c for c in symbol.reference if c.isalpha())
+    prefix = "".join(c for c in symbol.reference if c.isalpha())
     types[prefix] += 1
 
 print("Component breakdown:")
@@ -290,9 +267,7 @@ for prefix, count in types.most_common():
     print(f"  {prefix}: {count}")
 
 # Find most common capacitor values
-cap_values = Counter(
-    c.value for c in sch.symbols.filter(reference__startswith="C")
-)
+cap_values = Counter(c.value for c in sch.symbols.filter(reference__startswith="C"))
 print("\nMost common capacitor values:")
 for value, count in cap_values.most_common(5):
     print(f"  {value}: {count}")
@@ -358,11 +333,13 @@ report = {
     "statistics": {
         "total_components": len(sch.symbols),
         "ics": sch.symbols.filter(reference__startswith="U").count(),
-        "passives": sum([
-            sch.symbols.filter(reference__startswith="R").count(),
-            sch.symbols.filter(reference__startswith="C").count(),
-            sch.symbols.filter(reference__startswith="L").count(),
-        ]),
+        "passives": sum(
+            [
+                sch.symbols.filter(reference__startswith="R").count(),
+                sch.symbols.filter(reference__startswith="C").count(),
+                sch.symbols.filter(reference__startswith="L").count(),
+            ]
+        ),
     },
     "ics": [
         {
@@ -373,11 +350,7 @@ report = {
         for s in sch.symbols.filter(reference__startswith="U").order_by("reference")
     ],
     "high_value_resistors": [
-        s.reference
-        for s in sch.symbols.filter(
-            reference__startswith="R",
-            value__regex=r"\d+[kM]"
-        )
+        s.reference for s in sch.symbols.filter(reference__startswith="R", value__regex=r"\d+[kM]")
     ],
 }
 

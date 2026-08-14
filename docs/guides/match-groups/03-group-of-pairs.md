@@ -31,8 +31,8 @@ mipi_lane_0 = NetClassRouting(
     name="MIPI_CSI_LANE_0",
     intra_pair_clearance=0.075,
     coupled_routing=True,
-    diffpair_partner="CSI_DAT0_N",         # within-pair
-    length_match_group="MIPI_CSI",         # cross-lane
+    diffpair_partner="CSI_DAT0_N",  # within-pair
+    length_match_group="MIPI_CSI",  # cross-lane
     length_match_tolerance_mm=0.05,
 )
 
@@ -41,7 +41,7 @@ mipi_lane_1 = NetClassRouting(
     intra_pair_clearance=0.075,
     coupled_routing=True,
     diffpair_partner="CSI_DAT1_N",
-    length_match_group="MIPI_CSI",         # same group name as lane 0
+    length_match_group="MIPI_CSI",  # same group name as lane 0
     length_match_tolerance_mm=0.05,
 )
 ```

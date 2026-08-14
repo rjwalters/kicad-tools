@@ -36,8 +36,8 @@ Interfaces compose other interfaces as typed members:
 ```python
 # From faebryk/library/I2C.py
 class I2C(ModuleInterface):
-    scl: F.ElectricLogic    # Clock line with reference power
-    sda: F.ElectricLogic    # Data line with reference power
+    scl: F.ElectricLogic  # Clock line with reference power
+    sda: F.ElectricLogic  # Data line with reference power
 
     address = L.p_field(within=L.Range(0, 0x7F))
     frequency = L.p_field(units=P.Hz)
@@ -54,6 +54,7 @@ Interfaces auto-connect their power references:
 @L.rt_field
 def single_electric_reference(self):
     return F.has_single_electric_reference_defined(self.reference)
+
 
 @staticmethod
 def connect_all_module_references(node):
@@ -112,10 +113,7 @@ class ResistorVoltageDivider(Module):
 
     def __preinit__(self):
         # Internal wiring
-        self.power.hv.connect_via(
-            [self.r_top, self.output.line, self.r_bottom],
-            self.power.lv
-        )
+        self.power.hv.connect_via([self.r_top, self.output.line, self.r_bottom], self.power.lv)
 ```
 
 #### Pattern 6: Design Checks
@@ -194,26 +192,34 @@ Add interface types to enable connection validation:
 ```python
 # Proposed: src/kicad_tools/schematic/interfaces/base.py
 
+
 class Interface(Protocol):
     """Base interface type for type-checked connections."""
+
     @property
     def interface_type(self) -> str: ...
 
+
 class PowerInterface(Interface):
     """Power connection (VCC/GND pair)."""
+
     vcc: Port
     gnd: Port
     voltage: float | None = None
     max_current: float | None = None
 
+
 class I2CInterface(Interface):
     """I2C bus connection."""
+
     sda: Port
     scl: Port
     frequency: int = 100_000  # Hz
 
+
 class USBDataInterface(Interface):
     """USB data connection (D+/D-)."""
+
     dp: Port
     dm: Port
 ```
@@ -227,26 +233,20 @@ class USBDataInterface(Interface):
 
 ```python
 # Proposed addition to CircuitBlock
-def connect(self, other: "CircuitBlock",
-            self_interface: str,
-            other_interface: str) -> None:
+def connect(self, other: "CircuitBlock", self_interface: str, other_interface: str) -> None:
     """Connect two blocks via compatible interfaces."""
     self_if = self.get_interface(self_interface)
     other_if = other.get_interface(other_interface)
 
     if not self_if.is_compatible_with(other_if):
         raise InterfaceError(
-            f"Cannot connect {type(self_if).__name__} "
-            f"to {type(other_if).__name__}"
+            f"Cannot connect {type(self_if).__name__} to {type(other_if).__name__}"
         )
 
     # Auto-wire matching ports
     for port_name in self_if.port_names():
         if port_name in other_if.port_names():
-            self.schematic.add_wire(
-                self_if.port(port_name),
-                other_if.port(port_name)
-            )
+            self.schematic.add_wire(self_if.port(port_name), other_if.port(port_name))
 ```
 
 ### 3.3 Add Parameter Validation (Low Priority)
@@ -261,9 +261,7 @@ class PowerInterface(Interface):
         errors = []
         if self.voltage and other.voltage:
             if abs(self.voltage - other.voltage) > 0.1:
-                errors.append(
-                    f"Voltage mismatch: {self.voltage}V vs {other.voltage}V"
-                )
+                errors.append(f"Voltage mismatch: {self.voltage}V vs {other.voltage}V")
         return errors
 ```
 
@@ -324,10 +322,9 @@ class MCUBlock(CircuitBlock):
 
         # Define typed interfaces with concrete ports
         self.power = PowerInterface(
-            vcc=self.mcu.pin_position("VCC"),
-            gnd=self.mcu.pin_position("GND"),
-            voltage=3.3
+            vcc=self.mcu.pin_position("VCC"), gnd=self.mcu.pin_position("GND"), voltage=3.3
         )
+
 
 # Usage with type-checked connections
 mcu = MCUBlock(sch, 100, 100)
@@ -335,7 +332,7 @@ i2c_pullups = I2CPullups(sch, 150, 100)
 
 # Type-checked connection
 mcu.connect(i2c_pullups, "i2c", "i2c")  # OK
-mcu.connect(usb_block, "i2c", "usb")     # Error: incompatible
+mcu.connect(usb_block, "i2c", "usb")  # Error: incompatible
 ```
 
 ## 5. Conclusions

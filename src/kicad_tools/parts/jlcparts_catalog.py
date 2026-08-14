@@ -489,7 +489,7 @@ def _discover_split_parts(base_url: str) -> list[str]:
     ``cache.zip`` is the *last* segment. This helper returns URLs in the
     correct concatenation order (``z01``, ``z02``, ..., then ``cache.zip``).
     """
-    import requests  # type: ignore[import-untyped]
+    import requests
 
     part_urls: list[str] = []
     index = 1

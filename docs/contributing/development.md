@@ -392,7 +392,7 @@ Return actionable errors:
 raise DRCViolation(
     "Clearance violation: C1 pad 1 too close to R2 pad 2",
     location=(10.5, 20.3),
-    suggestion="Move C1 0.2mm right"
+    suggestion="Move C1 0.2mm right",
 )
 
 # Bad: Generic

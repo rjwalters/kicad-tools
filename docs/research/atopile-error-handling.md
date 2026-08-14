@@ -125,8 +125,8 @@ def get_frozen(self) -> tuple:
     """Return a hashable version for deduplication."""
     return (self.__class__, self.message, self._title)
     # With source info:
-    + get_src_info_from_token(self.origin_start)
-    + get_src_info_from_token(self.origin_stop)
+    +get_src_info_from_token(self.origin_start)
+    +get_src_info_from_token(self.origin_stop)
 ```
 
 The logging handler tracks seen exceptions to avoid duplicate output.
@@ -176,7 +176,7 @@ class KiCadDiagnostic(Exception):
         message: str,
         file_path: Path,
         element_type: str,  # "footprint", "track", "via", etc.
-        element_ref: str,   # "C1", "R2", etc.
+        element_ref: str,  # "C1", "R2", etc.
         position: tuple[float, float],
         layer: str | None = None,
     ): ...

@@ -36,9 +36,7 @@ response = client.messages.create(
     model="claude-sonnet-4-20250514",
     max_tokens=1024,
     tools=KICAD_TOOLS,
-    messages=[
-        {"role": "user", "content": "Create an LED blinker with an ATtiny85"}
-    ]
+    messages=[{"role": "user", "content": "Create an LED blinker with an ATtiny85"}],
 )
 
 # Process tool calls
@@ -64,10 +62,10 @@ response = client.chat.completions.create(
     model="gpt-4-turbo",
     messages=[
         {"role": "system", "content": "You are a PCB designer using kicad-tools."},
-        {"role": "user", "content": "Create a temperature sensor board"}
+        {"role": "user", "content": "Create a temperature sensor board"},
     ],
     functions=functions,
-    function_call="auto"
+    function_call="auto",
 )
 ```
 
@@ -79,12 +77,10 @@ from common.kicad_tools_wrapper import KiCadAgent
 agent = KiCadAgent()
 
 # Execute tool calls from any LLM
-result = agent.execute("add_schematic_symbol", {
-    "lib_id": "Device:R",
-    "x": 100, "y": 80,
-    "reference": "R1",
-    "value": "10k"
-})
+result = agent.execute(
+    "add_schematic_symbol",
+    {"lib_id": "Device:R", "x": 100, "y": 80, "reference": "R1", "value": "10k"},
+)
 
 if result.success:
     print(f"Success: {result.message}")

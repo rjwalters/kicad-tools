@@ -63,8 +63,8 @@ project = Project.create("my_board", directory="./projects/")
 project = Project.load("my_board.kicad_pro")
 
 # Access schematic and PCB
-sch = project.schematic   # Parsed Schematic object
-pcb = project.pcb         # Parsed PCB object
+sch = project.schematic  # Parsed Schematic object
+pcb = project.pcb  # Parsed PCB object
 
 # Cross-reference to check sync
 result = project.cross_reference()
@@ -106,7 +106,8 @@ sch = Schematic.load("./designs/led_driver.kicad_sch")
 # Add symbols
 sch.add_symbol(
     lib_id="Device:R",
-    x=100, y=50,
+    x=100,
+    y=50,
     reference="R1",
     value="330",
     footprint="Resistor_SMD:R_0603_1608Metric",
@@ -114,7 +115,8 @@ sch.add_symbol(
 
 sch.add_symbol(
     lib_id="Device:LED",
-    x=100, y=70,
+    x=100,
+    y=70,
     reference="D1",
     value="LED",
     footprint="LED_SMD:LED_0603_1608Metric",
@@ -164,18 +166,29 @@ Or via Python subprocess:
 import subprocess
 
 # Export netlist
-subprocess.run([
-    "kicad-cli", "sch", "export", "netlist",
-    "./designs/led_driver.kicad_sch",
-    "-o", "./designs/led_driver.net"
-])
+subprocess.run(
+    [
+        "kicad-cli",
+        "sch",
+        "export",
+        "netlist",
+        "./designs/led_driver.kicad_sch",
+        "-o",
+        "./designs/led_driver.net",
+    ]
+)
 
 # Update PCB
-subprocess.run([
-    "kicad-cli", "pcb", "update",
-    "./designs/led_driver.kicad_pcb",
-    "--netlist", "./designs/led_driver.net"
-])
+subprocess.run(
+    [
+        "kicad-cli",
+        "pcb",
+        "update",
+        "./designs/led_driver.kicad_pcb",
+        "--netlist",
+        "./designs/led_driver.net",
+    ]
+)
 ```
 
 ### Step 4: Verify Synchronization
@@ -272,11 +285,16 @@ Run DRC and manufacturer checks:
 
 ```python
 # Run KiCad DRC first
-subprocess.run([
-    "kicad-cli", "pcb", "drc",
-    "./designs/led_driver.kicad_pcb",
-    "-o", "./designs/led_driver-drc.rpt"
-])
+subprocess.run(
+    [
+        "kicad-cli",
+        "pcb",
+        "drc",
+        "./designs/led_driver.kicad_pcb",
+        "-o",
+        "./designs/led_driver-drc.rpt",
+    ]
+)
 
 # Check against manufacturer rules
 checks = project.check_drc(

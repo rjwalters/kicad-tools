@@ -295,11 +295,11 @@ from kicad_tools.manufacturers import find_compatible_manufacturers
 
 # Your design constraints
 compatible = find_compatible_manufacturers(
-    trace_width_mm=0.15,    # Your minimum trace
-    clearance_mm=0.15,      # Your minimum clearance
-    via_drill_mm=0.3,       # Your minimum via drill
+    trace_width_mm=0.15,  # Your minimum trace
+    clearance_mm=0.15,  # Your minimum clearance
+    via_drill_mm=0.3,  # Your minimum via drill
     layers=4,
-    needs_assembly=True,    # Need PCBA service
+    needs_assembly=True,  # Need PCBA service
 )
 
 print("Compatible manufacturers for your design:")
@@ -397,6 +397,7 @@ from kicad_tools import PCB
 from kicad_tools.manufacturers import get_profile, find_compatible_manufacturers
 from kicad_tools.drc import DRCReport, check_manufacturer_rules
 
+
 def validate_for_manufacturing(
     pcb_path: str,
     manufacturer: str = "jlcpcb",
@@ -449,8 +450,10 @@ def validate_for_manufacturing(
 
     return result.passed
 
+
 if __name__ == "__main__":
     import sys
+
     pcb_file = sys.argv[1] if len(sys.argv) > 1 else "board.kicad_pcb"
     mfr = sys.argv[2] if len(sys.argv) > 2 else "jlcpcb"
     layers = int(sys.argv[3]) if len(sys.argv) > 3 else 2  # Default to 2-layer

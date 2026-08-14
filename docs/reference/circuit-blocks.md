@@ -9,8 +9,12 @@ Circuit blocks are reusable, tested subcircuits for building schematics programm
 ```python
 from kicad_tools.schematic import Schematic
 from kicad_tools.schematic.blocks import (
-    MCUBlock, CrystalOscillator, LDOBlock,
-    USBConnector, DebugHeader, I2CPullups
+    MCUBlock,
+    CrystalOscillator,
+    LDOBlock,
+    USBConnector,
+    DebugHeader,
+    I2CPullups,
 )
 
 # Create schematic
@@ -32,13 +36,12 @@ Blocks can also be composed algebraically with `&` (series) and `|` (parallel)
 operators, deferring placement until `realize()` is called:
 
 ```python
-from kicad_tools.schematic.blocks import (
-    VoltageDividerSense, ADCInputFilterBlock
-)
+from kicad_tools.schematic.blocks import VoltageDividerSense, ADCInputFilterBlock
 
 # Compose a voltage sense chain: divider feeds into an anti-aliasing filter
-sense_chain = VoltageDividerSense(sch, 0, 0, ratio=11.0) \
-            & ADCInputFilterBlock(sch, 0, 0, cutoff_hz=1000)
+sense_chain = VoltageDividerSense(sch, 0, 0, ratio=11.0) & ADCInputFilterBlock(
+    sch, 0, 0, cutoff_hz=1000
+)
 
 # Place the composed block into the schematic at the desired position
 sense_chain.realize(sch, x=50, y=100)
@@ -57,12 +60,15 @@ See [Composition Operators](#composition-operators) for full details.
 Linear voltage regulator with input/output capacitors.
 
 ```python
-ldo = LDOBlock(sch, x=50, y=100,
-    input_voltage=5.0,      # Input voltage
-    output_voltage=3.3,     # Output voltage
-    input_cap="10uF",       # Input capacitor
+ldo = LDOBlock(
+    sch,
+    x=50,
+    y=100,
+    input_voltage=5.0,  # Input voltage
+    output_voltage=3.3,  # Output voltage
+    input_cap="10uF",  # Input capacitor
     output_caps=["10uF", "100nF"],  # Output capacitors
-    ref="U1"                # Optional reference designator
+    ref="U1",  # Optional reference designator
 )
 ```
 
@@ -75,10 +81,13 @@ ldo = LDOBlock(sch, x=50, y=100,
 DC barrel jack power input with protection.
 
 ```python
-jack = BarrelJackInput(sch, x=50, y=100,
-    voltage=12.0,           # Expected voltage
+jack = BarrelJackInput(
+    sch,
+    x=50,
+    y=100,
+    voltage=12.0,  # Expected voltage
     polarity_protection=True,
-    fuse_value="1A"
+    fuse_value="1A",
 )
 ```
 
@@ -91,9 +100,12 @@ jack = BarrelJackInput(sch, x=50, y=100,
 USB power input with protection.
 
 ```python
-usb_pwr = USBPowerInput(sch, x=50, y=100,
+usb_pwr = USBPowerInput(
+    sch,
+    x=50,
+    y=100,
     connector_type="type-c",  # "micro", "mini", "type-c"
-    current_limit="500mA"
+    current_limit="500mA",
 )
 ```
 
@@ -106,10 +118,13 @@ usb_pwr = USBPowerInput(sch, x=50, y=100,
 Battery input with protection.
 
 ```python
-batt = BatteryInput(sch, x=50, y=100,
-    chemistry="lipo",        # "lipo", "liion", "nimh"
+batt = BatteryInput(
+    sch,
+    x=50,
+    y=100,
+    chemistry="lipo",  # "lipo", "liion", "nimh"
     cells=1,
-    protection=True          # Over-discharge protection
+    protection=True,  # Over-discharge protection
 )
 ```
 
@@ -124,10 +139,13 @@ batt = BatteryInput(sch, x=50, y=100,
 Microcontroller with bypass capacitors.
 
 ```python
-mcu = MCUBlock(sch, x=150, y=100,
+mcu = MCUBlock(
+    sch,
+    x=150,
+    y=100,
     part="STM32F103C8T6",
     bypass_caps=["100nF", "100nF", "100nF", "4.7uF"],
-    ref="U1"
+    ref="U1",
 )
 ```
 
@@ -140,10 +158,7 @@ mcu = MCUBlock(sch, x=150, y=100,
 Crystal with load capacitors.
 
 ```python
-xtal = CrystalOscillator(sch, x=100, y=100,
-    frequency="8MHz",
-    load_caps="20pF"
-)
+xtal = CrystalOscillator(sch, x=100, y=100, frequency="8MHz", load_caps="20pF")
 ```
 
 **Ports:** `IN`, `OUT`, `GND`
@@ -155,10 +170,7 @@ xtal = CrystalOscillator(sch, x=100, y=100,
 Reset switch with debounce capacitor.
 
 ```python
-reset = ResetButton(sch, x=120, y=50,
-    debounce_cap="100nF",
-    pullup="10k"
-)
+reset = ResetButton(sch, x=120, y=50, debounce_cap="100nF", pullup="10k")
 ```
 
 **Ports:** `RST`, `GND`
@@ -172,10 +184,13 @@ reset = ResetButton(sch, x=120, y=50,
 USB connector with optional ESD protection.
 
 ```python
-usb = USBConnector(sch, x=50, y=150,
+usb = USBConnector(
+    sch,
+    x=50,
+    y=150,
     connector_type="type-c",  # "usb-b", "mini", "micro", "type-c"
     esd_protection=True,
-    data_lines=True           # Include D+/D-
+    data_lines=True,  # Include D+/D-
 )
 ```
 
@@ -188,9 +203,12 @@ usb = USBConnector(sch, x=50, y=150,
 Programming/debug header.
 
 ```python
-debug = DebugHeader(sch, x=200, y=100,
-    interface="swd",          # "swd", "jtag", "tag-connect"
-    connector="2x5"           # Pin header type
+debug = DebugHeader(
+    sch,
+    x=200,
+    y=100,
+    interface="swd",  # "swd", "jtag", "tag-connect"
+    connector="2x5",  # Pin header type
 )
 ```
 
@@ -203,10 +221,7 @@ debug = DebugHeader(sch, x=200, y=100,
 I2C bus pull-up resistors.
 
 ```python
-i2c = I2CPullups(sch, x=180, y=150,
-    pullup_value="4.7k",
-    bus_voltage=3.3
-)
+i2c = I2CPullups(sch, x=180, y=150, pullup_value="4.7k", bus_voltage=3.3)
 ```
 
 **Ports:** `VCC`, `GND`, `SDA`, `SCL`
@@ -220,11 +235,7 @@ i2c = I2CPullups(sch, x=180, y=150,
 Status LED with current-limiting resistor.
 
 ```python
-led = LEDIndicator(sch, x=200, y=150,
-    color="green",
-    forward_voltage=2.2,
-    current="10mA"
-)
+led = LEDIndicator(sch, x=200, y=150, color="green", forward_voltage=2.2, current="10mA")
 ```
 
 **Ports:** `ANODE`, `GND`
@@ -236,9 +247,7 @@ led = LEDIndicator(sch, x=200, y=150,
 Decoupling capacitor array.
 
 ```python
-decoupling = DecouplingCaps(sch, x=160, y=80,
-    values=["100nF", "100nF", "10uF"]
-)
+decoupling = DecouplingCaps(sch, x=160, y=80, values=["100nF", "100nF", "10uF"])
 ```
 
 **Ports:** `VCC`, `GND`
@@ -256,13 +265,13 @@ class MyBlock(CircuitBlock):
 
         # Add components
         self.r1 = self.add_resistor("R1", "10k", x, y)
-        self.c1 = self.add_capacitor("C1", "100nF", x+20, y)
+        self.c1 = self.add_capacitor("C1", "100nF", x + 20, y)
 
         # Define ports (connection points)
         self.ports = {
             "IN": self.r1.pin(1),
             "OUT": self.c1.pin(2),
-            "GND": (x+10, y+30),
+            "GND": (x + 10, y + 30),
         }
 
         # Internal wiring
@@ -520,6 +529,7 @@ matching.
 ```python
 from kicad_tools.schematic.blocks import CircuitBlock
 
+
 class MyFilter(CircuitBlock):
     """RC low-pass filter."""
 
@@ -528,18 +538,19 @@ class MyFilter(CircuitBlock):
 
         # Add components
         self.r = self.add_resistor("R", r_value, x, y)
-        self.c = self.add_capacitor("C", c_value, x+30, y)
+        self.c = self.add_capacitor("C", c_value, x + 30, y)
 
         # Internal wiring
         self.add_wire(self.r.pin(2), self.c.pin(1))
-        self.add_wire(self.c.pin(2), (x+30, y+20))  # GND
+        self.add_wire(self.c.pin(2), (x + 30, y + 20))  # GND
 
         # Define ports
         self.ports = {
             "IN": self.r.pin(1),
             "OUT": self.c.pin(1),
-            "GND": (x+30, y+20),
+            "GND": (x + 30, y + 20),
         }
+
 
 # Usage
 lpf = MyFilter(sch, x=100, y=100, r_value="4.7k", c_value="1uF")

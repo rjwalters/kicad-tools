@@ -95,7 +95,7 @@ For dense components like TQFP packages (0.8mm pitch), use fine grid resolution:
 rules = DesignRules(grid_resolution=0.25)  # Only 3-4 nets route
 
 # Fine enough for QFP
-rules = DesignRules(grid_resolution=0.1)   # All 13 nets route
+rules = DesignRules(grid_resolution=0.1)  # All 13 nets route
 ```
 
 ### Pin Assignment Affects Routability
@@ -159,10 +159,10 @@ kicad-tools/
 from kicad_tools.optim import PlacementOptimizer, PlacementConfig
 
 config = PlacementConfig(
-    charge_density=100.0,      # Repulsion strength
-    spring_stiffness=10.0,     # Net attraction
-    damping=0.95,              # Velocity decay
-    rotation_stiffness=10.0,   # 90° alignment force
+    charge_density=100.0,  # Repulsion strength
+    spring_stiffness=10.0,  # Net attraction
+    damping=0.95,  # Velocity decay
+    rotation_stiffness=10.0,  # 90° alignment force
 )
 
 optimizer = PlacementOptimizer.from_pcb(pcb, config=config)
@@ -176,11 +176,11 @@ wire_length = optimizer.total_wire_length()
 from kicad_tools.router import load_pcb_for_routing, DesignRules
 
 rules = DesignRules(
-    grid_resolution=0.1,   # Routing grid (mm)
-    trace_width=0.2,       # Trace width (mm)
+    grid_resolution=0.1,  # Routing grid (mm)
+    trace_width=0.2,  # Trace width (mm)
     trace_clearance=0.15,  # Min clearance (mm)
-    via_drill=0.3,         # Via hole (mm)
-    via_diameter=0.6,      # Via pad (mm)
+    via_drill=0.3,  # Via hole (mm)
+    via_diameter=0.6,  # Via pad (mm)
 )
 
 router, net_map = load_pcb_for_routing(
@@ -190,9 +190,9 @@ router, net_map = load_pcb_for_routing(
 )
 
 # Choose strategy
-router.route_all()                          # Basic
+router.route_all()  # Basic
 router.route_all_negotiated(max_iterations=5)  # Congestion-aware
-router.route_all_monte_carlo(num_trials=10)    # Multi-start
+router.route_all_monte_carlo(num_trials=10)  # Multi-start
 
 stats = router.get_statistics()
 print(f"Routed {stats['nets_routed']} nets with {stats['vias']} vias")

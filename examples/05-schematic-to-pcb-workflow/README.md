@@ -46,8 +46,8 @@ pcb = project.pcb
 
 # Operations
 result = project.cross_reference()  # Check sync
-project.route(skip_nets=["GND"])    # Autoroute
-project.export_gerbers("output/")   # Manufacturing
+project.route(skip_nets=["GND"])  # Autoroute
+project.export_gerbers("output/")  # Manufacturing
 ```
 
 ### PCBEditor

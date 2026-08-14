@@ -90,11 +90,15 @@ function incrementalLayoutUpdate(original: PCB, updated: PCB): PCBDiff {
 1. **Source-attached diagnostics**:
 ```python
 class KiCadDiagnostic(Exception):
-    def __init__(self, message: str, file_path: Path,
-                 element_type: str,  # "footprint", "track", "via"
-                 element_ref: str,   # "C1", "R2"
-                 position: tuple[float, float],
-                 layer: str | None = None): ...
+    def __init__(
+        self,
+        message: str,
+        file_path: Path,
+        element_type: str,  # "footprint", "track", "via"
+        element_ref: str,  # "C1", "R2"
+        position: tuple[float, float],
+        layer: str | None = None,
+    ): ...
 ```
 
 2. **Error accumulation**:
@@ -137,11 +141,13 @@ class Interface(Protocol):
     @property
     def interface_type(self) -> str: ...
 
+
 class PowerInterface(Interface):
     vcc: Port
     gnd: Port
     voltage: float | None = None
     max_current: float | None = None
+
 
 class I2CInterface(Interface):
     sda: Port

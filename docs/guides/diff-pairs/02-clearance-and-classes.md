@@ -19,10 +19,10 @@ Read `intra_pair_clearance` via the accessor, never the field directly:
 from kicad_tools.router.rules import NetClassRouting
 
 nc = NetClassRouting(name="USB", clearance=0.15, intra_pair_clearance=0.075)
-assert nc.effective_intra_pair_clearance() == 0.075   # explicit override
+assert nc.effective_intra_pair_clearance() == 0.075  # explicit override
 
 nc2 = NetClassRouting(name="USB", clearance=0.15)
-assert nc2.effective_intra_pair_clearance() == 0.15   # fallback to clearance
+assert nc2.effective_intra_pair_clearance() == 0.15  # fallback to clearance
 ```
 
 The `None` sentinel encodes "fall back to `clearance`" — it is NOT a literal
@@ -38,7 +38,7 @@ the net class opts in:
 NetClassRouting(
     name="HighSpeed",
     intra_pair_clearance=0.075,
-    coupled_routing=True,   # opt-in to CoupledPathfinder
+    coupled_routing=True,  # opt-in to CoupledPathfinder
 )
 ```
 

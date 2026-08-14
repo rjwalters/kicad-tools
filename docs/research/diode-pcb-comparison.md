@@ -40,7 +40,9 @@ A `.zen` file is Starlark (Bazel's Python-subset) extended with PCB primitives
 
 ```python
 Resistor = Module("@stdlib/generics/Resistor.zen")
-VCC = Power(); GND = Ground(); LED_ANODE = Net()
+VCC = Power()
+GND = Ground()
+LED_ANODE = Net()
 Resistor(name="R1", value="1kohm", package="0402", P1=VCC, P2=LED_ANODE)
 Board(name="blinky", layers=4, layout_path="layout/blinky")
 ```

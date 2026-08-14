@@ -69,8 +69,11 @@ Key characteristics:
 class NotDeducibleException(Exception):
     """Raised when predicate cannot be proven true or false"""
 
+
 # From utils.py - Contradiction types
 class Contradiction(Exception): ...
+
+
 class ContradictionByLiteral(Contradiction): ...
 ```
 
@@ -105,8 +108,7 @@ def pick_topologically(tree, solver, progress):
 
         # 2c. Pick module with least candidates first (most constrained)
         picked = [
-            (min(group, key=lambda m: len(candidates[m])), candidates[m][0])
-            for group in groups
+            (min(group, key=lambda m: len(candidates[m])), candidates[m][0]) for group in groups
         ]
 
         # 2d. Attach selected parts
@@ -179,20 +181,24 @@ Key features:
 ```python
 # Simplified constraint-aware component block
 class ResistorBlock:
-    def __init__(self, sch, ref,
-                 resistance: Interval,  # e.g., Interval(9.5e3, 10.5e3)
-                 power: Interval = Interval(0, 0.125)):
+    def __init__(
+        self,
+        sch,
+        ref,
+        resistance: Interval,  # e.g., Interval(9.5e3, 10.5e3)
+        power: Interval = Interval(0, 0.125),
+    ):
         # Store constraints
         self.constraints = {
-            'resistance': resistance,
-            'max_power': power,
+            "resistance": resistance,
+            "max_power": power,
         }
 
     def pick_part(self, db: PartDatabase) -> LCSCPart:
         """Query LCSC for compatible parts"""
         candidates = db.query_resistors(
-            resistance=self.constraints['resistance'],
-            power=self.constraints['max_power'],
+            resistance=self.constraints["resistance"],
+            power=self.constraints["max_power"],
         )
         return candidates[0]  # Return best match
 ```
@@ -219,14 +225,16 @@ class ResistorBlock:
 
 ```python
 # Current kicad-tools approach
-ldo = LDOBlock(sch, ref="U1", value="AMS1117-3.3",
-               input_cap="10uF", output_caps=["10uF", "100nF"])
+ldo = LDOBlock(sch, ref="U1", value="AMS1117-3.3", input_cap="10uF", output_caps=["10uF", "100nF"])
 
 # Proposed constraint-based approach
-ldo = LDOBlock(sch, ref="U1",
-               input_voltage=Interval.from_center_rel(5.0, 0.10),  # 5V +/- 10%
-               output_voltage=Interval.from_center_rel(3.3, 0.05), # 3.3V +/- 5%
-               output_current=0.5)  # Auto-select LDO and caps
+ldo = LDOBlock(
+    sch,
+    ref="U1",
+    input_voltage=Interval.from_center_rel(5.0, 0.10),  # 5V +/- 10%
+    output_voltage=Interval.from_center_rel(3.3, 0.05),  # 3.3V +/- 5%
+    output_current=0.5,
+)  # Auto-select LDO and caps
 
 # System would:
 # 1. Query LCSC for LDOs matching Vin, Vout, Iout specs

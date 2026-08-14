@@ -114,10 +114,7 @@ print(f"Resistors: {len(resistors)}")
 caps_100nf = sch.symbols.filter(value="100nF")
 
 # Find all resistors over 10k (using regex)
-high_value_r = sch.symbols.filter(
-    reference__startswith="R",
-    value__regex=r"[1-9]\d+k|[1-9]\d*M"
-)
+high_value_r = sch.symbols.filter(reference__startswith="R", value__regex=r"[1-9]\d+k|[1-9]\d*M")
 
 # Find components from a specific library
 power_symbols = sch.symbols.filter(lib_id__contains="power:")
@@ -298,6 +295,7 @@ Here's a complete script that analyzes a schematic and produces a summary:
 from collections import Counter
 from kicad_tools import Schematic, extract_bom
 
+
 def analyze_schematic(path: str):
     """Print detailed analysis of a schematic."""
 
@@ -310,20 +308,20 @@ def analyze_schematic(path: str):
     # Component counts by type
     type_counts = Counter()
     for symbol in sch.symbols:
-        prefix = ''.join(c for c in symbol.reference if c.isalpha())
+        prefix = "".join(c for c in symbol.reference if c.isalpha())
         type_counts[prefix] += 1
 
     print("\nComponent Types:")
     for prefix, count in sorted(type_counts.items()):
         name = {
-            'R': 'Resistors',
-            'C': 'Capacitors',
-            'L': 'Inductors',
-            'D': 'Diodes',
-            'Q': 'Transistors',
-            'U': 'ICs',
-            'J': 'Connectors',
-            'SW': 'Switches',
+            "R": "Resistors",
+            "C": "Capacitors",
+            "L": "Inductors",
+            "D": "Diodes",
+            "Q": "Transistors",
+            "U": "ICs",
+            "J": "Connectors",
+            "SW": "Switches",
         }.get(prefix, prefix)
         print(f"  {name}: {count}")
 
@@ -343,8 +341,10 @@ def analyze_schematic(path: str):
     for value, count in res_values.most_common(5):
         print(f"  {value}: {count}")
 
+
 if __name__ == "__main__":
     import sys
+
     if len(sys.argv) < 2:
         print("Usage: python analyze.py <schematic.kicad_sch>")
         sys.exit(1)

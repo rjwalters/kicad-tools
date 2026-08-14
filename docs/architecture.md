@@ -155,8 +155,8 @@ The MCP layer enables AI assistants like Claude to interact with KiCad designs v
 agent = PCBReasoningAgent.from_pcb("board.kicad_pcb")
 
 while not agent.is_complete():
-    prompt = agent.get_prompt()      # State for LLM
-    command = call_llm(prompt)       # Your LLM
+    prompt = agent.get_prompt()  # State for LLM
+    command = call_llm(prompt)  # Your LLM
     result, diagnosis = agent.execute(command)
 
 agent.save("routed.kicad_pcb")

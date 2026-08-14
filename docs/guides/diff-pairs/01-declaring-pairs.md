@@ -18,7 +18,7 @@ usb_p = NetClassRouting(
     trace_width=0.2,
     clearance=0.15,
     intra_pair_clearance=0.075,
-    diffpair_partner="USB_DM",   # names the other half
+    diffpair_partner="USB_DM",  # names the other half
     coupled_routing=True,
 )
 ```
@@ -55,9 +55,9 @@ curator lesson).
 ```python
 from kicad_tools.router.diffpair import is_single_ended_refused
 
-assert is_single_ended_refused("USB_CC1")    # True — refused
-assert is_single_ended_refused("USB_SBU1")   # True — refused
-assert not is_single_ended_refused("USB_D+") # False — real diff pair
+assert is_single_ended_refused("USB_CC1")  # True — refused
+assert is_single_ended_refused("USB_SBU1")  # True — refused
+assert not is_single_ended_refused("USB_D+")  # False — real diff pair
 ```
 
 If you genuinely need tight clearance on `CC1`/`CC2` for ESD-trace reasons,

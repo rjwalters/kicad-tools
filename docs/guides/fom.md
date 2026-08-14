@@ -175,6 +175,7 @@ def my_predictor(pcb) -> float:
     """Return a probability in [0, 1]."""
     ...
 
+
 result = compute_fom(pcb, predictor=my_predictor, beta=1.0)
 # score = soft_score * my_predictor(pcb)**beta
 ```

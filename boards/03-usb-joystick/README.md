@@ -148,9 +148,9 @@ The demo configures net classes for priority-based routing:
 
 ```python
 net_class_map = create_net_class_map(
-    power_nets=["VCC", "VBUS", "GND"],      # Highest priority
-    high_speed_nets=["USB_D+", "USB_D-"],   # USB differential pair
-    clock_nets=["XTAL1", "XTAL2"],          # Crystal oscillator
+    power_nets=["VCC", "VBUS", "GND"],  # Highest priority
+    high_speed_nets=["USB_D+", "USB_D-"],  # USB differential pair
+    clock_nets=["XTAL1", "XTAL2"],  # Crystal oscillator
 )
 ```
 
@@ -189,10 +189,10 @@ This ensures:
 ```python
 rules = DesignRules(
     grid_resolution=0.25,  # Routing grid
-    trace_width=0.25,      # Default trace width
+    trace_width=0.25,  # Default trace width
     trace_clearance=0.15,  # Minimum clearance
-    via_drill=0.3,         # Via drill diameter
-    via_diameter=0.6,      # Via pad diameter
+    via_drill=0.3,  # Via drill diameter
+    via_diameter=0.6,  # Via pad diameter
 )
 ```
 

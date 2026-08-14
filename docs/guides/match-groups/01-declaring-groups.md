@@ -21,9 +21,9 @@ ddr_dq = NetClassRouting(
     name="DDR_DQ",
     trace_width=0.15,
     clearance=0.15,
-    length_match_group="DDR_DATA_BYTE_0",   # group name
-    length_match_tolerance_mm=0.1,           # ±0.1 mm
-    length_critical=True,                    # gate for the tuner
+    length_match_group="DDR_DATA_BYTE_0",  # group name
+    length_match_tolerance_mm=0.1,  # ±0.1 mm
+    length_critical=True,  # gate for the tuner
 )
 ```
 

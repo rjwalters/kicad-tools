@@ -146,7 +146,9 @@ sch = Schematic(
 from kicad_tools.schematic.blocks import USBConnector
 
 usb = USBConnector(
-    sch, x=30, y=100,
+    sch,
+    x=30,
+    y=100,
     connector_type="type-c",
     esd_protection=True,
 )
@@ -158,7 +160,9 @@ usb = USBConnector(
 from kicad_tools.schematic.blocks import LDOBlock
 
 ldo = LDOBlock(
-    sch, x=80, y=100,
+    sch,
+    x=80,
+    y=100,
     ref="U1",
     value="AMS1117-3.3",
     input_cap="10uF",
@@ -167,7 +171,7 @@ ldo = LDOBlock(
 
 # Connect to power rails
 ldo.connect_to_rails(
-    vin_rail_y=30,   # 5V rail
+    vin_rail_y=30,  # 5V rail
     vout_rail_y=50,  # 3.3V rail
     gnd_rail_y=200,  # Ground rail
 )
@@ -179,7 +183,9 @@ ldo.connect_to_rails(
 from kicad_tools.schematic.blocks import CrystalOscillator
 
 xtal = CrystalOscillator(
-    sch, x=250, y=60,
+    sch,
+    x=250,
+    y=60,
     frequency="8MHz",
     load_caps="20pF",
 )
@@ -191,7 +197,9 @@ xtal = CrystalOscillator(
 from kicad_tools.schematic.blocks import DebugHeader
 
 debug = DebugHeader(
-    sch, x=280, y=140,
+    sch,
+    x=280,
+    y=140,
     interface="swd",
     pins=6,
 )
@@ -203,7 +211,9 @@ debug = DebugHeader(
 from kicad_tools.schematic.blocks import LEDIndicator
 
 led = LEDIndicator(
-    sch, x=300, y=100,
+    sch,
+    x=300,
+    y=100,
     ref_prefix="D1",
     label="USER",
     resistor_value="330R",

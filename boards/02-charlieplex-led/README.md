@@ -127,10 +127,10 @@ Edit `route_demo.py` to adjust:
 ```python
 rules = DesignRules(
     grid_resolution=0.25,  # Routing grid (finer = more options, slower)
-    trace_width=0.3,       # Trace width in mm
-    trace_clearance=0.2,   # Minimum clearance in mm
-    via_drill=0.3,         # Via drill diameter
-    via_diameter=0.6,      # Via pad diameter
+    trace_width=0.3,  # Trace width in mm
+    trace_clearance=0.2,  # Minimum clearance in mm
+    via_drill=0.3,  # Via drill diameter
+    via_diameter=0.6,  # Via pad diameter
 )
 ```
 

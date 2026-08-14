@@ -143,19 +143,19 @@ class is_atomic_part(Module.TraitT):
     def __init__(self, manufacturer, partnumber, footprint, symbol, model=None):
         self._manufacturer = manufacturer
         self._footprint = footprint  # Path to .kicad_mod
-        self._symbol = symbol        # Path to .kicad_sym
+        self._symbol = symbol  # Path to .kicad_sym
 ```
 
 **Designator Prefixes:**
 ```python
 class has_designator_prefix(Module.TraitT):
     class Prefix(StrEnum):
-        R = "R"    # Resistor
-        C = "C"    # Capacitor
-        L = "L"    # Inductor
-        U = "U"    # IC
-        Q = "Q"    # Transistor
-        D = "D"    # Diode
+        R = "R"  # Resistor
+        C = "C"  # Capacitor
+        L = "L"  # Inductor
+        U = "U"  # IC
+        Q = "Q"  # Transistor
+        D = "D"  # Diode
         # ... 50+ standard prefixes
 ```
 
@@ -172,9 +172,7 @@ class Resistor(Module):
     max_voltage = L.p_field(units=P.V)
 
     attach_to_footprint: F.can_attach_to_footprint_symmetrically
-    designator_prefix = L.f_field(F.has_designator_prefix)(
-        F.has_designator_prefix.Prefix.R
-    )
+    designator_prefix = L.f_field(F.has_designator_prefix)(F.has_designator_prefix.Prefix.R)
 
     @L.rt_field
     def pickable(self) -> F.is_pickable_by_type:
@@ -225,8 +223,9 @@ class PickedPartLCSC(PickedPart):
         stock: int
         price: float
         description: str
-        basic: bool       # JLCPCB basic part
-        preferred: bool   # JLCPCB preferred part
+        basic: bool  # JLCPCB basic part
+        preferred: bool  # JLCPCB preferred part
+
 
 class EasyEDAPart:
     """Composite of footprint, symbol, and 3D model from LCSC."""
@@ -331,7 +330,7 @@ Extend LCSC client for parametric search:
 ```python
 def search_by_parameters(
     component_type: str,  # "resistor", "capacitor", etc.
-    parameters: dict,     # {"resistance": "10kohm", "package": "0402"}
+    parameters: dict,  # {"resistance": "10kohm", "package": "0402"}
 ) -> list[Part]:
     """Find parts matching electrical parameters."""
 ```
@@ -349,11 +348,14 @@ def create_resistor(
     """Generate footprint and find matching LCSC parts."""
 
     fp = create_chip(package, prefix="R")
-    parts = search_by_parameters("resistor", {
-        "resistance": resistance,
-        "package": package,
-        "tolerance": tolerance,
-    })
+    parts = search_by_parameters(
+        "resistor",
+        {
+            "resistance": resistance,
+            "package": package,
+            "tolerance": tolerance,
+        },
+    )
     return fp, parts
 ```
 

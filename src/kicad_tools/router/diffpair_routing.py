@@ -6562,8 +6562,10 @@ class DiffPairRouter:
 
         order = sorted(
             range(len(leg.segments)),
-            key=lambda i: -math.hypot(
-                leg.segments[i].x2 - leg.segments[i].x1, leg.segments[i].y2 - leg.segments[i].y1
+            key=lambda i: (
+                -math.hypot(
+                    leg.segments[i].x2 - leg.segments[i].x1, leg.segments[i].y2 - leg.segments[i].y1
+                )
             ),
         )
         for i in order:

@@ -111,12 +111,18 @@ detection layer. It is:
 ```python
 def detect_asset_type(path: PurePosixPath) -> AssetType:
     suffix = path.suffix.lower()
-    if suffix == ".kicad_sym": return AssetType.SYMBOL_LIB
-    if suffix == ".kicad_mod": return AssetType.FOOTPRINT
-    if suffix in [".step", ".stp"]: return AssetType.STEP_MODEL
-    if suffix == ".wrl": return AssetType.WRL_MODEL
-    if suffix == ".stl": return AssetType.STL_MODEL
-    if suffix == ".pdf": return AssetType.DATASHEET
+    if suffix == ".kicad_sym":
+        return AssetType.SYMBOL_LIB
+    if suffix == ".kicad_mod":
+        return AssetType.FOOTPRINT
+    if suffix in [".step", ".stp"]:
+        return AssetType.STEP_MODEL
+    if suffix == ".wrl":
+        return AssetType.WRL_MODEL
+    if suffix == ".stl":
+        return AssetType.STL_MODEL
+    if suffix == ".pdf":
+        return AssetType.DATASHEET
     return AssetType.UNKNOWN
 ```
 

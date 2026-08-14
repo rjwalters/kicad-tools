@@ -23,7 +23,7 @@ from kicad_tools.router.rules import NetClassRouting
 ddr_dq = NetClassRouting(
     name="DDR_DQ",
     length_match_group="DDR_DATA_BYTE_0",
-    length_match_reference=None,           # explicit, but the default
+    length_match_reference=None,  # explicit, but the default
     length_match_tolerance_mm=0.1,
 )
 ```
@@ -40,7 +40,7 @@ must not gain phase delay.
 ddr_dq_pace_car = NetClassRouting(
     name="DDR_DQ",
     length_match_group="DDR_DATA_BYTE_0",
-    length_match_reference="DQS_P",        # pace-car: DQS_P holds, DQ meanders
+    length_match_reference="DQS_P",  # pace-car: DQS_P holds, DQ meanders
     length_match_tolerance_mm=0.1,
 )
 ```
@@ -61,7 +61,7 @@ reference automatically (e.g. MIPI CSI clock = `CSI_CLK_P/N`).
 mipi_csi_data = NetClassRouting(
     name="MIPI_CSI_DATA",
     length_match_group="MIPI_CSI",
-    length_match_reference="clock",        # resolver picks the clock pair
+    length_match_reference="clock",  # resolver picks the clock pair
     length_match_tolerance_mm=0.05,
 )
 ```

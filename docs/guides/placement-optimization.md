@@ -87,9 +87,9 @@ optimizer = PlacementOptimizer.from_pcb("board.kicad_pcb")
 
 # Configure optimization
 optimizer.set_weights(
-    routing=1.0,      # Prioritize routability
-    thermal=0.5,      # Consider thermal
-    grouping=0.3,     # Group related components
+    routing=1.0,  # Prioritize routability
+    thermal=0.5,  # Consider thermal
+    grouping=0.3,  # Group related components
 )
 
 # Run optimization

@@ -9,18 +9,22 @@ This document provides an overview of the kicad-tools Python API.
 ```python
 from kicad_tools import (
     # Core
-    Schematic, PCB, Project,
-    load_schematic, save_schematic,
-    load_pcb, save_pcb,
-
+    Schematic,
+    PCB,
+    Project,
+    load_schematic,
+    save_schematic,
+    load_pcb,
+    save_pcb,
     # Query API
-    SymbolQuery, FootprintQuery,
-
+    SymbolQuery,
+    FootprintQuery,
     # Reasoning
-    PCBReasoningAgent, PCBState,
-
+    PCBReasoningAgent,
+    PCBState,
     # BOM
-    BOM, extract_bom,
+    BOM,
+    extract_bom,
 )
 ```
 
@@ -236,16 +240,16 @@ from kicad_tools.router import Autorouter, DesignRules
 
 # Configure rules
 rules = DesignRules(
-    trace_width=0.2,      # mm
-    clearance=0.15,       # mm
-    via_drill=0.3,        # mm
-    via_diameter=0.6,     # mm
+    trace_width=0.2,  # mm
+    clearance=0.15,  # mm
+    via_drill=0.3,  # mm
+    via_diameter=0.6,  # mm
 )
 
 # Create router
 router = Autorouter(
-    width=100,    # Board width mm
-    height=80,    # Board height mm
+    width=100,  # Board width mm
+    height=80,  # Board height mm
     rules=rules,
 )
 

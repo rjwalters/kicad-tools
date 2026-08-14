@@ -304,6 +304,7 @@ from kicad_tools.export import (
 )
 from kicad_tools.drc import check_manufacturer_rules
 
+
 def export_for_jlcpcb(pcb_path: str, sch_path: str, output_dir: str):
     """Generate all files needed for JLCPCB order."""
 
@@ -339,8 +340,9 @@ def export_for_jlcpcb(pcb_path: str, sch_path: str, output_dir: str):
 
     # Create ZIP for upload
     import shutil
+
     gerber_zip = output / "gerbers.zip"
-    shutil.make_archive(str(output / "gerbers"), 'zip', gerber_dir)
+    shutil.make_archive(str(output / "gerbers"), "zip", gerber_dir)
     print(f"   Created: {gerber_zip}")
 
     # Generate BOM
@@ -377,6 +379,7 @@ def export_for_jlcpcb(pcb_path: str, sch_path: str, output_dir: str):
     print("  2. Upload gerbers.zip for PCB fabrication")
     print("  3. Enable 'SMT Assembly' and upload BOM + CPL")
     print("  4. Review and place order")
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
@@ -455,8 +458,8 @@ from kicad_tools.export import export_pnp, PnPExportConfig
 
 config = PnPExportConfig(
     rotation_offsets={
-        "SOT-23": 180,      # Rotate SOT-23 by 180°
-        "TQFP-32": 90,      # Rotate TQFP-32 by 90°
+        "SOT-23": 180,  # Rotate SOT-23 by 180°
+        "TQFP-32": 90,  # Rotate TQFP-32 by 90°
     }
 )
 

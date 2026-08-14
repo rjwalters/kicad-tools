@@ -189,11 +189,11 @@ from kicad_tools.manufacturers import DesignRules
 
 my_rules = DesignRules(
     name="MyFab",
-    min_trace_width=0.15,      # mm
-    min_trace_spacing=0.15,     # mm
-    min_drill=0.25,             # mm
-    min_annular_ring=0.125,     # mm
-    min_via_diameter=0.5,       # mm
+    min_trace_width=0.15,  # mm
+    min_trace_spacing=0.15,  # mm
+    min_drill=0.25,  # mm
+    min_annular_ring=0.125,  # mm
+    min_via_diameter=0.5,  # mm
     min_silkscreen_width=0.15,  # mm
     min_silkscreen_clearance=0.1,
 )

@@ -129,11 +129,7 @@ library of validated design patterns accelerates iteration and improves quality.
   ```python
   from kicad_tools.patterns import USBPattern
 
-  pattern = USBPattern(
-      speed="high_speed",
-      connector="type_c",
-      esd_protection=True
-  )
+  pattern = USBPattern(speed="high_speed", connector="type_c", esd_protection=True)
   placements = pattern.get_placements(connector_at=(10, 50))
   # Returns validated placement meeting USB spec
   ```
@@ -164,9 +160,12 @@ library of validated design patterns accelerates iteration and improves quality.
 - [x] High-level operations for common tasks
   ```python
   # High level - declarative
-  design.add_subsystem("power_supply",
+  design.add_subsystem(
+      "power_supply",
       components=["U_REG", "C_IN", "C_OUT", "L1"],
-      near_edge="left", optimize_for="thermal")
+      near_edge="left",
+      optimize_for="thermal",
+  )
 
   # Medium level - guided
   optimizer.group_components(refs, strategy="power_supply", anchor="U_REG")
@@ -230,10 +229,13 @@ library of validated design patterns accelerates iteration and improves quality.
 ldo = LDOBlock(sch, ref="U1", value="AMS1117-3.3")
 
 # Constraint-based approach
-ldo = LDOBlock(sch, ref="U1",
-               input_voltage=Interval(4.5, 5.5),
-               output_voltage=Interval.from_center_rel(3.3, 0.05),
-               output_current=0.5)
+ldo = LDOBlock(
+    sch,
+    ref="U1",
+    input_voltage=Interval(4.5, 5.5),
+    output_voltage=Interval.from_center_rel(3.3, 0.05),
+    output_current=0.5,
+)
 # System auto-selects LDO and caps from LCSC
 ```
 

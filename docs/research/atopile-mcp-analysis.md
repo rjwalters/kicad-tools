@@ -48,6 +48,7 @@ class MCPTools:
         def decorator_wrapper(func: Callable):
             self._tools[func] = decorator
             return func
+
         return decorator_wrapper
 
     def install(self, mcp: FastMCP):
@@ -60,6 +61,7 @@ class MCPTools:
 
 ```python
 library_tools = MCPTools()
+
 
 @library_tools.register()
 def inspect_library_module_or_interface(name: str) -> NodeInfo:
@@ -94,6 +96,7 @@ class NodeInfo(BaseModel):
     locator: str
     language: Language
     code: str
+
 
 class BuildResult(Result):
     target: str
@@ -173,32 +176,28 @@ Recommendation: **Hybrid approach** - expose both patterns.
 ```python
 # Proposed MCP tools wrapping PlacementSession
 
+
 @placement_tools.register()
 def start_placement_session(pcb_path: str) -> SessionInfo:
     """Start interactive placement session. Returns session_id."""
     ...
 
+
 @placement_tools.register()
 def query_placement_move(
-    session_id: str,
-    ref: str,
-    x: float,
-    y: float,
-    rotation: float | None = None
+    session_id: str, ref: str, x: float, y: float, rotation: float | None = None
 ) -> MoveResult:
     """Query impact of moving component without applying."""
     ...
 
+
 @placement_tools.register()
 def apply_placement_move(
-    session_id: str,
-    ref: str,
-    x: float,
-    y: float,
-    rotation: float | None = None
+    session_id: str, ref: str, x: float, y: float, rotation: float | None = None
 ) -> MoveResult:
     """Apply move to session (can be undone)."""
     ...
+
 
 @placement_tools.register()
 def commit_placement_session(session_id: str) -> CommitResult:

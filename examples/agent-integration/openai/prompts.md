@@ -96,15 +96,12 @@ Use the provided functions to complete design tasks."""
 # User request
 messages = [
     {"role": "system", "content": system_prompt},
-    {"role": "user", "content": "Create a simple LED circuit with a resistor"}
+    {"role": "user", "content": "Create a simple LED circuit with a resistor"},
 ]
 
 # Get function calls from GPT
 response = client.chat.completions.create(
-    model="gpt-4-turbo",
-    messages=messages,
-    functions=functions,
-    function_call="auto"
+    model="gpt-4-turbo", messages=messages, functions=functions, function_call="auto"
 )
 
 # Process function calls

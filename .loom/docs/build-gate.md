@@ -441,11 +441,11 @@ A gate failure is **not** the same as a builder failure: the issue is automatica
 
 ```python
 {
-  "post_builder_gate_failed": True,
-  "gate_check": "has_commits" | "has_real_changes" | "build_passes",
-  "gate_detail": "<human-readable failure reason>",
-  "reason": "build_failed_post_builder",
-  "claim_released": True,
+    "post_builder_gate_failed": True,
+    "gate_check": "has_commits" | "has_real_changes" | "build_passes",
+    "gate_detail": "<human-readable failure reason>",
+    "reason": "build_failed_post_builder",
+    "claim_released": True,
 }
 ```
 

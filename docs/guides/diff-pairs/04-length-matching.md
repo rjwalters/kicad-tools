@@ -15,7 +15,7 @@ from kicad_tools.router.rules import NetClassRouting
 
 usb3 = NetClassRouting(
     name="USB3_SS",
-    skew_tolerance_mm=0.1,   # tight: USB 3.0 / PCIe Gen2+
+    skew_tolerance_mm=0.1,  # tight: USB 3.0 / PCIe Gen2+
     coupled_routing=True,
 )
 ```

@@ -30,6 +30,11 @@ from .models import (
 )
 
 if TYPE_CHECKING:
+    # ``requests`` is an optional runtime dependency (imported lazily in
+    # ``_get_session``), but it ships inline types, so a type-checking-only
+    # import is enough to annotate the cached session attribute.
+    import requests
+
     from ..schema.bom import BOMItem
     from .jlcparts_catalog import JlcpartsCatalog
     from .jlcpcb_api import JLCOpenAPIClient
@@ -167,11 +172,11 @@ def _request_exception_type() -> type[BaseException]:
     ``except`` reference and any test that raises it agree on identity.
     """
     try:
-        import requests  # type: ignore[import-untyped]
+        import requests
     except ImportError:
         return _RequestsUnavailableSentinel
-    # ``requests`` ships no type stubs here, so ``RequestException`` is ``Any``;
-    # the explicit annotation keeps callers' ``except`` type-safe.
+    # The explicit annotation keeps callers' ``except`` type-safe by pinning the
+    # declared return type independently of how ``requests`` exports it.
     exc_type: type[BaseException] = requests.RequestException
     return exc_type
 
@@ -360,7 +365,7 @@ class LCSCClient:
         """
         self.cache = cache if cache is not None else PartsCache() if use_cache else None
         self.timeout = timeout
-        self._session = None
+        self._session: requests.Session | None = None
         self._rate_limiter = RateLimiter(rate_limit) if rate_limit > 0 else None
         self._max_retries = max_retries
         self._base_retry_delay = base_retry_delay

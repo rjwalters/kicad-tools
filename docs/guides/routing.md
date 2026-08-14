@@ -68,11 +68,11 @@ router.save("routed.kicad_pcb")
 from kicad_tools.router import DesignRules
 
 rules = DesignRules(
-    trace_width=0.2,        # mm
-    clearance=0.15,         # mm
-    via_drill=0.3,          # mm
-    via_diameter=0.6,       # mm
-    grid_resolution=0.25,   # Routing grid
+    trace_width=0.2,  # mm
+    clearance=0.15,  # mm
+    via_drill=0.3,  # mm
+    via_diameter=0.6,  # mm
+    grid_resolution=0.25,  # Routing grid
 )
 
 router = Autorouter.from_pcb("board.kicad_pcb", rules=rules)
@@ -88,10 +88,10 @@ clearances than the rest of the board. Use per-component clearance to handle thi
 from kicad_tools.router import DesignRules
 
 rules = DesignRules(
-    trace_clearance=0.15,              # Default clearance for most components
+    trace_clearance=0.15,  # Default clearance for most components
     component_clearances={
-        "U1": 0.1,                      # Tighter clearance for fine-pitch IC
-        "U2": 0.08,                     # Even tighter for QFN
+        "U1": 0.1,  # Tighter clearance for fine-pitch IC
+        "U2": 0.08,  # Even tighter for QFN
     },
 )
 ```
@@ -103,9 +103,9 @@ clearance based on pin pitch:
 
 ```python
 rules = DesignRules(
-    trace_clearance=0.15,              # Default
-    fine_pitch_clearance=0.1,          # For fine-pitch components
-    fine_pitch_threshold=0.8,          # Components with pitch < 0.8mm use fine_pitch_clearance
+    trace_clearance=0.15,  # Default
+    fine_pitch_clearance=0.1,  # For fine-pitch components
+    fine_pitch_threshold=0.8,  # Components with pitch < 0.8mm use fine_pitch_clearance
 )
 ```
 
@@ -119,10 +119,10 @@ Explicit `component_clearances` take precedence over automatic detection:
 ```python
 rules = DesignRules(
     trace_clearance=0.15,
-    fine_pitch_clearance=0.1,          # Auto-apply to pitch < 0.8mm
+    fine_pitch_clearance=0.1,  # Auto-apply to pitch < 0.8mm
     fine_pitch_threshold=0.8,
     component_clearances={
-        "U3": 0.05,                     # Override: U3 needs extra-tight clearance
+        "U3": 0.05,  # Override: U3 needs extra-tight clearance
     },
 )
 
@@ -343,9 +343,9 @@ router.enable_blind_vias(top_layer="F.Cu", bottom_layer="In1.Cu")
 ```python
 # After initial routing, optimize
 router.optimize_traces(
-    straighten=True,        # Remove unnecessary bends
-    minimize_length=True,   # Shorten traces
-    minimize_vias=True,     # Reduce via count
+    straighten=True,  # Remove unnecessary bends
+    minimize_length=True,  # Shorten traces
+    minimize_vias=True,  # Reduce via count
 )
 ```
 
@@ -609,8 +609,8 @@ Uses `grid_resolution` from design rules. Fine grids ensure accuracy but scale a
 
 ```python
 rules = DesignRules(
-    trace_clearance=0.127,    # JLCPCB 5mil
-    grid_resolution=0.0635,   # Half of clearance (default)
+    trace_clearance=0.127,  # JLCPCB 5mil
+    grid_resolution=0.0635,  # Half of clearance (default)
 )
 ```
 

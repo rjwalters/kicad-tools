@@ -107,8 +107,8 @@ from kicad_tools.router import Autorouter, DesignRules
 # Configure design rules
 rules = DesignRules(
     grid_resolution=0.25,  # mm
-    trace_width=0.2,       # mm
-    clearance=0.15,        # mm
+    trace_width=0.2,  # mm
+    clearance=0.15,  # mm
 )
 
 # Create router and add components
@@ -201,28 +201,30 @@ Build schematics using reusable, tested circuit blocks:
 ```python
 from kicad_tools.schematic.models import Schematic
 from kicad_tools.schematic.blocks import (
-    MCUBlock, CrystalOscillator, LDOBlock, USBConnector,
-    DebugHeader, I2CPullups, ResetButton
+    MCUBlock,
+    CrystalOscillator,
+    LDOBlock,
+    USBConnector,
+    DebugHeader,
+    I2CPullups,
+    ResetButton,
 )
 
 sch = Schematic("My STM32 Design")
 
 # Add an MCU with bypass capacitors
-mcu = MCUBlock(sch, x=150, y=100,
-    part="STM32F103C8T6",
-    bypass_caps=["100nF", "100nF", "100nF", "4.7uF"])
+mcu = MCUBlock(
+    sch, x=150, y=100, part="STM32F103C8T6", bypass_caps=["100nF", "100nF", "100nF", "4.7uF"]
+)
 
 # Add crystal oscillator
-xtal = CrystalOscillator(sch, x=100, y=100,
-    frequency="8MHz", load_caps="20pF")
+xtal = CrystalOscillator(sch, x=100, y=100, frequency="8MHz", load_caps="20pF")
 
 # Add power supply
-ldo = LDOBlock(sch, x=50, y=100,
-    input_voltage=5.0, output_voltage=3.3)
+ldo = LDOBlock(sch, x=50, y=100, input_voltage=5.0, output_voltage=3.3)
 
 # Add USB connector with ESD protection
-usb = USBConnector(sch, x=50, y=150,
-    connector_type="type-c", esd_protection=True)
+usb = USBConnector(sch, x=50, y=150, connector_type="type-c", esd_protection=True)
 
 # Add debug header for programming
 debug = DebugHeader(sch, x=200, y=100, interface="swd")
@@ -280,9 +282,11 @@ Monitor long-running operations with progress callbacks:
 from kicad_tools import ProgressCallback, ProgressContext
 from kicad_tools.router import Autorouter
 
+
 def on_progress(progress: float, message: str, cancelable: bool) -> bool:
-    print(f"{progress*100:.0f}%: {message}")
+    print(f"{progress * 100:.0f}%: {message}")
     return True  # Return False to cancel
+
 
 # Use with context manager
 with ProgressContext(on_progress):
@@ -291,6 +295,7 @@ with ProgressContext(on_progress):
 
 # Or create JSON-formatted callbacks for automation
 from kicad_tools import create_json_callback
+
 callback = create_json_callback()
 ```
 

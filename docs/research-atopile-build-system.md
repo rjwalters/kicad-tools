@@ -25,12 +25,12 @@ class MusterTarget:
     aliases: list[str]
     func: MusterFuncType
     description: str | None = None
-    implicit: bool = True          # Hidden from user, auto-included as dependency
-    virtual: bool = False          # Grouping target with no actual work
+    implicit: bool = True  # Hidden from user, auto-included as dependency
+    virtual: bool = False  # Grouping target with no actual work
     dependencies: list["MusterTarget"] = field(default_factory=list)
     tags: set[Tags] = field(default_factory=set)
     produces_artifact: bool = False
-    success: bool | None = None    # Tracks execution status
+    success: bool | None = None  # Tracks execution status
 ```
 
 **Key Design Decisions:**
@@ -48,8 +48,10 @@ The system handles partial builds through `muster.select()`:
 def select(self, selected_targets: set[str]) -> Generator[MusterTarget, None, None]:
     # 1. Get subgraph containing selected targets and ALL their dependencies
     subgraph = self.dependency_dag.get_subgraph(
-        selector_func=lambda name: name in selected_targets
-        or any(alias in selected_targets for alias in self.targets[name].aliases)
+        selector_func=lambda name: (
+            name in selected_targets
+            or any(alias in selected_targets for alias in self.targets[name].aliases)
+        )
     )
 
     # 2. Topologically sort to ensure correct execution order
@@ -80,11 +82,11 @@ Atopile uses `LoggingStage` for rich terminal progress:
 class LoggingStage(Advancable):
     def __init__(self, name: str, description: str, steps: int | None = None):
         self._progress = IndentedProgress(
-            CompletableSpinnerColumn(),    # ✓/✗/⚠ completion indicators
+            CompletableSpinnerColumn(),  # ✓/✗/⚠ completion indicators
             TextColumn("{task.description}"),
-            StyledMofNCompleteColumn(),    # N/M progress
-            ShortTimeElapsedColumn(),      # [1.2s]
-            ...
+            StyledMofNCompleteColumn(),  # N/M progress
+            ShortTimeElapsedColumn(),  # [1.2s]
+            ...,
         )
 ```
 
