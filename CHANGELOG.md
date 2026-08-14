@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Placement pad-anchoring audit** (`docs/placement-pad-anchoring-audit.md`,
+  part of #4831) — a docs-only, symbol-anchored survey of where the placement
+  stack measures distance between component **centres** versus real **pad**
+  coordinates, prompted by pcbplace's report that pad-anchored constraints cut
+  a demo board's wiring 59.5 → 12.7 mm. Every claim cites a `file.py:line` the
+  reader can re-check, and the doc ships the two commands that re-check them.
+  Headline finding: a pad-anchored HPWL estimator (`compute_hpwl`,
+  `src/kicad_tools/placement/wirelength.py:111`) already exists and is tested,
+  but **nothing under `src/` calls it** — the optimizer objective
+  (`evaluate_placement`, `src/kicad_tools/placement/cost.py:715`) scores
+  centre-anchored HPWL instead, and both front-ends decode transformed pads and
+  discard them on every evaluation. Includes an inventory of every objective
+  term plus the multi-fidelity, seed/prior and declarative-constraint surfaces;
+  a first-party measurement showing the two estimators diverge by 0.2-40% on the
+  committed benchmark fixtures (with an explicit note that this bounds *ranking*
+  differences and is **not** evidence of shorter routed copper); an
+  "already pad-anchored" section (the legacy `optim` spring placer is already
+  pin-anchored today); a decline list with rationale so declined terms are not
+  re-proposed; and a disambiguation of the three unrelated existing meanings of
+  "anchor" in this repo (`--anchor-weight`, `--placement-feedback-anchor`,
+  `SpatialConstraint.max_distance(anchor=…)`). Five migration candidates are
+  listed as stubs **inside the doc** and deliberately not filed as issues.
+  No source changes.
+
 - **Open-schematics corpus probe** (`scripts/corpus/probe_open_schematics.py`,
   part of #4830) — a local, opt-in dev script that samples N random records
   from the Hugging Face dataset `bshada/open-schematics` (87,931 real KiCad
