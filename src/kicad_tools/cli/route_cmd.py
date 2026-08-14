@@ -5765,6 +5765,29 @@ def route_with_layer_escalation(
             )
             flush_print("=" * 60)
 
+        # Issue #2823: divide the remaining wall-clock budget fairly across
+        # the remaining layer-escalation attempts.  Without this, the first
+        # attempt (typically 2L) greedily consumes the entire ``--timeout``,
+        # leaving the higher-layer attempts (4L, 6L) no time to run -- so
+        # the escalation strategy degenerates to "spend everything on the
+        # lowest layer count, give up."  ``attempt_num`` is 1-based; the
+        # helper expects a 0-based index, hence ``attempt_num - 1``.
+        # Falls back to ``args.timeout`` when no deadline is configured.
+        #
+        # Issue #4798: computed HERE (ahead of ``load_pcb_for_routing``)
+        # rather than just before the route call, because the lattice's
+        # absolute ``lattice_deadline`` is stamped at load time and must be
+        # capped by this same fair slice.  ``_per_attempt_budgeted_timeout``
+        # depends only on ``args`` / ``attempt_num`` / ``layer_configs`` --
+        # same inputs, only the clock read moves earlier (slice grows by the
+        # load duration; measured inert on board 04) -- for the
+        # ``timeout=_attempt_timeout`` kwarg the other engines receive below.
+        _attempt_timeout = _per_attempt_budgeted_timeout(
+            args,
+            attempt_index=attempt_num - 1,
+            max_attempts=len(layer_configs),
+        )
+
         # Load PCB with this layer stack
         try:
             with spinner(f"Loading PCB ({layer_count} layers)...", quiet=quiet):
@@ -5794,7 +5817,11 @@ def route_with_layer_escalation(
                     # and --timeout supplies an absolute ceiling alongside it.
                     localize_lattice_to_region=getattr(args, "_complete_localized", False),
                     lattice_link_budget_s=_resolve_lattice_link_budget(args),
-                    lattice_deadline=_lattice_absolute_deadline(args),
+                    # Issue #4798: bound by THIS attempt's fair slice, not the
+                    # whole remaining run budget -- otherwise the lattice's
+                    # single whole-netset ``route_netset`` call can starve every
+                    # later escalation attempt.
+                    lattice_deadline=_lattice_attempt_deadline(args, _attempt_timeout),
                     # Issue #4170 (Phase 2b-1): board-relative boundary stub
                     # terminals whose tip cells are carved open as same-net
                     # reconnection targets (None when no --region / no stubs).
@@ -5872,19 +5899,8 @@ def route_with_layer_escalation(
 
         escape_flag = _resolve_escape_routing_flag(args)
 
-        # Issue #2823: divide the remaining wall-clock budget fairly across
-        # the remaining layer-escalation attempts.  Without this, the first
-        # attempt (typically 2L) greedily consumes the entire ``--timeout``,
-        # leaving the higher-layer attempts (4L, 6L) no time to run -- so
-        # the escalation strategy degenerates to "spend everything on the
-        # lowest layer count, give up."  ``attempt_num`` is 1-based; the
-        # helper expects a 0-based index, hence ``attempt_num - 1``.
-        # Falls back to ``args.timeout`` when no deadline is configured.
-        _attempt_timeout = _per_attempt_budgeted_timeout(
-            args,
-            attempt_index=attempt_num - 1,
-            max_attempts=len(layer_configs),
-        )
+        # ``_attempt_timeout`` (this attempt's #2823 fair slice) was computed
+        # ahead of ``load_pcb_for_routing`` above -- see issue #4798.
 
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
@@ -6796,6 +6812,24 @@ def route_with_rule_relaxation(
             via_in_pad_last_resort=getattr(args, "via_in_pad_last_resort", False),
         )
 
+        # Issue #2823: divide the remaining wall-clock budget fairly across
+        # the remaining rule-relaxation tiers so the looser-rule attempts
+        # also get a real chance to run.  Without this, tier 0 greedily
+        # consumes the full ``--timeout`` and the relaxation strategy
+        # degenerates to "spend everything on the strictest tier, give up."
+        # Falls back to ``args.timeout`` when no deadline is configured.
+        #
+        # Issue #4798: computed ahead of ``load_pcb_for_routing`` so the
+        # lattice's absolute ``lattice_deadline`` (stamped at load time) can be
+        # capped by the same slice.  Same inputs, only the clock read moves
+        # earlier (slice grows by the load duration; measured inert on board
+        # 04) for the value handed to the other engines as ``timeout=`` below.
+        _attempt_timeout = _per_attempt_budgeted_timeout(
+            args,
+            attempt_index=_tier_idx,
+            max_attempts=_relaxation_max_attempts,
+        )
+
         # Load PCB
         try:
             with spinner(f"Loading PCB (tier {tier.tier})...", quiet=quiet):
@@ -6822,7 +6856,9 @@ def route_with_rule_relaxation(
                     # and --timeout supplies an absolute ceiling alongside it.
                     localize_lattice_to_region=getattr(args, "_complete_localized", False),
                     lattice_link_budget_s=_resolve_lattice_link_budget(args),
-                    lattice_deadline=_lattice_absolute_deadline(args),
+                    # Issue #4798: bound by THIS tier's fair slice, not the
+                    # whole remaining run budget.
+                    lattice_deadline=_lattice_attempt_deadline(args, _attempt_timeout),
                     # Issue #4170 (Phase 2b-1): board-relative boundary stub
                     # terminals whose tip cells are carved open as same-net
                     # reconnection targets (None when no --region / no stubs).
@@ -6880,17 +6916,8 @@ def route_with_rule_relaxation(
 
         escape_flag = _resolve_escape_routing_flag(args)
 
-        # Issue #2823: divide the remaining wall-clock budget fairly across
-        # the remaining rule-relaxation tiers so the looser-rule attempts
-        # also get a real chance to run.  Without this, tier 0 greedily
-        # consumes the full ``--timeout`` and the relaxation strategy
-        # degenerates to "spend everything on the strictest tier, give up."
-        # Falls back to ``args.timeout`` when no deadline is configured.
-        _attempt_timeout = _per_attempt_budgeted_timeout(
-            args,
-            attempt_index=_tier_idx,
-            max_attempts=_relaxation_max_attempts,
-        )
+        # ``_attempt_timeout`` (this tier's #2823 fair slice) was computed
+        # ahead of ``load_pcb_for_routing`` above -- see issue #4798.
 
         try:
             if _should_use_escape_routing(router, escape_flag, quiet):
@@ -9048,6 +9075,26 @@ def route_with_combined_escalation(
                 via_in_pad_last_resort=getattr(args, "via_in_pad_last_resort", False),
             )
 
+            # Issue #2823: divide the remaining wall-clock budget fairly
+            # across all remaining cells of the 2D combined-escalation
+            # matrix so later (higher-layer or stricter-rule) attempts
+            # also get a real chance to run.  Without this, the first
+            # cell (2L, tier 0) greedily consumes the entire ``--timeout``
+            # and the rest of the matrix is starved.
+            # Falls back to ``args.timeout`` when no deadline is configured.
+            #
+            # Issue #4798: computed ahead of ``load_pcb_for_routing`` so the
+            # lattice's absolute ``lattice_deadline`` (stamped at load time)
+            # can be capped by the same slice.  Same inputs, only the clock
+            # read moves earlier (slice grows by the load duration; measured
+            # inert on board 04) for the value the other engines get as
+            # ``timeout=``.
+            _attempt_timeout = _per_attempt_budgeted_timeout(
+                args,
+                attempt_index=_combined_attempt_index,
+                max_attempts=_combined_max_attempts,
+            )
+
             # Load PCB
             try:
                 with spinner(f"Loading PCB ({layer_count}L, tier {tier.tier})...", quiet=quiet):
@@ -9074,7 +9121,9 @@ def route_with_combined_escalation(
                         # and --timeout supplies an absolute ceiling alongside it.
                         localize_lattice_to_region=getattr(args, "_complete_localized", False),
                         lattice_link_budget_s=_resolve_lattice_link_budget(args),
-                        lattice_deadline=_lattice_absolute_deadline(args),
+                        # Issue #4798: bound by THIS cell's fair slice, not the
+                        # whole remaining run budget.
+                        lattice_deadline=_lattice_attempt_deadline(args, _attempt_timeout),
                         # Issue #4170 (Phase 2b-1): board-relative boundary stub
                         # terminals whose tip cells are carved open as same-net
                         # reconnection targets (None when no --region / no stubs).
@@ -9118,18 +9167,8 @@ def route_with_combined_escalation(
             # Route
             escape_flag = _resolve_escape_routing_flag(args)
 
-            # Issue #2823: divide the remaining wall-clock budget fairly
-            # across all remaining cells of the 2D combined-escalation
-            # matrix so later (higher-layer or stricter-rule) attempts
-            # also get a real chance to run.  Without this, the first
-            # cell (2L, tier 0) greedily consumes the entire ``--timeout``
-            # and the rest of the matrix is starved.
-            # Falls back to ``args.timeout`` when no deadline is configured.
-            _attempt_timeout = _per_attempt_budgeted_timeout(
-                args,
-                attempt_index=_combined_attempt_index,
-                max_attempts=_combined_max_attempts,
-            )
+            # ``_attempt_timeout`` (this cell's #2823 fair slice) was computed
+            # ahead of ``load_pcb_for_routing`` above -- see issue #4798.
 
             try:
                 if _should_use_escape_routing(router, escape_flag, quiet):
@@ -10414,6 +10453,67 @@ def _lattice_absolute_deadline(args) -> float | None:
     if deadline is None:
         deadline = getattr(args, "_wall_clock_deadline", None)
     return float(deadline) if deadline is not None else None
+
+
+def _lattice_attempt_deadline(args, attempt_timeout: float | None) -> float | None:
+    """Absolute deadline for ONE escalation attempt's lattice negotiation.
+
+    Issue #4798.  Like :func:`_lattice_absolute_deadline`, but additionally
+    bounded by ``attempt_timeout`` -- this attempt's
+    :func:`_per_attempt_budgeted_timeout` slice -- when one is supplied.
+
+    Why this exists: the lattice negotiates the whole netset in a *single*
+    ``route_netset`` call, so ``route_all``'s between-nets ``timeout`` check
+    never fires and the absolute ``lattice_deadline`` is the only bound the
+    engine sees.  Handing it the whole-run deadline inside a multi-attempt
+    escalation loop lets attempt N consume every remaining attempt's budget --
+    the lattice equivalent of the pre-#2823 "first attempt eats everything"
+    regression that per-attempt budgeting exists to prevent for every other
+    engine (which all receive ``timeout=_attempt_timeout`` at the same sites).
+
+    The result is never *looser* than :func:`_lattice_absolute_deadline`:
+
+    * ``attempt_timeout`` is ``None`` (no ``--timeout``, or
+      ``--deterministic-budget`` without ``--timeout``, where
+      :func:`_per_attempt_budgeted_timeout` returns ``None``), **or is 0 /
+      negative** -- the documented unbounded sentinel
+      (:func:`_set_wall_clock_deadline`), which is not a slice at all -> the
+      absolute deadline verbatim, byte-identical to the pre-#4798 behaviour.
+    * otherwise (a real, positive slice) -> ``min(absolute deadline, now +
+      attempt slice)``, with the candidate returned verbatim when no absolute
+      deadline is configured.
+
+    Args:
+        args: Parsed CLI namespace (read only via
+            :func:`_lattice_absolute_deadline`).
+        attempt_timeout: This attempt's fair share of the remaining wall-clock
+            budget in seconds; ``None`` when no budget is configured, or
+            ``0``/negative for the unbounded sentinel.
+
+    Returns:
+        An absolute ``time.monotonic()`` ceiling, or ``None`` when neither
+        bound is configured.
+    """
+    absolute = _lattice_absolute_deadline(args)
+    # ``None``/``0``/negative are all "no real slice".  The 0-and-negative half
+    # matters: ``--timeout 0`` (and any negative value) is the documented
+    # UNBOUNDED sentinel -- see :func:`_set_wall_clock_deadline`, "If
+    # ``args.timeout`` is falsy (None, 0, or negative) the deadline is set to
+    # ``None`` so the rest of the orchestration treats the run as unbounded."
+    # On that path ``_per_attempt_budgeted_timeout`` returns the timeout
+    # verbatim (``_remaining_budget`` is ``None``) and no absolute deadline is
+    # stamped, so computing ``now + attempt_timeout`` here would hand the
+    # lattice an already-expired ceiling and abort an explicitly unbounded run
+    # instantly.  Returning ``absolute`` is also inert for a *genuine*
+    # exhausted-budget ``0.0``: that can only arise when ``_remaining_budget``
+    # clamps at zero, which requires an absolute deadline already <= now, where
+    # ``min(absolute, now) == absolute`` anyway.  Note ``not attempt_timeout``
+    # would NOT cover negatives (``not -5.0`` is ``False``), hence the explicit
+    # comparison.
+    if attempt_timeout is None or attempt_timeout <= 0:
+        return absolute
+    candidate = time.monotonic() + float(attempt_timeout)
+    return candidate if absolute is None else min(absolute, candidate)
 
 
 def _apply_complete_localization(args, pcb_path: Path) -> int:

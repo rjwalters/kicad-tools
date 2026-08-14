@@ -3047,3 +3047,223 @@ class TestStartingLayersEndToEnd:
             f"Expected first attempt to be 2L by default, got "
             f"{layer_counts_seen[0]} (full sequence: {layer_counts_seen})"
         )
+
+
+class TestLatticeDeadlineIsPerAttempt:
+    """Issue #4798: the ``lattice_deadline`` handed to ``load_pcb_for_routing``
+    inside an escalation loop is capped by THIS attempt's #2823 fair slice, not
+    by the whole remaining run budget.
+
+    The lattice engine negotiates the whole netset in a single ``route_netset``
+    call, so ``route_all``'s between-nets ``timeout`` check never fires and the
+    absolute ``lattice_deadline`` is the only bound it sees.  Before this fix
+    the first attempt could consume every later attempt's budget -- the lattice
+    equivalent of the pre-#2823 regression.
+    """
+
+    def _make_mock_router(self, nets_routed=1, nets_to_route=5, overflow=20):
+        from unittest.mock import MagicMock
+
+        router = MagicMock()
+        router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
+        router.grid.width = 50.0
+        router.grid.height = 40.0
+        router.grid.get_total_overflow.return_value = overflow
+        router.get_statistics.return_value = {
+            "nets_routed": nets_routed,
+            "segments": 10,
+            "vias": 2,
+        }
+        router.power_stall_abort = False
+        router._pour_nets_without_zones = set()
+        router._is_pour_net.return_value = False
+        router.rules.via_diameter = 0.6
+        router.rules.min_drill_clearance = 0.0
+        router.rules.trace_width = 0.2
+        router.rules.trace_clearance = 0.15
+        router._edge_clearance = None
+        router._edge_segments = None
+        return router
+
+    def _make_args(self, **overrides):
+        defaults = {
+            "backend": "python",
+            "grid": 0.25,
+            "trace_width": 0.2,
+            "clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "fine_pitch_clearance": None,
+            "skip_nets": None,
+            "auto_pour": False,
+            "max_layers": 6,
+            "starting_layers": None,
+            "min_completion": 0.95,
+            "strategy": "negotiated",
+            "verbose": False,
+            "force": False,
+            "timeout": 600,
+            "iterations": 3,
+            "per_net_timeout": None,
+            "batch_routing": False,
+            "high_performance": False,
+            "hierarchical": False,
+            "perturbation": True,
+            "two_phase": False,
+            "multi_resolution": False,
+            "edge_clearance": 0.25,
+            "escape_routing": None,
+            "no_optimize": True,
+            "dry_run": True,
+        }
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    _PCB = (
+        "(kicad_pcb\n"
+        "  (version 20240101)\n"
+        '  (generator "test")\n'
+        "  (layers\n"
+        '    (0 "F.Cu" signal)\n'
+        '    (31 "B.Cu" signal)\n'
+        "  )\n"
+        ")"
+    )
+
+    def _run(self, tmp_path, args):
+        """Drive the escalation loop, returning every ``lattice_deadline`` seen."""
+        from kicad_tools.cli.route_cmd import route_with_layer_escalation
+
+        pcb = tmp_path / "two_layer.kicad_pcb"
+        pcb.write_text(self._PCB)
+        out = tmp_path / "out.kicad_pcb"
+
+        seen: list[float | None] = []
+
+        def mock_load(*_args, **kwargs):
+            seen.append(kwargs.get("lattice_deadline"))
+            return self._make_mock_router(), {}
+
+        with patch("kicad_tools.router.load_pcb_for_routing", mock_load):
+            with patch("kicad_tools.router.is_cpp_available", return_value=False):
+                route_with_layer_escalation(pcb, out, args, quiet=True)
+        return seen
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_first_attempt_is_capped_by_its_fair_slice(self, _esc_flag, _esc_use, _pour, tmp_path):
+        """With a 600 s budget over an N-attempt ladder, attempt 1 gets ~600/N.
+
+        The pre-#4798 behaviour handed attempt 1 the full ``now + 600 s``
+        whole-run deadline.
+        """
+        import time
+
+        from kicad_tools.cli.route_cmd import _set_wall_clock_deadline
+
+        args = self._make_args(timeout=600, auto_fix=False)
+        _set_wall_clock_deadline(args)
+        absolute = args._routing_deadline
+        assert absolute is not None
+
+        seen = self._run(tmp_path, args)
+        assert seen, "the escalation loop must have loaded at least one attempt"
+        assert len(seen) > 1, "need a multi-attempt ladder to exercise the slice"
+
+        # Every attempt is bounded by the whole-run deadline (never looser).
+        for deadline in seen:
+            assert deadline is not None
+            assert deadline <= absolute + 1e-6
+
+        # The FIRST attempt is strictly tighter than the whole-run deadline:
+        # its fair slice is ~600/len(seen) seconds from now.
+        expected_slice = 600.0 / len(seen)
+        assert seen[0] < absolute, (
+            "the first lattice attempt must NOT receive the whole-run deadline "
+            f"(got {seen[0]}, whole-run {absolute})"
+        )
+        assert seen[0] <= time.monotonic() + expected_slice + 5.0
+
+    @patch("kicad_tools.cli.route_cmd._auto_skip_pour_nets", return_value=([], []))
+    @patch("kicad_tools.cli.route_cmd._should_use_escape_routing", return_value=False)
+    @patch("kicad_tools.cli.route_cmd._resolve_escape_routing_flag", return_value=None)
+    def test_no_timeout_leaves_the_deadline_none(self, _esc_flag, _esc_use, _pour, tmp_path):
+        """No ``--timeout`` -> no slice -> ``None``, byte-identical to pre-#4798."""
+        args = self._make_args(timeout=None, auto_fix=False)
+        args._routing_deadline = None
+        args._wall_clock_deadline = None
+
+        seen = self._run(tmp_path, args)
+        assert seen
+        assert all(deadline is None for deadline in seen), seen
+
+
+class TestLatticeDeadlineCallSites:
+    """Issue #4798 structural guard: the three multi-attempt escalation loops
+    must use ``_lattice_attempt_deadline``; the two single-attempt call sites
+    must keep using ``_lattice_absolute_deadline`` verbatim.
+    """
+
+    @pytest.mark.parametrize(
+        "func_name",
+        [
+            "route_with_layer_escalation",
+            "route_with_rule_relaxation",
+            "route_with_combined_escalation",
+        ],
+    )
+    def test_escalation_loops_use_the_attempt_capped_helper(self, func_name):
+        import inspect
+
+        from kicad_tools.cli import route_cmd as route_cmd_mod
+
+        source = inspect.getsource(getattr(route_cmd_mod, func_name))
+        assert "lattice_deadline=_lattice_attempt_deadline(args, _attempt_timeout)" in source, (
+            f"{func_name} must cap the lattice deadline by this attempt's "
+            "_per_attempt_budgeted_timeout slice (issue #4798)"
+        )
+        assert "_lattice_absolute_deadline" not in source, (
+            f"{func_name} must NOT pass the whole-run deadline to the lattice (issue #4798)"
+        )
+
+    @pytest.mark.parametrize(
+        "func_name",
+        [
+            "route_with_layer_escalation",
+            "route_with_rule_relaxation",
+            "route_with_combined_escalation",
+        ],
+    )
+    def test_attempt_timeout_is_computed_before_the_load(self, func_name):
+        """The hoist: ``_attempt_timeout`` must precede ``load_pcb_for_routing``.
+
+        Otherwise the ``lattice_deadline=`` kwarg would reference an undefined
+        (or stale, previous-attempt) value.
+        """
+        import inspect
+
+        from kicad_tools.cli import route_cmd as route_cmd_mod
+
+        source = inspect.getsource(getattr(route_cmd_mod, func_name))
+        compute = source.index("_attempt_timeout = _per_attempt_budgeted_timeout(")
+        load = source.index("router, net_map = load_pcb_for_routing(")
+        assert compute < load, (
+            f"{func_name} must compute _attempt_timeout BEFORE load_pcb_for_routing "
+            "so the lattice deadline can be capped by it (issue #4798)"
+        )
+
+    def test_single_attempt_call_sites_keep_the_absolute_deadline(self):
+        """``main()``'s primary load + the ``--order-method`` throwaway router
+        are not inside a multi-attempt loop, so the whole-run deadline is
+        already the correct per-attempt cap there.
+        """
+        import inspect
+
+        from kicad_tools.cli import route_cmd as route_cmd_mod
+
+        source = inspect.getsource(route_cmd_mod)
+        assert source.count("lattice_deadline=_lattice_absolute_deadline(args)") == 2, (
+            "exactly the two single-attempt call sites must keep the "
+            "unsliced absolute deadline (issue #4798)"
+        )

@@ -26,6 +26,8 @@ import pytest
 from kicad_tools.cli.route_cmd import (
     _COMPLETE_LINK_BUDGET_DEFAULT_S,
     _lattice_absolute_deadline,
+    _lattice_attempt_deadline,
+    _per_attempt_budgeted_timeout,
     _resolve_lattice_link_budget,
 )
 from kicad_tools.cli.route_cmd import (
@@ -154,6 +156,176 @@ class TestLatticeAbsoluteDeadline:
         got = _lattice_absolute_deadline(args)
         assert got is not None
         assert before < got <= before + 60.0 + 1.0
+
+
+# ---------------------------------------------------------------------------
+# _lattice_attempt_deadline: within a tier, the cap is the ATTEMPT's slice.
+#
+# Issue #4798.  ``_lattice_absolute_deadline`` returns the whole-invocation
+# deadline, which is the correct cap at the two single-attempt call sites but
+# wrong inside a multi-attempt escalation loop: the lattice negotiates the whole
+# netset in ONE ``route_netset`` call, so an unsliced absolute deadline lets
+# attempt N consume every later attempt's budget.  These cases pin the
+# arithmetic itself (never looser than the absolute deadline; only ever tighter,
+# and only when a fair slice is actually computed).
+# ---------------------------------------------------------------------------
+class TestLatticeAttemptDeadline:
+    def test_none_attempt_timeout_is_passthrough(self):
+        """No fair slice -> byte-identical to the pre-#4798 absolute cap."""
+        stamp = time.monotonic() + 120.0
+        args = argparse.Namespace(_routing_deadline=stamp, _wall_clock_deadline=stamp)
+        assert _lattice_attempt_deadline(args, None) == _lattice_absolute_deadline(args) == stamp
+
+    def test_none_everywhere_stays_uncapped(self):
+        args = argparse.Namespace(_routing_deadline=None, _wall_clock_deadline=None)
+        assert _lattice_attempt_deadline(args, None) is None
+
+    def test_attempt_slice_tighter_than_absolute_wins(self):
+        """The whole-run deadline is 600s out; this attempt only owns 150s."""
+        absolute = time.monotonic() + 600.0
+        args = argparse.Namespace(_routing_deadline=absolute, _wall_clock_deadline=absolute)
+        before = time.monotonic()
+        got = _lattice_attempt_deadline(args, 150.0)
+        assert got is not None
+        # now + 150s, comfortably inside the absolute cap.
+        assert before + 150.0 <= got <= time.monotonic() + 150.0
+        assert got < absolute
+
+    def test_absolute_tighter_than_attempt_slice_wins(self):
+        """A nearly-expired run budget clamps a generous per-attempt slice."""
+        absolute = time.monotonic() + 5.0
+        args = argparse.Namespace(_routing_deadline=absolute, _wall_clock_deadline=absolute)
+        assert _lattice_attempt_deadline(args, 900.0) == absolute
+
+    def test_no_absolute_deadline_returns_candidate_verbatim(self):
+        """--timeout absent but a slice supplied -> the slice becomes the cap."""
+        args = argparse.Namespace(_routing_deadline=None, _wall_clock_deadline=None)
+        before = time.monotonic()
+        got = _lattice_attempt_deadline(args, 30.0)
+        assert got is not None
+        assert before + 30.0 <= got <= time.monotonic() + 30.0
+
+    def test_missing_attributes_with_a_slice(self):
+        before = time.monotonic()
+        got = _lattice_attempt_deadline(argparse.Namespace(), 12.0)
+        assert got is not None
+        assert before + 12.0 <= got <= time.monotonic() + 12.0
+
+    @pytest.mark.parametrize("slice_s", [0.0, 1.0, 60.0, 600.0, 100_000.0])
+    def test_never_looser_than_the_absolute_deadline(self, slice_s: float):
+        """The invariant: this helper only ever TIGHTENS the pre-#4798 cap."""
+        absolute = time.monotonic() + 300.0
+        args = argparse.Namespace(_routing_deadline=absolute, _wall_clock_deadline=absolute)
+        got = _lattice_attempt_deadline(args, slice_s)
+        assert got is not None and got <= absolute
+
+    # -- the ``--timeout 0`` / negative UNBOUNDED sentinel must not expire ----
+    #
+    # ``_set_wall_clock_deadline``: "If ``args.timeout`` is falsy (None, 0, or
+    # negative) the deadline is set to ``None`` so the rest of the
+    # orchestration treats the run as unbounded."  On that path
+    # ``_per_attempt_budgeted_timeout`` returns the timeout verbatim (0.0 /
+    # -5.0) and no absolute deadline is stamped, so a naive ``now +
+    # attempt_timeout`` would hand the lattice an already-expired ceiling and
+    # abort an explicitly unbounded run instantly.
+    def test_zero_slice_without_an_absolute_deadline_stays_unbounded(self):
+        """``--timeout 0`` is the unbounded sentinel, not a zero-length slice."""
+        args = argparse.Namespace(_routing_deadline=None, _wall_clock_deadline=None)
+        assert _lattice_attempt_deadline(args, 0.0) is None
+
+    def test_negative_slice_without_an_absolute_deadline_stays_unbounded(self):
+        """Negative ``--timeout`` is unbounded too (``not -5.0`` is ``False``)."""
+        args = argparse.Namespace(_routing_deadline=None, _wall_clock_deadline=None)
+        assert _lattice_attempt_deadline(args, -5.0) is None
+
+    @pytest.mark.parametrize("slice_s", [0.0, -5.0])
+    def test_nonpositive_slice_with_an_absolute_deadline_returns_it_verbatim(self, slice_s: float):
+        """A non-slice never tightens the cap -- the absolute deadline stands.
+
+        Inert for a *genuine* exhausted-budget ``0.0``, which can only arise
+        when ``_remaining_budget`` clamps at zero -- and that requires an
+        absolute deadline already ``<= now``, where the old
+        ``min(absolute, now)`` collapsed to ``absolute`` anyway.
+        """
+        absolute = time.monotonic() + 300.0
+        args = argparse.Namespace(_routing_deadline=absolute, _wall_clock_deadline=absolute)
+        assert _lattice_attempt_deadline(args, slice_s) == absolute
+
+    def test_expired_absolute_budget_still_yields_a_past_deadline(self):
+        """The real exhausted-budget shape: the absolute cap is already past."""
+        absolute = time.monotonic() - 1.0
+        args = argparse.Namespace(_routing_deadline=absolute, _wall_clock_deadline=absolute)
+        got = _lattice_attempt_deadline(args, 0.0)
+        assert got is not None and got <= time.monotonic()
+
+    def test_auto_fix_reserve_is_still_honored(self):
+        """The absolute term still comes from ``_routing_deadline`` (#3238)."""
+        routing = time.monotonic() + 40.0
+        args = argparse.Namespace(_routing_deadline=routing, _wall_clock_deadline=routing + 20.0)
+        assert _lattice_attempt_deadline(args, 900.0) == routing
+
+    # -- the #4802 --deterministic-budget sentinel must stay inert ----------
+    def test_deterministic_budget_without_timeout_collapses_to_absolute(self):
+        """``--deterministic-budget`` alone: no deadline -> nothing changes.
+
+        ``--deterministic-budget`` pins ``per_net_timeout`` to the ``0.0``
+        sentinel (#4776/#4802) and does NOT stamp a wall-clock deadline, so
+        ``_per_attempt_budgeted_timeout`` returns ``None`` at every escalation
+        site and ``_lattice_attempt_deadline`` collapses to
+        ``_lattice_absolute_deadline`` -- byte-identical to pre-#4798.
+        """
+        args = argparse.Namespace(
+            timeout=None,
+            per_net_timeout=0.0,
+            _routing_deadline=None,
+            _wall_clock_deadline=None,
+        )
+        slice_s = _per_attempt_budgeted_timeout(args, attempt_index=0, max_attempts=4)
+        assert slice_s is None
+        assert _lattice_attempt_deadline(args, slice_s) == _lattice_absolute_deadline(args) is None
+
+    def test_zero_per_net_timeout_sentinel_is_not_read_as_a_slice(self):
+        """The ``0.0`` sentinel must never leak in as ``attempt_timeout``.
+
+        Guards the #4798 hoist against accidentally coupling to
+        ``args.per_net_timeout``: with a real ``--timeout`` present the slice
+        comes from the wall-clock budget (75s of a 300s budget across 4
+        attempts), not from the disabled per-link sentinel.
+        """
+        absolute = time.monotonic() + 300.0
+        args = argparse.Namespace(
+            timeout=300.0,
+            per_net_timeout=0.0,
+            _routing_deadline=absolute,
+            _wall_clock_deadline=absolute,
+        )
+        slice_s = _per_attempt_budgeted_timeout(args, attempt_index=0, max_attempts=4)
+        assert slice_s is not None
+        assert 70.0 <= slice_s <= 75.0  # ~300/4, minus test-execution jitter
+        got = _lattice_attempt_deadline(args, slice_s)
+        assert got is not None and got < absolute
+
+    def test_fair_slice_shrinks_the_cap_across_a_four_attempt_ladder(self):
+        """End-to-end arithmetic: attempt 0 of 4 gets ~1/4 of the budget."""
+        args = argparse.Namespace(timeout=400.0, auto_fix=False)
+        from kicad_tools.cli.route_cmd import _set_wall_clock_deadline
+
+        _set_wall_clock_deadline(args)
+        absolute = _lattice_absolute_deadline(args)
+        assert absolute is not None
+
+        first = _lattice_attempt_deadline(
+            args, _per_attempt_budgeted_timeout(args, attempt_index=0, max_attempts=4)
+        )
+        last = _lattice_attempt_deadline(
+            args, _per_attempt_budgeted_timeout(args, attempt_index=3, max_attempts=4)
+        )
+        assert first is not None and last is not None
+        # The first attempt is capped near now+100s, NOT near the now+400s
+        # whole-run deadline it used to receive.
+        assert first < absolute - 250.0
+        # The final attempt may use whatever remains -> the absolute cap.
+        assert last == absolute
 
 
 # ---------------------------------------------------------------------------

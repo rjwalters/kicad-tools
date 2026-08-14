@@ -579,6 +579,98 @@ wiring the flag at the CLI's own `route_all_negotiated` call site would
 not reach the passes that produced these numbers -- it would be a
 different experiment.
 
+## Per-attempt lattice deadline cap: A/B measurement (#4798)
+
+**What changed.** Issue #4798 caps the lattice engine's absolute
+`lattice_deadline` at the *current escalation attempt's*
+`_per_attempt_budgeted_timeout` fair slice instead of the whole remaining
+run budget, via a new `_lattice_attempt_deadline(args, attempt_timeout)`
+helper in `route_cmd.py`. The `_attempt_timeout` computation is hoisted
+ahead of `load_pcb_for_routing` at the three multi-attempt escalation
+sites (`route_with_layer_escalation`, the rule-relaxation tier ladder,
+the combined 2D layers x tiers matrix) so the value is available where
+the deadline is stamped. The two single-attempt call sites keep
+`_lattice_absolute_deadline` verbatim.
+
+**Why board 07 is expected to be inert.** `generate_design.py` drives
+`--strategy negotiated --no-auto-layers --layers 4`, so none of the three
+escalation loops runs at all, and the engine is the grid negotiator, not
+`--route-engine lattice` (only `Autorouter._negotiate_lattice_netset`
+reads `_lattice_deadline`). Per the #4802 precedent, the gate is still
+**measured and documented**, not waived.
+
+**What was compared.** Same-host local A/B (Apple Silicon, 28 cores),
+`PYTHONHASHSEED=42 uv run python boards/07-matchgroup-test/generate_design.py
+<out> --step all --seed 42` with the C++ backend built (build 19) in both
+arms. **B** = pristine clone of `main` @ `33666637` (a separate checkout, so
+the running arm cannot see the working-tree edits -- board 07 invokes
+`kct route` as a *subprocess*, which would otherwise pick them up
+mid-run). **A** = the #4798 change on top of the same head. A **second B
+run** (`B2`, same pristine clone, no source change) was added as the
+run-to-run control.
+
+| | B (`main`) | B2 (control, `main` again) | A (#4798) |
+|---|---|---|---|
+| final reach | 26/31 | 26/31 | 26/31 |
+| copper-LVS opens (`--expect-opens`) | `DQ3, DQ4, MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N` | identical | identical |
+| copper-LVS shorts / vacuous | 0 / 0 | 0 / 0 | 0 / 0 |
+| bound pads | 244 | 244 | 244 |
+| blocking DRC (`check_routed_drc.py`, jlcpcb) | **8** (== allowlist) | **8** | **8** |
+| DRC rule split | `diffpair_length_skew` 4 + `diffpair_routing_continuity` 4 | identical | identical |
+| raw `kct check` errors | 13 (8 blocking + 5 advisory `connectivity`) | 13 | 13 |
+| deltas proposed / kept | 10 / 0 | 10 / 0 | 10 / 0 |
+| final-pass rip-up iterations | 10 | 10 | 10 |
+| normalized PCB md5 (uuid-stripped, sorted) | `026d5506...` | `1f36faa9...` | `1f36faa9...` |
+
+**Every gated metric is identical across all three runs.** The md5 column
+is the interesting one: `B` and `B2` are the *same code* and still differ,
+while `B2` and `A` are **byte-identical after uuid normalization**. So the
+copper drift on this fixture is run-to-run wall-clock variance, not the
+change -- the same mechanism the #4770/#4781 sections above document
+(board 07's stage deadline is still a 600 s wall clock even under
+`--deterministic-budget`, so how much of a rip-up iteration fits is a
+function of host load). A normalized log diff between `B` and `A` is 30
+lines, all of them elapsed-time stamps, one zero-overflow-recovery
+denominator (`0/7` vs `0/8`), the stranded-pad coordinates of the same 5
+known-open nets, and a 1-segment orthogonal/45-deg split shift.
+
+**Board 04 cross-check (the board this change can actually reach).**
+`boards/04-stm32-devboard` is the fixture that runs `--auto-layers
+--auto-mfr-tier --deterministic-budget --timeout 600`, i.e. it *does* execute
+`route_with_layer_escalation` with a wall-clock budget, so it exercises
+the hoisted `_attempt_timeout` (which the negotiated arm still receives
+as its `timeout=` kwarg). Same-host A/B, same two checkouts:
+
+| | B (`main`) | A (#4798) |
+|---|---|---|
+| nets routed | 9/9 | 9/9 |
+| routed DRC (`check_routed_drc.py`, jlcpcb-tier1, strict 0) | **0** | **0** |
+| copper-LVS (`check_copper_lvs.py`, plain clean gate) | clean | clean |
+| recipe verdict | ERC PASS / Routing SUCCESS / DRC PASS / LVS PASS / Overall PASS | identical |
+| normalized PCB md5 (uuid-stripped, sorted) | `4444f351...` | `4444f351...` -- **identical artifact** |
+
+Board 04 is the strong result: byte-identical copper on the one fixture
+whose route actually enters an escalation loop under `--timeout`.
+
+### Reproducing this A/B
+
+```bash
+# B side: a PRISTINE checkout (clone, not your worktree) at the base commit.
+git clone --shared --no-checkout <repo> /tmp/ab-before && cd /tmp/ab-before
+git checkout <base-sha> && uv sync --frozen --extra dev --python 3.12
+uv run kct build-native                       # MUST report "available"
+PYTHONHASHSEED=42 uv run python boards/07-matchgroup-test/generate_design.py \
+  /tmp/board07-before --step all --seed 42
+
+# A side: the same command from the issue worktree.
+```
+
+The separate checkout is load-bearing, not hygiene: `route_pcb()` shells
+out to `python -m kicad_tools.cli route`, so a "before" arm launched from
+the worktree you are editing will silently pick up your changes on its
+*next* subprocess. Run at least two B arms before attributing any copper
+difference on this board to a diff.
+
 ## Files in this directory
 
 - `README.md` -- this file.

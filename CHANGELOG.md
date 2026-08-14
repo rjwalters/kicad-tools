@@ -672,6 +672,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A lattice escalation attempt no longer gets the whole run's wall-clock
+  budget as its cap** (#4798) — every other routing engine receives its
+  escalation attempt's fair slice as `timeout=_per_attempt_budgeted_timeout(…)`
+  (#2823/#3463), but the lattice engine's only bound is the absolute
+  `lattice_deadline` stamped at `load_pcb_for_routing` time, and all three
+  escalation sites (`route_with_layer_escalation`, the rule-relaxation tier
+  ladder, the combined 2D layers × tiers matrix) passed
+  `_lattice_absolute_deadline(args)` — the end-of-invocation deadline spanning
+  **every** remaining attempt. Because the lattice negotiates the whole netset
+  in a single `route_netset` call, `route_all`'s between-nets `timeout` check
+  never fires mid-run, so under `--route-engine lattice --timeout N` with a
+  multi-attempt ladder the first attempt could consume the entire remaining
+  budget and starve the later attempts — the lattice equivalent of the
+  pre-#2823 "first attempt eats everything" regression. A new
+  `_lattice_attempt_deadline(args, attempt_timeout)` helper now returns
+  `min(whole-run deadline, now + this attempt's fair slice)`, and
+  `_attempt_timeout` is computed ahead of the load at those three sites so the
+  cap is available there. The result is never *looser* than before, only ever
+  tighter, and only when a *positive* fair slice is actually computed: with no
+  `--timeout` — including `--deterministic-budget` without `--timeout`, where
+  `_per_attempt_budgeted_timeout` returns `None` — and with the documented
+  unbounded sentinel `--timeout 0` (or negative), where the slice comes back
+  `0`/negative rather than as a real slice, it collapses to
+  `_lattice_absolute_deadline(args)` verbatim. The two genuinely single-attempt
+  call sites (`main()`'s primary load and the `--order-method` throwaway-router
+  factory) and the `--timeout` banner keep the unsliced absolute deadline,
+  which is already the correct per-attempt cap there. Hoisting the
+  `_per_attempt_budgeted_timeout` call feeds the negotiated / escape /
+  two-phase / multi-resolution / evolutionary arms the same inputs as before
+  (`args`, the loop indices); only the helper's `time.monotonic()` read moves
+  earlier, so each arm's slice grows by the PCB-load duration — measured inert
+  on board 04. Gated on a back-to-back host A/B of board 07 (which drives
+  `--strategy negotiated --no-auto-layers`, so the change is expected — and
+  measured — to be inert there); recorded in
+  `boards/07-matchgroup-test/diagnostic-runs/README.md`.
+
 - **The pure-Python pairwise (HV-isolation) search gate now measures from the
   per-net-class copper width** (#4793) — the three Python search kernels added
   by #4791 (`Router._cross_domain_trace_blocked`,
