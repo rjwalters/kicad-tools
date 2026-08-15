@@ -50,6 +50,9 @@ and is exactly what epic #4431 exists to serve.
 ## Run configuration
 
 Everything below ran locally on macOS (darwin 25.6.0), single machine, no CI.
+Three arms were run: the recipe **with** the pairwise matrix, the same recipe
+**without** it (control), and a **grid/negotiated** arm that exercises #4507's own
+C++ kernels rather than the lattice's.
 
 | Input | Value |
 |---|---|
@@ -195,21 +198,27 @@ optocoupler's own pad bounding box. That is #4506 working as designed
 (manufacturer-qualified functional insulation inside a rated package); the census
 cannot see the exemption, which is a *known* scope difference, not a defect.
 
-Crucially, the 3 leaks are **exactly** the set the router's own post-route audit
-printed. The audit is neither silent nor under-reporting any more. It is
-*correct about its own matrix* — and its matrix is the problem.
+Crucially, those 3 are **exactly** what the router's own post-route audit printed
+during the run (its 5 instances collapse to the same 2 net pairs over the same 3
+pair-layer keys). The audit is neither silent nor under-reporting any more; it is
+*correct about its own matrix*. The matrix is the problem.
 
 ## The root cause: signed potentials are collapsed to magnitudes
 
-The independent geometric classification of the census output finds **8**
-same-layer track↔track shortfalls, but the router's gate finds only 3 + 2 waived.
-The 3 unexplained pairs are the tell:
+The independent geometric classification of the census output
+(softstart's own `classify_creepage_fails.py`) finds **8** same-layer track↔track
+shortfalls on the final board. Two of them are the gate leaks above, two are the
+attach-zone waivers above — and **four** the router's gate does not consider
+violations at all. Those four are the tell:
 
 | net a (V) | net b (V) | census delta-V | census requires | router requires |
 |---|---|---|---|---|
 | `/FUSED_LINE` (+150) | `/GATE_BUS_NEG` (−150) | 300 V | 3.20 mm | **0** (pair absent) |
 | `/LED_A_POS` (+90) | `/SCAP_NEG` (−90) | 180 V | 2.00 mm | **0** (pair absent) |
+| `/LED_K_POS` (+90) | `/SCAP_NEG` (−90) | 180 V | 2.00 mm | **0** (pair absent) |
 | `/SCAP_NEG` (−90) | `/SRC_POS` (+150) | 240 V | 2.50 mm | 1.25 mm |
+
+Every one of them is a POS↔NEG pair.
 
 `build_pairwise_clearance_table()`
 (`src/kicad_tools/router/pairwise_clearance.py`) normalises its input as
@@ -239,8 +248,9 @@ total under-constrained                       : 339 / 1922  (17.6 %)
 worst: V_RSV_NEG <-> V_RSV_POS   census 3.20 mm   router 0.00 mm
 ```
 
-All eight worst cases are POS↔NEG pairs at the full 300 V bank span — i.e. the
-requirement collapses hardest precisely where the isolation matters most. The
+Every one of the eight worst-shortfall rows is a POS↔NEG pair at the full 300 V
+bank span — the requirement collapses hardest precisely where the isolation
+matters most. The
 `HV pairwise clearance: 84 mapped nets, 1823 cross-pairs` banner is itself the
 artifact: 1823 rather than 1922 because 99 pairs were differenced to zero.
 
@@ -268,14 +278,55 @@ pairwise implementation — `router/lattice/pairwise.py` (`LatticePairwise`, #46
 `DesignRules.pairwise_clearance` table, which is why the root cause above hits
 both, but the recipe that terminates on this board exercises the lattice search.
 
-The grid/negotiated engine — where #4507's own kernels live — still cannot route
-this board (the fixture journal records 4/82 at 0.05 mm grid, 3/82 at
-0.03175 mm). So softstart rev-C is, today, a proof of the **shared table**, not of
-the **C++ search**. A T4 that is meant to certify #4507's own search-time
-avoidance needs either a board the grid engine can route, or the lattice/grid
-engine gap closed first.
+So this run was repeated on the grid/negotiated engine — where #4507's own kernels
+live — as a third arm:
+
+```bash
+kct route softstart_revc.kicad_pcb -o grid.kicad_pcb \
+  --route-engine grid --strategy negotiated --layers 4 \
+  --net-class-map net_class_map.json --voltage-map vmap.json \
+  --creepage-standard iec60664 --pollution-degree 2 --material-group IIIa \
+  --manufacturer jlcpcb --copper 2 --timeout 1200 --per-net-timeout 20 \
+  --max-cells 25000000
+```
+
+Result: **2 / 82 nets** (55 partial, 25 with no segments), 23 min 35 s, 12 HV
+pairwise violations in copper it did commit. That is the fixture journal's old
+verdict unchanged (it records 4/82 at 0.05 mm grid, 3/82 at 0.03175 mm): the grid
+engine cannot route this board at all, for reasons that predate #4431 — 77 % of
+pads are off-grid at the auto-selected 0.05 mm resolution, and the log is a wall
+of `no path (C++ A* open set exhausted)` fine-pitch escape failures.
+
+The arm is not wasted, though: it is the first observation of **#4860's
+`FAILURE_PAIRWISE_BLOCKED` firing on a real HV board**. Ten nets drained the C++
+open set specifically on cross-domain refusals and said so —
+
+```
+Net /LED_K_NEG: C++ pathfinder gave up (open set drained with expansions refused
+  by pairwise (HV-isolation) clearance (blocking net id 51)); falling back to the
+  pure-Python A*
+```
+
+— for `/GATE_NEG_A`, `/GATE_RTN_NEG`, `/LED_A_NEG`, `/LED_K_NEG`,
+`/PRECHARGE_NEG`, `/SCAP_NEG_RTN`, `/SRC_NEG`, `/STATUS_LED`, `/V_AC_SENSE_RAW`
+and `/V_BUS_DVDT`. Before #4860 every one of these was an undifferentiated
+`FAILURE_NO_PATH`. Note the operator-facing gap: the message names an integer
+net **id**, not the net name (consistent with the older
+`FAILURE_VIA_VIA_BLOCKED` phrasing it mirrors, so this is a shared wording
+choice rather than a regression — but on a real board `blocking net id 51` is not
+actionable without a lookup).
+
+**Bottom line for #4507's own code**: softstart rev-C is today a proof of the
+*shared* `DesignRules.pairwise_clearance` table (which the lattice consumes), not
+of the C++ grid search. A T4 that certifies #4507's own search-time avoidance
+needs either a board the grid engine can route, or the grid engine's fine-pitch
+escape wall cleared first — neither of which is a Phase 2 deliverable.
 
 ## What would have to change for T4 to pass
+
+Nothing on this list is a Phase 2 regression: they are, respectively, a
+table-construction defect shared by every engine, its downstream residual, a
+placement capacity wall, and a definitional mismatch between two gates.
 
 1. **Fix the sign collapse** (above). Without it no bipolar HV board can be
    gate-clean, because the gate is not asking for the right numbers. This is the
@@ -300,7 +351,7 @@ engine gap closed first.
 |---|---|---|---|
 | 1 | C++ `validate_route` + search-time check consume a domain-id array + domain-pair matrix | **MET** | `Grid3D::set_pairwise_domains` / `pairwise_required_clearance` (#4510 via #4524/#4533) |
 | 2 | Search-time avoidance: hard blocking + halo/pricing widening around HV copper | **MET** | C++ kernels + `pairwise_avoidance_cost` (#4511); Python-fallback mirrors (#4791); soft gradient (#4849); nearest-band pricing (#4859) |
-| 2b | Failed avoidance must be *actionable*, not silent | **MET** | `FAILURE_PAIRWISE_BLOCKED` + blocker net → `via_blocked_ripup` (#4860) |
+| 2b | Failed avoidance must be *actionable*, not silent | **MET** | `FAILURE_PAIRWISE_BLOCKED` + blocker net → `via_blocked_ripup` (#4860). **Observed live here**: 10 nets on the grid arm drained specifically on cross-domain refusals and named their blocker |
 | 3 | #4506 attach-zone exemption threaded into the C++ check | **MET** | `Grid3D::set_attach_zones` / `attach_zone_exempts(..., layer)`; layer scoping in #4780. **Confirmed live on a real board here**: 2 of 5 track-track shortfalls waived inside an optocoupler's pad bbox |
 | T1 | Parity: C++ and Python validators agree | **MET** | `tests/router/test_pairwise_cpp_parity.py` |
 | T2 | Two-domain fixture converges | **MET** | `test_two_domain_board_converges_with_search_time_avoidance` |
