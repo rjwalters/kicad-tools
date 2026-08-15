@@ -9,6 +9,13 @@ Orchestrates the full build pipeline:
 5. Run autorouter
 6. Run verification (DRC, audit)
 7. Export manufacturing package (Gerbers, BOM, CPL)
+
+Machine output (``--format json``, issue #4674): one document describing the
+run -- the resolved spec/artifact paths, the effective manufacturer, and a
+``steps`` array with one entry per executed step (its success, message,
+output file and elapsed time) -- or ``{"error": ..., "success": false}`` when
+the project directory cannot be resolved.  Exit codes are unchanged.  See
+``docs/reference/machine-output.md``.
 """
 
 from __future__ import annotations
@@ -34,6 +41,13 @@ from rich.markup import escape as markup_escape
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from kicad_tools.cli.format_options import (
+    FORMAT_JSON,
+    FORMAT_TEXT,
+    add_format_flag,
+    emit_json,
+    stdout_to_stderr_when,
+)
 from kicad_tools.manufacturers import get_all_manufacturer_names
 
 if TYPE_CHECKING:
@@ -3407,6 +3421,7 @@ Examples:
             "step (default: 30.0)."
         ),
     )
+    add_format_flag(parser)
 
     return parser
 
@@ -3415,6 +3430,26 @@ def main(argv: list[str] | None = None) -> int:
     """Main entry point for kct build command."""
     parser = _build_inner_parser()
     args = parser.parse_args(argv)
+    as_json = getattr(args, "format", FORMAT_TEXT) == FORMAT_JSON
+
+    # JSON mode owns stdout: the build header, the per-step ledger and the
+    # streamed stdout of every generator script / kct subprocess all land
+    # there.  Divert the lot to stderr so the diagnostics survive and exactly
+    # one document lands on stdout.
+    with stdout_to_stderr_when(as_json):
+        exit_code, document = _run_main(args, as_json)
+    if as_json and document is not None:
+        emit_json(document)
+    return exit_code
+
+
+def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None]:
+    """Execute one ``kct build`` run; returns (exit code, JSON document).
+
+    Split out of :func:`main` so the JSON document is emitted *outside* the
+    stdout diversion that protects the single-document contract.  The document
+    is ``None`` in text mode.
+    """
     console = Console(quiet=args.quiet)
 
     # Determine project directory and spec file
@@ -3439,8 +3474,16 @@ def main(argv: list[str] | None = None) -> int:
         spec_file = _find_spec_file(project_dir)
 
     if not project_dir.exists():
+        message = f"Directory not found: {project_dir}"
+        if as_json:
+            return 1, {
+                "command": "build",
+                "spec": str(args.spec) if args.spec else None,
+                "error": message,
+                "success": False,
+            }
         console.print(f"[red]Error:[/red] Directory not found: {project_dir}")
-        return 1
+        return 1, None
 
     # Load the spec file if available
     spec = None
@@ -3533,6 +3576,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Run build steps
     results: list[BuildResult] = []
+    # Per-step wall time, parallel to ``results`` (issue #4674): the JSON
+    # document reports it per entry; the prose already prints it inline.
+    step_elapsed_s: list[float] = []
 
     # Wall-clock anchor for the whole pipeline (issue #3944).  Uses
     # ``time.monotonic()`` so the reported totals are immune to system
@@ -3649,6 +3695,7 @@ def main(argv: list[str] | None = None) -> int:
 
             step_elapsed = time.monotonic() - step_start
             results.append(result)
+            step_elapsed_s.append(step_elapsed)
             progress.remove_task(task)
 
             # Print step result with per-step elapsed time (issue #3944)
@@ -3680,20 +3727,32 @@ def main(argv: list[str] | None = None) -> int:
                     smoke = _smoke_check_pcb(pcb_for_check, step.value, console, ctx)
                     if smoke is not None:
                         results.append(smoke)
+                        step_elapsed_s.append(0.0)
                         if not args.quiet:
                             console.print(
                                 f"  [[red]FAIL[/red]] {step.value} (smoke-check): {smoke.message}"
                             )
                         break
 
+    # Summary
+    wall_time_s = time.monotonic() - build_start
+    success_count = sum(1 for r in results if r.success)
+    total_count = len(results)
+    build_succeeded = success_count == total_count
+
+    export_results = [r for r in results if r.step == "export" and r.success]
+    manufacturing_output = (
+        str(export_results[0].output_file)
+        if export_results and export_results[0].output_file
+        else None
+    )
+
     # Print summary
     if not args.quiet:
-        total_elapsed = _format_elapsed(time.monotonic() - build_start)
+        total_elapsed = _format_elapsed(wall_time_s)
         console.print()
-        success_count = sum(1 for r in results if r.success)
-        total_count = len(results)
 
-        if success_count == total_count:
+        if build_succeeded:
             console.print(
                 f"[green]Build completed successfully[/green] "
                 f"({success_count}/{total_count} steps) in {total_elapsed}"
@@ -3706,17 +3765,58 @@ def main(argv: list[str] | None = None) -> int:
                 console.print(f"\n[dim]Output:[/dim] {ctx.pcb_file}")
 
             # Show manufacturing output if export step ran
-            export_results = [r for r in results if r.step == "export" and r.success]
-            if export_results and export_results[0].output_file:
-                console.print(f"[dim]Manufacturing:[/dim] {export_results[0].output_file}")
+            if manufacturing_output is not None:
+                console.print(f"[dim]Manufacturing:[/dim] {manufacturing_output}")
         else:
             console.print(
                 f"[red]Build failed[/red] "
                 f"({success_count}/{total_count} steps succeeded) in {total_elapsed}"
             )
-            return 1
 
-    return 0
+    # The exit code no longer depends on --quiet.  It used to be computed
+    # inside the `if not args.quiet` block above, so `kct build --quiet`
+    # exited 0 even when a step failed -- which would also have made the
+    # JSON document's "success": false contradict the exit code (#4674).
+    exit_code = 0 if build_succeeded else 1
+
+    if not as_json:
+        return exit_code, None
+
+    document = {
+        "command": "build",
+        "spec": str(spec_file) if spec_file else None,
+        "project_dir": str(project_dir),
+        "output_dir": str(output_dir) if output_dir else None,
+        "mfr": effective_mfr,
+        "step": args.step,
+        "dry_run": ctx.dry_run,
+        "force": ctx.force,
+        "schematic": str(ctx.schematic_file) if ctx.schematic_file else None,
+        "pcb": str(ctx.pcb_file) if ctx.pcb_file else None,
+        "routed_pcb": str(ctx.routed_pcb_file) if ctx.routed_pcb_file else None,
+        "manufacturing_output": manufacturing_output,
+        "steps": [
+            {
+                "step": result.step,
+                "success": result.success,
+                "message": result.message,
+                "output_file": str(result.output_file) if result.output_file else None,
+                # Volatile by nature; named rather than hidden so determinism
+                # is asserted modulo it (batch-6 convention).
+                "elapsed_s": round(elapsed, 3),
+            }
+            for result, elapsed in zip(results, step_elapsed_s, strict=False)
+        ],
+        "counts": {
+            "total": total_count,
+            "succeeded": success_count,
+            "failed": total_count - success_count,
+        },
+        "wall_time_s": round(wall_time_s, 3),
+        "exit_code": exit_code,
+        "success": build_succeeded,
+    }
+    return exit_code, document
 
 
 if __name__ == "__main__":

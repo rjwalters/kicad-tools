@@ -31,6 +31,14 @@ Usage:
     kct pipeline board.kicad_pcb --step fix-erc
     kct pipeline project.kicad_pro --mfr jlcpcb --layers 4
     kct pipeline board.kicad_pcb --layers 4-sig
+
+Machine output (``--format json``, issue #4674): one document describing the
+run -- the resolved input/pcb/schematic paths, the manufacturer and layer
+stack, and a ``steps`` array with one entry per executed step (its
+success/skip/warning classification and message) -- or ``{"error": ...,
+"success": false}`` when the input cannot be resolved.  Exit codes (0 / 1 /
+2-for-best-effort-partial) are unchanged.  See
+``docs/reference/machine-output.md``.
 """
 
 from __future__ import annotations
@@ -48,6 +56,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from kicad_tools.cli.format_options import (
+    FORMAT_JSON,
+    FORMAT_TEXT,
+    add_format_flag,
+    emit_json,
+    stdout_to_stderr_when,
+)
 from kicad_tools.manufacturers import get_all_manufacturer_names
 
 logger = logging.getLogger(__name__)
@@ -2534,13 +2549,45 @@ Examples:
             "step (default: 30.0)."
         ),
     )
+    add_format_flag(parser)
+
     args = parser.parse_args(argv)
+    as_json = getattr(args, "format", FORMAT_TEXT) == FORMAT_JSON
+
+    # JSON mode owns stdout: every pipeline step prints its own progress
+    # ledger (rich Console + Progress) and several shell out to tools that
+    # print on stdout.  Divert the lot to stderr so the diagnostics survive
+    # and exactly one document lands on stdout.
+    with stdout_to_stderr_when(as_json):
+        exit_code, document = _run_main(args, as_json)
+    if as_json and document is not None:
+        emit_json(document)
+    return exit_code
+
+
+def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None]:
+    """Execute one ``kct pipeline`` run; returns (exit code, JSON document).
+
+    Split out of :func:`main` so the JSON document is emitted *outside* the
+    stdout diversion that protects the single-document contract.  The document
+    is ``None`` in text mode.
+    """
+
+    def fail(message: str, *, code: int = 1) -> tuple[int, dict]:
+        """Report a failure as a document (JSON) or on stderr (text)."""
+        if not as_json:
+            print(f"Error: {message}", file=sys.stderr)
+        return code, {
+            "command": "pipeline",
+            "input": str(args.input),
+            "error": message,
+            "success": False,
+        }
 
     input_path = Path(args.input).resolve()
 
     if not input_path.exists():
-        print(f"Error: File not found: {input_path}", file=sys.stderr)
-        return 1
+        return fail(f"File not found: {input_path}")
 
     # Determine input type and resolve PCB file
     is_project = input_path.suffix == ".kicad_pro"
@@ -2550,11 +2597,7 @@ Examples:
         project_file = input_path
         pcb_file = _resolve_pcb_from_project(input_path)
         if pcb_file is None:
-            print(
-                f"Error: No .kicad_pcb file found for project {input_path.name}",
-                file=sys.stderr,
-            )
-            return 1
+            return fail(f"No .kicad_pcb file found for project {input_path.name}")
     elif input_path.suffix == ".kicad_pcb":
         pcb_file = input_path
         # Check if a .kicad_pro exists alongside
@@ -2563,12 +2606,9 @@ Examples:
             project_file = pro_file
             is_project = True
     else:
-        print(
-            f"Error: Unsupported file type: {input_path.suffix} "
-            f"(expected .kicad_pcb or .kicad_pro)",
-            file=sys.stderr,
+        return fail(
+            f"Unsupported file type: {input_path.suffix} (expected .kicad_pcb or .kicad_pro)"
         )
-        return 1
 
     # Resolve layer configuration from PCB when not explicitly specified.
     # When --layers is given (e.g. "4", "4-sig"), use the string as-is so it
@@ -2594,8 +2634,7 @@ Examples:
     if args.sch is not None:
         sch_path = Path(args.sch).resolve()
         if not sch_path.exists():
-            print(f"Error: Schematic file not found: {sch_path}", file=sys.stderr)
-            return 1
+            return fail(f"Schematic file not found: {sch_path}")
         schematic_file = sch_path
     else:
         schematic_file = _resolve_schematic(pcb_file, project_file)
@@ -2636,6 +2675,47 @@ Examples:
 
     results = run_pipeline(ctx, steps)
 
+    def document(exit_code: int, *, commit_created: bool = False) -> dict | None:
+        """Build the run document (JSON mode only)."""
+        if not as_json:
+            return None
+        return {
+            "command": "pipeline",
+            "input": str(input_path),
+            "pcb": str(pcb_file),
+            "project": str(project_file) if project_file else None,
+            "schematic": str(schematic_file) if schematic_file else None,
+            "mfr": ctx.mfr,
+            "layers": ctx.layers,
+            "layer_count": ctx.layer_count,
+            "step": args.step,
+            "dry_run": ctx.dry_run,
+            "force": ctx.force,
+            "best_effort": ctx.best_effort,
+            "steps": [
+                {
+                    "step": r.step.value if isinstance(r.step, PipelineStep) else str(r.step),
+                    "success": r.success,
+                    "skipped": r.skipped,
+                    "warning": r.warning,
+                    "message": r.message,
+                }
+                for r in results
+            ],
+            "counts": {
+                "total": len(results),
+                "succeeded": sum(1 for r in results if r.success),
+                "skipped": sum(1 for r in results if r.skipped),
+                "warnings": sum(1 for r in results if r.warning),
+            },
+            # A --commit run says whether it actually committed, so exit 0
+            # alone is never read as "the change is in git" (batch-5
+            # producers-say-whether-they-produced convention).
+            "commit": {"requested": ctx.commit, "created": commit_created},
+            "exit_code": exit_code,
+            "success": exit_code == 0,
+        }
+
     # Determine exit code:
     #   0 = all steps succeeded
     #   2 = partial success (--best-effort continued past a routing failure)
@@ -2646,20 +2726,22 @@ Examples:
     )
 
     if not all_succeeded and not has_route_warning:
-        return 1
+        return 1, document(1)
 
     # Handle --commit flag (silently ignored with --dry-run)
+    commit_created = False
     if ctx.commit and not ctx.dry_run:
         console = Console(quiet=ctx.quiet)
         commit_rc = _git_commit_result(ctx, results, console)
         if commit_rc != 0:
-            return commit_rc
+            return commit_rc, document(commit_rc)
+        commit_created = True
 
     # Exit code 2 for partial success (routing incomplete in best-effort mode)
     if has_route_warning:
-        return 2
+        return 2, document(2, commit_created=commit_created)
 
-    return 0
+    return 0, document(0, commit_created=commit_created)
 
 
 if __name__ == "__main__":

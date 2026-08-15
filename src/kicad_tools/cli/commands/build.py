@@ -1,4 +1,9 @@
-"""Build command handler for end-to-end workflow orchestration."""
+"""Build command handler for end-to-end workflow orchestration.
+
+Machine output (``--format json``, issue #4674): the canonical flag is
+forwarded to ``build_cmd``'s inner parser, which emits one document
+describing the run.  See ``docs/reference/machine-output.md``.
+"""
 
 __all__ = ["run_build_command"]
 
@@ -80,5 +85,10 @@ def run_build_command(args) -> int:
     build_hv_threshold = getattr(args, "build_hv_threshold", 30.0)
     if build_hv_threshold is not None and build_hv_threshold != 30.0:
         sub_argv.extend(["--hv-threshold", str(build_hv_threshold)])
+
+    # Machine output (#4674): forward the canonical flag only when it asks for
+    # JSON, so a default invocation still builds a byte-identical inner argv.
+    if getattr(args, "format", "text") == "json":
+        sub_argv.extend(["--format", "json"])
 
     return build_main(sub_argv)

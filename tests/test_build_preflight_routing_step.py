@@ -179,15 +179,17 @@ class TestBuildStepEnum:
     def test_default_all_chain_orders_preflight_between_stitch_and_verify(self) -> None:
         """Statically check the default chain ordering.
 
-        The default chain is a literal list inside main(); just check
-        the relative order of the substrings is correct.  This is a
-        weak but extremely cheap invariant to enforce.
+        The default chain is a literal list inside ``_run_main()`` (split out
+        of ``main()`` by #4674 so the ``--format json`` document is emitted
+        outside the stdout diversion); just check the relative order of the
+        substrings is correct.  This is a weak but extremely cheap invariant
+        to enforce.
         """
         import inspect
 
         from kicad_tools.cli import build_cmd
 
-        src = inspect.getsource(build_cmd.main)
+        src = inspect.getsource(build_cmd._run_main)
         stitch_idx = src.index("BuildStep.STITCH")
         preflight_idx = src.index("BuildStep.PREFLIGHT_ROUTING")
         verify_idx = src.index("BuildStep.VERIFY")

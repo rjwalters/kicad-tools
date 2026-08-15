@@ -1,4 +1,9 @@
-"""Pipeline command handler for end-to-end PCB repair workflow."""
+"""Pipeline command handler for end-to-end PCB repair workflow.
+
+Machine output (``--format json``, issue #4674): the canonical flag is
+forwarded to ``pipeline_cmd``'s inner parser, which emits one document
+describing the run.  See ``docs/reference/machine-output.md``.
+"""
 
 __all__ = ["run_pipeline_command"]
 
@@ -95,5 +100,10 @@ def run_pipeline_command(args) -> int:
     # Use global quiet or command-level quiet
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
+
+    # Machine output (#4674): forward the canonical flag only when it asks for
+    # JSON, so a default invocation still builds a byte-identical inner argv.
+    if getattr(args, "format", "text") == "json":
+        sub_argv.extend(["--format", "json"])
 
     return pipeline_main(sub_argv)

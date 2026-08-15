@@ -20,6 +20,13 @@ Usage:
 Exit Codes:
     0 - Success
     1 - Error or no work to do
+
+Machine output (``--format json``, issue #4674): one document describing the
+run -- the resolved input/output paths, the resolved via geometry, and the
+full (untruncated) per-pad ledger of placed vias, skipped pads, connectivity
+fallbacks and pads needing a routed fanout -- or ``{"error": ..., "success":
+false}`` on failure.  Exit codes are unchanged.  See
+``docs/reference/machine-output.md``.
 """
 
 import argparse
@@ -29,6 +36,13 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.cli.format_options import (
+    FORMAT_JSON,
+    FORMAT_TEXT,
+    add_format_flag,
+    emit_json,
+    stdout_to_stderr_when,
+)
 from kicad_tools.core.sexp_file import load_pcb, save_pcb, verify_pcb_write
 from kicad_tools.router.via_clearance import drill_hole_to_hole_clear
 from kicad_tools.sexp import SExp
@@ -5843,6 +5857,109 @@ def output_result(
         print(f"\nRun DRC to verify: kicad-cli pcb drc {result.pcb_name}")
 
 
+def _pad_ref(pad: PadInfo) -> dict:
+    """Serialize the identity of a pad for the machine-output document."""
+    return {
+        "reference": pad.reference,
+        "pad": pad.pad_number,
+        "net": pad.net_name,
+        "layer": pad.layer,
+        "x": round(pad.x, 4),
+        "y": round(pad.y, 4),
+    }
+
+
+def result_document(
+    result: StitchResult,
+    *,
+    mode: str,
+    pcb: Path,
+    edited_path: Path,
+    via_size: float,
+    drill: float,
+    nets_auto_detected: bool,
+    manufacturer: dict | None,
+    dry_run: bool,
+    drc_requested: bool,
+    drc_ran: bool,
+) -> dict:
+    """Build the ``--format json`` document for one stitch run (issue #4674).
+
+    Unlike the prose summary -- which truncates via lists at 10 entries and
+    skipped-pad lists at 5 -- the document carries the **complete** ledger, so
+    a machine caller never has to re-run with different flags to see the pads
+    the run could not place.  Coordinates are rounded to 4 decimal places
+    (0.1 nm), well below KiCad's own file precision, so two runs on the same
+    input are byte-identical.
+    """
+    dogleg = [t for t in result.traces_added if t.is_dogleg]
+    extended = [t for t in result.traces_added if t.is_extended_escape]
+
+    obstacles: dict[str, int] = {}
+    for _pad, detail in result.skip_details:
+        obstacles[detail.obstacle_type] = obstacles.get(detail.obstacle_type, 0) + 1
+
+    document: dict = {
+        "command": "stitch",
+        "pcb": str(pcb),
+        "output": str(edited_path),
+        "mode": mode,
+        "target_nets": sorted(result.target_nets),
+        "nets_auto_detected": nets_auto_detected,
+        "manufacturer": manufacturer,
+        "via_size_mm": via_size,
+        "drill_mm": drill,
+        "detected_layers": dict(sorted(result.detected_layers.items())),
+        "stackup_inferred_nets": sorted(result.stackup_inferred_nets),
+        "fallback_nets": sorted(result.fallback_nets),
+        "strict_model_error": result.strict_model_error or None,
+        "pads_found": result.pads_found,
+        "already_connected": result.already_connected,
+        "vias_added": [
+            {
+                **_pad_ref(via.pad),
+                "via_x": round(via.via_x, 4),
+                "via_y": round(via.via_y, 4),
+                "size_mm": via.size,
+                "drill_mm": via.drill,
+                "layers": list(via.layers),
+                "via_type": via.via_type or "standard",
+            }
+            for via in result.vias_added
+        ],
+        "vias_added_count": len(result.vias_added),
+        "micro_vias_placed": result.micro_vias_placed,
+        "traces_added": {
+            "total": len(result.traces_added),
+            "straight": len(result.traces_added) - len(dogleg) - len(extended),
+            "dogleg": len(dogleg),
+            "extended_escape": len(extended),
+        },
+        "via_in_pad_filtered": result.via_in_pad_filtered,
+        "hole_to_hole_rejected": result.hole_to_hole_rejected,
+        "connectivity_fallback": [
+            {**_pad_ref(pad), "reason": reason} for pad, reason in result.connectivity_fallback
+        ],
+        "needs_routed_fanout": [
+            {**_pad_ref(pad), "reason": reason} for pad, reason in result.needs_routed_fanout
+        ],
+        "pads_skipped": [
+            {**_pad_ref(pad), "reason": reason} for pad, reason in result.pads_skipped
+        ],
+        "obstacle_breakdown": dict(sorted(obstacles.items())),
+        "dry_run": dry_run,
+        # A producer says whether it produced (batch-5 convention): vias are
+        # only on disk when the run was not a dry run AND placed something.
+        "saved": bool(result.vias_added) and not dry_run,
+        # `--drc` is honoured only for a non-dry run that actually placed
+        # copper, and kicad-cli may be absent, so "requested" and "ran" are
+        # reported separately rather than collapsed into one boolean.
+        "drc": {"requested": drc_requested, "ran": drc_ran},
+    }
+    document["success"] = bool(result.vias_added) or bool(result.already_connected)
+    return document
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-pcb-stitch command."""
     parser = argparse.ArgumentParser(
@@ -6037,17 +6154,54 @@ def main(argv: list[str] | None = None) -> int:
             "(e.g., '2layer_1oz')."
         ),
     )
+    add_format_flag(parser)
 
     args = parser.parse_args(argv)
+    as_json = getattr(args, "format", FORMAT_TEXT) == FORMAT_JSON
+
+    # JSON mode owns stdout: the stitch engine, the post-stitch carve and the
+    # kicad-cli DRC pass all print progress on stdout, and this module's own
+    # informational lines ("Manufacturer profile ...", "Auto-detected N power
+    # plane nets") do too.  Divert the lot to stderr so the diagnostics
+    # survive and exactly one document lands on stdout.
+    with stdout_to_stderr_when(as_json):
+        exit_code, document = _run_main(args, as_json)
+    if as_json and document is not None:
+        emit_json(document)
+    return exit_code
+
+
+def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None]:
+    """Execute one ``kct stitch`` run; returns (exit code, JSON document).
+
+    Split out of :func:`main` so the JSON document is emitted *outside* the
+    stdout diversion that protects the single-document contract.  The document
+    is ``None`` in text mode.
+    """
+
+    def fail(message: str, *, text_message: str | None = None, code: int = 1) -> tuple[int, dict]:
+        """Report a failure as a document (JSON) or on stderr (text).
+
+        *text_message* overrides the prose so the several non-``Error:``-
+        prefixed messages stay byte-identical (batch-4 convention).
+        """
+        if not as_json:
+            print(
+                text_message if text_message is not None else f"Error: {message}", file=sys.stderr
+            )
+        return code, {
+            "command": "stitch",
+            "pcb": str(args.pcb),
+            "error": message,
+            "success": False,
+        }
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: PCB not found: {pcb_path}", file=sys.stderr)
-        return 1
+        return fail(f"PCB not found: {pcb_path}")
 
     if pcb_path.suffix != ".kicad_pcb":
-        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
-        return 1
+        return fail(f"Expected .kicad_pcb file, got: {pcb_path.suffix}")
 
     # If output specified, copy to output first
     if args.output and not args.dry_run:
@@ -6074,6 +6228,7 @@ def main(argv: list[str] | None = None) -> int:
     # defaults are preserved (no behavior change).
     via_size = args.via_size
     drill = args.drill
+    manufacturer: dict | None = None
     if args.mfr is not None:
         try:
             detected_layers = _count_copper_layers(pcb_path)
@@ -6081,13 +6236,14 @@ def main(argv: list[str] | None = None) -> int:
                 args.mfr, detected_layers, args.copper
             )
         except FileNotFoundError:
-            print(
-                f"Error: No configuration found for manufacturer '{args.mfr}'",
-                file=sys.stderr,
-            )
-            return 1
+            return fail(f"No configuration found for manufacturer '{args.mfr}'")
         via_size = mfr_via_size
         drill = mfr_drill
+        manufacturer = {
+            "profile": args.mfr,
+            "copper_layers": detected_layers,
+            "copper_oz": args.copper,
+        }
         print(
             f"Manufacturer profile '{args.mfr}' ({detected_layers}-layer, "
             f"{args.copper:g}oz): via_size={via_size:.3f}mm, drill={drill:.3f}mm"
@@ -6095,6 +6251,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Auto-detect power plane nets if none specified
     net_names = args.nets
+    nets_auto_detected = not net_names
     if not net_names:
         # Load PCB to find zones
         from kicad_tools.core.sexp_file import load_pcb as _load_pcb
@@ -6102,10 +6259,14 @@ def main(argv: list[str] | None = None) -> int:
         sexp = _load_pcb(pcb_path)
         plane_nets = find_all_plane_nets(sexp)
         if not plane_nets:
-            print("No power plane nets found (no zones with assigned nets)", file=sys.stderr)
-            return 1
+            return fail(
+                "No power plane nets found (no zones with assigned nets)",
+                text_message="No power plane nets found (no zones with assigned nets)",
+            )
         net_names = list(plane_nets.keys())
         print(f"Auto-detected {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
+
+    mode = "thermal" if args.thermal else ("blanket" if args.blanket else "stitch")
 
     try:
         if args.thermal:
@@ -6156,7 +6317,8 @@ def main(argv: list[str] | None = None) -> int:
                 avoid_pad_overlap=args.avoid_pad_overlap,
             )
 
-        output_result(result, dry_run=args.dry_run, run_drc=args.drc, edited_path=pcb_path)
+        if not as_json:
+            output_result(result, dry_run=args.dry_run, run_drc=args.drc, edited_path=pcb_path)
 
         # Issue #3773: stitching adds new foreign-net copper (GND vias and
         # pad-to-via trace segments) *across* the existing rail pours, but
@@ -6172,17 +6334,34 @@ def main(argv: list[str] | None = None) -> int:
             _carve_foreign_copper_after_stitch(pcb_path)
 
         # Run DRC if requested (and not dry run, and vias were actually added)
+        drc_ran = False
         if args.drc and not args.dry_run and result.vias_added:
-            run_post_stitch_drc(pcb_path)
+            drc_ran = run_post_stitch_drc(pcb_path) == 0
+
+        document = (
+            result_document(
+                result,
+                mode=mode,
+                pcb=Path(args.pcb),
+                edited_path=pcb_path,
+                via_size=via_size,
+                drill=drill,
+                nets_auto_detected=nets_auto_detected,
+                manufacturer=manufacturer,
+                dry_run=args.dry_run,
+                drc_requested=bool(args.drc),
+                drc_ran=drc_ran,
+            )
+            if as_json
+            else None
+        )
 
         if result.vias_added:
-            return 0
-        else:
-            return 0 if result.already_connected else 1
+            return 0, document
+        return (0 if result.already_connected else 1), document
 
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+        return fail(str(e))
 
 
 if __name__ == "__main__":

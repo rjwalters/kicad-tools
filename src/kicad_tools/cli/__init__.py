@@ -577,6 +577,10 @@ def _run_stitch_command(args) -> int:
         sub_argv.extend(["--mfr", str(args.stitch_mfr)])
     if hasattr(args, "stitch_copper") and args.stitch_copper != 1.0:
         sub_argv.extend(["--copper", str(args.stitch_copper)])
+    # Machine output (#4674): forward the canonical flag only when it asks for
+    # JSON, so a default invocation still builds a byte-identical inner argv.
+    if getattr(args, "format", "text") == "json":
+        sub_argv.extend(["--format", "json"])
 
     return stitch_cmd(sub_argv)
 

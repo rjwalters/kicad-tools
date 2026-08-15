@@ -3385,6 +3385,7 @@ def _add_stitch_parser(subparsers) -> None:
             "to select the correct design-rules row from the manufacturer YAML."
         ),
     )
+    add_format_flag(stitch_parser)
 
 
 def _add_route_parser(subparsers) -> None:
@@ -7753,6 +7754,7 @@ def _add_pipeline_parser(subparsers) -> None:
             "step (default: 30.0)."
         ),
     )
+    add_format_flag(pipeline_parser)
 
 
 def _add_create_pcb_parser(subparsers) -> None:
@@ -8017,6 +8019,7 @@ def _add_build_parser(subparsers) -> None:
             "step (default: 30.0)."
         ),
     )
+    add_format_flag(build_parser)
 
 
 def _add_build_native_parser(subparsers) -> None:
