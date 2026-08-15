@@ -47,6 +47,7 @@ Point-in-time working documents — dated entries describe the tree as of their 
 
 | Document | Description |
 |----------|-------------|
+| [HV Pairwise Proof: softstart rev-C (2026-08)](hv-pairwise-softstart-proof.md) | #4507 T4 manual proof run on the local-only mains HV fixture |
 | [Placement Pad-Anchoring Audit (2026-08)](placement-pad-anchoring-audit.md) | Centre- vs pad-anchored placement objective terms (#4831) |
 | [Board Fleet Parity Audit (2026-06)](board-fleet-parity-audit-2026-06.md) | Fleet-wide board status snapshot |
 | [Install Pilot: chorus](install-pilot-chorus.md) | Consumer-repo install pilot for Epic #4054 acceptance |

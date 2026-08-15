@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HV pairwise proof run on the softstart rev-C mains board** (part of #4507,
+  epic #4431 Phase 2) — `docs/hv-pairwise-softstart-proof.md` records the T4
+  manual criterion's local run: the fixture is local-only by design, so the
+  proof is a documented measurement rather than a CI job. Both arms of the same
+  recipe on the same placed board, differing only in whether `--voltage-map` is
+  supplied: the pairwise search-time avoidance removes **54 → 3** same-layer
+  HV track↔track violations (and **107 → 42** board-level `kct creepage`
+  census fails) for the cost of one net and ~22 % wall time — retiring the
+  fixture's earlier "enforcement costs ~40 % of routability" reading. **T4
+  nonetheless FAILS** (49/82 nets, 42 board-level fails, target 0), and the run
+  root-causes the residual: `build_pairwise_clearance_table()` normalises net
+  potentials with `abs()` before differencing them, so on a *signed* voltage map
+  a +150 V net and a −150 V net difference to 0 V instead of 300 V. On
+  softstart's own 84-net map that under-constrains **339 of 1922 cross-pairs
+  (17.6 %)**, with 99 pairs — every POS↔NEG bank pair, up to 3.20 mm required —
+  dropping out of the matrix entirely and becoming invisible to both the search
+  and the post-route audit. The census (`creepage/engine.py`) differences the
+  same file's values *signed*, so the router and the gate disagree by
+  construction. Documentation only; no behavior change in this entry.
+
 - **Cross-domain (HV) failures now name a rip-up target** (part of #4507, epic
   #4431 Phase 2) — the search-time pairwise kernels
   (`Pathfinder::cross_domain_trace_blocked` / `cross_domain_via_blocked`,
