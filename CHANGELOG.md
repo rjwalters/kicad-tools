@@ -108,6 +108,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listed as stubs **inside the doc** and deliberately not filed as issues.
   No source changes.
 
+- **Curated open-schematics sample manifest + parser scorecard** (part of
+  #4830, slice 2) — the corpus probe's one-off sample is now a *standing*
+  regression set. `scripts/corpus/manifests/open-schematics-sample.json` is a
+  committed, deterministic manifest of 30 real-world artifacts (22
+  `.kicad_pcb`, 8 `.kicad_sch`) pinned by `sha256` + datasets-server URL,
+  spanning 15 declared KiCad file-format versions (`20160815` → `20250114`,
+  plus KiCad-4-era `version 3`/`4`) and 24 (kind, version-era, size-decade)
+  strata. **No third-party payload bytes are committed** — the corpus stays
+  referenced by URL; manifest validation and a test both reject an entry that
+  embeds file content. `scripts/corpus/build_manifest.py` rebuilds the
+  manifest (seeded scan pool, every candidate parsed before it can be pinned,
+  round-robin stratified selection), and `scripts/corpus/check_manifest.py`
+  scores this repo's parsers against it: cache-or-fetch each payload into the
+  gitignored `scripts/corpus/.cache/payloads/`, verify the hash, parse, and
+  report parse failures, **regressions** against each entry's pinned
+  `expected_outcome`, and **shape-metric drift** (a file can load cleanly and
+  still yield an empty object graph). Integrity outcomes
+  (`missing-cached-payload`, `payload-hash-mismatch`) are separate classes,
+  excluded from `parse_failure_rate`, so an upstream row change or a flaky
+  fetch never reads as a parser regression. Current status: 30/30 entries
+  parse clean, 0 regressions, 0 drift; a warm-cache `--offline` re-run takes
+  ~8 s. The dataset-access and taxonomy helpers used by all three scripts were
+  extracted to `scripts/corpus/hf_hub.py` and
+  `scripts/corpus/parse_taxonomy.py` (the latter is pure/offline and covered by
+  `tests/test_corpus_manifest.py`; the network scripts remain unimported by
+  `tests/` and unreferenced by any workflow).
+
 - **Open-schematics corpus probe** (`scripts/corpus/probe_open_schematics.py`,
   part of #4830) — a local, opt-in dev script that samples N random records
   from the Hugging Face dataset `bshada/open-schematics` (87,931 real KiCad

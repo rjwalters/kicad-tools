@@ -1,9 +1,31 @@
 # scripts/corpus/
 
 Local, **opt-in** tooling for probing external KiCad corpora with this repo's own
-parsers. Nothing here is part of the installed `kct` package, nothing here runs in
-CI, and nothing under `tests/` imports it — these scripts do network I/O and are
-run by hand.
+parsers. Nothing here is part of the installed `kct` package and nothing here runs
+in CI — the network scripts are run by hand and are never imported from `tests/`.
+
+| File | Kind | What it does |
+|------|------|--------------|
+| `probe_open_schematics.py` | CLI, network | Sample N random dataset records and report a parser failure taxonomy (slice 1) |
+| `build_manifest.py` | CLI, network | Rebuild the committed curated-sample manifest (slice 2) |
+| `check_manifest.py` | CLI, network on a cold cache | Score the parsers against the manifest; the repeatable measurement |
+| `manifests/open-schematics-sample.json` | data | The committed manifest: pointers (URL + `sha256`), never payloads |
+| `hf_hub.py` | library, network | Hugging Face datasets-server access (retry/backoff) |
+| `parse_taxonomy.py` | library, **pure** | Outcome buckets, format sniffing, exception classification |
+| `corpus_manifest.py` | library, **pure** | Manifest schema/validation, cache integrity, scoring, rendering |
+
+These scripts import each other by plain module name (the script's own directory
+is `sys.path[0]` when you run `python scripts/corpus/<script>.py`). Type-check
+them with that directory on the search path, or mypy cannot resolve the siblings:
+
+```bash
+MYPYPATH=scripts/corpus uv run mypy scripts/corpus/   # Success: no issues found
+```
+
+The two pure modules are the tested surface (`tests/test_corpus_manifest.py`);
+they do no network I/O and have no CLI, which is why importing them from the test
+suite does not violate the "no network in pytest" rule that keeps the network
+scripts out of `tests/`.
 
 ## `probe_open_schematics.py`
 
@@ -100,6 +122,76 @@ has no version-reject path today.
 
 Failure messages are grouped by a digit-normalised signature, so
 `Expected atom at position 4172` and `... at position 91` count as one offender.
+
+## The curated sample manifest (slice 2)
+
+The probe answers *"does the parser survive random files?"* once. The manifest
+makes that answer **repeatable**: a committed list of specific artifacts, pinned
+by hash, that anyone can re-score at any time.
+
+```bash
+# score the parsers against the committed manifest
+# (first run downloads ~17 MB into the gitignored cache, then it is offline)
+uv run python scripts/corpus/check_manifest.py
+uv run python scripts/corpus/check_manifest.py --offline   # ~8 s, cache only
+
+# rebuild the manifest (only when you want a bigger/different sample)
+uv run python scripts/corpus/build_manifest.py --n 30 --scan 90 --seed 4830
+```
+
+### What the manifest is (and is not)
+
+`manifests/open-schematics-sample.json` holds, per entry: the dataset row offset
+and cell/slot, the upstream project name, the exact datasets-server fetch URL,
+the payload `sha256` and size, the detected format and declared KiCad version,
+the parse outcome observed when it was pinned (`expected_outcome`), and coarse
+shape metrics (footprints/pads/nets/copper layers/segments/vias/zones for a
+board; symbols/wires/labels/junctions/sheets for a schematic).
+
+It holds **no payload bytes**. `validate_manifest_dict` rejects entries carrying
+`text`/`payload`/`content`/… keys, and `tests/test_corpus_manifest.py` asserts
+the same property on the committed file — reference by URL is the licensing
+posture for a 317 GB CC-BY-4.0 aggregate of other people's designs, and it should
+be hard to break by accident.
+
+The current sample: **30 entries** (22 PCB, 8 schematic) across 24 strata and 15
+declared file-format versions from `20160815` to `20250114`, plus two KiCad-4-era
+legacy boards (`version 3`, `version 4`). 16.5 MB of payload, fetched on demand.
+
+### What `check_manifest.py` reports
+
+| Signal | Meaning |
+|--------|---------|
+| `parse failures` | entries that raised, bucketed by the shared taxonomy |
+| `regressions` | pinned as parseable, no longer parse — **the alarm** |
+| `unexpected passes` | pinned as a known failure, parses now — re-pin it |
+| `metrics drift` | parsed, but the object graph no longer matches the pinned counts |
+| `unavailable` | `missing-cached-payload` / `payload-hash-mismatch` — integrity, *not* parser health |
+
+Integrity outcomes are excluded from `parse_failure_rate` on purpose: an upstream
+row change or a flaky fetch must never be readable as a parser regression. Exit
+status is 1 on regressions; `--strict` also fails on drift or unavailable
+entries.
+
+Metrics drift exists because "it parsed" is a weak assertion. The corpus contains
+KiCad-4-era `(version 3)` boards that load cleanly through the s-expr reader and
+yield **zero footprints and zero pads** — accepted, not understood. Pinning the
+counts turns that class of silent regression into a visible diff. (That
+observation is itself a parser-hardening lead for a later slice: this repo has no
+version-reject path, so a legacy file is neither parsed nor refused.)
+
+### Adding to / rebuilding the manifest
+
+`build_manifest.py` scans a seeded pool of records, parses every candidate before
+it is eligible, and then round-robins over `(kind, version era, size decade)`
+strata so the sample cannot collapse onto one design style. Flags worth knowing:
+`--n` / `--scan` / `--seed` (determinism), `--max-per-record` (default 1, so one
+big project cannot dominate), `--min-bytes` / `--max-bytes`, and
+`--include-failures` (pin artifacts that fail *today* with their observed failure
+class, turning them into regression pins for a fix that has not landed yet).
+
+Rebuilding rewrites the committed JSON; review the diff, and re-run
+`check_manifest.py` before committing it.
 
 ### Attribution and licensing
 

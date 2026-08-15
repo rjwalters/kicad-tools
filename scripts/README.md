@@ -35,10 +35,10 @@ end-to-end checks, the mypy baseline, and route determinism:
 
 ### `corpus/`
 
-Opt-in, **local-only** probes of external KiCad corpora (network I/O; never
-invoked from CI, never imported by `tests/`). See
+Opt-in, **local-only** tooling for external KiCad corpora (network I/O; never
+invoked from CI; the network scripts are never imported by `tests/`). See
 [`corpus/README.md`](corpus/README.md) for flags, output layout, the failure
-taxonomy, and the CC-BY-4.0 attribution requirement.
+taxonomy, the manifest schema, and the CC-BY-4.0 attribution requirement.
 
 `probe_open_schematics.py` — sample N random records from the Hugging Face
 `bshada/open-schematics` dataset (87,931 real KiCad designs, CC-BY-4.0), parse
@@ -50,6 +50,20 @@ failure taxonomy (JSON + human-readable) under the gitignored
 uv run python scripts/corpus/probe_open_schematics.py --n 50 --seed 1234
 uv run python scripts/corpus/probe_open_schematics.py --dry-run   # offline path
 ```
+
+`check_manifest.py` / `build_manifest.py` — score the parsers against the
+committed curated sample (`corpus/manifests/open-schematics-sample.json`: 30
+real-world artifacts pinned by URL + `sha256`, **no payloads committed**), or
+rebuild that manifest from a seeded, stratified scan:
+
+```bash
+uv run python scripts/corpus/check_manifest.py            # fetch (cold) + score
+uv run python scripts/corpus/check_manifest.py --offline  # cache only, ~8 s
+uv run python scripts/corpus/build_manifest.py --n 30 --scan 90 --seed 4830
+```
+
+The pure helpers `corpus/parse_taxonomy.py` and `corpus/corpus_manifest.py` (no
+network, no CLI) are unit-tested by `tests/test_corpus_manifest.py`.
 
 ### `research/`
 

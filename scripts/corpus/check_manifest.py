@@ -169,14 +169,15 @@ def evaluate_entry(
         result.detail = detail
         return result
 
-    outcome, exc, elapsed = parse_file(path, entry.kind)
+    outcome, parse_exc, elapsed = parse_file(path, entry.kind)
     result.outcome = outcome
     result.elapsed_ms = round(elapsed, 2)
     result.detail = detail
-    if exc is not None:
-        result.exception_type = type(exc).__name__
-        result.message = str(exc).strip().splitlines()[0][:400] if str(exc).strip() else None
-        result.signature = signature_of(exc)
+    if parse_exc is not None:
+        result.exception_type = type(parse_exc).__name__
+        message = str(parse_exc).strip()
+        result.message = message.splitlines()[0][:400] if message else None
+        result.signature = signature_of(parse_exc)
     elif not args.no_metrics and entry.metrics:
         # A clean load is a weak assertion; compare the object graph too.
         result.metrics_drift = compare_metrics(entry.metrics, metrics_for(path, entry.kind))

@@ -34,10 +34,8 @@ class HubError(RuntimeError):
 def _requests_module() -> Any:
     try:
         # Imported lazily: offline paths (--dry-run, --offline) must work
-        # without it. The type-ignore keeps the script clean under mypy without
-        # pulling types-requests into the dev env (this file is outside the
-        # src/ baseline gate).
-        import requests  # type: ignore[import-untyped]
+        # without it.
+        import requests
     except ImportError as exc:  # pragma: no cover - dev envs always have it
         raise HubError(
             "the 'requests' package is required for network mode; "

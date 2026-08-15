@@ -143,9 +143,13 @@ def collect_candidates(
             if size < args.min_bytes or size > args.max_bytes:
                 continue
             stem = f"cand{offset:07d}-{kind}{slot}"
-            outcome, exc, _elapsed = parse_payload(text, kind, scratch_dir, stem, args.max_bytes)
+            outcome, parse_exc, _elapsed = parse_payload(
+                text, kind, scratch_dir, stem, args.max_bytes
+            )
             if outcome != OK and not args.include_failures:
-                notes.append(f"offset {offset} {kind}{slot}: dropped, outcome={outcome} ({exc})")
+                notes.append(
+                    f"offset {offset} {kind}{slot}: dropped, outcome={outcome} ({parse_exc})"
+                )
                 continue
             path = scratch_dir / f"{stem}{SUFFIX_FOR_KIND[kind]}"
             path.write_text(text, encoding="utf-8")
