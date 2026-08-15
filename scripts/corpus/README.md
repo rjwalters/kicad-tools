@@ -13,6 +13,7 @@ in CI — the network scripts are run by hand and are never imported from `tests
 | `hf_hub.py` | library, network | Hugging Face datasets-server access (retry/backoff) |
 | `parse_taxonomy.py` | library, **pure** | Outcome buckets, format sniffing, exception classification |
 | `corpus_manifest.py` | library, **pure** | Manifest schema/validation, cache integrity, scoring, rendering |
+| `omnieda_sample.py` | CLI + library, **offline** | Characterize an OmniLayout/OmniRouting sample and census its KiCad-mappability gaps (slice 3) |
 
 These scripts import each other by plain module name (the script's own directory
 is `sys.path[0]` when you run `python scripts/corpus/<script>.py`). Type-check
@@ -25,7 +26,9 @@ MYPYPATH=scripts/corpus uv run mypy scripts/corpus/   # Success: no issues found
 The two pure modules are the tested surface (`tests/test_corpus_manifest.py`);
 they do no network I/O and have no CLI, which is why importing them from the test
 suite does not violate the "no network in pytest" rule that keeps the network
-scripts out of `tests/`.
+scripts out of `tests/`. `omnieda_sample.py` is tested for the same reason
+(`tests/test_corpus_omnieda.py`): it has a CLI but no network — its input is a
+sample you downloaded by hand.
 
 ## `probe_open_schematics.py`
 
@@ -208,3 +211,28 @@ Before redistributing (or vendoring) an *individual* board, verify that specific
 project's license — the dataset license covers the collection, not necessarily
 every constituent design. Per issue #4830 the corpus is referenced by URL +
 revision sha, never mirrored into this repo.
+
+## `omnieda_sample.py` — OmniLayout / OmniRouting recon (slice 3)
+
+Different corpus, different rules. The [OmniLayout benchmark](https://www.omnieda.com/)
+does **not** ship KiCad files: its records are JSON transcriptions of Eagle
+`.brd` boards, so none of the tooling above (which drives `PCB.load` /
+`Schematic.load`) can be pointed at them. This script is the substitute
+measurement — per record it reports what the data contains and which fields have
+no counterpart in `kicad_tools.schema.pcb`:
+
+```bash
+uv run python scripts/corpus/omnieda_sample.py --sample /path/to/extracted --out /tmp/omni
+```
+
+It is **offline**: the sample lives behind interactive Google Drive links, so
+you download and extract by hand and pass the directory. The download commands,
+the SHA-256 of the archives that were measured, the full gap census, and the
+adopt / adapt / drop verdict are in
+[`docs/research/omnilayout-recon.md`](../../docs/research/omnilayout-recon.md).
+
+**Do not add OmniEDA data to `manifests/`.** Unlike open-schematics (CC-BY-4.0),
+the OmniEDA release carries no data license at all — the only stated license is
+CC BY-NC-ND 4.0 on the papers. The script exists as the re-evaluation
+instrument for a future, properly licensed release; nothing from that corpus is
+fetched, cached or committed here.

@@ -62,8 +62,19 @@ uv run python scripts/corpus/check_manifest.py --offline  # cache only, ~8 s
 uv run python scripts/corpus/build_manifest.py --n 30 --scan 90 --seed 4830
 ```
 
+`omnieda_sample.py` — **offline**; characterize a manually-downloaded
+OmniLayout / OmniRouting sample (Eagle-derived JSON, *not* KiCad files) and
+census the fields that have no `schema.pcb` counterpart. Download steps, the
+measured numbers, and the adopt/adapt/drop verdict live in
+[`docs/research/omnilayout-recon.md`](../docs/research/omnilayout-recon.md):
+
+```bash
+uv run python scripts/corpus/omnieda_sample.py --sample /path/to/extracted --out /tmp/omni
+```
+
 The pure helpers `corpus/parse_taxonomy.py` and `corpus/corpus_manifest.py` (no
-network, no CLI) are unit-tested by `tests/test_corpus_manifest.py`.
+network, no CLI) are unit-tested by `tests/test_corpus_manifest.py`;
+`corpus/omnieda_sample.py` (offline) by `tests/test_corpus_omnieda.py`.
 
 ### `research/`
 

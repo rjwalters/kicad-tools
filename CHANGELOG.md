@@ -192,6 +192,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listed as stubs **inside the doc** and deliberately not filed as issues.
   No source changes.
 
+- **OmniLayout / OmniRouting recon** (`docs/research/omnilayout-recon.md`, part
+  of #4830, slice 3) — the external LLM layout/routing benchmark at
+  omnieda.com was downloaded, characterized and **declined as a corpus**;
+  verdict: *adapt the protocol, drop the data*. Evidence: the release carries
+  **no data licence at all** (no licence text on either site page, none in
+  either archive, none in the released scripts; the only stated licence is
+  CC BY-NC-ND 4.0 — non-commercial *and* no-derivatives — on the two papers,
+  arXiv:2607.03261 / arXiv:2608.04434), and the redistribution does not surface
+  the upstream hardware licences of the third-party boards it is derived from.
+  The public drop is also 5 hand-picked boards behind Google Drive links, not
+  the advertised 1,681 designs, and the payload is **not KiCad** — every record
+  is a JSON transcription of an Eagle 9.6.2 `.brd`, so no slice-1/2 tooling
+  applies. Three findings that would have bitten a naive harness are recorded
+  with counts: 61 of one board's "routing wires" sit on Eagle layer 19
+  (*Unrouted* ratsnest stubs, not copper), *no* record carries a schematic
+  despite the "schematic-coupled" billing, and two boards declare an inner
+  copper layer that carries neither trace nor pour. What is worth keeping is
+  the metric vocabulary (DRC-attributed net routability NRR, pad-pair
+  routability PRR, open/physical-short/logical-short split, violation split by
+  cause) — mapped field-by-field onto `BenchmarkResult` in the doc, and
+  implementable against our own boards and the CC-BY-4.0 open-schematics
+  manifest with no licence exposure. `scripts/corpus/omnieda_sample.py` (new,
+  **offline**, covered by `tests/test_corpus_omnieda.py`) is the instrument
+  that produced the numbers and the re-evaluation trigger if the promised
+  open-source release ever lands: it reports per-board contents plus a census
+  of fields with no `kicad_tools.schema.pcb` counterpart. No third-party bytes
+  are fetched, cached or committed.
+
 - **Curated open-schematics sample manifest + parser scorecard** (part of
   #4830, slice 2) — the corpus probe's one-off sample is now a *standing*
   regression set. `scripts/corpus/manifests/open-schematics-sample.json` is a

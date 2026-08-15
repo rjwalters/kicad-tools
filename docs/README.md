@@ -48,6 +48,7 @@ Point-in-time working documents — dated entries describe the tree as of their 
 | Document | Description |
 |----------|-------------|
 | [Placement Pad-Anchoring Audit (2026-08)](placement-pad-anchoring-audit.md) | Centre- vs pad-anchored placement objective terms (#4831) |
+| [OmniLayout / OmniRouting Recon (2026-08)](research/omnilayout-recon.md) | External LLM layout/routing benchmark (#4830); verdict: adapt the metric protocol, drop the data (no licence) |
 | [Board Fleet Parity Audit (2026-06)](board-fleet-parity-audit-2026-06.md) | Fleet-wide board status snapshot |
 | [Install Pilot: chorus](install-pilot-chorus.md) | Consumer-repo install pilot for Epic #4054 acceptance |
 | [Atopile Build System Research](research-atopile-build-system.md) | Survey of Atopile's build DAG and targets |
