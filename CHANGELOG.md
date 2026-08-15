@@ -59,6 +59,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`LoadedCensusReport`, `build_advisory`, `emit_advisory`, `board_net_names`);
   documented in `docs/reference/crosstail-census-report.md`.
 
+- **Opt-in go/no-go on the crossing-tail census prediction** (part of #4799) —
+  `kct route --census-advisory-gate` promotes the advisory above from a printed
+  prediction to a decision: when the replayed census is applicable, trusted and
+  predicts an **inert** crossover lattice, the route aborts with the new
+  **exit code 9** *before any router or component loading* — the one route exit
+  code that means "nothing was spent". The `[crosstail-gate] NO-GO` block names
+  the worst nets by inert count and points at the layer that can act on it
+  (placement / escape planning, not the router), plus how to proceed anyway.
+  `--census-advisory-gate-pct PCT` (0–100, argparse-validated; implies the
+  gate) overrides the threshold, which otherwise defaults to the same
+  `SATURATED_PCT_ADVISORY_THRESHOLD` (90) the printed verdict uses, so verdict
+  and gate cannot silently disagree. The gate keys on **inertness**
+  (saturated + single-`v1`-site legal sets), not saturation alone, and reports
+  which of the two fired. Everything that would make the prediction
+  untrustworthy is a **GO** with an explicit reason token — `no-report`,
+  `not-applicable` (0 crossovers scanned is not a 0%-saturated pass *or* a
+  failure), `stale` (a cross-check the advisory already suppressed can never
+  gate), `census-disabled`, `schema-mismatch`, `no-board-crossovers`,
+  `below-threshold` — as is any exception inside the predictor. **Defaults are
+  unchanged**: without the flag the preflight still returns 0 unconditionally
+  and the advisory block still ends in `ADVISORY ONLY`. New API:
+  `evaluate_gate` / `emit_gate_decision` / `CensusGateDecision` /
+  `GATE_EXIT_CODE` in `kicad_tools.router.crosstail_advisory`; the threshold
+  remains uncalibrated beyond the board-06 precedent (#4799 follow-up), along
+  with a genuine pre-A\* predictor and coverage beyond diff-pair crossing
+  tails.
+
 - **Structured crossing-tail census report** (part of #4799) — the #4580
   diff-pair crossover legality census now also captures what it prints as
   data. Each censused crossover produces a `CrossingTailCensusRecord`

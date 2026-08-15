@@ -381,8 +381,13 @@ That report is a post-mortem, but it does not have to be read as one: feeding
 it back in with `kct route --census-advisory <report.json>` (or
 `KCT_CROSSTAIL_CENSUS_ADVISORY=<path>`) prints this board's saturation figure
 **before** the next route's first A\* expansion, cross-checked against the
-board's current nets and suppressed when the report is stale.  Advisory only —
-it cannot change or fail a route.
+board's current nets and suppressed when the report is stale.  Advisory by
+default — it cannot change or fail a route.  Adding `--census-advisory-gate`
+(opt-in) turns that prediction into a go/no-go: on this board's own report it
+exits **9** before any router work rather than spending the 28 minutes again,
+naming the worst nets and pointing at placement / escape planning as the fix
+layer.  A prediction that cannot be trusted (stale, `not-applicable`,
+census-disabled) never gates.
 
 **State-neutral is not the same as budget-neutral ([#4635]).** PR [#4611]'s
 prose claimed the census "cannot" change the route because it is

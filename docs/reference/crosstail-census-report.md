@@ -1,9 +1,12 @@
 # Crossing-tail census report (`KCT_CROSSTAIL_CENSUS_REPORT`)
 
-A **report-only**, machine-readable aggregate of the diff-pair crossing-tail
-legality census. It answers one question about a board — *how much of the
-crossover via-site lattice is legal at all?* — as data rather than as scraped
-stdout.
+A machine-readable aggregate of the diff-pair crossing-tail legality census. It
+answers one question about a board — *how much of the crossover via-site
+lattice is legal at all?* — as data rather than as scraped stdout.
+
+Writing the report is **report-only**. Replaying it before the next route is
+advisory by default (`kct route --census-advisory`), and can be promoted to a
+go/no-go on request (`--census-advisory-gate`, exit 9).
 
 Issue [#4799]. The measurement itself is older ([#4580], budget-corrected in
 [#4635]); this document covers the structured capture layered on top of it.
@@ -162,14 +165,18 @@ The default threshold is **90%** (`SATURATED_PCT_ADVISORY_THRESHOLD`), taken
 from the board-06 precedent: its measured saturation sits in the 90–95% band,
 while an open synthetic lattice measures near 0%.
 
-**This is documentation, not a gate.** No code branches on `verdict`, no exit
-code reflects it, and nothing about routing changes when it flips. Wiring
-saturation into an actual go/no-go or steering decision is deliberate follow-up
-work, as is a genuine *pre*-routing predictor (the census's legality checks
-consult order-dependent state — drills already placed by earlier crossovers,
-the escape-channel registry keyed on which nets are still unrouted, and the
-pair's own guide route — so it cannot simply be hoisted ahead of the first A*
-expansion).
+**Documentation by default; a gate only if you ask.** Nothing in the *report*
+branches on `verdict` — writing it changes no route and no exit code. The
+replay side adds one opt-in exception: `kct route --census-advisory-gate` turns
+the same verdict into a go/no-go that can abort a run with exit 9 (see
+[the gate](#turning-the-prediction-into-a-gono-go-census-advisory-gate) below).
+It is off by default, so an un-flagged route is byte-identical to the
+advisory-only behaviour. What remains follow-up work is a genuine *pre*-routing
+predictor (the census's legality checks consult order-dependent state — drills
+already placed by earlier crossovers, the escape-channel registry keyed on
+which nets are still unrouted, and the pair's own guide route — so it cannot
+simply be hoisted ahead of the first A* expansion) and calibrating the
+threshold against a corpus of real designs.
 
 ## Replaying it before the next route (`--census-advisory`)
 
@@ -226,8 +233,8 @@ The prediction is suppressed the same way for a report that scanned nothing
 
 `--census-advisory` **cannot fail a route.** A missing, unreadable, malformed
 or foreign file prints one `[crosstail-advisory] no prediction: …` line and the
-route proceeds; the preflight returns 0 unconditionally, unlike the
-`_offboard_preflight` gate it is modelled on. Anomalies that are *not* fatal —
+route proceeds; the preflight returns 0 unless `--census-advisory-gate` is also
+set (below). Anomalies that are *not* fatal —
 a schema version this build does not know, a report written with the census
 disabled, a stored summary that disagrees with its own records (the advisory
 re-aggregates from the records and says so) — surface as `WARNING:` lines.
@@ -246,8 +253,78 @@ tooling; `kct route` prints only the text):
 | `nets_in_report` / `nets_on_board` / `coverage_pct` | The cross-check |
 | `predicted_crossovers` / `predicted_saturated` / `_pct` | Restricted to nets still on the board |
 | `prior_summary` | The re-aggregated summary block, identical in shape to the report's own |
+| `predicted_inert` / `_pct` | Saturated **plus** single-site-legal, restricted to nets still on the board — what the gate keys on |
 | `nets[]` | Per-net roll-up (`crossovers`, `saturated`, `saturated_pct`, `no_ordering_lever`, `inert`, `present_on_board`), worst first |
 | `warnings[]` | The `WARNING:` lines, verbatim |
+
+## Turning the prediction into a go/no-go (`--census-advisory-gate`)
+
+The advisory tells an operator that the next 28 minutes are unlikely to be
+productive. `--census-advisory-gate` lets CI act on that instead of reading it:
+
+```bash
+uv run kct route board.kicad_pcb \
+  --census-advisory census.json --census-advisory-gate
+# ... exits 9, having loaded neither the router nor the components
+```
+
+```
+[crosstail-advisory]   GATE ARMED (--census-advisory-gate) -- see the [crosstail-gate] verdict below (#4799)
+[crosstail-gate] NO-GO (saturated) -- refusing to route a lattice this board already measured inert
+[crosstail-gate]   predicted 150/166 saturated (90.4%), inert 94.6% >= threshold 90.0%
+[crosstail-gate]   worst nets: PCIE_TX- inert 86/88, MIPI_CLK- inert 22/24, …
+[crosstail-gate]   the diff-pair shadow phase would spend its whole budget with no ordering lever to pull: …
+[crosstail-gate]   FIX LAYER: placement / escape planning, not the router -- …
+[crosstail-gate]   aborted before any router work (exit 9); drop --census-advisory-gate to route anyway, or raise --census-advisory-gate-pct (#4799)
+```
+
+| Flag | Effect |
+|------|--------|
+| `--census-advisory-gate` | Arms the gate. **Off by default** — without it the preflight still returns 0 unconditionally, and the advisory block still ends in `ADVISORY ONLY`. |
+| `--census-advisory-gate-pct PCT` | Inert-percentage threshold (0–100, argparse-validated). Defaults to the threshold the printed verdict used (`SATURATED_PCT_ADVISORY_THRESHOLD`, 90), so the gate and the verdict cannot silently disagree. Passing it implies `--census-advisory-gate`. |
+
+The gate runs in the same preflight as the advisory — after the hard off-board
+gate, **before** any router or component loading — so a NO-GO board spends
+nothing beyond parsing the report and the board's net list (~0.15 s, measured
+below). Exit code **9** is unique on the [route ladder](cli.md#kct-route-ladder):
+every other non-zero code means "we routed and the result was unsatisfactory",
+while 9 means "we declined to start".
+
+### What can and cannot gate
+
+NO-GO requires **all** of: a report was read; the prior run actually measured
+something; the board cross-check accepted it; the census was enabled when it was
+written; the schema is one this build reads; at least one predicted crossover
+survives the cross-check; and `predicted_inert_pct >= threshold`.
+
+Everything else is a **GO** with an explicit reason token, printed as
+`[crosstail-gate] GO (<reason>)`:
+
+| `reason` | Why it cannot gate |
+|----------|--------------------|
+| `no-report` | Nothing was given to predict from (armed-with-no-report still prints a line — a silent pass would read as a clean prediction) |
+| `not-applicable` | The prior run scanned 0 crossovers. **Not a 0%-saturated result**, so it is neither a pass nor a failure — the same distinction the report draws (boards 05 / 07) |
+| `stale` | The advisory already suppressed the prediction as describing another design; a suppressed prediction must never fail a route |
+| `census-disabled` | The report was written without `KCT_CROSSTAIL_CENSUS=1`, so its figures are not measurements |
+| `schema-mismatch` | The document declares a schema this build does not read; fields may be missing |
+| `no-board-crossovers` | None of the measured crossovers belong to a net still on this board |
+| `below-threshold` | `predicted_inert_pct` is under the bound — ordering levers remain |
+
+A gate that raises is also a GO: an exception inside a predictor is not
+evidence about the board, so `_census_advisory_preflight` returns 0 on any
+error, exactly as it did when it was advisory-only.
+
+The gate keys on **inert**, not saturation alone: a lattice whose every legal
+set offers a single via site is just as unmovable by an ordering key as one
+that offers nothing, and `reason` distinguishes the two (`saturated` vs
+`inert`) so the message sends the reader to the right mechanism.
+
+Machine form: `CensusGateDecision.to_dict()` (`gated`, `reason`, `detail`,
+`exit_code`, `threshold_pct`, the four predicted counts, `worst_nets[]`).
+
+**The threshold is not calibrated.** 90% comes from the board-06 precedent, one
+board — treat `--census-advisory-gate-pct` as required tuning for any other
+design, and see #4799 for the open work of calibrating it against a corpus.
 
 ## Not applicable ≠ zero
 
@@ -323,6 +400,8 @@ from kicad_tools.router.crosstail_advisory import (
     board_net_names,  # nets of the board about to be routed (None = unknown)
     build_advisory,  # report + board nets -> prediction
     emit_advisory,  # the two above + print; never raises
+    evaluate_gate,  # prediction -> opt-in go/no-go
+    emit_gate_decision,  # evaluate_gate + print; never raises
 )
 
 advisory = build_advisory(
@@ -330,7 +409,13 @@ advisory = build_advisory(
     board_net_names("board.kicad_pcb"),
 )
 print(advisory.applicable, advisory.predicted_saturated, advisory.summary.verdict)
+
+decision = evaluate_gate(advisory)  # threshold_pct=... to override
+print(decision.gated, decision.reason, decision.exit_code)
 ```
+
+`evaluate_gate(None)` is a valid call and returns a GO (`reason="no-report"`),
+so a caller never has to special-case "the report could not be read".
 
 `LoadedCensusReport.from_path` raises `CensusReportError` for anything that is
 not a readable census report — `emit_advisory` (and therefore `kct route`)

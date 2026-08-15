@@ -14,8 +14,14 @@ indicator rather than a post-mortem:
    a different design's measurement.
 4. "Not applicable" (nothing was ever scanned) stays distinct from "0%
    saturated" -- the same distinction slice 1 drew, carried through the replay.
-5. Advisory ONLY: the preflight returns 0 for a missing, malformed, empty and
-   valid report alike, and never raises.
+5. Advisory by default: without ``--census-advisory-gate`` the preflight
+   returns 0 for a missing, malformed, empty and valid report alike, and never
+   raises.
+6. The opt-in go/no-go gate (sections 8-9): it fails a route only for a
+   prediction that is applicable, trusted, and inert at/above the threshold --
+   and every "cannot trust this" path (no report, not-applicable, stale,
+   census-disabled, unknown schema, crash) is pinned as a GO, because those are
+   the cases where a gate would fail builds for the wrong reason.
 
 No board fixture and no routing: every test drives fabricated records, so this
 file runs in milliseconds -- which is also the point of the feature (a leading
@@ -32,6 +38,16 @@ import pytest
 
 from kicad_tools.router.crosstail_advisory import (
     ADVISORY_ENV_VAR,
+    GATE_EXIT_CODE,
+    GATE_REASON_BELOW_THRESHOLD,
+    GATE_REASON_CENSUS_DISABLED,
+    GATE_REASON_INERT,
+    GATE_REASON_NO_BOARD_CROSSOVERS,
+    GATE_REASON_NO_REPORT,
+    GATE_REASON_NOT_APPLICABLE,
+    GATE_REASON_SATURATED,
+    GATE_REASON_SCHEMA_MISMATCH,
+    GATE_REASON_STALE,
     STALE_COVERAGE_PCT_THRESHOLD,
     WORST_NETS_SHOWN,
     CensusReportError,
@@ -42,6 +58,9 @@ from kicad_tools.router.crosstail_advisory import (
     board_net_names,
     build_advisory,
     emit_advisory,
+    emit_gate_decision,
+    evaluate_gate,
+    parse_gate_threshold_pct,
 )
 from kicad_tools.router.crosstail_census import (
     SCHEMA_VERSION,
@@ -429,6 +448,10 @@ def test_to_dict_exposes_a_stable_field_set():
         "predicted_crossovers",
         "predicted_saturated",
         "predicted_saturated_pct",
+        # #4799 gate slice: inertness (saturated + single-site-legal) is what
+        # the go/no-go keys on, so it is part of the machine form too.
+        "predicted_inert",
+        "predicted_inert_pct",
         "prior_summary",
         "nets",
         "warnings",
@@ -614,3 +637,394 @@ def test_outer_kct_parser_accepts_and_forwards_the_flag():
     assert "--census-advisory" in with_flag
     assert with_flag[with_flag.index("--census-advisory") + 1] == "census.json"
     assert "--census-advisory" not in without_flag
+
+
+# --------------------------------------------------------------------------
+# 8. the opt-in go/no-go gate (--census-advisory-gate)
+# --------------------------------------------------------------------------
+#
+# The gate is the enforcement half of the advisory: same prediction, now
+# allowed to refuse a route.  Its whole design surface is "when may this fail
+# a build?", so most of what follows pins the cases where it must NOT.
+
+
+def _saturated_advisory(*, board_nets=None, count: int = 10, saturated: int = 10):
+    records = [_record("PCIE_TX-", legal=0) for _ in range(saturated)]
+    records += [_record("PCIE_TX-", legal=7, distinct_v1=4) for _ in range(count - saturated)]
+    return build_advisory(_report_from(records), board_nets)
+
+
+def test_gate_says_no_go_on_a_saturated_prediction():
+    decision = evaluate_gate(_saturated_advisory())
+
+    assert decision.gated is True
+    assert decision.reason == GATE_REASON_SATURATED
+    assert decision.exit_code == GATE_EXIT_CODE == 9
+    assert decision.predicted_inert_pct == 100.0
+    assert decision.threshold_pct == 90.0
+
+
+def test_no_go_message_names_the_worst_nets_and_the_fix_layer():
+    records = [_record("PCIE_TX-", legal=0) for _ in range(8)]
+    records += [_record("USB2_D+", legal=0) for _ in range(2)]
+    decision = evaluate_gate(build_advisory(_report_from(records)))
+    text = decision.format_human()
+
+    assert "NO-GO" in text
+    assert "PCIE_TX- inert 8/8" in text
+    assert "USB2_D+ inert 2/2" in text
+    # The actionable half: which layer can fix this, and how to proceed anyway.
+    assert "placement / escape planning" in text
+    assert "not the router" in text
+    assert "exit 9" in text
+    assert "--census-advisory-gate" in text
+    assert "KCT_CROSSTAIL_CENSUS_REPORT" in text
+
+
+def test_gate_keys_on_inert_not_saturation_alone():
+    """Every legal set having a single site is just as inert as legal=0."""
+    records = [_record("A", legal=5, distinct_v1=1) for _ in range(10)]
+    advisory = build_advisory(_report_from(records))
+
+    assert advisory.predicted_saturated == 0
+    assert advisory.predicted_inert == 10
+
+    decision = evaluate_gate(advisory)
+    assert decision.gated is True
+    # Distinct token: nothing was saturated, so calling it "saturated" would
+    # send the reader looking for a legality wall that is not there.
+    assert decision.reason == GATE_REASON_INERT
+
+
+def test_gate_never_fires_without_a_report():
+    decision = evaluate_gate(None)
+    assert decision.gated is False
+    assert decision.reason == GATE_REASON_NO_REPORT
+    assert decision.exit_code == 0
+    assert "GO (no-report)" in decision.format_human()
+
+
+def test_gate_never_fires_on_a_not_applicable_report():
+    """0 crossovers scanned is not 0% saturated -- and not a failure either."""
+    decision = evaluate_gate(build_advisory(_report_from([])))
+
+    assert decision.gated is False
+    assert decision.reason == GATE_REASON_NOT_APPLICABLE
+    assert decision.exit_code == 0
+    assert "not a 0%-saturated result" in decision.detail
+
+
+def test_gate_never_fires_on_a_suppressed_stale_prediction():
+    """A measurement of some other design must not fail this board's route."""
+    records = [_record(f"OLD{i}", legal=0) for i in range(4)]
+    advisory = build_advisory(_report_from(records), {"OLD0", "SOMETHING_ELSE"})
+    assert advisory.stale is True
+    assert advisory.summary.verdict == VERDICT_SATURATED  # would gate if trusted
+
+    decision = evaluate_gate(advisory)
+    assert decision.gated is False
+    assert decision.reason == GATE_REASON_STALE
+    assert "different design" in decision.detail or "stale" in decision.detail
+
+
+def test_gate_never_fires_on_a_census_disabled_report():
+    records = [_record("A", legal=0) for _ in range(4)]
+    advisory = build_advisory(_report_from(records, census_enabled=False))
+
+    decision = evaluate_gate(advisory)
+    assert decision.gated is False
+    assert decision.reason == GATE_REASON_CENSUS_DISABLED
+
+
+def test_gate_never_fires_on_an_unknown_schema_version():
+    payload = _report_from([_record("A", legal=0) for _ in range(4)])
+    future = LoadedCensusReport(
+        path=None,
+        schema_version=SCHEMA_VERSION + 7,
+        generated_at=payload.generated_at,
+        census_enabled=True,
+        records=payload.records,
+        stored_summary=payload.stored_summary,
+    )
+    decision = evaluate_gate(build_advisory(future))
+
+    assert decision.gated is False
+    assert decision.reason == GATE_REASON_SCHEMA_MISMATCH
+    assert str(SCHEMA_VERSION + 7) in decision.detail
+
+
+def test_gate_never_fires_when_no_predicted_crossover_survives_the_cross_check():
+    """Defensive: an applicable report that contributes nothing to this board."""
+    empty_prediction = CrossingTailAdvisory(
+        source="<payload>",
+        generated_at=None,
+        age_seconds=None,
+        census_enabled=True,
+        summary=build_advisory(_report_from([_record("A", legal=0)])).summary,
+        nets=(),
+        board_nets_known=True,
+        nets_in_report=1,
+        nets_on_board=1,
+        coverage_pct=100.0,
+        predicted_crossovers=0,
+        predicted_saturated=0,
+        stale=False,
+    )
+    decision = evaluate_gate(empty_prediction)
+    assert decision.gated is False
+    assert decision.reason == GATE_REASON_NO_BOARD_CROSSOVERS
+
+
+def test_gate_does_not_fire_below_the_threshold():
+    decision = evaluate_gate(_saturated_advisory(count=10, saturated=5))
+
+    assert decision.gated is False
+    assert decision.reason == GATE_REASON_BELOW_THRESHOLD
+    assert decision.predicted_inert_pct == 50.0
+    assert "50.0% < threshold 90.0%" in decision.detail
+    assert decision.format_human().startswith("[crosstail-gate] GO (below-threshold)")
+
+
+def test_gate_threshold_is_tunable_in_both_directions():
+    advisory = _saturated_advisory(count=10, saturated=5)
+    assert evaluate_gate(advisory, threshold_pct=50.0).gated is True
+    assert evaluate_gate(advisory, threshold_pct=50.1).gated is False
+    # Exactly at the bound gates: the same >= convention the verdict uses.
+    assert evaluate_gate(advisory, threshold_pct=50.0).threshold_pct == 50.0
+
+
+def test_gate_defaults_to_the_threshold_the_printed_verdict_used():
+    """Verdict and gate must not be able to disagree by construction."""
+    advisory = build_advisory(
+        _report_from([_record("A", legal=0), _record("B", legal=9, distinct_v1=5)]),
+        saturated_threshold_pct=40.0,
+    )
+    assert advisory.summary.verdict == VERDICT_SATURATED
+    assert evaluate_gate(advisory).threshold_pct == 40.0
+    assert evaluate_gate(advisory).gated is True
+
+
+def test_gate_decision_to_dict_is_machine_readable():
+    payload = evaluate_gate(_saturated_advisory()).to_dict()
+
+    assert payload["gate"] == "crosstail-census"
+    assert payload["gated"] is True
+    assert payload["reason"] == GATE_REASON_SATURATED
+    assert payload["exit_code"] == GATE_EXIT_CODE
+    assert payload["predicted_inert_pct"] == 100.0
+    assert payload["worst_nets"] == ["PCIE_TX- inert 10/10"]
+
+
+def test_go_decisions_do_not_name_worst_nets():
+    """A GO block listing 'worst nets' reads like a failure that was ignored."""
+    decision = evaluate_gate(_saturated_advisory(count=10, saturated=1))
+    assert decision.worst_nets == ()
+    assert "worst nets" not in decision.format_human()
+
+
+def test_emit_gate_decision_prints_and_never_raises(capsys):
+    decision = emit_gate_decision(_saturated_advisory())
+    assert decision.gated is True
+    assert "[crosstail-gate] NO-GO" in capsys.readouterr().err
+
+
+def test_advisory_trailer_is_honest_about_an_armed_gate():
+    advisory = _saturated_advisory()
+    assert "ADVISORY ONLY" in advisory.format_human()
+    armed = advisory.format_human(gating=True)
+    assert "ADVISORY ONLY" not in armed
+    assert "GATE ARMED" in armed
+
+
+def test_gate_threshold_parser_rejects_nonsense():
+    assert parse_gate_threshold_pct("90") == 90.0
+    assert parse_gate_threshold_pct("0") == 0.0
+    for bad in ("abc", "-1", "101", ""):
+        with pytest.raises(ValueError):
+            parse_gate_threshold_pct(bad)
+
+
+# --------------------------------------------------------------------------
+# 9. the gate on the CLI surface
+# --------------------------------------------------------------------------
+
+
+def _saturated_report(tmp_path, net: str = "MIPI_CLK-", n: int = 10):
+    collector = CrossingTailCensusCollector()
+    for _ in range(n):
+        collector.add(_record(net, legal=0))
+    return write_report(tmp_path / "census.json", collector, census_enabled=True)
+
+
+def test_route_preflight_gates_only_when_asked(tmp_path, capsys, monkeypatch):
+    from kicad_tools.cli import route_cmd
+
+    monkeypatch.delenv(ADVISORY_ENV_VAR, raising=False)
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text(_MINIMAL_PCB)
+    target = _saturated_report(tmp_path)
+
+    # Default (flag absent): byte-identical to the #4862 advisory -- 0.
+    advisory_only = SimpleNamespace(census_advisory=str(target))
+    assert route_cmd._census_advisory_preflight(pcb, advisory_only) == 0
+    assert "ADVISORY ONLY" in capsys.readouterr().err
+
+    # Armed on the same report: NO-GO.
+    gated = SimpleNamespace(census_advisory=str(target), census_advisory_gate=True)
+    assert route_cmd._census_advisory_preflight(pcb, gated) == GATE_EXIT_CODE
+    err = capsys.readouterr().err
+    assert "[crosstail-gate] NO-GO" in err
+    assert "GATE ARMED" in err
+
+
+def test_route_preflight_gate_pct_implies_the_gate(tmp_path, capsys, monkeypatch):
+    from kicad_tools.cli import route_cmd
+
+    monkeypatch.delenv(ADVISORY_ENV_VAR, raising=False)
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text(_MINIMAL_PCB)
+    target = _saturated_report(tmp_path)
+
+    args = SimpleNamespace(census_advisory=str(target), census_advisory_gate_pct=99.9)
+    assert route_cmd._census_advisory_preflight(pcb, args) == GATE_EXIT_CODE
+
+    # ...and a threshold above the measurement lets it through.
+    loose = SimpleNamespace(census_advisory=str(target), census_advisory_gate_pct=100.1)
+    assert route_cmd._census_advisory_preflight(pcb, loose) == 0
+    assert "GO (below-threshold)" in capsys.readouterr().err
+
+
+def test_route_preflight_gate_is_loud_when_armed_with_no_report(tmp_path, capsys, monkeypatch):
+    from kicad_tools.cli import route_cmd
+
+    monkeypatch.delenv(ADVISORY_ENV_VAR, raising=False)
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text(_MINIMAL_PCB)
+
+    args = SimpleNamespace(census_advisory_gate=True)
+    assert route_cmd._census_advisory_preflight(pcb, args) == 0
+    err = capsys.readouterr().err
+    assert "GO (no-report)" in err
+    # Armed-but-inert must not look like a passed prediction.
+    assert "nothing to gate on" in err
+
+
+def test_route_preflight_gate_never_blocks_on_a_broken_report(tmp_path, monkeypatch):
+    from kicad_tools.cli import route_cmd
+
+    monkeypatch.delenv(ADVISORY_ENV_VAR, raising=False)
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text(_MINIMAL_PCB)
+
+    broken = tmp_path / "broken.json"
+    broken.write_text("{")
+    args = SimpleNamespace(census_advisory=str(broken), census_advisory_gate=True)
+    assert route_cmd._census_advisory_preflight(pcb, args) == 0
+
+    missing = SimpleNamespace(
+        census_advisory=str(tmp_path / "absent.json"), census_advisory_gate=True
+    )
+    assert route_cmd._census_advisory_preflight(pcb, missing) == 0
+
+
+def test_route_preflight_gate_never_blocks_when_it_crashes(tmp_path, monkeypatch):
+    """A predictor that raises is not evidence about the board."""
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.router import crosstail_advisory as mod
+
+    monkeypatch.delenv(ADVISORY_ENV_VAR, raising=False)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(mod, "emit_advisory", _boom)
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text(_MINIMAL_PCB)
+    args = SimpleNamespace(
+        census_advisory=str(_saturated_report(tmp_path)), census_advisory_gate=True
+    )
+    assert route_cmd._census_advisory_preflight(pcb, args) == 0
+
+
+def test_route_main_aborts_with_exit_nine_before_any_router_work(tmp_path, capsys, monkeypatch):
+    """End-to-end: the gate's return value actually reaches the exit code.
+
+    Also the point of a *pre*-route gate -- no output board is produced,
+    because nothing downstream of the preflight ever ran.
+    """
+    from kicad_tools.cli import route_cmd
+
+    monkeypatch.delenv(ADVISORY_ENV_VAR, raising=False)
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text(_MINIMAL_PCB)
+    target = _saturated_report(tmp_path)
+
+    rc = route_cmd.main([str(pcb), "--census-advisory", str(target), "--census-advisory-gate"])
+
+    assert rc == GATE_EXIT_CODE
+    assert "[crosstail-gate] NO-GO" in capsys.readouterr().err
+    assert not (tmp_path / "b_routed.kicad_pcb").exists()
+
+
+def test_route_help_documents_the_gate_and_its_exit_code(capsys):
+    from kicad_tools.cli import route_cmd
+
+    with pytest.raises(SystemExit):
+        route_cmd.main(["--help"])
+    out = capsys.readouterr().out
+    assert "--census-advisory-gate" in out
+    assert "--census-advisory-gate-pct" in out
+    assert "9  --census-advisory-gate" in out
+
+
+def test_outer_kct_parser_accepts_and_forwards_the_gate_flags():
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.cli.commands import routing
+    from kicad_tools.cli.parser import create_parser
+
+    captured: list[list[str]] = []
+
+    def _fake_route_main(argv):
+        captured.append(list(argv))
+        return 0
+
+    original = route_cmd.main
+    route_cmd.main = _fake_route_main
+    try:
+        args = create_parser().parse_args(
+            [
+                "route",
+                "board.kicad_pcb",
+                "--census-advisory",
+                "census.json",
+                "--census-advisory-gate",
+                "--census-advisory-gate-pct",
+                "75",
+            ]
+        )
+        assert args.census_advisory_gate is True
+        assert args.census_advisory_gate_pct == 75.0
+        assert routing.run_route_command(args) == 0
+
+        plain = create_parser().parse_args(["route", "board.kicad_pcb"])
+        assert plain.census_advisory_gate is False
+        assert plain.census_advisory_gate_pct is None
+        assert routing.run_route_command(plain) == 0
+    finally:
+        route_cmd.main = original
+
+    with_flags, without_flags = captured
+    assert "--census-advisory-gate" in with_flags
+    assert with_flags[with_flags.index("--census-advisory-gate-pct") + 1] == "75.0"
+    # Flag-off path stays byte-identical to the advisory-only behaviour.
+    assert "--census-advisory-gate" not in without_flags
+    assert "--census-advisory-gate-pct" not in without_flags
+
+
+def test_outer_parser_rejects_an_out_of_range_threshold():
+    from kicad_tools.cli.parser import create_parser
+
+    with pytest.raises(SystemExit):
+        create_parser().parse_args(
+            ["route", "board.kicad_pcb", "--census-advisory-gate-pct", "150"]
+        )
