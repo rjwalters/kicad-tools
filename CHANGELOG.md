@@ -723,6 +723,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Multi-fidelity level 1 now measures wirelength at the pads it already
+  required** (part of #4831, audit milestone M2) — `_evaluate_fidelity_1`
+  (`src/kicad_tools/placement/multi_fidelity.py`) was *handed*
+  `PlacedComponent` objects with fully transformed pads (fidelity ≥ 1 raises
+  `ValueError` without them, because the pad-to-pad DRC check needs them),
+  then projected every part down to its centre before calling
+  `compute_wirelength` — pure information loss. It now builds
+  `build_pad_position_map(placements_rich)` and passes it as `pad_positions`,
+  so fidelity 1 (and 2/3, which build on its breakdown) scores pad-anchored
+  HPWL. The most visible consequence: **rotation is no longer invisible to the
+  wirelength term** — rotating a part leaves `p.x`/`p.y` untouched, so the
+  centre-anchored estimate could not see a pad swing from a facing edge to the
+  far edge of a package. Fidelity 0 is deliberately unchanged (it accepts
+  centre-only placements, so it cannot assume pads exist), which also keeps the
+  historical estimate reachable via `FidelityLevel.HPWL`. Only the wirelength
+  term moves — overlap, boundary, area and DRC are untouched. **Unconditional,
+  unlike M1's opt-in `kct optimize-placement --pad-anchored-wirelength`**: the
+  multi-fidelity evaluator is library/test surface (nothing under `src/` calls
+  `evaluate_placement_multifidelity`), so a second opt-in switch would have
+  bought no safety while leaving the information loss on by default. As in M1
+  the pads are routed *through* `compute_wirelength` rather than calling
+  `compute_hpwl` directly, so per-net `Net.weight` survives and pins without a
+  pad still fall back to their component centre.
+  `docs/placement-pad-anchoring-audit.md` records M2 as landed; M3-M5 remain.
+
 - **The diff-pair shadow constructor stays default-OFF — measured, not
   assumed** (#4800, part of #4409) — all five correctness gates the
   `DifferentialPairConfig.enable_shadow_construction` flip was waiting on

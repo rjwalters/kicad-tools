@@ -15,7 +15,14 @@ document rather than filed (issue creation is serialized in this repo).
 > pads the CLI already decoded. It is **opt-in**: with no map the score is
 > byte-identical to the centre-anchored objective. The line-number citations
 > below describe the tree *as audited*; `cost.py` line numbers shifted by the
-> M1 patch. M2-M5 are unchanged and still unfiled.
+> M1 patch. M3-M5 are unchanged and still unfiled.
+>
+> **Status update (2026-08-15): M2 has landed too.** `_evaluate_fidelity_1`
+> (`src/kicad_tools/placement/multi_fidelity.py`) now measures wirelength at
+> the pads it was already required to carry, **unconditionally** — see §6 M2
+> for why that needed no opt-in flag while M1 did. Fidelity 0 remains
+> centre-anchored. `multi_fidelity.py` line citations below predate that
+> patch; the symbol names are still the identity of each claim.
 
 ## Why this audit exists
 
@@ -133,12 +140,14 @@ Three centre-anchored terms; the rest are body geometry or bookkeeping.
 | Level | Symbol | Anchoring | Evidence |
 |---|---|---|---|
 | Fidelity 0 (HPWL) | `_evaluate_fidelity_0` (`multi_fidelity.py:266`) | **centre** | delegates to `compute_wirelength`, `multi_fidelity.py:276` |
-| Fidelity 1 (+DRC) | `_evaluate_fidelity_1` (`multi_fidelity.py:292`) | **centre** wirelength, **pad** DRC | builds `simple_placements` by dropping pads (`multi_fidelity.py:306-314`) then calls `compute_wirelength` at `multi_fidelity.py:316`, while `check_placement_drc` (`src/kicad_tools/placement/drc.py:205`) does real pad-to-pad clearance |
-| Fidelity 2/3 (routing) | `_evaluate_global_routing` (`multi_fidelity.py:511`) | n/a | routability ratio only |
+| Fidelity 1 (+DRC) | `_evaluate_fidelity_1` (`multi_fidelity.py:292`) | ~~**centre**~~ → **pad** wirelength (M2), **pad** DRC | *As audited*: built `simple_placements` by dropping pads (`multi_fidelity.py:306-314`) then called `compute_wirelength` at `multi_fidelity.py:316`, while `check_placement_drc` (`src/kicad_tools/placement/drc.py:205`) did real pad-to-pad clearance. **Since M2** it also passes `build_pad_position_map(placements_rich)` as `pad_positions`, so the wirelength term is pad-anchored too. |
+| Fidelity 2/3 (routing) | `_evaluate_global_routing` (`multi_fidelity.py:511`) | n/a (inherits the fidelity-1 breakdown) | routability ratio only |
 
-`_evaluate_fidelity_1` is the sharpest instance of the pattern: it is *handed*
+`_evaluate_fidelity_1` was the sharpest instance of the pattern: it is *handed*
 `PlacedComponent` objects with transformed pads (it needs them for DRC) and
-still measures wirelength between centres.
+still measured wirelength between centres. **M2 fixed this** (§6); fidelity 0
+remains centre-anchored, since it accepts centre-only placements and so cannot
+assume pads exist.
 
 Reachability note (honest scoping): `evaluate_placement_multifidelity`
 (`multi_fidelity.py:374`) is exported from `src/kicad_tools/placement/__init__.py:57`
@@ -316,9 +325,40 @@ which `compute_wirelength` honours (`cost.py:265`) and which the
 `--anchor-weight` feature depends on (§7). A straight swap would silently drop
 per-net weighting; the follow-up must carry the weight through.
 
-### M2 — Stop discarding pads in `_evaluate_fidelity_1`
+### M2 — Stop discarding pads in `_evaluate_fidelity_1` — **LANDED (unconditional)**
 
-> **Stub title:** `refactor(placement): use pad HPWL at multi-fidelity level 1, where pads are already required`
+> **Shipped as:** `_evaluate_fidelity_1` (`src/kicad_tools/placement/multi_fidelity.py`)
+> now builds `build_pad_position_map(placements_rich)` and passes it to
+> `compute_wirelength(..., pad_positions=...)`. Fidelity ≥ 1 is therefore
+> pad-anchored; fidelity 0 (which accepts centre-only placements) is
+> unchanged, so the historical estimate is still reachable by asking for
+> `FidelityLevel.HPWL`. Levels 2 and 3 build on the fidelity-1 breakdown and
+> inherit the pad-anchored term.
+>
+> **Flag decision — unconditional, unlike M1.** M1 is opt-in because
+> `evaluate_placement` is the objective of every production
+> `kct optimize-placement` / MCP run. The multi-fidelity module is
+> library/test surface: `rg -n "evaluate_placement_multifidelity"` matches
+> only `placement/multi_fidelity.py`, `placement/__init__.py` (re-export) and
+> `tests/test_multi_fidelity.py` — nothing else under `src/` calls it, which
+> is exactly the "low risk, good pathfinder" framing below. Adding a second
+> opt-in switch here would have bought no safety and left the information
+> loss in place by default.
+>
+> **Implementation note.** As in M1, the pad coordinates are passed *into*
+> `compute_wirelength` rather than calling `compute_hpwl(placements_rich, nets)`
+> as this stub originally proposed. `compute_hpwl` ignores `Net.weight`, so a
+> literal swap would have silently dropped per-net weighting at level 1 while
+> level 0 kept honouring it; routing the pads through `compute_wirelength`
+> keeps one net-iteration code path, preserves weights, and keeps the per-pin
+> fallback to the component centre for pins that have no pad. Only the
+> wirelength term moves — overlap/boundary/area/DRC are untouched (§7).
+>
+> **Tests:** `tests/test_multi_fidelity_pad_anchored.py` (level 0 vs level 1 on
+> the same input, rotation visible only at level 1, `Net.weight` survival,
+> missing-pad fallback, level-2 inheritance, determinism).
+
+> **Stub title (as filed):** `refactor(placement): use pad HPWL at multi-fidelity level 1, where pads are already required`
 > **Scope:** in `_evaluate_fidelity_1` (`multi_fidelity.py:292`), replace the
 > `compute_wirelength(simple_placements, nets)` call at `multi_fidelity.py:316`
 > with `compute_hpwl(placements_rich, nets)`.
@@ -430,7 +470,7 @@ to standardise on, kept clearly distinct from the "locked/immovable" sense above
 | Stub | Title | Depends on |
 |---|---|---|
 | M1 | `feat(placement): score the optimizer objective on pad-anchored HPWL` | **LANDED opt-in** (`--pad-anchored-wirelength`); MCP front-end + default-on remain |
-| M2 | `refactor(placement): use pad HPWL at multi-fidelity level 1, where pads are already required` | — (low risk, good pathfinder for M1) |
+| M2 | `refactor(placement): use pad HPWL at multi-fidelity level 1, where pads are already required` | **LANDED unconditional** (fidelity ≥ 1 pad-anchored; fidelity 0 unchanged) |
 | M3 | `feat(optim): allow max_distance constraints to target a pad, not a component centre` | overlaps #4831 item 4 |
 | M4 | `fix(optim): pick the shared-net pad instead of pins[0] for cluster springs` | M1 (only if `optim` stays in use) |
 | M5 | `feat(placement): report pad-anchored HPWL alongside the centre-anchored score` | — (de-risks M1) |
