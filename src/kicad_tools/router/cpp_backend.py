@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 20
+_REQUIRED_CPP_BUILD_VERSION = 21
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -2294,6 +2294,13 @@ class CppPathfinder:
         unreachable goal).  We also record the C++ pathfinder's iteration
         counter so callers can log "aborted at N iterations" cleanly.
 
+        Issue #4507: ``failure_reason`` may also be
+        ``FAILURE_PAIRWISE_BLOCKED`` -- the open set drained while
+        cross-domain (HV-isolation) widening refused expansions.  It uses the
+        same ``blocking_via_net`` field (the foreign-domain net whose copper
+        refused the candidate), so the negotiated strategy's targeted rip-up
+        works on it unchanged.
+
         Note: We capture even when we are about to fall back to the Python
         router.  If the Python fallback also fails, the cpp-side
         diagnostic is still actionable (the via blocker has not moved).
@@ -2346,12 +2353,23 @@ class CppPathfinder:
             int(router_cpp.FAILURE_VIA_VIA_BLOCKED): (
                 "all via candidates blocked by stored-via geometry"
             ),
+            # Issue #4507: the cross-domain (HV-isolation) sibling.
+            int(router_cpp.FAILURE_PAIRWISE_BLOCKED): (
+                "open set drained with expansions refused by pairwise (HV-isolation) clearance"
+            ),
         }
         desc = descriptions.get(reason)
         if desc is None:
             return f"C++ search failed (failure_reason={reason})"
         blocking_net = int(getattr(result, "blocking_via_net", 0))
-        if reason == int(router_cpp.FAILURE_VIA_VIA_BLOCKED) and blocking_net:
+        if (
+            reason
+            in (
+                int(router_cpp.FAILURE_VIA_VIA_BLOCKED),
+                int(router_cpp.FAILURE_PAIRWISE_BLOCKED),
+            )
+            and blocking_net
+        ):
             desc += f" (blocking net id {blocking_net})"
         return desc
 

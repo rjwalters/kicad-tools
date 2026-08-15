@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cross-domain (HV) failures now name a rip-up target** (part of #4507, epic
+  #4431 Phase 2) — the search-time pairwise kernels
+  (`Pathfinder::cross_domain_trace_blocked` / `cross_domain_via_blocked`,
+  #4511) refused HV-through-LV candidates *silently*: unlike the #2476
+  stored-via check they named no blocker, so a net that failed only because a
+  low-voltage neighbour crowded its widened HV keepout came back as a bare
+  `FAILURE_NO_PATH` — a reason code the negotiated strategy has no targeted
+  response for, so it blanket-retried. That is exactly the negotiator thrash
+  Phase 2 exists to end. Both kernels now record the foreign net and the
+  refused candidate's world position, and a search that drains the open set
+  with such an observation reports the new
+  `FAILURE_PAIRWISE_BLOCKED` (7) with the blocker in
+  `RouteResult.blocking_via_net` — the same field
+  `NegotiatedRouter.via_blocked_ripup` already drains, so the HV net's
+  crowding neighbour gets ripped up and the HV net is routed first.
+  Precedence is deliberately conservative: `FAILURE_VIA_VIA_BLOCKED` still
+  wins when both were seen, and TIMEOUT / ITERATION_LIMIT are never
+  overridden (they are budget artifacts per #2610, not geometry). An
+  attach-zone-waived (#4506) pair records nothing — ripping it up would not
+  help. Router log label: `pairwise_blocked`. Strictly dormant without
+  `--voltage-map` (single `pairwise_active()` boolean, unchanged route
+  output); `ROUTER_CPP_BUILD_VERSION` 20 → 21 for the new binding surface.
+
 - **Structured crossing-tail census report** (part of #4799) — the #4580
   diff-pair crossover legality census now also captures what it prints as
   data. Each censused crossover produces a `CrossingTailCensusRecord`

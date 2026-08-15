@@ -213,7 +213,18 @@ namespace router {
 // changes and the Python mirror (``Router._pairwise_avoidance_cost``) was
 // updated in lockstep: a stale .so would price a different gradient than the
 // fallback, so the version bump forces a rebuild via ``kct build-native``.
-constexpr int ROUTER_CPP_BUILD_VERSION = 20;
+//
+// Version 21 (Issue #4507): cross-domain (HV) rip-up diagnostics.  The
+// search-time pairwise kernels (``cross_domain_trace_blocked`` /
+// ``cross_domain_via_blocked``) now record the foreign net whose copper
+// refused the candidate, and a drained-open-set failure with such an
+// observation is reported as the new ``FAILURE_PAIRWISE_BLOCKED`` with the
+// blocker in ``RouteResult::blocking_via_net``.  Before this the HV widening
+// was the one refusal path that produced NO diagnostic at all, so the
+// negotiated strategy fell through to blanket retry (the thrash Phase 2
+// exists to end).  New module constant + four ``Pathfinder`` accessors =
+// binding-surface change; route output is unchanged (diagnostics only).
+constexpr int ROUTER_CPP_BUILD_VERSION = 21;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -354,12 +365,27 @@ struct Via {
 // location of the candidate via that was rejected.  The negotiated strategy
 // uses these fields to target rip-up at the specific net whose stored via
 // blocked progress, rather than blanket retry.
+//
+// FAILURE_PAIRWISE_BLOCKED (Issue #4507, epic #4431 Phase 2) is the
+// cross-domain sibling: the A* open set drained while at least one expansion
+// was refused by the search-time pairwise (HV-isolation) widening
+// (``Pathfinder::cross_domain_trace_blocked`` / ``cross_domain_via_blocked``).
+// ``RouteResult::blocking_via_net`` then carries the net id of the most
+// recently observed foreign-domain copper and ``failure_x``/``failure_y`` the
+// world location of the refused candidate, so the negotiated strategy can rip
+// up THAT net rather than blanket retry.  It is strictly weaker than
+// FAILURE_VIA_VIA_BLOCKED (which wins when both were observed) and, unlike it,
+// never overrides TIMEOUT / ITERATION_LIMIT: those are budget artifacts, and a
+// widened HV keepout is only the actionable explanation when the search truly
+// ran out of candidates.  Value 7 skips 6, which the mirrored
+// ``violation_type`` vocabulary uses for drill spacing.
 enum FailureReason : int {
     FAILURE_NONE = 0,
     FAILURE_NO_PATH = 1,            // Open set exhausted, no candidates remained.
     FAILURE_ITERATION_LIMIT = 2,    // Reached max_iterations cap (memory backstop).
     FAILURE_TIMEOUT = 3,            // Per-net wall-clock deadline exceeded (Issue #2610).
     FAILURE_VIA_VIA_BLOCKED = 5,    // All via candidates refused by stored-via geometry.
+    FAILURE_PAIRWISE_BLOCKED = 7,   // Expansions refused by cross-domain (HV) widening.
 };
 
 // Complete route result

@@ -589,6 +589,10 @@ bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
             const float mx = (cw.first + fw.first) * 0.5f;
             const float my = (cw.second + fw.second) * 0.5f;
             if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) continue;
+            // Issue #4507: name the blocker so a drained search can report
+            // FAILURE_PAIRWISE_BLOCKED instead of a bare NO_PATH.  Diagnostic
+            // only -- the verdict below is unchanged.
+            note_pairwise_block(cell.net, cw.first, cw.second);
             return true;
         }
     }
@@ -632,6 +636,8 @@ bool Pathfinder::cross_domain_via_blocked(int x, int y, int net) const {
                 // ``layer``, so the waiver is scoped to it (a via passing a
                 // rated SMD part's pad field on an inner layer is not exempt).
                 if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) continue;
+                // Issue #4507: record the blocker (diagnostic only).
+                note_pairwise_block(cell.net, cw.first, cw.second);
                 return true;
             }
         }
@@ -1184,6 +1190,13 @@ RouteResult Pathfinder::route(
     float last_block_world_x = 0.0f;
     float last_block_world_y = 0.0f;
 
+    // Issue #4507: same idea for cross-domain (HV) refusals, which until now
+    // were the one rejection path that produced no diagnostic at all.  The
+    // counters live on the pathfinder (the recording kernels are ``const``
+    // and are reached from four different blocking call sites), so reset them
+    // here for a fresh one-shot search.
+    clear_pairwise_block_diagnostics();
+
     // Issue #3143: Populate the per-cell pad-channel cost lookup so the
     // one-shot route() path honours the budget identically to
     // route_resumable().  Empty budget list (default) leaves the map
@@ -1570,6 +1583,15 @@ RouteResult Pathfinder::route(
         result.blocking_via_net = last_blocking_net;
         result.failure_x = last_block_world_x;
         result.failure_y = last_block_world_y;
+    } else if (result.failure_reason == FAILURE_NO_PATH &&
+               pairwise_block_count_ > 0 && last_pairwise_block_net_ != 0) {
+        // Issue #4507: no stored-via blocker, but the open set drained while
+        // cross-domain (HV) widening refused expansions -- name that net so
+        // the negotiated strategy rips IT up instead of blanket-retrying.
+        // Deliberately narrower than the VIA_VIA branch above: only a genuine
+        // drain qualifies, never TIMEOUT / ITERATION_LIMIT (budget artifacts,
+        // per Issue #2610's distinction).
+        set_pairwise_failure(result);
     }
     return result;
 }
@@ -1695,6 +1717,12 @@ RouteResult Pathfinder::route_resumable(
     search_last_blocking_net_ = 0;
     search_last_block_world_x_ = 0.0f;
     search_last_block_world_y_ = 0.0f;
+
+    // Issue #4507: cross-domain (HV) refusal diagnostics follow the SAME
+    // reset discipline -- cleared for a fresh resumable search, deliberately
+    // preserved across resume() so a blocker observed by the initial search
+    // still names the culprit when a later resume drains the open set.
+    clear_pairwise_block_diagnostics();
 
     // Issue #3143: Build the per-cell pad-channel cost lookup ONCE per
     // resumable search.  Held across resume() calls so the soft-budget
@@ -2152,6 +2180,11 @@ RouteResult Pathfinder::run_astar_loop() {
         result.blocking_via_net = search_last_blocking_net_;
         result.failure_x = search_last_block_world_x_;
         result.failure_y = search_last_block_world_y_;
+    } else if (result.failure_reason == FAILURE_NO_PATH &&
+               pairwise_block_count_ > 0 && last_pairwise_block_net_ != 0) {
+        // Issue #4507: cross-domain (HV) blocker on a genuine drain -- see the
+        // twin branch in route() for the precedence rationale.
+        set_pairwise_failure(result);
     }
     return result;
 }
@@ -2174,6 +2207,8 @@ void Pathfinder::clear_search_state() {
     search_last_blocking_net_ = 0;
     search_last_block_world_x_ = 0.0f;
     search_last_block_world_y_ = 0.0f;
+    // Issue #4507: ditto for the cross-domain (HV) blocker diagnostics.
+    clear_pairwise_block_diagnostics();
     // Issue #2559 / Phase 1C: reset partner-net state so a stale partner
     // from a previous net does not leak into the next route().
     search_partner_net_ = -1;

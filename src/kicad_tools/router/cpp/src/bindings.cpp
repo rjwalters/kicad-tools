@@ -176,6 +176,10 @@ NB_MODULE(router_cpp, m) {
     // Issue #2610: wall-clock deadline (--per-net-timeout) was hit.
     m.attr("FAILURE_TIMEOUT") = static_cast<int>(FAILURE_TIMEOUT);
     m.attr("FAILURE_VIA_VIA_BLOCKED") = static_cast<int>(FAILURE_VIA_VIA_BLOCKED);
+    // Issue #4507: the open set drained while cross-domain (HV) pairwise
+    // widening refused expansions; ``blocking_via_net`` names the foreign net.
+    m.attr("FAILURE_PAIRWISE_BLOCKED") =
+        static_cast<int>(FAILURE_PAIRWISE_BLOCKED);
 
     // Grid3D class
     nb::class_<Grid3D>(m, "Grid3D")
@@ -537,6 +541,27 @@ NB_MODULE(router_cpp, m) {
              "x"_a, "y"_a, "layer"_a, "net"_a,
              "Issue #4511 Scope 2: the soft cross-domain avoidance cost (0.0 "
              "when dormant or no HV copper in the gradient band).")
+        .def("clear_pairwise_block_diagnostics",
+             &Pathfinder::clear_pairwise_block_diagnostics,
+             "Issue #4507: reset the cross-domain (HV) rip-up diagnostics.  "
+             "Called automatically at the start of every search; exposed so "
+             "tests can drive the kernels in isolation.")
+        .def_prop_ro("pairwise_block_count",
+                     &Pathfinder::pairwise_block_count,
+                     "Issue #4507: how many expansions the search-time "
+                     "pairwise (HV) widening refused since the last reset.")
+        .def_prop_ro("last_pairwise_block_net",
+                     &Pathfinder::last_pairwise_block_net,
+                     "Issue #4507: net id of the most recently observed "
+                     "cross-domain blocker (0 when none).  Surfaced on a "
+                     "drained search as ``RouteResult.blocking_via_net`` with "
+                     "``failure_reason == FAILURE_PAIRWISE_BLOCKED``.")
+        .def_prop_ro("last_pairwise_block_x",
+                     &Pathfinder::last_pairwise_block_x,
+                     "Issue #4507: world X of the refused candidate.")
+        .def_prop_ro("last_pairwise_block_y",
+                     &Pathfinder::last_pairwise_block_y,
+                     "Issue #4507: world Y of the refused candidate.")
         .def_prop_ro("iterations", &Pathfinder::get_iterations)
         .def_prop_ro("nodes_explored", &Pathfinder::get_nodes_explored);
 

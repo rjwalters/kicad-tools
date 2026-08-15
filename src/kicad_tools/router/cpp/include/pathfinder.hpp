@@ -281,6 +281,31 @@ public:
     // pair.  Used to size the annulus scans above.  Returns 0 when dormant.
     int pairwise_wide_radius_cells(float half_mm) const;
 
+    // Issue #4507: cross-domain rip-up diagnostics.  Both kernels above record
+    // the foreign net whose copper refused the candidate (plus the candidate's
+    // world coordinates) so a drained search can name a blocker instead of
+    // returning a bare NO_PATH.  This is the pairwise sibling of the #2476
+    // stored-via diagnostic and feeds the same
+    // ``NegotiatedRouter.via_blocked_ripup`` path.
+    //
+    // The counters are pure diagnostics -- they never change which candidates
+    // are accepted -- and are only written on a rejection that already
+    // short-circuited on ``pairwise_active()``, so the no-voltage-map hot path
+    // is untouched.
+    int pairwise_block_count() const { return pairwise_block_count_; }
+    int last_pairwise_block_net() const { return last_pairwise_block_net_; }
+    float last_pairwise_block_x() const { return last_pairwise_block_x_; }
+    float last_pairwise_block_y() const { return last_pairwise_block_y_; }
+
+    // Reset the diagnostics above.  Called at the start of every search so a
+    // stale blocker from the previous net cannot leak into the next one.
+    void clear_pairwise_block_diagnostics() {
+        pairwise_block_count_ = 0;
+        last_pairwise_block_net_ = 0;
+        last_pairwise_block_x_ = 0.0f;
+        last_pairwise_block_y_ = 0.0f;
+    }
+
     // Check if diagonal move cuts through obstacles.
     //
     // Public for binding + unit-test access (Issue #3456): the
@@ -437,6 +462,35 @@ private:
     // Lazily build (and cache) the distance-sorted band offsets above.
     const std::vector<PairwiseBandOffset>& pairwise_band_offsets(
         int hard_radius, int band) const;
+
+    // Issue #4507: cross-domain rip-up diagnostics (see the public accessors).
+    // Mutable because the recording kernels are ``const`` -- same rationale as
+    // the band-offset cache above; nothing here feeds a routing decision.
+    mutable int pairwise_block_count_ = 0;
+    mutable int last_pairwise_block_net_ = 0;
+    mutable float last_pairwise_block_x_ = 0.0f;
+    mutable float last_pairwise_block_y_ = 0.0f;
+
+    // Record one cross-domain refusal.  ``foreign_net`` is the net whose
+    // copper triggered the widened requirement; ``(wx, wy)`` is the world
+    // location of the REFUSED CANDIDATE (matching the #2476 via-vs-via
+    // convention, which reports the candidate rather than the blocker).
+    void note_pairwise_block(int foreign_net, float wx, float wy) const {
+        ++pairwise_block_count_;
+        last_pairwise_block_net_ = foreign_net;
+        last_pairwise_block_x_ = wx;
+        last_pairwise_block_y_ = wy;
+    }
+
+    // Stamp the recorded cross-domain blocker onto a failed RouteResult.
+    // Shared by the one-shot ``route()`` epilogue and the resumable
+    // ``run_astar_loop()`` epilogue so the two cannot drift.
+    void set_pairwise_failure(RouteResult& result) const {
+        result.failure_reason = FAILURE_PAIRWISE_BLOCKED;
+        result.blocking_via_net = last_pairwise_block_net_;
+        result.failure_x = last_pairwise_block_x_;
+        result.failure_y = last_pairwise_block_y_;
+    }
 
     // Routable layer indices
     std::vector<int> routable_layers_;

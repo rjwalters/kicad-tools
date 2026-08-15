@@ -1312,6 +1312,12 @@ class NegotiatedRouter:
     # Issue #2610: per-net wall-clock deadline (--per-net-timeout) was hit.
     _FAILURE_TIMEOUT = 3
     _FAILURE_VIA_VIA_BLOCKED = 5
+    # Issue #4507 (epic #4431 Phase 2): the A* open set drained while
+    # search-time pairwise (HV-isolation) widening refused expansions.  Carries
+    # the offending foreign-domain net in ``blocking_via_net``, exactly like
+    # the via-vs-via case, so the same targeted rip-up applies.  (6 is reserved
+    # by the mirrored ``violation_type`` vocabulary for drill spacing.)
+    _FAILURE_PAIRWISE_BLOCKED = 7
 
     # Issue #2610: Human-readable labels for log differentiation.  Used by
     # describe_failure_reason() to emit "DAC_CLK aborted at iteration cap
@@ -1324,6 +1330,7 @@ class NegotiatedRouter:
         _FAILURE_ITERATION_LIMIT: "iteration_cap",
         _FAILURE_TIMEOUT: "wall_clock_timeout",
         _FAILURE_VIA_VIA_BLOCKED: "via_via_blocked",
+        _FAILURE_PAIRWISE_BLOCKED: "pairwise_blocked",
     }
 
     @classmethod
@@ -1341,15 +1348,20 @@ class NegotiatedRouter:
 
         Returns:
             One of: ``"none"``, ``"blocked_path"``, ``"iteration_cap"``,
-            ``"wall_clock_timeout"``, ``"via_via_blocked"``, ``"unknown"``.
+            ``"wall_clock_timeout"``, ``"via_via_blocked"``,
+            ``"pairwise_blocked"``, ``"unknown"``.
         """
         if not info:
             return "none"
         reason = int(info.get("failure_reason") or 0)
         return cls._FAILURE_REASON_LABELS.get(reason, "unknown")
 
+    # Failure reasons that name an actionable blocking net in
+    # ``blocking_via_net`` and therefore feed :meth:`via_blocked_ripup`.
+    _BLOCKER_FAILURE_REASONS = frozenset({_FAILURE_VIA_VIA_BLOCKED, _FAILURE_PAIRWISE_BLOCKED})
+
     def _record_via_blocked_failure(self, failed_net: int) -> None:
-        """Capture a via-vs-via failure from the most recent route() call.
+        """Capture a blocker-naming failure from the most recent route() call.
 
         Issue #2476: When a sub-route fails, ask the underlying router for
         structured failure diagnostics.  If the C++ pathfinder reports
@@ -1358,11 +1370,20 @@ class NegotiatedRouter:
         the negotiated outer loop can rip up the specific blocker rather
         than blanket retry.
 
+        Issue #4507 (epic #4431 Phase 2): ``FAILURE_PAIRWISE_BLOCKED`` is
+        accepted on the same footing.  There the blocker is the foreign-domain
+        (HV<->LV) net whose copper made the widened pairwise clearance
+        unsatisfiable -- the search-time refusal that previously produced a
+        bare ``NO_PATH``, so an HV net that was merely *crowded* by a
+        low-voltage neighbour fell through to blanket retry and thrashed the
+        negotiator.  Ripping up the named neighbour and routing the HV net
+        first is exactly the move that resolves it.
+
         This is a no-op when:
         - The router is the Python pathfinder (returns ``None``).
         - The failure was an unrelated grid-cell rejection (no actionable
           diagnostic).
-        - The blocking net id is 0 (not a stored-via geometric reject).
+        - The blocking net id is 0 (no geometric/pairwise blocker named).
 
         Args:
             failed_net: Net id of the net whose route failed.
@@ -1373,7 +1394,7 @@ class NegotiatedRouter:
         info = get_info()
         if not info:
             return
-        if info.get("failure_reason") != self._FAILURE_VIA_VIA_BLOCKED:
+        if info.get("failure_reason") not in self._BLOCKER_FAILURE_REASONS:
             return
         blocking_net = int(info.get("blocking_via_net") or 0)
         if blocking_net == 0 or blocking_net == failed_net:
@@ -2346,6 +2367,9 @@ class NegotiatedRouter:
         Issue #2476: When the C++ A* search refuses every via candidate
         because of a stored-via clearance violation, it surfaces the
         offending stored-via net via ``RouteResult.blocking_via_net``.
+        Issue #4507 feeds the same channel from ``FAILURE_PAIRWISE_BLOCKED``
+        (the cross-domain HV blocker), so this method now also resolves
+        "HV net crowded by a low-voltage neighbour" failures.
         This method drains those (failed_net, blocking_net) pairs from
         :meth:`get_and_clear_via_blocking_nets`, rips up each blocking
         net, and routes the failed net first.  Displaced blockers are
