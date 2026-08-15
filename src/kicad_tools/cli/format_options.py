@@ -18,6 +18,9 @@ This module is the shared machinery for commands that carry both spellings:
   ``parse_args`` so downstream code can keep checking a single attribute.
 * :func:`wants_json` -- one-shot predicate for code that prefers not to
   mutate the namespace.
+* :func:`stdout_to_stderr_when` -- protect the single-document contract from
+  third-party / progress chatter printed on stdout by code the command does
+  not own.
 
 Precedence rule: either spelling requesting JSON wins.  The two flags cannot
 conflict, because ``--json`` only ever means ``--format json``.
@@ -26,7 +29,11 @@ conflict, because ``--json`` only ever means ``--format json``.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
+import sys
+from collections.abc import Iterator
 from typing import Any
 
 FORMAT_TEXT = "text"
@@ -91,6 +98,38 @@ def emit_json(payload: Any) -> None:
     chatter must go to stderr or be suppressed when JSON mode is active.
     """
     print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+
+
+@contextlib.contextmanager
+def stdout_to_stderr_when(active: bool) -> Iterator[None]:
+    """Divert stdout to stderr while *active* (i.e. JSON mode owns stdout).
+
+    Many commands call into code they do not own -- third-party libraries,
+    subprocess drivers, the negotiated router, report collectors -- that
+    writes progress chatter or install banners on **stdout**.  Under
+    ``--format json`` that chatter would corrupt the single-document
+    contract, so wrap those regions in this context manager: the output is
+    captured and replayed on stderr, so the diagnostics survive and the JSON
+    stream stays parseable.
+
+    When *active* is false this is a no-op, so a command can wrap the region
+    unconditionally and pass its own ``as_json`` predicate.
+
+    Introduced per-module in batch 5 of the #4674 machine-output sweep
+    (``report_cmd``), copied into ``reason_cmd`` and ``commands/routing`` in
+    batch 6, and promoted here in batch 7 (``build`` / ``pipeline`` /
+    ``stitch``) rather than making a fourth copy.
+    """
+    if not active:
+        yield
+        return
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            yield
+    finally:
+        if buffer.getvalue():
+            print(buffer.getvalue(), end="", file=sys.stderr)
 
 
 def normalize_format_alias(

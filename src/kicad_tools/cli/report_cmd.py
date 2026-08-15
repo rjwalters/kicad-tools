@@ -19,14 +19,12 @@ document; warnings keep going to stderr either way.  See
 from __future__ import annotations
 
 import argparse
-import contextlib
-import io
 import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .format_options import FORMAT_JSON, add_format_flag, emit_json
+from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
 
 if TYPE_CHECKING:
     from kicad_tools.report.figures import FigureEntry
@@ -132,30 +130,6 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-@contextlib.contextmanager
-def _stdout_to_stderr_when(active: bool):
-    """Divert stdout to stderr while *active* (i.e. JSON mode owns stdout).
-
-    Report generation calls into code that writes progress chatter to stdout
-    and is not this module's to change -- the data collector, the figure
-    generator, and WeasyPrint (which prints a multi-line "install my native
-    libraries" banner on stdout when they are missing).  Under ``--format
-    json`` that would corrupt the single-document contract, so it is captured
-    and replayed on stderr: the diagnostics survive, the JSON stream stays
-    parseable.
-    """
-    if not active:
-        yield
-        return
-    buffer = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buffer):
-            yield
-    finally:
-        if buffer.getvalue():
-            print(buffer.getvalue(), end="", file=sys.stderr)
-
-
 def _run_generate(args: argparse.Namespace) -> int:
     """Execute the ``generate`` sub-command."""
     as_json = getattr(args, "format", "text") == FORMAT_JSON
@@ -208,7 +182,7 @@ def _run_generate(args: argparse.Namespace) -> int:
     else:
         # Auto-collect: write snapshots into the versioned output directory.
         # This pre-determines the version directory so figures land in the same vN/.
-        with _stdout_to_stderr_when(as_json):
+        with stdout_to_stderr_when(as_json):
             version_dir, data_kwargs = _auto_collect(
                 pcb_path=input_path,
                 output_dir=Path(args.output),
@@ -247,7 +221,7 @@ def _run_generate(args: argparse.Namespace) -> int:
         if version_dir is None:
             version_dir = generator.next_version_dir(Path(args.output))
         figures_dir = version_dir / "figures"
-        with _stdout_to_stderr_when(as_json):
+        with stdout_to_stderr_when(as_json):
             figures = _generate_figures(args, input_path, figures_dir, data)
 
     try:
@@ -259,7 +233,7 @@ def _run_generate(args: argparse.Namespace) -> int:
 
     # Attempt to render Markdown to HTML then PDF.
     pdf_path: Path | None = None
-    with _stdout_to_stderr_when(as_json):
+    with stdout_to_stderr_when(as_json):
         try:
             from kicad_tools.report.renderers import render_html, render_pdf
 
@@ -331,7 +305,7 @@ def _generate_figures(
 
     Returns the ``figures`` block of the ``--format json`` document
     (``{"generated": bool, "skipped_reason": str | None}``).  The caller
-    diverts stdout in JSON mode (see :func:`_stdout_to_stderr_when`), so the
+    diverts stdout in JSON mode (see :func:`~.format_options.stdout_to_stderr_when`), so the
     progress line needs no special handling here.
     """
 

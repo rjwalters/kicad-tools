@@ -8,11 +8,9 @@ written copper and warnings, or the failure that stopped it) -- and
 codes are unchanged in both cases.  See ``docs/reference/machine-output.md``.
 """
 
-import contextlib
-import io
 import sys
 
-from ..format_options import FORMAT_JSON, emit_json
+from ..format_options import FORMAT_JSON, emit_json, stdout_to_stderr_when
 
 __all__ = [
     "run_route_command",
@@ -20,29 +18,6 @@ __all__ = [
     "run_zones_command",
     "run_optimize_command",
 ]
-
-
-@contextlib.contextmanager
-def _stdout_to_stderr_when(active: bool):
-    """Divert stdout to stderr while *active* (i.e. JSON mode owns stdout).
-
-    ``route_net_auto`` drives the negotiated router, which prints a multi-line
-    per-iteration progress log on **stdout** that this module does not own.
-    Under ``--format json`` that would corrupt the single-document contract, so
-    it is captured and replayed on stderr: the log survives, the JSON stream
-    stays parseable.  Same helper as ``report_cmd._stdout_to_stderr_when``
-    (batch 5 of #4674).
-    """
-    if not active:
-        yield
-        return
-    buffer = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buffer):
-            yield
-    finally:
-        if buffer.getvalue():
-            print(buffer.getvalue(), end="", file=sys.stderr)
 
 
 def run_zones_command(args) -> int:
@@ -218,7 +193,6 @@ def _route_auto_one(
     the ``--format json`` payload (issue #4674); prose is printed only when
     *as_json* is false, so text output stays byte-identical.
     """
-    import sys
 
     via_drill = getattr(args, "via_drill", None)
     via_diameter = getattr(args, "via_diameter", None)
@@ -237,7 +211,7 @@ def _route_auto_one(
     try:
         # The negotiated router logs its per-iteration progress on stdout;
         # under --format json that chatter is replayed on stderr instead.
-        with _stdout_to_stderr_when(as_json):
+        with stdout_to_stderr_when(as_json):
             result = route_net_auto(
                 pcb_path=pcb_path,
                 net_name=net_name,
@@ -417,7 +391,6 @@ def _parse_route_auto_targets(args, *, as_json: bool = False) -> tuple[list[str]
     (the error has already been reported -- as prose, or as the single
     ``{"error": ...}`` document under *as_json*, issue #4674).
     """
-    import sys
 
     def _usage_error(message: str) -> tuple[None, int]:
         if as_json:

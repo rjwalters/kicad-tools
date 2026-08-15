@@ -17,36 +17,17 @@ half-emitted.  See ``docs/reference/machine-output.md``.
 """
 
 import argparse
-import contextlib
-import io
 import json
 import sys
 from pathlib import Path
 
-from kicad_tools.cli.format_options import FORMAT_JSON, add_format_flag, emit_json
+from kicad_tools.cli.format_options import (
+    FORMAT_JSON,
+    add_format_flag,
+    emit_json,
+    stdout_to_stderr_when,
+)
 from kicad_tools.manufacturers import get_manufacturer_ids
-
-
-@contextlib.contextmanager
-def _stdout_to_stderr_when(active: bool):
-    """Divert stdout to stderr while *active* (i.e. JSON mode owns stdout).
-
-    ``--auto-route`` drives the router, which prints a multi-line progress log
-    on **stdout** that this module does not own; under ``--format json`` that
-    would corrupt the single-document contract, so it is captured and replayed
-    on stderr.  Same helper as ``report_cmd._stdout_to_stderr_when`` (batch 5
-    of #4674).
-    """
-    if not active:
-        yield
-        return
-    buffer = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buffer):
-            yield
-    finally:
-        if buffer.getvalue():
-            print(buffer.getvalue(), end="", file=sys.stderr)
 
 
 def _fail(
@@ -454,7 +435,7 @@ def _auto_route(agent, output_path: Path, args, *, as_json: bool = False) -> tup
         net.name for net in sorted(agent.get_state().unrouted_nets, key=lambda n: n.priority)
     ][: args.max_nets]
 
-    with _stdout_to_stderr_when(as_json):
+    with stdout_to_stderr_when(as_json):
         results = agent.route_priority_nets(max_nets=args.max_nets)
 
     successful = sum(1 for r in results if r.success)
