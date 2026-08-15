@@ -267,6 +267,13 @@ public:
     // keeps HV<->LV margin (soft cost before hard block) instead of hugging the
     // hard limit and thrashing the negotiator.  0.0 when dormant / no
     // cross-domain copper in the band.
+    //
+    // Issue #4848: the price is taken from the NEAREST qualifying cross-domain
+    // cell in the band (version 19 and earlier priced the first one in
+    // row-major scan order, which is the topmost cell of the window rather
+    // than the closest -- a 7x under-price whenever foreign copper flanked the
+    // candidate on both sides).  Implemented as a ring-ordered scan over
+    // ``pairwise_band_offsets`` so the early exit survives.
     float pairwise_avoidance_cost(int x, int y, int layer, int net) const;
 
     // Shared helper: the widened cross-domain radius (cells) for a routing net
@@ -399,6 +406,35 @@ private:
     // the bounding square rather than a temporary vector allocation
     // (mirrors PR #3232's canonical pattern for ``is_trace_blocked``).
     std::vector<std::pair<int8_t, int8_t>> via_kernel_offsets_;
+
+    // Issue #4848: distance-sorted offsets for the soft pairwise avoidance
+    // band, the ring-ordered analogue of ``via_kernel_offsets_``.  Every entry
+    // lies in the annulus ``(hard_r, hard_r + band]`` and carries its
+    // PRE-COMPUTED linear-decay ``frac``, so the hot kernel neither recomputes
+    // ``sqrt`` nor re-filters the bounding square: walking the vector in order
+    // visits the band from the inside out, and the FIRST qualifying cell is by
+    // construction the NEAREST one.  That is what makes exact nearest-in-band
+    // pricing affordable -- the pre-#4848 row-major scan needed its early
+    // ``break`` to stay cheap and paid for it with scan-order-dependent
+    // prices.
+    //
+    // Cached against ``(hard_r, band)``, which changes at most once per route
+    // (they derive from ``search_trace_half_width_mm_`` and the grid's widest
+    // pairwise clearance, both fixed for the duration of a search).  Mutable
+    // because the kernel is ``const``, exactly like the other lazily-built
+    // scan geometry.
+    struct PairwiseBandOffset {
+        int16_t dx;
+        int16_t dy;
+        float frac;
+    };
+    mutable int pairwise_band_hard_r_ = -1;
+    mutable int pairwise_band_band_ = -1;
+    mutable std::vector<PairwiseBandOffset> pairwise_band_offsets_;
+
+    // Lazily build (and cache) the distance-sorted band offsets above.
+    const std::vector<PairwiseBandOffset>& pairwise_band_offsets(
+        int hard_radius, int band) const;
 
     // Routable layer indices
     std::vector<int> routable_layers_;

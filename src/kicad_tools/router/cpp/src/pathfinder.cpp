@@ -639,6 +639,61 @@ bool Pathfinder::cross_domain_via_blocked(int x, int y, int net) const {
     return false;
 }
 
+const std::vector<Pathfinder::PairwiseBandOffset>&
+Pathfinder::pairwise_band_offsets(int hard_radius, int band) const {
+    if (pairwise_band_hard_r_ == hard_radius && pairwise_band_band_ == band) {
+        return pairwise_band_offsets_;
+    }
+
+    const int halo_radius = hard_radius + band;
+    const int hard_sq = hard_radius * hard_radius;
+    const int halo_sq = halo_radius * halo_radius;
+
+    pairwise_band_offsets_.clear();
+    // Annulus area is ~pi * (halo^2 - hard^2); reserve the bounding-square
+    // upper bound's fraction so the build never reallocates in a loop.
+    pairwise_band_offsets_.reserve(
+        static_cast<size_t>(3.2f * static_cast<float>(halo_sq - hard_sq)) + 8);
+
+    for (int dy = -halo_radius; dy <= halo_radius; ++dy) {
+        for (int dx = -halo_radius; dx <= halo_radius; ++dx) {
+            const int dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= hard_sq || dist_sq > halo_sq) continue;  // band only
+            // Linear decay: strongest just outside the hard radius, zero at the
+            // band edge.  Scaled by the caller to ``cost_straight`` so a cell
+            // hugging the hard limit costs ~1 extra step of detour -- enough to
+            // steer, not enough to distort the optimum route away from a clean
+            // lane.
+            const float d = std::sqrt(static_cast<float>(dist_sq));
+            float frac = (static_cast<float>(halo_radius) - d) /
+                         static_cast<float>(band);
+            if (frac < 0.0f) frac = 0.0f;
+            if (frac > 1.0f) frac = 1.0f;
+            pairwise_band_offsets_.push_back(
+                PairwiseBandOffset{static_cast<int16_t>(dx),
+                                   static_cast<int16_t>(dy), frac});
+        }
+    }
+
+    // Ring order: nearest cell first.  ``frac`` is a strictly decreasing
+    // function of distance, so sorting by DESCENDING ``frac`` is exactly
+    // sorting by ascending distance -- and it keeps the comparison on the
+    // value the kernel returns, so ties (equal distance) are indistinguishable
+    // by construction and the scan is deterministic regardless of which one it
+    // stops on.  ``stable_sort`` keeps the build reproducible across
+    // toolchains.
+    std::stable_sort(pairwise_band_offsets_.begin(),
+                     pairwise_band_offsets_.end(),
+                     [](const PairwiseBandOffset& a,
+                        const PairwiseBandOffset& b) {
+                         return a.frac > b.frac;
+                     });
+
+    pairwise_band_hard_r_ = hard_radius;
+    pairwise_band_band_ = band;
+    return pairwise_band_offsets_;
+}
+
 float Pathfinder::pairwise_avoidance_cost(int x, int y, int layer,
                                           int net) const {
     if (!grid_.pairwise_active()) return 0.0f;
@@ -655,37 +710,23 @@ float Pathfinder::pairwise_avoidance_cost(int x, int y, int layer,
     // limit.  Bounded and thin -- the extra cells scanned are HV-board only.
     const int band = std::max(
         1, static_cast<int>(std::ceil(grid_.max_pairwise_clearance() * 0.5f / res)));
-    const int halo_radius = hard_radius + band;
-    const int hard_sq = hard_radius * hard_radius;
-    const int halo_sq = halo_radius * halo_radius;
 
-    float cost = 0.0f;
-    for (int dy = -halo_radius; dy <= halo_radius; ++dy) {
-        for (int dx = -halo_radius; dx <= halo_radius; ++dx) {
-            const int dist_sq = dx * dx + dy * dy;
-            if (dist_sq <= hard_sq || dist_sq > halo_sq) continue;  // band only
-            const int cx = x + dx, cy = y + dy;
-            if (!grid_.is_valid(cx, cy, layer)) continue;
-            const auto& cell = grid_.at(cx, cy, layer);
-            if (!cell.blocked || cell.net == net || cell.net == 0) continue;
-            if (grid_.pairwise_required_clearance(net, cell.net) <= 0.0f) continue;
-            // Linear decay: strongest just outside the hard radius, zero at the
-            // band edge.  Scaled to ``cost_straight`` so a cell hugging the
-            // hard limit costs ~1 extra step of detour -- enough to steer,
-            // not enough to distort the optimum route away from a clean lane.
-            const float d = std::sqrt(static_cast<float>(dist_sq));
-            float frac = (static_cast<float>(halo_radius) - d) /
-                         static_cast<float>(band);
-            if (frac < 0.0f) frac = 0.0f;
-            if (frac > 1.0f) frac = 1.0f;
-            cost += rules_.cost_straight * frac;
-            // One cross-domain neighbour is enough to establish the gradient;
-            // avoid over-penalising a cell flanked by a long HV run.
-            break;
-        }
-        if (cost > 0.0f) break;
+    // Issue #4848: NEAREST-in-band pricing.  The offsets are pre-sorted from
+    // the hard radius outward, so the first qualifying cell is the closest
+    // cross-domain copper and the scan can return immediately -- the early
+    // exit the pre-#4848 row-major ``break`` bought, but now with the
+    // semantics the gradient was always documented to have ("strongest just
+    // outside the hard radius").  One cross-domain neighbour still sets the
+    // whole price: a candidate flanked by a long HV run is not over-penalised.
+    for (const auto& off : pairwise_band_offsets(hard_radius, band)) {
+        const int cx = x + off.dx, cy = y + off.dy;
+        if (!grid_.is_valid(cx, cy, layer)) continue;
+        const auto& cell = grid_.at(cx, cy, layer);
+        if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+        if (grid_.pairwise_required_clearance(net, cell.net) <= 0.0f) continue;
+        return rules_.cost_straight * off.frac;
     }
-    return cost;
+    return 0.0f;
 }
 
 bool Pathfinder::is_via_blocked(int x, int y, int net, bool allow_sharing,

@@ -511,24 +511,53 @@ def test_gradient_band_gate_flags_every_priced_cell() -> None:
             assert bool(band[0, 100 + dy, 100]) is True, f"band gate misses dy={dy}"
 
 
-def test_gradient_prices_the_first_cell_in_scan_order() -> None:
-    """Mirror wart, pinned: the C++ kernel BREAKS at its first band cell.
-
-    Row-major scan order runs from the topmost row of the window, so the
-    cell 24 cells ABOVE wins over the (much nearer) cell 18 cells below --
-    "one cross-domain neighbour is enough to establish the gradient".  The
-    Python mirror reproduces the same cell so the two engines cannot price a
-    candidate differently; see ``test_avoidance_gradient_parity_*`` in
-    ``test_pairwise_cpp_parity.py`` for the cross-engine proof.
-    """
+def _cost_with_band_cells(cells) -> float:
+    """Gradient price at (100, 100) for foreign LV copper at ``(dy, dx)`` cells."""
     rules = _rules()
     grid = RoutingGrid(width=20.0, height=20.0, rules=rules, layer_stack=LayerStack.two_layer())
-    for dy in (-24, 18):
-        grid._blocked[0, 100 + dy, 100] = True
-        grid._net[0, 100 + dy, 100] = LV_NET
+    for dy, dx in cells:
+        grid._blocked[0, 100 + dy, 100 + dx] = True
+        grid._net[0, 100 + dy, 100 + dx] = LV_NET
     router = Router(grid, rules, diagonal_routing=True)
     router.set_net_name_to_id(dict(NET_NAMES))
-    assert router._pairwise_avoidance_cost(100, 100, 0, HV_NET) == pytest.approx(1.0 / 8.0)
+    return router._pairwise_avoidance_cost(100, 100, 0, HV_NET)
+
+
+def test_gradient_prices_the_nearest_cell_in_the_band() -> None:
+    """Issue #4848: the price comes from the NEAREST band cell, not the first.
+
+    Both engines used to break at the first qualifying cell in ROW-MAJOR scan
+    order, which starts at the topmost row of the window -- so a candidate
+    with foreign copper 18 cells below (the binding side) and 24 cells above
+    priced ``1/8`` off the far cell instead of ``7/8`` off the near one, a 7x
+    under-price of the real proximity.  Nearest-in-band pricing makes the
+    nudge a monotone function of distance, matching the decay this kernel
+    always documented.  Mirrored cell-for-cell in C++ -- see
+    ``test_avoidance_gradient_parity_*`` in ``test_pairwise_cpp_parity.py``.
+    """
+    # The 24-above / 18-below arrangement, both orientations: the NEAR cell
+    # sets the price whichever side of the candidate it sits on.
+    assert _cost_with_band_cells(((-24, 0), (18, 0))) == pytest.approx(7.0 / 8.0)
+    assert _cost_with_band_cells(((24, 0), (-18, 0))) == pytest.approx(7.0 / 8.0)
+    # Order-free: adding FARTHER band copper never changes the price.
+    assert _cost_with_band_cells(((18, 0),)) == pytest.approx(7.0 / 8.0)
+    assert _cost_with_band_cells(((-24, 0), (18, 0), (0, 22), (-20, 3))) == pytest.approx(7.0 / 8.0)
+
+
+def test_gradient_is_monotone_as_copper_approaches() -> None:
+    """Sliding the same foreign blob nearer can only raise the price (#4848).
+
+    Under the old scan-order pricing this was false: moving a bar one row
+    closer left the price unchanged (both positions happened to be priced off
+    the same topmost row), so the gradient carried no information about the
+    binding distance.
+    """
+    prices = [
+        _cost_with_band_cells(tuple((dy, dx) for dy in range(top, top + 5) for dx in range(-4, 5)))
+        for top in range(-25, -17)
+    ]
+    assert prices == sorted(prices), f"gradient not monotone in proximity: {prices}"
+    assert prices[0] < prices[-1]  # non-vacuous: the sweep actually moves
 
 
 # ---------------------------------------------------------------------------

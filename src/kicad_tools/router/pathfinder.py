@@ -2409,32 +2409,28 @@ class Router:
     #   outside the hard radius, zero at the band edge), so a cell hugging
     #   the limit costs about one extra step of detour -- enough to steer,
     #   not enough to distort the optimum away from a clean lane.
-    # * Same "one cross-domain neighbour is enough" rule, and same TWO-LEVEL
-    #   break -- the detail #4849's review caught.  The C++ kernel's inner
-    #   ``break`` fires at the first qualifying cell of a ROW (so a cell
-    #   flanked by a long HV run is not over-penalised), but the outer break
-    #   is CONDITIONAL: ``if (cost > 0.0f) break;``.  A qualifying cell
-    #   sitting exactly on the halo circle (``dist_sq == halo_r^2``) prices
-    #   ``frac == 0``, leaves ``cost`` at zero, and so lets the scan run on
-    #   into later rows and price a different cell.  That is not exotic: the
-    #   very first cell the scan visits (``dy = -halo_r, dx = 0``) is always
-    #   exactly on the circle, so any foreign copper whose topmost band cell
-    #   lands in the candidate's own column trips it.  An unconditional
-    #   return at the first qualifying cell would return 0.0 where C++
-    #   returns a full-magnitude cost, so the mirror below tracks the row it
-    #   priced (skipping that row's remaining cells, the inner break) and
-    #   stops only once the accumulated cost is strictly positive.  Because
-    #   every pre-stop contribution is exactly zero, accumulating and
-    #   returning at the first positive term is identical to the C++ sum.
-    #   ``np.nonzero`` yields C (row-major) order, so the entry it stops on
-    #   is the same cell the C++ scan stops on (clipping the scan window at
-    #   the board edge removes whole leading rows/columns and so preserves
-    #   row-major order among the remaining cells).  Scan-order dependence is
-    #   a wart of the reference implementation, mirrored deliberately: parity
-    #   first -- two engines agreeing on an arbitrary-but-bounded nudge beats
-    #   two engines disagreeing about which candidate is cheap.  Changing the
-    #   semantics is #4848's job (both engines together, with a
-    #   ``ROUTER_CPP_BUILD_VERSION`` bump), never a silent divergence here.
+    # * Same "one cross-domain neighbour is enough" rule -- a candidate flanked
+    #   by a long HV run is priced once, not once per cell -- and the same
+    #   NEAREST-IN-BAND choice of which cell that is (#4848).  The price is
+    #   ``cost_straight * frac(d_min)`` where ``d_min`` is the distance to the
+    #   closest qualifying cross-domain cell in the band, so the gradient is a
+    #   monotone function of real proximity.  Ties need no rule: ``frac``
+    #   depends only on the distance, so every cell at ``d_min`` prices the
+    #   same.  Up to ROUTER_CPP_BUILD_VERSION 19 BOTH engines instead priced
+    #   the first qualifying cell in row-major scan order (a two-level break,
+    #   with the outer one conditional on a strictly positive cost so that a
+    #   cell exactly on the halo circle, ``frac == 0``, did not stop the scan).
+    #   That made the nudge scan-order dependent: foreign copper 18 cells below
+    #   a candidate and 24 cells above priced ``1/8`` off the FAR cell instead
+    #   of ``7/8`` off the near one -- a 7x under-price that contradicted this
+    #   kernel's own documented decay.  #4848 changed both engines together,
+    #   with a ``ROUTER_CPP_BUILD_VERSION`` bump so a stale ``.so`` cannot
+    #   price a different gradient than this fallback; the C++ side keeps its
+    #   early exit by walking a distance-sorted band-offset table
+    #   (``Pathfinder::pairwise_band_offsets``) instead of the bounding square,
+    #   while the mirror below takes a vectorised ``min`` over the band's
+    #   squared distances.  Divergence here is always a bug: the two engines
+    #   must agree cell-for-cell on which candidate is cheap.
     # * ``half_mm`` is the ROUTED net's class trace width (#4793), exactly as
     #   in the hard kernels.
     # * NO #4506 attach-zone waiver, mirroring the C++ kernel: this is a
@@ -2540,33 +2536,28 @@ class Router:
         if not bool(np.any(candidates)):
             return 0.0
 
-        # Mirror the C++ kernel's TWO-LEVEL break (see the block comment
-        # above).  ``np.nonzero`` yields C (row-major) order, so walking it
-        # visits cells in the reference's scan order; ``priced_row`` replays
-        # the inner ``break`` (the rest of a row is skipped once that row has
-        # priced a cell) and the ``cost > 0.0`` test replays the CONDITIONAL
-        # outer break -- a cell exactly on the halo circle prices 0.0 and the
-        # scan continues into later rows, exactly as the C++ scan does.
-        cost = 0.0
-        priced_row = -1  # no row index is negative, so this never matches
-        for row, col in zip(*np.nonzero(candidates), strict=True):
-            if row == priced_row:
-                continue  # the C++ inner break already left this row
-            foreign_net = int(net_region[row, col])
-            if foreign_net <= 0 or foreign_net >= widen_lut.size:
-                continue
-            if not widen_lut[foreign_net]:
-                continue  # same domain / no widening for this pair
-            priced_row = int(row)
-            distance = math.sqrt(float(dist_sq[row, col]))
-            # Linear decay: strongest just outside the hard radius, zero at
-            # the band edge, scaled to ``cost_straight``.
-            frac = (halo_r - distance) / band
-            frac = min(1.0, max(0.0, frac))
-            cost += self.rules.cost_straight * frac
-            if cost > 0.0:
-                break
-        return cost
+        # Issue #4848: price the NEAREST qualifying cell, not the first in
+        # scan order (see the block comment above).  Keep the widening filter
+        # off the full window -- ``candidates`` is already sparse, so the
+        # per-net lookup only ever touches the handful of foreign cells that
+        # made it into the band.
+        candidate_nets = net_region[candidates]
+        in_range = (candidate_nets > 0) & (candidate_nets < widen_lut.size)
+        if not bool(np.any(in_range)):
+            return 0.0
+        qualifies = np.zeros(candidate_nets.shape, dtype=np.bool_)
+        # Same domain / no widening for this pair -> not a gradient source.
+        qualifies[in_range] = widen_lut[candidate_nets[in_range]]
+        if not bool(np.any(qualifies)):
+            return 0.0
+
+        nearest_sq = float(dist_sq[candidates][qualifies].min())
+        distance = math.sqrt(nearest_sq)
+        # Linear decay: strongest just outside the hard radius, zero at the
+        # band edge, scaled to ``cost_straight``.
+        frac = (halo_r - distance) / band
+        frac = min(1.0, max(0.0, frac))
+        return self.rules.cost_straight * frac
 
     def _pairwise_band_kernel(self, hard_r: int, band: int) -> tuple[np.ndarray, np.ndarray]:
         """Cached ``(dist_sq, band_mask)`` window for the gradient scan."""

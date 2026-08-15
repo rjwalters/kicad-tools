@@ -199,7 +199,21 @@ namespace router {
 // ``net_layers`` map keeps the layer-agnostic version-18 verdict, so old
 // callers are unaffected -- but the struct field and the defaulted argument
 // are both new binding surface, hence the bump.
-constexpr int ROUTER_CPP_BUILD_VERSION = 19;
+//
+// Version 20 (Issue #4848): the soft pairwise avoidance gradient
+// (``Pathfinder::pairwise_avoidance_cost``) prices the NEAREST qualifying
+// cross-domain cell in the band instead of the first one in row-major scan
+// order.  Version 19's two-level break stopped at the topmost band cell, so a
+// candidate with foreign copper 18 cells below (the binding side) and 24 cells
+// above priced 1/8 instead of 7/8 -- a 7x under-price of the real proximity,
+// contradicting the documented "strongest just outside the hard radius" decay.
+// The kernel now walks a distance-sorted band-offset table (built once per
+// ``(hard_r, band)``), so the early exit survives with exact nearest-in-band
+// semantics.  No binding-surface change, but the ROUTE OUTPUT on HV boards
+// changes and the Python mirror (``Router._pairwise_avoidance_cost``) was
+// updated in lockstep: a stale .so would price a different gradient than the
+// fallback, so the version bump forces a rebuild via ``kct build-native``.
+constexpr int ROUTER_CPP_BUILD_VERSION = 20;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the

@@ -19,6 +19,9 @@ This module covers:
 
 from __future__ import annotations
 
+import math
+import random
+
 import pytest
 
 from kicad_tools.router.cpp_backend import CppGrid, CppPathfinder, is_cpp_available
@@ -854,8 +857,6 @@ def test_search_avoidance_cost_gradient_near_hv() -> None:
 
 def _seg_rect_gap(seg, x1, x2, y1, y2) -> float:
     """Min distance (mm) from a segment centreline to an axis-aligned rect."""
-    import math
-
     best = float("inf")
     for i in range(101):
         t = i / 100.0
@@ -1336,37 +1337,39 @@ def _route_through_a_rated_gap(layer_scoped: bool):
 
 
 @requires_cpp
-def test_layer_scoped_zone_converges_where_layer_agnostic_thrashes() -> None:
-    """Headline (#4507): the layer-scoped search converges; the agnostic one does not.
+def test_rated_gap_board_converges_on_the_licensed_layer() -> None:
+    """Headline (#4507): the search crosses on the layer the rated part licences.
 
-    Same board, same geometry, same C++ search -- only the zone's layer scoping
-    differs.  Layer-AGNOSTIC (the pre-#4507 C++ shape) the search keeps
-    proposing the F.Cu gap the layer-scoped Python post-check rejects, exhausts
-    its resume budget, drops into the pure-Python fallback and fails.
-    Layer-SCOPED, the search knows the F.Cu gap is illegal from the first
-    expansion, dives to the rated part's own B.Cu layer, and converges.
+    An LV wall with a single 3 mm gap on F.Cu, and a rated footprint whose
+    attach zone straddles the gap but whose pads are on B.Cu.  The only
+    gate-clean answer is to dive to B.Cu and cross there; necking through the
+    F.Cu gap is a pairwise violation the layer-scoped acceptance check
+    (#4699) rejects.
+
+    Evolution of this fixture, so a future reader can tell an improvement from
+    a regression:
+
+    * pre-#4507, layer-AGNOSTIC: the C++ search kept proposing the F.Cu gap
+      the layer-scoped gate rejected, burned its resume budget and dropped
+      into the pure-Python fallback, which then failed outright.
+    * #4507: the fallback became pairwise-aware and layer-scoped, so the
+      agnostic baseline was *rescued* by it -- slowly, but gate-clean.
+    * #4848: with the soft avoidance gradient priced off the NEAREST band
+      cell instead of the first one in scan order, the nudge away from the
+      under-clearance F.Cu gap is strong enough that even the layer-AGNOSTIC
+      configuration converges inside the C++ search -- no thrash, no fallback.
+      That is the routing-quality payoff #4848 was filed for, so this test now
+      pins the *outcome* (converged, gate-clean, on the licensed layer, in the
+      C++ search) for both configurations rather than the old contrast.
     """
-    route, violation, layers, fallback = _route_through_a_rated_gap(layer_scoped=True)
-    assert route is not None, "layer-scoped search failed to converge"
-    assert violation is None, f"converged route still violates the gate: {violation}"
-    assert fallback is False, "convergence must come from the C++ search, not the fallback"
-    # It found the legal answer: cross on the layer the rated part licences.
-    assert "B_CU" in layers
-
-    blind_route, blind_violation, blind_layers, blind_fallback = _route_through_a_rated_gap(
-        layer_scoped=False
-    )
-    # The pre-#4507 shape cannot get there in the C++ search: it burns the
-    # resume budget on routes the layer-scoped gate rejects and ends up in the
-    # slow Python fallback.
-    assert blind_fallback is True, "the agnostic baseline is expected to thrash into fallback"
-    # Since the pure-Python fallback became pairwise-aware and layer-scoped
-    # itself (#4507, the search-time fallback slice), it now RESCUES the net --
-    # slowly, but gate-clean and on the licensed layer -- where it previously
-    # failed outright (``blind_route is None`` was the pinned pre-slice state).
-    assert blind_route is not None, "the pairwise-aware Python fallback should rescue the net"
-    assert blind_violation is None
-    assert "B_CU" in blind_layers
+    for layer_scoped in (True, False):
+        route, violation, layers, fallback = _route_through_a_rated_gap(layer_scoped=layer_scoped)
+        label = "layer-scoped" if layer_scoped else "layer-agnostic"
+        assert route is not None, f"{label} search failed to converge"
+        assert violation is None, f"{label} route violates the gate: {violation}"
+        assert fallback is False, f"{label} convergence must come from the C++ search"
+        # It found the legal answer: cross on the layer the rated part licences.
+        assert "B_CU" in layers, f"{label} route never reached the licensed layer"
 
 
 # ---------------------------------------------------------------------------
@@ -1395,10 +1398,12 @@ def _py_router_with_foreign_cells(
 ):
     """A Python Router on a 20x20 board with foreign LV cells at ``cells``.
 
-    ``cells`` are ``(dy, dx)`` offsets from ``origin`` (the probe point).
-    Cell-exact mirror of the C++ fixtures' ``Grid3D.mark_blocked`` (there is no
-    public single-cell setter on ``RoutingGrid``; the search kernels read these
-    arrays directly).
+    ``cells`` are ``(dy, dx)`` offsets from ``origin`` (the probe point), or
+    ``(dy, dx, net)`` to place copper of some other net (``HV_TAP_NET`` for
+    same-domain copper, ``0`` for the pour / unconnected convention -- neither
+    is a gradient source).  Cell-exact mirror of the C++ fixtures'
+    ``Grid3D.mark_blocked`` (there is no public single-cell setter on
+    ``RoutingGrid``; the search kernels read these arrays directly).
     """
     from kicad_tools.router.layers import LayerStack
     from kicad_tools.router.pathfinder import Router
@@ -1413,9 +1418,11 @@ def _py_router_with_foreign_cells(
     if with_table:
         rules.pairwise_clearance = _table()
     grid = RoutingGrid(width=20.0, height=20.0, rules=rules, layer_stack=LayerStack.two_layer())
-    for dy, dx in cells:
+    for cell in cells:
+        dy, dx = cell[0], cell[1]
+        cell_net = cell[2] if len(cell) > 2 else LV_NET
         grid._blocked[0, origin[1] + dy, origin[0] + dx] = True
-        grid._net[0, origin[1] + dy, origin[0] + dx] = LV_NET
+        grid._net[0, origin[1] + dy, origin[0] + dx] = cell_net
     router = Router(grid, rules, diagonal_routing=True, net_class_map=net_class_map)
     router.set_net_name_to_id(dict(NET_NAMES))
     return router
@@ -1439,8 +1446,10 @@ def _cpp_pathfinder_with_foreign_cells(
 
     pf = router_cpp.Pathfinder(grid, _cpp_rules(), True)
     pf.set_search_pair_widths(half_trace_mm, half_via_mm)
-    for dy, dx in cells:
-        grid.mark_blocked(origin[0] + dx, origin[1] + dy, 0, LV_NET, False, False)
+    for cell in cells:
+        dy, dx = cell[0], cell[1]
+        cell_net = cell[2] if len(cell) > 2 else LV_NET
+        grid.mark_blocked(origin[0] + dx, origin[1] + dy, 0, cell_net, False, False)
     return pf
 
 
@@ -1525,43 +1534,83 @@ def test_avoidance_gradient_parity_off_axis() -> None:
 
 @requires_cpp
 def test_avoidance_gradient_parity_picks_the_same_cell() -> None:
-    """With several band cells, both engines stop on the SAME one.
+    """With several band cells, both engines price the SAME (nearest) one.
 
-    The C++ kernel breaks at its first row-major hit rather than taking the
-    nearest ("one cross-domain neighbour is enough"), so the priced value is
-    scan-order dependent -- a Python mirror that took the nearest instead
-    would disagree here while agreeing on every single-cell probe.
+    Issue #4848: up to build version 19 both kernels broke at the first
+    qualifying cell in ROW-MAJOR scan order, so the topmost band cell set the
+    price rather than the closest one -- ``((18, 0), (-24, 0))`` priced
+    ``1/8`` off the far cell instead of ``7/8`` off the near one.  The
+    expected magnitudes below are the nearest-cell prices, so this fails
+    loudly (not just on a mutual disagreement) if either engine drifts back
+    to scan order.
     """
-    for cells in (
-        ((18, 0), (-24, 0)),
-        ((-18, 0), (24, 0)),
-        ((-24, -3), (18, 2), (19, -1)),
-        ((-20, -20), (-19, 0), (21, 21)),
+    halo_r = _GRADIENT_HARD_R + _GRADIENT_BAND  # 25
+    for cells, expected in (
+        (((18, 0), (-24, 0)), 7.0 / 8.0),  # near cell below wins
+        (((-18, 0), (24, 0)), 7.0 / 8.0),  # ... and above
+        (((-24, -3), (18, 2), (19, -1)), (halo_r - math.sqrt(328)) / 8.0),
+        # Only (-19, 0) is inside the halo at all: the two diagonals sit at
+        # sqrt(800) and sqrt(882), both beyond the band edge.
+        (((-20, -20), (-19, 0), (21, 21)), 6.0 / 8.0),
     ):
         py = _py_router_with_foreign_cells(cells)
         cpp = _cpp_pathfinder_with_foreign_cells(cells)
-        assert py._pairwise_avoidance_cost(100, 100, 0, HV_NET) == pytest.approx(
-            cpp.pairwise_avoidance_cost(100, 100, 0, HV_NET), abs=1e-6
-        ), f"backends disagree for {cells}"
+        py_cost = py._pairwise_avoidance_cost(100, 100, 0, HV_NET)
+        cpp_cost = cpp.pairwise_avoidance_cost(100, 100, 0, HV_NET)
+        assert py_cost == pytest.approx(cpp_cost, abs=1e-6), f"backends disagree for {cells}"
+        assert py_cost == pytest.approx(expected, abs=1e-6), f"not the nearest cell for {cells}"
 
 
 @requires_cpp
-def test_avoidance_gradient_parity_zero_frac_cell_does_not_stop_the_scan() -> None:
-    """A cell exactly ON the halo circle prices 0 and the scan CONTINUES.
+def test_avoidance_gradient_parity_is_order_free() -> None:
+    """Adding FARTHER band copper never changes either engine's price (#4848).
 
-    Issue #4849 (review of the #4507 mirror): the C++ kernel's break is
-    two-level and the outer one is conditional -- ``if (cost > 0.0f) break;``
-    -- so a qualifying cell at exactly ``halo_r`` (``frac == 0``) leaves the
-    accumulated cost at zero and lets the scan run on into later rows, where
-    it can price a different cell.  A Python mirror that returned
+    The scan-order contract this replaced had no such invariant: which cell
+    won depended on where in the window it sat, so a distant blob could
+    override a near one.  Nearest-in-band pricing makes the gradient a pure
+    function of the binding distance, and the two engines agree on it cell
+    for cell.
+    """
+    nearest = ((19, 0),)
+    decoys = (
+        ((-25, 0),),  # exactly on the halo circle (the old zero-frac trap)
+        ((-24, 0), (-23, 3)),
+        ((0, 22), (22, 0), (-20, -12)),
+        ((-24, -3), (24, 4), (-21, 8), (20, -14)),
+    )
+    baseline_py = _py_router_with_foreign_cells(nearest)._pairwise_avoidance_cost(
+        100, 100, 0, HV_NET
+    )
+    assert baseline_py == pytest.approx(6.0 / 8.0, abs=1e-6)
+    for decoy in decoys:
+        cells = nearest + decoy
+        py = _py_router_with_foreign_cells(cells)
+        cpp = _cpp_pathfinder_with_foreign_cells(cells)
+        py_cost = py._pairwise_avoidance_cost(100, 100, 0, HV_NET)
+        cpp_cost = cpp.pairwise_avoidance_cost(100, 100, 0, HV_NET)
+        assert py_cost == pytest.approx(cpp_cost, abs=1e-6), f"backends disagree for {cells}"
+        assert py_cost == pytest.approx(baseline_py, abs=1e-6), f"decoy changed the price: {decoy}"
+
+
+@requires_cpp
+def test_avoidance_gradient_parity_on_circle_cell_never_swallows_the_price() -> None:
+    """A cell exactly ON the halo circle prices 0 and never hides a nearer one.
+
+    History: version 19's C++ break was two-level with a CONDITIONAL outer
+    ``if (cost > 0.0f) break;``, precisely so a qualifying cell at exactly
+    ``halo_r`` (``frac == 0``) would not swallow the price -- the row-major
+    scan's very first cell (``dy = -halo_r, dx = 0``) sits exactly on the
+    circle, so ANY foreign copper whose topmost band cell lands in the
+    candidate's own column tripped it, and a Python mirror that returned
     unconditionally at the first qualifying cell returned 0.0 where C++
-    returned a full-magnitude cost.
+    returned a full-magnitude cost (#4849).
 
-    This is not an exotic corner: the first cell the scan ever visits
-    (``dy = -halo_r, dx = 0``) sits exactly on the circle, so ANY foreign
-    copper whose topmost band cell lands in the candidate's own column trips
-    it -- and A* evaluates a candidate at every grid position, so an HV blob
-    produces a whole row of cells the two engines would price differently.
+    Nearest-in-band pricing (#4848) makes that corner structural rather than
+    conditional: an on-circle cell is the FARTHEST cell in the band, so it can
+    only ever win when nothing nearer qualifies (and then 0.0 is the right
+    answer).  The magnitudes below are unchanged by #4848 -- they were already
+    the nearest cell's price -- so this stays the direct regression net for
+    both engines.
     """
     halo_r = _GRADIENT_HARD_R + _GRADIENT_BAND  # 25
     for cells, expected in (
@@ -1569,27 +1618,29 @@ def test_avoidance_gradient_parity_zero_frac_cell_does_not_stop_the_scan() -> No
         (((-halo_r, 0), (-18, 0)), 0.875),
         (((-halo_r, 0), (0, 20)), 0.625),
         (((-20, -15), (18, 0)), 0.875),  # the (20, 15, 25) Pythagorean triple
+        (((-halo_r, 0),), 0.0),  # alone on the circle -> genuinely free
     ):
         py = _py_router_with_foreign_cells(cells)
         cpp = _cpp_pathfinder_with_foreign_cells(cells)
         py_cost = py._pairwise_avoidance_cost(100, 100, 0, HV_NET)
         cpp_cost = cpp.pairwise_avoidance_cost(100, 100, 0, HV_NET)
         assert py_cost == pytest.approx(cpp_cost, abs=1e-6), f"backends disagree for {cells}"
-        # Non-vacuous: the zero-frac cell must NOT have swallowed the price
+        # Non-vacuous: the on-circle cell must NOT have swallowed the price
         # (the pre-#4849 Python mirror returned exactly 0.0 for every case
         # here, so an equality-only assertion could pass on a mutual zero).
         assert py_cost == pytest.approx(expected, abs=1e-6), f"wrong magnitude for {cells}"
 
 
 @requires_cpp
-def test_avoidance_gradient_parity_contiguous_bar_touching_the_halo() -> None:
-    """One contiguous foreign bar whose nearest row sits exactly at the halo.
+def test_avoidance_gradient_parity_contiguous_bar_slides_nearer() -> None:
+    """A solid foreign bar prices STRICTLY higher as it slides one row nearer.
 
-    The zero-frac divergence above needs no artificial two-blob fixture: a
-    single solid bar of foreign copper is enough, because its topmost band
-    row contributes only the on-circle cell in the candidate's own column.
-    Sliding the same bar one row nearer must price identically -- the
-    on-circle row was worth nothing in either engine.
+    Issue #4848's routing-quality payoff, in miniature and in both engines.
+    Under the version-19 scan-order contract these two positions priced
+    *identically* (0.0836 -- both were charged off the same topmost band row,
+    ``dy = -24, dx = -4``), so the gradient carried no information about how
+    close the copper actually was.  Nearest-in-band pricing charges the bar's
+    closest row: 21 cells out, then 20.
     """
     halo_r = _GRADIENT_HARD_R + _GRADIENT_BAND  # 25
     costs = []
@@ -1601,10 +1652,11 @@ def test_avoidance_gradient_parity_contiguous_bar_touching_the_halo() -> None:
         cpp_cost = cpp.pairwise_avoidance_cost(100, 100, 0, HV_NET)
         assert py_cost == pytest.approx(cpp_cost, abs=1e-6), f"backends disagree for bar at {top}"
         costs.append(py_cost)
-    # Both bars price the row at dy = -24, dx = -4: sqrt(576 + 16) = 24.331,
-    # frac = (25 - 24.331) / 8.
-    assert costs[0] == pytest.approx(costs[1], abs=1e-6)
-    assert costs[0] == pytest.approx(0.0836189, abs=1e-6)
+    # Bar top -25: nearest row is dy = -21 (dx = 0) -> frac = (25 - 21) / 8.
+    # Bar top -24: nearest row is dy = -20 (dx = 0) -> frac = (25 - 20) / 8.
+    assert costs[0] == pytest.approx(4.0 / 8.0, abs=1e-6)
+    assert costs[1] == pytest.approx(5.0 / 8.0, abs=1e-6)
+    assert costs[1] > costs[0]
 
 
 @requires_cpp
@@ -1647,6 +1699,80 @@ def test_avoidance_gradient_parity_wide_class_width() -> None:
     # it (free) where the global width priced it.
     assert costs[1] == 0.0
     assert any(cost > 0.0 for cost in costs)
+
+
+@requires_cpp
+@pytest.mark.parametrize("seed", [17, 4848, 90210])
+def test_avoidance_gradient_parity_randomized_band_population(seed: int) -> None:
+    """Seeded fuzz: the two engines agree on every randomly populated band.
+
+    Issue #4848's acceptance criterion.  The hand-written fixtures above pin
+    named corners; this sweeps arbitrary copper layouts -- cells inside the
+    hard radius, across the whole band, past the halo, plus same-domain and
+    net-0 copper that must be ignored -- and asserts the Python mirror and the
+    C++ kernel return the SAME value, and that the value is exactly the
+    nearest qualifying cell's linear decay (computed independently here, so
+    the sweep does not merely pin two implementations of the same bug).
+
+    Origins are drawn near the board edge as well as in open field, so the
+    clipped-window path (Python clips the array slice; C++ skips
+    out-of-bounds offsets) is fuzzed too.
+    """
+    rng = random.Random(seed)
+    halo_r = _GRADIENT_HARD_R + _GRADIENT_BAND  # 25
+    nonzero_seen = 0
+    for _ in range(60):
+        # Mix open-field origins with ones hard against the board edges.
+        origin = (
+            rng.choice([rng.randint(0, 3), rng.randint(30, 170), rng.randint(196, 199)]),
+            rng.choice([rng.randint(0, 3), rng.randint(30, 170), rng.randint(196, 199)]),
+        )
+        cells = []
+        for _ in range(rng.randint(1, 14)):
+            dy = rng.randint(-halo_r - 3, halo_r + 3)
+            dx = rng.randint(-halo_r - 3, halo_r + 3)
+            gx, gy = origin[0] + dx, origin[1] + dy
+            if not (0 <= gx < 200 and 0 <= gy < 200):
+                continue  # off-board: neither engine can see it
+            # Weighted towards LV (the only gradient source) but with plenty
+            # of same-domain / pour copper to exercise the widening filter.
+            cell_net = rng.choice([LV_NET, LV_NET, LV_NET, HV_TAP_NET, 0])
+            cells.append((dy, dx, cell_net))
+        if not cells:
+            continue
+        cells = tuple(cells)
+
+        py = _py_router_with_foreign_cells(cells, origin=origin)
+        cpp = _cpp_pathfinder_with_foreign_cells(cells, origin=origin)
+        py_cost = py._pairwise_avoidance_cost(origin[0], origin[1], 0, HV_NET)
+        cpp_cost = cpp.pairwise_avoidance_cost(origin[0], origin[1], 0, HV_NET)
+        assert py_cost == pytest.approx(cpp_cost, abs=1e-6), (
+            f"backends disagree at origin={origin} cells={cells}"
+        )
+
+        # Independent oracle: nearest qualifying cell, linear decay.  A later
+        # write wins when two draws land on the same coordinate, exactly as it
+        # does in both grids.
+        by_coord: dict[tuple[int, int], int] = {}
+        for dy, dx, cell_net in cells:
+            by_coord[(dy, dx)] = cell_net
+        qualifying = [
+            dy * dy + dx * dx
+            for (dy, dx), cell_net in by_coord.items()
+            if cell_net == LV_NET and _GRADIENT_HARD_R**2 < dy * dy + dx * dx <= halo_r**2
+        ]
+        expected = 0.0
+        if qualifying:
+            expected = (
+                py.rules.cost_straight * (halo_r - math.sqrt(min(qualifying))) / _GRADIENT_BAND
+            )
+            if expected > 0.0:
+                nonzero_seen += 1
+        assert py_cost == pytest.approx(expected, abs=1e-6), (
+            f"not the nearest cell at origin={origin} cells={cells}"
+        )
+    # Non-vacuous: the sweep must actually have priced something.
+    assert nonzero_seen >= 5, f"only {nonzero_seen} priced boards -- sweep is near-vacuous"
 
 
 @requires_cpp
