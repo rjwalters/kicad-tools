@@ -1362,7 +1362,7 @@ expanded by the `# Exit codes:` comment block — both live in `_main_impl`
 | 4 | Partial routing **and** clearance violations remain — segment-segment (issue #1666) or HV pairwise (issue #4588) |
 | 5 | Interrupted by SIGINT with partial results saved (file on disk is valid) |
 | 8 | `--complete`: one or more previously-unconnected links remain unroutable (issue #4477) |
-| 9 | `--census-advisory-gate`: the replayed crossing-tail census (`--census-advisory <report.json>`) predicts an inert crossover lattice for this board, so routing was **not started** (issue #4799). The only route code that means "nothing was spent"; the fix layer is placement / escape planning. Opt-in — never returned without the flag. See [crosstail-census-report](crosstail-census-report.md#turning-the-prediction-into-a-gono-go-census-advisory-gate). |
+| 9 | `--census-advisory-gate`: the replayed crossing-tail census (`--census-advisory <report.json>`) predicts an inert crossover lattice for this board, so routing was **not started** (issue #4799). The only route code that means "nothing was spent"; the fix layer is placement / escape planning. Opt-in — never returned without the flag. See [crosstail-census-report](crosstail-census-report.md#turning-the-prediction-into-a-gate). |
 
 > **Consumer note (issues #4588 / #4607).** `kct build` and `kct pipeline`
 > forward `--voltage-map` (plus `--creepage-standard`, `--pollution-degree`,

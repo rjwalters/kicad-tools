@@ -152,7 +152,7 @@ unchanged.
 | `verdict` | See below |
 | `saturated_threshold_pct` | The threshold the verdict used (default 90.0) |
 
-## Interpreting it (advisory, non-blocking)
+## Interpreting it (advisory by default)
 
 | Verdict | Condition | Reading |
 |---------|-----------|---------|
@@ -169,7 +169,7 @@ while an open synthetic lattice measures near 0%.
 branches on `verdict` — writing it changes no route and no exit code. The
 replay side adds one opt-in exception: `kct route --census-advisory-gate` turns
 the same verdict into a go/no-go that can abort a run with exit 9 (see
-[the gate](#turning-the-prediction-into-a-gono-go-census-advisory-gate) below).
+[the gate](#turning-the-prediction-into-a-gate) below).
 It is off by default, so an un-flagged route is byte-identical to the
 advisory-only behaviour. What remains follow-up work is a genuine *pre*-routing
 predictor (the census's legality checks consult order-dependent state — drills
@@ -257,7 +257,7 @@ tooling; `kct route` prints only the text):
 | `nets[]` | Per-net roll-up (`crossovers`, `saturated`, `saturated_pct`, `no_ordering_lever`, `inert`, `present_on_board`), worst first |
 | `warnings[]` | The `WARNING:` lines, verbatim |
 
-## Turning the prediction into a go/no-go (`--census-advisory-gate`)
+## Turning the prediction into a gate
 
 The advisory tells an operator that the next 28 minutes are unlikely to be
 productive. `--census-advisory-gate` lets CI act on that instead of reading it:
@@ -313,6 +313,12 @@ Everything else is a **GO** with an explicit reason token, printed as
 A gate that raises is also a GO: an exception inside a predictor is not
 evidence about the board, so `_census_advisory_preflight` returns 0 on any
 error, exactly as it did when it was advisory-only.
+
+Unlike the report and the advisory, the gate has **no environment surface**:
+`KCT_CROSSTAIL_CENSUS_ADVISORY` can supply the report to *read*, but only the
+explicit flag can make a route fail on it. An exported variable must never be
+able to turn someone else's green pipeline red — and `kct build` / `kct
+pipeline` do not forward the flag, so exit 9 cannot reach them at all.
 
 The gate keys on **inert**, not saturation alone: a lattice whose every legal
 set offers a single via site is just as unmovable by an ordering key as one
