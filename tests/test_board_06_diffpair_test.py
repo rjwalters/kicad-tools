@@ -699,6 +699,14 @@ class TestManufacturabilityFloor:
 # =============================================================================
 
 
+# Issue #4853: the ``strict_gate_result`` fixture below budgets 180 s for its
+# ``kct check`` subprocess, but CI runs ``pytest ... --timeout=60``, so
+# pytest-timeout reaped the fixture at 60 s and the stated budget was
+# unreachable.  A ``timeout`` marker takes precedence over the command-line
+# value, so this makes the two numbers agree at the fixture's stated 180 s.
+# The class scope means the whole subprocess cost is charged to the FIRST
+# test's setup; the tests themselves are pure assertions over the parsed JSON.
+@pytest.mark.timeout(180)
 class TestBoard06StrictGateGuard:
     """Issue #3338 -- pin the strict CI gate's blocking-error count on the
     committed routed PCB so a future artifact refresh that drifts on the
@@ -899,10 +907,21 @@ class TestBoard06StrictGateGuard:
                 "PR #3273 trap re-opens."
             )
 
+            # Issue #4853: invoke the CLI in the interpreter that is ALREADY
+            # running this test rather than shelling out to ``uv run kct``.
+            # A nested ``uv run`` re-syncs the project environment before
+            # exec'ing, and CI installs with ``uv sync --extra dev`` while
+            # the nested call resolves the DEFAULT extras -- so it churns
+            # (and can uninstall) dev packages out from under the running
+            # ``pytest -n auto`` session.  That unbounded, partly
+            # network-dependent cost is what pushed this fixture past CI's
+            # ``--timeout=60`` reaper and turned ``main`` red.  ``kct`` is a
+            # console script for ``kicad_tools.cli:main``, so
+            # ``-m kicad_tools.cli`` runs the identical command.
             cmd = [
-                "uv",
-                "run",
-                "kct",
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
                 "check",
                 str(routed_pcb),
                 "--mfr",

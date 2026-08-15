@@ -773,6 +773,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The board-06 strict-gate test fixture no longer shells out through a nested
+  `uv run`** (#4853) — `TestBoard06StrictGateGuard`'s class-scoped
+  `strict_gate_result` fixture ran `uv run kct check …` from inside a test.
+  `uv run` re-syncs the project environment before exec'ing, and CI installs
+  with `uv sync --frozen --extra dev` while the nested call resolves the
+  *default* extras — so the inner invocation churned dev packages out from
+  under the running `pytest -n auto` session, at an unbounded and partly
+  network-dependent cost. That variance pushed the fixture past CI's
+  `--timeout=60` reaper, erroring all three tests (the class scope charges the
+  whole subprocess to the first test's setup) and turning `main` and every open
+  PR red on a signature attributable to no diff. The fixture now invokes
+  `[sys.executable, "-m", "kicad_tools.cli", "check", …]` — the same command in
+  the already-resolved interpreter, with no resolve/sync step. The class also
+  carries `@pytest.mark.timeout(180)` so the timeout the fixture already asked
+  of `subprocess.run` is the one that actually applies (a marker takes
+  precedence over the command-line `--timeout`), instead of being silently
+  capped at a third of it. Test-only change; no library behavior is affected.
+
 - **A lattice escalation attempt no longer gets the whole run's wall-clock
   budget as its cap** (#4798) — every other routing engine receives its
   escalation attempt's fair slice as `timeout=_per_attempt_budgeted_timeout(…)`
