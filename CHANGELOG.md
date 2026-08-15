@@ -72,17 +72,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hot loop consults a pre-dilated band bitmap (one bool lookup per neighbour)
   and calls the exact kernel only for cells near cross-domain copper. Strictly
   dormant without `--voltage-map` (one `is None` test per neighbour,
-  byte-identical g-scores). The mirror reproduces the reference's **two-level**
-  break, including the conditional outer one (`if (cost > 0.0f) break;`): a
-  qualifying cell exactly on the halo circle prices `frac == 0` and lets the
-  scan run on into later rows rather than ending it, which matters because the
-  first cell every scan visits (`dy = -halo_r, dx = 0`) always sits on that
-  circle. New Python↔C++ parity tests pin the *value*, not just the sign: the
-  whole band, off-axis distances, board-edge-clipped scan windows,
-  per-net-class widths, the multi-cell case that proves both engines stop on
-  the same candidate cell, and the zero-`frac` cases (an on-circle cell paired
-  with a later priced one, and a single contiguous foreign bar whose topmost
-  row touches the halo).
+  byte-identical g-scores). **As shipped, #4849 mirrored the C++ reference's
+  then-current row-major scan** — including its **two-level** break with a
+  conditional outer one (`if (cost > 0.0f) break;`), so that a qualifying cell
+  exactly on the halo circle priced `frac == 0` and let the scan run on into
+  later rows rather than ending it. **That scan-order contract is superseded
+  inside this same unreleased cycle by #4848** (see *Fixed* below): both
+  engines now price the **nearest** qualifying cell in the band, neither has a
+  two-level break, and an on-circle cell is the band's *farthest* member by
+  construction rather than a scan-continuation special case. The Python↔C++
+  parity tests still pin the *value*, not just the sign — the whole band,
+  off-axis distances, board-edge-clipped scan windows, per-net-class widths, a
+  multi-cell case proving both engines settle on the same candidate cell, and
+  the zero-`frac` cases — but #4848 renamed several of them (and re-pointed
+  their assertions) where the narrowed semantics made the old names describe
+  behavior that no longer exists.
 
 - **Placement pad-anchoring audit** (`docs/placement-pad-anchoring-audit.md`,
   part of #4831) — a docs-only, symbol-anchored survey of where the placement
@@ -826,6 +830,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intended beyond the runtime bump.
 
 ### Fixed
+
+- **The pairwise HV-avoidance gradient is priced from the *nearest* qualifying
+  band cell, not the first one in scan order** (#4848, epic #4431 Phase 2b) —
+  `Pathfinder::pairwise_avoidance_cost` and its Python mirror
+  `Router._pairwise_avoidance_cost` both documented a linear decay "strongest
+  just outside the hard radius, zero at the band edge", but both broke at the
+  first qualifying cell in **row-major** order, which starts at the *topmost*
+  row of the scan window rather than the closest cell. A candidate with foreign
+  LV copper 18 cells below (the binding side, `frac = 7/8`) and 24 cells above
+  (`frac = 1/8`) priced **0.125 instead of 0.875** — a 7x under-price of the
+  real proximity, making the HV↔LV margin nudge effectively random with respect
+  to *which* cross-domain copper was actually close. The C++ kernel now walks a
+  distance-sorted band-offset table built once per `(hard_r, band)`
+  (`Pathfinder::pairwise_band_offsets`, the ring-ordered analogue of
+  `via_kernel_offsets_`), each entry carrying its pre-computed decay `frac`, so
+  the first qualifying cell *is* the nearest and the load-bearing early exit
+  survives — while visiting only the annulus instead of its bounding square
+  (2.3x cheaper per call: 1.945 → 0.845 µs over 198k probes on the HV fixture).
+  The Python mirror replaces the two-level-break replay with a vectorised `min`
+  over the band's squared distances (flat at ~15 µs/call). An on-circle cell
+  (`frac == 0`) can no longer swallow the price by construction — it is the
+  band's farthest member, so it wins only when nothing nearer qualifies, which
+  is exactly when `0.0` is correct — retiring the conditional outer break
+  #4849 had to mirror (that entry, above, is amended accordingly). **Route
+  output changes**: on the two-domain HV fixture the corrected gradient buys
+  +0.163 mm of edge gap (2.000 → 2.163 mm against a 1.6 mm requirement) for
+  +5.5 mm of length, and a seeded randomized parity sweep pins both engines
+  against an independent nearest-cell oracle. **Consumer-visible:**
+  `ROUTER_CPP_BUILD_VERSION` is bumped **19 → 20** (mirrored in
+  `cpp_backend.py`) because a stale `.so` would price a *different* gradient
+  than the Python fallback. The binding surface is unchanged, but any checkout
+  carrying a version-19 extension silently falls back to the pure-Python router
+  (10-100x slower) until `uv run kct build-native` is re-run.
 
 - **The board-06 strict-gate test fixture no longer shells out through a nested
   `uv run`** (#4853) — `TestBoard06StrictGateGuard`'s class-scoped

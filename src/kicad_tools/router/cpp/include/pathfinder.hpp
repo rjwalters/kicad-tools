@@ -421,8 +421,10 @@ private:
     // Cached against ``(hard_r, band)``, which changes at most once per route
     // (they derive from ``search_trace_half_width_mm_`` and the grid's widest
     // pairwise clearance, both fixed for the duration of a search).  Mutable
-    // because the kernel is ``const``, exactly like the other lazily-built
-    // scan geometry.
+    // because the kernel is ``const`` and the table is built on first use --
+    // the lazily-built sibling of the eagerly-constructed
+    // ``via_kernel_offsets_`` above (which is built in the constructor and is
+    // therefore not ``mutable``).
     struct PairwiseBandOffset {
         int16_t dx;
         int16_t dy;
