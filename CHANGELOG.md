@@ -31,6 +31,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inherit the environment, an empty flush never overwrites a report that has
   records. New reference doc: `docs/reference/crosstail-census-report.md`.
 
+- **`--format json` on `build`, `pipeline` and `stitch`** (closes #4674,
+  seventh and final batch of the #4543 machine-output sweep) — the multi-stage
+  orchestrators now accept the canonical `--format json` and emit one
+  deterministic document on stdout instead of prose, wired end-to-end (outer
+  parser → shim → inner parser). `build` reports the resolved
+  spec/schematic/pcb/routed-pcb paths, the effective manufacturer, and a
+  `steps[]` ledger (`step`, `success`, `message`, `output_file`, `elapsed_s`)
+  plus `counts`, `manufacturing_output` and `wall_time_s`; `pipeline` reports
+  the resolved input/pcb/project/schematic, the mfr + layer stack, a `steps[]`
+  ledger carrying each step's skip/warning classification, `commit:
+  {requested, created}` and the `exit_code` (0 / 1 / 2-for-`--best-effort`
+  partial); `stitch` reports the resolved via geometry and the **complete**
+  per-pad ledger — vias placed, pads skipped, connectivity fallbacks, pads
+  needing a routed fanout, and the obstacle breakdown. The stitch document is
+  deliberately untruncated: its prose caps via lists at 10 entries and
+  skipped-pad lists at 5, and a machine caller must not have to re-run with
+  different flags to see the pads a run could not place. All three drive
+  sub-tools that print progress on stdout, so each wraps its run in the
+  stdout-diversion helper (now promoted to
+  `cli/format_options.py::stdout_to_stderr_when` rather than copied a fourth
+  time): the chatter is replayed on stderr and exactly one document lands on
+  stdout. Failure paths emit `{"error": ..., "success": false}` documents with
+  exit codes unchanged, and text-mode output is byte-identical. Audit
+  (`scripts/audit_machine_output.py`): prose-only 8 → 5, format-json 189 →
+  192 — the actionable backlog is now **empty**, the 5 remaining prose-only
+  leaves being the 4 documented exemptions (`interactive`, `mcp serve`, `run`,
+  `footprint generate`) plus `route`, deferred to the route workstream.
+  `tests/test_format_json_sweep_orchestrators.py` guards the new surfaces and
+  pins the prose-only bucket against that exemption list.
+
 - **`--format json` on the 5 board-improvement drivers** (part of #4674,
   sixth batch of the #4543 machine-output sweep) — `optimize-placement`,
   `optimize-traces`, `route-auto`, `reason` and `creepage-export-rules` now
@@ -857,6 +887,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intended beyond the runtime bump.
 
 ### Fixed
+
+- **`kct build --quiet` exited 0 when a build step failed** (part of #4674) —
+  the success/failure verdict was computed *inside* the `if not args.quiet:`
+  summary block, so suppressing the summary also suppressed the non-zero exit
+  code and a failed quiet build looked green to CI. The verdict is now hoisted
+  out of the guard; prose output is unchanged.
 
 - **The pairwise HV-avoidance gradient is priced from the *nearest* qualifying
   band cell, not the first one in scan order** (#4848, epic #4431 Phase 2b) —

@@ -43,6 +43,13 @@ use:
   (`args.json` or `args.format`, whichever it historically used).
 - `wants_json(args)` — one-shot predicate that checks both spellings without
   mutating the namespace.
+- `stdout_to_stderr_when(active)` — context manager that captures stdout
+  written inside it and replays it on stderr while *active*. Wrap any region
+  that calls code the command does not own (third-party libraries, the
+  negotiated router, subprocess drivers, progress ledgers) so their chatter
+  cannot corrupt the single-document contract. Introduced per-module in batch
+  5, copied twice in batch 6, promoted here in batch 7 rather than making a
+  fourth copy.
 
 The mechanical sweep that adds `--format json` to the prose-only backlog
 below is issue **#4674** and should build on these helpers.
@@ -52,13 +59,13 @@ below is issue **#4674** and should build on these helpers.
 Measured by programmatic introspection of the real argparse tree
 (`create_parser()`, recursive walk of `_SubParsersAction` leaves) — not grep:
 
-| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 b1 | b2 | b3 | b4 | b5 | b6 |
-|---|---|---|---|---|---|---|---|---|
-| `--format` with a `json` choice | 124 | 124 | 148 | 164 | 174 | 179 | 184 | 189 |
-| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 | 2 | 2 | 2 | 2 | 2 |
-| `--json` boolean only | 2 | **0** | 0 | 0 | 0 | 0 | 0 | 0 |
-| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** | 0 | 0 | 0 | 0 | 0 |
-| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 | 33 | 23 | 18 | 13 | 8 |
+| Idiom (outer `kct` parser) | Before #4543 | After #4543 | After #4674 b1 | b2 | b3 | b4 | b5 | b6 | b7 |
+|---|---|---|---|---|---|---|---|---|---|
+| `--format` with a `json` choice | 124 | 124 | 148 | 164 | 174 | 179 | 184 | 189 | **192** |
+| Both `--format json` and legacy `--json` alias | 0 | 2 (`placement refine`, `calibrate`) | 2 | 2 | 2 | 2 | 2 | 2 | 2 |
+| `--json` boolean only | 2 | **0** | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| `--format` without a `json` choice | 1 (`benchmark report`, `text,markdown`) | 1 | **0** | 0 | 0 | 0 | 0 | 0 | 0 |
+| Neither (prose-only) | 72 | 72 (backlog for #4674, below) | 49 | 33 | 23 | 18 | 13 | 8 | **5 (all exempt / deferred)** |
 
 The first #4674 batch swept the grouped-subcommand families -- `mfr` (7),
 `spec` (5), `placement fix/nudge/snap/align/distribute` (5), `zones
@@ -80,9 +87,15 @@ The fifth batch swept the board-artifact producers -- `board-metrics`,
 
 The sixth batch swept the board-improvement / rule-derivation drivers --
 `optimize-placement`, `optimize-traces`, `route-auto`, `reason`,
-`creepage-export-rules` (5). The remaining 8 prose-only leaves (`build`,
-`pipeline`, `stitch`, plus the 4 exempt and the deferred `route`) stay on the
-#4674 backlog below.
+`creepage-export-rules` (5).
+
+The seventh and final batch swept the multi-stage orchestrators -- `build`,
+`pipeline`, `stitch` (3). **The #4674 backlog is now empty**: the 5 leaves
+still in the audit's `prose-only` bucket are the 4 documented exemptions plus
+the deferred `route`, both listed below.
+`tests/test_format_json_sweep_orchestrators.py` pins that bucket against
+exactly that list, so a new prose-only leaf fails a test rather than silently
+re-opening the backlog.
 
 Issue #4543 closed the `--json`-only bucket by adding `--format {text,json}`
 alongside the existing `--json` on both commands (outer parser, forwarding
@@ -319,13 +332,45 @@ Three conventions this batch adds or reinforces:
 
 `tests/test_format_json_sweep_drivers.py` guards these 5 surfaces.
 
-**Remaining actionable (3)** — the audit's `prose-only` bucket reads 8
-because it also counts the 4 exempt commands and the deferred `route`
-(sections above):
+**Done (seventh #4674 batch, 3 surfaces — the last):** the multi-stage
+orchestrators — the leaves that drive many other commands to completion:
+`build`, `pipeline`, `stitch`. Shapes:
 
-- `build`, `pipeline` (multi-stage orchestrators)
-- `stitch` (single command, but its 6k-line inner module has a bespoke
-  multi-phase report — batch it alone)
+| Command | Document |
+|---|---|
+| `build` | `{"command": "build", "spec", "project_dir", "output_dir", "mfr", "step", "dry_run", "force", "schematic", "pcb", "routed_pcb", "manufacturing_output", "steps": [{step, success, message, output_file, elapsed_s}], "counts": {total, succeeded, failed}, "wall_time_s", "exit_code", "success"}` |
+| `pipeline` | `{"command": "pipeline", "input", "pcb", "project", "schematic", "mfr", "layers", "layer_count", "step", "dry_run", "force", "best_effort", "steps": [{step, success, skipped, warning, message}], "counts": {total, succeeded, skipped, warnings}, "commit": {requested, created}, "exit_code", "success"}` |
+| `stitch` | `{"command": "stitch", "pcb", "output", "mode": "stitch"\|"blanket"\|"thermal", "target_nets", "nets_auto_detected", "manufacturer", "via_size_mm", "drill_mm", "detected_layers", "stackup_inferred_nets", "fallback_nets", "strict_model_error", "pads_found", "already_connected", "vias_added": [...], "vias_added_count", "micro_vias_placed", "traces_added": {total, straight, dogleg, extended_escape}, "via_in_pad_filtered", "hole_to_hole_rejected", "connectivity_fallback": [...], "needs_routed_fanout": [...], "pads_skipped": [...], "obstacle_breakdown", "dry_run", "saved", "drc": {requested, ran}, "success"}` |
+
+Three conventions this batch adds or reinforces:
+
+- **The document is the complete ledger, not the prose's excerpt.** `stitch`'s
+  text summary caps via lists at 10 entries and skipped-pad lists at 5 (`...
+  (N more)`); the JSON document carries every entry, because a machine caller
+  must not have to re-run with different flags to see the pads a run could not
+  place. `len(vias_added) == vias_added_count` is asserted in the tests.
+- **A multi-step run reports the ledger, not just the verdict.** All three
+  emit one entry per executed step with that step's own classification —
+  including `pipeline`'s `skipped` / `warning` axes, which its exit code
+  cannot express (exit 2 means "best-effort partial", not "which step").
+  `build` names `elapsed_s` / `wall_time_s` as volatile (the `board-metrics`
+  `generated_at` treatment) so determinism is asserted modulo them.
+- **The `stdout_to_stderr_when` diversion is now shared machinery.** It was
+  copied into three CLI modules across batches 5-6; rather than making a
+  fourth copy, this batch promoted it to
+  `format_options.py::stdout_to_stderr_when` and repointed the three existing
+  call sites. All three orchestrators need it — the rich `Console` /
+  `Progress` ledger, every generator script's streamed stdout, and the
+  kicad-cli DRC pass all write to stdout.
+
+One drive-by fix this batch had to make: `kct build`'s success/failure verdict
+was computed *inside* the `if not args.quiet:` summary block, so
+`kct build --quiet` exited 0 even when a step failed. That could not ship
+alongside a document whose `"success": false` would then contradict its own
+exit code, so the verdict is hoisted out of the guard (prose unchanged).
+
+`tests/test_format_json_sweep_orchestrators.py` guards these 3 surfaces, the
+promoted helper, and the now-closed backlog.
 
 
 ## Interop note (survey idea 7)
@@ -333,10 +378,12 @@ because it also counts the 4 exempt commands and the deferred `route`
 A stable machine-output contract is the enabling precondition for external
 agents (e.g. copperhead) delegating routing/DRC/LVS/tapeout to `kct`: with
 `--format json` canonical, an orchestrator can invoke any covered subcommand
-and parse a predictable payload instead of scraping prose. Once #4674 closes
-the prose-only backlog, the contract is: **every non-exempt `kct` subcommand
-accepts `--format json` and emits a single JSON document on stdout.** No
-separate issue tracks idea 7; it rides on this note plus #4674.
+and parse a predictable payload instead of scraping prose. As of #4674's
+seventh batch the prose-only backlog is closed, so the contract now holds:
+**every non-exempt `kct` subcommand accepts `--format json` and emits a single
+JSON document on stdout** (the exceptions are the 4 exemptions and the
+deferred `route`, tabulated above). No separate issue tracks idea 7; it rode
+on this note plus #4674.
 
 ## Rules for new commands
 
