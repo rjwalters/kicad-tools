@@ -28,6 +28,11 @@ Design constraints (from the issue; please preserve them):
   go to ``scripts/corpus/.cache/`` by default, which is gitignored. A run leaves
   ``git status`` clean.
 
+Dataset access (``hf_hub``) and the outcome taxonomy (``parse_taxonomy``) live
+in sibling modules so the manifest tooling added in slice 2
+(``build_manifest.py`` / ``check_manifest.py``) classifies outcomes with the
+same code rather than a drifting second copy.
+
 Why the datasets-server ``/rows`` endpoint (and not ``/tree/main``)?
     The dataset is published as ~1,700 parquet shards under ``data/``, not as
     individual ``.kicad_sch`` / ``.kicad_pcb`` blobs, so listing the repo tree
@@ -58,75 +63,37 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import re
 import shutil
 import sys
 import tempfile
-import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from kicad_tools.exceptions import FileFormatError, KiCadToolsError
-from kicad_tools.schema import PCB, Schematic
-from kicad_tools.sexp import ParseError as SexpParseError
+# Sibling modules in scripts/corpus/ (the script's own directory is sys.path[0]
+# when it is run as `python scripts/corpus/probe_open_schematics.py`).
+from hf_hub import (
+    DEFAULT_DATASET,
+    HubError,
+    dataset_revision,
+    dataset_row_count,
+    fetch_row,
+)
+from parse_taxonomy import (
+    FAILURE_CLASSES,
+    NET_ERROR,
+    OK,
+    SKIP_TRUNCATED,
+    declared_version,
+    detect_format,
+    parse_payload,
+    signature_of,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUT_DIR = REPO_ROOT / "scripts" / "corpus" / ".cache"
-
-DEFAULT_DATASET = "bshada/open-schematics"
-DATASETS_SERVER = "https://datasets-server.huggingface.co"
-HUB_API = "https://huggingface.co/api/datasets"
-USER_AGENT = "kicad-tools-corpus-probe/1 (+https://github.com/rjwalters/kicad-tools)"
-
-# ---------------------------------------------------------------------------
-# Failure taxonomy
-#
-# Buckets are chosen so that each one maps to a *different engineering action*.
-# Resist the temptation to add a bucket that cannot be acted on differently
-# from an existing one -- a taxonomy whose classes all mean "fix the parser"
-# is just a catch-all with extra steps.
-# ---------------------------------------------------------------------------
-OK = "ok"
-
-# Parser defects / gaps -- these are the actionable ones.
-FAIL_SEXPR_SYNTAX = "sexpr-syntax-error"  # tokenizer/grammar rejected the file
-FAIL_WRONG_ROOT = "wrong-root-token"  # parsed, but root tag is not what we expect
-FAIL_ENCODING = "encoding-error"  # not decodable as UTF-8
-FAIL_MISSING_NODE = "missing-node-or-atom"  # KeyError/IndexError walking the tree
-FAIL_BAD_VALUE = "unexpected-value"  # ValueError/TypeError converting an atom
-FAIL_TREE_SHAPE = "unexpected-tree-shape"  # AttributeError on an unexpected node
-FAIL_RECURSION = "recursion-limit"  # nesting deeper than CPython's stack
-FAIL_MEMORY = "out-of-memory"
-FAIL_KCT = "kicad-tools-error"  # any other KiCadToolsError subclass
-FAIL_OTHER = "uncaught-internal-error"  # everything else: triage individually
-
-# Not parser defects -- excluded from the failure rate, counted separately.
-SKIP_NON_KICAD = "skipped-non-kicad-format"  # legacy .sch / Altium / unknown blob
-SKIP_EMPTY = "skipped-empty-payload"
-SKIP_OVERSIZE = "skipped-oversize-payload"
-SKIP_TRUNCATED = "skipped-dataset-truncated-cell"  # dataset API truncated the row
-NET_ERROR = "network-error"  # record could not be fetched at all
-
-FAILURE_CLASSES = frozenset(
-    {
-        FAIL_SEXPR_SYNTAX,
-        FAIL_WRONG_ROOT,
-        FAIL_ENCODING,
-        FAIL_MISSING_NODE,
-        FAIL_BAD_VALUE,
-        FAIL_TREE_SHAPE,
-        FAIL_RECURSION,
-        FAIL_MEMORY,
-        FAIL_KCT,
-        FAIL_OTHER,
-    }
-)
-
-_VERSION_RE = re.compile(r"\(\s*version\s+(\d+)\s*\)")
-_DIGITS_RE = re.compile(r"\d+")
 
 
 # ---------------------------------------------------------------------------
@@ -170,120 +137,8 @@ class RecordResult:
 
 
 # ---------------------------------------------------------------------------
-# Classification
-# ---------------------------------------------------------------------------
-def detect_format(text: str) -> str:
-    """Sniff what kind of file a payload actually is, from its first bytes.
-
-    The dataset's ``extensions_used`` field is per-record, not per-file, so the
-    only reliable per-payload signal is the content itself.
-    """
-    head = text[:4096].lstrip()
-    if head.startswith("(kicad_sch"):
-        return "kicad_sch"
-    if head.startswith("(kicad_pcb"):
-        return "kicad_pcb"
-    if head.startswith("(kicad_"):
-        token = head[1:].split(None, 1)[0].strip("()")
-        return f"kicad-other:{token}"
-    if head.startswith("EESchema"):
-        return "legacy-eeschema"
-    if head.startswith("PCBNEW-BOARD") or head.startswith("(module"):
-        return "legacy-pcbnew"
-    if "|RECORD=" in head or head.startswith("\x00") or "Altium" in head[:512]:
-        return "altium"
-    if not head:
-        return "empty"
-    return "unknown"
-
-
-def declared_version(text: str) -> str | None:
-    """Extract the KiCad file-format version token (e.g. ``20231120``)."""
-    match = _VERSION_RE.search(text[:4096])
-    return match.group(1) if match else None
-
-
-def classify_exception(exc: BaseException) -> str:
-    """Map a parse exception onto a taxonomy bucket."""
-    if isinstance(exc, RecursionError):
-        return FAIL_RECURSION
-    if isinstance(exc, MemoryError):
-        return FAIL_MEMORY
-    if isinstance(exc, UnicodeError):
-        return FAIL_ENCODING
-    if isinstance(exc, FileFormatError):
-        return FAIL_WRONG_ROOT
-    if isinstance(exc, SexpParseError):
-        return FAIL_SEXPR_SYNTAX
-    if isinstance(exc, KiCadToolsError):
-        return FAIL_KCT
-    if isinstance(exc, KeyError | IndexError):
-        return FAIL_MISSING_NODE
-    if isinstance(exc, AttributeError):
-        return FAIL_TREE_SHAPE
-    if isinstance(exc, ValueError | TypeError):
-        return FAIL_BAD_VALUE
-    return FAIL_OTHER
-
-
-def signature_of(exc: BaseException) -> str:
-    """Digit-normalised one-line exception signature, for grouping offenders.
-
-    ``Expected atom at position 4172`` and ``Expected atom at position 91``
-    are the same defect; collapsing the digits makes the "worst offenders"
-    table count them together.
-    """
-    first_line = str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
-    normalised = _DIGITS_RE.sub("N", first_line)
-    return f"{exc.__class__.__name__}: {normalised[:160]}"
-
-
-# ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
-def parse_payload(
-    text: str,
-    kind: str,
-    scratch_dir: Path,
-    stem: str,
-    max_bytes: int,
-) -> tuple[str, BaseException | None, float]:
-    """Write ``text`` to a scratch file and load it with this repo's parser.
-
-    Returns ``(outcome, exception_or_None, elapsed_ms)``. The scratch file is
-    always removed; nothing is left behind outside ``scratch_dir``.
-    """
-    fmt = detect_format(text)
-    size = len(text.encode("utf-8", errors="replace"))
-    if fmt == "empty" or not text.strip():
-        return SKIP_EMPTY, None, 0.0
-    if size > max_bytes:
-        return SKIP_OVERSIZE, None, 0.0
-
-    expected = "kicad_sch" if kind == "schematic" else "kicad_pcb"
-    if fmt != expected:
-        # Legacy Eeschema, Altium, or a KiCad file of a different type: this
-        # repo has no parser for these, so it is not a parser defect.
-        return SKIP_NON_KICAD, None, 0.0
-
-    suffix = ".kicad_sch" if kind == "schematic" else ".kicad_pcb"
-    path = scratch_dir / f"{stem}{suffix}"
-    started = time.perf_counter()
-    try:
-        path.write_text(text, encoding="utf-8")
-        if kind == "schematic":
-            Schematic.load(path)
-        else:
-            PCB.load(path)
-    except BaseException as exc:  # the taxonomy IS the point: bucket, do not propagate
-        if isinstance(exc, KeyboardInterrupt | SystemExit):
-            raise
-        return classify_exception(exc), exc, (time.perf_counter() - started) * 1000.0
-    finally:
-        path.unlink(missing_ok=True)
-    return OK, None, (time.perf_counter() - started) * 1000.0
-
-
 def probe_artifact(
     *,
     record_index: int,
@@ -318,108 +173,6 @@ def probe_artifact(
         elapsed_ms=round(elapsed, 2),
     )
     return result, (text if result.failed else None)
-
-
-# ---------------------------------------------------------------------------
-# Hugging Face access (stdlib + requests only -- no `datasets` dependency)
-# ---------------------------------------------------------------------------
-class HubError(RuntimeError):
-    """A dataset request failed after all retries."""
-
-
-def _requests_module() -> Any:
-    try:
-        # Imported lazily: --dry-run must work without it. The type-ignore keeps
-        # the script clean under mypy without pulling types-requests into the
-        # dev env (this file is outside the src/ baseline gate).
-        import requests  # type: ignore[import-untyped]
-    except ImportError as exc:  # pragma: no cover - dev envs always have it
-        raise HubError(
-            "the 'requests' package is required for network mode; "
-            "run via `uv run python scripts/corpus/probe_open_schematics.py`, "
-            "or use --dry-run for the offline path"
-        ) from exc
-    return requests
-
-
-def hub_get_json(url: str, params: dict[str, Any], timeout: float, retries: int) -> dict[str, Any]:
-    """GET a JSON endpoint with bounded retries and backoff."""
-    requests = _requests_module()
-    last: Exception | None = None
-    for attempt in range(1, retries + 1):
-        try:
-            response = requests.get(
-                url,
-                params=params,
-                timeout=timeout,
-                headers={"User-Agent": USER_AGENT},
-            )
-            if response.status_code == 200:
-                payload = response.json()
-                if not isinstance(payload, dict):
-                    raise HubError(f"{url}: expected a JSON object, got {type(payload).__name__}")
-                return payload
-            # 429/5xx are transient (datasets-server warms shards on demand).
-            if response.status_code in (429, 500, 502, 503, 504):
-                last = HubError(f"{url}: HTTP {response.status_code}")
-            else:
-                raise HubError(f"{url}: HTTP {response.status_code}: {response.text[:200]}")
-        except HubError:
-            raise
-        except Exception as exc:  # requests raises a wide family of transport errors
-            last = exc
-        if attempt < retries:
-            time.sleep(min(2.0 * attempt, 10.0))
-    raise HubError(f"{url}: failed after {retries} attempts: {last}")
-
-
-def dataset_revision(dataset: str, timeout: float, retries: int) -> str | None:
-    """Resolve the dataset's current commit sha, so a report is reproducible."""
-    try:
-        info = hub_get_json(f"{HUB_API}/{dataset}", {}, timeout, retries)
-    except HubError:
-        return None
-    sha = info.get("sha")
-    return str(sha) if sha else None
-
-
-def dataset_row_count(dataset: str, config: str, split: str, timeout: float, retries: int) -> int:
-    """Total number of rows in the split (the sampling universe)."""
-    info = hub_get_json(f"{DATASETS_SERVER}/info", {"dataset": dataset}, timeout, retries)
-    configs: dict[str, Any] = info.get("dataset_info", {})
-    entry: dict[str, Any] = configs.get(config) or next(iter(configs.values()), {})
-    splits: dict[str, Any] = entry.get("splits", {})
-    split_info: dict[str, Any] = splits.get(split) or next(iter(splits.values()), {})
-    count = int(split_info.get("num_examples", 0))
-    if count <= 0:
-        raise HubError(f"{dataset}: could not determine row count for split '{split}'")
-    return count
-
-
-def fetch_row(
-    dataset: str, config: str, split: str, offset: int, timeout: float, retries: int
-) -> dict[str, Any]:
-    """Fetch a single dataset row (one record) by absolute offset."""
-    payload = hub_get_json(
-        f"{DATASETS_SERVER}/rows",
-        {
-            "dataset": dataset,
-            "config": config,
-            "split": split,
-            "offset": offset,
-            "length": 1,
-        },
-        timeout,
-        retries,
-    )
-    rows = payload.get("rows") or []
-    if not rows:
-        raise HubError(f"{dataset}: no row at offset {offset}")
-    row = rows[0]
-    return {
-        "row": row.get("row", {}),
-        "truncated_cells": list(row.get("truncated_cells") or []),
-    }
 
 
 # ---------------------------------------------------------------------------
