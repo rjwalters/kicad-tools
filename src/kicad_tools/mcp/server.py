@@ -211,11 +211,21 @@ def create_server() -> MCPServer:
     return MCPServer()
 
 
-def create_fastmcp_server(http_mode: bool = False) -> FastMCP:
+def create_fastmcp_server(
+    http_mode: bool = False,
+    host: str | None = None,
+    port: int | None = None,
+) -> FastMCP:
     """Create a FastMCP server with all tools registered from the unified registry.
 
     Args:
         http_mode: If True, creates server in stateless HTTP mode.
+        host: Bind address for HTTP transports. FastMCP's own default
+            (``127.0.0.1``) is used when omitted. ``host``/``port`` are
+            constructor arguments in the MCP SDK -- ``FastMCP.run()`` does not
+            accept them -- so they must be supplied here.
+        port: Bind port for HTTP transports. FastMCP's own default (``8000``)
+            is used when omitted.
 
     Returns:
         Configured FastMCP server instance.
@@ -230,7 +240,13 @@ def create_fastmcp_server(http_mode: bool = False) -> FastMCP:
             "FastMCP is required for HTTP transport. Install with: pip install 'kicad-tools[mcp]'"
         ) from e
 
-    mcp = FastMCP("kicad-tools", stateless_http=http_mode)
+    settings: dict[str, Any] = {}
+    if host is not None:
+        settings["host"] = host
+    if port is not None:
+        settings["port"] = port
+
+    mcp = FastMCP("kicad-tools", stateless_http=http_mode, **settings)
 
     # Register all tools from the unified registry
     for tool_name, tool_spec in TOOL_REGISTRY.items():
@@ -297,10 +313,11 @@ def run_server(
         server = create_server()
         server.run()
     elif transport == "http":
-        # Use FastMCP for HTTP transport
-        mcp = create_fastmcp_server(http_mode=True)
+        # Use FastMCP for HTTP transport. host/port are constructor arguments
+        # in the MCP SDK; FastMCP.run() only accepts transport/mount_path.
+        mcp = create_fastmcp_server(http_mode=True, host=host, port=port)
         logger.info(f"Starting HTTP MCP server on {host}:{port}")
-        mcp.run(transport="streamable-http", host=host, port=port)
+        mcp.run(transport="streamable-http")
     else:
         raise ValueError(f"Unknown transport: {transport}. Use 'stdio' or 'http'.")
 
