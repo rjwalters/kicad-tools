@@ -704,7 +704,15 @@ class TestScoreMonotonicity:
         design_rules,
     ):
         """When no DRC violations exist, fidelity 0 and 1 should produce
-        similar base scores (wirelength + overlap + boundary + area)."""
+        similar base scores (wirelength + overlap + boundary + area).
+
+        Since #4831 M2 the two levels anchor wirelength differently (0 =
+        component centres, 1 = transformed pads), so they only agree when the
+        pad offsets cancel -- which they do for these fixtures: both parts put
+        pin "1" 0.5 mm to the left of their centre, so the net's bounding box
+        is translated, not resized. See ``test_multi_fidelity_pad_anchored.py``
+        for the cases where the two levels deliberately disagree.
+        """
         r0 = evaluate_placement_multifidelity(
             placements=placed_components,
             nets=simple_nets,
@@ -724,7 +732,7 @@ class TestScoreMonotonicity:
         assert r0.score.is_feasible is True
         assert r1.score.is_feasible is True
 
-        # Wirelength should be similar (both use component centers)
+        # Wirelength agrees here because the pad offsets cancel (see docstring)
         assert abs(r0.score.breakdown.wirelength - r1.score.breakdown.wirelength) < 0.01
 
     def test_drc_violations_increase_score(

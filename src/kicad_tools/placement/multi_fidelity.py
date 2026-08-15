@@ -16,6 +16,15 @@ Level  Method                      Approx Cost  Use
 3      + Full detailed routing     ~1 s         Final validation
 =====  ==========================  ===========  ==============================
 
+Wirelength anchoring differs by level (issue #4831 M2). Fidelity 0 accepts
+centre-only placements, so its HPWL is measured between component centres.
+Fidelity >= 1 *requires* :class:`~kicad_tools.placement.vector.PlacedComponent`
+inputs with transformed pads, so its HPWL is measured between the real pad
+coordinates -- which makes the estimate sensitive to rotation, something the
+centre-anchored form cannot see. Levels 2 and 3 build on the fidelity-1
+breakdown and inherit the pad-anchored term. See
+``docs/placement-pad-anchoring-audit.md``.
+
 Usage::
 
     from kicad_tools.placement.multi_fidelity import (
@@ -54,6 +63,7 @@ from .cost import (
 )
 from .drc import DrcResult, check_placement_drc
 from .vector import ComponentDef, PlacedComponent
+from .wirelength import build_pad_position_map
 
 if TYPE_CHECKING:
     from kicad_tools.router.global_router import GlobalRouter
@@ -301,6 +311,18 @@ def _evaluate_fidelity_1(
 
     Uses the richer PlacedComponent type with transformed pads for DRC.
     Falls back to fidelity 0 DRC score (0) if no design rules provided.
+
+    **Pad-anchored wirelength (issue #4831 M2).** Fidelity >= 1 already
+    *requires* :class:`~kicad_tools.placement.vector.PlacedComponent` inputs
+    carrying transformed pads, so the wirelength term is measured at the pads
+    rather than at component centres -- unconditionally, with no opt-in flag
+    (unlike :func:`kicad_tools.placement.cost.evaluate_placement`, whose
+    centre-anchored default protects every production placement run). The
+    body-geometry terms (overlap, boundary, area) stay centre/bbox-based:
+    pad anchoring is a *connectivity* notion and does not apply to them
+    (``docs/placement-pad-anchoring-audit.md`` §7). Fidelity 0 remains
+    centre-anchored, so the historical estimate is still reachable by asking
+    for :attr:`FidelityLevel.HPWL`.
     """
     # First compute fidelity-0 metrics using simple placement types
     simple_placements = [
@@ -313,7 +335,13 @@ def _evaluate_fidelity_1(
         for p in placements_rich
     ]
 
-    wirelength = compute_wirelength(simple_placements, nets)
+    # Pads are mandatory at this fidelity (see the ValueError raised by
+    # evaluate_placement_multifidelity), so anchoring wirelength to them costs
+    # one dict build -- not a new transform pass. Pins missing from the map
+    # fall back to their component centre inside compute_wirelength, and
+    # per-net Net.weight is preserved (which compute_hpwl would have dropped).
+    pad_positions = build_pad_position_map(placements_rich)
+    wirelength = compute_wirelength(simple_placements, nets, pad_positions=pad_positions)
     overlap = compute_overlap(simple_placements, config.footprint_sizes)
     boundary = compute_boundary_violation(simple_placements, board, config.footprint_sizes)
     area = compute_area(simple_placements)
@@ -386,6 +414,12 @@ def evaluate_placement_multifidelity(
 
     Each fidelity level includes all checks from lower levels and adds
     progressively more expensive analysis.
+
+    The wirelength term is centre-anchored at fidelity 0 and pad-anchored at
+    fidelity >= 1, where transformed pads are already mandatory (issue #4831
+    M2; see the module docstring). Passing the *same* rich placements at two
+    different fidelities can therefore yield two different wirelength values
+    -- that is the intended information gain, not a bug.
 
     Args:
         placements: Component positions.  For fidelity 0, simple
