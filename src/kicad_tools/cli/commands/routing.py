@@ -740,6 +740,12 @@ def run_route_command(args) -> int:
     # flag-off path stays byte-identical.
     if getattr(args, "allow_offboard", False):
         sub_argv.append("--allow-offboard")
+    # Issue #4799: forward the pre-route census advisory report path.  Defaults
+    # to None (the inner preflight then falls back to
+    # KCT_CROSSTAIL_CENSUS_ADVISORY); forward only when the user set it so the
+    # flag-off path stays byte-identical.
+    if getattr(args, "census_advisory", None):
+        sub_argv.extend(["--census-advisory", str(args.census_advisory)])
     if getattr(args, "auto_fix", False):
         sub_argv.append("--auto-fix")
     if getattr(args, "auto_fix_passes", None) is not None:

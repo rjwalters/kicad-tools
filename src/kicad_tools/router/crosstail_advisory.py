@@ -334,10 +334,17 @@ class CrossingTailAdvisory:
                 f"{self.predicted_crossovers} saturated crossover(s) "
                 f"({self.predicted_saturated_pct}%)"
             )
-            worst = [n for n in self.nets if n.saturated > 0][:WORST_NETS_SHOWN]
+            # Only nets that actually contribute to the prediction are named:
+            # listing a net the board no longer has, next to a predicted count
+            # that deliberately excludes it, reads as an inconsistency.  The
+            # full per-net roll-up (absent nets included) stays in to_dict().
+            saturated_nets = [
+                n for n in self.nets if n.saturated > 0 and n.present_on_board is not False
+            ]
+            worst = saturated_nets[:WORST_NETS_SHOWN]
             if worst:
                 rendered = ", ".join(f"{n.net_name} {n.saturated}/{n.crossovers}" for n in worst)
-                elided = len([n for n in self.nets if n.saturated > 0]) - len(worst)
+                elided = len(saturated_nets) - len(worst)
                 suffix = f" (+{elided} more)" if elided > 0 else ""
                 lines.append(f"{tag}   worst nets: {rendered}{suffix}")
         for warning in self.warnings:

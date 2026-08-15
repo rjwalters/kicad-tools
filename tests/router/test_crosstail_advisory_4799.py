@@ -382,6 +382,18 @@ def test_human_block_elides_beyond_the_worst_offenders():
     assert "(+3 more)" in line
 
 
+def test_human_block_names_only_nets_that_feed_the_prediction():
+    """A net excluded from the counts must not headline the "worst" line."""
+    report = _report_from([_record("HERE", legal=0), _record("GONE", legal=0)])
+    advisory = build_advisory(report, {"HERE"})
+
+    line = next(ln for ln in advisory.format_human().splitlines() if "worst nets" in ln)
+    assert "HERE 1/1" in line
+    assert "GONE" not in line
+    # ...but the full roll-up, absent nets included, survives in the dict form.
+    assert {n["net_name"] for n in advisory.to_dict()["nets"]} == {"HERE", "GONE"}
+
+
 def test_saturated_prediction_states_the_upstream_reading():
     report = _report_from([_record(f"N{i}", legal=0) for i in range(10)])
     text = build_advisory(report).format_human()
@@ -555,3 +567,42 @@ def test_route_help_documents_the_flag(capsys):
     out = capsys.readouterr().out
     assert "--census-advisory" in out
     assert "Advisory only" in out
+
+
+def test_outer_kct_parser_accepts_and_forwards_the_flag():
+    """`kct route` parses with the OUTER parser and shells the inner one.
+
+    Adding the flag to route_cmd.py alone leaves `kct route --census-advisory`
+    dying with "unrecognized arguments" -- which is exactly what happened
+    before this test existed.
+    """
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.cli.commands import routing
+    from kicad_tools.cli.parser import create_parser
+
+    captured: list[list[str]] = []
+
+    def _fake_route_main(argv):
+        captured.append(list(argv))
+        return 0
+
+    original = route_cmd.main
+    route_cmd.main = _fake_route_main  # imported inside run_route_command
+    try:
+        args = create_parser().parse_args(
+            ["route", "board.kicad_pcb", "--census-advisory", "census.json"]
+        )
+        assert args.census_advisory == "census.json"
+        assert routing.run_route_command(args) == 0
+
+        # Unset stays unset: the flag-off path must be byte-identical.
+        plain = create_parser().parse_args(["route", "board.kicad_pcb"])
+        assert plain.census_advisory is None
+        assert routing.run_route_command(plain) == 0
+    finally:
+        route_cmd.main = original
+
+    with_flag, without_flag = captured
+    assert "--census-advisory" in with_flag
+    assert with_flag[with_flag.index("--census-advisory") + 1] == "census.json"
+    assert "--census-advisory" not in without_flag

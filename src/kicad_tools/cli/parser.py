@@ -4078,6 +4078,22 @@ def _add_route_parser(subparsers) -> None:
             "footprints)."
         ),
     )
+    # Issue #4799: pre-route crossing-tail census advisory.  Mirror of the
+    # inner route_cmd.py flag; both sites must stay in sync per
+    # ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--census-advisory",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to a crossing-tail census report (written by "
+            "KCT_CROSSTAIL_CENSUS_REPORT) to replay as a pre-route prediction: "
+            "how saturated this board's diff-pair crossover lattice measured "
+            "last time, printed before routing starts. Advisory only -- never "
+            "changes routing or the exit code. Defaults to "
+            "$KCT_CROSSTAIL_CENSUS_ADVISORY when unset."
+        ),
+    )
     # Issue #4178: hard-gate on native (kicad-cli) DRC actually running.
     # Mirror of the inner route_cmd.py flag; both sites must stay in sync per
     # ``tests/test_cli_parser_drift.py``.
