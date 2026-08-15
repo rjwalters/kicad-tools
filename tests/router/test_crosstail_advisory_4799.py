@@ -265,7 +265,15 @@ def test_a_report_from_a_different_board_is_declared_stale():
     assert advisory.summary.applicable is True
     assert advisory.applicable is False
     assert any("different design" in w for w in advisory.warnings)
-    assert "WARNING" in advisory.format_human()
+    text = advisory.format_human()
+    assert "WARNING" in text
+    # "Suppressed" has to mean it: no predicted counts on screen for a report
+    # that was just rejected, or a reader will use them anyway.
+    assert "prediction SUPPRESSED" in text
+    assert "predicted this run" not in text
+    assert "worst nets" not in text
+    # ...while the rejected numbers stay available to tooling.
+    assert advisory.to_dict()["predicted_saturated"] == 1
 
 
 def test_coverage_exactly_at_the_threshold_is_not_stale():

@@ -189,17 +189,22 @@ not go through `kct route` (board scripts drive the router API directly); the
 flag wins when both are set. The block prints to **stderr**, before any router
 or component loading:
 
+Verbatim, replaying board-06's own census report (the 2026-08-14 seed-42
+shadow-ON run documented above) against `diffpair_test_routed.kicad_pcb`:
+
 ```
-[crosstail-advisory] pre-route prediction from census.json, 3.2h old
+[crosstail-advisory] pre-route prediction from census.json, 8.0h old
 [crosstail-advisory]   prior run: 166 crossover(s), 150 saturated (90.4%), inert 94.6%, verdict=saturated
-[crosstail-advisory]   board cross-check: 18/18 report net(s) still on this board (100.0% coverage)
+[crosstail-advisory]   board cross-check: 9/9 report net(s) still on this board (100.0% coverage)
 [crosstail-advisory]   predicted this run: 150/166 saturated crossover(s) (90.4%)
-[crosstail-advisory]   worst nets: MIPI_D0- 12/12, MIPI_D0+ 12/12, USB_DP 11/12, …
-[crosstail-advisory]   reading: ordering levers are inert here -- the diff-pair shadow phase will
-                       spend its budget without a lever to pull; the constraint is upstream in
-                       placement / escape planning
+[crosstail-advisory]   worst nets: PCIE_TX- 86/88, MIPI_CLK- 22/24, USB3_TX1- 20/26, USB2_D+ 6/10, PCIE_RX- 5/7 (+4 more)
+[crosstail-advisory]   reading: ordering levers are inert here -- the diff-pair shadow phase will spend its budget without a lever to pull; the constraint is upstream in placement / escape planning
 [crosstail-advisory]   ADVISORY ONLY -- this route is unchanged by the above (#4799)
 ```
+
+The headline figures are the ones the census printed 28 minutes into the run
+that produced the report (150/166, 90.4%, `inert 94.6%`) — the point is
+entirely *when* they are on screen.
 
 This is a *replay*, not a placement-only predictor: it inherits the previous
 run's ordering, so its accuracy decays as the design moves. Two guards keep it
@@ -270,6 +275,27 @@ If the report cannot be written (unwritable path, read-only directory), the
 flush prints a diagnostic line to stderr and returns — it never raises, on the
 `_offboard_preflight` precedent that report-only surfaces must not block a
 route that already succeeded.
+
+### Cost of the advisory
+
+A leading indicator that costs what it is trying to avoid is not one, so this
+is the number the eventual go/no-go wiring will need. Measured on board-06's
+own 166-crossover report against `diffpair_test_routed.kicad_pcb`
+(2026-08-15, same machine as the run that produced the report):
+
+| Step | Wall clock |
+|------|-----------|
+| `LoadedCensusReport.from_path` (parse + rehydrate 166 records) | 0.0009 s |
+| `board_net_names` (parse the board, 26 nets) | 0.1468 s |
+| `build_advisory` (roll-up, cross-check, verdict) | 0.0008 s |
+| **Total preflight** | **0.149 s** |
+| the census this replays, inside the routing run | 1.27 s (`census_s_total`) |
+| the board-06 `--step route` run that produced it | ~1680 s (28 min) |
+
+So the prediction costs **~0.01% of the route it precedes** and ~12% of the
+in-route census it replays; the board parse dominates it, and everything else
+is noise. Its own copy of the census's cost is zero — the measurement already
+happened, in a previous process.
 
 ## API
 

@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a missing, malformed or foreign report prints one `no prediction:` line and
   the route proceeds unchanged — and no code branches on the verdict. Wiring
   it into a go/no-go or steering decision remains follow-up work on #4799.
+  Measured on board-06's own 166-crossover report: the whole preflight costs
+  **0.149 s** (0.0009 s to load, 0.147 s to read the board's nets, 0.0008 s to
+  aggregate) and reproduces the run's 150/166 = 90.4% saturation figure —
+  ~0.01% of the 28-minute route it now precedes instead of concluding.
   New API in `kicad_tools.router.crosstail_advisory`
   (`LoadedCensusReport`, `build_advisory`, `emit_advisory`, `board_net_names`);
   documented in `docs/reference/crosstail-census-report.md`.

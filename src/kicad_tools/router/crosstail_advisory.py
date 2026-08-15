@@ -329,6 +329,16 @@ class CrossingTailAdvisory:
                     f"{tag}   board cross-check: skipped (board nets unavailable); "
                     f"predicting from all {self.nets_in_report} report net(s)"
                 )
+        if s.applicable and self.stale:
+            # A block that says "suppressed" and then prints the numbers has
+            # not suppressed anything -- a reader is entitled to use whatever
+            # is on screen.  The rejected counts stay in to_dict() for tooling
+            # that wants to inspect what was thrown away.
+            lines.append(
+                f"{tag}   prediction SUPPRESSED -- this report does not "
+                f"describe the board being routed (see WARNING below)"
+            )
+        elif s.applicable:
             lines.append(
                 f"{tag}   predicted this run: {self.predicted_saturated}/"
                 f"{self.predicted_crossovers} saturated crossover(s) "
