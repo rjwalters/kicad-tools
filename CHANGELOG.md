@@ -32,6 +32,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--voltage-map` (single `pairwise_active()` boolean, unchanged route
   output); `ROUTER_CPP_BUILD_VERSION` 20 → 21 for the new binding surface.
 
+- **Pre-route crossing-tail census advisory** (part of #4799) — `kct route
+  --census-advisory <report.json>` (or `KCT_CROSSTAIL_CENSUS_ADVISORY=<path>`
+  for callers that drive the router API directly) replays a census report
+  written by an earlier run *before the first A\* expansion* of the next one,
+  turning the crossover census from a post-mortem into a leading indicator:
+  same measurement, read earlier. The `[crosstail-advisory]` block reports the
+  prior run's `saturated_pct` / `inert_pct` / `verdict`, a per-net roll-up of
+  the saturated crossovers (worst first), and the predicted saturated-crossover
+  count for this run. Because a replay inherits the previous run's ordering,
+  two guards keep it honest: report nets are cross-checked against the nets
+  declared by the board being routed (nets that no longer exist do not
+  contribute), and a report whose nets overlap the board by less than 50%
+  (`STALE_COVERAGE_PCT_THRESHOLD`) is declared `stale` with its prediction
+  suppressed rather than presented as this board's forecast. A report that
+  scanned nothing stays `not-applicable` (boards 05 and 07 today), never "0%
+  saturated". **Advisory only**: the preflight returns 0 unconditionally —
+  a missing, malformed or foreign report prints one `no prediction:` line and
+  the route proceeds unchanged — and no code branches on the verdict. Wiring
+  it into a go/no-go or steering decision remains follow-up work on #4799.
+  New API in `kicad_tools.router.crosstail_advisory`
+  (`LoadedCensusReport`, `build_advisory`, `emit_advisory`, `board_net_names`);
+  documented in `docs/reference/crosstail-census-report.md`.
+
 - **Structured crossing-tail census report** (part of #4799) — the #4580
   diff-pair crossover legality census now also captures what it prints as
   data. Each censused crossover produces a `CrossingTailCensusRecord`

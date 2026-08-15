@@ -377,6 +377,13 @@ whenever the census is on.  It is report-only and costs ~1 µs per crossover on
 top of the census itself; schema and interpretation live in
 [`docs/reference/crosstail-census-report.md`](../../docs/reference/crosstail-census-report.md).
 
+That report is a post-mortem, but it does not have to be read as one: feeding
+it back in with `kct route --census-advisory <report.json>` (or
+`KCT_CROSSTAIL_CENSUS_ADVISORY=<path>`) prints this board's saturation figure
+**before** the next route's first A\* expansion, cross-checked against the
+board's current nets and suppressed when the report is stale.  Advisory only —
+it cannot change or fail a route.
+
 **State-neutral is not the same as budget-neutral ([#4635]).** PR [#4611]'s
 prose claimed the census "cannot" change the route because it is
 "observation-only by construction".  That is true of router **state** — every

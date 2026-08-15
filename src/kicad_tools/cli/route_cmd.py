@@ -10216,6 +10216,37 @@ def _offboard_preflight(pcb_path: Path) -> int:
     return 2
 
 
+def _census_advisory_preflight(pcb_path: Path, args) -> int:
+    """Replay a prior crossing-tail census as a pre-route prediction (#4799).
+
+    The census measures how much of a differential pair's 225-entry crossover
+    via-site lattice is legal at all, but it does so *during* routing and
+    reports at the end — so a board whose lattice is 90% saturated only learns
+    it after the shadow phase has already spent its budget.  Loading the
+    previous run's report here turns that post-mortem into a leading indicator:
+    same measurement, taken earlier.
+
+    **Always returns 0.**  Unlike ``_offboard_preflight`` this is advisory, not
+    a gate: a missing or stale report degrades to a printed diagnostic, never
+    to a refusal to route.  Wiring the prediction into an actual go/no-go
+    decision is deliberate follow-up work on #4799.
+    """
+    try:
+        from kicad_tools.router.crosstail_advisory import (
+            advisory_path_from_env,
+            emit_advisory,
+        )
+
+        report_path = getattr(args, "census_advisory", None) or advisory_path_from_env()
+        if report_path is None:
+            return 0
+        emit_advisory(report_path, pcb_path)
+    except Exception:
+        # An advisory that cannot run must never block routing (#4156 precedent).
+        pass
+    return 0
+
+
 def _apply_complete_mode_defaults(args, parser, argv: list[str] | None = None) -> None:
     """Apply the ``--complete`` mode implications (Issue #4471, epic #4465).
 
@@ -12104,6 +12135,22 @@ def _main_impl(argv: list[str] | None = None) -> int:
             "footprints)."
         ),
     )
+    # Issue #4799: replay a previous run's crossing-tail census as a pre-route
+    # prediction.  Strictly advisory -- it prints a block before any router work
+    # and never changes routing or the exit code.
+    parser.add_argument(
+        "--census-advisory",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to a crossing-tail census report (written by "
+            "KCT_CROSSTAIL_CENSUS_REPORT) to replay as a pre-route prediction: "
+            "how saturated this board's diff-pair crossover lattice measured "
+            "last time, printed before routing starts. Advisory only -- never "
+            "changes routing or the exit code. Defaults to "
+            "$KCT_CROSSTAIL_CENSUS_ADVISORY when unset."
+        ),
+    )
     parser.add_argument(
         "--manufacturer",
         "--mfr",
@@ -13004,6 +13051,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
         rc = _offboard_preflight(pcb_path)
         if rc != 0:
             return rc
+
+    # Issue #4799: advisory crossing-tail census replay.  Runs after the hard
+    # gates (there is no point predicting congestion for a board that is not
+    # going to route at all) and before any router/component loading, so the
+    # prediction is on screen ahead of the first A* expansion.
+    _census_advisory_preflight(pcb_path, args)
 
     # Issue #2996: Validate and load the optional --net-class-map sidecar
     # early -- before dispatching to any of the route_with_* sub-flows --

@@ -171,6 +171,79 @@ the escape-channel registry keyed on which nets are still unrouted, and the
 pair's own guide route — so it cannot simply be hoisted ahead of the first A*
 expansion).
 
+## Replaying it before the next route (`--census-advisory`)
+
+The document above is still a post-mortem: it lands at the end of the run that
+produced it, after the shadow phase has already spent its budget. **Loading it
+at the start of the *next* run** is what turns the census into a leading
+indicator — same measurement, read earlier:
+
+```bash
+# run N: measure (see "Enabling the report" above) -> census.json
+# run N+1: predict, before the first A* expansion
+uv run kct route board.kicad_pcb --census-advisory census.json
+```
+
+`KCT_CROSSTAIL_CENSUS_ADVISORY=<path>` is the equivalent for callers that do
+not go through `kct route` (board scripts drive the router API directly); the
+flag wins when both are set. The block prints to **stderr**, before any router
+or component loading:
+
+```
+[crosstail-advisory] pre-route prediction from census.json, 3.2h old
+[crosstail-advisory]   prior run: 166 crossover(s), 150 saturated (90.4%), inert 94.6%, verdict=saturated
+[crosstail-advisory]   board cross-check: 18/18 report net(s) still on this board (100.0% coverage)
+[crosstail-advisory]   predicted this run: 150/166 saturated crossover(s) (90.4%)
+[crosstail-advisory]   worst nets: MIPI_D0- 12/12, MIPI_D0+ 12/12, USB_DP 11/12, …
+[crosstail-advisory]   reading: ordering levers are inert here -- the diff-pair shadow phase will
+                       spend its budget without a lever to pull; the constraint is upstream in
+                       placement / escape planning
+[crosstail-advisory]   ADVISORY ONLY -- this route is unchanged by the above (#4799)
+```
+
+This is a *replay*, not a placement-only predictor: it inherits the previous
+run's ordering, so its accuracy decays as the design moves. Two guards keep it
+honest rather than confident:
+
+* **Board cross-check.** The report's nets are matched against the nets
+  declared by the board being routed. Nets that no longer exist do not
+  contribute to the predicted counts, so a report is not allowed to predict
+  saturation for copper that is gone.
+* **Staleness.** When fewer than **50%** of the report's nets still exist on
+  the board (`STALE_COVERAGE_PCT_THRESHOLD`), the advisory sets `stale` and
+  suppresses the prediction — a report from a *different* design must not be
+  reported as this board's forecast. 50% is deliberately generous: a handful of
+  renamed nets keeps a same-board report usable.
+
+The prediction is suppressed the same way for a report that scanned nothing
+(`verdict: "not-applicable"`, boards 05 / 07 — see below); `applicable` is
+`false` in both cases and the block says which.
+
+`--census-advisory` **cannot fail a route.** A missing, unreadable, malformed
+or foreign file prints one `[crosstail-advisory] no prediction: …` line and the
+route proceeds; the preflight returns 0 unconditionally, unlike the
+`_offboard_preflight` gate it is modelled on. Anomalies that are *not* fatal —
+a schema version this build does not know, a report written with the census
+disabled, a stored summary that disagrees with its own records (the advisory
+re-aggregates from the records and says so) — surface as `WARNING:` lines.
+
+### Advisory fields
+
+`CrossingTailAdvisory.to_dict()` is the machine form of the block above (for
+tooling; `kct route` prints only the text):
+
+| Field | Meaning |
+|-------|---------|
+| `source` / `generated_at` / `age_seconds` | Which report, written when, how stale |
+| `applicable` | The prediction is usable: the prior run measured something **and** the board cross-check accepted it |
+| `stale` | Coverage fell below `STALE_COVERAGE_PCT_THRESHOLD` |
+| `board_nets_known` | Whether the board's nets could be read at all (`false` ⇒ cross-check skipped, every report net contributes) |
+| `nets_in_report` / `nets_on_board` / `coverage_pct` | The cross-check |
+| `predicted_crossovers` / `predicted_saturated` / `_pct` | Restricted to nets still on the board |
+| `prior_summary` | The re-aggregated summary block, identical in shape to the report's own |
+| `nets[]` | Per-net roll-up (`crossovers`, `saturated`, `saturated_pct`, `no_ordering_lever`, `inert`, `present_on_board`), worst first |
+| `warnings[]` | The `WARNING:` lines, verbatim |
+
 ## Not applicable ≠ zero
 
 Only board-06 exercises this path today. Board-05 has no differential pairs;
@@ -215,6 +288,27 @@ write_report("census.json")
 
 `DiffPairRouter._census_records` holds the same records for a single router
 instance, reset at the start of every `route_all_with_diffpairs` call.
+
+The replay side:
+
+```python
+from kicad_tools.router.crosstail_advisory import (
+    LoadedCensusReport,  # parse + rehydrate a report
+    board_net_names,  # nets of the board about to be routed (None = unknown)
+    build_advisory,  # report + board nets -> prediction
+    emit_advisory,  # the two above + print; never raises
+)
+
+advisory = build_advisory(
+    LoadedCensusReport.from_path("census.json"),
+    board_net_names("board.kicad_pcb"),
+)
+print(advisory.applicable, advisory.predicted_saturated, advisory.summary.verdict)
+```
+
+`LoadedCensusReport.from_path` raises `CensusReportError` for anything that is
+not a readable census report — `emit_advisory` (and therefore `kct route`)
+catches it.
 
 [#3438]: https://github.com/rjwalters/kicad-tools/issues/3438
 [#4580]: https://github.com/rjwalters/kicad-tools/issues/4580
