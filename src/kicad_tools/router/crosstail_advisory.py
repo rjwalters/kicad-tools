@@ -28,11 +28,20 @@ carries an explicit board cross-check (how many of the report's nets still
 exist on the board being routed) and refuses to look confident when the
 overlap is poor.
 
-**Advisory only.**  Nothing here changes routing, and nothing here can fail a
-run: :func:`emit_advisory` swallows every error into a stderr diagnostic, on
-the ``_offboard_preflight`` precedent that report-only surfaces must never
-block a route.  Wiring saturation into an actual go/no-go or steering decision
-remains deliberate follow-up work on #4799.
+**Advisory by default.**  Reading a report changes nothing: :func:`emit_advisory`
+swallows every error into a stderr diagnostic, on the ``_offboard_preflight``
+precedent that report-only surfaces must never block a route.
+
+**Opt-in go/no-go.**  :func:`evaluate_gate` turns that same prediction into a
+decision for callers that ask for one (``kct route --census-advisory-gate``):
+when the replayed prediction is applicable, trusted, and inert at or above the
+threshold, the route aborts with :data:`GATE_EXIT_CODE` *before the first A\\*
+expansion*, naming the worst nets and pointing at the layer that can actually
+fix them (placement / escape planning).  The gate is deliberately hard to
+trigger by accident -- every condition that makes the prediction less than
+trustworthy (no report, nothing measured, a stale/suppressed cross-check, a
+census that was never enabled, an unknown schema) resolves to **GO**, because
+"we could not predict" must never read as "we predict failure".
 """
 
 from __future__ import annotations
@@ -55,8 +64,19 @@ from kicad_tools.router.crosstail_census import (
 
 __all__ = [
     "ADVISORY_ENV_VAR",
+    "GATE_EXIT_CODE",
+    "GATE_REASON_BELOW_THRESHOLD",
+    "GATE_REASON_CENSUS_DISABLED",
+    "GATE_REASON_INERT",
+    "GATE_REASON_NOT_APPLICABLE",
+    "GATE_REASON_NO_BOARD_CROSSOVERS",
+    "GATE_REASON_NO_REPORT",
+    "GATE_REASON_SATURATED",
+    "GATE_REASON_SCHEMA_MISMATCH",
+    "GATE_REASON_STALE",
     "STALE_COVERAGE_PCT_THRESHOLD",
     "WORST_NETS_SHOWN",
+    "CensusGateDecision",
     "CensusReportError",
     "CrossingTailAdvisory",
     "LoadedCensusReport",
@@ -65,6 +85,9 @@ __all__ = [
     "board_net_names",
     "build_advisory",
     "emit_advisory",
+    "emit_gate_decision",
+    "evaluate_gate",
+    "parse_gate_threshold_pct",
 ]
 
 #: Fallback surface for callers that do not go through ``kct route`` -- board
@@ -82,6 +105,27 @@ STALE_COVERAGE_PCT_THRESHOLD = 50.0
 
 #: How many worst-offender nets the human block names before eliding.
 WORST_NETS_SHOWN = 5
+
+#: Exit code ``kct route`` returns when the opt-in census gate says NO-GO.
+#: Distinct from every code already on the route ladder (0-8; see the
+#: ``exit codes:`` epilog in ``cli/route_cmd.py``) so CI can tell "refused to
+#: start -- the lattice was measured inert" apart from "started and failed",
+#: which is the whole point of a pre-route gate.
+GATE_EXIT_CODE = 9
+
+#: Why the gate decided what it decided.  The first six are all **GO**: they
+#: describe a prediction that does not exist or cannot be trusted, and the gate
+#: refuses to convert any of them into a failure.
+GATE_REASON_NO_REPORT = "no-report"
+GATE_REASON_NOT_APPLICABLE = "not-applicable"
+GATE_REASON_STALE = "stale"
+GATE_REASON_CENSUS_DISABLED = "census-disabled"
+GATE_REASON_SCHEMA_MISMATCH = "schema-mismatch"
+GATE_REASON_NO_BOARD_CROSSOVERS = "no-board-crossovers"
+GATE_REASON_BELOW_THRESHOLD = "below-threshold"
+#: NO-GO reasons.
+GATE_REASON_SATURATED = "saturated"
+GATE_REASON_INERT = "inert"
 
 
 class CensusReportError(ValueError):
@@ -259,6 +303,10 @@ class CrossingTailAdvisory:
     predicted_saturated: int
     stale: bool
     warnings: tuple[str, ...] = ()
+    #: Schema version the *report* declared.  Kept as a field (rather than
+    #: re-derived from the warning text) because the gate has to branch on it:
+    #: a document this build only half-understands must not fail a route.
+    report_schema_version: int = SCHEMA_VERSION
 
     @property
     def applicable(self) -> bool:
@@ -277,6 +325,32 @@ class CrossingTailAdvisory:
             return 0.0
         return round(100.0 * self.predicted_saturated / self.predicted_crossovers, 1)
 
+    @property
+    def contributing_nets(self) -> tuple[NetPrediction, ...]:
+        """Report nets that still exist on the board (worst first).
+
+        ``present_on_board is None`` (cross-check skipped) counts as present --
+        the same rule :func:`build_advisory` used to compute the predicted
+        counts, kept in one place so the block and the gate cannot disagree.
+        """
+        return tuple(n for n in self.nets if n.present_on_board is not False)
+
+    @property
+    def predicted_inert(self) -> int:
+        """Predicted crossovers where no ordering key could change the outcome.
+
+        The union of saturated and single-site-legal, restricted to nets still
+        on the board -- the gate's real subject.  ``predicted_saturated`` alone
+        would call a lattice healthy when its every legal set offered one site.
+        """
+        return sum(n.inert for n in self.contributing_nets)
+
+    @property
+    def predicted_inert_pct(self) -> float:
+        if self.predicted_crossovers <= 0:
+            return 0.0
+        return round(100.0 * self.predicted_inert / self.predicted_crossovers, 1)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "advisory": "crosstail-census",
@@ -294,13 +368,20 @@ class CrossingTailAdvisory:
             "predicted_crossovers": self.predicted_crossovers,
             "predicted_saturated": self.predicted_saturated,
             "predicted_saturated_pct": self.predicted_saturated_pct,
+            "predicted_inert": self.predicted_inert,
+            "predicted_inert_pct": self.predicted_inert_pct,
             "prior_summary": self.summary.to_dict(),
             "nets": [n.to_dict() for n in self.nets],
             "warnings": list(self.warnings),
         }
 
-    def format_human(self) -> str:
-        """Greppable ``[crosstail-advisory]`` block, printed before routing."""
+    def format_human(self, *, gating: bool = False) -> str:
+        """Greppable ``[crosstail-advisory]`` block, printed before routing.
+
+        *gating* only changes the trailer: a block that says "ADVISORY ONLY --
+        this route is unchanged" and is then followed by an abort would be a
+        lie, so an armed :func:`evaluate_gate` gets its own last line.
+        """
         tag = "[crosstail-advisory]"
         age = ""
         if self.age_seconds is not None:
@@ -365,7 +446,13 @@ class CrossingTailAdvisory:
                 f"diff-pair shadow phase will spend its budget without a lever "
                 f"to pull; the constraint is upstream in placement / escape planning"
             )
-        lines.append(f"{tag}   ADVISORY ONLY -- this route is unchanged by the above (#4799)")
+        if gating:
+            lines.append(
+                f"{tag}   GATE ARMED (--census-advisory-gate) -- see the "
+                f"[crosstail-gate] verdict below (#4799)"
+            )
+        else:
+            lines.append(f"{tag}   ADVISORY ONLY -- this route is unchanged by the above (#4799)")
         return "\n".join(lines)
 
 
@@ -479,6 +566,241 @@ def build_advisory(
         predicted_saturated=predicted_saturated,
         stale=stale,
         warnings=tuple(warnings),
+        report_schema_version=report.schema_version,
+    )
+
+
+@dataclass(frozen=True)
+class CensusGateDecision:
+    """The opt-in go/no-go verdict derived from a :class:`CrossingTailAdvisory`.
+
+    ``gated`` is the decision; ``reason`` is the machine-readable *why* (one of
+    the ``GATE_REASON_*`` tokens) so a caller never has to parse the prose.
+    Every "cannot trust the prediction" path is a **GO** with its own reason --
+    the distinction that keeps this gate from failing routes on the strength of
+    a file that describes some other board.
+    """
+
+    gated: bool
+    reason: str
+    detail: str
+    threshold_pct: float
+    predicted_crossovers: int
+    predicted_saturated: int
+    predicted_saturated_pct: float
+    predicted_inert: int
+    predicted_inert_pct: float
+    worst_nets: tuple[str, ...] = ()
+    source: str | None = None
+
+    @property
+    def exit_code(self) -> int:
+        """:data:`GATE_EXIT_CODE` on NO-GO, 0 on GO."""
+        return GATE_EXIT_CODE if self.gated else 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "gate": "crosstail-census",
+            "schema_version": SCHEMA_VERSION,
+            "source": self.source,
+            "gated": self.gated,
+            "reason": self.reason,
+            "detail": self.detail,
+            "exit_code": self.exit_code,
+            "threshold_pct": self.threshold_pct,
+            "predicted_crossovers": self.predicted_crossovers,
+            "predicted_saturated": self.predicted_saturated,
+            "predicted_saturated_pct": self.predicted_saturated_pct,
+            "predicted_inert": self.predicted_inert,
+            "predicted_inert_pct": self.predicted_inert_pct,
+            "worst_nets": list(self.worst_nets),
+        }
+
+    def format_human(self) -> str:
+        """Greppable ``[crosstail-gate]`` block, printed under the advisory."""
+        tag = "[crosstail-gate]"
+        if not self.gated:
+            return "\n".join(
+                [
+                    f"{tag} GO ({self.reason})",
+                    f"{tag}   {self.detail}",
+                ]
+            )
+        lines = [
+            f"{tag} NO-GO ({self.reason}) -- refusing to route a lattice this board "
+            f"already measured inert",
+            f"{tag}   predicted {self.predicted_saturated}/{self.predicted_crossovers} "
+            f"saturated ({self.predicted_saturated_pct}%), inert "
+            f"{self.predicted_inert_pct}% >= threshold {self.threshold_pct}%",
+        ]
+        if self.worst_nets:
+            lines.append(f"{tag}   worst nets: {', '.join(self.worst_nets)}")
+        lines.extend(
+            [
+                f"{tag}   the diff-pair shadow phase would spend its whole budget "
+                f"with no ordering lever to pull: no via-site sort key can create "
+                f"legality that the lattice does not have",
+                f"{tag}   FIX LAYER: placement / escape planning, not the router -- "
+                f"give the nets above more room (re-place their sources/sinks, widen "
+                f"the escape channels, or add a layer), then re-measure with "
+                f"KCT_CROSSTAIL_CENSUS=1 KCT_CROSSTAIL_CENSUS_REPORT=<path>",
+                f"{tag}   aborted before any router work (exit {self.exit_code}); "
+                f"drop --census-advisory-gate to route anyway, or raise "
+                f"--census-advisory-gate-pct (#4799)",
+            ]
+        )
+        return "\n".join(lines)
+
+
+def parse_gate_threshold_pct(value: str) -> float:
+    """argparse ``type=`` for ``--census-advisory-gate-pct``.
+
+    Rejects non-numeric and out-of-range values at parse time (argparse exit 2)
+    rather than letting a typo like ``-90`` silently gate every board.
+    """
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid percentage: {value!r}") from None
+    if not (0.0 <= parsed <= 100.0):
+        raise ValueError(f"percentage must be between 0 and 100, got {parsed}")
+    return parsed
+
+
+def evaluate_gate(
+    advisory: CrossingTailAdvisory | None,
+    *,
+    threshold_pct: float | None = None,
+) -> CensusGateDecision:
+    """Turn a replayed prediction into an opt-in go/no-go (#4799).
+
+    NO-GO requires **all** of:
+
+    * a prediction exists (a report was read),
+    * the prior run actually measured something (``applicable``; "not
+      applicable" is 0 crossovers scanned, which is emphatically not 0%
+      saturated and must never be read as either a pass or a failure),
+    * the board cross-check accepted it (``not stale``) -- a suppressed
+      prediction can never gate, per this module's staleness contract,
+    * the report was written with the census enabled and at a schema this
+      build reads (otherwise the numbers are not the numbers),
+    * at least one predicted crossover survives the board cross-check, and
+    * ``predicted_inert_pct >= threshold_pct``.
+
+    *threshold_pct* defaults to the threshold the advisory's own verdict used
+    (:data:`SATURATED_PCT_ADVISORY_THRESHOLD`, 90%), so the gate and the
+    printed verdict cannot drift apart unless the caller asks them to.
+    """
+    if advisory is None:
+        return CensusGateDecision(
+            gated=False,
+            reason=GATE_REASON_NO_REPORT,
+            detail=(
+                "no census report could be read, so there is no prediction to "
+                "gate on; routing proceeds unchanged"
+            ),
+            threshold_pct=(
+                SATURATED_PCT_ADVISORY_THRESHOLD if threshold_pct is None else threshold_pct
+            ),
+            predicted_crossovers=0,
+            predicted_saturated=0,
+            predicted_saturated_pct=0.0,
+            predicted_inert=0,
+            predicted_inert_pct=0.0,
+        )
+
+    threshold = advisory.summary.saturated_threshold_pct if threshold_pct is None else threshold_pct
+
+    def _decide(gated: bool, reason: str, detail: str) -> CensusGateDecision:
+        # Worst offenders by inert count -- the gate's subject is inertness, not
+        # saturation alone, so a net whose every legal set has a single site
+        # must be nameable here even though it saturates nowhere.
+        offenders = sorted(
+            (n for n in advisory.contributing_nets if n.inert > 0),
+            key=lambda n: (-n.inert, -n.crossovers, n.net_name),
+        )
+        worst = tuple(
+            f"{n.net_name} inert {n.inert}/{n.crossovers}" for n in offenders[:WORST_NETS_SHOWN]
+        )
+        return CensusGateDecision(
+            gated=gated,
+            reason=reason,
+            detail=detail,
+            threshold_pct=threshold,
+            predicted_crossovers=advisory.predicted_crossovers,
+            predicted_saturated=advisory.predicted_saturated,
+            predicted_saturated_pct=advisory.predicted_saturated_pct,
+            predicted_inert=advisory.predicted_inert,
+            predicted_inert_pct=advisory.predicted_inert_pct,
+            worst_nets=worst if gated else (),
+            source=advisory.source,
+        )
+
+    if not advisory.summary.applicable:
+        return _decide(
+            False,
+            GATE_REASON_NOT_APPLICABLE,
+            "the prior run scanned 0 crossover(s) (verdict=not-applicable): "
+            "nothing was measured, which is not a 0%-saturated result and not a "
+            "failing one either -- never gating on it",
+        )
+    if advisory.stale:
+        return _decide(
+            False,
+            GATE_REASON_STALE,
+            f"the prediction was suppressed as stale ({advisory.coverage_pct}% of "
+            f"the report's nets are on this board); a measurement of a different "
+            f"design must never fail this route",
+        )
+    if not advisory.census_enabled:
+        return _decide(
+            False,
+            GATE_REASON_CENSUS_DISABLED,
+            "the report was written with the census disabled "
+            "(KCT_CROSSTAIL_CENSUS unset), so its lattice figures are not "
+            "measurements -- not gating",
+        )
+    if advisory.summary.crossovers_scanned and advisory.nets_in_report == 0:
+        # Defensive: records with no net names at all.
+        return _decide(
+            False,
+            GATE_REASON_NO_BOARD_CROSSOVERS,
+            "the report names no nets, so nothing can be matched to this board",
+        )
+    if advisory.predicted_crossovers <= 0:
+        return _decide(
+            False,
+            GATE_REASON_NO_BOARD_CROSSOVERS,
+            "none of the report's measured crossovers belong to a net that is "
+            "still on this board -- nothing to predict",
+        )
+    if advisory.report_schema_version != SCHEMA_VERSION:
+        return _decide(
+            False,
+            GATE_REASON_SCHEMA_MISMATCH,
+            f"the report declares schema v{advisory.report_schema_version} and "
+            f"this build reads v{SCHEMA_VERSION}; fields may be missing, so its "
+            "numbers are not trusted to fail a route",
+        )
+
+    if advisory.predicted_inert_pct < threshold:
+        return _decide(
+            False,
+            GATE_REASON_BELOW_THRESHOLD,
+            f"predicted inert {advisory.predicted_inert_pct}% < threshold "
+            f"{threshold}% ({advisory.predicted_saturated}/"
+            f"{advisory.predicted_crossovers} saturated); ordering levers remain, "
+            "routing proceeds",
+        )
+    reason = (
+        GATE_REASON_SATURATED
+        if advisory.predicted_saturated_pct >= threshold
+        else GATE_REASON_INERT
+    )
+    return _decide(
+        True,
+        reason,
+        f"predicted inert {advisory.predicted_inert_pct}% >= threshold {threshold}%",
     )
 
 
@@ -520,6 +842,7 @@ def emit_advisory(
     *,
     stream: Any = None,
     saturated_threshold_pct: float = SATURATED_PCT_ADVISORY_THRESHOLD,
+    gating: bool = False,
 ) -> CrossingTailAdvisory | None:
     """Print the pre-route advisory for *report_path*.  Never raises.
 
@@ -527,6 +850,10 @@ def emit_advisory(
     one-line diagnostic goes to *stream*).  A missing or malformed report is a
     missing diagnostic, not a reason to refuse to route -- the
     ``_offboard_preflight`` precedent.
+
+    *gating* only affects the block's trailer (see
+    :meth:`CrossingTailAdvisory.format_human`); the decision itself is
+    :func:`evaluate_gate`'s, so printing and deciding stay separable.
     """
     import sys
 
@@ -548,5 +875,41 @@ def emit_advisory(
         board_nets,
         saturated_threshold_pct=saturated_threshold_pct,
     )
-    print(advisory.format_human(), file=out)
+    print(advisory.format_human(gating=gating), file=out)
     return advisory
+
+
+def emit_gate_decision(
+    advisory: CrossingTailAdvisory | None,
+    *,
+    threshold_pct: float | None = None,
+    stream: Any = None,
+) -> CensusGateDecision:
+    """Print and return the go/no-go for *advisory*.  Never raises.
+
+    A decision that cannot be computed is a **GO**: the caller gets an
+    unconditional :class:`CensusGateDecision` and routing proceeds, because an
+    exception in a predictor is not evidence about the board.
+    """
+    import sys
+
+    out = stream if stream is not None else sys.stderr
+    try:
+        decision = evaluate_gate(advisory, threshold_pct=threshold_pct)
+    except Exception as exc:  # pragma: no cover - defensive, see docstring
+        print(f"[crosstail-gate] GO (error) -- gate could not run: {exc}", file=out)
+        return CensusGateDecision(
+            gated=False,
+            reason="error",
+            detail=f"gate could not run: {exc}",
+            threshold_pct=(
+                SATURATED_PCT_ADVISORY_THRESHOLD if threshold_pct is None else threshold_pct
+            ),
+            predicted_crossovers=0,
+            predicted_saturated=0,
+            predicted_saturated_pct=0.0,
+            predicted_inert=0,
+            predicted_inert_pct=0.0,
+        )
+    print(decision.format_human(), file=out)
+    return decision

@@ -10216,6 +10216,24 @@ def _offboard_preflight(pcb_path: Path) -> int:
     return 2
 
 
+#: Exit code for the opt-in crossing-tail census gate (#4799).  Mirrored from
+#: ``crosstail_advisory.GATE_EXIT_CODE`` as a literal so building the parser
+#: (help text) does not import the router package.
+_CENSUS_GATE_EXIT_CODE = 9
+
+
+def _census_gate_pct(value: str) -> float:
+    """argparse ``type=`` for ``--census-advisory-gate-pct`` (#4799).
+
+    Delegates to the router-side validator so the inner and outer parsers
+    cannot disagree about what a legal threshold is.  Raises ``ValueError``,
+    which argparse renders as its standard "invalid value" error (exit 2).
+    """
+    from kicad_tools.router.crosstail_advisory import parse_gate_threshold_pct
+
+    return parse_gate_threshold_pct(value)
+
+
 def _census_advisory_preflight(pcb_path: Path, args) -> int:
     """Replay a prior crossing-tail census as a pre-route prediction (#4799).
 
@@ -10226,25 +10244,52 @@ def _census_advisory_preflight(pcb_path: Path, args) -> int:
     previous run's report here turns that post-mortem into a leading indicator:
     same measurement, taken earlier.
 
-    **Always returns 0.**  Unlike ``_offboard_preflight`` this is advisory, not
-    a gate: a missing or stale report degrades to a printed diagnostic, never
-    to a refusal to route.  Wiring the prediction into an actual go/no-go
-    decision is deliberate follow-up work on #4799.
+    **Returns 0 unless ``--census-advisory-gate`` is set.**  Without the gate
+    flag this is advisory exactly as it was in #4862: a missing or stale report
+    degrades to a printed diagnostic, never to a refusal to route.  With the
+    flag, a prediction that is applicable, trusted and inert at/above the
+    threshold aborts the run with
+    :data:`~kicad_tools.router.crosstail_advisory.GATE_EXIT_CODE` (9) before any
+    router or component loading — the point of a *pre*-route gate is to spend
+    nothing.  Every path where the prediction cannot be trusted (no report,
+    nothing measured, stale cross-check, census disabled, unknown schema) still
+    returns 0.
     """
+    gate = bool(getattr(args, "census_advisory_gate", False)) or (
+        getattr(args, "census_advisory_gate_pct", None) is not None
+    )
     try:
         from kicad_tools.router.crosstail_advisory import (
             advisory_path_from_env,
             emit_advisory,
+            emit_gate_decision,
         )
 
         report_path = getattr(args, "census_advisory", None) or advisory_path_from_env()
         if report_path is None:
+            if gate:
+                # Armed but with nothing to read: say so rather than passing
+                # silently, or the operator reads a green run as "predicted OK".
+                print(
+                    "[crosstail-gate] GO (no-report) -- --census-advisory-gate is "
+                    "set but no census report was given (--census-advisory / "
+                    "$KCT_CROSSTAIL_CENSUS_ADVISORY); nothing to gate on",
+                    file=sys.stderr,
+                )
             return 0
-        emit_advisory(report_path, pcb_path)
+        advisory = emit_advisory(report_path, pcb_path, gating=gate)
+        if not gate:
+            return 0
+        decision = emit_gate_decision(
+            advisory,
+            threshold_pct=getattr(args, "census_advisory_gate_pct", None),
+        )
+        return decision.exit_code
     except Exception:
-        # An advisory that cannot run must never block routing (#4156 precedent).
-        pass
-    return 0
+        # An advisory that cannot run must never block routing (#4156
+        # precedent) — and neither may the gate: a crashed predictor is not
+        # evidence about the board.
+        return 0
 
 
 def _apply_complete_mode_defaults(args, parser, argv: list[str] | None = None) -> None:
@@ -11232,6 +11277,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
                  clearance violations (issues #1666, #4588)
               5  interrupted by SIGINT with partial results saved
               8  --complete: one or more unroutable links remain (issue #4477)
+              9  --census-advisory-gate: the replayed crossing-tail census
+                 predicts an inert crossover lattice; aborted before any
+                 router work (issue #4799)
         """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -12147,8 +12195,33 @@ def _main_impl(argv: list[str] | None = None) -> int:
             "KCT_CROSSTAIL_CENSUS_REPORT) to replay as a pre-route prediction: "
             "how saturated this board's diff-pair crossover lattice measured "
             "last time, printed before routing starts. Advisory only -- never "
-            "changes routing or the exit code. Defaults to "
-            "$KCT_CROSSTAIL_CENSUS_ADVISORY when unset."
+            "changes routing or the exit code unless --census-advisory-gate is "
+            "also set. Defaults to $KCT_CROSSTAIL_CENSUS_ADVISORY when unset."
+        ),
+    )
+    parser.add_argument(
+        "--census-advisory-gate",
+        action="store_true",
+        default=False,
+        help=(
+            "Turn the --census-advisory prediction into a go/no-go: abort "
+            f"(exit {_CENSUS_GATE_EXIT_CODE}) before any router work when the "
+            "replayed census predicts an inert crossover lattice (inert%% >= "
+            "the threshold, default 90). Off by default. A prediction that "
+            "cannot be trusted -- no report, nothing measured "
+            "('not-applicable'), a stale board cross-check, a census-disabled "
+            "or unknown-schema report -- never gates."
+        ),
+    )
+    parser.add_argument(
+        "--census-advisory-gate-pct",
+        metavar="PCT",
+        type=_census_gate_pct,
+        default=None,
+        help=(
+            "Inert-percentage threshold for --census-advisory-gate (0-100; "
+            "default 90, the SATURATED_PCT_ADVISORY_THRESHOLD the printed "
+            "verdict uses). Passing this implies --census-advisory-gate."
         ),
     )
     parser.add_argument(
@@ -13052,11 +13125,15 @@ def _main_impl(argv: list[str] | None = None) -> int:
         if rc != 0:
             return rc
 
-    # Issue #4799: advisory crossing-tail census replay.  Runs after the hard
-    # gates (there is no point predicting congestion for a board that is not
-    # going to route at all) and before any router/component loading, so the
-    # prediction is on screen ahead of the first A* expansion.
-    _census_advisory_preflight(pcb_path, args)
+    # Issue #4799: crossing-tail census replay.  Runs after the hard gates
+    # (there is no point predicting congestion for a board that is not going to
+    # route at all) and before any router/component loading, so the prediction
+    # is on screen ahead of the first A* expansion.  Advisory (returns 0) unless
+    # --census-advisory-gate armed it, in which case an inert prediction aborts
+    # here with exit 9 — before anything has been spent.
+    rc = _census_advisory_preflight(pcb_path, args)
+    if rc != 0:
+        return rc
 
     # Issue #2996: Validate and load the optional --net-class-map sidecar
     # early -- before dispatching to any of the route_with_* sub-flows --
@@ -15750,6 +15827,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
     #     was specifically asked to close never closed".  See the per-link
     #     report printed above (and optionally written via
     #     --complete-report) for WHY and what copper is blocking.
+    # 9 = ``--census-advisory-gate`` refused to start: a previous run's
+    #     crossing-tail census (replayed via --census-advisory) predicts an
+    #     inert crossover lattice for this board (issue #4799).  Returned by
+    #     _census_advisory_preflight BEFORE any router or component loading,
+    #     so it is the one route exit code that means "nothing was spent";
+    #     the fix layer is placement / escape planning, not the router.
     #
     # The --min-completion flag (default 0.95) controls the success threshold.
     # With --min-completion 0.80, routing 85% of nets returns exit code 0.

@@ -746,6 +746,13 @@ def run_route_command(args) -> int:
     # flag-off path stays byte-identical.
     if getattr(args, "census_advisory", None):
         sub_argv.extend(["--census-advisory", str(args.census_advisory)])
+    # Issue #4799: forward the opt-in go/no-go gate and its threshold.  Both
+    # default off/None; forwarded only when set so the flag-off path stays
+    # byte-identical to the advisory-only behaviour.
+    if getattr(args, "census_advisory_gate", False):
+        sub_argv.append("--census-advisory-gate")
+    if getattr(args, "census_advisory_gate_pct", None) is not None:
+        sub_argv.extend(["--census-advisory-gate-pct", str(args.census_advisory_gate_pct)])
     if getattr(args, "auto_fix", False):
         sub_argv.append("--auto-fix")
     if getattr(args, "auto_fix_passes", None) is not None:

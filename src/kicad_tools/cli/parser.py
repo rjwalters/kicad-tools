@@ -3388,6 +3388,19 @@ def _add_stitch_parser(subparsers) -> None:
     add_format_flag(stitch_parser)
 
 
+def _census_gate_pct(value: str) -> float:
+    """argparse ``type=`` for ``--census-advisory-gate-pct`` (issue #4799).
+
+    Mirror of ``route_cmd._census_gate_pct``; both delegate to the single
+    router-side validator so the inner and outer parsers cannot disagree about
+    what a legal threshold is.  The import is deferred to keep the router
+    package off the CLI's import path until the flag is actually used.
+    """
+    from kicad_tools.router.crosstail_advisory import parse_gate_threshold_pct
+
+    return parse_gate_threshold_pct(value)
+
+
 def _add_route_parser(subparsers) -> None:
     """Add route subcommand parser."""
     route_parser = subparsers.add_parser(
@@ -4090,8 +4103,32 @@ def _add_route_parser(subparsers) -> None:
             "KCT_CROSSTAIL_CENSUS_REPORT) to replay as a pre-route prediction: "
             "how saturated this board's diff-pair crossover lattice measured "
             "last time, printed before routing starts. Advisory only -- never "
-            "changes routing or the exit code. Defaults to "
-            "$KCT_CROSSTAIL_CENSUS_ADVISORY when unset."
+            "changes routing or the exit code unless --census-advisory-gate is "
+            "also set. Defaults to $KCT_CROSSTAIL_CENSUS_ADVISORY when unset."
+        ),
+    )
+    route_parser.add_argument(
+        "--census-advisory-gate",
+        action="store_true",
+        default=False,
+        help=(
+            "Turn the --census-advisory prediction into a go/no-go: abort "
+            "(exit 9) before any router work when the replayed census predicts "
+            "an inert crossover lattice (inert%% >= the threshold, default 90). "
+            "Off by default. A prediction that cannot be trusted -- no report, "
+            "nothing measured ('not-applicable'), a stale board cross-check, a "
+            "census-disabled or unknown-schema report -- never gates."
+        ),
+    )
+    route_parser.add_argument(
+        "--census-advisory-gate-pct",
+        metavar="PCT",
+        type=_census_gate_pct,
+        default=None,
+        help=(
+            "Inert-percentage threshold for --census-advisory-gate (0-100; "
+            "default 90, the SATURATED_PCT_ADVISORY_THRESHOLD the printed "
+            "verdict uses). Passing this implies --census-advisory-gate."
         ),
     )
     # Issue #4178: hard-gate on native (kicad-cli) DRC actually running.
