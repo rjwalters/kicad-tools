@@ -292,10 +292,12 @@ Three conventions this batch adds:
   `report generate` calls into a data collector, a figure generator, and
   WeasyPrint — the last of which prints a multi-line "install my native
   libraries" banner *on stdout* when they are missing, which would corrupt
-  the single-document contract on any machine without them. The
-  `_stdout_to_stderr_when(as_json)` helper in `report_cmd.py` captures those
-  regions and replays them on stderr; copy it for any leaf that calls
-  third-party code it does not own.
+  the single-document contract on any machine without them. A
+  `stdout_to_stderr_when(as_json)` context manager captures those regions
+  and replays them on stderr; reach for it in any leaf that calls
+  third-party code it does not own. It started as a per-module private
+  helper here and was promoted in the seventh batch — import the shared
+  `format_options.stdout_to_stderr_when` rather than making a new copy.
 
 `tests/test_format_json_sweep_artifacts.py` guards these 5 surfaces.
 
@@ -323,7 +325,7 @@ Three conventions this batch adds or reinforces:
 - **Volatile fields are named, not hidden.** `optimize-placement` reports
   `wall_time_s`; like `board-metrics`'s `generated_at` it is the one field
   determinism is asserted modulo.
-- **The `_stdout_to_stderr_when` diversion is now the standard treatment**
+- **The `stdout_to_stderr_when` diversion is now the standard treatment**
   (third use, after `report generate`): `route-auto` and `reason --auto-route`
   drive the negotiated router, whose per-iteration progress log goes to
   **stdout**. It is captured and replayed on stderr so the JSON stream stays
@@ -340,7 +342,7 @@ orchestrators — the leaves that drive many other commands to completion:
 |---|---|
 | `build` | `{"command": "build", "spec", "project_dir", "output_dir", "mfr", "step", "dry_run", "force", "schematic", "pcb", "routed_pcb", "manufacturing_output", "steps": [{step, success, message, output_file, elapsed_s}], "counts": {total, succeeded, failed}, "wall_time_s", "exit_code", "success"}` |
 | `pipeline` | `{"command": "pipeline", "input", "pcb", "project", "schematic", "mfr", "layers", "layer_count", "step", "dry_run", "force", "best_effort", "steps": [{step, success, skipped, warning, message}], "counts": {total, succeeded, skipped, warnings}, "commit": {requested, created}, "exit_code", "success"}` |
-| `stitch` | `{"command": "stitch", "pcb", "output", "mode": "stitch"\|"blanket"\|"thermal", "target_nets", "nets_auto_detected", "manufacturer", "via_size_mm", "drill_mm", "detected_layers", "stackup_inferred_nets", "fallback_nets", "strict_model_error", "pads_found", "already_connected", "vias_added": [...], "vias_added_count", "micro_vias_placed", "traces_added": {total, straight, dogleg, extended_escape}, "via_in_pad_filtered", "hole_to_hole_rejected", "connectivity_fallback": [...], "needs_routed_fanout": [...], "pads_skipped": [...], "obstacle_breakdown", "dry_run", "saved", "drc": {requested, ran}, "success"}` |
+| `stitch` | `{"command": "stitch", "pcb", "output", "mode": "stitch"\|"blanket"\|"thermal", "target_nets", "nets_auto_detected", "manufacturer", "via_size_mm", "drill_mm", "detected_layers", "stackup_inferred_nets", "fallback_nets", "strict_model_error", "pads_found", "already_connected", "vias_added": [...], "vias_added_count", "micro_vias_placed", "traces_added": {total, straight, dogleg, extended_escape}, "via_in_pad_filtered", "hole_to_hole_rejected", "connectivity_fallback": [...], "needs_routed_fanout": [...], "pads_skipped": [...], "obstacle_breakdown", "dry_run", "saved", "drc": {requested, ran}, "exit_code", "success"}` |
 
 Three conventions this batch adds or reinforces:
 
@@ -354,7 +356,9 @@ Three conventions this batch adds or reinforces:
   including `pipeline`'s `skipped` / `warning` axes, which its exit code
   cannot express (exit 2 means "best-effort partial", not "which step").
   `build` names `elapsed_s` / `wall_time_s` as volatile (the `board-metrics`
-  `generated_at` treatment) so determinism is asserted modulo them.
+  `generated_at` treatment) so determinism is asserted modulo them. All three
+  also carry `exit_code` alongside `success`, so a caller reading a captured
+  document never has to correlate it with a separately recorded `$?`.
 - **The `stdout_to_stderr_when` diversion is now shared machinery.** It was
   copied into three CLI modules across batches 5-6; rather than making a
   fourth copy, this batch promoted it to

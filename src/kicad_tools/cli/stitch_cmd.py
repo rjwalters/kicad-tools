@@ -5956,7 +5956,14 @@ def result_document(
         # reported separately rather than collapsed into one boolean.
         "drc": {"requested": drc_requested, "ran": drc_ran},
     }
-    document["success"] = bool(result.vias_added) or bool(result.already_connected)
+    # Parity with the other two orchestrators (`build`, `pipeline`): the
+    # document carries the process exit code so a machine caller reading a
+    # captured document never has to correlate it with a separate `$?`.
+    # The caller's verdict is exactly this predicate -- vias placed, or the
+    # pads were already connected.
+    success = bool(result.vias_added) or bool(result.already_connected)
+    document["exit_code"] = 0 if success else 1
+    document["success"] = success
     return document
 
 
@@ -6193,6 +6200,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
             "command": "stitch",
             "pcb": str(args.pcb),
             "error": message,
+            "exit_code": code,
             "success": False,
         }
 

@@ -350,17 +350,19 @@ class TestSyncOrdering:
     def test_default_chain_orders_sync_after_pcb_before_outline(self) -> None:
         """Statically check the default chain ordering.
 
-        We parse the source of `main` to find the BuildStep list rather
-        than running it (which would require a full project setup).
+        We parse the source of `_run_main` to find the BuildStep list
+        rather than running it (which would require a full project setup).
         """
         import inspect
 
         from kicad_tools.cli import build_cmd
 
-        src = inspect.getsource(build_cmd.main)
-        # The default chain is a literal list inside main(); just check
-        # the relative order of the substrings is correct.  This is a
-        # weak but extremely cheap invariant to enforce.
+        src = inspect.getsource(build_cmd._run_main)
+        # The default chain is a literal list inside ``_run_main()`` (split
+        # out of ``main()`` by #4674 so the ``--format json`` document is
+        # emitted outside the stdout diversion); just check the relative
+        # order of the substrings is correct.  This is a weak but extremely
+        # cheap invariant to enforce.
         pcb_idx = src.index("BuildStep.PCB")
         sync_idx = src.index("BuildStep.SYNC")
         outline_idx = src.index("BuildStep.OUTLINE")

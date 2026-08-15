@@ -3805,7 +3805,10 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 # is asserted modulo it (batch-6 convention).
                 "elapsed_s": round(elapsed, 3),
             }
-            for result, elapsed in zip(results, step_elapsed_s, strict=False)
+            # ``step_elapsed_s`` is appended in lockstep with ``results`` at
+            # every site, so a length mismatch is a bug worth raising rather
+            # than silently truncating the ledger.
+            for result, elapsed in zip(results, step_elapsed_s, strict=True)
         ],
         "counts": {
             "total": total_count,

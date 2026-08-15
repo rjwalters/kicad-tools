@@ -296,6 +296,7 @@ class TestStitchEmission:
         assert payload["drill_mm"] == 0.2
         assert payload["pads_found"] == 2
         assert payload["vias_added_count"] >= 1
+        assert payload["exit_code"] == 0
         assert payload["success"] is True
 
     def test_document_is_the_full_untruncated_ledger(self, stitch_board, capsys):
@@ -360,6 +361,7 @@ class TestStitchEmission:
         assert rc == 1
         payload = json.loads(out)
         assert payload["command"] == "stitch"
+        assert payload["exit_code"] == 1
         assert payload["success"] is False
         assert "not found" in payload["error"]
 
