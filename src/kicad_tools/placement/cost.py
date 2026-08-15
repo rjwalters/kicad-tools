@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Sequence
+from typing import Mapping, Sequence
 
 
 class CostMode(Enum):
@@ -228,21 +228,37 @@ class BoardOutline:
 def compute_wirelength(
     placements: Sequence[ComponentPlacement],
     nets: Sequence[Net],
+    pad_positions: Mapping[tuple[str, str], tuple[float, float]] | None = None,
 ) -> float:
     """Compute total half-perimeter wirelength (HPWL) estimate.
 
     For each net, computes the half-perimeter of the bounding box of all
-    connected component positions. This is the standard HPWL estimator
-    used in placement optimization.
+    connected pins. This is the standard HPWL estimator used in placement
+    optimization.
 
     Each net's HPWL contribution is multiplied by ``net.weight`` (default
     ``1.0``). Setting ``weight > 1.0`` prioritises keeping that net short
     (used by the anchor-aware path in ``optimize-placement``); setting
     ``weight = 0.0`` excludes the net from the wirelength sum entirely.
 
+    **Pad anchoring (issue #4831 M1).** By default each pin is measured at
+    its component's *centre*, which makes the estimate blind to where a pad
+    actually sits on the footprint -- and blind to rotation entirely, since
+    rotating a part leaves ``p.x``/``p.y`` unchanged. Passing *pad_positions*
+    (see :func:`kicad_tools.placement.wirelength.build_pad_position_map`)
+    measures each pin at its own pad instead, which is the anchoring
+    pcbplace reports as its single highest-leverage placement finding
+    (``docs/placement-pad-anchoring-audit.md``). Resolution is per pin: a
+    pin absent from *pad_positions* silently falls back to its component
+    centre, so a partially-populated map degrades gracefully rather than
+    dropping the net.
+
     Args:
         placements: Current component positions.
         nets: Net connectivity information.
+        pad_positions: Optional map from ``(reference, pad_name)`` to the
+            absolute ``(x, y)`` of that pad in mm. ``None`` (the default)
+            preserves the historical centre-anchored behaviour exactly.
 
     Returns:
         Total weighted HPWL across all nets (mm).
@@ -256,11 +272,15 @@ def compute_wirelength(
     for net in nets:
         xs: list[float] = []
         ys: list[float] = []
-        for ref, _ in net.pins:
-            if ref in pos_map:
-                x, y = pos_map[ref]
-                xs.append(x)
-                ys.append(y)
+        for ref, pin_name in net.pins:
+            pos: tuple[float, float] | None = None
+            if pad_positions is not None:
+                pos = pad_positions.get((ref, pin_name))
+            if pos is None:
+                pos = pos_map.get(ref)
+            if pos is not None:
+                xs.append(pos[0])
+                ys.append(pos[1])
         if len(xs) >= 2:
             total += net.weight * ((max(xs) - min(xs)) + (max(ys) - min(ys)))
     return total
@@ -724,6 +744,7 @@ def evaluate_placement(
     ref_domains: dict[str, str] | None = None,
     required_mm_by_domain_pair: dict[tuple[str, str], float] | None = None,
     exempt_pairs: set[frozenset[str]] | None = None,
+    pad_positions: Mapping[tuple[str, str], tuple[float, float]] | None = None,
 ) -> PlacementScore:
     """Evaluate a placement configuration and return a composite score.
 
@@ -761,6 +782,15 @@ def evaluate_placement(
             Required alongside *ref_domains* for the creepage term to fire.
         exempt_pairs: Optional set of ``frozenset({ref_a, ref_b})`` pairs
             exempted from the creepage keepout (guarded sense taps).
+        pad_positions: Optional map from ``(reference, pad_name)`` to that
+            pad's absolute ``(x, y)`` in mm, as built by
+            :func:`kicad_tools.placement.wirelength.build_pad_position_map`.
+            When supplied, the **wirelength term only** is measured
+            pad-to-pad instead of centre-to-centre (issue #4831 M1); every
+            other term is unchanged. ``None`` (the default) keeps the
+            objective byte-identical to the historical centre-anchored
+            score. Pins missing from the map fall back to their component
+            centre.
 
     Returns:
         PlacementScore with total score, per-component breakdown, and
@@ -770,7 +800,7 @@ def evaluate_placement(
         config = PlacementCostConfig()
 
     # Compute individual cost components
-    wirelength = compute_wirelength(placements, nets)
+    wirelength = compute_wirelength(placements, nets, pad_positions)
     overlap = compute_overlap(placements, footprint_sizes)
     boundary = compute_boundary_violation(placements, board, footprint_sizes)
     drc = compute_drc_violations(placements, rules, footprint_sizes)

@@ -76,6 +76,32 @@ def _build_pad_lookup(
     return lookup
 
 
+def build_pad_position_map(
+    placements: Sequence[PlacedComponent],
+) -> dict[tuple[str, str], tuple[float, float]]:
+    """Build a ``(reference, pad_name) -> (x, y)`` map of absolute pad positions.
+
+    This is the bridge that lets the optimizer objective in
+    :mod:`kicad_tools.placement.cost` measure wirelength against real pad
+    coordinates without importing this module (``wirelength`` already imports
+    ``cost``, so the dependency may only run one way). Pass the result as the
+    ``pad_positions`` argument of
+    :func:`kicad_tools.placement.cost.compute_wirelength` or
+    :func:`kicad_tools.placement.cost.evaluate_placement` (issue #4831 M1;
+    see ``docs/placement-pad-anchoring-audit.md``).
+
+    Args:
+        placements: Decoded placements with transformed pad coordinates
+            (as returned by :func:`kicad_tools.placement.vector.decode`).
+
+    Returns:
+        Mapping from ``(component_reference, pad_name)`` to the pad's
+        absolute ``(x, y)`` position in mm. Components without pads
+        contribute no entries.
+    """
+    return {(comp.reference, pad.name): (pad.x, pad.y) for comp in placements for pad in comp.pads}
+
+
 def _hpwl_for_net(
     net: Net,
     pad_lookup: dict[tuple[str, str], TransformedPad],

@@ -91,6 +91,35 @@ decoded current vector (verified by
   rather than a random population; otherwise CMA-ES searches a layout space
   disconnected from your placement and can regress wirelength substantially.
 
+## What the wirelength term measures: centres vs pads (issue #4831 M1)
+
+The objective's wirelength term (`compute_wirelength`,
+`src/kicad_tools/placement/cost.py`) historically measured every pin at its
+**component centre**. Two consequences worth knowing before reading a score:
+
+- **Rotation is invisible to it.** Only `p.x`/`p.y` are read, so rotating a
+  footprint changes the centre-anchored wirelength by exactly zero — even
+  though the optimizer is searching that rotation dimension.
+- **A pin is scored where the part is, not where the pad is.** On a large IC
+  the error is bounded below by half the package diagonal: a decap "5 mm from
+  the chip centre" can be ~10 mm of copper from the pad it decouples.
+
+Passing `--pad-anchored-wirelength` (CLI) or the `pad_positions` argument of
+`compute_wirelength` / `evaluate_placement` (library) measures each pin at its
+own transformed pad instead. Pads are already produced by every candidate
+decode and thrown away, so the added cost is one dict build per evaluation.
+Resolution is per pin — a pin absent from the map falls back to its component
+centre, so partial pad data degrades gracefully instead of dropping the net.
+Per-net `Net.weight` (the `--anchor-weight` mechanism) is honoured in both
+modes.
+
+This is **opt-in**: with no `pad_positions` the score is byte-identical to the
+historical objective. It is not a rescaling — the two estimators differ by
+0.2 % to 40 % on the *same* layout across this repo's placement fixtures, so
+they can rank two candidate layouts differently. Background, the full
+term-by-term inventory, and the remaining migration candidates are in
+[`placement-pad-anchoring-audit.md`](placement-pad-anchoring-audit.md).
+
 ## HV-aware placement: the creepage-keepout term (issue #4373)
 
 By default the optimizer objective is **voltage-blind**: the wirelength term

@@ -949,6 +949,7 @@ kct optimize-placement <pcb_file> [options]
 | `--checkpoint DIR` | Directory for checkpoint save/resume |
 | `--no-slide-off` | Disable slide-off overlap pre-processing on the seed |
 | `--anchor-weight FLOAT` | Per-net HPWL multiplier boost for nets that touch `(locked)` footprints. Scales each qualifying net's HPWL by `1 + anchor_weight * (anchored_pins / total_pins)`. **Default 0.0**. |
+| `--pad-anchored-wirelength` | Measure the wirelength term between transformed **pad** coordinates instead of footprint centres (issue #4831 M1). **Default off** — the objective is unchanged unless you pass it. |
 | `--time-budget SEC` | Wall-clock budget (bounds the feasibility-gated convergence loop) |
 | `--allow-infeasible` | Exit 0 even when overlap/DRC/boundary violations remain |
 | `-v` / `-q` | Verbose / quiet |
@@ -960,6 +961,19 @@ uses `--anchor-weight 1.0` — the help-text range is the conservative knob
 designers would reach for; `1.0` is the value that actually lifted board-05
 BLDC from 40% → 60% routing completion in practice. Treat help text as the
 ceiling and the guide as the proven floor.
+
+**Pad-anchored wirelength (`--pad-anchored-wirelength`, issue #4831 M1).**
+By default every net's HPWL is measured between footprint *centres*, so the
+term is blind to where a pad actually sits — and blind to rotation entirely,
+since rotating a part leaves its centre unchanged. The flag measures each pin
+at its own transformed pad instead (pads are already computed for every
+candidate and thrown away today, so the added cost is one dict build per
+evaluation). Per-pin fallback: a pin with no pad in the map is still measured
+at its component centre, so partial pad data degrades rather than dropping the
+net. On this repo's own placement fixtures the two estimators differ by 0.2 %
+to 40 % on the *same* layout, so expect different — not merely rescaled —
+optimizer trajectories. See
+[`docs/placement-pad-anchoring-audit.md`](../placement-pad-anchoring-audit.md).
 
 **Feasibility gate.** By default the optimizer exits **1** with
 `FATAL: optimizer exited with infeasible placement (...)` on stderr if the

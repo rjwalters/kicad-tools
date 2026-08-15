@@ -103,6 +103,7 @@ from .visualization import (
 from .wirelength import (
     HPWLResult,
     NetWirelength,
+    build_pad_position_map,
     compute_hpwl,
     compute_hpwl_breakdown,
 )
@@ -154,6 +155,7 @@ __all__ = [
     "bounds",
     "bounds_with_blocks",
     "build_affinity_graph",
+    "build_pad_position_map",
     "compute_block_boundary_violation",
     "compute_hpwl",
     "compute_hpwl_breakdown",

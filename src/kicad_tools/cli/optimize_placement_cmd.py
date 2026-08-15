@@ -51,6 +51,7 @@ from kicad_tools.placement.vector import (
     bounds,
     decode,
 )
+from kicad_tools.placement.wirelength import build_pad_position_map
 
 # ---------------------------------------------------------------------------
 # Interrupt handling (SIGINT / SIGTERM)
@@ -180,14 +181,24 @@ def _evaluate(
     ref_domains: dict[str, str] | None = None,
     required_mm_by_domain_pair: dict[tuple[str, str], float] | None = None,
     exempt_pairs: set[frozenset[str]] | None = None,
+    pad_anchored: bool = False,
 ) -> PlacementScore:
     """Evaluate a single placement vector and return its score.
 
     When ``ref_domains`` and ``required_mm_by_domain_pair`` are supplied the
     HV creepage-keepout term (issue #4373) is active; otherwise the objective
     is byte-identical to the historical voltage-blind score.
+
+    When *pad_anchored* is True the wirelength term is measured between the
+    transformed pad coordinates ``decode`` already produces, instead of
+    between footprint centres (issue #4831 M1). ``False`` (the default)
+    discards those pads exactly as before, keeping the score unchanged.
     """
-    placements = _vector_to_placements(vector, components)
+    placed = decode(vector, components)
+    placements = [
+        ComponentPlacement(reference=p.reference, x=p.x, y=p.y, rotation=p.rotation) for p in placed
+    ]
+    pad_positions = build_pad_position_map(placed) if pad_anchored else None
     return evaluate_placement(
         placements,
         nets,
@@ -198,6 +209,7 @@ def _evaluate(
         ref_domains=ref_domains,
         required_mm_by_domain_pair=required_mm_by_domain_pair,
         exempt_pairs=exempt_pairs,
+        pad_positions=pad_positions,
     )
 
 
@@ -714,6 +726,7 @@ def run_optimize_placement(
     quiet: bool = False,
     no_slide_off: bool = False,
     anchor_weight: float = 0.0,
+    pad_anchored_wirelength: bool = False,
     time_budget: float | None = None,
     allow_infeasible: bool = False,
     voltage_map_path: str | None = None,
@@ -743,6 +756,15 @@ def run_optimize_placement(
             receive an inflated wirelength weight of
             ``1 + anchor_weight * anchor_pad_fraction``. Default 0.0
             preserves the historical uniform weighting (regression-safe).
+        pad_anchored_wirelength: When True, the wirelength term of the
+            objective is measured between the transformed **pad**
+            coordinates each candidate decode already produces, instead of
+            between footprint centres (issue #4831 M1;
+            ``docs/placement-pad-anchoring-audit.md``). This makes rotation
+            visible to wirelength -- rotating a part cannot change a
+            centre-anchored HPWL at all -- and stops a decap being scored as
+            "at the chip" when it is a package-diagonal away from the pad it
+            decouples. Default False keeps the objective byte-identical.
         time_budget: Wall-clock budget in seconds. The main optimization
             loop exits as soon as the elapsed time exceeds this value
             (after completing the current generation). ``None`` means no
@@ -889,6 +911,21 @@ def run_optimize_placement(
 
     footprint_sizes = _build_footprint_sizes(components)
 
+    # Pad-anchored wirelength (issue #4831 M1). The pads are transformed on
+    # every decode regardless; this only decides whether the objective reads
+    # them or throws them away. Warn -- rather than silently no-op -- when the
+    # board yielded no pads at all, since the per-pin fallback would then make
+    # the flag a no-op.
+    if pad_anchored_wirelength and not quiet:
+        pad_count = sum(len(c.pads) for c in components)
+        if pad_count == 0:
+            print(
+                "  WARNING: --pad-anchored-wirelength requested but no pads were "
+                "extracted; wirelength falls back to footprint centres."
+            )
+        else:
+            print(f"  Wirelength anchored to {pad_count} pads (not footprint centres)")
+
     # Compute bounds
     placement_bounds = bounds(board_outline, components)
 
@@ -930,6 +967,7 @@ def run_optimize_placement(
             ref_domains=hv_ref_domains,
             required_mm_by_domain_pair=hv_required,
             exempt_pairs=hv_exempt,
+            pad_anchored=pad_anchored_wirelength,
         )
         if not quiet:
             _print_score("Current", score)
@@ -1044,6 +1082,7 @@ def run_optimize_placement(
             ref_domains=hv_ref_domains,
             required_mm_by_domain_pair=hv_required,
             exempt_pairs=hv_exempt,
+            pad_anchored=pad_anchored_wirelength,
         )
         if not quiet:
             _print_score("Seed", seed_score)
@@ -1068,6 +1107,7 @@ def run_optimize_placement(
                 ref_domains=hv_ref_domains,
                 required_mm_by_domain_pair=hv_required,
                 exempt_pairs=hv_exempt,
+                pad_anchored=pad_anchored_wirelength,
             )
             initial_scores.append(score.total)
 
@@ -1087,6 +1127,7 @@ def run_optimize_placement(
             ref_domains=hv_ref_domains,
             required_mm_by_domain_pair=hv_required,
             exempt_pairs=hv_exempt,
+            pad_anchored=pad_anchored_wirelength,
         )
 
     # Keep interrupt state up-to-date with best vector for graceful save
@@ -1140,6 +1181,7 @@ def run_optimize_placement(
                     ref_domains=hv_ref_domains,
                     required_mm_by_domain_pair=hv_required,
                     exempt_pairs=hv_exempt,
+                    pad_anchored=pad_anchored_wirelength,
                 )
                 scores.append(score.total)
 
@@ -1206,6 +1248,7 @@ def run_optimize_placement(
         ref_domains=hv_ref_domains,
         required_mm_by_domain_pair=hv_required,
         exempt_pairs=hv_exempt,
+        pad_anchored=pad_anchored_wirelength,
     )
 
     # Save final checkpoint

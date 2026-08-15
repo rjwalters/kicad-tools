@@ -5982,6 +5982,22 @@ def _add_optimize_placement_parser(subparsers) -> None:
         ),
     )
     op_parser.add_argument(
+        "--pad-anchored-wirelength",
+        action="store_true",
+        default=False,
+        help=(
+            "Measure the wirelength term between transformed pad "
+            "coordinates instead of footprint centres. The pads are "
+            "already computed for every candidate and discarded today, so "
+            "this costs one dict build per evaluation. It makes rotation "
+            "visible to wirelength (a centre-anchored HPWL cannot see it) "
+            "and stops a decap scoring as 'at the chip' while sitting a "
+            "package-diagonal from the pad it decouples. Default off "
+            "keeps the objective unchanged (issue #4831; see "
+            "docs/placement-pad-anchoring-audit.md)."
+        ),
+    )
+    op_parser.add_argument(
         "--time-budget",
         type=float,
         default=None,

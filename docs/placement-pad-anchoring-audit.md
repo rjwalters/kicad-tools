@@ -7,6 +7,16 @@
 migration candidate below is a *stub for a future issue*, listed in this
 document rather than filed (issue creation is serialized in this repo).
 
+> **Status update (2026-08-14, later the same day): M1 has landed.**
+> `compute_wirelength` and `evaluate_placement` now accept an optional
+> `pad_positions` map (built by `build_pad_position_map`,
+> `src/kicad_tools/placement/wirelength.py`), and
+> `kct optimize-placement --pad-anchored-wirelength` supplies it from the
+> pads the CLI already decoded. It is **opt-in**: with no map the score is
+> byte-identical to the centre-anchored objective. The line-number citations
+> below describe the tree *as audited*; `cost.py` line numbers shifted by the
+> M1 patch. M2-M5 are unchanged and still unfiled.
+
 ## Why this audit exists
 
 pcbplace (a generative placement engine described to the owner; see #4831 for
@@ -261,7 +271,21 @@ this audit. Benefit rationale is grounded in (a) pcbplace's reported
 59.5 → 12.7 mm wiring reduction from pad anchors, and (b) the first-party
 divergence measured in §4 — with the honest caveat from §4 attached to both.
 
-### M1 — Wire `compute_hpwl` into `evaluate_placement`
+### M1 — Wire `compute_hpwl` into `evaluate_placement` — **LANDED (opt-in)**
+
+> **Shipped as:** `kct optimize-placement --pad-anchored-wirelength` plus the
+> `pad_positions` argument on `compute_wirelength` / `evaluate_placement`.
+> Implementation note: rather than calling `compute_hpwl` directly (which
+> would have dropped `Net.weight`, and which `cost.py` cannot import without
+> a cycle — `wirelength.py` imports `cost.py`), the pad coordinates are
+> passed *into* `compute_wirelength` as a `(reference, pad_name) -> (x, y)`
+> map. That keeps per-net weighting, keeps one net-iteration code path, and
+> adds per-pin fallback to the component centre. The counter-note below about
+> silently dropping `Net.weight` is therefore **resolved, not carried**.
+> Remaining M1 surface, deliberately deferred: the MCP front-end
+> (`src/kicad_tools/mcp/tools/optimize_placement.py`) still discards its
+> pads, and pad anchoring is opt-in rather than the default — flipping the
+> default needs fleet evidence (see M5).
 
 > **Stub title:** `feat(placement): score the optimizer objective on pad-anchored HPWL`
 > **Scope:** give `evaluate_placement` (`cost.py:715`) access to transformed pads
@@ -405,7 +429,7 @@ to standardise on, kept clearly distinct from the "locked/immovable" sense above
 
 | Stub | Title | Depends on |
 |---|---|---|
-| M1 | `feat(placement): score the optimizer objective on pad-anchored HPWL` | — (carry `Net.weight` through) |
+| M1 | `feat(placement): score the optimizer objective on pad-anchored HPWL` | **LANDED opt-in** (`--pad-anchored-wirelength`); MCP front-end + default-on remain |
 | M2 | `refactor(placement): use pad HPWL at multi-fidelity level 1, where pads are already required` | — (low risk, good pathfinder for M1) |
 | M3 | `feat(optim): allow max_distance constraints to target a pad, not a component centre` | overlaps #4831 item 4 |
 | M4 | `fix(optim): pick the shared-net pad instead of pins[0] for cluster springs` | M1 (only if `optim` stays in use) |
