@@ -336,6 +336,9 @@ def test_backend_surfaces_the_diagnostic_to_the_negotiated_strategy() -> None:
     assert info is not None
     assert info["failure_reason"] == int(router_cpp.FAILURE_PAIRWISE_BLOCKED)
     assert info["blocking_via_net"] == 2
+    # The structured diagnostic carries the blocker's board net NAME too, so a
+    # caller reporting the failure does not have to invert the id map itself.
+    assert info["blocking_net_name"] == "LV"
 
     # And the human-readable form names the blocker for the router log.
     class _Result:
@@ -344,7 +347,85 @@ def test_backend_surfaces_the_diagnostic_to_the_negotiated_strategy() -> None:
 
     desc = pf._describe_cpp_failure(_Result())
     assert "pairwise" in desc
-    assert "blocking net id 2" in desc
+    assert "blocking net LV" in desc
+
+
+def _bare_pathfinder() -> CppPathfinder:
+    """A minimal ``CppPathfinder`` for describe-only diagnostics assertions."""
+    rules = DesignRules(
+        trace_width=TRACE_WIDTH,
+        trace_clearance=DRU,
+        via_diameter=0.6,
+        via_clearance=DRU,
+        grid_resolution=RESOLUTION,
+    )
+    grid = RoutingGrid(width=4.0, height=4.0, rules=rules, layer_stack=LayerStack.two_layer())
+    return CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+
+
+@requires_cpp
+def test_blocker_diagnostic_names_the_net_not_its_id() -> None:
+    """The blocker is reported by NAME once the reverse map is threaded (#4507).
+
+    The T4 softstart rev-C proof run observed ten nets drain the C++ open set
+    on cross-domain refusals and report only ``blocking net id 51`` -- a
+    number the operator has to look up before they can act on it.  Both
+    blocker-naming reasons (the #2476 stored-via one and the #4507 pairwise
+    one) resolve the id through ``set_net_name_to_id``.
+    """
+    from kicad_tools.router import router_cpp
+
+    pf = _bare_pathfinder()
+    pf.set_net_name_to_id(dict(NET_NAMES))
+
+    class _Pairwise:
+        failure_reason = int(router_cpp.FAILURE_PAIRWISE_BLOCKED)
+        blocking_via_net = LV_NET
+
+    class _ViaVia:
+        failure_reason = int(router_cpp.FAILURE_VIA_VIA_BLOCKED)
+        blocking_via_net = LV_NET
+
+    for result in (_Pairwise(), _ViaVia()):
+        desc = pf._describe_cpp_failure(result)
+        assert "(blocking net /GND)" in desc
+        assert "net id" not in desc
+
+
+@requires_cpp
+def test_blocker_diagnostic_falls_back_to_the_id_when_unresolvable() -> None:
+    """An un-threaded (or incomplete) map keeps the pre-#4507 bare-id wording."""
+    from kicad_tools.router import router_cpp
+
+    class _Result:
+        failure_reason = int(router_cpp.FAILURE_PAIRWISE_BLOCKED)
+        blocking_via_net = 51
+
+    # No reverse map at all -- e.g. a bare pathfinder outside the Autorouter.
+    assert "(blocking net id 51)" in _bare_pathfinder()._describe_cpp_failure(_Result())
+
+    # Map present but silent about this id (a net the Autorouter never
+    # registered): still the id, never a misleading name.
+    pf = _bare_pathfinder()
+    pf.set_net_name_to_id(dict(NET_NAMES))
+    assert "(blocking net id 51)" in pf._describe_cpp_failure(_Result())
+
+
+@requires_cpp
+def test_blocker_name_cache_follows_a_remapped_net_table() -> None:
+    """Re-threading the map invalidates the memoised id -> name inverse."""
+    from kicad_tools.router import router_cpp
+
+    class _Result:
+        failure_reason = int(router_cpp.FAILURE_PAIRWISE_BLOCKED)
+        blocking_via_net = LV_NET
+
+    pf = _bare_pathfinder()
+    pf.set_net_name_to_id(dict(NET_NAMES))
+    assert "(blocking net /GND)" in pf._describe_cpp_failure(_Result())
+
+    pf.set_net_name_to_id({"/AC_LINE": HV_NET, "/PGND": LV_NET})
+    assert "(blocking net /PGND)" in pf._describe_cpp_failure(_Result())
 
 
 def test_negotiated_records_the_pairwise_blocker_for_ripup() -> None:

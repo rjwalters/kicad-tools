@@ -1256,6 +1256,8 @@ class CppPathfinder:
         # Schema: {
         #   "failure_reason": int,           # FAILURE_* constant
         #   "blocking_via_net": int,         # 0 if not via-blocked
+        #   "blocking_net_name": str | None, # #4507: the id resolved through
+        #                                    # set_net_name_to_id, or None
         #   "failure_x": float,              # world-coord (mm)
         #   "failure_y": float,
         # } or ``None`` if no diagnostic was captured.
@@ -1272,6 +1274,10 @@ class CppPathfinder:
         # returns ``None`` and the C++ search uses the wider inter-pair
         # ``clearance`` for every other net (the pre-Phase-1C contract).
         self._net_name_to_id: dict[str, int] = {}
+        # Issue #4507: memoised inverse of the map above, built on demand by
+        # :meth:`_resolve_net_id` so a blocker-naming failure can report the
+        # board's net NAME rather than a raw id.  ``None`` = not built yet.
+        self._net_id_to_name_cache: dict[int, str] | None = None
         self._attach_zones = ()
 
         # Issue #4510 / Epic #4431 Phase 2a: lazily-built C++ payload for the
@@ -1484,6 +1490,9 @@ class CppPathfinder:
         ``clearance`` for every other net).
         """
         self._net_name_to_id = dict(mapping)
+        # Issue #4507: the id -> name inverse used by the blocker diagnostics
+        # is derived from this map -- drop it so the next lookup rebuilds.
+        self._net_id_to_name_cache = None
         # Issue #4510: the C++ domain matrix / attach zones are keyed by net
         # ID, translated through this map -- rebuild them on the next validate.
         self._pairwise_cpp_payload = None
@@ -2324,13 +2333,40 @@ class CppPathfinder:
         # see how close the search came to the memory cap.
         iterations = int(getattr(self._impl, "iterations", 0))
 
+        blocking_net = int(getattr(result, "blocking_via_net", 0))
         self._last_failure_info = {
             "failure_reason": int(reason),
-            "blocking_via_net": int(getattr(result, "blocking_via_net", 0)),
+            "blocking_via_net": blocking_net,
+            # Issue #4507 (T4 re-score): the id alone is not actionable in a
+            # router log or a caller's report -- ten softstart rev-C nets
+            # drained on cross-domain refusals and named only "net id 51".
+            # ``None`` when the id is 0 or absent from the reverse map.
+            "blocking_net_name": self._resolve_net_id(blocking_net),
             "failure_x": float(getattr(result, "failure_x", 0.0)),
             "failure_y": float(getattr(result, "failure_y", 0.0)),
             "iterations": iterations,
         }
+
+    def _resolve_net_id(self, net_id: int) -> str | None:
+        """Return the board net name for *net_id*, or ``None`` (Issue #4507).
+
+        The C++ kernels speak net **ids**; every operator-facing surface
+        (router log lines, failure-info dicts) wants the board's own net
+        name.  :meth:`set_net_name_to_id` already carries the forward map,
+        so the inverse is derivable -- built lazily and memoised, because a
+        blocker-naming failure is rare relative to the search itself.
+
+        Returns ``None`` for id ``0`` (the "no blocker named" sentinel) and
+        for any id the map does not cover (an un-threaded map, or a net the
+        Autorouter never registered), so callers can fall back to the id.
+        """
+        if not net_id:
+            return None
+        cache = self._net_id_to_name_cache
+        if cache is None:
+            cache = {nid: name for name, nid in self._net_name_to_id.items()}
+            self._net_id_to_name_cache = cache
+        return cache.get(net_id)
 
     def _describe_cpp_failure(self, result: router_cpp.RouteResult) -> str:
         """Return a human-readable description of a failed C++ route result.
@@ -2370,7 +2406,14 @@ class CppPathfinder:
             )
             and blocking_net
         ):
-            desc += f" (blocking net id {blocking_net})"
+            # Issue #4507: name the blocker when the reverse net map is
+            # threaded (it is on every ``Autorouter`` path).  "blocking net
+            # id 51" is not actionable on a real board -- the operator has to
+            # go look the id up before they can rip anything up.  The bare id
+            # remains the fallback for an un-threaded map so the diagnostic
+            # never gets *less* informative than it was.
+            name = self._resolve_net_id(blocking_net)
+            desc += f" (blocking net {name})" if name else f" (blocking net id {blocking_net})"
         return desc
 
     def get_last_failure_info(self) -> dict | None:
@@ -2383,9 +2426,12 @@ class CppPathfinder:
 
         Returns:
             Dict with keys ``failure_reason``, ``blocking_via_net``,
-            ``failure_x``, ``failure_y`` -- or ``None`` if no diagnostic
-            is available.  ``failure_reason`` matches the ``FAILURE_*``
-            constants in the ``router_cpp`` module (see ``types.hpp``).
+            ``blocking_net_name``, ``failure_x``, ``failure_y`` -- or
+            ``None`` if no diagnostic is available.  ``failure_reason``
+            matches the ``FAILURE_*`` constants in the ``router_cpp``
+            module (see ``types.hpp``).  ``blocking_net_name`` (#4507) is
+            the board net name for ``blocking_via_net``, or ``None`` when
+            no blocker was named / the reverse map does not cover the id.
         """
         return self._last_failure_info
 
