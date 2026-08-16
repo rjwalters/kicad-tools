@@ -14,6 +14,7 @@ in CI — the network scripts are run by hand and are never imported from `tests
 | `parse_taxonomy.py` | library, **pure** | Outcome buckets, format sniffing, exception classification |
 | `corpus_manifest.py` | library, **pure** | Manifest schema/validation, cache integrity, scoring, rendering |
 | `omnieda_sample.py` | CLI + library, **offline** | Characterize an OmniLayout/OmniRouting sample and census its KiCad-mappability gaps (slice 3) |
+| `benchmark_readiness.py` | CLI + library, **offline** | Score cached boards for capacity-predictor calibration / route-vs-human benchmarking (slice 4) |
 
 These scripts import each other by plain module name (the script's own directory
 is `sys.path[0]` when you run `python scripts/corpus/<script>.py`). Type-check
@@ -28,7 +29,9 @@ they do no network I/O and have no CLI, which is why importing them from the tes
 suite does not violate the "no network in pytest" rule that keeps the network
 scripts out of `tests/`. `omnieda_sample.py` is tested for the same reason
 (`tests/test_corpus_omnieda.py`): it has a CLI but no network — its input is a
-sample you downloaded by hand.
+sample you downloaded by hand. So is `benchmark_readiness.py`
+(`tests/test_corpus_readiness.py`): its input is the payload cache
+`check_manifest.py` already filled.
 
 ## `probe_open_schematics.py`
 
@@ -211,6 +214,46 @@ Before redistributing (or vendoring) an *individual* board, verify that specific
 project's license — the dataset license covers the collection, not necessarily
 every constituent design. Per issue #4830 the corpus is referenced by URL +
 revision sha, never mirrored into this repo.
+
+## `benchmark_readiness.py` — is a board usable as a benchmark? (slice 4)
+
+The manifest scorecard says a board *parses*. That is a long way from "we can
+benchmark against it". This script scores each cached board against the
+preconditions the two proposed follow-on capabilities need — a feature vector
+plus a routability label for the #4799 capacity predictor, and reference copper
+for a route-vs-human harness — and names the blocking cause when it cannot:
+
+```bash
+uv run python scripts/corpus/check_manifest.py        # populate the cache once
+uv run python scripts/corpus/benchmark_readiness.py   # ~40 s, offline
+
+# compare the corpus distribution against this repo's own boards
+uv run python scripts/corpus/benchmark_readiness.py --no-manifest \
+  --board boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb
+```
+
+Reports (JSON + text) land in the gitignored `.cache/`, same as everything else
+here. Blocker codes are one-per-engineering-action:
+
+| Blocker | Meaning |
+|---------|---------|
+| `no-pad-graph` | parsed, but zero footprints/pads came out |
+| `legacy-module-schema` | the cause of most of the above: pre-KiCad-6 `(module …)` |
+| `no-net-binding` | pads exist, but no net has ≥ 2 pads |
+| `no-outline` | no Edge.Cuts bounding box with positive area |
+| `outline-not-polygonal` | bounding box fine, outline polygon < 3 points (arc corners) |
+| `no-reference-copper` | unrouted: a predictor *input*, never a reference |
+| `partial-reference-routing` | < 95% of multi-pad nets carry copper |
+
+Two definitions to know before reading a report: **pours count as copper** (a
+plane-served ground net has no segments; ignoring pours scores 7 of this repo's
+8 routed boards as unfinished), and **completion is net-level and optimistic**
+(any copper on the net counts), so the census is a screen — it rejects
+confidently and accepts provisionally.
+
+The measured verdicts, the three pilot route-vs-human runs, and the follow-up
+recommendations are in
+[`docs/research/corpus-benchmark-feasibility.md`](../../docs/research/corpus-benchmark-feasibility.md).
 
 ## `omnieda_sample.py` — OmniLayout / OmniRouting recon (slice 3)
 

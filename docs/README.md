@@ -50,6 +50,7 @@ Point-in-time working documents — dated entries describe the tree as of their 
 | [HV Pairwise Proof: softstart rev-C (2026-08)](hv-pairwise-softstart-proof.md) | #4507 T4 manual proof run on the local-only mains HV fixture |
 | [Placement Pad-Anchoring Audit (2026-08)](placement-pad-anchoring-audit.md) | Centre- vs pad-anchored placement objective terms (#4831) |
 | [OmniLayout / OmniRouting Recon (2026-08)](research/omnilayout-recon.md) | External LLM layout/routing benchmark (#4830); verdict: adapt the metric protocol, drop the data (no licence) |
+| [Corpus Benchmark Feasibility (2026-08)](research/corpus-benchmark-feasibility.md) | #4830 slice 4: which open-schematics boards can serve as capacity-predictor labels (#4799) or route-vs-human cases, plus three pilot routes |
 | [Board Fleet Parity Audit (2026-06)](board-fleet-parity-audit-2026-06.md) | Fleet-wide board status snapshot |
 | [Install Pilot: chorus](install-pilot-chorus.md) | Consumer-repo install pilot for Epic #4054 acceptance |
 | [Atopile Build System Research](research-atopile-build-system.md) | Survey of Atopile's build DAG and targets |

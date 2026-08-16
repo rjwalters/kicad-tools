@@ -72,9 +72,24 @@ measured numbers, and the adopt/adapt/drop verdict live in
 uv run python scripts/corpus/omnieda_sample.py --sample /path/to/extracted --out /tmp/omni
 ```
 
+`benchmark_readiness.py` — **offline**; score the cached corpus boards (and any
+local `.kicad_pcb`) for whether they can serve as capacity-predictor
+calibration examples (#4799) or route-vs-human benchmark cases, with one
+blocker code per distinct cause. Measured verdicts and the three pilot routes
+are in
+[`docs/research/corpus-benchmark-feasibility.md`](../docs/research/corpus-benchmark-feasibility.md):
+
+```bash
+uv run python scripts/corpus/check_manifest.py        # populate the cache once
+uv run python scripts/corpus/benchmark_readiness.py   # census, ~40 s, offline
+uv run python scripts/corpus/benchmark_readiness.py --no-manifest \
+  --board boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb
+```
+
 The pure helpers `corpus/parse_taxonomy.py` and `corpus/corpus_manifest.py` (no
 network, no CLI) are unit-tested by `tests/test_corpus_manifest.py`;
-`corpus/omnieda_sample.py` (offline) by `tests/test_corpus_omnieda.py`.
+`corpus/omnieda_sample.py` (offline) by `tests/test_corpus_omnieda.py`;
+`corpus/benchmark_readiness.py` (offline) by `tests/test_corpus_readiness.py`.
 
 ### `research/`
 
