@@ -20,7 +20,11 @@ a benchmark verdict rather than crash:
   when that is the cause, because that blocker is fixable in the parser and the
   generic "no pads" bucket hides how much of the corpus it would unlock;
 * a partially-routed board is disqualified as a *reference*, not silently scored
-  against.
+  against;
+* an outline whose corner arcs use the pre-KiCad-6 centre+angle form collapses
+  to a 2-point chain (the ``mid=(0, 0)`` parse default), while the same
+  geometry in KiCad-6 ``(start)(mid)(end)`` form chains fine -- both are pinned
+  so the blocker keeps naming the legacy *parse* gap rather than the chainer.
 """
 
 from __future__ import annotations
@@ -62,22 +66,55 @@ OUTLINE = "\n".join(
     for x1, y1, x2, y2 in [(0, 0, 20, 0), (20, 0, 20, 10), (20, 10, 0, 10), (0, 10, 0, 0)]
 )
 
-# A rounded rectangle: 4 straight edges joined by 4 corner arcs. Same bounding
-# box as OUTLINE, but ``get_board_outline()`` only chains the straight
-# segments, so it yields 2 points -- the shape that made ``kct route`` die
-# inside shapely on corpus board os-0003340-pcb0 ("A linearring requires at
-# least 4 coordinates"). Reproduced here by hand: it is a library gap, not a
-# property of any one corpus file.
-ROUNDED_OUTLINE = "\n".join(
-    [
-        '  (gr_line (start 2 0) (end 18 0) (layer "Edge.Cuts") (width 0.05))',
-        '  (gr_line (start 20 2) (end 20 8) (layer "Edge.Cuts") (width 0.05))',
-        '  (gr_line (start 18 10) (end 2 10) (layer "Edge.Cuts") (width 0.05))',
-        '  (gr_line (start 0 8) (end 0 2) (layer "Edge.Cuts") (width 0.05))',
-        '  (gr_arc (start 2 2) (mid 0.6 0.6) (end 2 0) (layer "Edge.Cuts") (width 0.05))',
-        '  (gr_arc (start 18 2) (mid 19.4 0.6) (end 20 2) (layer "Edge.Cuts") (width 0.05))',
-        '  (gr_arc (start 18 8) (mid 19.4 9.4) (end 18 10) (layer "Edge.Cuts") (width 0.05))',
-        '  (gr_arc (start 2 8) (mid 0.6 9.4) (end 0 8) (layer "Edge.Cuts") (width 0.05))',
+# The four straight edges of a 20x10 rounded rectangle -- same bounding box as
+# OUTLINE, with 2 mm cut off each corner for an arc to bridge.
+_ROUNDED_STRAIGHTS = [
+    '  (gr_line (start 2 0) (end 18 0) (layer "Edge.Cuts") (width 0.05))',
+    '  (gr_line (start 20 2) (end 20 8) (layer "Edge.Cuts") (width 0.05))',
+    '  (gr_line (start 18 10) (end 2 10) (layer "Edge.Cuts") (width 0.05))',
+    '  (gr_line (start 0 8) (end 0 2) (layer "Edge.Cuts") (width 0.05))',
+]
+
+# The defect fixture. These corner arcs use the *pre-KiCad-6* form: ``(start)``
+# is the arc **centre**, ``(end)`` is one endpoint, and the sweep is given by
+# ``(angle ...)``. There is no ``mid`` token at all, so
+# ``GraphicArc.from_sexp`` (src/kicad_tools/schema/pcb.py) leaves ``mid`` at
+# its ``(0.0, 0.0)`` default. ``get_board_outline()`` then dutifully emits
+# ``start->mid`` and ``mid->end`` for each arc -- four segments to the origin,
+# which poison the chain down to 2 points.
+#
+# That is the shape that made ``kct route`` die inside shapely on corpus board
+# os-0003340-pcb0 ("A linearring requires at least 4 coordinates"); that board
+# declares ``version 20210623`` and writes exactly these arcs. The bug is the
+# legacy *parse*, not the chainer -- ROUNDED_OUTLINE_V6 below is the same
+# geometry in KiCad-6 form and chains fine. When the parser learns to derive
+# ``mid`` from centre+endpoint+angle, this test flips.
+ROUNDED_OUTLINE_LEGACY_ARC = "\n".join(
+    _ROUNDED_STRAIGHTS
+    + [
+        '  (gr_arc (start 2 2) (end 2 0) (angle -90) (layer "Edge.Cuts") (width 0.05))',
+        '  (gr_arc (start 18 2) (end 20 2) (angle -90) (layer "Edge.Cuts") (width 0.05))',
+        '  (gr_arc (start 18 8) (end 18 10) (angle -90) (layer "Edge.Cuts") (width 0.05))',
+        '  (gr_arc (start 2 8) (end 0 8) (angle -90) (layer "Edge.Cuts") (width 0.05))',
+    ]
+)
+
+# The control fixture: the same rounded rectangle written the KiCad-6 way,
+# ``(start)(mid)(end)`` with a real on-arc midpoint (centre +/- r/sqrt(2)).
+# This one chains to 13 points today, which is what pins "the chainer already
+# handles arcs" and stops a future legacy-arc fix from regressing it.
+_R = 2 - 2 * 0.7071067811865476  # 0.585786: corner offset of the arc midpoint
+ROUNDED_OUTLINE_V6 = "\n".join(
+    _ROUNDED_STRAIGHTS
+    + [
+        f"  (gr_arc (start 2 0) (mid {_R:.6f} {_R:.6f}) (end 0 2)"
+        ' (layer "Edge.Cuts") (width 0.05))',
+        f"  (gr_arc (start 20 2) (mid {20 - _R:.6f} {_R:.6f}) (end 18 0)"
+        ' (layer "Edge.Cuts") (width 0.05))',
+        f"  (gr_arc (start 18 10) (mid {20 - _R:.6f} {10 - _R:.6f}) (end 20 8)"
+        ' (layer "Edge.Cuts") (width 0.05))',
+        f"  (gr_arc (start 0 8) (mid {_R:.6f} {10 - _R:.6f}) (end 2 10)"
+        ' (layer "Edge.Cuts") (width 0.05))',
     ]
 )
 
@@ -110,7 +147,7 @@ def _footprint(ref: str, x: float, gnd_pad: str, sig_pad: str) -> str:
 
 def board_text(
     *,
-    outline: str = "rect",  # "rect" | "rounded" | "none"
+    outline: str = "rect",  # "rect" | "rounded-legacy-arc" | "rounded-v6" | "none"
     pads: bool = True,
     nets: bool = True,
     copper: str = "",
@@ -119,9 +156,17 @@ def board_text(
 
     Two footprints share a GND net and a SIG net, so both nets are multi-pad
     (i.e. routable) -- which is what every gate in the module keys off.
+
+    The declared file version follows the outline form: the legacy centre+angle
+    arc form is only written by pre-KiCad-6 tooling, so a board carrying it
+    declares ``20210623`` (the version os-0003340-pcb0 declares) rather than
+    the modern ``20221018``. Nothing in the module gates on the version -- it
+    is declared for fidelity, so the fixture is a file KiCad could actually
+    have written.
     """
+    version = "20210623" if outline == "rounded-legacy-arc" else "20221018"
     body = [
-        "(kicad_pcb (version 20221018) (generator pcbnew)",
+        f"(kicad_pcb (version {version}) (generator pcbnew)",
         "  (general (thickness 1.6))",
         "  (paper A4)",
         '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))',
@@ -131,8 +176,10 @@ def board_text(
     ]
     if outline == "rect":
         body.append(OUTLINE)
-    elif outline == "rounded":
-        body.append(ROUNDED_OUTLINE)
+    elif outline == "rounded-legacy-arc":
+        body.append(ROUNDED_OUTLINE_LEGACY_ARC)
+    elif outline == "rounded-v6":
+        body.append(ROUNDED_OUTLINE_V6)
     if pads:
         if nets:
             body.append(_footprint("R1", 5, "1", "2"))
@@ -219,9 +266,29 @@ class TestFeatureExtraction:
         assert f.net_density_per_cm2 == 0.0
 
     def test_rounded_outline_has_area_but_no_usable_polygon(self, tmp_path: Path) -> None:
-        f = features(tmp_path, "rounded", board_text(outline="rounded", copper=SIG_TRACE))
+        """Legacy centre+angle arcs parse to ``mid=(0, 0)`` and poison the chain.
+
+        This is the library defect behind corpus board os-0003340-pcb0. It is a
+        *parser* gap (``GraphicArc.from_sexp`` never reads the ``(angle ...)``
+        form), not a chainer gap -- see the v6 control below. When the parser
+        learns the legacy form, this assertion is the one that flips.
+        """
+        f = features(
+            tmp_path, "rounded", board_text(outline="rounded-legacy-arc", copper=SIG_TRACE)
+        )
         assert f.area_cm2 == pytest.approx(2.0), "the bounding box is fine"
-        assert f.outline_points < 3, "arcs are not chained into the outline polygon"
+        assert f.outline_points < 3, "the mid=(0,0) default collapses the outline chain"
+
+    def test_kicad6_rounded_outline_chains_into_a_real_polygon(self, tmp_path: Path) -> None:
+        """The control: identical geometry in ``(start)(mid)(end)`` form works.
+
+        ``get_board_outline()`` already emits ``start->mid`` and ``mid->end``
+        per arc, so a well-formed KiCad-6 rounded rectangle is fine today.
+        Pinned so a future legacy-arc fix cannot regress the working path.
+        """
+        f = features(tmp_path, "rounded-v6", board_text(outline="rounded-v6", copper=SIG_TRACE))
+        assert f.area_cm2 == pytest.approx(2.0)
+        assert f.outline_points >= 4, "modern arcs already chain -- the chainer is not the bug"
 
     def test_to_dict_carries_the_derived_metrics(self, tmp_path: Path) -> None:
         data = features(tmp_path, "derived", board_text(copper=GND_POUR)).to_dict()
@@ -280,17 +347,29 @@ class TestVerdicts:
         assert not verdict.capacity_features
 
     def test_rounded_outline_is_a_separate_blocker_from_a_missing_one(self, tmp_path: Path) -> None:
-        """The fix is arc chaining, not a missing Edge.Cuts -- keep them apart."""
+        """The fix is legacy arc parsing, not a missing Edge.Cuts -- keep them apart."""
         verdict = evaluate(
             features(
                 tmp_path,
                 "rounded",
-                board_text(outline="rounded", copper=f"{SIG_TRACE}\n{GND_TRACE}"),
+                board_text(outline="rounded-legacy-arc", copper=f"{SIG_TRACE}\n{GND_TRACE}"),
             )
         )
         assert verdict.capacity_blockers == [BLOCK_OUTLINE_NOT_POLYGONAL]
         assert BLOCK_NO_OUTLINE not in verdict.capacity_blockers
         assert not verdict.harness_candidate
+
+    def test_kicad6_rounded_outline_is_not_blocked_at_all(self, tmp_path: Path) -> None:
+        """The working path stays a candidate -- the blocker is legacy-specific."""
+        verdict = evaluate(
+            features(
+                tmp_path,
+                "rounded-v6",
+                board_text(outline="rounded-v6", copper=f"{SIG_TRACE}\n{GND_TRACE}"),
+            )
+        )
+        assert verdict.capacity_blockers == []
+        assert verdict.capacity_features and verdict.harness_candidate
 
 
 class TestCensus:

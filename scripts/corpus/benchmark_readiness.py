@@ -65,10 +65,12 @@ DEFAULT_OUT_DIR = REPO_ROOT / "scripts" / "corpus" / ".cache"
 # measurement, it is an opinion.
 # --------------------------------------------------------------------------
 
-#: A net needs >= 2 pads to be routable at all; a board needs a few such nets
-#: before "our router vs. the human" means anything. Two is the floor at which
-#: a comparison is arithmetically possible, not the floor at which it is
-#: interesting -- the census reports net counts so a harness can raise it.
+#: How many *routable nets* (nets with >= 2 pads) a board must have before
+#: "our router vs. the human" means anything. Note the two levels: a net needs
+#: >= 2 pads to be routable at all, and a board needs at least this many such
+#: nets. Two *such nets* is the floor at which a comparison is arithmetically
+#: possible, not the floor at which it is interesting -- the census reports
+#: net counts so a harness can raise it.
 MIN_MULTI_PAD_NETS = 2
 
 #: Fraction of multi-pad nets that must carry copper before the board counts as
@@ -89,17 +91,23 @@ BLOCK_NO_PAD_GRAPH = "no-pad-graph"
 #: the pre-KiCad-6 ``(module ...)`` token, which this repo's parser silently
 #: ignores (it reads ``(footprint ...)`` only). Actionable as parser work.
 BLOCK_LEGACY_MODULE_SCHEMA = "legacy-module-schema"
-#: Pads exist but none carry a net, or no net has >= 2 pads: nothing to route.
+#: Pads exist but the board has fewer than ``MIN_MULTI_PAD_NETS`` routable
+#: nets -- usually none carry a net at all (a panel or a mechanical board), but
+#: a board with exactly one multi-pad net also lands here: nothing to route,
+#: or too little to compare.
 BLOCK_NO_NET_BINDING = "no-net-binding"
 #: No Edge.Cuts outline with positive area: no area, hence no density feature
 #: and no routing region.
 BLOCK_NO_OUTLINE = "no-outline"
 #: The outline has area (its bounding box is fine) but cannot be reconstructed
-#: as a polygon -- measured, not theoretical: a rounded-rectangle outline of
-#: 4 ``gr_line`` + 4 ``gr_arc`` yields 2 points, which makes ``kct route``
-#: false-positive its off-board preflight and then die inside shapely with
-#: "A linearring requires at least 4 coordinates". Distinct from
-#: ``no-outline`` because the fix is arc handling, not a missing Edge.Cuts.
+#: as a polygon -- measured, not theoretical: a rounded rectangle whose corner
+#: arcs use the pre-KiCad-6 centre+angle form (no ``mid`` token, so
+#: ``GraphicArc.from_sexp`` defaults ``mid`` to the origin) yields 2 points,
+#: which makes ``kct route`` false-positive its off-board preflight and then
+#: die inside shapely with "A linearring requires at least 4 coordinates".
+#: The equivalent KiCad-6 ``(start)(mid)(end)`` board chains fine. Distinct
+#: from ``no-outline`` because the fix is legacy arc *parsing*, not a missing
+#: Edge.Cuts.
 BLOCK_OUTLINE_NOT_POLYGONAL = "outline-not-polygonal"
 #: No copper at all: usable as an unrouted *input*, never as a human reference.
 BLOCK_NO_REFERENCE_COPPER = "no-reference-copper"
@@ -128,6 +136,10 @@ LABEL_PARTIAL = "partially-routed"
 LABEL_UNROUTED = "unrouted-input"  # features only, no label
 LABEL_NONE = "unusable"  # features not extractable
 
+# Deliberately a raw token scan, not a parse: it also matches a "(module "
+# occurrence inside a quoted string or a comment. Harmless -- it is only a
+# cause *hint*, read behind an already-failed pad-graph gate, never a gate of
+# its own.
 _MODULE_TOKEN_RE = re.compile(r"\(\s*module\s", re.MULTILINE)
 
 
@@ -472,6 +484,10 @@ def _profile(features: list[BoardFeatures]) -> dict[str, Any]:
         return {}
 
     def _span(values: list[float]) -> dict[str, float]:
+        # "median" here is the upper-middle order statistic, not an interpolated
+        # median: for an even-sized subset it is the higher of the two middle
+        # values. Good enough for a distribution sketch over ~8 boards; do not
+        # read it as a statistic.
         ordered = sorted(values)
         middle = ordered[len(ordered) // 2]
         return {

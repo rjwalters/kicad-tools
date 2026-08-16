@@ -46,7 +46,7 @@ engineering action:
 | `legacy-module-schema` | the diagnosable cause of most of the above: pre-KiCad-6 `(module …)` | parser |
 | `no-net-binding` | pads exist, but no net has ≥ 2 pads | the design (not fixable) |
 | `no-outline` | no Edge.Cuts bounding box with positive area | the design |
-| `outline-not-polygonal` | bounding box fine, but `get_board_outline()` returns < 3 points | `schema.pcb` arc chaining |
+| `outline-not-polygonal` | bounding box fine, but `get_board_outline()` returns < 3 points | parser — `GraphicArc.from_sexp`, the pre-KiCad-6 `(gr_arc … angle …)` form |
 | `no-reference-copper` | no copper at all — an unrouted *input*, never a reference | the design |
 | `partial-reference-routing` | < 95% of multi-pad nets carry copper — too incomplete to score against | the design |
 
@@ -78,6 +78,15 @@ blockers                          boards
   no-outline                           1
   outline-not-polygonal                1
 ```
+
+The blocker column does **not** sum to 22, by design: a board carries every
+code that applies to it, one per distinct engineering action, so the counts
+overlap. All 9 `legacy-module-schema` boards *are* the same 9 `no-pad-graph`
+boards — the second code names the fixable cause of the first. The
+featurizability blockers (`no-pad-graph`, `no-net-binding`, `no-outline`,
+`outline-not-polygonal`) fall on 12 distinct boards, leaving the 10
+featurizable ones; `no-reference-copper` then disqualifies 2 of those 10 as
+*references* while leaving them usable as predictor inputs.
 
 ### 2.1 The dominant blocker is one parser gap
 
@@ -131,14 +140,36 @@ produced two comparisons and two library defects:
 
 Each failure is informative, and none is fatal to the idea:
 
-- **`os-0003340-pcb0` — arc outlines.** Its Edge.Cuts is a rounded rectangle:
-  4 `gr_line` + 4 `gr_arc`. `get_board_outline()` chains only the straight
-  segments and returns **2 points**, which makes the off-board preflight
-  reject two-thirds of the board and then kills the run inside shapely. This
-  reproduces on a hand-written 8-primitive board (see
-  `tests/test_corpus_readiness.py::…::test_rounded_outline_has_area_but_no_usable_polygon`) —
-  it is a `schema.pcb` gap, not a corpus artifact, and it will hit any user
-  with a rounded-corner board. The census now predicts it
+- **`os-0003340-pcb0` — legacy arcs, the same gap as §2.1.** Its Edge.Cuts is a
+  rounded rectangle: 4 `gr_line` + 4 `gr_arc`, and `get_board_outline()`
+  returns **2 points**, which makes the off-board preflight reject two-thirds
+  of the board and then kills the run inside shapely. The chainer is not at
+  fault — it already emits `start→mid` and `mid→end` per arc
+  (`src/kicad_tools/schema/pcb.py:3482-3485`), and a well-formed KiCad-6
+  rounded rectangle chains to 13 points. The defect is one level down, in the
+  **parser**: the board declares `version 20210623` and writes its arcs in the
+  pre-KiCad-6 centre+angle form, with no `mid` token at all —
+
+  ```
+  (gr_arc (start 100.999997 93) (end 101 92) (angle -90) (layer "Edge.Cuts") …)
+  ```
+
+  `GraphicArc.from_sexp` (`src/kicad_tools/schema/pcb.py:1596-1623`) reads
+  `start`/`mid`/`end` literally, so `mid` silently defaults to `(0, 0)`. Every
+  arc then injects a segment to the origin and poisons the chain. Measured
+  side by side on hand-written 8-primitive boards (both pinned in
+  `tests/test_corpus_readiness.py`):
+
+  ```
+  v6-wellformed      outline_points = 13
+  legacy-centre-arc  outline_points =  2
+  ```
+
+  So this is **not** a generic "rounded corners break" defect — KiCad 6+ files
+  are fine. It hits boards written by pre-KiCad-6 (or 5.99-era) tools, which
+  makes it the *second instance of finding #1's root cause*: a legacy schema
+  that is neither read nor refused, just silently half-understood. It is a
+  library gap, not a corpus artifact. The census now predicts it
   (`outline-not-polygonal`) instead of discovering it at crash time.
 - **`os-0009947-pcb1` — imported rules vs. our profile, then a real gap.** The
   human routed to that board's *own* design rules; we applied the default
@@ -163,8 +194,8 @@ minutes of compute per board.
 Build **Capability B first, scoped small**; defer **Capability A**.
 
 **Why B first.** The harness pays for itself immediately: three pilot boards
-produced three generic findings (arc outlines, rule import, a real wirelength
-ratio). It needs no labels, no statistics, and no bigger corpus — a
+produced three generic findings (legacy arc parsing, rule import, a real
+wirelength ratio). It needs no labels, no statistics, and no bigger corpus — a
 `kct bench route-vs-human <board>` over 5–10 pinned boards is a complete,
 useful increment. And its per-board preflight is what makes A trustworthy
 later.
@@ -177,12 +208,20 @@ sequencing with numbers.
 
 Concrete follow-up issues to file (all generic library capability):
 
+Items 1 and 2 are the same defect shape — a pre-KiCad-6 construct the parser
+accepts without understanding — and are worth filing as a pair:
+
 1. **`(module …)` boards: read or refuse.** Unblocks 41% of the sampled corpus.
    Include a `kct check`-visible signal so a user is never silently handed an
    empty component graph.
-2. **Chain arcs into `get_board_outline()`.** Rounded-rectangle outlines are
-   ordinary; today they yield a 2-point polygon, a false off-board preflight
-   failure, and a shapely crash inside `kct route`.
+2. **Parse pre-KiCad-6 `(gr_arc … (angle …))` into `start`/`mid`/`end`.** The
+   legacy centre+angle form carries no `mid` token, so `GraphicArc.from_sexp`
+   defaults it to `(0, 0)`; the resulting segment-to-origin poisons
+   `get_board_outline()` down to a 2-point polygon, a false off-board preflight
+   failure, and a shapely crash inside `kct route`. Derive `mid` from
+   centre + start-point + swept angle (and refuse, loudly, if the form is
+   unrecognisable) — the arc *chainer* already handles `start/mid/end`
+   correctly and needs no change.
 3. **Import a board's own design rules when routing an imported board** (or a
    `kct route --rules-from-board` flag). Prerequisite for any fair comparison
    against third-party copper.
