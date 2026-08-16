@@ -16,6 +16,12 @@ and whether the result was written -- or ``{"error": ..., "success": false}``
 on failure, with every exit code (0 / 1 / 2-on-interrupt) unchanged.
 ``wall_time_s`` is the one deliberately volatile field.  See
 ``docs/reference/machine-output.md``.
+
+Under ``--dry-run`` the document also carries ``wirelength_estimators``: the
+centre-anchored and pad-anchored wirelength of the *same* layout, side by
+side (issue #4831 M5). Only one of them is scored -- the other is report-only
+evidence for whether pad anchoring should become the default. See
+``docs/placement-pad-anchoring-audit.md``.
 """
 
 from __future__ import annotations
@@ -51,7 +57,10 @@ from kicad_tools.placement.vector import (
     bounds,
     decode,
 )
-from kicad_tools.placement.wirelength import build_pad_position_map
+from kicad_tools.placement.wirelength import (
+    build_pad_position_map,
+    compare_wirelength_estimators,
+)
 
 # ---------------------------------------------------------------------------
 # Interrupt handling (SIGINT / SIGTERM)
@@ -969,10 +978,21 @@ def run_optimize_placement(
             exempt_pairs=hv_exempt,
             pad_anchored=pad_anchored_wirelength,
         )
+        # Report BOTH wirelength estimators for this layout (issue #4831 M5).
+        # Report-only: `score` above is untouched, so --dry-run still reports
+        # exactly the objective the optimizer would minimise. Decoding a
+        # second time costs one pass over the components and happens once,
+        # outside any search loop.
+        estimators = compare_wirelength_estimators(
+            decode(current_vector, components),
+            nets,
+            scored="pad" if pad_anchored_wirelength else "centre",
+        )
         if not quiet:
             _print_score("Current", score)
             print(f"\n  Feasible: {score.is_feasible}")
             print(f"  Total score: {score.total:.4f}")
+            print(f"  {estimators.summary_line()}")
             # The optimizer objective (bounding-box overlap area in mm^2 and a
             # bbox-clearance DRC count) is a distinct metric from
             # `kct placement check`, which uses courtyard-expanded polygons and
@@ -984,12 +1004,22 @@ def run_optimize_placement(
                 "bbox-clearance DRC), NOT the `kct placement check` metric "
                 "(courtyard polygons / KiCad DRC). See docs/placement-scoring.md."
             )
+            # Only one of the two estimator numbers above is scored; the other
+            # is report-only, so the choice of anchoring can be argued from
+            # measured boards. See docs/placement-pad-anchoring-audit.md.
+            print(
+                "  Note: only the "
+                f"{estimators.scored}-anchored wirelength is scored above "
+                "(--pad-anchored-wirelength switches it); the other estimator "
+                "is report-only. See docs/placement-pad-anchoring-audit.md."
+            )
         if as_json:
             emit_json(
                 {
                     **base_document,
                     "mode": "evaluate",
                     "scores": {"current": _score_document(score)},
+                    "wirelength_estimators": estimators.as_dict(),
                     "feasible": bool(score.is_feasible),
                     "saved": False,
                     "written_to": None,

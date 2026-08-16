@@ -25,7 +25,7 @@ import math
 from dataclasses import dataclass
 from typing import Sequence
 
-from .cost import Net
+from .cost import ComponentPlacement, Net, compute_wirelength
 from .vector import PlacedComponent, TransformedPad
 
 
@@ -193,6 +193,148 @@ def compute_hpwl_breakdown(
         total += result.hpwl
 
     return HPWLResult(total=total, per_net=tuple(per_net))
+
+
+# ---------------------------------------------------------------------------
+# Side-by-side estimator report (issue #4831 M5)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WirelengthEstimatorReport:
+    """Both wirelength estimators measured on one layout (issue #4831 M5).
+
+    The optimizer can score its wirelength term either between component
+    centres (the historical default) or between real transformed pad
+    coordinates (M1, ``--pad-anchored-wirelength``). This report evaluates
+    *both* on the same placement so the choice can be argued from measured
+    fleet evidence instead of from pcbplace's second-hand
+    59.5 -> 12.7 mm number. It never changes what is optimized.
+
+    Attributes:
+        centre_anchored_mm: Weighted HPWL measured between component centres.
+        pad_anchored_mm: Weighted HPWL measured between transformed pads,
+            with a per-pin fallback to the component centre for pins that
+            have no pad.
+        delta_mm: ``pad_anchored_mm - centre_anchored_mm``. Negative means
+            the pad-anchored estimator reads the layout as *shorter*.
+        delta_pct: ``delta_mm`` as a percentage of ``centre_anchored_mm``, or
+            ``None`` when the centre-anchored estimate is zero (no ratio is
+            defined).
+        scored: Which estimator the objective actually used for this run --
+            ``"pad"`` or ``"centre"``. The other value is report-only.
+        pads_available: True when at least one placement carries a pad. When
+            False the two estimators are identical by construction and the
+            comparison carries no information (a board whose components were
+            decoded without pad geometry).
+        pad_count: Number of transformed pads seen across all placements.
+    """
+
+    centre_anchored_mm: float
+    pad_anchored_mm: float
+    delta_mm: float
+    delta_pct: float | None
+    scored: str
+    pads_available: bool
+    pad_count: int
+
+    def as_dict(self, ndigits: int | None = None) -> dict[str, object]:
+        """Render as a JSON-serializable dict, optionally rounding the floats.
+
+        Args:
+            ndigits: When not ``None``, round every millimetre/percentage
+                field to this many decimal places (the MCP surface rounds;
+                the CLI ``--format json`` document does not).
+
+        Returns:
+            A dict with the same field names as this dataclass.
+        """
+
+        def _r(value: float | None) -> float | None:
+            if value is None or ndigits is None:
+                return value
+            return round(value, ndigits)
+
+        return {
+            "centre_anchored_mm": _r(self.centre_anchored_mm),
+            "pad_anchored_mm": _r(self.pad_anchored_mm),
+            "delta_mm": _r(self.delta_mm),
+            "delta_pct": _r(self.delta_pct),
+            "scored": self.scored,
+            "pads_available": self.pads_available,
+            "pad_count": self.pad_count,
+        }
+
+    def summary_line(self) -> str:
+        """One-line human summary for CLI prose output."""
+        if not self.pads_available:
+            return (
+                f"Wirelength estimators: centre-anchored {self.centre_anchored_mm:.2f} mm; "
+                "pad-anchored not measurable (no pad geometry decoded)"
+            )
+        pct = "n/a" if self.delta_pct is None else f"{self.delta_pct:+.1f}%"
+        return (
+            f"Wirelength estimators: centre-anchored {self.centre_anchored_mm:.2f} mm | "
+            f"pad-anchored {self.pad_anchored_mm:.2f} mm ({pct}); "
+            f"objective scored {self.scored}-anchored"
+        )
+
+
+def compare_wirelength_estimators(
+    placements: Sequence[PlacedComponent],
+    nets: Sequence[Net],
+    *,
+    scored: str = "centre",
+) -> WirelengthEstimatorReport:
+    """Measure the centre- and pad-anchored wirelength of one layout.
+
+    Both legs go through :func:`kicad_tools.placement.cost.compute_wirelength`
+    -- the *same* estimator with and without a pad map -- rather than pairing
+    it against :func:`compute_hpwl`. That matters: ``compute_hpwl`` ignores
+    ``Net.weight``, so pairing the two would confound the anchoring change
+    with a silent loss of per-net weighting (the audit's M1 counter-note).
+    Here the only difference between the two numbers is where each pin is
+    measured.
+
+    This is a pure measurement: it reads nothing global, mutates nothing, and
+    returns the same values for the same inputs.
+
+    Args:
+        placements: Decoded placements with transformed pad coordinates (as
+            returned by :func:`kicad_tools.placement.vector.decode`).
+        nets: Net connectivity, including any ``Net.weight`` values.
+        scored: Which estimator the caller's objective actually used --
+            ``"centre"`` or ``"pad"``. Recorded in the report; it does not
+            affect either measurement.
+
+    Returns:
+        A :class:`WirelengthEstimatorReport`.
+
+    Raises:
+        ValueError: If *scored* is neither ``"centre"`` nor ``"pad"``.
+    """
+    if scored not in ("centre", "pad"):
+        raise ValueError(f"scored must be 'centre' or 'pad', got {scored!r}")
+
+    centres = [
+        ComponentPlacement(reference=p.reference, x=p.x, y=p.y, rotation=p.rotation)
+        for p in placements
+    ]
+    pad_positions = build_pad_position_map(placements)
+
+    centre_mm = compute_wirelength(centres, nets)
+    pad_mm = compute_wirelength(centres, nets, pad_positions)
+    delta = pad_mm - centre_mm
+
+    return WirelengthEstimatorReport(
+        centre_anchored_mm=centre_mm,
+        pad_anchored_mm=pad_mm,
+        delta_mm=delta,
+        delta_pct=(delta / centre_mm * 100.0) if centre_mm else None,
+        scored=scored,
+        pads_available=bool(pad_positions),
+        pad_count=len(pad_positions),
+    )
 
 
 # ---------------------------------------------------------------------------

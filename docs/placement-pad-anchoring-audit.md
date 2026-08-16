@@ -23,6 +23,16 @@ document rather than filed (issue creation is serialized in this repo).
 > for why that needed no opt-in flag while M1 did. Fidelity 0 remains
 > centre-anchored. `multi_fidelity.py` line citations below predate that
 > patch; the symbol names are still the identity of each claim.
+>
+> **Status update (2026-08-15, later): M5 has landed.**
+> `compare_wirelength_estimators` /`WirelengthEstimatorReport`
+> (`src/kicad_tools/placement/wirelength.py`) measure both estimators on one
+> layout; `kct optimize-placement --dry-run` reports the pair in prose and as
+> a `wirelength_estimators` block in its `--format json` document, and the MCP
+> `evaluate_placement` response carries the same block. Report-only — no
+> objective changed. This is the evidence channel M1's default flip was
+> waiting on. **M3 and M4 remain unimplemented and unfiled**, as does the M1
+> tail (MCP front-end still scores centres; pad anchoring still opt-in).
 
 ## Why this audit exists
 
@@ -234,6 +244,21 @@ for name, b in boards.items():
 PY
 ```
 
+**Since M5, this table no longer needs a bespoke script.** Any board can be
+measured with the shipped CLI, which reports both estimators for the layout as
+committed:
+
+```bash
+uv run kct optimize-placement board.kicad_pcb --dry-run --format json \
+  | jq .wirelength_estimators
+# {"centre_anchored_mm": …, "pad_anchored_mm": …, "delta_mm": …,
+#  "delta_pct": …, "scored": "centre", "pads_available": true, "pad_count": …}
+```
+
+Note the two numbers differ from the script above on weighted boards: the CLI
+honours `Net.weight` on *both* legs (see §6 M5), whereas `compute_hpwl` in the
+snippet ignores it. On the unweighted fixtures in the table they agree.
+
 **What this does and does not show.** It shows the two estimators assign
 materially different lengths to the *same* layout (up to 40% on a 3-part board,
 11% on a 20-part board) — which bounds how differently they can *rank*
@@ -243,6 +268,36 @@ produces shorter routed copper on our boards; nobody has run that experiment
 here. The pad-anchored value happened to be lower on all three fixtures, but
 that direction is not guaranteed in general — a pad can sit outside the
 bounding box of its own component's centre.
+
+### 4.1 Fleet measurement (M5, 2026-08-15, at `07649039`)
+
+The three-fixture table above was the *whole* evidence base when M1 shipped
+opt-in. M5's reporting channel makes the same measurement available on any
+board, so here is the committed fleet, measured with the command above
+(`boards/0*/output/*_routed.kicad_pcb`):
+
+| Board | Components | Nets | Pads | Centre-anchored | Pad-anchored | Δ |
+|---|---|---|---|---|---|---|
+| `00-simple-led` | 3 | 3 | 6 | 34.00 mm | 32.00 mm | −5.88% |
+| `01-voltage-divider` | 4 | 3 | 8 | 58.00 mm | 55.46 mm | −4.38% |
+| `02-charlieplex-led` | 14 | 9 | 34 | 262.00 mm | 274.70 mm | **+4.85%** |
+| `03-usb-joystick` | 19 | 16 | 86 | 586.54 mm | 530.75 mm | −9.51% |
+| `04-stm32-devboard` | 17 | 12 | 85 | 351.00 mm | 353.72 mm | **+0.77%** |
+| `05-bldc-motor-controller` | 55 | 44 | 209 | 1732.00 mm | 1724.23 mm | −0.45% |
+| `06-diffpair-test` | 7 | 26 | 198 | 1115.00 mm | 1097.81 mm | −1.54% |
+| `07-matchgroup-test` | 8 | 34 | 244 | 1285.00 mm | 1233.12 mm | −4.04% |
+
+**The finding that matters for M1's default flip: the sign is not constant.**
+Two of eight fleet boards read *longer* at the pads (`02` by +4.85%, `04` by
++0.77%), which the §4 fixture table — three boards, all negative — could not
+have revealed. The §4 caveat ("a pad can sit outside the bounding box of its
+own component's centre") is therefore not hypothetical on our own boards.
+
+What it still does **not** show: that optimizing against pads produces shorter
+routed copper. These are two estimators reading one fixed layout; nobody has
+yet run the optimizer both ways on a board and compared the routed result.
+That experiment — not this table — is what should decide whether
+`--pad-anchored-wirelength` becomes the default.
 
 ---
 
@@ -408,9 +463,58 @@ fix with no objective-wide blast radius.
 are a proximity heuristic, and `pins[0]` is often already the relevant pad on
 two-pad passives. File only if M1 lands and the `optim` engine remains in use.
 
-### M5 — Report both estimators before switching either
+### M5 — Report both estimators before switching either — **LANDED (report-only)**
 
-> **Stub title:** `feat(placement): report pad-anchored HPWL alongside the centre-anchored score`
+> **Shipped as:** `compare_wirelength_estimators` returning a frozen
+> `WirelengthEstimatorReport`
+> (`src/kicad_tools/placement/wirelength.py`, re-exported from
+> `src/kicad_tools/placement/__init__.py`), consumed by two surfaces:
+>
+> - `kct optimize-placement --dry-run` prints a `Wirelength estimators: …`
+>   line and, under `--format json`, emits a `wirelength_estimators` block
+>   (`centre_anchored_mm`, `pad_anchored_mm`, `delta_mm`, `delta_pct`,
+>   `scored`, `pads_available`, `pad_count`) — documented in
+>   `docs/reference/machine-output.md`;
+> - the MCP `evaluate_placement` response carries the same block, rounded to
+>   4 dp, with `scored: "centre"` (that front-end is still centre-anchored —
+>   the M1 tail).
+>
+> **Implementation note — both legs go through `compute_wirelength`.** The
+> stub below proposed emitting `compute_hpwl` next to
+> `CostBreakdown.wirelength`. That would have made the reported delta a
+> *mixture* of two changes, because `compute_hpwl` ignores `Net.weight`
+> while `CostBreakdown.wirelength` honours it: on any board using
+> `--anchor-weight`, part of the "pad anchoring saves X mm" headline would
+> actually have been "weighting silently vanished". Calling
+> `compute_wirelength` twice — once without a pad map, once with — makes
+> anchoring the only difference between the two numbers, which is the whole
+> point of the measurement.
+>
+> **`scored` is a label, not a switch.** It records which estimator the
+> caller's objective used, so a fleet aggregation can tell a measured
+> board from a scored one. Both numbers are computed from the layout
+> either way; `--pad-anchored-wirelength` changes which one lands in
+> `CostBreakdown.wirelength`, never the reported pair.
+>
+> **`pads_available` guards a false negative.** A board decoded without pad
+> geometry makes the two estimators identical by construction. Reporting
+> that as a 0.00 mm delta would read as "pad anchoring buys nothing here";
+> the flag (and `pad_count`) marks it as *not measured* instead.
+>
+> **Deliberately not covered:** the full (non-`--dry-run`) optimize run's
+> final score. `--dry-run` scores the layout as committed, which is exactly
+> the fleet measurement M1's default flip needs; adding a second emission
+> point inside the optimize path would widen the JSON contract without
+> adding evidence.
+>
+> **Tests:** `tests/test_placement_wirelength_estimator_report.py` (both
+> estimators on one layout, `Net.weight` on both legs, null `delta_pct` on a
+> zero-length centre estimate, padless boards flagged, rotation visible only
+> in the pad leg, determinism, `as_dict` rounding, and — the load-bearing
+> invariant — that the scored `CostBreakdown.wirelength` still equals
+> whichever estimator `scored` names, with and without the flag).
+
+> **Stub title (as filed):** `feat(placement): report pad-anchored HPWL alongside the centre-anchored score`
 > **Scope:** emit `compute_hpwl` next to `CostBreakdown.wirelength`
 > (`cost.py:98`) in `kct optimize-placement --dry-run` and the MCP
 > `evaluate_placement` response (`mcp/tools/optimize_placement.py:603`), without
@@ -421,8 +525,12 @@ evidence at zero behavioural risk, so M1's real payoff (or absence) can be
 argued from our own boards rather than from pcbplace's reported
 59.5 → 12.7 mm. This is the cheapest way to de-risk M1.
 
-**Honest counter-note.** Purely additive telemetry — it improves nobody's
-placement by itself, and if M1 is going to be built regardless, M5 is skippable.
+**Honest counter-note (as written, before the build).** Purely additive
+telemetry — it improves nobody's placement by itself, and if M1 is going to be
+built regardless, M5 is skippable. *Resolution:* M1 shipped **opt-in**
+precisely because the default flip lacked fleet evidence, so M5 stopped being
+skippable and became the gate on M1's remaining tail. It still improves nobody's
+placement on its own — that is the point of "report-only".
 
 ---
 
@@ -473,7 +581,7 @@ to standardise on, kept clearly distinct from the "locked/immovable" sense above
 | M2 | `refactor(placement): use pad HPWL at multi-fidelity level 1, where pads are already required` | **LANDED unconditional** (fidelity ≥ 1 pad-anchored; fidelity 0 unchanged) |
 | M3 | `feat(optim): allow max_distance constraints to target a pad, not a component centre` | overlaps #4831 item 4 |
 | M4 | `fix(optim): pick the shared-net pad instead of pins[0] for cluster springs` | M1 (only if `optim` stays in use) |
-| M5 | `feat(placement): report pad-anchored HPWL alongside the centre-anchored score` | — (de-risks M1) |
+| M5 | `feat(placement): report pad-anchored HPWL alongside the centre-anchored score` | **LANDED report-only** (`wirelength_estimators` on `--dry-run` + MCP `evaluate_placement`); the evidence M1's default flip needs |
 
 Related documents: `docs/placement-scoring.md` (why the placement scoring
 surfaces intentionally disagree, issue #3940) and

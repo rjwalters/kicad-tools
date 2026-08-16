@@ -39,7 +39,10 @@ from kicad_tools.placement.vector import (
     bounds,
     decode,
 )
-from kicad_tools.placement.wirelength import compute_per_footprint_ratsnest
+from kicad_tools.placement.wirelength import (
+    compare_wirelength_estimators,
+    compute_per_footprint_ratsnest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -622,6 +625,10 @@ def evaluate_placement(
         - score: Total placement score (lower is better).
         - feasible: Whether placement is feasible (no overlaps/violations).
         - breakdown: Per-component score breakdown (wirelength, overlap, DRC, area).
+        - wirelength_estimators: The centre-anchored and pad-anchored
+          wirelength of this same layout side by side, with their delta and
+          which one ``score`` was computed from (issue #4831 M5). Report-only:
+          it does not change ``score`` or ``breakdown``.
         - component_count: Number of components.
         - net_count: Number of nets.
         - board_dimensions: Board width and height in mm.
@@ -685,11 +692,18 @@ def evaluate_placement(
     placed_components = _build_placed_components(current_placements, components)
     ratsnest_list = compute_per_footprint_ratsnest(placed_components, nets)
 
+    # Both wirelength estimators on the same layout (issue #4831 M5). The MCP
+    # objective is centre-anchored, so "scored" is always "centre" here; the
+    # pad-anchored number is report-only evidence for whether that should
+    # change. See docs/placement-pad-anchoring-audit.md.
+    estimators = compare_wirelength_estimators(placed_components, nets, scored="centre")
+
     return {
         "success": True,
         "score": round(score.total, 4),
         "feasible": score.is_feasible,
         "breakdown": _breakdown_to_dict(score.breakdown),
+        "wirelength_estimators": estimators.as_dict(ndigits=4),
         "component_count": len(components),
         "net_count": len(nets),
         "board_dimensions": {

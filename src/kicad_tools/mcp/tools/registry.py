@@ -1701,7 +1701,9 @@ register_tool(
         "Evaluate current PCB placement quality without optimizing. Returns a "
         "placement score breakdown including wirelength, component overlap, DRC "
         "violations, boundary violations, and bounding area. Use this to assess "
-        "board quality before deciding whether to run optimize_placement."
+        "board quality before deciding whether to run optimize_placement. Also "
+        "reports 'wirelength_estimators': the same layout measured both between "
+        "component centres and between real pads, for comparison only."
     ),
     parameters=_make_params(
         properties={

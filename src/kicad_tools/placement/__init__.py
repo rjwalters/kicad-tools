@@ -103,7 +103,9 @@ from .visualization import (
 from .wirelength import (
     HPWLResult,
     NetWirelength,
+    WirelengthEstimatorReport,
     build_pad_position_map,
+    compare_wirelength_estimators,
     compute_hpwl,
     compute_hpwl_breakdown,
 )
@@ -132,6 +134,7 @@ __all__ = [
     "DRCResult",
     "DRCViolation",
     "NetWirelength",
+    "WirelengthEstimatorReport",
     "PassResult",
     "PadDef",
     "PlacedComponent",
@@ -156,6 +159,7 @@ __all__ = [
     "bounds_with_blocks",
     "build_affinity_graph",
     "build_pad_position_map",
+    "compare_wirelength_estimators",
     "compute_block_boundary_violation",
     "compute_hpwl",
     "compute_hpwl_breakdown",
