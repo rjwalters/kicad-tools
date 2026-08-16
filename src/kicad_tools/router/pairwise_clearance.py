@@ -410,6 +410,98 @@ def build_pairwise_clearance_table(
     )
 
 
+class SubthresholdCoverage(NamedTuple):
+    """Pairs the ``--hv-threshold`` drops that the census still requires (#4507).
+
+    ``build_pairwise_clearance_table`` omits every pair whose ``|Delta V|`` is
+    below ``hv_threshold`` (default 30 V), so the router enforces only the
+    scalar DRU floor for them.  The creepage census (``kct creepage``) has no
+    such threshold: it looks the standard up at whatever ``|Delta V|`` the pair
+    actually has, and IEC 60664-1's low-voltage rows are **above** a typical
+    0.2 mm fab floor (0.40-0.53 mm for PD2 / material group IIIa).
+
+    Every such pair is therefore a requirement the router will not enforce and
+    the census will score -- structurally unreachable "0 board-level fails" on
+    any board with low-voltage pairs, no matter how good the search is.  This
+    is a *policy* gap, not a defect (the threshold exists so LV<->LV pairs are
+    not over-segregated), but it must be visible rather than silent.
+
+    Attributes:
+        pair_count: Number of sub-threshold pairs whose requirement exceeds the
+            DRU floor.  ``0`` when the threshold hides nothing.
+        max_required_mm: Largest such requirement (mm); ``0.0`` when none.
+        worst_pair: The ``(net_a, net_b)`` carrying :attr:`max_required_mm`
+            (``/``-stripped, sorted), or ``None`` when none.
+        worst_delta_v: That pair's ``|Delta V|`` in volts; ``0.0`` when none.
+    """
+
+    pair_count: int
+    max_required_mm: float
+    worst_pair: tuple[str, str] | None
+    worst_delta_v: float
+
+
+def subthreshold_coverage_gap(
+    net_voltages: Mapping[str, float],
+    *,
+    dru: float,
+    standard_id: str = "iec60664",
+    pollution_degree: int = 2,
+    material_group: str = "IIIa",
+    hv_threshold: float = 30.0,
+) -> SubthresholdCoverage:
+    """Measure what ``hv_threshold`` hides from the pairwise matrix (#4507).
+
+    Mirrors :func:`build_pairwise_clearance_table`'s inputs exactly -- same
+    signed differencing (#4867), same standard lookup -- but reports the pairs
+    that fall on the *other* side of the threshold and would still carry a
+    requirement above ``dru``.  See :class:`SubthresholdCoverage`.
+
+    Same-potential pairs (``|Delta V| == 0``) are excluded: the census gives
+    them a 0 mm requirement, so they are not a coverage gap.
+
+    The standard lookup is memoised per distinct ``|Delta V|``, so a large
+    voltage map costs O(N^2) float comparisons but only a handful of table
+    lookups.  An out-of-table ``|Delta V|`` is *swallowed* here (the pair is
+    skipped) rather than raised: this is a diagnostic, and the fail-loud
+    contract belongs to :func:`build_pairwise_clearance_table`, which sees the
+    same voltages.
+    """
+    from kicad_tools.creepage.standards import StandardLookupError, get_standard
+
+    std = get_standard(standard_id)
+    normalised = {_norm_net_key(name): float(v) for name, v in net_voltages.items()}
+    ids = sorted(normalised)
+    lookup_cache: dict[float, float | None] = {}
+
+    count = 0
+    worst_required = 0.0
+    worst_pair: tuple[str, str] | None = None
+    worst_dv = 0.0
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            a, b = ids[i], ids[j]
+            dv = abs(normalised[a] - normalised[b])
+            if dv <= 0.0 or dv >= hv_threshold:
+                continue
+            if dv not in lookup_cache:
+                try:
+                    lookup_cache[dv] = std.required_creepage(dv, pollution_degree, material_group)[
+                        0
+                    ]
+                except StandardLookupError:
+                    lookup_cache[dv] = None
+            required = lookup_cache[dv]
+            if required is None or required <= dru:
+                continue
+            count += 1
+            if required > worst_required:
+                worst_required = required
+                worst_pair = (a, b)
+                worst_dv = dv
+    return SubthresholdCoverage(count, worst_required, worst_pair, worst_dv)
+
+
 class CppDomainMatrix(NamedTuple):
     """C++-consumable form of a :class:`PairwiseClearanceTable` (Issue #4510).
 

@@ -4381,6 +4381,56 @@ def _apply_pairwise_clearance(router: "Autorouter", args, quiet: bool = False) -
             f"  HV pairwise clearance: {len(voltages)} mapped nets, "
             f"{len(required)} cross-pairs ({enforcement})"
         )
+        _warn_subthreshold_coverage_gap(args, voltages, float(rules.trace_clearance))
+
+
+def _warn_subthreshold_coverage_gap(args, voltages, dru: float) -> None:
+    """Name the pairs ``--hv-threshold`` drops but ``kct creepage`` will score (#4507).
+
+    The banner above counts the pairs the router *will* enforce.  It said
+    nothing about the ones it will not: every mapped pair whose ``|Delta V|``
+    sits below ``--hv-threshold`` (30 V by default) keeps only the scalar DRU
+    floor, while the census looks the standard up at the pair's actual
+    ``|Delta V|`` -- and IEC 60664-1's low-voltage rows (0.40-0.53 mm at PD2 /
+    IIIa) are *above* a 0.2 mm fab floor.
+
+    On softstart rev-C that is **405 pairs** the router does not widen and the
+    census does score, which is why the #4507 T4 criterion ("0 board-level
+    creepage census fails") is unreachable at default settings regardless of
+    how good the search is.  Keeping that silent is the same failure mode
+    #4588 / #4699 / #4867 each closed in turn: a reassuring banner over an
+    under-constrained matrix.  Advisory only -- nothing is gated here.
+    """
+    from kicad_tools.cli.progress import flush_print
+    from kicad_tools.router.pairwise_clearance import subthreshold_coverage_gap
+
+    hv_threshold = float(getattr(args, "hv_threshold", 30.0))
+    gap = subthreshold_coverage_gap(
+        voltages,
+        dru=dru,
+        standard_id=getattr(args, "creepage_standard", "iec60664"),
+        pollution_degree=getattr(args, "pollution_degree", 2),
+        material_group=getattr(args, "material_group", "IIIa"),
+        hv_threshold=hv_threshold,
+    )
+    if gap.pair_count == 0:
+        return
+    worst = ""
+    if gap.worst_pair is not None:
+        worst = (
+            f" (worst: {gap.worst_pair[0]}<->{gap.worst_pair[1]} at "
+            f"{gap.worst_delta_v:g}V -> {gap.max_required_mm:.3f}mm)"
+        )
+    flush_print(
+        f"    NOTE: {gap.pair_count} further pair(s) sit below the "
+        f"{hv_threshold:g}V --hv-threshold yet still require more than the "
+        f"{dru:.3f}mm DRU floor{worst}."
+    )
+    flush_print(
+        "    The router enforces only the DRU floor for those; 'kct creepage' "
+        "scores them against the standard.  Pass --hv-threshold 0 to widen "
+        "every mapped pair."
+    )
 
 
 def _pairwise_attach_zones(router: "Autorouter") -> "tuple[AttachZone, ...]":
@@ -11995,7 +12045,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
             "Minimum net-pair |ΔV| (volts) that triggers a creepage widening "
             "for --voltage-map pairwise clearance; lower-difference pairs keep "
             "the scalar DRU floor to avoid over-segregating low-voltage nets "
-            "(default: 30.0). Mirrors optimize-placement / kct creepage."
+            "(default: 30.0). Mirrors optimize-placement. NOTE (#4507): "
+            "'kct creepage' has NO such threshold -- it scores every pair at "
+            "its actual |ΔV|, and IEC 60664-1's low-voltage rows (0.40-0.53mm "
+            "at PD2/IIIa) exceed a typical 0.2mm fab floor, so sub-threshold "
+            "pairs the router leaves at the DRU floor can still fail the "
+            "census.  The run reports how many; pass 0 to widen every pair."
         ),
     )
     parser.add_argument(
