@@ -32,6 +32,29 @@ if TYPE_CHECKING:
     from ..manufacturers import DesignRules
     from ..query.footprints import FootprintList
 
+# S-expression tags that introduce a component (footprint) block.
+#
+# KiCad 6 renamed ``(module ...)`` to ``(footprint ...)``; boards written by
+# pre-KiCad-6 tools -- still a large share of the public corpus -- use the
+# legacy spelling.  Every sub-form we read inside the block (``pad``, ``at``,
+# ``layer``, ``fp_text reference`` / ``fp_text value``, ``attr``) is spelled
+# identically on both sides of the rename, so accepting ``module`` as an alias
+# recovers the whole component graph without any per-sub-form translation
+# (issue #4873).  ``core.sexp_file.load_footprint`` already accepts the same
+# alias for standalone ``.kicad_mod`` library files.
+FOOTPRINT_TAGS: tuple[str, ...] = ("footprint", "module")
+
+
+def _is_footprint_tag(tag: str | None) -> bool:
+    """Return True if *tag* names a footprint block (modern or legacy).
+
+    Use this instead of a bare ``tag == "footprint"`` comparison anywhere the
+    board S-expression tree is walked, so legacy ``(module ...)`` boards stay
+    editable (position sync, rename, remove, translate) and not just readable.
+    """
+    return tag in FOOTPRINT_TAGS
+
+
 # Default regex for detecting power/ground net names.
 # Matches names like GND, +3V3, +5V, VCC, VDD, VBUS, or names starting with '+'.
 _DEFAULT_POWER_NET_PATTERN = re.compile(
@@ -1848,6 +1871,10 @@ class PCB:
         # (add_trace/add_via) emits name-based refs when this is True so a
         # name-based board stays name-based on save.
         self._net_name_only_dialect: bool = False
+        #: Loud, human-readable signals raised while parsing this board -- used
+        #: today for the "file has a component graph we could not read" guard
+        #: (issue #4873).  Empty on a board the parser fully understands.
+        self.parse_warnings: list[str] = []
         self._parse()
         self._detect_board_origin()
         self._link_footprint_sexp_nodes()
@@ -2196,7 +2223,10 @@ class PCB:
                 self._parse_layers(child)
             elif tag == "net":
                 self._parse_net(child)
-            elif tag == "footprint":
+            elif tag in FOOTPRINT_TAGS:
+                # ``module`` is the pre-KiCad-6 spelling of ``footprint``;
+                # the block's contents are unchanged by the rename, so the
+                # same parser handles both (issue #4873).
                 fp = Footprint.from_sexp(child)
                 self._footprints.append(fp)
             elif tag == "segment":
@@ -2243,6 +2273,52 @@ class PCB:
         # but the header declarations (net N "name") are always present, so we
         # can rebuild the number from the name.
         self._fixup_net_numbers()
+
+        self._warn_on_unparsed_component_graph()
+
+    def _warn_on_unparsed_component_graph(self) -> None:
+        """Refuse to return an empty component graph *silently*.
+
+        The ``(module ...)`` defect (issue #4873) was invisible precisely
+        because ``_parse()``'s dispatch chain has no fallback: a component
+        block spelled with an unrecognised tag simply fell through the loop
+        and the board reported zero footprints and zero pads with no error,
+        no warning, and no version signal.
+
+        This guard makes that class of failure loud rather than data-shaped:
+        if the file plainly carries a component graph (it has ``(pad ...)``
+        nodes somewhere in the tree) but no footprint was parsed, log a
+        warning naming the declared board version and the container tags we
+        could not read, and record it in :attr:`parse_warnings` so callers
+        can surface it too.  Genuinely component-free boards (panel frames,
+        outline-only fixtures) have no pads and stay quiet.
+        """
+        if self._footprints:
+            return
+
+        pad_nodes = self._sexp.find_all("pad")
+        if not pad_nodes:
+            return  # No component graph in the file at all -- nothing lost.
+
+        unreadable_tags = sorted(
+            {
+                child.tag
+                for child in self._sexp.iter_children()
+                if child.tag is not None and not _is_footprint_tag(child.tag) and child.find("pad")
+            }
+        )
+        version_node = self._sexp.find_child("version")
+        declared_version = (version_node.get_string(0) if version_node else None) or "unknown"
+        message = (
+            f"Board declares version {declared_version} and contains "
+            f"{len(pad_nodes)} pad node(s), but no footprint could be parsed: "
+            f"the component graph is unreadable. Unrecognised container tag(s): "
+            f"{', '.join(unreadable_tags) if unreadable_tags else 'none at top level'}. "
+            "Pad-level results (routing, DRC, LVS, BOM) from this board would be "
+            "wrong, not merely incomplete."
+        )
+        logger.warning("%s", message)
+        self.parse_warnings.append(message)
 
     def _parse_layers(self, sexp: SExp):
         """Parse layer definitions."""
@@ -2678,7 +2754,7 @@ class PCB:
         # iteration order (fallback for legacy files without UUIDs).
         order_idx = 0
         for child in self._sexp.iter_children():
-            if child.tag != "footprint":
+            if not _is_footprint_tag(child.tag):
                 continue
 
             # Direct child only: pads/properties carry their own (uuid)
@@ -3008,7 +3084,7 @@ class PCB:
         # Translate every positioned top-level item in the tree.
         for child in self._sexp.iter_children():
             tag = child.tag
-            if tag == "footprint":
+            if _is_footprint_tag(tag):
                 self._translate_footprint_sexp(child, dx_nm, dy_nm)
             elif tag in (
                 "segment",
@@ -3115,6 +3191,20 @@ class PCB:
                 return fp
         return None
 
+    def _iter_footprint_sexps(self) -> Iterator[SExp]:
+        """Yield every footprint node in the tree, in document order.
+
+        Matches both the modern ``(footprint ...)`` spelling and the legacy
+        pre-KiCad-6 ``(module ...)`` spelling (issue #4873).  Search semantics
+        match :meth:`SExp.find_all` -- descendants of the root, not the root
+        itself -- so this is a drop-in replacement for the
+        ``self._sexp.find_all("footprint")`` calls it supersedes.
+        """
+        for child in self._sexp.children:
+            for node in child.iter_all():
+                if _is_footprint_tag(node.tag):
+                    yield node
+
     def _find_footprint_sexp(self, reference: str) -> SExp | None:
         """Find a footprint S-expression node by reference designator.
 
@@ -3126,7 +3216,7 @@ class PCB:
         Returns:
             The footprint SExp node if found, None otherwise.
         """
-        for fp_sexp in self._sexp.find_all("footprint"):
+        for fp_sexp in self._iter_footprint_sexps():
             ref_value = None
 
             # KiCad 7 format: fp_text with type "reference"
@@ -4144,7 +4234,7 @@ class PCB:
         abs_y = y + self._board_origin[1]
 
         for child in self._sexp.iter_children():
-            if child.tag != "footprint":
+            if not _is_footprint_tag(child.tag):
                 continue
 
             # Check if this is the right footprint by looking at reference
@@ -4214,7 +4304,7 @@ class PCB:
 
         # Update the S-expression tree
         for child in self._sexp.iter_children():
-            if child.tag != "footprint":
+            if not _is_footprint_tag(child.tag):
                 continue
 
             fp_ref = self._get_footprint_reference(child)
@@ -4268,7 +4358,7 @@ class PCB:
 
         # Update the S-expression tree
         for child in self._sexp.iter_children():
-            if child.tag != "footprint":
+            if not _is_footprint_tag(child.tag):
                 continue
 
             fp_ref = self._get_footprint_reference(child)
@@ -4348,7 +4438,7 @@ class PCB:
 
         # Update S-expression tree
         for child in self._sexp.iter_children():
-            if child.tag != "footprint":
+            if not _is_footprint_tag(child.tag):
                 continue
 
             # Get reference from this footprint
@@ -4449,7 +4539,7 @@ class PCB:
         """
         # Find footprint in S-expression tree
         for child in self._sexp.iter_children():
-            if child.tag != "footprint":
+            if not _is_footprint_tag(child.tag):
                 continue
 
             fp_ref = self._get_footprint_reference(child)
@@ -4576,7 +4666,7 @@ class PCB:
 
         # Update S-expression tree
         for child in self._sexp.iter_children():
-            if child.tag != "footprint":
+            if not _is_footprint_tag(child.tag):
                 continue
 
             fp_ref = self._get_footprint_reference(child)
@@ -4683,7 +4773,7 @@ class PCB:
 
         # Update S-expression tree
         for child in self._sexp.iter_children():
-            if child.tag != "footprint":
+            if not _is_footprint_tag(child.tag):
                 continue
 
             fp_ref = self._get_footprint_reference(child)
@@ -5132,7 +5222,7 @@ class PCB:
             # Find the first footprint and insert before it
             first_footprint_index = -1
             for i, child in enumerate(self._sexp.children):
-                if child.name == "footprint":
+                if _is_footprint_tag(child.name):
                     first_footprint_index = i
                     break
 
@@ -5746,7 +5836,7 @@ class PCB:
             return False
 
         # Update the S-expression tree
-        for fp_sexp in self._sexp.find_all("footprint"):
+        for fp_sexp in self._iter_footprint_sexps():
             # Find the matching footprint by reference
             ref_value = None
 

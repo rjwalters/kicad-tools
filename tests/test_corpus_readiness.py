@@ -16,9 +16,11 @@ a benchmark verdict rather than crash:
 * a **pour** counts as copper (a ground net served only by a filled zone is
   routed; scoring it unrouted mis-grades every board that has a plane), while a
   **keepout rule area** does not (it is a constraint, not a conductor);
-* an empty component graph is attributed to the legacy ``(module ...)`` schema
-  when that is the cause, because that blocker is fixable in the parser and the
-  generic "no pads" bucket hides how much of the corpus it would unlock;
+* a pre-KiCad-6 ``(module ...)`` board keeps its component graph (issue #4873
+  taught the parser the alias; this file used to pin the opposite), and an
+  empty component graph is still attributed to a legacy schema when *that* is
+  the cause, because the generic "no pads" bucket hides how much of the corpus
+  a parser fix would unlock;
 * a partially-routed board is disqualified as a *reference*, not silently scored
   against;
 * an outline whose corner arcs use the pre-KiCad-6 centre+angle form now
@@ -243,6 +245,37 @@ LEGACY_MODULE_BOARD = """(kicad_pcb (version 4) (host pcbnew "(2017-11-30)")
 )
 """
 
+# The same pre-KiCad-6 dialect, but a *complete* two-part board: two multi-pad
+# nets, both fully routed. Before #4873 this was worth zero to the benchmark
+# line (no component graph at all); it is now a labelled route-vs-human
+# reference, which is the whole payoff the census measured (9/22 pinned boards
+# were losing their component graph to the token rename alone).
+LEGACY_MODULE_ROUTED_BOARD = """(kicad_pcb (version 4) (host pcbnew "(2017-11-30)")
+  (general (thickness 1.6))
+  (page A4)
+  (layers (0 F.Cu signal) (31 B.Cu signal) (44 Edge.Cuts user))
+  (net 0 "")
+  (net 1 GND)
+  (net 2 SIG)
+  (gr_line (start 0 0) (end 20 0) (layer Edge.Cuts) (width 0.05))
+  (gr_line (start 20 0) (end 20 10) (layer Edge.Cuts) (width 0.05))
+  (gr_line (start 20 10) (end 0 10) (layer Edge.Cuts) (width 0.05))
+  (gr_line (start 0 10) (end 0 0) (layer Edge.Cuts) (width 0.05))
+  (module R_0603 (layer F.Cu) (tedit 0) (at 5 5)
+    (fp_text reference R1 (at 0 0) (layer F.SilkS))
+    (pad 1 smd rect (at -0.8 0) (size 0.9 0.8) (layers F.Cu F.Paste F.Mask) (net 1 GND))
+    (pad 2 smd rect (at 0.8 0) (size 0.9 0.8) (layers F.Cu F.Paste F.Mask) (net 2 SIG))
+  )
+  (module R_0603 (layer F.Cu) (tedit 0) (at 12 5)
+    (fp_text reference R2 (at 0 0) (layer F.SilkS))
+    (pad 2 smd rect (at -0.8 0) (size 0.9 0.8) (layers F.Cu F.Paste F.Mask) (net 2 SIG))
+    (pad 1 smd rect (at 0.8 0) (size 0.9 0.8) (layers F.Cu F.Paste F.Mask) (net 1 GND))
+  )
+  (segment (start 5.8 5) (end 11.2 5) (width 0.25) (layer F.Cu) (net 2))
+  (segment (start 4.2 5) (end 12.8 5) (width 0.25) (layer B.Cu) (net 1))
+)
+"""
+
 
 def write_board(tmp_path: Path, name: str, text: str) -> Path:
     path = tmp_path / f"{name}.kicad_pcb"
@@ -280,11 +313,29 @@ class TestFeatureExtraction:
         assert keepout.multi_pad_nets_with_copper == 1
         assert keepout.routed_net_fraction == pytest.approx(0.5)
 
-    def test_legacy_module_board_parses_but_yields_no_pads(self, tmp_path: Path) -> None:
+    def test_legacy_module_board_yields_its_component_graph(self, tmp_path: Path) -> None:
+        """Pre-KiCad-6 ``(module ...)`` boards keep their pads (issue #4873).
+
+        This test used to pin the *defect* (``footprints == 0 and pads == 0``):
+        the parser read ``(footprint ...)`` only, so 9 of the 22 pinned corpus
+        boards silently lost their entire component graph. The parser now
+        treats ``module`` as the legacy spelling of ``footprint``, so the graph
+        survives -- while ``legacy_module_tokens`` keeps counting the dialect,
+        which is still worth reporting as a provenance signal.
+        """
         f = features(tmp_path, "legacy", LEGACY_MODULE_BOARD)
-        assert f.footprints == 0 and f.pads == 0
-        assert f.legacy_module_tokens == 1, "the (module ...) token is the diagnosable cause"
-        assert f.segments == 1, "copper still parses -- only the component graph is missing"
+        assert f.footprints == 1 and f.pads == 1
+        assert f.netted_pads == 1, "the pad's (net 1 GND) binding survives the alias"
+        assert f.legacy_module_tokens == 1, "the dialect is still counted, just no longer fatal"
+        assert f.segments == 1
+
+    def test_legacy_module_board_can_be_a_full_benchmark_case(self, tmp_path: Path) -> None:
+        """The census payoff: a routed legacy board is now fully featurizable."""
+        f = features(tmp_path, "legacy-routed", LEGACY_MODULE_ROUTED_BOARD)
+        assert (f.footprints, f.pads, f.netted_pads) == (2, 4, 4)
+        assert f.multi_pad_nets == 2
+        assert f.multi_pad_nets_with_trace_copper == 2
+        assert f.routed_net_fraction == pytest.approx(1.0)
 
     def test_missing_outline_yields_zero_area_without_raising(self, tmp_path: Path) -> None:
         f = features(tmp_path, "no-outline", board_text(outline="none", copper=SIG_TRACE))
@@ -373,11 +424,41 @@ class TestVerdicts:
         assert verdict.capacity_features and not verdict.capacity_labeled
         assert verdict.harness_blockers == [BLOCK_NO_REFERENCE_COPPER]
 
-    def test_legacy_module_board_names_the_fixable_cause(self, tmp_path: Path) -> None:
+    def test_legacy_module_board_is_no_longer_schema_blocked(self, tmp_path: Path) -> None:
+        """#4873: the dialect no longer costs the board its component graph.
+
+        The one-pad fixture still fails the *net-binding* gate (nothing to
+        route), but that is a property of the board, not of the parser -- the
+        two parser blockers must be gone.
+        """
         verdict = evaluate(features(tmp_path, "legacy", LEGACY_MODULE_BOARD))
+        assert verdict.capacity_blockers == [BLOCK_NO_NET_BINDING]
+        assert BLOCK_NO_PAD_GRAPH not in verdict.capacity_blockers
+        assert BLOCK_LEGACY_MODULE_SCHEMA not in verdict.capacity_blockers
+
+    def test_routed_legacy_module_board_is_a_harness_candidate(self, tmp_path: Path) -> None:
+        verdict = evaluate(features(tmp_path, "legacy-routed", LEGACY_MODULE_ROUTED_BOARD))
+        assert verdict.capacity_blockers == []
+        assert verdict.label == LABEL_COMPLETE
+        assert verdict.capacity_features and verdict.capacity_labeled
+        assert verdict.harness_candidate
+
+    def test_a_dialect_that_still_parses_to_nothing_names_itself(self) -> None:
+        """The legacy-schema diagnostic stays live for the *next* dialect.
+
+        Keyed on zero footprints (not zero pads) since #4873: a board whose
+        modules parse but carry no pads is a mechanical board, while a board
+        that yields no footprints at all while the raw text is full of
+        ``(module ...)`` tokens is still parser work, and saying so keeps it
+        out of the generic ``no-pad-graph`` bucket.
+        """
+        verdict = evaluate(
+            BoardFeatures(board_id="future-dialect", footprints=0, pads=0, legacy_module_tokens=7)
+        )
         assert verdict.label == LABEL_NONE
         assert not verdict.capacity_features
-        assert verdict.capacity_blockers == [BLOCK_NO_PAD_GRAPH, BLOCK_LEGACY_MODULE_SCHEMA]
+        assert BLOCK_NO_PAD_GRAPH in verdict.capacity_blockers
+        assert BLOCK_LEGACY_MODULE_SCHEMA in verdict.capacity_blockers
 
     def test_pads_without_nets_are_a_distinct_blocker(self, tmp_path: Path) -> None:
         verdict = evaluate(features(tmp_path, "mech", board_text(nets=False)))
@@ -541,7 +622,7 @@ class TestCensus:
         assert totals["pour_dependent_candidates"] == 1
 
         assert report["by_label"] == {LABEL_COMPLETE: 2, LABEL_PARTIAL: 1, LABEL_NONE: 1}
-        assert report["blockers"][BLOCK_LEGACY_MODULE_SCHEMA] == 1
+        assert report["blockers"][BLOCK_NO_NET_BINDING] == 1
         assert report["blockers"][BLOCK_PARTIAL_REFERENCE_ROUTING] == 1
         assert report["candidate_profile"]["count"] == 2
         assert [b["board_id"] for b in report["boards"]] == sorted(
@@ -558,7 +639,7 @@ class TestCensus:
     def test_render_names_every_blocker_and_board(self, tmp_path: Path) -> None:
         boards, verdicts = self._mixed(tmp_path)
         text = render_census(census(boards, verdicts))
-        assert BLOCK_LEGACY_MODULE_SCHEMA in text
+        assert BLOCK_NO_NET_BINDING in text
         assert BLOCK_PARTIAL_REFERENCE_ROUTING in text
         for board in boards:
             assert board.board_id in text

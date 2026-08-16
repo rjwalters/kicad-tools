@@ -1126,6 +1126,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--manufacturer jlcpcb` because it forwarded flags only when their value
   differed from the default.
 
+- **Legacy `(module …)` boards parsed to zero footprints and zero pads —
+  silently** (#4873) — KiCad 6 renamed the component block from `(module …)` to
+  `(footprint …)`, and `PCB._parse()`'s dispatch chain matched the modern
+  spelling only, with no `else` arm. A pre-KiCad-6 board therefore parsed its
+  nets, segments, vias and zones fine while its **entire component graph
+  vanished**, with no error, no warning and no version signal — a data-shaped
+  wrong answer that every downstream consumer (routing, DRC, LVS, BOM) would
+  read as "this board has no parts." `module` is now accepted as the legacy
+  spelling of `footprint` throughout `schema/pcb.py`: not just the parse
+  dispatch, but every tree walk that keys on the tag
+  (`_link_footprint_sexp_nodes`, `_translate_footprint_sexp`,
+  `_find_footprint_sexp`, reference/value updates, silkscreen text edits, net
+  insertion), so a module-sourced board is **editable**, not merely readable —
+  position sync, rename, remove, translate and save/reload all round-trip. No
+  sub-form translation was needed: `pad` / `at` / `layer` / `fp_text` / `attr`
+  are spelled identically on both sides of the rename. Measured on the pinned
+  22-board open-schematics corpus census
+  (`scripts/corpus/benchmark_readiness.py`): the `legacy-module-schema` and
+  `no-pad-graph` blockers drop **9 → 0**, featurizable boards rise **10 → 18**
+  and route-vs-human benchmark cases **8 → 16** — the token rename alone was
+  costing 41% of the sample. The class of failure is now loud in general: a
+  board that carries `(pad …)` nodes but yields no footprint logs a warning
+  naming the declared version and the unreadable container tag, and records it
+  in the new `PCB.parse_warnings`, so a *future* unknown component container
+  cannot silently return an empty component graph either. The sibling legacy
+  `gr_arc` centre+angle defect (#4874) is deliberately not in this change.
+
 - **`route --voltage-map` collapsed signed net potentials with `abs()`, so
   +150 V vs −150 V differenced to 0 V** (#4867, blocker for #4507, epic #4431
   Phase 2) — the router normalised its voltage map to *magnitudes* before

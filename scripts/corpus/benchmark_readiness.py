@@ -87,9 +87,13 @@ COMPLETE_REFERENCE_FRACTION = 0.95
 
 #: Parsed, but no footprints/pads came out: no component graph to featurize.
 BLOCK_NO_PAD_GRAPH = "no-pad-graph"
-#: The specific, fixable cause of most ``no-pad-graph`` boards: the file uses
-#: the pre-KiCad-6 ``(module ...)`` token, which this repo's parser silently
-#: ignores (it reads ``(footprint ...)`` only). Actionable as parser work.
+#: The specific, fixable cause a ``no-pad-graph`` board *used* to have: the file
+#: uses the pre-KiCad-6 ``(module ...)`` token, which the parser silently
+#: ignored (it read ``(footprint ...)`` only). Issue #4873 taught
+#: ``PCB._parse()`` the alias, so this blocker should now be empty on the
+#: pinned corpus; it is kept as a live diagnostic in case some other legacy
+#: dialect still yields no footprints at all -- naming the dialect keeps that
+#: case actionable as parser work instead of hiding it in the generic bucket.
 BLOCK_LEGACY_MODULE_SCHEMA = "legacy-module-schema"
 #: Pads exist but the board has fewer than ``MIN_MULTI_PAD_NETS`` routable
 #: nets -- usually none carry a net at all (a panel or a mechanical board), but
@@ -375,9 +379,14 @@ def evaluate(features: BoardFeatures) -> Readiness:
 
     if features.footprints == 0 or features.pads == 0:
         blockers.append(BLOCK_NO_PAD_GRAPH)
-        if features.legacy_module_tokens > 0:
-            # Name the cause, not just the symptom: this one is fixable in the
-            # parser and would recover the whole bucket at once.
+        if features.footprints == 0 and features.legacy_module_tokens > 0:
+            # Name the cause, not just the symptom: a legacy-dialect board that
+            # yields *no footprints at all* is parser work, not corpus noise.
+            # Since #4873 the plain ``(module ...)`` rename is understood, so
+            # this fires only for a dialect we still cannot read -- keyed on
+            # zero footprints (not zero pads), because a legacy board whose
+            # modules simply carry no pads is a mechanical board, not a parse
+            # gap.
             blockers.append(BLOCK_LEGACY_MODULE_SCHEMA)
     elif features.multi_pad_nets < MIN_MULTI_PAD_NETS:
         blockers.append(BLOCK_NO_NET_BINDING)

@@ -5,6 +5,28 @@ slice 4 of 4. Measured on 2026-08-16 against the 22 PCB entries of
 `scripts/corpus/manifests/open-schematics-sample.json` (revision-pinned
 `bshada/open-schematics` payloads) plus this repo's own 8 routed boards.*
 
+> **Update — the biggest lever has landed.**
+> [#4873](https://github.com/rjwalters/kicad-tools/issues/4873) taught
+> `PCB._parse()` to read the pre-KiCad-6 `(module …)` spelling as a footprint.
+> Re-running the census below on the same pinned payload cache:
+>
+> | Census figure | Before #4873 | After #4873 |
+> |---|---|---|
+> | `legacy-module-schema` blockers | 9 | **0** |
+> | `no-pad-graph` blockers | 9 | **0** |
+> | featurizable boards (#4799) | 10 / 22 (45.5%) | **18 / 22 (81.8%)** |
+> | labeled calibration examples | 8 (36.4%) | **16 (72.7%)** |
+> | route-vs-human cases | 8 (36.4%) | **16 (72.7%)** |
+> | `unusable` label | 12 | **4** |
+>
+> Everything below is the **pre-fix** measurement and is kept as the record of
+> why the fix was worth making. The residual blockers are unchanged in kind:
+> `no-net-binding` ×2 and `no-reference-copper` ×2 are properties of those
+> designs, `no-outline` ×1 and `outline-not-polygonal` ×1 (the legacy
+> centre+angle `gr_arc` form, tracked as
+> [#4874](https://github.com/rjwalters/kicad-tools/issues/4874)) are the
+> remaining parser work.
+
 Slices 1–3 answered *"can our parsers read real-world KiCad files?"* (yes:
 30/30 manifest entries parse). This slice answers the question the two proposed
 follow-on capabilities actually depend on: **is the corpus usable as benchmark

@@ -4710,3 +4710,185 @@ class TestGraphicArcLegacyCenterAngle:
         issue fixes)."""
         arc = self._parse_arc('(gr_arc (start 2 0) (end 0 2) (layer "Edge.Cuts") (width 0.05))')
         assert arc.mid == (0.0, 0.0)
+
+
+LEGACY_MODULE_BOARD = """(kicad_pcb (version 4) (host pcbnew "(2017-11-30)")
+  (general (thickness 1.6))
+  (page A4)
+  (layers (0 F.Cu signal) (31 B.Cu signal) (44 Edge.Cuts user))
+  (net 0 "")
+  (net 1 GND)
+  (net 2 SIG)
+  (gr_line (start 0 0) (end 20 0) (layer Edge.Cuts) (width 0.05))
+  (gr_line (start 20 0) (end 20 10) (layer Edge.Cuts) (width 0.05))
+  (gr_line (start 20 10) (end 0 10) (layer Edge.Cuts) (width 0.05))
+  (gr_line (start 0 10) (end 0 0) (layer Edge.Cuts) (width 0.05))
+  (module R_0603 (layer F.Cu) (tedit 5A1F2B3C) (at 5 5)
+    (attr smd)
+    (fp_text reference R1 (at 0 1.5) (layer F.SilkS))
+    (fp_text value 10K (at 0 -1.5) (layer F.Fab))
+    (pad 1 smd rect (at -0.8 0) (size 0.9 0.8) (layers F.Cu F.Paste F.Mask) (net 1 GND))
+    (pad 2 smd rect (at 0.8 0) (size 0.9 0.8) (layers F.Cu F.Paste F.Mask) (net 2 SIG))
+  )
+  (module C_0402 (layer B.Cu) (tedit 5A1F2B3D) (at 12 5 90)
+    (fp_text reference C1 (at 0 1.5) (layer B.SilkS))
+    (pad 1 smd rect (at -0.5 0) (size 0.6 0.6) (layers B.Cu B.Paste B.Mask) (net 2 SIG))
+  )
+  (segment (start 4.2 5) (end 12.8 5) (width 0.25) (layer F.Cu) (net 1))
+)
+"""
+
+
+class TestLegacyModuleBoards:
+    """Pre-KiCad-6 ``(module ...)`` boards are footprints too (issue #4873).
+
+    KiCad 6 renamed the block; boards written by the pcbnew 5.x line (still a
+    large share of the public corpus) use the old spelling.  Before the fix
+    these boards parsed their nets/segments fine and reported **zero
+    footprints and zero pads** with no error -- a data-shaped wrong answer.
+    """
+
+    def _write(self, tmp_path: Path, text: str, name: str = "legacy") -> Path:
+        path = tmp_path / f"{name}.kicad_pcb"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_module_blocks_parse_as_footprints(self, tmp_path: Path):
+        pcb = PCB.load(self._write(tmp_path, LEGACY_MODULE_BOARD))
+
+        assert pcb.footprint_count == 2
+        assert [fp.reference for fp in pcb.footprints] == ["R1", "C1"]
+
+        r1 = pcb.get_footprint("R1")
+        assert r1 is not None
+        assert r1.name == "R_0603"
+        assert r1.value == "10K"
+        assert r1.layer == "F.Cu"
+        assert r1.position == (5.0, 5.0)
+        assert r1.attr == "smd"
+
+        c1 = pcb.get_footprint("C1")
+        assert c1 is not None
+        assert c1.layer == "B.Cu"
+        assert c1.rotation == 90.0
+
+    def test_module_pads_carry_position_net_and_layer(self, tmp_path: Path):
+        pcb = PCB.load(self._write(tmp_path, LEGACY_MODULE_BOARD))
+
+        r1 = pcb.get_footprint("R1")
+        assert r1 is not None
+        assert len(r1.pads) == 2
+
+        pad1, pad2 = r1.pads
+        assert (pad1.number, pad2.number) == ("1", "2")
+        assert pad1.position == (-0.8, 0.0)
+        assert (pad1.net_number, pad1.net_name) == (1, "GND")
+        assert (pad2.net_number, pad2.net_name) == (2, "SIG")
+        assert pad1.layers == ["F.Cu", "F.Paste", "F.Mask"]
+
+        # Absolute board position resolves through the footprint origin.
+        assert pcb.get_pad_position("R1", "1") == pytest.approx((4.2, 5.0))
+
+    def test_no_parse_warning_when_the_graph_is_readable(self, tmp_path: Path):
+        pcb = PCB.load(self._write(tmp_path, LEGACY_MODULE_BOARD))
+        assert pcb.parse_warnings == []
+
+    def test_position_sync_writes_back_into_the_module_node(self, tmp_path: Path):
+        """Editing a module-sourced footprint persists across save/reload."""
+        path = self._write(tmp_path, LEGACY_MODULE_BOARD)
+        pcb = PCB.load(path)
+
+        r1 = pcb.get_footprint("R1")
+        assert r1 is not None
+        r1.position = (7.5, 6.25)
+
+        out = tmp_path / "moved.kicad_pcb"
+        pcb.save(out)
+
+        reloaded = PCB.load(out)
+        moved = reloaded.get_footprint("R1")
+        assert moved is not None
+        assert moved.position == (7.5, 6.25)
+        assert len(moved.pads) == 2, "pads survive the round-trip"
+        assert reloaded.footprint_count == 2
+
+    def test_update_reference_and_value_find_the_module_node(self, tmp_path: Path):
+        path = self._write(tmp_path, LEGACY_MODULE_BOARD)
+        pcb = PCB.load(path)
+
+        assert pcb.update_footprint_reference("R1", "R99") is True
+        assert pcb.update_footprint_value("R99", "22K") is True
+
+        out = tmp_path / "renamed.kicad_pcb"
+        pcb.save(out)
+
+        reloaded = PCB.load(out)
+        assert reloaded.get_footprint("R1") is None
+        renamed = reloaded.get_footprint("R99")
+        assert renamed is not None
+        assert renamed.value == "22K"
+
+    def test_remove_footprint_deletes_the_module_node(self, tmp_path: Path):
+        path = self._write(tmp_path, LEGACY_MODULE_BOARD)
+        pcb = PCB.load(path)
+
+        assert pcb.remove_footprint("R1") is True
+        assert pcb.footprint_count == 1
+
+        out = tmp_path / "removed.kicad_pcb"
+        pcb.save(out)
+
+        text = out.read_text(encoding="utf-8")
+        assert "R_0603" not in text, "the (module ...) node itself must be gone"
+
+        reloaded = PCB.load(out)
+        assert reloaded.footprint_count == 1
+        assert reloaded.get_footprint("R1") is None
+        assert reloaded.get_footprint("C1") is not None
+
+    def test_modern_footprint_boards_are_unaffected(self, minimal_pcb: Path):
+        """The alias must not perturb the modern ``(footprint ...)`` path."""
+        pcb = PCB.load(minimal_pcb)
+        assert pcb.footprint_count > 0
+        assert pcb.parse_warnings == []
+
+
+class TestUnreadableComponentGraphIsLoud:
+    """No silent zero: a pad graph we cannot read must announce itself (#4873).
+
+    The ``(module ...)`` defect was invisible because the parse dispatch has
+    no fallback -- an unrecognised container tag fell through and the board
+    reported zero footprints with no signal at all.  The guard is generic, so
+    a *future* unknown container is loud instead of data-shaped.
+    """
+
+    UNKNOWN_CONTAINER_BOARD = """(kicad_pcb (version 3)
+  (layers (0 F.Cu signal) (31 B.Cu signal))
+  (net 0 "")
+  (net 1 GND)
+  (component_v0 R_0603 (layer F.Cu) (at 5 5)
+    (fp_text reference R1 (at 0 0) (layer F.SilkS))
+    (pad 1 smd rect (at -0.8 0) (size 0.9 0.8) (layers F.Cu) (net 1 GND))
+  )
+)
+"""
+
+    def test_unknown_container_with_pads_warns(self, tmp_path: Path, caplog):
+        path = tmp_path / "unknown.kicad_pcb"
+        path.write_text(self.UNKNOWN_CONTAINER_BOARD, encoding="utf-8")
+
+        with caplog.at_level("WARNING", logger="kicad_tools.schema.pcb"):
+            pcb = PCB.load(path)
+
+        assert pcb.footprint_count == 0
+        assert len(pcb.parse_warnings) == 1
+        message = pcb.parse_warnings[0]
+        assert "component_v0" in message, "name the container tag we could not read"
+        assert "version 3" in message, "name the declared board version"
+        assert message in caplog.text, "the warning must also reach the log"
+
+    def test_component_free_board_stays_quiet(self):
+        """A genuinely padless board (panel frame, outline fixture) is fine."""
+        pcb = PCB.create(width=50.0, height=50.0)
+        assert pcb.footprint_count == 0
+        assert pcb.parse_warnings == []
