@@ -1066,6 +1066,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`load_pads_for_analysis` returned anonymous pads on every KiCad 7+ board,
+  silently disabling fine-pitch escape planning** (#4872) — the grid-analysis
+  pad loader (`router/io.py`) read the footprint reference only from the legacy
+  `(fp_text reference U1 …)` spelling. KiCad 7 and later write it exclusively as
+  `(property "Reference" "U1" …)`, so on any modern board — including this
+  repo's own pcbnew-resaved fixtures — every returned pad carried `ref=""`.
+  Positions and sizes were correct, so nothing crashed and nothing warned; the
+  pads were simply anonymous. That is the worst failure shape for the consumers
+  that group by reference: `identify_fine_pitch_components` skips ref-less pads
+  outright, so `compute_multi_resolution_plan` found **zero** fine-pitch
+  components and adaptive/multi-resolution **fine-pitch escape routing never
+  fired** on a modern-format board, degrading to plain coarse-grid routing with
+  no diagnostic. Both routing engines reach this loader through their primary
+  construction entry points (`LatticePathfinder.from_board`,
+  `MeshPathfinder.from_board`). The reference is now read with the same
+  two-step precedence `load_pcb_for_routing` has always used elsewhere in the
+  same file — `property "Reference"` first, `fp_text reference` as the legacy
+  fallback — so a transitional file carrying both resolves to the property
+  value. Measured on the committed
+  `boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb`: 34 pads
+  collapsed into a single `""` bucket before, now 14 distinct references
+  matching `kicad_tools.schema.PCB` exactly. Legacy `fp_text` boards (quoted and
+  unquoted) are unaffected — a one-branch parse fix, no geometry or transform
+  behaviour touched.
+
 - **`route --voltage-map` collapsed signed net potentials with `abs()`, so
   +150 V vs −150 V differenced to 0 V** (#4867, blocker for #4507, epic #4431
   Phase 2) — the router normalised its voltage map to *magnitudes* before

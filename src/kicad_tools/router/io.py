@@ -2122,8 +2122,13 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
         footprint_name_match = re.search(r'\(footprint\s+"([^"]*)"', section)
         footprint_name = footprint_name_match.group(1) if footprint_name_match else ""
 
-        # Get footprint reference
-        ref_match = re.search(r'\(fp_text\s+reference\s+"?([^"\s)]+)"?', section)
+        # Get footprint reference. KiCad 7+ writes it as
+        # (property "Reference" "U1" ...); the (fp_text reference U1 ...)
+        # spelling is legacy (pre-KiCad-7). Try the modern property form
+        # first, then fall back -- same precedence load_pcb_for_routing uses.
+        ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', section)
+        if not ref_match:
+            ref_match = re.search(r'\(fp_text\s+reference\s+"?([^"\s)]+)"?', section)
         ref = ref_match.group(1) if ref_match else ""
 
         # Get footprint position and rotation
