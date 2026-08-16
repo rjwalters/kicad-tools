@@ -17,10 +17,10 @@ fail-loud out-of-table contract are all reused verbatim from the already-merged
 placement derivation
 (:func:`kicad_tools.placement.hv_domains.build_required_by_domain_pair`, itself
 backed by :meth:`kicad_tools.creepage.standards.CreepageStandard.required_creepage`).
-Feeding that builder a per-net ``{net_name: |V|}`` map -- each net treated as its
-own "domain" -- yields the order-independent ``{(net_a, net_b): required_mm}``
-matrix the router resolves against, so the router, placement and the post-route
-creepage census all agree by construction.
+Feeding that builder a per-net ``{net_name: V}`` map of **signed** potentials
+(#4867) -- each net treated as its own "domain" -- yields the order-independent
+``{(net_a, net_b): required_mm}`` matrix the router resolves against, so the
+router, placement and the post-route creepage census all agree by construction.
 
 Explicitly OUT OF SCOPE here (deferred to follow-up architect phases):
 
@@ -39,8 +39,10 @@ byte-identically.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Mapping, NamedTuple, Sequence
 
 from kicad_tools.core.geometry import segment_to_segment_distance
@@ -253,8 +255,11 @@ class PairwiseClearanceTable:
         dru: The scalar manufacturer/DRU clearance floor (mm).  Every resolved
             requirement is at least this value -- a pairwise widening never
             *tightens* below the fab's functional spacing.
-        net_voltages: ``{net_name: |V|}`` worst-case voltage magnitude per net,
-            keyed by the ``/``-stripped net name.  Retained for provenance /
+        net_voltages: ``{net_name: V}`` worst-case **signed** potential per net
+            (relative to the map's common reference), keyed by the
+            ``/``-stripped net name.  Signs are load-bearing (#4867): the pair
+            requirement is looked up at ``|Va - Vb|``, so a +150 V net and a
+            -150 V net are 300 V apart, not 0 V.  Retained for provenance /
             diagnostics; the resolver reads :attr:`required_by_pair`.
         required_by_pair: ``{(net_a, net_b): required_mm}`` with order-independent
             (sorted, ``/``-stripped) keys, as produced by
@@ -296,6 +301,46 @@ class PairwiseClearanceTable:
         return max(self.dru, max(self.required_by_pair.values()))
 
 
+def load_signed_voltage_map(path: str | Path) -> dict[str, float]:
+    """Load a ``--voltage-map`` sidecar preserving each net's **sign** (#4867).
+
+    Parses through :func:`kicad_tools.creepage.engine.voltage_map_from_dict` --
+    the same parse contract ``kct creepage`` uses -- so reserved ``_``-prefixed
+    metadata keys (``_comment``, ``_edge_voltage``) are skipped identically.
+
+    This is the router's counterpart to placement's
+    :func:`kicad_tools.placement.hv_domains.load_voltage_map`, which collapses
+    each net to ``max(|lo|, |hi|)`` because placement's cross-domain model is
+    magnitude-only.  The router must NOT do that: the pairwise table differences
+    potentials, and two nets at +150 V / -150 V are 300 V apart (3.20 mm of IEC
+    60664-1 creepage), not 0 V.  A bipolar map about a mid-point reference is
+    the normal encoding for an HV bank topology.
+
+    Range support (#4411): each net is parsed as a closed ``[lo, hi]`` interval
+    and collapsed to the endpoint of largest magnitude *with its sign* --
+    exactly the authored value for a scalar entry (the degenerate interval), and
+    the worst-case excursion for a swinging node.  The router's table is
+    scalar-per-net, so a genuinely swinging pair can still be differenced less
+    conservatively than the census' full
+    ``dv = max(|a.hi - b.lo|, |b.hi - a.lo|)``; consuming intervals end-to-end
+    is #4411 follow-up work, out of scope here.  For an all-non-negative map
+    this returns exactly what ``load_voltage_map`` does.
+
+    Raises:
+        ValueError: If the file is not a JSON object, or any net voltage
+            endpoint is not a finite real number.
+    """
+    from kicad_tools.creepage.engine import voltage_map_from_dict
+
+    raw = json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        # ``voltage_map_from_dict`` raises ``TypeError`` for a non-dict; keep the
+        # ``ValueError`` contract the CLI loaders already catch.
+        raise ValueError(f"voltage map must be a JSON object, got {type(raw).__name__}")
+    intervals = voltage_map_from_dict(raw)[0]
+    return {name: (iv.hi if abs(iv.hi) >= abs(iv.lo) else iv.lo) for name, iv in intervals.items()}
+
+
 def build_pairwise_clearance_table(
     net_voltages: Mapping[str, float],
     *,
@@ -317,10 +362,15 @@ def build_pairwise_clearance_table(
     silently extrapolating.
 
     Args:
-        net_voltages: ``{net_name: volts}`` -- signed or magnitude; magnitudes
-            are taken internally.  Reserved ``_``-prefixed metadata keys should
-            already be stripped by the loader
-            (:func:`kicad_tools.placement.hv_domains.load_voltage_map`).
+        net_voltages: ``{net_name: volts}`` -- **signed** potentials about the
+            map's common reference, differenced as supplied (#4867).  Signs are
+            load-bearing: ``{A: +150, B: -150}`` is a 300 V pair, exactly as the
+            creepage census (``kct creepage``) reads the same sidecar.  Passing
+            pre-``abs()``-ed magnitudes silently collapses every bipolar pair to
+            ``0 V`` and drops it out of the matrix, so use
+            :func:`load_signed_voltage_map` (not placement's magnitude-only
+            ``load_voltage_map``) to read a sidecar for this builder.  Reserved
+            ``_``-prefixed metadata keys are stripped by that loader.
         dru: Scalar clearance floor (mm), typically ``DesignRules.trace_clearance``.
         standard_id: Creepage standard id (``iec60664`` / ``iec62368``).
         pollution_degree: IEC pollution degree (1, 2 or 3).
@@ -339,7 +389,13 @@ def build_pairwise_clearance_table(
     # (placement.__init__ pulls router.rules), avoiding any import-order cycle.
     from kicad_tools.placement.hv_domains import build_required_by_domain_pair
 
-    normalised = {_norm_net_key(name): abs(float(v)) for name, v in net_voltages.items()}
+    # Issue #4867: difference the potentials AS SUPPLIED.  Taking ``abs()`` here
+    # (pre-#4867) collapsed every bipolar pair before ``build_required_by_domain_pair``
+    # could difference it -- +150 V vs -150 V became |150| - |150| = 0 V, fell
+    # below ``hv_threshold`` and vanished from the matrix entirely, invisible to
+    # both search-time avoidance and the post-route audit.  An all-non-negative
+    # map is unaffected (``abs`` was the identity on it).
+    normalised = {_norm_net_key(name): float(v) for name, v in net_voltages.items()}
     required = build_required_by_domain_pair(
         normalised,
         standard_id=standard_id,

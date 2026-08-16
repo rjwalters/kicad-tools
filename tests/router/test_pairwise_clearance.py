@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kicad_tools.creepage.engine import resolve_hv_nets
 from kicad_tools.creepage.standards import StandardLookupError
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.pairwise_clearance import (
@@ -30,6 +31,7 @@ from kicad_tools.router.pairwise_clearance import (
     build_attach_zones,
     build_pairwise_clearance_table,
     find_pairwise_violations,
+    load_signed_voltage_map,
     path_pairwise_violation,
     route_pairwise_violation,
     segment_pair_violation,
@@ -149,6 +151,246 @@ def test_below_hv_threshold_pair_absent_from_matrix() -> None:
     table = _table({"/V12": 12.0, "/GND": 0.0})
     assert ("GND", "V12") not in table.required_by_pair
     assert table.required_clearance("/V12", "/GND") == pytest.approx(DRU)
+
+
+# ---------------------------------------------------------------------------
+# Signed potentials (#4867)
+# ---------------------------------------------------------------------------
+#
+# ``build_pairwise_clearance_table`` used to normalise its input with
+# ``abs(float(v))`` BEFORE differencing, so a +150 V net and a -150 V net
+# differenced to ``|150| - |150| = 0 V``, fell below ``hv_threshold`` and
+# dropped out of the matrix entirely -- invisible to search-time avoidance AND
+# to the post-route audit, which can only report on pairs its own table holds.
+# The census (``creepage/engine.py``) reads the same sidecar signed, so router
+# and gate disagreed by construction on every bipolar (bank) topology.
+
+
+def test_bipolar_pair_differences_to_the_full_span() -> None:
+    """+150 V vs -150 V is a 300 V pair (3.20 mm), not 0 V (absent)."""
+    table = _table({"/BANK_POS": 150.0, "/BANK_NEG": -150.0})
+    assert ("BANK_NEG", "BANK_POS") in table.required_by_pair
+    assert table.required_by_pair[("BANK_NEG", "BANK_POS")] == pytest.approx(3.2)
+    assert table.required_clearance("/BANK_POS", "/BANK_NEG") == pytest.approx(3.2)
+
+
+def test_bipolar_pair_is_wider_than_either_net_against_ground() -> None:
+    """The bank span binds harder than either leg's own potential."""
+    table = _table({"/BANK_POS": 150.0, "/BANK_NEG": -150.0, "/GND": 0.0})
+    span = table.required_clearance("/BANK_POS", "/BANK_NEG")
+    to_gnd = table.required_clearance("/BANK_POS", "/GND")
+    assert span > to_gnd
+    assert to_gnd == pytest.approx(IEC_150V_PD2_IIIA_MM)
+    # The magnitude reading collapsed POS<->NEG to nothing; the signed reading
+    # makes it the *widest* pair on the board.
+    assert table.max_required_clearance() == pytest.approx(span)
+
+
+def test_asymmetric_bipolar_pair_uses_the_signed_difference() -> None:
+    """-90 V vs +150 V is 240 V (2.50 mm), not the 60 V of the magnitudes."""
+    table = _table({"/SCAP_NEG": -90.0, "/SRC_POS": 150.0})
+    # 240 V under IEC 60664-1 / PD2 / IIIa.
+    assert table.required_by_pair[("SCAP_NEG", "SRC_POS")] == pytest.approx(2.5)
+    # The magnitude reading would have differenced |150| - |90| = 60 V, which is
+    # a strictly smaller (and therefore unsafe) requirement.
+    magnitude_only = _table({"/SCAP_NEG": 90.0, "/SRC_POS": 150.0})
+    assert magnitude_only.required_by_pair[("SCAP_NEG", "SRC_POS")] < 2.5
+
+
+def test_signed_pair_below_hv_threshold_stays_out_of_the_matrix() -> None:
+    """No over-correction: a signed span under the threshold is still absent.
+
+    +10 V vs -10 V is a genuine 20 V span -- signed differencing must see it as
+    20 V (not 0 V), but 20 V is below the 30 V default threshold, so the pair
+    keeps only the DRU floor exactly as an all-positive 20 V span would.
+    """
+    table = _table({"/AUX_POS": 10.0, "/AUX_NEG": -10.0})
+    assert table.required_by_pair == {}
+    assert table.required_clearance("/AUX_POS", "/AUX_NEG") == pytest.approx(DRU)
+
+
+def test_all_positive_map_is_unchanged_by_signed_differencing() -> None:
+    """Regression guard: the common non-bipolar case must not move (#4867 AC).
+
+    ``abs()`` was the identity on a non-negative map, so dropping it has to be
+    a strict no-op there -- asserted against the explicitly magnitude-normalised
+    input the pre-#4867 code built internally.
+    """
+    voltages = {"/AC_LINE": 150.0, "/GND": 0.0, "/V12": 12.0, "/HVDC": 400.0}
+    signed = build_pairwise_clearance_table(voltages, dru=DRU)
+    magnitudes = build_pairwise_clearance_table({k: abs(v) for k, v in voltages.items()}, dru=DRU)
+    assert dict(signed.required_by_pair) == dict(magnitudes.required_by_pair)
+    assert dict(signed.net_voltages) == dict(magnitudes.net_voltages)
+
+
+def test_all_negative_map_matches_its_mirror_image() -> None:
+    """A uniformly negative map differences identically to its positive mirror."""
+    negative = build_pairwise_clearance_table({"/A": -150.0, "/B": -0.0}, dru=DRU)
+    positive = build_pairwise_clearance_table({"/A": 150.0, "/B": 0.0}, dru=DRU)
+    assert dict(negative.required_by_pair) == dict(positive.required_by_pair)
+
+
+def test_signed_potentials_are_retained_for_provenance() -> None:
+    """``net_voltages`` keeps the sign so diagnostics can explain the span."""
+    table = _table({"/BANK_POS": 150.0, "/BANK_NEG": -150.0})
+    assert dict(table.net_voltages) == {"BANK_POS": 150.0, "BANK_NEG": -150.0}
+
+
+# ---------------------------------------------------------------------------
+# The router's signed sidecar loader (#4867)
+# ---------------------------------------------------------------------------
+
+
+def _write_map(tmp_path, payload) -> str:
+    import json
+
+    p = tmp_path / "vmap.json"
+    p.write_text(json.dumps(payload))
+    return str(p)
+
+
+def test_load_signed_voltage_map_preserves_sign(tmp_path) -> None:
+    """The router's loader must NOT collapse to a magnitude (placement's does)."""
+    from kicad_tools.placement.hv_domains import load_voltage_map
+
+    path = _write_map(tmp_path, {"/BANK_POS": 150, "/BANK_NEG": -150, "/GND": 0})
+    assert load_signed_voltage_map(path) == {
+        "/BANK_POS": 150.0,
+        "/BANK_NEG": -150.0,
+        "/GND": 0.0,
+    }
+    # Placement's magnitude-only loader is the thing that used to be reused here.
+    assert load_voltage_map(path)["/BANK_NEG"] == 150.0
+
+
+def test_load_signed_voltage_map_skips_reserved_metadata_keys(tmp_path) -> None:
+    """Same parse contract as ``kct creepage``: ``_``-prefixed keys are not nets."""
+    path = _write_map(
+        tmp_path,
+        {"_comment": "signed volts about GND", "_edge_voltage": 0, "/HV": -150},
+    )
+    assert load_signed_voltage_map(path) == {"/HV": -150.0}
+
+
+def test_load_signed_voltage_map_collapses_a_range_to_its_signed_extreme(
+    tmp_path,
+) -> None:
+    """A swinging node (#4411) keeps the SIGN of its worst-case endpoint."""
+    path = _write_map(tmp_path, {"/SW": {"min": -170, "max": 90}, "/GND": 0})
+    assert load_signed_voltage_map(path) == {"/SW": -170.0, "/GND": 0.0}
+
+
+def test_load_signed_voltage_map_matches_placement_on_a_positive_map(
+    tmp_path,
+) -> None:
+    """All-non-negative maps read identically through either loader (#4867 AC)."""
+    from kicad_tools.placement.hv_domains import load_voltage_map
+
+    path = _write_map(tmp_path, {"/AC_LINE": 150, "/GND": 0, "/V12": 12})
+    assert load_signed_voltage_map(path) == load_voltage_map(path)
+
+
+def test_load_signed_voltage_map_rejects_a_non_object(tmp_path) -> None:
+    """The CLI catches ``ValueError``; a JSON array must not escape as TypeError."""
+    path = _write_map(tmp_path, [1, 2, 3])
+    with pytest.raises(ValueError):
+        load_signed_voltage_map(path)
+
+
+# ---------------------------------------------------------------------------
+# Parity with the creepage census over a bipolar map (#4867 AC)
+# ---------------------------------------------------------------------------
+
+
+def _bipolar_board_source() -> str:
+    """Three single-pad footprints: +150 V, -150 V and 0 V, well separated."""
+    pads = [("BANK_POS", 1, 105.0), ("BANK_NEG", 2, 115.0), ("GND", 3, 125.0)]
+    fps = "".join(
+        f"""  (footprint "test:pad" (layer "F.Cu") (at {x} 110)
+    (pad "1" smd rect (at 0 0) (size 2 2) (layers "F.Cu")
+      (net {num} "{name}"))
+  )
+"""
+        for name, num, x in pads
+    )
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test_4867")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "BANK_POS")
+  (net 2 "BANK_NEG")
+  (net 3 "GND")
+  (gr_line (start 100 100) (end 130 100) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 130 100) (end 130 120) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 130 120) (end 100 120) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 100 120) (end 100 100) (layer "Edge.Cuts") (width 0.1))
+{fps})
+"""
+
+
+def test_router_table_matches_the_creepage_census_on_a_bipolar_map(tmp_path) -> None:
+    """The router and ``kct creepage`` must require the SAME mm on every pair.
+
+    This is the #4867 acceptance criterion asserted as parity over a bipolar
+    fixture rather than a spot check: the census differences the sidecar's
+    signed endpoints, so any magnitude collapse on the router side shows up
+    here as a missing pair (POS<->NEG) or a smaller requirement.
+    """
+    from kicad_tools._shapely import has_shapely
+
+    if not has_shapely():
+        pytest.skip("creepage census requires shapely")
+
+    from kicad_tools.creepage.engine import (
+        compute_creepage_census,
+        voltage_map_from_dict,
+    )
+    from kicad_tools.creepage.standards import get_standard
+    from kicad_tools.schema.pcb import PCB
+
+    payload = {"BANK_POS": 150, "BANK_NEG": -150, "GND": 0}
+    board = tmp_path / "bipolar.kicad_pcb"
+    board.write_text(_bipolar_board_source())
+    pcb = PCB.load(board)
+
+    intervals = voltage_map_from_dict(payload)[0]
+    hv_nets = resolve_hv_nets(pcb, "HV", None, voltage_map=intervals, census_threshold=30.0)
+    report = compute_creepage_census(
+        pcb,
+        hv_nets,
+        voltage_map=intervals,
+        standard_obj=get_standard("iec60664"),
+        pollution_degree=2,
+        material_group="IIIa",
+    )
+    census_required = {
+        tuple(sorted((p.net_a, p.net_b))): p.required_creepage_mm
+        for p in report.pairs
+        if p.kind == "conductor"
+    }
+    assert census_required, "census produced no conductor pairs"
+
+    router_map = load_signed_voltage_map(_write_map(tmp_path, payload))
+    table = build_pairwise_clearance_table(router_map, dru=DRU)
+
+    for pair, census_mm in census_required.items():
+        assert census_mm is not None
+        if census_mm <= DRU:
+            continue  # below the DRU floor -- the router keeps the scalar path
+        assert table.required_by_pair.get(pair) == pytest.approx(census_mm), (
+            f"router/census disagree on {pair}: {table.required_by_pair.get(pair)} vs {census_mm}"
+        )
+    # And specifically the pair the magnitude collapse used to erase.
+    assert ("BANK_NEG", "BANK_POS") in census_required
+    assert ("BANK_NEG", "BANK_POS") in table.required_by_pair
 
 
 # ---------------------------------------------------------------------------

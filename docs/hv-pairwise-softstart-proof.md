@@ -2,6 +2,20 @@
 
 Point-in-time working document — it describes the tree as of its date.
 
+> **Update (#4867 fixed):** the root cause this run isolated — the `abs()`
+> collapse of signed potentials, described in
+> [The root cause](#the-root-cause-signed-potentials-are-collapsed-to-magnitudes)
+> — has since been fixed. Re-measuring the table over the **same**
+> `vmap.json` (md5 `cc72a701a6c4c3c335859bcc6029ab94`) now yields **1922
+> cross-pairs**, matching the census exactly: the 99 missing pairs are back,
+> the 240 under-required pairs carry their full requirement, and **no pair is
+> lost**. Everything below the update is the *pre-fix* measurement and is kept
+> as the record of the diagnosis. The routing arms have **not** been re-run, so
+> the 49/82 · 42-census-fail · 3-gate-hit numbers in the verdict table are
+> stale: per #4867's acceptance criteria the leak set is expected to **grow**
+> before it shrinks, because 99 pairs re-enter the matrix. **#4507's T4 must be
+> re-scored** on top of the fix.
+
 This is the record of the **T4 manual criterion** of issue
 [#4507](https://github.com/rjwalters/kicad-tools/issues/4507) (router Phase 2 of
 epic #4431, pairwise HV-isolation clearance):
@@ -265,6 +279,21 @@ This is a **safety-gate under-constraint**, not merely a missed optimisation: a
 `--voltage-map` run can print a reassuring banner, pass its own post-route audit,
 and still commit ±300 V copper at the DRU floor.
 
+**Resolved by #4867.** Potentials are now differenced as supplied, and the
+sidecar is read through `router.pairwise_clearance.load_signed_voltage_map`
+(the census' own parse contract) rather than placement's magnitude-only loader.
+Replaying the block above against the same `vmap.json` on the fixed tree:
+
+```
+cross-pairs, signed (post-fix)                : 1922   <- what the banner now prints
+cross-pairs, magnitude (pre-fix)              : 1823
+pairs that RE-ENTER the matrix                :   99
+pairs previously UNDER-required               :  240
+total previously under-constrained            :  339 / 1922  (17.6 %)
+pairs LOST by the fix                         :    0
+worst: AC_LINE <-> {BOOST_B,GATE_BUS,GATE_DRV,SRC,TRK}_NEG   3.20 mm (was 0.00)
+```
+
 ## Which engine actually ran — and what that means for #4507
 
 Worth stating plainly, because it bounds what this run does and does not prove
@@ -356,7 +385,7 @@ placement capacity wall, and a definitional mismatch between two gates.
 | T1 | Parity: C++ and Python validators agree | **MET** | `tests/router/test_pairwise_cpp_parity.py` |
 | T2 | Two-domain fixture converges | **MET** | `test_two_domain_board_converges_with_search_time_avoidance` |
 | T3 | Backward compat: no `--voltage-map` → unchanged routes | **MET** | `test_no_voltage_map_route_leaves_grid_dormant` + this run's control arm (dormant, no banner, 7/7 in 32 s) |
-| **T4** | **softstart rev-C: route completes, 0 board-level census fails** | **FAILS** | **49/82 nets; 42 board-level fails; 3 router-gate leaks — root-caused to the signed/magnitude collapse above** |
+| **T4** | **softstart rev-C: route completes, 0 board-level census fails** | **FAILS (must be re-scored)** | **49/82 nets; 42 board-level fails; 3 router-gate leaks — root-caused to the signed/magnitude collapse above. That collapse is fixed (#4867), which restores 99 missing pairs and corrects 240 more; the routing arms have not been re-run, so these three numbers are pre-fix and no longer describe the tool** |
 
 ## Reproducing
 

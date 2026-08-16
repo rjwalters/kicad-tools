@@ -11875,8 +11875,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
         metavar="FILE",
         help=(
             "Path to a JSON per-net voltage map {net_name: volts} (reuses the "
-            "#4371 format; ranges {min,max} per #4411 collapse to worst-case "
-            "magnitude). Enables HV-isolation pairwise clearance (Issue #4431 "
+            "#4371 format; ranges {min,max} per #4411 collapse to the worst-case "
+            "endpoint). Potentials are read SIGNED, exactly as kct creepage "
+            "reads the same file (#4867): a +150 V net and a -150 V net are a "
+            "300 V pair, not 0 V. Enables HV-isolation pairwise clearance (Issue #4431 "
             "Phase 1): the router derives a net-pair required-clearance matrix "
             "max(dru, IEC creepage @ |ΔV|) using the SAME lookup as HV-aware "
             "placement (--voltage-map on optimize-placement) and the creepage "
@@ -13229,22 +13231,31 @@ def _main_impl(argv: list[str] | None = None) -> int:
     args._pairwise_required = None
     if getattr(args, "voltage_map", None) is not None:
         from kicad_tools.creepage.standards import StandardLookupError
-        from kicad_tools.placement.hv_domains import (
-            build_required_by_domain_pair,
-            load_voltage_map,
+        from kicad_tools.placement.hv_domains import build_required_by_domain_pair
+        from kicad_tools.router.pairwise_clearance import (
+            _norm_net_key,
+            load_signed_voltage_map,
         )
-        from kicad_tools.router.pairwise_clearance import _norm_net_key
 
         vm_path = Path(args.voltage_map).resolve()
         if not vm_path.exists():
             print(f"Error: voltage-map file not found: {vm_path}", file=sys.stderr)
             return 1
         try:
-            _raw_voltages = load_voltage_map(vm_path)
+            # Issue #4867: read the sidecar SIGNED.  Placement's
+            # ``load_voltage_map`` collapses each net to ``max(|lo|, |hi|)``
+            # (its cross-domain model is magnitude-only) and this site then
+            # took ``abs()`` again -- so a +150 V net and a -150 V net
+            # differenced to 0 V, fell below ``--hv-threshold``, and dropped
+            # out of the matrix entirely: neither the search-time kernels nor
+            # the post-route audit could see the 300 V pair.  The census
+            # (``kct creepage``) reads the same file signed, so the router now
+            # agrees with the gate it is scored against.
+            _raw_voltages = load_signed_voltage_map(vm_path)
         except (ValueError, OSError) as e:
             print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
             return 1
-        _voltages = {_norm_net_key(n): abs(float(v)) for n, v in _raw_voltages.items()}
+        _voltages = {_norm_net_key(n): float(v) for n, v in _raw_voltages.items()}
         try:
             _required = build_required_by_domain_pair(
                 _voltages,

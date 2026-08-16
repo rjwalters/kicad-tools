@@ -445,6 +445,29 @@ def test_build_cpp_domain_matrix_normalises_leading_slash() -> None:
     assert matrix[net_to_domain[1]][net_to_domain[2]] == pytest.approx(IEC_150V_PD2_IIIA_MM)
 
 
+def test_build_cpp_domain_matrix_carries_a_bipolar_span() -> None:
+    """Issue #4867: a signed (+/-) map projects the FULL span into the matrix.
+
+    The C++ grid has no concept of a net's voltage -- it only reads the dense
+    mm matrix built here.  So the magnitude collapse in
+    ``build_pairwise_clearance_table`` (+150 V vs -150 V -> 0 V -> pair absent)
+    reached the C++ validator as a *dormant* payload: no domains, no widening,
+    no rejection.  This pins the projection end of the fix.
+    """
+    table = build_pairwise_clearance_table({"/BANK_POS": 150.0, "/BANK_NEG": -150.0}, dru=DRU)
+    domains = build_cpp_domain_matrix(table, {"/BANK_POS": 1, "/BANK_NEG": 2})
+    assert domains is not None, "bipolar pair must not project to a dormant payload"
+    net_to_domain, matrix = domains
+    pos, neg = net_to_domain[1], net_to_domain[2]
+    # 300 V under IEC 60664-1 / PD2 / IIIa.
+    assert matrix[pos][neg] == pytest.approx(3.2)
+    assert matrix[neg][pos] == pytest.approx(3.2)
+    # And the dense matrix still reproduces the Python resolver exactly.
+    assert max(table.dru, matrix[pos][neg]) == pytest.approx(
+        table.required_clearance("/BANK_POS", "/BANK_NEG")
+    )
+
+
 def test_build_cpp_domain_matrix_dormant_without_widening_pairs() -> None:
     assert build_cpp_domain_matrix(None, NET_NAMES) is None
     # All nets at the same potential -> no pair needs widening.
@@ -695,6 +718,43 @@ def test_backend_validate_route_rejects_hv_trace_beside_lv_pad() -> None:
     backend.set_attach_zones((AttachZone(0.0, -1.0, 5.0, 1.0, frozenset({"AC_LINE", "GND"})),))
     cpp_grid._impl.set_pairwise_domains([], [])  # force a fresh install
     assert backend._validate_route_clearance(route, start, end, 1) is None
+
+
+@requires_cpp
+def test_backend_validate_route_rejects_a_bipolar_neighbour() -> None:
+    """Issue #4867: the C++ validator sees the +/-150 V span end to end.
+
+    Same geometry as the HV-vs-LV-pad case above, but the neighbouring pad is
+    at -150 V instead of 0 V -- a *wider* 300 V pair.  Pre-#4867 the magnitude
+    collapse differenced it to 0 V, ``build_cpp_domain_matrix`` returned the
+    dormant ``None``, and the C++ grid validated this route clean.  Confirms
+    the Python-only fix reaches the C++ consumer without a recompile.
+    """
+    py_grid, rules = _backend_grid_and_rules()
+    bank_names = {"/BANK_POS": HV_NET, "/BANK_NEG": LV_NET}
+    rules.pairwise_clearance = build_pairwise_clearance_table(
+        {"/BANK_POS": 150.0, "/BANK_NEG": -150.0}, dru=DRU
+    )
+    cpp_grid = CppGrid.from_routing_grid(py_grid)
+    backend = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
+    backend.set_net_name_to_id(bank_names)
+
+    # -150 V pad 0.4 mm off the +150 V candidate's centreline -> 0.2 mm gap,
+    # DRU-legal but far inside the 3.2 mm creepage requirement.
+    cpp_grid._impl.add_pad(2.5, 0.4, 0.2, 0.2, LV_NET, 0, 0, DRU, False)
+
+    route = Route(
+        net=HV_NET,
+        net_name="/BANK_POS",
+        segments=[
+            Segment(0.0, 0.0, 5.0, 0.0, TRACE_WIDTH, Layer.F_CU, net=HV_NET, net_name="/BANK_POS")
+        ],
+    )
+    start = Pad(0.0, 0.0, 0.2, 0.2, HV_NET, "/BANK_POS")
+    end = Pad(5.0, 0.0, 0.2, 0.2, HV_NET, "/BANK_POS")
+
+    assert backend._validate_route_clearance(route, start, end, 1) is not None
+    assert cpp_grid._impl.pairwise_required_clearance(HV_NET, LV_NET) == pytest.approx(3.2)
 
 
 # ---------------------------------------------------------------------------

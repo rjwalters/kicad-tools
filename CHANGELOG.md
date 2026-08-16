@@ -1038,6 +1038,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`route --voltage-map` collapsed signed net potentials with `abs()`, so
+  +150 V vs −150 V differenced to 0 V** (#4867, blocker for #4507, epic #4431
+  Phase 2) — the router normalised its voltage map to *magnitudes* before
+  differencing (`build_pairwise_clearance_table`, and again in `route_cmd`'s
+  preload, which additionally read the sidecar through placement's
+  magnitude-only `load_voltage_map`). The creepage census reads the **same
+  file** signed, so on a bipolar map — the normal encoding for an HV bank
+  topology, and the one softstart rev-C declares in its own `_comment` — the
+  two disagreed by construction: the census requires 3.20 mm between a +150 V
+  and a −150 V net, the router required nothing at all. Such a pair was not
+  merely under-required but **absent from the matrix**, therefore invisible to
+  the search-time kernels *and* to the post-route audit, which can only report
+  on pairs its own table contains. On softstart rev-C's 84-net map that
+  under-constrained **339 of 1922 cross-pairs (17.6 %)**, 99 of them missing
+  entirely, while the run printed a reassuring `HV pairwise clearance: 84
+  mapped nets, 1823 cross-pairs` banner and exited 0 over ±300 V copper at the
+  DRU floor. Potentials are now differenced **as supplied**, via a new
+  `router.pairwise_clearance.load_signed_voltage_map` that shares the census'
+  parse contract (`_`-prefixed metadata keys skipped; a #4411 `{min,max}` range
+  collapses to its worst-case endpoint *with the sign*). The banner's
+  cross-pair count is now the signed count. All-non-negative maps are
+  unaffected — `abs()` was the identity there — and a signed span below
+  `--hv-threshold` (e.g. ±10 V) still stays out of the matrix, so there is no
+  over-correction. Python-only: the C++ grid has no concept of a net's voltage
+  and consumes the already-built dense mm matrix, so the corrected requirements
+  reach `Grid3D::set_pairwise_domains` with no recompile. Placement's
+  magnitude-only `load_voltage_map` is deliberately untouched (its cross-domain
+  model has no reference potential). Per the issue's own acceptance criteria,
+  softstart rev-C's leak set is expected to **grow** before it shrinks — 99
+  pairs re-enter the matrix — and #4507's T4 criterion must be re-scored on top
+  of this change.
+
 - **`kct build --quiet` exited 0 when a build step failed** (part of #4674) —
   the success/failure verdict was computed *inside* the `if not args.quiet:`
   summary block, so suppressing the summary also suppressed the non-zero exit
