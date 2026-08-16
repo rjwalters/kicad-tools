@@ -23,6 +23,7 @@ from .label import GlobalLabel, HierarchicalLabel, Label
 from .library import LibraryManager, LibraryPin, LibrarySymbol, SymbolLibrary
 from .pcb import (
     PCB,
+    BoardNetClass,
     Footprint,
     Layer,
     Net,
@@ -74,4 +75,5 @@ __all__ = [
     "Zone",
     "Setup",
     "StackupLayer",
+    "BoardNetClass",
 ]

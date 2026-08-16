@@ -23,6 +23,7 @@ grid``.
 
 import logging
 import re
+import sys
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -664,3 +665,338 @@ class TestResolveRouteEngine:
             'getattr(args, "route_engine", "grid")',
             'getattr(args, "route_engine", engine_default)',
         ], reads
+
+
+# ---------------------------------------------------------------------------
+# Issue #4875: imported boards are gated against THEIR OWN declared rules
+# ---------------------------------------------------------------------------
+#
+# Before #4875 the gate always evaluated ``args.clearance``, which was either
+# an explicit ``--clearance`` or the flat 0.15mm default -- ``--manufacturer``
+# never touched it and the board's own declared design rules were not parsed
+# at all.  An externally authored board that declares 0.254mm clearance was
+# therefore refused for failing a 0.075mm grid requirement it never claimed.
+#
+# These cases drive the REAL resolution path (no stub on the resolver) with a
+# clearance-aware selector stub that reproduces the selector's own arithmetic:
+# a memory-capped 0.1mm grid is "memory forced unsafe" exactly when it is
+# coarser than clearance/2.
+
+_LEGACY_BOARD_HEAD = """(kicad_pcb (version 20171130) (host pcbnew 5.1.9)
+  (general (thickness 1.6))
+  (page A4)
+  (layers (0 F.Cu signal) (31 B.Cu signal) (44 Edge.Cuts user))
+  (setup (pad_to_mask_clearance 0.05) (aux_axis_origin 0 0))
+  (net 0 "")
+  (net 1 GND)
+"""
+
+_LEGACY_BOARD_TAIL = """  (gr_line (start 0 0) (end 200 0) (layer Edge.Cuts) (width 0.1))
+)
+"""
+
+
+def _imported_board(tmp_path, net_class_block: str = "") -> Path:
+    """Write a legacy-format imported board, optionally declaring rules."""
+    pcb = tmp_path / "imported.kicad_pcb"
+    pcb.write_text(_LEGACY_BOARD_HEAD + net_class_block + _LEGACY_BOARD_TAIL)
+    return pcb
+
+
+def _declares(clearance: float, trace_width: float = 0.25) -> str:
+    return (
+        f'  (net_class Default "This is the default net class."\n'
+        f"    (clearance {clearance})\n"
+        f"    (trace_width {trace_width})\n"
+        f"    (via_dia 0.8) (via_drill 0.4)\n"
+        f"    (add_net GND)\n"
+        f"  )\n"
+    )
+
+
+def _memory_capped_selection(grid: float, clearance: float) -> GridAutoSelection:
+    """The selector's own verdict for a memory-capped ``grid`` at ``clearance``."""
+    safe = grid <= clearance / 2 + 1e-9
+    return GridAutoSelection(
+        resolution=grid,
+        off_grid_pads=0,
+        total_pads=2,
+        off_grid_percentage=0.0,
+        candidates_tried=[(grid, 0)],
+        memory_capped=True,
+        uncapped_resolution=0.065,
+        origin_offset=(0.0, 0.0),
+        clearance_compliant_at_clearance_over_2=safe,
+        memory_budget_used=4_000_000,
+        lattice_rescued=False,
+        memory_forced_unsafe_grid=not safe,
+    )
+
+
+def _run_imported_board(pcb: Path, extra_args, *, forced_grid: float = 0.1):
+    """Drive ``main()`` to the gate on a real board file.
+
+    Returns ``(exit_code, gate_reached, clearance_seen_by_selector)``.
+    """
+    pads = [PadPosition(x=10.0, y=10.0), PadPosition(x=20.0, y=10.0)]
+    observed = {"clearance": None}
+    gate_reached = {"value": False}
+
+    def _select(**kwargs):
+        observed["clearance"] = kwargs["clearance"]
+        return _memory_capped_selection(forced_grid, kwargs["clearance"])
+
+    def _sentinel(*_args, **_kwargs):
+        gate_reached["value"] = True
+        raise _GateReached
+
+    with (
+        patch("kicad_tools.router.io.extract_pad_positions", return_value=pads),
+        patch("kicad_tools.router.io.extract_board_dimensions", return_value=(200.0, 200.0)),
+        patch("kicad_tools.router.io.auto_select_grid_resolution", side_effect=_select),
+        patch("kicad_tools.router.io.compute_multi_resolution_plan", return_value=None),
+        patch("kicad_tools.router.io.load_pads_for_analysis", return_value=pads),
+        patch.object(route_cmd, "_resolve_starting_layers", side_effect=_sentinel),
+    ):
+        try:
+            code = route_cmd.main([str(pcb), *extra_args])
+        except _GateReached:
+            code = None
+    return code, gate_reached["value"], observed["clearance"]
+
+
+def test_imported_board_without_declared_rules_is_refused(tmp_path, capsys):
+    """Baseline: the pre-#4875 behavior the fixture must still reproduce.
+
+    Nothing declares a rule, so the gate evaluates the 0.15mm house default
+    (0.1mm grid > 0.075mm) and refuses -- exactly as before.
+    """
+    pcb = _imported_board(tmp_path)
+    code, gate_reached, clearance = _run_imported_board(pcb, [])
+
+    assert clearance == 0.15
+    assert code == 1
+    assert gate_reached is False
+    out = capsys.readouterr().out
+    assert "rules:" not in out, "no banner when nothing but the default resolved"
+
+
+def test_board_declared_clearance_clears_the_false_gate_refusal(tmp_path, capsys):
+    """The #4875 fix: the board's own 0.254mm rule admits the 0.1mm grid."""
+    pcb = _imported_board(tmp_path, _declares(0.254))
+    code, gate_reached, clearance = _run_imported_board(pcb, [])
+
+    assert clearance == 0.254, "the selector must see the board's own clearance"
+    assert gate_reached is True, "the board declares rules its own grid satisfies"
+    assert code is None
+
+    out = capsys.readouterr().out
+    assert 'Clearance: 0.254mm (rules: board net_class "Default")' in out
+    assert out.count("(rules:") == 1, "the rule-source banner prints exactly once"
+
+
+def test_explicit_clearance_overrides_board_declared_rules(tmp_path, capsys):
+    """An explicit ``--clearance`` wins over the board, unmodified."""
+    pcb = _imported_board(tmp_path, _declares(0.254))
+    code, gate_reached, clearance = _run_imported_board(pcb, ["--clearance", "0.15"])
+
+    assert clearance == 0.15, "explicit flag must not be replaced by board rules"
+    assert code == 1, "0.1mm grid > 0.075mm -- gated at the operator's value"
+    assert gate_reached is False
+
+    out = capsys.readouterr().out
+    assert "Clearance: 0.15mm (rules: explicit --clearance flag)" in out
+    assert out.count("(rules:") == 1
+
+
+def test_explicit_clearance_equals_spelling_is_detected(tmp_path, capsys):
+    """``--clearance=0.15`` is as explicit as ``--clearance 0.15``."""
+    pcb = _imported_board(tmp_path, _declares(0.254))
+    _code, _gate, clearance = _run_imported_board(pcb, ["--clearance=0.15"])
+    assert clearance == 0.15
+    assert "(rules: explicit --clearance flag)" in capsys.readouterr().out
+
+
+def test_explicit_manufacturer_overrides_board_declared_rules(tmp_path, capsys):
+    """An explicit ``--manufacturer`` is an operator override of board rules.
+
+    Decision (issue #4875 ambiguity #1): only an *actually explicit*
+    ``--manufacturer`` counts.  It restores today's behavior exactly (the
+    0.15mm default), so no invocation that names a manufacturer -- which is
+    every demo-board recipe -- changes its clearance because of this issue.
+    """
+    pcb = _imported_board(tmp_path, _declares(0.254))
+    code, gate_reached, clearance = _run_imported_board(pcb, ["--manufacturer", "jlcpcb"])
+
+    assert clearance == 0.15
+    assert code == 1
+    assert gate_reached is False
+
+    out = capsys.readouterr().out
+    assert "rules: manufacturer profile jlcpcb" in out
+    assert "overrides the board's declared net_class" in out
+    assert out.count("(rules:") == 1
+
+
+def test_explicit_mfr_alias_also_overrides(tmp_path, capsys):
+    """The ``--mfr`` alias is the same override."""
+    pcb = _imported_board(tmp_path, _declares(0.254))
+    _code, _gate, clearance = _run_imported_board(pcb, ["--mfr", "oshpark"])
+    assert clearance == 0.15
+    assert "rules: manufacturer profile oshpark" in capsys.readouterr().out
+
+
+def test_sub_floor_board_clearance_is_raised_to_the_fab_floor(tmp_path, capsys):
+    """A declared clearance no fab can etch is clamped UP, never silently.
+
+    Decision (issue #4875 ambiguity #2): the conservative resolution.  A
+    board declaring 0.05mm is below every configured tier's capability
+    minimum; honoring it verbatim would route copper no fab can produce, so
+    it is raised to the active profile's floor and the substitution is
+    named on stdout AND warned about on stderr.
+    """
+    pcb = _imported_board(tmp_path, _declares(0.05))
+    _code, _gate, clearance = _run_imported_board(pcb, [])
+
+    assert clearance == pytest.approx(0.127), "raised to the jlcpcb floor"
+
+    captured = capsys.readouterr()
+    assert 'board net_class "Default" 0.05mm, raised to the jlcpcb floor' in captured.out
+    assert "below the jlcpcb minimum clearance" in captured.err
+    assert "--clearance 0.05" in captured.err, "names the opt-out"
+    assert captured.out.count("(rules:") == 1
+
+
+def test_board_clearance_between_floor_and_default_is_honored(tmp_path, capsys):
+    """0.13mm is tighter than our house default but etchable -- keep it."""
+    pcb = _imported_board(tmp_path, _declares(0.13))
+    _code, _gate, clearance = _run_imported_board(pcb, [])
+
+    assert clearance == 0.13
+    captured = capsys.readouterr()
+    assert 'Clearance: 0.13mm (rules: board net_class "Default")' in captured.out
+    assert "below the jlcpcb minimum clearance" not in captured.err
+
+
+def test_quiet_suppresses_the_banner_but_not_the_clamp_warning(tmp_path, capsys):
+    """``--quiet`` hides provenance chatter; the un-manufacturable warning stays."""
+    pcb = _imported_board(tmp_path, _declares(0.05))
+    _code, _gate, clearance = _run_imported_board(pcb, ["--quiet"])
+
+    assert clearance == pytest.approx(0.127)
+    captured = capsys.readouterr()
+    assert "(rules:" not in captured.out
+    assert "below the jlcpcb minimum clearance" in captured.err
+
+
+class TestClearanceRuleSourceHelpers:
+    """Unit coverage for the #4875 resolution helpers."""
+
+    @pytest.mark.parametrize(
+        "argv,expected",
+        [
+            (["board.kicad_pcb"], False),
+            (["board.kicad_pcb", "--clearance", "0.2"], True),
+            (["board.kicad_pcb", "--clearance=0.2"], True),
+            (["board.kicad_pcb", "--clear-cache"], False),
+            (["board.kicad_pcb", "--edge-clearance", "0.3"], False),
+            (["board.kicad_pcb", "--fine-pitch-clearance", "0.1"], False),
+        ],
+    )
+    def test_clearance_flag_detection(self, argv, expected):
+        assert route_cmd._flag_passed_explicitly(argv, ("--clearance",)) is expected
+
+    @pytest.mark.parametrize(
+        "argv,expected",
+        [
+            (["board.kicad_pcb"], False),
+            (["board.kicad_pcb", "--manufacturer", "oshpark"], True),
+            (["board.kicad_pcb", "--manufacturer=oshpark"], True),
+            (["board.kicad_pcb", "--mfr", "oshpark"], True),
+            (["board.kicad_pcb", "--mfr=oshpark"], True),
+            (["board.kicad_pcb", "--max-layers", "6"], False),
+        ],
+    )
+    def test_manufacturer_flag_detection(self, argv, expected):
+        options = ("--manufacturer", "--mfr")
+        assert route_cmd._flag_passed_explicitly(argv, options) is expected
+
+    def test_default_class_wins_over_named_classes(self):
+        classes = {
+            "Power": SimpleNamespace(clearance=0.4),
+            "Default": SimpleNamespace(clearance=0.2),
+        }
+        assert route_cmd._board_base_clearance(classes) == ("Default", 0.2)
+
+    def test_strictest_named_class_is_the_base_without_a_default(self):
+        classes = {
+            "Power": SimpleNamespace(clearance=0.4),
+            "Signal": SimpleNamespace(clearance=0.18),
+        }
+        assert route_cmd._board_base_clearance(classes) == ("Signal", 0.18)
+
+    def test_classes_without_a_clearance_declare_nothing(self):
+        classes = {"Default": SimpleNamespace(clearance=None)}
+        assert route_cmd._board_base_clearance(classes) is None
+        assert route_cmd._board_base_clearance({}) is None
+
+    def test_unreadable_board_falls_back_to_no_declared_rules(self, tmp_path):
+        """Rule derivation is an enhancement, never a new failure mode."""
+        missing = tmp_path / "nope.kicad_pcb"
+        assert route_cmd._board_declared_net_classes(missing) == {}
+
+    def test_malformed_board_falls_back_to_no_declared_rules(self, tmp_path):
+        broken = tmp_path / "broken.kicad_pcb"
+        broken.write_text("(kicad_pcb (net_class Default (clearance 0.2)")  # unbalanced
+        assert route_cmd._board_declared_net_classes(broken) == {}
+
+    def test_modern_board_skips_the_parse_entirely(self, tmp_path):
+        """The text pre-check is what keeps the fleet path free of new cost."""
+        modern = tmp_path / "modern.kicad_pcb"
+        modern.write_text("(kicad_pcb (version 20221018) (setup))\n")
+        with patch("kicad_tools.schema.PCB.load", side_effect=AssertionError("parsed!")):
+            assert route_cmd._board_declared_net_classes(modern) == {}
+
+
+class TestOuterCliForwardsExplicitDefaults:
+    """Issue #4875: ``kct route`` must forward a deliberately-default flag.
+
+    ``run_route_command`` builds the inner ``route_cmd`` argv by comparing
+    each outer flag against its default and forwarding only the differences
+    (so a flag-off invocation stays byte-identical).  That is exactly wrong
+    for the two flags whose *presence* now carries meaning: ``kct route
+    --clearance 0.15`` and ``--manufacturer jlcpcb`` were dropped, so the
+    board's declared rules silently outranked an explicit operator choice.
+    """
+
+    def _sub_argv(self, argv: list[str]) -> list[str]:
+        from kicad_tools.cli.commands import routing
+        from kicad_tools.cli.parser import create_parser
+
+        cli_argv = ["route", "board.kicad_pcb", *argv]
+        args = create_parser().parse_args(cli_argv)
+
+        captured: dict[str, list[str]] = {}
+
+        def _capture(sub_argv):
+            captured["argv"] = list(sub_argv)
+            return 0
+
+        with (
+            patch.object(sys, "argv", ["kct", *cli_argv]),
+            patch("kicad_tools.cli.route_cmd.main", side_effect=_capture),
+        ):
+            routing.run_route_command(args)
+        return captured["argv"]
+
+    def test_flag_off_argv_stays_byte_identical(self):
+        assert self._sub_argv([]) == ["board.kicad_pcb"]
+
+    def test_explicit_default_clearance_is_forwarded(self):
+        assert "--clearance" in self._sub_argv(["--clearance", "0.15"])
+
+    def test_explicit_default_manufacturer_is_forwarded(self):
+        assert "--manufacturer" in self._sub_argv(["--manufacturer", "jlcpcb"])
+
+    def test_explicit_default_mfr_alias_is_forwarded(self):
+        assert "--manufacturer" in self._sub_argv(["--mfr", "jlcpcb"])

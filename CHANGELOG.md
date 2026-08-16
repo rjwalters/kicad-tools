@@ -1091,6 +1091,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unquoted) are unaffected — a one-branch parse fix, no geometry or transform
   behaviour touched.
 
+- **Imported boards were gated against our default manufacturer profile
+  instead of their own declared rules** (#4875) — `kct route` fed the #3911
+  grid-safety gate an `args.clearance` that was *always* either an explicit
+  `--clearance` or the flat 0.15 mm default: `--manufacturer` never touched
+  it, and a board's own design rules were not parsed anywhere. An externally
+  authored board that declares 0.254 mm clearance was therefore refused for
+  failing a 0.075 mm grid requirement it never claimed — the tool substituted
+  its house rules for the board's, which also biases any route-vs-human
+  benchmark (found during the #4830 corpus pilots, PR #4869). Three changes:
+  `schema/pcb.py` now parses the **legacy top-level `(net_class …)` blocks**
+  pre-KiCad-6 boards carry (siblings of `(setup …)`, so `_parse_setup` never
+  saw them) and exposes them as `PCB.net_classes`; `router/mfr_limits.py`
+  gains `resolve_clearance(manufacturer)` alongside #4568's
+  `resolve_edge_clearance` and #4700's `resolve_min_trace_width`; and
+  `route_cmd` resolves the clearance **before** the auto-grid block (rather
+  than beside the #4568/#4700 auto-fills, which run after grid selection and
+  would be too late for the gate) with the precedence *explicit `--clearance`
+  > explicit `--manufacturer` > board-declared `net_class` clearance >
+  0.15 mm*, printing one `rules: …` provenance banner naming the source. Two
+  decisions were resolved conservatively: only an **actually explicit**
+  `--manufacturer` counts as an operator override (a default `jlcpcb` does
+  not, so no existing invocation changes clearance), and a declared clearance
+  **below the active profile's `min_clearance`** is raised to that floor with
+  a stderr warning naming the `--clearance` opt-out, rather than routing
+  copper no configured fab can etch. Derivation is gated on the board
+  actually carrying a `net_class` block — a token this repo's writer never
+  emits — so the demo-board fleet is structurally unaffected
+  (`tests/test_grid_safety_gate_fleet.py` now enforces that directly). Only
+  pre-KiCad-6 boards benefit: KiCad 6+ keeps net classes in the companion
+  `.kicad_pro`, so a modern single-file import still falls back to the
+  profile exactly as before. Also fixes the outer `kct route` argv
+  forwarding, which dropped a deliberate `--clearance 0.15` /
+  `--manufacturer jlcpcb` because it forwarded flags only when their value
+  differed from the default.
+
 - **`route --voltage-map` collapsed signed net potentials with `abs()`, so
   +150 V vs −150 V differenced to 0 V** (#4867, blocker for #4507, epic #4431
   Phase 2) — the router normalised its voltage map to *magnitudes* before

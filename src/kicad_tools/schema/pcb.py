@@ -1682,6 +1682,62 @@ class Setup:
     tenting_back: bool | None = None
 
 
+@dataclass
+class BoardNetClass:
+    """A board-declared legacy top-level ``(net_class …)`` design-rule block.
+
+    Issue #4875.  Pre-KiCad-6 ``.kicad_pcb`` files (and the transitional
+    files written around the format change) carry their trace-clearance /
+    track-width / via-size design rules **in the board file itself**, as
+    top-level ``(net_class …)`` nodes that are siblings of ``(setup …)``::
+
+        (net_class Default "This is the default net class."
+          (clearance 0.2)
+          (trace_width 0.25)
+          (via_dia 0.8)
+          (via_drill 0.4)
+          (uvia_dia 0.3)
+          (uvia_drill 0.1)
+          (add_net GND)
+        )
+
+    KiCad 6+ moved net classes into the companion ``.kicad_pro`` project
+    file, so a modern board carries none of these -- which is exactly why
+    :attr:`PCB.net_classes` is empty for every board this repo's own writer
+    produces (it never emits ``net_class`` nodes).  Consumers therefore use
+    a non-empty :attr:`PCB.net_classes` as the positive signal "this is an
+    imported board that declares its own rules".
+
+    Every dimension is ``None`` when the corresponding token is absent, so
+    callers can distinguish "declared as 0" from "not declared".
+
+    Attributes:
+        name: Class name (``Default`` for the board-wide class).
+        description: Free-text description, ``""`` when absent.
+        clearance: Trace-to-trace clearance in mm.
+        trace_width: Default track width in mm.
+        via_dia: Through-via pad diameter in mm.
+        via_drill: Through-via drill diameter in mm.
+        uvia_dia: Micro-via pad diameter in mm.
+        uvia_drill: Micro-via drill diameter in mm.
+        diff_pair_width: Differential-pair track width in mm.
+        diff_pair_gap: Differential-pair gap in mm.
+        nets: Net names assigned to this class (``add_net`` entries).
+    """
+
+    name: str = ""
+    description: str = ""
+    clearance: float | None = None
+    trace_width: float | None = None
+    via_dia: float | None = None
+    via_drill: float | None = None
+    uvia_dia: float | None = None
+    uvia_drill: float | None = None
+    diff_pair_width: float | None = None
+    diff_pair_gap: float | None = None
+    nets: list[str] = field(default_factory=list)
+
+
 # Paper sizes in mm (width, height) - KiCad uses landscape orientation
 PAPER_SIZES: dict[str, tuple[float, float]] = {
     "A4": (297.0, 210.0),
@@ -1744,6 +1800,12 @@ class PCB:
         self._texts: list[GraphicText] = []
         self._graphics: list[BoardGraphic] = []
         self._setup: Setup | None = None
+        # Issue #4875: board-declared legacy top-level ``(net_class …)``
+        # design rules, keyed by class name.  A dict (not a list) so a
+        # re-``_parse()`` -- which appends rather than replaces -- overwrites
+        # instead of duplicating.  Empty for every KiCad 6+ board and for
+        # every board this repo's writer produces.
+        self._net_classes: dict[str, BoardNetClass] = {}
         self._title_block: dict[str, str] = {}
         self._board_origin: tuple[float, float] = (0.0, 0.0)
         # Issue #4416: board-level net-reference dialect signal.  Set by
@@ -2137,6 +2199,11 @@ class PCB:
                 graphic_type = tag[3:]  # Remove "gr_" prefix
                 graphic = BoardGraphic.from_sexp(child, graphic_type)
                 self._graphics.append(graphic)
+            elif tag == "net_class":
+                # Issue #4875: legacy (pre-KiCad-6) board-declared design
+                # rules.  These are top-level siblings of ``(setup …)``, NOT
+                # nested inside it, so ``_parse_setup`` never sees them.
+                self._parse_net_class(child)
 
         # Post-parse fixup: recover net_number from name for KiCad 10 name-only
         # format.  KiCad 10 may emit inline (net "name") without a numeric ID,
@@ -2394,6 +2461,45 @@ class PCB:
                     setup.tenting_back = value == "yes"
 
         self._setup = setup
+
+    def _parse_net_class(self, sexp: SExp) -> None:
+        """Parse one legacy top-level ``(net_class …)`` block (issue #4875).
+
+        The legacy grammar is ``(net_class <name> <description> (clearance
+        …) (trace_width …) …)`` -- name and description are positional
+        strings, every rule is a child node.  Unknown child tokens are
+        ignored; absent tokens leave their field ``None`` so a caller can
+        tell "not declared" from "declared as 0".
+        """
+        name = sexp.get_string(0) or ""
+        net_class = BoardNetClass(
+            name=name,
+            description=sexp.get_string(1) or "",
+        )
+
+        for token in (
+            "clearance",
+            "trace_width",
+            "via_dia",
+            "via_drill",
+            "uvia_dia",
+            "uvia_drill",
+            "diff_pair_width",
+            "diff_pair_gap",
+        ):
+            node = sexp.find(token)
+            if node is None:
+                continue
+            value = node.get_float(0)
+            if value is not None:
+                setattr(net_class, token, float(value))
+
+        for add_net in sexp.find_all("add_net"):
+            net_name = add_net.get_string(0)
+            if net_name is not None:
+                net_class.nets.append(net_name)
+
+        self._net_classes[net_class.name] = net_class
 
     def _parse_stackup(self, sexp: SExp) -> list[StackupLayer]:
         """Parse stackup definition."""
@@ -2918,6 +3024,7 @@ class PCB:
         self._texts = []
         self._graphics = []
         self._setup = None
+        self._net_classes = {}
         self._title_block = {}
         self._parse()
         self._board_origin = (0.0, 0.0)
@@ -3845,6 +3952,19 @@ class PCB:
     def setup(self) -> Setup | None:
         """Board setup/design rules."""
         return self._setup
+
+    @property
+    def net_classes(self) -> dict[str, BoardNetClass]:
+        """Board-declared legacy top-level ``(net_class …)`` blocks by name.
+
+        Issue #4875.  Empty (``{}``) for every KiCad 6+ board -- modern
+        files keep net classes in the companion ``.kicad_pro`` -- and for
+        every board this repo writes, so a non-empty mapping is the
+        positive "imported board with its own declared design rules"
+        signal that :mod:`kicad_tools.cli.route_cmd` gates rule derivation
+        on.
+        """
+        return self._net_classes
 
     # Statistics
 

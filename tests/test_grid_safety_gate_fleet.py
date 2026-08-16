@@ -158,3 +158,87 @@ def test_fleet_memory_cap_warning_matches_gate(
         f"it is at risk; a False on board 05 drops a genuine warning. "
         f"Warnings seen: {warning_texts}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #4875: the fleet must be structurally immune to board-derived rules
+# ---------------------------------------------------------------------------
+#
+# #4875 lets ``kct route`` derive ``args.clearance`` from a board's own legacy
+# top-level ``(net_class …)`` block.  The gate assertions above are all keyed
+# to ``ROUTE_DEFAULT_CLEARANCE`` (0.15mm), so they only stay meaningful while
+# no fleet board can reach that derivation path.  It cannot: this repo's PCB
+# writer emits no ``net_class`` node at all, and the derivation is gated on
+# one being present.  These cases enforce both halves of that argument.
+
+#: The ``--manufacturer`` each recipe's ``kct route`` invocation actually
+#: passes, or ``None`` where it passes none (boards 00 and 06 route through
+#: the library API rather than the CLI).  Verified against the recipe
+#: sources.  An explicit manufacturer is #4875's operator override, so these
+#: invocations must resolve to the unchanged 0.15mm default too.
+FLEET_MANUFACTURER: dict[str, str | None] = {
+    "00-simple-led": None,
+    "01-voltage-divider": None,
+    "02-charlieplex-led": "jlcpcb",
+    "03-usb-joystick": "jlcpcb-tier1",
+    "04-stm32-devboard": "jlcpcb-tier1",
+    "05-bldc-motor-controller": "jlcpcb-tier1",
+    "06-diffpair-test": None,
+    "07-matchgroup-test": "jlcpcb",
+}
+
+
+@pytest.mark.parametrize("board_dir,stem,_expected", FLEET)
+def test_fleet_board_declares_no_legacy_net_class(board_dir: str, stem: str, _expected: bool):
+    """No fleet input carries the token that unlocks board-derived rules."""
+    from kicad_tools.cli.route_cmd import _board_declared_net_classes
+
+    pcb = _input_pcb(board_dir, stem)
+    if not pcb.exists():
+        pytest.skip(f"input PCB not committed: {pcb}")
+
+    assert "(net_class" not in pcb.read_text(errors="replace"), (
+        f"{board_dir} now carries a legacy net_class block; the 0.15mm "
+        "clearance every assertion in this file assumes no longer holds."
+    )
+    assert _board_declared_net_classes(pcb) == {}
+
+
+@pytest.mark.parametrize("board_dir,stem,_expected", FLEET)
+def test_fleet_clearance_is_unchanged_by_rule_derivation(
+    board_dir: str, stem: str, _expected: bool
+):
+    """``args.clearance`` still resolves to 0.15mm for every fleet recipe.
+
+    Run both with no flags and with the recipe's real ``--manufacturer``, so
+    neither #4875 branch (board-derived, or manufacturer-as-override) can
+    silently move a fleet board off the default the gate map is keyed to.
+    """
+    from types import SimpleNamespace
+
+    from kicad_tools.cli.route_cmd import _resolve_route_clearance
+
+    pcb = _input_pcb(board_dir, stem)
+    if not pcb.exists():
+        pytest.skip(f"input PCB not committed: {pcb}")
+
+    mfr = FLEET_MANUFACTURER[board_dir] or "jlcpcb"
+    invocations: list[list[str]] = [
+        [str(pcb)],
+        [str(pcb), "--manufacturer", mfr],
+    ]
+
+    for argv in invocations:
+        args = SimpleNamespace(
+            clearance=ROUTE_DEFAULT_CLEARANCE,
+            manufacturer=mfr,
+            quiet=True,
+        )
+        resolved = _resolve_route_clearance(args, pcb, argv, quiet=True)
+        assert resolved == ROUTE_DEFAULT_CLEARANCE, (
+            f"{board_dir} @ {argv}: clearance moved to {resolved}mm. "
+            "Every gate expectation in this file (and the committed routed "
+            "artifacts) assumes the flat 0.15mm route default."
+        )
+        assert args.clearance == ROUTE_DEFAULT_CLEARANCE
+        assert args._clearance_rule_source == "default"

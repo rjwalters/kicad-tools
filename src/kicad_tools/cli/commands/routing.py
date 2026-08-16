@@ -503,7 +503,17 @@ def run_route_auto_command(args) -> int:
 
 def run_route_command(args) -> int:
     """Handle route command."""
+    from ..route_cmd import _flag_passed_explicitly
     from ..route_cmd import main as route_main
+
+    # Issue #4875: the inner command now derives its clearance from a board's
+    # own declared ``(net_class …)`` rules when nothing explicit outranks
+    # them, so "the operator typed the default value" and "the operator typed
+    # nothing" are no longer equivalent.  The value-comparison forwarding
+    # below would drop a deliberate ``--clearance 0.15`` / ``--manufacturer
+    # jlcpcb``, silently handing the decision back to the board.
+    _explicit_clearance = _flag_passed_explicitly(None, ("--clearance",))
+    _explicit_manufacturer = _flag_passed_explicitly(None, ("--manufacturer", "--mfr"))
 
     sub_argv = [args.pcb]
     if args.output:
@@ -558,7 +568,7 @@ def run_route_command(args) -> int:
     # auto-fill.  Flag-off argv stays byte-identical.
     if getattr(args, "trace_width", None) is not None:
         sub_argv.extend(["--trace-width", str(args.trace_width)])
-    if args.clearance != 0.15:
+    if args.clearance != 0.15 or _explicit_clearance:
         sub_argv.extend(["--clearance", str(args.clearance)])
     if args.via_drill != 0.3:
         sub_argv.extend(["--via-drill", str(args.via_drill)])
@@ -708,7 +718,7 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--min-trace", str(args.min_trace)])
     if getattr(args, "min_clearance_floor", None) is not None:
         sub_argv.extend(["--min-clearance-floor", str(args.min_clearance_floor)])
-    if getattr(args, "manufacturer", "jlcpcb") != "jlcpcb":
+    if getattr(args, "manufacturer", "jlcpcb") != "jlcpcb" or _explicit_manufacturer:
         sub_argv.extend(["--manufacturer", args.manufacturer])
     # Issue #4700: the copper weight selects the manufacturer design-rule row
     # (``<layers>layer_<oz>oz``) the trace-width floor is resolved from, so it

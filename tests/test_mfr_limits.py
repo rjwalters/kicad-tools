@@ -15,6 +15,7 @@ from kicad_tools.router.mfr_limits import (
     get_mfr_limits,
     get_mfr_size_tier_ladder,
     get_relaxation_tiers,
+    resolve_clearance,
     resolve_min_trace_width,
 )
 
@@ -741,3 +742,52 @@ class TestRelaxationLadderRespectsCheckSideFloor:
                     min_trace_floor=floor,
                 )
                 assert all(t.trace_width >= floor - 1e-9 for t in tiers), (name, copper)
+
+
+class TestResolveClearance:
+    """Issue #4875: the shared clearance-floor resolution helper.
+
+    ``resolve_clearance`` is the clearance analogue of #4568's
+    ``resolve_edge_clearance``: ``kct route`` uses it as the floor a
+    board-declared ``(net_class (clearance …))`` value is raised to, so a
+    legacy import can never be routed below what any configured fab can
+    actually etch.
+    """
+
+    def test_resolves_each_known_manufacturer(self):
+        """Every configured profile resolves to its own min_clearance."""
+        for name, limits in MFR_LIMITS.items():
+            assert resolve_clearance(name) == pytest.approx(limits.min_clearance)
+
+    def test_case_insensitive_and_alias_tolerant(self):
+        """Names go through get_mfr_limits, so aliases/casing work."""
+        assert resolve_clearance("JLCPCB") == pytest.approx(MFR_JLCPCB.min_clearance)
+        assert resolve_clearance("oshpark") == pytest.approx(MFR_OSHPARK.min_clearance)
+
+    def test_none_and_empty_resolve_to_none(self):
+        """No manufacturer configured -> no floor (never raises)."""
+        assert resolve_clearance(None) is None
+        assert resolve_clearance("") is None
+
+    def test_unknown_manufacturer_resolves_to_none(self):
+        """Validation belongs to the CLI layer -- the helper never raises."""
+        assert resolve_clearance("not-a-fab") is None
+
+    def test_default_profile_floor_is_below_the_route_default(self):
+        """Pins the premise the #4875 clamp relies on.
+
+        The clamp only ever runs with the *default* ``--manufacturer``
+        (``jlcpcb``) -- an explicit ``--manufacturer`` takes the override
+        branch instead and never clamps -- and jlcpcb's 0.127mm capability
+        minimum is looser than ``kct route``'s own 0.15mm default.  So a
+        board declaring anything in 0.127..0.15mm (tighter than our house
+        default, but etchable) is honored verbatim; only a genuinely
+        un-manufacturable declaration is raised.
+
+        ``oshpark`` (0.152mm) is the one profile whose floor exceeds the
+        route default, which is exactly why it must stay on the
+        explicit-override branch rather than silently re-floor a board.
+        """
+        assert resolve_clearance("jlcpcb") == pytest.approx(0.127)
+        assert resolve_clearance("jlcpcb") < 0.15
+        assert resolve_clearance("oshpark") > 0.15

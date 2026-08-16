@@ -532,6 +532,43 @@ def resolve_edge_clearance(manufacturer: str | None) -> float | None:
     return None
 
 
+def resolve_clearance(manufacturer: str | None) -> float | None:
+    """Resolve the trace-to-trace clearance floor for a manufacturer.
+
+    Shared resolution helper (Issue #4875), the clearance analogue of
+    :func:`resolve_edge_clearance`.  ``kct route`` uses it as the **floor**
+    a board-declared ``(net_class (clearance …))`` value is raised to, and
+    as the value an explicit ``--manufacturer`` resolves to when it
+    overrides board-declared rules.
+
+    Note this reads :attr:`MfrLimits.min_clearance` (the fab's absolute
+    copper-to-copper capability minimum), which is deliberately *not* the
+    same thing as the routing clearance a design should target -- ``kct
+    route``'s own default (0.15mm) is looser than every current profile's
+    ``min_clearance`` on purpose.  Callers must therefore treat the result
+    as a lower bound, never as a recommended value.
+
+    Args:
+        manufacturer: Manufacturer name (case-insensitive, aliases OK),
+            or ``None``/empty when no manufacturer is configured.
+
+    Returns:
+        The manufacturer's ``min_clearance`` in mm, or ``None`` when
+        ``manufacturer`` is falsy, unknown (no raise -- manufacturer
+        validation belongs to the CLI layer), or its clearance floor is
+        not positive.
+    """
+    if not manufacturer:
+        return None
+    try:
+        limits = get_mfr_limits(manufacturer)
+    except ValueError:
+        return None
+    if limits.min_clearance > 0:
+        return limits.min_clearance
+    return None
+
+
 def resolve_min_trace_width(
     manufacturer: str | None,
     layers: int | None = None,

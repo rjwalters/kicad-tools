@@ -5054,6 +5054,224 @@ def _mfr_rule_key(layers: int | None, copper_oz: float | None) -> str:
     return f"{layer_text} {copper_text}"
 
 
+# ---------------------------------------------------------------------------
+# Issue #4875: board-declared clearance derivation for imported boards
+# ---------------------------------------------------------------------------
+
+#: ``kct route``'s historical flat ``--clearance`` default in mm.  Kept as the
+#: argparse default (rather than a ``None`` sentinel) because ``args.clearance``
+#: is read as a plain float at dozens of sites; explicit-vs-default is detected
+#: from argv instead (see :func:`_flag_passed_explicitly`).
+DEFAULT_ROUTE_CLEARANCE_MM = 0.15
+
+_CLEARANCE_EPS = 1e-9
+
+
+def _flag_passed_explicitly(argv: list[str] | None, options: tuple[str, ...]) -> bool:
+    """Return True when the invocation explicitly carried one of ``options``.
+
+    Issue #4875.  ``--clearance`` (``default=0.15``) and ``--manufacturer``
+    (``default="jlcpcb"``) both have *value* defaults, so -- unlike #4700's
+    ``--trace-width`` sentinel -- ``args`` alone cannot tell "the operator
+    asked for jlcpcb" from "nobody passed anything".  This mirrors the
+    existing ``"--no-auto-layers" in _argv_for_q5`` argv-sniff, extended to
+    handle the ``--flag=value`` spelling and argparse's unambiguous
+    long-option abbreviations.
+
+    Chosen over converting both flags to ``None`` sentinels deliberately: the
+    sentinel refactor would make ``args.manufacturer`` optional at 15+ call
+    sites that all assume ``str`` today, a blast radius far larger than the
+    behavior this issue changes.
+    """
+    tokens = list(argv) if argv is not None else list(sys.argv[1:])
+    for token in tokens:
+        if not token.startswith("--"):
+            continue
+        head = token.split("=", 1)[0]
+        if any(option == head or option.startswith(head) for option in options):
+            return True
+    return False
+
+
+def _board_declared_net_classes(pcb_path) -> dict:
+    """Parse the board's legacy top-level ``(net_class …)`` blocks, if any.
+
+    Issue #4875.  Returns ``{}`` -- cheaply, without parsing the board -- for
+    the overwhelmingly common case of a file that carries no ``net_class``
+    token at all (every KiCad 6+ board, and every board this repo's own
+    writer produces).  That text pre-check is what makes the derivation path
+    a structural no-op for the demo-board fleet.
+
+    Never raises: an unreadable or malformed board yields ``{}`` and the
+    caller falls back to today's behavior.
+    """
+    try:
+        text = Path(pcb_path).read_text(errors="replace")
+    except OSError:
+        return {}
+    if "(net_class" not in text:
+        return {}
+    try:
+        from kicad_tools.schema import PCB
+
+        return dict(PCB.load(Path(pcb_path)).net_classes)
+    except Exception:
+        # Rule derivation is an enhancement, never a new failure mode: a
+        # board this parser chokes on still routes at today's default.
+        return {}
+
+
+def _board_base_clearance(net_classes: dict) -> tuple[str, float] | None:
+    """Pick the board's base clearance from its declared net classes.
+
+    KiCad's board-wide class is ``Default``, so it wins when present.  On a
+    board that declares only named classes, the strictest (smallest)
+    declared clearance is used as the base -- ``args.clearance`` is the
+    router's global spacing floor, and a base looser than a declared class
+    would route that class wider than the board asked for.
+
+    Returns ``(class_name, clearance_mm)`` or ``None`` when no class
+    declares a positive clearance.
+    """
+    candidates: list[tuple[str, float]] = []
+    for name, net_class in net_classes.items():
+        value = getattr(net_class, "clearance", None)
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            candidates.append((str(name), value))
+    if not candidates:
+        return None
+    for name, value in candidates:
+        if name == "Default":
+            return (name, value)
+    return min(candidates, key=lambda item: (item[1], item[0]))
+
+
+def _decide_route_clearance(
+    *,
+    clearance: float,
+    explicit_clearance: bool,
+    manufacturer: str | None,
+    explicit_manufacturer: bool,
+    board_clearance: tuple[str, float] | None,
+) -> tuple[float, str, str | None, str | None]:
+    """Pure precedence core for :func:`_resolve_route_clearance` (issue #4875).
+
+    Precedence, matching the ``resolve_edge_clearance`` / ``resolve_min_trace_width``
+    shape established by #4568 / #4700::
+
+        explicit --clearance
+          > explicit --manufacturer (the operator's profile overrides the
+            board's own declared rules)
+          > board-declared legacy ``net_class`` clearance, raised to the
+            active profile's ``min_clearance`` floor when it undercuts it
+          > today's flat default (unchanged)
+
+    Returns ``(value, source, banner, warning)``.  ``banner`` is ``None``
+    only in the untouched no-board-rules case, where printing one would add
+    a line to every existing invocation while naming nothing new.
+    """
+    if explicit_clearance:
+        return (
+            clearance,
+            "flag",
+            f"Clearance: {clearance:.4g}mm (rules: explicit --clearance flag)",
+            None,
+        )
+
+    if board_clearance is None:
+        # No board-declared rules (every modern-format import, and the whole
+        # demo-board fleet): behavior is byte-identical to before #4875.
+        return (clearance, "default", None, None)
+
+    class_name, declared = board_clearance
+
+    if explicit_manufacturer:
+        return (
+            clearance,
+            "manufacturer",
+            f"Clearance: {clearance:.4g}mm (rules: manufacturer profile "
+            f"{manufacturer}) -- explicit --manufacturer overrides the board's "
+            f'declared net_class "{class_name}" clearance ({declared:.4g}mm)',
+            None,
+        )
+
+    from kicad_tools.router.mfr_limits import resolve_clearance
+
+    floor = resolve_clearance(manufacturer)
+    if floor is not None and declared < floor - _CLEARANCE_EPS:
+        warning = (
+            f'WARNING: the board declares net_class "{class_name}" clearance '
+            f"{declared:.4g}mm, which is below the {manufacturer} minimum "
+            f"clearance {floor:.4g}mm -- no configured fab tier can produce it. "
+            f"Routing at the {floor:.4g}mm floor instead; pass --clearance "
+            f"{declared:.4g} to route at the board's declared value anyway."
+        )
+        banner = (
+            f"Clearance: {floor:.4g}mm (rules: board net_class "
+            f'"{class_name}" {declared:.4g}mm, raised to the {manufacturer} '
+            f"floor {floor:.4g}mm)"
+        )
+        return (floor, "board-clamped", banner, warning)
+
+    return (
+        declared,
+        "board",
+        f'Clearance: {declared:.4g}mm (rules: board net_class "{class_name}")',
+        None,
+    )
+
+
+def _resolve_route_clearance(args, pcb_path, argv=None, *, quiet: bool = False) -> float:
+    """Resolve ``args.clearance`` from the board's own declared rules.
+
+    Issue #4875.  ``kct route`` used to feed the grid-safety gate (#3911) a
+    clearance that was *always* either an explicit ``--clearance`` or the
+    flat 0.15mm default -- ``--manufacturer`` never touched it, and the
+    board's own declared design rules were not parsed at all.  Externally
+    authored boards were therefore gated against house rules they never
+    claimed.
+
+    This runs **before** the auto-grid selection block, because that block
+    reads ``args.clearance`` for both the grid search and the #3911 gate; a
+    resolution placed next to the #4568/#4700 auto-fills further down would
+    be too late to affect either.
+
+    Prints the rule-source banner (stdout, suppressed by ``--quiet``) at
+    most once, and the looser-than-floor clamp warning (stderr, never
+    suppressed).  Also stashes the source on ``args._clearance_rule_source``.
+
+    Returns the resolved clearance in mm.
+    """
+    explicit_clearance = _flag_passed_explicitly(argv, ("--clearance",))
+    explicit_manufacturer = _flag_passed_explicitly(argv, ("--manufacturer", "--mfr"))
+
+    board_clearance = None
+    if not explicit_clearance:
+        board_clearance = _board_base_clearance(_board_declared_net_classes(pcb_path))
+
+    value, source, banner, warning = _decide_route_clearance(
+        clearance=float(getattr(args, "clearance", DEFAULT_ROUTE_CLEARANCE_MM)),
+        explicit_clearance=explicit_clearance,
+        manufacturer=getattr(args, "manufacturer", None),
+        explicit_manufacturer=explicit_manufacturer,
+        board_clearance=board_clearance,
+    )
+
+    args.clearance = value
+    args._clearance_rule_source = source
+    if warning is not None:
+        print(warning, file=sys.stderr)
+    if banner is not None and not quiet:
+        print(banner)
+    return value
+
+
 def _warn_layer_selection_advisories(args, layer_stack, *, is_auto: bool) -> None:
     """Emit Issue #4314 route-time layer-selection advisories to stderr.
 
@@ -11539,7 +11757,16 @@ def _main_impl(argv: list[str] | None = None) -> int:
         "--clearance",
         type=float,
         default=0.15,
-        help="Trace clearance in mm (default: 0.15)",
+        help=(
+            "Trace clearance in mm (default: 0.15). Precedence (issue #4875): "
+            "explicit --clearance > explicit --manufacturer > the board's own "
+            "declared legacy top-level (net_class (clearance ...)) rules > "
+            "0.15. Board-declared rules are only available on pre-KiCad-6 "
+            "boards that carry them in the .kicad_pcb itself; a modern import "
+            "keeps the 0.15 default exactly as before. A declared value below "
+            "the active manufacturer's minimum clearance is raised to that "
+            "floor with a stderr WARNING."
+        ),
     )
     parser.add_argument(
         "--fine-pitch-clearance",
@@ -13520,6 +13747,16 @@ def _main_impl(argv: list[str] | None = None) -> int:
         output_path = Path(args.output)
     else:
         output_path = pcb_path.with_stem(pcb_path.stem + "_routed")
+
+    # Issue #4875: resolve the effective trace clearance from the board's OWN
+    # declared design rules before anything reads it.  Ordering is
+    # load-bearing: the auto-grid selector below feeds ``args.clearance``
+    # straight into both the grid search and the #3911 memory-forced-unsafe
+    # gate, so an imported board that declares tighter-but-self-consistent
+    # rules must have them resolved HERE -- resolving alongside the #4568 /
+    # #4700 manufacturer auto-fills (further down, after grid selection) would
+    # be too late for either.
+    _resolve_route_clearance(args, pcb_path, argv, quiet=args.quiet)
 
     # Resolve grid value: "auto" or numeric
     # We need to resolve this early, before sub-functions are called
