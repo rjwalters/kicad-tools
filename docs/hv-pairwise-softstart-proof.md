@@ -2,19 +2,14 @@
 
 Point-in-time working document — it describes the tree as of its date.
 
-> **Update (#4867 fixed):** the root cause this run isolated — the `abs()`
-> collapse of signed potentials, described in
+> **Re-scored (#4867's fix landed as #4868).** The root cause the first run
+> isolated — the `abs()` collapse of signed potentials, described in
 > [The root cause](#the-root-cause-signed-potentials-are-collapsed-to-magnitudes)
-> — has since been fixed. Re-measuring the table over the **same**
-> `vmap.json` (md5 `cc72a701a6c4c3c335859bcc6029ab94`) now yields **1922
-> cross-pairs**, matching the census exactly: the 99 missing pairs are back,
-> the 240 under-required pairs carry their full requirement, and **no pair is
-> lost**. Everything below the update is the *pre-fix* measurement and is kept
-> as the record of the diagnosis. The routing arms have **not** been re-run, so
-> the 49/82 · 42-census-fail · 3-gate-hit numbers in the verdict table are
-> stale: per #4867's acceptance criteria the leak set is expected to **grow**
-> before it shrinks, because 99 pairs re-enter the matrix. **#4507's T4 must be
-> re-scored** on top of the fix.
+> — is fixed, and the routing arms have now been **re-run on top of it**.
+> [The re-score](#the-re-score-same-recipe-corrected-table) is the current
+> record and supersedes the pre-fix numbers; everything from
+> [Verdict (pre-fix run)](#verdict-of-the-pre-fix-run-t4-fails--but-the-machinery-is-measurably-doing-its-job)
+> downwards is kept verbatim as the record of the diagnosis.
 
 This is the record of the **T4 manual criterion** of issue
 [#4507](https://github.com/rjwalters/kicad-tools/issues/4507) (router Phase 2 of
@@ -29,7 +24,168 @@ cannot live in CI: softstart rev-C is a **local-only** consumer fixture
 (`github.com/rjwalters/softstart`, deliberately no CI presence here), so the
 proof is a documented local run. This file is that record.
 
-## Verdict: **T4 FAILS** — but the machinery is measurably doing its job
+## The re-score: same recipe, corrected table
+
+Re-run on `main` @ `090086b4` (C++ backend build 21) with the **same** fixture at
+`7800b046`, the **same** four input files at the same md5s, and the same three
+commands. The only difference from the pre-fix run below is that
+`build_pairwise_clearance_table()` and the CLI's `--voltage-map` preload now
+difference the potentials **as supplied** (#4868), so the banner prints
+`84 mapped nets, 1922 cross-pairs` instead of 1823.
+
+### Verdict: **T4 still FAILS** — 25, not 0
+
+| Measure | T4 requires | **post-fix (this run)** | pre-fix | control: matrix off |
+|---|---|---|---|---|
+| Signal nets routed | 100 % | **50 / 82 (61 %)** | 49 / 82 | 50 / 82 |
+| Cross-pairs in the matrix | = census | **1922** | 1823 | dormant |
+| Board-level census fails, after step 2 | **0** | **25** | 57 | 107 |
+| Board-level census fails, after step 3 (HV keepouts) | **0** | **35** | 42 | — (pass not run) |
+| Router's own gate on the finished board (same-layer track↔track, #4506 zones honoured) | 0 | **2** | 3 | 54 |
+| Router's inline post-route audit | 0 | **1** | 5 | (dormant) |
+
+The headline: **restoring the 99 missing pairs and correcting 240 more did not
+cost routability and did not grow the leak set.** #4867's acceptance criteria
+expected the leaks to *grow* before shrinking; on this board they shrank in every
+column — one net *more* routed (50 vs 49), less than half the board-level census
+fails (25 vs 57 at the same step), and one fewer router-gate leak (2 vs 3).
+
+Wall clock is **not** comparable this time: the grid arm ran concurrently on the
+same machine (step 1 258 s, step 2 1291 s vs 109 s / 1032 s uncontended).
+Nothing else in the recipe changed.
+
+### Two new findings, neither of them a search defect
+
+**1. `--hv-threshold` hides pairs the census scores (405 of them here).**
+`build_pairwise_clearance_table()` omits every pair whose `|ΔV|` is below
+`--hv-threshold` (30 V by default), leaving it at the scalar DRU floor. The
+census has no threshold: it looks IEC 60664-1 up at the pair's *actual* `|ΔV|`,
+and the standard's low-voltage rows are **above** a 0.2 mm fab floor:
+
+```
+mapped-net pairs below the 30 V threshold requiring more than the DRU floor : 811
+  ...of which the census actually scores on this board                      : 405
+their census requirement                                : 0.40 / 0.42 / 0.45 / 0.48 / 0.50 / 0.53 mm
+their |ΔV| range                                        : 1.6 V .. 28.0 V
+what the router requires for them                       : 0.200 mm (the DRU floor)
+```
+
+This is not the sign collapse returning — those 405 pairs difference correctly,
+they are simply *below the threshold*. It is nonetheless load-bearing for T4:
+**5 of the 25 residual board-level fails are sub-30 V pairs** (e.g.
+`/PRE_D_POS`↔`/PRECHARGE_POS`, 0.400 mm against 0.420 mm at 11.7 V), and after
+step 1 alone it was 10 of 36. No search can close them, because the requirement
+never reaches the search.
+
+The threshold itself is deliberate policy — it exists so LV↔LV pairs are not
+over-segregated — so this run does **not** propose changing the default. What it
+does propose (and #4507's next increment ships) is that the run *say so*: the
+`--voltage-map` banner now reports the hidden-pair count, the worst pair, and the
+`--hv-threshold 0` escape hatch, instead of printing a cross-pair count that
+reads like full coverage. Verified end to end: at `--hv-threshold 0` the pairs
+enter the matrix and the #4588 audit fails the copper the census was already
+failing.
+
+**2. The HV keepout pass now makes this board worse (25 → 35).** Pre-fix, step 3
+retired 15 fails (57 → 42). Post-fix it *adds* 15 and retires 5:
+
+```
+kct zones hv-keepout --clearance 1.6 --refill   →  8 voids planned (pre-fix: 5)
+  retired : 5 genuine fails (0.425-0.967 mm against 1.3-1.6 mm)
+  created : 15 marginal fails at 1.5931-1.5942 mm against 1.600 mm
+```
+
+Every one of the 15 is the *same* defect: the carved void leaves the pour edge
+**6-7 µm short** of the clearance it was asked for, so a pair that was not
+failing before the pass fails by 0.4 % of its requirement afterwards. Carving at
+exactly the required clearance has no margin for the polygon discretisation of
+the void, and the refill lands inside. This is `zones/hv_keepout.py`, not the
+router search — recorded here (with the numbers to reproduce it) rather than
+fixed in a Phase 2 PR. **The best board this recipe produces is therefore step 2
+at 25, and step 3 should be run with a clearance margin (or not at all) until
+that is addressed.**
+
+### What the residual 25 actually are
+
+| Class | Count | Can Phase 2's search fix it? |
+|---|---|---|
+| Involves a plane pour (`GND` / `+3.3V` auto-pour copper) | 9 | No — the router's gate is trace↔trace; pour geometry is the census' remit (#3901) |
+| Sub-30 V pair, absent from the matrix by `--hv-threshold` | 5 (1 also pour) | No — the requirement never reaches the search |
+| Pad/via geometry or placement-fixed copper | 12 | Partly — but only 1 net pair of the 12 is same-layer track↔track |
+| **Router's own gate on the finished board** | **2 instances, 1 net pair** | Yes — `/I_SENSE_OUT`↔`/SCAP_NEG`, 0.600 mm against 1.400 mm on B.Cu |
+
+The 2 remaining gate leaks are what the router is genuinely responsible for, down
+from 3 pre-fix and 54 with the matrix off. Replaying `segment_pair_violation`
+over the finished board with and without the #4506 attach zones:
+
+```
+step2.kicad_pcb: 1940 segments over 55 nets, 135 attach zones, 1922 cross-pairs
+  track-track pairwise violations WITH #4506 attach zones :  2  (1 net pair)
+  track-track pairwise violations WITHOUT attach zones    :  8  (3 net pairs)
+```
+
+The 6 waived instances are the same two optocoupler pairs the pre-fix run found
+(`/GATE_POS_A`↔`/LED_K_POS`, `/GATE_NEG_A`↔`/LED_K_NEG`, 0.892-1.000 mm inside
+the part's own pad bbox) — #4506 working as designed on real geometry, twice.
+
+### The grid arm, re-run
+
+Same third arm as before (the one that exercises #4507's *own* C++ kernels rather
+than the lattice's): **0 / 82 nets** (pre-fix 2 / 82), 55 partial, 27 with no
+segments, 22 min 44 s, 12 HV pairwise violations in the copper it did commit. The
+fine-pitch escape wall this board hits is unchanged and predates #4431; the
+stricter table costs it the two nets it used to finish.
+
+`FAILURE_PAIRWISE_BLOCKED` (#4860) fired on **8** nets (pre-fix 10), naming six
+distinct blockers:
+
+| drained net | blocker reported | blocker's name |
+|---|---|---|
+| `/SCAP_NEG_RTN`, `/GATE_NEG_A` | `blocking net id 33` | `/LED_A_NEG` |
+| `/V_AC_SENSE_RAW`, `/V_BUS_DVDT` | `blocking net id 4` | `/AC_LINE` |
+| `/PRECHARGE_NEG` | `blocking net id 50` | `/SCAP_NEG` |
+| `/STATUS_LED` | `blocking net id 54` | `/SRC_NEG` |
+| `/SRC_NEG` | `blocking net id 51` | `/SCAP_NEG_RTN` |
+| `/GATE_RTN_NEG` | `blocking net id 21` | `/GATE_BUS_NEG` |
+
+The right-hand column is a lookup this run had to do by hand — the operator-facing
+gap the pre-fix run flagged in passing. #4507's next increment closes it: the
+diagnostic resolves the id through the pathfinder's own net map, falling back to
+the bare id only when no map is threaded. Confirmed on this same board (a
+shorter, `--timeout 420` replay of the arm above, on the patched tree):
+
+```
+Net /SCAP_NEG_RTN: C++ pathfinder gave up (open set drained with expansions
+  refused by pairwise (HV-isolation) clearance (blocking net /LED_A_NEG));
+  falling back to the pure-Python A* ...
+```
+
+— the same refusal that printed `blocking net id 33` two paragraphs above.
+
+### What T4 needs now
+
+The pre-fix list's item 1 (the sign collapse) is **done**. The rest, re-derived
+from this run:
+
+1. **The `--hv-threshold` policy question** (5 of 25). A board that must pass
+   `kct creepage` cleanly has to route with `--hv-threshold 0`, which no
+   documentation said and no run reported. Now reported; whether the *default*
+   should change is an owner call, not a Builder one.
+2. **Pour-vs-trace scope** (9 of 25). The router's gate audits trace copper; the
+   census measures pours too. Either the gate grows a pour-aware pass or T4 is
+   scored on a pour-free board. Not a Phase 2 deliverable (#3901).
+3. **`kct zones hv-keepout` margin** (the 25 → 35 regression above).
+4. **The 2 genuine gate leaks** — the only line item Phase 2's own machinery
+   owns, and the smallest one on the list.
+5. **32 nets still unrouted** — `PLACEMENT_BOUND` / `CONGESTION_SATURATED` /
+   `BUDGET_STARVED`, unchanged in character since 2026-07-21. Placement capacity,
+   not pairwise.
+
+## Verdict of the pre-fix run: **T4 FAILS** — but the machinery is measurably doing its job
+
+> Everything from here down is the original 2026-08-15 pre-fix measurement,
+> retained as the record of the diagnosis. Its counts are superseded by
+> [the re-score](#the-re-score-same-recipe-corrected-table) above.
 
 | Measure | T4 requires | matrix **on** | control: matrix **off** |
 |---|---|---|---|
@@ -376,21 +532,26 @@ placement capacity wall, and a definitional mismatch between two gates.
 
 ## #4507 criterion status after this run
 
+> Re-scored against the post-#4868 run. Rows 1-3 and T1-T3 are unchanged; the
+> "observed live" evidence in 2b / 3 and the T4 row carry the **re-score's**
+> numbers, with the pre-fix figures in parentheses.
+
 | # | Criterion | Status | Evidence |
 |---|---|---|---|
 | 1 | C++ `validate_route` + search-time check consume a domain-id array + domain-pair matrix | **MET** | `Grid3D::set_pairwise_domains` / `pairwise_required_clearance` (#4510 via #4524/#4533) |
 | 2 | Search-time avoidance: hard blocking + halo/pricing widening around HV copper | **MET** | C++ kernels + `pairwise_avoidance_cost` (#4511); Python-fallback mirrors (#4791); soft gradient (#4849); nearest-band pricing (#4859) |
-| 2b | Failed avoidance must be *actionable*, not silent | **MET** | `FAILURE_PAIRWISE_BLOCKED` + blocker net → `via_blocked_ripup` (#4860). **Observed live here**: 10 nets on the grid arm drained specifically on cross-domain refusals and named their blocker |
-| 3 | #4506 attach-zone exemption threaded into the C++ check | **MET** | `Grid3D::set_attach_zones` / `attach_zone_exempts(..., layer)`; layer scoping in #4780. **Confirmed live on a real board here**: 2 of 5 track-track shortfalls waived inside an optocoupler's pad bbox |
+| 2b | Failed avoidance must be *actionable*, not silent | **MET** | `FAILURE_PAIRWISE_BLOCKED` + blocker net → `via_blocked_ripup` (#4860). **Observed live here**: 8 (pre-fix 10) nets on the grid arm drained specifically on cross-domain refusals and named their blocker — by *id* in this run, by *name* after the follow-up increment |
+| 3 | #4506 attach-zone exemption threaded into the C++ check | **MET** | `Grid3D::set_attach_zones` / `attach_zone_exempts(..., layer)`; layer scoping in #4780. **Confirmed live on a real board here**: 6 of 8 (pre-fix 2 of 5) track-track shortfalls waived inside an optocoupler's pad bbox |
 | T1 | Parity: C++ and Python validators agree | **MET** | `tests/router/test_pairwise_cpp_parity.py` |
 | T2 | Two-domain fixture converges | **MET** | `test_two_domain_board_converges_with_search_time_avoidance` |
 | T3 | Backward compat: no `--voltage-map` → unchanged routes | **MET** | `test_no_voltage_map_route_leaves_grid_dormant` + this run's control arm (dormant, no banner, 7/7 in 32 s) |
-| **T4** | **softstart rev-C: route completes, 0 board-level census fails** | **FAILS (must be re-scored)** | **49/82 nets; 42 board-level fails; 3 router-gate leaks — root-caused to the signed/magnitude collapse above. That collapse is fixed (#4867), which restores 99 missing pairs and corrects 240 more; the routing arms have not been re-run, so these three numbers are pre-fix and no longer describe the tool** |
+| **T4** | **softstart rev-C: route completes, 0 board-level census fails** | **FAILS — re-scored, and no longer blocked on a correctness defect** | **50/82 nets (was 49); 25 board-level fails after step 2 (was 57), 35 after step 3 (was 42); 2 router-gate leaks (was 3); 1922 cross-pairs (was 1823). The sign collapse is fixed and did *not* grow the leak set. What remains: 9 pour-scope + 5 sub-`--hv-threshold` + 12 pad/placement fails and 32 unrouted nets — none of them a Phase 2 search defect** |
 
 ## Reproducing
 
-Everything is deterministic given the fixture and this repo at `2d5fc9b2` with
-the C++ backend at build 21. The three analysis helpers used above are:
+Everything is deterministic given the fixture and this repo at `090086b4`
+(pre-fix run: `2d5fc9b2`) with the C++ backend at build 21. The four analysis
+helpers used above are:
 
 * softstart's own `hardware/kicad/classify_creepage_fails.py` (census → track↔track
   vs pad-involved), used unmodified;
@@ -398,7 +559,15 @@ the C++ backend at build 21. The three analysis helpers used above are:
 * a throwaway replay of `segment_pair_violation` over the finished board with and
   without `build_attach_zones(...)` — 60 lines, reproduced from the snippet in
   [Attributing the 26](#attributing-the-26-which-are-the-routers-fault); it
-  imports only public router API.
+  imports only public router API. **Frame note for anyone re-running it:** read
+  the segments *and* the attach zones from the same board file and do **not**
+  apply the `pcb.board_origin` shift that `_pairwise_attach_zones` uses — that
+  shift exists because the CLI audit's `Route` objects live in the router's
+  internal frame, and applying it to file-frame copper silently moves every zone
+  off the board (the exemption then waives nothing, and the replay over-reports
+  8 leaks instead of 2);
+* a `subthreshold_coverage_gap(...)` call over the same `vmap.json` for the
+  `--hv-threshold` numbers — public API as of the increment that reported them.
 
 No board artifacts are committed to this repo: routed boards are `DO_NOT_FAB`
 work-in-progress and live in scratch, per the fixture repo's own policy.
