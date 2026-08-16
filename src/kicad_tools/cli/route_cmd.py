@@ -10292,6 +10292,70 @@ def _census_advisory_preflight(pcb_path: Path, args) -> int:
         return 0
 
 
+def _forecast_signal_layers(args) -> int | None:
+    """Signal-layer count the run will actually route on (#4799).
+
+    Mirrors the ``--layers`` handling of the routing sub-flows: an explicit
+    stack choice yields that stack's routable-layer count, while ``auto``
+    returns ``None`` so the forecast detects the stack from the board itself.
+    Any failure also returns ``None`` — an advisory never guesses loudly.
+    """
+    choice = getattr(args, "layers", "auto")
+    if choice in (None, "auto"):
+        return None
+    try:
+        from kicad_tools.router.layers import LayerStack
+
+        stack = {
+            "2": LayerStack.two_layer,
+            "4": LayerStack.four_layer_sig_gnd_pwr_sig,
+            "4-sig": LayerStack.four_layer_sig_sig_gnd_pwr,
+            "4-all": LayerStack.four_layer_all_signal,
+            "6": LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig,
+        }[choice]()
+        return len(stack.signal_layers)
+    except Exception:
+        return None
+
+
+def _capacity_forecast_preflight(pcb_path: Path, args) -> None:
+    """Print the pre-route pad-field escape-capacity forecast (#4799).
+
+    Unlike the census advisory above, this predictor needs **no prior run**:
+    ring depth, inter-pad gaps and the pin count that has to leave a footprint
+    are properties of the placement, so the forecast is exact on the first
+    route of a brand-new board.  It answers the counting question the router
+    otherwise discovers by exhausting its budget — are there more interior pins
+    than channels to carry them?
+
+    Off by default and **advisory in every case**: this function returns
+    ``None`` and its caller ignores the outcome, so an armed forecast cannot
+    change an exit code.  Wiring it into a go/no-go the way ``#4865`` did for
+    the census is deliberate follow-up work.
+    """
+    if not getattr(args, "capacity_forecast", False) and not getattr(
+        args, "capacity_forecast_json", None
+    ):
+        return
+    try:
+        from kicad_tools.router.capacity_forecast import emit_forecast
+
+        emit_forecast(
+            pcb_path,
+            report_path=getattr(args, "capacity_forecast_json", None),
+            signal_layers=_forecast_signal_layers(args),
+            track_width_mm=_effective_trace_width(args),
+            clearance_mm=getattr(args, "clearance", None),
+            via_diameter_mm=getattr(args, "via_diameter", None),
+            via_in_pad=_mfr_supports_via_in_pad(getattr(args, "manufacturer", None)),
+        )
+    except Exception:
+        # A predictor that cannot run must never block routing — the
+        # ``_offboard_preflight`` precedent, and ``emit_forecast`` already
+        # swallows its own errors; this catches an import failure.
+        return
+
+
 def _apply_complete_mode_defaults(args, parser, argv: list[str] | None = None) -> None:
     """Apply the ``--complete`` mode implications (Issue #4471, epic #4465).
 
@@ -12224,6 +12288,30 @@ def _main_impl(argv: list[str] | None = None) -> int:
             "verdict uses). Passing this implies --census-advisory-gate."
         ),
     )
+    # Issue #4799: placement-only pad-field escape-capacity forecast.
+    parser.add_argument(
+        "--capacity-forecast",
+        action="store_true",
+        default=False,
+        help=(
+            "Print a pre-route escape-capacity forecast before any router "
+            "work: for every multi-ring pad field (BGA/LGA-style), how many "
+            "interior pins must cross each ring versus how many channels the "
+            "pad geometry and layer stack provide. Placement-only, so it needs "
+            "no prior run. Advisory only -- never changes routing or the exit "
+            "code."
+        ),
+    )
+    parser.add_argument(
+        "--capacity-forecast-json",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Also write the --capacity-forecast result as a JSON document to "
+            "PATH (implies --capacity-forecast). Still advisory: an unwritable "
+            "path prints a diagnostic and routing continues."
+        ),
+    )
     parser.add_argument(
         "--manufacturer",
         "--mfr",
@@ -13134,6 +13222,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
     rc = _census_advisory_preflight(pcb_path, args)
     if rc != 0:
         return rc
+
+    # Issue #4799: pad-field escape-capacity forecast.  Placement-only, so
+    # unlike the census replay above it needs no prior run — it is exact on the
+    # first route of a new board.  Runs in the same pre-router window and is
+    # advisory in every case (no return value is consulted).
+    _capacity_forecast_preflight(pcb_path, args)
 
     # Issue #2996: Validate and load the optional --net-class-map sidecar
     # early -- before dispatching to any of the route_with_* sub-flows --

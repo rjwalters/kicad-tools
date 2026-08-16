@@ -4131,6 +4131,32 @@ def _add_route_parser(subparsers) -> None:
             "verdict uses). Passing this implies --census-advisory-gate."
         ),
     )
+    # Issue #4799: placement-only pad-field escape-capacity forecast.  Mirror
+    # of the inner route_cmd.py flags; both sites must stay in sync per
+    # ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--capacity-forecast",
+        action="store_true",
+        default=False,
+        help=(
+            "Print a pre-route escape-capacity forecast before any router "
+            "work: for every multi-ring pad field (BGA/LGA-style), how many "
+            "interior pins must cross each ring versus how many channels the "
+            "pad geometry and layer stack provide. Placement-only, so it needs "
+            "no prior run. Advisory only -- never changes routing or the exit "
+            "code."
+        ),
+    )
+    route_parser.add_argument(
+        "--capacity-forecast-json",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Also write the --capacity-forecast result as a JSON document to "
+            "PATH (implies --capacity-forecast). Still advisory: an unwritable "
+            "path prints a diagnostic and routing continues."
+        ),
+    )
     # Issue #4178: hard-gate on native (kicad-cli) DRC actually running.
     # Mirror of the inner route_cmd.py flag; both sites must stay in sync per
     # ``tests/test_cli_parser_drift.py``.

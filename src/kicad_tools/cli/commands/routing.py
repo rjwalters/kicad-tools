@@ -753,6 +753,13 @@ def run_route_command(args) -> int:
         sub_argv.append("--census-advisory-gate")
     if getattr(args, "census_advisory_gate_pct", None) is not None:
         sub_argv.extend(["--census-advisory-gate-pct", str(args.census_advisory_gate_pct)])
+    # Issue #4799: forward the placement-only escape-capacity forecast.  Both
+    # default off/None; forwarded only when set so an un-flagged route is
+    # byte-identical.
+    if getattr(args, "capacity_forecast", False):
+        sub_argv.append("--capacity-forecast")
+    if getattr(args, "capacity_forecast_json", None):
+        sub_argv.extend(["--capacity-forecast-json", str(args.capacity_forecast_json)])
     if getattr(args, "auto_fix", False):
         sub_argv.append("--auto-fix")
     if getattr(args, "auto_fix_passes", None) is not None:

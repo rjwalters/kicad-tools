@@ -171,12 +171,15 @@ replay side adds one opt-in exception: `kct route --census-advisory-gate` turns
 the same verdict into a go/no-go that can abort a run with exit 9 (see
 [the gate](#turning-the-prediction-into-a-gate) below).
 It is off by default, so an un-flagged route is byte-identical to the
-advisory-only behaviour. What remains follow-up work is a genuine *pre*-routing
-predictor (the census's legality checks consult order-dependent state — drills
+advisory-only behaviour. *This* measurement cannot be hoisted ahead of the
+first A* expansion — its legality checks consult order-dependent state (drills
 already placed by earlier crossovers, the escape-channel registry keyed on
-which nets are still unrouted, and the pair's own guide route — so it cannot
-simply be hoisted ahead of the first A* expansion) and calibrating the
-threshold against a corpus of real designs.
+which nets are still unrouted, and the pair's own guide route) — so replaying
+the previous run remains the only way to have it early. A genuinely
+placement-only predictor of a *different* quantity now exists alongside it:
+[the escape-capacity forecast](capacity-forecast.md) counts interior pins
+against pad-field channels with no prior run at all. Calibrating this
+threshold against a corpus of real designs is still open.
 
 ## Replaying it before the next route (`--census-advisory`)
 

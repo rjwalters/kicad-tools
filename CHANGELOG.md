@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Placement-only pre-route escape-capacity forecast** (part of #4799) —
+  `kct route --capacity-forecast` (and `--capacity-forecast-json <path>` for the
+  JSON document) prints, before any router or component loading, whether each
+  multi-ring pad field's interior pins can physically leave it. Unlike the
+  earlier slices of #4799 — the crossing-tail census report (#4852), its replay
+  (#4862) and gate (#4865), all of which need a *previous* run's measurement —
+  this predictor reads placement and design rules only, so it is exact on the
+  first route of a brand-new board. The model
+  (`router/capacity_forecast.py`) peels each pad field into rings, counts the
+  tracks each inter-pad channel carries, tests whether a via can be dropped at
+  the **interstitial** site (the diagonal gap a dogbone actually uses — a
+  1.27 mm/0.45 mm array leaves 0.41 mm orthogonally but 0.58 mm diagonally, and
+  modelling the wrong one turns a healthy BGA into a false blockage), and
+  reports `demand / supply` per ring cut with verdicts
+  `not-applicable` / `ample` / `tight` / `over-capacity` / `infeasible`. Pins on
+  poured nets are deferred only where a via drop exists. **Advisory in every
+  case**: the preflight returns no value for the caller to turn into an exit
+  code, and an unreadable board or unwritable report degrades to one stderr
+  line. Measured on the fleet (2026-08-15): 1–23 ms per board (0.9 s on a
+  90-footprint external design), two multi-ring fields found — boards 06 and
+  07's 7×7 arrays, both `ample` at 0.08×/0.05× — and **no board flagged**, the
+  honest reading, since both blocked boards fail for mechanisms this counting
+  model does not claim to see. Its positive controls are pinned as tests: the
+  same array with no legal via drop is 1.04× over capacity, and a 0.5 mm-pitch
+  array is `infeasible`. A board-scale RUDY estimate was measured first and
+  rejected — 1.2–3.5 % utilisation on every board, including the two that do not
+  route. Docs: `docs/reference/capacity-forecast.md`.
+
 - **HV pairwise proof run on the softstart rev-C mains board** (part of #4507,
   epic #4431 Phase 2) — `docs/hv-pairwise-softstart-proof.md` records the T4
   manual criterion's local run: the fixture is local-only by design, so the
