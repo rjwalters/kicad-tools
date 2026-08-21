@@ -26,6 +26,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..schema.pcb import _is_footprint_tag
 from ..sexp.parser import SExp, parse_file
 
 logger = logging.getLogger(__name__)
@@ -258,7 +259,7 @@ class KiCadToDSNExporter:
         assert self._pcb is not None
 
         for child in self._pcb.children:
-            if not hasattr(child, "name") or child.name != "footprint":
+            if not hasattr(child, "name") or not _is_footprint_tag(child.name):
                 continue
 
             # First child is the library footprint name

@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # Import SExp parsing and builders
+from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp, parse_file
 from kicad_tools.sexp.builders import (
     fmt,
@@ -36,6 +37,19 @@ from kicad_tools.sexp.builders import (
     via_node,
     zone_node,
 )
+
+
+def _find_all_footprints(doc: SExp) -> list[SExp]:
+    """Return every footprint node in *doc*, in document order.
+
+    Matches both the modern ``(footprint ...)`` spelling and the legacy
+    pre-KiCad-6 ``(module ...)`` spelling (issue #4893). Search semantics
+    match :meth:`SExp.find_all` -- descendants of the root, not the root
+    itself -- so this is a drop-in replacement for ``doc.find_all("footprint")``.
+    """
+    return [
+        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
+    ]
 
 
 @dataclass
@@ -217,7 +231,7 @@ class PCBEditor:
         if not self.doc:
             return
 
-        for fp_node in self.doc.find_all("footprint"):
+        for fp_node in _find_all_footprints(self.doc):
             # Get reference from fp_text (PCB format) or property (newer format)
             ref = None
 

@@ -34,10 +34,25 @@ from pathlib import Path
 from typing import Any
 
 from kicad_tools.core.sexp_file import save_pcb
+from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp.builders import gr_text_node
 from kicad_tools.sexp.parser import SExp, parse_file
 
 logger = logging.getLogger(__name__)
+
+
+def _find_all_footprints(doc: SExp) -> list[SExp]:
+    """Return every footprint node in *doc*, in document order.
+
+    Matches both the modern ``(footprint ...)`` spelling and the legacy
+    pre-KiCad-6 ``(module ...)`` spelling (issue #4893). Search semantics
+    match :meth:`SExp.find_all` -- descendants of the root, not the root
+    itself -- so this is a drop-in replacement for ``doc.find_all("footprint")``.
+    """
+    return [
+        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
+    ]
+
 
 # Silkscreen layer names recognised by KiCad (pre-8.0 and 8.0+).
 SILKSCREEN_LAYERS = frozenset(("F.SilkS", "B.SilkS", "F.Silkscreen", "B.Silkscreen"))
@@ -103,7 +118,7 @@ class SilkscreenGenerator:
         """
         result = SilkscreenResult()
 
-        for fp_node in self.doc.find_all("footprint"):
+        for fp_node in _find_all_footprints(self.doc):
             ref_text = self._find_ref_text(fp_node)
             if ref_text is None:
                 continue

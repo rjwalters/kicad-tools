@@ -47,6 +47,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from kicad_tools.pcb.models3d import _find_matching_paren, _skip_string
+from kicad_tools.schema.pcb import FOOTPRINT_TAGS
 
 __all__ = [
     "DEFAULT_FRAME_MARGIN_MM",
@@ -335,8 +336,10 @@ def _translate_pcb_text(text: str, dx_nm: int, dy_nm: int) -> tuple[str, int]:
     edits: list[tuple[int, int, str]] = []
     items = 0
     for tag, s, e in _iter_child_blocks(text, root_open, root_close):
-        if tag == "footprint":
+        if tag in FOOTPRINT_TAGS:
             # Move only the footprint's own (at ...); children are relative.
+            # Matches both the modern "footprint" and legacy pre-KiCad-6
+            # "module" spelling (issue #4893).
             for ctag, cs, ce in _iter_child_blocks(text, s, e):
                 if ctag == "at":
                     edits.extend(_coord_edits(text, cs, ce, dx_nm, dy_nm))

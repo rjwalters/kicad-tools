@@ -32,13 +32,14 @@ import sys
 from pathlib import Path
 
 from kicad_tools.core.sexp_file import load_pcb, save_pcb
+from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp
 
 
 def find_footprint_sexp(sexp: SExp, reference: str) -> SExp:
     """Find footprint S-expression by reference."""
     for child in sexp.iter_children():
-        if child.tag == "footprint":
+        if _is_footprint_tag(child.tag):
             # Look for fp_text with reference
             for fp_text in child.find_children("fp_text"):
                 if fp_text.get_string(0) == "reference":
