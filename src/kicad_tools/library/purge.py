@@ -21,6 +21,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import parse_string
 
 
@@ -214,7 +215,7 @@ class UnusedLibraryAnalyzer:
             return refs
 
         for child in sexp.children:
-            if child.name == "footprint" and child.children:
+            if _is_footprint_tag(child.name) and child.children:
                 first = child.children[0]
                 if first.is_atom and isinstance(first.value, str):
                     refs.add(first.value)

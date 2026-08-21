@@ -626,6 +626,56 @@ class TestMfrCLICommands:
         assert len(violations) > 0
         assert any("TRACE_WIDTH" in v[0] for v in violations)
 
+    def test_validate_pcb_design_hole_size_in_legacy_module(self):
+        """A pad drill below the minimum inside a ``(module ...)`` block is caught.
+
+        Before issue #4892, ``_validate_pcb_design`` only recognized the
+        modern ``(footprint ...)`` tag (``child.tag == "footprint"``), so a
+        pre-KiCad-6 ``(module ...)`` footprint's undersized pad drill was
+        silently invisible to this check.
+        """
+        from kicad_tools.cli.mfr import _validate_pcb_design
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.sexp import SExp
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2)
+
+        sexp = SExp.list(
+            "kicad_pcb",
+            SExp.list(
+                "module",
+                "R_0603",
+                SExp.list("fp_text", "reference", "R1"),
+                SExp.list(
+                    "pad",
+                    "1",
+                    "thru_hole",
+                    "circle",
+                    SExp.list("drill", 0.05),  # far below any manufacturer minimum
+                ),
+            ),
+        )
+
+        violations = _validate_pcb_design(sexp, rules)
+
+        assert any(v[0] == "HOLE_SIZE" for v in violations)
+        assert any("R1" in v[1] for v in violations)
+
+    def test_validate_pcb_design_no_footprints_of_either_spelling(self):
+        """No footprint/module nodes at all should not raise and yield no HOLE_SIZE."""
+        from kicad_tools.cli.mfr import _validate_pcb_design
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.sexp import SExp
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2)
+
+        sexp = SExp.list("kicad_pcb", SExp.list("net", 0, ""))
+
+        violations = _validate_pcb_design(sexp, rules)
+        assert not any(v[0] == "HOLE_SIZE" for v in violations)
+
 
 class TestTwoLayerRules:
     """Tests for 2-layer design rules across all manufacturers."""

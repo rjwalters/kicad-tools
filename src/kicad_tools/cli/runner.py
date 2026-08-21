@@ -12,6 +12,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from kicad_tools.schema.pcb import _is_footprint_tag
+
 
 def find_kicad_cli() -> Path | None:
     """Find kicad-cli executable.
@@ -1074,7 +1076,7 @@ def validate_net_format(pcb_path: Path) -> NetFormatReport:
             _check_net_node(child.get("net"), "via")
 
     # Check pads inside footprints
-    for fp_node in (c for c in sexp.children if c.name == "footprint"):
+    for fp_node in (c for c in sexp.children if _is_footprint_tag(c.name)):
         for pad_node in (c for c in fp_node.children if c.name == "pad"):
             _check_net_node(pad_node.get("net"), "pad")
 
@@ -1127,7 +1129,7 @@ def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
     snapshot: dict[str, list] = {}
 
     # Snapshot pads inside footprints, keyed by reference + pad number
-    for fp_node in (c for c in sexp.children if c.name == "footprint"):
+    for fp_node in (c for c in sexp.children if _is_footprint_tag(c.name)):
         fp_ref = _get_fp_reference(fp_node)
         if not fp_ref:
             continue
@@ -1448,7 +1450,7 @@ def _restore_net_declarations(
     # --- Restore per-element inline net assignments ---
     if element_nets:
         # Restore pad nets inside footprints (keyed by reference:pad_number)
-        for fp_node in (c for c in output_sexp.children if c.name == "footprint"):
+        for fp_node in (c for c in output_sexp.children if _is_footprint_tag(c.name)):
             fp_ref = _get_fp_reference(fp_node)
             if not fp_ref:
                 continue

@@ -1313,6 +1313,35 @@ def kicad7_multi_fp_pcb(tmp_path: Path) -> Path:
     return pcb_file
 
 
+# Pre-KiCad-6 (module ...) format PCB with multiple footprints (issue #4892)
+LEGACY_MODULE_MULTI_FOOTPRINT_PCB = """(kicad_pcb (version 4)
+  (general (thickness 1.6))
+  (page A4)
+  (layers (0 F.Cu signal) (31 B.Cu signal))
+  (net 0 "")
+  (net 1 GND)
+  (module Resistor_SMD:R_0402_1005Metric (layer F.Cu) (tedit 5A1F2B3C) (at 100 100)
+    (fp_text reference R1 (at 0 -1.5) (layer F.SilkS))
+    (fp_text value 10k (at 0 1.5) (layer F.Fab))
+    (pad 1 smd roundrect (at -0.51 0) (size 0.54 0.64) (layers F.Cu F.Paste F.Mask) (net 1 GND))
+  )
+  (module Resistor_SMD:R_0402_1005Metric (layer F.Cu) (tedit 5A1F2B3D) (at 110 100)
+    (fp_text reference R2 (at 0 -1.5) (layer F.SilkS))
+    (fp_text value 10k (at 0 1.5) (layer F.Fab))
+    (pad 1 smd roundrect (at -0.51 0) (size 0.54 0.64) (layers F.Cu F.Paste F.Mask) (net 1 GND))
+  )
+)
+"""
+
+
+@pytest.fixture
+def legacy_module_multi_fp_pcb(tmp_path: Path) -> Path:
+    """Create a pre-KiCad-6 ``(module ...)`` format PCB with multiple footprints."""
+    pcb_file = tmp_path / "legacy_module_multi.kicad_pcb"
+    pcb_file.write_text(LEGACY_MODULE_MULTI_FOOTPRINT_PCB)
+    return pcb_file
+
+
 class TestPcbDedupe:
     """Tests for 'kicad-tools pcb dedupe' command (issue #4175)."""
 
@@ -1914,6 +1943,42 @@ class TestPcbReannotate:
         output_file = tmp_path / "output.kicad_pcb"
         args = Namespace(
             pcb=str(kicad7_multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        pcb = PCB.load(output_file)
+        refs = {fp.reference for fp in pcb.footprints}
+        assert "R10" in refs
+        assert "R20" in refs
+        assert "R1" not in refs
+        assert "R2" not in refs
+
+    def test_legacy_module_format_rename(self, legacy_module_multi_fp_pcb: Path, tmp_path, capsys):
+        """Test rename with pre-KiCad-6 ``(module ...)`` format (issue #4892).
+
+        Before the fix, ``_update_footprint_reference``'s
+        ``pcb._sexp.find_all("footprint")`` call never matched a legacy
+        ``(module ...)`` node, so the rename silently found nothing to
+        update on a board sourced from a pre-KiCad-6 tool.
+        """
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"R1": "R10", "R2": "R20"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(legacy_module_multi_fp_pcb),
             pcb_command="reannotate",
             map=str(map_file),
             output=str(output_file),

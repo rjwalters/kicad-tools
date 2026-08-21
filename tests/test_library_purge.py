@@ -113,6 +113,51 @@ class TestUnusedLibraryAnalyzer:
 
         assert len(result.unused_footprints) == 0
 
+    def test_legacy_module_pcb_ref_marks_footprint_used(self, tmp_path: Path) -> None:
+        """A pre-KiCad-6 ``(module "Lib:Name" ...)`` PCB reference is still seen.
+
+        Before issue #4892, ``_extract_footprint_refs_pcb`` only matched the
+        modern ``(footprint ...)`` spelling via ``child.name == "footprint"``,
+        so a legacy board's footprint references were silently dropped and
+        the corresponding library footprint was misreported as unused.
+        """
+        pretty_dir = tmp_path / "mylib.pretty"
+        pretty_dir.mkdir()
+        (pretty_dir / "FP1.kicad_mod").write_text(
+            '(footprint "FP1" (layer "F.Cu"))', encoding="utf-8"
+        )
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(
+            '(kicad_pcb (version 4) (module "mylib:FP1" (layer "F.Cu")))',
+            encoding="utf-8",
+        )
+
+        analyzer = UnusedLibraryAnalyzer(tmp_path)
+        result = analyzer.analyze()
+
+        assert len(result.unused_footprints) == 0
+
+    def test_pcb_with_zero_footprints_of_either_spelling(self, tmp_path: Path) -> None:
+        """A PCB with no ``footprint``/``module`` nodes at all still analyzes cleanly."""
+        pretty_dir = tmp_path / "mylib.pretty"
+        pretty_dir.mkdir()
+        (pretty_dir / "FP1.kicad_mod").write_text(
+            '(footprint "FP1" (layer "F.Cu"))', encoding="utf-8"
+        )
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(
+            '(kicad_pcb (version 20231120) (net 0 ""))',
+            encoding="utf-8",
+        )
+
+        analyzer = UnusedLibraryAnalyzer(tmp_path)
+        result = analyzer.analyze()
+
+        unused_fp_ids = {item.lib_id for item in result.unused_footprints}
+        assert "mylib:FP1" in unused_fp_ids
+
 
 class TestPurgeResult:
     """Tests for PurgeResult formatting."""

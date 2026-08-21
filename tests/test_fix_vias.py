@@ -655,6 +655,50 @@ class TestFindNearbyItemsGeometry:
         assert item_type == "via"
         assert abs(via_diam - 0.8) < 1e-6
 
+    def test_pads_found_in_legacy_module_footprint(self, tmp_path: Path):
+        """Pads inside a pre-KiCad-6 ``(module ...)`` block are still found.
+
+        Before issue #4892, ``find_nearby_items`` walked
+        ``doc.find_all("footprint")`` only, so pads inside legacy
+        ``(module ...)`` footprints were silently invisible to via-clearance
+        checking.
+        """
+        pcb_content = """(kicad_pcb (version 4)
+          (general (thickness 1.6))
+          (layers (0 F.Cu signal) (31 B.Cu signal))
+          (net 0 "")
+          (net 1 GND)
+          (module R_0603 (layer F.Cu) (tedit 5A1F2B3C) (at 5 5)
+            (fp_text reference R1 (at 0 1.5) (layer F.SilkS))
+            (pad 1 smd rect (at 100 100) (size 0.9 0.8) (layers F.Cu F.Paste F.Mask) (net 1 GND))
+          )
+        )
+        """
+        pcb_file = tmp_path / "legacy_module.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        items = find_nearby_items(doc, 100, 100, 2.0)
+        assert len(items) == 1
+        assert items[0][0] == "pad"
+
+    def test_no_footprints_of_either_spelling_returns_empty(self, tmp_path: Path):
+        """A board with zero footprints (neither spelling) yields no pad items."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (net 0 "")
+        )
+        """
+        pcb_file = tmp_path / "no_footprints.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        items = find_nearby_items(doc, 100, 100, 2.0)
+        assert items == []
+
 
 class TestClearanceWithTraceWidth:
     """Tests for clearance gap accounting for trace width."""

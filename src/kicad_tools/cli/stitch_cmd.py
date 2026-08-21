@@ -45,6 +45,7 @@ from kicad_tools.cli.format_options import (
 )
 from kicad_tools.core.sexp_file import load_pcb, save_pcb, verify_pcb_write
 from kicad_tools.router.via_clearance import drill_hole_to_hole_clear
+from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import segment_node, via_node
 
@@ -442,7 +443,7 @@ def get_net_map(sexp: SExp) -> dict[int, str]:
     for child in sexp.iter_children():
         if child.tag in ("segment", "arc", "via", "zone"):
             _collect(child)
-        elif child.tag == "footprint":
+        elif _is_footprint_tag(child.tag):
             for pad in child.find_children("pad"):
                 _collect(pad)
     return dict(enumerate(names, start=1))
@@ -764,7 +765,7 @@ def find_pads_on_nets(sexp: SExp, net_names: set[str]) -> list[PadInfo]:
     pads = []
 
     for fp in sexp.iter_children():
-        if fp.tag != "footprint":
+        if not _is_footprint_tag(fp.tag):
             continue
 
         # Get footprint position
@@ -887,7 +888,7 @@ def find_smd_pad_bboxes_on_nets(
     name_to_num = get_name_to_net_map(sexp)
 
     for fp in sexp.iter_children():
-        if fp.tag != "footprint":
+        if not _is_footprint_tag(fp.tag):
             continue
 
         at_node = fp.find_child("at")
@@ -995,7 +996,7 @@ def find_all_pad_bboxes(
     name_to_num = get_name_to_net_map(sexp)
 
     for fp in sexp.iter_children():
-        if fp.tag != "footprint":
+        if not _is_footprint_tag(fp.tag):
             continue
 
         at_node = fp.find_child("at")
@@ -1285,7 +1286,7 @@ def find_all_pads(
     name_to_num = get_name_to_net_map(sexp)
 
     for fp in sexp.iter_children():
-        if fp.tag != "footprint":
+        if not _is_footprint_tag(fp.tag):
             continue
 
         # Get footprint position and rotation
@@ -1410,7 +1411,7 @@ def find_all_drills(
             continue
 
         # Through-hole pads inside footprints
-        if child.tag != "footprint":
+        if not _is_footprint_tag(child.tag):
             continue
         if not include_pads:
             continue
@@ -3845,7 +3846,7 @@ def find_thermal_pad_candidates(
     candidates: list[ThermalPadCandidate] = []
 
     for fp in sexp.iter_children():
-        if fp.tag != "footprint":
+        if not _is_footprint_tag(fp.tag):
             continue
 
         # Footprint library:name string (first positional arg).

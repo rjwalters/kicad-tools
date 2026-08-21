@@ -28,6 +28,7 @@ from kicad_tools.manufacturers import (
     get_profile,
     list_manufacturers,
 )
+from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.units import get_current_formatter
 
 
@@ -760,7 +761,7 @@ def _validate_pcb_design(sexp, rules) -> list[tuple[str, str]]:
 
     # Check pad drill sizes in footprints
     for child in sexp.values:
-        if isinstance(child, SExp) and child.tag == "footprint":
+        if isinstance(child, SExp) and _is_footprint_tag(child.tag):
             ref = None
             for fp_text in child.find_children("fp_text"):
                 if fp_text.get_string(0) == "reference":

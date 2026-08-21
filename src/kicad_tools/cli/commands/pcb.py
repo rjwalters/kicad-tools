@@ -642,9 +642,20 @@ def _update_footprint_reference(pcb, old_ref: str, new_ref: str) -> bool:
     Returns:
         True if the reference was found and updated.
     """
-    # Find the footprint S-expression node
+    from kicad_tools.schema.pcb import _is_footprint_tag
+
+    # Find the footprint S-expression node. ``find_all`` doesn't natively
+    # support matching either footprint tag spelling, so walk descendants
+    # directly (mirrors the modern/legacy `(module ...)` handling in
+    # schema/pcb.py, issue #4892).
     fp_sexp = None
-    for candidate in pcb._sexp.find_all("footprint"):
+    candidates = (
+        node
+        for child in pcb._sexp.children
+        for node in child.iter_all()
+        if _is_footprint_tag(node.name)
+    )
+    for candidate in candidates:
         ref = pcb._get_footprint_reference(candidate)
         if ref == old_ref:
             fp_sexp = candidate

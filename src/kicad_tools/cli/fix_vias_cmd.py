@@ -29,7 +29,21 @@ from pathlib import Path
 from kicad_tools.core.sexp_file import save_pcb
 from kicad_tools.manufacturers import get_all_manufacturer_names
 from kicad_tools.manufacturers.base import load_design_rules_from_yaml
+from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp.parser import SExp, parse_file
+
+
+def _find_all_footprints(doc: SExp) -> list[SExp]:
+    """Return every footprint node in *doc*, in document order.
+
+    Matches both the modern ``(footprint ...)`` spelling and the legacy
+    pre-KiCad-6 ``(module ...)`` spelling (issue #4892). Search semantics
+    match :meth:`SExp.find_all` -- descendants of the root, not the root
+    itself -- so this is a drop-in replacement for ``doc.find_all("footprint")``.
+    """
+    return [
+        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
+    ]
 
 
 @dataclass
@@ -271,7 +285,7 @@ def find_nearby_items(
     items: list[tuple[str, float, float, float]] = []
 
     # Check pads (in footprints)
-    for fp_node in doc.find_all("footprint"):
+    for fp_node in _find_all_footprints(doc):
         for pad_node in fp_node.find_all("pad"):
             at_node = pad_node.find("at")
             if at_node:

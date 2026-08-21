@@ -273,6 +273,37 @@ class TestValidateNetFormat:
         assert report.valid is False
         assert report.name_only_pads == 1
 
+    def test_name_only_pad_in_legacy_module_footprint(self, tmp_path):
+        """A pad inside a pre-KiCad-6 ``(module ...)`` block is still checked.
+
+        Before issue #4892, ``validate_net_format`` only descended into
+        ``(footprint ...)`` blocks (``c.name == "footprint"``), so a
+        name-only-corrupted pad inside a legacy ``(module ...)`` footprint
+        was silently invisible to this check.
+        """
+        from kicad_tools.cli.runner import validate_net_format
+
+        fp = """(module R_0603
+    (fp_text reference R1 (at 0 1.5) (layer F.SilkS))
+    (pad 1 smd rect (at 0 0) (size 1 1) (layers F.Cu) (net "GND"))
+  )"""
+        pcb = self._write_pcb(tmp_path, [], footprints=fp)
+        report = validate_net_format(pcb)
+        assert report.valid is False
+        assert report.name_only_pads == 1
+
+    def test_no_footprints_of_either_spelling_is_valid(self, tmp_path):
+        """A board with zero footprint/module blocks reports no corruption."""
+        from kicad_tools.cli.runner import validate_net_format
+
+        pcb = self._write_pcb(
+            tmp_path,
+            ['(segment (start 10 20) (end 30 40) (width 0.25) (layer "F.Cu") (net 1) (uuid "a"))'],
+        )
+        report = validate_net_format(pcb)
+        assert report.valid is True
+        assert report.total_corrupt == 0
+
 
 # ---------------------------------------------------------------------------
 # _restore_net_declarations with name-only corruption
@@ -1446,6 +1477,101 @@ class TestUuidBasedMatching:
         assert "uuid:zero-seg" in snapshot
         assert snapshot["uuid:zero-seg"][0].get_int(0) == 0
         assert "seg:10.0,20.0:30.0,40.0:F.Cu" in snapshot
+
+
+# ---------------------------------------------------------------------------
+# Issue #4892: legacy pre-KiCad-6 (module ...) footprints in the CLI-layer
+# net snapshot/restore tree-walks
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyModuleFootprintNetSnapshotRestore:
+    """Pad nets inside legacy ``(module ...)`` footprints must round-trip.
+
+    Before issue #4892, ``_snapshot_element_nets`` and
+    ``_restore_net_declarations`` both walked ``sexp.children`` looking for
+    ``c.name == "footprint"`` only, so a pre-KiCad-6 board's pads were
+    silently excluded from both the snapshot and the restore pass.
+    """
+
+    @staticmethod
+    def _write_pcb(tmp_path: Path, content: str) -> Path:
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(content)
+        return pcb
+
+    def test_snapshot_includes_pads_in_module_footprint(self, tmp_path):
+        from kicad_tools.cli.runner import _snapshot_element_nets
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb (version 4)
+  (net 0 "")
+  (net 1 "GND")
+  (module R_0603 (layer F.Cu) (at 5 5)
+    (fp_text reference "R1" (at 0 1.5) (layer F.SilkS))
+    (pad "1" smd rect (at -0.8 0) (size 0.9 0.8) (layers F.Cu) (net 1 "GND"))
+  )
+)""",
+        )
+
+        snapshot = _snapshot_element_nets(pcb)
+        assert "R1:1" in snapshot
+        assert snapshot["R1:1"][0].get_int(0) == 1
+
+    def test_restore_reaches_pads_in_module_footprint(self, tmp_path):
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb (version 4)
+  (net 0 "")
+  (net 1 "GND")
+  (module R_0603 (layer F.Cu) (at 5 5)
+    (fp_text reference "R1" (at 0 1.5) (layer F.SilkS))
+    (pad "1" smd rect (at -0.8 0) (size 0.9 0.8) (layers F.Cu) (net ""))
+  )
+)""",
+        )
+
+        net_nodes = [_net_node(0, ""), _net_node(1, "GND")]
+        element_nets = {"R1:1": [_net_node(1, "GND")]}
+
+        _restore_net_declarations(pcb, net_nodes, element_nets)
+
+        sexp = load_pcb(str(pcb))
+        for child in sexp.children:
+            if child.name == "module":
+                pad_node = next(c for c in child.children if c.name == "pad")
+                net_node = pad_node.get("net")
+                assert net_node is not None
+                assert net_node.get_int(0) == 1, (
+                    f"Corrupted pad net inside (module ...) should be restored; got {net_node}"
+                )
+                break
+        else:
+            pytest.fail("No module footprint found")
+
+    def test_snapshot_zero_footprints_of_either_spelling(self, tmp_path):
+        """A board with no footprint/module blocks yields an empty snapshot dict."""
+        from kicad_tools.cli.runner import _snapshot_element_nets
+
+        pcb = self._write_pcb(
+            tmp_path,
+            """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 1 "GND")
+  (segment (start 10 20) (end 30 40) (width 0.25) (layer "F.Cu") (net 1) (uuid "a"))
+)""",
+        )
+
+        snapshot = _snapshot_element_nets(pcb)
+        # Only the segment's geometry/uuid keys should be present -- no
+        # pad keys (which would be shaped "<reference>:<pad_number>").
+        assert set(snapshot.keys()) == {"seg:10.0,20.0:30.0,40.0:F.Cu", "uuid:a"}
 
 
 # ---------------------------------------------------------------------------
