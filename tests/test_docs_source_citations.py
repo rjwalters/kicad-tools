@@ -188,6 +188,26 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
         "_evaluate_vector",
         "src/kicad_tools/mcp/tools/optimize_placement.py",
     ),
+    # docs/hv-pairwise-softstart-proof.md — the #4507 code-side
+    # re-verification.  The load-bearing claim is that the foreign-pad
+    # predicate is defined once and is now consulted from the coupled
+    # finish-gate loop too (the one call site PR #4911 fixed), so anchor
+    # both the definition and the call site rather than a line number.
+    (
+        "docs/hv-pairwise-softstart-proof.md",
+        "pairwise_pad_blocked",
+        "src/kicad_tools/router/lattice/obstacles.py",
+    ),
+    (
+        "docs/hv-pairwise-softstart-proof.md",
+        "pairwise_pad_blocked",
+        "src/kicad_tools/router/lattice/pathfinder.py",
+    ),
+    (
+        "docs/hv-pairwise-softstart-proof.md",
+        "_route_pair_impl",
+        "src/kicad_tools/router/lattice/pathfinder.py",
+    ),
 )
 
 

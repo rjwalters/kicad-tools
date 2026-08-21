@@ -129,7 +129,8 @@ read (not relying on prior passes' own conclusions) of every file the
   `_escape_stubs`) — matching the fourth pass's own read. The one
   call site that did NOT consult it (`_route_pair_impl`'s `finish()`
   re-verification loop, for foreign PAD copper specifically) was fixed in
-  PR #4911 and is now present at `pathfinder.py:1781`.
+  PR #4911: that loop in `src/kicad_tools/router/lattice/pathfinder.py`
+  now calls `pairwise_pad_blocked` itself.
 - `route_cmd.py`: the post-route audit docstring at line ~4578 already says
   "trace-vs-trace (same layer), trace-vs-via and via-vs-via" — updated past
   the stale "trace-to-trace, same layer only" wording the issue quoted, with
