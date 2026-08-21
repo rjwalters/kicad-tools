@@ -46,13 +46,18 @@ ways, both keyed on the same cap:
   in practice these two cases are exercised by an explicit manual/container
   ``-m slow`` run.
 
-All per-file parses are memoized (``functools.cache``) so each demo file is
-parsed at most once across every test that exercises it.
+Per-file parses are memoized (``functools.cache``) so a single test never
+reads or parses the same file twice, but the caches are **cleared after every
+test** (``_release_demo_parses``): a retained corpus of parsed ``SExp`` nodes
+makes every later ``gc.collect()`` in the same xdist worker dramatically more
+expensive, which is a cost paid by unrelated tests. See that fixture's
+docstring for the measurement.
 """
 
 from __future__ import annotations
 
 import functools
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -155,7 +160,7 @@ def _pcb_parse_params() -> list[Any]:  # list[ParameterSet]; pytest exports no p
 
 @functools.cache
 def _parse_raw(path: Path) -> SExp:
-    """Parse a demo file's raw text exactly once per test session."""
+    """Parse a demo file's raw text once (per test -- see ``_release_demo_parses``)."""
     return parse_string(path.read_text(encoding="utf-8"))
 
 
@@ -169,6 +174,34 @@ def _load_pcb(path: Path) -> PCB:
 def _load_schematic(path: Path) -> Schematic:
     """Construct a ``Schematic`` from the memoized raw parse (no second file parse)."""
     return Schematic(_parse_raw(path), path)
+
+
+@pytest.fixture(autouse=True)
+def _release_demo_parses() -> Iterator[None]:
+    """Drop every memoized demo parse at the end of each test in this module.
+
+    The caches above exist to avoid re-reading and re-parsing a file within a
+    single test (``test_footprint_count_matches_raw_sexp`` needs both the
+    ``PCB`` and the raw tree). They must **not** outlive the test: a parsed
+    demo corpus is millions of GC-tracked ``SExp`` nodes, and every one of
+    them is rescanned by every subsequent ``gc.collect()`` in the same
+    process. Under ``pytest -n auto`` an xdist worker runs this module's
+    tests interleaved with the rest of the suite, so retaining the corpus
+    for the whole session silently taxes unrelated tests that collect in a
+    loop -- measured locally, ~20 MB of retained parsed S-expressions turns
+    27 ``gc.collect()`` calls (exactly what
+    ``tests/test_router_cpp_grid_keepalive_4485.py::
+    test_dropped_grid_route_matches_retained_grid_route`` does) from 0.28s
+    into 72s, i.e. straight through CI's 60s per-test timeout. Clearing the
+    caches here bounds the retention to one test and restores the collect
+    cost to baseline; the only cost is re-parsing a file when a *different*
+    test function revisits it, and the oversized boards are excluded from
+    those revisits by the size cap above.
+    """
+    yield
+    _parse_raw.cache_clear()
+    _load_pcb.cache_clear()
+    _load_schematic.cache_clear()
 
 
 class TestKiCadDemosPCBConformance:
