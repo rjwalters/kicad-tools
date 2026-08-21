@@ -22,22 +22,39 @@ inside the ``kicad/kicad:10.0`` CI container image (``ci.yml``'s
 
 **Two of those 19 boards are enormous**: ``jetson-agx-thor-baseboard.kicad_pcb``
 (~85 MB) and ``vme-wren.kicad_pcb`` (~70 MB) -- real production designs, not
-toy fixtures. Every file still gets the core "parses without exception" check
-regardless of size, but the *additional* round-trip-equivalence checks
-(footprint-count cross-check, fixed-point re-serialization) are skipped above
-``_PCB_ROUNDTRIP_SIZE_CAP_BYTES`` to keep this module's CI cost bounded --
-each of those two files alone costs roughly a minute of parse+serialize time
-at this size, and running the fixed-point check twice more per file (as an
-earlier draft of this test did, by re-parsing independently in each test
-function instead of sharing one cached parse) pushed a full local run past
-ten minutes. All per-file parses are memoized (``functools.cache``) so each
-demo file is parsed at most once across every test that exercises it.
+toy fixtures. Files above ``_PCB_ROUNDTRIP_SIZE_CAP_BYTES`` are handled two
+ways, both keyed on the same cap:
+
+* The *additional* round-trip-equivalence checks (footprint-count
+  cross-check, fixed-point re-serialization) are skipped for them -- each of
+  those two files alone costs roughly a minute of parse+serialize time at
+  this size, and running the fixed-point check twice more per file (as an
+  earlier draft of this test did, by re-parsing independently in each test
+  function instead of sharing one cached parse) pushed a full local run past
+  ten minutes.
+* Their ``test_parses_without_exception`` parametrize case carries
+  ``@pytest.mark.slow`` (applied per-parameter, so the other 17 boards still
+  run in every CI pass). An earlier revision ran the parse check on *every*
+  file regardless of size, which made the 85 MB board exceed the 60s global
+  ``--timeout`` of ``ci.yml``'s ``Test`` job (``pytest -n auto
+  --timeout=60 -m "not slow"``) and fail the build. The marker moves those
+  cases out of the 60s-budget default run without deleting the coverage:
+  they are still selected by ``-m slow`` (``slow-tests.yml``, or a local
+  ``pytest -m slow``), which uses a 1200s per-test timeout. Note that the
+  nightly ``slow-tests.yml`` job runs outside the ``kicad/kicad`` container,
+  so the module-level skip below applies there unless KiCad is installed --
+  in practice these two cases are exercised by an explicit manual/container
+  ``-m slow`` run.
+
+All per-file parses are memoized (``functools.cache``) so each demo file is
+parsed at most once across every test that exercises it.
 """
 
 from __future__ import annotations
 
 import functools
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -47,8 +64,8 @@ from kicad_tools.schema.schematic import Schematic
 from kicad_tools.sexp import SExp, parse_string
 
 # Above this size, skip the extra round-trip-equivalence checks (footprint
-# count cross-check, fixed-point re-serialization) and rely on the
-# "parses without exception" check alone -- see module docstring.
+# count cross-check, fixed-point re-serialization) and mark the remaining
+# "parses without exception" case `slow` -- see module docstring.
 _PCB_ROUNDTRIP_SIZE_CAP_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
@@ -113,6 +130,29 @@ def _demo_id(path: Path) -> str:
     return str(path.relative_to(KICAD_DEMOS_DIR))
 
 
+def _pcb_parse_params() -> list[Any]:  # list[ParameterSet]; pytest exports no public alias
+    """Parametrize cases for the PCB "parses without exception" check.
+
+    One case per demo board, with ``pytest.mark.slow`` applied *per
+    parameter* to the handful that exceed ``_PCB_ROUNDTRIP_SIZE_CAP_BYTES``
+    (the ~70 MB and ~85 MB production boards). Marking the individual
+    oversized cases rather than the whole test keeps the other boards in
+    CI's default ``-m "not slow"`` run, where they cost well under the job's
+    60s per-test timeout, while the oversized ones stay reachable via
+    ``-m slow``. See the module docstring for the full rationale.
+    """
+    return [
+        pytest.param(
+            path,
+            marks=(
+                [pytest.mark.slow] if path.stat().st_size > _PCB_ROUNDTRIP_SIZE_CAP_BYTES else []
+            ),
+            id=_demo_id(path),
+        )
+        for path in PCB_DEMO_FILES
+    ]
+
+
 @functools.cache
 def _parse_raw(path: Path) -> SExp:
     """Parse a demo file's raw text exactly once per test session."""
@@ -134,7 +174,7 @@ def _load_schematic(path: Path) -> Schematic:
 class TestKiCadDemosPCBConformance:
     """Every demo ``.kicad_pcb`` file parses cleanly with ``schema.pcb.PCB``."""
 
-    @pytest.mark.parametrize("pcb_path", PCB_DEMO_FILES, ids=_demo_id)
+    @pytest.mark.parametrize("pcb_path", _pcb_parse_params())
     def test_parses_without_exception(self, pcb_path: Path) -> None:
         _load_pcb(pcb_path)
 
