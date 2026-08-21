@@ -4650,3 +4650,63 @@ class TestSetupTenting:
         assert pcb.setup is not None
         assert pcb.setup.tenting_front is True
         assert pcb.setup.tenting_back is True
+
+
+class TestGraphicArcLegacyCenterAngle:
+    """Pre-KiCad-6 ``gr_arc`` uses ``(start <center>) (end <point>) (angle
+    <deg>)`` with no ``mid`` token -- ``GraphicArc.from_sexp`` must derive the
+    true on-arc start/mid/end triple instead of defaulting ``mid`` to
+    ``(0, 0)`` (#4874). Verified against the real corpus board
+    ``os-0003340-pcb0`` (version ``20210623``), which alternates ``angle -90``
+    and ``angle 90`` on its corners.
+    """
+
+    def _parse_arc(self, text: str):
+        from kicad_tools.schema.pcb import GraphicArc
+        from kicad_tools.sexp import parse_string
+
+        return GraphicArc.from_sexp(parse_string(text))
+
+    def test_legacy_negative_angle_derives_on_arc_points(self):
+        """center=(101,93), E=(101,92), angle=-90 -> mirrors the real corpus
+        board's top-left corner, where the derived far endpoint (100,93)
+        must match the adjacent edge's endpoint in the file."""
+        arc = self._parse_arc(
+            '(gr_arc (start 101 93) (end 101 92) (angle -90) (layer "Edge.Cuts") (width 0.05))'
+        )
+        assert arc.start == pytest.approx((101.0, 92.0))
+        assert arc.end == pytest.approx((100.0, 93.0))
+        assert arc.mid == pytest.approx((100.29289, 92.29289), abs=1e-4)
+        # Non-degenerate: none of the derived points sit on the legacy center.
+        center = (101.0, 93.0)
+        assert arc.start != center
+        assert arc.mid != center
+        assert arc.end != center
+
+    def test_legacy_positive_angle_derives_on_arc_points(self):
+        """center=(121,93), E=(121,92), angle=+90 -> mirrors the real corpus
+        board's top-right corner (mixed-sign requirement: the same unmodified
+        formula must handle both sweep directions)."""
+        arc = self._parse_arc(
+            '(gr_arc (start 121 93) (end 121 92) (angle 90) (layer "Edge.Cuts") (width 0.05))'
+        )
+        assert arc.start == pytest.approx((121.0, 92.0))
+        assert arc.end == pytest.approx((122.0, 93.0))
+        assert arc.mid == pytest.approx((121.70711, 92.29289), abs=1e-4)
+
+    def test_explicit_mid_token_is_unaffected(self):
+        """Modern (start)(mid)(end) arcs (no ``angle`` token) are untouched."""
+        arc = self._parse_arc(
+            "(gr_arc (start 2 0) (mid 0.585786 0.585786) (end 0 2)"
+            ' (layer "Edge.Cuts") (width 0.05))'
+        )
+        assert arc.start == pytest.approx((2.0, 0.0))
+        assert arc.mid == pytest.approx((0.585786, 0.585786))
+        assert arc.end == pytest.approx((0.0, 2.0))
+
+    def test_missing_mid_and_angle_defaults_to_zero(self):
+        """No ``mid`` and no ``angle`` -- nothing to derive from; ``mid``
+        keeps its historical ``(0, 0)`` default (defensive, not the bug this
+        issue fixes)."""
+        arc = self._parse_arc('(gr_arc (start 2 0) (end 0 2) (layer "Edge.Cuts") (width 0.05))')
+        assert arc.mid == (0.0, 0.0)

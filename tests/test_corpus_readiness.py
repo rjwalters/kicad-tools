@@ -21,10 +21,12 @@ a benchmark verdict rather than crash:
   generic "no pads" bucket hides how much of the corpus it would unlock;
 * a partially-routed board is disqualified as a *reference*, not silently scored
   against;
-* an outline whose corner arcs use the pre-KiCad-6 centre+angle form collapses
-  to a 2-point chain (the ``mid=(0, 0)`` parse default), while the same
-  geometry in KiCad-6 ``(start)(mid)(end)`` form chains fine -- both are pinned
-  so the blocker keeps naming the legacy *parse* gap rather than the chainer.
+* an outline whose corner arcs use the pre-KiCad-6 centre+angle form now
+  chains to the *same* polygon as the equivalent KiCad-6 ``(start)(mid)(end)``
+  form (``GraphicArc.from_sexp`` derives the true on-arc start/mid/end triple
+  from centre+endpoint+angle -- #4874) -- pinned, including a mixed-sign
+  variant, so a regression that reintroduces the ``mid=(0, 0)`` default (or a
+  sign-specific fix) is caught here rather than downstream in ``kct route``.
 """
 
 from __future__ import annotations
@@ -33,6 +35,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from kicad_tools.schema import PCB
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS_DIR = ROOT / "scripts" / "corpus"
@@ -75,26 +79,46 @@ _ROUNDED_STRAIGHTS = [
     '  (gr_line (start 0 8) (end 0 2) (layer "Edge.Cuts") (width 0.05))',
 ]
 
-# The defect fixture. These corner arcs use the *pre-KiCad-6* form: ``(start)``
-# is the arc **centre**, ``(end)`` is one endpoint, and the sweep is given by
-# ``(angle ...)``. There is no ``mid`` token at all, so
-# ``GraphicArc.from_sexp`` (src/kicad_tools/schema/pcb.py) leaves ``mid`` at
-# its ``(0.0, 0.0)`` default. ``get_board_outline()`` then dutifully emits
-# ``start->mid`` and ``mid->end`` for each arc -- four segments to the origin,
-# which poison the chain down to 2 points.
+# The (formerly defective) legacy-parse fixture. These corner arcs use the
+# *pre-KiCad-6* form: ``(start)`` is the arc **centre**, ``(end)`` is one
+# on-arc endpoint, and the sweep is given by ``(angle ...)``. There is no
+# ``mid`` token at all. ``GraphicArc.from_sexp`` (src/kicad_tools/schema/pcb.py)
+# now derives the true on-arc start/mid/end triple by rotating the given
+# endpoint about the centre by the (signed) angle -- see #4874 -- instead of
+# defaulting ``mid`` to ``(0.0, 0.0)``, which used to poison
+# ``get_board_outline()``'s chain down to 2 points.
 #
-# That is the shape that made ``kct route`` die inside shapely on corpus board
-# os-0003340-pcb0 ("A linearring requires at least 4 coordinates"); that board
-# declares ``version 20210623`` and writes exactly these arcs. The bug is the
-# legacy *parse*, not the chainer -- ROUNDED_OUTLINE_V6 below is the same
-# geometry in KiCad-6 form and chains fine. When the parser learns to derive
-# ``mid`` from centre+endpoint+angle, this test flips.
+# That was the shape that made ``kct route`` die inside shapely on corpus
+# board os-0003340-pcb0 ("A linearring requires at least 4 coordinates");
+# that board declares ``version 20210623`` and writes exactly these arcs.
+# ROUNDED_OUTLINE_V6 below is the same geometry in KiCad-6 form -- now that
+# the parser derives ``mid`` from centre+endpoint+angle, both fixtures chain
+# to the identical 13-point polygon.
 ROUNDED_OUTLINE_LEGACY_ARC = "\n".join(
     _ROUNDED_STRAIGHTS
     + [
         '  (gr_arc (start 2 2) (end 2 0) (angle -90) (layer "Edge.Cuts") (width 0.05))',
         '  (gr_arc (start 18 2) (end 20 2) (angle -90) (layer "Edge.Cuts") (width 0.05))',
         '  (gr_arc (start 18 8) (end 18 10) (angle -90) (layer "Edge.Cuts") (width 0.05))',
+        '  (gr_arc (start 2 8) (end 0 8) (angle -90) (layer "Edge.Cuts") (width 0.05))',
+    ]
+)
+
+# Mixed-sign variant of the fixture above: two corners keep ``angle -90``,
+# the other two are rewritten as ``angle +90`` with the ``(end)`` token
+# swapped to the *other* physical on-arc point -- the same real arc, just
+# approached from the opposite direction, mirroring how the real corpus
+# board os-0003340-pcb0 alternates sweep sign corner-to-corner (see #4874).
+# A fix that special-cases or hardcodes one sign would place the derived
+# mid/endpoint on the far side of the circle for these two corners and still
+# fail to chain -- so this fixture must resolve to the exact same 13-point
+# polygon as ROUNDED_OUTLINE_LEGACY_ARC / ROUNDED_OUTLINE_V6.
+ROUNDED_OUTLINE_LEGACY_ARC_MIXED_SIGN = "\n".join(
+    _ROUNDED_STRAIGHTS
+    + [
+        '  (gr_arc (start 2 2) (end 0 2) (angle 90) (layer "Edge.Cuts") (width 0.05))',
+        '  (gr_arc (start 18 2) (end 20 2) (angle -90) (layer "Edge.Cuts") (width 0.05))',
+        '  (gr_arc (start 18 8) (end 20 8) (angle 90) (layer "Edge.Cuts") (width 0.05))',
         '  (gr_arc (start 2 8) (end 0 8) (angle -90) (layer "Edge.Cuts") (width 0.05))',
     ]
 )
@@ -147,7 +171,9 @@ def _footprint(ref: str, x: float, gnd_pad: str, sig_pad: str) -> str:
 
 def board_text(
     *,
-    outline: str = "rect",  # "rect" | "rounded-legacy-arc" | "rounded-v6" | "none"
+    outline: str = "rect",
+    # "rect" | "rounded-legacy-arc" | "rounded-legacy-arc-mixed-sign"
+    # | "rounded-v6" | "none"
     pads: bool = True,
     nets: bool = True,
     copper: str = "",
@@ -164,7 +190,7 @@ def board_text(
     is declared for fidelity, so the fixture is a file KiCad could actually
     have written.
     """
-    version = "20210623" if outline == "rounded-legacy-arc" else "20221018"
+    version = "20210623" if outline.startswith("rounded-legacy-arc") else "20221018"
     body = [
         f"(kicad_pcb (version {version}) (generator pcbnew)",
         "  (general (thickness 1.6))",
@@ -178,6 +204,8 @@ def board_text(
         body.append(OUTLINE)
     elif outline == "rounded-legacy-arc":
         body.append(ROUNDED_OUTLINE_LEGACY_ARC)
+    elif outline == "rounded-legacy-arc-mixed-sign":
+        body.append(ROUNDED_OUTLINE_LEGACY_ARC_MIXED_SIGN)
     elif outline == "rounded-v6":
         body.append(ROUNDED_OUTLINE_V6)
     if pads:
@@ -265,19 +293,36 @@ class TestFeatureExtraction:
         assert f.pad_density_per_cm2 == 0.0
         assert f.net_density_per_cm2 == 0.0
 
-    def test_rounded_outline_has_area_but_no_usable_polygon(self, tmp_path: Path) -> None:
-        """Legacy centre+angle arcs parse to ``mid=(0, 0)`` and poison the chain.
+    def test_rounded_outline_chains_into_a_usable_polygon(self, tmp_path: Path) -> None:
+        """Legacy centre+angle arcs now derive a genuine on-arc ``mid``.
 
-        This is the library defect behind corpus board os-0003340-pcb0. It is a
-        *parser* gap (``GraphicArc.from_sexp`` never reads the ``(angle ...)``
-        form), not a chainer gap -- see the v6 control below. When the parser
-        learns the legacy form, this assertion is the one that flips.
+        This was the library defect behind corpus board os-0003340-pcb0
+        (#4874): ``GraphicArc.from_sexp`` never read the ``(angle ...)`` form
+        and defaulted ``mid`` to ``(0, 0)``, poisoning the outline chain down
+        to 2 points. Now that the parser derives ``mid`` from
+        centre+endpoint+angle, this fixture chains exactly like the v6
+        control below.
         """
         f = features(
             tmp_path, "rounded", board_text(outline="rounded-legacy-arc", copper=SIG_TRACE)
         )
         assert f.area_cm2 == pytest.approx(2.0), "the bounding box is fine"
-        assert f.outline_points < 3, "the mid=(0,0) default collapses the outline chain"
+        assert f.outline_points >= 4, "the legacy centre+angle arc now chains correctly"
+
+    def test_rounded_outline_mixed_sign_chains_into_a_usable_polygon(self, tmp_path: Path) -> None:
+        """Same as above, but with two of the four corners at ``angle +90``.
+
+        Mirrors the real corpus board's alternating sweep sign -- a fix keyed
+        to one sign would put the derived mid/endpoint on the far side of the
+        circle for these two corners and still collapse the chain.
+        """
+        f = features(
+            tmp_path,
+            "rounded-mixed",
+            board_text(outline="rounded-legacy-arc-mixed-sign", copper=SIG_TRACE),
+        )
+        assert f.area_cm2 == pytest.approx(2.0), "the bounding box is fine"
+        assert f.outline_points >= 4, "the mixed-sign legacy arcs chain correctly too"
 
     def test_kicad6_rounded_outline_chains_into_a_real_polygon(self, tmp_path: Path) -> None:
         """The control: identical geometry in ``(start)(mid)(end)`` form works.
@@ -346,8 +391,10 @@ class TestVerdicts:
         assert BLOCK_NO_OUTLINE in verdict.capacity_blockers
         assert not verdict.capacity_features
 
-    def test_rounded_outline_is_a_separate_blocker_from_a_missing_one(self, tmp_path: Path) -> None:
-        """The fix is legacy arc parsing, not a missing Edge.Cuts -- keep them apart."""
+    def test_rounded_outline_legacy_arc_is_not_blocked_now_that_it_parses(
+        self, tmp_path: Path
+    ) -> None:
+        """The legacy centre+angle form now chains fine -- no longer blocked (#4874)."""
         verdict = evaluate(
             features(
                 tmp_path,
@@ -355,9 +402,10 @@ class TestVerdicts:
                 board_text(outline="rounded-legacy-arc", copper=f"{SIG_TRACE}\n{GND_TRACE}"),
             )
         )
-        assert verdict.capacity_blockers == [BLOCK_OUTLINE_NOT_POLYGONAL]
+        assert verdict.capacity_blockers == []
+        assert BLOCK_OUTLINE_NOT_POLYGONAL not in verdict.capacity_blockers
         assert BLOCK_NO_OUTLINE not in verdict.capacity_blockers
-        assert not verdict.harness_candidate
+        assert verdict.capacity_features and verdict.harness_candidate
 
     def test_kicad6_rounded_outline_is_not_blocked_at_all(self, tmp_path: Path) -> None:
         """The working path stays a candidate -- the blocker is legacy-specific."""
@@ -370,6 +418,103 @@ class TestVerdicts:
         )
         assert verdict.capacity_blockers == []
         assert verdict.capacity_features and verdict.harness_candidate
+
+
+class TestLegacyArcOutlineExactCoordinates:
+    """Direct ``PCB.load(...).get_board_outline()`` coordinate assertions (#4874).
+
+    The census-level tests above pin ``outline_points`` counts through
+    ``benchmark_readiness``; these pin the actual chained coordinates so a fix
+    that merely inflates the point count (without landing on the true on-arc
+    positions) cannot pass silently.
+    """
+
+    # First point repeated at the end to close the polygon, matching
+    # get_board_outline()'s convention for a closed outline.
+    _EXPECTED_ROUNDED_OUTLINE = [
+        (2.0, 0.0),
+        (18.0, 0.0),
+        (19.414214, 0.585786),
+        (20.0, 2.0),
+        (20.0, 8.0),
+        (19.414214, 9.414214),
+        (18.0, 10.0),
+        (2.0, 10.0),
+        (0.585786, 9.414214),
+        (0.0, 8.0),
+        (0.0, 2.0),
+        (0.585786, 0.585786),
+        (2.0, 0.0),
+    ]
+
+    def _outline(self, tmp_path: Path, name: str, outline: str) -> list[tuple[float, float]]:
+        path = write_board(tmp_path, name, board_text(outline=outline, copper=SIG_TRACE))
+        return PCB.load(path).get_board_outline()
+
+    def _assert_matches_expected(self, outline: list[tuple[float, float]]) -> None:
+        assert len(outline) == len(self._EXPECTED_ROUNDED_OUTLINE)
+        for actual, expected in zip(outline, self._EXPECTED_ROUNDED_OUTLINE, strict=True):
+            assert actual == pytest.approx(expected, abs=1e-5)
+
+    def test_v6_outline_is_the_reference_13_point_polygon(self, tmp_path: Path) -> None:
+        self._assert_matches_expected(self._outline(tmp_path, "v6", "rounded-v6"))
+
+    def test_legacy_arc_outline_matches_the_v6_reference_exactly(self, tmp_path: Path) -> None:
+        """All-``angle -90`` legacy encoding chains to the identical polygon."""
+        self._assert_matches_expected(self._outline(tmp_path, "legacy", "rounded-legacy-arc"))
+
+    def test_mixed_sign_legacy_arc_outline_matches_the_v6_reference_exactly(
+        self, tmp_path: Path
+    ) -> None:
+        """Two corners at ``angle +90`` still land on the exact same polygon."""
+        self._assert_matches_expected(
+            self._outline(tmp_path, "legacy-mixed", "rounded-legacy-arc-mixed-sign")
+        )
+
+    def test_legacy_arc_start_mid_end_are_non_degenerate(self, tmp_path: Path) -> None:
+        """Both consumers of GraphicArc.start/.mid/.end (pcb.py:3482, pcb.py:3568)
+
+        rely on genuine on-arc points -- confirm none of the three collapse to
+        the legacy centre after parsing.
+        """
+        path = write_board(
+            tmp_path, "legacy-arcs", board_text(outline="rounded-legacy-arc", copper=SIG_TRACE)
+        )
+        pcb = PCB.load(path)
+        edge_arcs = [arc for arc in pcb.graphic_items if hasattr(arc, "mid")]
+        assert len(edge_arcs) == 4
+        legacy_centers = {(2.0, 2.0), (18.0, 2.0), (18.0, 8.0), (2.0, 8.0)}
+        for arc in edge_arcs:
+            assert arc.start not in legacy_centers
+            assert arc.mid not in legacy_centers
+            assert arc.end not in legacy_centers
+            assert arc.mid != (0.0, 0.0)
+
+
+CORPUS_PAYLOAD = CORPUS_DIR / ".cache" / "payloads" / "6556a794cd2a65d9-os-0003340-pcb0.kicad_pcb"
+
+
+@pytest.mark.skipif(
+    not CORPUS_PAYLOAD.exists(),
+    reason=(
+        "corpus payload not cached locally -- best-effort/offline check, same "
+        "convention as the rest of this module (no network in pytest)"
+    ),
+)
+class TestRealCorpusBoardOutline:
+    """The actual board that motivated #4874 (version ``20210623``)."""
+
+    def test_outline_chains_to_a_closed_polygon(self) -> None:
+        from shapely.geometry import LinearRing
+
+        pcb = PCB.load(CORPUS_PAYLOAD)
+        outline = pcb.get_board_outline()
+        assert len(outline) >= 4, "legacy centre+angle arcs must no longer collapse the chain"
+        # A closed LinearRing needs >= 4 coords; this is exactly the shapely
+        # construction that used to raise "A linearring requires at least 4
+        # coordinates" via kct route's off-board preflight.
+        ring = LinearRing(outline)
+        assert ring.is_valid or ring.is_ring
 
 
 class TestCensus:
