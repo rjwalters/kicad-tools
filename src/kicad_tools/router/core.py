@@ -2874,19 +2874,45 @@ class Autorouter:
         return build_lattice_pairwise(table, zones, self._net_name_to_id(), layer_indices or None)
 
     def _net_name_to_id(self) -> dict[str, int]:
-        """Net name -> id map (``net_names`` + a pad-derived fallback).
+        """Net name -> id map (``net_names`` + a pad-derived + preserved-route fallback).
 
         Shared by the lattice pairwise (#4602) and keepout (#4605)
         projections: a router assembled without ``add_component`` (tests,
         deserialization) may have an empty ``net_names`` map while its pads
         still carry names.
+
+        Issue #4507 (attribution sub-task): on a *filtered* pass (``--nets``
+        / ``--skip-nets`` / ``--region`` / ``--complete``) the board loader
+        (``router/io.py``) rewrites every NON-routable net's pads to
+        ``net_num = 0`` so they act as anonymous clearance obstacles --
+        ``pad.net_name`` survives but ``pad.net`` collapses, so BOTH sources
+        above (``self.net_names`` and the ``all_pads`` loop, which both read
+        ``pad.net``) silently map every preserved/fixed net onto the same
+        sentinel id, 0.  This is the exact defect issue #4622 named and fixed
+        for the net-class-map sidecar merge (``_resolve_net_class_map_domains``
+        in ``route_cmd.py``, widened with ``router.existing_routes``); this
+        method never got the same fix, so ``LatticePairwise.required_by_pair``
+        silently had NO entry for any pair naming a preserved net -- the
+        search-time HV pairwise avoidance #4602/#4507 built was dormant for
+        exactly that class, on every ``--complete`` run (which always has a
+        preserved/fixed net set). ``existing_routes`` carries each preserved
+        net's TRUE id straight from the board's copper, never rewritten by
+        the filtered-pass loader, so it corrects any entry that is missing or
+        collapsed to 0 -- never a genuinely-resolved (non-zero) id from the
+        two sources above, which take precedence when already correct.
         """
-        name_to_id: dict[str, int] = {
-            name: int(net_id) for net_id, name in self.net_names.items() if name
-        }
+        name_to_id: dict[str, int] = {}
+        for net_id, name in self.net_names.items():
+            if name:
+                name_to_id[name] = int(net_id)
         for pad in self.all_pads or list(self.pads.values()):
             if pad.net_name and pad.net_name not in name_to_id and pad.net is not None:
                 name_to_id[pad.net_name] = int(pad.net)
+        for route in self.existing_routes or []:
+            route_name = getattr(route, "net_name", None)
+            route_net = getattr(route, "net", None)
+            if route_name and route_net and name_to_id.get(route_name, 0) == 0:
+                name_to_id[route_name] = int(route_net)
         return name_to_id
 
     def _lattice_keepout_projection(self) -> Any:

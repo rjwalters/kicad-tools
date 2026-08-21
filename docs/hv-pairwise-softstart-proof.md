@@ -3,23 +3,199 @@
 Running record of the #4507 T4 manual criterion, newest run first. Each section
 describes the tree as of its own date.
 
-> **Current record: [the 2026-08-21 second pass](#the-2026-08-21-second-pass-the-widened-gate-attributes-all-6-residuals).**
-> Ask item 4's kernel widening (trace↔pad, via↔pad, via↔trace) landed and the
-> recipe was re-run a fourth time on the same four inputs at the same md5s. The
-> router's own gate is no longer silent on this class of copper: every
-> board-level census fail this run produced is now individually attributed —
-> 4 as genuine, previously-invisible pairwise shortfalls the gate now reports
-> mm-for-mm, 2 as copper the gate correctly waives under the #4506 attach-zone
-> exemption (a deliberate scope difference from the exemption-blind census, not
-> a defect).
+> **Current record: [the 2026-08-21 third pass](#the-2026-08-21-third-pass-the-attribution-sub-task-finds-and-fixes-a-genuine-search-time-defect).**
+> The attribution sub-task the second pass named as still open ("does the
+> search actually avoid this copper, or was there no clean alternative?") is
+> resolved for 3 of the 4 genuine residuals: a real search-time defect
+> (case (c), not a placement trade-off) in `Autorouter._net_name_to_id()`
+> silently mapped every PRESERVED/fixed net's name to net id 0 on any
+> `--complete`/`--nets`/`--skip-nets`/`--region` pass, so the #4602 lattice
+> pairwise projection never had an entry keyed by that net's TRUE id — the
+> search-time HV avoidance was silently dormant for exactly that class. Fixed,
+> with a regression test; re-running the same recipe on the same board drops
+> board-level census fails from 6 to 3 (4 genuine → 1 genuine; the 2
+> #4506-exempted pairs are unchanged). The 4th genuine finding
+> (`/LED_A_NEG`↔`/SCAP_POS`) does NOT reproduce this defect — both nets
+> resolve correctly and the static predicate blocks the exact violating
+> geometry in isolation — so it is named here as still open, not
+> guess-fixed.
 >
-> Below that, retained as the record of the diagnosis: [the 2026-08-21 first
+> Below that, retained as the record of the diagnosis: [the 2026-08-21 second
+> pass](#the-2026-08-21-second-pass-the-widened-gate-attributes-all-6-residuals)
+> (Ask item 4's kernel widening, and the attribution question this pass
+> resolves), [the 2026-08-21 first
 > re-run](#the-2026-08-21-re-run-the-router-gate-is-clean-and-what-that-leaves)
-> (the frame-correction fix and the "gate does not look" root cause this pass
+> (the frame-correction fix and the "gate does not look" root cause that pass
 > closes), [the 2026-08-16 re-score](#the-re-score-same-recipe-corrected-table)
 > (#4867's `abs()` sign collapse fixed by #4868), and from [Verdict (pre-fix
 > run)](#verdict-of-the-pre-fix-run-t4-fails--but-the-machinery-is-measurably-doing-its-job)
 > downwards the original pre-fix measurement.
+
+## The 2026-08-21 third pass: the attribution sub-task finds (and fixes) a genuine search-time defect
+
+Fifth run of the same recipe, same fixture inputs (`softstart_revc.kicad_pcb`
+md5 `7d82599e…`, `net_class_map.json` `9184a661…`, `vmap.json` `cc72a701…`,
+`creepage_class_map.json` `6c3b324a…` — identical to every prior run in this
+file), `main` @ `c5d2127d` (PR #4887, the commit the previous section's "6"
+figure was measured against, plus this issue's own attribution-sub-task diff)
+with the C++ backend at build 21. Steps 1 and 2 only, same as every run since
+the frame-correction pass.
+
+### What this pass answers
+
+The previous section named the open question explicitly: for each of the 4
+genuine findings, is it (c) a genuine search-time gap in the lattice's
+existing pairwise-aware pad/via widening, or (a)/(b) an inherent trade-off of
+a board that only completes 44/77 (57%) signal nets under placement pressure?
+
+**Answer: 3 of the 4 are case (c) -- a real, fixable search-time defect, not a
+placement trade-off -- and it is now fixed. The 4th does not reproduce that
+defect and remains open.**
+
+### The defect: preserved nets silently resolve to net id 0
+
+`Autorouter._net_name_to_id()` (`src/kicad_tools/router/core.py`) builds the
+net-name → net-id reverse map that
+`Autorouter._lattice_pairwise_projection()` (#4602) uses to project the
+name-keyed `DesignRules.pairwise_clearance` table into the net-id space the
+(deliberately geometry-only, #4597) lattice search consumes. Before this pass
+it was built from `self.net_names` plus a `pad.net`-keyed fallback over
+`self.all_pads` -- **both of which read `Pad.net`.**
+
+On a *filtered* pass (`--nets` / `--skip-nets` / `--region` / `--complete` --
+every composition step, and therefore every step of this recipe's own step 2)
+the board loader (`router/io.py`) rewrites every NON-routable net's pads to
+`net_num = 0` so they act as anonymous clearance obstacles: `pad.net_name`
+survives, `pad.net` collapses. So `_net_name_to_id()` mapped **every**
+preserved/fixed net's name onto the same sentinel id, 0 -- and
+`LatticePairwise.required_by_pair` (keyed by REAL net-id pairs, since the
+actual committed copper for a preserved net keeps ITS true id, sourced
+separately via `router/lattice/pathfinder.py`'s `_seed_fixed_copper`) never
+had an entry any query against that net's true id could find.
+`pairwise.required(moving_net, real_preserved_id)` silently returned `0.0`:
+the search-time HV avoidance #4602/#4507 built was dormant for exactly this
+class, on **every** `--complete` run (which always has a preserved/fixed net
+set -- `--complete` is precisely how this recipe's own step 2 runs).
+
+This is the *same defect class* issue #4622 already named and fixed for a
+different consumer: the net-class-map sidecar merge
+(`_resolve_net_class_map_domains` in `route_cmd.py`), which was widened with
+`router.existing_routes` (preserved routes carry each net's TRUE id straight
+from the board's copper, never rewritten by the filtered-pass loader).
+`_net_name_to_id()` never got the matching fix. It now does: any entry that
+is missing or collapsed to 0 is corrected from `existing_routes`; a
+genuinely-resolved (non-zero) id from the two existing sources is never
+overridden.
+
+Confirmed with a targeted diagnostic against the real board (`step1.kicad_pcb`
++ the same `net_class_map.json`/`vmap.json`, short-circuited with
+`--timeout 3` so the pairwise projection is built without paying for the
+full negotiation):
+
+```
+before the fix:
+  required_by_pair size: 1748  (of a possible 1922 cross-pairs)
+  /GATE_BUS_POS(22) <-> /I_SENSE_OUT(0): required=3.2   <- WRONG id AND value
+  /I_SENSE_OUT(0) <-> /SCAP_NEG(50): required=1.4        <- WRONG id (I_SENSE_OUT)
+  /PRECHARGE_POS(0) <-> /V_BANK_NEG_MID(96): required=1.2  <- WRONG id (PRECHARGE_POS)
+  /LED_A_NEG(33) <-> /SCAP_POS(52): required=2.0         <- correct (both step2-native)
+
+after the fix:
+  required_by_pair size: 1893  (of a possible 1922; the remaining 29 have no
+                                 existing_routes copper at all -- unroutable
+                                 unless/until something commits some)
+  /GATE_BUS_POS(22) <-> /I_SENSE_OUT(31): required=1.6   <- fixed
+  /I_SENSE_OUT(31) <-> /SCAP_NEG(50): required=1.4        <- fixed
+  /PRECHARGE_POS(43) <-> /V_BANK_NEG_MID(96): required=1.2  <- fixed
+  /LED_A_NEG(33) <-> /SCAP_POS(52): required=2.0          <- unchanged (already correct)
+```
+
+`/I_SENSE_OUT` and `/PRECHARGE_POS` are precisely the two nets step 1 routes
+and step 2 preserves -- the two-step composition this recipe (and the
+documented HV-outer recipe generally) always uses.
+
+### Re-running the recipe with the fix: 6 → 3 board-level census fails
+
+Same recipe, same inputs, step1 output byte-identical to the previous section
+(the fix is a no-op on step 1: nothing is preserved yet). Step 2 (`--complete`)
+re-run on the fixed tree:
+
+| Measure | previous section | **this pass (fixed)** |
+|---|---|---|
+| Signal nets routed | 50 (6/7 + 44/77) | **50 (6/7 + 44/77)** -- unchanged |
+| Wall clock, step 2 | 1758.3s of 5790.0s budget | **1441.8s of 5790.0s budget** |
+| Board-level census fails | **6** | **3** |
+| — genuine (not #4506-exempted) | 4 | **1** |
+| — #4506-exempted (scope difference, not a defect) | 2 | **2** (unchanged) |
+
+```
+$ python3 hardware/kicad/creepage_triage.py step2_fixed.kicad_pcb creepage_fixed.json
+== board (3) ==
+  /AC_LINE           /AC_NEUTRAL          have=0.600 req=1.60 dV=150
+  /AC_NEUTRAL        /FUSED_LINE          have=0.600 req=1.60 dV=150
+  /LED_A_NEG         /SCAP_POS            have=1.825 req=2.00 dV=180
+```
+
+The first two are the same mains-cluster attach-zone exemption the previous
+section already attributed (`J1`/`J2`/`F1`, waived by the router's gate,
+scored by the exemption-blind census) -- unaffected by this pass, reproduces
+identically. **The 3 fixed pairs (`/GATE_BUS_POS`↔`/I_SENSE_OUT`,
+`/I_SENSE_OUT`↔`/SCAP_NEG`, `/PRECHARGE_POS`↔`/V_BANK_NEG_MID`) no longer
+appear anywhere in the census, at any location, with or without the
+attach-zone exemption applied** -- confirmed with
+`scripts/replay_pairwise_gate.py --no-attach-zones` too, which is the wider
+(pre-exemption) scope and would have shown them if the search had merely
+routed around the CENSUS's specific reported point while leaving a shortfall
+elsewhere.
+
+Signal net completion is byte-identical (50/82, no routability cost) --
+consistent with this being a correctness fix to how a requirement is
+LOOKED UP, not a change to how tightly the search is constrained.
+
+### What remains: `/LED_A_NEG` ↔ `/SCAP_POS`, still open
+
+This pair does **not** reproduce the id-resolution defect: both nets are
+step2-native (routed together, not preserved from step 1), and the targeted
+diagnostic above shows both resolve to their correct ids (33, 52) with the
+correct requirement (2.0mm) **before and after** this fix. A second targeted
+check -- replaying `LatticeObstacleModel.pairwise_pad_blocked` directly against
+the exact violating geometry (LED_A_NEG's emitted segment vs. the real SCAP_POS
+pad polygon and position, both read from the routed board) -- confirms the
+static predicate correctly reports this exact geometry as blocked in
+isolation. So neither the id-projection (fixed here) nor the static
+pad-widening predicate itself is at fault for this specific pair; the
+remaining candidates are a subtler search-time interaction (e.g. an emission
+path this run did not isolate) or a genuine congestion trade-off given the
+44/77 (57%) completion rate. Not guessed at further here -- named as the next
+attribution target, with the isolation technique (diagnostic id/value dump +
+direct predicate replay against real board geometry) that resolved the other
+3 available for whoever picks it up.
+
+### Reproducing this pass
+
+```bash
+# Steps 1-2 identical to the previous section's Commands (same recipe, same inputs).
+# Step 1 is unaffected by the fix and can be reused verbatim from a prior run.
+uv run kct route step1.kicad_pcb -o step2_fixed.kicad_pcb \
+  --complete --complete-exclude-nets "GND,+3.3V" --complete-report report_fixed.json \
+  --net-class-map net_class_map.json --voltage-map vmap.json \
+  --creepage-standard iec60664 --pollution-degree 2 --material-group IIIa \
+  --manufacturer jlcpcb --copper 2 --layers 4
+
+uv run kct creepage step2_fixed.kicad_pcb --voltage-map vmap.json \
+  --net-class-map creepage_class_map.json --standard iec60664 \
+  --pollution-degree 2 --material-group IIIa --working-voltage 250 \
+  --waive-same-footprint --format json > creepage_fixed.json
+python3 hardware/kicad/creepage_triage.py step2_fixed.kicad_pcb creepage_fixed.json
+
+uv run python scripts/replay_pairwise_gate.py step2_fixed.kicad_pcb --voltage-map vmap.json
+```
+
+Regression coverage (unit-level, does not need the fixture):
+`tests/router/test_lattice_pairwise_preserved_net_id_4507.py`.
+
+No board artifacts are committed to this repo, as with every prior run in this
+file.
 
 ## The 2026-08-21 second pass: the widened gate attributes all 6 residuals
 
