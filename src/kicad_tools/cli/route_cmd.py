@@ -4575,9 +4575,15 @@ def _audit_pairwise_clearance(
     scan) when ``--voltage-map`` was not supplied, so every pre-existing run is
     byte-identical.
 
-    Scope: **trace-to-trace, same layer only** (the limit of
-    ``find_pairwise_violations``).  Pad/via geometry is the ``kct creepage``
-    census' remit; the failure banner says so.
+    Scope: trace-vs-trace (same layer), trace-vs-via and via-vs-via -- issue
+    #4507 widened ``find_pairwise_violations`` past its original trace-only
+    walk, using the via geometry every ``Route`` already carries, so this
+    in-run audit gained via coverage for free.  Foreign PAD copper is still
+    NOT checked here (that needs the board's pad geometry, which this
+    in-memory routing session does not resolve); the ``kct creepage`` census
+    remains the only pad-aware whole-board check, and the failure banner says
+    so.  A read-back replay of the WRITTEN board file (``board_pairwise_
+    violations``) does cover pads -- see ``scripts/replay_pairwise_gate.py``.
     """
     if getattr(args, "_pairwise_required", None) is None:
         return []
@@ -4624,11 +4630,15 @@ def _audit_pairwise_clearance(
 def _format_pairwise_violations(violations: "Sequence[PairwiseViolation]", limit: int = 10) -> str:
     """Render pairwise violations in the ``router/io.py`` clearance-report shape.
 
-    ``[trace] /NET_A vs /NET_B: X.XXXmm (required Y.YYYmm) at (x, y)`` with an
-    ``... and K more`` tail, so the output is diffable against ``kct creepage``.
+    ``[pairwise] /NET_A vs /NET_B: X.XXXmm (required Y.YYYmm) at (x, y)`` with
+    an ``... and K more`` tail, so the output is diffable against
+    ``kct creepage``.  Tagged generically (not ``[trace]``) since issue #4507
+    widened the underlying scan past trace-vs-trace to also report
+    trace-vs-via and via-vs-via shortfalls, and a :class:`PairwiseViolation`
+    itself does not record which copper kind produced it.
     """
     lines = [
-        f"  [trace] {v.net_a} vs {v.net_b}: {v.actual_mm:.3f}mm "
+        f"  [pairwise] {v.net_a} vs {v.net_b}: {v.actual_mm:.3f}mm "
         f"(required {v.required_mm:.3f}mm) at ({v.x:.3f}, {v.y:.3f})"
         for v in violations[:limit]
     ]
@@ -4646,7 +4656,7 @@ def _print_pairwise_addendum(violations: "Sequence[PairwiseViolation]") -> None:
     """
     print(f"  Additionally, {len(violations)} HV pairwise clearance violation(s) detected:")
     print(_format_pairwise_violations(violations, limit=5))
-    print("  (trace-to-trace only; run 'kct creepage' for the full census)")
+    print("  (trace/via, no pad geometry; run 'kct creepage' for the full census)")
 
 
 def _pairwise_escalation_exit(rc: int, violations: "Sequence[PairwiseViolation]") -> int:
@@ -4701,13 +4711,13 @@ def _print_pairwise_failure_banner(
     print("Routed copper is closer than the --voltage-map derived creepage")
     print("requirement for these net pairs. This board is NOT safe to manufacture.")
     print()
-    print("Scope of this gate: trace-to-trace, same layer only, over ALL trace")
-    print("copper the output carries -- freshly routed AND preserved (#4699).")
-    print("A finding between preserved routes was inherited from the input")
-    print("board, not created by this run; re-route those nets (or fix the")
-    print("input) -- the written board is unsafe either way. Pad and via")
-    print("geometry are not scanned here -- 'kct creepage' is the authoritative")
-    print("full census:")
+    print("Scope of this gate: trace-vs-trace (same layer), trace-vs-via and")
+    print("via-vs-via, over ALL copper the output carries -- freshly routed")
+    print("AND preserved (#4699). A finding between preserved routes was")
+    print("inherited from the input board, not created by this run; re-route")
+    print("those nets (or fix the input) -- the written board is unsafe")
+    print("either way. Foreign PAD copper is not scanned here (issue #4507) --")
+    print("'kct creepage' is the authoritative full census:")
     vm = getattr(args, "voltage_map", None)
     print(
         f"  kct creepage {output_path} --voltage-map {vm} --standard "
@@ -16091,7 +16101,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 print()
                 print(f"HV Pairwise Clearance ({pairwise_violation_count} violation(s)):")
                 print(_format_pairwise_violations(pairwise_violations))
-                print("  (trace-to-trace only; run 'kct creepage' for the full census)")
+                print("  (trace/via, no pad geometry; run 'kct creepage' for the full census)")
         else:
             print(
                 f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} signal nets{summary_suffix}"

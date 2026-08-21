@@ -3,28 +3,36 @@
 
 This is the after-the-fact scorer for issue #4507's T4 criterion: it answers
 "of the copper on this board, what does the ROUTER's gate say is bad?" -- which
-is a different question from ``kct creepage``.  The census is net-pair keyed and
-measures pads, vias and pour fills as well as traces, and it has no concept of
-the #4506 rated-footprint attach-zone exemption.  The router's gate
-(``segment_pair_violation``) is trace-vs-trace and honours that exemption, so
-only this replay can attribute a census fail to *routed copper* versus placement
-or pour geometry.
+is a different question from ``kct creepage``.  The census is net-pair keyed
+and measures pads, vias and pour fills as well as traces, and it has no
+concept of the #4506 rated-footprint attach-zone exemption.  The router's gate
+(``board_pairwise_violations``) now covers trace-vs-trace, trace-vs-via,
+via-vs-via and (unless ``--no-pad-geometry``) trace/via-vs-pad -- issue #4507
+widened it past its original trace-vs-trace-only scope, which is what left 17
+residual fails invisible on the softstart rev-C T4 proof board (all of them
+trace/via-vs-pad or via-vs-trace) -- and honours the #4506 exemption
+throughout, so only this replay can attribute a census fail to *routed
+copper* versus placement/pour geometry.  Pour fills remain out of scope
+(#3901).
 
 Usage::
 
     uv run python scripts/replay_pairwise_gate.py ROUTED.kicad_pcb \\
-        --voltage-map vmap.json [--dru 0.15] [--hv-threshold 30] [--json]
+        --voltage-map vmap.json [--dru 0.15] [--hv-threshold 30] \\
+        [--no-attach-zones] [--no-pad-geometry] [--json]
 
 The board file is read-only.  Exit code is 1 when the gate reports at least one
-trace-vs-trace shortfall (with the #4506 exemption applied), 0 otherwise.
+shortfall (with the #4506 exemption applied), 0 otherwise.
 
-**Frame note.**  Both the copper and the attach zones are resolved through
-``router.pairwise_clearance.board_pairwise_violations``, which reads them from
-the same file in the same sheet-absolute frame.  Do NOT hand-roll this with
-``build_attach_zones(PCB.load(path).footprints)``: ``PCB.load`` reports
-footprint positions *board-relative*, so unshifted zones land ``board_origin``
-away from the copper they are meant to waive and the replay mis-reports (that
-mistake is what put two phantom "genuine router leaks" into the #4507 T4 proof).
+**Frame note.**  The copper, the attach zones AND the pad geometry are all
+resolved through ``router.pairwise_clearance.board_pairwise_violations``,
+which reads them from the same file in the same sheet-absolute frame.  Do NOT
+hand-roll this with ``build_attach_zones(PCB.load(path).footprints)`` or
+``PCB.load(path).footprints[i].pads``: ``PCB.load`` reports footprint (and pad)
+positions *board-relative*, so unshifted geometry lands ``board_origin`` away
+from the copper it is meant to describe and the replay mis-reports (that
+mistake is what put two phantom "genuine router leaks" into the #4507 T4
+proof).
 """
 
 from __future__ import annotations
@@ -76,6 +84,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="score without the #4506 rated-footprint exemption (the census' view)",
     )
+    parser.add_argument(
+        "--no-pad-geometry",
+        action="store_true",
+        help=(
+            "score trace/via copper only, without foreign pad geometry -- the "
+            "pre-#4507 scope, kept for A/B comparison against this widening"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     return parser.parse_args(argv)
 
@@ -92,7 +108,8 @@ def main(argv: list[str] | None = None) -> int:
         hv_threshold=args.hv_threshold,
     )
     zones = () if args.no_attach_zones else None
-    violations = board_pairwise_violations(args.board, table, attach_zones=zones)
+    pads = () if args.no_pad_geometry else None
+    violations = board_pairwise_violations(args.board, table, attach_zones=zones, foreign_pads=pads)
     pair_keys = sorted({violation_pair_key(v) for v in violations})
 
     if args.json:
@@ -103,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
                     "mapped_nets": len(table.net_voltages),
                     "cross_pairs": len(table.required_by_pair),
                     "attach_zones_applied": not args.no_attach_zones,
+                    "pad_geometry_applied": not args.no_pad_geometry,
                     "violation_count": len(violations),
                     "net_pairs": [list(pair) for pair in pair_keys],
                     "violations": [
@@ -122,12 +140,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         scope = "without" if args.no_attach_zones else "with"
+        pad_scope = "trace/via only" if args.no_pad_geometry else "trace/via/pad"
         print(
             f"{args.board}: {len(table.net_voltages)} mapped nets, "
             f"{len(table.required_by_pair)} cross-pairs, DRU floor {args.dru:.3f} mm"
         )
         print(
-            f"  trace-vs-trace pairwise violations ({scope} #4506 attach zones): "
+            f"  pairwise violations ({pad_scope}, {scope} #4506 attach zones): "
             f"{len(violations)}  ({len(pair_keys)} net pairs)"
         )
         seen: set[tuple[str, str]] = set()

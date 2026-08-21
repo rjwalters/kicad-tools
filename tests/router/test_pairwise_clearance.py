@@ -26,6 +26,7 @@ from kicad_tools.creepage.standards import StandardLookupError
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.pairwise_clearance import (
     AttachZone,
+    PadGeometry,
     PairwiseClearanceTable,
     PairwisePathChecker,
     build_attach_zones,
@@ -36,7 +37,7 @@ from kicad_tools.router.pairwise_clearance import (
     route_pairwise_violation,
     segment_pair_violation,
 )
-from kicad_tools.router.primitives import Route, Segment
+from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
 # A 150 V mains net vs ground: IEC 60664-1, PD2, material group IIIa -> 1.6 mm.
@@ -622,6 +623,173 @@ def test_find_pairwise_violations_board_scan() -> None:
     violations = find_pairwise_violations(routes, table)
     assert len(violations) == 1
     assert {violations[0].net_a, violations[0].net_b} == {"/AC_LINE", "/GND"}
+
+
+# ---------------------------------------------------------------------------
+# Issue #4507: widening the gate past trace-vs-trace to via and pad copper.
+#
+# PR #4885's T4 audit found 17 residual softstart rev-C fails, ALL of them
+# routed trace/via copper against a foreign PAD or VIA -- copper this
+# module's original gate (trace-vs-trace only) could not see by construction.
+# ---------------------------------------------------------------------------
+
+
+def _via(x, y, net, name, diameter=0.6, drill=0.3, layers=(Layer.F_CU, Layer.B_CU)) -> Via:
+    return Via(x=x, y=y, drill=drill, diameter=diameter, layers=layers, net=net, net_name=name)
+
+
+def _pad(net_name: str, x: float, y: float, half: float = 0.2, layers=("F.Cu",)) -> PadGeometry:
+    import shapely
+
+    box = shapely.box(x - half, y - half, x + half, y + half)
+    return PadGeometry(net_name=net_name, layers=frozenset(layers), polygon=box)
+
+
+class TestViaWidening:
+    """``Route.vias`` were always present; #4507 is the first thing that reads
+    them for the pairwise gate."""
+
+    def test_route_pairwise_violation_flags_foreign_via_proximity(self) -> None:
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        moving = Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")])
+        foreign = Route(net=2, net_name="/GND", vias=[_via(2.5, 0.3, 2, "/GND")])
+        v = route_pairwise_violation(moving, 1, [foreign], table)
+        assert v is not None
+        assert {v.net_a, v.net_b} == {"/AC_LINE", "/GND"}
+
+    def test_route_pairwise_violation_flags_moving_via_vs_foreign_trace(self) -> None:
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        moving = Route(net=1, net_name="/AC_LINE", vias=[_via(2.5, 0.0, 1, "/AC_LINE")])
+        foreign = Route(net=2, net_name="/GND", segments=[_seg(0, 0.3, 5, 0.3, 2, "/GND")])
+        v = route_pairwise_violation(moving, 1, [foreign], table)
+        assert v is not None
+        assert {v.net_a, v.net_b} == {"/AC_LINE", "/GND"}
+
+    def test_route_pairwise_violation_flags_via_vs_via(self) -> None:
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        moving = Route(net=1, net_name="/AC_LINE", vias=[_via(0.0, 0.0, 1, "/AC_LINE")])
+        foreign = Route(net=2, net_name="/GND", vias=[_via(0.5, 0.0, 2, "/GND")])
+        v = route_pairwise_violation(moving, 1, [foreign], table)
+        assert v is not None
+        assert {v.net_a, v.net_b} == {"/AC_LINE", "/GND"}
+
+    def test_route_pairwise_violation_via_accepts_clearance_met(self) -> None:
+        """A via far enough from foreign copper is not a false positive."""
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        moving = Route(net=1, net_name="/AC_LINE", vias=[_via(0.0, 0.0, 1, "/AC_LINE")])
+        foreign = Route(net=2, net_name="/GND", vias=[_via(10.0, 0.0, 2, "/GND")])
+        assert route_pairwise_violation(moving, 1, [foreign], table) is None
+
+    def test_via_widening_honours_attach_zone(self) -> None:
+        """A #4506 zone waives via-vs-trace exactly like trace-vs-trace.
+
+        0.3 mm edge gap: above the 0.2 mm DRU floor (a zone never waives
+        below it, mirroring ``test_attach_zone_never_waives_below_dru_floor``)
+        but below the 1.6 mm pairwise requirement.
+        """
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        zone = AttachZone(-1.0, -1.0, 6.0, 1.0, frozenset({"AC_LINE", "GND"}))
+        moving = Route(
+            net=1, net_name="/AC_LINE", vias=[_via(2.5, 0.3, 1, "/AC_LINE", diameter=0.2)]
+        )
+        foreign = Route(net=2, net_name="/GND", segments=[_seg(0, 0.8, 5, 0.8, 2, "/GND")])
+        assert route_pairwise_violation(moving, 1, [foreign], table, attach_zones=(zone,)) is None
+
+    def test_find_pairwise_violations_reports_via_findings(self) -> None:
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        routes = [
+            Route(net=1, net_name="/AC_LINE", vias=[_via(0.0, 0.0, 1, "/AC_LINE")]),
+            Route(net=2, net_name="/GND", vias=[_via(0.5, 0.0, 2, "/GND")]),
+        ]
+        violations = find_pairwise_violations(routes, table)
+        assert len(violations) == 1
+        assert {violations[0].net_a, violations[0].net_b} == {"/AC_LINE", "/GND"}
+
+    def test_no_vias_no_change_in_behaviour(self) -> None:
+        """Routes with empty ``vias`` (the default) are unaffected (dormancy)."""
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        moving = Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")])
+        foreign = Route(net=2, net_name="/GND", segments=[_seg(20, 20, 25, 20, 2, "/GND")])
+        assert route_pairwise_violation(moving, 1, [foreign], table) is None
+
+
+class TestPadWidening:
+    """``foreign_pads`` is opt-in (default ``()``): dormant for every existing
+    live caller, populated only by :func:`board_pairwise_violations`."""
+
+    def test_dormant_by_default(self) -> None:
+        """Without ``foreign_pads`` the gate is unchanged, even beside a pad."""
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        moving = Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")])
+        assert route_pairwise_violation(moving, 1, [], table) is None
+
+    def test_route_pairwise_violation_flags_trace_vs_pad(self) -> None:
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        moving = Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")])
+        pad = _pad("/GND", 2.5, 0.3)
+        v = route_pairwise_violation(moving, 1, [], table, foreign_pads=(pad,))
+        assert v is not None
+        assert {v.net_a, v.net_b} == {"/AC_LINE", "/GND"}
+
+    def test_route_pairwise_violation_flags_via_vs_pad(self) -> None:
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        moving = Route(net=1, net_name="/AC_LINE", vias=[_via(0.0, 0.0, 1, "/AC_LINE")])
+        pad = _pad("/GND", 0.5, 0.0)
+        v = route_pairwise_violation(moving, 1, [], table, foreign_pads=(pad,))
+        assert v is not None
+        assert {v.net_a, v.net_b} == {"/AC_LINE", "/GND"}
+
+    def test_pad_widening_honours_attach_zone(self) -> None:
+        """0.4 mm edge gap: above DRU (0.2 mm), below the 1.6 mm requirement."""
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        zone = AttachZone(-1.0, -1.0, 6.0, 1.0, frozenset({"AC_LINE", "GND"}))
+        moving = Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")])
+        pad = _pad("/GND", 2.5, 0.7)
+        assert (
+            route_pairwise_violation(
+                moving, 1, [], table, attach_zones=(zone,), foreign_pads=(pad,)
+            )
+            is None
+        )
+
+    def test_pad_on_a_different_layer_does_not_conflict(self) -> None:
+        """A same-XY, different-layer SMD pad cannot conflict with the trace."""
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        moving = Route(
+            net=1,
+            net_name="/AC_LINE",
+            segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE", layer=Layer.F_CU)],
+        )
+        pad = _pad("/GND", 2.5, 0.0, layers=("B.Cu",))
+        assert route_pairwise_violation(moving, 1, [], table, foreign_pads=(pad,)) is None
+
+    def test_through_hole_pad_conflicts_on_every_layer(self) -> None:
+        """A ``*.Cu`` (through-hole) pad still conflicts regardless of layer."""
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        moving = Route(
+            net=1,
+            net_name="/AC_LINE",
+            segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE", layer=Layer.B_CU)],
+        )
+        pad = _pad("/GND", 2.5, 0.3, layers=("*.Cu",))
+        assert route_pairwise_violation(moving, 1, [], table, foreign_pads=(pad,)) is not None
+
+    def test_same_net_pad_never_conflicts(self) -> None:
+        """A route's own connection pad is never reported against itself."""
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        moving = Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")])
+        own_pad = _pad("/AC_LINE", 5.0, 0.0)
+        assert route_pairwise_violation(moving, 1, [], table, foreign_pads=(own_pad,)) is None
+
+    def test_find_pairwise_violations_checks_every_route_once_per_pad(self) -> None:
+        table = _table({"/AC_LINE": 150.0, "/GND": 0.0})
+        routes = [
+            Route(net=1, net_name="/AC_LINE", segments=[_seg(0, 0, 5, 0, 1, "/AC_LINE")]),
+        ]
+        pad = _pad("/GND", 2.5, 0.3)
+        violations = find_pairwise_violations(routes, table, foreign_pads=(pad,))
+        assert len(violations) == 1
+        assert {violations[0].net_a, violations[0].net_b} == {"/AC_LINE", "/GND"}
 
 
 # ---------------------------------------------------------------------------

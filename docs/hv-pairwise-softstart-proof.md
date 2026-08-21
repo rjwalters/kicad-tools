@@ -3,20 +3,171 @@
 Running record of the #4507 T4 manual criterion, newest run first. Each section
 describes the tree as of its own date.
 
-> **Current record: [the 2026-08-21 re-run](#the-2026-08-21-re-run-the-router-gate-is-clean-and-what-that-leaves).**
-> The recipe has been run a third time, on `main` @ `0efe6218` with the same
-> four inputs at the same md5s. It found the previous run's replay was scored in
-> the **wrong coordinate frame** — see
-> [The frame correction](#the-frame-correction-the-replay-was-scored-in-the-wrong-coordinate-space)
-> — and, once corrected, that the router's own gate is **clean** on the finished
-> board while the census still reports 17 board-level fails, none of them
-> trace↔trace.
+> **Current record: [the 2026-08-21 second pass](#the-2026-08-21-second-pass-the-widened-gate-attributes-all-6-residuals).**
+> Ask item 4's kernel widening (trace↔pad, via↔pad, via↔trace) landed and the
+> recipe was re-run a fourth time on the same four inputs at the same md5s. The
+> router's own gate is no longer silent on this class of copper: every
+> board-level census fail this run produced is now individually attributed —
+> 4 as genuine, previously-invisible pairwise shortfalls the gate now reports
+> mm-for-mm, 2 as copper the gate correctly waives under the #4506 attach-zone
+> exemption (a deliberate scope difference from the exemption-blind census, not
+> a defect).
 >
-> Below that, retained as the record of the diagnosis:
-> [the 2026-08-16 re-score](#the-re-score-same-recipe-corrected-table) (#4867's
-> `abs()` sign collapse fixed by #4868), and from
-> [Verdict (pre-fix run)](#verdict-of-the-pre-fix-run-t4-fails--but-the-machinery-is-measurably-doing-its-job)
+> Below that, retained as the record of the diagnosis: [the 2026-08-21 first
+> re-run](#the-2026-08-21-re-run-the-router-gate-is-clean-and-what-that-leaves)
+> (the frame-correction fix and the "gate does not look" root cause this pass
+> closes), [the 2026-08-16 re-score](#the-re-score-same-recipe-corrected-table)
+> (#4867's `abs()` sign collapse fixed by #4868), and from [Verdict (pre-fix
+> run)](#verdict-of-the-pre-fix-run-t4-fails--but-the-machinery-is-measurably-doing-its-job)
 > downwards the original pre-fix measurement.
+
+## The 2026-08-21 second pass: the widened gate attributes all 6 residuals
+
+Fourth run of the same recipe, same fixture inputs (`softstart_revc.kicad_pcb`
+md5 `7d82599e…`, `net_class_map.json` `9184a661…`, `vmap.json` `cc72a701…`,
+`creepage_class_map.json` `6c3b324a…` — identical to every prior run in this
+file), `main` @ `cb1a3cc9` (PR #4885, the commit the previous section's "17"
+figure was measured against, plus this issue's own kernel-widening diff) with
+the C++ backend at build 21. Steps 1 and 2 only, same as the immediately
+preceding run — step 3 (`kct zones hv-keepout`) is still unaddressed.
+
+**What changed in the code, not the board**: `segment_pair_violation` and its
+callers (`route_pairwise_violation`, `find_pairwise_violations`,
+`board_pairwise_violations`, and the `_audit_pairwise_clearance` in-run audit)
+were trace↔trace only, by the documented design the previous section names.
+This pass adds trace↔via, via↔via (for free from `Route.vias`, which every
+caller already carried) and trace↔pad / via↔pad (new — `board_pad_geometry()`
+resolves true pad copper from the board file, sheet-absolute, the same frame
+`board_trace_routes()` and `board_attach_zones()` already use). The routing
+search itself (C++ `Grid3D::validate_route`, `lattice/obstacles.py`'s
+`pairwise_pad_blocked`) is untouched — this is an audit/replay-visibility
+fix, not a search change, per the attribution this run performs below.
+
+**Caveat on the numbers**: step 2 is a wall-clock-budgeted `--complete` pass
+(`elapsed 1758.3s of a 5790.0s budget` this run), and no board artifact from
+the previous section's run was retained (softstart's own no-board-artifacts
+policy — see "Reproducing" at the bottom of this file). So this run's 44/77 +
+6/7 signal-net counts happening to match the previous section's are not proof
+of a bit-identical board; treat the two runs' census counts (6 here vs. 17
+there) as two independent measurements of the same recipe, not a diffed
+before/after of one board. What this run *does* establish, on its own copper,
+is complete: every board-level census fail it produced is accounted for.
+
+| Measure | T4 requires | **this run** |
+|---|---|---|
+| Signal nets routed | 100 % | 50 (6/7 + 44/77) |
+| Cross-pairs in the matrix | = census | 1922 |
+| Board-level census fails, after step 2 | **0** | **6** |
+| — attributed to a genuine, now-visible pairwise shortfall | — | **4** |
+| — attributed to a #4506-exempted pairwise shortfall (scope difference, not a defect) | — | **2** |
+| — unattributed | 0 | **0** |
+| Router's own gate on the finished board (trace/via/pad, #4506 zones honoured) | 0 | **4** (was silently 0) |
+
+### Attribution: every one of the 6 traced to a specific copper primitive
+
+`kct creepage` (the census, `--waive-same-footprint`) reports 6 board-level
+fails on this run's `step2.kicad_pcb`:
+
+```
+/AC_LINE          <-> /AC_NEUTRAL       0.600 mm (req 1.600 mm)
+/AC_NEUTRAL       <-> /FUSED_LINE       0.600 mm (req 1.600 mm)
+/GATE_BUS_POS     <-> /I_SENSE_OUT      0.400 mm (req 1.600 mm)
+/SCAP_NEG         <-> /I_SENSE_OUT      0.400 mm (req 1.400 mm)
+/V_BANK_NEG_MID   <-> /PRECHARGE_POS    1.014 mm (req 1.200 mm)
+/LED_A_NEG        <-> /SCAP_POS         1.825 mm (req 2.000 mm)
+```
+
+The widened `scripts/replay_pairwise_gate.py` (backed by
+`board_pairwise_violations`, the identical kernel the router's own audit
+uses) reproduces **4 of the 6 exactly**, mm-for-mm, with the #4506 exemption
+applied (the router's real operating scope):
+
+```
+$ uv run python scripts/replay_pairwise_gate.py step2.kicad_pcb --voltage-map vmap.json
+  pairwise violations (trace/via/pad, with #4506 attach zones): 12  (8 net pairs)
+    /GATE_BUS_POS <-> /I_SENSE_OUT: 0.400 mm against 1.600 mm  <- via-involved
+    /I_SENSE_OUT <-> /SCAP_NEG: 0.400 mm against 1.400 mm      <- via-involved
+    /PRECHARGE_POS <-> /V_BANK_NEG_MID: 1.014 mm against 1.200 mm  <- via-involved
+    ...
+    /LED_A_NEG <-> /SCAP_POS: 1.825 mm against 2.000 mm        <- pad-involved
+```
+
+(The other 4 pairs the widened gate reports — `/GATE_NEG_A`↔`/LED_K_NEG`,
+`/GATE_POS_A`↔`/LED_K_POS`, `/V_BANK_POS_MID`↔`/SCAP_POS`,
+`/AC_NEUTRAL`↔`/AC_LINE` at 1.484 mm — are real findings too, just at a
+*different* location than the census's own reported minimum for that net
+pair; `kct creepage` is net-pair-keyed and reports only the tightest gap per
+pair, and for three of those four the tighter gap is a `same_footprint`
+pad-vs-pad instance this router-copper gate does not check by design — pads
+that never move are a placement question, not something search-time
+avoidance can act on.)
+
+The other 2 (`/AC_LINE`↔`/AC_NEUTRAL`, `/AC_NEUTRAL`↔`/FUSED_LINE`) reproduce
+exactly, mm-for-mm, **only with the #4506 exemption disabled**:
+
+```
+$ uv run python scripts/replay_pairwise_gate.py step2.kicad_pcb --voltage-map vmap.json --no-attach-zones
+    /AC_NEUTRAL <-> /FUSED_LINE: 0.600 mm against 1.600 mm
+    /AC_NEUTRAL <-> /AC_LINE: 0.600 mm against 1.600 mm
+```
+
+Both sit inside a rated connector/fuse-holder footprint's own attach copper
+(`J1`/`J2`/`F1` — the mains input cluster), the same waiver class as the `Q7`/
+`Q8` MOSFET packages the first re-run's frame correction confirmed. The
+router's gate sees this copper and correctly does not flag it, under the
+scope #4506 gives it; `kct creepage` has no concept of that exemption and
+scores the pair at its true minimum regardless. This is the same "census/
+attach-zone scope difference is expected, not a bug" finding the pre-fix
+run's own "What would have to change for T4 to pass" list already named —
+this run is the first evidence that it, specifically, is what the remaining
+non-genuine fails are.
+
+**Net result: zero of this run's 6 board-level census fails are unattributed.**
+Before this pass, all 6 (like the previous section's 17) were invisible to the
+router's own gate by construction — "the gate does not look." After it, every
+one is either a genuine finding the gate now reports (4) or a documented,
+intentional exemption-scope difference (2). "What T4 needs now" item 1 from
+the previous section — widen the pairwise gate past trace↔trace — is **MET**.
+
+### What is still open
+
+The 4 genuine findings are real, but this pass does not establish *why* the
+search placed that copper — whether `lattice/obstacles.py`'s existing
+pairwise-aware pad/via widening (`pairwise_pad_blocked`, the `pairwise.
+required(...)` call sites) failed to avoid it on nets it did route (a
+residual search-time gap, case (c) from the curator's framing), or whether it
+is an inherent trade-off of a run that only completed 44/77 (57 %) signal
+nets under documented `CONGESTION_SATURATED`/`BUDGET_STARVED` placement
+pressure (case (a)/(b) territory — a search that had no clean alternative to
+offer, on a board that is not fully routed regardless). Resolving that
+needs comparing the lattice's obstacle grid at each of the 4 locations
+against what it should have computed, which is deeper than this run's
+audit-kernel change touches. Named here as the open follow-up, not assumed
+either way.
+
+The `--hv-threshold` policy question, the `kct zones hv-keepout` margin bug,
+and the 27–32 unrouted-net placement wall are all unchanged from the previous
+section and remain out of this issue's scope for the reasons already given
+there.
+
+### Reproducing this run
+
+```bash
+# Steps 1-2 identical to the previous section's Commands (same recipe, same inputs).
+uv run kct creepage step2.kicad_pcb --voltage-map vmap.json \
+  --net-class-map creepage_class_map.json --standard iec60664 \
+  --pollution-degree 2 --material-group IIIa --working-voltage 250 \
+  --waive-same-footprint --format json > creepage_step2.json
+python3 hardware/kicad/creepage_triage.py step2.kicad_pcb creepage_step2.json
+
+uv run python scripts/replay_pairwise_gate.py step2.kicad_pcb --voltage-map vmap.json
+uv run python scripts/replay_pairwise_gate.py step2.kicad_pcb --voltage-map vmap.json --no-attach-zones
+uv run python scripts/replay_pairwise_gate.py step2.kicad_pcb --voltage-map vmap.json --no-pad-geometry
+```
+
+No board artifacts are committed to this repo (routed boards are
+`DO_NOT_FAB` work-in-progress and live in scratch, per the fixture repo's own
+policy) — as with every prior run in this file.
 
 ## The 2026-08-21 re-run: the router gate is clean, and what that leaves
 

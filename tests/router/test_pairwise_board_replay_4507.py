@@ -245,9 +245,40 @@ class TestBoardPairwiseViolations:
         unwaived = board_pairwise_violations(board, table, attach_zones=())
 
         assert len(waived) == 1
-        # Disabling the exemption (the census' view) surfaces R5's own copper.
-        assert len(unwaived) == 2
-        assert {round(v.actual_mm, 3) for v in unwaived} == {0.8, 1.8}
+        # Disabling the exemption (the census' view) surfaces R5's own copper
+        # -- four ways now that #4507 widened the gate past trace-vs-trace:
+        # the original two trace-vs-trace shortfalls (0.8, 1.8) PLUS two new
+        # trace-vs-pad ones each net's trace makes against R5's OTHER pad
+        # (~1.7 mm -- the trace runs almost to R5's own-net pad, so the
+        # closest foreign copper is the neighbouring pad one pad-width over).
+        assert len(unwaived) == 4
+        assert {round(v.actual_mm, 3) for v in unwaived} == {0.8, 1.7, 1.8}
+
+    @pytest.mark.parametrize("origin", ORIGINS)
+    def test_pad_widening_is_waived_by_the_same_zone_as_trace_widening(
+        self, tmp_path, table, origin
+    ):
+        """The new trace-vs-pad findings are #4506-exempt, not just counted."""
+        board = _write(tmp_path, *origin)
+
+        waived = board_pairwise_violations(board, table)
+
+        # The one surviving finding is the far-corner trace-vs-trace pair;
+        # every trace-vs-pad finding this board could produce sits inside
+        # R5's own attach zone and is waived exactly like its trace-vs-trace
+        # sibling.
+        assert len(waived) == 1
+        assert waived[0].actual_mm == pytest.approx(0.8)
+
+    @pytest.mark.parametrize("origin", ORIGINS)
+    def test_disabling_pad_geometry_restores_the_pre_4507_scope(self, tmp_path, table, origin):
+        """``foreign_pads=()`` is the escape hatch back to trace/via-only."""
+        board = _write(tmp_path, *origin)
+
+        trace_only = board_pairwise_violations(board, table, attach_zones=(), foreign_pads=())
+
+        assert len(trace_only) == 2
+        assert {round(v.actual_mm, 3) for v in trace_only} == {0.8, 1.8}
 
     def test_dru_floor_defaults_to_the_tables(self, tmp_path, table):
         board = _write(tmp_path, 68.5, 55.0)

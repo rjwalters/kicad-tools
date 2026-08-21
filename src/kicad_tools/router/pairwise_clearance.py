@@ -43,13 +43,13 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterable, Mapping, NamedTuple, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, NamedTuple, Sequence
 
 from kicad_tools.core.geometry import segment_to_segment_distance
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.router.layers import Layer
-    from kicad_tools.router.primitives import Route, Segment
+    from kicad_tools.router.primitives import Route, Segment, Via
     from kicad_tools.schema.pcb import Footprint
 
 # A pairwise conflict is only reported when the edge-to-edge gap falls short of
@@ -161,6 +161,18 @@ class AttachZone:
         return self.covers_layer(a, layer) and self.covers_layer(b, layer)
 
 
+def _pad_copper_layers(pad: object) -> frozenset[str]:
+    """Copper layers a pad's OWN copper occupies (``*.Cu`` for through-hole).
+
+    Shared by :func:`build_attach_zones` (per-net #4506 zone layer scoping)
+    and :func:`board_pad_geometry` (issue #4507's pad-widening layer filter)
+    so the two cannot read a pad's layer list two different ways.
+    """
+    return frozenset(
+        layer for layer in (getattr(pad, "layers", None) or ()) if layer.endswith(".Cu")
+    )
+
+
 def build_attach_zones(
     footprints: Iterable[Footprint],
     *,
@@ -201,9 +213,7 @@ def build_attach_zones(
             half_h = abs(sin_rot) * pad.size[0] / 2.0 + abs(cos_rot) * pad.size[1] / 2.0
             bounds.append((x - half_w, y - half_h, x + half_w, y + half_h))
             key = _norm_net_key(pad.net_name)
-            copper = {
-                layer for layer in (getattr(pad, "layers", None) or ()) if layer.endswith(".Cu")
-            }
+            copper = _pad_copper_layers(pad)
             if copper:
                 layers_by_net.setdefault(key, set()).update(copper)
         if not bounds:
@@ -670,7 +680,9 @@ class PairwiseViolation(NamedTuple):
         net_b: The foreign net name it is too close to.
         actual_mm: Measured edge-to-edge gap (mm).
         required_mm: The derived pairwise requirement (mm).
-        x: Violation x-coordinate (mm) -- midpoint of the foreign segment.
+        x: Violation x-coordinate (mm) -- midpoint of the closest-gap segment
+            between the two conflicting copper elements (trace, via or --
+            issue #4507 -- pad).
         y: Violation y-coordinate (mm).
     """
 
@@ -773,6 +785,148 @@ def closest_gap_midpoint_xy(
     return ((closest_a[0] + closest_b[0]) / 2.0, (closest_a[1] + closest_b[1]) / 2.0)
 
 
+class PadGeometry(NamedTuple):
+    """A foreign pad's true copper polygon, for the pad-widening gate (#4507).
+
+    Eight of the seventeen T4 softstart-rev-C residual pairwise fails (PR
+    #4885's audit) are routed trace/via copper against a foreign PAD -- copper
+    :func:`segment_pair_violation` cannot see because it only ever compares two
+    :class:`~kicad_tools.router.primitives.Segment` objects.  This carrier is
+    the pad-shaped analogue of a :class:`~kicad_tools.router.primitives.Route`
+    that :func:`_copper_pair_violation` can compare a trace or via against.
+
+    Attributes:
+        net_name: The pad's net (raw, not ``/``-stripped -- every consumer
+            here routes lookups through :meth:`PairwiseClearanceTable.
+            required_clearance`, which normalises on both sides itself).
+        layers: Copper layers the pad's OWN copper occupies, from
+            :func:`_pad_copper_layers`.  Empty means "unknown/unrestricted"
+            (mirrors :meth:`AttachZone.covers_layer`'s convention) --
+            :data:`ALL_COPPER_LAYERS` is the through-hole wildcard, present
+            verbatim rather than expanded, exactly as ``AttachZone.net_layers``
+            stores it.
+        polygon: The pad's TRUE copper outline (roundrect/oval honoured, via
+            :func:`~kicad_tools.validate.rules.clearance._pad_polygon`) in the
+            SAME sheet-absolute frame every :class:`Segment`/:class:`Via` this
+            module works with uses.
+    """
+
+    net_name: str
+    layers: frozenset[str]
+    polygon: Any
+
+
+def _pad_covers_layer(layers: frozenset[str], layer: object) -> bool:
+    """True when a pad's own copper reaches ``layer`` (empty/``*.Cu`` = any)."""
+    if not layers or ALL_COPPER_LAYERS in layers:
+        return True
+    return _norm_layer_key(layer) in layers
+
+
+def _pad_probe_layer(pad: PadGeometry) -> str | None:
+    """The single shared layer to probe a #4506 zone at for a via-vs-``pad``
+    pair (issue #4507).
+
+    A via is modelled layer-agnostic here (its barrel is assumed to reach
+    every layer it might occupy -- see :func:`_via_copper_polygon`'s
+    docstring), so the "shared layer" for the exemption probe is the PAD's:
+    ``None`` (layer-agnostic, mirroring the through-hole / via-vs-via
+    convention) when the pad is through-hole, layer-unknown, or occupies more
+    than one explicit copper layer; that one layer name otherwise.
+    """
+    if not pad.layers or ALL_COPPER_LAYERS in pad.layers or len(pad.layers) != 1:
+        return None
+    return next(iter(pad.layers))
+
+
+def _segment_copper_polygon(seg: Segment) -> Any | None:
+    """A trace segment's true copper outline (rectangle + round caps)."""
+    from kicad_tools.geometry.copper import segment_copper_polygon
+
+    return segment_copper_polygon(seg.start, seg.end, seg.width)
+
+
+def _via_copper_polygon(via: Via) -> Any:
+    """A via's copper disc, in the barrel's own (x, y) with its full diameter.
+
+    Modelled layer-agnostic: a via's annular ring exists on every layer its
+    barrel spans, and (for the common through-hole case this fixture and the
+    C++ ``validate_route`` via-vs-via/via-vs-segment branches share) that is
+    usually the whole stack.  A blind/buried via that does NOT reach a given
+    inner layer is therefore checked one layer wider than its true geometry --
+    a conservative (never-silently-missed) approximation, not a correctness
+    regression, and the same simplification :func:`_pad_probe_layer` accepts
+    on the pad side of a via pair.
+    """
+    from shapely.geometry import Point  # type: ignore[import-untyped]
+
+    return Point(via.x, via.y).buffer(via.diameter / 2.0)
+
+
+def _shapely_gap_and_midpoint(poly_a: Any, poly_b: Any) -> tuple[float, float, float]:
+    """Edge-to-edge gap (mm) and closest-gap midpoint between two polygons.
+
+    The polygon analogue of :func:`_segment_edge_gap` / :func:`_closest_gap_midpoint`
+    for copper this module cannot model as two line segments (pads, vias).
+    ``shapely.shortest_line`` returns the endpoints closest points on ``poly_a``
+    and ``poly_b`` even when the two overlap (the fully-degenerate case a
+    negative-clearance HV shortfall can produce); this mirrors
+    :func:`closest_gap_midpoint_xy`'s own tolerance of that situation.
+    """
+    import shapely  # type: ignore[import-untyped]
+
+    gap = float(poly_a.distance(poly_b))
+    line = shapely.shortest_line(poly_a, poly_b)
+    if line is None or line.is_empty:
+        point = poly_a.centroid
+        return gap, float(point.x), float(point.y)
+    (x1, y1), (x2, y2) = line.coords[0], line.coords[-1]
+    return gap, (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+
+def _copper_pair_violation(
+    poly_a: Any,
+    net_a: str,
+    poly_b: Any,
+    net_b: str,
+    layer: object | None,
+    table: PairwiseClearanceTable,
+    *,
+    floor: float,
+    attach_zones: Sequence[AttachZone],
+    tolerance: float,
+) -> PairwiseViolation | None:
+    """Shapely-geometry pairwise check -- the pad/via analogue of
+    :func:`segment_pair_violation` (issue #4507).
+
+    Used for any copper PAIR that is not trace-vs-trace (which stays on the
+    faster analytic path segment_pair_violation already had).  ``layer`` is
+    the single shared copper layer the two pieces occupy -- exactly what
+    ``segment_pair_violation`` requires its two segments to already agree on
+    -- or ``None`` for a layer-agnostic pair (via-vs-via, or an ambiguous/
+    through-hole pad probe), the same convention the C++ ``widen()`` helper
+    (``grid.cpp``) and ``LatticePairwise.exempt_pt_pt`` use for via-vs-via.
+    """
+    required = table.required_clearance(net_a, net_b)
+    if required <= floor + tolerance:
+        return None
+    gap, gap_x, gap_y = _shapely_gap_and_midpoint(poly_a, poly_b)
+    if gap >= required - tolerance:
+        return None
+    if gap >= floor - tolerance and _attach_zone_exempts(
+        attach_zones, gap_x, gap_y, net_a, net_b, layer
+    ):
+        return None
+    return PairwiseViolation(
+        net_a=net_a,
+        net_b=net_b,
+        actual_mm=gap,
+        required_mm=required,
+        x=gap_x,
+        y=gap_y,
+    )
+
+
 def segment_pair_violation(
     seg_a: Segment,
     seg_b: Segment,
@@ -838,15 +992,22 @@ def route_pairwise_violation(
     dru: float | None = None,
     attach_zones: Sequence[AttachZone] = (),
     tolerance: float = _PASS_TOLERANCE,
+    foreign_pads: Sequence[PadGeometry] = (),
 ) -> PairwiseViolation | None:
     """Find the first pairwise-clearance shortfall for a freshly-routed net.
 
-    Walks every segment of ``route`` against every segment of the already-routed
-    ``foreign_routes`` (skipping the route's own net), returning the first
-    :class:`PairwiseViolation` or ``None`` when the route clears all pairwise
-    requirements.  This is the additive HV check threaded into the Python
-    post-route validators (``pathfinder`` and ``cpp_backend``); the scalar
-    segment/pad/via checks run first and unchanged.
+    Walks every segment AND via of ``route`` against every segment and via of
+    the already-routed ``foreign_routes`` (skipping the route's own net),
+    returning the first :class:`PairwiseViolation` or ``None`` when the route
+    clears all pairwise requirements.  This is the additive HV check threaded
+    into the Python post-route validators (``pathfinder`` and ``cpp_backend``);
+    the scalar segment/pad/via checks run first and unchanged.
+
+    Issue #4507: via coverage comes for free from :attr:`Route.vias` (every
+    caller already carries real via geometry there); ``foreign_pads`` is
+    additive and opt-in (default ``()``, a strict no-op) -- only
+    :func:`board_pairwise_violations` populates it today, from
+    :func:`board_pad_geometry`.
 
     ``exclude_net`` is the route's own net id (same-net copper never conflicts).
     ``id_to_name`` resolves a net id to its board net name; when omitted the
@@ -870,6 +1031,127 @@ def route_pairwise_violation(
         floor=floor,
         attach_zones=attach_zones,
         tolerance=tolerance,
+        vias=route.vias,
+        foreign_pads=foreign_pads,
+    )
+
+
+def _moving_via_vs_foreign_segment(
+    via: Via,
+    moving_name: str,
+    seg: Segment,
+    foreign_name: str,
+    table: PairwiseClearanceTable,
+    *,
+    floor: float,
+    attach_zones: Sequence[AttachZone],
+    tolerance: float,
+) -> PairwiseViolation | None:
+    """Moving-via-vs-foreign-trace pairwise check (issue #4507).
+
+    ``net_a`` is always the MOVING net (the via's), matching every other
+    violation this module reports.
+    """
+    seg_poly = _segment_copper_polygon(seg)
+    if seg_poly is None:
+        return None
+    return _copper_pair_violation(
+        _via_copper_polygon(via),
+        moving_name,
+        seg_poly,
+        foreign_name,
+        seg.layer,
+        table,
+        floor=floor,
+        attach_zones=attach_zones,
+        tolerance=tolerance,
+    )
+
+
+def _moving_segment_vs_foreign_via(
+    seg: Segment,
+    moving_name: str,
+    via: Via,
+    foreign_name: str,
+    table: PairwiseClearanceTable,
+    *,
+    floor: float,
+    attach_zones: Sequence[AttachZone],
+    tolerance: float,
+) -> PairwiseViolation | None:
+    """Moving-trace-vs-foreign-via pairwise check (issue #4507)."""
+    seg_poly = _segment_copper_polygon(seg)
+    if seg_poly is None:
+        return None
+    return _copper_pair_violation(
+        seg_poly,
+        moving_name,
+        _via_copper_polygon(via),
+        foreign_name,
+        seg.layer,
+        table,
+        floor=floor,
+        attach_zones=attach_zones,
+        tolerance=tolerance,
+    )
+
+
+def _via_vs_via_violation(
+    via_a: Via,
+    net_a: str,
+    via_b: Via,
+    net_b: str,
+    table: PairwiseClearanceTable,
+    *,
+    floor: float,
+    attach_zones: Sequence[AttachZone],
+    tolerance: float,
+) -> PairwiseViolation | None:
+    """Via-vs-via pairwise check (issue #4507); always layer-agnostic."""
+    return _copper_pair_violation(
+        _via_copper_polygon(via_a),
+        net_a,
+        _via_copper_polygon(via_b),
+        net_b,
+        None,
+        table,
+        floor=floor,
+        attach_zones=attach_zones,
+        tolerance=tolerance,
+    )
+
+
+def _copper_vs_pad_violation(
+    poly: Any,
+    net_name: str,
+    layer: object | None,
+    pad: PadGeometry,
+    table: PairwiseClearanceTable,
+    *,
+    floor: float,
+    attach_zones: Sequence[AttachZone],
+    tolerance: float,
+) -> PairwiseViolation | None:
+    """Trace-or-via-vs-pad pairwise check (issue #4507).
+
+    ``layer`` is the moving copper's own layer for a trace (applicability is
+    enforced -- a pad on a different, non-through-hole layer cannot conflict);
+    pass ``None`` for a via, whose barrel is modelled layer-agnostic (see
+    :func:`_via_copper_polygon`), which also skips the applicability filter.
+    """
+    if layer is not None and not _pad_covers_layer(pad.layers, layer):
+        return None
+    probe_layer = layer if layer is not None else _pad_probe_layer(pad)
+    return _copper_pair_violation(
+        poly,
+        net_name,
+        pad.polygon,
+        pad.net_name,
+        probe_layer,
+        table,
+        floor=floor,
+        attach_zones=attach_zones,
+        tolerance=tolerance,
     )
 
 
@@ -884,15 +1166,30 @@ def _segments_pairwise_violation(
     floor: float,
     attach_zones: Sequence[AttachZone],
     tolerance: float,
+    vias: Sequence[Via] = (),
+    foreign_pads: Sequence[PadGeometry] = (),
 ) -> PairwiseViolation | None:
-    """Shared moving-copper-vs-foreign-routes walk (issue #4507).
+    """Shared moving-copper-vs-foreign-copper walk (issue #4507).
 
-    ONE implementation backs both :func:`route_pairwise_violation` (the
-    post-route acceptance gate) and :func:`path_pairwise_violation` (the
-    candidate-path predicate), so a copper-moving pass that consults the
-    predicate can never disagree with the gate that audits its output --
-    the same single-implementation discipline :func:`project_zone_layers`
-    enforces for the #4506 layer scoping.
+    ONE implementation backs :func:`route_pairwise_violation` (the post-route
+    acceptance gate), :func:`path_pairwise_violation` (the candidate-path
+    predicate, trace-vs-trace only -- it has no via/route context to widen
+    with) and (via :func:`find_pairwise_violations`) the board-level audit and
+    replay, so a copper-moving pass that consults the predicate can never
+    disagree with the gate that audits its output -- the same single-
+    implementation discipline :func:`project_zone_layers` enforces for the
+    #4506 layer scoping.
+
+    Coverage past trace-vs-trace (issue #4507's widening, dormant unless a
+    caller supplies ``vias``/``foreign_pads``):
+
+    * ``segments`` (moving) vs a foreign route's :attr:`Route.vias` --
+      trace-vs-via.
+    * ``vias`` (moving) vs a foreign route's segments/vias -- via-vs-trace,
+      via-vs-via.
+    * ``segments``/``vias`` (moving) vs ``foreign_pads`` -- trace-vs-pad,
+      via-vs-pad.  Checked once per pad (not per foreign route), since a pad
+      is static board copper, not owned by any :class:`Route`.
     """
     for other in foreign_routes:
         if other.net == exclude_net:
@@ -917,6 +1214,80 @@ def _segments_pairwise_violation(
                 )
                 if violation is not None:
                     return violation
+            for ovia in other.vias:
+                violation = _moving_segment_vs_foreign_via(
+                    seg,
+                    moving_name,
+                    ovia,
+                    foreign_name,
+                    table,
+                    floor=floor,
+                    attach_zones=attach_zones,
+                    tolerance=tolerance,
+                )
+                if violation is not None:
+                    return violation
+        for via in vias:
+            for oseg in other.segments:
+                violation = _moving_via_vs_foreign_segment(
+                    via,
+                    moving_name,
+                    oseg,
+                    foreign_name,
+                    table,
+                    floor=floor,
+                    attach_zones=attach_zones,
+                    tolerance=tolerance,
+                )
+                if violation is not None:
+                    return violation
+            for ovia in other.vias:
+                violation = _via_vs_via_violation(
+                    via,
+                    moving_name,
+                    ovia,
+                    foreign_name,
+                    table,
+                    floor=floor,
+                    attach_zones=attach_zones,
+                    tolerance=tolerance,
+                )
+                if violation is not None:
+                    return violation
+
+    for pad in foreign_pads:
+        required = table.required_clearance(moving_name, pad.net_name)
+        if required <= floor + tolerance:
+            continue
+        for seg in segments:
+            seg_poly = _segment_copper_polygon(seg)
+            if seg_poly is None:
+                continue
+            violation = _copper_vs_pad_violation(
+                seg_poly,
+                moving_name,
+                seg.layer,
+                pad,
+                table,
+                floor=floor,
+                attach_zones=attach_zones,
+                tolerance=tolerance,
+            )
+            if violation is not None:
+                return violation
+        for via in vias:
+            violation = _copper_vs_pad_violation(
+                _via_copper_polygon(via),
+                moving_name,
+                None,
+                pad,
+                table,
+                floor=floor,
+                attach_zones=attach_zones,
+                tolerance=tolerance,
+            )
+            if violation is not None:
+                return violation
     return None
 
 
@@ -949,11 +1320,15 @@ def path_pairwise_violation(
     the ``--lattice-optimize`` post-passes stop proposing copper the pairwise
     audit backstop then flags.
 
-    Scope matches the audit exactly (trace-to-trace, same copper layer, #4506
-    attach-zone exemption included): both delegate to the same
-    :func:`_segments_pairwise_violation` walk, so predicate and gate agree by
-    construction.  Pad/via geometry remains the scalar checks' and the
-    ``kct creepage`` census' remit.
+    Scope matches the audit (same #4506 attach-zone exemption): both delegate
+    to the same :func:`_segments_pairwise_violation` walk, so predicate and
+    gate agree by construction.  Issue #4507 widened that shared walk to also
+    check the candidate against a foreign route's :attr:`Route.vias`
+    (trace-vs-via); the candidate itself has no via of its own (it is one
+    in-flight segment move), and foreign PAD copper is not threaded through
+    this predicate -- callers that need pad coverage use
+    :func:`route_pairwise_violation` / :func:`find_pairwise_violations` with
+    an explicit ``foreign_pads``, as :func:`board_pairwise_violations` does.
 
     The moving net's name resolves from ``net_name`` when supplied, else from
     ``id_to_name[exclude_net]``.  An unresolvable moving net returns ``None``
@@ -1127,17 +1502,26 @@ def find_pairwise_violations(
     dru: float | None = None,
     attach_zones: Sequence[AttachZone] = (),
     tolerance: float = _PASS_TOLERANCE,
+    foreign_pads: Sequence[PadGeometry] = (),
 ) -> list[PairwiseViolation]:
     """Scan a whole routed board for pairwise-clearance shortfalls (board-level).
 
-    Every unordered pair of distinct-net routes is checked segment-vs-segment.
-    Returns a deterministically-ordered list of every :class:`PairwiseViolation`
-    found (empty when the board satisfies all pairwise requirements).  Intended
-    for a post-route board audit / tests; the in-loop validators use
-    :func:`route_pairwise_violation` for early-exit.
+    Every unordered pair of distinct-net routes is checked trace-vs-trace,
+    trace-vs-via and via-vs-via (issue #4507 widened this past the original
+    trace-vs-trace-only scan -- ``Route.vias`` was already carried by every
+    caller, just never walked).  When ``foreign_pads`` is supplied (issue
+    #4507; only :func:`board_pairwise_violations` populates it today, from
+    :func:`board_pad_geometry`), every route's trace and via copper is ALSO
+    checked against every foreign pad, once per route -- a pad is static
+    board copper, not owned by any :class:`Route`, so it cannot join the
+    route-pair loop the way a via can.  Returns a deterministically-ordered
+    list of every :class:`PairwiseViolation` found (empty when the board
+    satisfies all pairwise requirements).  Intended for a post-route board
+    audit / tests; the in-loop validators use :func:`route_pairwise_violation`
+    for early-exit.
 
     ``attach_zones`` (issue #4588) carries the #4506 rated-footprint necking
-    regions through to :func:`segment_pair_violation`, exactly as
+    regions through to every check here, exactly as
     :func:`route_pairwise_violation` already does.  Omitting them would make
     this scan report every deliberately-exempted domain-bridging footprint
     (tap resistors, TO-220 packages, optocouplers) as a violation -- a false
@@ -1166,6 +1550,83 @@ def find_pairwise_violations(
                         net_a_name=a_name,
                         net_b_name=b_name,
                         dru=floor,
+                        attach_zones=attach_zones,
+                        tolerance=tolerance,
+                    )
+                    if violation is not None:
+                        out.append(violation)
+                for ovia in rb.vias:
+                    violation = _moving_segment_vs_foreign_via(
+                        seg,
+                        a_name,
+                        ovia,
+                        b_name,
+                        table,
+                        floor=floor,
+                        attach_zones=attach_zones,
+                        tolerance=tolerance,
+                    )
+                    if violation is not None:
+                        out.append(violation)
+            for via in ra.vias:
+                for oseg in rb.segments:
+                    violation = _moving_via_vs_foreign_segment(
+                        via,
+                        a_name,
+                        oseg,
+                        b_name,
+                        table,
+                        floor=floor,
+                        attach_zones=attach_zones,
+                        tolerance=tolerance,
+                    )
+                    if violation is not None:
+                        out.append(violation)
+                for ovia in rb.vias:
+                    violation = _via_vs_via_violation(
+                        via,
+                        a_name,
+                        ovia,
+                        b_name,
+                        table,
+                        floor=floor,
+                        attach_zones=attach_zones,
+                        tolerance=tolerance,
+                    )
+                    if violation is not None:
+                        out.append(violation)
+
+    if foreign_pads:
+        for route in materialised:
+            route_name = _resolve_net_name(id_to_name, route.net, route.net_name)
+            for pad in foreign_pads:
+                required = table.required_clearance(route_name, pad.net_name)
+                if required <= floor + tolerance:
+                    continue
+                for seg in route.segments:
+                    seg_poly = _segment_copper_polygon(seg)
+                    if seg_poly is None:
+                        continue
+                    violation = _copper_vs_pad_violation(
+                        seg_poly,
+                        route_name,
+                        seg.layer,
+                        pad,
+                        table,
+                        floor=floor,
+                        attach_zones=attach_zones,
+                        tolerance=tolerance,
+                    )
+                    if violation is not None:
+                        out.append(violation)
+                for via in route.vias:
+                    violation = _copper_vs_pad_violation(
+                        _via_copper_polygon(via),
+                        route_name,
+                        None,
+                        pad,
+                        table,
+                        floor=floor,
                         attach_zones=attach_zones,
                         tolerance=tolerance,
                     )
@@ -1233,23 +1694,79 @@ def shift_attach_zones(
 
 
 def board_trace_routes(board_path: str | Path) -> list[Route]:
-    """Every ``(segment ...)`` in a board file, grouped into one route per net.
+    """Every ``(segment ...)``/``(via ...)`` in a board file, one route per net.
 
-    Vias and zone fills are deliberately excluded: the pairwise gate
-    (:func:`segment_pair_violation`) is a **trace-vs-trace** check, so this is
-    exactly the copper it can speak about.  Net ids are re-assigned densely
-    (1..N, in net-name order) because a name-based board resolves unknown names
-    to id 0, and :func:`find_pairwise_violations` skips equal-id route pairs --
-    which would silently drop every comparison on such a board.
+    Zone fills are still excluded (pour geometry is the census' remit, #3901 --
+    unchanged since this function's introduction).  Vias were originally
+    excluded too, when the pairwise gate was trace-vs-trace only; issue #4507
+    widened the gate to also walk via copper, and both parsers already read
+    the SAME sheet-absolute frame (:func:`~kicad_tools.router.optimizer.pcb.
+    parse_segments` / ``parse_vias`` work on the raw file text directly,
+    unlike ``PCB.load``'s board-relative footprint view -- see
+    :func:`board_attach_zones`), so folding vias in here is a frame-safe
+    widening, not a new frame to get wrong.
+
+    Net ids are re-assigned densely (1..N, in net-name order over the UNION of
+    net names carrying a segment or a via) because a name-based board resolves
+    unknown names to id 0, and :func:`find_pairwise_violations` skips
+    equal-id route pairs -- which would silently drop every comparison on
+    such a board.
     """
-    from kicad_tools.router.optimizer.pcb import parse_segments
+    from kicad_tools.router.optimizer.pcb import parse_segments, parse_vias
     from kicad_tools.router.primitives import Route
 
-    by_net = parse_segments(Path(board_path).read_text())
+    text = Path(board_path).read_text()
+    segments_by_net = parse_segments(text)
+    vias_by_net = parse_vias(text)
+    net_names = sorted(set(segments_by_net) | set(vias_by_net))
     return [
-        Route(net=index, net_name=net_name, segments=list(by_net[net_name]))
-        for index, net_name in enumerate(sorted(by_net), start=1)
+        Route(
+            net=index,
+            net_name=net_name,
+            segments=list(segments_by_net.get(net_name, ())),
+            vias=list(vias_by_net.get(net_name, ())),
+        )
+        for index, net_name in enumerate(net_names, start=1)
     ]
+
+
+def board_pad_geometry(board_path: str | Path) -> tuple[PadGeometry, ...]:
+    """Every connected pad's true copper polygon, sheet-absolute (issue #4507).
+
+    ``PCB.load`` reports footprint (and therefore pad) positions
+    **board-relative** (see :func:`board_attach_zones`'s docstring for the
+    full frame explanation); this shifts every pad polygon by the same
+    ``board_origin`` :func:`board_attach_zones` already applies, so it lines
+    up with :func:`board_trace_routes`' segments/vias in the same file's own
+    sheet-absolute frame.
+
+    Unconnected (net-less) pads are skipped -- they cannot participate in a
+    net-pair requirement.  A degenerate (non-positive-size) pad is skipped by
+    :func:`~kicad_tools.validate.rules.clearance._pad_polygon` itself.
+    """
+    from shapely.affinity import translate  # type: ignore[import-untyped]
+
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.clearance import _pad_polygon
+
+    pcb = PCB.load(str(board_path))
+    ox, oy = pcb.board_origin
+    out: list[PadGeometry] = []
+    for footprint in pcb.footprints:
+        for pad in footprint.pads:
+            if not pad.net_name:
+                continue
+            polygon = _pad_polygon(pad, footprint)
+            if polygon is None:
+                continue
+            out.append(
+                PadGeometry(
+                    net_name=pad.net_name,
+                    layers=_pad_copper_layers(pad),
+                    polygon=translate(polygon, ox, oy),
+                )
+            )
+    return tuple(out)
 
 
 def board_pairwise_violations(
@@ -1259,17 +1776,17 @@ def board_pairwise_violations(
     dru: float | None = None,
     attach_zones: Sequence[AttachZone] | None = None,
     tolerance: float = _PASS_TOLERANCE,
+    foreign_pads: Sequence[PadGeometry] | None = None,
 ) -> list[PairwiseViolation]:
     """Replay the router's own pairwise gate over a finished board FILE (#4507).
 
     The board-level equivalent of :func:`find_pairwise_violations` for copper
-    that is no longer in memory: it reads the traces and the #4506 attach zones
-    out of the *same* file, in the *same* frame, and runs the identical
-    :func:`segment_pair_violation` kernel the in-run audit uses.  This is how a
-    routed board is scored against the gate after the fact (the #4507 T4
-    softstart proof), and having one supported implementation is what keeps that
-    scoring from being re-derived -- with a fresh frame bug each time -- as a
-    throwaway script.
+    that is no longer in memory: it reads the traces, vias, pads and the #4506
+    attach zones out of the *same* file, in the *same* frame, and runs the
+    identical checks the in-run audit uses.  This is how a routed board is
+    scored against the gate after the fact (the #4507 T4 softstart proof), and
+    having one supported implementation is what keeps that scoring from being
+    re-derived -- with a fresh frame bug each time -- as a throwaway script.
 
     Args:
         board_path: Path to a routed ``.kicad_pcb`` file.
@@ -1280,17 +1797,24 @@ def board_pairwise_violations(
             pass ``()`` to score the board with the #4506 exemption disabled
             (the census' view, which has no concept of it).
         tolerance: Sub-micron pass tolerance, as elsewhere in this module.
+        foreign_pads: Pad copper to widen against.  ``None`` (the default)
+            resolves them from ``board_path`` via :func:`board_pad_geometry`;
+            pass ``()`` to score trace/via copper only (the pre-#4507 scope).
 
     Returns:
-        Every trace-vs-trace shortfall on the board, deterministically ordered.
+        Every trace/via pairwise shortfall on the board (trace-vs-trace,
+        trace-vs-via, via-vs-via, and -- unless disabled -- trace/via-vs-pad),
+        deterministically ordered.
     """
     zones = board_attach_zones(board_path) if attach_zones is None else attach_zones
+    pads = board_pad_geometry(board_path) if foreign_pads is None else foreign_pads
     return find_pairwise_violations(
         board_trace_routes(board_path),
         table,
         dru=dru,
         attach_zones=zones,
         tolerance=tolerance,
+        foreign_pads=pads,
     )
 
 
