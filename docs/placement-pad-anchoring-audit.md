@@ -1,38 +1,52 @@
 # Placement pad-anchoring audit — 2026-08
 
 **Issue:** #4831 (item 1 of 5 — the written audit; items 2-5 remain open)
-**Audit commit:** `784dac2b` (the `main` this branch was cut from)
-**Date:** 2026-08-14
-**Scope:** read-only. This audit changed **no** file under `src/`. Every
-migration candidate below is a *stub for a future issue*, listed in this
-document rather than filed (issue creation is serialized in this repo).
+**Originally audited at:** `784dac2b`
+**Re-verified at:** `8a98a69f` (2026-08-21) — every anchor below re-checked
+against the live tree, every measurement re-run; see §2.
+**Scope:** read-only with respect to `src/`. Every migration candidate below
+is a *stub for a future issue*, listed in this document rather than filed
+(issue creation is serialized in this repo).
 
-> **Status update (2026-08-14, later the same day): M1 has landed.**
-> `compute_wirelength` and `evaluate_placement` now accept an optional
-> `pad_positions` map (built by `build_pad_position_map`,
-> `src/kicad_tools/placement/wirelength.py`), and
-> `kct optimize-placement --pad-anchored-wirelength` supplies it from the
-> pads the CLI already decoded. It is **opt-in**: with no map the score is
-> byte-identical to the centre-anchored objective. The line-number citations
-> below describe the tree *as audited*; `cost.py` line numbers shifted by the
-> M1 patch. M3-M5 are unchanged and still unfiled.
+> **Citation style — symbol anchors, not line numbers (repo policy #4764).**
+> This document originally cited source as `file.py:NNN`. Those citations
+> rotted three times in the eight days after it landed: PRs #4857 (M1),
+> #4863 (M2) and #4870 (M5) each shifted `cost.py`, `wirelength.py`,
+> `multi_fidelity.py` and both optimizer front-ends, and each appended a
+> "line citations below predate this patch" disclaimer rather than fixing
+> them. By 2026-08-21, 60+ of the 86 line citations resolved to the wrong
+> symbol: the line cited as `evaluate_placement` had drifted 20 lines into
+> the body of `compute_domain_cohesion`, and the line cited as
+> `compute_hpwl` had drifted onto an `Args:` line 26 lines above the
+> function it claimed to point at.
 >
-> **Status update (2026-08-15): M2 has landed too.** `_evaluate_fidelity_1`
-> (`src/kicad_tools/placement/multi_fidelity.py`) now measures wirelength at
-> the pads it was already required to carry, **unconditionally** — see §6 M2
-> for why that needed no opt-in flag while M1 did. Fidelity 0 remains
-> centre-anchored. `multi_fidelity.py` line citations below predate that
-> patch; the symbol names are still the identity of each claim.
+> That is precisely the failure `tests/test_docs_source_citations.py`
+> (issue #4764) exists to prevent — it *bans* `file.py:NNN` in policed
+> docs and requires a **symbol + path** anchor instead, because a symbol
+> survives a refactor and is machine-checkable. This document escaped the
+> guard only because its glob list covered `docs/guides/*.md` and
+> `docs/reference/*.md` but not top-level `docs/*.md`. It is now re-anchored
+> on symbols, and `docs/*.md` is inside the guard (§2), so this class of rot
+> cannot recur silently.
 >
-> **Status update (2026-08-15, later): M5 has landed.**
-> `compare_wirelength_estimators` /`WirelengthEstimatorReport`
-> (`src/kicad_tools/placement/wirelength.py`) measure both estimators on one
-> layout; `kct optimize-placement --dry-run` reports the pair in prose and as
-> a `wirelength_estimators` block in its `--format json` document, and the MCP
-> `evaluate_placement` response carries the same block. Report-only — no
-> objective changed. This is the evidence channel M1's default flip was
-> waiting on. **M3 and M4 remain unimplemented and unfiled**, as does the M1
-> tail (MCP front-end still scores centres; pad anchoring still opt-in).
+> Verify any claim below with `rg -n '<symbol>' <path>`.
+
+## Status of the migration candidates
+
+Three of the five candidates in §6 have landed since this audit was written.
+They are recorded inline in §6 with their as-built notes; in brief:
+
+| Stub | Status |
+|---|---|
+| **M1** — score the objective on pad-anchored wirelength | **Landed, opt-in** (#4857). `compute_wirelength` / `evaluate_placement` take an optional `pad_positions` map; `kct optimize-placement --pad-anchored-wirelength` supplies it. Default is still centre-anchored. The MCP front-end is *not* migrated. |
+| **M2** — pad HPWL at multi-fidelity level 1 | **Landed, unconditional** (#4863). Fidelity ≥ 1 measures at pads; fidelity 0 unchanged. |
+| **M3** — pad-address `max_distance` | Not implemented, not filed. |
+| **M4** — cluster springs target the shared-net pad | Not implemented, not filed. |
+| **M5** — report both estimators side by side | **Landed, report-only** (#4870). `compare_wirelength_estimators` feeds `kct optimize-placement --dry-run` and the MCP `evaluate_placement` response. |
+
+M1's remaining tail (default-on, plus the MCP front-end) is still gated on the
+evidence M5 now produces — and §4.1's fleet measurement says that evidence does
+**not** yet support flipping the default.
 
 ## Why this audit exists
 
@@ -47,38 +61,51 @@ That number is **second-hand and not reproduced here** — treat it as the
 motivation for looking, not as evidence about *our* boards. What this audit
 does supply is a first-party inventory of which of our placement terms are
 centre-anchored, plus a first-party measurement of how far the two estimators
-diverge on our own committed fixtures (§4).
+diverge on our own fixtures and on the committed board fleet (§4).
 
 ---
 
 ## 1. Headline findings
 
-1. **A pad-anchored HPWL estimator already exists, is tested, and is not wired
-   into the optimizer.** `compute_hpwl` (`src/kicad_tools/placement/wirelength.py:111`)
-   measures HPWL from real transformed pad coordinates. The optimizer objective
-   `evaluate_placement` (`src/kicad_tools/placement/cost.py:715`) instead calls
-   `compute_wirelength` (`src/kicad_tools/placement/cost.py:228`), which builds
-   `pos_map` from component **centres** (`src/kicad_tools/placement/cost.py:253`).
-   Nothing under `src/` calls `compute_hpwl` — only
-   `tests/test_placement_benchmark.py:50` and `tests/test_placement_wirelength.py:18`.
-2. **The pads are already computed and then thrown away on every evaluation.**
-   Both optimizer front-ends decode a placement vector into `PlacedComponent`
-   objects *with* transformed pads and immediately project them down to
-   centre-only `ComponentPlacement`:
-   `_vector_to_placements` (`src/kicad_tools/cli/optimize_placement_cmd.py:142`)
-   and `_vector_to_placements` (`src/kicad_tools/mcp/tools/optimize_placement.py:221`).
-   The migration is therefore not blocked on data availability.
-3. **The older `optim` force-directed placer is already pin-anchored.** Its net
-   springs pull *pin* coordinates, not centres — `compute_spring_force`
-   (`src/kicad_tools/optim/placement.py:1230`) and `total_wire_length`
-   (`src/kicad_tools/optim/placement.py:2340`) both read `pin.x`/`pin.y`. So the
-   repo already contains a working example of pad/pin anchoring; the newer
-   `placement` package regressed to centres.
-4. **The declarative `near`-equivalent constraint is centre-to-centre.**
-   `_validate_max_distance` (`src/kicad_tools/optim/constraints.py:239`) computes
+1. **A pad-anchored HPWL estimator exists, is tested, and still has no call
+   site in `src/`.** `compute_hpwl` in `src/kicad_tools/placement/wirelength.py`
+   measures HPWL from real transformed pad coordinates. `rg -n 'compute_hpwl'
+   src/` returns only its own definition, docstring mentions, and the
+   `src/kicad_tools/placement/__init__.py` re-export — no caller. It is
+   exercised only from `tests/test_placement_wirelength.py` and
+   `tests/test_placement_benchmark.py`.
+   **This finding is now partly resolved, but not by `compute_hpwl`.** M1/M2
+   delivered pad anchoring through a different route: `build_pad_position_map`
+   in `wirelength.py` produces a `(reference, pad_name) -> (x, y)` map that is
+   passed *into* `compute_wirelength` in `src/kicad_tools/placement/cost.py`.
+   That preserves `Net.weight` (which `compute_hpwl` ignores) and avoids an
+   import cycle, at the cost of leaving `compute_hpwl` itself dead in `src/`.
+   Whether to retire `compute_hpwl` or route it through the same weighting is
+   an open tidy-up, not a pad-anchoring gap.
+2. **The optimizer objective is still centre-anchored by default.**
+   `evaluate_placement` in `cost.py` accepts `pad_positions` but defaults it to
+   `None`, and `compute_wirelength` builds `pos_map` from component **centres**
+   whenever a pin is absent from that map. Only the CLI opts in, and only
+   behind `--pad-anchored-wirelength`.
+3. **One of the two front-ends still throws its pads away.** Both decode a
+   placement vector into `PlacedComponent` objects *with* transformed pads. The
+   CLI keeps them when asked — `_evaluate` in
+   `src/kicad_tools/cli/optimize_placement_cmd.py` calls
+   `build_pad_position_map` under its `pad_anchored` flag. The MCP path does
+   not: `_vector_to_placements` and `_evaluate_vector` in
+   `src/kicad_tools/mcp/tools/optimize_placement.py` project straight down to
+   centre-only `ComponentPlacement` and never pass `pad_positions`. The
+   migration is not blocked on data availability anywhere.
+4. **The older `optim` force-directed placer is already pin-anchored.** Its net
+   springs pull *pin* coordinates, not centres — `compute_spring_force` and
+   `total_wire_length` in `src/kicad_tools/optim/placement.py` both read
+   `pin1.x`/`pin2.x`. So the repo already contains a working example of
+   pad/pin anchoring; the newer `placement` package regressed to centres.
+5. **The declarative `near`-equivalent constraint is centre-to-centre.**
+   `_validate_max_distance` in `src/kicad_tools/optim/constraints.py` computes
    `comp.x - anchor.x` between component origins. This is the closest analogue
-   in our tree to pcbplace's decap example.
-5. **"Anchor" already means three unrelated things in this repo** (§7). None of
+   in our tree to pcbplace's decap example, and it is unmigrated.
+6. **"Anchor" already means three unrelated things in this repo** (§8). None of
    them is pad anchoring. Do not mistake `--anchor-weight` or
    `--placement-feedback-anchor` for prior art on this issue.
 
@@ -86,27 +113,33 @@ diverge on our own committed fixtures (§4).
 
 ## 2. How to verify this document
 
-Every claim below cites `path:line`. Two commands re-check them against the
-tree you are reading:
+Every source claim is anchored on a **symbol name plus a file path**. Check any
+one of them with:
 
 ```bash
-# 1. Does the cited symbol live at the cited line?
-uv run python - <<'PY'
-import ast, pathlib
-for f, line in [("src/kicad_tools/placement/cost.py", 715),
-                ("src/kicad_tools/placement/wirelength.py", 111)]:
-    tree = ast.parse(pathlib.Path(f).read_text())
-    for n in ast.walk(tree):
-        if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.lineno == line:
-            print(f, line, n.name)
-PY
-
-# 2. Is the pad-anchored estimator wired into the objective anywhere in src/?
-rg -n "compute_hpwl" src/     # expect: only wirelength.py + placement/__init__.py exports
+rg -n 'compute_wirelength' src/kicad_tools/placement/cost.py
 ```
 
-Line numbers drift. If a cite misses, `rg -n "<symbol>" <file>` and treat the
-symbol name — not the number — as the identity of the claim.
+If a symbol has been renamed, that `rg` returns nothing — which is the signal
+to update this document, not to guess at a line number.
+
+Three assertions in this document are machine-checked so they cannot rot
+unnoticed:
+
+| Assertion | Guard |
+|---|---|
+| No `file.py:NNN` citations here; every named symbol still exists in the file this doc names | `tests/test_docs_source_citations.py` (`docs/*.md` is inside `GUARDED_DOC_GLOBS`) |
+| §4's fixture divergence numbers | `tests/test_placement_pad_anchored_wirelength.py` |
+| §6 M2's level-0 vs level-1 anchoring split | `tests/test_multi_fidelity_pad_anchored.py` |
+
+The load-bearing negative claim — that `compute_hpwl` has no caller in `src/` —
+is a one-liner:
+
+```bash
+rg -n 'compute_hpwl' src/
+# expect: only wirelength.py (def + docstrings), a multi_fidelity.py comment,
+# and the placement/__init__.py re-export. No call site.
+```
 
 ---
 
@@ -117,64 +150,69 @@ Classification key:
 - **centre** — the term measures distance/extent between component origins.
 - **pad** — the term measures real transformed pad/pin coordinates.
 - **body** — the term measures footprint bounding boxes / courtyards. Not a
-  net-based term, so pad anchoring does not apply (see §6).
+  net-based term, so pad anchoring does not apply (see §7).
 - **n/a** — bookkeeping, not a geometric measurement.
 
 ### 3.1 The optimizer objective — `src/kicad_tools/placement/cost.py`
 
-`evaluate_placement` (`cost.py:715`) is *the* objective scored by
-`kct optimize-placement` (via `_evaluate`, `src/kicad_tools/cli/optimize_placement_cmd.py:163`),
-by the MCP `optimize_placement`/`evaluate_placement` tools
-(`src/kicad_tools/mcp/tools/optimize_placement.py:325` and `:603`), and by the
-registry handler (`src/kicad_tools/mcp/tools/registry.py:1692`).
+`evaluate_placement` is *the* objective scored by `kct optimize-placement` (via
+`_evaluate` in `src/kicad_tools/cli/optimize_placement_cmd.py`), by the MCP
+`optimize_placement` / `evaluate_placement` tools in
+`src/kicad_tools/mcp/tools/optimize_placement.py`, and by the registry handler
+in `src/kicad_tools/mcp/tools/registry.py`.
+
+All symbols below live in `src/kicad_tools/placement/cost.py` unless stated.
 
 | Term | Symbol | Anchoring | Evidence |
 |---|---|---|---|
-| Wirelength (HPWL) | `compute_wirelength` (`cost.py:228`) | **centre** | `pos_map = {p.reference: (p.x, p.y) …}` at `cost.py:253`; called from `cost.py:773` |
-| Overlap | `compute_overlap` (`cost.py:269`) | body | AABB from `footprint_sizes`, `cost.py:289` |
-| Board boundary | `compute_boundary_violation` (`cost.py:301`) | body | half-extent box vs outline, `cost.py:328-337` |
-| DRC clearance count | `compute_drc_violations` (`cost.py:342`) | body | pairwise bbox gap vs `min_clearance`, `cost.py:376-392` |
-| Compactness / area | `compute_area` (`cost.py:396`) | **centre** | docstring: "bounding-box area enclosing all component centers", `cost.py:399` |
-| Block boundary | `compute_block_boundary_violation` (`cost.py:421`) | body | member bbox vs `BlockRegion`, `cost.py:466-469` |
-| Inter-block spacing | `compute_inter_block_spacing_violation` (`cost.py:474`) | body | per-block bbox union, `cost.py:514-521` |
-| HV creepage keepout | `compute_creepage_violation` (`cost.py:553`) | body | edge-to-edge bbox gap vs required creepage, `cost.py:633-643` |
-| Same-domain cohesion | `compute_domain_cohesion` (`cost.py:648`) | **centre** | `by_domain … append((p.x, p.y))` at `cost.py:700`; `del footprint_sizes  # unused: cohesion is measured between footprint centres` at `cost.py:691` |
-| Weighted-sum aggregation | `_weighted_sum_score` (`cost.py:847`) | n/a | |
-| Lexicographic aggregation | `_lexicographic_score` (`cost.py:862`) | n/a | |
-| Per-net weighting | `Net.weight` (`cost.py:169`, field documented `cost.py:176-181`) | n/a | multiplies whichever wirelength term is in use |
+| Wirelength (HPWL) | `compute_wirelength` | **centre** by default, **pad** when `pad_positions` is supplied (M1) | builds `pos_map` from `(p.x, p.y)`; a pin found in `pad_positions` uses its pad, otherwise falls back to `pos_map`. Called from `evaluate_placement` |
+| Overlap | `compute_overlap` | body | AABB per component from `footprint_sizes` via `half_w, half_h` |
+| Board boundary | `compute_boundary_violation` | body | half-extent box vs the `BoardOutline` |
+| DRC clearance count | `compute_drc_violations` | body | pairwise bbox gap vs `min_gap` from `DesignRuleSet.min_clearance` |
+| Compactness / area | `compute_area` | **centre** | docstring: "bounding-box area enclosing all component centers" |
+| Block boundary | `compute_block_boundary_violation` | body | member bbox vs `BlockRegion` via `region_map` |
+| Inter-block spacing | `compute_inter_block_spacing_violation` | body | per-block bbox union |
+| HV creepage keepout | `compute_creepage_violation` | body | edge-to-edge bbox `gap_x`/`gap_y` vs the required creepage |
+| Same-domain cohesion | `compute_domain_cohesion` | **centre** | `by_domain.setdefault(domain, []).append((p.x, p.y))`, and the explicit `del footprint_sizes  # unused: cohesion is measured between footprint centres` |
+| Weighted-sum aggregation | `_weighted_sum_score` | n/a | |
+| Lexicographic aggregation | `_lexicographic_score` | n/a | |
+| Per-net weighting | `Net.weight` | n/a | multiplies whichever wirelength term is in use |
 
-Three centre-anchored terms; the rest are body geometry or bookkeeping.
+Three centre-anchored terms; the rest are body geometry or bookkeeping. Only
+the first has been migrated, and only behind a flag.
 
 ### 3.2 The multi-fidelity evaluator — `src/kicad_tools/placement/multi_fidelity.py`
 
 | Level | Symbol | Anchoring | Evidence |
 |---|---|---|---|
-| Fidelity 0 (HPWL) | `_evaluate_fidelity_0` (`multi_fidelity.py:266`) | **centre** | delegates to `compute_wirelength`, `multi_fidelity.py:276` |
-| Fidelity 1 (+DRC) | `_evaluate_fidelity_1` (`multi_fidelity.py:292`) | ~~**centre**~~ → **pad** wirelength (M2), **pad** DRC | *As audited*: built `simple_placements` by dropping pads (`multi_fidelity.py:306-314`) then called `compute_wirelength` at `multi_fidelity.py:316`, while `check_placement_drc` (`src/kicad_tools/placement/drc.py:205`) did real pad-to-pad clearance. **Since M2** it also passes `build_pad_position_map(placements_rich)` as `pad_positions`, so the wirelength term is pad-anchored too. |
-| Fidelity 2/3 (routing) | `_evaluate_global_routing` (`multi_fidelity.py:511`) | n/a (inherits the fidelity-1 breakdown) | routability ratio only |
+| Fidelity 0 (HPWL) | `_evaluate_fidelity_0` | **centre** | calls `compute_wirelength(placements, nets)` with no pad map |
+| Fidelity 1 (+DRC) | `_evaluate_fidelity_1` | **pad** wirelength (M2), **pad** DRC | calls `build_pad_position_map(placements_rich)` and passes it as `pad_positions`; `check_placement_drc` does real pad-to-pad clearance |
+| Fidelity 2/3 (routing) | `_evaluate_global_routing` | n/a (inherits the fidelity-1 breakdown) | routability ratio only |
 
-`_evaluate_fidelity_1` was the sharpest instance of the pattern: it is *handed*
-`PlacedComponent` objects with transformed pads (it needs them for DRC) and
-still measured wirelength between centres. **M2 fixed this** (§6); fidelity 0
-remains centre-anchored, since it accepts centre-only placements and so cannot
-assume pads exist.
+`_evaluate_fidelity_1` was the sharpest instance of the original pattern: it is
+*handed* `PlacedComponent` objects with transformed pads (it needs them for
+DRC) and still measured wirelength between centres. **M2 fixed this** (§6).
+Fidelity 0 remains centre-anchored, since it accepts centre-only placements and
+so cannot assume pads exist — which keeps the historical estimate reachable by
+asking for `FidelityLevel.HPWL`.
 
-Reachability note (honest scoping): `evaluate_placement_multifidelity`
-(`multi_fidelity.py:374`) is exported from `src/kicad_tools/placement/__init__.py:57`
-but is not called from any CLI or MCP surface — `rg -n "multi_fidelity" src/`
-returns only the package `__init__`. It is library/test surface today, so a
-migration there has lower blast radius *and* lower payoff than §3.1.
+Reachability note (honest scoping): `evaluate_placement_multifidelity` is
+exported from `src/kicad_tools/placement/__init__.py` but is not called from any
+CLI or MCP surface — `rg -n 'evaluate_placement_multifidelity' src/` matches
+only the module itself and that re-export. It is library/test surface today, so
+a migration there has lower blast radius *and* lower payoff than §3.1. This is
+why M2 needed no opt-in flag while M1 did.
 
 ### 3.3 Seeds and priors
 
 | Term | Symbol | Anchoring | Evidence |
 |---|---|---|---|
-| Force-directed seed | `force_directed_placement` (`src/kicad_tools/placement/seed.py:95`) | **centre** | attraction from `_build_net_adjacency` (`seed.py:65`) — a shared-net *count* per component pair, applied to centre positions |
-| Random seed | `random_placement` (`src/kicad_tools/placement/seed.py:248`) | n/a | |
-| Affinity graph | `build_affinity_graph` (`src/kicad_tools/placement/priors.py:191`) | n/a (topological) | edge weight = shared-net count, `priors.py:225-232`; pad-blind by construction |
-| Schematic-proximity prior | `schematic_proximity_prior` (`src/kicad_tools/placement/priors.py:489`) | **centre** | iterates positions toward the weighted centroid of neighbours |
-| GP prior mean | `prior_mean_position` (`src/kicad_tools/placement/priors.py:637`) | **centre** | weighted centroid of neighbour positions, `priors.py:664-673` |
-| Cluster / power-domain detection | `find_clusters` (`priors.py:243`), `detect_power_domains` (`priors.py:308`), `power_domain_clustering` (`priors.py:619`) | n/a (topological) | |
+| Force-directed seed | `force_directed_placement` in `src/kicad_tools/placement/seed.py` | **centre** | attraction from `_build_net_adjacency` — a shared-net *count* per component pair, applied to centre positions |
+| Random seed | `random_placement` in `seed.py` | n/a | |
+| Affinity graph | `build_affinity_graph` in `src/kicad_tools/placement/priors.py` | n/a (topological) | edge weight = shared-net count; pad-blind by construction |
+| Schematic-proximity prior | `schematic_proximity_prior` in `priors.py` | **centre** | iterates positions toward the weighted centroid of neighbours |
+| GP prior mean | `prior_mean_position` in `priors.py` | **centre** | weighted centroid of neighbour positions |
+| Cluster / power-domain detection | `find_clusters`, `detect_power_domains`, `power_domain_clustering` in `priors.py` | n/a (topological) | |
 
 ### 3.4 Declarative constraints — `src/kicad_tools/optim/constraints.py`
 
@@ -183,30 +221,31 @@ This is the existing analogue of pcbplace's five-verb vocabulary (relevant to
 
 | Constraint | Symbol | Anchoring | Evidence |
 |---|---|---|---|
-| `max_distance` (≈ `near`) | `_validate_max_distance` (`constraints.py:239`) | **centre** | `dist = sqrt((comp.x - anchor.x)**2 + (comp.y - anchor.y)**2)`, `constraints.py:266` |
-| `alignment` | `_validate_alignment` (`constraints.py:282`) | **centre** | axis coordinate of component origins |
-| `ordering` | `_validate_ordering` (`constraints.py:317`) | **centre** | |
-| `within_box` (≈ `fixed`/region) | `_validate_within_box` (`constraints.py:360`) | **centre** | |
-| `relative_position` | `_validate_relative_position` (`constraints.py:404`) | **centre** | |
-| Keepout (≈ `keepout`) | `validate_keepout_violations` (`src/kicad_tools/optim/keepout.py:581`) | **centre point** | `zone.contains_point(cx, cy)` on `fp.position`, `keepout.py:598-601` |
+| `max_distance` (≈ `near`) | `_validate_max_distance` | **centre** | `dist = math.sqrt((comp.x - anchor.x) ** 2 + (comp.y - anchor.y) ** 2)` |
+| `alignment` | `_validate_alignment` | **centre** | axis coordinate of component origins |
+| `ordering` | `_validate_ordering` | **centre** | |
+| `within_box` (≈ `fixed`/region) | `_validate_within_box` | **centre** | |
+| `relative_position` | `_validate_relative_position` | **centre** | |
+| Keepout (≈ `keepout`) | `validate_keepout_violations` in `src/kicad_tools/optim/keepout.py` | **centre point** | `cx, cy = fp.position` then `zone.contains_point` |
 
 ### 3.5 Other placement surfaces (for completeness)
 
 | Surface | Symbol | Anchoring | Note |
 |---|---|---|---|
-| `kct placement check` diagnostics | `PlacementAnalyzer` (`src/kicad_tools/placement/analyzer.py:47`) | body | real courtyard polygons; see `docs/placement-scoring.md` |
-| Side-aware overlap/boundary | `compute_overlap` (`src/kicad_tools/placement/geometry.py:93`), `compute_boundary_violation` (`geometry.py:144`) | body | richer siblings of the `cost.py` versions |
-| C++ cost kernels | `compute_overlap_cpp` (`src/kicad_tools/placement/cpp_backend.py:145`), `compute_boundary_violation_cpp` (`cpp_backend.py:182`), `compute_drc_violations_cpp` (`cpp_backend.py:222`), `create_batch_evaluator` (`cpp_backend.py:260`) | body | the accelerated terms are exactly the body-geometry ones — **note for any migration**: there is no `compute_wirelength_cpp`, so a pad-anchored wirelength does not invalidate a C++ kernel |
-| `kct placement refine` energy | `PlacementSession._compute_score` (`src/kicad_tools/optim/session.py:273`) | **pad** (indirectly) | sums `total_wire_length()` (pin-anchored, §5) + spacing energy; explicitly *not* the optimizer objective (`session.py:276-291`) |
+| `kct placement check` diagnostics | `PlacementAnalyzer` in `src/kicad_tools/placement/analyzer.py` | body | real courtyard polygons; see `docs/placement-scoring.md` |
+| Side-aware overlap/boundary | `compute_overlap`, `compute_boundary_violation` in `src/kicad_tools/placement/geometry.py` | body | richer siblings of the `cost.py` versions |
+| C++ cost kernels | `compute_overlap_cpp`, `compute_boundary_violation_cpp`, `compute_drc_violations_cpp`, `create_batch_evaluator` in `src/kicad_tools/placement/cpp_backend.py` | body | the accelerated terms are exactly the body-geometry ones — **note for any migration**: there is no `compute_wirelength_cpp`, so a pad-anchored wirelength does not invalidate a C++ kernel |
+| `kct placement refine` energy | `PlacementSession._compute_score` in `src/kicad_tools/optim/session.py` | **pad** (indirectly) | sums `total_wire_length()` (pin-anchored, §5) + spacing energy; its own docstring flags it as a physics-simulation energy proxy, explicitly *not* the optimizer objective |
 
 ---
 
 ## 4. Measured divergence between the two estimators (first-party)
 
 Both estimators were run over the **same** committed placements in
-`tests/fixtures/placement/benchmark_boards.json` (decoded through
-`encode`/`decode`, `src/kicad_tools/placement/vector.py:320`/`:344`, so pad
-transforms are the production ones):
+`tests/fixtures/placement/benchmark_boards.json` (decoded through `encode` /
+`decode` in `src/kicad_tools/placement/vector.py`, so pad transforms are the
+production ones). Re-run at `8a98a69f`; all three rows reproduce exactly as
+first measured.
 
 | Fixture board | Components | Nets | `compute_wirelength` (centres) | `compute_hpwl` (pads) | Δ |
 |---|---|---|---|---|---|
@@ -215,36 +254,11 @@ transforms are the production ones):
 | `medium_mcu_board` (reference) | 20 | 17 | 382.000 mm | 339.230 mm | −11.2% |
 | `stress_50_components` | 50 | — | *not measured* | *not measured* | no committed placement — the fixture carries only a `component_generation` block and the board is built programmatically in `tests/test_placement_benchmark.py` |
 
-Reproduce with:
+These three rows are pinned by `tests/test_placement_pad_anchored_wirelength.py`,
+so a change to either estimator fails a test rather than silently invalidating
+this table.
 
-```bash
-uv run python - <<'PY'
-import json, pathlib
-from kicad_tools.placement.cost import ComponentPlacement, Net, compute_wirelength
-from kicad_tools.placement.vector import ComponentDef, PadDef, PlacedComponent, decode, encode
-from kicad_tools.placement.wirelength import compute_hpwl
-
-boards = json.loads(pathlib.Path("tests/fixtures/placement/benchmark_boards.json").read_text())["boards"]
-for name, b in boards.items():
-    if "components" not in b:
-        continue
-    defs = {c["reference"]: ComponentDef(
-        reference=c["reference"],
-        pads=tuple(PadDef(p["name"], p["local_x"], p["local_y"], p.get("size_x", .5), p.get("size_y", .5))
-                   for p in c.get("pads", [])),
-        width=c.get("width", 1.0), height=c.get("height", 1.0)) for c in b["components"]}
-    nets = [Net(n["name"], tuple((p[0], p[1]) for p in n["pins"])) for n in b["nets"]]
-    raw = b.get("known_optimal_placement") or b.get("reference_placement")
-    order = [defs[r["reference"]] for r in raw]
-    placed = [PlacedComponent(r["reference"], r["x"], r["y"], r.get("rotation", 0.0), r.get("side", 0), ())
-              for r in raw]
-    dec = decode(encode(placed), order)
-    centre = compute_wirelength([ComponentPlacement(p.reference, p.x, p.y, p.rotation) for p in dec], nets)
-    print(f"{name:22s} centre={centre:8.3f}  pad={compute_hpwl(dec, nets):8.3f}")
-PY
-```
-
-**Since M5, this table no longer needs a bespoke script.** Any board can be
+**Since M5, measuring a board needs no bespoke script.** Any board can be
 measured with the shipped CLI, which reports both estimators for the layout as
 committed:
 
@@ -255,9 +269,9 @@ uv run kct optimize-placement board.kicad_pcb --dry-run --format json \
 #  "delta_pct": …, "scored": "centre", "pads_available": true, "pad_count": …}
 ```
 
-Note the two numbers differ from the script above on weighted boards: the CLI
-honours `Net.weight` on *both* legs (see §6 M5), whereas `compute_hpwl` in the
-snippet ignores it. On the unweighted fixtures in the table they agree.
+Note the CLI's numbers differ from a direct `compute_hpwl` call on weighted
+boards: the CLI honours `Net.weight` on *both* legs (see §6 M5), whereas
+`compute_hpwl` ignores it. On the unweighted fixtures in the table they agree.
 
 **What this does and does not show.** It shows the two estimators assign
 materially different lengths to the *same* layout (up to 40% on a 3-part board,
@@ -267,25 +281,26 @@ find a different optimum. It does **not** show that optimizing against pads
 produces shorter routed copper on our boards; nobody has run that experiment
 here. The pad-anchored value happened to be lower on all three fixtures, but
 that direction is not guaranteed in general — a pad can sit outside the
-bounding box of its own component's centre.
+bounding box of its own component's centre, and §4.1 shows that happening.
 
-### 4.1 Fleet measurement (M5, 2026-08-15, at `07649039`)
+### 4.1 Fleet measurement (M5)
 
 The three-fixture table above was the *whole* evidence base when M1 shipped
 opt-in. M5's reporting channel makes the same measurement available on any
-board, so here is the committed fleet, measured with the command above
-(`boards/0*/output/*_routed.kicad_pcb`):
+board, so here is the committed fleet, measured with the command above over
+`boards/0*/output/*_routed.kicad_pcb`. Re-run at `8a98a69f`; every row
+reproduces the figures first recorded at `07649039`.
 
-| Board | Components | Nets | Pads | Centre-anchored | Pad-anchored | Δ |
-|---|---|---|---|---|---|---|
-| `00-simple-led` | 3 | 3 | 6 | 34.00 mm | 32.00 mm | −5.88% |
-| `01-voltage-divider` | 4 | 3 | 8 | 58.00 mm | 55.46 mm | −4.38% |
-| `02-charlieplex-led` | 14 | 9 | 34 | 262.00 mm | 274.70 mm | **+4.85%** |
-| `03-usb-joystick` | 19 | 16 | 86 | 586.54 mm | 530.75 mm | −9.51% |
-| `04-stm32-devboard` | 17 | 12 | 85 | 351.00 mm | 353.72 mm | **+0.77%** |
-| `05-bldc-motor-controller` | 55 | 44 | 209 | 1732.00 mm | 1724.23 mm | −0.45% |
-| `06-diffpair-test` | 7 | 26 | 198 | 1115.00 mm | 1097.81 mm | −1.54% |
-| `07-matchgroup-test` | 8 | 34 | 244 | 1285.00 mm | 1233.12 mm | −4.04% |
+| Board | Pads | Centre-anchored | Pad-anchored | Δ |
+|---|---|---|---|---|
+| `00-simple-led` | 6 | 34.00 mm | 32.00 mm | −5.88% |
+| `01-voltage-divider` | 8 | 58.00 mm | 55.46 mm | −4.38% |
+| `02-charlieplex-led` | 34 | 262.00 mm | 274.70 mm | **+4.85%** |
+| `03-usb-joystick` | 86 | 586.54 mm | 530.75 mm | −9.51% |
+| `04-stm32-devboard` | 85 | 351.00 mm | 353.72 mm | **+0.77%** |
+| `05-bldc-motor-controller` | 209 | 1732.00 mm | 1724.24 mm | −0.45% |
+| `06-diffpair-test` | 198 | 1115.00 mm | 1097.81 mm | −1.54% |
+| `07-matchgroup-test` | 244 | 1285.00 mm | 1233.12 mm | −4.04% |
 
 **The finding that matters for M1's default flip: the sign is not constant.**
 Two of eight fleet boards read *longer* at the pads (`02` by +4.85%, `04` by
@@ -297,7 +312,8 @@ What it still does **not** show: that optimizing against pads produces shorter
 routed copper. These are two estimators reading one fixed layout; nobody has
 yet run the optimizer both ways on a board and compared the routed result.
 That experiment — not this table — is what should decide whether
-`--pad-anchored-wirelength` becomes the default.
+`--pad-anchored-wirelength` becomes the default. **On the evidence to date, it
+should not.**
 
 ---
 
@@ -305,37 +321,40 @@ That experiment — not this table — is what should decide whether
 
 | Surface | Symbol | Status |
 |---|---|---|
-| Pad HPWL estimator | `compute_hpwl` (`src/kicad_tools/placement/wirelength.py:111`), `compute_hpwl_breakdown` (`wirelength.py:140`) | Pad-anchored via `_build_pad_lookup` (`wirelength.py:60`) + `_hpwl_for_net` (`wirelength.py:79`), which read `pad.x`/`pad.y` from `TransformedPad` (`src/kicad_tools/placement/vector.py:142`). Tested in `tests/test_placement_wirelength.py:18` and `tests/test_placement_benchmark.py:460`, `:572`, `:670`. **Not called from anywhere in `src/`.** |
-| Per-footprint ratsnest | `compute_per_footprint_ratsnest` (`wirelength.py:191`) | Pad-anchored (nearest-pad distances, `wirelength.py:243-247`). **Is** used in `src/` — but only for *reporting*, not scoring: `src/kicad_tools/mcp/tools/optimize_placement.py:42` (import), `:553`, `:686`. (The curator's scope note said it was test-only; it is not — corrected here.) |
-| Placement DRC | `check_placement_drc` (`src/kicad_tools/placement/drc.py:205`) | Pad-anchored pad-to-pad clearance, per its own docstring (`drc.py:220-224`). Wired into fidelity ≥ 1 (`multi_fidelity.py:325`) but **not** into `evaluate_placement`, which uses the bbox-count `compute_drc_violations` instead. |
-| Pad transform machinery | `_transform_pad` (`vector.py:254`), `decode` (`vector.py:344`) | Produces absolute pad coordinates for every component on every decode. Pads are populated in both production front-ends: `src/kicad_tools/cli/optimize_placement_cmd.py:486-496` and `src/kicad_tools/mcp/tools/optimize_placement.py:129`. |
-| Legacy force-directed placer | `compute_spring_force` (`src/kicad_tools/optim/placement.py:1230`), `total_wire_length` (`optim/placement.py:2340`), `create_springs_from_nets` (`optim/placement.py:830`) | **Pin-anchored.** `Pin` (`src/kicad_tools/optim/components.py:35`) stores absolute coordinates; `Spring` (`optim/components.py:187`) connects `(comp_ref, pin_num)` pairs. This is the behaviour pcbplace advocates, already shipping in the `optim` engine behind `kct placement refine`. |
+| Pad HPWL estimator | `compute_hpwl`, `compute_hpwl_breakdown` in `src/kicad_tools/placement/wirelength.py` | Pad-anchored via `_build_pad_lookup` + `_hpwl_for_net`, which read `pad.x`/`pad.y` from `TransformedPad` in `src/kicad_tools/placement/vector.py`. Tested in `tests/test_placement_wirelength.py` and `tests/test_placement_benchmark.py`. **Still has no call site in `src/`** — M1/M2 delivered pad anchoring through `build_pad_position_map` instead (§1). |
+| Pad position map | `build_pad_position_map` in `wirelength.py` | The actual M1/M2 vehicle: turns `PlacedComponent` pads into the `(reference, pad_name) -> (x, y)` map that `compute_wirelength` consumes. |
+| Estimator comparison | `compare_wirelength_estimators`, `WirelengthEstimatorReport` in `wirelength.py` | M5's report-only channel. Runs `compute_wirelength` twice — once without a pad map, once with — so anchoring is the *only* difference between the two numbers. |
+| Per-footprint ratsnest | `compute_per_footprint_ratsnest` in `wirelength.py` | Pad-anchored (nearest-pad distances). **Is** used in `src/` — but only for *reporting*, not scoring, from `src/kicad_tools/mcp/tools/optimize_placement.py`. (The curator's scope note said it was test-only; it is not — corrected here.) |
+| Placement DRC | `check_placement_drc` in `src/kicad_tools/placement/drc.py` | Pad-anchored pad-to-pad clearance, per its own docstring. Wired into fidelity ≥ 1 but **not** into `evaluate_placement`, which uses the bbox-count `compute_drc_violations` instead. |
+| Pad transform machinery | `_transform_pad`, `decode` in `vector.py` | Produces absolute pad coordinates for every component on every decode. Pads are populated in both production front-ends (`PadDef` construction in `optimize_placement_cmd.py` and `mcp/tools/optimize_placement.py`). |
+| Legacy force-directed placer | `compute_spring_force`, `total_wire_length`, `create_springs_from_nets` in `src/kicad_tools/optim/placement.py` | **Pin-anchored.** `Pin` in `src/kicad_tools/optim/components.py` stores absolute coordinates; `Spring` connects `(comp_ref, pin_num)` pairs. This is the behaviour pcbplace advocates, already shipping in the `optim` engine behind `kct placement refine`. |
 
 Two honest consequences:
 
 - The repo does **not** need to invent pad anchoring; it needs to stop
-  discarding it in the newer `placement` package.
+  discarding it in the newer `placement` package — which M1/M2 have now
+  partly done.
 - Any migration should state which of the two engines it is aligning, because
-  they currently disagree: `optim` measures pin-to-pin spring length while
-  `placement` measures centre HPWL.
+  they still disagree: `optim` measures pin-to-pin spring length while
+  `placement` measures centre HPWL by default.
 
-One partial exception worth naming: `_create_cluster_springs`
-(`src/kicad_tools/optim/placement.py:897`) is *nominally* pin-anchored but picks
-`comp.pins[0]` as "a proxy for center" (`optim/placement.py:920-922`, `:934`) — an
-arbitrary pad, not the electrically relevant one. That is precisely the
-distinction pcbplace draws (near *its own power pad*), so this counts as
-"pad-addressed but not pad-*meaningful*".
+One partial exception worth naming: `_create_cluster_springs` in
+`optim/placement.py` is *nominally* pin-anchored but picks `anchor_comp.pins[0]`
+as "the first pin as proxy for center" — an arbitrary pad, not the electrically
+relevant one. That is precisely the distinction pcbplace draws (near *its own
+power pad*), so this counts as "pad-addressed but not pad-*meaningful*".
 
 ---
 
 ## 6. Migration candidates
 
-Each stub is a future issue **to be filed by a human/Champion/Curator**, not by
-this audit. Benefit rationale is grounded in (a) pcbplace's reported
-59.5 → 12.7 mm wiring reduction from pad anchors, and (b) the first-party
-divergence measured in §4 — with the honest caveat from §4 attached to both.
+Each unimplemented stub is a future issue **to be filed by a human / Champion /
+Curator**, not by this audit. Benefit rationale is grounded in (a) pcbplace's
+reported 59.5 → 12.7 mm wiring reduction from pad anchors, and (b) the
+first-party divergence measured in §4 — with the honest caveat from §4
+attached to both.
 
-### M1 — Wire `compute_hpwl` into `evaluate_placement` — **LANDED (opt-in)**
+### M1 — Wire pad anchoring into `evaluate_placement` — **LANDED (opt-in)**
 
 > **Shipped as:** `kct optimize-placement --pad-anchored-wirelength` plus the
 > `pad_positions` argument on `compute_wirelength` / `evaluate_placement`.
@@ -343,98 +362,89 @@ divergence measured in §4 — with the honest caveat from §4 attached to both.
 > would have dropped `Net.weight`, and which `cost.py` cannot import without
 > a cycle — `wirelength.py` imports `cost.py`), the pad coordinates are
 > passed *into* `compute_wirelength` as a `(reference, pad_name) -> (x, y)`
-> map. That keeps per-net weighting, keeps one net-iteration code path, and
-> adds per-pin fallback to the component centre. The counter-note below about
-> silently dropping `Net.weight` is therefore **resolved, not carried**.
-> Remaining M1 surface, deliberately deferred: the MCP front-end
-> (`src/kicad_tools/mcp/tools/optimize_placement.py`) still discards its
-> pads, and pad anchoring is opt-in rather than the default — flipping the
-> default needs fleet evidence (see M5).
+> map built by `build_pad_position_map`. That keeps per-net weighting, keeps
+> one net-iteration code path, and adds per-pin fallback to the component
+> centre. The counter-note below about silently dropping `Net.weight` is
+> therefore **resolved, not carried**.
+>
+> **Remaining M1 tail, deliberately deferred:** the MCP front-end
+> (`_evaluate_vector` in `src/kicad_tools/mcp/tools/optimize_placement.py`)
+> still discards its pads, and pad anchoring is opt-in rather than the
+> default. Flipping the default needs fleet evidence — which M5 has now
+> produced, and which **argues against flipping it** (§4.1: two of eight
+> boards measure *longer* at the pads). The open question is no longer
+> "measure the fleet" but "run the optimizer both ways and compare routed
+> copper".
 
-> **Stub title:** `feat(placement): score the optimizer objective on pad-anchored HPWL`
-> **Scope:** give `evaluate_placement` (`cost.py:715`) access to transformed pads
-> (either by accepting `PlacedComponent` or by an optional pad-lookup argument)
-> and use `compute_hpwl` (`wirelength.py:111`) for the wirelength term, keeping
-> `compute_wirelength` as the fallback when pads are absent. Update the
-> benchmark expectations in `tests/test_placement_benchmark.py` and
-> `docs/placement-scoring.md`.
+> **Stub title (as filed):** `feat(placement): score the optimizer objective on pad-anchored HPWL`
+> **Scope:** give `evaluate_placement` access to transformed pads and use them
+> for the wirelength term, keeping the centre-anchored path as the fallback
+> when pads are absent. Update the benchmark expectations in
+> `tests/test_placement_benchmark.py` and `docs/placement-scoring.md`.
 
 **Expected benefit.** This is the term pcbplace identifies as the source of its
 59.5 → 12.7 mm improvement. §4 shows the two estimators already disagree by
 0.2-40% on our own fixtures, so the objective's ranking of candidate layouts
 genuinely changes. It also makes rotation meaningful to wirelength for free:
-today, rotating a part changes `compute_wirelength` by exactly zero (only
-`p.x`/`p.y` are read at `cost.py:253`), whereas pad coordinates rotate with the
-part (`_transform_pad`, `vector.py:254`) — so the optimizer currently searches a
-rotation dimension the wirelength term cannot see.
+under the centre-anchored path, rotating a part changes `compute_wirelength` by
+exactly zero (only `p.x`/`p.y` are read), whereas pad coordinates rotate with
+the part via `_transform_pad` — so the optimizer was searching a rotation
+dimension the wirelength term could not see.
 
 **Cost/risk.** This changes the score of *every* placement run (GA/BO/CMA-ES
-trajectories, snapshots, board pipelines). The pads are already computed and
-discarded (`optimize_placement_cmd.py:142`, `mcp/tools/optimize_placement.py:221`),
-so the added compute is one dict build per evaluation
-(`_build_pad_lookup`, `wirelength.py:60`), not a new transform pass. Deliberately
-excluded from this audit-only slice.
-
-**Honest counter-note.** `compute_hpwl` ignores `Net.weight` (`cost.py:169`),
-which `compute_wirelength` honours (`cost.py:265`) and which the
-`--anchor-weight` feature depends on (§7). A straight swap would silently drop
-per-net weighting; the follow-up must carry the weight through.
+trajectories, snapshots, board pipelines) — which is exactly why it shipped
+opt-in. The pads are already computed and discarded, so the added compute is one
+dict build per evaluation, not a new transform pass.
 
 ### M2 — Stop discarding pads in `_evaluate_fidelity_1` — **LANDED (unconditional)**
 
-> **Shipped as:** `_evaluate_fidelity_1` (`src/kicad_tools/placement/multi_fidelity.py`)
-> now builds `build_pad_position_map(placements_rich)` and passes it to
-> `compute_wirelength(..., pad_positions=...)`. Fidelity ≥ 1 is therefore
-> pad-anchored; fidelity 0 (which accepts centre-only placements) is
-> unchanged, so the historical estimate is still reachable by asking for
-> `FidelityLevel.HPWL`. Levels 2 and 3 build on the fidelity-1 breakdown and
-> inherit the pad-anchored term.
+> **Shipped as:** `_evaluate_fidelity_1` in
+> `src/kicad_tools/placement/multi_fidelity.py` now builds
+> `build_pad_position_map(placements_rich)` and passes it to
+> `compute_wirelength`. Fidelity ≥ 1 is therefore pad-anchored; fidelity 0
+> (which accepts centre-only placements) is unchanged, so the historical
+> estimate is still reachable by asking for `FidelityLevel.HPWL`. Levels 2
+> and 3 build on the fidelity-1 breakdown and inherit the pad-anchored term.
 >
 > **Flag decision — unconditional, unlike M1.** M1 is opt-in because
 > `evaluate_placement` is the objective of every production
 > `kct optimize-placement` / MCP run. The multi-fidelity module is
-> library/test surface: `rg -n "evaluate_placement_multifidelity"` matches
-> only `placement/multi_fidelity.py`, `placement/__init__.py` (re-export) and
-> `tests/test_multi_fidelity.py` — nothing else under `src/` calls it, which
-> is exactly the "low risk, good pathfinder" framing below. Adding a second
-> opt-in switch here would have bought no safety and left the information
-> loss in place by default.
+> library/test surface (§3.2) — nothing else under `src/` calls it. Adding a
+> second opt-in switch here would have bought no safety and left the
+> information loss in place by default.
 >
 > **Implementation note.** As in M1, the pad coordinates are passed *into*
-> `compute_wirelength` rather than calling `compute_hpwl(placements_rich, nets)`
-> as this stub originally proposed. `compute_hpwl` ignores `Net.weight`, so a
-> literal swap would have silently dropped per-net weighting at level 1 while
-> level 0 kept honouring it; routing the pads through `compute_wirelength`
-> keeps one net-iteration code path, preserves weights, and keeps the per-pin
-> fallback to the component centre for pins that have no pad. Only the
-> wirelength term moves — overlap/boundary/area/DRC are untouched (§7).
+> `compute_wirelength` rather than calling `compute_hpwl` as this stub
+> originally proposed. `compute_hpwl` ignores `Net.weight`, so a literal swap
+> would have silently dropped per-net weighting at level 1 while level 0 kept
+> honouring it. Only the wirelength term moves — overlap/boundary/area/DRC
+> are untouched (§7).
 >
 > **Tests:** `tests/test_multi_fidelity_pad_anchored.py` (level 0 vs level 1 on
 > the same input, rotation visible only at level 1, `Net.weight` survival,
 > missing-pad fallback, level-2 inheritance, determinism).
 
 > **Stub title (as filed):** `refactor(placement): use pad HPWL at multi-fidelity level 1, where pads are already required`
-> **Scope:** in `_evaluate_fidelity_1` (`multi_fidelity.py:292`), replace the
-> `compute_wirelength(simple_placements, nets)` call at `multi_fidelity.py:316`
-> with `compute_hpwl(placements_rich, nets)`.
+> **Scope:** in `_evaluate_fidelity_1`, measure wirelength at the pads the
+> function is already required to carry, instead of at the centres it
+> currently projects down to.
 
 **Expected benefit.** Same mechanism as M1 (pcbplace's 59.5 → 12.7 mm; §4's
 measured divergence), at the lowest possible cost: fidelity ≥ 1 already
-*requires* `PlacedComponent` with transformed pads (`multi_fidelity.py:457-461`)
-and already uses them for DRC. The one-line downgrade at `multi_fidelity.py:306-314`
-is pure information loss.
+*requires* `PlacedComponent` with transformed pads and already uses them for
+DRC. The projection down to centres was pure information loss.
 
 **Honest scope note.** Payoff today is small because nothing under `src/` calls
 `evaluate_placement_multifidelity` (§3.2) — this is library/test surface. Its
-value is as a low-risk pathfinder for M1, not as a user-visible win.
+value was as a low-risk pathfinder for M1, not as a user-visible win.
 
 ### M3 — Pad-address the `max_distance` constraint
 
 > **Stub title:** `feat(optim): allow max_distance constraints to target a pad, not a component centre`
-> **Scope:** extend `SpatialConstraint.max_distance` (`constraints.py:46`, factory
-> at `constraints.py:57`) to accept `anchor="U1.14"`-style pad addressing, and
-> teach `_validate_max_distance` (`constraints.py:239`) to measure to the nearest
-> pad on the named net/pad instead of `anchor.x`/`anchor.y` (`constraints.py:266`).
+> **Scope:** extend `SpatialConstraint.max_distance` in
+> `src/kicad_tools/optim/constraints.py` to accept `anchor="U1.14"`-style pad
+> addressing, and teach `_validate_max_distance` to measure to the named pad
+> instead of the anchor component's origin.
 
 **Expected benefit.** This is a *direct* transcription of pcbplace's headline
 example: their 59.5 → 12.7 mm came from re-expressing "cap near chip" as "cap
@@ -450,9 +460,9 @@ constraint spec). It may be better folded into that slice than shipped alone.
 ### M4 — Make cluster springs target the electrically relevant pad
 
 > **Stub title:** `fix(optim): pick the shared-net pad instead of pins[0] for cluster springs`
-> **Scope:** in `_create_cluster_springs` (`optim/placement.py:897`), replace the
-> `pins[0]` "proxy for center" choice (`optim/placement.py:920-922`, `:934`) with the
-> pad on the net the cluster is formed around.
+> **Scope:** in `_create_cluster_springs` in `src/kicad_tools/optim/placement.py`,
+> replace the `pins[0]` "proxy for center" choice with the pad on the net the
+> cluster is formed around.
 
 **Expected benefit.** Same pcbplace mechanism at the cluster level: the spring
 already pulls *a* pad (so the machinery exists — §5), just not the meaningful
@@ -461,14 +471,14 @@ fix with no objective-wide blast radius.
 
 **Honest counter-note.** Smaller and less certain than M1-M3; cluster springs
 are a proximity heuristic, and `pins[0]` is often already the relevant pad on
-two-pad passives. File only if M1 lands and the `optim` engine remains in use.
+two-pad passives. File only if the `optim` engine remains in use.
 
 ### M5 — Report both estimators before switching either — **LANDED (report-only)**
 
 > **Shipped as:** `compare_wirelength_estimators` returning a frozen
-> `WirelengthEstimatorReport`
-> (`src/kicad_tools/placement/wirelength.py`, re-exported from
-> `src/kicad_tools/placement/__init__.py`), consumed by two surfaces:
+> `WirelengthEstimatorReport` in `src/kicad_tools/placement/wirelength.py`,
+> re-exported from `src/kicad_tools/placement/__init__.py` and consumed by two
+> surfaces:
 >
 > - `kct optimize-placement --dry-run` prints a `Wirelength estimators: …`
 >   line and, under `--format json`, emits a `wirelength_estimators` block
@@ -480,50 +490,44 @@ two-pad passives. File only if M1 lands and the `optim` engine remains in use.
 >   the M1 tail).
 >
 > **Implementation note — both legs go through `compute_wirelength`.** The
-> stub below proposed emitting `compute_hpwl` next to
-> `CostBreakdown.wirelength`. That would have made the reported delta a
-> *mixture* of two changes, because `compute_hpwl` ignores `Net.weight`
-> while `CostBreakdown.wirelength` honours it: on any board using
-> `--anchor-weight`, part of the "pad anchoring saves X mm" headline would
-> actually have been "weighting silently vanished". Calling
-> `compute_wirelength` twice — once without a pad map, once with — makes
-> anchoring the only difference between the two numbers, which is the whole
-> point of the measurement.
+> stub below proposed emitting `compute_hpwl` next to `CostBreakdown.wirelength`.
+> That would have made the reported delta a *mixture* of two changes, because
+> `compute_hpwl` ignores `Net.weight` while `CostBreakdown.wirelength` honours
+> it: on any board using `--anchor-weight`, part of the "pad anchoring saves
+> X mm" headline would actually have been "weighting silently vanished".
+> Calling `compute_wirelength` twice — once without a pad map, once with —
+> makes anchoring the only difference between the two numbers, which is the
+> whole point of the measurement.
 >
 > **`scored` is a label, not a switch.** It records which estimator the
-> caller's objective used, so a fleet aggregation can tell a measured
-> board from a scored one. Both numbers are computed from the layout
-> either way; `--pad-anchored-wirelength` changes which one lands in
+> caller's objective used, so a fleet aggregation can tell a measured board
+> from a scored one. Both numbers are computed from the layout either way;
+> `--pad-anchored-wirelength` changes which one lands in
 > `CostBreakdown.wirelength`, never the reported pair.
 >
 > **`pads_available` guards a false negative.** A board decoded without pad
-> geometry makes the two estimators identical by construction. Reporting
-> that as a 0.00 mm delta would read as "pad anchoring buys nothing here";
-> the flag (and `pad_count`) marks it as *not measured* instead.
+> geometry makes the two estimators identical by construction. Reporting that
+> as a 0.00 mm delta would read as "pad anchoring buys nothing here"; the flag
+> (and `pad_count`) marks it as *not measured* instead.
 >
-> **Deliberately not covered:** the full (non-`--dry-run`) optimize run's
-> final score. `--dry-run` scores the layout as committed, which is exactly
-> the fleet measurement M1's default flip needs; adding a second emission
-> point inside the optimize path would widen the JSON contract without
-> adding evidence.
+> **Deliberately not covered:** the full (non-`--dry-run`) optimize run's final
+> score. `--dry-run` scores the layout as committed, which is exactly the fleet
+> measurement M1's default flip needs; adding a second emission point inside
+> the optimize path would widen the JSON contract without adding evidence.
 >
-> **Tests:** `tests/test_placement_wirelength_estimator_report.py` (both
-> estimators on one layout, `Net.weight` on both legs, null `delta_pct` on a
-> zero-length centre estimate, padless boards flagged, rotation visible only
-> in the pad leg, determinism, `as_dict` rounding, and — the load-bearing
-> invariant — that the scored `CostBreakdown.wirelength` still equals
-> whichever estimator `scored` names, with and without the flag).
+> **Tests:** `tests/test_placement_wirelength_estimator_report.py`.
 
 > **Stub title (as filed):** `feat(placement): report pad-anchored HPWL alongside the centre-anchored score`
-> **Scope:** emit `compute_hpwl` next to `CostBreakdown.wirelength`
-> (`cost.py:98`) in `kct optimize-placement --dry-run` and the MCP
-> `evaluate_placement` response (`mcp/tools/optimize_placement.py:603`), without
-> changing what is optimized.
+> **Scope:** report the pad-anchored estimate next to `CostBreakdown.wirelength`
+> in `kct optimize-placement --dry-run` and the MCP `evaluate_placement`
+> response, without changing what is optimized.
 
 **Expected benefit.** Converts §4's three-fixture measurement into fleet-wide
 evidence at zero behavioural risk, so M1's real payoff (or absence) can be
 argued from our own boards rather than from pcbplace's reported
-59.5 → 12.7 mm. This is the cheapest way to de-risk M1.
+59.5 → 12.7 mm. This was the cheapest way to de-risk M1 — and §4.1 shows it
+earned its keep: the fleet contradicts the fixture set's uniformly-negative
+delta, so M1's default flip is now argued *against* by first-party data.
 
 **Honest counter-note (as written, before the build).** Purely additive
 telemetry — it improves nobody's placement by itself, and if M1 is going to be
@@ -538,12 +542,12 @@ placement on its own — that is the point of "report-only".
 
 | Term | Why not |
 |---|---|
-| `compute_area` (`cost.py:396`) | Centre-anchored, but it is a *compactness proxy*, not a connectivity term. A pad-anchored area (bbox of all pads) would mostly re-measure total footprint extent, which `compute_overlap`/boundary already constrain. pcbplace's write-up identifies no area/compactness pad-anchoring win. Re-proposing this needs new evidence, not just the observation that it reads `p.x`. |
-| `compute_domain_cohesion` (`cost.py:648`) | Centre-anchored by explicit design — its docstring (`cost.py:685`) and `del footprint_sizes` (`cost.py:691`) state that domains are clustered as a radius-of-gyration over centres. A voltage *domain* is a property of the whole part (an HV part's every pad is HV), so a pad-anchored variant would compute nearly the same field at N-pads cost. Decline unless a mixed-domain part (isolator, opto) motivates per-pad domains — which is a different feature, not a re-anchoring. |
-| `compute_overlap` / `compute_boundary_violation` / `compute_drc_violations` / block terms / `compute_creepage_violation` (`cost.py:269`, `:301`, `:342`, `:421`, `:474`, `:553`) | Body geometry, not net geometry. Pad anchoring is undefined for them. Note the DRC term *does* have a pad-accurate sibling (`check_placement_drc`, `drc.py:205`) — unifying those is a **precision** question, not a pad-anchoring question, and is out of scope here. |
-| `build_affinity_graph` (`priors.py:191`), `find_clusters` (`priors.py:243`), `detect_power_domains` (`priors.py:308`) | Purely topological (shared-net counts). No coordinates read; nothing to anchor. |
-| `force_directed_placement` (`seed.py:95`), `schematic_proximity_prior` (`priors.py:489`), `prior_mean_position` (`priors.py:637`) | Centre-anchored, but these produce *seeds/priors* that the objective then optimizes. Pad-anchoring a seed buys at most a slightly better starting point for a search whose own objective is still centre-anchored. Revisit **only after** M1 lands; migrating them first is optimizing the wrong end. |
-| `validate_keepout_violations` (`keepout.py:581`) | Centre-*point* containment (`keepout.py:598`), so a part straddling a zone edge is missed. That is a body-geometry precision gap, not a pad-anchoring gap; recorded here so a future reader does not file it under this heading. |
+| `compute_area` in `cost.py` | Centre-anchored, but it is a *compactness proxy*, not a connectivity term. A pad-anchored area (bbox of all pads) would mostly re-measure total footprint extent, which `compute_overlap` / `compute_boundary_violation` already constrain. pcbplace's write-up identifies no area/compactness pad-anchoring win. Re-proposing this needs new evidence, not just the observation that it reads `p.x`. |
+| `compute_domain_cohesion` in `cost.py` | Centre-anchored by explicit design — its docstring and the `del footprint_sizes` line state that domains are clustered as a radius-of-gyration over centres. A voltage *domain* is a property of the whole part (an HV part's every pad is HV), so a pad-anchored variant would compute nearly the same field at N-pads cost. Decline unless a mixed-domain part (isolator, opto) motivates per-pad domains — which is a different feature, not a re-anchoring. |
+| `compute_overlap`, `compute_boundary_violation`, `compute_drc_violations`, the block terms, `compute_creepage_violation` in `cost.py` | Body geometry, not net geometry. Pad anchoring is undefined for them. Note the DRC term *does* have a pad-accurate sibling (`check_placement_drc`) — unifying those is a **precision** question, not a pad-anchoring question, and is out of scope here. |
+| `build_affinity_graph`, `find_clusters`, `detect_power_domains` in `priors.py` | Purely topological (shared-net counts). No coordinates read; nothing to anchor. |
+| `force_directed_placement` in `seed.py`; `schematic_proximity_prior`, `prior_mean_position` in `priors.py` | Centre-anchored, but these produce *seeds/priors* that the objective then optimizes. Pad-anchoring a seed buys at most a slightly better starting point for a search whose own objective is still centre-anchored by default. Revisit only after M1's default flips; migrating them first is optimizing the wrong end. |
+| `validate_keepout_violations` in `keepout.py` | Centre-*point* containment, so a part straddling a zone edge is missed. That is a body-geometry precision gap, not a pad-anchoring gap; recorded here so a future reader does not file it under this heading. |
 
 ---
 
@@ -552,36 +556,39 @@ placement on its own — that is the point of "report-only".
 None of these is pcbplace's pad anchoring. Do not cite them as prior art.
 
 1. **`--anchor-weight` (net weighting around locked parts).**
-   `_compute_net_anchor_weight` (`src/kicad_tools/cli/optimize_placement_cmd.py:532`)
-   sets `Net.weight = 1 + anchor_weight * (anchored_pins / total_pins)` for nets
-   touching a `(locked)` footprint. "Anchored" = *immovable*. The distance being
-   weighted is still centre-to-centre HPWL (`cost.py:265`).
+   `_compute_net_anchor_weight` in `src/kicad_tools/cli/optimize_placement_cmd.py`
+   (and its twin in `src/kicad_tools/mcp/tools/optimize_placement.py`) returns
+   `1.0 + anchor_weight * fraction` for nets touching a `(locked)` footprint,
+   where `fraction` is `anchored_pins / total_pins`. "Anchored" here means
+   *immovable*. The distance being weighted is still whichever HPWL the
+   objective is configured for — centre-to-centre by default.
 2. **`--placement-feedback-anchor` / `--placement-feedback-no-anchor`.**
-   `_auto_detect_anchored_refs` (`src/kicad_tools/cli/route_cmd.py:2817`) and
-   `_resolve_placement_feedback_anchors` (`route_cmd.py:2851`) compute the set of
-   refs the route↔placement feedback loop may not move; the set is passed as
-   `fixed_refs` (`route_cmd.py:3017`, `:3166`). Again: immovability, not pads.
-3. **`SpatialConstraint.max_distance(anchor=…)`.** Here `anchor`
-   (`src/kicad_tools/optim/constraints.py:57`) names the *reference component* of
-   a proximity constraint — and, per §6 M3, it is measured centre-to-centre,
+   `_auto_detect_anchored_refs` and `_resolve_placement_feedback_anchors` in
+   `src/kicad_tools/cli/route_cmd.py` compute the set of refs the
+   route↔placement feedback loop may not move; the set is passed as
+   `fixed_refs`. Again: immovability, not pads.
+3. **`SpatialConstraint.max_distance(anchor=…)`.** Here `anchor` in
+   `src/kicad_tools/optim/constraints.py` names the *reference component* of a
+   proximity constraint — and, per §6 M3, it is measured centre-to-centre,
    making it a migration target rather than prior art.
 
 pcbplace's sense — *a constraint expressed relative to a specific pad rather
 than to the part origin* — has no existing name in this codebase. If a future
 slice needs one, "pad-anchored" (as used throughout this document) is the term
-to standardise on, kept clearly distinct from the "locked/immovable" sense above.
+to standardise on, kept clearly distinct from the "locked/immovable" sense
+above.
 
 ---
 
-## 9. Stub index (nothing filed)
+## 9. Stub index
 
-| Stub | Title | Depends on |
+| Stub | Title | Status / depends on |
 |---|---|---|
-| M1 | `feat(placement): score the optimizer objective on pad-anchored HPWL` | **LANDED opt-in** (`--pad-anchored-wirelength`); MCP front-end + default-on remain |
+| M1 | `feat(placement): score the optimizer objective on pad-anchored HPWL` | **LANDED opt-in** (`--pad-anchored-wirelength`); MCP front-end + default-on remain, and §4.1 currently argues against default-on |
 | M2 | `refactor(placement): use pad HPWL at multi-fidelity level 1, where pads are already required` | **LANDED unconditional** (fidelity ≥ 1 pad-anchored; fidelity 0 unchanged) |
-| M3 | `feat(optim): allow max_distance constraints to target a pad, not a component centre` | overlaps #4831 item 4 |
-| M4 | `fix(optim): pick the shared-net pad instead of pins[0] for cluster springs` | M1 (only if `optim` stays in use) |
-| M5 | `feat(placement): report pad-anchored HPWL alongside the centre-anchored score` | **LANDED report-only** (`wirelength_estimators` on `--dry-run` + MCP `evaluate_placement`); the evidence M1's default flip needs |
+| M3 | `feat(optim): allow max_distance constraints to target a pad, not a component centre` | Unfiled; overlaps #4831 item 4 |
+| M4 | `fix(optim): pick the shared-net pad instead of pins[0] for cluster springs` | Unfiled; only if the `optim` engine stays in use |
+| M5 | `feat(placement): report pad-anchored HPWL alongside the centre-anchored score` | **LANDED report-only** (`wirelength_estimators` on `--dry-run` + MCP `evaluate_placement`) |
 
 Related documents: `docs/placement-scoring.md` (why the placement scoring
 surfaces intentionally disagree, issue #3940) and

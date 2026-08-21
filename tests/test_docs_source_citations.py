@@ -7,6 +7,14 @@ fix but which no guard watched:
 
 * ``docs/reference/*.md`` — ``api.md`` (footprint attribute round-trip)
   and ``cli.md`` (exit-code ladders) both cite source;
+* ``docs/*.md`` — the top-level docs.  Added for issue #4831: every
+  top-level doc *except* ``placement-pad-anchoring-audit.md`` already
+  complied, and that one had rotted three times in eight days (86
+  ``.py:NNN`` citations, 60+ resolving to the wrong symbol after PRs
+  #4857/#4863/#4870 shifted the placement modules).  Each of those PRs
+  appended a "line citations below predate this patch" disclaimer rather
+  than fixing them — the exact silent-rot mode this module exists to make
+  loud.  Blast radius of the glob was therefore one file;
 * ``boards/*/README.md`` — board READMEs cite the CLI/build plumbing
   that produces their artifacts;
 * ``docs/guides/*.md`` — the top-level guides (``routing.md``,
@@ -39,6 +47,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Non-recursive globs, relative to the repo root.  See the module
 # docstring for why recursion is banned here.
 GUARDED_DOC_GLOBS: tuple[str, ...] = (
+    "docs/*.md",
     "docs/guides/*.md",
     "docs/guides/diff-pairs/*.md",
     "docs/guides/match-groups/*.md",
@@ -83,6 +92,101 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
         "boards/03-usb-joystick/README.md",
         "route_pcb",
         "boards/03-usb-joystick/generate_design.py",
+    ),
+    # docs/placement-pad-anchoring-audit.md — the centre-vs-pad inventory
+    # (#4831).  These are the anchors the audit's load-bearing claims rest
+    # on: the objective it says is centre-anchored by default, the pad-map
+    # vehicle M1/M2 actually shipped, the estimator it reports as still
+    # having no call site in src/, and the fidelity split M2 created.
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "compute_wirelength",
+        "src/kicad_tools/placement/cost.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "evaluate_placement",
+        "src/kicad_tools/placement/cost.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "compute_domain_cohesion",
+        "src/kicad_tools/placement/cost.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "compute_area",
+        "src/kicad_tools/placement/cost.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "compute_hpwl",
+        "src/kicad_tools/placement/wirelength.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "build_pad_position_map",
+        "src/kicad_tools/placement/wirelength.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "compare_wirelength_estimators",
+        "src/kicad_tools/placement/wirelength.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "compute_per_footprint_ratsnest",
+        "src/kicad_tools/placement/wirelength.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "_evaluate_fidelity_0",
+        "src/kicad_tools/placement/multi_fidelity.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "_evaluate_fidelity_1",
+        "src/kicad_tools/placement/multi_fidelity.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "check_placement_drc",
+        "src/kicad_tools/placement/drc.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "_validate_max_distance",
+        "src/kicad_tools/optim/constraints.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "_create_cluster_springs",
+        "src/kicad_tools/optim/placement.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "total_wire_length",
+        "src/kicad_tools/optim/placement.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "_compute_net_anchor_weight",
+        "src/kicad_tools/cli/optimize_placement_cmd.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "_auto_detect_anchored_refs",
+        "src/kicad_tools/cli/route_cmd.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "_resolve_placement_feedback_anchors",
+        "src/kicad_tools/cli/route_cmd.py",
+    ),
+    (
+        "docs/placement-pad-anchoring-audit.md",
+        "_evaluate_vector",
+        "src/kicad_tools/mcp/tools/optimize_placement.py",
     ),
 )
 

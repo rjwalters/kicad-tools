@@ -826,6 +826,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The pad-anchoring audit is re-anchored on symbols and brought under the
+  citation guard** (part of #4831, item 1) —
+  `docs/placement-pad-anchoring-audit.md` cited source as `file.py:NNN`, the
+  form `tests/test_docs_source_citations.py` (#4764) *bans* precisely because
+  it rots. It rotted three times in the eight days after it landed: PRs #4857
+  (M1), #4863 (M2) and #4870 (M5) each shifted `cost.py`, `wirelength.py`,
+  `multi_fidelity.py` and both optimizer front-ends, and each appended a "line
+  citations below predate this patch" disclaimer instead of fixing them. By
+  2026-08-21, 60+ of the doc's 86 line citations resolved to the wrong symbol —
+  the line cited as `evaluate_placement` had drifted into the body of
+  `compute_domain_cohesion`. The doc escaped the guard only because its glob
+  list covered `docs/guides/*.md` and `docs/reference/*.md` but not top-level
+  `docs/*.md`. Every citation is now a **symbol + path** anchor,
+  `GUARDED_DOC_GLOBS` gains `docs/*.md` (blast radius: one file — every other
+  top-level doc already complied), and 18 `CITED_SYMBOLS` rows pin the audit's
+  load-bearing anchors in both directions, so a rename goes red instead of rotting.
+  Substantive claims invalidated by M1/M2/M5 are corrected rather than
+  disclaimed: the objective is centre-anchored *by default* (pad anchoring is
+  opt-in behind `--pad-anchored-wirelength`), only the MCP front-end still
+  discards its pads, and `compute_hpwl` still has no call site in `src/`
+  because M1/M2 shipped via `build_pad_position_map` instead. Both measurement
+  tables (§4 fixtures, §4.1 fleet) were re-run at `8a98a69f` and reproduce
+  exactly — including the finding that argues *against* flipping M1's default:
+  two of eight fleet boards measure longer at the pads. Docs-only plus the
+  guard; no `src/` change.
+
 - **Multi-fidelity level 1 now measures wirelength at the pads it already
   required** (part of #4831, audit milestone M2) — `_evaluate_fidelity_1`
   (`src/kicad_tools/placement/multi_fidelity.py`) was *handed*
