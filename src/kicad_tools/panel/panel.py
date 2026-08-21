@@ -24,6 +24,7 @@ from typing import Any
 
 from kicad_tools.core.sexp_file import load_pcb, save_pcb
 from kicad_tools.pcb.board_geometry import BoardGeometry, has_shapely
+from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
 from kicad_tools.sexp.builders import (
     fmt,
     gr_line_node,
@@ -620,9 +621,14 @@ class Panel:
         src = self._source_sexp
         assert src is not None
 
-        # Content node types to clone
+        # Content node types to clone. Includes both footprint spellings
+        # (modern "footprint" and legacy pre-KiCad-6 "module") so legacy
+        # boards are panelized instead of silently losing every component
+        # (issue #4891) -- the child.name == "footprint" check below would
+        # otherwise be unreachable for "module" nodes since they'd already
+        # be filtered out here.
         content_tags = {
-            "footprint",
+            *FOOTPRINT_TAGS,
             "segment",
             "via",
             "zone",
@@ -658,7 +664,7 @@ class Panel:
             _offset_positions(cloned, inst.offset_x - src_min_x, inst.offset_y - src_min_y)
 
             # Remap reference designators for footprints
-            if child.name == "footprint":
+            if _is_footprint_tag(child.name):
                 _remap_reference(cloned, inst.index)
 
             panel_sexp.append(cloned)

@@ -36,7 +36,21 @@ from typing import Any, Protocol
 
 from kicad_tools._shapely import require_shapely
 from kicad_tools.core.layers import via_spans_layer
+from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp
+
+
+def _find_all_footprints(doc: SExp) -> list[SExp]:
+    """Return every footprint node in *doc*, in document order.
+
+    Matches both the modern ``(footprint ...)`` spelling and the legacy
+    pre-KiCad-6 ``(module ...)`` spelling (issue #4891).  Search semantics
+    match :meth:`SExp.find_all` -- descendants of the root, not the root
+    itself -- so this is a drop-in replacement for ``doc.find_all("footprint")``.
+    """
+    return [
+        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
+    ]
 
 
 class _Geometry(Protocol):
@@ -142,7 +156,7 @@ def _collect_obstacles(
     obstacles: list[_Obstacle] = []
 
     # --- Pads (inside footprints) ---
-    for fp in doc.find_all("footprint"):
+    for fp in _find_all_footprints(doc):
         fp_at = fp.find("at")
         if fp_at is None:
             continue
@@ -649,7 +663,7 @@ def _apply_selective_pad_connection(doc: SExp) -> int:
         return 0
 
     changed = 0
-    for fp in doc.find_all("footprint"):
+    for fp in _find_all_footprints(doc):
         for pad in fp.find_all("pad"):
             net_key = _net_key(pad.find("net"), name_map)
             if net_key is None:
@@ -813,7 +827,7 @@ def force_solid_on_pads_by_uuid(doc: SExp, pad_uuids: set[str]) -> int:
     if not pad_uuids:
         return 0
     changed = 0
-    for fp in doc.find_all("footprint"):
+    for fp in _find_all_footprints(doc):
         for pad in fp.find_all("pad"):
             uuid_node = pad.find("uuid")
             if uuid_node is None:

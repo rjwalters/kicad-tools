@@ -2045,10 +2045,10 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
     positions: list[PadPosition] = []
 
     # Split by footprint for easier parsing
-    footprint_sections = re.split(r"(?=\(footprint\s)", pcb_text)
+    footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
 
     for section in footprint_sections:
-        if not section.startswith("(footprint"):
+        if not section.startswith("(footprint") and not section.startswith("(module"):
             continue
 
         # Get footprint position and rotation
@@ -2112,10 +2112,10 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
     pads: list[Pad] = []
 
     # Split by footprint for easier parsing
-    footprint_sections = re.split(r"(?=\(footprint\s)", pcb_text)
+    footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
 
     for section in footprint_sections:
-        if not section.startswith("(footprint"):
+        if not section.startswith("(footprint") and not section.startswith("(module"):
             continue
 
         # Get footprint library name (e.g. "Package_QFP:TQFP-32_7x7mm_P0.8mm")
@@ -3641,10 +3641,10 @@ def load_pcb_for_routing(
     components: list[dict] = []
 
     # Split by footprint for easier parsing
-    footprint_sections = re.split(r"(?=\(footprint\s)", pcb_text)
+    footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
 
     for section in footprint_sections:
-        if not section.startswith("(footprint"):
+        if not section.startswith("(footprint") and not section.startswith("(module"):
             continue
 
         # Get footprint position
@@ -3657,10 +3657,16 @@ def load_pcb_for_routing(
         fp_y = float(at_match.group(2))
         fp_rot = float(at_match.group(3)) if at_match.group(3) else 0
 
-        # Get reference - try KiCad 9 property format first, then old fp_text format
+        # Get reference - try KiCad 9 property format first, then old fp_text format.
+        # The fp_text fallback accepts an optional quote (same pattern as
+        # load_pads_for_analysis above): pre-KiCad-6 (module ...) boards write
+        # this value unquoted (e.g. "(fp_text reference R1 ...)"), and a
+        # quote-only regex would silently drop the whole footprint here,
+        # leaving load_pcb_for_routing with zero pads on a legacy board even
+        # after the (module ...) container itself is recognized (issue #4891).
         ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', section)
         if not ref_match:
-            ref_match = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', section)
+            ref_match = re.search(r'\(fp_text\s+reference\s+"?([^"\s)]+)"?', section)
         if not ref_match:
             continue
         ref = ref_match.group(1)

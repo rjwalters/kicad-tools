@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.core.sexp_file import save_pcb
+from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp.parser import SExp, parse_file
 
 # Silkscreen layer names recognised by KiCad (pre-8.0 and 8.0+).
@@ -29,6 +30,19 @@ FP_GRAPHIC_TYPES = ("fp_line", "fp_rect", "fp_circle", "fp_arc")
 
 # Graphic element types at board level.
 GR_GRAPHIC_TYPES = ("gr_line", "gr_rect", "gr_circle", "gr_arc")
+
+
+def _find_all_footprints(doc: SExp) -> list[SExp]:
+    """Return every footprint node in *doc*, in document order.
+
+    Matches both the modern ``(footprint ...)`` spelling and the legacy
+    pre-KiCad-6 ``(module ...)`` spelling (issue #4891).  Search semantics
+    match :meth:`SExp.find_all` -- descendants of the root, not the root
+    itself -- so this is a drop-in replacement for ``doc.find_all("footprint")``.
+    """
+    return [
+        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
+    ]
 
 
 @dataclass
@@ -123,7 +137,7 @@ class SilkscreenRepairer:
         result = SilkscreenRepairResult(min_width_mm=min_width_mm)
 
         # --- Footprint-level graphics ---
-        for fp_node in self.doc.find_all("footprint"):
+        for fp_node in _find_all_footprints(self.doc):
             fp_ref = self._footprint_reference(fp_node)
             for gtype in FP_GRAPHIC_TYPES:
                 for graphic_node in fp_node.find_all(gtype):
@@ -170,7 +184,7 @@ class SilkscreenRepairer:
         result = TextHeightRepairResult(min_height_mm=min_height_mm)
 
         # --- Footprint-level text ---
-        for fp_node in self.doc.find_all("footprint"):
+        for fp_node in _find_all_footprints(self.doc):
             fp_ref = self._footprint_reference(fp_node)
             for ttype in FP_TEXT_TYPES:
                 for text_node in fp_node.find_all(ttype):
