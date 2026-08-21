@@ -3,24 +3,36 @@
 Running record of the #4507 T4 manual criterion, newest run first. Each section
 describes the tree as of its own date.
 
-> **Current record: [the 2026-08-21 fourth pass](#the-2026-08-21-fourth-pass-the-coupledfat-path-had-its-own-pairwise-gap-too).**
-> Continues the third pass's still-open `/LED_A_NEG`↔`/SCAP_POS` attribution.
-> A code-level (not fixture) audit of every emission path the lattice engine
-> can commit copper through found a second, independently-real case (c)
-> defect: the diff-pair coupled/fat routing path's finish-gate
+> **Current record: [the 2026-08-21 fifth pass](#the-2026-08-21-fifth-pass-fixture-access-root-caused-code-side-re-verified-complete).**
+> Root-causes *why* every pass since the third one has been unable to reach
+> the physical fixture (a worktree-relative symlink depth bug, filed
+> separately as #4925), confirms independently that this specific host also
+> lacks the rev-C data even from the primary checkout, and does a fresh,
+> from-scratch re-read of every file the #4507 tracking issue names to verify
+> Ask item 4 and the attribution sub-task are both still complete on `main`
+> with no new gap found. No code change in this pass — see that section for
+> why, and for the recommended next step (operator/host action, not another
+> code-search pass).
+>
+> Immediately below: [the 2026-08-21 fourth
+> pass](#the-2026-08-21-fourth-pass-the-coupledfat-path-had-its-own-pairwise-gap-too),
+> which continued the third pass's still-open `/LED_A_NEG`↔`/SCAP_POS`
+> attribution. A code-level (not fixture) audit of every emission path the
+> lattice engine can commit copper through found a second, independently-real
+> case (c) defect: the diff-pair coupled/fat routing path's finish-gate
 > re-verification checked a foreign PAD's SCALAR clearance but never its
 > pairwise (HV) requirement, unlike the same re-verification's already-
 > pairwise-aware check of foreign COMMITTED trace/via copper. Fixed with a
 > synthetic regression test (`test_pair_declines_when_emitted_leg_violates_
 > pairwise_pad_requirement`, `tests/router/lattice/test_coupled_pairs.py`).
-> **This pass could NOT re-run the physical softstart rev-C fixture** (it is
-> local-only hardware-fixture data not available in this environment), so it
-> does not claim to have confirmed this explains `/LED_A_NEG`↔`/SCAP_POS`
-> specifically — only that the gap is real, reproducible synthetically, and
-> matches that residual's exact geometry shape (a routed TRACE against a
+> That pass could NOT re-run the physical softstart rev-C fixture either (it
+> is local-only hardware-fixture data not available in this environment), so
+> it did not claim to have confirmed this explains `/LED_A_NEG`↔`/SCAP_POS`
+> specifically — only that the gap was real, reproducible synthetically, and
+> matched that residual's exact geometry shape (a routed TRACE against a
 > foreign PAD). A separate, out-of-scope-for-#4507 candidate was also found
 > and filed as #4910 (non-cardinal pad-rotation AABB approximation in the
-> search-time obstacle model) rather than guessed into this fix.
+> search-time obstacle model) rather than guessed into that fix.
 >
 > Below that, retained as the record of the diagnosis: [the 2026-08-21 third
 > pass](#the-2026-08-21-third-pass-the-attribution-sub-task-finds-and-fixes-a-genuine-search-time-defect)
@@ -34,6 +46,131 @@ describes the tree as of its own date.
 > (#4867's `abs()` sign collapse fixed by #4868), and from [Verdict (pre-fix
 > run)](#verdict-of-the-pre-fix-run-t4-fails--but-the-machinery-is-measurably-doing-its-job)
 > downwards the original pre-fix measurement.
+
+## The 2026-08-21 fifth pass: fixture access root-caused, code-side re-verified complete
+
+`main` @ `da10bac8` (PR #4911, the fourth pass's own commit), C++ backend
+build 21. This pass had two goals: (1) actually get the physical fixture and
+run the recipe, retiring the fourth pass's "not available in this
+environment" note with either a real re-run or a *specific, evidenced*
+reason it still can't happen; (2) failing that, do a fresh independent
+re-read of every file #4507 names to make sure a fifth pass isn't needed for
+a reason a code review would have caught.
+
+### Fixture access: two independent, now-confirmed reasons
+
+**Reason 1 — the symlink is worktree-depth-broken, filed as #4925.**
+`boards/external/softstart` is a *relative* symlink
+(`../../../softstart/hardware/kicad`) calibrated for the primary checkout
+sitting directly under the same parent as the sibling `softstart` fixture
+repo. A Loom-managed worktree (`.loom/worktrees/issue-N/`, or this repo's
+daemon-managed `.claude/worktrees/agent-<id>/`) nests two levels *inside*
+the checkout, so the same three `../` lands inside the worktree tooling
+directory instead — a path that does not exist. Confirmed directly:
+
+```
+$ readlink boards/external/softstart
+../../../softstart/hardware/kicad
+
+# from the primary checkout:
+$ realpath boards/external/softstart
+/Users/…/GitHub/softstart/hardware/kicad                                  # correct, exists
+
+# from this pass's worktree:
+$ realpath boards/external/softstart
+/Users/…/GitHub/kicad-tools/.claude/worktrees/softstart/hardware/kicad    # wrong, does not exist
+```
+
+This is very likely *why* the third and fourth passes (both run in Builder
+worktrees, per Loom's normal dispatch) reported "no physical fixture was
+available in this environment" — not a statement about the host, but an
+artifact of every builder always running from a worktree. Filed as #4925
+(out of #4507's scope — a repo-infra path bug, not a pairwise-clearance
+defect) with a suggested fix (git-common-dir-relative resolution or an env
+var override) for whoever picks it up.
+
+**Reason 2 — even the primary checkout's sibling repo lacks rev-C data.**
+Fixing #4925 would not by itself unblock T4 on *this* host: checking the
+sibling `softstart` repo directly (bypassing the symlink entirely,
+`/Users/…/GitHub/softstart`) shows only a Rev B design. There is no
+`hardware/kicad/output_revc/` tree, no `softstart_revc.kicad_pcb`, and none
+of the `vmap.json` / `net_class_map.json` / `creepage_class_map.json`
+sidecars this doc's recipe reads — `generate_design.py` in that repo has no
+revision flag and only ever produces the committed Rev B outputs. Every
+prior pass's own convention ("No board artifacts are committed to this repo
+… routed boards are `DO_NOT_FAB` work-in-progress and live in scratch") is
+consistent with this: the rev-C proof inputs were always generated fresh,
+outside version control, in whatever environment ran the recipe, and are not
+persisted anywhere this pass can reach. **So this pass could not run the
+recipe either, for a second, independent, host-level reason — not a repeat
+of the same "not available" note, but two separately-verified causes.**
+
+### Code-side re-verification: still complete, no new gap found
+
+With the fixture confirmed unreachable, this pass instead did a from-scratch
+read (not relying on prior passes' own conclusions) of every file the
+#4507 tracking issue's "Affected Files" list names:
+
+- `pairwise_clearance.py`: `_segments_pairwise_violation` (the shared
+  moving-vs-foreign walk) takes `foreign_pads` and checks
+  trace-vs-pad/via-vs-pad explicitly (module docstring at the top of that
+  function enumerates the coverage); `board_pairwise_violations` /
+  `board_pad_geometry` / `board_trace_routes` (added by PR #4885, widened by
+  #4887) thread real pad geometry from the written board file. Confirmed
+  present and unchanged since #4887/#4908.
+- `lattice/pairwise.py`: `LatticePairwise.exempt_seg_pt` /
+  `exempt_pt_pt` / `exempt_seg_seg` are all present and probe the correct
+  closest-gap midpoint per the #4506 exemption contract; no dead helper or
+  missing probe shape found.
+- `lattice/obstacles.py`: `pairwise_pad_blocked` grows each foreign pad's
+  keep-out per-pair (`own_half + required(net, pad.net) − agent_radius`) and
+  is consulted from every ordinary (non-coupled) emission call site
+  (`_route_search`'s edge/node/via exploration, `_scan_stubs`,
+  `_escape_stubs`) — matching the fourth pass's own read. The one
+  call site that did NOT consult it (`_route_pair_impl`'s `finish()`
+  re-verification loop, for foreign PAD copper specifically) was fixed in
+  PR #4911 and is now present at `pathfinder.py:1781`.
+- `route_cmd.py`: the post-route audit docstring at line ~4578 already says
+  "trace-vs-trace (same layer), trace-vs-via and via-vs-via" — updated past
+  the stale "trace-to-trace, same layer only" wording the issue quoted, with
+  an explicit note that pad copper needs the board-file replay
+  (`board_pairwise_violations`) instead. Current, not stale.
+- `scripts/replay_pairwise_gate.py`: already documents (and implements) the
+  pad-geometry companion to `board_trace_routes`, with a `--no-pad-geometry`
+  flag for the pre-#4507 scope as a control.
+- `tests/router/test_pairwise_clearance.py`,
+  `tests/router/test_pairwise_board_replay_4507.py`,
+  `tests/router/lattice/test_coupled_pairs.py`: all carry the trace↔pad,
+  via↔pad, via↔trace, and (from PR #4911) coupled-path-pad regression cases
+  the revised Ask item 4 calls for.
+
+No further case (c) defect turned up. Combined with the fourth pass's own
+"what was ruled out" read (every ordinary emission call site already
+consults the predicate) and this pass's confirmation of the one call site
+that didn't (now fixed), the code side of #4507's revised Ask item 4 and its
+attribution sub-task are believed complete as of `main` @ `da10bac8`. Full
+test suite for this area re-run clean on this pass: 364 passed, 1 skipped
+(`tests/router/lattice/test_coupled_pairs.py`,
+`tests/router/test_pairwise_clearance.py`,
+`tests/router/test_pairwise_cpp_parity.py`,
+`tests/router/test_pairwise_python_search.py`,
+`tests/router/test_pairwise_board_replay_4507.py`,
+`tests/router/test_lattice_pairwise_preserved_net_id_4507.py`,
+`tests/router/test_pairwise_ripup_diagnostics_4507.py`,
+`tests/router/test_post_pass_pairwise_gate_4766.py`,
+`tests/test_route_subthreshold_coverage_4507.py`,
+`tests/test_placement.py`).
+
+### What T4 needs now
+
+Not more code search — a run of this doc's recipe against the actual
+softstart rev-C inputs, which requires either (a) #4925 fixed AND a host
+whose primary checkout has current rev-C outputs generated and sitting at
+`hardware/kicad/output_revc/` with the sidecar files this recipe reads, or
+(b) direct operator access to regenerate those inputs. Neither is a code
+change this repo's automated pipeline can make on its own. Recorded here so
+the next pass (or a human) does not have to re-derive reasons 1 and 2 above
+from scratch.
 
 ## The 2026-08-21 fourth pass: the coupled/fat path had its own pairwise gap too
 
