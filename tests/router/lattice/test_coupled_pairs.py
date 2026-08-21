@@ -297,6 +297,58 @@ def test_pair_declines_when_emitted_leg_violates_keepout() -> None:
     assert stats2.routed == 1 and routes2
 
 
+def test_pair_declines_when_emitted_leg_violates_pairwise_pad_requirement() -> None:
+    """Issue #4507: a coupled/fat leg must honour a mapped foreign PAD's HV
+    pairwise requirement, not just the scalar floor.
+
+    The fat centerline SEARCH deliberately skips pairwise widening (a real
+    same-domain diff pair must not be over-constrained by a multi-mm HV
+    keep-out on top of its own pitch) -- but the finish-gate's emitted-leg
+    re-verification already re-covers foreign COMMITTED trace/via copper
+    pairwise-aware (``CommittedCopper.seg_clear`` consults the installed
+    projection).  Before this fix the same re-verification's PAD check
+    (``pads_block_segment_grown``) was pure-scalar, so a mapped foreign pad
+    close enough to violate the pairwise requirement but far enough to clear
+    the ordinary DRU floor slipped through untouched -- precisely the T4
+    softstart-rev-C residual's shape (a routed trace vs. a foreign pad, not
+    caught by any predicate the coupled path consulted).
+    """
+    from kicad_tools.router.lattice.pairwise import LatticePairwise
+
+    # The unobstructed pair's own body bulges to y in [6.25, 6.55] over the
+    # flat mid-corridor (an artifact of the fat-agent stub search, pinned by
+    # ``test_pair_routes_coupled_at_exact_pitch_with_correct_polarity``'s
+    # sibling boards -- not something this test relies on staying put, since
+    # both controls below re-derive the outcome from the SAME foreign pad).
+    # Placed just above that body at y=8.0: its scalar keep-out edge (0.1
+    # trace half + 0.25 agent radius baked into ``pad_rects`` + its own 0.5mm
+    # half-height) sits at y=7.25 -- 0.70mm clear of the N leg at y=6.55, so
+    # the pure-scalar check never blocks it.  Its pairwise keep-out grows by
+    # ``own_half + 2.0mm requirement - agent_radius`` = 1.85mm further, to
+    # y=5.4 -- past both legs, so the mapped 2.0mm requirement DOES block it.
+    foreign = _pad(15.0, 8.0, 9, "HV_FOREIGN", ref="HV1", width=1.0, height=1.0)
+    pf, pc = _pair_board([foreign])
+    pf.set_pairwise(
+        LatticePairwise(
+            required_by_pair={(1, 9): 2.0, (2, 9): 2.0},
+            zones=(),
+            max_by_net={1: 2.0, 2: 2.0, 9: 2.0},
+        )
+    )
+    routes, stats = pf.route_netset([], coupled=[pc])
+    assert pf.pair_outcomes[pc.key] == "pair-leg-pairwise-blocked", pf.pair_outcomes
+    assert pf.failure_reasons[pc.key] == "pair-leg-pairwise-blocked"
+    assert routes == {}
+    assert stats.routed == 0 and stats.total == 1
+    # Control: the identical board with no pairwise projection installed
+    # couples cleanly straight over the same foreign pad (proves the decline
+    # above is the pairwise requirement, not the corridor or the pad itself).
+    pf2, pc2 = _pair_board([foreign])
+    routes2, stats2 = pf2.route_netset([], coupled=[pc2])
+    assert pf2.pair_outcomes[pc2.key] == "coupled"
+    assert stats2.routed == 1 and routes2
+
+
 def test_pair_declines_on_polarity_twist_when_no_hook_room() -> None:
     # P/N swapped at the far end.  Full-height walls RIGHT behind both end
     # pad columns (grown keep-outs overlapping the pads' own) leave no hook

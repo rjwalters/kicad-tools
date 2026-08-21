@@ -3,24 +3,28 @@
 Running record of the #4507 T4 manual criterion, newest run first. Each section
 describes the tree as of its own date.
 
-> **Current record: [the 2026-08-21 third pass](#the-2026-08-21-third-pass-the-attribution-sub-task-finds-and-fixes-a-genuine-search-time-defect).**
-> The attribution sub-task the second pass named as still open ("does the
-> search actually avoid this copper, or was there no clean alternative?") is
-> resolved for 3 of the 4 genuine residuals: a real search-time defect
-> (case (c), not a placement trade-off) in `Autorouter._net_name_to_id()`
-> silently mapped every PRESERVED/fixed net's name to net id 0 on any
-> `--complete`/`--nets`/`--skip-nets`/`--region` pass, so the #4602 lattice
-> pairwise projection never had an entry keyed by that net's TRUE id — the
-> search-time HV avoidance was silently dormant for exactly that class. Fixed,
-> with a regression test; re-running the same recipe on the same board drops
-> board-level census fails from 6 to 3 (4 genuine → 1 genuine; the 2
-> #4506-exempted pairs are unchanged). The 4th genuine finding
-> (`/LED_A_NEG`↔`/SCAP_POS`) does NOT reproduce this defect — both nets
-> resolve correctly and the static predicate blocks the exact violating
-> geometry in isolation — so it is named here as still open, not
-> guess-fixed.
+> **Current record: [the 2026-08-21 fourth pass](#the-2026-08-21-fourth-pass-the-coupledfat-path-had-its-own-pairwise-gap-too).**
+> Continues the third pass's still-open `/LED_A_NEG`↔`/SCAP_POS` attribution.
+> A code-level (not fixture) audit of every emission path the lattice engine
+> can commit copper through found a second, independently-real case (c)
+> defect: the diff-pair coupled/fat routing path's finish-gate
+> re-verification checked a foreign PAD's SCALAR clearance but never its
+> pairwise (HV) requirement, unlike the same re-verification's already-
+> pairwise-aware check of foreign COMMITTED trace/via copper. Fixed with a
+> synthetic regression test (`test_pair_declines_when_emitted_leg_violates_
+> pairwise_pad_requirement`, `tests/router/lattice/test_coupled_pairs.py`).
+> **This pass could NOT re-run the physical softstart rev-C fixture** (it is
+> local-only hardware-fixture data not available in this environment), so it
+> does not claim to have confirmed this explains `/LED_A_NEG`↔`/SCAP_POS`
+> specifically — only that the gap is real, reproducible synthetically, and
+> matches that residual's exact geometry shape (a routed TRACE against a
+> foreign PAD). A separate, out-of-scope-for-#4507 candidate was also found
+> and filed as #4910 (non-cardinal pad-rotation AABB approximation in the
+> search-time obstacle model) rather than guessed into this fix.
 >
-> Below that, retained as the record of the diagnosis: [the 2026-08-21 second
+> Below that, retained as the record of the diagnosis: [the 2026-08-21 third
+> pass](#the-2026-08-21-third-pass-the-attribution-sub-task-finds-and-fixes-a-genuine-search-time-defect)
+> (the preserved-net-id fix, 3 of 4 prior residuals), [the 2026-08-21 second
 > pass](#the-2026-08-21-second-pass-the-widened-gate-attributes-all-6-residuals)
 > (Ask item 4's kernel widening, and the attribution question this pass
 > resolves), [the 2026-08-21 first
@@ -30,6 +34,127 @@ describes the tree as of its own date.
 > (#4867's `abs()` sign collapse fixed by #4868), and from [Verdict (pre-fix
 > run)](#verdict-of-the-pre-fix-run-t4-fails--but-the-machinery-is-measurably-doing-its-job)
 > downwards the original pre-fix measurement.
+
+## The 2026-08-21 fourth pass: the coupled/fat path had its own pairwise gap too
+
+This pass continues the third pass's open question for the one genuine
+residual that did NOT reproduce the preserved-net-id defect:
+`/LED_A_NEG`↔`/SCAP_POS`. The third pass's own targeted checks had already
+shown that (a) both nets resolve to their correct ids with the correct
+2.0mm requirement, and (b) replaying `LatticeObstacleModel.pairwise_pad_
+blocked` directly against the exact violating geometry (LED_A_NEG's emitted
+segment vs. the real SCAP_POS pad) correctly reports it as blocked in
+isolation. That combination is itself informative: if the predicate that
+gates ordinary (non-coupled) lattice routing would have refused this exact
+geometry, then either (i) this geometry was never actually offered to that
+predicate during the real negotiated run, or (ii) it was emitted through a
+DIFFERENT code path that does not consult the predicate at all.
+
+**No physical fixture was available in this environment** (`hardware/kicad/
+output_revc/` is a local-only hardware-fixture tree per this doc's own
+convention, not present in this worktree) — this pass is a static/synthetic
+attribution, not a re-run of the recipe. It documents what a full read of
+every lattice emission path found, and fixes the one genuine gap that read
+turned up, with a synthetic regression test rather than a guessed live fix.
+
+### What was ruled out
+
+Read end to end, every geometry-emitting call site the ORDINARY (single-net,
+non-coupled) lattice search uses consults `pairwise_pad_blocked` consistently
+whenever a projection is installed: the A* edge/node/via exploration loop
+(`_route_search`, three call sites — edge, node, via-hop), the pad-escape
+dogleg scan (`_scan_stubs`, both the candidate-node probe and each dogleg
+leg), and the tapered-neck escape fallback (`_escape_stubs`, which re-enters
+`_scan_stubs`). Emission itself (`_emit`) is "path IS copper" — a straight
+`Segment`-per-lattice-step conversion with `merge_collinear` fusing
+contiguous EXACT-collinear runs (tolerance 1e-4mm, four orders of magnitude
+below the 0.175mm residual shortfall) and no other post-fit stage, so nothing
+after the search can introduce unchecked geometry into an ordinary route.
+This rules out (i) for every *ordinary* connection.
+
+### What was found: the diff-pair coupled/fat path's finish gate
+
+`LatticePathfinder._route_pair_impl` (issue #4270's diff-pair "fat centerline"
+router) is (ii): a documented, deliberate exception. Its centerline SEARCH
+skips pairwise widening entirely (`coupled.committed_seg_clear_grown`'s own
+docstring: "an engaged diff pair is a same-domain signal pair by
+construction; giving the whole grown envelope a multi-mm HV keep-out ... would
+make every coupled run near mapped copper decline outright"). That docstring
+also claims the emitted legs are re-covered end to end by re-verification:
+"`_pair_attach`/re-verification go through `CommittedCopper.seg_clear`
+(pairwise-aware when a projection is installed)".
+
+That claim is half true. The `finish()` re-verification loop in
+`_route_pair_impl` (the authoritative accept/reject gate for every emitted
+leg, offset body AND pad-attach doglegs alike) checks two things per segment:
+
+```python
+if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, 0.0):
+    return None, "pair-leg-blocked"
+if not committed.seg_clear(a, b, layer, net):
+    return None, "pair-leg-blocked"
+```
+
+`committed.seg_clear` IS pairwise-aware (it is the ordinary `CommittedCopper`
+method, which consults its installed `pairwise` projection against foreign
+COMMITTED trace/via copper) — but `pads_block_segment_grown`
+(`lattice/coupled.py`) is a pure-scalar check against foreign PAD keep-outs;
+it has no `pairwise` parameter and never did. So the "covered end-to-end"
+claim held for foreign committed copper but not for foreign PAD copper — and
+`/LED_A_NEG`↔`/SCAP_POS` is exactly a routed-TRACE-vs-foreign-PAD pair, the
+one geometry class this path never re-checked against the pairwise
+requirement.
+
+Whether LED_A_NEG was ever actually routed through this path on the real
+board is unconfirmed (it would require the suffix-based diff-pair detector,
+`_POS_NEG_PATTERN` in `router/diffpair.py`, to have matched a same-prefix
+`LED_A_POS`/`LED_A_NEG` pair — plausible given softstart rev-C's `_POS`/`_NEG`
+bipolar-rail naming convention across many of its nets — AND the net class
+either of them resolves to have `coupled_routing=True` in
+`net_class_map.json`, which this pass cannot inspect without the fixture).
+Independent of that, the gap itself is real and reproducible on a synthetic
+board with no dependency on the fixture, so it is fixed here rather than left
+as a report-only finding.
+
+### The fix
+
+`LatticePathfinder._route_pair_impl`'s `finish()` loop now additionally
+consults `self.obstacles.pairwise_pad_blocked(a, b, layer, net, trace_w /
+2.0, 0.0, self._pairwise)` for each emitted leg segment, guarded by
+`self._pairwise is not None` (byte-identical dormancy without
+`--voltage-map`, matching every other #4507/#4602 predicate). This is
+checked at the LEG's own single-trace half-width with no extra surcharge —
+mirroring exactly how the non-fat search's own `pairwise_pad_blocked` call in
+`_route_search` is parameterised — so a coupled pair is never over-
+constrained by its own fat pitch envelope, only by what its actual emitted
+copper requires. A violation declines the pair honestly (`"pair-leg-pairwise-
+blocked"`), consistent with #4270/#3906's "never ship a short, decline with a
+named reason" discipline; it does not fall back to splitting the pair into
+uncoupled legs.
+
+### Regression coverage
+
+`tests/router/lattice/test_coupled_pairs.py::
+test_pair_declines_when_emitted_leg_violates_pairwise_pad_requirement` — a
+synthetic two-layer board with an engaged diff pair and one foreign pad
+placed where the pair's own (otherwise-legal) fat route runs: close enough to
+violate a mapped 2.0mm pairwise requirement, but far enough to clear the
+ordinary scalar floor. Before the fix the pair routed straight over it
+(`pair_outcomes == "coupled"`); after the fix it declines with
+`"pair-leg-pairwise-blocked"`. A control with no pairwise projection
+installed on the identical board (including the same foreign pad) still
+couples cleanly, proving the decline is the pairwise requirement and not the
+corridor or the pad's ordinary scalar keep-out.
+
+### What remains open
+
+`/LED_A_NEG`↔`/SCAP_POS` itself is still not confirmed fixed — only a real,
+independently-verified gap of the right geometric shape is now closed. A
+future pass with fixture access should re-run this doc's recipe to check
+whether the residual count actually drops. If it does not, the pad-rotation
+AABB gap filed as #4910 (unconfirmed, out of #4507's own scope since it
+affects ordinary DRC clearance too, not just pairwise) is the next candidate
+to check against that specific pad's actual rotation angle.
 
 ## The 2026-08-21 third pass: the attribution sub-task finds (and fixes) a genuine search-time defect
 

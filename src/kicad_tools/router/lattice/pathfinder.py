@@ -1762,6 +1762,26 @@ class LatticePathfinder:
                         return None, "pair-leg-blocked"
                     if not committed.seg_clear(a, b, layer, net):
                         return None, "pair-leg-blocked"
+                    # Issue #4507: the fat centerline SEARCH deliberately skips
+                    # HV pairwise widening (see ``coupled.committed_seg_clear_
+                    # grown``'s docstring) so a genuine same-domain diff pair
+                    # is never over-constrained by a multi-mm HV keep-out on
+                    # top of its own pitch.  ``committed.seg_clear`` above
+                    # already re-covers foreign COMMITTED trace/via copper
+                    # pairwise-aware (it consults ``committed.pairwise``
+                    # directly); ``pads_block_segment_grown`` two lines up
+                    # never does -- it is the pure-scalar fat-pad check.  So a
+                    # mapped foreign PAD's pairwise requirement was silently
+                    # unchecked for the single-trace LEG this loop emits (the
+                    # T4 residual's exact shape: a coupled/misdetected pair's
+                    # trace passing a foreign HV pad at the scalar, not the
+                    # pairwise, floor).  Checked at the LEG's own half-width
+                    # with no extra surcharge, mirroring the non-fat search's
+                    # own ``pairwise_pad_blocked`` call in ``_route_search``.
+                    if self._pairwise is not None and self.obstacles.pairwise_pad_blocked(
+                        a, b, layer, net, trace_w / 2.0, 0.0, self._pairwise
+                    ):
+                        return None, "pair-leg-pairwise-blocked"
                     # Issue #4605: the fat centerline search skips the keepout
                     # mask, so the EMITTED legs (offset body + attach doglegs)
                     # are verified against it here at their true half-width --
