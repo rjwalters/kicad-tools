@@ -1,15 +1,152 @@
-# HV pairwise avoidance: softstart rev-C proof run (2026-08-15)
+# HV pairwise avoidance: softstart rev-C proof runs (2026-08-15 → 2026-08-21)
 
-Point-in-time working document — it describes the tree as of its date.
+Running record of the #4507 T4 manual criterion, newest run first. Each section
+describes the tree as of its own date.
 
-> **Re-scored (#4867's fix landed as #4868).** The root cause the first run
-> isolated — the `abs()` collapse of signed potentials, described in
-> [The root cause](#the-root-cause-signed-potentials-are-collapsed-to-magnitudes)
-> — is fixed, and the routing arms have now been **re-run on top of it**.
-> [The re-score](#the-re-score-same-recipe-corrected-table) is the current
-> record and supersedes the pre-fix numbers; everything from
+> **Current record: [the 2026-08-21 re-run](#the-2026-08-21-re-run-the-router-gate-is-clean-and-what-that-leaves).**
+> The recipe has been run a third time, on `main` @ `0efe6218` with the same
+> four inputs at the same md5s. It found the previous run's replay was scored in
+> the **wrong coordinate frame** — see
+> [The frame correction](#the-frame-correction-the-replay-was-scored-in-the-wrong-coordinate-space)
+> — and, once corrected, that the router's own gate is **clean** on the finished
+> board while the census still reports 17 board-level fails, none of them
+> trace↔trace.
+>
+> Below that, retained as the record of the diagnosis:
+> [the 2026-08-16 re-score](#the-re-score-same-recipe-corrected-table) (#4867's
+> `abs()` sign collapse fixed by #4868), and from
 > [Verdict (pre-fix run)](#verdict-of-the-pre-fix-run-t4-fails--but-the-machinery-is-measurably-doing-its-job)
-> downwards is kept verbatim as the record of the diagnosis.
+> downwards the original pre-fix measurement.
+
+## The 2026-08-21 re-run: the router gate is clean, and what that leaves
+
+Third run of the same recipe. Same fixture inputs, **byte-identical** to both
+earlier runs (`softstart_revc.kicad_pcb` md5 `7d82599e…`, `net_class_map.json`
+`9184a661…`, `vmap.json` `cc72a701…`, `creepage_class_map.json` `6c3b324a…`),
+now on Linux against `main` @ `0efe6218` with the C++ backend at build 21. Steps
+1 and 2 only — step 3 was skipped deliberately (the 2026-08-16 finding that
+`kct zones hv-keepout --clearance 1.6` makes this board *worse* stands, and is
+unaddressed).
+
+| Measure | T4 requires | **2026-08-21** | 2026-08-16 | 2026-08-15 pre-fix | matrix off |
+|---|---|---|---|---|---|
+| Signal nets routed | 100 % | **50** (6/7 + 44/77) | 50 / 82 | 49 / 82 | 50 / 82 |
+| Cross-pairs in the matrix | = census | **1922** | 1922 | 1823 | dormant |
+| Board-level census fails, after step 2 | **0** | **17** | 25 | 57 | 107 |
+| **Router's own gate on the finished board** | 0 | **0** | 2 | 3 | 54 |
+| Wall clock (step 1 + step 2) | — | 6:43 + 25:05 | — | 19 min | 15 min |
+
+Baseline sanity, unchanged across all three runs: the census on the **placed,
+unrouted** board is 2997 pairs, 24 raw fails, all `same_footprint`, **0
+board-level** — byte-for-byte the fixture's own 2026-08-06 record. Every fail
+below is copper this run laid down.
+
+### The frame correction: the replay was scored in the wrong coordinate space
+
+The 2026-08-16 run reported **2 genuine gate leaks** (`/I_SENSE_OUT`↔`/SCAP_NEG`,
+0.600 mm against 1.400 mm) and called them "the only line item Phase 2's own
+machinery owns". They were an artifact of the ad-hoc replay's coordinate frame,
+and the "Reproducing" note that recorded the convention had it **backwards**:
+
+* `PCB.load` detects the `Edge.Cuts` origin and reports footprint positions
+  **board-relative** (`schema/pcb.py::_detect_board_origin`). On softstart rev-C
+  that origin is `(68.5, 55.0)`: `Q8` is `(at 186.5 117.0)` in the file and
+  `(118.0, 62.0)` after loading.
+* `(segment ...)` and `(via ...)` coordinates in the same file — and every
+  `Segment` the router works with — are **sheet-absolute**.
+
+So attach zones built straight off `PCB.load(...).footprints` sit 68.5 mm ×
+55 mm away from the copper they are meant to waive. The production resolver has
+always applied that shift (`cli/route_cmd.py::_pairwise_attach_zones`); only the
+throwaway replay did not, and the shift is silently bidirectional — a misplaced
+rectangle both fails to waive the copper it should and waives whatever unrelated
+copper it lands on, so a wrong frame does not announce itself as an error.
+
+Replayed in the correct frame on the 2026-08-21 board:
+
+```
+$ uv run python scripts/replay_pairwise_gate.py step2.kicad_pcb \
+      --voltage-map vmap.json --dru 0.15
+step2.kicad_pcb: 84 mapped nets, 1922 cross-pairs, DRU floor 0.150 mm
+  trace-vs-trace pairwise violations (with #4506 attach zones): 0  (0 net pairs)
+
+$ ... --no-attach-zones
+  trace-vs-trace pairwise violations (without #4506 attach zones): 14  (2 net pairs)
+    /GATE_NEG_A <-> /LED_K_NEG: 0.600 mm against 1.400 mm at (186.100, 116.600)
+    /GATE_POS_A <-> /LED_K_POS: 0.600 mm against 1.400 mm at (142.100, 116.600)
+```
+
+The 14 waived instances are two rated MOSFET packages' own attach copper (`Q7`,
+`Q8`) — #4506 working as designed on real geometry. **The router's own gate has
+no finding on this board**, which is also what the run's inline post-route audit
+said: it printed nothing. Step 1's output scores 0 the same way.
+
+`/I_SENSE_OUT`↔`/SCAP_NEG`, the pair the previous run named, is **5.167 mm**
+apart in trace copper against a 1.400 mm requirement.
+
+To stop this recurring, the replay is no longer a throwaway: it is
+`scripts/replay_pairwise_gate.py` over
+`router.pairwise_clearance.board_pairwise_violations`, which reads copper and
+zones from the same file in the same frame, and `tests/router/
+test_pairwise_board_replay_4507.py` pins the behaviour at three board origins
+(including `(0, 0)`, the one a frame-blind replay still gets right).
+
+### What the residual 17 actually are — and why the gate cannot see them
+
+Every one of the 17 is copper this run added (the placed board scores 0
+board-level). Taking each failing pair and finding the copper primitives that
+actually carry its minimum distance:
+
+| Governing geometry | Count | Audited by the router's pairwise gate? |
+|---|---|---|
+| routed **trace ↔ foreign pad** | 8 | **No** |
+| routed **via ↔ foreign pad** | 5 | **No** |
+| routed **via ↔ foreign trace** | 4 | **No** |
+| routed **trace ↔ foreign trace** | **0** | Yes — and it reports none |
+
+That is the finding this run replaces "2 genuine leaks" with, and it is a
+sharper one: **the residual is not a search that leaks, it is a gate that does
+not look.** `segment_pair_violation` — the kernel behind the lattice's
+search-time avoidance (#4602), the #4588 post-route audit and this replay — is
+*trace↔trace only*, exactly as #4431 Phase 1 defined it. #4507's own Ask names
+the asymmetry in item 3: "the C++ path walks **all** copper (segments, vias,
+pads), unlike Phase 1's trace↔trace-only Python check". Phase 2 armed the C++
+`Grid3D`/`Pathfinder` path, which does walk all copper — but the engine that
+routes this board is the lattice, and the audit shared by every engine is the
+trace-only one. So the copper the board actually fails on is, by construction,
+invisible to both.
+
+Four of the 17 are additionally sub-`--hv-threshold` pairs (11.7 V – 27.0 V:
+`/PRE_D_POS`↔`/PRECHARGE_POS`, `/PRE_D_NEG`↔`/PRECHARGE_NEG`,
+`/PGND`↔`/GATE_RTN_POS`, `/RTN_COM_NEG`↔`/GATE_RTN_NEG`), i.e. below the 30 V
+default and therefore absent from the matrix entirely — the policy question
+#4876 reported and did not change. The run says so itself:
+
+```
+NOTE: 811 further pair(s) sit below the 30V --hv-threshold yet still require
+more than the 0.150mm DRU floor (worst: +12V<->PRE_D_NEG at 27V -> 0.530mm).
+```
+
+### What T4 needs now
+
+Re-derived from this run; item 1 is the one that is #4507's own machinery.
+
+1. **Widen the pairwise gate past trace↔trace** — pad and via copper, on the
+   Python/lattice side, with the #4506 attach-zone waiver applied the same way.
+   All 17 residual fails are in that class, and none of them can be fixed by a
+   search whose acceptance predicate cannot see the geometry. The C++ side
+   already walks all copper, so the shape of the check exists to mirror.
+2. **`--hv-threshold` policy** (4 of 17) — a board that must pass `kct creepage`
+   cleanly has to route with `--hv-threshold 0`. Reported since #4876; whether
+   the *default* should change is an owner call.
+3. **`kct zones hv-keepout` margin** — unaddressed; the pass still carves voids
+   6–7 µm short of the requested clearance (2026-08-16 numbers below). Step 3 is
+   not worth running until it is fixed.
+4. **32 nets still unrouted** — `PLACEMENT_BOUND` / `CONGESTION_SATURATED` /
+   `BUDGET_STARVED`. Placement capacity, not pairwise; unchanged in character
+   since 2026-07-21.
+
+---
 
 This is the record of the **T4 manual criterion** of issue
 [#4507](https://github.com/rjwalters/kicad-tools/issues/4507) (router Phase 2 of
@@ -128,6 +265,14 @@ The 6 waived instances are the same two optocoupler pairs the pre-fix run found
 (`/GATE_POS_A`↔`/LED_K_POS`, `/GATE_NEG_A`↔`/LED_K_NEG`, 0.892-1.000 mm inside
 the part's own pad bbox) — #4506 working as designed on real geometry, twice.
 
+> **Corrected 2026-08-21.** The replay above was run with **unshifted** attach
+> zones, i.e. 68.5 mm × 55.0 mm away from the copper they were meant to waive,
+> so both counts in that code block are unreliable and the "2 genuine gate
+> leaks" row in the table above is an artifact. See
+> [The frame correction](#the-frame-correction-the-replay-was-scored-in-the-wrong-coordinate-space):
+> correctly framed, the gate reports **0** on a board routed by the same recipe,
+> and `/I_SENSE_OUT`↔`/SCAP_NEG` is 5.167 mm apart in trace copper.
+
 ### The grid arm, re-run
 
 Same third arm as before (the one that exercises #4507's *own* C++ kernels rather
@@ -175,8 +320,10 @@ from this run:
    census measures pours too. Either the gate grows a pour-aware pass or T4 is
    scored on a pour-free board. Not a Phase 2 deliverable (#3901).
 3. **`kct zones hv-keepout` margin** (the 25 → 35 regression above).
-4. **The 2 genuine gate leaks** — the only line item Phase 2's own machinery
-   owns, and the smallest one on the list.
+4. ~~**The 2 genuine gate leaks**~~ — **withdrawn 2026-08-21**: a frame artifact
+   of the ad-hoc replay, not copper. The line item Phase 2's own machinery owns
+   is instead "widen the gate past trace↔trace", see
+   [What T4 needs now](#what-t4-needs-now) at the top.
 5. **32 nets still unrouted** — `PLACEMENT_BOUND` / `CONGESTION_SATURATED` /
    `BUDGET_STARVED`, unchanged in character since 2026-07-21. Placement capacity,
    not pairwise.
@@ -535,6 +682,11 @@ placement capacity wall, and a definitional mismatch between two gates.
 > Re-scored against the post-#4868 run. Rows 1-3 and T1-T3 are unchanged; the
 > "observed live" evidence in 2b / 3 and the T4 row carry the **re-score's**
 > numbers, with the pre-fix figures in parentheses.
+>
+> **T4 superseded 2026-08-21**: still FAILS, now at **17** board-level fails with
+> **0** router-gate findings — the "2 router-gate leaks" cited below were a
+> replay frame artifact. Current numbers and the residual's real composition are
+> in [the 2026-08-21 re-run](#the-2026-08-21-re-run-the-router-gate-is-clean-and-what-that-leaves).
 
 | # | Criterion | Status | Evidence |
 |---|---|---|---|
@@ -556,16 +708,14 @@ helpers used above are:
 * softstart's own `hardware/kicad/classify_creepage_fails.py` (census → track↔track
   vs pad-involved), used unmodified;
 * softstart's own `hardware/kicad/creepage_triage.py` (the fixture's gate);
-* a throwaway replay of `segment_pair_violation` over the finished board with and
-  without `build_attach_zones(...)` — 60 lines, reproduced from the snippet in
-  [Attributing the 26](#attributing-the-26-which-are-the-routers-fault); it
-  imports only public router API. **Frame note for anyone re-running it:** read
-  the segments *and* the attach zones from the same board file and do **not**
-  apply the `pcb.board_origin` shift that `_pairwise_attach_zones` uses — that
-  shift exists because the CLI audit's `Route` objects live in the router's
-  internal frame, and applying it to file-frame copper silently moves every zone
-  off the board (the exemption then waives nothing, and the replay over-reports
-  8 leaks instead of 2);
+* ~~a throwaway replay of `segment_pair_violation` over the finished board with
+  and without `build_attach_zones(...)` — 60 lines, reproduced from the snippet
+  in [Attributing the 26](#attributing-the-26-which-are-the-routers-fault)~~
+  **superseded, and its frame note was wrong — see
+  [The frame correction](#the-frame-correction-the-replay-was-scored-in-the-wrong-coordinate-space).**
+  Use `scripts/replay_pairwise_gate.py` (backed by
+  `router.pairwise_clearance.board_pairwise_violations`), which resolves the
+  copper and the #4506 zones from the same file in the same frame;
 * a `subthreshold_coverage_gap(...)` call over the same `vmap.json` for the
   `--hv-threshold` numbers — public API as of the increment that reported them.
 
