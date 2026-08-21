@@ -2325,10 +2325,16 @@ class PCB:
         for child in sexp.iter_children():
             # Layers are stored as (N "name" type)
             if len(child.values) >= 1:
-                # The tag is the layer number as string
+                # The tag is the layer number as string. ``child.tag`` is
+                # ``None`` for an untagged/malformed nested list (e.g. a
+                # stray extra "(" produces a bare list child) -- ``int(None)``
+                # raises ``TypeError``, not ``ValueError``, so both must be
+                # caught here or a malformed ``(layers ...)`` block crashes
+                # the parser instead of skipping the unreadable entry
+                # (found by the never-panic fuzz property, issue #4880).
                 try:
                     number = int(child.tag)
-                except ValueError:
+                except (ValueError, TypeError):
                     continue
                 name = child.get_string(0) or ""
                 layer_type = child.get_string(1) or "user"
