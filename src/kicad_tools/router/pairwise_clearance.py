@@ -1174,6 +1174,126 @@ def find_pairwise_violations(
     return out
 
 
+def board_attach_zones(board_path: str | Path) -> tuple[AttachZone, ...]:
+    """#4506 attach zones for a board FILE, in that file's own coordinate frame.
+
+    ``build_attach_zones`` works on already-loaded :class:`Footprint` objects and
+    therefore inherits whatever frame the caller loaded them in.  ``PCB.load``
+    detects the ``Edge.Cuts`` origin and reports footprint positions
+    **board-relative** (``schema/pcb.py::_detect_board_origin``), while every
+    piece of copper *written into the file* -- and every
+    :class:`~kicad_tools.router.primitives.Segment` the router works with --
+    is **sheet-absolute**.  Zones built straight off ``PCB.load(...).footprints``
+    are therefore offset by ``board_origin`` from the copper they are meant to
+    waive, on every board that does not sit at sheet origin (0, 0), i.e. on
+    every real board.
+
+    Getting that shift wrong is silently bidirectional and has cost real time
+    twice (#4588's gate fixture pins it for the CLI path; the #4507 T4 proof run
+    mis-attributed two "genuine router leaks" to a mis-framed ad-hoc replay).
+    This helper is the single answer for anyone reading copper out of a board
+    file: it returns zones that line up with ``(segment ...)`` / ``(via ...)``
+    coordinates as they appear in that same file.
+
+    Args:
+        board_path: Path to a ``.kicad_pcb`` file.
+
+    Returns:
+        Attach zones shifted into the board file's sheet-absolute frame.
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(str(board_path))
+    ox, oy = pcb.board_origin
+    return shift_attach_zones(build_attach_zones(pcb.footprints), ox, oy)
+
+
+def shift_attach_zones(
+    zones: Iterable[AttachZone], offset_x: float, offset_y: float
+) -> tuple[AttachZone, ...]:
+    """Translate attach zones by ``(offset_x, offset_y)`` (#4506 frame plumbing).
+
+    Board-relative -> sheet-absolute is the only shift the router needs, and it
+    is applied in exactly two places (the CLI's memoised resolver and
+    :func:`board_attach_zones`); both go through this one implementation so the
+    two cannot drift apart.
+    """
+    from dataclasses import replace as dataclass_replace
+
+    return tuple(
+        dataclass_replace(
+            zone,
+            min_x=zone.min_x + offset_x,
+            min_y=zone.min_y + offset_y,
+            max_x=zone.max_x + offset_x,
+            max_y=zone.max_y + offset_y,
+        )
+        for zone in zones
+    )
+
+
+def board_trace_routes(board_path: str | Path) -> list[Route]:
+    """Every ``(segment ...)`` in a board file, grouped into one route per net.
+
+    Vias and zone fills are deliberately excluded: the pairwise gate
+    (:func:`segment_pair_violation`) is a **trace-vs-trace** check, so this is
+    exactly the copper it can speak about.  Net ids are re-assigned densely
+    (1..N, in net-name order) because a name-based board resolves unknown names
+    to id 0, and :func:`find_pairwise_violations` skips equal-id route pairs --
+    which would silently drop every comparison on such a board.
+    """
+    from kicad_tools.router.optimizer.pcb import parse_segments
+    from kicad_tools.router.primitives import Route
+
+    by_net = parse_segments(Path(board_path).read_text())
+    return [
+        Route(net=index, net_name=net_name, segments=list(by_net[net_name]))
+        for index, net_name in enumerate(sorted(by_net), start=1)
+    ]
+
+
+def board_pairwise_violations(
+    board_path: str | Path,
+    table: PairwiseClearanceTable,
+    *,
+    dru: float | None = None,
+    attach_zones: Sequence[AttachZone] | None = None,
+    tolerance: float = _PASS_TOLERANCE,
+) -> list[PairwiseViolation]:
+    """Replay the router's own pairwise gate over a finished board FILE (#4507).
+
+    The board-level equivalent of :func:`find_pairwise_violations` for copper
+    that is no longer in memory: it reads the traces and the #4506 attach zones
+    out of the *same* file, in the *same* frame, and runs the identical
+    :func:`segment_pair_violation` kernel the in-run audit uses.  This is how a
+    routed board is scored against the gate after the fact (the #4507 T4
+    softstart proof), and having one supported implementation is what keeps that
+    scoring from being re-derived -- with a fresh frame bug each time -- as a
+    throwaway script.
+
+    Args:
+        board_path: Path to a routed ``.kicad_pcb`` file.
+        table: The pairwise requirement table the run was scored with.
+        dru: Scalar clearance floor (mm); defaults to ``table.dru``.
+        attach_zones: Rated-footprint exemption regions.  ``None`` (the default)
+            resolves them from ``board_path`` via :func:`board_attach_zones`;
+            pass ``()`` to score the board with the #4506 exemption disabled
+            (the census' view, which has no concept of it).
+        tolerance: Sub-micron pass tolerance, as elsewhere in this module.
+
+    Returns:
+        Every trace-vs-trace shortfall on the board, deterministically ordered.
+    """
+    zones = board_attach_zones(board_path) if attach_zones is None else attach_zones
+    return find_pairwise_violations(
+        board_trace_routes(board_path),
+        table,
+        dru=dru,
+        attach_zones=zones,
+        tolerance=tolerance,
+    )
+
+
 def normalize_net_key(name: str) -> str:
     """Public form of the pairwise net-name normaliser (#4766).
 

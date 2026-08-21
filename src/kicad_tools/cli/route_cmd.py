@@ -66,7 +66,6 @@ import sys
 import textwrap
 import time
 from dataclasses import dataclass
-from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -4450,6 +4449,11 @@ def _pairwise_attach_zones(router: "Autorouter") -> "tuple[AttachZone, ...]":
     Without the shift the #4506 exemption silently misses on every board that
     does not sit at sheet origin (0, 0) -- i.e. on every real board.
 
+    The shift itself lives in
+    :func:`~kicad_tools.router.pairwise_clearance.board_attach_zones`, so the
+    after-the-fact board-file replay (#4507) and this in-run resolver cannot
+    drift apart on the frame.
+
     Returns an empty tuple when no source board path was recorded (attach-zone
     exemption then simply does not apply, which is the pre-#4506 behaviour).
     """
@@ -4460,22 +4464,10 @@ def _pairwise_attach_zones(router: "Autorouter") -> "tuple[AttachZone, ...]":
     pcb_path = getattr(router, "_pairwise_attach_zone_pcb_path", None)
     zones: tuple[AttachZone, ...] = ()
     if pcb_path is not None:
-        from kicad_tools.router.pairwise_clearance import build_attach_zones
-        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.router.pairwise_clearance import board_attach_zones
 
         try:
-            pcb = PCB.load(pcb_path)
-            ox, oy = pcb.board_origin
-            zones = tuple(
-                dataclass_replace(
-                    zone,
-                    min_x=zone.min_x + ox,
-                    min_y=zone.min_y + oy,
-                    max_x=zone.max_x + ox,
-                    max_y=zone.max_y + oy,
-                )
-                for zone in build_attach_zones(pcb.footprints)
-            )
+            zones = board_attach_zones(pcb_path)
         except Exception as exc:  # defensive: never fail the audit on a bad board
             # Issue #4588: an empty tuple is indistinguishable from "no rated
             # footprints on this board", so a silent swallow degrades straight
