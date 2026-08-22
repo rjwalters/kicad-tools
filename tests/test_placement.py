@@ -14,6 +14,7 @@ from kicad_tools.placement import (
 )
 from kicad_tools.placement.analyzer import DesignRules
 from kicad_tools.placement.conflict import Point, Rectangle
+from tests.conftest import EXTERNAL_BOARDS_ENV_VAR, resolve_external_boards_dir
 
 # Test PCB with overlapping component courtyards
 OVERLAPPING_PCB = """(kicad_pcb
@@ -1569,15 +1570,21 @@ class TestOffsetOriginOffBoard:
 
 
 class TestSoftstartRevCOffBoard:
-    """Live check against the local-only softstart rev-C fixture (#4290)."""
+    """Live check against the local-only softstart rev-C fixture (#4290).
+
+    ``boards/external/softstart`` is a local-only relative symlink calibrated
+    for the primary checkout's location on disk; from a git worktree the same
+    symlink resolves to a path that doesn't exist, which used to look
+    identical to "fixture genuinely not provisioned on this host" (#4925).
+    ``resolve_external_boards_dir()`` locates the primary checkout's
+    ``boards/external/`` via ``git rev-parse --git-common-dir`` (stable
+    across worktrees) so this test only skips when the fixture is *actually*
+    absent, not merely unreachable from a worktree's own relative path. Set
+    ``KICAD_TOOLS_EXTERNAL_BOARDS_DIR`` to override the resolution entirely.
+    """
 
     _SOFTSTART_REVC = (
-        Path(__file__).resolve().parent.parent
-        / "boards"
-        / "external"
-        / "softstart"
-        / "output_revc"
-        / "softstart_revc.kicad_pcb"
+        resolve_external_boards_dir() / "softstart" / "output_revc" / "softstart_revc.kicad_pcb"
     )
 
     def test_u14_antenna_overhang_is_not_an_error(self):
@@ -1588,7 +1595,11 @@ class TestSoftstartRevCOffBoard:
         except OSError:
             available = False
         if not available:
-            pytest.skip("softstart fixture not available on this host (local-only symlink)")
+            pytest.skip(
+                f"softstart fixture not available at {board} (local-only symlink; "
+                f"see #4925 -- if it exists elsewhere, set "
+                f"{EXTERNAL_BOARDS_ENV_VAR}=/path/to/boards/external)"
+            )
 
         conflicts = PlacementAnalyzer().find_conflicts(board)
         off_errors = [

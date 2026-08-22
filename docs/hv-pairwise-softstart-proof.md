@@ -89,6 +89,19 @@ artifact of every builder always running from a worktree. Filed as #4925
 defect) with a suggested fix (git-common-dir-relative resolution or an env
 var override) for whoever picks it up.
 
+> **Update (#4925 fixed).** `tests.conftest.resolve_external_boards_dir()`
+> now locates the *primary* checkout's `boards/external/` via `git rev-parse
+> --git-common-dir` (stable across every worktree of the repo) instead of
+> deriving it from the calling worktree's own `__file__` location, so a
+> Builder worktree no longer misreads "unreachable from here" as "absent on
+> this host." `tests/test_placement.py::TestSoftstartRevCOffBoard` (the
+> consumer this doc's own recipe shares fixture-path conventions with) now
+> uses it. Set `KICAD_TOOLS_EXTERNAL_BOARDS_DIR=/path/to/boards/external` to
+> override the resolution entirely on a layout the heuristic can't infer.
+> This does **not** change Reason 2 below — a future pass still needs a host
+> whose primary checkout has current rev-C outputs generated, resolvable or
+> not.
+
 **Reason 2 — even the primary checkout's sibling repo lacks rev-C data.**
 Fixing #4925 would not by itself unblock T4 on *this* host: checking the
 sibling `softstart` repo directly (bypassing the symlink entirely,
@@ -165,8 +178,9 @@ test suite for this area re-run clean on this pass: 364 passed, 1 skipped
 ### What T4 needs now
 
 Not more code search — a run of this doc's recipe against the actual
-softstart rev-C inputs, which requires either (a) #4925 fixed AND a host
-whose primary checkout has current rev-C outputs generated and sitting at
+softstart rev-C inputs, which requires either (a) a host whose primary
+checkout (or a directory named via `KICAD_TOOLS_EXTERNAL_BOARDS_DIR`, now
+that #4925 is fixed) has current rev-C outputs generated and sitting at
 `hardware/kicad/output_revc/` with the sidecar files this recipe reads, or
 (b) direct operator access to regenerate those inputs. Neither is a code
 change this repo's automated pipeline can make on its own. Recorded here so

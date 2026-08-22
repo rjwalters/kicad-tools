@@ -1,6 +1,7 @@
 """Pytest fixtures for kicad-tools tests."""
 
 import hashlib
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -8,6 +9,80 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+EXTERNAL_BOARDS_ENV_VAR = "KICAD_TOOLS_EXTERNAL_BOARDS_DIR"
+
+
+def resolve_external_boards_dir(start_dir: Path | None = None) -> Path:
+    """Resolve ``boards/external/`` in a worktree-depth-safe way (#4925).
+
+    ``boards/external/*`` entries (e.g. ``softstart``, ``chorus-test-revA``)
+    are local-only *relative* symlinks into sibling checkouts of external
+    hardware-fixture repos, e.g. ``../../../softstart/hardware/kicad``. That
+    fixed hop count is calibrated for exactly one layout: the *primary*
+    checkout sitting directly under the same parent directory as the sibling
+    fixture repo.
+
+    A linked git worktree (Loom's own ``.loom/worktrees/issue-N/``, or this
+    repo's daemon-managed ``.claude/worktrees/agent-<id>/``) nests the
+    worktree root *inside* the primary checkout, so the exact same relative
+    symlink resolves to a location that does not exist -- not because the
+    fixture is genuinely absent, but because the worktree is deeper than the
+    layout the ``../`` hops assume. Every consumer that just gated on
+    ``Path.exists()`` against its own checkout's ``boards/external/`` was
+    silently skipping from every worktree, which was repeatedly mistaken for
+    "fixture not provisioned on this host" (see #4925, PRs #4908/#4911).
+
+    Resolution order:
+
+    1. The ``KICAD_TOOLS_EXTERNAL_BOARDS_DIR`` environment variable, if set --
+       an explicit override naming the directory that holds the fixture
+       symlinks (or the fixture data directly), for hosts/layouts this
+       heuristic cannot infer.
+    2. The *primary* checkout's own ``boards/external/`` directory, located
+       via ``git rev-parse --git-common-dir``. All worktrees of one repo
+       share a single ``.git`` (or, for a linked worktree, a ``.git`` file
+       pointing back at it), so this is stable regardless of how deep the
+       calling worktree is nested -- unlike deriving the path from
+       ``__file__`` alone.
+    3. ``start_dir / "boards" / "external"`` -- the fallback when git is
+       unavailable or the common-dir lookup fails. Only correct when
+       ``start_dir`` IS the primary checkout (identical to (2) in that case).
+
+    Args:
+        start_dir: Directory to resolve from. Defaults to this repo's own
+            root (``REPO_ROOT``) so callers don't have to pass it explicitly;
+            overridable so the resolution logic itself can be unit-tested
+            against a scratch git repo without a real fixture checkout.
+    """
+    env_override = os.environ.get(EXTERNAL_BOARDS_ENV_VAR)
+    if env_override:
+        return Path(env_override)
+
+    if start_dir is None:
+        start_dir = REPO_ROOT
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=start_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return start_dir / "boards" / "external"
+
+    git_common_dir = Path(result.stdout.strip())
+    if not git_common_dir.is_absolute():
+        git_common_dir = (start_dir / git_common_dir).resolve()
+
+    # Standard (non-bare) layout: <primary-checkout>/.git is the common dir
+    # shared by every worktree of the repo, so its parent is the primary
+    # checkout root regardless of how deep `start_dir` itself is nested.
+    primary_checkout_root = git_common_dir.parent
+    return primary_checkout_root / "boards" / "external"
 
 
 def isolate_pcb_from_sidecars(pcb_path: Path, dest_dir: Path) -> Path:
