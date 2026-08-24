@@ -70,6 +70,15 @@ class NetStatus:
             the analyzer), used to render a copy-pasteable
             :attr:`suggested_fix`. Empty when the analyzer was handed an
             in-memory ``PCB`` with no path (issue #4679).
+        island_count: Number of disjoint copper groups ("islands") the
+            net's pads fall into after routing (issue #4934). ``1`` means
+            every pad is on one contiguous piece of copper; ``0`` means the
+            net has no pads at all. The analyzer already computes these
+            islands to classify pads; exposing the count is what lets a
+            consumer derive the number of *remaining ratsnest connections*
+            for the net (``island_count - 1``) rather than over-counting
+            them as ``unconnected_count`` (which collapses every non-largest
+            island into individual pads).
     """
 
     net_number: int
@@ -85,6 +94,37 @@ class NetStatus:
     has_vias: bool = False
     has_filled_zone: bool = False  # A zone on this net produced fill copper
     source_file: str = ""
+    # Issue #4934: number of disjoint copper islands the net's pads form.
+    # Defaults to 0 so a hand-constructed NetStatus with no pads reports a
+    # consistent "no islands"; ``_analyze_net`` always sets a real value.
+    island_count: int = 0
+
+    @property
+    def open_connections(self) -> int:
+        """Remaining ratsnest connections on this net (issue #4934).
+
+        A net whose pads form ``k`` disjoint copper islands still needs
+        ``k - 1`` connections to be complete -- exactly the number of
+        ratsnest lines KiCad draws for it, and the quantity DeepPCB
+        reports as remaining "airwires". This is NOT the same as
+        :attr:`unconnected_count`: three pads sitting on one shared,
+        stranded island count as ONE open connection, not two.
+        """
+        return max(self.island_count - 1, 0)
+
+    @property
+    def total_connections(self) -> int:
+        """Connections required to fully route this net (issue #4934).
+
+        ``total_pads - 1`` for a multi-pad net (the ratsnest a fully
+        ripped-up board would show), ``0`` for a 0- or 1-pad net.
+        """
+        return max(self.total_pads - 1, 0)
+
+    @property
+    def routed_connections(self) -> int:
+        """Connections already made by copper on this net (issue #4934)."""
+        return self.total_connections - self.open_connections
 
     @property
     def connected_count(self) -> int:
@@ -199,6 +239,10 @@ class NetStatus:
             "connected_count": self.connected_count,
             "unconnected_count": self.unconnected_count,
             "connection_percentage": round(self.connection_percentage, 1),
+            "island_count": self.island_count,
+            "total_connections": self.total_connections,
+            "routed_connections": self.routed_connections,
+            "open_connections": self.open_connections,
             "is_plane_net": self.is_plane_net,
             "has_filled_zone": self.has_filled_zone,
             "is_advisory_incomplete": self.is_advisory_incomplete,
@@ -308,6 +352,40 @@ class NetStatusResult:
         """Total number of unconnected pads across all nets."""
         return sum(n.unconnected_count for n in self.nets)
 
+    @property
+    def total_connections(self) -> int:
+        """Ratsnest connections required to fully route the board (#4934).
+
+        The DeepPCB-comparable denominator: the number of airwires a fully
+        ripped-up copy of this board would show (``Σ max(pads - 1, 0)``).
+        """
+        return sum(n.total_connections for n in self.nets)
+
+    @property
+    def open_connections(self) -> int:
+        """Ratsnest connections still unrouted across the board (#4934)."""
+        return sum(n.open_connections for n in self.nets)
+
+    @property
+    def routed_connections(self) -> int:
+        """Ratsnest connections satisfied by copper across the board (#4934).
+
+        The DeepPCB-comparable numerator (their "98 of 98 airwires").
+        """
+        return self.total_connections - self.open_connections
+
+    @property
+    def connection_completion_percentage(self) -> float:
+        """Routed connections as a percentage of required ones (#4934).
+
+        ``100.0`` for a board with nothing to route (no multi-pad nets), so
+        an empty board is never reported as a routing failure.
+        """
+        total = self.total_connections
+        if total == 0:
+            return 100.0
+        return (self.routed_connections / total) * 100
+
     def by_net_class(self) -> dict[str, list[NetStatus]]:
         """Group nets by net class."""
         result: dict[str, list[NetStatus]] = defaultdict(list)
@@ -332,6 +410,10 @@ class NetStatusResult:
             "blocking_incomplete_count": self.blocking_incomplete_count,
             "unrouted_count": self.unrouted_count,
             "total_unconnected_pads": self.total_unconnected_pads,
+            "total_connections": self.total_connections,
+            "routed_connections": self.routed_connections,
+            "open_connections": self.open_connections,
+            "connection_completion_percentage": round(self.connection_completion_percentage, 2),
             "advisory_incomplete_names": sorted(self.advisory_incomplete_names),
             "nets": [n.to_dict() for n in self.nets],
         }
@@ -596,6 +678,8 @@ class NetStatusAnalyzer:
         if len(pad_infos) < 2:
             # Single-pad nets are always "complete"
             status.connected_pads = pad_infos
+            # Issue #4934: one pad is trivially one island; zero pads is none.
+            status.island_count = len(pad_infos)
             return status
 
         # Build connectivity graph
@@ -603,6 +687,10 @@ class NetStatusAnalyzer:
 
         # Find connected components (islands)
         islands = self._find_islands(graph, [p.full_name for p in pad_infos])
+        # Issue #4934: the island COUNT (not just which pads sit in the
+        # largest one) is what a ratsnest-style "remaining connections"
+        # metric needs, so record it before the largest-island collapse.
+        status.island_count = len(islands)
 
         # Largest island is considered "connected"
         if islands:
