@@ -34,8 +34,8 @@ the text first — a `[text](path)` inside backticks is a description of a link,
 not a link:
 
 ```python
-text = re.sub(r'```.*?```', '', text, flags=re.S)   # fenced blocks
-text = re.sub(r'`[^`]*`', '', text)                  # inline spans
+text = re.sub(r"```.*?```", "", text, flags=re.S)  # fenced blocks
+text = re.sub(r"`[^`]*`", "", text)  # inline spans
 ```
 
 Without this the checker flags the sentences in this very file, and in
