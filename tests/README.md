@@ -28,7 +28,7 @@ Declared in `pyproject.toml`:
 
 ## Layout
 
-Most of the suite is a flat set of ~740 `test_*.py` modules at the root of
+Most of the suite is a flat set of ~850 `test_*.py` modules at the root of
 `tests/`. Focused test data and subsystems live in subpackages:
 
 | Directory | Contents |
@@ -40,6 +40,7 @@ Most of the suite is a flat set of ~740 `test_*.py` modules at the root of
 | `perf/` | Performance and timing tests. |
 | `report/` | Report / feedback rendering tests. |
 | `cost/` | Cost-estimation tests. |
+| `creepage/` | Creepage/HV-isolation engine, CLI, and standards tests. |
 | `baselines/` | Baseline snapshots for regression checks. |
 | `install/` | Installer / packaging tests. |
 
