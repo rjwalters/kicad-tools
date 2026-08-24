@@ -1,0 +1,73 @@
+# Pinned manifest for the external DeepPCB-comparison benchmark boards
+# (Epic #4932, Phase 1 / issue #4933).
+#
+# Each board is pinned to a full commit SHA -- never a branch or tag -- so
+# `fetch_boards.py` is byte-reproducible. Board files are NEVER vendored
+# into this repo (license + repo-size hygiene): `fetch_boards.py`
+# materializes them at run time into a gitignored cache dir. See
+# `README.md` in this directory for the full acquisition + normalization
+# pipeline and why board files aren't committed here.
+#
+# `deep_pcb_reference` records DeepPCB's own published numbers
+# (https://deeppcb.ai/benchmarks/ and
+# https://deeppcb.ai/deeppcb-vs-quilter-open-source-routing-compared-2026/)
+# for later side-by-side comparison (#4934's metrics module). A field is
+# simply absent from a board's table when DeepPCB did not publish that
+# number for it -- e.g. PocketBeagle and BeagleConnect Freedom were only
+# used in the vs-Quilter airwire-count comparison, not the STRF case study
+# (completion %, via count, wall-clock).
+#
+# `license` is the SPDX identifier read directly from each repo's LICENSE
+# file at the pinned commit (verified 2026-08-24 -- re-check if a board's
+# pinned commit is ever bumped, since upstream could relicense).
+
+[strf]
+name = "STRF RF mixed-signal"
+repo_url = "https://github.com/pms67/STRF-Kicad"
+vcs = "github"
+commit = "0525ef655e460ff6d91d770582b47925e7852e7a"
+board_path = "STRF.kicad_pcb"
+# Repo root LICENSE file, MIT (verified 2026-08-24). Ignore the sibling
+# STRF_Panel.kicad_pcb -- a multi-up panelization of the same design, not a
+# distinct benchmark board (see Epic #4932's board table).
+license = "MIT"
+
+[strf.deep_pcb_reference]
+airwires = 98
+completion_pct = 100
+vias = 68
+wall_clock_minutes_max = 3
+
+[pocketbeagle]
+name = "PocketBeagle"
+repo_url = "https://github.com/beagleboard/pocketbeagle"
+vcs = "github"
+commit = "d793a63f48dd3041e333362d5ec870377d255f89"
+board_path = "KiCAD/PocketBeagle.kicad_pcb"
+# Repo root LICENSE file, CC-BY-4.0 (verified 2026-08-24). Ignore the
+# sibling EAGLE/ directory -- a separate, non-KiCad CAD source for the same
+# board.
+license = "CC-BY-4.0"
+
+[pocketbeagle.deep_pcb_reference]
+airwires = 290
+
+[beagleconnect_freedom]
+name = "BeagleConnect Freedom"
+# GitLab-hosted (openbeagle.org / git.beagleboard.org, same instance).
+repo_url = "https://git.beagleboard.org/beagleconnect/freedom"
+vcs = "gitlab"
+# Numeric GitLab project id, resolved once (2026-08-24) via
+# `GET /api/v4/projects/beagleconnect%2Ffreedom` so fetch_boards.py never
+# needs to re-resolve the URL-encoded path per run.
+gitlab_project_id = 190
+commit = "3f99c08de7d81991f95eb2c23f30798a129ffdcf"
+# Path contains a literal space -- "BeagleConnect Freedom C7" is the board
+# name GitLab's archive API preserves verbatim in the tarball member path.
+# Skip the sibling "BeagleConnect Freedom C7-backups/" directory.
+board_path = "hw/KICAD/BeagleConnect Freedom C7.kicad_pcb"
+# Repo root LICENSE file, CC-BY-4.0 (verified 2026-08-24).
+license = "CC-BY-4.0"
+
+[beagleconnect_freedom.deep_pcb_reference]
+airwires = 414

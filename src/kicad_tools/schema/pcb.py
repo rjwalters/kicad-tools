@@ -88,6 +88,23 @@ def _is_power_net(name: str, pattern: re.Pattern[str] | None = None) -> bool:
 # ``router/connectivity.py`` (#4165) rather than inventing a second epsilon.
 _DEDUP_QUANT = 3
 
+# ``remove_segments``/``remove_vias``' coordinate-fallback matching (for
+# elements with no UUID) round-trips a coordinate through board-relative
+# space and back (subtract ``board_origin`` at parse time in
+# ``_detect_board_origin``, re-add it when building the lookup key) -- a
+# float operation that is not always bit-exact.  ``_DEDUP_QUANT``'s 1-micron
+# precision is occasionally too coarse to disambiguate that round-trip noise
+# from a genuine tie at the rounding boundary (observed: a real board with a
+# non-zero ``board_origin`` -- BeagleConnect Freedom, issue #4933 -- left a
+# small residual of un-removed copper at 1-micron rounding). 0.1-micron
+# precision matches this file format's actual on-disk decimal precision
+# closely enough to absorb the round-trip noise without it, and empirically
+# resolved 100% of that board's segments/vias (verified against all three
+# of #4933's fetched benchmark boards). This is intentionally a separate,
+# tighter constant from ``_DEDUP_QUANT`` -- that one governs a different,
+# deliberately coarser "is this a near-duplicate copper pour" comparison.
+_COORD_MATCH_QUANT = 4
+
 # Type aliases for the dedup keys.
 _SegmentKey = tuple[int, str, tuple[tuple[float, float], tuple[float, float]], float]
 _ViaKey = tuple[int, float, float, tuple[str, ...]]
@@ -3336,7 +3353,14 @@ class PCB:
         # Fallback: match by (start, end, layer) for segments without UUIDs.
         # Segment coordinates are board-relative, but the S-expression tree
         # stores them in sheet-absolute form, so offset by board_origin when
-        # building the lookup key.
+        # building the lookup key. Coordinates are rounded to
+        # _COORD_MATCH_QUANT rather than compared for exact float equality:
+        # board_origin subtraction at parse time (_detect_board_origin) and
+        # re-addition here is a float round-trip that is not always
+        # bit-exact, so an un-rounded key silently failed to match some
+        # no-UUID segments on boards with a non-zero board_origin (issue
+        # #4933, discovered via a real-world fetched board -- BeagleConnect
+        # Freedom -- during normalize.py's end-to-end rip-up smoke test).
         coords_to_remove: set[tuple[float, float, float, float, str]] = set()
         ox, oy = self._board_origin
 
@@ -3346,10 +3370,10 @@ class PCB:
             else:
                 coords_to_remove.add(
                     (
-                        seg.start[0] + ox,
-                        seg.start[1] + oy,
-                        seg.end[0] + ox,
-                        seg.end[1] + oy,
+                        round(seg.start[0] + ox, _COORD_MATCH_QUANT),
+                        round(seg.start[1] + oy, _COORD_MATCH_QUANT),
+                        round(seg.end[0] + ox, _COORD_MATCH_QUANT),
+                        round(seg.end[1] + oy, _COORD_MATCH_QUANT),
                         seg.layer,
                     )
                 )
@@ -3375,10 +3399,10 @@ class PCB:
             layer_node = child.find("layer")
             if start_node and end_node and layer_node:
                 key = (
-                    start_node.get_float(0) or 0.0,
-                    start_node.get_float(1) or 0.0,
-                    end_node.get_float(0) or 0.0,
-                    end_node.get_float(1) or 0.0,
+                    round(start_node.get_float(0) or 0.0, _COORD_MATCH_QUANT),
+                    round(start_node.get_float(1) or 0.0, _COORD_MATCH_QUANT),
+                    round(end_node.get_float(0) or 0.0, _COORD_MATCH_QUANT),
+                    round(end_node.get_float(1) or 0.0, _COORD_MATCH_QUANT),
                     layer_node.get_string(0) or "",
                 )
                 if key in coords_to_remove:
@@ -3388,19 +3412,139 @@ class PCB:
             self._sexp.remove(node)
             removed_count += 1
 
-        # Remove from in-memory list
+        # Remove from in-memory list. Must use the SAME (offset + rounded)
+        # key space as coords_to_remove above -- a bare board-relative key
+        # here (no +ox/+oy) never matches on a board with a non-zero
+        # board_origin, silently leaving ripped-up-from-the-tree segments
+        # behind in self._segments (issue #4933).
         remaining = []
         for seg in self._segments:
             should_remove = False
             if seg.uuid and seg.uuid in uuids_to_remove:
                 should_remove = True
             elif not seg.uuid:
-                key = (seg.start[0], seg.start[1], seg.end[0], seg.end[1], seg.layer)
+                key = (
+                    round(seg.start[0] + ox, _COORD_MATCH_QUANT),
+                    round(seg.start[1] + oy, _COORD_MATCH_QUANT),
+                    round(seg.end[0] + ox, _COORD_MATCH_QUANT),
+                    round(seg.end[1] + oy, _COORD_MATCH_QUANT),
+                    seg.layer,
+                )
                 if key in coords_to_remove:
                     should_remove = True
             if not should_remove:
                 remaining.append(seg)
         self._segments = remaining
+        self._invalidate_dedup_keys()
+
+        return removed_count
+
+    def remove_vias(self, vias: list[Via]) -> int:
+        """Remove specific vias from the PCB (issue #4933's rip-up helper).
+
+        Removes matching vias from both the S-expression tree (for
+        persistence via save()) and the in-memory ``_vias`` list. Vias are
+        matched by UUID when available, falling back to matching by
+        position and layer stack -- mirrors :meth:`remove_segments`'s
+        lookup discipline (there was previously no public via-removal
+        method; :meth:`dedupe_copper` shows the closest existing pattern).
+
+        Args:
+            vias: List of Via objects to remove.
+
+        Returns:
+            The number of vias actually removed.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> removed = pcb.remove_vias(list(pcb.vias))
+            >>> print(f"Removed {removed} vias")
+        """
+        if not vias:
+            return 0
+
+        # Build lookup sets for fast matching
+        uuids_to_remove: set[str] = set()
+        # Fallback: match by (x, y, layers) for vias without UUIDs. Via
+        # positions are board-relative, but the S-expression tree stores
+        # them in sheet-absolute form, so offset by board_origin when
+        # building the lookup key -- same convention as remove_segments().
+        # Coordinates are rounded to _COORD_MATCH_QUANT rather than compared
+        # for exact float equality: the board_origin subtract-then-add
+        # round trip is not always bit-exact, so an un-rounded key can
+        # silently fail to match (see remove_segments() for the full
+        # explanation and the real-world board that surfaced this, issue
+        # #4933).
+        coords_to_remove: set[tuple[float, float, tuple[str, ...]]] = set()
+        ox, oy = self._board_origin
+
+        for via in vias:
+            if via.uuid:
+                uuids_to_remove.add(via.uuid)
+            else:
+                coords_to_remove.add(
+                    (
+                        round(via.position[0] + ox, _COORD_MATCH_QUANT),
+                        round(via.position[1] + oy, _COORD_MATCH_QUANT),
+                        tuple(via.layers),
+                    )
+                )
+
+        # Remove from S-expression tree
+        removed_count = 0
+        sexp_to_remove = []
+        for child in self._sexp.children:
+            if child.is_atom or child.name != "via":
+                continue
+
+            # Check UUID match
+            uuid_node = child.find("uuid")
+            if uuid_node:
+                via_uuid = uuid_node.get_string(0) or ""
+                if via_uuid in uuids_to_remove:
+                    sexp_to_remove.append(child)
+                    continue
+
+            # Fallback: position + layers match
+            at_node = child.find("at")
+            layers_node = child.find("layers")
+            if at_node and layers_node:
+                layers = tuple(
+                    layers_node.get_string(i) or ""
+                    for i in range(len(layers_node.values))
+                    if isinstance(layers_node.values[i], str)
+                )
+                key = (
+                    round(at_node.get_float(0) or 0.0, _COORD_MATCH_QUANT),
+                    round(at_node.get_float(1) or 0.0, _COORD_MATCH_QUANT),
+                    layers,
+                )
+                if key in coords_to_remove:
+                    sexp_to_remove.append(child)
+
+        for node in sexp_to_remove:
+            self._sexp.remove(node)
+            removed_count += 1
+
+        # Remove from in-memory list. Must use the SAME (offset + rounded)
+        # key space as coords_to_remove above -- see remove_segments()'s
+        # equivalent step for why (issue #4933).
+        remaining_vias = []
+        for via in self._vias:
+            should_remove = False
+            if via.uuid and via.uuid in uuids_to_remove:
+                should_remove = True
+            elif not via.uuid:
+                key = (
+                    round(via.position[0] + ox, _COORD_MATCH_QUANT),
+                    round(via.position[1] + oy, _COORD_MATCH_QUANT),
+                    tuple(via.layers),
+                )
+                if key in coords_to_remove:
+                    should_remove = True
+            if not should_remove:
+                remaining_vias.append(via)
+        self._vias = remaining_vias
         self._invalidate_dedup_keys()
 
         return removed_count

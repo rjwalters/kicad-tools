@@ -4200,6 +4200,141 @@ class TestRemoveSegments:
         assert len(seg_nodes_after) == 0
 
 
+# Regression fixture for issue #4933: a non-zero board_origin whose
+# subtract-then-add float round trip is NOT bit-exact for one of the two
+# no-UUID copper items below (58.3225 - 24.408798 + 24.408798 !=
+# 58.3225 to the last bit -- see pcb.py's _COORD_MATCH_QUANT comment).
+# Reproduces, on a small tracked fixture, the exact real-world mismatch
+# discovered via a live smoke test against BeagleConnect Freedom
+# (git.beagleboard.org/beagleconnect/freedom), where 1-micron rounding
+# left ~14 of 2291 no-UUID segments un-removed after remove_segments().
+_ORIGIN_ROUND_TRIP_PCB = """(kicad_pcb
+  (version 20211014)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (gr_rect (start 256.063615 24.408798) (end 400 200)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (segment (start 272.26 58.3225) (end 272.26 61.01) (width 0.25) (layer "F.Cu") (net 1))
+  (via (at 272.26 58.3225) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+)
+"""
+
+
+@pytest.fixture
+def origin_round_trip_pcb(tmp_path: Path) -> Path:
+    pcb_file = tmp_path / "origin_round_trip.kicad_pcb"
+    pcb_file.write_text(_ORIGIN_ROUND_TRIP_PCB)
+    return pcb_file
+
+
+class TestRemoveSegmentsBoardOriginRoundTrip:
+    """Regression coverage for issue #4933's board_origin round-trip fix."""
+
+    def test_remove_segments_survives_float_round_trip(self, origin_round_trip_pcb: Path):
+        pcb = PCB.load(origin_round_trip_pcb)
+        assert pcb._board_origin != (0.0, 0.0)
+        assert pcb.segments[0].uuid == ""  # no UUID -- exercises the coordinate fallback
+
+        removed = pcb.remove_segments(list(pcb.segments))
+
+        assert removed == 1
+        assert len(pcb.segments) == 0
+        assert pcb.segment_count == 0  # tree-side removal also succeeded
+
+    def test_remove_vias_survives_float_round_trip(self, origin_round_trip_pcb: Path):
+        pcb = PCB.load(origin_round_trip_pcb)
+        assert pcb._board_origin != (0.0, 0.0)
+        assert pcb.vias[0].uuid == ""
+
+        removed = pcb.remove_vias(list(pcb.vias))
+
+        assert removed == 1
+        assert len(pcb.vias) == 0
+        assert pcb.via_count == 0
+
+
+_MULTILAYER_ZONES_PCB = (
+    Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+)
+
+
+class TestRemoveVias:
+    """Tests for PCB.remove_vias method (issue #4933's rip-up helper)."""
+
+    def test_remove_via_by_uuid(self):
+        """Test removing a via matched by UUID."""
+        pcb = PCB.load(_MULTILAYER_ZONES_PCB)
+        assert len(pcb.vias) == 2
+
+        via = pcb.vias[0]
+        assert via.uuid
+
+        removed = pcb.remove_vias([via])
+
+        assert removed == 1
+        assert len(pcb.vias) == 1
+
+    def test_remove_via_persists_to_save(self, tmp_path: Path):
+        """Test that removed vias are not present after save and reload."""
+        pcb = PCB.load(_MULTILAYER_ZONES_PCB)
+        vias = pcb.vias[:]
+
+        removed = pcb.remove_vias(vias)
+        assert removed == len(vias)
+
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(output_path)
+
+        pcb2 = PCB.load(output_path)
+        assert len(pcb2.vias) == 0
+
+    def test_remove_empty_list_returns_zero(self):
+        """Test that removing an empty list returns 0 and changes nothing."""
+        pcb = PCB.load(_MULTILAYER_ZONES_PCB)
+        before = len(pcb.vias)
+
+        removed = pcb.remove_vias([])
+
+        assert removed == 0
+        assert len(pcb.vias) == before
+
+    def test_remove_via_sexp_node_gone(self):
+        """Test that the via S-expression node is removed from the tree."""
+        pcb = PCB.load(_MULTILAYER_ZONES_PCB)
+        via_nodes_before = [c for c in pcb._sexp.children if not c.is_atom and c.name == "via"]
+        assert len(via_nodes_before) == 2
+
+        pcb.remove_vias(pcb.vias[:])
+
+        via_nodes_after = [c for c in pcb._sexp.children if not c.is_atom and c.name == "via"]
+        assert len(via_nodes_after) == 0
+
+    def test_remove_vias_leaves_segments_footprints_zones_intact(self):
+        """Rip-up of vias alone must not disturb unrelated board content."""
+        pcb = PCB.load(_MULTILAYER_ZONES_PCB)
+        segments_before = len(pcb.segments)
+        footprints_before = len(pcb.footprints)
+        zones_before = len(pcb.zones)
+
+        pcb.remove_vias(pcb.vias[:])
+
+        assert len(pcb.segments) == segments_before
+        assert len(pcb.footprints) == footprints_before
+        assert len(pcb.zones) == zones_before
+
+
 class TestPCBConstructorGuard:
     """Tests for PCB constructor type guard (issue #1770)."""
 

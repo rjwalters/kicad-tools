@@ -145,3 +145,9 @@ tests/benchmark_results.json
 # NEVER commit these — the corpus stays referenced by URL + sha256 in
 # scripts/corpus/manifests/, not vendored.
 scripts/corpus/.cache/
+
+# External DeepPCB-comparison benchmark boards (benchmarks/external/,
+# #4932/#4933). Fetched-at-runtime third-party board files -- NEVER commit
+# these, they stay referenced by pinned commit SHA in
+# benchmarks/external/boards.toml instead.
+.cache/kct-benchmarks/

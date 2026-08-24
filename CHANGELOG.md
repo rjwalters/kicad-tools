@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **External DeepPCB-comparison benchmark board acquisition** (#4933, part of
+  Epic #4932) — `benchmarks/external/boards.toml` pins the three open-source
+  KiCad boards DeepPCB publishes autorouter numbers for (STRF, PocketBeagle,
+  BeagleConnect Freedom) to a full commit SHA each, plus their upstream
+  license and DeepPCB's published reference numbers.
+  `fetch_boards.py` materializes each board's `.kicad_pcb` at its pinned
+  commit into a gitignored cache dir (GitHub tarball / GitLab archive API,
+  no vendoring, no credentials), verifying the fetched tree actually
+  references the pinned SHA. `normalize.py` then loads the fetched board,
+  captures the pre-rip-up "human baseline" routing stats
+  (`PCB.routing_status()`) as a JSON sidecar, strips all existing tracks and
+  vias while preserving footprint placement/nets/netclasses/zones/outline,
+  and saves the route-ready result — falling back to `kicad-cli pcb upgrade`
+  for boards whose legacy (KiCad 5/6-era) format this repo's parser cannot
+  read directly. `PCB.remove_vias()` is new (mirrors the existing
+  `remove_segments()`) so the rip-up step has a public via-removal
+  primitive to call. Feeds Epic #4932's metrics-extraction phase (#4934).
 - **Placement-only pre-route escape-capacity forecast** (part of #4799) —
   `kct route --capacity-forecast` (and `--capacity-forecast-json <path>` for the
   JSON document) prints, before any router or component loading, whether each
@@ -1092,6 +1109,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`PCB.remove_segments()` silently left copper behind on boards with a
+  non-zero `board_origin`** (#4933) — the coordinate-fallback match (for
+  segments/vias with no UUID) rebuilt an in-memory removal key without
+  re-adding the `board_origin` offset, so it never matched anything once
+  `board_origin != (0, 0)`; separately, the offset-correct key on both the
+  tree and in-memory sides compared coordinates for exact float equality,
+  and the `board_origin` subtract-then-add round trip is not always
+  bit-exact, silently dropping a further slice of matches at the old
+  1-micron rounding. Found via a real-world fetched board (BeagleConnect
+  Freedom, part of #4933's benchmark harness) where the bug's combined
+  effect left ~15% of a 2291-segment board's copper un-stripped after
+  "rip-up". Both the offset and a tighter, purpose-built
+  `_COORD_MATCH_QUANT` (0.1 micron, distinct from the existing 1-micron
+  `_DEDUP_QUANT` used for copper-pour deduplication) are now applied
+  consistently everywhere a coordinate key is built, verified against all
+  three of #4933's real fetched boards.
 - **`load_pads_for_analysis` returned anonymous pads on every KiCad 7+ board,
   silently disabling fine-pitch escape planning** (#4872) — the grid-analysis
   pad loader (`router/io.py`) read the footprint reference only from the legacy

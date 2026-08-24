@@ -6,11 +6,12 @@ workflow under `.github/workflows/` invokes anything here. These are scripts a
 human runs deliberately when a design question needs numbers, and the committed
 results are the record of the run that answered it.
 
-There is currently exactly one suite:
+There are currently two suites:
 
 | Suite | Question it answers | Issue |
 |---|---|---|
 | [`hierarchical/`](hierarchical/) | Does bottom-up hierarchical placement get most of the way there without a cascaded GA? | #2721 |
+| [`external/`](external/) | Fetch + normalize the third-party KiCad boards DeepPCB publishes benchmark numbers for, as inputs to a later routing comparison. | #4932, #4933 |
 
 ## `hierarchical/` — bottom-up baseline vs. spacing-proxy GA
 
@@ -105,3 +106,13 @@ cascaded-GA architecture and use bottom-up as a **GA seed** (and as a
 sub-millisecond "preview" placement), not as a replacement. Full argument, with
 the per-board explanation of why board 02 is the outlier, is in
 [`hierarchical/verdict.md`](hierarchical/verdict.md).
+
+## `external/` — DeepPCB comparison board acquisition
+
+Unlike `hierarchical/`, this suite's inputs are **not** committed: it
+fetches three third-party, human-routed KiCad boards (STRF, PocketBeagle,
+BeagleConnect Freedom) at pinned commit SHAs into a gitignored cache dir,
+then rips up their existing copper (preserving placement/nets/netclasses/
+zones/outline) to produce route-ready input for a later routing comparison
+against DeepPCB's published numbers (Epic #4932). Full details, the pinned
+manifest, and the fetch/normalize commands: [`external/README.md`](external/README.md).
