@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`kct bench external` -- zero-touch DeepPCB-comparable benchmark CLI**
+  (#4941, Epic #4932 Phase 2) — drives the full pipeline as one command:
+  fetch a pinned third-party board (`benchmarks/external/fetch_boards.py`,
+  #4933), rip up its copper (`normalize.py`), route it with kicad-tools
+  using rules as-shipped (no netclass/diff-pair tuning), then measure the
+  result with the Phase 1 metrics module (`kicad_tools.benchmark.external`,
+  #4934) and write a JSON + markdown report in the schema documented at
+  `docs/benchmark-external-report-schema.md`. Gates wall-clock timing on
+  the C++ router backend exactly as `kct build-native --check` reports it
+  — the stopwatch is never even started without it, so a Python-fallback
+  number can never reach the report (this project's routing-performance
+  convention). `--seed` plus the manifest's pinned commit gives
+  byte-reproducible runs; `--skip-fetch` reuses an already-fetched board
+  and `--skip-kicad-cli-drc` degrades gracefully on hosts without
+  `kicad-cli`, both honestly recorded (never rendered as "clean"). See
+  `benchmarks/external/README.md` for usage.
 - **External DeepPCB-comparison benchmark board acquisition** (#4933, part of
   Epic #4932) — `benchmarks/external/boards.toml` pins the three open-source
   KiCad boards DeepPCB publishes autorouter numbers for (STRF, PocketBeagle,

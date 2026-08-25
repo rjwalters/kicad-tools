@@ -35,6 +35,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools create-pcb <schematic>  - Create PCB from schematic
     kicad-tools init <project>         - Initialize project with manufacturer rules
     kicad-tools run <script>           - Run Python script with kicad-tools interpreter
+    kicad-tools bench external         - Zero-touch DeepPCB-comparable board benchmarks
 
 See `kicad-tools --help` for complete documentation.
 """
@@ -48,6 +49,7 @@ from kicad_tools.units import get_unit_formatter, set_current_formatter
 from .commands import (
     run_analyze_command,
     run_audit_command,
+    run_bench_command,
     run_benchmark_command,
     run_board_metrics_command,
     run_build_command,
@@ -474,6 +476,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "benchmark":
         return run_benchmark_command(args)
+
+    elif args.command == "bench":
+        return run_bench_command(args)
 
     elif args.command == "run":
         return run_run_command(args)

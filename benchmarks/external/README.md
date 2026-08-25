@@ -75,7 +75,32 @@ environment instead of a flag.
 
 The normalized output plus each board's `<slug>.baseline.json` (the
 human's original segment/via counts, trace length, and unrouted-pad count
-from `PCB.routing_status()` before rip-up) are what a later phase of Epic
-#4932 (#4934's metrics module, `kct bench external`) consumes to run the
-router and report both the human baseline and the router's result
-side-by-side with DeepPCB's published numbers.
+from `PCB.routing_status()` before rip-up) are what Epic #4932 Phase 2's
+`kct bench external` CLI (issue #4941) consumes to run the router and
+report both the human baseline and the router's result side-by-side with
+DeepPCB's published numbers.
+
+## `kct bench external` -- the end-to-end zero-touch protocol (issue #4941)
+
+`kct bench external` drives fetch -> normalize -> route -> measure as one
+command, using rules as-shipped (no netclass/diff-pair tuning) -- the
+"zero-touch" protocol mirroring DeepPCB's own vs-Quilter methodology:
+
+```bash
+# Every board in boards.toml, JSON + markdown reports under
+# .cache/kct-benchmarks/external/results/ by default
+uv run kct bench external
+
+# Just STRF, with progress output
+uv run kct bench external --board strf -v
+```
+
+It gates timing on the C++ router backend exactly as
+`kct build-native --check` does (see the top-level `CLAUDE.md`): when the
+backend is unavailable, routing still runs so completion/via/wirelength/
+DRC metrics are still measured, but no wall-clock number is recorded --
+never a Python-fallback timing in a published comparison. See
+`docs/benchmark-external-report-schema.md` for the report schema and
+`kct bench external --help` for the full flag list (`--seed` for
+deterministic reruns, `--skip-fetch` to reuse an already-fetched board,
+`--skip-kicad-cli-drc` for hosts without `kicad-cli`).

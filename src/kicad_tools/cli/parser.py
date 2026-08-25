@@ -199,6 +199,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_doctor_parser(subparsers)
     _add_spec_parser(subparsers)
     _add_benchmark_parser(subparsers)
+    _add_bench_parser(subparsers)
     _add_sync_parser(subparsers)
     _add_run_parser(subparsers)
     _add_explain_parser(subparsers)
@@ -8432,6 +8433,123 @@ def _add_benchmark_parser(subparsers) -> None:
         default="text",
         help="Output format (default: text)",
     )
+
+
+def _add_bench_parser(subparsers) -> None:
+    """Add ``bench`` subcommand parser (Epic #4932 Phase 2, issue #4941).
+
+    Distinct from the ``benchmark`` command above (this repo's own in-tree
+    routing regression-test suite, ``kicad_tools.benchmark``) -- ``bench``
+    runs the DeepPCB-comparable EXTERNAL-board harness
+    (``benchmarks/external/``): fetch a pinned third-party board, rip up
+    its copper, route it with kicad-tools using rules as-shipped, and
+    report the DeepPCB-comparable metric tuple (completion %, vias,
+    wirelength, wall-clock) alongside this project's stricter DRC gates.
+    """
+    bench_parser = subparsers.add_parser(
+        "bench",
+        help="Run external DeepPCB-comparable board benchmarks",
+        description=(
+            "Fetch, route, and measure the third-party boards DeepPCB "
+            "publishes numbers for (Epic #4932)."
+        ),
+    )
+    bench_subparsers = bench_parser.add_subparsers(
+        dest="bench_command",
+        help="Bench commands",
+    )
+
+    bench_external = bench_subparsers.add_parser(
+        "external",
+        help="Zero-touch protocol: fetch, route as-shipped, measure, report",
+        description=(
+            "Run the zero-touch protocol (rules as-shipped, no tuning) on "
+            "one or more external benchmark boards: fetch at the manifest's "
+            "pinned commit, rip up existing copper, route, then emit a "
+            "JSON + markdown report in the schema documented at "
+            "docs/benchmark-external-report-schema.md. Mirrors DeepPCB's "
+            "own vs-Quilter zero-touch methodology."
+        ),
+    )
+    bench_external.add_argument(
+        "--board",
+        action="append",
+        dest="boards",
+        metavar="SLUG",
+        help="Run only this board slug (repeatable); default: every board in the manifest",
+    )
+    bench_external.add_argument(
+        "--manifest",
+        default=None,
+        help="Path to boards.toml (default: benchmarks/external/boards.toml)",
+    )
+    bench_external.add_argument(
+        "--cache-dir",
+        dest="cache_dir",
+        default=None,
+        help="Fetch/normalize cache dir (default: .cache/kct-benchmarks/external)",
+    )
+    bench_external.add_argument(
+        "--output-dir",
+        dest="output_dir",
+        default=None,
+        help="Where to write reports (default: <cache-dir>/results)",
+    )
+    bench_external.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help=(
+            "Router --seed for deterministic, byte-reproducible routing "
+            "(default: 42) -- combined with the manifest's pinned commit, "
+            "this is the reproduction key for the report's numbers"
+        ),
+    )
+    bench_external.add_argument(
+        "--mfr",
+        "--manufacturer",
+        dest="manufacturer",
+        choices=get_all_manufacturer_names(),
+        default="jlcpcb",
+        help="Target manufacturer for the kct check gate (default: jlcpcb)",
+    )
+    bench_external.add_argument(
+        "--layers",
+        "-l",
+        type=int,
+        default=4,
+        help="Layer count for the kct check gate (default: 4, matching STRF)",
+    )
+    bench_external.add_argument(
+        "--skip-fetch",
+        dest="skip_fetch",
+        action="store_true",
+        help="Reuse an already-fetched board file in --cache-dir instead of downloading",
+    )
+    bench_external.add_argument(
+        "--skip-kicad-cli-drc",
+        dest="skip_kicad_cli_drc",
+        action="store_true",
+        help=(
+            "Skip the mandatory `kicad-cli pcb drc --refill-zones` cross-gate "
+            "(e.g. no kicad-cli on this host). The report honestly records "
+            "kicad_cli_drc.ran=false -- never a clean verdict."
+        ),
+    )
+    bench_external.add_argument(
+        "--kicad-cli-timeout",
+        dest="kicad_cli_timeout",
+        type=int,
+        default=300,
+        help="Seconds before the kicad-cli DRC cross-gate is abandoned (default: 300)",
+    )
+    bench_external.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print per-board progress",
+    )
+    add_format_flag(bench_external)
 
 
 def _add_sync_parser(subparsers) -> None:

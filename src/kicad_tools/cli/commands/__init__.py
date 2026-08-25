@@ -16,6 +16,7 @@ This package contains command handler modules organized by domain:
 """
 
 from .analyze import run_analyze_command
+from .bench import run_bench_command
 from .benchmark import run_benchmark_command
 from .board_metrics import run_board_metrics_command
 from .build import run_build_command
@@ -86,6 +87,8 @@ __all__ = [
     "run_optimize_command",
     # Benchmark
     "run_benchmark_command",
+    # External benchmark (Epic #4932)
+    "run_bench_command",
     # Validation
     "run_check_command",
     "run_creepage_command",
