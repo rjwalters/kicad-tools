@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zero-touch run in the same `--output-dir`. Same report schema and
   native-backend timing gate as the zero-touch protocol. See
   `benchmarks/external/README.md` for usage.
+- **PocketBeagle + BeagleConnect Freedom zero-touch benchmark runs**
+  (#4942, Epic #4932 Phase 2) — ran `kct bench external` (#4941/#4944)
+  against the two remaining pinned boards and committed the results to
+  `benchmarks/external/results/`. Neither board placed a single track:
+  the router's own pre-route safety gates refused both whole-board,
+  before laying any copper — PocketBeagle's off-grid-escalation fine-zone
+  solver blows its cell budget on a large coarse-pitch through-hole
+  header (filed as #4945), and BeagleConnect Freedom's `--allow-offboard`
+  placement preflight is whole-board rather than scoped, so one
+  off-board footprint vetoes routing the other ~455 connections (filed
+  as #4946). Both are documented as generic router-capability gaps, not
+  board-specific patches — the pinned board files are unmodified. License
+  notes (both CC-BY-4.0) were already recorded in
+  `benchmarks/external/boards.toml` by Phase 1.
 - **`kct bench external` -- zero-touch DeepPCB-comparable benchmark CLI**
   (#4941, Epic #4932 Phase 2) — drives the full pipeline as one command:
   fetch a pinned third-party board (`benchmarks/external/fetch_boards.py`,

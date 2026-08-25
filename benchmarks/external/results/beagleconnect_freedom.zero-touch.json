@@ -1,0 +1,116 @@
+{
+  "$schema": "https://kicad-tools.org/schemas/benchmark-external/v1.json",
+  "schema_version": 1,
+  "generated_at": "2026-08-25T04:11:58.061768+00:00",
+  "board_id": "beagleconnect_freedom",
+  "board_commit": "3f99c08de7d81991f95eb2c23f30798a129ffdcf",
+  "board_source": "https://git.beagleboard.org/beagleconnect/freedom",
+  "board_file": "beagleconnect_freedom.kicad_pcb",
+  "protocol": "zero-touch",
+  "tool_commit": "636fd368",
+  "completion": {
+    "connections_routed": 150,
+    "connections_total": 460,
+    "completion_pct": 32.61,
+    "nets_total": 161,
+    "nets_complete": 26,
+    "nets_incomplete": 135,
+    "nets_unrouted": 0,
+    "nets_blocking_incomplete": 126
+  },
+  "copper": {
+    "via_count": 0,
+    "wirelength_mm": 0,
+    "segment_count": 0,
+    "arc_count": 0,
+    "wirelength_by_layer_mm": {}
+  },
+  "timing": {
+    "wall_clock_s": 4.358,
+    "valid": true,
+    "refusal_reason": null
+  },
+  "backend": {
+    "backend": "cpp",
+    "available": true,
+    "version": "1.0.0",
+    "build_version": 21,
+    "unavailable_reason": null
+  },
+  "kct_check": {
+    "ran": true,
+    "passed": false,
+    "error_count": 8337,
+    "warning_count": 590,
+    "errors_by_rule": {
+      "connectivity": 129,
+      "courtyards_overlap": 3,
+      "edge_clearance_pad": 5,
+      "edge_clearance_pad_hole": 2,
+      "edge_clearance_zone": 8179,
+      "min_pad_size": 11,
+      "pth_annular_ring": 2,
+      "single_pad_net": 6
+    },
+    "note": null
+  },
+  "kicad_cli_drc": {
+    "ran": true,
+    "violation_count": 417,
+    "by_type": {
+      "clearance": 65,
+      "copper_edge_clearance": 61,
+      "courtyards_overlap": 3,
+      "drill_out_of_range": 2,
+      "invalid_outline": 199,
+      "npth_inside_courtyard": 6,
+      "shorting_items": 16,
+      "solder_mask_bridge": 16,
+      "starved_thermal": 48,
+      "zones_intersect": 1
+    },
+    "note": null
+  },
+  "diff_pairs": {
+    "pairs_total": 4,
+    "pairs_complete": 0,
+    "completion_pct": 0.0,
+    "pairs": [
+      {
+        "net_positive": "/RF/RF_2_4GHZ_P",
+        "net_negative": "/RF/RF_2_4GHZ_N",
+        "positive_complete": false,
+        "negative_complete": false,
+        "complete": false
+      },
+      {
+        "net_positive": "/RF/RF_SUB_1GHZ_P",
+        "net_negative": "/RF/RF_SUB_1GHZ_N",
+        "positive_complete": false,
+        "negative_complete": false,
+        "complete": false
+      },
+      {
+        "net_positive": "/USB Input/D+",
+        "net_negative": "/USB Input/D-",
+        "positive_complete": false,
+        "negative_complete": false,
+        "complete": false
+      },
+      {
+        "net_positive": "/USB Input/D_P",
+        "net_negative": "/USB Input/D_N",
+        "positive_complete": false,
+        "negative_complete": false,
+        "complete": false
+      }
+    ]
+  },
+  "notes": [
+    "seed=42",
+    "router exit code: 2",
+    "human baseline (pre-rip-up): 2291 segments, 399 vias, 2791.2mm, 25 unrouted pads",
+    "router produced no output file -- reporting the unrouted, ripped-up board (0% complete) rather than a stale artifact",
+    "DeepPCB published reference: {'airwires': 414}"
+  ]
+}

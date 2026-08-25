@@ -133,3 +133,18 @@ protocol so a `--tuned` run never overwrites a prior zero-touch run in
 the same `--output-dir`: `<slug>.<protocol>.json` and
 `report.<protocol>.md` (e.g. `strf.tuned.json` / `report.tuned.md` vs.
 `strf.zero-touch.json` / `report.zero-touch.md`).
+
+## Committed results (issue #4942, Epic #4932 Phase 2)
+
+`results/` holds the committed JSON + markdown output of zero-touch runs
+against `pocketbeagle` and `beagleconnect_freedom` (see `results/README.md`
+for what's tracked there and why the `normalized/`/`routed/` board-copy
+subdirectories `--output-dir` also produces are never committed). Both
+boards currently refuse to route zero-touch -- the router's own pre-route
+safety gates abort before placing any copper, rather than producing an
+unsafe or silently-partial result. Filed as generic router-capability
+issues (no board-specific patching): #4945 (auto-grid cell-budget refusal
+on a large coarse-pitch header) and #4946 (`--allow-offboard`'s whole-board
+scope). STRF has not yet been run through this exact combined-report
+command in this repo (#4941's own verification used a synthetic fixture,
+not the pinned STRF commit) -- see Epic #4932 for that board's status.
