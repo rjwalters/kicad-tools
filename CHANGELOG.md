@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **kicad-tools.org benchmarks section** (#4952, Epic #4932 Phase 3) — a new
+  `/benchmarks` page on the demo-gallery site presenting Phase 2's committed
+  results (PocketBeagle + BeagleConnect Freedom, #4942) side by side with
+  DeepPCB's own published numbers (https://deeppcb.ai/benchmarks/), read at
+  build time from `benchmarks/external/results/*.json` — no numbers are
+  hand-copied into the page. A methodology section distinguishes the
+  zero-touch protocol (rules as-shipped) from the tuned protocol (declared
+  netclass/diff-pair config, STRF-only, #4943). Both boards refused to route
+  zero-touch, so each is honestly annotated with its filed generic-router-
+  capability issue (#4945, #4946) rather than presented as a bare, unexplained
+  percentage. STRF has no committed report yet in this repository — the page
+  says so explicitly (linking Epic #4932 for status) instead of omitting the
+  board or fabricating a number. Reproduction instructions list the exact
+  harness command plus each board's pinned upstream commit. New site nav link
+  ("Benchmarks") added to the shared header.
 - **`kct bench external --tuned` -- declared-netclass protocol for STRF**
   (#4943, Epic #4932 Phase 2) — a second protocol for the zero-touch
   harness (#4941/#4944): applies a declared per-board netclass/diff-pair

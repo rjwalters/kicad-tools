@@ -1,0 +1,521 @@
+---
+/**
+ * External autorouter benchmarks page (Epic #4932 Phase 3, issue #4952).
+ *
+ * Publishes this epic's results (Phase 2: #4941/#4942/#4943, all merged)
+ * side by side with DeepPCB's own published numbers
+ * (https://deeppcb.ai/benchmarks/) for the three boards DeepPCB benchmarks
+ * against: STRF (mixed-signal RF), PocketBeagle, and BeagleConnect Freedom.
+ *
+ * Data sources (both read at build time, never fetched client-side):
+ *   - `loadBenchmarks()` — the committed schema-v1 JSON reports under
+ *     `benchmarks/external/results/` (currently PocketBeagle and
+ *     BeagleConnect Freedom, both zero-touch; see that directory's README
+ *     for why STRF has no committed report yet).
+ *   - `DEEP_PCB_REFERENCE` — DeepPCB's own published numbers, hand-mirrored
+ *     from `benchmarks/external/boards.toml`.
+ *
+ * Honesty rules carried over from the CLI renderer
+ * (`src/kicad_tools/benchmark/external/render.py`) and this epic's stated
+ * risk register:
+ *   - A board with no committed report renders as "not yet reproduced in
+ *     this repository", never silently omitted and never backfilled with a
+ *     guessed number.
+ *   - Zero-touch and tuned results are never merged into one row — DeepPCB's
+ *     STRF case study involved manual netclass setup, while its
+ *     PocketBeagle/BeagleConnect numbers were zero-touch; conflating the two
+ *     would misrepresent both.
+ *   - A board that did not route 100% is annotated with its filed
+ *     generic-router-capability issue, not silently presented as a lesser
+ *     percentage with no explanation.
+ */
+import { loadBenchmarks } from "../data/loadBenchmarks.ts";
+import { DEEP_PCB_REFERENCE, deepPcbReferenceFor } from "../data/deepPcbReference.ts";
+import {
+  fmtCompletion,
+  fmtConnections,
+  fmtVias,
+  fmtWirelength,
+  fmtTiming,
+  fmtKctCheck,
+  fmtCliDrc,
+  fmtDiffPairs,
+} from "../data/benchmarkFormat.ts";
+import SiteHeader from "../components/Header.astro";
+import SiteFooter from "../components/Footer.astro";
+
+const reports = loadBenchmarks();
+const reportedSlugs = new Set(reports.map((r) => r.board_id));
+const pendingBoards = DEEP_PCB_REFERENCE.filter((b) => !reportedSlugs.has(b.slug));
+
+// Per-board honest failure-mode annotations (results/README.md). Both
+// committed boards refuse to route zero-touch — filed as generic
+// router-capability issues, never board-specific patches.
+const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: string }> = {
+  pocketbeagle: {
+    issue: "#4945",
+    url: "https://github.com/rjwalters/kicad-tools/issues/4945",
+    summary:
+      "the auto-grid resolver's off-grid-escalation path blows its memory-cell budget on the board's two large low-density through-hole headers, and the router safely refuses to route at all rather than producing an unsafe result.",
+  },
+  beagleconnect_freedom: {
+    issue: "#4946",
+    url: "https://github.com/rjwalters/kicad-tools/issues/4946",
+    summary:
+      "one footprint (an RF shielding-can land pattern with real GND-net pads) sits outside Edge.Cuts in the pinned board, and the placement preflight gate aborts the entire route rather than routing the other ~455 connections and reporting just that footprint's nets as unresolved.",
+  },
+};
+
+const EPIC_URL = "https://github.com/rjwalters/kicad-tools/issues/4932";
+const REPO = "https://github.com/rjwalters/kicad-tools";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>kicad-tools.org — external autorouter benchmarks</title>
+    <meta
+      name="description"
+      content="kicad-tools' autorouter results on DeepPCB's published benchmark boards (STRF, PocketBeagle, BeagleConnect Freedom), reported side by side with DeepPCB's own numbers."
+    />
+  </head>
+  <body>
+    <SiteHeader />
+    <main>
+      <header class="page-header">
+        <h1>External autorouter benchmarks</h1>
+        <p class="tagline">
+          Our autorouter's results on the same boards DeepPCB publishes
+          numbers for, reported side by side with
+          <a href="https://deeppcb.ai/benchmarks/" target="_blank" rel="noopener noreferrer"
+            >DeepPCB's own published figures</a
+          >. Public, honest, and reproducible from a clean checkout — see
+          <a href={EPIC_URL} target="_blank" rel="noopener noreferrer">Epic #4932</a> for the full
+          benchmark harness design.
+        </p>
+      </header>
+
+      <section class="methodology">
+        <h2>Methodology</h2>
+        <p class="section-copy">
+          Every headline number (completion, via count, wirelength) is
+          re-measured from the routed <code>.kicad_pcb</code> file itself,
+          never from a router-internal counter — so our numbers, DeepPCB's,
+          and a human's stand on the same footing. Two distinct protocols are
+          reported, and results from one are <strong>never</strong> merged
+          into the other:
+        </p>
+        <ul class="protocol-list" role="list">
+          <li>
+            <strong>zero-touch</strong> — rules exactly as shipped, no
+            netclass or diff-pair tuning. This mirrors DeepPCB's own
+            vs-Quilter methodology and is what PocketBeagle and BeagleConnect
+            Freedom are reported under below.
+          </li>
+          <li>
+            <strong>tuned</strong> — a declared per-board netclass / diff-pair
+            configuration applied before routing, mirroring DeepPCB's own
+            published STRF case study (USB 2.0 differential pairs at a
+            90&nbsp;ohm target, SPI bus on a compact-via netclass). Currently
+            defined for STRF only.
+          </li>
+        </ul>
+        <p class="section-copy">
+          Timing is <strong>refused, not fudged</strong>, when the C++ router
+          backend was not built for a given run — a Python-fallback runtime is
+          never published as if it were representative. Both{" "}
+          <code>kct check</code> and <code>kicad-cli pcb drc</code> are
+          required slots per report: the former catches connectivity shorts
+          the latter is blind to, the latter catches diff-pair / match-group
+          rules the former can't express natively. Full schema:{" "}
+          <a
+            href={`${REPO}/blob/main/docs/benchmark-external-report-schema.md`}
+            target="_blank"
+            rel="noopener noreferrer">benchmark-external-report-schema.md</a
+          >.
+        </p>
+      </section>
+
+      <section class="results">
+        <h2>Results</h2>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Board</th>
+                <th scope="col">Protocol</th>
+                <th scope="col">Completion</th>
+                <th scope="col">Connections</th>
+                <th scope="col">Vias</th>
+                <th scope="col">Wirelength (mm)</th>
+                <th scope="col">Runtime</th>
+                <th scope="col">kct check</th>
+                <th scope="col">kicad-cli DRC</th>
+                <th scope="col">Diff pairs</th>
+                <th scope="col">DeepPCB reference</th>
+              </tr>
+            </thead>
+            <tbody>
+              {
+                reports.map((report) => {
+                  const ref = deepPcbReferenceFor(report.board_id);
+                  const refCells: string[] = [];
+                  if (ref?.airwires !== undefined) refCells.push(`${ref.airwires} airwires`);
+                  if (ref?.completionPct !== undefined)
+                    refCells.push(`${ref.completionPct}% complete`);
+                  if (ref?.vias !== undefined) refCells.push(`${ref.vias} vias`);
+                  return (
+                    <tr>
+                      <th scope="row">{ref?.name ?? report.board_id}</th>
+                      <td>
+                        <code>{report.protocol}</code>
+                      </td>
+                      <td class:list={[{ warn: report.completion.completion_pct < 100 }]}>
+                        {fmtCompletion(report)}
+                      </td>
+                      <td>{fmtConnections(report)}</td>
+                      <td>{fmtVias(report)}</td>
+                      <td>{fmtWirelength(report)}</td>
+                      <td>{fmtTiming(report)}</td>
+                      <td class:list={[{ warn: !report.kct_check.passed }]}>
+                        {fmtKctCheck(report)}
+                      </td>
+                      <td>{fmtCliDrc(report)}</td>
+                      <td>{fmtDiffPairs(report)}</td>
+                      <td class="ref-cell">{refCells.length > 0 ? refCells.join(" · ") : "—"}</td>
+                    </tr>
+                  );
+                })
+              }
+              {
+                pendingBoards.map((board) => {
+                  const refCells: string[] = [];
+                  if (board.airwires !== undefined) refCells.push(`${board.airwires} airwires`);
+                  if (board.completionPct !== undefined)
+                    refCells.push(`${board.completionPct}% complete`);
+                  if (board.vias !== undefined) refCells.push(`${board.vias} vias`);
+                  return (
+                    <tr class="pending-row">
+                      <th scope="row">{board.name}</th>
+                      <td colspan="9" class="pending-cell">
+                        not yet reproduced in this repository's benchmark harness — see{" "}
+                        <a href={EPIC_URL} target="_blank" rel="noopener noreferrer">
+                          Epic #4932
+                        </a>{" "}
+                        for status
+                      </td>
+                      <td class="ref-cell">{refCells.length > 0 ? refCells.join(" · ") : "—"}</td>
+                    </tr>
+                  );
+                })
+              }
+            </tbody>
+          </table>
+        </div>
+        <p class="table-note">
+          A <span class="warn">highlighted</span> completion or{" "}
+          <code>kct check</code> cell means the board did not route 100% or
+          did not pass our own connectivity/clearance checks — see
+          "Failure-mode annotations" below for why.
+        </p>
+      </section>
+
+      {
+        Object.keys(FAILURE_NOTES).length > 0 && (
+          <section class="annotations">
+            <h2>Failure-mode annotations</h2>
+            <p class="section-copy">
+              Honest reporting of every board we did not route 100% — no
+              board-specific patching, only generic router-capability issues:
+            </p>
+            <ul class="annotation-list" role="list">
+              {reports
+                .filter((r) => r.board_id in FAILURE_NOTES)
+                .map((r) => {
+                  const note = FAILURE_NOTES[r.board_id];
+                  return (
+                    <li>
+                      <strong>{r.board_id}</strong> ({r.protocol}) —{" "}
+                      {note.summary} Filed as{" "}
+                      <a href={note.url} target="_blank" rel="noopener noreferrer">
+                        {note.issue}
+                      </a>
+                      .
+                    </li>
+                  );
+                })}
+            </ul>
+          </section>
+        )
+      }
+
+      <section class="reproduction">
+        <h2>Reproduction</h2>
+        <p class="section-copy">
+          Every result above is reproducible from a clean checkout with the
+          pinned upstream commit and the exact harness command:
+        </p>
+        <ul class="repro-list" role="list">
+          {
+            reports.map((r) => (
+              <li>
+                <code>{r.board_id}</code>: {r.board_source ?? "source not recorded"} @{" "}
+                <code>{r.board_commit ?? "unpinned"}</code> (kicad-tools{" "}
+                <code>{r.tool_commit}</code>, protocol <code>{r.protocol}</code>)
+              </li>
+            ))
+          }
+          {
+            pendingBoards.map((b) => (
+              <li>
+                <code>{b.slug}</code>: {b.repoUrl} @ <code>{b.commit}</code> — not yet run through
+                the harness in this repository
+              </li>
+            ))
+          }
+        </ul>
+        <pre class="repro-cmd"><code>{`# Fetch, normalize, route, and measure every board in one command
+uv run kct bench external --board pocketbeagle --board beagleconnect_freedom
+
+# STRF's tuned protocol (declared netclass config; STRF only)
+uv run kct bench external --board strf --tuned`}</code></pre>
+        <p class="section-copy">
+          Requires the C++ router backend (<code>uv run kct build-native</code>) for a
+          reportable wall-clock timing, and <code>kicad-cli</code> on <code>PATH</code> for the
+          legacy-format board upgrades these boards need. See{" "}
+          <a
+            href={`${REPO}/blob/main/benchmarks/external/README.md`}
+            target="_blank"
+            rel="noopener noreferrer">benchmarks/external/README.md</a
+          > for the full acquisition and normalization pipeline.
+        </p>
+      </section>
+    </main>
+    <SiteFooter />
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    color-scheme: dark;
+    --bg: #0a0e12;
+    --text: #e6edf3;
+    --muted: #9aa7b2;
+    --accent: #3fae7a;
+    --border: #25303a;
+    --card-bg: #11171d;
+    --badge-bg: #1b2530;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family:
+      system-ui,
+      -apple-system,
+      "Segoe UI",
+      Roboto,
+      Helvetica,
+      Arial,
+      sans-serif;
+    line-height: 1.5;
+  }
+</style>
+
+<style>
+  main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem 1.25rem 4rem;
+  }
+
+  .page-header {
+    margin-bottom: 2rem;
+  }
+
+  h1 {
+    margin: 0 0 0.6rem;
+    font-size: clamp(1.6rem, 4vw, 2.4rem);
+  }
+
+  .tagline {
+    margin: 0;
+    color: var(--muted);
+    font-size: 1rem;
+    max-width: 75ch;
+  }
+
+  .tagline a,
+  .section-copy a,
+  .annotation-list a,
+  .repro-list a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .tagline a:hover,
+  .section-copy a:hover,
+  .annotation-list a:hover,
+  .repro-list a:hover {
+    text-decoration: underline;
+  }
+
+  section {
+    margin-top: 2.5rem;
+    padding: 1.5rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card-bg);
+  }
+
+  section h2 {
+    margin: 0 0 0.75rem;
+    font-size: 1.3rem;
+  }
+
+  .section-copy {
+    margin: 0 0 1rem;
+    color: var(--muted);
+    font-size: 0.92rem;
+    max-width: 75ch;
+  }
+
+  .section-copy:last-child {
+    margin-bottom: 0;
+  }
+
+  .protocol-list,
+  .annotation-list,
+  .repro-list {
+    list-style: none;
+    margin: 0 0 1rem;
+    padding: 0;
+    display: grid;
+    gap: 0.75rem;
+    max-width: 85ch;
+  }
+
+  .protocol-list li,
+  .annotation-list li,
+  .repro-list li {
+    color: var(--muted);
+    font-size: 0.92rem;
+  }
+
+  .protocol-list strong,
+  .annotation-list strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  code {
+    background: var(--badge-bg);
+    padding: 0.05rem 0.3rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .table-scroll {
+    overflow-x: auto;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    min-width: 900px;
+  }
+
+  th,
+  td {
+    text-align: left;
+    padding: 0.6rem 0.9rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+
+  thead th {
+    color: var(--muted);
+    font-weight: 500;
+    background: var(--badge-bg);
+  }
+
+  tbody th {
+    font-weight: 600;
+  }
+
+  tbody tr:last-child th,
+  tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  td.warn {
+    color: #e0a800;
+    font-weight: 600;
+  }
+
+  td.ref-cell {
+    color: var(--muted);
+    white-space: normal;
+  }
+
+  .pending-row td,
+  .pending-row th {
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  .pending-cell {
+    white-space: normal;
+  }
+
+  .table-note {
+    margin: 0.75rem 0 0;
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+
+  .table-note .warn {
+    color: #e0a800;
+    font-style: normal;
+  }
+
+  .repro-cmd {
+    margin: 0 0 1rem;
+    padding: 1rem 1.1rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow-x: auto;
+  }
+
+  .repro-cmd code {
+    background: none;
+    padding: 0;
+    font-size: 0.85rem;
+    white-space: pre;
+  }
+
+  @media (max-width: 640px) {
+    section {
+      padding: 1.1rem;
+    }
+  }
+</style>

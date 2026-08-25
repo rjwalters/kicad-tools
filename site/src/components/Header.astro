@@ -13,14 +13,17 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
 
 <header class="site-header">
   <a class="site-title" href="/">kicad-tools</a>
-  <a
-    class="repo-link"
-    href={REPO}
-    target="_blank"
-    rel="noopener noreferrer"
-  >
-    View on GitHub
-  </a>
+  <nav class="site-nav">
+    <a class="nav-link" href="/benchmarks">Benchmarks</a>
+    <a
+      class="repo-link"
+      href={REPO}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      View on GitHub
+    </a>
+  </nav>
 </header>
 
 <style>
@@ -43,12 +46,21 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
     text-decoration: none;
   }
 
+  .site-nav {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .nav-link,
   .repo-link {
     color: var(--accent);
     font-size: 0.85rem;
     text-decoration: none;
   }
 
+  .nav-link:hover,
+  .nav-link:focus-visible,
   .repo-link:hover,
   .repo-link:focus-visible,
   .site-title:hover,
