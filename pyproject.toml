@@ -243,6 +243,13 @@ exclude = ["boards/external"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# .claude/ and .loom/ hold Loom-vendored markdown (README.md, role/pattern
+# docs) refreshed by `./.loom/scripts/resync-installed.sh` on every Loom
+# update. Their embedded Python code blocks are illustrative examples, not
+# repo source -- ruff's markdown formatting on them just gets clobbered by
+# the next resync (#4895, #4930, #4938, #4940, #4950), breaking `main` CI
+# repeatedly. Exclude the vendored surface instead of re-formatting it.
+extend-exclude = [".claude", ".loom"]
 
 [tool.ruff.lint]
 select = [
