@@ -1,15 +1,25 @@
-"""``kct bench external`` -- zero-touch DeepPCB-comparable benchmark runs.
+"""``kct bench external`` -- zero-touch / tuned DeepPCB-comparable benchmarks.
 
-Epic #4932 Phase 2, issue #4941. Drives the full pipeline: fetch a pinned
-third-party board (:mod:`benchmarks.external.fetch_boards`), rip up its
-existing copper while preserving placement/netclasses (issue #4933's
-``normalize.py``), route it with kicad-tools' router using RULES AS
-SHIPPED -- no netclass or diff-pair tuning -- mirroring DeepPCB's own
-"download the board, upload, route" vs-Quilter methodology, then measure
-the result with the Phase 1 metrics module
-(:mod:`kicad_tools.benchmark.external`, issue #4934) and write a JSON +
-markdown report in the schema documented at
+Epic #4932 Phase 2, issues #4941 (zero-touch) and #4943 (tuned). Drives the
+full pipeline: fetch a pinned third-party board
+(:mod:`benchmarks.external.fetch_boards`), rip up its existing copper while
+preserving placement/netclasses (issue #4933's ``normalize.py``), route it
+with kicad-tools' router, then measure the result with the Phase 1 metrics
+module (:mod:`kicad_tools.benchmark.external`, issue #4934) and write a
+JSON + markdown report in the schema documented at
 ``docs/benchmark-external-report-schema.md``.
+
+Two protocols, always reported SEPARATELY (never merged/averaged -- Epic
+#4932's stated risk register):
+
+* **zero-touch** (default) -- RULES AS SHIPPED, no netclass or diff-pair
+  tuning, mirroring DeepPCB's own "download the board, upload, route"
+  vs-Quilter methodology.
+* **tuned** (``--tuned``) -- applies a declared per-board netclass/
+  diff-pair config (:mod:`benchmarks.external.tuned_rules`) mirroring
+  DeepPCB's own case-study setup. Currently defined for STRF only; other
+  boards report a clear per-board error under ``--tuned`` rather than
+  silently falling back to zero-touch rules.
 
 Distinct from the existing ``kct benchmark`` command (:mod:`kicad_tools.
 benchmark`, this repo's own in-tree routing regression-test suite) --
@@ -40,8 +50,10 @@ started around it, so no timing number is even produced to discard.
 
 from __future__ import annotations
 
+import json
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Callable
 
@@ -51,7 +63,7 @@ __all__ = ["run_bench_command"]
 
 
 class BenchExternalError(RuntimeError):
-    """Raised when the zero-touch harness cannot produce a report at all."""
+    """Raised when the harness cannot produce a report at all."""
 
 
 def _find_repo_root() -> Path | None:
@@ -69,14 +81,13 @@ def _find_repo_root() -> Path | None:
     return None
 
 
-def _load_external_modules() -> tuple[Any, Any]:
-    """Import ``benchmarks/external/fetch_boards.py`` and ``normalize.py``.
+def _external_dir() -> Path:
+    """Resolve ``benchmarks/external/`` and ensure it is importable.
 
-    These live outside the installed ``kicad_tools`` package by Phase 1's
-    deliberate design (issue #4933). Added to ``sys.path`` the same way
-    ``normalize.py`` already imports its own sibling ``fetch_boards`` --
-    both this module and ``normalize`` end up sharing one
-    ``sys.modules["fetch_boards"]`` entry.
+    Shared by :func:`_load_external_modules` and :func:`_load_tuned_rules`
+    -- both dynamically import a sibling module from this directory (issue
+    #4933's deliberate outside-the-package placement, see the module
+    docstring).
     """
     repo_root = _find_repo_root()
     if repo_root is None:
@@ -91,10 +102,36 @@ def _load_external_modules() -> tuple[Any, Any]:
     external_dir = repo_root / "benchmarks" / "external"
     if str(external_dir) not in sys.path:
         sys.path.insert(0, str(external_dir))
+    return external_dir
+
+
+def _load_external_modules() -> tuple[Any, Any]:
+    """Import ``benchmarks/external/fetch_boards.py`` and ``normalize.py``.
+
+    These live outside the installed ``kicad_tools`` package by Phase 1's
+    deliberate design (issue #4933). Added to ``sys.path`` the same way
+    ``normalize.py`` already imports its own sibling ``fetch_boards`` --
+    both this module and ``normalize`` end up sharing one
+    ``sys.modules["fetch_boards"]`` entry.
+    """
+    _external_dir()
     import fetch_boards  # type: ignore[import-not-found]
     import normalize  # type: ignore[import-not-found]
 
     return fetch_boards, normalize
+
+
+def _load_tuned_rules() -> Any:
+    """Import ``benchmarks/external/tuned_rules.py`` (issue #4943's ``--tuned`` config).
+
+    Same outside-the-package placement and import mechanism as
+    :func:`_load_external_modules`; kept separate because it is only
+    needed when ``--tuned`` is requested.
+    """
+    _external_dir()
+    import tuned_rules  # type: ignore[import-not-found]
+
+    return tuned_rules
 
 
 def run_bench_command(args) -> int:
@@ -108,12 +145,20 @@ def run_bench_command(args) -> int:
 
 
 def _run_bench_external(args) -> int:
-    from kicad_tools.benchmark.external import probe_backend, render_markdown
+    from kicad_tools.benchmark.external import (
+        PROTOCOL_TUNED,
+        PROTOCOL_ZERO_TOUCH,
+        probe_backend,
+        render_markdown,
+    )
 
     json_mode = wants_json(args)
+    tuned = getattr(args, "tuned", False)
+    protocol = PROTOCOL_TUNED if tuned else PROTOCOL_ZERO_TOUCH
 
     try:
         fetch_boards, normalize = _load_external_modules()
+        tuned_rules = _load_tuned_rules() if tuned else None
     except BenchExternalError as exc:
         return _fail(json_mode, str(exc))
 
@@ -172,8 +217,29 @@ def _run_bench_external(args) -> int:
     with stdout_to_stderr_when(json_mode):
         for slug, spec in boards.items():
             if verbose:
-                print(f"== {slug} ==")
+                print(f"== {slug} ({protocol}) ==")
             try:
+                net_class_map_path = None
+                diff_pairs = None
+                if tuned:
+                    assert tuned_rules is not None  # guaranteed by `if tuned` above
+                    tuned_map = tuned_rules.build_tuned_net_class_map(slug)
+                    if tuned_map is None:
+                        raise BenchExternalError(
+                            f"no tuned netclass/diff-pair config defined for "
+                            f"board {slug!r} -- the --tuned protocol currently "
+                            "covers STRF only (benchmarks/external/"
+                            "tuned_rules.py, Epic #4932 issue #4943). Run "
+                            "without --board to restrict to boards with a "
+                            "defined tuned config, or add one to tuned_rules.py."
+                        )
+                    net_class_map_path = output_dir / "tuned" / f"{slug}.net_class_map.json"
+                    net_class_map_path.parent.mkdir(parents=True, exist_ok=True)
+                    net_class_map_path.write_text(
+                        json.dumps(tuned_map, indent=2) + "\n", encoding="utf-8"
+                    )
+                    diff_pairs = tuned_rules.diff_pairs_for(slug)
+
                 report = _run_one_board(
                     spec,
                     fetch_boards,
@@ -188,6 +254,9 @@ def _run_bench_external(args) -> int:
                     kicad_cli_timeout=kicad_cli_timeout,
                     backend=backend,
                     verbose=verbose,
+                    protocol=protocol,
+                    net_class_map_path=net_class_map_path,
+                    diff_pairs=diff_pairs,
                 )
             except BenchExternalError as exc:
                 print(f"error: {slug}: {exc}", file=sys.stderr)
@@ -203,10 +272,15 @@ def _run_bench_external(args) -> int:
                 f"{report.copper.wirelength_mm:.1f}mm -> {json_path}"
             )
 
+        # Named per protocol (issue #4943): the tuned report must never
+        # overwrite -- or be conflated with -- the zero-touch report for the
+        # same output dir.
         markdown_path = None
         if reports:
-            markdown = render_markdown(reports)
-            markdown_path = output_dir / "report.md"
+            markdown = render_markdown(
+                reports, title=f"External autorouter benchmark results ({protocol})"
+            )
+            markdown_path = output_dir / f"report.{protocol}.md"
             markdown_path.write_text(markdown, encoding="utf-8")
             print()
             print(markdown)
@@ -256,9 +330,20 @@ def _run_one_board(
     verbose: bool,
     route_fn: Callable[[list[str]], int] | None = None,
     opener: Any = None,
+    protocol: str = "zero-touch",
+    net_class_map_path: Path | None = None,
+    diff_pairs: Sequence[tuple[str, str]] | None = None,
 ):
-    """Fetch, normalize, route, and measure one board. Returns a ``BenchmarkReport``."""
-    from kicad_tools.benchmark.external import PROTOCOL_ZERO_TOUCH, collect_report
+    """Fetch, normalize, route, and measure one board. Returns a ``BenchmarkReport``.
+
+    ``protocol`` selects the report's tag (``"zero-touch"`` or ``"tuned"``,
+    see :mod:`kicad_tools.benchmark.external`). ``net_class_map_path``, when
+    given (issue #4943's ``--tuned`` protocol), is passed to ``kct route``
+    as ``--net-class-map`` and engages ``--differential-pairs`` so the
+    declared diff-pair classes are actually routed as coupled pairs rather
+    than falling through to the default single-ended strategy.
+    """
+    from kicad_tools.benchmark.external import collect_report
 
     route: Callable[[list[str]], int]
     if route_fn is not None:
@@ -296,9 +381,16 @@ def _run_one_board(
     routed_path = output_dir / "routed" / f"{spec.slug}.kicad_pcb"
     routed_path.parent.mkdir(parents=True, exist_ok=True)
     route_argv = [str(normalized_path), "-o", str(routed_path), "--seed", str(seed)]
+    if net_class_map_path is not None:
+        # Issue #4943 ("tuned" protocol): apply the declared per-board
+        # netclass/diff-pair sidecar, and enable --differential-pairs so
+        # any coupled_routing=True classes in it (e.g. STRF's USB pair)
+        # actually engage the coupled pathfinder rather than falling
+        # through to single-ended routing.
+        route_argv += ["--net-class-map", str(net_class_map_path), "--differential-pairs"]
 
     if verbose:
-        print(f"  routing (zero-touch, seed={seed}) ...")
+        print(f"  routing ({protocol}, seed={seed}) ...")
 
     wall_clock_s: float | None = None
     route_rc: int | None
@@ -337,14 +429,22 @@ def _run_one_board(
         )
     if spec.deep_pcb_reference:
         notes.append(f"DeepPCB published reference: {spec.deep_pcb_reference}")
+    if net_class_map_path is not None:
+        notes.append(
+            f"tuned protocol: applied declared net-class-map "
+            f"({net_class_map_path}) via --net-class-map --differential-pairs "
+            "-- see benchmarks/external/tuned_rules.py for the source values "
+            "and schema-mapping caveats"
+        )
 
     return collect_report(
         measured_path,
         board_id=spec.slug,
-        protocol=PROTOCOL_ZERO_TOUCH,
+        protocol=protocol,
         board_commit=spec.commit,
         board_source=spec.repo_url,
         wall_clock_s=wall_clock_s,
+        diff_pairs=diff_pairs,
         manufacturer=manufacturer,
         layers=layers,
         run_kicad_cli=run_kicad_cli,

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`kct bench external --tuned` -- declared-netclass protocol for STRF**
+  (#4943, Epic #4932 Phase 2) — a second protocol for the zero-touch
+  harness (#4941/#4944): applies a declared per-board netclass/diff-pair
+  config (`benchmarks/external/tuned_rules.py`) before routing, mirroring
+  DeepPCB's own published STRF case study
+  (USB 90R diff pair at 0.20/0.15mm, SPI bus on its own compact-via
+  netclass) rather than routing with rules as-shipped. Currently defined
+  for STRF only — other board slugs fail with a clear per-board error
+  under `--tuned` instead of silently falling back to zero-touch rules.
+  Reported strictly separately from the zero-touch protocol (Epic #4932's
+  stated risk register: DeepPCB's case-study numbers involved manual
+  netclass setup, its vs-Quilter numbers were zero-touch) — output files
+  are named per protocol (`<slug>.<protocol>.json`,
+  `report.<protocol>.md`) so a `--tuned` run never overwrites a prior
+  zero-touch run in the same `--output-dir`. Same report schema and
+  native-backend timing gate as the zero-touch protocol. See
+  `benchmarks/external/README.md` for usage.
 - **`kct bench external` -- zero-touch DeepPCB-comparable benchmark CLI**
   (#4941, Epic #4932 Phase 2) — drives the full pipeline as one command:
   fetch a pinned third-party board (`benchmarks/external/fetch_boards.py`,

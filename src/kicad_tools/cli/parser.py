@@ -8461,14 +8461,20 @@ def _add_bench_parser(subparsers) -> None:
 
     bench_external = bench_subparsers.add_parser(
         "external",
-        help="Zero-touch protocol: fetch, route as-shipped, measure, report",
+        help="Zero-touch / tuned protocol: fetch, route, measure, report",
         description=(
-            "Run the zero-touch protocol (rules as-shipped, no tuning) on "
-            "one or more external benchmark boards: fetch at the manifest's "
-            "pinned commit, rip up existing copper, route, then emit a "
-            "JSON + markdown report in the schema documented at "
-            "docs/benchmark-external-report-schema.md. Mirrors DeepPCB's "
-            "own vs-Quilter zero-touch methodology."
+            "Run the zero-touch protocol (rules as-shipped, no tuning; "
+            "default) or, with --tuned, the tuned protocol (a declared "
+            "per-board netclass/diff-pair config, see "
+            "benchmarks/external/tuned_rules.py) on one or more external "
+            "benchmark boards: fetch at the manifest's pinned commit, rip "
+            "up existing copper, route, then emit a JSON + markdown report "
+            "in the schema documented at "
+            "docs/benchmark-external-report-schema.md. The zero-touch "
+            "protocol mirrors DeepPCB's own vs-Quilter methodology; the "
+            "tuned protocol mirrors DeepPCB's own case-study methodology. "
+            "The two protocols are always reported separately -- never "
+            "merged or averaged."
         ),
     )
     bench_external.add_argument(
@@ -8477,6 +8483,21 @@ def _add_bench_parser(subparsers) -> None:
         dest="boards",
         metavar="SLUG",
         help="Run only this board slug (repeatable); default: every board in the manifest",
+    )
+    bench_external.add_argument(
+        "--tuned",
+        action="store_true",
+        help=(
+            "Run the tuned protocol instead of zero-touch: applies a "
+            "declared per-board netclass/diff-pair config "
+            "(benchmarks/external/tuned_rules.py) mirroring DeepPCB's own "
+            "case-study setup (e.g. STRF's USB 90R diff pair at "
+            "0.20/0.15mm, SPI netclass with a 0.4mm via) before routing. "
+            "Currently defined for STRF only -- other boards report a "
+            "clear per-board error rather than silently falling back to "
+            "zero-touch rules. Output files are named report.tuned.md / "
+            "<slug>.tuned.json, distinct from the zero-touch report."
+        ),
     )
     bench_external.add_argument(
         "--manifest",

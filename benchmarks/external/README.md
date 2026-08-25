@@ -104,3 +104,32 @@ never a Python-fallback timing in a published comparison. See
 `kct bench external --help` for the full flag list (`--seed` for
 deterministic reruns, `--skip-fetch` to reuse an already-fetched board,
 `--skip-kicad-cli-drc` for hosts without `kicad-cli`).
+
+## `--tuned` -- the declared-netclass protocol for STRF (issue #4943)
+
+`--tuned` runs the SAME fetch -> normalize -> route -> measure pipeline,
+but applies a declared per-board netclass/diff-pair config before
+routing, mirroring DeepPCB's own published STRF case study
+(https://deeppcb.ai/benchmark/mixed-signal-rf-board-routing/): the USB
+2.0 data pairs at a 0.20mm track / 0.15mm gap for the 90 ohm target, and
+the SPI bus on its own compact-via netclass. See
+`benchmarks/external/tuned_rules.py` for the exact values, net names, and
+the sourcing/schema-mapping notes.
+
+```bash
+uv run kct bench external --board strf --tuned -v
+```
+
+Currently defined for STRF only -- `--tuned` against any other board
+slug fails that board with a clear per-board error (`errors` in the JSON
+mode payload) rather than silently falling back to zero-touch rules or
+guessing at unrelated net names.
+
+**The tuned and zero-touch reports are always kept separate** (Epic
+#4932's stated risk register: DeepPCB's case-study numbers involved
+manual netclass setup, while their vs-Quilter numbers were zero-touch --
+conflating the two would misrepresent both). Output files are named per
+protocol so a `--tuned` run never overwrites a prior zero-touch run in
+the same `--output-dir`: `<slug>.<protocol>.json` and
+`report.<protocol>.md` (e.g. `strf.tuned.json` / `report.tuned.md` vs.
+`strf.zero-touch.json` / `report.zero-touch.md`).

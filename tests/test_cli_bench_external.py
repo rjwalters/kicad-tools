@@ -143,6 +143,28 @@ def _make_stub_route(output_text: str | None = None, *, write_output: bool = Tru
     return _route
 
 
+def _make_capturing_stub_route(output_text: str | None, captured_argv: list[list[str]]):
+    """Like ``_make_stub_route``, but records each invocation's argv.
+
+    Used to assert the tuned protocol actually appends ``--net-class-map``
+    / ``--differential-pairs`` to the router invocation (issue #4943)
+    without depending on the real router.
+    """
+
+    def _route(argv: list[str]) -> int:
+        captured_argv.append(list(argv))
+        input_path = Path(argv[0])
+        output_path = Path(argv[argv.index("-o") + 1])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_text is not None:
+            output_path.write_text(output_text, encoding="utf-8")
+        else:
+            shutil.copyfile(input_path, output_path)
+        return 0
+
+    return _route
+
+
 def _cpp_backend() -> BackendInfo:
     return BackendInfo(backend="cpp", available=True, version="1.0.0", build_version=21)
 
@@ -187,6 +209,80 @@ class TestExternalModuleLoading:
         assert hasattr(fetch_boards, "BoardSpec")
         assert hasattr(normalize, "normalize_board")
         assert hasattr(normalize, "NormalizeError")
+
+    def test_load_tuned_rules_returns_expected_attrs(self):
+        tuned_rules = bench_cmd._load_tuned_rules()
+        assert hasattr(tuned_rules, "build_tuned_net_class_map")
+        assert hasattr(tuned_rules, "diff_pairs_for")
+        assert hasattr(tuned_rules, "TUNED_DIFF_PAIRS")
+
+
+# ---------------------------------------------------------------------------
+# tuned_rules.py -- the declared STRF netclass/diff-pair config (issue #4943)
+# ---------------------------------------------------------------------------
+
+
+class TestTunedRules:
+    """DeepPCB's STRF case-study values, reproduced from
+    https://deeppcb.ai/benchmark/mixed-signal-rf-board-routing/ (verified
+    2026-08-25): USB diff pairs at 0.20mm track / 0.15mm gap, SPI bus on
+    its own compact-via netclass. See ``benchmarks/external/tuned_rules.py``
+    for the full sourcing and schema-mapping notes.
+    """
+
+    def test_strf_usb_pairs_match_declared_geometry(self):
+        tuned_rules = bench_cmd._load_tuned_rules()
+        ncm = tuned_rules.build_tuned_net_class_map("strf")
+        assert ncm is not None
+
+        for net_p, net_n in (("USB_D+", "USB_D-"), ("USB_CONN_D+", "USB_CONN_D-")):
+            for net, partner in ((net_p, net_n), (net_n, net_p)):
+                entry = ncm[net]
+                assert entry["trace_width"] == pytest.approx(0.20)
+                assert entry["intra_pair_clearance"] == pytest.approx(0.15)
+                assert entry["coupled_routing"] is True
+                assert entry["diffpair_partner"] == partner
+
+    def test_strf_spi_bus_gets_compact_via_netclass(self):
+        tuned_rules = bench_cmd._load_tuned_rules()
+        ncm = tuned_rules.build_tuned_net_class_map("strf")
+        assert ncm is not None
+
+        for net in ("SPI3_SCK", "SPI3_MOSI", "SPI3_MISO", "SPI3_!CS"):
+            entry = ncm[net]
+            assert entry["via_size"] == pytest.approx(0.4)
+            assert entry["name"] == "SPI"
+
+    def test_strf_net_class_map_is_net_class_routing_loadable(self):
+        """Every entry round-trips through the real ``NetClassRouting.from_dict``
+        used by ``--net-class-map`` (issue #2996's canonical loader) -- not
+        just a dict with the right-looking keys.
+        """
+        from kicad_tools.router.rules import NetClassRouting
+
+        tuned_rules = bench_cmd._load_tuned_rules()
+        ncm = tuned_rules.build_tuned_net_class_map("strf")
+        assert ncm is not None
+        for net, entry in ncm.items():
+            parsed = NetClassRouting.from_dict(entry)
+            assert parsed.name == entry["name"], net
+
+    def test_unsupported_board_returns_none(self):
+        tuned_rules = bench_cmd._load_tuned_rules()
+        assert tuned_rules.build_tuned_net_class_map("pocketbeagle") is None
+        assert tuned_rules.build_tuned_net_class_map("beagleconnect_freedom") is None
+        assert tuned_rules.build_tuned_net_class_map("does-not-exist") is None
+
+    def test_diff_pairs_for_strf(self):
+        tuned_rules = bench_cmd._load_tuned_rules()
+        pairs = tuned_rules.diff_pairs_for("strf")
+        assert pairs is not None
+        assert ("USB_D+", "USB_D-") in pairs
+        assert ("USB_CONN_D+", "USB_CONN_D-") in pairs
+
+    def test_diff_pairs_for_unsupported_board_returns_none(self):
+        tuned_rules = bench_cmd._load_tuned_rules()
+        assert tuned_rules.diff_pairs_for("pocketbeagle") is None
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +499,82 @@ class TestRunOneBoard:
         assert report.board_id == "fixture"
         assert (tmp_path / "cache" / "fixture" / "fixture.kicad_pcb").exists()
 
+    def test_tuned_protocol_appends_net_class_map_and_diffpair_flags(self, tmp_path):
+        """Issue #4943: a supplied ``net_class_map_path`` engages
+        ``--net-class-map`` + ``--differential-pairs`` on the router
+        invocation and tags the report ``protocol="tuned"``.
+        """
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+        spec = _spec(fetch_boards)
+
+        ncm_path = tmp_path / "tuned" / "fixture.net_class_map.json"
+        ncm_path.parent.mkdir(parents=True)
+        ncm_path.write_text("{}", encoding="utf-8")
+
+        captured: list[list[str]] = []
+        report = bench_cmd._run_one_board(
+            spec,
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=tmp_path / "out",
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_capturing_stub_route(ROUTED_OUTPUT_FIXTURE, captured),
+            protocol="tuned",
+            net_class_map_path=ncm_path,
+            diff_pairs=[("SIG1", "SIG1")],
+        )
+
+        assert report.protocol == "tuned"
+        assert len(captured) == 1
+        assert "--net-class-map" in captured[0]
+        assert str(ncm_path) in captured[0]
+        assert "--differential-pairs" in captured[0]
+        assert any("tuned protocol: applied declared net-class-map" in n for n in report.notes)
+
+    def test_zero_touch_protocol_omits_net_class_map_flags(self, tmp_path):
+        """The default (no ``net_class_map_path``) path must NOT add the
+        tuned-only flags -- zero-touch stays rules-as-shipped.
+        """
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+        spec = _spec(fetch_boards)
+
+        captured: list[list[str]] = []
+        report = bench_cmd._run_one_board(
+            spec,
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=tmp_path / "out",
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_capturing_stub_route(ROUTED_OUTPUT_FIXTURE, captured),
+        )
+
+        assert report.protocol == "zero-touch"
+        assert "--net-class-map" not in captured[0]
+        assert "--differential-pairs" not in captured[0]
+        assert not any("tuned protocol" in n for n in report.notes)
+
 
 # ---------------------------------------------------------------------------
 # Full CLI dispatch: run_bench_command
@@ -467,8 +639,12 @@ class TestRunBenchExternalCli:
         assert payload["completion"]["completion_pct"] == 100.0
         assert payload["kicad_cli_drc"]["ran"] is False
 
-        assert (output_dir / "report.md").exists()
-        markdown = (output_dir / "report.md").read_text()
+        # Markdown report is named per protocol (issue #4943) so a later
+        # --tuned run never overwrites -- or gets conflated with -- this
+        # zero-touch report.
+        assert (output_dir / "report.zero-touch.md").exists()
+        assert not (output_dir / "report.md").exists()
+        markdown = (output_dir / "report.zero-touch.md").read_text()
         assert "fixture" in markdown
         assert "zero-touch" in markdown
 
@@ -616,3 +792,135 @@ license = "MIT"
         assert rc == 0
         assert (output_dir / "fixture_a.zero-touch.json").exists()
         assert (output_dir / "fixture_b.zero-touch.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# --tuned protocol, end-to-end (issue #4943)
+# ---------------------------------------------------------------------------
+
+
+class TestTunedProtocolCli:
+    def test_tuned_unsupported_board_records_per_board_error(self, tmp_path, monkeypatch, capsys):
+        """``--tuned`` against a board with no declared config (real
+        ``tuned_rules.py`` only covers STRF) must fail that board with a
+        clear message -- never silently fall back to zero-touch rules.
+        """
+        from kicad_tools.cli import route_cmd
+
+        monkeypatch.setattr(route_cmd, "main", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
+
+        cache_dir = tmp_path / "cache"
+        manifest_path = _write_manifest(tmp_path, cache_dir)
+        output_dir = tmp_path / "out"
+
+        args = create_parser().parse_args(
+            [
+                "bench",
+                "external",
+                "--board",
+                "fixture",
+                "--manifest",
+                str(manifest_path),
+                "--cache-dir",
+                str(cache_dir),
+                "--output-dir",
+                str(output_dir),
+                "--skip-fetch",
+                "--skip-kicad-cli-drc",
+                "--tuned",
+            ]
+        )
+        rc = bench_cmd.run_bench_command(args)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "fixture" in err
+        assert "STRF only" in err
+
+        # No report was produced for the unsupported board.
+        assert not (output_dir / "fixture.tuned.json").exists()
+        assert not (output_dir / "report.tuned.md").exists()
+
+    def test_tuned_end_to_end_via_cli(self, tmp_path, monkeypatch):
+        """A board WITH a declared tuned config (monkeypatched here, since
+        production ``tuned_rules.py`` only defines STRF and this fixture
+        board isn't STRF) runs the full tuned pipeline: sidecar written,
+        ``--net-class-map``/``--differential-pairs`` passed to the router,
+        report tagged ``protocol="tuned"``, output files kept separate
+        from the zero-touch names.
+        """
+        from kicad_tools.cli import route_cmd
+
+        captured: list[list[str]] = []
+        monkeypatch.setattr(
+            route_cmd, "main", _make_capturing_stub_route(ROUTED_OUTPUT_FIXTURE, captured)
+        )
+
+        tuned_rules = bench_cmd._load_tuned_rules()
+        fake_ncm = {"SIG1": {"name": "Tuned", "trace_width": 0.3}}
+        monkeypatch.setattr(
+            tuned_rules,
+            "build_tuned_net_class_map",
+            lambda slug: fake_ncm if slug == "fixture" else None,
+        )
+        monkeypatch.setattr(
+            tuned_rules,
+            "diff_pairs_for",
+            lambda slug: None,
+        )
+
+        cache_dir = tmp_path / "cache"
+        manifest_path = _write_manifest(tmp_path, cache_dir)
+        output_dir = tmp_path / "out"
+
+        args = create_parser().parse_args(
+            [
+                "bench",
+                "external",
+                "--board",
+                "fixture",
+                "--manifest",
+                str(manifest_path),
+                "--cache-dir",
+                str(cache_dir),
+                "--output-dir",
+                str(output_dir),
+                "--skip-fetch",
+                "--skip-kicad-cli-drc",
+                "--seed",
+                "7",
+                "--tuned",
+            ]
+        )
+        rc = bench_cmd.run_bench_command(args)
+        assert rc == 0
+
+        # Sidecar written under output_dir/tuned/, matching the monkeypatched config.
+        ncm_path = output_dir / "tuned" / "fixture.net_class_map.json"
+        assert ncm_path.exists()
+        assert json.loads(ncm_path.read_text()) == fake_ncm
+
+        # Router was invoked with the tuned-protocol flags.
+        assert len(captured) == 1
+        assert "--net-class-map" in captured[0]
+        assert str(ncm_path) in captured[0]
+        assert "--differential-pairs" in captured[0]
+
+        # Report is tagged "tuned" and kept in tuned-named files, distinct
+        # from the zero-touch names.
+        json_path = output_dir / "fixture.tuned.json"
+        assert json_path.exists()
+        payload = json.loads(json_path.read_text())
+        assert payload["protocol"] == "tuned"
+        assert not (output_dir / "fixture.zero-touch.json").exists()
+
+        assert (output_dir / "report.tuned.md").exists()
+        assert not (output_dir / "report.zero-touch.md").exists()
+        markdown = (output_dir / "report.tuned.md").read_text()
+        assert "tuned" in markdown
+
+    def test_tuned_flag_defaults_false(self):
+        """``--tuned`` is opt-in; the bare ``bench external`` subcommand
+        stays zero-touch (backward compatible with issue #4941's CLI).
+        """
+        args = create_parser().parse_args(["bench", "external"])
+        assert getattr(args, "tuned", False) is False
