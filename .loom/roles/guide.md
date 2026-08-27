@@ -2157,15 +2157,29 @@ render_plan_body() {
   # Bullet count of a section body ("" -> 0), for the Backlog Balance table.
   count() { [ -z "$1" ] && printf '0' || printf '%s\n' "$1" | grep -c '^- '; }
 
+  # #6993, DO NOT DROP THE `sort_by(.number)`: every list below is piped
+  # through an explicit `sort_by(.number)` before bullets are formatted.
+  # GitHub's search-backed listings are NOT stably ordered — two items whose
+  # default ordering key ties (labeled within the same second, or split across
+  # a pagination boundary) can swap positions between two otherwise-identical
+  # queries with ZERO underlying state change. `update_work_plan()` compares
+  # `render_plan_body()`'s output byte-for-byte against the committed region
+  # (correctly — see the #5413 note there), so an unsorted render makes pure
+  # reorder noise indistinguishable from a genuine label-state change, and
+  # every ordering flip becomes a real docs-maintenance PR whose entire
+  # content is a cosmetic swap (PR #6988 merged exactly such a 2-line diff).
+  # Sorting on the issue/PR number — a stable, content-derived key — removes
+  # the nondeterminism at the source. It changes only the ORDER within a
+  # section, never which items appear in it.
   local held urgent ready building review approved curated proposals epics
   urgent=$("$GH_READ" issue list --label "loom:urgent" --state open --limit 200 --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title)"')
+    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
   ready=$("$GH_READ" issue list --label "loom:issue" --state open --limit 200 --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title)"')
+    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
   building=$("$GH_READ" issue list --label "loom:building" --state open --limit 200 --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title)"')
+    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
   review=$("$GH_READ" pr list --label "loom:review-requested" --state open --limit 200 --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title)"')
+    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
   # #5930/#6457: PRs carrying `loom:operator` are Judge-approved work stuck on
   # a human merge-risk-hold decision — folded into the generated region (see
   # the "#5930, DO NOT put a hand-written narrative section outside the
@@ -2178,20 +2192,26 @@ render_plan_body() {
   # never disagree about which open `loom:pr` PRs also carry `loom:operator`
   # (#6457 — a PR labeled `loom:operator` moments before generation could
   # appear in "Approved" but be silently omitted from the Pileup section).
+  #
+  # #6993: `approved_json` is sorted ONCE here, at the source, so BOTH the
+  # `approved` and the `held` renders below inherit the same deterministic
+  # order without either derivation needing its own sort (and without
+  # reintroducing a second query, which #6457 removed on purpose).
   local approved_json
-  approved_json=$("$GH_READ" pr list --label "loom:pr" --state open --limit 200 --json number,title,labels)
+  approved_json=$("$GH_READ" pr list --label "loom:pr" --state open --limit 200 --json number,title,labels \
+    --jq 'sort_by(.number)')
   approved=$(printf '%s' "$approved_json" | jq -r '.[] | "- **#\(.number)**: \(.title)"')
   held=$(printf '%s' "$approved_json" | jq -r '.[] | select([(.labels // [])[].name] | index("loom:operator")) | "- **#\(.number)**: \(.title)"')
   curated=$("$GH_READ" issue list --label "loom:curated" --state open --limit 200 --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title) *(curated)*"')
+    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title) *(curated)*"')
   local architect hermit
   architect=$("$GH_READ" issue list --label "loom:architect" --state open --limit 200 --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title) *(architect)*"')
+    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title) *(architect)*"')
   hermit=$("$GH_READ" issue list --label "loom:hermit" --state open --limit 200 --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title) *(hermit)*"')
+    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title) *(hermit)*"')
   proposals="${architect}${architect:+${hermit:+$'\n'}}${hermit}"
   epics=$("$GH_READ" issue list --label "loom:epic" --state open --limit 200 --json number,title \
-    --jq '.[] | "- **#\(.number)**: \(.title)"')
+    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
 
   section "Operator Attention: Merge-Risk-Hold Pileup" \
     "Judge-approved PRs stuck under a \`loom:operator\` merge-risk hold — implementation work is done, only a human merge decision is missing." \
