@@ -292,6 +292,59 @@ visibility-only scope:
   (real per-account token attribution, multi-host aggregation) is a natural
   follow-up, not required by #6136's acceptance criteria.
 
+## 5c. Merge-admission-recheck outcomes (merge-pr.sh, local-only, issue #6978)
+
+`merge-pr.sh`'s synchronous-merge path calls `_recheck_mergeable_before_refusal()`
+(#6104/#6118) whenever the forge's cached `.mergeable` reads `false` — it
+re-queries (uncached) after a short backoff and, if still unresolved,
+corroborates with a local `git merge-tree` check before deciding whether to
+proceed with the merge anyway, refuse a confirmed conflict, or refuse an
+unresolved/stale state. Like Guide's Document Maintenance phase (§5b above),
+`merge-pr.sh` is a bash script invoked directly (by Champion's `--auto`, and
+interactively) — never a tracked `loom-daemon` `SweepRegistry` sweep — so it
+has no attachment point to the `sweep.*`/`tokens.snapshot` pipeline above
+without a much larger change. #6156's efficacy review of that recheck found
+this was the one actionable gap: the decision was only ever `echo`ed to
+stdout/stderr, with nothing durable anywhere to answer (in retrospect) how
+often the forge's cache lied, how often local corroboration confirmed a real
+conflict vs. came back unresolved, or what the backoff cost in aggregate.
+
+This closes that gap with the same small, decoupled local-telemetry pattern
+as §5b, mirroring `guide-docs-telemetry.sh`:
+
+- **Emission**: the mergeability gate calls
+  `./.loom/scripts/merge-admission-telemetry.sh record --repo <owner/repo>
+  --pr <N> --action <merge|refuse-conflict|refuse-stale> --reason <text>
+  --retries-used <N> --backoff-delay-sec <N>` right after
+  `_recheck_mergeable_before_refusal()` returns its decision and BEFORE
+  branching on it with `info`/`error` (the `error` branch exits the script,
+  so telemetry must be emitted first or it would never fire on a refusal).
+  The call is wrapped so a failure here (unwritable log dir, missing `jq`,
+  etc.) can never abort the merge path — this is observability-only, and the
+  recheck's actual decision logic is unchanged. One JSON line —
+  `{schema_version, emitted_at, emitted_at_epoch, host_id, record: {kind:
+  "merge.admission_recheck", repo, pr_number, action, reason, retries_used,
+  backoff_delay_sec}}` — is appended to
+  `.loom/logs/merge-admission-telemetry.jsonl` (gitignored, host-local, same
+  directory `sweep-outcome-telemetry.jsonl` and `guide-docs-telemetry.jsonl`
+  already live in). `retries_used`/`backoff_delay_sec` are `null` when not
+  supplied or non-numeric, never coerced to 0.
+- **Query**: `./.loom/scripts/merge-admission-telemetry.sh report --since 7d`
+  (accepts `7d`/`24h`/`30m`/`90s`/a bare integer of seconds; `--json` for a
+  machine-readable summary) prints the invocation count broken down by
+  `merge`/`refuse-conflict`/`refuse-stale` over the window, from one command
+  — a zero-activity window renders "No merge-admission-recheck invocations in
+  this window." rather than erroring.
+- **What this does NOT do**: it does not add a `merge.*` kind to the wire
+  schema in `.loom/docs/telemetry-schema.md`, does not export anywhere, and
+  does not appear in the Cloudflare-backed dashboard — it is a purely local,
+  single-host-at-a-time journal an operator queries directly on whichever
+  host ran the merge. A fleet-wide, dashboard-integrated version of this
+  (multi-host aggregation) is a natural follow-up, not required by #6978's
+  observability-only scope. It also does not change
+  `_recheck_mergeable_before_refusal()`'s actual decision logic in any way
+  (#6156 recommended keeping that behavior as-is).
+
 ## 6. The operator reference instance
 
 `dashboard.example.com` is a live, operator-owned deployment of this same
@@ -313,5 +366,6 @@ capture, and why) so you can produce the equivalent for your own instance.
 | `dashboard/docs/query-api.md` | `/api/*` vs `/public/*` routes, redaction policy, live tail |
 | `dashboard/docs/token-analytics.md` | Burn curves, forecasting, per-repo attribution |
 | `defaults/scripts/guide-docs-telemetry.sh` | Local doc-maintenance throughput telemetry (§5b) — record + report, no daemon/Cloudflare involvement |
+| `defaults/scripts/merge-admission-telemetry.sh` | Local merge-admission-recheck outcome telemetry (§5c) — record + report, no daemon/Cloudflare involvement |
 | `dashboard/docs/reference-deployment.md` | Generic guidance/template for recording your own instance's deployment identity in your own infrastructure repo — carries no operator identity here |
 | `loom-daemon/src/observability/mod.rs` | Config resolution, collector/queue/exporter/sender source of truth |

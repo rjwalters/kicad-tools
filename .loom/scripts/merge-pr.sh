@@ -1929,11 +1929,38 @@ if [[ "$AUTO_MERGE" != "true" ]]; then
 # from "this branch genuinely conflicts" — see _recheck_mergeable_before_refusal().
 if [[ "$PR_MERGEABLE" == "false" ]]; then
   _MSM_BASE_REF="$(echo "$PR_JSON" | jq -r '.base.ref // empty')"
+  _MSM_RETRIES="${LOOM_MERGEABLE_RECHECK_RETRIES:-3}"
+  _MSM_DELAY="${LOOM_MERGEABLE_RECHECK_DELAY:-3}"
   _MSM_DECISION="$(_recheck_mergeable_before_refusal "$REPO_NWO" "$PR_NUMBER" "$GH" \
     "$_MSM_BASE_REF" "$PR_BRANCH" "$REPO_ROOT" \
-    "${LOOM_MERGEABLE_RECHECK_RETRIES:-3}" "${LOOM_MERGEABLE_RECHECK_DELAY:-3}")"
+    "$_MSM_RETRIES" "$_MSM_DELAY")"
   _MSM_ACTION="${_MSM_DECISION%%:*}"
   _MSM_REASON="${_MSM_DECISION#*:}"
+
+  # Every non-early-return path through _recheck_mergeable_before_refusal
+  # consumes exactly $_MSM_RETRIES attempts, EXCEPT the one where the recheck
+  # resolves mergeable=true mid-loop (at attempt N < retries) -- that path's
+  # reason string embeds "recheck #N" (see the function's own echo above), so
+  # parse it out for a durable "how many backoff attempts did this actually
+  # cost" telemetry field rather than always reporting the configured max.
+  # This reads the already-existing decision text; it does not change the
+  # recheck's decision logic in any way (#6978, AC4).
+  _MSM_RETRIES_USED="$_MSM_RETRIES"
+  if [[ "$_MSM_REASON" =~ recheck\ \#([0-9]+) ]]; then
+    _MSM_RETRIES_USED="${BASH_REMATCH[1]}"
+  fi
+
+  # Durable telemetry (#6978, follow-up from #6156): emit one
+  # merge.admission_recheck record per invocation, in addition to the
+  # existing info/error stdout messages below. Best-effort only — a failure
+  # here (unwritable log dir, missing jq, etc.) must never abort the merge
+  # path itself, so it is fully isolated with `|| true` and its own output
+  # is discarded. This does not change the decision computed above at all.
+  "$SCRIPT_DIR/merge-admission-telemetry.sh" record \
+    --repo "$REPO_NWO" --pr "$PR_NUMBER" --action "$_MSM_ACTION" --reason "$_MSM_REASON" \
+    --retries-used "$_MSM_RETRIES_USED" --backoff-delay-sec "$_MSM_DELAY" \
+    >/dev/null 2>&1 || true
+
   case "$_MSM_ACTION" in
     merge)
       info "PR #$PR_NUMBER: $_MSM_REASON"
@@ -1945,7 +1972,7 @@ if [[ "$PR_MERGEABLE" == "false" ]]; then
       error "PR #$PR_NUMBER has merge conflicts — resolve before merging (forge's cached mergeable state is stale/unknown and could not be corroborated locally: $_MSM_REASON)"
       ;;
   esac
-  unset _MSM_BASE_REF _MSM_DECISION _MSM_ACTION _MSM_REASON 2>/dev/null || true
+  unset _MSM_BASE_REF _MSM_RETRIES _MSM_DELAY _MSM_DECISION _MSM_ACTION _MSM_REASON _MSM_RETRIES_USED 2>/dev/null || true
 fi
 
 if [[ "$DRY_RUN" == "true" ]]; then

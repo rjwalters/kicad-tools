@@ -127,6 +127,7 @@ test-loom-dispatcher.sh
 test-loom-status.sh
 test-mcp-config.sh
 test-mcp-pnpm-selfrepair.sh
+test-merge-admission-telemetry.sh
 test-merge-pr-app-permission-fallback.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
 test-merge-pr-auto-reconcile.sh
