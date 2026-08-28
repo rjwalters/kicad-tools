@@ -2174,9 +2174,12 @@ render_plan_body() {
   local held urgent ready building review approved curated proposals epics
   urgent=$("$GH_READ" issue list --label "loom:urgent" --state open --limit 200 --json number,title \
     --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
-  ready=$("$GH_READ" issue list --label "loom:issue" --state open --limit 200 --json number,title \
+  # #7008: exclude loom:operator-only (a human-only decision, not buildable
+  # by automation) the same way the "Finding Work" search does; `ready` also
+  # excludes loom:building (an issue already claimed is no longer "ready").
+  ready=$("$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only" --state open --limit 200 --json number,title \
     --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
-  building=$("$GH_READ" issue list --label "loom:building" --state open --limit 200 --json number,title \
+  building=$("$GH_READ" issue list --label "loom:building" --search "-label:loom:operator-only" --state open --limit 200 --json number,title \
     --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
   review=$("$GH_READ" pr list --label "loom:review-requested" --state open --limit 200 --json number,title \
     --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')

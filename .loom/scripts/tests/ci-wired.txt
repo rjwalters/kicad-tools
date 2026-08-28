@@ -104,6 +104,7 @@ test-guide-work-log-out-of-order-merge.sh
 test-guide-work-log-pr-pagination.sh
 test-guide-work-log-self-loop.sh
 test-guide-work-plan-debounce.sh
+test-guide-work-plan-operator-only-exclude.sh
 test-host-sleep-config.sh
 test-install-active-session.sh
 test-install-agents-md-reapply.sh
