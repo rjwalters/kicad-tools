@@ -411,6 +411,68 @@ digest_row() {
     echo "| #$pr_num | $reason | $status |"
 }
 
+# =====================================================================
+# Per-PR conflict-duration tracking (#7020), mirrored from
+# champion-pr-merge.md's "Held-PR Census -> Per-PR Digest" Step 0 / Step 1:
+#   - conflict_since_for: carry the first-seen-CONFLICTING timestamp forward
+#     from the PREVIOUS pass's digest body (a `champion:conflict-since:PR=<n>
+#     TS=<iso>` marker) if this PR was already CONFLICTING there; otherwise
+#     this is a fresh conflict episode and the clock starts at "now". A PR
+#     that went MERGEABLE for even one intervening pass has no marker in
+#     that pass's body, so the very next CONFLICTING pass naturally resets
+#     rather than resuming the original "since" — the load-bearing edge case
+#     from the issue's own Test Plan (no rot-time accumulation across a
+#     MERGEABLE gap).
+#   - conflict_days: whole days elapsed between a since-timestamp and "now"
+#     (both ISO-8601 UTC), cross-platform (GNU `date -d`, BSD `date -j -f`).
+#   - digest_status: formats the Status cell exactly as champion-pr-merge.md's
+#     STATUS variable does — "<mergeable>[ since <ts>, <n>d][, out at Doctor]".
+#   - digest_aggregate_line: formats the digest issue's "**Aggregate**: ..."
+#     line, split into held-clean vs. held-rotting counts.
+# =====================================================================
+CONFLICT_SINCE_PREFIX="<!-- champion:conflict-since:PR="
+ROT_THRESHOLD_DAYS=3
+
+conflict_since_for() {
+    local pr_num="$1" mergeable="$2" old_body="$3" now_iso="$4"
+    if [[ "$mergeable" != "CONFLICTING" ]]; then
+        echo ""
+        return
+    fi
+    local prior
+    prior=$(printf '%s\n' "$old_body" | grep -o "${CONFLICT_SINCE_PREFIX}${pr_num} TS=[0-9TZ:-]*" | head -1 | sed -E 's/.*TS=//')
+    if [[ -n "$prior" ]]; then
+        echo "$prior"
+    else
+        echo "$now_iso"
+    fi
+}
+
+_iso_to_epoch() {
+    date -d "$1" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s
+}
+
+conflict_days() {
+    local since_iso="$1" now_iso="$2"
+    echo $(( ( $(_iso_to_epoch "$now_iso") - $(_iso_to_epoch "$since_iso") ) / 86400 ))
+}
+
+digest_status() {
+    local mergeable="$1" since="$2" days="$3" at_doctor="$4"
+    local status="$mergeable"
+    if [[ "$mergeable" == "CONFLICTING" ]]; then
+        status="${status} since ${since}, ${days}d"
+    fi
+    [[ "$at_doctor" == true ]] && status="$status, out at Doctor"
+    echo "$status"
+}
+
+digest_aggregate_line() {
+    local held="$1" conflicting="$2" rotting="$3" at_doctor="$4" oldest="$5"
+    local clean=$((conflicting - rotting))
+    echo "Merge-risk holds: $held open PR(s) — $conflicting conflicting ($rotting rotting >=${ROT_THRESHOLD_DAYS}d, $clean clean), $at_doctor out at Doctor, oldest ${oldest}d"
+}
+
 echo "=== test-champion-held-pr-health-pass.sh ==="
 echo
 
@@ -784,7 +846,95 @@ assert_eq "| #6621 | override: loom:auto-merge-ok applied | MERGEABLE |" \
 echo
 
 # ---------------------------------------------------------------------
-echo "Test 11: the shipped markdown matches this mirror (drift guard)"
+echo "Test 11: per-PR digest — conflict-duration tracking distinguishes fresh vs. rotting conflicts (#7020)"
+
+NOW_T0="2026-08-20T00:00:00Z"
+NOW_T1="2026-08-23T00:00:00Z"  # +3 days, still conflicting
+NOW_T2="2026-08-24T00:00:00Z"  # PR cleared to MERGEABLE this tick
+NOW_T3="2026-08-25T00:00:00Z"  # PR is CONFLICTING again, after the gap
+
+# Tick 1: brand-new conflict, no prior digest body at all (first-run case,
+# also covers "the digest issue itself does not exist yet" from the issue's
+# own Test Plan).
+SINCE_T1=$(conflict_since_for 9001 CONFLICTING "" "$NOW_T0")
+assert_eq "$NOW_T0" "$SINCE_T1" \
+    "tick 1: a first-seen conflict with no prior digest body starts the clock at 'now'"
+assert_eq "0" "$(conflict_days "$SINCE_T1" "$NOW_T0")" \
+    "tick 1: a conflict that started this same instant is 0 days old"
+
+BODY_T1="<!-- champion:conflict-since:PR=9001 TS=${SINCE_T1} -->"
+
+# Tick 2 (+3d): still conflicting — the digest carries the SAME since-
+# timestamp forward from the prior pass's body, so duration accumulates
+# rather than resetting on every tick.
+SINCE_T2=$(conflict_since_for 9001 CONFLICTING "$BODY_T1" "$NOW_T1")
+assert_eq "$NOW_T0" "$SINCE_T2" \
+    "tick 2: an ongoing conflict reuses the ORIGINAL since-timestamp carried in the prior digest body"
+DAYS_T2=$(conflict_days "$SINCE_T2" "$NOW_T1")
+assert_eq "3" "$DAYS_T2" "tick 2: 3 continuous days of conflict is computed correctly"
+assert_eq "true" "$([[ "$DAYS_T2" -ge "$ROT_THRESHOLD_DAYS" ]] && echo true || echo false)" \
+    "tick 2: 3 days at the ROT_THRESHOLD_DAYS=3 boundary already counts as rotting (>=, not >)"
+assert_eq "CONFLICTING since ${SINCE_T2}, 3d" \
+    "$(digest_status CONFLICTING "$SINCE_T2" "$DAYS_T2" false)" \
+    "tick 2: the digest row's Status cell reads 'CONFLICTING since <date>, Nd', matching the issue's own example format"
+
+BODY_T2="<!-- champion:conflict-since:PR=9001 TS=${SINCE_T2} -->"
+
+# Tick 3: the PR cleared (MERGEABLE) this pass — conflict_since_for returns
+# empty, so NO conflict-since marker is written for it into this pass's
+# digest body (mirroring champion-pr-merge.md's `if [ "$PR_MERGEABLE" =
+# "CONFLICTING" ]` guard around the marker-emitting block).
+SINCE_T3_CLEAR=$(conflict_since_for 9001 MERGEABLE "$BODY_T2" "$NOW_T2")
+assert_eq "" "$SINCE_T3_CLEAR" "tick 3: a cleared (MERGEABLE) PR gets no conflict-since marker"
+BODY_T3=""   # PR 9001's marker is genuinely absent from this pass's body
+
+# Tick 4: CONFLICTING again. The prior body (BODY_T3) carries no marker for
+# this PR — it was MERGEABLE last pass — so the clock RESETS to "now" rather
+# than resuming the T0 origin. This is the exact edge case named in the
+# issue body: "a held PR that flips CONFLICTING -> MERGEABLE -> CONFLICTING
+# again ... should not accumulate rot time across the MERGEABLE gap."
+SINCE_T4=$(conflict_since_for 9001 CONFLICTING "$BODY_T3" "$NOW_T3")
+assert_eq "$NOW_T3" "$SINCE_T4" \
+    "tick 4: re-conflicting after a MERGEABLE gap RESETS the since-timestamp to 'now'"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$SINCE_T4" != "$NOW_T0" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: tick 4 does NOT resume the original T0 origin — no rot-time accumulates across the MERGEABLE gap"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: tick 4 resumed the pre-gap origin — rot time would wrongly accumulate across a MERGEABLE gap"
+fi
+echo
+
+# ---------------------------------------------------------------------
+echo "Test 12: digest Status formatting and the aggregate held-clean/held-rotting split (#7020)"
+
+assert_eq "MERGEABLE" "$(digest_status MERGEABLE "" "" false)" \
+    "a MERGEABLE PR's Status cell carries no since/duration figure at all"
+assert_eq "MERGEABLE, out at Doctor" "$(digest_status MERGEABLE "" "" true)" \
+    "a MERGEABLE-but-out-at-Doctor PR keeps the existing Doctor suffix, unaffected by #7020"
+assert_eq "CONFLICTING since 2026-08-20T00:00:00Z, 8d" \
+    "$(digest_status CONFLICTING "2026-08-20T00:00:00Z" 8 false)" \
+    "a rotting CONFLICTING PR's Status cell matches the issue's example format verbatim"
+assert_eq "CONFLICTING since 2026-08-20T00:00:00Z, 8d, out at Doctor" \
+    "$(digest_status CONFLICTING "2026-08-20T00:00:00Z" 8 true)" \
+    "the since/duration figure and the Doctor suffix compose without clobbering each other"
+
+# Aggregate line: 5 held, 3 conflicting (2 rotting >=3d, 1 still fresh/clean),
+# 1 out at Doctor, oldest 12d.
+assert_eq "Merge-risk holds: 5 open PR(s) — 3 conflicting (2 rotting >=3d, 1 clean), 1 out at Doctor, oldest 12d" \
+    "$(digest_aggregate_line 5 3 2 1 12)" \
+    "the aggregate line distinguishes held-clean from held-rotting counts (AC #2), additive to the existing N/C/D/A fields"
+
+# A fully clean pile (every conflict younger than the threshold) still
+# reports both counts explicitly rather than omitting the rotting figure.
+assert_eq "Merge-risk holds: 2 open PR(s) — 2 conflicting (0 rotting >=3d, 2 clean), 0 out at Doctor, oldest 1d" \
+    "$(digest_aggregate_line 2 2 0 0 1)" \
+    "an all-clean pile reports '0 rotting' explicitly, not a silently-omitted figure"
+echo
+
+# ---------------------------------------------------------------------
+echo "Test 13: the shipped markdown matches this mirror (drift guard)"
 
 assert_doc_contains "$CHAMPION_MD" \
     "## Held-PR Health Pass (#6720)" \
@@ -953,6 +1103,44 @@ assert_doc_contains "$CHAMPION_MD" \
 assert_doc_lacks "$CHAMPION_MD" \
     "### #5 under a hold — route to Doctor, keep the hold" \
     "the pre-#6852 unconditional held-route heading is gone (superseded, not just supplemented)"
+
+# --- #7020: per-PR conflict-duration tracking, and the held-clean/
+# held-rotting split in the digest's aggregate line ---
+assert_doc_contains "$CHAMPION_MD" \
+    "**Step 0 — locate the existing digest issue and read its current body" \
+    "the digest gained a Step 0 that reads its OWN previous body, ahead of Step 1 (#7020)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'OLD_DIGEST_BODY=$("$GH_READ" issue view "$DIGEST_ISSUE" --json body --jq '"'"'.body'"'"')' \
+    "Step 0 reads the pinned digest issue's own body so Step 1 can carry the conflict-since clock forward across passes (#7020)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'CONFLICT_SINCE_PREFIX="<!-- champion:conflict-since:PR="' \
+    "each held PR's first-seen-CONFLICTING timestamp is persisted under its own durable marker (#7020 AC #1)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "ROT_THRESHOLD_DAYS=3" \
+    "a rot threshold distinguishes a fresh conflict from a rotting one (#7020 AC #1/#2)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'PRIOR_SINCE=$(printf '"'"'%s\n'"'"' "$OLD_DIGEST_BODY" | grep -o "${CONFLICT_SINCE_PREFIX}${PR_NUM} TS=[0-9TZ:-]*" | head -1 | sed -E '"'"'s/.*TS=//'"'"')' \
+    "the since-timestamp is carried forward from the PREVIOUS pass's digest body, not re-derived from a fresh 'now' every tick (#7020)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'STATUS="${STATUS} since ${CONFLICT_SINCE}, ${CONFLICT_DAYS}d"' \
+    "a CONFLICTING held PR's digest row shows 'CONFLICTING since <date>, Nd', matching the issue's own example format (#7020 AC #1)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    '$HELD_ROTTING rotting >=${ROT_THRESHOLD_DAYS}d, $HELD_CONFLICTING_CLEAN clean' \
+    "the digest's aggregate line distinguishes held-clean from held-rotting counts (#7020 AC #2)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    '$CONFLICT_SINCE_MARKERS---' \
+    "the per-PR conflict-since markers are written back into the digest body so the NEXT pass's Step 0 can read them (#7020)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "a \`MERGEABLE\` pass never writes the marker for that PR" \
+    "the doc names the CONFLICTING -> MERGEABLE -> CONFLICTING reset edge case explicitly (#7020 Test Plan)"
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

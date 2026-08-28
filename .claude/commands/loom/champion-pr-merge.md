@@ -1596,20 +1596,56 @@ convention already used for `champion:merge-risk-hold` /
 single pinned tracking issue this pass **edits in place**, never a fresh
 comment or issue every tick.
 
-**Step 1 — per-PR hold reason.** `$HELD_JSON` already carries `mergeable` and
-whether the PR is `loom:changes-requested` (out at Doctor); it does not carry
-*why* the PR was held. Read that from the PR's own hold comment — the same
-markers the sticky-hold precheck (criterion #2) and the durable critical-file
-hold (criterion #3, #6879) each read — one cached read per held PR, never a
-second bulk `gh pr list`. `loom:operator` is common to both hold kinds (this
-is why the aggregate `$HELD_JSON` query above already counts a critical-file
-hold for free), but each kind writes its reason under its own marker, so both
-are checked:
+**Step 0 — locate the existing digest issue and read its current body
+(#7020).** Step 1 below needs the *previous* pass's digest body to carry a
+per-PR conflict-duration clock forward across ticks — `gh pr view` only ever
+reports the *current* `mergeable` value, never how long it has read
+`CONFLICTING`, so the only durable place to keep "since when" is the digest
+issue Champion already overwrites every pass. Moved here, ahead of Step 1,
+so the lookup that used to live in Step 2 runs first:
+
+```bash
+DIGEST_TITLE="Champion: Merge-Risk Hold Digest"
+DIGEST_MARKER="<!-- champion:merge-risk-hold-digest -->"
+
+# Cached ("$GH_READ") — locating the pinned issue is itself an observation,
+# same rule as the follow-on-issue duplicate search elsewhere in this role.
+DIGEST_ISSUE=$("$GH_READ" issue list --search "\"$DIGEST_TITLE\" in:title" \
+  --state open --json number,body --limit 10 \
+  --jq "[.[] | select(.body | startswith(\"$DIGEST_MARKER\"))] | first | .number // empty")
+
+if [ -n "$DIGEST_ISSUE" ]; then
+  OLD_DIGEST_BODY=$("$GH_READ" issue view "$DIGEST_ISSUE" --json body --jq '.body')
+else
+  OLD_DIGEST_BODY=""
+fi
+```
+
+**Step 1 — per-PR hold reason, and conflict-duration tracking (#7020).**
+`$HELD_JSON` already carries `mergeable` and whether the PR is
+`loom:changes-requested` (out at Doctor); it does not carry *why* the PR was
+held, nor *how long* it has been `CONFLICTING`. Read the reason from the PR's
+own hold comment — the same markers the sticky-hold precheck (criterion #2)
+and the durable critical-file hold (criterion #3, #6879) each read — one
+cached read per held PR, never a second bulk `gh pr list`. `loom:operator` is
+common to both hold kinds (this is why the aggregate `$HELD_JSON` query above
+already counts a critical-file hold for free), but each kind writes its
+reason under its own marker, so both are checked. Track conflict duration by
+carrying a per-PR `<!-- champion:conflict-since:PR=<n> TS=<iso> -->` marker
+forward from `$OLD_DIGEST_BODY` (Step 0) — present only when that PR was
+*already* `CONFLICTING` in the immediately-prior pass, so it is naturally
+absent (and the clock resets to "now") the first time a PR turns
+`CONFLICTING` **and** after any `MERGEABLE` tick in between two conflict
+episodes, since a `MERGEABLE` pass never writes the marker for that PR:
 
 ```bash
 HOLD_MARKER="<!-- champion:merge-risk-hold -->"
 CRITICAL_FILE_HOLD_MARKER="<!-- champion:critical-file-hold -->"
+CONFLICT_SINCE_PREFIX="<!-- champion:conflict-since:PR="
+ROT_THRESHOLD_DAYS=3   # continuously CONFLICTING at least this long -> "rotting"
 DIGEST_ROWS=""
+CONFLICT_SINCE_MARKERS=""
+HELD_ROTTING=0
 for PR_NUM in $(printf '%s\n' "$HELD_JSON" | jq -r '.[].number'); do
   ROW=$(printf '%s\n' "$HELD_JSON" | jq -c --argjson n "$PR_NUM" '.[] | select(.number == $n)')
   PR_MERGEABLE=$(jq -r '.mergeable' <<<"$ROW")
@@ -1635,45 +1671,71 @@ for PR_NUM in $(printf '%s\n' "$HELD_JSON" | jq -r '.[].number'); do
   fi
 
   STATUS="$PR_MERGEABLE"
+  if [ "$PR_MERGEABLE" = "CONFLICTING" ]; then
+    # Reuse the prior pass's since-timestamp for THIS PR if one exists in
+    # $OLD_DIGEST_BODY (Step 0); otherwise this is a fresh conflict episode
+    # and the clock starts now. Never accumulates rot time across a
+    # MERGEABLE gap (#7020) — see the note above.
+    PRIOR_SINCE=$(printf '%s\n' "$OLD_DIGEST_BODY" | grep -o "${CONFLICT_SINCE_PREFIX}${PR_NUM} TS=[0-9TZ:-]*" | head -1 | sed -E 's/.*TS=//')
+    if [ -n "$PRIOR_SINCE" ]; then
+      CONFLICT_SINCE="$PRIOR_SINCE"
+    else
+      CONFLICT_SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    fi
+    SINCE_TS=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$CONFLICT_SINCE" +%s 2>/dev/null || \
+               date -d "$CONFLICT_SINCE" +%s 2>/dev/null)
+    CONFLICT_DAYS=$(( ($(date +%s) - SINCE_TS) / 86400 ))
+    STATUS="${STATUS} since ${CONFLICT_SINCE}, ${CONFLICT_DAYS}d"
+    [ "$CONFLICT_DAYS" -ge "$ROT_THRESHOLD_DAYS" ] && HELD_ROTTING=$((HELD_ROTTING + 1))
+    CONFLICT_SINCE_MARKERS="${CONFLICT_SINCE_MARKERS}${CONFLICT_SINCE_PREFIX}${PR_NUM} TS=${CONFLICT_SINCE} -->
+"
+  fi
   [ "$AT_DOCTOR" = true ] && STATUS="$STATUS, out at Doctor"
   DIGEST_ROWS="${DIGEST_ROWS}| #$PR_NUM | $REASON | $STATUS |
 "
 done
+HELD_CONFLICTING_CLEAN=$((HELD_CONFLICTING - HELD_ROTTING))
 ```
+
+**`ROT_THRESHOLD_DAYS=3` is deliberately short of the 24h staleness window
+criterion #5 already routes on.** It answers a different question: staleness
+(criterion #5, and #6852's hold-only suspension above) is about *how long
+since the PR was last touched at all*; rotting is about *how long a specific
+conflict has sat unresolved*, and only the digest tracks it — nothing routes
+or force-pushes on it. Three days is long enough that a conflict Champion's
+very next tick would still be reporting on doesn't immediately read as
+"rotting", and short enough to flag real multi-day drift (the 1–3 week piles
+this section exists to make visible) well before it compounds into the
+crisis-sized pile #6720/#6848 both describe. This distinguishes "held,
+clean" (`$HELD_CONFLICTING_CLEAN`, a conflict younger than the threshold)
+from "held, rotting" (`$HELD_ROTTING`, at or past it) in the aggregate line
+below.
 
 **Step 2 — write the digest to a durable, pinned tracking issue.** Champion
 edits this issue's **body** in place every pass (not a comment thread) — the
 current pile belongs at the top of the issue, not buried at the bottom of a
-scrollback with one comment per 10-minute tick. Find it by a fixed title plus
-a body marker, mirroring the marker-comment convention used everywhere else in
-this role:
+scrollback with one comment per 10-minute tick. `$DIGEST_ISSUE` was already
+located in Step 0 above; this step only builds the new body (including the
+hidden `champion:conflict-since` markers Step 1 collected, which is how the
+clock survives into the *next* pass) and writes it:
 
 ```bash
-DIGEST_TITLE="Champion: Merge-Risk Hold Digest"
-DIGEST_MARKER="<!-- champion:merge-risk-hold-digest -->"
-
-# Cached ("$GH_READ") — locating the pinned issue is itself an observation,
-# same rule as the follow-on-issue duplicate search elsewhere in this role.
-DIGEST_ISSUE=$("$GH_READ" issue list --search "\"$DIGEST_TITLE\" in:title" \
-  --state open --json number,body --limit 10 \
-  --jq "[.[] | select(.body | startswith(\"$DIGEST_MARKER\"))] | first | .number // empty")
-
 DIGEST_TABLE="${DIGEST_ROWS:-| _none_ | _none_ | _none_ |
 }"
 DIGEST_BODY="$DIGEST_MARKER
 # Merge-Risk Hold Digest
 
-Auto-maintained by Champion's Held-PR Census (#6720, #6851). This issue's body
-is **overwritten in place every pass** — it is never appended to, and it is
-**not a work item**: do not curate, build, or promote it.
+Auto-maintained by Champion's Held-PR Census (#6720, #6851, #7020). This
+issue's body is **overwritten in place every pass** — it is never appended
+to, and it is **not a work item**: do not curate, build, or promote it.
 
 **Last updated**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-**Aggregate**: Merge-risk holds: $HELD_COUNT open PR(s) — $HELD_CONFLICTING conflicting, $HELD_AT_DOCTOR out at Doctor, oldest ${OLDEST_DAYS}d
+**Aggregate**: Merge-risk holds: $HELD_COUNT open PR(s) — $HELD_CONFLICTING conflicting ($HELD_ROTTING rotting >=${ROT_THRESHOLD_DAYS}d, $HELD_CONFLICTING_CLEAN clean), $HELD_AT_DOCTOR out at Doctor, oldest ${OLDEST_DAYS}d
 
 | PR | Hold reason | Status |
 |---|---|---|
 $DIGEST_TABLE
----
+$CONFLICT_SINCE_MARKERS---
 *Automated by Champion role*"
 
 if [ -z "$DIGEST_ISSUE" ]; then
