@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# test-stale-claim-standdown-suppression.sh - Regression guard for #5123.
+# test-stale-claim-standdown-suppression.sh - Regression guard for #5123,
+# re-pointed at the shared evaluator by #6514.
 #
 # #5123 closed two gaps in the loom:reviewing / loom:treating / loom:curating
 # stale-claim livelock protection:
@@ -13,22 +14,27 @@
 #      all — a dead Curator claim was permanently stranded, the exact failure
 #      shape already fixed for loom:reviewing/loom:treating.
 #
-# This suite has two parts:
+# #6514 then found that #5123's suppression, combined with the old "any comment
+# after the claim means the claimant is alive" rule, LIVELOCKED the check: one
+# routine Builder status note pinned the claim fresh forever, while the
+# suppression starved the bounded fallback's streak so it could never fire
+# either. The fix moved the whole computation out of the three prompts and into
+# `defaults/scripts/claim-staleness.sh`, whose behaviour — including #5123's
+# actual requirement, "never post a duplicate stand-down comment" — is covered
+# directly and executably by `test-claim-staleness.sh`.
 #
-#   A. Extracts the ACTUAL "Duplicate stand-down suppression" bash block from
-#      judge.md, doctor.md, and curator.md (not a reimplementation) and runs
-#      it against mocked `gh`/`jq` input, asserting: (a) an unchanged latest
-#      marker suppresses the comment, (b) a stale/absent marker still posts
-#      one. This means an edit that breaks the extracted block's syntax or
-#      behavior fails this suite directly — no docs/test drift possible for
-#      this specific code path.
+# So this suite is now a DOC-CONFORMANCE guard: it asserts the three role
+# prompts really do drive the shared evaluator, still document the #5123 /
+# #6514 / #4790 guarantees, and have not re-grown a private copy of the
+# defective logic.
 #
-#   B. A decision-table conformance check mirroring the Fresh/Stale/bounded-
-#      fallback table shared by all three role prompts (the table itself is
-#      prose, not executable, so this reimplements it once and asserts
-#      boundary behavior: never stomp a fresh claim, TTL-reclaim once stale,
-#      and the streak+age-floor join for the bounded fallback) — covering the
-#      loom:curating port specifically, since that lane is new in this PR.
+#   A. Each prompt drives `claim-staleness.sh check` and
+#      `claim-staleness.sh standdown` with ITS OWN claim label, and none of them
+#      still carries the hand-rolled `COMMENTS_AFTER=` / `LATEST_COMMENT_BODY=`
+#      blocks the shared script replaced.
+#   B. The decision table each prompt documents covers exactly the CLAIM_STATE
+#      values the script can actually emit — the anti-drift join between the
+#      prose table and the implementation.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-stale-claim-standdown-suppression.sh
@@ -37,12 +43,15 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CLAIM_STALENESS="$HELPERS_DIR/claim-staleness.sh"
 
 # Role prompts are shipped (installed at .claude/commands/loom/<role>.md), so
 # resolve each the way each layout actually lays it out: the installed path
-# first (consumer repos, and Loom's own dogfooded checkout), falling back to
-# the defaults/ source-tree path (a bare source checkout with no
-# .claude/commands/loom/ copy yet). See issue #6194 / #6241.
+# first (consumer repos, and Loom's own dogfooded checkout, where it is a
+# symlink back into defaults/), falling back to the defaults/ source-tree path
+# (a bare source checkout with no .claude/commands/loom/ copy yet). See issue
+# #6194 / #6241.
 resolve_role_md() {
     local role="$1"
     if [[ -f "$REPO_ROOT/.claude/commands/loom/$role.md" ]]; then
@@ -76,186 +85,115 @@ fail() {
 }
 
 for f in "$JUDGE_MD" "$DOCTOR_MD" "$CURATOR_MD"; do
-    [[ -f "$f" ]] || { echo "FATAL: missing $f"; exit 1; }
-done
-
-# Extract a fenced ```bash ... ``` block: starts at the line containing
-# $2 (must be inside the fence, right after the opening ```bash) and reads
-# through (but excludes) the next line that is exactly ```.
-extract_block() { # <file> <start-substring>
-    local file="$1" start="$2"
-    awk -v start="$start" '
-        index($0, start) { capture=1 }
-        capture {
-            if ($0 == "```") exit
-            print
-        }
-    ' "$file"
-}
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
-
-# ============================================================================
-# Part A: extracted duplicate-suppression blocks (real code under test)
-# ============================================================================
-
-echo "Part A: duplicate stand-down comment suppression (extracted from role prompts)"
-
-# <lane-name> <file> <gh-subcommand-that-must-fire e.g. "gh pr comment"/"gh issue comment">
-run_suppression_case() {
-    local lane="$1" file="$2" gh_kind="$3" comments_json="$4" expect_comment="$5"
-    local case_label="$6"
-
-    local block
-    block="$(extract_block "$file" 'LATEST_COMMENT_BODY=')"
-    if [[ -z "$block" ]]; then
-        fail "$lane ($case_label): could not extract the duplicate-suppression block from $file"
-        return
-    fi
-
-    local gh_calls="$WORK/${lane}-gh-calls-$RANDOM"
-    : > "$gh_calls"
-
-    # Mock `gh` — records every invocation so we can assert whether a
-    # comment was (or wasn't) posted, without touching the network.
-    gh() {
-        printf '%s\n' "gh $*" >> "$gh_calls"
+    [[ -f "$f" ]] || {
+        echo "FATAL: missing $f"
+        exit 1
     }
-    export -f gh >/dev/null 2>&1 || true
-
-    # These four are consumed by the extracted block below via `eval`, not
-    # referenced directly in this function — shellcheck can't see that use.
-    # shellcheck disable=SC2034
-    N=12345
-    CLAIMED_AT="2026-08-03T21:11:41Z"
-    # shellcheck disable=SC2034
-    MARKER="<!-- loom:standdown claim=$CLAIMED_AT -->"
-    # shellcheck disable=SC2034
-    COMMENTS_JSON="$comments_json"
-
-    local out
-    out="$(eval "$block" 2>&1)"
-    local rc=$?
-
-    if [[ "$rc" -ne 0 ]]; then
-        fail "$lane ($case_label): extracted block exited non-zero (rc=$rc): $out"
-        return
-    fi
-
-    local comment_posted=0
-    grep -q "$gh_kind" "$gh_calls" 2>/dev/null && comment_posted=1
-
-    if [[ "$expect_comment" == "yes" ]]; then
-        if [[ "$comment_posted" -eq 1 ]]; then
-            pass "$lane ($case_label): posted a stand-down comment as expected"
-        else
-            fail "$lane ($case_label): expected a stand-down comment, none was posted. gh calls: $(cat "$gh_calls" 2>/dev/null)"
-        fi
-    else
-        if [[ "$comment_posted" -eq 0 ]]; then
-            pass "$lane ($case_label): suppressed the duplicate comment as expected"
-        else
-            fail "$lane ($case_label): expected NO comment (duplicate suppression), but one was posted: $(cat "$gh_calls" 2>/dev/null)"
-        fi
-        if [[ "$out" == *"skipping duplicate comment"* ]]; then
-            pass "$lane ($case_label): logged the skip reason"
-        else
-            fail "$lane ($case_label): did not log a skip reason. Got: $out"
-        fi
-    fi
-
-    unset -f gh 2>/dev/null || true
+done
+[[ -x "$CLAIM_STALENESS" ]] || {
+    echo "FATAL: $CLAIM_STALENESS missing or not executable"
+    exit 1
 }
 
-MARKER_TXT='<!-- loom:standdown claim=2026-08-03T21:11:41Z -->'
+assert_file_contains() { # <label> <file> <substring>
+    if grep -qF -- "$3" "$2"; then
+        pass "$1"
+    else
+        fail "$1 (expected to find: $3)"
+    fi
+}
 
-# Case 1: latest (and only) comment already carries the identical marker ->
-# suppress.
-DUP_JSON=$(cat <<EOF
-[{"created_at":"2026-08-03T21:12:31Z","body":"Judge pass: PR still carries a fresh claim. $MARKER_TXT"}]
-EOF
-)
-
-# Case 2: no comments since the claim at all -> must still post (first
-# stand-down for this claim, nothing to suppress).
-EMPTY_JSON='[]'
-
-# Case 3: a real (non-marker) comment is the latest -> must still post (this
-# is genuine activity, not a repeat stand-down).
-FRESH_JSON=$(cat <<EOF
-[{"created_at":"2026-08-03T21:12:00Z","body":"Actually reviewing now, one moment."}]
-EOF
-)
-
-run_suppression_case "judge"   "$JUDGE_MD"   "gh pr comment"    "$DUP_JSON"   "no"  "identical marker already latest"
-run_suppression_case "judge"   "$JUDGE_MD"   "gh pr comment"    "$EMPTY_JSON" "yes" "no comments yet"
-run_suppression_case "judge"   "$JUDGE_MD"   "gh pr comment"    "$FRESH_JSON" "yes" "latest comment is real activity"
-
-run_suppression_case "doctor"  "$DOCTOR_MD"  "gh pr comment"    "$DUP_JSON"   "no"  "identical marker already latest"
-run_suppression_case "doctor"  "$DOCTOR_MD"  "gh pr comment"    "$EMPTY_JSON" "yes" "no comments yet"
-run_suppression_case "doctor"  "$DOCTOR_MD"  "gh pr comment"    "$FRESH_JSON" "yes" "latest comment is real activity"
-
-run_suppression_case "curator" "$CURATOR_MD" "gh issue comment" "$DUP_JSON"   "no"  "identical marker already latest"
-run_suppression_case "curator" "$CURATOR_MD" "gh issue comment" "$EMPTY_JSON" "yes" "no comments yet"
-run_suppression_case "curator" "$CURATOR_MD" "gh issue comment" "$FRESH_JSON" "yes" "latest comment is real activity"
+assert_file_lacks() { # <label> <file> <substring>
+    if grep -qF -- "$3" "$2"; then
+        fail "$1 (must NOT contain: $3)"
+    else
+        pass "$1"
+    fi
+}
 
 # ============================================================================
-# Part B: loom:curating decision-table conformance (mirrors the doc's table)
+# Part A: each role prompt drives the shared evaluator, not a private copy
+# ============================================================================
+
+echo "Part A: role prompts drive claim-staleness.sh (no private re-implementation)"
+
+check_lane() { # <lane> <file> <claim-label>
+    local lane="$1" file="$2" label="$3"
+
+    assert_file_contains "$lane: runs \`claim-staleness.sh check --label $label\`" \
+        "$file" "claim-staleness.sh check --number \"\$N\" --label $label"
+    assert_file_contains "$lane: runs \`claim-staleness.sh standdown --label $label\`" \
+        "$file" "claim-staleness.sh standdown --number \"\$N\" --label $label"
+    assert_file_contains "$lane: documents the claim-activity marker (#6514)" \
+        "$file" "<!-- loom:claim-activity claim="
+    assert_file_contains "$lane: documents the seq-bumped stand-down marker (#6514)" \
+        "$file" "seq="
+    assert_file_contains "$lane: keeps the #4790 age floor on the bounded fallback" \
+        "$file" "#4790"
+    assert_file_contains "$lane: still credits #5123 for comment de-duplication" \
+        "$file" "#5123"
+
+    # The defective inline computation must not come back.
+    assert_file_lacks "$lane: no hand-rolled COMMENTS_AFTER computation" \
+        "$file" 'COMMENTS_AFTER=$(printf'
+    assert_file_lacks "$lane: no hand-rolled duplicate-suppression block" \
+        "$file" "LATEST_COMMENT_BODY="
+    assert_file_lacks "$lane: no 'any comment means fresh' decision row" \
+        "$file" 'OR `COMMENTS_AFTER > 0`'
+}
+
+check_lane "judge" "$JUDGE_MD" "loom:reviewing"
+check_lane "doctor" "$DOCTOR_MD" "loom:treating"
+check_lane "curator" "$CURATOR_MD" "loom:curating"
+
+# ============================================================================
+# Part B: the documented decision table matches the states the script emits
 # ============================================================================
 
 echo ""
-echo "Part B: loom:curating Fresh/Stale/bounded-fallback decision table"
+echo "Part B: decision-table / implementation anti-drift join"
 
-# Mirrors the exact table added to curator.md's "Stale loom:curating Claim
-# Check" (structurally identical to judge.md/doctor.md's). Kept in sync by
-# hand with that table — if the table's conditions change, update this
-# function to match.
-decide_curating() { # <claim_age_min> <comments_after> <standdown_count> [ttl] [streak_cap]
-    local age="$1" comments_after="$2" standdown_count="$3"
-    local ttl="${4:-30}" streak_cap="${5:-3}"
+# Every state the script can assign, in the order the prompts tabulate them.
+CLAIM_STATES=(unclaimed fresh stale stale-bounded-fallback unknown)
 
-    if [[ "$standdown_count" -ge "$streak_cap" && "$age" -ge "$ttl" ]]; then
-        echo "stale-bounded-fallback"
-    elif [[ "$age" -lt "$ttl" || "$comments_after" -gt 0 ]]; then
-        echo "fresh"
+for state in "${CLAIM_STATES[@]}"; do
+    if grep -qF -- "CLAIM_STATE=\"$state\"" "$CLAIM_STALENESS"; then
+        pass "claim-staleness.sh can emit CLAIM_STATE=$state"
     else
-        echo "stale"
+        fail "claim-staleness.sh no longer emits CLAIM_STATE=$state"
     fi
-}
+    for f in "$JUDGE_MD" "$DOCTOR_MD" "$CURATOR_MD"; do
+        if grep -qF -- "\`$state\`" "$f"; then
+            pass "$(basename "$f" .md): decision table documents \`$state\`"
+        else
+            fail "$(basename "$f" .md): decision table is missing \`$state\`"
+        fi
+    done
+done
 
-assert_decision() { # <label> <expected> <actual...>
-    local label="$1" expected="$2"; shift 2
-    local actual
-    actual="$(decide_curating "$@")"
-    if [[ "$actual" == "$expected" ]]; then
-        pass "$label -> $expected"
+# The script must not grow a state the prompts do not document.
+while IFS= read -r found; do
+    [[ -n "$found" ]] || continue
+    matched=0
+    for state in "${CLAIM_STATES[@]}"; do
+        [[ "$found" == "$state" ]] && matched=1
+    done
+    if [[ "$matched" -eq 1 ]]; then
+        pass "claim-staleness.sh state '$found' is documented by the prompts"
     else
-        fail "$label -> expected $expected, got $actual (inputs: $*)"
+        fail "claim-staleness.sh emits undocumented state '$found'"
     fi
-}
+done < <(grep -oE 'CLAIM_STATE="[a-z-]+"' "$CLAIM_STALENESS" | sed 's/CLAIM_STATE="//; s/"//' | sort -u)
 
-# Never stomp a genuinely fresh claim (age well under TTL, no other activity).
-assert_decision "fresh: age=5m, no activity"                 "fresh"                 5 0 0
-# Real (non-standdown) activity keeps it fresh even once past the TTL.
-assert_decision "fresh: age=45m but real comment after claim" "fresh"                45 1 0
-# Ordinary staleness: past TTL, zero non-standdown activity.
-assert_decision "stale: age=31m, no activity"                 "stale"                 31 0 0
-# Exact TTL boundary (age == ttl) must already be reclaimable, not fresh.
-assert_decision "boundary: age==ttl exactly"                  "stale"                 30 0 0
-assert_decision "boundary: age==ttl-1 is still fresh"         "fresh"                 29 0 0
-# Bounded fallback: streak alone (claim still young) must NOT force-reclaim —
-# this is the #4790 regression the age-floor join exists to prevent.
-assert_decision "peer-arrival-rate alone (age=10m, streak=3) stays fresh" "fresh" 10 0 3
-# Bounded fallback fires only once BOTH the streak cap and the age floor hold.
-assert_decision "bounded fallback: age=30m AND streak=3"      "stale-bounded-fallback" 30 0 3
-# One short of the streak cap, past TTL -> ordinary stale (not "fallback"),
-# same outcome either way but exercises the boundary distinctly.
-assert_decision "streak=2 (below cap), past TTL"              "stale"                 40 0 2
-
-# Custom TTL / streak cap (repo override) still honored.
-assert_decision "custom TTL=60: age=45m stays fresh"          "fresh"                 45 0 0 60 3
-assert_decision "custom TTL=60: age=61m goes stale"           "stale"                 61 0 0 60 3
+# The three lanes must keep their distinct thresholds (a Doctor fix cycle
+# legitimately outruns a Judge review pass).
+assert_file_contains "judge: keeps LOOM_STALE_REVIEWING_MINUTES" "$JUDGE_MD" "LOOM_STALE_REVIEWING_MINUTES"
+assert_file_contains "doctor: keeps LOOM_STALE_TREATING_MINUTES" "$DOCTOR_MD" "LOOM_STALE_TREATING_MINUTES"
+assert_file_contains "curator: keeps LOOM_STALE_CURATING_MINUTES" "$CURATOR_MD" "LOOM_STALE_CURATING_MINUTES"
+for f in "$JUDGE_MD" "$DOCTOR_MD" "$CURATOR_MD"; do
+    assert_file_contains "$(basename "$f" .md): keeps LOOM_MAX_STANDDOWN_STREAK" \
+        "$f" "LOOM_MAX_STANDDOWN_STREAK"
+done
 
 # ============================================================================
 # Summary

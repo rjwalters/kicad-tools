@@ -707,118 +707,128 @@ same fix (the failure this section exists to prevent).
 **If the PR does NOT carry `loom:treating`:** proceed to claim as today — no
 behavior change: `gh pr edit <number> --add-label "loom:treating"`.
 
-**If the PR DOES carry `loom:treating`:** determine the claim's age and
-whether anyone has *genuinely* commented since the claim was made — see
-"Stand-down marker convention" below for why the comment count excludes
-stand-down comments:
+**If the PR DOES carry `loom:treating`:** evaluate the claim with the shared
+staleness evaluator. **Do not hand-roll the timeline/comment arithmetic** —
+`judge.md`, `doctor.md` and `curator.md` all drive the same script so the three
+lanes cannot drift apart, and it is unit-tested
+(`.loom/scripts/tests/test-claim-staleness.sh`, #6514):
 
 ```bash
 N=<pr-number>
-# `--paginate` re-invokes `--jq` once per response page and concatenates the
-# per-page results rather than applying the filter across the combined
-# timeline (#4637) — a timeline spanning more than one page (>100 events)
-# would otherwise yield a multi-line CLAIMED_AT that corrupts MARKER and
-# every comparison below. `// empty` drops the no-match-on-this-page line
-# entirely (not a literal "null"), and `sort | tail -n 1` collapses the
-# remaining per-page timestamps to the single latest one — RFC3339 UTC
-# timestamps (the `Z`-suffixed form the GitHub API returns) sort correctly
-# as plain strings, so this needs no minimum `gh` version.
-CLAIMED_AT=$(gh api "repos/{owner}/{repo}/issues/$N/timeline" --paginate \
-  --jq '[.[] | select(.event=="labeled" and .label.name=="loom:treating")] | last | .created_at // empty' \
-  | sort | tail -n 1)
-MARKER="<!-- loom:standdown claim=$CLAIMED_AT -->"
-COMMENTS_JSON=$(gh api "repos/{owner}/{repo}/issues/$N/comments" \
-  | jq --arg t "$CLAIMED_AT" '[.[] | select(.created_at > $t)]')
-# printf, not echo: zsh's echo interprets \n escapes inside the JSON, corrupting it
-COMMENTS_AFTER=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$MARKER" '[.[] | select(.body | contains($m) | not)] | length')
-STANDDOWN_COUNT=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$MARKER" '[.[] | select(.body | contains($m))] | length')
+# Every read the script makes is a live `gh api` call: this is claim
+# arbitration, and a 30s-stale timeline or comment list is exactly the window in
+# which a competing Doctor's claim (or its stand-down) lands.
+eval "$(./.loom/scripts/claim-staleness.sh check --number "$N" --label loom:treating)"
+echo "$CLAIM_STATE — claim age ${CLAIM_AGE_MINUTES}m, idle ${IDLE_MINUTES}m, stand-down streak ${STANDDOWN_COUNT}"
 ```
 
-Then decide:
+`eval` is safe here: the script emits only `KEY=VALUE` lines built from a fixed
+enum, validated RFC3339 timestamps and integers — never forge text — so no
+comment body can reach your shell. Use `--json` instead if you prefer `jq`.
 
-| Condition | Verdict | Action |
-|-----------|---------|--------|
-| `STANDDOWN_COUNT >= LOOM_MAX_STANDDOWN_STREAK` (default **3**) AND claim age ≥ `LOOM_STALE_TREATING_MINUTES` (default **60**) | **Stale — bounded fallback** (see below) | Force-reclaim regardless of `COMMENTS_AFTER`. Breaks the livelock even if the marker/exclusion logic above is somehow bypassed — but the streak alone is never enough (#4790): it also requires the claim to have aged past the normal staleness threshold, so a high *peer arrival rate* (several concurrent Doctors each standing down within minutes) cannot force-reclaim a claim that is still genuinely fresh. |
-| Claim age < `LOOM_STALE_TREATING_MINUTES` (default **60**), OR `COMMENTS_AFTER > 0` | **Fresh** — a Doctor is actively fixing this PR | **Do not stomp the claim.** Post a marked stand-down comment **unless the latest comment on the PR already carries an identical marker for this exact `$CLAIMED_AT`** (see "Duplicate stand-down suppression" below — then skip silently instead), then skip this PR and move to the next candidate in the queue. |
-| Claim age ≥ `LOOM_STALE_TREATING_MINUTES` AND `COMMENTS_AFTER == 0` | **Stale** — the claiming Doctor's process almost certainly died mid-fix | Reclaim (see below), then proceed with the normal fix from step 3. |
-| Timeline API call fails or returns empty (`CLAIMED_AT` unset) | **Unknown — fail safe** | Treat as **fresh**. Never stomp a claim on API failure or missing data. |
+Then decide on `$CLAIM_STATE`:
+
+| `$CLAIM_STATE` | Meaning | Action |
+|---|---|---|
+| `unclaimed` | the PR does not actually carry `loom:treating` right now | Claim it normally: `gh pr edit $N --add-label "loom:treating"` |
+| `fresh` | a Doctor is plausibly still fixing this PR | **Do not stomp the claim.** Record a stand-down (see below), then skip this PR and move to the next candidate in the queue. |
+| `stale` | no *claimant* activity for ≥ `LOOM_STALE_TREATING_MINUTES` (default **60**) — the claiming Doctor's process almost certainly died mid-fix | Reclaim (see below), then proceed with the normal fix from step 3. |
+| `stale-bounded-fallback` | the stand-down streak reached `LOOM_MAX_STANDDOWN_STREAK` (default **3**) **and** the claim's own age is ≥ `LOOM_STALE_TREATING_MINUTES` | Force-reclaim (see below) — the livelock breaker. |
+| `unknown` | the timeline/label read failed or returned nothing | **Fail safe: treat exactly like `fresh`.** Never stomp a claim on API failure or missing data. |
+
+**What counts as claimant activity (#6514)**: only a comment carrying *this
+claim's* activity marker —
+
+```
+<!-- loom:claim-activity claim=$CLAIMED_AT -->
+```
+
+Every other comment is ignored: it neither pins nor extends the claim. This is
+the fix for the PR #6513 livelock (found on the Judge lane, identical in shape
+here). The old rule counted **any** non-stand-down comment posted after the
+claim (`COMMENTS_AFTER > 0`) as proof the claimant was alive, so a single
+routine Builder post-push status note — a different author, saying nothing about
+the fix — pinned that claim "fresh" for the rest of its life, because
+`CLAIMED_AT` never moves. And claimant activity now only **resets the idle
+clock** rather than pinning the claim, so even a genuine heartbeat buys only
+another `LOOM_STALE_TREATING_MINUTES`.
+
+**A Doctor's fix cycle routinely runs long and silent** (assess → fix → verify
+locally → push → re-verify remotely), so post a progress comment ending with
+that marker whenever you cross a long step. The script prints the marker for the
+live claim, so you never hand-assemble it:
+
+```bash
+gh pr comment $N --body "Doctor: fix pushed, waiting on CI to re-run — still treating.
+$(./.loom/scripts/claim-staleness.sh marker --number "$N" --label loom:treating)"
+```
 
 **Stand-down marker convention (#4618 — breaks the livelock)**: a "standing
 down, not stomping" comment is evidence of **no activity**, not activity — it
-means a *later* Doctor pass declined to touch the claim, not that the
-*original* claimant is still working. Before #4618, `COMMENTS_AFTER` counted
-every comment after the claim indiscriminately, so each stand-down comment
-satisfied the very freshness test the next pass ran, making the claim look
-eternally fresh even though nothing was actually happening (the `loom:reviewing`
-analog of this played out on PR #4614: 3 consecutive stand-down comments over
-30+ minutes, never reclaimed — the same defect shape applies here to
-`loom:treating`). Every stand-down comment you post in the "Fresh" row above
-MUST end with the `<!-- loom:standdown claim=$CLAIMED_AT -->` marker so it is
-excluded from `COMMENTS_AFTER` on every subsequent pass, and counted in
-`STANDDOWN_COUNT` instead:
+means a *later* Doctor pass declined to touch the claim, not that the *original*
+claimant is still working. Before #4618, every comment after the claim counted
+indiscriminately, so each stand-down comment satisfied the very freshness test
+the next pass ran, making the claim look eternally fresh even though nothing was
+happening (the `loom:reviewing` analog played out on PR #4614: 3 consecutive
+stand-down comments over 30+ minutes, never reclaimed). Stand-down comments
+therefore carry their own marker and are counted into the streak, never into
+liveness.
+
+**Recording a stand-down** (the `fresh` and `unknown` rows):
 
 ```bash
-gh pr comment $N --body "Doctor pass: PR still carries a fresh \`loom:treating\` claim (claimed $CLAIMED_AT) — standing down without reclaiming. Not stomping.
-<!-- loom:standdown claim=$CLAIMED_AT -->"
+./.loom/scripts/claim-staleness.sh standdown --number "$N" --label loom:treating
+# then skip this PR and move to the next candidate
 ```
 
-**Duplicate stand-down suppression (#5123)**: the marker convention above stops
-a stand-down from ever looking like live activity, but it does not by itself
-stop a *pile of identical stand-downs* from accumulating — every "Fresh" pass
-still posted a new marked comment unconditionally, so a claim sitting just
-inside the TTL produced one near-identical comment per Doctor pass (the same
-defect shape observed live on the Judge lane on PR #5115: 3 stand-downs in 85
-seconds). Re-verification of staleness still runs on **every** pass — only the
-redundant comment is skipped. Before posting the stand-down comment above,
-check whether the *latest* comment on the PR already carries the identical
-marker for this exact `$CLAIMED_AT` (`COMMENTS_JSON` was already fetched above
-— no extra API call needed):
+It posts the marked stand-down comment the first time, and on every later pass
+**edits that same comment in place**, bumping `seq=` in its marker:
 
-```bash
-LATEST_COMMENT_BODY=$(printf '%s\n' "$COMMENTS_JSON" | jq -r 'sort_by(.created_at) | last | .body // empty')
-if printf '%s' "$LATEST_COMMENT_BODY" | grep -qF -- "$MARKER"; then
-  echo "Latest comment already carries the stand-down marker for claim $CLAIMED_AT — skipping duplicate comment (still standing down, not reclaiming)."
-else
-  gh pr comment $N --body "Doctor pass: PR still carries a fresh \`loom:treating\` claim (claimed $CLAIMED_AT) — standing down without reclaiming. Not stomping.
-<!-- loom:standdown claim=$CLAIMED_AT -->"
-fi
+```
+<!-- loom:standdown claim=$CLAIMED_AT seq=2 -->
 ```
 
-**Bounded fallback (AC3, #4618; age-floor join added by #4798)**:
-`STANDDOWN_COUNT` is a hard cap independent of the marker-exclusion logic
-working correctly — it counts how many stand-down comments have accumulated
-against *this exact* `$CLAIMED_AT` (the marker embeds it, so a genuine
-reclaim — which changes `CLAIMED_AT` — resets the count to zero
-automatically). But the streak count by itself measures **peer arrival
-rate** (how many other Doctors happened to revisit this exact PR), not claim
-liveness — a claim only minutes old can accumulate `LOOM_MAX_STANDDOWN_STREAK`
-stand-downs from that many concurrent Doctors without ever coming close to
-stale in the age sense (the `loom:reviewing` analog of this played out on
-PR #4790: a claim 17m36s old, well under the 30-minute default
-`LOOM_STALE_REVIEWING_MINUTES`, was force-reclaimed after 3 Judges each
-stood down within that same ~17m36s window — the identical defect shape
-applies here to `loom:treating`/`LOOM_STALE_TREATING_MINUTES`). So the
-fallback fires only once **both** hold: `LOOM_MAX_STANDDOWN_STREAK` marked
-comments have piled up against the same claim with no reclaim, **and** the
-claim's own age is ≥ `LOOM_STALE_TREATING_MINUTES` — reusing the same age
-floor the ordinary staleness row below already applies. This still
-force-reclaims regardless of `COMMENTS_AFTER` (the whole reason this
-fallback exists independent of the marker-exclusion logic), it just no
-longer overrides the age check too. Use this reclaim comment:
+**This is what keeps the bounded fallback reachable (#6514).** Duplicate
+stand-down suppression (#5123) previously skipped the pass entirely, so
+`STANDDOWN_COUNT` froze at 1 and `LOOM_MAX_STANDDOWN_STREAK` was never reached —
+the second half of the PR #6513 livelock, in which the claim could escape
+neither through the ordinary staleness row nor through the fallback. Bumping in
+place keeps the forge free of near-identical comments (the #5123 goal) while the
+streak still accumulates (the #4618 AC3 goal). A legacy marker with no `seq=`
+counts as `seq=1`. Re-verification of staleness still runs on **every** pass —
+only the redundant *comment* is avoided, never the check.
+
+**Bounded fallback (AC3, #4618; age-floor join added by #4798; unstarved by
+#6514)**: the streak is a hard cap independent of the activity/marker logic
+working correctly — it counts how many stand-down passes have accumulated
+against *this exact* `$CLAIMED_AT` (the marker embeds it, so a genuine reclaim —
+which changes `CLAIMED_AT` — resets the count to zero automatically). But the
+streak by itself measures **peer arrival rate** (how many other Doctors happened
+to revisit this PR), not claim liveness — a claim only minutes old can
+accumulate `LOOM_MAX_STANDDOWN_STREAK` stand-downs from that many concurrent
+Doctors without coming close to stale in the age sense (the `loom:reviewing`
+analog played out on PR #4790: a claim 17m36s old, well under the 30-minute
+default, was force-reclaimed after 3 Judges each stood down within that same
+window). So the fallback fires only once **both** hold:
+`LOOM_MAX_STANDDOWN_STREAK` passes have piled up against the same claim with no
+reclaim, **and** the claim's own age is ≥ `LOOM_STALE_TREATING_MINUTES`. Note
+that this row is keyed on the **claim's** age, not on the idle clock, precisely
+so a claimant stuck in a loop emitting activity markers still cannot hold the
+claim forever. Use this reclaim comment:
 
 ```bash
 gh pr edit $N --remove-label "loom:treating"
-gh pr comment $N --body "Reclaiming loom:treating claim: $STANDDOWN_COUNT consecutive stand-down comments have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_TREATING_MINUTES:-60}m) with no actual fix progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
+gh pr comment $N --body "Reclaiming loom:treating claim: $STANDDOWN_COUNT consecutive stand-down passes have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_TREATING_MINUTES:-60}m) with no actual fix progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
 gh pr edit $N --add-label "loom:treating"
 CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 # Continue to step 3 (Check PR details) and fix normally
 ```
 
-**Reclaiming a stale claim** (the ordinary claim-age path):
+**Reclaiming a stale claim** (the ordinary idle-clock path):
 
 ```bash
 gh pr edit $N --remove-label "loom:treating"
-gh pr comment $N --body "Reclaiming stale loom:treating claim (age > ${LOOM_STALE_TREATING_MINUTES:-60}m, no follow-up comment) — a prior Doctor's process likely died mid-fix."
+gh pr comment $N --body "Reclaiming stale loom:treating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_TREATING_MINUTES:-60}m with no claimant activity) — a prior Doctor's process likely died mid-fix."
 gh pr edit $N --add-label "loom:treating"
 CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 # Continue to step 3 (Check PR details) and fix normally
@@ -827,10 +837,18 @@ CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 **Env vars**: `LOOM_STALE_TREATING_MINUTES` (default **60**) — deliberately
 longer than the Judge's `LOOM_STALE_REVIEWING_MINUTES` (30): a Doctor's fix
 cycle (assess all CI failures → fix → verify locally → push → re-verify
-remotely) legitimately runs longer than a single review pass. Use the
-**treating** var here; do not borrow the Judge's 30-minute threshold.
-`LOOM_MAX_STANDDOWN_STREAK` (default **3**) — the AC3 bounded-fallback cap
-described above, shared with `judge.md`'s identical check.
+remotely) legitimately runs longer than a single review pass. The script picks
+the **treating** default from the `--label` you pass; do not borrow the Judge's
+30-minute threshold. `LOOM_MAX_STANDDOWN_STREAK` (default **3**) — the AC3
+bounded-fallback cap described above, shared with `judge.md`'s identical check.
+
+**If `.loom/scripts/claim-staleness.sh` is missing** (an older install that has
+not been resynced yet): fall back to the **age-only** rule — read the latest
+`labeled` event for `loom:treating` from
+`repos/{owner}/{repo}/issues/$N/timeline`, reclaim when it is older than
+`LOOM_STALE_TREATING_MINUTES`, and treat a failed or empty read as fresh. Do
+**not** reintroduce a "any comment after the claim means fresh" test — that is
+precisely the defect this section exists to fix.
 
 **Daemon backstop (#4367, freshness signal fixed by #4618)**: this check is
 the fast path — it only fires when another Doctor happens to revisit the same

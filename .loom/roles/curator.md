@@ -380,88 +380,121 @@ mirrors "Stale `loom:reviewing` Claim Check" in `judge.md` structurally, with
 **If the issue does NOT carry `loom:curating`:** proceed to claim as today —
 no behavior change: `gh issue edit <number> --add-label "loom:curating"`.
 
-**If the issue DOES carry `loom:curating`:** determine the claim's age and
-whether anyone has *genuinely* commented since the claim was made — see
-"Stand-down marker convention" below for why the comment count excludes
-stand-down comments:
+**If the issue DOES carry `loom:curating`:** evaluate the claim with the shared
+staleness evaluator. **Do not hand-roll the timeline/comment arithmetic** —
+`judge.md`, `doctor.md` and `curator.md` all drive the same script so the three
+lanes cannot drift apart, and it is unit-tested
+(`.loom/scripts/tests/test-claim-staleness.sh`, #6514):
 
 ```bash
 N=<issue-number>
-# All reads in this block must be live `gh`/`gh api` calls — this is claim
+# Every read the script makes is a live `gh api` call — this is claim
 # arbitration, and a stale cache read would reintroduce the double-claim this
-# check exists to prevent. `--paginate` re-invokes `--jq` once per response
-# page and concatenates the per-page results rather than applying the filter
-# across the combined timeline (#4637) — `sort | tail -n 1` collapses the
-# resulting per-page timestamps to the single latest one; RFC3339 UTC
-# timestamps sort correctly as plain strings.
-CLAIMED_AT=$(gh api "repos/{owner}/{repo}/issues/$N/timeline" --paginate \
-  --jq '[.[] | select(.event=="labeled" and .label.name=="loom:curating")] | last | .created_at // empty' \
-  | sort | tail -n 1)
-MARKER="<!-- loom:standdown claim=$CLAIMED_AT -->"
-COMMENTS_JSON=$(gh api "repos/{owner}/{repo}/issues/$N/comments" \
-  | jq --arg t "$CLAIMED_AT" '[.[] | select(.created_at > $t)]')
-# printf, not echo: zsh's echo interprets \n escapes inside the JSON, corrupting it
-COMMENTS_AFTER=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$MARKER" '[.[] | select(.body | contains($m) | not)] | length')
-STANDDOWN_COUNT=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$MARKER" '[.[] | select(.body | contains($m))] | length')
+# check exists to prevent.
+eval "$(./.loom/scripts/claim-staleness.sh check --number "$N" --label loom:curating)"
+echo "$CLAIM_STATE — claim age ${CLAIM_AGE_MINUTES}m, idle ${IDLE_MINUTES}m, stand-down streak ${STANDDOWN_COUNT}"
 ```
 
-Then decide:
+`eval` is safe here: the script emits only `KEY=VALUE` lines built from a fixed
+enum, validated RFC3339 timestamps and integers — never forge text — so no
+comment body can reach your shell. Use `--json` instead if you prefer `jq`.
 
-| Condition | Verdict | Action |
-|-----------|---------|--------|
-| `STANDDOWN_COUNT >= LOOM_MAX_STANDDOWN_STREAK` (default **3**) AND claim age ≥ `LOOM_STALE_CURATING_MINUTES` (default **30**) | **Stale — bounded fallback** (see below) | Force-reclaim regardless of `COMMENTS_AFTER`. Breaks the livelock even if the marker/exclusion logic above is somehow bypassed — mirrors the age-floor join `judge.md`/`doctor.md` already apply (#4790): the streak alone is never enough, it also requires the claim to have aged past the normal staleness threshold. |
-| Claim age < `LOOM_STALE_CURATING_MINUTES` (default **30**), OR `COMMENTS_AFTER > 0` | **Fresh** — a Curator is actively enhancing this issue | **Do not stomp the claim.** Post a marked stand-down comment **unless the latest comment already carries an identical marker for this exact `$CLAIMED_AT`** (see "Duplicate stand-down suppression" below — then skip silently instead), then skip this issue and continue to the next candidate. |
-| Claim age ≥ `LOOM_STALE_CURATING_MINUTES` AND `COMMENTS_AFTER == 0` | **Stale** — the claiming Curator's process almost certainly died mid-enhancement | Reclaim (see below), then proceed with normal curation. |
-| Timeline API call fails or returns empty (`CLAIMED_AT` unset) | **Unknown — fail safe** | Treat as **fresh**. Never stomp a claim on API failure or missing data. |
+Then decide on `$CLAIM_STATE`:
+
+| `$CLAIM_STATE` | Meaning | Action |
+|---|---|---|
+| `unclaimed` | the issue does not actually carry `loom:curating` right now | Claim it normally: `gh issue edit $N --add-label "loom:curating"` |
+| `fresh` | a Curator is plausibly still enhancing this issue | **Do not stomp the claim.** Record a stand-down (see below), then skip this issue and continue to the next candidate. |
+| `stale` | no *claimant* activity for ≥ `LOOM_STALE_CURATING_MINUTES` (default **30**) — the claiming Curator's process almost certainly died mid-enhancement | Reclaim (see below), then proceed with normal curation. |
+| `stale-bounded-fallback` | the stand-down streak reached `LOOM_MAX_STANDDOWN_STREAK` (default **3**) **and** the claim's own age is ≥ `LOOM_STALE_CURATING_MINUTES` | Force-reclaim (see below) — the livelock breaker. |
+| `unknown` | the timeline/label read failed or returned nothing | **Fail safe: treat exactly like `fresh`.** Never stomp a claim on API failure or missing data. |
+
+**What counts as claimant activity (#6514)**: only a comment carrying *this
+claim's* activity marker —
+
+```
+<!-- loom:claim-activity claim=$CLAIMED_AT -->
+```
+
+Every other comment is ignored: it neither pins nor extends the claim. This is
+the fix for the PR #6513 livelock (found on the Judge lane, identical in shape
+here). The old rule counted **any** non-stand-down comment posted after the
+claim (`COMMENTS_AFTER > 0`) as proof the claimant was alive, so a single
+unrelated comment from another actor pinned that claim "fresh" for the rest of
+its life, because `CLAIMED_AT` never moves. Claimant activity now only **resets
+the idle clock** rather than pinning the claim, so even a genuine heartbeat buys
+only another `LOOM_STALE_CURATING_MINUTES`. **Your own curation enhancement
+comment counts as activity only if it carries the marker** — the script prints
+the marker for the live claim, so append it to any mid-curation progress note
+when a pass runs long (e.g. heavy use of the reproduction playbook above):
+
+```bash
+gh issue comment $N --body "Curator: still researching the codebase for this enhancement.
+$(./.loom/scripts/claim-staleness.sh marker --number "$N" --label loom:curating)"
+```
 
 **Stand-down marker convention (mirrors #4618)**: a "standing down, not
 stomping" comment is evidence of **no activity**, not activity — it means a
 *later* Curator pass declined to touch the claim, not that the *original*
-claimant is still working. Every stand-down comment you post in the "Fresh"
-row above MUST end with the `<!-- loom:standdown claim=$CLAIMED_AT -->` marker
-so it is excluded from `COMMENTS_AFTER` on every subsequent pass, and counted
-in `STANDDOWN_COUNT` instead. **Duplicate stand-down suppression (#5123)**:
-re-verification of staleness still runs on every pass — only the redundant
-*comment* is skipped, by checking whether the *latest* comment already carries
-the identical marker (`COMMENTS_JSON` was already fetched above — no extra API
-call needed):
+claimant is still working. Stand-down comments therefore carry their own marker
+and are counted into the streak, never into liveness.
+
+**Recording a stand-down** (the `fresh` and `unknown` rows):
 
 ```bash
-LATEST_COMMENT_BODY=$(printf '%s\n' "$COMMENTS_JSON" | jq -r 'sort_by(.created_at) | last | .body // empty')
-if printf '%s' "$LATEST_COMMENT_BODY" | grep -qF -- "$MARKER"; then
-  echo "Latest comment already carries the stand-down marker for claim $CLAIMED_AT — skipping duplicate comment (still standing down, not reclaiming)."
-else
-  gh issue comment $N --body "Curator pass: issue still carries a fresh \`loom:curating\` claim (claimed $CLAIMED_AT) — standing down without reclaiming. Not stomping.
-<!-- loom:standdown claim=$CLAIMED_AT -->"
-fi
+./.loom/scripts/claim-staleness.sh standdown --number "$N" --label loom:curating
+# then skip this issue and continue to the next candidate
 ```
 
-**Bounded fallback** (mirrors AC3, #4618; age-floor join added by #4798):
-`STANDDOWN_COUNT` is a hard cap independent of the marker-exclusion logic
-working correctly — it counts how many stand-down comments have accumulated
-against *this exact* `$CLAIMED_AT` (the marker embeds it, so a genuine
-reclaim — which changes `CLAIMED_AT` — resets the count to zero
+It posts the marked stand-down comment the first time, and on every later pass
+**edits that same comment in place**, bumping `seq=` in its marker
+(`<!-- loom:standdown claim=$CLAIMED_AT seq=2 -->`). **This is what keeps the
+bounded fallback reachable (#6514)**: duplicate stand-down suppression (#5123)
+previously skipped the pass entirely, so `STANDDOWN_COUNT` froze at 1 and
+`LOOM_MAX_STANDDOWN_STREAK` was never reached — the second half of the PR #6513
+livelock. Bumping in place keeps the forge free of near-identical comments (the
+#5123 goal) while the streak still accumulates (the #4618 AC3 goal). A legacy
+marker with no `seq=` counts as `seq=1`. Re-verification of staleness still runs
+on **every** pass — only the redundant *comment* is avoided, never the check.
+
+**Bounded fallback** (mirrors AC3, #4618; age-floor join added by #4798;
+unstarved by #6514): the streak is a hard cap independent of the
+activity/marker logic working correctly — it counts how many stand-down passes
+have accumulated against *this exact* `$CLAIMED_AT` (the marker embeds it, so a
+genuine reclaim — which changes `CLAIMED_AT` — resets the count to zero
 automatically). The fallback fires only once **both** hold:
-`LOOM_MAX_STANDDOWN_STREAK` marked comments have piled up against the same
-claim with no reclaim, **and** the claim's own age is ≥
-`LOOM_STALE_CURATING_MINUTES` — reusing the same age floor the ordinary
-staleness row above already applies. Use this reclaim comment:
+`LOOM_MAX_STANDDOWN_STREAK` passes have piled up against the same claim with no
+reclaim, **and** the claim's own age is ≥ `LOOM_STALE_CURATING_MINUTES` —
+reusing the same age floor the ordinary staleness row above already applies
+(#4790: the streak alone measures *peer arrival rate*, not claim liveness, so it
+must never force-reclaim a claim that is still genuinely young), and
+keyed on the **claim's** age rather than the idle clock precisely so a claimant
+stuck in a loop emitting activity markers cannot hold the claim forever. Use
+this reclaim comment:
 
 ```bash
 gh issue edit $N --remove-label "loom:curating"
-gh issue comment $N --body "Reclaiming loom:curating claim: $STANDDOWN_COUNT consecutive stand-down comments have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_CURATING_MINUTES:-30}m) with no actual curation progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
+gh issue comment $N --body "Reclaiming loom:curating claim: $STANDDOWN_COUNT consecutive stand-down passes have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_CURATING_MINUTES:-30}m) with no actual curation progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
 gh issue edit $N --add-label "loom:curating"
 # Continue with normal curation
 ```
 
-**Reclaiming a stale claim** (the ordinary claim-age path):
+**Reclaiming a stale claim** (the ordinary idle-clock path):
 
 ```bash
 gh issue edit $N --remove-label "loom:curating"
-gh issue comment $N --body "Reclaiming stale loom:curating claim (age > ${LOOM_STALE_CURATING_MINUTES:-30}m, no follow-up comment) — a prior Curator's parent sweep likely died mid-enhancement."
+gh issue comment $N --body "Reclaiming stale loom:curating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_CURATING_MINUTES:-30}m with no claimant activity) — a prior Curator's parent sweep likely died mid-enhancement."
 gh issue edit $N --add-label "loom:curating"
 # Continue with normal curation
 ```
+
+**If `.loom/scripts/claim-staleness.sh` is missing** (an older install that has
+not been resynced yet): fall back to the **age-only** rule — read the latest
+`labeled` event for `loom:curating` from
+`repos/{owner}/{repo}/issues/$N/timeline`, reclaim when it is older than
+`LOOM_STALE_CURATING_MINUTES`, and treat a failed or empty read as fresh. Do
+**not** reintroduce a "any comment after the claim means fresh" test — that is
+precisely the defect this section exists to fix.
 
 **Env vars**: `LOOM_STALE_CURATING_MINUTES` (default **30**) — named to mirror
 `LOOM_STALE_REVIEWING_MINUTES`/`LOOM_STALE_TREATING_MINUTES` (`judge.md` /

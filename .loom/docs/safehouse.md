@@ -1004,11 +1004,11 @@ what feeds the public fleet feed. Loom is the producer:
 > health a de facto reclamation dependency. Epic #6165 closes that gap with a
 > genuinely fleet-scoped liveness source — the lease record
 > ([`lease-record.md`](lease-record.md)), consulted by
-> `claim_reconciliation::forge::reconcile_workspace_with_coordination` as the
-> authoritative gate before any reclaim fires (Phase 2, #6286) — and Phase 4
-> (#6317) removes the peer-claim/DEGRADED freeze from that decision path
-> entirely once it lands, restoring this channel to exactly the advisory,
-> fast-backoff role described below. See
+> `claim_reconciliation::forge::reconcile_workspace` as the authoritative
+> gate before any reclaim fires (Phase 2, #6286) — and Phase 4 (#6317)
+> removed the peer-claim/DEGRADED freeze from that decision path entirely,
+> restoring this channel to exactly the advisory, fast-backoff role
+> described below. See
 > [`lease-renewal-measurement.md`](lease-renewal-measurement.md) for the
 > renewal-cost data backing that authority, and Epic #6165 for the full
 > phase history.

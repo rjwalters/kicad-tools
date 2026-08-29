@@ -187,7 +187,7 @@ A reader should:
 **Phase 2 (Issue #6286) has now shipped this contract.**
 `loom-daemon`'s `claim_reconciliation::forge::fetch_freshest_lease_updated_at`
 (the periodic/startup reconciliation pass,
-`reconcile_workspace_with_coordination`) and
+`claim_reconciliation::forge::reconcile_workspace`) and
 `worktree_ops::gh::freshest_lease_updated_at` (the `recover-orphans` CLI's
 `check_untracked_building`) both implement exactly the four steps above —
 locate via `LEASE_MARKER_PREFIX`, freshness from the REST comments
@@ -198,6 +198,10 @@ evidence (journal / run-registry / label-age) already decided. Both call
 sites consult the lease as the LAST gate, immediately before a reclaim would
 otherwise fire — see `claim_reconciliation.rs`'s "Lease-record freshness"
 section and its top-of-file doc comment for the full before/after picture.
+**Phase 4 (Issue #6317) then removed the peer-claim-coordination-degraded
+gate (Issue #6157) that used to run alongside this one** — the lease is now
+the sole fleet-scoped reclamation gate; `reconcile_workspace` no longer
+accepts (or needs) any injected peer-coordination evidence.
 
 See also: [`lease-renewal.md`](lease-renewal.md) for the renewal mechanism
 this format was co-designed with, and
