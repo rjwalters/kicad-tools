@@ -90,6 +90,31 @@
 # a drift guard pinning the pinned-tracking-issue mechanism (title/marker,
 # `loom:blocked` exclusion, edit-in-place vs. create) in the shipped markdown.
 #
+# Recurrence incident (#7048): #6720's own fix is what made this possible —
+# 2026-08-28 ~16:31Z the operator batch-removed `loom:operator` from 22
+# CONFLICTING held PRs so Doctor could rebase them (the release terms were
+# journaled in the operator's own incident tracking, outside this repo).
+# Doctor's rebases worked, but a bare
+# `--remove-label loom:operator` is not one of the four durable release
+# signals "Sticky holds" (#4742) recognizes, so the hold MARKER survived and
+# re-derived on the next read. When the axes were still red for the SAME
+# reason (a structurally-red blast-radius axis does not change just because
+# `main` moved), "Hold behavior" silently reasserted `loom:operator` —
+# overriding the operator's own recent, explicit decision within hours.
+# Because `loom:operator` is exactly what excludes a PR from Doctor's
+# Priority-1 CONFLICTING queue (#5978), the relabeled PRs could never be
+# rebased again: 17 of the 22 released PRs were re-held within ~29 hours, and
+# the merge pace (recovered to ~15/day) dropped back to zero. #7048 narrows
+# "Hold behavior": a manual release is still not a release SIGNAL (the axes
+# are still re-judged fresh, unweakened) — but when the freshly-derived
+# concern is byte-identical to the one already on record AND `loom:operator`
+# was hand-removed since that record was written, the label is not silently
+# reasserted. A genuinely new/different concern still re-holds normally.
+# This file's Test 14/14B/15/15B cover the per-PR decision; Test 16
+# simulates the actual merge-wave shape (N held PRs, each rebase re-
+# conflicting the remainder) and asserts convergence to zero open conflicts
+# rather than the observed stable all-held deadlock.
+#
 # Usage:
 #   ./.loom/scripts/tests/test-champion-held-pr-health-pass.sh
 
@@ -249,6 +274,11 @@ state_labels() {
 champion_pr_pass() {
     local state="$1" prior_hold="$2" release_reason="$3" axes_red="$4"
     local mergeable="$5" hours_ago="$6" ci="$7" last_activity="${8:-2026-08-01T00:00:00Z}"
+    # reason_changed (#7048): whether THIS tick's freshly-derived concern is a
+    # NEW/different one from whatever the prior hold episode had on record.
+    # Only meaningful when a manual release is also in force (see below);
+    # defaults to false so every pre-#7048 call site is unaffected.
+    local reason_changed="${9:-false}"
 
     local MERGE_BLOCKED_BY_HOLD=false
 
@@ -263,16 +293,41 @@ champion_pr_pass() {
     else
         # Never held, or held-and-released: the four axes are judged normally.
         if [ "$axes_red" = true ]; then
-            # "Hold behavior" — idempotent notice + loom:operator, no merge.
-            if state_has "marker:champion:merge-risk-hold" "$state"; then
-                echo "HOLD_NOTICE:suppressed"
-            else
-                state_add "marker:champion:merge-risk-hold" "$state"
-                echo "COMMENT:champion:merge-risk-hold"
+            # Manual-release detection (#7048): the bot never removes
+            # loom:operator on this path (only a real merge or the unheld-
+            # stale route do that), so "a prior hold episode existed AND the
+            # label is not currently on the PR" can only mean a human removed
+            # it by hand since that episode's marker was posted.
+            local manual_release_since_hold=false
+            if [ "$prior_hold" = true ] && ! state_has "label:loom:operator" "$state"; then
+                manual_release_since_hold=true
             fi
-            state_add "label:loom:operator" "$state"
+
+            if [ "$manual_release_since_hold" = true ] && [ "$reason_changed" != true ]; then
+                # #7048: respect the manual release — do NOT silently
+                # reassert loom:operator for a concern that reads the same as
+                # the one already on record. The ORIGINAL hold marker/notice
+                # is left untouched; one transparency comment per episode.
+                if state_has "marker:champion:hold-release-respected" "$state"; then
+                    echo "RESPECT_NOTICE:suppressed"
+                else
+                    state_add "marker:champion:hold-release-respected" "$state"
+                    echo "COMMENT:champion:hold-release-respected"
+                fi
+                echo "HOLD:manual-release-respected"
+                # loom:operator is deliberately NOT reapplied here.
+            else
+                # "Hold behavior" — idempotent notice + loom:operator, no merge.
+                if state_has "marker:champion:merge-risk-hold" "$state"; then
+                    echo "HOLD_NOTICE:suppressed"
+                else
+                    state_add "marker:champion:merge-risk-hold" "$state"
+                    echo "COMMENT:champion:merge-risk-hold"
+                fi
+                state_add "label:loom:operator" "$state"
+                echo "HOLD:fresh"
+            fi
             MERGE_BLOCKED_BY_HOLD=true
-            echo "HOLD:fresh"
         fi
     fi
 
@@ -1141,6 +1196,215 @@ assert_doc_contains "$CHAMPION_MD" \
 assert_doc_contains "$CHAMPION_MD" \
     "a \`MERGEABLE\` pass never writes the marker for that PR" \
     "the doc names the CONFLICTING -> MERGEABLE -> CONFLICTING reset edge case explicitly (#7020 Test Plan)"
+
+# --- #7048: manual-release-respecting sticky hold ---
+assert_doc_contains "$CHAMPION_MD" \
+    "MANUAL_RELEASE_SINCE_HOLD=false" \
+    "the sticky-hold precheck computes MANUAL_RELEASE_SINCE_HOLD (#7048)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'OPERATOR_LABEL_NOW=$(jq -r '"'"'[.labels[].name] | any(. == "loom:operator")'"'"' <<<"$PR_JSON")' \
+    "manual release is detected from the SAME already-fetched PR_JSON, no extra forge call (#7048)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'if [ "$MANUAL_RELEASE_SINCE_HOLD" = true ] && [ "$CONCERN_BULLET" = "$PRIOR_CONCERN_BULLET" ]; then' \
+    "Hold behavior only skips the reapply when the concern is BYTE-IDENTICAL to the prior hold's own bullet (#7048)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'RESPECT_MARKER="<!-- champion:hold-release-respected:$HEAD_SHA -->"' \
+    "a manually-released, same-reason PR gets a distinct, per-head-SHA transparency notice instead of a silent relabel (#7048)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "**Champion: Respecting a Manual Release (#7048)**" \
+    "the respecting-manual-release notice names itself and the issue (#7048)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true' \
+    "loom:operator is still reapplied on the genuinely-new-reason branch — #7048 narrows, does not remove, the reapply (AC #1)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "That is not a release signal" \
+    "the notice is explicit that respecting the label removal does not clear the hold itself — merge safety is unweakened (AC #1)"
+
+echo
+echo "Test 14: manual release, SAME reason — loom:operator is NOT silently reapplied (#7048)"
+# Models the observed incident directly: a PR was held, the operator batch-
+# removed loom:operator (no qualifying release comment — the label is simply
+# absent from the state below), and Doctor's rebase (a new commit,
+# release_reason set) re-derives the SAME structurally-red concern (blast
+# radius on a guard-hook file never stops being red just because main moved).
+S=$(state_new)
+state_add "marker:champion:merge-risk-hold" "$S"
+# loom:operator deliberately NOT added — models the hand removal.
+OUT=$(champion_pr_pass "$S" true "new head commit abc1234" true MERGEABLE 2 pass 2026-08-01T00:00:00Z false)
+assert_contains "$OUT" "HOLD:manual-release-respected" "the manual release is recognized and respected (AC #1)"
+assert_contains "$OUT" "COMMENT:champion:hold-release-respected" "a one-time transparency comment is posted"
+assert_lacks "$OUT" "COMMENT:champion:merge-risk-hold" "the ORIGINAL hold notice is not reposted — it is left untouched"
+assert_lacks "$OUT" "HOLD:fresh" "this is not treated as an ordinary silent re-hold"
+assert_contains "$OUT" "NO_MERGE:hold" "the hold itself still stands — respecting the label removal never weakens merge safety (AC #1)"
+assert_lacks "$(state_labels "$S")" "loom:operator" \
+    "loom:operator is NOT reapplied — this is what keeps the PR visible to Doctor's Priority-1 CONFLICTING queue (#5978, AC #1)"
+rm -f "$S"
+echo
+
+echo "Test 14B: manual release respected — transparency notice is idempotent per head SHA, not per tick (#7048)"
+S=$(state_new)
+state_add "marker:champion:merge-risk-hold" "$S"
+TICK1=$(champion_pr_pass "$S" true "new head commit abc1234" true MERGEABLE 2 pass)
+TICK2=$(champion_pr_pass "$S" true "new head commit abc1234" true MERGEABLE 3 pass)
+assert_contains "$TICK1" "COMMENT:champion:hold-release-respected" "tick 1 posts the transparency notice"
+assert_contains "$TICK2" "RESPECT_NOTICE:suppressed" "tick 2 suppresses the duplicate notice (still the same episode)"
+assert_lacks "$TICK2" "loom:operator" "loom:operator is still never reapplied on the repeat tick"
+rm -f "$S"
+echo
+
+echo "Test 15: manual release, but a NEW/different reason — loom:operator IS reapplied (#7048)"
+# The operator has not seen THIS concern before, so re-flagging it is fair —
+# #7048 narrows the silent-reapply case, it does not disable holds entirely.
+S=$(state_new)
+state_add "marker:champion:merge-risk-hold" "$S"
+OUT=$(champion_pr_pass "$S" true "new head commit abc1234" true MERGEABLE 2 pass 2026-08-01T00:00:00Z true)
+assert_contains "$OUT" "HOLD:fresh" "a genuinely new/different concern re-holds normally, even after a manual release (AC #1)"
+assert_lacks "$OUT" "HOLD:manual-release-respected" "this is not the same-reason respected path"
+assert_contains "$(state_labels "$S")" "loom:operator" "loom:operator is reapplied — the operator has not seen this NEW reason yet"
+rm -f "$S"
+echo
+
+echo "Test 15B: manual release detection requires a PRIOR hold episode — a PR's very first hold is unaffected (#7048)"
+# prior_hold=false (never held before): MANUAL_RELEASE_SINCE_HOLD is
+# trivially false regardless of whether loom:operator happens to be absent
+# (it always is, on a first-ever hold) — this must behave exactly like the
+# pre-#7048 "fresh hold" path (Test 6/6B above), not the respected path.
+S=$(state_new)
+OUT=$(champion_pr_pass "$S" false "" true MERGEABLE 2 pass)
+assert_contains "$OUT" "HOLD:fresh" "a PR's first-ever hold always reapplies loom:operator, never the respected path"
+assert_lacks "$OUT" "HOLD:manual-release-respected" "no prior episode exists to have been manually released from"
+assert_contains "$(state_labels "$S")" "loom:operator" "loom:operator is applied on the ordinary first-ever hold"
+rm -f "$S"
+echo
+
+# ---------------------------------------------------------------------
+echo "Test 16: MERGE-WAVE REGRESSION (#7048) — N previously-held, manually-released PRs must drain to zero open conflicts, not restabilize into an all-held deadlock"
+# This is the exact incident shape from the issue: 2026-08-28->08-29,
+# rjwalters batch-released loom:operator from 22 CONFLICTING held PRs so
+# Doctor could rebase them; the bot re-applied loom:operator to 17 of them
+# within ~29 hours as each rebase re-derived the same still-red concern,
+# and the merge pace dropped back to zero. Doctor's Priority-1 queue only
+# ever touches a CONFLICTING PR that does NOT carry loom:operator (#5978) —
+# so once the bot relabels a PR, Doctor can never rebase it again, and it
+# stays CONFLICTING forever. This wave models that queue directly: PRE-#7048
+# reapply logic always reasserts the label (axes never actually go green in
+# this fixture — the concern is structural, e.g. "touches guard hooks"),
+# POST-#7048 logic does not, because the reason never changes.
+
+# Isolated "Hold behavior" reapply decision — the single boolean this whole
+# incident turns on — mirrored in both its pre- and post-#7048 shapes.
+hold_reapply_decision_PRE7048() {
+    local axes_red="$1"
+    [[ "$axes_red" == true ]] && echo true || echo false
+}
+
+hold_reapply_decision_POST7048() {
+    local axes_red="$1" manual_release_since_hold="$2" reason_changed="$3"
+    if [[ "$axes_red" != true ]]; then
+        echo false
+        return
+    fi
+    if [[ "$manual_release_since_hold" == true && "$reason_changed" != true ]]; then
+        echo false
+    else
+        echo true
+    fi
+}
+
+# Simulate a merge wave over $n PRs, all previously held for the SAME
+# structurally-red concern and all manually released (loom:operator absent,
+# hold marker still present) right before the wave starts. Each tick, Doctor
+# rebases exactly one CONFLICTING, non-excluded PR (its Priority-1 queue):
+# the rebase mechanically clears THAT PR's own conflict, then Champion
+# re-judges it (axes still red, same reason, manual release in force). If
+# $decision_fn says "reapply" the PR becomes EXCLUDED — stuck CONFLICTING
+# forever, since Doctor's queue will never touch a loom:operator PR again. If
+# it says "do not reapply", the PR is free to proceed (modeled here as
+# merging, since nothing further blocks it once Doctor+the label are out of
+# the way) — and per the issue's own observed shape, merging one PR moves
+# `main`, conflicting every other still-open PR.
+run_merge_wave() {
+    local n="$1" decision_fn="$2"
+    local -a conflicting gone
+    local i
+    for ((i = 0; i < n; i++)); do
+        conflicting[i]=true
+        gone[i]=false
+    done
+    local merged=0 waves=0
+    local max_waves=$((n * 2 + 5))   # generous cap; a converging system finishes in <= n waves
+
+    while ((waves < max_waves)); do
+        local target=-1
+        for ((i = 0; i < n; i++)); do
+            if [[ "${conflicting[i]}" == true && "${gone[i]}" == false ]]; then
+                target=$i
+                break
+            fi
+        done
+        ((target == -1)) && break   # nothing left for Doctor to touch
+        waves=$((waves + 1))
+
+        # Doctor rebases $target: mechanically clears ITS OWN conflict.
+        conflicting[target]=false
+
+        local reapply
+        reapply=$("$decision_fn" true true false)
+        if [[ "$reapply" == true ]]; then
+            # Bug shape: relabeled -> excluded from Doctor's queue forever,
+            # and since nothing else will ever touch it, it stays conflicting.
+            gone[target]=true
+            conflicting[target]=true
+        else
+            # Fix shape: not excluded, so it proceeds — merges, moving main
+            # and re-conflicting every other still-open PR (the issue's own
+            # "each merge conflicts the remainder" wave shape).
+            merged=$((merged + 1))
+            gone[target]=true
+            for ((i = 0; i < n; i++)); do
+                if [[ "$i" != "$target" && "${gone[i]}" == false ]]; then
+                    conflicting[i]=true
+                fi
+            done
+        fi
+    done
+
+    local still_conflicting=0
+    for ((i = 0; i < n; i++)); do
+        [[ "${conflicting[i]}" == true ]] && still_conflicting=$((still_conflicting + 1))
+    done
+    echo "$still_conflicting $merged $waves"
+}
+
+N=6
+read -r OLD_CONFLICTING OLD_MERGED OLD_WAVES <<<"$(run_merge_wave "$N" hold_reapply_decision_PRE7048)"
+read -r NEW_CONFLICTING NEW_MERGED NEW_WAVES <<<"$(run_merge_wave "$N" hold_reapply_decision_POST7048)"
+
+assert_eq "$N" "$OLD_WAVES" \
+    "control: pre-#7048 logic touches each PR exactly once before the whole wave stalls (relabeled on first touch)"
+assert_eq "$N" "$OLD_CONFLICTING" \
+    "control: pre-#7048 logic reproduces the incident shape — the wave stabilizes with ALL $N PRs stuck CONFLICTING"
+assert_eq "0" "$OLD_MERGED" \
+    "control: pre-#7048 logic merges NOTHING — matches the observed '0 merges since 06:37Z' stall"
+assert_eq "0" "$NEW_CONFLICTING" \
+    "fix: post-#7048 logic drains the SAME wave to ZERO open conflicts, never restabilizing into an all-held deadlock (AC #2/#3)"
+assert_eq "$N" "$NEW_MERGED" \
+    "fix: post-#7048 logic lets every PR through instead of relabeling it out of Doctor's reach (AC #2)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$NEW_WAVES" -le "$N" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: the fix converges in at most $N waves (one Doctor touch per PR), not an unbounded/non-converging loop"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: expected convergence within $N waves, took $NEW_WAVES"
+fi
+echo
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
