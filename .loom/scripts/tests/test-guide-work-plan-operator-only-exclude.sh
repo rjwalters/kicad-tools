@@ -27,6 +27,16 @@
 #   ready:    --search "-label:loom:building -label:loom:operator-only"
 #   building: --search "-label:loom:operator-only"
 #
+# #7071 EXTENSION: the `ready` query (and the "Finding Work" search, and the
+# incumbency-rule eligibility checks — covered by their own regression
+# suites) never excluded `loom:blocked`, only `loom:operator-only` — despite
+# `loom:blocked` meaning exactly the same thing for a Builder ("can never act
+# on this right now"). An issue can carry `loom:issue` + `loom:blocked`
+# simultaneously (Curator applies `loom:blocked` pre-approval, and a
+# dependency-driven block can land on an already-approved issue too), so this
+# suite is extended to also cover that combination:
+#   ready:    --search "-label:loom:building -label:loom:operator-only -label:loom:blocked"
+#
 # Verifies that:
 #   1. STRUCTURE: guide.md's `ready=` and `building=` queries inside
 #      `render_plan_body()` carry the expected `--search` exclusion clauses.
@@ -98,15 +108,15 @@ pass "render_plan_body() body extracted from $GUIDE_MD"
 # Test 1: STRUCTURE — ready/building queries carry the exclusion clauses
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 1: the ready/building queries exclude loom:operator-only"
+echo "Test 1: the ready/building queries exclude loom:operator-only (and, #7071, loom:blocked)"
 
 READY_LINE="$(grep -n '^  ready=' <<<"$RPB_BODY" || true)"
 BUILDING_LINE="$(grep -n '^  building=' <<<"$RPB_BODY" || true)"
 
-if grep -q '^  ready=\$("\$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only"' <<<"$RPB_BODY"; then
-    pass "the ready= query excludes loom:building and loom:operator-only via --search"
+if grep -q '^  ready=\$("\$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked"' <<<"$RPB_BODY"; then
+    pass "the ready= query excludes loom:building, loom:operator-only, and loom:blocked via --search"
 else
-    fail "expected ready= to carry --search \"-label:loom:building -label:loom:operator-only\" (got: $READY_LINE)"
+    fail "expected ready= to carry --search \"-label:loom:building -label:loom:operator-only -label:loom:blocked\" (got: $READY_LINE)"
 fi
 
 if grep -q '^  building=\$("\$GH_READ" issue list --label "loom:building" --search "-label:loom:operator-only"' <<<"$RPB_BODY"; then
@@ -173,12 +183,14 @@ FIX="$TMPROOT/fixtures"
 # `ready` fixture (loom:issue query): #6068 plain-eligible, #6245 mirrors the
 # real-world repro (loom:issue + loom:operator-only + loom:operator-blocked),
 # #6100 a loom:issue + loom:building issue (also excluded by `ready`'s own
-# --search clause, independent of operator-only).
+# --search clause, independent of operator-only), #6805 (#7071) a loom:issue
+# + loom:blocked issue — the combination this suite's extension covers.
 cat > "$FIX/issue-loom_issue.json" <<'JSON'
 [
   {"number":6068,"title":"Plain ready issue","labels":[{"name":"loom:issue"}]},
   {"number":6245,"title":"Guard ask-pattern false positive","labels":[{"name":"loom:issue"},{"name":"loom:operator-only"},{"name":"loom:operator-blocked"}]},
-  {"number":6100,"title":"Already-building issue","labels":[{"name":"loom:issue"},{"name":"loom:building"}]}
+  {"number":6100,"title":"Already-building issue","labels":[{"name":"loom:issue"},{"name":"loom:building"}]},
+  {"number":6805,"title":"Blocked-but-approved issue","labels":[{"name":"loom:issue"},{"name":"loom:blocked"}]}
 ]
 JSON
 
@@ -226,6 +238,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test 2b (AC, #7071): render_plan_body() excludes loom:blocked from Ready
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 2b: render_plan_body() excludes loom:blocked from the Ready section"
+
+if grep -q '#6805' <<<"$READY_BODY"; then
+    fail "#6805 (loom:issue + loom:blocked) must NOT appear in the Ready section"
+else
+    pass "#6805 (loom:issue + loom:blocked) is excluded from the Ready section"
+fi
+
+# ---------------------------------------------------------------------------
 # Test 3: NO OVER-EXCLUSION — plain issues still render
 # ---------------------------------------------------------------------------
 echo ""
@@ -258,6 +282,12 @@ if grep -q '#6245' <<<"$PRE_READY"; then
     pass "without the --search clause, #6245 WOULD have rendered into Ready (bug reproduced)"
 else
     fail "expected the negative-control (unfiltered) query to include #6245"
+fi
+
+if grep -q '#6805' <<<"$PRE_READY"; then
+    pass "without the --search clause, #6805 (loom:issue + loom:blocked) WOULD have rendered into Ready (#7071 bug reproduced)"
+else
+    fail "expected the negative-control (unfiltered) query to include #6805"
 fi
 
 if grep -q '#6501' <<<"$PRE_BUILDING"; then

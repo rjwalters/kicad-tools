@@ -142,14 +142,17 @@ Writes stay literal `gh` (so the guard hooks still see them). Full policy:
 ## Finding Work
 
 ```bash
-# Find all human-approved issues ready for work (exclude building issues and
-# loom:operator-only issues — #6941: labels.yml documents loom:operator-only
-# as "sweep skips", so Builder can never act on one, exactly like
-# loom:blocked; it must never surface as ready/urgent-eligible work).
+# Find all human-approved issues ready for work (exclude building issues,
+# loom:operator-only issues, and loom:blocked issues — #6941: labels.yml
+# documents loom:operator-only as "sweep skips", so Builder can never act on
+# one, exactly like loom:blocked; #7071: loom:blocked itself was never
+# excluded here even though a curated issue can carry both loom:issue and
+# loom:blocked simultaneously — neither must ever surface as
+# ready/urgent-eligible work).
 # NOTE: gh ANDs --label values, so `--label "!loom:building"` matches a literal
-# label no issue carries and silently returns an empty set. Exclude building
-# and operator-only issues with raw search terms instead.
-"$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only" --state open --json number,title,labels,body
+# label no issue carries and silently returns an empty set. Exclude building,
+# operator-only, and blocked issues with raw search terms instead.
+"$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked" --state open --json number,title,labels,body
 
 # Find currently urgent issues (exclude building issues)
 "$GH_READ" issue list --label "loom:urgent" --search "-label:loom:building" --state open
@@ -259,6 +262,39 @@ decision) counts. A lookup failure (rate limit, `gh` outage) fails **open** —
 same posture as every other best-effort forge probe in this workflow — so
 Guide never gets permanently stuck unable to select anything; it just doesn't
 get to skip this particular candidate this tick.
+
+### Skip Candidates Carrying `loom:blocked` (#7071)
+
+A `loom:issue` candidate can also carry `loom:blocked` at the same time —
+Curator applies it pre-approval and a later dependency-driven block (see
+"Unblocking: Resolve Dependency Blocks" below) can land on an
+already-`loom:issue` issue too. Either way it means the same thing
+`loom:operator-only` means: Builder can never act on it right now. #7008/PR
+#7012 added the `has_operator_only()` exclusion above but left `loom:blocked`
+itself unexcluded from the `ready=` query, the "Finding Work" search, and the
+incumbency-rule eligibility checks — so a `loom:issue`+`loom:blocked` issue
+kept rendering as "Ready" and stayed urgent-eligible. Same shape as
+`has_operator_only()`:
+
+```bash
+has_blocked() {
+  local number="$1"
+  local labels
+  labels=$(gh issue view "$number" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null)
+  case ",$labels," in
+    *,loom:blocked,*) echo "true"; return ;;
+  esac
+  echo "false"
+}
+
+# Before promoting a candidate (Fill free slots) or keeping an incumbent
+# (Evict ineligible holders), skip it if this returns "true":
+if [ "$(has_blocked <number>)" = "true" ]; then
+  echo "Skipping #<number> - loom:blocked, Builder can never act on this"
+fi
+```
+
+A lookup failure fails **open**, same posture as `has_operator_only()` above.
 
 ## Priority Assessment
 
@@ -1045,22 +1081,24 @@ Each tick performs the smallest possible edit to it, in this order:
    ```
 
 2. **Evict ineligible holders.** A holder is ineligible when it is closed, has
-   lost `loom:issue`, has gained `loom:building` / `loom:blocked` /
-   `loom:operator-only` (`has_operator_only()` returns `true` — Builder can
-   never act on it, exactly like `loom:blocked`, #6941), or now has an open linked
-   PR carrying `loom:pr` (see "Skip Candidates With an Open Linked PR" above —
-   its Builder work is done and it is only waiting on a human merge decision).
-   This is a *state change*, never a judgment call, so it is the one demotion
-   you may make without a challenger.
+   lost `loom:issue`, has gained `loom:building` / `loom:operator-only`
+   (`has_operator_only()` returns `true` — Builder can never act on it,
+   #6941) / `loom:blocked` (`has_blocked()` returns `true` — same reason,
+   #7071), or now has an open linked PR carrying `loom:pr` (see "Skip
+   Candidates With an Open Linked PR" above — its Builder work is done and it
+   is only waiting on a human merge decision). This is a *state change*,
+   never a judgment call, so it is the one demotion you may make without a
+   challenger.
 
 3. **Fill free slots.** If fewer than 3 eligible holders remain, promote the
    highest-ranked eligible `loom:issue` candidates until the set is back to 3
    — "eligible" excludes any candidate with an open `loom:pr`-labeled linked
-   PR per "Skip Candidates With an Open Linked PR" above (#5911), and any
-   candidate `has_operator_only()` returns `true` for (#6941) — such a
-   candidate can never be genuinely "ready work" regardless of rank, since
-   Builder/sweep hard-skips it. Filling a free slot displaces nobody, so no
-   comparison against an incumbent is required.
+   PR per "Skip Candidates With an Open Linked PR" above (#5911), any
+   candidate `has_operator_only()` returns `true` for (#6941), and any
+   candidate `has_blocked()` returns `true` for (#7071) — such a candidate can
+   never be genuinely "ready work" regardless of rank, since Builder/sweep
+   hard-skips it. Filling a free slot displaces nobody, so no comparison
+   against an incumbent is required.
 
 4. **With 3 eligible holders, a candidate may displace the weakest holder ONLY
    IF it *strictly outranks* it** (`urgency_rank` below). **A tie leaves the
@@ -1166,7 +1204,7 @@ looks the way it does instead of re-litigating it from scratch.
 
 ## Safety Check: Never Mark Building Issues Urgent
 
-**Before applying `loom:urgent`, verify the issue doesn't already have `loom:building`, isn't already satisfied by an open `loom:pr` PR, and doesn't carry `loom:operator-only`:**
+**Before applying `loom:urgent`, verify the issue doesn't already have `loom:building`, isn't already satisfied by an open `loom:pr` PR, and doesn't carry `loom:operator-only` or `loom:blocked`:**
 
 ```bash
 # Check labels before marking urgent
@@ -1183,6 +1221,14 @@ fi
 # must never read as a top Builder priority.
 if [ "$(has_operator_only <number>)" = "true" ]; then
   echo "Skipping #<number> - loom:operator-only, Builder can never act on this"
+  exit 0
+fi
+
+# #7071: same last-line-of-defense re-check for loom:blocked — a curated
+# issue can carry both loom:issue and loom:blocked at once, and the
+# eligibility filters above are best-effort, not guaranteed to have caught it.
+if [ "$(has_blocked <number>)" = "true" ]; then
+  echo "Skipping #<number> - loom:blocked, Builder can never act on this"
   exit 0
 fi
 
@@ -1209,6 +1255,7 @@ fi
 - The daemon may misinterpret building issues as ready work
 - An issue whose PR already carries `loom:pr` needs a human merge decision, not urgency signaling toward a Builder (#5911)
 - An issue carrying `loom:operator-only` can never be acted on by Builder — sweep hard-skips it outright, so `loom:urgent` on it is a false top-priority signal (#6941; #6245 was mispromoted twice in <24h this way)
+- An issue carrying `loom:blocked` is exactly as unbuildable, for a human-dependency reason instead of a mechanism-only one — `loom:urgent` on it is the same false top-priority signal (#7071)
 
 **If an urgent issue is already building:**
 - Leave it alone - work is already happening
@@ -2177,7 +2224,12 @@ render_plan_body() {
   # #7008: exclude loom:operator-only (a human-only decision, not buildable
   # by automation) the same way the "Finding Work" search does; `ready` also
   # excludes loom:building (an issue already claimed is no longer "ready").
-  ready=$("$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only" --state open --limit 200 --json number,title \
+  # #7071: also exclude loom:blocked — a curated issue can carry both
+  # loom:issue and loom:blocked at once (Curator applies loom:blocked
+  # pre-approval, and a dependency-driven block can land on an
+  # already-approved issue too), and it is exactly as unbuildable as
+  # loom:operator-only, so it must never render as "Ready" either.
+  ready=$("$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked" --state open --limit 200 --json number,title \
     --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
   building=$("$GH_READ" issue list --label "loom:building" --search "-label:loom:operator-only" --state open --limit 200 --json number,title \
     --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
