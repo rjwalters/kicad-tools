@@ -3041,9 +3041,12 @@ resolve_stash_cwd() {
 #     (#5783; see the qchar == SQ branch at strip_literal_text()'s call site below).
 # Each redacted span is replaced by a SAME-LENGTH placeholder so byte offsets of
 # the surrounding command are unchanged. Best-effort like COMMAND_NO_COMMENT:
-# it does not model backslash-escaped quotes, but since the result feeds only
-# the narrowing (never widening) catastrophic scan, the worst case is a raw
-# substring surviving — never a catastrophic block being skipped incorrectly.
+# a backslash-escaped inner double quote (`\"`, DQSPAN below, #7095) IS modeled
+# for the double-quoted-span case, but other escape shapes (e.g. an escaped
+# quote inside a SINGLE-quoted span, which real bash quoting does not even
+# support) are not attempted. Since the result feeds only the narrowing
+# (never widening) catastrophic scan, the worst case is a raw substring
+# surviving — never a catastrophic block being skipped incorrectly.
 #
 # -----------------------------------------------------------------------------
 # HEREDOC-WRAPPED FLAG VALUES (#5216)
@@ -3166,10 +3169,29 @@ strip_literal_text() {
         # and the quoted value, which the first alternative'"'"'s shape does not
         # anticipate, so it gets its own alternative rather than being folded
         # into the flag list above.
+        #
+        # DQSPAN (#7095): an escape-aware double-quoted-span pattern. A bare
+        # `[^"]*` stops at the FIRST raw `"` it meets, including one that is
+        # itself backslash-escaped -- exactly the shape an exact-phrase
+        # `gh ... --search "\"phrase\""` value takes. That collapsed the
+        # redacted span down to just the leading backslash, leaving the rest
+        # of the value (and any dangerous-looking phrase inside it) fully
+        # visible to the raw ALWAYS_BLOCK_PATTERNS scan below. `(\\.|[^"\\])*`
+        # instead walks the span two ways: the `\\.` alternative consumes an
+        # escaping backslash TOGETHER WITH whatever it escapes (so `\"` and
+        # `\\` are swallowed as one unit and never read as a bare closing
+        # quote), while `[^"\\]` consumes any ordinary character that is
+        # neither the quote delimiter nor a backslash. The span still
+        # terminates on the first UNESCAPED `"`, so span-boundary detection
+        # across multiple flags on one line is unaffected, and the `$(`/
+        # backtick safety-floor check further below still sees the full inner
+        # text -- escapes and all -- since that check is a plain substring
+        # search over `inner`, not a re-parse of it.
+        DQSPAN = DQ "(\\\\.|[^" DQ "\\\\])*" DQ
         re = "(^|[ \t\n])(--message|--body|--notes|--title|--comment|--search|-m)[ \t]*=?[ \t]*(" \
-             DQ "[^" DQ "]*" DQ "|" SQ "[^" SQ "]*" SQ ")" \
+             DQSPAN "|" SQ "[^" SQ "]*" SQ ")" \
              "|(^|[ \t\n])(--arg|--argjson)[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]+(" \
-             DQ "[^" DQ "]*" DQ "|" SQ "[^" SQ "]*" SQ ")"
+             DQSPAN "|" SQ "[^" SQ "]*" SQ ")"
         buf = ""
     }
     # MULTI-LINE REDACTION (#3898): slurp the whole (possibly multi-line) command
