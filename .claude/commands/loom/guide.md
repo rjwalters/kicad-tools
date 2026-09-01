@@ -2229,8 +2229,16 @@ render_plan_body() {
   # pre-approval, and a dependency-driven block can land on an
   # already-approved issue too), and it is exactly as unbuildable as
   # loom:operator-only, so it must never render as "Ready" either.
-  ready=$("$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked" --state open --limit 200 --json number,title \
-    --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
+  #
+  # #7083: `ready_json` is fetched here as raw JSON (not pre-formatted
+  # bullets) because it still needs one more filter below — issues already
+  # carrying an open `loom:pr`-labeled linked PR are fully implemented and
+  # merge-pending, not "ready for implementation" — but that exclusion set
+  # can only be derived once `approved_json` (fetched further down) is in
+  # hand, so the final bullet-formatted `ready` is assembled after it.
+  local ready_json
+  ready_json=$("$GH_READ" issue list --label "loom:issue" --search "-label:loom:building -label:loom:operator-only -label:loom:blocked" --state open --limit 200 --json number,title \
+    --jq 'sort_by(.number)')
   building=$("$GH_READ" issue list --label "loom:building" --search "-label:loom:operator-only" --state open --limit 200 --json number,title \
     --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title)"')
   review=$("$GH_READ" pr list --label "loom:review-requested" --state open --limit 200 --json number,title \
@@ -2253,10 +2261,22 @@ render_plan_body() {
   # order without either derivation needing its own sort (and without
   # reintroducing a second query, which #6457 removed on purpose).
   local approved_json
-  approved_json=$("$GH_READ" pr list --label "loom:pr" --state open --limit 200 --json number,title,labels \
+  approved_json=$("$GH_READ" pr list --label "loom:pr" --state open --limit 200 --json number,title,labels,closingIssuesReferences \
     --jq 'sort_by(.number)')
   approved=$(printf '%s' "$approved_json" | jq -r '.[] | "- **#\(.number)**: \(.title)"')
   held=$(printf '%s' "$approved_json" | jq -r '.[] | select([(.labels // [])[].name] | index("loom:operator")) | "- **#\(.number)**: \(.title)"')
+  # #7083: derive the set of issue numbers already closed by an open
+  # `loom:pr`-labeled PR from `approved_json`'s own `closingIssuesReferences`
+  # (each PR's closes-graph) — the same "reuse the already-fetched PR list,
+  # never add a second forge query" discipline `held`'s derivation above
+  # established for #6457. Filtering `ready_json` against this set is what
+  # keeps fully-implemented, merge-pending work out of the "Ready" section
+  # (it belongs in "Approved (Awaiting Merge)" instead).
+  local pr_linked_issues
+  pr_linked_issues=$(printf '%s' "$approved_json" | \
+    jq -c '[.[] | (.closingIssuesReferences // [])[].number] | unique')
+  ready=$(printf '%s' "$ready_json" | jq -r --argjson excl "$pr_linked_issues" \
+    '.[] | select((.number as $n | $excl | index($n)) | not) | "- **#\(.number)**: \(.title)"')
   curated=$("$GH_READ" issue list --label "loom:curated" --state open --limit 200 --json number,title \
     --jq 'sort_by(.number) | .[] | "- **#\(.number)**: \(.title) *(curated)*"')
   local architect hermit
