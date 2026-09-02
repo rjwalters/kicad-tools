@@ -1449,8 +1449,26 @@ make_sd_stub "$AD8_LOG" "$AD8_SLEEP_PID1"
     LOOM_SOCKET_PATH="$AD8_HOME/.loom/loom-daemon.sock" \
     LOOM_AUTONOMY_MARKER="$AD8_HOME/.loom/autonomy-desired" \
     bash "$START_SCRIPT" --no-launchd >/dev/null 2>&1 )
+# Kill AND reap the decoy synchronously (`wait`, not just `kill`) before the
+# very next invocation runs its already-running guard: a killed-but-not-yet-
+# reaped child is still a ZOMBIE in the process table, and `kill -0` on a
+# zombie's pid returns success (verified: `kill -0` on a just-killed pid
+# stays 0 for a real, measurable window before the parent reaps it -- see
+# #7132). Racing that reap window against the second invocation's startup
+# time is exactly the wall-clock-bounded flake #7132 reports under a loaded
+# CI runner. `wait` blocks until the reap is guaranteed done, closing the
+# race outright rather than hoping the parent reaps fast enough.
 kill "$AD8_SLEEP_PID1" 2>/dev/null || true
-rm -f "$AD8_HOME/.loom/.daemon.pid"
+wait "$AD8_SLEEP_PID1" 2>/dev/null || true
+# The real PID file for a dev-mode ($LOOM_MACHINE_CHECKOUT unset) invocation
+# lands under the repo-root state home, $WORKDIR/.loom/.daemon.pid (see the
+# S2 comment above) -- NOT under the pinned scratch $AD8_HOME. Removing the
+# wrong path here (a pre-existing bug) left the REAL pid file -- containing
+# the now-killed $AD8_SLEEP_PID1 -- lying around for the very next
+# (refusal-expecting) invocation's already-running guard to stumble over,
+# compounding the zombie race above with a second, independent way to
+# spuriously match "already running" instead of exercising the refusal path.
+rm -f "$WORKDIR/.loom/.daemon.pid"
 
 # AD8. A plain re-install (no flags) on the RECOVERY path now REFUSES (exit
 #      1) rather than warn-and-continue (#5409 AC1 -- the #4693 mitigation
@@ -1490,7 +1508,11 @@ TESTS_RUN=$((TESTS_RUN + 1))
 # refusal happened before the install step ran a second time -- not just
 # that it happened to exit non-zero afterward.
 ad8_enable_count="$(grep -c -- "--user enable --now $AD_SD_UNIT" "$AD8_LOG" 2>/dev/null || true)"
-if [[ "$ad8_enable_count" == "1" && ! -f "$AD8_HOME/.loom/.daemon.pid" ]]; then
+# The pid file this refusal must never write lives at $WORKDIR/.loom/.daemon.pid
+# (dev-mode state home, see the S2 comment above) -- not $AD8_HOME, which this
+# script never writes to. Checking the wrong path made this assertion
+# vacuously true regardless of what the refusal actually did (#7132).
+if [[ "$ad8_enable_count" == "1" && ! -f "$WORKDIR/.loom/.daemon.pid" ]]; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} autonomy downgrade (systemd): a refused start never actually (re)installs or writes a pid file"
 else
@@ -1524,7 +1546,12 @@ else
     echo "  output: $ad9_out"
 fi
 kill "$AD9_SLEEP_PID" 2>/dev/null || true
-rm -f "$AD8_HOME/.loom/.daemon.pid"
+wait "$AD9_SLEEP_PID" 2>/dev/null || true
+# Same real-path fix as the AD8 setup above -- AD9's successful start writes
+# $WORKDIR/.loom/.daemon.pid (not $AD8_HOME), and leaving it stale is exactly
+# the "already-running guard fires unexpectedly for the wrong reason" hazard
+# the AD8 fix above targets, one test block later.
+rm -f "$WORKDIR/.loom/.daemon.pid"
 rm -rf "$AD8_HOME"
 
 # ---------- nohup fallback tier (#5437) ----------

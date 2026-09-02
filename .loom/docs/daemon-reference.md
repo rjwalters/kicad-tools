@@ -4807,10 +4807,10 @@ described here is unaffected by Epic #6165 — it is exactly #4028's original,
 non-load-bearing role. What Epic #6165 changes is a *different* consumer of
 this same channel: `claim_reconciliation`'s decision to reclaim an
 already-`loom:building` issue, which for a period also froze while peer
-coordination was judged DEGRADED (#6157, config rows below). That freeze is
+coordination was judged DEGRADED (#6157, config rows below). That freeze was
 superseded by the fleet-scoped lease record ([`lease-record.md`](lease-record.md),
 Phase 2 #6286) and removed from the reclamation decision path entirely by
-Phase 4 (#6317) once it lands — see [`safehouse.md` → Peer-claim
+Phase 4 (#6317) — see [`safehouse.md` → Peer-claim
 coordination](safehouse.md#peer-claim-coordination-cross-host-soft-claim-4028)
 for the full note.
 

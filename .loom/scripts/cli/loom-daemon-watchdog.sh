@@ -1553,10 +1553,11 @@ escalate_peer_coordination_degraded() {
     body="$(cat <<EOF
 \`loom-daemon health\`'s \`peer_coordination\` section has gone DEGRADED on host
 \`$hostname_str\`. This host's one-way peer-claim RECEIVE path (Safehouse, #6157)
-can no longer be trusted to prove another host has already claimed an issue —
-while this holds, stale-claim reclamation is FROZEN rather than risking a
-duplicate build (see \`.loom/docs/safehouse.md\` -> "Degraded-coordination
-freeze, not host partitioning").
+can no longer be trusted to prove another host has already claimed an issue.
+This is diagnostic only since Epic #6165 Phase 4 (#6317): it no longer freezes
+stale-claim reclamation, which now gates solely on the lease record (#6286)
+(see \`.loom/docs/safehouse.md\` -> "Peer-claim coordination: cross-host soft
+claim (#4028)").
 
 - **Host**: \`$hostname_str\`
 - **Verdict**: $PEER_COORD_SUMMARY
