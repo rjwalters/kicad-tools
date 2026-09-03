@@ -556,6 +556,19 @@ if [ "$PRIORITY_1" -eq 0 ] && [ "$PRIORITY_2" -eq 0 ]; then
       # If commit.signoff is true (or the repo requires DCO), re-signed commits
       # must keep their Signed-off-by: trailer — use `git commit --amend --signoff`
       # when re-authoring a commit during the rebase. See defaults/docs/commit-signoff.md.
+
+      # Version-bearing-file sync gate (#7168): a rebase silently absorbs
+      # whatever version-bearing values origin/main already had. A file the
+      # branch's own commits never touched (in practice .loom/install-metadata.json)
+      # never raises a git conflict, so it can end up stale relative to
+      # VERSION/the files that WERE part of the conflict resolution --
+      # invisible until CI's "Installer Integration Tests" fails. Run the
+      # same gate create-pr.sh uses (#6730) here too, since this path pushes
+      # directly and never goes through create-pr.sh.
+      if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+        echo "Aborting: version-bearing files are out of sync after rebase (see BLOCKER:/Fix: above)." >&2
+        exit 1
+      fi
       git push --force-with-lease
 
       # Comment but don't add labels
@@ -1385,6 +1398,19 @@ git add <file>
 
 # Continue rebase after all conflicts resolved
 git rebase --continue
+
+# Version-bearing-file sync gate (#7168): a rebase silently absorbs whatever
+# version-bearing values origin/main already had. A file the branch's own
+# commits never touched (in practice .loom/install-metadata.json) never
+# raises a git conflict, so it can end up stale relative to VERSION/the
+# files that WERE part of the conflict resolution -- invisible until CI's
+# "Installer Integration Tests" fails. Run the same gate create-pr.sh uses
+# (#6730) here too, since this path pushes directly and never goes through
+# create-pr.sh.
+if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+  echo "Aborting: version-bearing files are out of sync after rebase (see BLOCKER:/Fix: above)." >&2
+  exit 1
+fi
 
 # Force push (PR branch is safe to force push)
 git push --force-with-lease
