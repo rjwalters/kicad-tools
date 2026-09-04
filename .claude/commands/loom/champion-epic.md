@@ -651,6 +651,24 @@ this one names as a blocker, to answer "is that epic's delivered capability
 done" rather than "should I create the next phase of this one" — read that
 section, not this one, when evaluating a blocker reference (#5211).
 
+**Idempotency guard on the "not yet complete" branch
+(`champion:epic-phase-progress:*`, #7188)**: when Phase N is not yet
+complete, a `**Champion: Phase progress update**` status comment is only
+ever posted when the *observed state* actually changed since the last such
+comment on this epic — a hash of the phase's open/closed issue-number sets
+plus any epic-text gate status is embedded in the comment and checked before
+posting, so an unchanged epic is silently skipped instead of accumulating
+one near-identical comment per pass. Observed downstream on
+example-org/tool-repo#202: 12 near-identical "Phase progress update"
+comments in ~27 hours before this guard existed, each confirming that
+nothing had changed. Unlike the "Idempotency Guard for Unrevised Epics"
+above (Step 4's rejection path), **no escalation ladder is added here** — an
+unchanged, in-progress epic is not stuck, it is *waiting* (on issues to
+close, or on a gate to lift), the same "isn't stuck, just waiting" state
+Step 2.5's blocker hold already treats with permanent silence. Indefinite
+silent-skip on no change is therefore the correct steady state, not a bug to
+bound.
+
 ```bash
 # Check if all Phase N issues for an epic are closed
 EPIC_NUMBER=123
@@ -710,8 +728,72 @@ CLOSED_COUNT=$(printf '%s\n' "$PHASE_ISSUES" | jq '[.[] | select(.state == "CLOS
 
 if [ "$OPEN_COUNT" -eq 0 ] && [ "$CLOSED_COUNT" -gt 0 ]; then
     echo "Phase $PHASE complete! Creating Phase $((PHASE + 1)) issues..."
+    # Proceed to "Creating Next Phase Issues" below — this is a state
+    # transition, not a repeat status narration, so it is never gated by the
+    # idempotency guard below.
+else
+    # Not yet complete. Only post a "Phase progress update" status comment if
+    # the observed state actually changed since the last one (#7188) — sorted
+    # issue-number sets, not just counts, so two different issues swapping
+    # open/closed while the totals happen to match is still seen as a change.
+    OPEN_NUMBERS=$(printf '%s\n' "$PHASE_ISSUES" | jq -c '[.[] | select(.state == "OPEN") | .number] | sort')
+    CLOSED_NUMBERS=$(printf '%s\n' "$PHASE_ISSUES" | jq -c '[.[] | select(.state == "CLOSED") | .number] | sort')
+
+    # Any epic-text gate status this phase names (e.g. "2C still unfiled,
+    # waiting on X") — the same "Blocked by" reference Step 2.5 above reads.
+    # Included verbatim so a gate lifting, even with the issue-number sets
+    # unchanged, still counts as a change. Cached (${GH_READ:-gh}) — this is
+    # a content check, not claim arbitration.
+    EPIC_JSON=$(${GH_READ:-gh} issue view "$EPIC_NUMBER" --json body,comments)
+    GATE_STATUS=$(printf '%s\n' "$EPIC_JSON" | jq -r '.body // ""' | grep -iE "blocked by|gate" || true)
+
+    # Portable sha256 — same fallback shape as the "Idempotency Guard for
+    # Unrevised Epics" section above (`_sha256`, restated here so this block
+    # is self-contained and does not depend on that section having already
+    # run earlier in this pass).
+    _sha256() {
+      if command -v sha256sum >/dev/null 2>&1; then sha256sum
+      elif command -v shasum >/dev/null 2>&1; then shasum -a 256
+      else cksum; fi
+    }
+    PHASE_STATE_HASH=$(printf '%s\n%s\n%s\n%s' \
+      "$PHASE" "$OPEN_NUMBERS" "$CLOSED_NUMBERS" "$GATE_STATUS" \
+      | _sha256 | awk '{print substr($1, 1, 16)}')
+    PROGRESS_MARKER="<!-- champion:epic-phase-progress:$EPIC_NUMBER:$PHASE:$PHASE_STATE_HASH -->"
+
+    if printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$PROGRESS_MARKER" \
+         '.comments[] | select(.body | contains($m))' >/dev/null; then
+      echo "Phase $PHASE state unchanged since the last progress update ($PHASE_STATE_HASH) — skipping silently (no comment, no label change)"
+      # Continue to the next epic; do not post.
+    else
+      # State changed (a different open/closed split, or a gate line
+      # changed), or no prior marker exists for this phase at all (first-ever
+      # status comment). Post as before, with the marker embedded so the next
+      # unchanged pass can detect the match.
+      gh issue comment "$EPIC_NUMBER" --body "**Champion: Phase progress update**
+
+Phase $PHASE: $CLOSED_COUNT closed / $((OPEN_COUNT + CLOSED_COUNT)) total — not yet complete.
+
+$GATE_STATUS
+
+$PROGRESS_MARKER
+
+---
+*Automated by Champion role*"
+    fi
 fi
 ```
+
+| Guard outcome | Next action |
+|---|---|
+| Phase complete (`OPEN_COUNT -eq 0 && CLOSED_COUNT -gt 0`) | Proceed to "Creating Next Phase Issues" below — a state transition, never gated by this guard |
+| Phase not complete, marker match (state unchanged since the last progress comment) | Silent skip — no comment, no label change |
+| Phase not complete, marker mismatch or no prior marker for this phase | Post the "Phase progress update" status comment, with `PROGRESS_MARKER` embedded |
+
+Unlike the rejection-path guard's `PRIOR_REJECTIONS` / `SKIP_STREAK` tally and
+`LOOM_MAX_UNREVISED_EVALUATIONS` cap, there is no escalation counter here and
+none is needed — see the rationale above ("no escalation ladder is added
+here").
 
 ### Creating Next Phase Issues
 
