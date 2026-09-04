@@ -398,10 +398,44 @@ err()  { echo -e "${RED}$*${NC}" >&2; }
 warn() { echo -e "${YELLOW}$*${NC}" >&2; }
 ok()   { echo -e "${GREEN}$*${NC}"; }
 
+# _read_help_banner -- one awk pass over "$0" printing the leading comment
+# banner (line 2 through the last comment line before `set -uo pipefail`),
+# stripping the leading "# ". Split out of show_help() below so it can be
+# invoked more than once for the torn-read stability check.
+_read_help_banner() {
+    awk 'NR>=2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0" 2>/dev/null
+}
+
 show_help() {
-    # Print the leading comment banner (line 2 through the last comment line
-    # before `set -uo pipefail`), stripping the leading "# ".
-    awk 'NR>=2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
+    # Reads "$0" at runtime -- fragile against a same-path truncate+rewrite
+    # of THIS exact file landing while the awk pass above is reading it (the
+    # shape `git checkout`/`cp` writes use -- open+truncate+write in place,
+    # not an atomic rename-into-place). That is not hypothetical: a shared
+    # self-hosted-runner checkout, a resync step, or an operator's own
+    # `git merge --ff-only` (this script's ff-sync step, #4330) landing on
+    # this file mid-read can all do it. There is no I/O error to catch --
+    # just a torn, incomplete banner missing whatever lines the writer had
+    # not reached yet. Confirmed reproducible locally: concurrently
+    # overwriting this file with itself during a --help loop took the
+    # failure rate from 0% to 100% (#7201).
+    #
+    # Hardened with a cheap, content-agnostic stability check instead of a
+    # hardcoded sentinel line (robust to future banner edits): read twice
+    # back-to-back and require an identical, non-empty result before
+    # trusting it -- a torn read from a write landing mid-pass is extremely
+    # unlikely to reproduce byte-for-byte on the very next pass a moment
+    # later. Bounded retries with a short backoff so a genuinely corrupted
+    # file (not a transient race) still terminates instead of looping
+    # forever -- it prints whatever the last pass read rather than hanging.
+    local banner banner2 _attempt
+    banner="$(_read_help_banner)"
+    for _attempt in 1 2 3 4 5; do
+        banner2="$(_read_help_banner)"
+        [[ -n "$banner2" && "$banner" == "$banner2" ]] && { banner="$banner2"; break; }
+        banner="$banner2"
+        sleep 0.05
+    done
+    printf '%s\n' "$banner"
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
