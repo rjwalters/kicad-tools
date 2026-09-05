@@ -1006,3 +1006,7 @@ collaboration:
   idea 5), filed from #4775.
 - [ADR-0012: Multi-Runtime Worker Support via a Runtime Adapter Contract](https://github.com/rjwalters/loom/blob/main/docs/adr/0012-runtime-adapter-contract.md).
 - Fork: https://github.com/gpeyton/loom · `AGENTS.md` standard: https://agents.md
+- [`docker/worker/MOUNT-CONTRACT.md`](https://github.com/rjwalters/loom/blob/main/docker/worker/MOUNT-CONTRACT.md) —
+  the normative container mount contract (path parity, secrets, uid mapping,
+  build-cache placement) for anything that dispatches a worker runtime inside
+  a `ghcr.io/rjwalters/loom-worker`-derived container (epic #6896).
