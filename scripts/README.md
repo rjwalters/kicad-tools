@@ -16,6 +16,7 @@ Python helpers with `uv run python scripts/<name>.py`, from the repository root.
 | `audit_machine_output.py` | Audit the `--format json` machine-output idiom across every CLI leaf subcommand (walks the real argparse tree); the measurement tool behind `docs/reference/machine-output.md` (#4543) and the #4674 sweep backlog. `--markdown` emits the doc tables. |
 | `changelog_gap_report.py` | Release gate: list user-visible commits since a `v*` tag whose issue number is not cited in the CHANGELOG's `[Unreleased]` section; exits non-zero when the gap set is non-empty. Invoked by `RELEASING.md` step (0) (#4638). |
 | `check_trace_vs_zone_fills.py` | Verify track segments against foreign-net zone fill copper (clearance/short check DRC cannot yet do; #3527). |
+| `replay_pairwise_gate.py` | Replay the router's own pairwise (HV-isolation) gate over a routed board. |
 | `route_chorus.py` | Canonical chorus-test-revA routing recipe runner with partial-net rescue (#3474). |
 
 ## Subdirectories
@@ -31,6 +32,7 @@ end-to-end checks, the mypy baseline, and route determinism:
 `check_board_00_e2e.py`, `check_board_05_blocking.py`, `check_copper_lvs.py`,
 `check_diffpair_coverage.py`, `check_matchgroup_coverage.py`,
 `check_mypy_baseline.py`, `check_net_status.py`, `check_routed_drc.py`,
+`local-gate.sh` (local CI-equivalent gate, Actions-outage backstop),
 `net_class_map_resolver.py`.
 
 ### `corpus/`

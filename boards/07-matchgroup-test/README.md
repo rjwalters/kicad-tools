@@ -446,10 +446,14 @@ tracked under #4049, and is deliberately **not** touched here.
 ## Phase 3 Dependency: #2723 (`--length-match-groups`)
 
 The `apply_match_group_tuning` orchestrator + `--length-match-groups`
-CLI flag are introduced by **Phase 3H (#2723)** and have NOT yet
-landed on `main` at the time of this board's scaffolding.
+CLI flag were introduced by **Phase 3H (#2723)** and have since landed
+on `main` (see `src/kicad_tools/cli/route_cmd.py` and the
+`--length-match-groups` flag in `src/kicad_tools/cli/parser.py`).
+Group-level meander insertion is opt-in via `--length-match-groups`;
+without net classes declaring `length_match_group`, the flag warns
+that it is inactive (#3440) rather than silently no-opping.
 
-What works today (Phases 1A/1B/1C/1D + 2.5G):
+What was already in place from Phases 1A/1B/1C/1D + 2.5G:
 
 - `length_match_group` net-class field is declared on every group
 - `detect_match_groups` consumes the declarations during routing
@@ -458,17 +462,12 @@ What works today (Phases 1A/1B/1C/1D + 2.5G):
 - `match_group_length_skew` DRC rule fires when the sidecar JSON
   is loaded into `kct check`
 
-What is deferred until #2723 lands:
+What #2723 added on top:
 
-- Group-level meander insertion to actively REDUCE skew (only
-  measurement happens today)
+- Group-level meander insertion to actively REDUCE skew (previously
+  only measurement happened)
 - AC#7's "post-pass skew strictly less than pre-pass skew" check
-  for the DDR data byte (today's pre-pass and post-pass skews
-  are identical because no tuning step runs)
-
-When #2723 lands, the `route_pcb` function's `# TODO Phase 3H
-(#2723): apply_match_group_tuning(router, ...)` marker should be
-replaced with the actual call.
+  for the DDR data byte
 
 ## CI Gate (Phase 3N, #2726)
 

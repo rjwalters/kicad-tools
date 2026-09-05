@@ -423,6 +423,13 @@ sources/sinks drive routing exercise only.
 
 [#2661]: https://github.com/rjwalters/kicad-tools/issues/2661
 
+## External Boards (`external/`)
+
+`external/` holds **local-only symlinks** to consumer-repo board fixtures
+(`chorus-test-revA`, `softstart`). The symlinks are tracked, but their
+targets live outside this repository and are not available in CI or fresh
+worktrees — they dangle unless the sibling repos are checked out locally.
+
 ## See Also
 
 - [examples/](../examples/) - Feature-specific demos (BOM, DRC, placement, etc.)

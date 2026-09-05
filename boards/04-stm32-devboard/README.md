@@ -260,16 +260,13 @@ auto-router.  After generating, you can:
 4. **Re-route** - `kct route boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb -o ./routed.kicad_pcb --timeout 240`
 5. **Export Files** - generate Gerbers, BOM, and CPL via `kct export`
 
-## Future API Features
+## Project API
 
-The kicad-tools API is evolving to support the complete workflow:
+The kicad-tools `Project` API supports the complete workflow
+(see `src/kicad_tools/project.py`):
 
 ```python
-# Planned API (not yet implemented)
 project = Project.create("stm32_devboard")
-
-# Sync schematic to PCB
-project.sync_to_pcb()
 
 # Auto-route with manufacturer rules
 project.route(strategy="negotiated", manufacturer="jlcpcb")
@@ -282,6 +279,9 @@ project.export_gerbers("output/manufacturing/")
 project.export_bom("output/manufacturing/bom.csv")
 project.export_positions("output/manufacturing/positions.csv")
 ```
+
+Not yet implemented: `project.sync_to_pcb()` (schematic-to-PCB sync
+still goes through the CLI workflow above).
 
 ## Related Examples
 

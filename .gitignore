@@ -17,6 +17,11 @@
 .DS_Store
 
 # Python
+# uv writes .venv/.gitignore itself, but that file is not tracked — deleting or
+# recreating the venv with a tool that doesn't write one (python -m venv) would
+# stage ~35k files. Same defense as htmlcov/ below.
+.venv/
+venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -151,3 +156,6 @@ scripts/corpus/.cache/
 # these, they stay referenced by pinned commit SHA in
 # benchmarks/external/boards.toml instead.
 .cache/kct-benchmarks/
+
+# Node (root package.json has npm scripts; site/ has its own .gitignore)
+node_modules/

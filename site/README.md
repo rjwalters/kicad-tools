@@ -49,8 +49,9 @@ the gallery cards never 404. A detail page shows:
 - a downloads section linking the manufacturing package
   (`kicad_project.zip`) plus any optional `report.pdf` / `bom_jlcpcb.csv` /
   `cpl_jlcpcb.csv` that exist for the board (detected at build time);
-- a clearly-commented placeholder for the Phase 4 interactive PCB viewer (not
-  implemented here);
+- an interactive PCB viewer (KiCanvas, vendored at
+  `public/vendor/kicanvas.js`) embedded via `<kicanvas-embed>` with a
+  loading overlay;
 - back-links to the gallery index.
 
 For `no_artifacts` boards the page renders a "not yet built" notice with four
@@ -187,18 +188,22 @@ site/
     components/
       BoardCard.astro    # gallery card (thumbnail + badges + status + link)
       RenderGallery.astro # detail-page 2×2 render grid
+      Header.astro       # shared site header
+      Footer.astro       # shared site footer
     data/
       types.ts           # Board / BoardSize / CostEstimate types (schema v1)
       loadBoards.ts      # build-time board data loader
       loadBoards.test.ts
+      boardStatus.ts     # per-board readiness/status derivation
+      boardStatus.test.ts
+      galleryConfig.mjs  # gallery ordering/config
     pages/
       index.astro        # gallery index — one card per board
-      [slug].astro       # per-board detail page (renders, metrics, downloads)
+      [slug].astro       # per-board detail page (renders, metrics, viewer, downloads)
 ```
 
 ## Scope
 
 This site ships the scaffold, the board data loader, the gallery index page
 (cards, renders, metric badges), and the per-board detail page (render gallery,
-metrics table, downloads). The interactive PCB viewer is Phase 4 — the detail
-page leaves a commented placeholder where it will embed.
+metrics table, downloads, and the interactive KiCanvas PCB viewer).
