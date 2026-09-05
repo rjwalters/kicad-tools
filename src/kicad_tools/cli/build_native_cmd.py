@@ -56,14 +56,64 @@ def _check_cmake() -> tuple[bool, str | None]:
     if not cmake_path:
         return (
             False,
-            "cmake not found. Install with: brew install cmake (macOS) or apt install cmake (Linux)",
+            "cmake not found. Install with: brew install cmake (macOS),"
+            " apt install cmake (Linux), or winget install cmake (Windows).",
         )
     return True, cmake_path
 
 
+def _find_msvc() -> str | None:
+    """Return the path to cl.exe if MSVC is available, otherwise None.
+
+    Detection order:
+    1. ``cl.exe`` already on PATH (vcvars activated or installed in PATH).
+    2. ``vswhere.exe`` (ships with every VS 2017+ and Build Tools install) to
+       locate the latest VS that ships the C++ desktop workload, then resolve
+       cl.exe from that installation root.
+    """
+    cl = shutil.which("cl")
+    if cl:
+        return cl
+
+    # vswhere canonical location (unchanged since VS 2017)
+    vswhere_default = Path("C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe")
+    vswhere = shutil.which("vswhere") or (
+        str(vswhere_default) if vswhere_default.exists() else None
+    )
+    if not vswhere:
+        return None
+
+    try:
+        # ``-products *`` is required so vswhere also searches Build Tools
+        # installations (not just VS IDE products).
+        result = subprocess.run(
+            [
+                vswhere,
+                "-latest",
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-find",
+                "VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+            if lines:
+                return lines[0]
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    return None
+
+
 def _check_compiler() -> tuple[bool, str | None]:
     """Check if a C++20 compiler is available."""
-    # Check for clang++ or g++
+    # Check for clang++ or g++ (macOS / Linux)
     for compiler in ["clang++", "g++"]:
         path = shutil.which(compiler)
         if path:
@@ -79,9 +129,17 @@ def _check_compiler() -> tuple[bool, str | None]:
                 return True, path
             except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.CalledProcessError):
                 continue
+
+    # Check for MSVC cl.exe (Windows)
+    msvc = _find_msvc()
+    if msvc:
+        return True, msvc
+
     return (
         False,
-        "C++20 compiler not found. Install Xcode Command Line Tools (macOS) or build-essential (Linux)",
+        "C++20 compiler not found. Install Xcode Command Line Tools (macOS),"
+        " build-essential (Linux), or Visual Studio Build Tools with the"
+        " 'Desktop development with C++' workload (Windows).",
     )
 
 
@@ -472,6 +530,12 @@ def build_native(
             f"-Dnanobind_DIR={nanobind_cmake}",
             "-DCMAKE_BUILD_TYPE=Release",
         ]
+
+        # On Windows with MSVC the Visual Studio generator is selected
+        # automatically; request x64 explicitly so the output .pyd matches the
+        # (almost certainly 64-bit) Python interpreter.
+        if sys.platform == "win32" and _find_msvc():
+            cmake_args.extend(["-A", "x64"])
 
         configure_result = subprocess.run(
             cmake_args,

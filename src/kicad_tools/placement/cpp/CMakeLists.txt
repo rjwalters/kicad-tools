@@ -37,7 +37,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Compiler flags
 if(MSVC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++20 /Zc:__cplusplus /O2")
+    # /D_USE_MATH_DEFINES: expose M_PI and friends from <cmath> on MSVC.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++20 /Zc:__cplusplus /O2 /D_USE_MATH_DEFINES")
 else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
 endif()
