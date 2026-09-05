@@ -2181,6 +2181,14 @@ function unmask_ws(s) {
 #      COMMAND_ASK_SCAN heredoc pass are UNCHANGED -- they still call
 #      mask_heredoc_bodies_selective() with shell_only unset, so all five
 #      language families stay "interpreter-fed" for those two purposes.
+#      FURTHER NARROWED (#7247): the same write-confinement-only call also now
+#      masks an UNQUOTED-delimiter body (not just quoted ones) when the opener
+#      is non-interpreter-fed AND the body is proven `$(`/backtick-expansion-
+#      free (_heredoc_body_expansion_free()) -- see mask_heredoc_bodies_
+#      selective()'s own header comment for the full rationale. Fixes the
+#      plain `cat > /path/to/file <<EOF ... EOF` shape, where prose containing
+#      a literal `>` (e.g. "rotting >=3d, clean") was mis-tokenized as a
+#      second, bogus redirect target.
 #
 #   2. Crafted false opener whose delimiter later appears. Opener detection
 #      (heredoc_delim_at()) runs on a single physical line, before qsplit()
@@ -2437,7 +2445,38 @@ function is_interpreter_opener(line, shell_only,   n, segs, i, seg, m, toks, j, 
 # python/perl/ruby/node[js] heredoc bodies as interpreter-fed, unchanged);
 # passed as 1 ONLY by the internal call inside extract_write_targets(), so
 # just the worktree-write-confinement scan narrows to shell interpreters.
-function mask_heredoc_bodies_selective(s, shell_only,   out, lines, nl, i, j, line, trimmed, body, delim, delim_quoted, closeat, p, off, MASKC) {
+#
+# UNQUOTED-DELIMITER, shell_only-ONLY narrowing (#7247): an UNQUOTED-delimiter
+# body (`<<EOF`, not `<<'"'"'EOF'"'"'`) is masked TOO, but ONLY when shell_only
+# is truthy (i.e. ONLY for the internal call inside extract_write_targets())
+# AND both of the following hold:
+#   1. the opener is NOT interpreter-fed per is_interpreter_opener(line,
+#      shell_only) -- an unquoted body handed to a real shell interpreter
+#      (bash/sh/zsh/dash/ksh/eval/source/.) stays visible exactly as before;
+#      only a plain sink (`cat`, `tee`, a repo script, or -- thanks to the
+#      shell_only narrowing already applied inside is_interpreter_opener()
+#      itself, #6353 -- python/perl/ruby/node[js]) qualifies here.
+#   2. the body is PROVABLY free of `$(`/unescaped-backtick expansion, per
+#      _heredoc_body_expansion_free() (defined below) -- the same proof
+#      mask_unquoted_cat_heredoc_bodies() (#6056) already requires for its
+#      narrower flag-capture idiom. A body containing a live `$(...)`/backtick
+#      command substitution is NOT masked and stays fully visible to this scan.
+#
+# This closes the plain `cat > /path/to/file <<EOF ... EOF` false positive
+# (#7247): ordinary prose containing a literal `>` (e.g. "rotting >=3d, clean")
+# was mis-tokenized by the downstream `>`/`>>` write-idiom scan as a SECOND
+# redirect operator with a bogus, cwd-joined target, manufacturing a
+# worktree-write-confinement DENY on a command that performs no write outside
+# its one, already-literal target. Gating this on shell_only keeps the
+# gh-api-rawfield-body-literal-at catastrophic check and the general
+# COMMAND_ASK_SCAN heredoc pass completely unaffected -- only the `>`/`>>`
+# scan inside extract_write_targets(), the ONLY consumer that can
+# misinterpret plain prose as shell redirect syntax in the first place, is
+# narrowed here. Requiring _heredoc_body_expansion_free() means this can only
+# ever narrow the scan, never blind it: a genuine `$(rm -rf ...)`/backtick
+# command substitution embedded in the body is left fully visible and its
+# write target, if any, still denies exactly as before.
+function mask_heredoc_bodies_selective(s, shell_only,   out, lines, nl, i, j, line, trimmed, body, delim, delim_quoted, closeat, p, off, MASKC, mask_this) {
     MASKC = sprintf("%c", 23) # ETB -- placeholder for inert heredoc-body text
     nl = split(s, lines, "\n")
     if (nl == 0) return ""
@@ -2459,7 +2498,13 @@ function mask_heredoc_bodies_selective(s, shell_only,   out, lines, nl, i, j, li
                 if (trimmed == delim) { closeat = j; break }
             }
             if (closeat == 0) continue
+            mask_this = 0
             if (delim_quoted && !is_interpreter_opener(line, shell_only)) {
+                mask_this = 1
+            } else if (shell_only && !delim_quoted && !is_interpreter_opener(line, shell_only) && _heredoc_body_expansion_free(lines, i + 1, closeat)) {
+                mask_this = 1
+            }
+            if (mask_this) {
                 for (j = i + 1; j < closeat; j++) {
                     body = lines[j]
                     gsub(/./, MASKC, body)
