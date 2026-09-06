@@ -317,6 +317,18 @@ if [[ -f "$SCRIPT_DIR/lib/worktree-removal-log.sh" ]]; then
 else
   loom_record_worktree_removal() { :; }
 fi
+# Cargo target-dir reclaim (#7239). Post-merge cleanup is the removal path most
+# worktrees actually take, so a redirected CARGO_TARGET_DIR/build.target-dir
+# would leak its per-worktree build output here more than anywhere else.
+# Sourced defensively with no-op fallbacks, same rationale as the ledger above:
+# a partially-resynced .loom/ must degrade to "no reclaim", never break a merge.
+if [[ -f "$SCRIPT_DIR/lib/cargo-target-dir.sh" ]]; then
+  # shellcheck source=lib/cargo-target-dir.sh
+  source "$SCRIPT_DIR/lib/cargo-target-dir.sh"
+else
+  loom_resolve_worktree_target_dir() { printf '%s\n' "$1/target"; }
+  loom_reclaim_worktree_target_dir() { printf 'inside\t%s\tcargo-target-dir.sh lib unavailable\n' "$3"; }
+fi
 # Default-branch resolver (#4100) — the local-branch delete guard must never
 # target the repo's default branch. Sourced defensively: a repo where this
 # fails to resolve (e.g. no network + no origin/HEAD symref) still falls back
@@ -2371,6 +2383,27 @@ _maybe_delete_local_branch() {
   return 0
 }
 
+# _mp_report_target_dir_reclaim <record>
+#
+# Render one `status<TAB>path<TAB>detail` record from
+# loom_reclaim_worktree_target_dir (#7239). Silent for `inside`/`absent` — the
+# un-redirected layout, i.e. almost every repo — so post-merge output is
+# unchanged unless something was actually reclaimed or deliberately kept.
+_mp_report_target_dir_reclaim() {
+  local record="$1" status path detail
+  status="$(printf '%s' "$record" | cut -f1)"
+  path="$(printf '%s' "$record" | cut -f2)"
+  detail="$(printf '%s' "$record" | cut -f3)"
+  case "$status" in
+    reclaimed) success "Reclaimed redirected cargo target dir: $path ($detail)" ;;
+    shared)    info "Keeping redirected cargo target dir $path — still used by $detail" ;;
+    protected) warning "Keeping redirected cargo target dir $path — $detail still using it" ;;
+    refused)   warning "Refusing to reclaim cargo target dir $path — $detail" ;;
+    failed)    warning "Could not reclaim redirected cargo target dir $path — $detail" ;;
+    *)         : ;;
+  esac
+}
+
 # _remove_loom_worktree <path> [allow_unmanaged]
 #
 # When allow_unmanaged is "true" (only set by the --worktree-path code path),
@@ -2494,6 +2527,16 @@ _remove_loom_worktree() {
     echo "  git -C \"$REPO_ROOT\" worktree remove \"$worktree_path\" --force"
     return 0
   fi
+  # #7239: resolve the worktree's cargo target dir BEFORE removing it —
+  # `cargo metadata` needs the manifest that is about to disappear. Acted on
+  # only after a successful removal, below. `command -v`-guarded so this
+  # function body stays self-contained: the test suites that eval it in
+  # isolation (the no-drift extraction pattern) degrade to "no reclaim"
+  # instead of erroring on a helper they never sourced.
+  local target_dir_resolved=""
+  if command -v loom_resolve_worktree_target_dir >/dev/null 2>&1; then
+    target_dir_resolved="$(loom_resolve_worktree_target_dir "$worktree_path" 2>/dev/null)" || target_dir_resolved=""
+  fi
   info "Removing worktree: $worktree_path"
   # #6372: capture the actual git error (was silently discarded via 2>/dev/null)
   # and, on first failure, try one `git worktree prune` + retry cycle before
@@ -2537,6 +2580,17 @@ _remove_loom_worktree() {
     # checkout lock is released first.
     if [[ "$allow_unmanaged" == "true" ]] && [[ -n "$attached_branch" ]]; then
       _maybe_delete_local_branch "$attached_branch"
+    fi
+    # #7239: reclaim a REDIRECTED cargo target dir now that the worktree is
+    # gone — only when it is outside the worktree, unshared with every other
+    # live worktree, and held open by no running process. Best-effort and
+    # silent for the default (un-redirected) layout, like every other cleanup
+    # step here: the merge already succeeded and is unaffected either way.
+    if [[ -n "$target_dir_resolved" ]] \
+       && command -v loom_reclaim_worktree_target_dir >/dev/null 2>&1 \
+       && command -v _mp_report_target_dir_reclaim >/dev/null 2>&1; then
+      _mp_report_target_dir_reclaim \
+        "$(loom_reclaim_worktree_target_dir "$REPO_ROOT" "$worktree_path" "$target_dir_resolved" false)"
     fi
   else
     # Best-effort by design (#6372): the merge itself already succeeded and is

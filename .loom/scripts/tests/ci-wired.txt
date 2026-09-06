@@ -34,6 +34,7 @@ test-bounded-run.sh
 test-build-gate-timeout.sh
 test-build-rs-watchset.sh
 test-build-slot.sh
+test-cargo-target-dir-reclaim.sh
 test-cargo-test-daemon-guard.sh
 test-champion-ci-checks-no-checks-signal.sh
 test-champion-critical-file-check.sh

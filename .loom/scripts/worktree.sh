@@ -8,7 +8,9 @@
 #   pnpm worktree <issue-number> <branch>              # Create worktree with custom branch name
 #   pnpm worktree <issue-number> --sparse <paths...>   # Cone-mode sparse checkout
 #   pnpm worktree <issue-number> --full                # Convert sparse worktree to full
-#   pnpm worktree remove <issue-number> [--keep-branch] [--force]  # Remove one managed worktree
+#   pnpm worktree remove <issue-number> [--keep-branch] [--force] [--dry-run]
+#     # Remove one managed worktree (--dry-run reports the plan, including any
+#     # reclaimable redirected cargo target dir + its size, and changes nothing)
 #   pnpm worktree snapshot <issue-number> [--include-untracked] [--json]
 #     # Write a patch file capturing the worktree's uncommitted diff to
 #     # <worktree-root>/.snapshots/issue-<N>-<UTC-timestamp>.patch — WITHOUT
@@ -64,6 +66,20 @@ if [[ -f "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree-removal-log
     source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree-removal-log.sh"
 else
     loom_record_worktree_removal() { :; }
+fi
+
+# Cargo target-dir resolver + removal-time reclaim (#7239). A worktree whose
+# Cargo output is redirected outside it (CARGO_TARGET_DIR / build.target-dir)
+# leaves that directory behind forever when the worktree is removed. Sourced
+# defensively with no-op fallbacks for the same reason as the ledger above: a
+# partially-resynced .loom/ must degrade to "no target-dir reclaim", never to a
+# `source` failure that breaks worktree creation and removal outright.
+if [[ -f "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cargo-target-dir.sh" ]]; then
+    # shellcheck source=lib/cargo-target-dir.sh
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cargo-target-dir.sh"
+else
+    loom_resolve_worktree_target_dir() { printf '%s\n' "$1/target"; }
+    loom_reclaim_worktree_target_dir() { printf 'inside\t%s\tcargo-target-dir.sh lib unavailable\n' "$3"; }
 fi
 
 # Race-safe reset helper (#6334). The "stale worktree" reset path below can
@@ -411,6 +427,11 @@ cleanup_partial_worktree_state() {
 #      once the worktree is gone).
 #   5. Hop out of the worktree first if our cwd is inside it (CWD-safety).
 #   6. `git worktree remove --force`; warn (don't hard-fail) on failure.
+#   6c. Reclaim the worktree's REDIRECTED cargo target dir (#7239) — see
+#      lib/cargo-target-dir.sh. Resolved in step 4b (before removal, while the
+#      manifest still exists), acted on only after the worktree is gone, and
+#      only when the directory is outside the worktree, unshared with every
+#      other live worktree, and held open by no running process.
 #   7. Delete the attached branch (unless --keep-branch) via merge-pr.sh's
 #      squash-aware `_maybe_delete_local_branch` safety rule (#4889) — see
 #      the header above `_wt_load_branch_safety_helper` below for why a bare
@@ -608,19 +629,20 @@ _worktree_merged_pr_head_sha() {
     return 0
 }
 
-# remove_worktree_command [--keep-branch] [--force] [--json] <issue-number>
+# remove_worktree_command [--keep-branch] [--force] [--dry-run] [--json] <issue-number>
 #
 # Invoked from the early arg dispatch below. Returns 0 on success (including the
 # idempotent no-op) and 1 on refusal / usage error / removal failure.
 remove_worktree_command() {
-    local issue_number="" keep_branch=false json=false force=false
-    local usage="Usage: pnpm worktree remove <issue-number> [--keep-branch] [--force] [--json]"
+    local issue_number="" keep_branch=false json=false force=false dry_run=false
+    local usage="Usage: pnpm worktree remove <issue-number> [--keep-branch] [--force] [--dry-run] [--json]"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --keep-branch) keep_branch=true; shift ;;
             --json)        json=true; shift ;;
             --force|-f)    force=true; shift ;;
+            --dry-run|-n)  dry_run=true; shift ;;
             --*)
                 print_error "Unknown flag for remove: $1"
                 echo ""
@@ -660,8 +682,40 @@ remove_worktree_command() {
     _rm_json() {
         # $1=success(bool) $2=removed(bool) $3=branchStatus
         [[ "$json" == true ]] || return 0
-        printf '{"success": %s, "issueNumber": %s, "worktreePath": "%s", "removed": %s, "branch": "%s", "branchStatus": "%s"}\n' \
-            "$1" "$issue_number" "$worktree_path" "$2" "${attached_branch:-}" "$3"
+        printf '{"success": %s, "issueNumber": %s, "worktreePath": "%s", "removed": %s, "branch": "%s", "branchStatus": "%s", "dryRun": %s, "targetDir": "%s", "targetDirStatus": "%s"}\n' \
+            "$1" "$issue_number" "$worktree_path" "$2" "${attached_branch:-}" "$3" \
+            "$dry_run" "${target_dir_path:-}" "${target_dir_status:-unchecked}"
+    }
+
+    # #7239: report one target-dir reclaim record (tab-separated
+    # `status<TAB>path<TAB>detail`) as a human line, and stash it for --json.
+    # Never writes to stdout directly — stdout purity in --json mode is the
+    # whole reason `_rm_info`/`_rm_warning` exist.
+    _rm_report_target_dir() {
+        local record="$1" status path detail
+        status="$(printf '%s' "$record" | cut -f1)"
+        path="$(printf '%s' "$record" | cut -f2)"
+        detail="$(printf '%s' "$record" | cut -f3)"
+        target_dir_status="$status"
+        target_dir_path="$path"
+        case "$status" in
+            reclaimed)
+                _rm_success "Reclaimed redirected cargo target dir: $path ($detail)" ;;
+            would-reclaim)
+                _rm_info "Would reclaim redirected cargo target dir: $path ($detail)" ;;
+            shared)
+                _rm_info "Keeping redirected cargo target dir $path — still used by $detail" ;;
+            protected)
+                _rm_warning "Keeping redirected cargo target dir $path — $detail still using it" ;;
+            refused)
+                _rm_warning "Refusing to reclaim cargo target dir $path — $detail" ;;
+            failed)
+                _rm_warning "Could not reclaim redirected cargo target dir $path — $detail" ;;
+            *)
+                # `inside` / `absent`: the overwhelmingly common, uninteresting
+                # cases (no redirect configured). Silent by design.
+                : ;;
+        esac
     }
 
     # Resolve the repo root even when invoked from inside a worktree: the git
@@ -677,6 +731,8 @@ remove_worktree_command() {
     worktree_root_dir="$(loom_worktree_root "$repo_root")"
     worktree_path="$worktree_root_dir/issue-$issue_number"
     local attached_branch=""
+    # #7239: populated by step 4b/6c below; surfaced in --json.
+    local target_dir_path="" target_dir_status="unchecked"
 
     # 1. Idempotent no-op if the worktree dir is absent (still prune any stale
     #    registration, matching the "prunes git worktree registration" AC).
@@ -718,13 +774,44 @@ remove_worktree_command() {
             _rm_json false false "untouched"
             return 1
         fi
-        _rm_warning "Worktree has $dirty_count uncommitted change(s) - discarding them (--force)"
+        if [[ "$dry_run" == true ]]; then
+            _rm_warning "Worktree has $dirty_count uncommitted change(s) - a real run would discard them (--force)"
+        else
+            _rm_warning "Worktree has $dirty_count uncommitted change(s) - discarding them (--force)"
+        fi
         printf '%s\n' "$dirty_lines" | head -20 >&2
     fi
 
     # 4. Discover the attached branch BEFORE removal (porcelain entry vanishes
     #    once the worktree is gone).
     attached_branch="$(_worktree_attached_branch "$repo_root" "$worktree_path")" || attached_branch=""
+
+    # 4b. Resolve this worktree's Cargo target dir BEFORE removal (#7239):
+    #     `cargo metadata` needs the worktree's manifest, which is gone the
+    #     moment step 6 runs. The reclaim decision itself happens in 6c, once
+    #     the worktree is off disk and can no longer count as its own "still
+    #     live" referent. Resolution is skipped entirely (returning the default
+    #     in-worktree path) unless a redirect is actually possible, so an
+    #     ordinary host pays no cargo invocation per removal.
+    local target_dir_resolved=""
+    target_dir_resolved="$(loom_resolve_worktree_target_dir "$worktree_path" 2>/dev/null)" || target_dir_resolved=""
+
+    # 4c. --dry-run: report the full plan (worktree, branch, redirected target
+    #     dir + size) and change nothing. This is the reclaimable-dirs report
+    #     mode — the same decision path the real removal takes, so what it
+    #     lists is exactly what a real run would delete.
+    if [[ "$dry_run" == true ]]; then
+        _rm_info "Would remove worktree: $worktree_path"
+        if [[ "$keep_branch" == true ]]; then
+            [[ -n "$attached_branch" ]] && _rm_info "Would keep local branch '$attached_branch' (--keep-branch)"
+        elif [[ -n "$attached_branch" ]]; then
+            _rm_info "Would delete local branch '$attached_branch'"
+        fi
+        _rm_report_target_dir \
+            "$(loom_reclaim_worktree_target_dir "$repo_root" "$worktree_path" "$target_dir_resolved" true)"
+        _rm_json true false "dry-run"
+        return 0
+    fi
 
     # 5. CWD-safety: if our shell is inside the worktree, hop out first.
     local worktree_real current_dir in_worktree=false
@@ -769,6 +856,16 @@ remove_worktree_command() {
     if [[ "$removed" == true ]]; then
         loom_record_worktree_removal "$repo_root" "worktree.sh remove" "$worktree_path" \
             "${attached_branch:-}" "explicit_remove"
+    fi
+
+    # 6c. #7239: reclaim the redirected cargo target dir resolved in step 4b —
+    #     only now that the worktree is actually gone, and only when the dir is
+    #     outside the worktree, unshared with any other live worktree, and held
+    #     open by no running process. A failed removal leaves it alone: the
+    #     worktree that owns it is still there.
+    if [[ "$removed" == true ]]; then
+        _rm_report_target_dir \
+            "$(loom_reclaim_worktree_target_dir "$repo_root" "$worktree_path" "$target_dir_resolved" false)"
     fi
 
     # 7. Branch cleanup (unless --keep-branch). Deferred until after removal so
@@ -1510,7 +1607,9 @@ Usage:
   pnpm worktree <issue-number> --base <branch>          Branch off <branch> (stacked PR, #3729)
   pnpm worktree <issue-number> --sparse <paths...>      Cone-mode sparse checkout
   pnpm worktree <issue-number> --full                   Convert sparse worktree to full
-  pnpm worktree remove <N> [--keep-branch] [--force]    Remove one managed worktree
+  pnpm worktree remove <N> [--keep-branch] [--force] [--dry-run]
+                                                        Remove one managed worktree
+                                                        (--dry-run: report the plan only)
   pnpm worktree snapshot <N> [--include-untracked] [--json]
                                                          Save uncommitted WIP as a patch file
   pnpm worktree stash-push <N> [--include-untracked] [--json]
