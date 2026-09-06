@@ -56,11 +56,15 @@
 #   TIER=<tier:goal-advancing|tier:goal-supporting|tier:maintenance|"">
 #
 # Exit codes:
-#   0  = OK (no APPROVED verdict comment; loom:issue already present; or
-#        loom:issue is currently absent but the label timeline shows it WAS
-#        applied after the newest APPROVED comment and the issue has since
-#        legitimately progressed further, e.g. loom:issue -> loom:building or
-#        -> loom:blocked — nothing to reconcile in any of these cases, #6933).
+#   0  = OK (no APPROVED verdict comment; loom:issue already present;
+#        loom:issue is currently absent but a later-lifecycle label
+#        (loom:building/loom:blocked) is currently present, proving the
+#        promotion landed and the issue has since progressed independent of
+#        the timeline read (#7299); or loom:issue is currently absent but the
+#        label timeline shows it WAS applied after the newest APPROVED
+#        comment and the issue has since legitimately progressed further,
+#        e.g. loom:issue -> loom:building or -> loom:blocked — nothing to
+#        reconcile in any of these cases, #6933).
 #        ALSO used for DECISION=ALREADY_ESCALATED (tier unrecoverable, but the
 #        issue already carries loom:operator-only from a prior run — a human
 #        already owns it, nothing further to do, #6942).
@@ -145,8 +149,25 @@ HAS_ISSUE_LABEL="$(jq -e '.labels[] | select(.name=="loom:issue")' <<<"$ISSUE_JS
 # Newest comment (by createdAt) whose body contains the APPROVED verdict
 # marker text Step 3b's template writes — compact JSON (`-c`, not `-r`) since
 # this is an object, not a scalar.
+#
+# EXCLUDE this script's own follow-up comments (the `<!-- champion:promotion-
+# landed-completed -->` / `<!-- champion:promotion-landed-mismatch -->`
+# markers written below): both of those templates quote the literal phrase
+# "Champion Review: APPROVED" in their own narrative text ("This issue
+# carried a `Champion Review: APPROVED` verdict comment, but ..."), so the
+# naive `contains()` match here would otherwise pick up a PRIOR RUN's own
+# comment as if it were a fresh Champion verdict once one exists. That
+# self-match moves APPROVED_AT forward to whenever this script itself last
+# ran — sometimes to mere seconds AFTER the very `labeled loom:issue`
+# timeline event Step 2 below is trying to confirm predates it — which is
+# exactly how issue #7287 got incorrectly re-escalated on a second run
+# despite the promotion having genuinely landed (#7299).
 APPROVED_COMMENT="$(jq -c '
-  [.comments[] | select(.body != null and (.body | contains("Champion Review: APPROVED")))]
+  [.comments[] | select(
+      .body != null
+      and (.body | contains("Champion Review: APPROVED"))
+      and (.body | contains("<!-- champion:promotion-landed-") | not)
+    )]
   | sort_by(.createdAt)
   | last // empty
 ' <<<"$ISSUE_JSON" 2>/dev/null || true)"
@@ -158,6 +179,20 @@ fi
 
 if [[ "$HAS_ISSUE_LABEL" == "yes" ]]; then
   emit "OK" "APPROVED verdict comment present and loom:issue is present — promotion landed"
+  exit 0
+fi
+
+# --- Step 1b: loom:issue is currently absent, but a LATER-lifecycle label is
+# present (loom:building, loom:blocked) — this is only reachable if loom:issue
+# was applied at some point and the issue has since legitimately progressed
+# past it (Builder's claim atomically swaps loom:issue -> loom:building, e.g.).
+# This is a strictly stronger, cheaper signal than the Step 2 timeline lookup
+# below: it needs no extra `gh api` call and does not depend on the timeline
+# read (or the APPROVED-comment match above) being reliable at all. Checked
+# BEFORE Step 2 so a timeline hiccup or a self-match on an old comment (the
+# exact #7287 failure this fix addresses) can never override it (#7299).
+if jq -e '.labels[] | select(.name=="loom:building" or .name=="loom:blocked")' <<<"$ISSUE_JSON" >/dev/null 2>&1; then
+  emit "OK" "loom:issue is currently absent but a later-lifecycle label (loom:building/loom:blocked) is present — promotion landed and the issue has since progressed"
   exit 0
 fi
 

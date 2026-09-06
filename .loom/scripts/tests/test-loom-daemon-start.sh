@@ -63,6 +63,51 @@ assert_eq() {
     fi
 }
 
+# wait_for_pid_file_gone (#7287) — deterministic teardown for the
+# kill-then-immediately-`rm -f` pattern used throughout this suite's systemd
+# fixtures. The old shape (`kill "$PID" || true` followed immediately by
+# `rm -f "$pid_file"`) never waited for anything: it fired the kill and moved
+# straight on to the next invocation, which runs its OWN already-running guard
+# (loom-daemon-start.sh reads `$pid_file`, `kill -0`s the recorded pid, and
+# exits early with a warm-only banner if that succeeds — #5409) before this
+# one's target pid was confirmed gone. Under load that guard can spuriously
+# fire on a pid that either hasn't exited yet or — since the systemd-unit test
+# path here records a SYNTHETIC pid (the stub `systemctl show` subshell's own
+# already-exited `$$`, not a real forked daemon) — has simply been recycled by
+# the OS to some unrelated, currently-live process. Either way the next
+# invocation's guard can be fooled into skipping the code path under test,
+# which is exactly the intermittent DEK6b failure this issue reports.
+#
+# This helper closes the race: it kills the recorded pid (best-effort, same as
+# before), then POLLS `kill -0` until it fails (truly gone) or a bounded
+# timeout elapses, and only then removes the pid file — so the very next
+# invocation can never observe a live-looking pid left over from this one.
+# On timeout it fails LOUDLY (hard exit, not a silent `|| true`) rather than
+# hang forever: a pid that is still alive after several seconds is either a
+# genuinely stuck fixture daemon (a real bug worth stopping the suite for) or,
+# in the rare pid-recycling case, an unrelated process that has occupied the
+# slot for that whole window — a coincidence a short-lived collision would not
+# survive, so the timeout is deliberately several times longer than any single
+# poll interval before it gives up.
+wait_for_pid_file_gone() {
+    local pid_file="$1" timeout_secs="${2:-10}"
+    [[ -f "$pid_file" ]] || return 0
+    local pid
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    rm -f "$pid_file"
+    [[ -n "$pid" ]] || return 0
+    kill "$pid" 2>/dev/null || true
+    local waited_ms=0 interval_ms=100
+    while kill -0 "$pid" 2>/dev/null; do
+        if (( waited_ms >= timeout_secs * 1000 )); then
+            echo "FATAL: pid $pid (from $pid_file) is still alive after ${timeout_secs}s during test teardown — refusing to proceed with a possibly-live process still occupying that pid (#7287)." >&2
+            exit 1
+        fi
+        sleep 0.1
+        waited_ms=$((waited_ms + interval_ms))
+    done
+}
+
 # ---------- fixture ----------
 WORKDIR="$(mktemp -d)"
 # bg_proc_reap kills the `sleep 30 &` decoys tracked via bg_proc_track below
@@ -1048,6 +1093,19 @@ chmod +x "$DEK_SD_BIN/systemctl"
 DEK_SD_UNIT="loom-daemon-dek-test-$$.service"
 DEK_SD_HOME="$(mktemp -d)"; mkdir -p "$DEK_SD_HOME/.loom/logs"
 DEK_SD_UNIT_PATH="$DEK_SD_HOME/.config/systemd/user/$DEK_SD_UNIT"
+# DEK5-DEK7 below invoke $START_SCRIPT via `cd "$WORKDIR" && ...` with NO
+# LOOM_MACHINE_CHECKOUT set, so loom-daemon-start.sh resolves its already-
+# running-guard pid file from $WORKDIR (find_repo_root() walks up from $PWD),
+# NOT from $DEK_SD_HOME -- i.e. the REAL pid file every invocation below reads
+# and writes is $WORKDIR/.loom/.daemon.pid, regardless of the per-fixture
+# $DEK_SD_HOME each invocation's HOME points at (same shape as the AD8 fix
+# below, #7132). The old per-site teardown checked `$DEK_SD_HOME/.loom/.daemon.pid`
+# instead -- a path this suite never writes to -- so it was a silent no-op:
+# the real pid file was never cleaned up between invocations, letting a stale
+# (and, since the systemd stub records its own already-exited subshell pid, a
+# potentially OS-recycled) pid value leak into the next invocation's
+# already-running guard (#7287).
+DEK_SD_PID_FILE="$WORKDIR/.loom/.daemon.pid"
 
 # DEK5. First-ever install (no existing unit) must NOT warn.
 dek5_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_SAFEHOUSE_ENABLED \
@@ -1066,10 +1124,7 @@ else
     echo -e "${RED}✗${NC} dropped-env-key (systemd): first-ever install (no existing unit) never warns"
     echo "  output: $dek5_out"
 fi
-if [[ -f "$DEK_SD_HOME/.loom/.daemon.pid" ]]; then
-    kill "$(cat "$DEK_SD_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
-    rm -f "$DEK_SD_HOME/.loom/.daemon.pid"
-fi
+wait_for_pid_file_gone "$DEK_SD_PID_FILE"
 TESTS_RUN=$((TESTS_RUN + 1))
 if [[ -f "$DEK_SD_UNIT_PATH" ]]; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -1095,10 +1150,8 @@ bg_proc_track "$DEK_SD_PID1"
     LOOM_AUTONOMY_MARKER="$DEK_SD_HOME/.loom/autonomy-desired" \
     bash "$START_SCRIPT" --no-launchd >/dev/null 2>&1 )
 kill "$DEK_SD_PID1" 2>/dev/null || true
-if [[ -f "$DEK_SD_HOME/.loom/.daemon.pid" ]]; then
-    kill "$(cat "$DEK_SD_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
-    rm -f "$DEK_SD_HOME/.loom/.daemon.pid"
-fi
+wait "$DEK_SD_PID1" 2>/dev/null || true
+wait_for_pid_file_gone "$DEK_SD_PID_FILE"
 TESTS_RUN=$((TESTS_RUN + 1))
 if [[ -f "$DEK_SD_UNIT_PATH" ]] && grep -q 'LOOM_SAFEHOUSE_ENABLED' "$DEK_SD_UNIT_PATH"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -1125,10 +1178,8 @@ dek6_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u
     LOOM_AUTONOMY_MARKER="$DEK_SD_HOME/.loom/autonomy-desired" \
     bash "$START_SCRIPT" --no-launchd --no-work-finder 2>&1 )
 kill "$DEK_SD_PID2" 2>/dev/null || true
-if [[ -f "$DEK_SD_HOME/.loom/.daemon.pid" ]]; then
-    kill "$(cat "$DEK_SD_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
-    rm -f "$DEK_SD_HOME/.loom/.daemon.pid"
-fi
+wait "$DEK_SD_PID2" 2>/dev/null || true
+wait_for_pid_file_gone "$DEK_SD_PID_FILE"
 TESTS_RUN=$((TESTS_RUN + 1))
 if echo "$dek6_out" | grep -qi 'drops 1 env key' && echo "$dek6_out" | grep -q 'LOOM_SAFEHOUSE_ENABLED' \
     && echo "$dek6_out" | grep -q 'safehouse.*block.*--from-config'; then
@@ -1161,10 +1212,8 @@ bg_proc_track "$DEK_SD_PID3"
     LOOM_AUTONOMY_MARKER="$DEK_SD_HOME/.loom/autonomy-desired" \
     bash "$START_SCRIPT" --no-launchd >/dev/null 2>&1 )
 kill "$DEK_SD_PID3" 2>/dev/null || true
-if [[ -f "$DEK_SD_HOME/.loom/.daemon.pid" ]]; then
-    kill "$(cat "$DEK_SD_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
-    rm -f "$DEK_SD_HOME/.loom/.daemon.pid"
-fi
+wait "$DEK_SD_PID3" 2>/dev/null || true
+wait_for_pid_file_gone "$DEK_SD_PID_FILE"
 sleep 30 & DEK_SD_PID4=$!
 bg_proc_track "$DEK_SD_PID4"
 # #5409: same rationale as DEK6 above -- --no-work-finder states the
@@ -1178,10 +1227,8 @@ dek7_out=$( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u
     LOOM_AUTONOMY_MARKER="$DEK_SD_HOME/.loom/autonomy-desired" \
     bash "$START_SCRIPT" --no-launchd --no-work-finder --force-env 2>&1 )
 kill "$DEK_SD_PID4" 2>/dev/null || true
-if [[ -f "$DEK_SD_HOME/.loom/.daemon.pid" ]]; then
-    kill "$(cat "$DEK_SD_HOME/.loom/.daemon.pid" 2>/dev/null)" 2>/dev/null || true
-    rm -f "$DEK_SD_HOME/.loom/.daemon.pid"
-fi
+wait "$DEK_SD_PID4" 2>/dev/null || true
+wait_for_pid_file_gone "$DEK_SD_PID_FILE"
 TESTS_RUN=$((TESTS_RUN + 1))
 if ! echo "$dek7_out" | grep -qi 'drops.*env key'; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
