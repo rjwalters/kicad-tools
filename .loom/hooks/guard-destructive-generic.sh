@@ -3654,7 +3654,9 @@ mask_catastrophic_var_assignment() {
 #      body, and EVERY occurrence is immediately preceded by one of the
 #      exact same trusted consumer shapes the sibling masking passes above
 #      already trust: `--search`/`--arg NAME`/`--argjson NAME` (the
-#      strip_literal_text() flag set), directly after
+#      strip_literal_text() flag set — also tolerating the escaped-quote
+#      exact-phrase wrapping `--search "\"$q\""` in addition to the plain
+#      `--search "$q"` shape, #7288), directly after
 #      grep/egrep/fgrep/rg/jq/check-duplicate.sh (the
 #      mask_catastrophic_positional_args() command set), OR interpolated
 #      anywhere inside a still-open `echo`/`printf` quoted argument (#6069)
@@ -3792,7 +3794,7 @@ mask_catastrophic_forloop_wordlist() {
                     }
                     found_any = 1
                     vpre = substr(btmp, 1, RSTART - 1)
-                    if (vpre !~ /(--search|--arg[ \t]+[A-Za-z_][A-Za-z0-9_]*|--argjson[ \t]+[A-Za-z_][A-Za-z0-9_]*)[ \t]*=?[ \t]*"?$/ \
+                    if (vpre !~ /(--search|--arg[ \t]+[A-Za-z_][A-Za-z0-9_]*|--argjson[ \t]+[A-Za-z_][A-Za-z0-9_]*)[ \t]*=?[ \t]*("(\\")?)?$/ \
                         && vpre !~ /(grep|egrep|fgrep|rg|jq|\.\/\.loom\/scripts\/check-duplicate\.sh)([ \t]+-[A-Za-z0-9_-]+)*[ \t]+"?$/ \
                         && vpre !~ /(^|[ \t\n;&|`(])(echo|printf)([ \t]+-[A-Za-z0-9_-]+)*[ \t]+["'"'"'][^"'"'"']*$/) {
                         safe = 0

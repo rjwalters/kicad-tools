@@ -155,6 +155,7 @@ test-merge-pr-worktree-path.sh
 test-merge-pr-worktree-remove-diagnosis.sh
 test-nextest-daemon-guard.sh
 test-operator-only-subkind.sh
+test-post-verdict.sh
 test-pr-worktree-isolation.sh
 test-probe-tokens-fallback.sh
 test-provision-codex-hooks.sh
@@ -243,6 +244,7 @@ tests/install/test-provision-daemon.sh
 tests/install/test-uninstall-clean-preserves-unmanaged-hooks.sh
 tests/install/test-uninstall-labels-block.sh
 tests/install/test-uninstall-preserve-siblings.sh
+tests/install/test-uninstall-settings-permissions.sh
 tests/install/test-uninstall-shim-cleanup.sh
 
 # tests/hermit/ — the Hermit role's stateless-ceremony heuristic regression

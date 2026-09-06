@@ -88,7 +88,17 @@ ETag cache (`loom-daemon forge <issue|pr> list --cached …`, backed by
 - **Separate pool.** It draws on REST `core`, not the exhausted GraphQL pool.
 - **Never stale.** Unlike the 30s TTL cache below, a `304` is positive proof
   nothing changed — so this path is safe even for claim-arbitration reads, and
-  is tried *before* the TTL cache.
+  is tried *before* the TTL cache. This holds even though the on-disk cache
+  filename is keyed by the **resolved** `owner/repo` (git-remote-resolved from
+  the caller's cwd, or an explicit `--repo`/`LOOM_REPO`, #7275) rather than the
+  raw `gh` argv text: a `304` still only ever comes back from GitHub's own
+  `If-None-Match` validation against the ETag actually returned for *that*
+  request's real repo, so a key collision could only ever cost an extra `200`
+  (cache miss), never serve stale or wrong-repo data. (Before #7275, the
+  agent-facing `--cached` path resolved that key component from a hardcoded
+  `None` cwd, so every repo sharing a label convention with no explicit
+  `--repo` collapsed onto the *same* cache file on a multi-repo fleet host —
+  a correctness-neutral but constant-cache-miss bug, not a staleness one.)
 - **Degrades gracefully.** When loom-daemon is unreachable (binary absent) or
   the shape is not cacheable, the daemon exits non-zero and the wrapper falls
   through to its normal path (TTL cache / plain `gh`) — the same fallback

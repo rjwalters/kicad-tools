@@ -1330,6 +1330,11 @@ re-blocking") and confirm that specific condition has since cleared — not
 just that the body's stated dependency closed. When in doubt, leave
 `loom:blocked` in place.
 
+**If either check tells you the tracked dependency is done but something else is
+holding the issue open, stop before writing "no action needed"** — that is the
+diagnosed-but-orthogonal case, and it escalates rather than settling. See
+"Diagnosed-but-orthogonal blockers" below.
+
 **Only once the superseding-block check clears**, proceed:
 1. Claim the issue if not already claimed: `gh issue edit <number> --add-label "loom:curating"`
 2. Remove `loom:blocked` label and add `loom:curated`: `gh issue edit <number> --remove-label "loom:blocked" --remove-label "loom:curating" --remove-label "loom:triage" --add-label "loom:curated"`
@@ -1410,11 +1415,12 @@ else
 fi
 ```
 
-**Three-way decision** (run it *before* posting, and before any `loom:curating`
+**Four-way decision** (run it *before* posting, and before any `loom:curating`
 claim you would only take in order to comment):
 
 | Prior re-check comment | Action |
 |---|---|
+| Any, when the tracked blocker is stale but a **different** condition is live | **Escalate** — see "Diagnosed-but-orthogonal blockers" below. This row is checked first and is never suppressed by the rows beneath it. |
 | **None** (first-ever check on this issue) | **Comment.** Always report the first conclusion — never skip a first pass. |
 | Present, **different** `CONCLUSION_HASH` | **Comment.** A changed conclusion always gets a comment — no exception, no window, no budget. |
 | Present, **same** hash, newer than the staleness window | **Skip silently.** No comment, no label change, no claim. Leave the issue exactly as found. |
@@ -1445,6 +1451,112 @@ allow that: it is a durable, addressable comment carrying the conclusion
 identity, not a bare "did we comment?" boolean. Do not add the escalation step
 speculatively — just do not build the suppression in a way that makes it
 unreachable.
+
+### Diagnosed-but-orthogonal blockers: escalate, never "no action needed" (#6516)
+
+**Problem this section fixes**: the re-check above has exactly two outcomes for a
+still-blocked issue — leave `loom:blocked`, or clear it — and both end in "no
+action needed" once the *tracked* blocker (the body's Dependencies entry, or a
+linked PR) looks resolved. That is right when the tracked blocker is simply still
+active. It is badly wrong when the re-check's **own analysis** concludes the
+tracked blocker is substantively done and identifies a *different, currently
+active* condition as the real reason the issue cannot proceed: the system has
+then diagnosed its own deadlock and filed the diagnosis as a comment nobody
+reads.
+
+Observed verbatim on a downstream repo (2026-08-18): "the prior comment's blocker
+description is now stale… the substance #14 tracks is done… #14 itself remains
+open, but for an unrelated reason: a Champion objection about epic process
+structure" — followed by "No action needed until both clear." Two buildable
+issues sat blocked for days behind an epic that was finished, in a fleet starved
+for work.
+
+**Trigger — all three, and nothing weaker:**
+
+1. Your re-check concluded the **tracked** blocker is substantively cleared
+   (merged / closed / superseded), not merely quiet.
+2. You identified a **specific, currently active** condition that is *not* the
+   tracked blocker and *not* in the body's Dependencies section — a process or
+   format objection, a label state, an unrelated hold.
+3. That condition is not something you can clear yourself in this pass.
+
+If the tracked blocker is genuinely still active, none of this applies and the
+ordinary suppression rules above stand unchanged. This branch is not a licence to
+escalate every heartbeat; it fires on the *transition* into "the tracked reason
+is stale and the real reason is elsewhere".
+
+**Mechanism (this is what makes it unsuppressible, not the prose):** fold the
+orthogonal condition's identity into the conclusion fingerprint. The linked-PR
+blocker set is what stayed constant while the truth moved, so a hash built only
+from it re-suppresses the very pass that discovered the problem.
+
+```bash
+# Stable identity of the orthogonal condition — the thing an operator must act
+# on, not your wording of it. e.g. "epic-open-but-complete:owner/repo#14",
+# "champion-format-objection:#14", "label-hold:loom:operator-only".
+ORTHOGONAL="epic-open-but-complete:owner/repo#14"
+CONCLUSION_HASH=$(printf '%s\n%s\n%s\n%s' "$VERDICT" "$BLOCKERS" "$BLOCK_REASON" "$ORTHOGONAL" \
+  | _sha256 | awk '{print substr($1, 1, 16)}')
+```
+
+`ORTHOGONAL` is empty on an ordinary re-check, so every existing fingerprint is
+unchanged and no existing suppression behavior moves. When it is non-empty the
+hash necessarily differs from the pass that preceded the discovery — the
+"changed conclusion always comments" row fires by construction.
+
+**Then escalate, in one pass:**
+
+1. **Retrack the real blocker.** Edit the body's Dependencies section so it names
+   the currently active condition, striking or annotating the stale entry — the
+   next pass must re-check the true blocker, not the dead one.
+2. **Comment** the finding (never suppressed — the hash changed), stating what
+   cleared, what is actually blocking, and what would unblock it.
+3. **Route to the operator**, keeping `loom:blocked` in place. Pick the sub-kind
+   from the *condition*, per "Applying `loom:operator-only`" above:
+
+| Orthogonal condition | Sub-kind |
+|---|---|
+| A finished-but-open epic / a stale process or format objection an operator can just close or withdraw | `loom:operator-mechanical` — confirmation, no judgement |
+| A **named** open issue/PR that will genuinely deliver something first | `loom:operator-blocked` — include the literal `Blocked by #N` line |
+| A real preference/authority call about how to proceed | `loom:operator-decision` — name the disagreement axis |
+
+```bash
+# Terminal check first: a human already owns it — say nothing, change nothing.
+gh issue view <number> --json labels --jq '.labels[].name' | grep -q '^loom:operator-only$' \
+  && echo "already routed — skip silently" \
+  || {
+    gh issue comment <number> --body "<!-- curator:dep-recheck:$CONCLUSION_HASH -->
+<!-- curator:orthogonal-block:$ORTHOGONAL -->
+**Curator: tracked blocker is stale — the real block is elsewhere**
+
+The Dependencies entry (\`<tracked blocker>\`) is substantively resolved: <evidence>.
+This issue is still blocked, but by an unrelated active condition: <the orthogonal
+condition, and what would clear it>.
+
+Routing to the operator rather than re-confirming a stale blocker (#6516)."
+    gh issue edit <number> --add-label "loom:operator-only,loom:operator-mechanical"
+  }
+```
+
+The `curator:orthogonal-block:$ORTHOGONAL` marker plus the terminal
+`loom:operator-only` check bound this to **one** escalation per distinct
+condition — a second pass finding the same condition sees the label and skips
+silently.
+
+**Behavioral checks** (what a change here must still produce):
+
+| Re-check situation | Required outcome |
+|---|---|
+| Tracked blocker (an epic) is substantively done but formally open for an unrelated reason — the #20/#22 shape | Escalation: body retracked, comment posted, `loom:operator-only` + sub-kind applied. **Never** "no action needed" |
+| Tracked blocker genuinely still active, nothing else changed | Ordinary suppression, unchanged — silent skip inside the window, heartbeat outside it. **No** escalation |
+| Same orthogonal condition, second pass | Silent skip via the `loom:operator-only` terminal check — exactly one escalation per condition |
+| Orthogonal condition clears, tracked blocker still stale | `ORTHOGONAL` empties, the hash changes again, the ordinary "changed conclusion" comment fires |
+
+**This does not consume the reserved #4967 counter above.** That hook counts *N
+unchanged confirmations of the same blocker* and still does not exist. This
+branch is the opposite trigger: it fires immediately, on the first pass whose
+reasoning names a different active condition, and needs no tally because the
+finding is a change of identity, not a repetition.
 
 ## Checking Operator-Only Premises (#6849)
 

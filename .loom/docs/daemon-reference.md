@@ -7013,6 +7013,36 @@ Assistant or openssl + `security import`, including the OpenSSL 3 PKCS12
 unattended signing) and why grants should target the daemon identity, not
 Terminal: [`macos-tcc-codesign.md`](macos-tcc-codesign.md).
 
+**AppleEvents / Automation attribution (#6366).** A TCC prompt reading
+*"loom-daemon" wants access to control "System Events"* (or any other app)
+follows the **exact same responsible-process mechanism** as the
+folder-access prompts described above — it does **not** mean the daemon
+itself sent an AppleEvent. `git grep -n osascript` against the daemon core
+(`loom-daemon/src`), `defaults/`, and the installed `.loom/` surfaces
+returns zero hits: nothing in the daemon or its shipped scripts drives GUI
+automation. What actually happens is that every sweep/role child is a
+launchd descendant of the daemon, and macOS attributes a **child's**
+AppleEvent request to the **daemon**, the responsible process at the top of
+that process tree — so an agent that improvises `osascript -e 'tell
+application "System Events" to …'` (or any `osascript`/`tell application`
+invocation, e.g. opening a Terminal window or faking a keystroke) surfaces
+the prompt in the operator's face labeled `loom-daemon`, even though the
+daemon core never touched Automation itself.
+
+Sweeps are headless by design ("No TTY available, running claude directly")
+and have no legitimate need for GUI automation, so **the correct fix is to
+deny it at the spawn layer, not to grant the prompt.** `defaults/.claude/settings.json`
+(the repo-default permission set every installed `.claude/settings.json`
+inherits, consumed by every `spawn-claude.sh`-launched session) ships a
+`permissions.deny` block covering `osascript`, `tell application`, and
+`"System Events"` invocations — a sweep child that attempts one now gets a
+clean tool-denial in its own log instead of a host-level TCC dialog.
+**If you see this prompt: click Deny, then find the sweep** (same "what to
+click" discipline as the folder-access prompts above) — a genuine need for
+`osascript` from a headless agent almost always indicates an improvised
+workaround rather than an intended capability, and the deny above should
+already have caught it before the prompt fires.
+
 ### Supervised restart primitive (#4054)
 
 Phase 2 of #4017 (auto-rebuild-and-restart-when-stale). It ships a
@@ -7794,7 +7824,12 @@ Each tick (surfaced in `loom-daemon status` — human and `--json` — as
    daemon. It **never** runs `git pull`.
 3. **Settle window** — waits `settleSecs` after first observing a stale commit,
    resetting on every further commit, so a burst of daemon merges collapses into
-   a single roll.
+   a single roll. **Bounded (Issue #6261)**: `SETTLE_CEILING_MULTIPLIER` (6) `×
+   settleSecs`, measured from the FIRST stale observation in the streak — not
+   reset by later commits — is a hard ceiling on how long repeated resets can
+   defer the first attempt, so a source checkout that advances faster than
+   `settleSecs` apart (a busy merge day) still converges within a bounded worst
+   case instead of never settling.
 4. **Build-stampede gate (bounded, #4929)** — defers the rebuild while
    `ipc::count_in_flight_sweeps` reports any non-terminal sweep across every
    managed root (a `cargo build --release` competes with in-flight sweep builds
@@ -7806,8 +7841,44 @@ Each tick (surfaced in `loom-daemon status` — human and `--json` — as
    build yields CPU to the running sweeps; the roll then proceeds through the
    same drain path below (and if that drain is refused or times out, the fresh
    binary is still provisioned for the next supervised restart). The clock
-   re-arms on any zero-in-flight check, a new source commit, or a completed
-   rebuild, so short busy bursts never reach the deadline.
+   re-arms on any zero-in-flight check or a completed rebuild — **not** on a new
+   source commit landing mid-defer (fixed by Issue #6261; pre-fix, a host busy
+   continuously across many merges never accumulated toward `deferDeadlineSecs`
+   at all, because every new commit silently restarted the clock from zero).
+
+**2026-08-14 incident (Issue #6261) — diagnosis and fix.** An urgent one-line
+daemon fix (#6250) merged and then sat undelivered for a full day across 20+
+further merges, with `auto_update` enabled the whole time. Two compounding
+gaps, both closed by #6261:
+- **The gate-reset bugs above** — the settle window's quiet-period timer and
+  gate 4's continuous-busy timer BOTH reset on every new commit landing, not
+  just (respectively) on catching up / going idle. A source checkout advancing
+  faster than `settleSecs` apart could defer "settled" indefinitely, and a host
+  busy continuously while commits kept landing never accumulated toward
+  `deferDeadlineSecs`. Both now have a reset-proof anchor (`first_stale_since`
+  for the settle ceiling; `deferred_since` no longer resets on a commit change)
+  so they still converge within a bounded worst case.
+- **No proactive signal.** Every tick's decision was published only to
+  `daemon status`'s latest-tick `note` field (overwritten every tick) and
+  otherwise unlogged for a `Skip` — so a day-long stall left zero trace in the
+  daemon's own log unless someone happened to run `daemon status` at exactly
+  the right moment. Every tick's decision (skip reason or rebuild) is now
+  logged (`log::info!`/`log::warn!`/`log::error!`, `auto_update: …`), and a
+  **staleness surface** (below) proactively warns once the magnitude crosses a
+  threshold, independent of what that tick's gates decide.
+
+**Staleness surface (`self_update::SelfUpdateStatus`, Issue #6261).** Beyond
+the boolean `update_available` hint, `loom-daemon status` (both the
+`Self-update:` text line and the `self_update` JSON block — this is the
+CLIENT-side, `self_update::check()` read, so it is populated **regardless** of
+whether the `auto_update` loop itself is enabled) now reports HOW stale:
+`commits_behind` (`git rev-list --count built..source`) and `hours_behind`
+(whole hours since the OLDEST unbuilt commit landed). Once either crosses a
+warn threshold — env-overridable via `LOOM_SELF_UPDATE_STALE_WARN_COMMITS` /
+`LOOM_SELF_UPDATE_STALE_WARN_HOURS`, default 10 commits / 12 hours — a
+`WARNING:` line prints in text mode and `self_update.staleness_warning` is
+non-null in `--json`; the `auto_update` loop (when enabled) also logs the
+same warning every tick it is active, independent of `decide()`'s gates.
 5. **Roll via drain, not a bare restart** — on a clean rebuild it triggers
    `ipc::handle_drain_request` (#4090), so in-flight sweeps finish first and
    survive in the registry rather than being orphaned as bare processes. The
