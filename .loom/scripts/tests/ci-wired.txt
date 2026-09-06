@@ -99,6 +99,7 @@ test-guide-operator-attention-fold.sh
 test-guide-operator-only-exclude.sh
 test-guide-plan-body-stable-sort.sh
 test-guide-pool-pressure-defer.sh
+test-guide-superseding-block-merge-state.sh
 test-guide-work-log-debounce.sh
 test-guide-work-log-issue-out-of-order.sh
 test-guide-work-log-issue-pagination.sh
