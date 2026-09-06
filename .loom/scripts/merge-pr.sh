@@ -540,6 +540,108 @@ Or, if you have already verified/reconciled them, re-run with --allow-stacked-ch
 _check_no_open_stacked_children
 
 # ---------------------------------------------------------------------------
+# Pre-merge defaults/ VERSION-bump collision guard (#7302).
+#
+# check-defaults-version-bump.sh's CI job (.github/workflows/ci.yml) gates a
+# PR's own HEAD VERSION against its PR's `base.sha` — fixed at PR-open (or
+# last-rebase) time and never re-diffed against the CURRENT default branch.
+# When two PRs are open concurrently and both bump VERSION from the same
+# stale base to the same target (e.g. both from 0.18.197 to 0.18.198), the
+# first to merge advances the default branch to that target; the CI gate on
+# the SECOND PR already passed against ITS OWN stale base and has no
+# visibility into that concurrent merge, so it can land on top with a
+# NET-ZERO version increment despite genuinely changing `defaults/` —
+# silently defeating the currency signal check-defaults-version-bump.sh
+# exists to guarantee (#5874). This happened for real: PR #7300 vs.
+# concurrently-merged #7298.
+#
+# Fix shape: re-run the SAME check script — UNCHANGED, per #7302's own
+# acceptance criteria; its job (diff two given refs) already works correctly,
+# the gap is entirely in which refs the CI caller gives it — here, at the
+# merge choke point, against the default branch's CURRENT tip instead of the
+# PR's stale base.sha. That is the freshest reference available short of an
+# atomic merge, and mirrors the pattern _check_no_open_stacked_children above
+# already uses (a live re-check immediately before the actual merge call).
+#
+# Best-effort at every NON-decision step — an unresolvable default branch, a
+# failed fetch, or a PR head not reachable locally all fall through to "skip
+# the check" rather than blocking a merge this guard cannot evaluate safely.
+# Only a CONFIRMED collision (the check script's own exit 1 against the
+# CURRENT default branch tip) hard-blocks, matching the
+# hard-block-on-confirmed-collision shape of the guard above. --dry-run still
+# runs the guard and reports the would-be block, mirroring that guard's
+# dry-run contract.
+_check_defaults_version_bump_collision() {
+  local check_script="$REPO_ROOT/defaults/scripts/check-defaults-version-bump.sh"
+  [[ -x "$check_script" ]] || return 0
+  [[ -n "${DEFAULT_BRANCH_NAME:-}" ]] || return 0
+  [[ -n "${PR_HEAD_SHA:-}" ]] || return 0
+  [[ -n "${PR_BRANCH:-}" ]] || return 0
+
+  # Best-effort fetch of the default branch's current tip and this PR's own
+  # branch. A failure here (offline, transient forge issue) means the guard
+  # cannot see anything fresher than what's already local — skip rather than
+  # block on stale/missing data. `|| return 0` (not `|| true`) keeps this a
+  # single early-exit instead of proceeding with a possibly-stale fetch.
+  git -C "$REPO_ROOT" fetch --quiet origin "$DEFAULT_BRANCH_NAME" "$PR_BRANCH" 2>/dev/null || return 0
+
+  local current_main_sha
+  current_main_sha="$(git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/$DEFAULT_BRANCH_NAME" 2>/dev/null || true)"
+  [[ -n "$current_main_sha" ]] || return 0
+
+  # The PR head commit must be reachable locally post-fetch (it will be,
+  # having just fetched PR_BRANCH above) — guards a fork-PR or
+  # already-deleted-branch edge case where it might not resolve.
+  git -C "$REPO_ROOT" rev-parse --verify --quiet "${PR_HEAD_SHA}^{commit}" >/dev/null 2>&1 || return 0
+
+  local pr_body check_output check_rc
+  pr_body="$(echo "$PR_JSON" | jq -r '.body // ""')"
+  check_rc=0
+  check_output=$(cd "$REPO_ROOT" && PR_BODY="$pr_body" "$check_script" --base "$current_main_sha" --head "$PR_HEAD_SHA" 2>&1) || check_rc=$?
+
+  if [[ "$check_rc" -eq 0 ]]; then
+    return 0
+  fi
+
+  # A non-zero, non-1 exit (bad usage, unresolved ref) is a guard-internal
+  # problem, not a confirmed collision — report and skip rather than block a
+  # merge on a guard fault.
+  if [[ "$check_rc" -ne 1 ]]; then
+    warning "defaults/ VERSION-bump collision guard: check-defaults-version-bump.sh exited $check_rc against current '$DEFAULT_BRANCH_NAME' ($current_main_sha) — skipping (not a confirmed collision):"
+    warning "$check_output"
+    return 0
+  fi
+
+  local msg
+  msg="Merge blocked: PR #$PR_NUMBER's \`defaults/\` change would leave '$DEFAULT_BRANCH_NAME' at an unchanged (or non-increasing) VERSION relative to its CURRENT tip ($current_main_sha) — a concurrently-merged PR likely already advanced '$DEFAULT_BRANCH_NAME' to this PR's target VERSION (#7302).
+
+$check_output
+
+Rebase onto the current '$DEFAULT_BRANCH_NAME' and bump VERSION again, then re-run this merge:
+  git fetch origin $DEFAULT_BRANCH_NAME
+  git rebase origin/$DEFAULT_BRANCH_NAME
+  ./scripts/version.sh bump patch
+  git push --force-with-lease
+
+If this change genuinely does not alter installed behavior, add the
+<!-- loom:no-surface-change --> marker to the PR body or a commit message
+instead of bumping VERSION, then re-run this merge."
+
+  # --dry-run still runs the guard and REPORTS the would-be block, but honors
+  # the dry-run contract (never exits 1) — same shape as the guard above.
+  if [[ "$DRY_RUN" == "true" ]]; then
+    warning "[dry-run] Would BLOCK merge of PR #$PR_NUMBER: defaults/ VERSION-bump collision against current '$DEFAULT_BRANCH_NAME' ($current_main_sha)."
+    return 0
+  fi
+
+  error "$msg"
+}
+
+# Invoke this guard too, before either merge path attempts the actual merge
+# API call — same reasoning as _check_no_open_stacked_children above.
+_check_defaults_version_bump_collision
+
+# ---------------------------------------------------------------------------
 # Partial-increment closing-keyword conflict detection (#4569, extended by
 # #4595 to cover commit messages).
 #

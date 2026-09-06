@@ -266,13 +266,32 @@ export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
 
 jq -n '{closedByPullRequestsReferences: [{number: 4743}]}' >"$STUB_DIR/issue-6335.json"
-jq -n '{number: 4743, state: "OPEN", labels: [{name:"loom:changes-requested"}], mergeable: "CONFLICTING", mergeStateStatus: "CONFLICTING"}' \
-    | jq '{number, state, labels: [.labels[].name], mergeable, mergeStateStatus}' >"$STUB_DIR/pr-4743.json"
+# NOTE: this is the REAL, unflattened shape `gh pr view --json labels`
+# actually returns — an array of label OBJECTS, not plain strings. Do NOT
+# pre-flatten this in the test stub (that masked the #7304 regression: the
+# real _fetch_dep_recheck_json() never flattened labels, but this stub used
+# to do the flattening for it, so the live-mode test validated a shape the
+# script doesn't actually produce).
+jq -n '{number: 4743, state: "OPEN", labels: [{id:"x", name:"loom:changes-requested", color:"ABCDEF"}], mergeable: "CONFLICTING", mergeStateStatus: "CONFLICTING"}' \
+    >"$STUB_DIR/pr-4743.json"
 
 out="$("$TARGET_SCRIPT" dep-recheck --number 6335 --repo owner/repo)"
 assert_eq "blocked" "$(field "$out" VERDICT)" "T13a: live --number mode fetches the issue's linked PRs and computes VERDICT"
 assert_contains_hash="$(field "$out" CONCLUSION_HASH)"
 assert_ne "" "$assert_contains_hash" "T13b: live --number mode emits a non-empty CONCLUSION_HASH"
+
+# --- T13d/T13e: THE #7304 REGRESSION - a labeled, CONFLICTING PR fetched via
+# the real gh label-object shape must not crash jq, and the label must
+# actually be recognized by _dep_recheck_verdict (not silently ignored).
+jq -n '{closedByPullRequestsReferences: [{number: 9999}]}' >"$STUB_DIR/issue-6336.json"
+jq -n '{number: 9999, state: "OPEN", labels: [{id:"a", name:"loom:blocked", color:"111111"}, {id:"b", name:"loom:pr", color:"222222"}], mergeable: "MERGEABLE", mergeStateStatus: "CLEAN"}' \
+    >"$STUB_DIR/pr-9999.json"
+
+out_labeled="$("$TARGET_SCRIPT" dep-recheck --number 6336 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_labeled" VERDICT)" \
+    "T13d: a labeled (loom:blocked), non-conflicting, real-shape PR is still VERDICT=blocked (label match works on real gh objects, not just the --stdin fixture shape)"
+assert_eq "9999:OPEN:loom:blocked,loom:pr" "$(field "$out_labeled" BLOCKERS)" \
+    "T13e: BLOCKERS renders plain sorted label names from the real gh label-object shape without a jq type error"
 
 jq -n '{number: 20,state: "OPEN"}' >"$STUB_DIR/issue-20.json"
 jq -n '{number: 22, state: "CLOSED"}' >"$STUB_DIR/issue-22.json"

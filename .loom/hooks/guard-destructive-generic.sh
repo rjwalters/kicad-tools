@@ -5097,7 +5097,12 @@ rm_scope_literal_same_command_resolve() {
 # segments of the SAME command (so `cd <worktree> && echo x > f` resolves the
 # relative target against the worktree, not the hook's cwd) — global awk
 # variable `curcwd`, threaded across the per-line pattern-action block exactly
-# like parse_force_ops threads `cpath` via `git -C`.
+# like parse_force_ops threads `cpath` via `git -C`. As of #7294, the `cd`
+# argument itself is first run through resolve_var() (mirroring
+# parse_force_ops' own #6152 fix) — so a same-command `NAME=value` assignment
+# resolved through `cd "$NAME/sub"` feeds a `$`-free, RESOLVED cwd into LATER
+# relative-path writes, instead of leaving `$NAME` literally embedded in
+# curcwd and failing those writes closed as unresolved.
 #
 # NOT a full shell parser: like parse_force_ops / extract_rm_targets, splitting
 # a segment into tokens starts from plain whitespace splitting. Unlike those
@@ -5372,7 +5377,38 @@ extract_write_targets() {
 
             if (toks[1] == "cd") {
                 if (m >= 2 && toks[2] != "" && toks[2] != "-") {
-                    cdarg = expand_cd_arg(toks[2], home)   # #5315
+                    # SAME-COMMAND VARIABLE RESOLUTION FOR THE cd ARGUMENT
+                    # ITSELF (#7294, mirrors parse_force_ops'"'"' identical
+                    # #6152 fix for its own `-C`/`cd` capture points): try
+                    # resolve_var() on the unquoted argument FIRST. When a
+                    # preceding same-command `NAME=value` assignment (a
+                    # plain literal OR a proven-safe #6949 mktemp value —
+                    # resolve_var() itself does not distinguish, it only
+                    # ever substitutes a value record_assign() already
+                    # captured) proves the value, curcwd is threaded from
+                    # that RESOLVED, `$`-free path instead of the raw,
+                    # still-unexpanded token. Without this, `TMP=/tmp/x; cd
+                    # "$TMP/repo"; echo hi > README.md` left curcwd carrying
+                    # the literal `$TMP` all the way into the write-
+                    # confinement check below, so a plain RELATIVE write
+                    # after such a `cd` was denied as
+                    # worktree-write-confinement-unresolved-var even though
+                    # the direct-write-target scanner (mark_expandable_
+                    # dollars / resolve_var_q(), #4881/#6444) already proves
+                    # the identical `$TMP/...` shape fine for a DIRECT write
+                    # target. When resolution FAILS (no matching assignment,
+                    # a chained/ambiguous/command-substitution value, or the
+                    # argument was never a bare variable reference at all)
+                    # cdresolved comes back byte-identical to cdunq, so this
+                    # falls through to EXACTLY the pre-#7294 code path --
+                    # same fail-closed behavior, unchanged.
+                    cdunq = strip_cd_quoting(toks[2])
+                    cdresolved = resolve_var(cdunq)
+                    if (cdresolved != cdunq) {
+                        cdarg = cdresolved   # #7294: proven $VAR resolution
+                    } else {
+                        cdarg = expand_cd_arg(toks[2], home)   # #5315
+                    }
                     # Quote-aware absolute/relative CLASSIFICATION only
                     # (#4933, widened to a PARTIALLY quoted argument by
                     # #5363 -- see the strip_cd_quoting() header comment
@@ -5414,8 +5450,38 @@ extract_write_targets() {
                     # ambiguity can only ever keep the existing verdict, never
                     # widen a deny into an allow (same fallback contract as
                     # #4926).
+                    #
+                    # FRESH-ROOT classification for a STILL-UNRESOLVED bare
+                    # `$NAME`/`${NAME}` cd argument (#7294, companion to the
+                    # resolve_var() attempt above): `tmp=$(mktemp -d); cd
+                    # "$tmp/repo"; ...` cannot be resolved to a literal value
+                    # by resolve_var() (a `$(...)` RHS is deliberately never
+                    # substituted, same rule wt_write_mktemp_same_command_safe()
+                    # relies on for the DIRECT-write-target #6949 fix), so
+                    # cdclass is still `$tmp/repo` here — starts with `$`, not
+                    # `/`. Joining that onto the PRIOR curcwd (the `else if`
+                    # below) is wrong the same way it would be wrong for an
+                    # absolute path: `$tmp` supplies its OWN root at runtime,
+                    # it is never actually relative to the cd'"'"'s starting
+                    # cwd. Treating it as a fresh root instead (curcwd = cdarg,
+                    # RAW and quote-preserved, exactly like the absolute
+                    # branch) reproduces for the CWD side the identical
+                    # "root unknown" shape `_wt_write_mktemp_leading_var()`
+                    # already recognizes for a write TARGET — letting the
+                    # shell-layer confinement check below try the SAME
+                    # same-command exact-string mktemp proof against the
+                    # combined cd-suffix + write-target path instead of
+                    # joining onto a real (and therefore falsely "protected
+                    # area") prefix. A value that resolve_var() DID resolve
+                    # (the `if` branch above) can never reach here starting
+                    # with `$` — resolve_var() never returns a substituted
+                    # value that itself still starts with `$` — so this can
+                    # only ever fire for a genuinely unresolved bare
+                    # reference, never mask a real resolution.
                     cdclass = strip_cd_quoting(cdarg)
-                    if (cdclass ~ /^\//) {
+                    if (cdclass ~ /^\// || \
+                        cdclass ~ /^\$\{[A-Za-z_][A-Za-z0-9_]*\}(\/.*)?$/ || \
+                        cdclass ~ /^\$[A-Za-z_][A-Za-z0-9_]*(\/.*)?$/) {
                         curcwd = cdarg
                     } else if (curcwd != "") {
                         curcwd = curcwd "/" cdarg
@@ -6437,6 +6503,44 @@ if worktree_isolation_guard_enabled && \
                 _wdirpart=""
                 [[ "$_weff" == */* ]] && _wdirpart="${_weff%/*}"
                 if [[ "$_wdirpart" == *$'\001'* ]]; then
+                    # Same-command mktemp CWD resolution (#7294): reached only
+                    # when the unexpanded `$` lives entirely in the TRACKED
+                    # CWD, never the target itself (`_wmarked` — the target's
+                    # own marked form — has no `\001`, and `_wtarget` itself
+                    # has no literal `$` to combine against). `_wcwd` is the
+                    # cd-tracking awk block's RAW, quote-preserved curcwd
+                    # (its own header comment above explains why quotes
+                    # survive to here), so when it is — after stripping at
+                    # most one layer of surrounding quotes — a BARE
+                    # `$NAME`/`${NAME}` reference optionally followed by a
+                    # `/`-suffix (the fresh-root classification added above,
+                    # same shape `_wt_write_mktemp_leading_var()` already
+                    # proves safe for a DIRECT write target, #6949), the
+                    # identical same-command exact-string mktemp proof
+                    # applies here too — just against the COMBINED cd-suffix
+                    # + actual write-target path, so a `..` anywhere in
+                    # EITHER half still fails closed exactly like the #6949
+                    # suffix rule (wt_write_mktemp_same_command_safe() runs
+                    # the same `*/../*|*/..` suffix check on the combined
+                    # string). A target that itself still carries a literal
+                    # `$` is excluded so this shortcut never has to reason
+                    # about resolving two unresolved variables at once — the
+                    # existing deny logic below is untouched for that case.
+                    if [[ "$_wmarked" != *$'\001'* && "$_wtarget" != *'$'* ]] \
+                        && _wt_write_mktemp_leading_var "$_wcwd"; then
+                        if [[ -z "${COMMAND_WT_MKTEMP_SCAN+x}" ]]; then
+                            COMMAND_WT_MKTEMP_SCAN="$COMMAND_NO_LITERAL_TEXT"
+                            if [[ "$COMMAND_WT_MKTEMP_SCAN" == *"<<"* ]]; then
+                                COMMAND_WT_MKTEMP_SCAN=$(printf '%s' "$COMMAND_WT_MKTEMP_SCAN" | awk "$_MASKHEREDOC_AWK"'
+                                { buf = buf (NR > 1 ? "\n" : "") $0 }
+                                END { printf "%s", mask_heredoc_bodies(buf) }')
+                            fi
+                        fi
+                        _wcombined="\$${_WT_WRITE_VARNAME}${_WT_WRITE_SUFFIX}/${_wtarget}"
+                        if wt_write_mktemp_same_command_safe "$_wcombined" "$COMMAND_WT_MKTEMP_SCAN"; then
+                            continue
+                        fi
+                    fi
                     _wknown="${_weff%%$'\001'*}"
                     _wknown="${_wknown%/*}"
                     # Normalize BEFORE judging: a `..` traversal in the known

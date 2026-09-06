@@ -140,6 +140,7 @@ test-merge-pr-app-permission-fallback.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
 test-merge-pr-auto-reconcile.sh
 test-merge-pr-closed-issue-cleanup.sh
+test-merge-pr-defaults-version-bump-collision.sh
 test-merge-pr-dirty-worktree-guard.sh
 test-merge-pr-head-mismatch.sh
 test-merge-pr-help.sh

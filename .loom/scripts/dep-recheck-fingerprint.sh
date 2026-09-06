@@ -242,6 +242,12 @@ _fetch_dep_recheck_json() {
             local one
             one="$(gh pr view "$pr" "${REPO_FLAG[@]}" --json number,state,labels,mergeable,mergeStateStatus)" ||
                 _die "gh pr view $pr failed — cannot compute a fingerprint from a failed read" 1
+            # `gh pr view --json labels` returns an array of label OBJECTS
+            # ({"name": "loom:pr", ...}), not plain strings. Normalize to
+            # plain name strings here, once, so every downstream consumer
+            # (_dep_recheck_blockers, _dep_recheck_verdict) can keep assuming
+            # the same string-array shape the --stdin fixtures already use.
+            one="$(jq -c '{number, state, labels: [.labels[].name], mergeable, mergeStateStatus}' <<<"$one")"
             [[ "$first" == true ]] && first=false || pr_json+=","
             pr_json+="$one"
         done
