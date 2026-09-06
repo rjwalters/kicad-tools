@@ -71,6 +71,7 @@ test-cpu-budget.sh
 test-create-pr-superseded-issue.sh
 test-create-pr-version-check.sh
 test-default-branch.sh
+test-dep-recheck-fingerprint.sh
 test-dependency-parse.sh
 test-detect-dependency-cycle.sh
 test-detect-startable-subset.sh

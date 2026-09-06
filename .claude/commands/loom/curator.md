@@ -1367,40 +1367,37 @@ appeared or cleared, or a flip between `blocked` and `clear` is a **changed**
 conclusion.
 
 Embed the fingerprint as a marker in every re-check comment you post, so the
-next pass can compare mechanically instead of re-reading prose:
+next pass can compare mechanically instead of re-reading prose. **Do not
+hand-roll the VERDICT/BLOCKERS/CONCLUSION_HASH computation** — every Curator
+pass re-deriving it independently from prose is exactly what let the hash
+churn across dozens of distinct values on #6335/#6805 despite an unchanged
+blocking condition, defeating this whole section (#7281). Drive the shared,
+unit-tested script instead
+(`.loom/scripts/tests/test-dep-recheck-fingerprint.sh`), mirroring how
+"Stale `loom:curating` Claim Check" above drives `claim-staleness.sh` (#6514):
 
 ```bash
 ISSUE_NUMBER=<number>
-ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" --json comments,closedByPullRequestsReferences)
+ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" --json comments)
 
-_sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum
-  elif command -v shasum >/dev/null 2>&1; then shasum -a 256
-  else cksum; fi
-}
+# Mechanical half: fetches the issue's own closedByPullRequestsReferences PRs
+# and computes VERDICT/BLOCKERS itself — including the #7281 fix that fails
+# safe (treats as still-blocking, never as newly-cleared) when a PR's
+# mergeable/mergeStateStatus is transiently UNKNOWN rather than a real value.
+eval "$(./.loom/scripts/dep-recheck-fingerprint.sh dep-recheck --number "$ISSUE_NUMBER")"
+# When there is no linked PR and the block came from the secondary heuristic
+# instead, override the mechanical (empty-BLOCKERS -> clear) default and fold
+# in the cited justification, so a *changed* reason ("doctor cycle exhausted"
+# → "Sweep coordination: blocking") still reads as a changed conclusion:
+#   eval "$(./.loom/scripts/dep-recheck-fingerprint.sh dep-recheck --number "$ISSUE_NUMBER" \
+#     --verdict blocked --block-reason "doctor cycle exhausted")"
+RECHECK_MARKER="<!-- curator:dep-recheck:$CONCLUSION_HASH -->"
 
-# One "<pr#>:<state>:<sorted block labels>" line per current blocker, sorted so
-# ordering churn from the API never looks like a changed conclusion. Prefix with
-# the verdict so blocked→clear can never collide with clear→blocked.
+# Most recent prior Curator re-check comment, of ANY conclusion.
 # NOTE: `printf '%s\n' "$VAR" | jq`, never `echo "$VAR" | jq` — zsh's `echo`
 # builtin reinterprets `\n`/`\t` escapes by default, corrupting captured
 # `gh --json` output (a literal `\n` inside a body/comment string becomes a
 # raw newline) before jq ever parses it (#5094).
-BLOCKERS=$(for PR in $(printf '%s\n' "$ISSUE_JSON" | jq -r '.closedByPullRequestsReferences[].number'); do
-  gh pr view "$PR" --json number,state,labels --jq \
-    '"\(.number):\(.state):\([.labels[].name | select(startswith("loom:"))] | sort | join(","))"'
-done | sort)
-VERDICT=blocked   # or "clear" once the superseding-block check passes
-# When there is no linked PR and the block came from the secondary heuristic,
-# BLOCKERS is empty — fold the cited justification in so a *changed* reason
-# ("doctor cycle exhausted" → "Sweep coordination: blocking") still reads as a
-# changed conclusion. Leave empty when the primary check supplied the blockers.
-BLOCK_REASON=""
-CONCLUSION_HASH=$(printf '%s\n%s\n%s' "$VERDICT" "$BLOCKERS" "$BLOCK_REASON" \
-  | _sha256 | awk '{print substr($1, 1, 16)}')
-RECHECK_MARKER="<!-- curator:dep-recheck:$CONCLUSION_HASH -->"
-
-# Most recent prior Curator re-check comment, of ANY conclusion.
 PRIOR=$(printf '%s\n' "$ISSUE_JSON" | jq -c '[.comments[] | select(.body | test("<!-- curator:dep-recheck:"))] | last // {}')
 PRIOR_HASH=$(printf '%s\n' "$PRIOR" | jq -r '.body // ""' \
   | sed -n 's|.*<!-- curator:dep-recheck:\([0-9a-f]\{1,\}\) -->.*|\1|p' | tail -n 1)
@@ -1414,6 +1411,16 @@ else
   PRIOR_AGE_H=""   # no prior re-check comment at all
 fi
 ```
+
+`eval` is safe here exactly as it is for `claim-staleness.sh`: the script
+emits only `KEY=VALUE` lines built from a fixed enum, pre-sorted plain-text
+blocker lines and a hex hash — never raw forge text. **If
+`.loom/scripts/dep-recheck-fingerprint.sh` is missing** (an older install
+that has not been resynced yet): fall back to computing `VERDICT`/`BLOCKERS`
+inline exactly as this section did before #7281, but apply the same UNKNOWN
+fail-safe by hand — never let a PR's `mergeable`/`mergeStateStatus` reading
+`UNKNOWN` (rather than a confirmed value) flip `VERDICT` from `blocked` to
+`clear` on its own.
 
 **Four-way decision** (run it *before* posting, and before any `loom:curating`
 claim you would only take in order to comment):
@@ -1494,9 +1501,8 @@ from it re-suppresses the very pass that discovered the problem.
 # Stable identity of the orthogonal condition — the thing an operator must act
 # on, not your wording of it. e.g. "epic-open-but-complete:owner/repo#14",
 # "champion-format-objection:#14", "label-hold:loom:operator-only".
-ORTHOGONAL="epic-open-but-complete:owner/repo#14"
-CONCLUSION_HASH=$(printf '%s\n%s\n%s\n%s' "$VERDICT" "$BLOCKERS" "$BLOCK_REASON" "$ORTHOGONAL" \
-  | _sha256 | awk '{print substr($1, 1, 16)}')
+eval "$(./.loom/scripts/dep-recheck-fingerprint.sh dep-recheck --number "$ISSUE_NUMBER" \
+  --orthogonal "epic-open-but-complete:owner/repo#14")"
 ```
 
 `ORTHOGONAL` is empty on an ordinary re-check, so every existing fingerprint is
@@ -1607,14 +1613,30 @@ REFS=$(printf '%s\n' "$TEXT" \
 - **No reference found** → no-op. Most `loom:operator-mechanical` /
   `loom:operator-decision` / `loom:operator-objective` issues have nothing
   checkable — leave them exactly as found, silently.
-- **One or more references found** → for each, check its current state with
-  `gh issue view <ref> --json state,title` (fall back to `gh pr view <ref>
-  --json state,title` if the reference turns out to be a PR, not an issue).
+- **One or more references found** → compute the fingerprint with the same
+  shared script "Re-check Idempotency" above uses (a distinct `operator-premise`
+  subcommand — this check's inputs, a set of issue/PR *references* with only a
+  state each, are not the PR-blocker shape `dep-recheck` computes over, so it
+  is not force-unified with that computation):
+
+```bash
+eval "$(./.loom/scripts/dep-recheck-fingerprint.sh operator-premise --refs "$REFS")"
+# VERDICT=stale-premise (>=1 reference closed) or VERDICT=open (all still open).
+# REFS is always populated (one `<ref>:<state>` line per reference checked,
+# in both verdicts); only CONCLUSION_HASH is empty when VERDICT=open — see
+# "Idempotency" below for why that means nothing is posted or compared.
+```
+
+Internally this fetches each reference's current state via `gh issue view
+<ref> --json state` (falling back to `gh pr view <ref> --json state` if the
+reference turns out to be a PR, not an issue) — you do not need to fetch
+those yourself.
 
 ### Reporting a closed reference
 
-If **any** referenced number is closed, post a comment naming it — do not
-silently absorb the finding, and do not touch any label:
+If **any** referenced number is closed (`VERDICT=stale-premise`), post a
+comment naming it — do not silently absorb the finding, and do not touch any
+label:
 
 ```bash
 gh issue comment "$ISSUE_NUMBER" --body "**Operator-parked, premise possibly stale**: the reference this issue is parked on, #<ref>, is now **closed**. Worth an operator taking another look — not auto-releasing; \`loom:operator-only\` and its sub-kind label are left untouched. <!-- curator:operator-premise-recheck:$CONCLUSION_HASH -->"
@@ -1638,11 +1660,12 @@ Apply the same three-way decision and 24h staleness window as "Re-check
 Idempotency" above, with two differences: use the marker prefix
 `curator:operator-premise-recheck:` (never `curator:dep-recheck:` — the two
 markers must stay distinguishable so a later pass can tell which check
-produced which comment), and fold the closed-reference list into
-`CONCLUSION_HASH` the same way `BLOCKERS` does above — one `"<ref>:<state>"`
-line per referenced number, sorted, plus the verdict (`stale-premise` when
-any reference is closed; nothing is posted at all, and no hash is computed
-or compared, when every reference is still open).
+produced which comment), and compare against `CONCLUSION_HASH` as emitted by
+the `operator-premise` subcommand above — one `"<ref>:<state>"` line per
+referenced number, sorted, folded in under the verdict (`stale-premise` when
+any reference is closed). When `VERDICT=open` (every reference still open),
+`CONCLUSION_HASH` is empty by design: nothing is posted at all, and there is
+nothing to compare against a prior marker either.
 
 ### What this section never does
 
