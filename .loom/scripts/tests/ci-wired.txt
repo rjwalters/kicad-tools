@@ -106,6 +106,7 @@ test-guide-work-log-issue-pagination.sh
 test-guide-work-log-out-of-order-merge.sh
 test-guide-work-log-pr-pagination.sh
 test-guide-work-log-self-loop.sh
+test-guide-work-plan-approved-review-label-fidelity.sh
 test-guide-work-plan-debounce.sh
 test-guide-work-plan-operator-only-exclude.sh
 test-guide-work-plan-ready-open-pr-exclude.sh

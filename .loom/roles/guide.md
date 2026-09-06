@@ -1216,6 +1216,16 @@ one lookup is the deliberate exception to fail-closed: if it cannot complete,
 the guard does **not** suppress on its account, so a forge hiccup on this
 specific probe never blocks an otherwise-legitimate promotion.
 
+Two more checks guard the hard cap itself against a concurrent-tick race
+(#7272 — two ticks independently refilling an emptied urgent set can each add
+a different rank-4 fill, pushing the count to 4): an `add` is also refused
+when the **live**, fleet-wide `loom:urgent` count is already >= 3 at write
+time regardless of cooldown/flap state (narrows, but does not fully close,
+the race — same fail-open posture as the PR-linkage lookup above); and a
+`remove` is exempted from `reversal-within-cooldown` whenever that live count
+currently *exceeds* 3, so an over-cap set is never stuck behind the cooldown
+waiting for `LOOM_URGENT_FLIP_COOLDOWN_SECS` to elapse.
+
 A suppressed write is not an error and is not something to work around — do not
 retry it, do not reach for `gh api` to bypass it, and do not "just this once"
 edit the label by hand. Move on; the next tick re-evaluates. The cooldown gates

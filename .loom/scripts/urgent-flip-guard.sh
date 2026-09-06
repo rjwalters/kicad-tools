@@ -43,8 +43,8 @@
 #    enough that it was almost certainly another tick's, not a real priority
 #    change?"
 #
-# Three suppression rules
-# ------------------------
+# Four suppression rules (plus one exemption)
+# --------------------------------------------
 #   0. ALREADY-SATISFIED-BY-AN-OPEN-PR (`add` only, issue #6975/#5911). If the
 #      issue's own `closedByPullRequestsReferences` links an OPEN pull request
 #      that already carries `loom:pr`, the issue is fully implemented and
@@ -88,6 +88,19 @@
 #      meantime, and lower LOOM_URGENT_FLIP_COOLDOWN_SECS for a repo whose
 #      triage genuinely moves faster than that.
 #
+#      OVER-CAP EXEMPTION (`remove` only, issue #7272): a `remove` that would
+#      otherwise be suppressed as a reversal is let through anyway when the
+#      LIVE fleet-wide `loom:urgent` count exceeds 3 at check time. This
+#      mirrors the flap-freeze's own `remove` exemption below -- "must not
+#      strand an over-cap set" applies equally to a cooldown-caused stall. A
+#      concurrent-tick race (two ticks independently refilling an emptied
+#      urgent set, each self-consistent alone) can otherwise push the count to
+#      4, and every one of those fresh labels then falls inside its own
+#      cooldown, leaving the "max 3" cap violated for up to
+#      LOOM_URGENT_FLIP_COOLDOWN_SECS with no guard-sanctioned way to correct
+#      it sooner. The exemption only ever widens what a `remove` may do; it
+#      never touches `add`, so it cannot itself create a new race.
+#
 #   2. FLAP-FREEZE (`add` only). If the issue already accumulated
 #      LOOM_URGENT_FLAP_THRESHOLD or more `loom:urgent` events inside
 #      LOOM_URGENT_FLAP_WINDOW_SECS, it is demonstrably flapping; freeze
@@ -100,17 +113,35 @@
 #      blocking the removal that restores the "max 3" cap. That invariant is
 #      unchanged by this guard.
 #
-# Fail-closed (history), fail-open (PR linkage)
-# -----------------------------------------------
+#   3. LIVE-CAP-AT-ADD-TIME (`add` only, issue #7272). Independent of any
+#      issue's own event history: right before writing an `add`, read the
+#      LIVE fleet-wide count of open issues carrying `loom:urgent` and
+#      suppress if it is already >= 3, regardless of cooldown/flap state.
+#      This narrows -- but does not fully close, there is still a TOCTOU
+#      between this read and either tick's actual label write -- the race
+#      where two concurrent ticks each observe an empty/under-cap urgent set
+#      and both add, together pushing the count past the cap. It is the
+#      companion to Rule 1's exemption above: this one shrinks the window in
+#      which an over-cap set can be CREATED; that one guarantees an existing
+#      over-cap set can always be CORRECTED without waiting out the cooldown.
+#
+# Fail-closed (history), fail-open (PR linkage, live count)
+# -----------------------------------------------------------
 # If the loom:urgent label history cannot be read at all (forge outage, wedged
 # `gh`, auth failure), the answer is SUPPRESS, not ALLOW — the same "a probe
 # that could not answer at all blocks the write" stance guide.md's #5511
 # open-linked-PR gate already takes for label writes. Skipping one tick's
 # urgency update is cheap; resuming an unbounded flap is not.
 #
-# Rule 0's separate PR-linkage lookup is the one deliberate exception: if IT
-# cannot be completed, this script does NOT suppress on its account — see
-# "0. ALREADY-SATISFIED-BY-AN-OPEN-PR" above for why.
+# Rule 0's PR-linkage lookup and Rules 1/3's live fleet-wide count lookup are
+# the deliberate exceptions: if either cannot be completed, this script does
+# NOT suppress on their account -- an unreadable live count just means
+# Rule 3's narrowing check is skipped (falls through to the pre-existing
+# history-based rules) and Rule 1's over-cap exemption is not granted (falls
+# through to the pre-existing reversal-within-cooldown suppression, i.e. no
+# regression from today). Neither failure mode can manufacture a NEW
+# suppression, and neither can force an ALLOW that the history-based rules
+# would not already have produced on their own.
 #
 # Exit codes:
 #   0  ALLOW    - proceed with the label write
@@ -176,6 +207,13 @@ Test seams (unset in normal operation):
                                     `{"456": {"state": "OPEN", "labels":
                                     [{"name": "loom:pr"}]}}`) instead of `gh pr
                                     view --json state,labels`.
+  LOOM_URGENT_GUARD_LIVE_COUNT_FILE Read the fleet-wide list of issue numbers
+                                    currently carrying `loom:urgent` from this
+                                    JSON file (a bare array, e.g. `[456, 789]`)
+                                    instead of `gh issue list --label
+                                    loom:urgent --state open`. Its length is
+                                    the LIVE count used by Rule 1's over-cap
+                                    exemption and Rule 3's live-cap check.
 
 Exit codes: 0 = allow, 1 = suppress, 2 = usage/configuration error.
 EOF
@@ -399,6 +437,45 @@ if [[ "$DIRECTION" == "add" ]]; then
     fi
 fi
 
+# --- Shared: the LIVE fleet-wide loom:urgent count (issue #7272) ------------
+# Used by Rule 1's over-cap exemption (`remove`) and Rule 3's live-cap check
+# (`add`). Unlike EVENTS above (this ONE issue's own history), this reads the
+# forge's CURRENT set of open issues carrying `loom:urgent` -- the only number
+# that answers "is the cap actually violated right now, fleet-wide". FAIL-OPEN
+# (echoes nothing, returns 1): see "Fail-closed (history), fail-open ..." in
+# the header for why an unreadable live count must never manufacture a new
+# suppression or force an ALLOW the history-based rules would not already
+# have produced.
+_read_live_urgent_count() {
+    local raw rc=0
+    if [[ -n "${LOOM_URGENT_GUARD_LIVE_COUNT_FILE:-}" ]]; then
+        [[ -f "$LOOM_URGENT_GUARD_LIVE_COUNT_FILE" ]] || return 1
+        raw="$(jq -r 'length' "$LOOM_URGENT_GUARD_LIVE_COUNT_FILE" 2>/dev/null)" || rc=$?
+    else
+        raw="$(gh issue list --label "$URGENT_LABEL" --state open --json number --jq 'length' 2>/dev/null)" || rc=$?
+    fi
+    [[ "$rc" -eq 0 ]] || return 1
+    [[ "$raw" =~ ^[0-9]+$ ]] || return 1
+    echo "$raw"
+    return 0
+}
+
+# --- Rule 3: live-cap-at-add-time (promotions only, #7272) -------------------
+# Narrows (does not fully close -- see header) the race where two concurrent
+# ticks each read an empty/under-cap urgent set and both add, together pushing
+# the fleet-wide count past the "max 3" cap. Independent of, and checked
+# before, the history-based rules below: this reads the CURRENT forge count
+# directly rather than this one issue's own event history.
+if [[ "$DIRECTION" == "add" ]]; then
+    LIVE_COUNT_FOR_ADD="$(_read_live_urgent_count)" || LIVE_COUNT_FOR_ADD=""
+    if [[ -n "$LIVE_COUNT_FOR_ADD" ]] && (( LIVE_COUNT_FOR_ADD >= 3 )); then
+        echo "SUPPRESS reason=live-cap-at-write-time issue=${ISSUE} direction=add live_count=${LIVE_COUNT_FOR_ADD}"
+        print_warn "${URGENT_LABEL} count is already ${LIVE_COUNT_FOR_ADD} (>= cap of 3) at write time — suppressing this add regardless of cooldown/flap state (#7272)."
+        print_info "This narrows, but does not fully close, the concurrent-tick race (#7272): the read above and this write are not atomic."
+        exit 1
+    fi
+fi
+
 # --- Rule 2: flap-freeze (promotions only) -----------------------------------
 # Checked before the cooldown so a demonstrably flapping issue reports the
 # more informative reason. `remove` is deliberately exempt: freezing it could
@@ -420,6 +497,21 @@ if [[ -n "$LAST_EVENT" ]] && (( LAST_AGE < LOOM_URGENT_FLIP_COOLDOWN_SECS )); th
         REVERSES=1
     fi
     if (( REVERSES == 1 )); then
+        # Over-cap exemption (#7272): mirrors Rule 2's own `remove` exemption
+        # below -- a `remove` must never be trapped behind the cooldown when
+        # the LIVE fleet-wide loom:urgent count already exceeds the "max 3"
+        # cap, or a concurrent-tick race's over-cap set would be stuck for up
+        # to LOOM_URGENT_FLIP_COOLDOWN_SECS with no guard-sanctioned recovery.
+        # Fails closed to the pre-existing behavior below (no regression) if
+        # the live count cannot be read.
+        if [[ "$DIRECTION" == "remove" ]]; then
+            LIVE_COUNT_FOR_REMOVE="$(_read_live_urgent_count)" || LIVE_COUNT_FOR_REMOVE=""
+            if [[ -n "$LIVE_COUNT_FOR_REMOVE" ]] && (( LIVE_COUNT_FOR_REMOVE > 3 )); then
+                echo "ALLOW reason=over-cap-correction issue=${ISSUE} direction=remove last_event=${LAST_EVENT} last_event_age_secs=${LAST_AGE} live_count=${LIVE_COUNT_FOR_REMOVE}"
+                print_success "${URGENT_LABEL} count is ${LIVE_COUNT_FOR_REMOVE} (> cap of 3) — allowing this remove despite the ${LAST_AGE}s-old cooldown so the over-cap set can be corrected (#7272)."
+                exit 0
+            fi
+        fi
         echo "SUPPRESS reason=reversal-within-cooldown issue=${ISSUE} direction=${DIRECTION} last_event=${LAST_EVENT} last_event_age_secs=${LAST_AGE} cooldown_secs=${LOOM_URGENT_FLIP_COOLDOWN_SECS}"
         print_warn "#${ISSUE} was ${LAST_EVENT} ${URGENT_LABEL} only ${LAST_AGE}s ago (cooldown ${LOOM_URGENT_FLIP_COOLDOWN_SECS}s) — this write would reverse another tick's decision."
         print_info "Leaving the label as-is. It becomes reversible again once the decision is older than the cooldown, so a real priority change is delayed at most one tick, never blocked."
