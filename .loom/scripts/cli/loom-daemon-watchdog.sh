@@ -474,6 +474,34 @@
 #                                /.watchdog-peer-coordination-escalated). Stores
 #                                `<timestamp> <issue-url>` so recovery can
 #                                comment on and close the exact filed issue.
+#   LOOM_WATCHDOG_PEER_COORD_COOLDOWN_SECS  #7258: post-recovery hysteresis —
+#                                after clear_peer_coordination_escalation()
+#                                closes an episode's tracking issue, a repeat
+#                                DEGRADED excursion within this many seconds is
+#                                suppressed (logged, no new issue filed) rather
+#                                than filing a fresh one. Default 21600 (6h),
+#                                comfortably above the ~1-2h flap interval
+#                                observed on a flapping host (#7258). This is
+#                                LAYERED ON TOP of, and does not replace, the
+#                                PEER_COORD_SENTINEL within-episode dedupe
+#                                above — it only governs repeat episodes AFTER
+#                                a recovery already cleared that sentinel. The
+#                                comparison is strict `<` (elapsed < cooldown):
+#                                an excursion landing exactly AT the boundary
+#                                is treated as cooldown-elapsed and escalates
+#                                fresh, same as one landing after it. 0
+#                                disables the cooldown outright (fires every
+#                                time, today's behavior).
+#   LOOM_WATCHDOG_PEER_COORD_COOLDOWN_STATE  #7258: path to the cooldown
+#                                timestamp file a successful recovery writes
+#                                (default <loom dir>
+#                                /.watchdog-peer-coordination-cooldown), read
+#                                back by the next escalation attempt. A
+#                                missing OR corrupt/non-numeric file fails
+#                                OPEN — treated as "no cooldown in effect",
+#                                i.e. today's fire-every-time behavior — never
+#                                an error and never a reason to skip
+#                                escalating a genuine degradation.
 #   LOOM_WATCHDOG_CREATE_ISSUE_FALLBACK_DIR  #6272: test seam ONLY — overrides
 #                                the third (production-intent) branch of the
 #                                create-issue.sh resolution shared by
@@ -566,6 +594,12 @@ PROBE_ARGS="${LOOM_WATCHDOG_IPC_PROBE_ARGS:-quarantine list}"
 # independently overridable for tests and tuning.
 PEER_COORD_TIMEOUT_SECS="${LOOM_WATCHDOG_PEER_COORD_TIMEOUT_SECS:-$PROBE_TIMEOUT_SECS}"
 [[ "$PEER_COORD_TIMEOUT_SECS" =~ ^[0-9]+$ ]] || PEER_COORD_TIMEOUT_SECS="$PROBE_TIMEOUT_SECS"
+# #7258: post-recovery hysteresis window (default 6h — comfortably above the
+# ~1-2h flap interval a flapping host was observed to hit). A non-numeric
+# override fails open to the default rather than erroring, matching every
+# other numeric knob in this file.
+PEER_COORD_COOLDOWN_SECS="${LOOM_WATCHDOG_PEER_COORD_COOLDOWN_SECS:-21600}"
+[[ "$PEER_COORD_COOLDOWN_SECS" =~ ^[0-9]+$ ]] || PEER_COORD_COOLDOWN_SECS=21600
 PROBE_FAIL_THRESHOLD="${LOOM_WATCHDOG_IPC_PROBE_FAIL_THRESHOLD:-3}"
 [[ "$PROBE_FAIL_THRESHOLD" =~ ^[1-9][0-9]*$ ]] || PROBE_FAIL_THRESHOLD=3
 # Mirrors daemon_install_state::DEFAULT_STARTUP_GRACE_SECS (90) and honors the
@@ -657,6 +691,13 @@ ESCALATION_SENTINEL="${LOOM_WATCHDOG_ESCALATION_SENTINEL:-$LOOM_DIR/.watchdog-ou
 # just a timestamp, unlike ESCALATION_SENTINEL) so the recovery path below can
 # comment on and close the EXACT issue this episode filed.
 PEER_COORD_SENTINEL="${LOOM_WATCHDOG_PEER_COORD_SENTINEL:-$LOOM_DIR/.watchdog-peer-coordination-escalated}"
+# #7258: post-recovery cooldown state — separate from PEER_COORD_SENTINEL
+# above (which only covers WITHIN one continuous degraded episode and is
+# deleted the moment recovery is observed). This file survives across the
+# recovery: it stores the epoch-seconds timestamp of the LAST successful
+# clear_peer_coordination_escalation(), so a repeat degradation shortly after
+# a recovery can be recognized as a flap rather than a brand-new episode.
+PEER_COORD_COOLDOWN_STATE="${LOOM_WATCHDOG_PEER_COORD_COOLDOWN_STATE:-$LOOM_DIR/.watchdog-peer-coordination-cooldown}"
 
 # Append a timestamped line to the watchdog log (best-effort) and echo to
 # stderr, which launchd captures to the job's StandardErrorPath. This IS the
@@ -1526,9 +1567,41 @@ check_peer_coordination_health() {
 # EXACT issue this episode filed, never a bare "clear and forget". Best-effort
 # and NON-FATAL throughout: no create-issue.sh, no forge auth, or an offline
 # host all degrade to the DIVERGENCE log line the caller already prints.
+#
+# #7258: on top of the within-episode PEER_COORD_SENTINEL dedupe above (which
+# only guards against re-filing WHILE one continuous episode is still open),
+# this also consults PEER_COORD_COOLDOWN_STATE — the timestamp of the last
+# episode's RECOVERY — so a host that flaps degraded/healthy every 1-2 hours
+# does not file a brand-new tracking issue on every flap. Sets the global
+# PEER_COORD_ESCALATE_SKIP_REASON to "cooldown" (and PEER_COORD_COOLDOWN_REMAINING
+# to the seconds left) when suppressed this way, so the caller's log line can
+# say WHY no issue was filed instead of conflating it with a hard failure
+# (missing create-issue.sh / forge auth / offline host).
 escalate_peer_coordination_degraded() {
+    PEER_COORD_ESCALATE_SKIP_REASON=""
+    PEER_COORD_COOLDOWN_REMAINING=""
     [[ "${LOOM_WATCHDOG_ESCALATE:-}" =~ ^(0|false|no)$ ]] && return 1
     [[ -f "$PEER_COORD_SENTINEL" ]] && return 1
+
+    # Cooldown check. A missing OR corrupt/non-numeric cooldown-state file (or
+    # one whose stored timestamp is in the future, e.g. clock skew) FAILS OPEN
+    # — falls through and escalates exactly like today, rather than erroring
+    # or silently suppressing on bad data. Boundary is a strict `<`: elapsed
+    # seconds exactly equal to the cooldown window count as elapsed, not
+    # still-cooling-down.
+    if [[ -f "$PEER_COORD_COOLDOWN_STATE" ]]; then
+        local cooldown_ts now_epoch elapsed
+        cooldown_ts="$(cat "$PEER_COORD_COOLDOWN_STATE" 2>/dev/null)"
+        if [[ "$cooldown_ts" =~ ^[0-9]+$ ]]; then
+            now_epoch="$(date -u +%s)"
+            elapsed=$(( now_epoch - cooldown_ts ))
+            if (( elapsed >= 0 && elapsed < PEER_COORD_COOLDOWN_SECS )); then
+                PEER_COORD_ESCALATE_SKIP_REASON="cooldown"
+                PEER_COORD_COOLDOWN_REMAINING=$(( PEER_COORD_COOLDOWN_SECS - elapsed ))
+                return 1
+            fi
+        fi
+    fi
 
     local repo_root issue_script fallback_dir
     repo_root="$(marker_get repo_root)"
@@ -1596,6 +1669,13 @@ EOF
 # a missing `gh`, no forge auth, or a failed close leaves the sentinel in place
 # so a LATER healthy tick simply retries rather than silently losing track of
 # an open tracking issue.
+#
+# #7258: on a successful close, also stamps PEER_COORD_COOLDOWN_STATE with
+# the current epoch time — the post-recovery hysteresis window
+# escalate_peer_coordination_degraded() reads back to suppress a re-filing
+# for a repeat flap within LOOM_WATCHDOG_PEER_COORD_COOLDOWN_SECS. Best-effort
+# like everything else here: a failed write just means the NEXT recovery
+# (or the next escalation attempt's fail-open path) tries again.
 clear_peer_coordination_escalation() {
     [[ -f "$PEER_COORD_SENTINEL" ]] || return 1
     local ts issue_ref
@@ -1614,6 +1694,8 @@ clear_peer_coordination_escalation() {
 
     if gh issue close "$issue_ref" --reason completed >/dev/null 2>&1; then
         rm -f "$PEER_COORD_SENTINEL" 2>/dev/null || true
+        mkdir -p "$(dirname "$PEER_COORD_COOLDOWN_STATE")" 2>/dev/null || true
+        date -u +%s > "$PEER_COORD_COOLDOWN_STATE" 2>/dev/null || true
         return 0
     fi
     return 1
@@ -2137,6 +2219,8 @@ if [[ "$probe_verdict" == "healthy" ]]; then
                 report OK "peer-coordination degradation already escalated out-of-band (sentinel ${PEER_COORD_SENTINEL})."
             elif escalate_peer_coordination_degraded; then
                 report DIVERGENCE "peer-claim coordination is DEGRADED: ${PEER_COORD_SUMMARY}. ESCALATED out-of-band: filed a forge tracking issue so this degradation is not confined to a logfile nobody tails (#6222)."
+            elif [[ "$PEER_COORD_ESCALATE_SKIP_REASON" == "cooldown" ]]; then
+                report DIVERGENCE "peer-claim coordination is DEGRADED: ${PEER_COORD_SUMMARY}. Suppressing a duplicate tracking issue: a previous episode on this host recovered within the last ${PEER_COORD_COOLDOWN_SECS}s cooldown window (#7258) — ${PEER_COORD_COOLDOWN_REMAINING:-?}s remaining before a repeat degradation would file fresh again. ${WATCHDOG_LOG} is the signal for this flap."
             else
                 report DIVERGENCE "peer-claim coordination is DEGRADED: ${PEER_COORD_SUMMARY}. Out-of-band escalation was NOT possible (disabled, no create-issue.sh reachable, or the forge call failed) — THIS LOGFILE IS THE ONLY SIGNAL for this degradation, ${WATCHDOG_LOG}."
             fi
