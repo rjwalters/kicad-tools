@@ -1157,6 +1157,40 @@ Each tick performs the smallest possible edit to it, in this order:
    outranks a holder, **this tick makes no `loom:urgent` writes at all**, which
    is the normal, healthy outcome for most ticks.
 
+   **#7323 BUG, DO NOT REINTRODUCE: "the weakest holder" can be more than one
+   issue.** When two or all three incumbents share the same lowest
+   `urgency_rank` and a challenger strictly outranks that shared rank, the
+   rule above only establishes that a swap is allowed — it does not say
+   *which* of the tied incumbents to evict, and two ticks that each pick
+   their own "obvious" choice disagree exactly like the #5565 flap this whole
+   section exists to prevent. Observed on #6320 (rank 3, `tier:goal-advancing`)
+   against the rank-4 `tier:goal-supporting` trio #6613/#6472/#6389: different
+   ticks evicted different trio members, so the urgent set kept
+   "self-correcting" back and forth for weeks after 2026-08-15.
+
+   Resolve it with one more deterministic comparison, applied **only among the
+   incumbents tied at that lowest rank** — every other incumbent in the set of
+   3 is untouched:
+
+   - **Lowest issue number stays; evict the highest issue number among the
+     tied subset.** Issue numbers are already in hand from step 1's
+     `issue list --json number,...` read, so this adds no extra forge call
+     (unlike a label-added-timestamp lookup) and, like `urgency_rank()`
+     itself, is immutable and mechanically reproducible from the same read.
+     It also happens to approximate "longest-held incumbent stays" without
+     needing to fetch *when* each one was labeled `loom:urgent`: lower issue
+     numbers were filed earlier, so they tend to have earned urgent status
+     earlier too.
+   - This tie-break only fires once the challenger strictly outranks the
+     **entire** tied subset. If the challenger merely ties the subset (e.g.
+     all three incumbents and the challenger share one rank), nothing is
+     evicted — the same "a tie leaves the incumbent in place" rule as the
+     single-holder case above, just applied to the whole group at once.
+   - If an incumbent's issue number is for any reason unreadable from the
+     step-1 listing, this tick makes **no** `loom:urgent` writes rather than
+     guess which one to evict — fail closed, the same stance
+     `urgent-flip-guard.sh` takes on an unreadable label-event history below.
+
 ### `urgency_rank()` — the deterministic ladder
 
 Two independent ticks reading the **same** forge state MUST compute the same
