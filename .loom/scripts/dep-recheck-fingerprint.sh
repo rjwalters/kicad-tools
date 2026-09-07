@@ -51,6 +51,8 @@
 #       [--verdict blocked|clear] [--block-reason TEXT] [--orthogonal ID] [--json]
 #   dep-recheck-fingerprint.sh operator-premise (--refs "N1 N2 ..." [--repo OWNER/NAME] | --stdin)
 #       [--json]
+#   dep-recheck-fingerprint.sh named-dependency (--number N [--repo OWNER/NAME] | --stdin)
+#       [--json]
 #
 # Subcommands:
 #   dep-recheck        The "Re-check Idempotency" fingerprint: VERDICT
@@ -63,18 +65,42 @@
 #                       CONCLUSION_HASH — left EMPTY when VERDICT=open, per
 #                       "no comment this pass" (nothing to report, nothing to
 #                       compare).
+#   named-dependency   The `## Dependencies` checklist fingerprint (#7314):
+#                       covers the shape `dep-recheck` cannot — a checklist
+#                       item naming a *different*, non-closing issue/PR as a
+#                       prerequisite (e.g. #6335 blocked on #6333, which does
+#                       not carry `Closes #6335`). Parses `- [ ] #N: ...` /
+#                       `- [x] #N: ...` items out of the issue body's own
+#                       `## Dependencies` section (a checked box is treated as
+#                       already resolved, no live lookup needed) and, for
+#                       every unchecked item, looks up the referenced issue's
+#                       or PR's own `state` (never its labels — this is
+#                       deliberately insensitive to a referenced PR's
+#                       review-cycle labels churning). Emits VERDICT
+#                       (blocked|clear), DEPS (one "<ref#>:<state-or-checked>"
+#                       line per named dependency, sorted), and
+#                       CONCLUSION_HASH. VERDICT=blocked iff any unchecked
+#                       reference is still OPEN; a reference that is MERGED or
+#                       CLOSED-without-merging both count as resolved, and an
+#                       issue body with no `## Dependencies` section (or an
+#                       empty one) is VERDICT=clear.
 #
 # Input modes (either one, mutually exclusive):
 #   --number N [--repo OWNER/NAME]   Live mode: fetch current PR/ref state via
 #                                     `gh issue view` / `gh pr view`. `dep-recheck`
 #                                     derives its own PR list from the issue's
 #                                     `closedByPullRequestsReferences`;
-#                                     `operator-premise` requires the caller's
-#                                     already-extracted `--refs "N1 N2 ..."`
-#                                     (this script does not parse issue body
-#                                     text for `Blocked by #N` etc. — that
-#                                     extraction stays in curator.md, tightly
-#                                     coupled to the phrasings it recognizes).
+#                                     `named-dependency` derives its own
+#                                     reference list by parsing the issue's own
+#                                     body `## Dependencies` section (see
+#                                     above); `operator-premise` requires the
+#                                     caller's already-extracted `--refs "N1
+#                                     N2 ..."` (that subcommand does not parse
+#                                     issue body text itself — that extraction
+#                                     stays in curator.md, tightly coupled to
+#                                     the free-form phrasings it recognizes,
+#                                     unlike `named-dependency`'s single fixed
+#                                     `## Dependencies` checklist format).
 #   --stdin                          Offline mode: read a JSON document on
 #                                     stdin instead of calling `gh` (used by
 #                                     the test suite, and available to any
@@ -86,6 +112,11 @@
 #                                         "mergeStateStatus":"DIRTY"}, ...]}
 #                                       operator-premise: {"refs": [{"number":N,
 #                                         "state":"OPEN"}, ...]}
+#                                       named-dependency: {"deps": [{"number":N,
+#                                         "checked":false,"state":"OPEN"}, ...]}
+#                                         (a checked entry may omit "state"
+#                                         entirely, or set it to null — it is
+#                                         never consulted).
 #
 # Options:
 #   --verdict blocked|clear   `dep-recheck` only: override the mechanically
@@ -133,13 +164,13 @@ _die() {
 
 SUBCOMMAND="${1:-}"
 case "$SUBCOMMAND" in
-    dep-recheck | operator-premise) shift ;;
+    dep-recheck | operator-premise | named-dependency) shift ;;
     -h | --help)
         _usage
         exit 0
         ;;
-    "") _die "missing subcommand (dep-recheck | operator-premise); see --help" ;;
-    *) _die "unknown subcommand '$SUBCOMMAND' (dep-recheck | operator-premise)" ;;
+    "") _die "missing subcommand (dep-recheck | operator-premise | named-dependency); see --help" ;;
+    *) _die "unknown subcommand '$SUBCOMMAND' (dep-recheck | operator-premise | named-dependency)" ;;
 esac
 
 NUMBER=""
@@ -198,7 +229,7 @@ command -v jq >/dev/null 2>&1 || _die "jq not found on PATH" 3
 if [[ "$USE_STDIN" == true ]]; then
     [[ -z "$NUMBER" ]] || _die "--stdin and --number are mutually exclusive"
     [[ -z "$REFS_ARG" ]] || _die "--stdin and --refs are mutually exclusive"
-elif [[ "$SUBCOMMAND" == "dep-recheck" ]]; then
+elif [[ "$SUBCOMMAND" == "dep-recheck" || "$SUBCOMMAND" == "named-dependency" ]]; then
     [[ -n "$NUMBER" ]] || _die "one of --number or --stdin is required"
     [[ "$NUMBER" =~ ^[0-9]+$ ]] || _die "--number must be a positive integer (got '$NUMBER')"
     command -v gh >/dev/null 2>&1 || _die "gh CLI not found on PATH" 3
@@ -369,7 +400,118 @@ _run_operator_premise() {
     fi
 }
 
+# --- named-dependency ---------------------------------------------------------
+
+# Extract only the `## Dependencies` section (up to the next level-2 heading
+# or end of body) so an unrelated `#N` mentioned anywhere else in the issue
+# body is never picked up as a named dependency.
+_extract_dependencies_section() {
+    awk '
+        /^## Dependencies[[:space:]]*$/ { found = 1; next }
+        found && /^## / { found = 0 }
+        found { print }
+    ' <<<"$1"
+}
+
+# One "<ref#> <true|false>" line per checklist item found in the section,
+# mirroring `operator-premise`'s regex-extraction approach (a fixed,
+# machine-readable pattern rather than free-form prose matching) but scoped
+# to this file's own `## Dependencies` checklist syntax:
+#   - [ ] #123: Prerequisite feature
+#   - [x] #456: Required infrastructure
+_extract_named_deps() {
+    local line num checked
+    grep -oE '^[[:space:]]*-[[:space:]]*\[[ xX]\][[:space:]]*#[0-9]+' <<<"$1" | while IFS= read -r line; do
+        checked="false"
+        [[ "$line" =~ \[[xX]\] ]] && checked="true"
+        num="$(grep -oE '#[0-9]+' <<<"$line" | tr -d '#')"
+        printf '%s %s\n' "$num" "$checked"
+    done
+}
+
+_fetch_named_dependency_json() {
+    local body section entries num checked state one deps_json first
+    body="$(gh issue view "$NUMBER" "${REPO_FLAG[@]}" --json body --jq '.body')" ||
+        _die "gh issue view $NUMBER failed — cannot compute a fingerprint from a failed read (fail safe: never guess 'clear' on missing data)" 1
+    section="$(_extract_dependencies_section "$body")"
+    entries="$(_extract_named_deps "$section")"
+    deps_json="[]"
+    if [[ -n "$entries" ]]; then
+        deps_json="["
+        first=true
+        while read -r num checked; do
+            [[ -z "$num" ]] && continue
+            if [[ "$checked" == "true" ]]; then
+                # Already resolved by whoever edited the checklist — no live
+                # lookup needed, and no state is ever consulted for it.
+                one="$(jq -n --argjson n "$num" '{number: $n, checked: true, state: null}')"
+            else
+                # A named dependency is either an issue or a PR — try issue
+                # first, and only fall back to `pr view` when that lookup
+                # itself fails (mirrors _fetch_operator_premise_json above).
+                # If BOTH fail, that is a real read failure — die rather than
+                # silently defaulting to a status that would misreport as
+                # "clear" (fail safe: never guess "clear" on missing data).
+                state="$(gh issue view "$num" "${REPO_FLAG[@]}" --json state --jq '.state' 2>/dev/null || true)"
+                if [[ -z "$state" ]]; then
+                    state="$(gh pr view "$num" "${REPO_FLAG[@]}" --json state --jq '.state' 2>/dev/null || true)"
+                fi
+                [[ -n "$state" ]] || _die "could not read state for named dependency #$num (neither gh issue view nor gh pr view succeeded)" 1
+                one="$(jq -n --argjson n "$num" --arg s "$state" '{number: $n, checked: false, state: $s}')"
+            fi
+            [[ "$first" == true ]] && first=false || deps_json+=","
+            deps_json+="$one"
+        done <<<"$entries"
+        deps_json+="]"
+    fi
+    jq -n --argjson deps "$deps_json" '{deps: $deps}'
+}
+
+# One "<ref#>:<state>" line per named dependency, sorted — a checked item
+# always renders as "<ref#>:checked" regardless of any "state" it carries
+# (never consulted, matching the header doc).
+_named_dependency_deps() {
+    jq -r '.deps | sort_by(.number) | .[]
+        | if .checked == true then "\(.number):checked" else "\(.number):\(.state)" end' <<<"$1" | sort
+}
+
+# A named dependency blocks iff it is unchecked AND its live state is OPEN.
+# MERGED and CLOSED (closed-without-merging) both count as resolved, matching
+# curator.md's "When Dependencies Complete" treatment of a closed reference —
+# and deliberately never looks at labels, so a referenced PR's review-cycle
+# label churn (loom:pr, loom:review-requested, loom:changes-requested,
+# loom:merge-conflict, loom:operator, ...) cannot flip this verdict on its own.
+_named_dependency_verdict() {
+    jq -r '
+      [.deps[] | select(.checked != true) | select(.state == "OPEN")] | length > 0
+    ' <<<"$1" | grep -qx true && echo "blocked" || echo "clear"
+}
+
+_run_named_dependency() {
+    local input_json deps verdict hash
+    if [[ "$USE_STDIN" == true ]]; then
+        input_json="$(cat)"
+    else
+        input_json="$(_fetch_named_dependency_json)"
+    fi
+    jq -e '.deps' >/dev/null 2>&1 <<<"$input_json" || _die "input JSON must have a top-level 'deps' array"
+
+    deps="$(_named_dependency_deps "$input_json")"
+    verdict="$(_named_dependency_verdict "$input_json")"
+    hash="$(printf '%s\n%s' "$verdict" "$deps" | _sha256 | awk '{print substr($1, 1, 16)}')"
+
+    if [[ "$JSON_OUTPUT" == true ]]; then
+        jq -n --arg verdict "$verdict" --arg deps "$deps" --arg hash "$hash" \
+            '{verdict: $verdict, deps: $deps, conclusion_hash: $hash}'
+    else
+        echo "VERDICT=$verdict"
+        echo "DEPS=$deps"
+        echo "CONCLUSION_HASH=$hash"
+    fi
+}
+
 case "$SUBCOMMAND" in
     dep-recheck) _run_dep_recheck ;;
     operator-premise) _run_operator_premise ;;
+    named-dependency) _run_named_dependency ;;
 esac

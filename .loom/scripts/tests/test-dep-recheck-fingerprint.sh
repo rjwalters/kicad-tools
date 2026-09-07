@@ -298,6 +298,76 @@ jq -n '{number: 22, state: "CLOSED"}' >"$STUB_DIR/issue-22.json"
 p="$("$TARGET_SCRIPT" operator-premise --refs "20 22" --repo owner/repo)"
 assert_eq "stale-premise" "$(field "$p" VERDICT)" "T13c: live operator-premise mode checks each --refs number's state"
 
+# --- T14: named-dependency - a `## Dependencies` checklist item naming a
+# different, non-closing issue/PR as a prerequisite (#7314, the #6335/#6333
+# shape `dep-recheck` cannot see: #6333 never carries `Closes #6335`) --------
+
+# T14a: a single unchecked dependency still OPEN -> VERDICT=blocked
+out="$(echo '{"deps":[{"number":6333,"checked":false,"state":"OPEN"}]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
+assert_eq "blocked" "$(field "$out" VERDICT)" "T14a: a single unchecked, still-OPEN named dependency is VERDICT=blocked"
+assert_eq "6333:OPEN" "$(field "$out" DEPS)" "T14a: DEPS renders the ref number and its live state"
+
+# T14b: a single unchecked dependency that has MERGED -> VERDICT=clear
+out="$(echo '{"deps":[{"number":6333,"checked":false,"state":"MERGED"}]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
+assert_eq "clear" "$(field "$out" VERDICT)" "T14b: a MERGED named dependency is VERDICT=clear"
+
+# T14c: a single unchecked dependency CLOSED without merging -> VERDICT=clear
+# (matches curator.md's "When Dependencies Complete" treatment of a closed
+# reference: closed-without-merging still counts as resolved).
+out="$(echo '{"deps":[{"number":6333,"checked":false,"state":"CLOSED"}]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
+assert_eq "clear" "$(field "$out" VERDICT)" "T14c: a CLOSED (not merged) named dependency still counts as clear"
+
+# T14d: multiple named dependencies, only some resolved -> VERDICT=blocked
+# until every one of them is resolved.
+out="$(echo '{"deps":[{"number":1,"checked":false,"state":"MERGED"},{"number":2,"checked":false,"state":"OPEN"}]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
+assert_eq "blocked" "$(field "$out" VERDICT)" "T14d: mixed dependencies (one resolved, one still open) is VERDICT=blocked"
+out="$(echo '{"deps":[{"number":1,"checked":false,"state":"MERGED"},{"number":2,"checked":false,"state":"CLOSED"}]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
+assert_eq "clear" "$(field "$out" VERDICT)" "T14d: mixed dependencies all resolved (one MERGED, one CLOSED) is VERDICT=clear"
+
+# T14e: a checked checklist item is treated as already resolved regardless of
+# its (never-consulted) state, and renders as "<ref>:checked".
+out="$(echo '{"deps":[{"number":1,"checked":true,"state":"OPEN"}]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
+assert_eq "clear" "$(field "$out" VERDICT)" "T14e: a checked dependency never blocks, even if its (unused) state says OPEN"
+assert_eq "1:checked" "$(field "$out" DEPS)" "T14e: DEPS renders a checked dependency as '<ref>:checked'"
+
+# T14f: no named dependencies at all -> VERDICT=clear, empty DEPS (mirrors
+# dep-recheck's "empty prs -> clear" default).
+out="$(echo '{"deps":[]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
+assert_eq "clear" "$(field "$out" VERDICT)" "T14f: an empty deps list defaults to VERDICT=clear"
+assert_eq "" "$(field "$out" DEPS)" "T14f: DEPS is empty when there are no named dependencies"
+
+# T14g: label churn on a referenced OPEN PR (loom:pr/loom:review-requested/
+# loom:changes-requested/loom:merge-conflict/loom:operator, etc.) is
+# irrelevant to this subcommand — it only ever looks at `state`, never
+# `labels`, and the --stdin shape doesn't even carry a labels field.
+out1="$(echo '{"deps":[{"number":6333,"checked":false,"state":"OPEN"}]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
+out2="$(echo '{"deps":[{"number":6333,"checked":false,"state":"OPEN"}]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
+assert_eq "$(field "$out1" CONCLUSION_HASH)" "$(field "$out2" CONCLUSION_HASH)" \
+    "T14g: identical named-dependency input twice produces an identical hash"
+
+# --- T15: named-dependency live --number mode (stubbed gh) - parses the
+# issue body's own `## Dependencies` checklist and looks up each unchecked
+# reference's live state -----------------------------------------------------
+jq -n '{body: "## Dependencies\n\n- [ ] #6333: prerequisite feature\n- [x] #100: already done\n\n## Other Section\n\n- [ ] #999: not a dependency, different section entirely\n"}' \
+    >"$STUB_DIR/issue-6335.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-6333.json"
+
+out="$("$TARGET_SCRIPT" named-dependency --number 6335 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out" VERDICT)" \
+    "T15a: live --number mode parses the body's Dependencies checklist and reports VERDICT=blocked while the named ref is still OPEN"
+# DEPS can span multiple lines (one per named dependency); `field()` above
+# only returns the first, so extract the full multi-line block directly.
+deps="$(printf '%s\n' "$out" | sed -n '/^DEPS=/,/^CONCLUSION_HASH=/p' | sed '$d' | sed 's/^DEPS=//')"
+assert_eq "$(printf '100:checked\n6333:OPEN')" "$deps" \
+    "T15b: DEPS includes both the checked (#100) and unchecked-but-open (#6333) entries, and excludes #999 from an unrelated section"
+
+# T15c: once the named dependency itself is merged, live mode reports clear.
+jq -n '{state: "MERGED"}' >"$STUB_DIR/pr-6333.json"
+rm -f "$STUB_DIR/issue-6333.json"
+out_merged="$("$TARGET_SCRIPT" named-dependency --number 6335 --repo owner/repo)"
+assert_eq "clear" "$(field "$out_merged" VERDICT)" \
+    "T15c: live mode falls back to gh pr view when the reference is a PR (not an issue), and reports VERDICT=clear once merged"
+
 # --- Summary ---
 echo ""
 echo "────────────────────────────────"

@@ -1293,6 +1293,18 @@ implementing/closing PR(s)** — the PR(s) GitHub will merge to close *this*
 issue. It is unrelated to a prerequisite PR belonging to a *different* issue
 named in this issue's own Dependencies checklist — that is a separate case,
 outside the scope of this primary check, and is unaffected by anything below.
+**For that separate case** (a checklist item naming a different, non-closing
+issue/PR — confirmed live on #6335, blocked on #6333, which does not carry
+`Closes #6335`), drive the same shared script's `named-dependency` subcommand
+instead (#7314): `./.loom/scripts/dep-recheck-fingerprint.sh named-dependency
+--number "$ISSUE_NUMBER"` parses this issue's own body `## Dependencies`
+checklist and reports `VERDICT=blocked` while any unchecked item is still
+open, `VERDICT=clear` once every one of them has merged or closed — reading
+each reference's own `state`, never its labels, so a referenced PR's
+review-cycle label churn (`loom:pr`, `loom:review-requested`,
+`loom:changes-requested`, `loom:merge-conflict`, `loom:operator`, …) cannot
+flip this verdict on its own. Fold its `CONCLUSION_HASH` into the "Re-check
+Idempotency" marker below exactly like the primary check's own output.
 Evaluate each returned still-OPEN PR against both sub-checks, in order —
 **this is unambiguous and covers every case, including this issue's own
 implementing PR**:
