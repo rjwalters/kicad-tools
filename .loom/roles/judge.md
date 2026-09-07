@@ -1323,8 +1323,24 @@ if [ "$MERGE_STATE" = "DIRTY" ]; then
 
     # Attempt rebase
     if git rebase origin/main; then
+        # Version-bearing-file sync gate (#7168, extended #7341): this
+        # auto-rebase pushes directly, exactly like Doctor's rebase-conflict
+        # recipes (#7171) and never routes through create-pr.sh -- a rebase
+        # silently absorbs whatever version-bearing values origin/main
+        # already had, and a file the branch's own commits never touched (in
+        # practice .loom/install-metadata.json) never raises a git conflict,
+        # so it can end up stale relative to VERSION/the files that WERE
+        # part of the rebase, invisible until CI's "Installer Integration
+        # Tests" fails. Gate BEFORE the push below, folded into the same
+        # push condition so a mismatch is treated exactly like a push
+        # failure (never hand-patch the version-bearing files yourself).
+        GATE_OK=true
+        if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+            echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - falling back to change request"
+            GATE_OK=false
+        fi
         # Rebase succeeded - push changes
-        if git push --force-with-lease; then
+        if [ "$GATE_OK" = true ] && git push --force-with-lease; then
             echo "Rebase successful - proceeding with evaluation"
             gh pr comment $PR_NUMBER --body "🔀 Automatically rebased branch to resolve merge conflicts. Proceeding with code evaluation."
             # Continue with normal evaluation
@@ -1391,6 +1407,15 @@ fi
 git fetch origin main
 git rebase origin/main
 
+# Version-bearing-file sync gate (#7168, extended #7341): this push goes
+# directly, never through create-pr.sh -- gate before it, same as the DIRTY
+# path above. Never hand-patch VERSION/CLAUDE.md/etc. yourself on a mismatch;
+# run the printed `./scripts/version.sh bump patch` fix instead.
+if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+  echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - aborting push"
+  exit 1
+fi
+
 # If rebase succeeds (no conflicts)
 git push --force-with-lease
 echo "Branch rebased successfully, continuing evaluation"
@@ -1415,6 +1440,14 @@ echo "Branch rebased successfully, continuing evaluation"
 # Resolve the conflict (e.g., keep both additions)
 # git add <resolved-files>
 git rebase --continue
+
+# Version-bearing-file sync gate (#7168, extended #7341): same reasoning as
+# the DIRTY/BEHIND paths above -- gate before this direct push too.
+if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+  echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - aborting push"
+  exit 1
+fi
+
 git push --force-with-lease
 gh pr comment <number> --body "🔀 Rebased branch and resolved merge conflict (both sides added entries to config)"
 ```

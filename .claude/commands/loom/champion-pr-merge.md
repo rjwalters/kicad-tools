@@ -1705,9 +1705,16 @@ DIGEST_MARKER="<!-- champion:merge-risk-hold-digest -->"
 
 # Cached ("$GH_READ") — locating the pinned issue is itself an observation,
 # same rule as the follow-on-issue duplicate search elsewhere in this role.
+#
+# Marker-tagged matches always win over marker-less ones, regardless of
+# issue-number ordering (a marker-tagged issue is always this convention's
+# own digest issue). When NO title match carries the marker — e.g. a digest
+# issue created before the marker convention shipped — fall back to the
+# oldest (lowest-numbered) open title match instead of returning empty and
+# letting a duplicate get created (#7338).
 DIGEST_ISSUE=$("$GH_READ" issue list --search "\"$DIGEST_TITLE\" in:title" \
   --state open --json number,body --limit 10 \
-  --jq "[.[] | select(.body | startswith(\"$DIGEST_MARKER\"))] | first | .number // empty")
+  --jq "([.[] | select(.body | startswith(\"$DIGEST_MARKER\"))] as \$tagged | if (\$tagged | length) > 0 then (\$tagged | min_by(.number)) else min_by(.number) end) | .number // empty")
 
 if [ -n "$DIGEST_ISSUE" ]; then
   OLD_DIGEST_BODY=$("$GH_READ" issue view "$DIGEST_ISSUE" --json body --jq '.body')

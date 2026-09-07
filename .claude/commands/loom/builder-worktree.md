@@ -150,6 +150,19 @@ git add <resolved-files>
 # 3. Continue the rebase
 git rebase --continue
 
+# Version-bearing-file sync gate (#7168, extended #7341): if you push here
+# directly (e.g. updating an already-open PR) rather than going through
+# create-pr.sh again, gate first -- a rebase silently absorbs whatever
+# version-bearing values origin/main already had, and a file your branch's
+# own commits never touched (in practice .loom/install-metadata.json) never
+# raises a git conflict, so it can drift invisibly until CI's "Installer
+# Integration Tests" fails. Never hand-patch VERSION/CLAUDE.md/etc. yourself
+# to fix a mismatch -- always run the printed `./scripts/version.sh` command.
+if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+  echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - resolve before pushing"
+  exit 1
+fi
+
 # 4. Force push (rebase rewrites history)
 git push --force-with-lease
 ```

@@ -918,6 +918,28 @@ git fetch origin && git log --oneline "$CLAIM_HEAD_SHA..origin/$(git branch --sh
 | Your work and theirs overlap partially | Keep only the parts still needed, rebase, re-run local checks, then push with `--force-with-lease`. |
 | You cannot tell | Prefer standing down and commenting — a duplicate fix costs more than a deferred one. |
 
+**If you rebase in either of the two "then push" rows above, gate the push the
+same way the merge-conflict recipes do** (#7168, extended #7341). Rebasing onto
+a moved head silently absorbs whatever version-bearing values that head already
+carried, and `.loom/install-metadata.json` never raises a git conflict (your
+branch's own commits never touched it) — so it can drift stale relative to
+`VERSION` and the files that *were* rewritten, invisible until CI's "Installer
+Integration Tests" fails:
+
+```bash
+# Run in the worktree, after `git rebase`, BEFORE `git push --force-with-lease`.
+if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+  echo "Aborting: version-bearing files are out of sync after rebase (see BLOCKER:/Fix: above)." >&2
+  exit 1
+fi
+git push --force-with-lease
+```
+
+**Never hand-patch VERSION/CLAUDE.md/`Cargo.toml`/… to "re-add a bump the rebase
+dropped"** — run the `./scripts/version.sh` command the gate prints. A hand-rolled
+bump reproduces `bef3e07a` (#7341): all 8 core files patched, `.loom/install-metadata.json`
+missed, CI red.
+
 **Standing down** (a concurrent fix already landed):
 
 ```bash
