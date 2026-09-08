@@ -2596,8 +2596,21 @@ function mask_unquoted_cat_heredoc_bodies(s,   out, lines, nl, i, j, line, trimm
     DQ = sprintf("%c", 34)
     BT = sprintf("%c", 96)
     # Same allowlist of non-executing text-data flags / `gh api -f <field>=`
-    # fields used by guard-loom-workflow.sh mask_cat_heredoc_bodies().
-    capre = "(^|[ \t])((-m|--message|--body|--notes|--title|--comment|--search)[ \t]*=?|-f[ \t]+(body|message|comment|title|notes|search)=)[ \t]*(" DQ "|" SQ ")?[ \t]*([$][(]|" BT ")[ \t]*$"
+    # fields used by guard-loom-workflow.sh mask_cat_heredoc_bodies(), PLUS
+    # (#7355) a plain shell-variable-assignment capture (`REPORT=$(cat <<EOF
+    # ... EOF)`). A capture into a flag value and a capture into a variable
+    # are equally confined -- both route the cat stdout into a `$(...)`
+    # command substitution whose RESULT is then just data (a string held in a
+    # variable, or a flag value); neither hands it to anything that
+    # executes. The four structural conditions above this allowlist (bare
+    # `cat`, capture-into-$(, opener line ends at the delimiter, body proven
+    # expansion-free) already do all the safety work -- this only widens
+    # WHERE the capture is allowed to land, not what may appear in the body.
+    # `[A-Za-z_][A-Za-z0-9_]*=` matches a bare `NAME=` immediately before the
+    # `$(`/backtick opener, with no space between `=` and the opener (a real
+    # assignment), so it does not also match e.g. a `[ "$x" = "$(cat ...` test
+    # (space before `=` there breaks the adjacency this alternative requires).
+    capre = "(^|[ \t])((-m|--message|--body|--notes|--title|--comment|--search)[ \t]*=?|-f[ \t]+(body|message|comment|title|notes|search)=|[A-Za-z_][A-Za-z0-9_]*=)[ \t]*(" DQ "|" SQ ")?[ \t]*([$][(]|" BT ")[ \t]*$"
     nl = split(s, lines, "\n")
     if (nl == 0) return ""
     for (i = 1; i <= nl; i++) {
@@ -4578,6 +4591,39 @@ if [[ "$COMMAND_NO_COMMENT" == *"--body"* || "$COMMAND_NO_COMMENT" == *"--messag
       "$COMMAND_NO_COMMENT" == *"--search"* || "$COMMAND_NO_COMMENT" == *"--arg"* ]]; then
     COMMAND_ASK_SCAN=$(strip_literal_text "$COMMAND_ASK_SCAN")
     COMMAND_CLOUD_ASK_SCAN=$(strip_literal_text "$COMMAND_CLOUD_ASK_SCAN")
+fi
+
+# COMMAND_ASK_SCAN_PRINTENV (#7355): a THIRD branched copy, same shape as
+# COMMAND_CLOUD_ASK_SCAN above, used ONLY by the credential-exposure
+# `printenv.*(SECRET|TOKEN|KEY)` ASK_PATTERNS entries further down. Those
+# three patterns are plain substring checks with no other consumer (unlike
+# COMMAND_ASK_SCAN itself, which SQL_DDL_PATTERN also reads -- see the
+# COMMAND_CLOUD_ASK_SCAN comment above for why that invariant means
+# grep/rg/jq positional text can never be masked out of COMMAND_ASK_SCAN
+# generally). So it is safe to give the printenv patterns their own
+# more-aggressively-masked copy, reusing mask_catastrophic_positional_args()
+# (grep/rg/jq/for-loop-wordlist positional-text masking) exactly as
+# COMMAND_CLOUD_ASK_SCAN does. This closes the false positive where a
+# jq/grep/rg command's own QUOTED filter/pattern argument merely contains the
+# word "printenv" -- e.g. `jq -c 'select(.pattern | test("printenv"))'` --
+# with no live `printenv` invocation anywhere in the command.
+#
+# Branched off the FULLY narrowed $COMMAND_ASK_SCAN -- i.e. AFTER the
+# check-duplicate.sh / strip_literal_text passes immediately above, not
+# before -- so it inherits every existing COMMAND_ASK_SCAN narrowing first
+# and only ADDS the extra positional masking on top. Never fed back into
+# COMMAND_ASK_SCAN itself, so SQL_DDL_PATTERN and every other
+# COMMAND_ASK_SCAN consumer are completely unaffected by this branch.
+COMMAND_ASK_SCAN_PRINTENV="$COMMAND_ASK_SCAN"
+if [[ "$COMMAND" == *"for "* && "$COMMAND" == *" in "* ]]; then
+    COMMAND_ASK_SCAN_PRINTENV=$(mask_catastrophic_forloop_wordlist "$COMMAND_ASK_SCAN_PRINTENV")
+fi
+if [[ "$COMMAND" == *"grep"* || "$COMMAND" == *"rg "* || \
+      "$COMMAND" == *"check-duplicate"* || "$COMMAND" == *"jq"* ]]; then
+    COMMAND_ASK_SCAN_PRINTENV=$(mask_catastrophic_positional_args "$COMMAND_ASK_SCAN_PRINTENV")
+fi
+if [[ "$COMMAND" == *"='"* || "$COMMAND" == *'="'* ]]; then
+    COMMAND_ASK_SCAN_PRINTENV=$(mask_catastrophic_var_assignment "$COMMAND_ASK_SCAN_PRINTENV")
 fi
 
 # =============================================================================
@@ -6876,10 +6922,19 @@ ASK_PATTERNS=(
     '(^|[;&|[:space:]])sky down'
     '(^|[;&|[:space:]])sky stop'
 
-    # Credential exposure
-    '(^|[;&|[:space:]])printenv.*SECRET'
-    '(^|[;&|[:space:]])printenv.*TOKEN'
-    '(^|[;&|[:space:]])printenv.*KEY'
+    # NOTE: the credential-exposure `printenv.*(SECRET|TOKEN|KEY)` patterns are
+    # NOT in this array. They used to be plain substring entries here, scanned
+    # against COMMAND_ASK_SCAN like every other entry -- but COMMAND_ASK_SCAN
+    # deliberately never gets grep/rg/jq positional-argument masking (it also
+    # feeds SQL_DDL_PATTERN below, which intentionally still scans a
+    # `grep '<pattern>' file`/jq-filter argument for a live DDL phrase), so a
+    # command whose own quoted jq/grep/rg argument merely CONTAINED the word
+    # "printenv" -- e.g. `jq -c 'select(.pattern | test("printenv"))'`, with no
+    # live `printenv` invocation at all -- false-asked on its leading space
+    # (#7355). They are scanned against COMMAND_ASK_SCAN_PRINTENV (built above,
+    # a further-masked branch dedicated to exactly these three patterns) in
+    # their own loop just below instead — see its own comment block.
+    #
     # NOTE: `cat .../.ssh/<file>` is NOT a plain substring entry here. It used
     # to be '(^|[;&|[:space:]])cat.*/\.ssh/', which matched the whole `.ssh/`
     # directory rather than the specific secret-bearing files inside it — so
@@ -6893,6 +6948,22 @@ ASK_PATTERNS=(
 
 for pattern in "${ASK_PATTERNS[@]}"; do
     if echo "$COMMAND_ASK_SCAN" | grep -qE "$pattern"; then
+        ask "Command requires confirmation: $COMMAND" "ask:$pattern"
+    fi
+done
+
+# Credential exposure (#7355): scanned against COMMAND_ASK_SCAN_PRINTENV, NOT
+# COMMAND_ASK_SCAN — see the NOTE above and the COMMAND_ASK_SCAN_PRINTENV
+# construction comment further up for why these three need their own,
+# further-masked copy rather than living in the ASK_PATTERNS array above.
+PRINTENV_ASK_PATTERNS=(
+    '(^|[;&|[:space:]])printenv.*SECRET'
+    '(^|[;&|[:space:]])printenv.*TOKEN'
+    '(^|[;&|[:space:]])printenv.*KEY'
+)
+
+for pattern in "${PRINTENV_ASK_PATTERNS[@]}"; do
+    if echo "$COMMAND_ASK_SCAN_PRINTENV" | grep -qE "$pattern"; then
         ask "Command requires confirmation: $COMMAND" "ask:$pattern"
     fi
 done

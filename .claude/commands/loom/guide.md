@@ -1149,6 +1149,27 @@ Each tick performs the smallest possible edit to it, in this order:
    hard-skips it. Filling a free slot displaces nobody, so no comparison
    against an incumbent is required.
 
+   **#7349 BUG, DO NOT REINTRODUCE: multiple eligible candidates can tie for
+   the top rank at a free slot, same as step 4's "the weakest holder" tie.**
+   When two or more eligible `loom:issue` candidates share the highest
+   `urgency_rank` and there is a free slot to fill, "promote the
+   highest-ranked" is ambiguous — a fresh tick re-derives the winner from
+   scratch every time and can pick a *different* tied candidate than the
+   previous tick did, evicting (via step 4's next pass) the one it just
+   promoted. This is the fill-side twin of the #7323 eviction-side bug PR
+   #7325 fixed. Resolve it with the same deterministic tie-break, mirrored
+   for promotion instead of eviction:
+
+   - **Lowest issue number wins; promote it among the tied subset.** Issue
+     numbers are already in hand from the ready-candidate listing, so this
+     adds no extra forge call. Once promoted, the winner becomes an
+     incumbent like any other and is protected by step 4's own "a tie leaves
+     the incumbent in place" rule on every subsequent tick, so the flap stops
+     as soon as one tick's pick sticks.
+   - If a candidate's issue number is for any reason unreadable, skip only
+     that candidate from the tie-break comparison rather than aborting the
+     fill — fail closed on that one candidate, not on the whole tick.
+
 4. **With 3 eligible holders, a candidate may displace the weakest holder ONLY
    IF it *strictly outranks* it** (`urgency_rank` below). **A tie leaves the
    incumbent in place.** Do not swap on "close call", "I'd sequence this
@@ -1613,13 +1634,27 @@ fi
 # Match on the branch-name PREFIX, not an exact head. Docs branches are named
 # `docs/guide-update-<timestamp>` (see Step 5), so `--head "docs/guide-update"`
 # (an exact-match filter) never matched and the "only one docs PR open" guard
-# never fired — PRs accumulated. `--search "head:docs/guide-update"` matches the
-# prefix. This check runs INSIDE the lock now, but it is not redundant with
-# it: the lock closes the race between two CONCURRENT ticks, while this check
-# is what makes a docs PR left open from a PRIOR (non-racing) tick — whose
-# lock was already released once its `gh pr create` succeeded — still cause
-# the next tick to skip.
-OPEN_DOCS_PR=$("$GH_READ" pr list --state open --search "head:docs/guide-update" --json number --jq '.[0].number // empty')
+# never fired — PRs accumulated.
+#
+# #7354 BUG, DO NOT REINTRODUCE: this used to be `--search
+# "head:docs/guide-update"`, which routes through GitHub's search/issues
+# index rather than the primary Pulls List API. That index is
+# eventually-consistent — it can (and, per #7352/#7353, does) return a stale
+# "no open PR" result for several minutes after another host's PR actually
+# landed, which is exactly the byte-identical-duplicate-PR race this guard
+# exists to prevent. Filtering client-side on `headRefName` against a plain
+# `pr list --state open` reads the same non-search-indexed Pulls List API
+# `gh pr create`/`gh pr merge` write to, so a just-created PR is visible
+# immediately with no index-propagation delay. `--limit 100` is deliberately
+# generous relative to this repo's typical open-PR count (~20-30) so a
+# transient backlog spike can't push the docs PR below the page size and
+# reintroduce a different kind of false-empty result.
+# This check runs INSIDE the lock now, but it is not redundant with it: the
+# lock closes the race between two CONCURRENT ticks, while this check is what
+# makes a docs PR left open from a PRIOR (non-racing) tick — whose lock was
+# already released once its `gh pr create` succeeded — still cause the next
+# tick to skip.
+OPEN_DOCS_PR=$("$GH_READ" pr list --state open --limit 100 --json number,headRefName --jq '[.[] | select(.headRefName | startswith("docs/guide-update"))][0].number // empty')
 
 if [ -n "$OPEN_DOCS_PR" ]; then
   echo "Docs PR #$OPEN_DOCS_PR is still open. Skipping document maintenance."
@@ -2694,7 +2729,7 @@ Automated document maintenance by Guide triage agent."
   # Step 1) only ever serializes ticks on THIS host — see its header comment.
   # A different fleet host's tick can commit/push/open its own docs PR at any
   # point up to this line without ever touching this host's lock. Re-run the
-  # EXACT same open-docs-PR search Step 1 used, as the LAST check before
+  # EXACT same open-docs-PR check Step 1 used, as the LAST check before
   # push+create, to shrink the TOCTOU window this local lock cannot close
   # from "the full Step 1-5 phase" down to "the gap between this line and
   # `gh pr create` below" — the same narrowing tactic Judge/Champion's
@@ -2703,7 +2738,21 @@ Automated document maintenance by Guide triage agent."
   # resolve to `gh-cached`, whose default 30s read TTL is scoped per-host and
   # would happily hand back a stale "no open PR" answer even though another
   # host opened one seconds ago; only an uncached read is trustworthy here.
-  OPEN_DOCS_PR_RECHECK=$(gh pr list --state open --search "head:docs/guide-update" --json number --jq '.[0].number // empty')
+  #
+  # #7354 BUG, DO NOT REINTRODUCE: this used to be `--search
+  # "head:docs/guide-update"`. That routes through GitHub's search/issues
+  # index, which is a SEPARATE, eventually-consistent store from the primary
+  # Pulls List API `gh pr create` writes to — a bare `gh`, uncached call
+  # through `--search` can still return a stale "no open PR" result for
+  # minutes after another host's `gh pr create` actually landed, because
+  # "uncached" only means "not read through gh-cached's local TTL", not "not
+  # subject to GitHub's own index-propagation lag" (#7352/#7353 recurred with
+  # exactly this shape: two PRs, ~2m28s apart, each recheck presumably
+  # querying the search index before it had caught up). Filtering
+  # client-side on `headRefName` against a plain `pr list --state open`
+  # avoids the search index entirely — same rationale as Step 1's check
+  # above, restated here because bare `gh` alone was never sufficient.
+  OPEN_DOCS_PR_RECHECK=$(gh pr list --state open --limit 100 --json number,headRefName --jq '[.[] | select(.headRefName | startswith("docs/guide-update"))][0].number // empty')
   if [ -n "$OPEN_DOCS_PR_RECHECK" ]; then
     echo "Docs PR #$OPEN_DOCS_PR_RECHECK appeared (likely another fleet host's tick) since Step 1's check. Discarding this tick's local commit instead of opening a duplicate PR."
     ./.loom/scripts/docs-guide-lock.sh release
@@ -2834,7 +2883,7 @@ Document Maintenance Phase
   protection across different fleet hosts, each of which has its own
   checkout and its own lock (#5615)
 - **Cross-host guard: an uncached recheck immediately before `gh pr create`**
-  (#5615) — `create_docs_pr()` re-runs Step 1's exact open-docs-PR search a
+  (#5615) — `create_docs_pr()` re-runs Step 1's exact open-docs-PR check a
   second time, right after committing but before pushing/creating, using
   plain `gh` (never `$GH_READ`/`gh-cached`, whose per-host read TTL could mask
   a PR another host just opened). If that recheck finds a PR, this tick
@@ -2842,13 +2891,20 @@ Document Maintenance Phase
   shrinking the cross-host TOCTOU window from the whole Step 1-5 phase down to
   the gap between the recheck and the create call, the same narrowing tactic
   Judge/Champion's Verdict-Time CAS Recheck uses for the analogous PR-label
-  race
+  race. **Both this recheck and Step 1's check read the plain Pulls List API
+  (`pr list --state open` + a client-side `headRefName` filter), never
+  `--search`** (#7354) — GitHub's search/issues index is a separate,
+  eventually-consistent store that can lag the primary Pulls List API by
+  minutes, so an uncached `--search` call is not actually a fresh read of PR
+  existence; #7352/#7353 (two byte-identical docs PRs, 2m28s apart) recurred
+  for exactly this reason
 - Only one docs PR open at a time (prevents accumulation) — the open-PR check
-  matches the `docs/guide-update` branch **prefix** (`head:` search), so it
-  catches the timestamped branches `docs-worktree.sh` creates. This is
-  distinct from the lock above: the lock stops concurrent ticks from racing
-  each other, this check stops a later tick from piling a second PR onto a
-  still-open one from an earlier, non-racing tick
+  matches the `docs/guide-update` branch **prefix**, filtered client-side out
+  of `pr list --state open --json number,headRefName`, so it catches the
+  timestamped branches `docs-worktree.sh` creates. This is distinct from the
+  lock above: the lock stops concurrent ticks from racing each other, this
+  check stops a later tick from piling a second PR onto a still-open one from
+  an earlier, non-racing tick
 - **Doc-maintenance throughput is separately observable** (issue #6136) — each
   successful `create_docs_pr()` records a local telemetry line (PR number,
   repo, files changed, and the phase's elapsed lock-hold time as an

@@ -3,7 +3,8 @@
 # single-writer discipline for Guide's Document Maintenance phase (Step 1's
 # open-docs-PR check + Step 5's uncached OPEN_DOCS_PR_RECHECK, #5573/#5615)
 # actually bound a multi-host race on the SAME debounce-eligible delta to
-# exactly one `gh pr create` (Issue #6327).
+# exactly one `gh pr create` (Issue #6327), AND does it survive GitHub
+# search-index propagation lag (Issue #7354 -- see Scenario 5 below).
 #
 # ## Why this suite exists
 #
@@ -74,6 +75,25 @@
 # which this suite does not attempt, per the issue's explicit instruction
 # not to build one preemptively.
 #
+# ## Scenario 5 (#7354): search-index propagation lag
+#
+# #7352/#7353 recurred the exact race Scenarios 2-4 prove is closed --
+# despite the lock+recheck combination being present and correct by every
+# check above. Root cause: the pre-#7354 Step 1/Step 5 lines queried GitHub's
+# search/issues index (`--search "head:docs/guide-update"`), a SEPARATE,
+# eventually-consistent store from the primary Pulls List API `gh pr create`
+# writes to. "Uncached" (bare `gh`, no `gh-cached` TTL) only guarantees a
+# fresh read of the local HTTP cache -- it says nothing about how fresh
+# GitHub's own search index is relative to the Pulls List API, and that index
+# can lag by minutes. Scenario 5 models this with a second, independently-
+# synced "search index" store and shows: (a) the OLD `--search`-based line
+# reproduces the #7352/#7353 duplicate-create when the search index hasn't
+# caught up, (b) the FIX -- a plain `pr list --state open` read filtered
+# client-side on `headRefName`, which never touches the search index -- does
+# not, and (c) the OLD line was not wrong in general, only late (it does find
+# the PR once the search index is synced), confirming this is a timing bug in
+# the query shape rather than a logic bug in the recheck itself.
+#
 # Usage:
 #   ./.loom/scripts/tests/test-guide-docs-pr-race.sh
 
@@ -130,12 +150,20 @@ fi
 # ---------------------------------------------------------------------------
 echo "Test 1: guide.md defines the Step 1 check and Step 5 uncached recheck"
 
-assert_grep 'OPEN_DOCS_PR=\$\("\$GH_READ" pr list --state open --search "head:docs/guide-update"' "$GUIDE_MD" \
-    "Step 1's open-docs-PR check uses \$GH_READ (may be cached)"
-assert_grep 'OPEN_DOCS_PR_RECHECK=\$\(gh pr list --state open --search "head:docs/guide-update"' "$GUIDE_MD" \
-    "Step 5's recheck uses bare gh (deliberately uncached, #5615)"
+assert_grep 'OPEN_DOCS_PR=\$\("\$GH_READ" pr list --state open --limit 100 --json number,headRefName' "$GUIDE_MD" \
+    "Step 1's open-docs-PR check uses \$GH_READ (may be cached) against the plain Pulls List API"
+assert_grep 'OPEN_DOCS_PR_RECHECK=\$\(gh pr list --state open --limit 100 --json number,headRefName' "$GUIDE_MD" \
+    "Step 5's recheck uses bare gh (deliberately uncached, #5615) against the plain Pulls List API"
 assert_grep '#6327 CORRECTED UNDERSTANDING' "$GUIDE_MD" \
     "guide.md documents the #6327 corrected understanding near the Step 1 lock/recheck block"
+# #7354: neither guard line may use `--search` any more -- that routes through
+# GitHub's eventually-consistent search index, which is what actually caused
+# #7352/#7353 (see Scenario 5 below), not a cache/staleness bug in gh itself.
+if grep -qF 'pr list --state open --search "head:docs/guide-update"' "$GUIDE_MD"; then
+    fail "(1) neither Step 1 nor Step 5 guard line uses --search (#7354 -- search index lag, not staleness)"
+else
+    pass "(1) neither Step 1 nor Step 5 guard line uses --search (#7354 -- search index lag, not staleness)"
+fi
 
 # ---------------------------------------------------------------------------
 # Extract the two guard lines VERBATIM so this suite can never silently drift
@@ -150,6 +178,11 @@ if [[ -z "$STEP1_LINE" || -z "$STEP5_LINE" ]]; then
     exit 2
 fi
 
+# The PRE-#7354 Step 5 line, hardcoded (guide.md no longer contains it) so
+# Scenario 5 can demonstrate the bug it caused and confirm the fix actually
+# closes that specific gap rather than just asserting the new line exists.
+OLD_STEP5_LINE='OPEN_DOCS_PR_RECHECK=$(gh pr list --state open --search "head:docs/guide-update" --json number --jq '\''.[0].number // empty'\'')'
+
 # ---------------------------------------------------------------------------
 # Harness: a shared fake-forge store of open docs-maintenance PRs, and a stub
 # `gh` that answers exactly the query shape both guard lines issue.
@@ -163,21 +196,35 @@ EVENT_LOG="$STUB_DIR/events.log"
 
 cat > "$STUB_DIR/gh" <<'STUB'
 #!/usr/bin/env bash
-# Minimal stub: only handles the exact `pr list --state open --search
-# "head:docs/guide-update" --json number --jq FILTER` query both the Step 1
-# check and the Step 5 recheck issue. STORE points at the shared fake-forge
-# JSON array of open docs PRs (each {"number": N}).
+# Stub handles two query shapes against two independent fake-forge JSON
+# arrays of open docs PRs (each {"number": N, "headRefName": "docs/..."}):
+#   1. `pr list --state open [--limit N] --json number,headRefName --jq
+#      FILTER` (the #7354-fixed Step 1/Step 5 lines) -- reads $LOOM_TEST_STORE,
+#      which every `simulate_tick`/scenario updates the instant a PR is
+#      "created". This is the real, non-search Pulls List API: always fresh.
+#   2. `pr list --state open --search "..." --json number --jq FILTER` (the
+#      PRE-#7354 line, kept only for Scenario 5's bug-reproduction) -- reads
+#      $LOOM_TEST_SEARCH_STORE if set, else falls back to $LOOM_TEST_STORE.
+#      Scenario 5 updates this copy on its own schedule to model GitHub's
+#      search/issues index lagging behind the primary Pulls List API.
 STORE="${LOOM_TEST_STORE:?stub gh: LOOM_TEST_STORE not set}"
+SEARCH_STORE="${LOOM_TEST_SEARCH_STORE:-$STORE}"
 if [[ "$1" == "pr" && "$2" == "list" ]]; then
   shift 2
   filter=""
+  is_search=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --search) is_search=1; shift 2 ;;
       --jq) filter="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
-  jq -c "$filter" "$STORE"
+  if [[ "$is_search" == "1" ]]; then
+    jq -c "$filter" "$SEARCH_STORE"
+  else
+    jq -c "$filter" "$STORE"
+  fi
   exit 0
 fi
 echo "stub gh: unhandled args: $*" >&2
@@ -193,6 +240,7 @@ reset_state() {
     echo '[]' > "$STORE"
     : > "$CREATED_LOG"
     : > "$EVENT_LOG"
+    unset LOOM_TEST_SEARCH_STORE
 }
 
 next_pr_number() {
@@ -201,6 +249,17 @@ next_pr_number() {
     local n
     n=$(( 1000 + $(wc -l < "$CREATED_LOG" | tr -d '[:space:]') ))
     echo "$n"
+}
+
+# create_pr_entry <n> -- appends {"number": n, "headRefName":
+# "docs/guide-update-<n>"} to $STORE. Centralized so every scenario's "a PR
+# just got created" step produces an entry shaped the way BOTH the #7354 fix
+# (needs .headRefName) and the pre-#7354 line (needs only .number, since its
+# store was implicitly pre-filtered to docs PRs) can read.
+create_pr_entry() {
+    local n="$1"
+    jq --argjson n "$n" --arg h "docs/guide-update-$n" \
+        '. + [{"number": $n, "headRefName": $h}]' "$STORE" > "$STORE.tmp" && mv "$STORE.tmp" "$STORE"
 }
 
 # simulate_tick <host>
@@ -228,7 +287,7 @@ simulate_tick() {
 
     local n
     n="$(next_pr_number)"
-    jq --argjson n "$n" '. + [{"number": $n}]' "$STORE" > "$STORE.tmp" && mv "$STORE.tmp" "$STORE"
+    create_pr_entry "$n"
     echo "$host" >> "$CREATED_LOG"
     echo "$host: Step 1 and Step 5 both empty -- created PR #$n" >> "$EVENT_LOG"
 }
@@ -277,7 +336,7 @@ assert_eq "" "$STEP1_B" "(2) host B's Step 1 check ALSO finds nothing (genuine i
 # empty) + create.
 OPEN_DOCS_PR_RECHECK=""; eval "$STEP5_LINE"
 assert_eq "" "$OPEN_DOCS_PR_RECHECK" "(2) host A's Step 5 recheck also finds nothing -- proceeds to create"
-n="$(next_pr_number)"; jq --argjson n "$n" '. + [{"number": $n}]' "$STORE" > "$STORE.tmp" && mv "$STORE.tmp" "$STORE"
+n="$(next_pr_number)"; create_pr_entry "$n"
 echo "host-A" >> "$CREATED_LOG"
 echo "host-A: Step 1 and Step 5 both empty -- created PR #$n" >> "$EVENT_LOG"
 
@@ -305,7 +364,7 @@ assert_eq "" "$STEP1_B" "(3) host B's Step 1 check also finds nothing"
 
 # This time host B finishes first.
 OPEN_DOCS_PR_RECHECK=""; eval "$STEP5_LINE"
-n="$(next_pr_number)"; jq --argjson n "$n" '. + [{"number": $n}]' "$STORE" > "$STORE.tmp" && mv "$STORE.tmp" "$STORE"
+n="$(next_pr_number)"; create_pr_entry "$n"
 echo "host-B" >> "$CREATED_LOG"
 echo "host-B: Step 1 and Step 5 both empty -- created PR #$n" >> "$EVENT_LOG"
 
@@ -336,7 +395,7 @@ done
 
 # host-B reaches Step 5 first among the three (arbitrary finish order).
 OPEN_DOCS_PR_RECHECK=""; eval "$STEP5_LINE"
-n="$(next_pr_number)"; jq --argjson n "$n" '. + [{"number": $n}]' "$STORE" > "$STORE.tmp" && mv "$STORE.tmp" "$STORE"
+n="$(next_pr_number)"; create_pr_entry "$n"
 echo "host-B" >> "$CREATED_LOG"
 echo "host-B: Step 1 and Step 5 both empty -- created PR #$n" >> "$EVENT_LOG"
 
@@ -348,6 +407,61 @@ done
 
 assert_eq "1" "$(created_count)" "(4) exactly one PR created across a 3-host interleave (not zero, not three)"
 assert_eq "host-B" "$(created_contents)" "(4) the surviving create belongs to the single winner (host-B) only"
+
+# ============================================================================
+# Scenario 5 (#7354): search-index propagation lag -- the actual #7352/#7353
+# shape. Host A creates a PR; the live Pulls List store reflects it
+# immediately, but a separate "search index" store (modeling GitHub's
+# eventually-consistent search/issues backend) has not been synced yet. The
+# PRE-#7354 --search-based recheck (OLD_STEP5_LINE) reads the lagging store
+# and comes back empty even though a PR already exists -- reproducing the
+# duplicate-create bug. The FIXED recheck (STEP5_LINE) reads the live store
+# directly and catches it immediately. Finally, once the search index is
+# synced, the OLD line does find the PR too -- confirming this was a timing
+# bug in the query shape, not a logic bug in the recheck.
+# ============================================================================
+echo ""
+echo "--- Scenario 5: search-index lag reproduces #7352/#7353 with the OLD --search line; the #7354 fix closes it ---"
+reset_state
+LOOM_TEST_SEARCH_STORE="$STUB_DIR/search-index.json"
+export LOOM_TEST_SEARCH_STORE
+echo '[]' > "$LOOM_TEST_SEARCH_STORE"
+
+# Host A: Step 1 empty, Step 5 (fixed line) empty -- proceeds to create. The
+# live store is updated immediately; the search-index copy is deliberately
+# NOT synced (models real propagation lag).
+OPEN_DOCS_PR=""; eval "$STEP1_LINE"
+assert_eq "" "$OPEN_DOCS_PR" "(5) host A's Step 1 check finds nothing"
+OPEN_DOCS_PR_RECHECK=""; eval "$STEP5_LINE"
+assert_eq "" "$OPEN_DOCS_PR_RECHECK" "(5) host A's Step 5 (fixed, non-search) recheck finds nothing -- proceeds to create"
+n="$(next_pr_number)"; create_pr_entry "$n"
+echo "host-A" >> "$CREATED_LOG"
+echo "host-A: created PR #$n (search index deliberately NOT yet synced)" >> "$EVENT_LOG"
+
+# Host B started before host A's create landed (models the ~2m28s
+# #7352/#7353 interleave) and is now at its own Step 5 moment. Run the OLD
+# (pre-#7354) --search-based recheck at this exact point: it still returns
+# EMPTY, because the search index it reads has not caught up -- reproducing
+# the bug that shipped #7352/#7353.
+OPEN_DOCS_PR_RECHECK=""; eval "$OLD_STEP5_LINE"
+assert_eq "" "$OPEN_DOCS_PR_RECHECK" \
+    "(5) OLD --search-based recheck returns EMPTY even though host A already created (unsynced search index) -- reproduces #7352/#7353"
+
+# Now run the FIXED (#7354) recheck at the identical point in the timeline:
+# it reads the live store directly and finds host A's PR immediately.
+OPEN_DOCS_PR_RECHECK=""; eval "$STEP5_LINE"
+assert_eq "$n" "$OPEN_DOCS_PR_RECHECK" \
+    "(5) FIXED recheck (plain pr list, client-side headRefName filter) finds host A's PR immediately -- #7354 closes the gap"
+
+# Sync the search index (as GitHub eventually would) and confirm the OLD line
+# WOULD have caught the PR once it caught up -- proving this is an
+# index-propagation timing bug, not a query-logic bug.
+cp "$STORE" "$LOOM_TEST_SEARCH_STORE"
+OPEN_DOCS_PR_RECHECK=""; eval "$OLD_STEP5_LINE"
+assert_eq "$n" "$OPEN_DOCS_PR_RECHECK" \
+    "(5) OLD --search-based recheck DOES find the PR once the search index catches up (confirms lag, not a logic bug)"
+
+unset LOOM_TEST_SEARCH_STORE
 
 # ============================================================================
 echo ""

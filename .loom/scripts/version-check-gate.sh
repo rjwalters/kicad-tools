@@ -18,6 +18,24 @@
 # that WERE part of the conflict resolution. Doctor's rebase recipes now call
 # this same script after conflict resolution and before the force-push.
 #
+# A second, related drop shape (#7351): even when the branch's OWN commits DO
+# touch .loom/install-metadata.json (e.g. a dedicated "resync install-metadata
+# after rebase" commit) and origin/main independently touched the same file,
+# a rebase can still silently discard the branch's edit with no conflict ever
+# raised, printing `dropping <sha> ... -- patch contents already upstream`.
+# This isn't a git diff/patch-id quirk (a report attributing it to git's
+# adjacent-line 3-way-merge hunking was investigated and superseded, see
+# #7351) -- it's this repo's own `.loom/install-metadata.json merge=ours`
+# .gitattributes driver (#4528), which always keeps "ours" on any merge
+# touching that path. During a rebase, "ours" is the upstream side being
+# rebased onto, so the driver discards the replayed commit's edit wholesale
+# (any line, not just an adjacent one) whenever origin/main also touched the
+# file -- git then sees an empty resulting diff and drops the commit outright.
+# This gate, run immediately after the rebase and before the push, still
+# catches the resulting mismatch the same way it catches the first shape
+# above -- see test-version-check-gate.sh's T8/T9 for a real `git rebase`
+# repro of both this drop and the false-positive-free ordinary case.
+#
 # Resolution order for which `version.sh` to run:
 #   1. $LOOM_VERSION_CHECK_SCRIPT if set (test seam -- same convention as
 #      LOOM_GITHUB_APP_SCRIPT in lib/forge-helpers.sh, lets a test stub
