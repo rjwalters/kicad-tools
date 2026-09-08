@@ -694,6 +694,18 @@ only an explicit non-empty regular file, installs it atomically with mode
 targeting the profile's `CODEX_HOME`—never put a secret in argv or registry
 metadata.
 
+**Session-managed profiles (issue #6925, Epic #6896 Phase 2):**
+`loom-daemon accounts session start|stop|status|attach <name>` layers a
+per-account `loom-worker-session` container (`docker/session/README.md`) on
+top of a profile this same CLI creates — the container owns the profile's
+`CODEX_HOME` volume as the single serializing writer of its `auth.json`
+refresh chain. Once `session start` has adopted a profile, `reauth` and the
+`status`/`list` login probe above both refuse it (`login_state:
+session_managed`) — re-authenticate via `session attach <name>` (an
+interactive `codex login` inside the container) instead of a host-direct
+`reauth`. `session stop` never SIGKILLs an in-flight `docker exec` (the
+#5119 restart-safety contract) unless `--force` is passed.
+
 Every lifecycle command is all-or-nothing over the (profile, registry) pair. A
 failed `add` or `import` removes the profile it created, so the name stays
 reusable; concurrent creations of the same name are serialized by an exclusive
