@@ -5277,6 +5277,19 @@ wt_write_mktemp_same_command_safe() {
 #      `NAME=$(cmd)`, `` NAME=`cmd` ``) is rejected rather than trusted as a
 #      literal (fail closed).
 #
+# LITERAL SUFFIX AFTER THE VARIABLE (#6805): the target does NOT have to be a
+# bare `$NAME`. The overwhelmingly common real-world shapes in the guard
+# decision log are a variable followed by a literal path suffix —
+# `rm -rf "$WT/.snapshots"`, `rm -f "$WORKTREE_ABS"/.merge_file_*` — which the
+# original #6676 pass rejected via _rm_scope_bare_var_name()'s bare-reference-
+# only test and denied at the catastrophic tier even though the value is a
+# static literal. _rm_scope_var_ref_split() (below) accepts `$NAME<suffix>` /
+# `${NAME}<suffix>` in any quoting, and the suffix is re-appended to the
+# resolved literal before the caller's scope check runs. This mirrors
+# resolve_var() in _VARRESOLVE_AWK, the write-confinement guard's shared
+# same-command resolver (#4881/#6152), which has always carried the trailing
+# `rest` of the token through the substitution.
+#
 # On success this prints the resolved literal absolute path on stdout and
 # returns 0. Unlike the mktemp fast path (which is unconditionally
 # /tmp-or-$TMPDIR-rooted and lets the CALLER skip the scope check entirely),
@@ -5284,10 +5297,61 @@ wt_write_mktemp_same_command_safe() {
 # re-running the normal rm-scope checks (the top-level catastrophic-path deny
 # AND the repo/worktree/tmp IN_SCOPE check) against the resolved path, so it
 # is judged exactly like an equivalent literal `rm -rf /that/path` would be.
+# That is what keeps the suffix extension a FALSE-POSITIVE refinement rather
+# than a relaxation: `WT=/etc; rm -rf "$WT/foo"` resolves to `/etc/foo` and is
+# still denied by the ordinary out-of-scope check, and any `..` in the suffix
+# is collapsed by the caller's normalize_abs_path() before that check.
 # =============================================================================
+
+# _rm_scope_var_ref_split() — split an rm target of the form
+# `$NAME<suffix>` / `${NAME}<suffix>` (in any quoting) into "NAME<TAB>suffix",
+# printed on stdout. Returns 1 when the target is not a variable reference
+# rooted at the path root, or when the suffix is not a pure literal.
+#
+# Operates on mark_expandable_dollars()'s normalized shape (#4921) rather than
+# hand-rolling a second quote parser: that helper strips quote characters,
+# applies backslash escapes, and replaces every EXPANDABLE `$` with SOH (0x01)
+# while leaving a LITERAL `$` (single-quoted or backslash-escaped — a file
+# genuinely named `$X`) alone. So `"$WT/.snapshots"`, `"$WT"/.snapshots` and
+# `$WT/.snapshots` all normalize to the same shape, and quoting cannot be used
+# to dodge the tests below.
+#
+# Fail-closed conditions (each returns 1, leaving today's deny in place):
+#   - the token does not START with an expandable `$` (a variable in a
+#     non-root component, e.g. `/foo/$BAR`, is not this function's business —
+#     the caller only reaches here for root-rooted unresolved targets);
+#   - the suffix contains another expandable `$` (SOH), a literal `$`, or a
+#     backtick — i.e. anything this single-pass resolver cannot prove static;
+#   - the suffix is non-empty and does not begin with `/` — a shape like
+#     `"$WT".bak` names a SIBLING of the resolved path rather than something
+#     under it, so it is excluded from the fast path rather than guessed.
+_rm_scope_var_ref_split() {
+    local tok="$1" marked body name rest
+    mark_expandable_dollars "$tok"
+    marked="$_MARKED_TOKEN"
+    [[ "$marked" == $'\001'* ]] || return 1
+    body="${marked:1}"
+    if [[ "$body" =~ ^\{([A-Za-z_][A-Za-z0-9_]*)\}(.*)$ ]]; then
+        name="${BASH_REMATCH[1]}"
+        rest="${BASH_REMATCH[2]}"
+    elif [[ "$body" =~ ^([A-Za-z_][A-Za-z0-9_]*)(.*)$ ]]; then
+        name="${BASH_REMATCH[1]}"
+        rest="${BASH_REMATCH[2]}"
+    else
+        return 1
+    fi
+    case "$rest" in
+        *$'\001'*|*'`'*|*'$'*) return 1 ;;
+    esac
+    [[ -z "$rest" || "$rest" == /* ]] || return 1
+    printf '%s\t%s' "$name" "$rest"
+}
+
 rm_scope_literal_same_command_resolve() {
-    local target="$1" cmdtext="$2" varname resolved
-    varname=$(_rm_scope_bare_var_name "$target") || return 1
+    local target="$1" cmdtext="$2" split varname suffix resolved
+    split=$(_rm_scope_var_ref_split "$target") || return 1
+    varname="${split%%$'\t'*}"
+    suffix="${split#*$'\t'}"
     [[ -n "$varname" ]] || return 1
     resolved=$(printf '%s' "$cmdtext" | awk -v varname="$varname" "$_QSPLIT_AWK"'
     BEGIN {
@@ -5323,7 +5387,7 @@ rm_scope_literal_same_command_resolve() {
         }
     }')
     [[ -n "$resolved" ]] || return 1
-    printf '%s' "$resolved"
+    printf '%s' "${resolved}${suffix}"
 }
 
 # =============================================================================
@@ -6379,13 +6443,15 @@ if echo "$COMMAND_ASK_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
                         continue
                     fi
 
-                    # Same-command LITERAL-path fast path (#6676): unlike the
+                    # Same-command LITERAL-path fast path (#6676, widened to
+                    # `$NAME<literal-suffix>` targets by #6805): unlike the
                     # mktemp form above, a resolved literal is NOT skipped
                     # past the scope check — ABS_PATH is replaced with the
-                    # proven literal and falls through to the same
-                    # catastrophic-path deny and repo/worktree/tmp IN_SCOPE
-                    # check just below, exactly as an equivalent literal
-                    # `rm -rf /that/path` would be judged. See
+                    # proven literal (variable value + literal suffix) and
+                    # falls through to the same catastrophic-path deny and
+                    # repo/worktree/tmp IN_SCOPE check just below, exactly as
+                    # an equivalent literal `rm -rf /that/path` would be
+                    # judged. See
                     # rm_scope_literal_same_command_resolve()'s own doc
                     # comment (above rm_scope_mktemp_same_command_safe()) for
                     # the exact resolution conditions.

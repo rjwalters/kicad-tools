@@ -2202,8 +2202,9 @@ suggest_commit_if_resync_only_dirt() {
     status="$(git -C "$WRITE_ROOT" status --porcelain 2>/dev/null)"
     [[ -z "$status" ]] && return 0
 
-    local line path
+    local line path src
     local -a resync_paths=()
+    local -a retired_paths=()
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         path="${line:3}"
@@ -2211,7 +2212,17 @@ suggest_commit_if_resync_only_dirt() {
         path="${path%\"}"
         path="${path#\"}"
         if _is_loom_pure_copy_surface_path "$path"; then
-            resync_paths+=("$path")
+            # #6613 (mirrored from audit_untracked_loom_paths() above): a path
+            # matching the pure-copy-surface *pattern* with no defaults/
+            # counterpart today is presumed retired-but-unlisted, not shipped
+            # payload -- committing it would permanently ship dead code, so it
+            # is excluded from the commit suggestion below instead.
+            src="$(_loom_pure_copy_surface_source_path "$path" 2>/dev/null)"
+            if [[ -n "$src" && -e "$src" ]]; then
+                resync_paths+=("$path")
+            else
+                retired_paths+=("$path")
+            fi
             continue
         fi
         case "$path" in
@@ -2225,6 +2236,15 @@ suggest_commit_if_resync_only_dirt() {
                 ;;
         esac
     done <<< "$status"
+
+    if [[ "${#retired_paths[@]}" -gt 0 ]]; then
+        warn "Untracked-and-unignored file(s) matching a pure-copy surface, but with no defaults/ counterpart today (likely retired, not committed payload) -- excluded from the commit suggestion below:"
+        for path in "${retired_paths[@]}"; do
+            printf '%b\n' "${YELLOW}    $path${NC}" >&2
+        done
+        warn "These look retired from defaults/ without a defaults/.loom-retired.list entry -- add one there (or delete the file directly if you are working from the source repo). Do NOT commit them."
+    fi
+
     [[ "${#resync_paths[@]}" -eq 0 ]] && return 0
 
     echo ""

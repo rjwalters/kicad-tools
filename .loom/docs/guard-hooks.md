@@ -726,11 +726,37 @@ command as the write.
 This workaround applies to the three `worktree-write-confinement-unresolved-var`
 deny sites in `guard-destructive-generic.sh`'s Bash-tool write-confinement
 check (the ones fed by `extract_write_targets()`, which runs the resolver
-above before reaching these deny paths). It does **not** apply to the
-`rm-scope-unresolved-var` deny (`guards.rmScope=repo`) — `extract_rm_targets()`
-never calls `record_assign()`/`resolve_var()`, so a same-command literal
-declaration does not resolve an `rm` target; that check still requires an
-explicit literal path.
+above before reaching these deny paths).
+
+The `rm-scope-unresolved-var` deny (`guards.rmScope=repo`) reaches the same
+outcome by a **separate, narrower** route: `extract_rm_targets()` still never
+calls `record_assign()`/`resolve_var()`, so the shared resolver above does not
+run on `rm` targets. Instead, two dedicated same-command fast paths sit
+immediately in front of the deny:
+
+| Fast path | Recognized shape | Verdict |
+|---|---|---|
+| `rm_scope_mktemp_same_command_safe()` (#6520) | a **bare** `$NAME`/`${NAME}` target whose single same-command assignment is exactly `NAME=$(mktemp -d)` / `NAME=$(mktemp)` (optionally double-quoted) | Proven `/tmp`-or-`$TMPDIR`-rooted; **skips the scope check entirely**. |
+| `rm_scope_literal_same_command_resolve()` (#6676, widened by #6805) | `$NAME<suffix>` / `${NAME}<suffix>` in any quoting, whose single same-command assignment is a pure literal absolute path (no `$`, no backtick), with a `<suffix>` that is empty or a pure literal starting at a `/` boundary | Resolves to `<literal><suffix>` and re-runs the **normal** rm-scope checks against it — so it can allow *or* deny. |
+
+Both inherit the write-confinement resolver's fail-closed rules: two
+assignments to the same name (even identical ones) poison the resolution, a
+RHS that itself carries an unresolved `$`/command substitution is not trusted,
+and an unassigned name stays unresolved. Heredoc bodies are masked before the
+scan, so an inert decoy assignment inside one cannot launder a real
+unresolved target (#6549).
+
+Because the literal fast path re-runs the ordinary checks on the *resolved*
+path, it is a false-positive refinement rather than a relaxation:
+`WT=/etc/foo; rm -rf "$WT/.snapshots"` still denies as out-of-scope,
+`WT=/; rm -rf "$WT/usr"` still denies as a top-level system directory, and a
+`..` in the suffix is collapsed by `normalize_abs_path()` before the scope
+test. What it stops denying is the routine builder/doctor cleanup shape —
+`WT="<repo>/.loom/worktrees/issue-N"; rm -rf "$WT/.snapshots"` — that was
+previously denied at the catastrophic tier purely because the target was
+spelled through a variable.
+
+Anything outside those two shapes still requires an explicit literal path.
 
 ### Background Subagent Stop Guard (`guards.backgroundSubagents` / `LOOM_GUARD_BACKGROUND_SUBAGENTS`)
 
