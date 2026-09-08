@@ -9,7 +9,14 @@
 # from prose instead of sharing one tested implementation. T3/T4 are the
 # direct regression tests — a PR's `mergeable`/`mergeStateStatus` flickering
 # through `UNKNOWN` (GitHub has not finished computing it yet) must not, on
-# its own, change the hash.
+# its own, change the hash. T16-T18 are the #7362 regression tests — a linked
+# PR's FULL label set used to be folded into BLOCKERS, so ordinary
+# review-cycle label churn (`loom:pr` <-> `loom:review-requested` <->
+# `loom:reviewing` <-> `loom:operator` <-> `loom:treating`) produced 28+
+# near-duplicate re-check comments on #6805 in 36 hours despite an unchanged
+# verdict; the fingerprint now tracks only whether a superseding-block label
+# (`loom:changes-requested`/`loom:blocked`) is present, plus the merge-state
+# bucket.
 #
 # Strategy: most tests drive `--stdin` directly (pure function, no `gh` at
 # all — the simplest and fastest way to pin down the hashing/decision logic).
@@ -131,10 +138,15 @@ assert_eq "clear" "$(field "$out_cleared" VERDICT)" "T5a: a confirmed-clean merg
 assert_ne "$(field "$out_conflicting" CONCLUSION_HASH)" "$(field "$out_cleared" CONCLUSION_HASH)" \
     "T5b: CONFLICTING -> confirmed MERGEABLE (a real change) changes CONCLUSION_HASH"
 
+# T5c (#7362): a SECOND, redundant superseding-block label alongside an
+# already-present one (loom:blocked added on top of loom:changes-requested)
+# does NOT change CONCLUSION_HASH -- the label component only tracks whether
+# *any* superseding-block label is present, not the full label set, so both
+# fixtures bucket to the same "block-label" state.
 FIXTURE_LABEL_ADDED='{"prs":[{"number":4743,"state":"OPEN","labels":["loom:changes-requested","loom:blocked"],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
 out_label_added="$(echo "$FIXTURE_LABEL_ADDED" | "$TARGET_SCRIPT" dep-recheck --stdin)"
-assert_ne "$(field "$out1" CONCLUSION_HASH)" "$(field "$out_label_added" CONCLUSION_HASH)" \
-    "T5c: an added block-bearing label (a real change) changes CONCLUSION_HASH"
+assert_eq "$(field "$out1" CONCLUSION_HASH)" "$(field "$out_label_added" CONCLUSION_HASH)" \
+    "T5c: a second, redundant superseding-block label does NOT change CONCLUSION_HASH (#7362 narrowed fingerprint)"
 
 FIXTURE_MERGED='{"prs":[{"number":4743,"state":"MERGED","labels":["loom:changes-requested"],"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}]}'
 out_merged="$(echo "$FIXTURE_MERGED" | "$TARGET_SCRIPT" dep-recheck --stdin)"
@@ -290,8 +302,8 @@ jq -n '{number: 9999, state: "OPEN", labels: [{id:"a", name:"loom:blocked", colo
 out_labeled="$("$TARGET_SCRIPT" dep-recheck --number 6336 --repo owner/repo)"
 assert_eq "blocked" "$(field "$out_labeled" VERDICT)" \
     "T13d: a labeled (loom:blocked), non-conflicting, real-shape PR is still VERDICT=blocked (label match works on real gh objects, not just the --stdin fixture shape)"
-assert_eq "9999:OPEN:loom:blocked,loom:pr" "$(field "$out_labeled" BLOCKERS)" \
-    "T13e: BLOCKERS renders plain sorted label names from the real gh label-object shape without a jq type error"
+assert_eq "9999:OPEN:block-label:mergeable" "$(field "$out_labeled" BLOCKERS)" \
+    "T13e: BLOCKERS renders the narrowed block-label/merge-bucket fingerprint (#7362) from the real gh label-object shape without a jq type error"
 
 jq -n '{number: 20,state: "OPEN"}' >"$STUB_DIR/issue-20.json"
 jq -n '{number: 22, state: "CLOSED"}' >"$STUB_DIR/issue-22.json"
@@ -367,6 +379,52 @@ rm -f "$STUB_DIR/issue-6333.json"
 out_merged="$("$TARGET_SCRIPT" named-dependency --number 6335 --repo owner/repo)"
 assert_eq "clear" "$(field "$out_merged" VERDICT)" \
     "T15c: live mode falls back to gh pr view when the reference is a PR (not an issue), and reports VERDICT=clear once merged"
+
+# --- T16: dep-recheck - narrowed label fingerprint (#7362): a pure label flip
+# among loom:pr/loom:review-requested/loom:reviewing/loom:operator/loom:treating
+# — none of them a superseding-block label — with no merge-state change must
+# NOT change CONCLUSION_HASH -------------------------------------------------
+BASE_MERGEABLE='"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"'
+F_PR='{"prs":[{"number":6817,"state":"OPEN","labels":["loom:pr"],'"$BASE_MERGEABLE"'}]}'
+F_REVIEW='{"prs":[{"number":6817,"state":"OPEN","labels":["loom:review-requested","loom:reviewing"],'"$BASE_MERGEABLE"'}]}'
+F_OPERATOR='{"prs":[{"number":6817,"state":"OPEN","labels":["loom:operator"],'"$BASE_MERGEABLE"'}]}'
+F_TREATING='{"prs":[{"number":6817,"state":"OPEN","labels":["loom:review-requested","loom:treating"],'"$BASE_MERGEABLE"'}]}'
+out_pr="$(echo "$F_PR" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+out_review="$(echo "$F_REVIEW" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+out_operator="$(echo "$F_OPERATOR" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+out_treating="$(echo "$F_TREATING" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "$(field "$out_pr" CONCLUSION_HASH)" "$(field "$out_review" CONCLUSION_HASH)" \
+    "T16a: loom:pr -> loom:review-requested+loom:reviewing (no superseding label, no merge-state change) leaves CONCLUSION_HASH unchanged (#7362)"
+assert_eq "$(field "$out_pr" CONCLUSION_HASH)" "$(field "$out_operator" CONCLUSION_HASH)" \
+    "T16b: loom:pr -> loom:operator (Champion merge-risk hold, no superseding label) leaves CONCLUSION_HASH unchanged"
+assert_eq "$(field "$out_pr" CONCLUSION_HASH)" "$(field "$out_treating" CONCLUSION_HASH)" \
+    "T16c: loom:pr -> loom:review-requested+loom:treating (Doctor cycle, no superseding label) leaves CONCLUSION_HASH unchanged"
+assert_eq "clear" "$(field "$out_pr" VERDICT)" \
+    "T16d: none of loom:pr/loom:review-requested/loom:reviewing/loom:operator/loom:treating is a superseding-block label on its own"
+
+# --- T17: a superseding-block label newly appearing/disappearing DOES change
+# CONCLUSION_HASH, even measured against the same base fixture as T16 --------
+F_CHANGES_REQUESTED='{"prs":[{"number":6817,"state":"OPEN","labels":["loom:changes-requested"],'"$BASE_MERGEABLE"'}]}'
+F_BLOCKED_LABEL='{"prs":[{"number":6817,"state":"OPEN","labels":["loom:blocked"],'"$BASE_MERGEABLE"'}]}'
+out_cr="$(echo "$F_CHANGES_REQUESTED" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+out_blocked_label="$(echo "$F_BLOCKED_LABEL" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_ne "$(field "$out_pr" CONCLUSION_HASH)" "$(field "$out_cr" CONCLUSION_HASH)" \
+    "T17a: loom:changes-requested newly appearing (a superseding-block label) changes CONCLUSION_HASH"
+assert_eq "blocked" "$(field "$out_cr" VERDICT)" "T17b: loom:changes-requested alone is VERDICT=blocked"
+assert_eq "$(field "$out_cr" CONCLUSION_HASH)" "$(field "$out_blocked_label" CONCLUSION_HASH)" \
+    "T17c: loom:changes-requested and loom:blocked are both superseding-block labels -> same bucket, same hash despite different label text"
+out_pr_again="$(echo "$F_PR" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "$(field "$out_pr" CONCLUSION_HASH)" "$(field "$out_pr_again" CONCLUSION_HASH)" \
+    "T17d: the superseding-block label disappearing again (back to loom:pr only) returns to the original hash"
+
+# --- T18: mergeable/mergeStateStatus crossing the conflicting/clean boundary
+# changes CONCLUSION_HASH even with labels held constant ---------------------
+F_PR_CONFLICTING='{"prs":[{"number":6817,"state":"OPEN","labels":["loom:pr"],"mergeable":"CONFLICTING","mergeStateStatus":"CONFLICTING"}]}'
+out_pr_conflicting="$(echo "$F_PR_CONFLICTING" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_ne "$(field "$out_pr" CONCLUSION_HASH)" "$(field "$out_pr_conflicting" CONCLUSION_HASH)" \
+    "T18a: mergeable MERGEABLE/CLEAN -> CONFLICTING (labels unchanged) changes CONCLUSION_HASH"
+assert_eq "blocked" "$(field "$out_pr_conflicting" VERDICT)" \
+    "T18b: CONFLICTING merge state alone (no superseding label) is still VERDICT=blocked"
 
 # --- Summary ---
 echo ""

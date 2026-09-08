@@ -3523,6 +3523,113 @@ mask_catastrophic_positional_args() {
     }'
 }
 
+# Mask quoted POSITIONAL arguments to grep/egrep/fgrep/rg/awk (issue #7363),
+# used ONLY to build the dedicated COMMAND_STASH_SCAN working copy the
+# stash-recovery/-create detectors read below (`_stash_is_recover` /
+# `_stash_is_pop` / stash_create_invoked()) — never fed into COMMAND_ASK_SCAN
+# itself. mask_ask_positional_args() (#5235) deliberately excludes grep/rg
+# from COMMAND_ASK_SCAN because that copy also feeds SQL_DDL_PATTERN, which
+# intentionally still scans a `grep '<pattern>' file` invocation's own quoted
+# argument for a literal DDL phrase (see that function's header comment).
+# stash-scope's detectors have no such competing raw-text consumer, so a
+# SEPARATE branched copy (COMMAND_STASH_SCAN, built below) can safely mask
+# grep/awk's own search-pattern argument without touching that SQL-DDL
+# invariant — mirrors how COMMAND_CLOUD_ASK_SCAN / COMMAND_ASK_SCAN_PRINTENV
+# each get their own more-aggressively-masked branch off COMMAND_ASK_SCAN.
+#
+# Without this, a read-only `grep -n "...git stash pop..." file` or
+# `awk '/git stash pop/{...}' file` — searching for a TEST-CASE NAME or other
+# literal string that happens to contain "git stash pop/drop/clear" — is
+# indistinguishable from a real `git stash pop` invocation to the plain
+# substring/regex scan below, and false-triggers stash-scope:worktree-collision
+# / stash-scope:main-checkout (confirmed in `.loom/logs/guard-decisions.log`,
+# #7363).
+#
+# ESCAPE-AWARE double-quote scanning (unlike mask_catastrophic_positional_args()
+# / mask_ask_positional_args() above, which close a double-quoted span on the
+# FIRST raw `"` regardless of a preceding backslash): the real false-positive
+# repro from #7363 is `grep -n "^assert_ask \"stash-scope: git stash pop in
+# main checkout asks" file` — a single double-quoted argument containing a
+# backslash-escaped `\"`. A naive same-character scan stops at that escaped
+# quote, leaving "stash-scope: git stash pop in main checkout asks" (a REAL
+# match for the recovery regex) fully visible past the truncation point. This
+# walks the span character-by-character, treating a backslash together with
+# whatever it escapes as one atomic unit (mirroring the DQSPAN idea in
+# strip_literal_text() above), so the span closes only on a truly unescaped
+# `"`. Single-quoted spans need no such handling — real bash gives backslash no
+# special meaning inside single quotes, so the plain same-character scan
+# mask_catastrophic_positional_args() already uses is correct there too.
+mask_stash_scan_positional_args() {
+    printf '%s' "$1" | awk '
+    BEGIN {
+        SQ = sprintf("%c", 39)
+        DQ = sprintf("%c", 34)
+        BS = sprintf("%c", 92)
+        # Command-name allowlist: read-only search commands whose quoted
+        # pattern/program argument is inert search text, never a live shell
+        # invocation. Safe to include grep/rg AND awk here — see the function
+        # header comment for why this copy has no SQL-DDL (or other raw-text)
+        # consumer to protect, unlike COMMAND_ASK_SCAN.
+        cmdre = "(grep|egrep|fgrep|rg|awk)"
+        flagre = "([ \t]+-[A-Za-z0-9_-]+)*"
+        anchor = "(^|[ \t\n;&|`(])" cmdre flagre "[ \t]+"
+        buf = ""
+    }
+    { buf = buf (NR > 1 ? "\n" : "") $0 }
+    END {
+        s = buf
+        out = ""
+        while (match(s, anchor)) {
+            pre     = substr(s, 1, RSTART - 1)
+            matched = substr(s, RSTART, RLENGTH)
+            rest    = substr(s, RSTART + RLENGTH)
+            out = out pre matched
+            # Mask every consecutive quoted positional argument immediately
+            # following the anchor (whitespace-separated), same boundary
+            # convention as mask_catastrophic_positional_args() above.
+            while (1) {
+                qc = substr(rest, 1, 1)
+                if (qc != DQ && qc != SQ) break
+                endpos = 0
+                if (qc == DQ) {
+                    # Escape-aware: a backslash swallows the NEXT character as
+                    # one atomic unit, so an escaped `\"` can never be misread
+                    # as the closing quote.
+                    i = 2
+                    rlen = length(rest)
+                    while (i <= rlen) {
+                        c = substr(rest, i, 1)
+                        if (c == BS) { i += 2; continue }
+                        if (c == DQ) { endpos = i; break }
+                        i++
+                    }
+                } else {
+                    # Single-quoted: bash gives backslash no special meaning
+                    # inside real single quotes, so a plain same-character
+                    # scan is correct here.
+                    for (i = 2; i <= length(rest); i++) {
+                        if (substr(rest, i, 1) == qc) { endpos = i; break }
+                    }
+                }
+                if (endpos == 0) break
+                inner = substr(rest, 2, endpos - 2)
+                if (index(inner, "$(") == 0 && index(inner, "`") == 0) {
+                    gsub(/./, "X", inner)
+                }
+                out = out qc inner qc
+                rest = substr(rest, endpos + 1)
+                while (substr(rest, 1, 1) == " " || substr(rest, 1, 1) == "\t") {
+                    out = out substr(rest, 1, 1)
+                    rest = substr(rest, 2)
+                }
+            }
+            s = rest
+        }
+        out = out s
+        printf "%s", out
+    }'
+}
+
 # Mask a bare shell variable assignment (`NAME='...'` / `NAME="..."`, at
 # command position, optionally after a leading `export`) whose quoted value
 # is never subsequently read via `$NAME`/`${NAME}` ANYWHERE else in the same
@@ -4624,6 +4731,34 @@ if [[ "$COMMAND" == *"grep"* || "$COMMAND" == *"rg "* || \
 fi
 if [[ "$COMMAND" == *"='"* || "$COMMAND" == *'="'* ]]; then
     COMMAND_ASK_SCAN_PRINTENV=$(mask_catastrophic_var_assignment "$COMMAND_ASK_SCAN_PRINTENV")
+fi
+
+# COMMAND_STASH_SCAN (#7363): a FOURTH branched copy, same shape as
+# COMMAND_CLOUD_ASK_SCAN / COMMAND_ASK_SCAN_PRINTENV above, used ONLY by the
+# stash-recovery/-create detectors below (`_stash_is_recover` / `_stash_is_pop`
+# / stash_create_invoked()) that gate the stash-scope:* ASK_PATTERNS entries.
+# Those detectors are plain regex/substring checks with no other consumer
+# (unlike COMMAND_ASK_SCAN itself, which SQL_DDL_PATTERN also reads — see the
+# COMMAND_CLOUD_ASK_SCAN comment above for why that invariant means grep/rg
+# positional text can never be masked out of COMMAND_ASK_SCAN generally). So
+# it is safe to give the stash detectors their own more-aggressively-masked
+# copy, reusing mask_stash_scan_positional_args() (grep/egrep/fgrep/rg/awk
+# positional-pattern masking, defined above) the same way COMMAND_CLOUD_ASK_SCAN
+# reuses mask_catastrophic_positional_args(). This closes the false positive
+# where a read-only grep/awk search's own QUOTED pattern argument merely
+# contains the substring "git stash pop/drop/clear" — e.g. a test runner
+# grepping for a test-case NAME that quotes it — with no live `git stash`
+# invocation anywhere in the command (#7363).
+#
+# Branched off the FULLY narrowed $COMMAND_ASK_SCAN -- i.e. AFTER the
+# check-duplicate.sh / strip_literal_text passes above, not before -- so it
+# inherits every existing COMMAND_ASK_SCAN narrowing first and only ADDS the
+# extra positional masking on top. Never fed back into COMMAND_ASK_SCAN
+# itself, so SQL_DDL_PATTERN and every other COMMAND_ASK_SCAN consumer are
+# completely unaffected by this branch.
+COMMAND_STASH_SCAN="$COMMAND_ASK_SCAN"
+if [[ "$COMMAND" == *"grep"* || "$COMMAND" == *"awk"* || "$COMMAND" == *"rg "* ]]; then
+    COMMAND_STASH_SCAN=$(mask_stash_scan_positional_args "$COMMAND_STASH_SCAN")
 fi
 
 # =============================================================================
@@ -7538,22 +7673,34 @@ fi
 # missed both a no-space `$(git stash pop)` (trailing `)`) and a no-space
 # `` `git stash pop` `` (trailing backtick); it now accepts either, plus the
 # shell-separator set the pre-check's own trailing class already accepted.
+#
+# QUOTE-AWARE SCAN COPY (#7363): all three checks below scan COMMAND_STASH_SCAN
+# (built above, a branch of COMMAND_ASK_SCAN with grep/egrep/fgrep/rg/awk's own
+# quoted pattern/program argument masked out via mask_stash_scan_positional_args())
+# rather than COMMAND_ASK_SCAN itself. A plain regex/substring scan of the raw
+# command has no notion of shell quoting, so a read-only `grep -n "...git
+# stash pop..." file` or `awk '/git stash pop/{...}' file` — searching for a
+# literal string that merely CONTAINS a stash-recovery phrase (e.g. a
+# test-case name) — was indistinguishable from a real invocation. Using the
+# masked copy here (and ONLY here — never fed back into COMMAND_ASK_SCAN
+# itself) narrows stash-scope's own false-positive surface without touching
+# SQL_DDL_PATTERN or any other COMMAND_ASK_SCAN consumer.
 # =============================================================================
 _stash_is_recover=false
 _stash_is_pop=false
 _stash_is_create=false
-if echo "$COMMAND_ASK_SCAN" | grep -qE '(^|[;&|(`]|[[:space:]])git[[:space:]]+stash([[:space:]]|[;&|)`]|$)'; then
-    if echo "$COMMAND_ASK_SCAN" | grep -qE '(^|[;&|(`]|[[:space:]])git[[:space:]]+stash[[:space:]]+(pop|drop|clear)([[:space:]]|[;&|)`]|$)'; then
+if echo "$COMMAND_STASH_SCAN" | grep -qE '(^|[;&|(`]|[[:space:]])git[[:space:]]+stash([[:space:]]|[;&|)`]|$)'; then
+    if echo "$COMMAND_STASH_SCAN" | grep -qE '(^|[;&|(`]|[[:space:]])git[[:space:]]+stash[[:space:]]+(pop|drop|clear)([[:space:]]|[;&|)`]|$)'; then
         _stash_is_recover=true
     fi
     # `pop` alone has a scriptable safe equivalent (safe-stash-pop.sh, #6501);
     # `drop`/`clear` do not — they destroy an entry outright with nothing to
     # verify afterwards. Track it separately so the main-checkout ask only
     # names the wrapper when the wrapper actually applies.
-    if echo "$COMMAND_ASK_SCAN" | grep -qE '(^|[;&|(`]|[[:space:]])git[[:space:]]+stash[[:space:]]+pop([[:space:]]|[;&|)`]|$)'; then
+    if echo "$COMMAND_STASH_SCAN" | grep -qE '(^|[;&|(`]|[[:space:]])git[[:space:]]+stash[[:space:]]+pop([[:space:]]|[;&|)`]|$)'; then
         _stash_is_pop=true
     fi
-    if stash_create_invoked "$COMMAND_ASK_SCAN"; then
+    if stash_create_invoked "$COMMAND_STASH_SCAN"; then
         _stash_is_create=true
     fi
 fi

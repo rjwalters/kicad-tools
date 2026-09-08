@@ -1369,14 +1369,25 @@ Re-verifying is cheap and always required; **commenting** is not.
 **Conclusion fingerprint** — what the re-check concluded, not how it was worded:
 
 - the verdict (`blocked` vs `clear`), and
-- the identity + status of every current blocker: each linked PR/issue number
-  with its state and its block-bearing labels, plus the block reason when the
-  block came from the secondary heuristic rather than a linked PR.
+- the identity + status of every current blocker: each linked PR/issue number,
+  its state, **whether it carries a superseding-block label**
+  (`loom:changes-requested` or `loom:blocked` — presence/absence only, not the
+  full label set) and its merge-state bucket (mergeable vs conflicting), plus
+  the block reason when the block came from the secondary heuristic rather
+  than a linked PR.
 
 Two passes have the *same* conclusion only when both parts match exactly. A
-different blocking number, a blocker that closed or merged, a label that
-appeared or cleared, or a flip between `blocked` and `clear` is a **changed**
-conclusion.
+different blocking number, a blocker that closed or merged, a superseding-block
+label appearing or clearing, a merge state crossing the
+mergeable/conflicting boundary, or a flip between `blocked` and `clear` is a
+**changed** conclusion. A PR's *other* label churn — `loom:pr` /
+`loom:review-requested` / `loom:reviewing` / `loom:treating` / `loom:operator`
+transitioning among themselves, with no superseding-block label and no
+merge-state change — is **not** a changed conclusion (#7362): none of those
+transitions individually flips whether this issue's Dependencies checklist
+item can be checked, so folding them into the fingerprint only produced
+comment spam on actively-reviewed PRs (28+ near-duplicate re-check comments on
+#6805 in 36 hours) without ever changing the substantive answer.
 
 Embed the fingerprint as a marker in every re-check comment you post, so the
 next pass can compare mechanically instead of re-reading prose. **Do not

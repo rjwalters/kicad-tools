@@ -28,6 +28,24 @@
 #   `UNKNOWN` and back does not change VERDICT, and therefore does not change
 #   CONCLUSION_HASH, on its own.
 #
+# WHY THE LABEL COMPONENT IS NARROWED (#7362)
+#
+#   `dep-recheck`'s BLOCKERS used to fold in a linked PR's FULL current label
+#   set. That made every incidental label change on an actively-reviewed PR —
+#   `loom:pr` <-> `loom:review-requested` <-> `loom:reviewing` <->
+#   `loom:operator` (Champion merge-risk hold) <->
+#   `loom:changes-requested`/`loom:treating`/`loom:ci-failure` (Doctor cycles)
+#   — change CONCLUSION_HASH, even though none of those transitions, on their
+#   own, changes the answer Curator's re-check actually reports (blocked vs
+#   clear). In production this produced 28+ near-duplicate re-check comments
+#   on #6805 in 36 hours, all reporting the same unchanged verdict. The label
+#   component now records only whether a **superseding-block label**
+#   (`loom:changes-requested` or `loom:blocked`) is present — the one fact
+#   that actually flips whether an OPEN PR with no merge conflict still
+#   blocks — plus the merge-state bucket (mergeable vs conflicting, with the
+#   same UNKNOWN-fails-safe-to-conflicting rule as VERDICT above). Every
+#   other `loom:*` label is deliberately excluded from the fingerprint.
+#
 # WHAT THIS SCRIPT DOES NOT DO
 #
 #   It does not compare against a prior marker, decide comment/skip/heartbeat,
@@ -56,9 +74,18 @@
 #
 # Subcommands:
 #   dep-recheck        The "Re-check Idempotency" fingerprint: VERDICT
-#                       (blocked|clear), BLOCKERS (one "<pr#>:<state>:<sorted
-#                       loom: labels>" line per PR in `closedByPullRequestsReferences`,
-#                       sorted), and CONCLUSION_HASH.
+#                       (blocked|clear), BLOCKERS (one
+#                       "<pr#>:<state>:<block-label|no-block-label>:<conflicting|mergeable>"
+#                       line per PR in `closedByPullRequestsReferences`,
+#                       sorted). The label component is deliberately narrow
+#                       (#7362): it records only whether a superseding-block
+#                       label (`loom:changes-requested`, `loom:blocked`) is
+#                       present, not the full label set, so ordinary
+#                       review-cycle label churn among `loom:pr` /
+#                       `loom:review-requested` / `loom:reviewing` /
+#                       `loom:treating` / `loom:operator` never touches
+#                       CONCLUSION_HASH. See "WHY THE LABEL COMPONENT IS
+#                       NARROWED (#7362)" below.
 #   operator-premise    The "Checking Operator-Only Premises" fingerprint:
 #                       VERDICT (stale-premise|open), REFS (one "<ref#>:<state>"
 #                       line per checked reference, sorted), and
@@ -287,12 +314,27 @@ _fetch_dep_recheck_json() {
     jq -n --argjson prs "$pr_json" '{prs: $prs}'
 }
 
-# One "<pr#>:<state>:<sorted loom: labels>" line per PR, sorted — matches the
-# original inline formula exactly (ordering churn from the API never looks
-# like a changed conclusion).
+# One
+# "<pr#>:<state>:<block-label|no-block-label>:<conflicting|mergeable>" line
+# per PR, sorted. The label component is deliberately narrow (#7362): it
+# tracks only whether a superseding-block label (`loom:changes-requested` or
+# `loom:blocked`) is present, NOT the PR's full label set, so a review-cycle
+# label flip among `loom:pr` / `loom:review-requested` / `loom:reviewing` /
+# `loom:treating` / `loom:operator` (none of which flips whether the PR
+# actually supersedes the blocked verdict) never changes this line, and
+# therefore never changes CONCLUSION_HASH. The merge-state component reuses
+# the same CONFLICTING/DIRTY/UNKNOWN-fails-safe-to-conflicting rule as
+# `_dep_recheck_verdict` below, so it only flips at the same
+# mergeable/conflicting boundary VERDICT itself reacts to — not on every
+# `mergeable`/`mergeStateStatus` string permutation.
 _dep_recheck_blockers() {
     jq -r '.prs | sort_by(.number) | .[]
-        | "\(.number):\(.state):\([.labels[] | select(startswith("loom:"))] | sort | join(","))"' <<<"$1" | sort
+        | (([.labels[] | select(. == "loom:changes-requested" or . == "loom:blocked")] | length) > 0) as $superseding
+        | ((.mergeable == "CONFLICTING")
+            or (.mergeStateStatus == "DIRTY" or .mergeStateStatus == "CONFLICTING")
+            or (.mergeable == "UNKNOWN")
+            or (.mergeStateStatus == "UNKNOWN")) as $conflicting
+        | "\(.number):\(.state):\(if $superseding then "block-label" else "no-block-label" end):\(if $conflicting then "conflicting" else "mergeable" end)"' <<<"$1" | sort
 }
 
 # A PR blocks iff it is OPEN and either carries a block-bearing label, or its
