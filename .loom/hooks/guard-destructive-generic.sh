@@ -1465,7 +1465,7 @@ resolve_default_branch() {
 # Shared as a single awk source string so the three parsers cannot drift.
 # =============================================================================
 _QSPLIT_AWK='
-function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ) {
+function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch) {
     SQ = sprintf("%c", 39)   # single quote
     DQ = sprintf("%c", 34)   # double quote
     out = ""
@@ -1493,10 +1493,46 @@ function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ) {
                 i = ci + 1
                 continue
             }
-            # Span carries command substitution: keep separators ACTIVE (copy the
-            # opening quote and keep walking char-by-char so a `|` inside splits).
-            out = out c
-            i++
+            # Span carries command substitution: keep separators ACTIVE inside
+            # the span (so a real `|`/`;`/`&` smuggled inside a `"$(a|halt)"`
+            # still splits as intended) -- but walk directly from i+1 up to the
+            # ALREADY-LOCATED closing quote at `ci` and emit that exact byte
+            # literally, never falling back through the top of this loop for
+            # it (#6472). Before this fix the code copied only the OPENING
+            # quote and resumed the top-level, quote-state-BLIND loop one
+            # character at a time: when that loop naturally reached the real
+            # closing quote (the very same `ci` position already found above),
+            # the `c == DQ || c == SQ` branch fired again and misread it as a
+            # BRAND NEW quote opening, scanning forward for the NEXT same-type
+            # quote character elsewhere in the command and treating everything
+            # in between -- including a live top-level separator -- as inert
+            # quoted data to copy verbatim. That is exactly the
+            # `$((...))`-in-a-double-quoted-sed-script false positive: in
+            # `sed -n "$((L-60)),$((L+40))p" file | grep -i pattern`, the
+            # sed script'"'"'s own closing `"` "reopens" a phantom span that runs
+            # to the NEXT unrelated `"` later in the command (`grep -i`'"'"'s
+            # pattern quote), silently absorbing the real pipe between them and
+            # merging two pipeline segments into one -- which is how a later
+            # segment'"'"'s `-i`-prefixed token ends up inside the earlier `sed`
+            # segment'"'"'s own argument list, producing a phantom write-target `|`.
+            out = out c   # the opening quote, emitted literally
+            k = i + 1
+            while (k < ci) {
+                ch = substr(s, k, 1)
+                if (ch == ";") { out = out "\n"; k++; continue }
+                if (ch == "&") {
+                    if (substr(s, k + 1, 1) == "&") { out = out "\n"; k += 2; continue }
+                    out = out "\n"; k++; continue
+                }
+                if (ch == "|") {
+                    if (substr(s, k + 1, 1) == "|") { out = out "\n"; k += 2; continue }
+                    out = out "\n"; k++; continue
+                }
+                out = out ch
+                k++
+            }
+            out = out qc   # the real closing quote -- emitted literally, never re-opened
+            i = ci + 1
             continue
         }
         if (c == ";") { out = out "\n"; i++; continue }
@@ -1877,31 +1913,62 @@ BEGIN {
 # never treated as entering a span, matching how such a string's `>` is
 # already unconditionally masked as quoted data regardless of context.
 #
-# Deliberately does NOT model backslash-escaped quotes -- same simplification
-# qsplit() (above) and strip_literal_text() already accept for this file's
-# other quote-tracking scans, and for good reason beyond just consistency: the
-# input mask_gt() actually receives (COMMAND_ASK_SCAN, see extract_write_targets()
-# below) has typically already been through strip_literal_text()'s OWN
-# escape-blind redaction, which can shift a quote's effective position (e.g. an
-# escaped `\"` inside a redacted --body value loses its backslash, since the
-# redaction's own quote-matching stops at the first bare `"` it finds). Layering
-# a stricter, escape-AWARE scan on top of that already-escape-blind text would
-# only desynchronize the two passes' quote parity -- worse, in the wrong
-# direction (masking too little). Matching qsplit()'s exact toggle-on-every-
-# quote-char behavior keeps both passes' parity in agreement. Same accepted
-# risk direction as qsplit(): pathological unbalanced-quote input could in
-# theory shift parity and mis-mask a genuine unquoted `>`, but that is the same
-# best-effort risk this file already accepts for `;|&` segmentation -- never a
-# NEW risk introduced here. An unterminated quote (no matching close before
-# end-of-string) just runs to the end of the string in that quote state --
-# never crashes, never mis-indexes. Same acceptance for an unbalanced
+# BACKSLASH-ESCAPED QUOTES (#6472): a bare `"`/`'"'"'` byte toggles `mode` above
+# UNCONDITIONALLY -- including one that is backslash-escaped and therefore, in
+# real shell semantics, still just literal DATA inside the CURRENTLY open span
+# (never closes it). A nested/escaped-quoting construct (e.g. a `python3 -c
+# "...'"'"'awk \"\$1 > \"x\"\"'"'"'..."` argument -- a double-quoted awk program
+# reached through an ADDITIONAL layer of escaped quoting) could therefore have
+# its escaped `\"` misread as closing the outer double-quoted span early,
+# flipping `mode` back to 0 (unquoted) mid-string -- so a `>` that is still
+# genuinely quoted DATA from the real shell'"'"'s point of view is left unmasked
+# and reaches extract_write_targets() as if it were a live redirect operator,
+# manufacturing a phantom write target out of whatever quoted text follows it.
+#
+# Fixed narrowly: an `esc` flag tracks "the previous byte was an unescaped
+# backslash in a context where backslash-escaping applies" -- unquoted (mode
+# 0) or double-quoted (mode 2) ONLY, never single-quoted (mode 1), where a
+# backslash is itself just a literal byte with no escaping power in real bash
+# (`'"'"'a\'"'"'` really does end the single-quoted span at that `'"'"'`, backslash or
+# not). While `esc` is set, the current byte is treated as literal data -- it
+# cannot toggle `mode`, open/close an arithmetic/test span, or (in
+# double-quoted mode, where every `>` is already masked regardless of escaping)
+# change how it is masked -- and `esc` is cleared. This is the SAME "byte
+# consumed, one-for-one, same output length" contract every other pass in this
+# function already keeps, so the parallel-tokenization invariant
+# extract_write_targets() depends on (masked text is byte-for-byte
+# length-identical to the original) is untouched.
+#
+# Deliberately does NOT extend escape-awareness to qsplit() or
+# strip_literal_text() -- same simplification those two accept for their own
+# quote-tracking scans, and still correct here for a specific reason: the text
+# mask_gt() receives (COMMAND_ASK_SCAN, see extract_write_targets() below) has,
+# for the specific commands that trigger it (only ones naming --body/--message/
+# --title/--notes/--comment/-m/--search/--arg), typically already been through
+# strip_literal_text()'"'"'s OWN escape-blind redaction, which can shift a quote'"'"'s
+# effective position (e.g. an escaped `\"` inside a redacted --body value loses
+# its backslash, since the redaction'"'"'s own quote-matching stops at the first
+# bare `"` it finds). For THOSE commands, by the time mask_gt() runs the
+# backslash is already gone from the text it sees, so this fix'"'"'s `esc` flag
+# simply never fires there either -- mask_gt() falls back to the exact same
+# escape-blind toggle-on-every-quote-char behavior as before, so no NEW
+# quote-parity desync with strip_literal_text() is introduced for that subset
+# of commands. The fix only changes behavior for the (much larger) set of
+# commands strip_literal_text() never touches at all, where no such
+# already-mangled-backslash text exists to desync against in the first place.
+# Same accepted risk direction as qsplit(): pathological unbalanced-quote input
+# could in theory shift parity and mis-mask a genuine unquoted `>`, but that is
+# the same best-effort risk this file already accepts for `;|&` segmentation --
+# never a NEW risk introduced here. An unterminated quote (no matching close
+# before end-of-string) just runs to the end of the string in that quote state
+# -- never crashes, never mis-indexes. Same acceptance for an unbalanced
 # `((`/`[[` span: depth simply never returns to 0 for the rest of the buffer,
 # masking any LATER unquoted `>`/`<` too -- the same "never widen a deny into
 # an allow" fallback direction every other best-effort scan in this file takes
 # (a masked-away `>` can only DROP a write target, never invent a new deny).
 # =============================================================================
 _MASKGT_AWK='
-function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth) {
+function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc) {
     SQ = sprintf("%c", 39)    # single quote
     DQ = sprintf("%c", 34)    # double quote
     MASK = sprintf("%c", 1)   # SOH -- placeholder for a quoted/arith-context ">"/"<" (never a real char)
@@ -1911,8 +1978,30 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth) {
     mode = 0     # 0 = unquoted, 1 = single-quoted, 2 = double-quoted
     adepth = 0   # `((...))` arithmetic-context nesting depth (unquoted only)
     tdepth = 0   # `[[...]]` test-context nesting depth (unquoted only)
+    esc = 0      # previous byte was an unescaped backslash (mode 0/2 only, #6472)
     while (i <= n) {
         c = substr(s, i, 1)
+        if (esc) {
+            # This byte is backslash-escaped literal data -- never a quote
+            # toggle, an arithmetic/test span delimiter, or (outside
+            # double-quoted mode) a masking trigger. In double-quoted mode
+            # every ">" is already masked regardless of escaping, so that
+            # half of the ternary is a no-op there, not a behavior change.
+            esc = 0
+            out = out (mode == 2 && c == ">" ? MASK : c)
+            i++
+            continue
+        }
+        if (c == "\\" && mode != 1) {
+            # Single-quoted mode (mode == 1) is handled below and never
+            # reaches here: a backslash has no escaping power inside single
+            # quotes in real bash, so it must stay a plain literal byte
+            # there and must never suppress the next quote-close check.
+            esc = 1
+            out = out c
+            i++
+            continue
+        }
         if (mode == 0) {
             if (c == SQ) { mode = 1; out = out c; i++; continue }
             if (c == DQ) { mode = 2; out = out c; i++; continue }

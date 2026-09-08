@@ -111,6 +111,24 @@
 #   LOOM_WATCHDOG_INTERVAL_SECS  Watchdog check cadence in seconds (default 300) —
 #                        macOS StartInterval / systemd OnUnitActiveSec+OnBootSec
 #   LOOM_LAUNCHD_LABEL   macOS only: override the LaunchAgent label (default com.rjwalters.loom-daemon)
+#   LOOM_ALLOW_SESSION_DAEMON_START  Acknowledge a deliberate PRODUCTION start
+#                        from inside a Loom agent session (#6568). By default,
+#                        a shell exporting agent-session vars
+#                        (LOOM_SWEEP_*/LOOM_TERMINAL_ID/LOOM_ROLE) is REFUSED a
+#                        real start that would write the DEFAULT supervisor
+#                        identity (com.rjwalters.loom-daemon /
+#                        loom-daemon.service) -- the 2026-08-17 incident, where
+#                        a sweep's start-path test overwrote the production
+#                        LaunchAgent on both operator Macs with its own
+#                        session env. Scope the identity instead
+#                        (LOOM_LAUNCHD_LABEL / LOOM_SYSTEMD_UNIT) for a test;
+#                        set this to 1 only for a genuine operator start.
+#                        --print-plist/--print-unit are never refused (warn
+#                        only). Independently of this refusal, the session-
+#                        scoped keys themselves (LOOM_SWEEP_*,
+#                        LOOM_TERMINAL_ID, LOOM_ROLE, LOOM_RUNTIME) are ALWAYS
+#                        stripped from the rendered plist/unit and are never
+#                        carried forward from an installed one.
 #   LOOM_LAUNCHD_DOMAIN  macOS only: pin the launchd domain (e.g. gui/$(id -u) or
 #                        user/$(id -u)); honored verbatim, else auto-resolved
 #                        gui→user (#4130). A pinned domain that does not resolve
@@ -155,7 +173,10 @@
 #   1  usage error / binary not found / daemon failed to start / (#5409) a
 #      DETECTED autonomy downgrade on a real start, refused pending an
 #      explicit --work-finder / --no-work-finder / --health-gate /
-#      --no-health-gate / --from-config
+#      --no-health-gate / --from-config / (#6568) a real start from a shell
+#      carrying agent-session context that would write the DEFAULT supervisor
+#      identity, refused pending an explicit LOOM_LAUNCHD_LABEL /
+#      LOOM_SYSTEMD_UNIT or LOOM_ALLOW_SESSION_DAEMON_START=1
 
 set -uo pipefail
 
@@ -222,6 +243,59 @@ xml_escape() {
 
 resolve_launchd_label() {
     echo "${LOOM_LAUNCHD_LABEL:-com.rjwalters.loom-daemon}"
+}
+
+# ---------- agent-session isolation (#6568) ----------
+# Incident 2026-08-17: a daemon-dispatched sweep (working issue #6388 out of a
+# /tmp checkout) invoked this script to exercise the start path. Two properties
+# combined to overwrite the REAL production LaunchAgent on BOTH operator Macs:
+#
+#   1. resolve_launchd_label() above returns the fixed production label
+#      whenever LOOM_LAUNCHD_LABEL is unset -- so a test/session invocation
+#      that forgets the override targets `com.rjwalters.loom-daemon` in the
+#      real gui/<uid> domain, i.e. it REPLACES the production job.
+#   2. render_launchd_plist / render_systemd_unit harvest EVERY exported LOOM_*
+#      var into the durable EnvironmentVariables dict / Environment= lines --
+#      so the sweep's own per-invocation session env (LOOM_SWEEP_CLAIM_OWNED,
+#      LOOM_TERMINAL_ID, LOOM_ROLE, LOOM_RUNTIME) plus its /tmp-rooted
+#      LOOM_WORKSPACE and a stray LOOM_ROLE_RUNNER_INTERVAL_SECS became the
+#      production daemon's durable config. Undetected for two days.
+#
+# Two independent defenses, because either alone still reproduces part of it:
+#
+#   * is_session_scoped_env_key() -- a HARD FILTER applied at every render (and
+#     at the #5344 carry-forward merge, so an ALREADY-poisoned installed
+#     plist/unit cannot re-inject them either). These keys describe ONE agent
+#     invocation; they are never correct as durable daemon config, no matter
+#     who runs the script.
+#   * guard_session_context_start() -- REFUSES a real start that would write
+#     the DEFAULT production identity from a shell carrying agent-session
+#     context, without requiring the caller to remember LOOM_LAUNCHD_LABEL.
+#
+# LOOM_RUNTIME is stripped but is deliberately NOT a detection signal: it is a
+# plausible thing for an operator to export as a personal default, and a
+# refusal keyed on it would block legitimate `loom start` runs. The three
+# detection keys below are set only by Loom's own agent-session spawn path.
+LOOM_SESSION_CONTEXT_KEY_RE='^(LOOM_SWEEP_[A-Za-z0-9_]*|LOOM_TERMINAL_ID|LOOM_ROLE)='
+
+# is_session_scoped_env_key <KEY> — true when KEY names a per-invocation AGENT
+# SESSION variable that must never be baked into durable daemon config.
+is_session_scoped_env_key() {
+    case "$1" in
+        LOOM_SWEEP_*|LOOM_TERMINAL_ID|LOOM_ROLE|LOOM_RUNTIME) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# session_context_keys — space-separated list of the agent-session keys THIS
+# shell exports (empty when the invoking shell is a plain operator shell).
+session_context_keys() {
+    env | grep -E "$LOOM_SESSION_CONTEXT_KEY_RE" 2>/dev/null | cut -d= -f1 | sort -u | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# in_session_context — true when this shell looks like a Loom agent session.
+in_session_context() {
+    [[ -n "$(session_context_keys)" ]]
 }
 
 # resolve_launchd_domain() — the launchd domain (gui/<uid> ↦ user/<uid>) the
@@ -485,7 +559,7 @@ warn_dropped_env_keys() {
     [[ -z "$old_keys" ]] && return 0
     new_keys="$("$keys_extractor" "$new_file" 2>/dev/null || true)"
 
-    local dropped=() k nk hit
+    local dropped=() purged=() k nk hit
     while IFS= read -r k; do
         [[ -z "$k" ]] && continue
         hit=false
@@ -494,8 +568,30 @@ warn_dropped_env_keys() {
                 if [[ "$nk" == "$k" ]]; then hit=true; break; fi
             done <<< "$new_keys"
         fi
-        [[ "$hit" == "false" ]] && dropped+=("$k")
+        [[ "$hit" == "true" ]] && continue
+        # #6568: an agent-session key the INSTALLED file carries is exactly the
+        # corruption this merge must NOT preserve. Without this branch the
+        # carry-forward would faithfully re-inject LOOM_SWEEP_CLAIM_OWNED /
+        # LOOM_TERMINAL_ID / LOOM_ROLE / LOOM_RUNTIME on every subsequent
+        # re-render, making the 2026-08-17 poisoning self-healing-proof: the
+        # renderers' strip (above) would drop them and this merge would put
+        # them straight back. Report the purge instead of carrying it forward.
+        if is_session_scoped_env_key "$k"; then
+            purged+=("$k")
+            continue
+        fi
+        dropped+=("$k")
     done <<< "$old_keys"
+
+    if [[ "${#purged[@]}" -gt 0 ]]; then
+        warn ""
+        warn "NOTICE: purging ${#purged[@]} AGENT-SESSION env key(s) carried by the installed $old_file (#6568):"
+        for k in "${purged[@]}"; do
+            warn "  - $k (per-invocation session state, never durable daemon config)"
+        done
+        warn "These are deliberately NOT carried forward into $new_file. Their presence means a daemon"
+        warn "config was once written from an agent session's environment -- see .loom/docs/daemon-reference.md."
+    fi
 
     [[ "${#dropped[@]}" -eq 0 ]] && return 0
 
@@ -680,6 +776,148 @@ warn_autonomy_downgrade() {
     fi
 }
 
+# ---------- agent-session isolation guard (#6568) ----------
+# The refusal half of the #6568 defenses (the strip half lives in
+# is_session_scoped_env_key, used by both renderers and by the carry-forward
+# merge). Modeled EXACTLY on warn_autonomy_downgrade above, deliberately:
+#
+#   * REAL START -> refuse (exit 1). Writing the default production identity
+#     from a shell that carries agent-session context is the 2026-08-17
+#     incident shape, and there is no way for the script to tell a deliberate
+#     "exercise the start path" from a genuine operator start after the fact.
+#   * --print-plist / --print-unit -> WARN only, exit 0, plist/unit still on
+#     stdout. These are read-only previews with no side effect to block, and
+#     refusing them would make it impossible to see what a real start would
+#     render -- the same reasoning (and the same $PRINT_PLIST/$PRINT_UNIT
+#     guard) warn_autonomy_downgrade uses.
+#
+# Scope: only the two tiers that write a durable supervisor definition under a
+# well-known identity (launchd label, systemd --user unit). The nohup fallback
+# tier renders NO plist/unit at all, so it has no durable config to poison and
+# is left byte-for-byte unchanged.
+#
+# Exemptions (both explicit acts, never a default):
+#   * An explicit LOOM_LAUNCHD_LABEL (launchd) / LOOM_SYSTEMD_UNIT (systemd)
+#     -- the caller has already scoped the start to a non-production identity,
+#     which is what every test in this repo does. This keeps the existing
+#     test-authoring pattern working unchanged from a session context.
+#   * LOOM_ALLOW_SESSION_DAEMON_START=1 -- an operator acknowledging that they
+#     really are starting the production daemon from inside an agent session
+#     (e.g. recovering a fleet host from a Claude Code terminal). It is loud,
+#     not silent: the warning still prints.
+guard_session_context_start() {
+    local session_keys mech identity_hint override_hint
+    session_keys="$(session_context_keys)"
+    [[ -z "$session_keys" ]] && return 0
+
+    # Which mechanism would this invocation write? The inspection modes decide
+    # it from argv alone (--print-plist => launchd, --print-unit => systemd),
+    # exactly like run_inspection_mode_and_exit's PRIOR_AUTONOMY_* resolution;
+    # a real start uses whatever platform detection picked.
+    if [[ "$PRINT_PLIST" == "true" ]]; then
+        mech="launchd"
+    elif [[ "$PRINT_UNIT" == "true" ]]; then
+        mech="systemd"
+    elif [[ "${USE_LAUNCHD:-false}" == "true" ]]; then
+        mech="launchd"
+    elif [[ "${IS_LINUX_SYSTEMD:-false}" == "true" ]]; then
+        mech="systemd"
+    else
+        return 0
+    fi
+
+    if [[ "$mech" == "launchd" ]]; then
+        [[ -n "${LOOM_LAUNCHD_LABEL:-}" ]] && return 0
+        identity_hint="the production LaunchAgent label $(resolve_launchd_label) in the real launchd domain"
+        override_hint="LOOM_LAUNCHD_LABEL=com.example.loom-daemon-test"
+    else
+        [[ -n "${LOOM_SYSTEMD_UNIT:-}" ]] && return 0
+        identity_hint="the production systemd --user unit ${LOOM_SYSTEMD_UNIT:-loom-daemon.service}"
+        override_hint="LOOM_SYSTEMD_UNIT=loom-daemon-test.service"
+    fi
+
+    warn ""
+    warn "WARNING: agent-session context detected -- this shell exports: $session_keys"
+    warn "  A start from here would write $identity_hint"
+    warn "  from a per-invocation agent environment (workspace, log paths and autonomy"
+    warn "  knobs scoped to ONE sweep). That is incident 2026-08-17: both operator Macs'"
+    warn "  production daemons ran for two days under a sweep's test configuration."
+
+    if [[ "${LOOM_ALLOW_SESSION_DAEMON_START:-}" =~ ^(1|true|yes)$ ]]; then
+        warn "  Proceeding anyway: LOOM_ALLOW_SESSION_DAEMON_START is set (explicit operator acknowledgement)."
+        return 0
+    fi
+
+    # Read-only previews are never refused (see the rationale above).
+    if [[ "$PRINT_PLIST" == "true" || "$PRINT_UNIT" == "true" ]]; then
+        warn "  This is a read-only preview, so it is NOT refused -- but a REAL start with this"
+        warn "  environment would be. See the remediation below."
+        warn "  Remediation: scope the identity ($override_hint),"
+        warn "  drop the session vars (env -u LOOM_ROLE -u LOOM_TERMINAL_ID -u LOOM_SWEEP_CLAIM_OWNED ...),"
+        warn "  or set LOOM_ALLOW_SESSION_DAEMON_START=1 to acknowledge a deliberate production start."
+        return 0
+    fi
+
+    err ""
+    err "ERROR: refusing to start -- this would overwrite the REAL daemon configuration with"
+    err "an agent session's environment (see the WARNING above). Choose one:"
+    err "  * Exercising/testing the start path? Scope the supervisor identity:"
+    err "      $override_hint"
+    err "  * Genuinely starting the production daemon from inside an agent session?"
+    err "      LOOM_ALLOW_SESSION_DAEMON_START=1 $0 ..."
+    err "  * Or run it from a clean shell:"
+    err "      env -u LOOM_ROLE -u LOOM_TERMINAL_ID -u LOOM_SWEEP_CLAIM_OWNED $0 ..."
+    err "(#6568 -- the session-scoped keys themselves are stripped from every rendered"
+    err "plist/unit regardless; this refusal additionally protects the production identity.)"
+    exit 1
+}
+
+# ---------- scratch-workdir drift warning (#6568 ask 3) ----------
+# The other half of the 2026-08-17 blast radius: nothing on either Mac
+# complained that the production daemon's WorkingDirectory / LOOM_WORKSPACE
+# had become /tmp/pr6416-checkout, so it booted silently under it for two
+# days (and its watchdog/socket/pid paths, under a mktemp dir, evaporated at
+# the next reboot). Surface it loudly at start/render time instead.
+#
+# Advisory only -- it never blocks a start. A scratch-rooted daemon is exactly
+# what this repo's own hermetic test suites deliberately run, so a refusal
+# here would be wrong; the point is that an OPERATOR reading start output sees
+# it immediately rather than two days later.
+is_scratch_style_path() {
+    local p="$1"
+    [[ -z "$p" ]] && return 1
+    local tmpdir="${TMPDIR:-}"
+    tmpdir="${tmpdir%/}"
+    [[ -n "$tmpdir" && "$p" == "$tmpdir"/* ]] && return 0
+    case "$p" in
+        /tmp/*|/private/tmp/*|/var/tmp/*|/var/folders/*|/private/var/folders/*) return 0 ;;
+        *-checkout|*-checkout/*) return 0 ;;
+        */.loom/worktrees/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+warn_scratch_workdir_drift() {
+    local offenders=() workspace="${LOOM_WORKSPACE:-}"
+    is_scratch_style_path "$REPO_ROOT" && offenders+=("WorkingDirectory=$REPO_ROOT")
+    if [[ -n "$workspace" && "$workspace" != "$REPO_ROOT" ]] && is_scratch_style_path "$workspace"; then
+        offenders+=("LOOM_WORKSPACE=$workspace")
+    fi
+    [[ "${#offenders[@]}" -eq 0 ]] && return 0
+
+    local o
+    warn ""
+    warn "WARNING: this daemon would run out of a SCRATCH / temporary directory (#6568):"
+    for o in "${offenders[@]}"; do
+        warn "  - $o"
+    done
+    warn "  A \$TMPDIR / *-checkout / worktree root is not durable daemon config: its contents"
+    warn "  (and any watchdog, socket or pid path under it) vanish on reboot or cleanup, and"
+    warn "  the daemon keeps reporting healthy the whole time. If this is a test fixture this"
+    warn "  is expected; if this is a real host, the daemon is misconfigured -- restart it from"
+    warn "  the machine checkout (see .loom/docs/troubleshooting.md)."
+}
+
 # ---------- autonomy env resolution (shared: inspection + real start, #6387) ----------
 # Lifted VERBATIM out of the former inline block that sat BETWEEN the
 # already-running guard and the plist/unit render, so both callers resolve
@@ -843,6 +1081,13 @@ run_inspection_mode_and_exit() {
     # are just inspecting or actually starting. Warn-only here by construction
     # (see the $PRINT_PLIST/$PRINT_UNIT guard inside warn_autonomy_downgrade).
     warn_autonomy_downgrade
+    # #6568: same treatment, same reason -- the session-isolation guard and the
+    # scratch-workdir drift warning both degrade to stderr advisories here, so
+    # --print-plist/--print-unit keep their "stdout is the plist/unit, exit 0,
+    # no side effects" contract exactly as before. Drift warning FIRST so it is
+    # still emitted on the real-start path, where the guard exits.
+    warn_scratch_workdir_drift
+    guard_session_context_start
 
     # ---------- --print-plist: pure inspection, no side effects ----------
     if [[ "$PRINT_PLIST" == "true" ]]; then
@@ -951,7 +1196,12 @@ run_inspection_mode_and_exit() {
 # Every already-exported LOOM_* / GH_TOKEN / GITEA_TOKEN / FORGE_TOKEN var is
 # still forwarded verbatim so the launchd job sees EXACTLY the autonomy flags
 # and auth this invocation resolved -- never wider, never narrower (#3972 AC:
-# "preserves the current flag semantics").
+# "preserves the current flag semantics") -- with ONE carve-out (#6568): the
+# per-invocation AGENT SESSION keys (LOOM_SWEEP_*, LOOM_TERMINAL_ID, LOOM_ROLE,
+# LOOM_RUNTIME, see is_session_scoped_env_key) are ALWAYS dropped. They describe
+# one sweep/role invocation, never durable daemon config; forwarding them is
+# what put LOOM_SWEEP_CLAIM_OWNED=6388 / LOOM_ROLE=sweep-lifecycle into the
+# production plist on both operator Macs for two days.
 #
 # Reconciling this STATIC forwarding with the #4430 MINTED GitHub App token
 # path (deliberate, not an oversight): `LOOM_GITHUB_APP_ID` /
@@ -991,6 +1241,11 @@ render_launchd_plist() {
         # Never duplicate the supervisor key hardcoded above (a caller that
         # exported LOOM_DAEMON_SUPERVISOR must not produce two plist entries).
         [[ "$key" == "LOOM_DAEMON_SUPERVISOR" ]] && continue
+        # #6568: agent-session keys are per-invocation, never durable daemon
+        # config. Dropped unconditionally -- including for an operator
+        # invocation that merely happens to have them exported (a `loom start`
+        # typed inside a Claude Code session inherits all of them).
+        is_session_scoped_env_key "$key" && continue
         env_entries+="        <key>$(xml_escape "$key")</key>\n        <string>$(xml_escape "$value")</string>\n"
     done < <(env | grep -E '^(LOOM_[A-Za-z0-9_]*|GH_TOKEN|GITEA_TOKEN|FORGE_TOKEN)=' || true)
 
@@ -1084,7 +1339,8 @@ render_launchd_plist() {
 #     (#4172, $PLIST_PATH_VALUE), not the invoking shell's PATH; every already-
 #     exported LOOM_* / GH_TOKEN / GITEA_TOKEN / FORGE_TOKEN var is forwarded
 #     verbatim so the service sees EXACTLY the autonomy flags + auth this
-#     invocation resolved -- never wider, never narrower. See
+#     invocation resolved -- never wider, never narrower, minus the #6568
+#     agent-session strip the launchd renderer applies too. See
 #     render_launchd_plist's #4430 reconciliation note above -- this static
 #     forwarding and the daemon's own minted-GitHub-App-token refresh loop
 #     are complementary (static = render-time seed/fallback, minted = live
@@ -1107,6 +1363,9 @@ render_systemd_unit() {
         key="${line%%=*}"
         # Never duplicate the supervisor key hardcoded above.
         [[ "$key" == "LOOM_DAEMON_SUPERVISOR" ]] && continue
+        # #6568: same agent-session strip the launchd renderer applies -- the
+        # systemd tier laundered the identical keys into Environment= lines.
+        is_session_scoped_env_key "$key" && continue
         env_lines+="Environment=${line}\n"
     done < <(env | grep -E '^(LOOM_[A-Za-z0-9_]*|GH_TOKEN|GITEA_TOKEN|FORGE_TOKEN)=' || true)
 
@@ -2149,6 +2408,14 @@ fi
 # the prior file gets overwritten. The inspection modes run their own
 # (warn-only) call from run_inspection_mode_and_exit, above.
 warn_autonomy_downgrade
+# #6568: placed here, alongside warn_autonomy_downgrade, for the same reason --
+# this is the last point before the plist/unit is rendered and installed, and
+# platform detection (just above) has decided which supervisor identity would
+# be written. guard_session_context_start REFUSES on this path (it only warns
+# under --print-plist/--print-unit); warn_scratch_workdir_drift is advisory on
+# both, and runs FIRST so a refused start still reports both diagnoses.
+warn_scratch_workdir_drift
+guard_session_context_start
 
 # ---------- background + PID file ----------
 : > "$START_LOG"

@@ -15,6 +15,12 @@
 #   (e) --dry-run + in sync -> exit 0
 #   (f) repo-specific file   -> file present only in .loom/ left untouched
 #   (g) .loom/resync-ignore  -> pinned file reported "skipped", not overwritten
+#   (g2) .loom/resync-ignore honors the repo-relative pin spelling, e.g.
+#        ".loom/hooks/foo.sh" or "./.loom/hooks/foo.sh" pinning the same file
+#        as the ".loom/"-relative "hooks/foo.sh" form (#6515)
+#   (g3) a .loom/resync-ignore pin matching nothing this run (typo, or a
+#        retired file) is reported as "pin had no effect", with a "did you
+#        mean" hint when a walked file shares its basename (#6515)
 #   (h) idempotent rerun     -> second run reports all unchanged
 # Widened surfaces (#4239):
 #   (i) drift in each new surface (roles/docs/bin/commands) -> updated + exit 2 on dry-run
@@ -50,14 +56,20 @@
 #       "removed" verb; --dry-run previews it (exit 2, "would remove") without
 #       deleting; .loom/resync-ignore can pin it against removal exactly like
 #       an update; a retired entry with no installed counterpart is a no-op
-# Untracked-.loom/-path remedy classification (#5983):
+# Untracked-.loom/-path remedy classification (#5983, #6613):
 #   (y) an untracked-and-unignored path under a pure-copy surface
-#       (.loom/hooks|scripts|roles|docs|runtimes|bin/) is shipped payload ->
-#       audit_untracked_loom_paths() recommends committing it directly, not
-#       adding it to EPHEMERAL_PATTERNS
+#       (.loom/hooks|scripts|roles|docs|runtimes|bin/) that still exists under
+#       defaults/ today is shipped payload -> audit_untracked_loom_paths()
+#       recommends committing it directly, not adding it to EPHEMERAL_PATTERNS
+#       and not the #6613 retired-file remedy either
 #   (z) an untracked-and-unignored path outside any pure-copy surface is
 #       genuine runtime state -> the existing EPHEMERAL_PATTERNS remedy is
 #       unchanged
+#   a path matching the pure-copy-surface PATTERN but with no defaults/
+#       counterpart today (removed from defaults/ without a
+#       defaults/.loom-retired.list entry) gets a third, distinct remedy
+#       naming defaults/.loom-retired.list -- neither "commit them" nor
+#       EPHEMERAL_PATTERNS
 # Crash-detection marker (#5980):
 #   a successful apply leaves no .loom/.resync-in-progress marker behind;
 #   --dry-run never writes one; a leftover marker (simulating a crashed prior
@@ -299,6 +311,90 @@ if [[ "$(cat "$REPO/.loom/hooks/guard.sh")" == "PINNED-LOCAL" ]]; then
     pass "(g) pinned file NOT overwritten"
 else
     fail "(g) pinned file was overwritten despite resync-ignore"
+fi
+
+# --- (g2) resync-ignore pin written in the natural repo-relative form -------
+# (#6515) — a pin spelled ".loom/hooks/guard.sh" (or "./.loom/hooks/guard.sh")
+# instead of the ".loom/"-relative "hooks/guard.sh" this script compares
+# against must ALSO be honored, not silently ignored.
+echo "Test group 5b: .loom/resync-ignore honors the repo-relative pin spelling (#6515)"
+REPO="$(make_fixture)"
+printf 'PINNED-LOCAL\n' > "$REPO/.loom/hooks/guard.sh"
+printf '.loom/hooks/guard.sh  # keep my local tweak (repo-relative form)\n' > "$REPO/.loom/resync-ignore"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]] && grep -q "skipped" <<<"$OUT"; then
+    pass "(g2) repo-relative-form pin reported as skipped"
+else
+    fail "(g2) repo-relative-form pin not reported skipped (rc=$RC)"
+fi
+if [[ "$(cat "$REPO/.loom/hooks/guard.sh")" == "PINNED-LOCAL" ]]; then
+    pass "(g2) repo-relative-form pin NOT overwritten"
+else
+    fail "(g2) repo-relative-form pin was overwritten despite resync-ignore"
+fi
+if ! grep -q "pin had no effect" <<<"$OUT"; then
+    pass "(g2) a pin that matched is not also reported dead"
+else
+    fail "(g2) a pin that matched was incorrectly reported as having no effect"
+fi
+
+# same again with a leading "./" on top of the repo-relative form.
+REPO="$(make_fixture)"
+printf 'PINNED-LOCAL\n' > "$REPO/.loom/hooks/guard.sh"
+printf './.loom/hooks/guard.sh  # keep my local tweak (./ + repo-relative form)\n' > "$REPO/.loom/resync-ignore"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]] && grep -q "skipped" <<<"$OUT" && [[ "$(cat "$REPO/.loom/hooks/guard.sh")" == "PINNED-LOCAL" ]]; then
+    pass "(g2) './' + repo-relative-form pin also honored"
+else
+    fail "(g2) './' + repo-relative-form pin was not honored (rc=$RC)"
+fi
+
+# --- (g3) dead-pin reporting (#6515) -----------------------------------------
+# A pin that matches nothing this run (typo, or a retired file) must be
+# reported loudly instead of silently doing nothing forever.
+echo "Test group 5c: dead .loom/resync-ignore pins are reported (#6515)"
+REPO="$(make_fixture)"
+printf 'hooks/gaurd.sh  # typo, does not exist\n' > "$REPO/.loom/resync-ignore"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if grep -q "pin had no effect: 'hooks/gaurd.sh'" <<<"$OUT"; then
+    pass "(g3) a pin matching nothing is reported as having no effect"
+else
+    fail "(g3) a dead pin was not reported (rc=$RC)"
+fi
+# unrelated to whether hooks/guard.sh itself drifted -- the dead pin did not
+# protect it, so it must still be resynced normally.
+if [[ "$(cat "$REPO/.loom/hooks/guard.sh")" == "A" ]]; then
+    pass "(g3) the (unrelated) file the dead pin was NOT protecting still resynced"
+else
+    fail "(g3) hooks/guard.sh did not resync despite the pin not matching it"
+fi
+
+# a pin whose basename matches a walked file, but in the wrong directory,
+# gets a "did you mean" suggestion naming the actual walked path.
+REPO="$(make_fixture)"
+printf 'scripts/guard.sh  # wrong directory, guard.sh actually lives under hooks/\n' > "$REPO/.loom/resync-ignore"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if grep -q "pin had no effect: 'scripts/guard.sh' (did you mean 'hooks/guard.sh'?)" <<<"$OUT"; then
+    pass "(g3) dead pin gets a 'did you mean' suggestion when a basename match exists"
+else
+    fail "(g3) dead pin did not get the expected 'did you mean' suggestion (rc=$RC)"
+fi
+
+# a pin that DOES match is never reported as dead in the same run as one that
+# doesn't -- (g) fixture pin ("hooks/guard.sh") lives alongside a dead one.
+REPO="$(make_fixture)"
+printf 'PINNED-LOCAL\n' > "$REPO/.loom/hooks/guard.sh"
+printf 'hooks/guard.sh   # this one matches\nscripts/nonexistent.sh   # this one does not\n' > "$REPO/.loom/resync-ignore"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if grep -q "pin had no effect: 'scripts/nonexistent.sh'" <<<"$OUT" && ! grep -q "pin had no effect: 'hooks/guard.sh'" <<<"$OUT"; then
+    pass "(g3) only the dead pin is reported; the live pin in the same file is not"
+else
+    fail "(g3) live/dead pin discrimination within one file failed (rc=$RC)"
 fi
 
 # --- (i) widened surfaces: drift detected + fixed ----------------------------
@@ -886,17 +982,21 @@ else
     fail "(#4280) missing binary did not produce the expected warning"
 fi
 
-# --- (#5983) audit classifies untracked .loom/ paths before choosing remedy text --
-echo "Test group 12n: audit classifies untracked .loom/ paths before choosing remedy text (#5983)"
+# --- (#5983, #6613) audit classifies untracked .loom/ paths before choosing remedy text --
+echo "Test group 12n: audit classifies untracked .loom/ paths before choosing remedy text (#5983, #6613)"
 
-# (a) An untracked path under a pure-copy surface (.loom/scripts/) is shipped
-# payload -- the remedy should say to commit it, not point at EPHEMERAL_PATTERNS.
-# The new file is placed directly inside the already-tracked .loom/scripts/
-# directory (a sibling of the fixture's tracked foo.sh) rather than a brand-new
-# subdirectory, so `git status --porcelain` reports it as its own path rather
-# than folding it into a single untracked-directory line.
+# (a) An untracked path under a pure-copy surface (.loom/scripts/) that STILL
+# exists under defaults/scripts/ today is shipped payload -- the remedy should
+# say to commit it, not point at EPHEMERAL_PATTERNS and not the #6613 retired
+# remedy either. The new file is placed directly inside the already-tracked
+# .loom/scripts/ directory (a sibling of the fixture's tracked foo.sh) rather
+# than a brand-new subdirectory, so `git status --porcelain` reports it as its
+# own path rather than folding it into a single untracked-directory line. Its
+# defaults/scripts/ counterpart is created with matching content so #6613's
+# "does this still exist under defaults/?" check finds it.
 REPO="$(make_fixture)"
 printf 'NEW-TEST\n' > "$REPO/.loom/scripts/check-defaults-version-bump.sh"   # untracked, unignored, pure-copy surface
+printf 'NEW-TEST\n' > "$REPO/defaults/scripts/check-defaults-version-bump.sh"   # still shipped today (#6613)
 OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
 if grep -qi "commit them" <<<"$OUT" && grep -q '.loom/scripts/check-defaults-version-bump.sh' <<<"$OUT"; then
     pass "(#5983) untracked payload path under .loom/scripts/ gets 'commit it' guidance"
@@ -907,6 +1007,11 @@ if grep -qi "add them to EPHEMERAL_PATTERNS" <<<"$OUT"; then
     fail "(#5983) untracked payload-only path incorrectly suggested the EPHEMERAL_PATTERNS remedy"
 else
     pass "(#5983) untracked payload-only path does not suggest the EPHEMERAL_PATTERNS remedy"
+fi
+if grep -qi "likely retired" <<<"$OUT"; then
+    fail "(#6613) still-shipped payload path incorrectly suggested the retired-file remedy"
+else
+    pass "(#6613) still-shipped payload path does not suggest the retired-file remedy"
 fi
 
 # (b) An untracked path OUTSIDE any pure-copy surface (genuine runtime state)
@@ -929,6 +1034,38 @@ if grep -q '.loom/some-new-runtime-dir-marker' <<<"$payload_block"; then
     fail "(#5983) untracked runtime-only path incorrectly suggested the shipped-payload remedy"
 else
     pass "(#5983) untracked runtime-only path does not suggest the shipped-payload remedy"
+fi
+
+# (c) An untracked path matching a pure-copy-surface PATTERN (.loom/scripts/)
+# but with NO defaults/scripts/ counterpart and NO defaults/.loom-retired.list
+# entry is neither "commit them" (it's dead code, not current payload) nor the
+# EPHEMERAL_PATTERNS remedy (it's not runtime state) -- it gets the #6613
+# "likely retired" remedy that points at defaults/.loom-retired.list.
+REPO="$(make_fixture)"
+printf 'ORPHAN\n' > "$REPO/.loom/scripts/some-retired-tool.sh"   # untracked, unignored, no defaults/ counterpart
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+retired_block="$(sed -n '/likely retired, not committed payload/,/Do NOT commit them/p' <<<"$OUT")"
+if grep -q '.loom/scripts/some-retired-tool.sh' <<<"$retired_block"; then
+    pass "(#6613) untracked retired-but-unlisted path gets the retired-file remedy"
+else
+    fail "(#6613) untracked retired-but-unlisted path did not get the retired-file remedy"
+fi
+if grep -q 'defaults/\.loom-retired\.list' <<<"$OUT"; then
+    pass "(#6613) retired-file remedy points at defaults/.loom-retired.list"
+else
+    fail "(#6613) retired-file remedy did not mention defaults/.loom-retired.list"
+fi
+payload_block="$(sed -n '/commit them):/,/likely retired, not committed payload/p' <<<"$OUT")"
+if grep -q '.loom/scripts/some-retired-tool.sh' <<<"$payload_block"; then
+    fail "(#6613) retired-but-unlisted path incorrectly got the 'commit them' payload remedy"
+else
+    pass "(#6613) retired-but-unlisted path does not get the 'commit them' payload remedy"
+fi
+if grep -qi "add them to EPHEMERAL_PATTERNS" <<<"$OUT" && grep -q '.loom/scripts/some-retired-tool.sh' \
+    <<<"$(sed -n '/not covered by the managed \.gitignore block/,/If these are Loom runtime state/p' <<<"$OUT")"; then
+    fail "(#6613) retired-but-unlisted path incorrectly got the EPHEMERAL_PATTERNS remedy"
+else
+    pass "(#6613) retired-but-unlisted path does not get the EPHEMERAL_PATTERNS remedy"
 fi
 
 # --- (#5294) stale-binary regression: a loom-daemon binary compiled before a
@@ -1162,6 +1299,32 @@ else
     fail "(#4285) pinned package.json not reported skipped"
 fi
 
+# --- (#6532 review) a ".loom/"-prefixed pin must NOT collapse onto an
+# unrelated bare top-level rel via the #6515 normalization -------------------
+# ".loom/package.json" is a nonsensical pin (there is no file at that path --
+# the root package.json's is_ignored() rel is the bare "package.json"), but
+# the #6515 repo-relative normalization would otherwise strip its ".loom/"
+# prefix down to "package.json" and silently match the unrelated root file
+# anyway. That is exactly the class of silent-pin-misfire bug this PR exists
+# to eliminate, just reintroduced by the fix's own normalization (flagged in
+# Judge review: a sibling PR adds an analogous bare "CLAUDE.md" rel for the
+# root guide, which would collide with a ".loom/CLAUDE.md" pin the same way).
+echo "Test group 12s: a '.loom/'-prefixed pin does not collapse onto an unrelated bare top-level rel"
+REPO="$(make_fixture)"
+printf '{\n  "name": "loom-workspace",\n  "version": "1.0.0"\n}\n' > "$REPO/package.json"
+printf '.loom/package.json  # meant to protect something under .loom/, NOT the root package.json\n' > "$REPO/.loom/resync-ignore"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+if ! grep -q '"version"' "$REPO/package.json"; then
+    pass "(#6532) '.loom/package.json' pin does NOT suppress the root package.json stub edit"
+else
+    fail "(#6532) '.loom/package.json' pin incorrectly collided with and suppressed the root package.json stub edit"
+fi
+if grep -q "pin had no effect: '\.loom/package\.json'" <<<"$OUT"; then
+    pass "(#6532) the non-colliding '.loom/package.json' pin is correctly reported dead"
+else
+    fail "(#6532) the non-colliding '.loom/package.json' pin was not reported dead (rc check: $?)"
+fi
+
 # --- (#5559) targeted field edit: .loom/CLAUDE.md version-header restamp ----
 echo "Test group 12j: .loom/CLAUDE.md version header restamp (#5559)"
 REPO="$(make_fixture)"
@@ -1243,6 +1406,122 @@ if grep -q "skipped.*CLAUDE.md" <<<"$OUT"; then
     pass "(#5559) pinned .loom/CLAUDE.md reported as skipped"
 else
     fail "(#5559) pinned .loom/CLAUDE.md not reported skipped"
+fi
+
+# --- (#6612) targeted field edit: root CLAUDE.md version-header restamp ----
+echo "Test group 12s: root CLAUDE.md version header restamp (#6612)"
+REPO="$(make_fixture)"
+printf '# Loom Orchestration - Repository Guide\n\n**Loom Version**: 0.16.0\n**Installation Date**: 2020-01-01\n\nBody text unaffected.\n\n**Generated by Loom Installation Process**\nLast updated: 2026-07-29\n' \
+    > "$REPO/CLAUDE.md"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]]; then pass "(#6612) apply with a stale root CLAUDE.md header exits 0"; else fail "(#6612) apply exits 0 (got $RC)"; fi
+if grep -q '\*\*Loom Version\*\*: 9.9.9' "$REPO/CLAUDE.md"; then
+    pass "(#6612) root CLAUDE.md Loom Version header restamped to source version"
+else
+    fail "(#6612) root CLAUDE.md Loom Version header NOT restamped"
+fi
+if grep -q "^Last updated: $(date +%Y-%m-%d)\$" "$REPO/CLAUDE.md"; then
+    pass "(#6612) root CLAUDE.md Last updated footer restamped to today"
+else
+    fail "(#6612) root CLAUDE.md Last updated footer NOT restamped"
+fi
+if grep -q '\*\*Installation Date\*\*: 2020-01-01' "$REPO/CLAUDE.md"; then
+    pass "(#6612) root CLAUDE.md Installation Date header left untouched (original install date, not a resync stamp)"
+else
+    fail "(#6612) root CLAUDE.md Installation Date header was altered"
+fi
+if grep -q "Body text unaffected." "$REPO/CLAUDE.md"; then
+    pass "(#6612) root CLAUDE.md body content untouched (targeted field edit, not a regenerate)"
+else
+    fail "(#6612) root CLAUDE.md body content was altered"
+fi
+if grep -q "CLAUDE.md.*restamped version header.*#6612" <<<"$OUT"; then
+    pass "(#6612) apply reports the root CLAUDE.md version-header restamp"
+else
+    fail "(#6612) apply did not report the root CLAUDE.md restamp"
+fi
+# Idempotent rerun: second apply is a clean no-op for the header.
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+if grep -q "CLAUDE.md (version header already" <<<"$OUT"; then
+    pass "(#6612) second run reports root CLAUDE.md version header unchanged (idempotent)"
+else
+    fail "(#6612) second run did not report root CLAUDE.md as unchanged"
+fi
+
+echo "Test group 12t: root CLAUDE.md missing is not created by resync"
+REPO="$(make_fixture)"
+rm -f "$REPO/CLAUDE.md"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]] && [[ ! -f "$REPO/CLAUDE.md" ]]; then
+    pass "(#6612) apply with no installed root CLAUDE.md exits 0 and does not create it"
+else
+    fail "(#6612) apply with no installed root CLAUDE.md misbehaved (rc=$RC)"
+fi
+
+echo "Test group 12u: --dry-run previews the root CLAUDE.md restamp without writing"
+REPO="$(make_fixture)"
+printf '**Loom Version**: 0.16.0\nLast updated: 2026-07-29\n' > "$REPO/CLAUDE.md"
+OUT="$(cd "$REPO" && bash "$SCRIPT" --dry-run 2>&1)"
+if grep -q '\*\*Loom Version\*\*: 0.16.0' "$REPO/CLAUDE.md"; then
+    pass "(#6612) --dry-run leaves root CLAUDE.md unstamped"
+else
+    fail "(#6612) --dry-run wrote to root CLAUDE.md"
+fi
+if grep -q "would update.*CLAUDE.md" <<<"$OUT"; then
+    pass "(#6612) --dry-run previews the root CLAUDE.md restamp"
+else
+    fail "(#6612) --dry-run did not preview the root CLAUDE.md restamp"
+fi
+
+echo "Test group 12v: .loom/resync-ignore pins root CLAUDE.md against the version-header restamp"
+REPO="$(make_fixture)"
+printf '**Loom Version**: 0.16.0\nLast updated: 2026-07-29\n' > "$REPO/CLAUDE.md"
+printf 'CLAUDE.md  # keep my pinned header\n' > "$REPO/.loom/resync-ignore"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+if grep -q '\*\*Loom Version\*\*: 0.16.0' "$REPO/CLAUDE.md"; then
+    pass "(#6612) pinned root CLAUDE.md header NOT restamped"
+else
+    fail "(#6612) pinned root CLAUDE.md header was restamped despite resync-ignore"
+fi
+if grep -q "skipped.*CLAUDE.md" <<<"$OUT"; then
+    pass "(#6612) pinned root CLAUDE.md reported as skipped"
+else
+    fail "(#6612) pinned root CLAUDE.md not reported skipped"
+fi
+
+echo "Test group 12w: root CLAUDE.md with no Loom Version header is left byte-unchanged (#6621)"
+REPO="$(make_fixture)"
+BEFORE_CONTENT='# Some Repo Guide
+
+No Loom version header anywhere in this file.
+'
+printf '%s' "$BEFORE_CONTENT" > "$REPO/CLAUDE.md"
+BEFORE_SUM="$(shasum "$REPO/CLAUDE.md")"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+RC=$?
+AFTER_SUM="$(shasum "$REPO/CLAUDE.md")"
+if [[ $RC -eq 0 ]]; then pass "(#6621) apply on a headerless root CLAUDE.md exits 0"; else fail "(#6621) apply exits 0 (got $RC)"; fi
+if [[ "$BEFORE_SUM" == "$AFTER_SUM" ]]; then
+    pass "(#6621) headerless root CLAUDE.md left byte-unchanged"
+else
+    fail "(#6621) headerless root CLAUDE.md was rewritten despite having no Loom Version header"
+fi
+if grep -q "CLAUDE.md.*restamped version header" <<<"$OUT"; then
+    fail "(#6621) apply falsely reported a restamp for a headerless root CLAUDE.md"
+else
+    pass "(#6621) apply does NOT report a phantom restamp for a headerless root CLAUDE.md"
+fi
+
+echo "Test group 12x: root CLAUDE.md with an unrelated 'Last updated:' line but no Loom Version header is untouched (#6621)"
+REPO="$(make_fixture)"
+printf 'Last updated: 2020-01-01 by a human, unrelated to Loom.\n' > "$REPO/CLAUDE.md"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+if grep -q '^Last updated: 2020-01-01 by a human, unrelated to Loom\.$' "$REPO/CLAUDE.md"; then
+    pass "(#6621) unrelated 'Last updated:' line survives when no Loom Version header is present"
+else
+    fail "(#6621) unrelated 'Last updated:' line was clobbered despite no Loom Version header"
 fi
 
 # --- (#4403) canonical-guard-defer: git-tracked target must NOT be removed --

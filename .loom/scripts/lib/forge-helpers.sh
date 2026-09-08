@@ -597,10 +597,25 @@ forge_auto_merge() {
 
 # --- CI Status Helpers ---
 
+# Distinguished exit code forge_get_check_runs returns when the forge's own
+# response makes clear the failure is a genuine HTTP 404 ("no such
+# resource"), as opposed to any other failure (network blip, 5xx, auth,
+# rate-limit). Callers that poll this function (merge-pr.sh's
+# `_wait_for_checks_then_sync_merge()` and its UNSTABLE-fallback sibling) use
+# this to tell "this repo has no check-runs to wait for" (e.g. GitHub Actions
+# disabled, #6389) apart from a transient fetch failure that should keep
+# polling. Any other nonzero return remains the generic "transient failure"
+# signal (return 1) so existing bounded-poll behavior is unchanged.
+FORGE_CHECK_RUNS_RC_NOT_FOUND=44
+
 # Get CI check runs for a commit.
 # Usage: forge_get_check_runs NWO COMMIT_SHA
 # GitHub: GET /repos/{nwo}/commits/{sha}/check-runs
 # Gitea: GET /repos/{owner}/{repo}/commits/{sha}/statuses (mapped to check-run shape)
+#
+# Return codes: 0 success (JSON on stdout); $FORGE_CHECK_RUNS_RC_NOT_FOUND
+# (44) on a confirmed HTTP 404 (GitHub only — see below); 1 for any other
+# failure.
 forge_get_check_runs() {
   local nwo="$1"
   local commit="$2"
@@ -632,6 +647,13 @@ forge_get_check_runs() {
       }]
     }'
   else
+    # Capture stdout and stderr into separate temp files so a non-2xx
+    # response's HTTP status (which `gh api` reports only on stderr, as
+    # "... (HTTP <code>)") can be inspected without disturbing the JSON
+    # payload on success (#6389).
+    local out_file err_file rc=0
+    out_file=$(mktemp)
+    err_file=$(mktemp)
     gh api "repos/$nwo/commits/$commit/check-runs" \
       --header "Accept: application/vnd.github+json" \
       --jq '{
@@ -642,7 +664,18 @@ forge_get_check_runs() {
           conclusion: .conclusion,
           html_url: .html_url
         }]
-      }' 2>/dev/null
+      }' >"$out_file" 2>"$err_file" || rc=$?
+
+    if [[ $rc -ne 0 ]]; then
+      if grep -q "HTTP 404" "$err_file" 2>/dev/null; then
+        rm -f "$out_file" "$err_file"
+        return "$FORGE_CHECK_RUNS_RC_NOT_FOUND"
+      fi
+      rm -f "$out_file" "$err_file"
+      return 1
+    fi
+    cat "$out_file"
+    rm -f "$out_file" "$err_file"
   fi
 }
 

@@ -1429,6 +1429,13 @@ _wait_for_checks_then_sync_merge() {
   local deadline
   deadline=$(( $(date +%s) + LOOM_AUTO_MERGE_TIMEOUT ))
 
+  # Consecutive-iteration counter (#6389) for the persistent-404 detection
+  # below. Declared outside the loop so it survives across iterations for
+  # the lifetime of this function call; reset to 0 whenever an iteration's
+  # fetch result is anything other than a confirmed 404 (success, or a
+  # non-404 failure).
+  local not_found_streak=0
+
   while true; do
     # A concurrent merger may have completed the PR while we waited.
     local recheck_json
@@ -1438,16 +1445,35 @@ _wait_for_checks_then_sync_merge() {
       return 0
     fi
 
-    # Fetch the check-runs rollup for the head SHA. Retry once to absorb a blip,
-    # then treat a persistent fetch failure as still-pending (bounded wait),
-    # mirroring the UNSTABLE fallback's #3678 discipline.
-    local fetch_rc=0 runs_raw
-    runs_raw="$(forge_get_check_runs "$REPO_NWO" "$head_sha" 2>/dev/null)" || fetch_rc=$?
-    if [[ "$fetch_rc" -ne 0 ]]; then
-      fetch_rc=0
-      runs_raw="$(forge_get_check_runs "$REPO_NWO" "$head_sha" 2>/dev/null)" || fetch_rc=$?
+    # Fetch the check-runs rollup for the head SHA. Retry once to absorb a
+    # blip. A persistent fetch failure is then classified in two ways
+    # (#6389): if BOTH attempts this iteration came back as a confirmed HTTP
+    # 404 ($FORGE_CHECK_RUNS_RC_NOT_FOUND — see forge_get_check_runs), and
+    # that keeps happening for LOOM_CHECK_RUNS_404_STREAK consecutive
+    # iterations (spaced a full poll interval apart), the check-runs API is
+    # treated as persistently unavailable for this repo (e.g. GitHub Actions
+    # disabled) and we short-circuit straight to the synchronous merge
+    # instead of polling to LOOM_AUTO_MERGE_TIMEOUT. Any other failure shape
+    # (a single 404, a 5xx, a network blip) resets the streak and keeps
+    # today's treat-as-still-pending bounded-poll behavior (#3678 discipline).
+    local attempt1_rc=0 attempt2_rc=0 fetch_rc runs_raw
+    runs_raw="$(forge_get_check_runs "$REPO_NWO" "$head_sha" 2>/dev/null)" || attempt1_rc=$?
+    if [[ "$attempt1_rc" -ne 0 ]]; then
+      runs_raw="$(forge_get_check_runs "$REPO_NWO" "$head_sha" 2>/dev/null)" || attempt2_rc=$?
     fi
+    fetch_rc="$attempt1_rc"
+    [[ "$attempt1_rc" -ne 0 ]] && fetch_rc="$attempt2_rc"
+
     if [[ "$fetch_rc" -ne 0 ]]; then
+      if [[ "$attempt1_rc" -eq "$FORGE_CHECK_RUNS_RC_NOT_FOUND" && "$attempt2_rc" -eq "$FORGE_CHECK_RUNS_RC_NOT_FOUND" ]]; then
+        not_found_streak=$(( not_found_streak + 1 ))
+      else
+        not_found_streak=0
+      fi
+      if [[ "$not_found_streak" -ge "$LOOM_CHECK_RUNS_404_STREAK" ]]; then
+        info "PR #$PR_NUMBER: check-runs API unavailable for this repo (no checks configured); proceeding to synchronous merge"
+        return 0
+      fi
       if [[ "$(date +%s)" -ge "$deadline" ]]; then
         error "Timed out after ${LOOM_AUTO_MERGE_TIMEOUT}s waiting for check-runs to become fetchable for PR #$PR_NUMBER (repo has auto-merge disabled). Re-run once the forge API is healthy, or raise LOOM_AUTO_MERGE_TIMEOUT."
       fi
@@ -1455,6 +1481,7 @@ _wait_for_checks_then_sync_merge() {
       sleep "$LOOM_AUTO_MERGE_POLL_INTERVAL"
       continue
     fi
+    not_found_streak=0
 
     # Failing (terminal non-success) and pending (not yet completed) check names.
     local failing pending
@@ -1545,6 +1572,11 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
   # (Also consumed by the #3820 auto-merge-disabled wait path below.)
   LOOM_AUTO_MERGE_POLL_INTERVAL="${LOOM_AUTO_MERGE_POLL_INTERVAL:-30}"
   LOOM_AUTO_MERGE_TIMEOUT="${LOOM_AUTO_MERGE_TIMEOUT:-600}"
+  # Consecutive-iteration threshold (#6389) for treating the check-runs
+  # endpoint's HTTP 404 as a persistent "no checks configured for this repo"
+  # condition rather than a transient blip — see
+  # `_wait_for_checks_then_sync_merge()` and the UNSTABLE fallback below.
+  LOOM_CHECK_RUNS_404_STREAK="${LOOM_CHECK_RUNS_404_STREAK:-2}"
 
   # Proactive repo-level "Allow auto-merge" probe (#3820). Read the setting once
   # (GitHub only; Gitea and any probe failure return "unknown", preserving
@@ -1852,6 +1884,10 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
       _UNSTABLE_FALLBACK_TO_MERGE=false
       _UNSTABLE_OBSERVED_PENDING=false
       _UNSTABLE_DEADLINE=$(( $(date +%s) + LOOM_AUTO_MERGE_TIMEOUT ))
+      # Consecutive-iteration counter (#6389) for the persistent-404
+      # detection below — same discipline as
+      # `_wait_for_checks_then_sync_merge()`'s `not_found_streak`.
+      _UNSTABLE_NOT_FOUND_STREAK=0
 
       while true; do
         # Fetch the check-runs rollup, capturing the helper's own exit status
@@ -1861,17 +1897,37 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
         # doing so lets a fetch error masquerade as "no failing, no pending"
         # and, once a pending check has been observed, take the resolved-green
         # immediate-merge branch on a commit whose real check state is unknown
-        # (#3678). Retry once to absorb a single blip, then route a persistent
-        # failure into the SAME bounded pending-wait path used by branch (b)
-        # below so the LOOM_AUTO_MERGE_TIMEOUT bound still applies.
-        _UNSTABLE_FETCH_RC=0
-        _UNSTABLE_FAILING_RAW="$(forge_get_check_runs "$REPO_NWO" "$_UNSTABLE_HEAD_SHA" 2>/dev/null)" || _UNSTABLE_FETCH_RC=$?
-        if [[ "$_UNSTABLE_FETCH_RC" -ne 0 ]]; then
-          _UNSTABLE_FETCH_RC=0
-          _UNSTABLE_FAILING_RAW="$(forge_get_check_runs "$REPO_NWO" "$_UNSTABLE_HEAD_SHA" 2>/dev/null)" || _UNSTABLE_FETCH_RC=$?
+        # (#3678). Retry once to absorb a single blip. If BOTH attempts this
+        # iteration come back as a confirmed HTTP 404
+        # ($FORGE_CHECK_RUNS_RC_NOT_FOUND) for LOOM_CHECK_RUNS_404_STREAK
+        # consecutive iterations (spaced a full poll interval apart), treat
+        # the check-runs API as persistently unavailable for this repo (e.g.
+        # GitHub Actions disabled, #6389) and fall back to the synchronous
+        # merge instead of polling to LOOM_AUTO_MERGE_TIMEOUT. Any other
+        # failure shape resets the streak and routes into the SAME bounded
+        # pending-wait path used by branch (b) below so the
+        # LOOM_AUTO_MERGE_TIMEOUT bound still applies.
+        _UNSTABLE_ATTEMPT1_RC=0
+        _UNSTABLE_ATTEMPT2_RC=0
+        _UNSTABLE_FAILING_RAW="$(forge_get_check_runs "$REPO_NWO" "$_UNSTABLE_HEAD_SHA" 2>/dev/null)" || _UNSTABLE_ATTEMPT1_RC=$?
+        if [[ "$_UNSTABLE_ATTEMPT1_RC" -ne 0 ]]; then
+          _UNSTABLE_FAILING_RAW="$(forge_get_check_runs "$REPO_NWO" "$_UNSTABLE_HEAD_SHA" 2>/dev/null)" || _UNSTABLE_ATTEMPT2_RC=$?
         fi
+        _UNSTABLE_FETCH_RC="$_UNSTABLE_ATTEMPT1_RC"
+        [[ "$_UNSTABLE_ATTEMPT1_RC" -ne 0 ]] && _UNSTABLE_FETCH_RC="$_UNSTABLE_ATTEMPT2_RC"
+
         if [[ "$_UNSTABLE_FETCH_RC" -ne 0 ]]; then
-          # Fetch is failing (twice). Treat as still-pending and keep polling,
+          if [[ "$_UNSTABLE_ATTEMPT1_RC" -eq "$FORGE_CHECK_RUNS_RC_NOT_FOUND" && "$_UNSTABLE_ATTEMPT2_RC" -eq "$FORGE_CHECK_RUNS_RC_NOT_FOUND" ]]; then
+            _UNSTABLE_NOT_FOUND_STREAK=$(( _UNSTABLE_NOT_FOUND_STREAK + 1 ))
+          else
+            _UNSTABLE_NOT_FOUND_STREAK=0
+          fi
+          if [[ "$_UNSTABLE_NOT_FOUND_STREAK" -ge "$LOOM_CHECK_RUNS_404_STREAK" ]]; then
+            info "PR #$PR_NUMBER: check-runs API unavailable for this repo (no checks configured); proceeding to synchronous merge"
+            _UNSTABLE_FALLBACK_TO_MERGE=true
+            break
+          fi
+          # Fetch is failing. Treat as still-pending and keep polling,
           # reusing the (b) branch's merged-concurrently recheck + deadline
           # guard so this never bypasses the bounded-wait/timeout semantics.
           warning "Failed to fetch check-runs for PR #$PR_NUMBER (rc=$_UNSTABLE_FETCH_RC); treating as still-pending and continuing to poll"
@@ -1888,6 +1944,7 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
           sleep "$LOOM_AUTO_MERGE_POLL_INTERVAL"
           continue
         fi
+        _UNSTABLE_NOT_FOUND_STREAK=0
         # Names of failing check runs (terminal non-success conclusions).
         # Sort + uniq to dedupe re-runs with the same context.
         _UNSTABLE_FAILING="$(echo "$_UNSTABLE_FAILING_RAW" | \
@@ -1982,7 +2039,8 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
         _UNSTABLE_FAILING _UNSTABLE_PENDING _UNSTABLE_REQUIRED \
         _UNSTABLE_INFORMATIONAL _UNSTABLE_OVERLAP _UNSTABLE_COUNT \
         _UNSTABLE_PENDING_COUNT _UNSTABLE_DEADLINE _UNSTABLE_RECHECK_JSON \
-        _UNSTABLE_LOOKUP_RC _UNSTABLE_FETCH_RC _UNSTABLE_OBSERVED_PENDING 2>/dev/null || true
+        _UNSTABLE_LOOKUP_RC _UNSTABLE_FETCH_RC _UNSTABLE_OBSERVED_PENDING \
+        _UNSTABLE_ATTEMPT1_RC _UNSTABLE_ATTEMPT2_RC _UNSTABLE_NOT_FOUND_STREAK 2>/dev/null || true
 
       if [[ "$_UNSTABLE_FALLBACK_TO_MERGE" == "true" ]]; then
         unset _UNSTABLE_FALLBACK_TO_MERGE

@@ -905,6 +905,78 @@ git -C <target> stash list | grep loom-install   # changes the installer stashed
 tail -f ~/.loom/daemon.log
 ```
 
+### `loom-daemon-start.sh` refuses: "agent-session context detected" (#6568)
+
+```
+WARNING: agent-session context detected -- this shell exports: LOOM_ROLE LOOM_SWEEP_CLAIM_OWNED LOOM_TERMINAL_ID
+ERROR: refusing to start -- this would overwrite the REAL daemon configuration with
+an agent session's environment (see the WARNING above).
+```
+
+**This is working as designed, not a bug.** Your shell is a Loom agent session
+(a dispatched sweep, a role runner, or a Claude Code terminal that inherited one),
+and the start would have written the **default** supervisor identity —
+`com.rjwalters.loom-daemon` on macOS, `loom-daemon.service` on systemd — from a
+per-invocation environment. That is the 2026-08-17 incident: a sweep exercising
+the start path overwrote the production LaunchAgent on **both** operator Macs
+with its own session env (`/tmp` `WorkingDirectory`, mktemp'd watchdog/socket/pid
+paths, `LOOM_ROLE=sweep-lifecycle`, a stray `LOOM_ROLE_RUNNER_INTERVAL_SECS=900`)
+and ran that way for two days undetected. Pick the option that matches intent:
+
+```bash
+# Exercising / testing the start path -> scope the supervisor identity.
+# (This is what every test in this repo does; it is also the exemption that
+#  keeps existing test-authoring patterns working from a session context.)
+LOOM_LAUNCHD_LABEL=com.example.loom-daemon-test ./.loom/scripts/cli/loom-daemon-start.sh   # macOS
+LOOM_SYSTEMD_UNIT=loom-daemon-test.service     ./.loom/scripts/cli/loom-daemon-start.sh    # systemd Linux
+
+# Genuinely (re)starting the production daemon from inside an agent session,
+# e.g. recovering a fleet host from a Claude Code terminal. Loud, not silent:
+# the warning still prints.
+LOOM_ALLOW_SESSION_DAEMON_START=1 ./.loom/scripts/cli/loom-daemon-start.sh
+
+# Or drop the session context entirely.
+env -u LOOM_ROLE -u LOOM_TERMINAL_ID -u LOOM_SWEEP_CLAIM_OWNED \
+    ./.loom/scripts/cli/loom-daemon-start.sh
+```
+
+`--print-plist` / `--print-unit` are **never** refused — they warn and still
+print, so you can always inspect what a real start would render.
+
+Independently of this refusal, the session-scoped keys themselves
+(`LOOM_SWEEP_*`, `LOOM_TERMINAL_ID`, `LOOM_ROLE`, `LOOM_RUNTIME`) are **always**
+stripped from every rendered plist/unit, and are never carried forward out of an
+already-installed one — if you see
+
+```
+NOTICE: purging 4 AGENT-SESSION env key(s) carried by the installed …
+```
+
+then that host's daemon config was written from an agent session at some point in
+the past; the re-render is cleaning it up. Full writeup:
+[`daemon-reference.md` → Agent-session isolation on the start path](daemon-reference.md).
+
+### Daemon warns it is running from a scratch directory (#6568)
+
+```
+WARNING: this daemon would run out of a SCRATCH / temporary directory (#6568):
+  - WorkingDirectory=/tmp/pr6416-checkout
+  - LOOM_WORKSPACE=/tmp/pr6416-checkout
+```
+
+Advisory, never blocking. Inside a test fixture this is expected (the daemon
+suites deliberately run scratch-rooted daemons). **On a real host it means the
+daemon is misconfigured** — its working directory, logs, and any watchdog /
+socket / pid path underneath it disappear on reboot or tmp cleanup, while the
+daemon keeps reporting healthy. Repair by re-starting from the machine checkout:
+
+```bash
+./.loom/scripts/cli/loom-daemon-stop.sh
+loom start                       # machine-mode dispatcher: WorkingDirectory := ~/.local/share/loom
+launchctl print gui/$(id -u)/com.rjwalters.loom-daemon | grep -A3 'environment'   # macOS: confirm
+systemctl --user cat loom-daemon.service | grep -E 'WorkingDirectory|LOOM_WORKSPACE'  # systemd: confirm
+```
+
 ### Claude Code not found
 
 ```bash

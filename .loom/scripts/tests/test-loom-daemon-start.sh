@@ -41,6 +41,18 @@ source "$SCRIPT_DIR/lib/bg-proc-trap.sh"
 source "$SCRIPT_DIR/lib/live-state-sandbox.sh"
 live_state_sandbox_snapshot
 
+# #6568: strip the AGENT-SESSION keys for the same reason the sandbox above
+# strips the state pointers -- this suite is routinely RUN BY a
+# daemon-dispatched sweep, whose shell exports all of them. Inherited, they
+# arm the session-isolation guard (which REFUSES a real start that would write
+# the default supervisor identity) on a dispatched run and not on a clean CI
+# run, so every real-start case below would mean something different depending
+# on who launched the suite. The "SI." section at the end sets them
+# EXPLICITLY per case, which is what makes those cases deterministic in both
+# environments.
+unset LOOM_SWEEP_CLAIM_OWNED LOOM_SWEEP_CPU_BUDGET_CORES LOOM_SWEEP_NICED \
+    LOOM_TERMINAL_ID LOOM_ROLE LOOM_RUNTIME LOOM_ALLOW_SESSION_DAEMON_START
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
@@ -60,6 +72,36 @@ assert_eq() {
         echo -e "${RED}✗${NC} $msg"
         echo -e "  expected: [$expected]"
         echo -e "  actual:   [$actual]"
+    fi
+}
+
+# Substring assertions (#6568) — this suite previously had only assert_eq and
+# hand-rolled `if grep -q ...` blocks. Same definitions as
+# test-loom-daemon-launchd-plist.sh's, so a reader moving between the two
+# daemon suites sees identical semantics.
+assert_contains() {
+    local haystack="$1" needle="$2" msg="$3"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [[ "$haystack" == *"$needle"* ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "${GREEN}✓${NC} $msg"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "${RED}✗${NC} $msg"
+        echo "  expected to find: [$needle]"
+    fi
+}
+
+assert_not_contains() {
+    local haystack="$1" needle="$2" msg="$3"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [[ "$haystack" != *"$needle"* ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "${GREEN}✓${NC} $msg"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "${RED}✗${NC} $msg"
+        echo "  expected NOT to find: [$needle]"
     fi
 }
 
@@ -2563,6 +2605,202 @@ else
     echo -e "${RED}✗${NC} #6420: --help documents LOOM_PID_FILE as an output of this script, not an input"
 fi
 rm -rf "$PF_REPO" "$PF_HOME" "$PF_MACHINE"
+
+# ============================================================
+# SI. Agent-session isolation on the REAL START path (#6568).
+#
+# Incident 2026-08-17: a daemon-dispatched sweep (issue #6388, checkout under
+# /tmp) invoked this script to exercise the start path. With no
+# LOOM_LAUNCHD_LABEL set it targeted the fixed production label, so it
+# OVERWROTE ~/Library/LaunchAgents/com.rjwalters.loom-daemon.plist on BOTH
+# operator Macs with a plist rendered from its own session env
+# (LOOM_SWEEP_CLAIM_OWNED=6388, LOOM_TERMINAL_ID=..., LOOM_ROLE=sweep-lifecycle,
+# LOOM_RUNTIME=claude, a /tmp WorkingDirectory, mktemp'd watchdog/socket/pid
+# paths, and a stray LOOM_ROLE_RUNNER_INTERVAL_SECS=900). Undetected for two
+# days.
+#
+# test-loom-daemon-launchd-plist.sh covers the RENDER side (the env strip and
+# the warn-only preview). These cases cover what a preview structurally
+# cannot: the REAL install path -- that the refusal happens BEFORE any
+# supervisor call or file write, that the documented exemptions still let a
+# real start through, and that a start with no session context is untouched.
+#
+# Safety: every case runs with a scratch $HOME and a stub systemctl/launchctl
+# on PATH, so even a completely broken guard cannot reach real supervisor
+# state -- the assertion is on the RECORDED STUB CALLS, never on this
+# machine's launchd/systemd. The systemd branch is forced (LOOM_SYSTEMD_FORCE=1
+# + --no-launchd) so these run identically on a Darwin and a Linux runner, the
+# same seam the S2..S5 cases above use.
+# ============================================================
+SI_BIN="$WORKDIR/si-bin"; mkdir -p "$SI_BIN"
+SI_LOG="$WORKDIR/si-supervisor-calls.log"; : > "$SI_LOG"
+# launchctl is stubbed purely as a backstop: --no-launchd means the launchd
+# branch is unreachable, so ANY recorded launchctl call is itself a failure.
+cat > "$SI_BIN/launchctl" <<EOF
+#!/usr/bin/env bash
+echo "launchctl \$*" >> "$SI_LOG"
+exit 0
+EOF
+chmod +x "$SI_BIN/launchctl"
+
+# si_arm — start a FRESH sleeper to stand in for the daemon MainPID and point
+# the stub `systemctl show -p MainPID` at it, then clear the call log.
+#
+# One sleeper per case, deliberately: the suite's teardown helper
+# (wait_for_pid_file_gone) kills whatever pid the pid file records, which for
+# these cases IS the shared sleeper -- so reusing one across cases makes every
+# case after the first report "daemon did not stay running" for a reason that
+# has nothing to do with what it is testing.
+SI_SLEEP_PID=""
+si_arm() {
+    sleep 30 & SI_SLEEP_PID=$!
+    bg_proc_track "$SI_SLEEP_PID"
+    cat > "$SI_BIN/systemctl" <<EOF
+#!/usr/bin/env bash
+echo "systemctl \$*" >> "$SI_LOG"
+if [[ "\${1:-}" == "--user" ]]; then shift; fi
+case "\${1:-}" in
+  show) echo "${SI_SLEEP_PID}" ;;
+  *)    exit 0 ;;
+esac
+EOF
+    chmod +x "$SI_BIN/systemctl"
+    : > "$SI_LOG"
+}
+
+SI_REPO="$(mktemp -d)"; mkdir -p "$SI_REPO/.loom/logs"
+si_run() {
+    # $1 = scratch HOME; remaining args are extra env assignments consumed by
+    # `env` before the script name.
+    local home="$1"; shift
+    ( cd "$SI_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+        -u LOOM_MACHINE_CHECKOUT -u LOOM_WORKSPACE \
+        PATH="$SI_BIN:$PATH" HOME="$home" \
+        LOOM_SYSTEMD_FORCE=1 LOOM_DAEMON_BIN="$FAKE_BIN" \
+        LOOM_SOCKET_PATH="$home/.loom/loom-daemon.sock" \
+        LOOM_AUTONOMY_MARKER="$home/.loom/autonomy-desired" \
+        "$@" bash "$START_SCRIPT" --no-launchd 2>&1 )
+}
+SI_SESSION_ENV=(
+    LOOM_SWEEP_CLAIM_OWNED=6388
+    LOOM_TERMINAL_ID=daemon-sweep-issue-6388-abcdef
+    LOOM_ROLE=sweep-lifecycle
+    LOOM_RUNTIME=claude
+)
+
+# SI1. The incident shape: a real start from a session context with NO
+#      identity override is REFUSED (exit 1) before anything is written.
+SI1_HOME="$(mktemp -d)"; mkdir -p "$SI1_HOME/.loom/logs"
+si_arm
+si1_out=$( si_run "$SI1_HOME" "${SI_SESSION_ENV[@]}" )
+si1_rc=$?
+rm -f "$SI_REPO/.loom/.daemon.pid"
+assert_eq "1" "$si1_rc" "#6568: a real start from an agent-session context with no identity override is REFUSED (exit 1)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$si1_out" | grep -q "refusing to start" && echo "$si1_out" | grep -q "agent-session context detected"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} #6568: the refusal names the detected agent-session context"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} #6568: the refusal names the detected agent-session context"
+    echo "$si1_out" | sed 's/^/    /'
+fi
+assert_eq "" "$(cat "$SI_LOG")" "#6568: the refusal happens BEFORE any systemctl/launchctl call (zero supervisor calls)"
+assert_eq "0" "$(find "$SI1_HOME/.config" -name '*.service' 2>/dev/null | wc -l | tr -d ' ')" "#6568: the refusal happens BEFORE the unit file is written (nothing installed)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$si1_out" | grep -q "LOOM_SYSTEMD_UNIT=" && echo "$si1_out" | grep -q "LOOM_ALLOW_SESSION_DAEMON_START=1"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} #6568: the refusal spells out both escape hatches (scope the identity / acknowledge explicitly)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} #6568: the refusal spells out both escape hatches (scope the identity / acknowledge explicitly)"
+    echo "$si1_out" | sed 's/^/    /'
+fi
+
+# SI2. Exemption 1 -- an explicit LOOM_SYSTEMD_UNIT scopes the start to a
+#      non-production identity, so the SAME session context proceeds. This is
+#      the pattern every test in this repo already uses (the launchd analog is
+#      LOOM_LAUNCHD_LABEL, pinned by test-loom-daemon-launchd-plist.sh:192-194),
+#      and it must keep working unchanged.
+SI2_HOME="$(mktemp -d)"; mkdir -p "$SI2_HOME/.loom/logs"
+SI2_UNIT="loom-daemon-si2-test-$$.service"
+si_arm
+si2_out=$( si_run "$SI2_HOME" "${SI_SESSION_ENV[@]}" LOOM_SYSTEMD_UNIT="$SI2_UNIT" )
+si2_rc=$?
+assert_eq "0" "$si2_rc" "#6568: an explicit LOOM_SYSTEMD_UNIT lets the SAME session context start normally (exit 0)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q -- "--user enable --now $SI2_UNIT" "$SI_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} #6568: the scoped start actually reached the install path (enable --now on the scratch unit)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} #6568: the scoped start actually reached the install path (enable --now on the scratch unit)"
+    echo "  systemctl calls: $(cat "$SI_LOG")"
+fi
+assert_not_contains "$si2_out" "refusing to start" "#6568: no refusal when the supervisor identity is explicitly scoped"
+
+# SI2b. The INSTALLED unit (not a preview) carries none of the session keys --
+#       the durable artifact is what mattered in the incident.
+SI2_UNIT_FILE="$SI2_HOME/.config/systemd/user/$SI2_UNIT"
+si2_env="$(grep -E '^Environment=' "$SI2_UNIT_FILE" 2>/dev/null || true)"
+assert_not_contains "$si2_env" "Environment=LOOM_SWEEP_CLAIM_OWNED=" "#6568: the INSTALLED unit carries no LOOM_SWEEP_CLAIM_OWNED"
+assert_not_contains "$si2_env" "Environment=LOOM_TERMINAL_ID=" "#6568: the INSTALLED unit carries no LOOM_TERMINAL_ID"
+assert_not_contains "$si2_env" "Environment=LOOM_ROLE=" "#6568: the INSTALLED unit carries no LOOM_ROLE"
+assert_not_contains "$si2_env" "Environment=LOOM_RUNTIME=" "#6568: the INSTALLED unit carries no LOOM_RUNTIME"
+assert_contains "$si2_env" "Environment=LOOM_DAEMON_SUPERVISOR=systemd" "#6568 control: the INSTALLED unit still carries the real daemon env (strip is targeted)"
+wait_for_pid_file_gone "$SI_REPO/.loom/.daemon.pid"
+
+# SI3. Exemption 2 -- LOOM_ALLOW_SESSION_DAEMON_START=1 is the operator's
+#      explicit acknowledgement for a genuine production start from inside an
+#      agent session. It proceeds, but LOUDLY: the warning still prints.
+SI3_HOME="$(mktemp -d)"; mkdir -p "$SI3_HOME/.loom/logs"
+si_arm
+si3_out=$( si_run "$SI3_HOME" "${SI_SESSION_ENV[@]}" LOOM_ALLOW_SESSION_DAEMON_START=1 )
+si3_rc=$?
+assert_eq "0" "$si3_rc" "#6568: LOOM_ALLOW_SESSION_DAEMON_START=1 lets a deliberate production start through"
+assert_not_contains "$si3_out" "refusing to start" "#6568: the acknowledged start is not refused"
+assert_contains "$si3_out" "agent-session context detected" "#6568: the acknowledged start is still LOUD (warning retained, not silenced)"
+assert_contains "$si3_out" "Proceeding anyway" "#6568: the acknowledgement is reported explicitly in the output"
+wait_for_pid_file_gone "$SI_REPO/.loom/.daemon.pid"
+
+# SI4. Control -- the guard is keyed on SESSION CONTEXT, not on "the default
+#      identity" alone. A start with no session vars and no identity override
+#      (an ordinary operator `loom start`) is completely unaffected.
+SI4_HOME="$(mktemp -d)"; mkdir -p "$SI4_HOME/.loom/logs"
+si_arm
+si4_out=$( si_run "$SI4_HOME" )
+si4_rc=$?
+assert_eq "0" "$si4_rc" "#6568 control: an ordinary operator start (no session vars) is unaffected"
+assert_not_contains "$si4_out" "agent-session context detected" "#6568 control: no session-context warning without session vars"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q -- "--user enable --now loom-daemon.service" "$SI_LOG"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} #6568 control: the default-identity start still installs + enables normally"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} #6568 control: the default-identity start still installs + enables normally"
+    echo "  systemctl calls: $(cat "$SI_LOG")"
+fi
+wait_for_pid_file_gone "$SI_REPO/.loom/.daemon.pid"
+
+# SI5. The scratch-workdir drift warning fires at start time (ask 3): both
+#      Macs booted silently under a /tmp WorkingDirectory for two days. It is
+#      advisory -- SI4 above already proved the same invocation shape exits 0.
+assert_contains "$si4_out" "SCRATCH / temporary directory" "#6568: a start whose WorkingDirectory is a scratch dir warns loudly at start time"
+
+# SI6. --help documents the new acknowledgement seam, so an operator who hits
+#      the refusal can find the way out without reading the source.
+si_help=$( bash "$START_SCRIPT" --help 2>&1 )
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$si_help" | grep -q 'LOOM_ALLOW_SESSION_DAEMON_START'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} #6568: --help documents LOOM_ALLOW_SESSION_DAEMON_START"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} #6568: --help documents LOOM_ALLOW_SESSION_DAEMON_START"
+fi
+
+rm -rf "$SI_REPO" "$SI1_HOME" "$SI2_HOME" "$SI3_HOME" "$SI4_HOME"
 
 # ============================================================
 # Live daemon state guard (#5179, adopted here per #5191): every live `.loom`

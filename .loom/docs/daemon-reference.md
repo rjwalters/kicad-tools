@@ -6905,6 +6905,92 @@ without an Aqua session, not regressions introduced here.
   bootstrap is (so the #3972 failure mode does not reproduce there — the systemd
   path is about reboot survival + supervised restart, not that incident).
 
+### Agent-session isolation on the start path (#6568)
+
+**Incident (2026-08-17, found 2026-08-19).** A daemon-dispatched sweep working
+issue #6388 out of a `/tmp/pr6416-checkout` checkout invoked
+`loom-daemon-start.sh` to exercise the start path. On **both** operator Macs it
+overwrote `~/Library/LaunchAgents/com.rjwalters.loom-daemon.plist` — the REAL
+production LaunchAgent — with a plist rendered from the sweep's own environment.
+Nothing complained; both production daemons ran under a test's configuration for
+two days. What production inherited:
+
+- `WorkingDirectory` / `StandardOutPath` / `StandardErrorPath` / `LOOM_WORKSPACE`
+  pointed at `/tmp/pr6416-checkout`;
+- session-scoped keys baked into `EnvironmentVariables`:
+  `LOOM_SWEEP_CLAIM_OWNED=6388`, `LOOM_TERMINAL_ID=daemon-sweep-issue-6388-…`,
+  `LOOM_ROLE=sweep-lifecycle`, `LOOM_RUNTIME=claude`;
+- watchdog/socket/pid paths under a `mktemp` dir — **wiped on reboot**, so the
+  watchdog's recovery state and the pid file silently vanished at the next
+  restart (one Mac showed 5 daemon restarts the following day);
+- `LOOM_ROLE_RUNNER_INTERVAL_SECS=900` on one Mac — an env-tier override that
+  beats every config tier, halving the fleet's configured 1800s role cadence
+  through a token-pool trough.
+
+**Root cause — two independent properties, either of which alone is enough.**
+
+1. `resolve_launchd_label()` returns the fixed production label
+   `com.rjwalters.loom-daemon` whenever `LOOM_LAUNCHD_LABEL` is unset, so an
+   invocation that *forgets* the override does not get a neutral sandbox — it
+   **replaces the production job**. (The systemd tier has the same shape with
+   `LOOM_SYSTEMD_UNIT` / `loom-daemon.service`.)
+2. `render_launchd_plist` / `render_systemd_unit` harvest **every** exported
+   `LOOM_*` var into the durable env block. That is correct for an operator
+   shell and catastrophic for an agent session, whose environment is
+   per-invocation by construction.
+
+**Fix — two defenses, because either property alone reproduces part of it.**
+
+- **Env strip (always on, no opt-out).** `is_session_scoped_env_key()` drops
+  `LOOM_SWEEP_*`, `LOOM_TERMINAL_ID`, `LOOM_ROLE` and `LOOM_RUNTIME` from every
+  rendered plist/unit — including for an operator invocation that merely happens
+  to have them exported (a `loom start` typed inside a Claude Code session
+  inherits all four). The same filter is applied to the **#5344 carry-forward
+  merge**, so an already-poisoned installed plist cannot re-inject them on the
+  next re-render; the purge is reported, not silent.
+- **Session-context refusal.** `guard_session_context_start()` REFUSES a real
+  start (exit 1) when the invoking shell exports any of
+  `LOOM_SWEEP_*` / `LOOM_TERMINAL_ID` / `LOOM_ROLE` **and** the invocation would
+  write the **default** supervisor identity. Two explicit exemptions:
+  scope the identity (`LOOM_LAUNCHD_LABEL=…` / `LOOM_SYSTEMD_UNIT=…` — what
+  every test in this repo already does), or acknowledge a deliberate production
+  start with `LOOM_ALLOW_SESSION_DAEMON_START=1` (which still prints the
+  warning — it is loud, not silent).
+
+`LOOM_RUNTIME` is stripped but is deliberately **not** a detection signal: it is
+a plausible personal default for an operator to export, and a refusal keyed on it
+would block legitimate `loom start` runs.
+
+**Automated restart paths are unaffected.** The host watchdog and the daemon's
+own self-update relaunch both re-enter `loom-daemon-start.sh` from a
+supervisor-provided environment (the plist/unit env), which carries no session
+keys — and the watchdog plist additionally bakes in an explicit
+`LOOM_LAUNCHD_LABEL`, so it is exempt twice over. The path that *is* newly gated
+is an **agent** running `loom start` / `loom update` by hand on a fleet host:
+that is the same act as the incident, and it now has to say so explicitly with
+`LOOM_ALLOW_SESSION_DAEMON_START=1`.
+
+**`--print-plist` / `--print-unit` are never refused.** They warn instead —
+stdout is still the rendered plist/unit and the exit code is still 0 — exactly
+like `warn_autonomy_downgrade`'s read-only preview split. Refusing a preview
+would make it impossible to inspect what a real start would do. The nohup
+fallback tier is also untouched: it renders no plist/unit, so it has no durable
+config to poison.
+
+**Scratch-workdir drift warning.** A start whose resolved `WorkingDirectory` or
+`LOOM_WORKSPACE` lands under `$TMPDIR`, `/tmp`, `/var/folders`, a `*-checkout`
+path, or a `.loom/worktrees/` root now warns loudly at start/render time. It is
+**advisory only** — it never blocks, because the repo's own hermetic test suites
+deliberately run scratch-rooted daemons — but it means an operator sees the
+condition in the start output instead of discovering it two days later.
+
+Regression coverage: the render/preview side in
+`defaults/scripts/tests/test-loom-daemon-launchd-plist.sh` (cases 21–25), the
+real-install side in `defaults/scripts/tests/test-loom-daemon-start.sh` (the
+"SI." section), including the control cases that prove the strip is targeted and
+the refusal is keyed on session context rather than on the default identity
+alone.
+
 ### systemd user unit (Linux, #4268)
 
 On a systemd Linux host, `loom-daemon-start.sh` installs a `systemd --user`
