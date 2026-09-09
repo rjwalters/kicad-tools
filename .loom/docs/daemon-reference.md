@@ -4313,6 +4313,74 @@ in neither, either, or both cooldowns simultaneously, and clearing/setting
 one never touches the other. No config knob: this is a per-issue, not
 per-workspace, declaration, and lives entirely in the issue body.
 
+**Host-affinity constraint (#7456).** Every mechanism above bounds *when* the
+work finder re-tries an issue; none of them steer *which host* gets it — every
+dispatcher in a multi-host fleet competes for the same claim on equal terms.
+That gap is fine for ordinary work, but not for an issue whose toolchain lives
+on one machine only: `example-org/pcb-tool#9` needed `some-fdtd-solver` (an FDTD
+EM solver, provisioned on `loom-worker-2` only) and landed on a host without it 7
+times in one day (20+ overall) — each time the Builder correctly bailed with
+"wrong host, no changes made" and released the claim (recording a no-op
+cooldown, see "No-op re-dispatch cooldown (#6670)" above), but only *after*
+the work finder had already flipped `loom:issue` → `loom:building`, spawned a
+sweep, and burned a token draw from a pool that was the binding fleet
+constraint that day.
+
+An issue declares a host-affinity constraint via **either** (both are ORed
+together, any-of semantics):
+
+- A repeatable label, `loom:host:<host-id>` — visible/filterable in the forge
+  UI without opening the body; or
+- A repeatable body marker, `<!-- loom:requires-host=<host-id> -->` — anchored
+  the same `<!-- ... -->` way the capability marker
+  (`<!-- loom:capability=<name> -->`, `loom-daemon/src/capability.rs`) is,
+  but with an **open** value grammar (a host id is whatever
+  `sweep_registry::host_identity()` resolves to on some machine — an explicit
+  `$LOOM_HOST_ID`, or a `$HOSTNAME`/`hostname`-binary fallback that can be
+  mixed-case and dotted, e.g. `Roberts-MacBook-Pro.local` — not a closed list
+  this repo can enumerate).
+
+```
+<!-- loom:requires-host=loom-worker-2 -->
+```
+
+Declaring nothing at all — every issue that predates this feature — leaves the
+constraint empty, which matches every host: **zero behavior change**. A
+non-empty constraint is fail-closed: it matches **only** a host whose own
+identity is literally one of the declared values (exact, case-sensitive
+string match — no normalization rescues a near-miss).
+
+Two independent enforcement points, mirroring the AC1–AC3 split the issue
+asked for:
+
+1. **`work_finder`'s autonomous tick** (`loom_daemon::host_affinity`,
+   `WorkItem::host_constraint`) checks every ready-issue candidate against
+   `WorkDispatcher::current_host_id()` (which defaults to
+   `sweep_registry::host_identity()`) *before* any other skip/park logic —
+   before the in-flight/capacity gates, and without ever calling `dispatch()`.
+   A non-matching host logs one INFO line —
+   `work_finder: skipping issue #N — requires host X, this is Y` — increments
+   its own `host-constraint-skip` counter on the per-tick summary line, and
+   leaves behind **no** claim flip, no comment, and no cooldown/backoff
+   record: the candidate simply was not actionable on this host at all, so it
+   is never even attempted. A matching host dispatches exactly as it would an
+   unconstrained issue.
+2. **`loom-daemon dispatch <issue>`** (the explicit-operator path) fetches the
+   issue's current labels/body via one `gh issue view` call and refuses with a
+   clear message — naming both the required host(s) and the actual one — when
+   they do not match, unless `--ignore-host-constraint` is passed. This check
+   runs entirely client-side, before the IPC round-trip: the CLI process and
+   the daemon it talks to over a Unix socket always share one host identity,
+   so there is no wire-protocol field for this. A `gh` fetch failure (offline,
+   missing binary, transient forge hiccup) fails **open** — the actual command
+   being gated is the dispatch itself, and a `gh` outage must not silently
+   turn into "every explicit dispatch refused."
+
+The Builder-side "landed on the wrong host, no changes made" bail-out this
+feature exists to make rare is unchanged and stays the backstop for a
+mislabelled issue — this is a `work_finder`/`dispatch`-level *filter*, not a
+replacement for the sweep's own toolchain check.
+
 ### Host-distress circuit breaker (#4235)
 
 The insta-crash quarantine above protects the shared **queue** from one broken
