@@ -706,6 +706,21 @@ interactive `codex login` inside the container) instead of a host-direct
 `reauth`. `session stop` never SIGKILLs an in-flight `docker exec` (the
 #5119 restart-safety contract) unless `--force` is passed.
 
+**Session-exec dispatch (issue #6926):** `spawn-codex.sh` detects an adopted
+profile via the same `.session-managed.json` sentinel and, when present,
+routes headless dispatch through `docker exec <container> codex exec ...`
+instead of a bare-metal `codex exec` — never `tmux send-keys` (that
+TUI-driving path is `session attach`'s alone, operator-only). This keeps the
+ownership rule intact end to end: once a profile is adopted, no ambient
+host-direct process — including a Loom-dispatched worker — touches its
+`CODEX_HOME` volume. Gated by `LOOM_CODEX_SESSION_EXEC` (`auto` default, `0`/
+`1` to override); a non-adopted profile is completely unaffected. An
+interactive (no-prompt) invocation against an adopted profile is refused
+(exit 78) rather than run bare-metal — use `session attach` instead. The
+managed `pre_tool_use` hook readiness preflight above runs identically in
+both modes, since it inspects the same profile directory the container
+mounts.
+
 Every lifecycle command is all-or-nothing over the (profile, registry) pair. A
 failed `add` or `import` removes the profile it created, so the name stays
 reusable; concurrent creations of the same name are serialized by an exclusive
