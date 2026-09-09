@@ -961,6 +961,109 @@ stateless-auth runtimes (Claude) — are specified in
 dispatch path**; this doc's seven contract points are unchanged by that ADR.
 This is a pointer only — no contract-point changes ship with it.
 
+### Containerized dispatch mode for Claude sweeps (issue #7429, epic #6896 Phase 3)
+
+The first of epic #6896's three sequential Phase 3 issues (mode → limits →
+rollout) ships a config-selectable, **initially OFF** containerized dispatch
+mode inside `spawn-claude.sh` — per ADR-0017 Decision 1, the per-runtime
+adapter (not the `spawn-worker.sh` seam) decides whether "spawn" means
+"start a fresh container." Enable it with:
+
+```json
+{
+  "runtimes": {
+    "containment": {
+      "enabled": true,
+      "image": "ghcr.io/rjwalters/loom-worker:latest"
+    }
+  }
+}
+```
+
+| Precedence | Source |
+|---|---|
+| 1 (highest) | `LOOM_SWEEP_CONTAINERIZED` env var (`1`/`true`/`yes` enables; anything else disables) |
+| 2 | `.loom/config.json` → `runtimes.containment.enabled` |
+| 3 (default) | `false` — byte-for-byte bare-metal dispatch, unchanged |
+
+The image is resolved the same way (`LOOM_SWEEP_CONTAINER_IMAGE` env →
+`runtimes.containment.image` config → default
+`ghcr.io/rjwalters/loom-worker:latest`).
+
+**Mechanism.** When enabled, `spawn-claude.sh` re-execs *itself* inside
+`docker run <image> <workspace>/.loom/scripts/spawn-claude.sh <original args>`,
+guarded by an internal `LOOM_SPAWN_CONTAINERIZED=1` recursion sentinel so the
+re-exec'd copy runs the ordinary (now-"bare-metal-inside-a-box") dispatch
+path straight through — CPU quota (advisory-only, same as any host with no
+reachable `systemd --user` manager), sleep-inhibit, and token selection all
+execute again, this time *inside* the container. This is deliberate, not
+incidental: it is the reason [`docker/worker/MOUNT-CONTRACT.md`](https://github.com/rjwalters/loom/blob/main/docker/worker/MOUNT-CONTRACT.md)
+§2 can say a worker container reads a token "via the existing rotation logic
+in `spawn-claude.sh`" — there is only one implementation of that logic, ever.
+Niceness is the one exception: the host-side `LOOM_SWEEP_NICED` sentinel is
+already exported by the time this block runs, and it is forwarded through
+the generic env passthrough below like any other `LOOM_*` var, so the
+recursed invocation correctly skips re-niceing a process tree the host
+kernel already sees as niced.
+
+**Mount contract application** (`docker/worker/MOUNT-CONTRACT.md`):
+
+- **§1 path parity** — the resolved `$WORKSPACE` (repo root, covering the
+  main checkout and every `.loom/worktrees/*` beneath it) is bind-mounted
+  read-write at the *identical* absolute host path, and `-w` is set to the
+  spawning process's own cwd (already inside that parity-mounted tree) — so
+  a sweep in `.loom/worktrees/issue-N` builds and commits with no repo copy.
+- **§2 secrets** — the shared machine-level token pool (when it resolves
+  outside `$WORKSPACE`) is bind-mounted read-only at parity; the per-repo
+  pool is already covered by the workspace mount. `GH_TOKEN`/`GITHUB_TOKEN`
+  are forwarded by name when present in the invoking environment;
+  `~/.config/gh` and `~/.gitconfig` are bound read-only, best-effort, when
+  present and no token env var covers `gh` auth.
+- **§3 uid/gid** — unchanged from the base image's own default (uid/gid
+  `1000`); this mode does not override `--user`, so the Linux-fleet
+  provisioning requirement in MOUNT-CONTRACT.md §3 applies unchanged.
+- **§4 build-cache placement** — `CARGO_TARGET_DIR` is resolved exactly the
+  way the rest of the repo already does (`lib/cargo-target-dir.sh`: env →
+  `cargo metadata` → `<workspace>/target`) and — only when it resolves
+  *outside* the already-mounted workspace — mounted at its own identical
+  absolute path and exported into the container. This is the specific
+  mechanism that keeps a containerized sweep sharing the SAME
+  per-repo-per-host cache `post-worktree.sh`'s binary-reuse fast path
+  already assumes, consistent with the #6013/#6014 rebuild-storm constraint
+  the mount contract's §4 documents. **Every `LOOM_*`/`CLAUDE_*`/
+  `SAFEHOUSE*`/`CODEX_*` env var already present in the invoking process's
+  environment is forwarded by name** (`-e VAR`, no value — docker reads it
+  live from the client's own env), covering `LOOM_SWEEP_CLAIM_OWNED`,
+  `LOOM_ROLE`, `LOOM_RUNTIME`, `LOOM_MODEL`/`LOOM_EFFORT`, and anything
+  else the daemon sets ahead of dispatch, without a hardcoded list that
+  could drift from what `sweep_registry::dispatch` actually exports.
+
+**Restart-safety (issue #5119, ADR-0017 Decision 4, "specified" section).** A
+per-sweep container is its own cgroup, owned by the container runtime, not
+by loom-daemon's systemd unit or by this script's own process tree. A
+hard-killed daemon SIGKILLs the local `docker run` *client* exactly like any
+other exec in `spawn-claude.sh` — but that does not stop the container it
+started, so the in-flight sweep survives as an orphan relative to the
+daemon's in-memory registry, extending launchd's existing "sweeps survive by
+design" property to systemd via the container boundary instead of process
+reparenting. `loom-daemon restart --drain` (#4090/#5119) remains the
+recommended path on both supervisors and is unaffected: a containerized
+sweep is admitted into the same in-flight accounting `--drain` already polls
+to zero. **Not shipped by this issue** (explicit Phase 3 follow-up ADR-0017
+names but defers): `SweepRegistry::reconstruct`'s container-recognition
+extension (so a restarted daemon re-admits a still-running orphaned
+container instead of risking a duplicate re-dispatch), and teaching
+`cancel_sweep` to `docker stop`/`docker rm` a containerized sweep it
+explicitly cancels.
+
+**Explicitly out of scope for this issue** (separate, later Phase 3 issues
+per #7429's own scope note): per-sweep resource limits (`--cpus`/`--memory`
+docker flags — this mode ships with none) and the fleet-default rollout
+decision. Bare-metal dispatch (`runtimes.containment.enabled` absent or
+`false`) is completely unaffected — the containment check is skipped
+entirely and every subsequent line of `spawn-claude.sh` runs exactly as it
+did before this mode existed.
+
 ## Fork mapping table
 
 The gpeyton/loom fork already built much of this as parallel special-casing. The
