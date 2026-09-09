@@ -1426,8 +1426,17 @@ _wait_for_checks_then_sync_merge() {
     return 0
   fi
 
-  local deadline
+  local deadline observed_checks
   deadline=$(( $(date +%s) + LOOM_AUTO_MERGE_TIMEOUT ))
+  # #6169: whether we have ever seen a nonzero check-runs total_count for this
+  # head SHA. A check-runs rollup with zero rows is ambiguous on its own — it
+  # can mean "this repo genuinely has no CI configured" (safe to declare
+  # settled) OR "the forge API returned an empty/degraded response for this
+  # poll" (e.g. an intermittent TLS failure -- NOT safe to trust). Requiring
+  # at least one observed nonzero total_count (or the full bounded wait
+  # elapsing) before trusting a zero-row read as genuine settlement closes
+  # the false-settle trap without changing behavior for the common case.
+  observed_checks=false
 
   # Consecutive-iteration counter (#6389) for the persistent-404 detection
   # below. Declared outside the loop so it survives across iterations for
@@ -1484,11 +1493,14 @@ _wait_for_checks_then_sync_merge() {
     not_found_streak=0
 
     # Failing (terminal non-success) and pending (not yet completed) check names.
-    local failing pending
+    local failing pending total_count
     failing="$(echo "$runs_raw" | \
       jq -r '[.check_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled" or .conclusion == "action_required") | .name] | unique | .[]' 2>/dev/null || true)"
     pending="$(echo "$runs_raw" | \
       jq -r '[.check_runs[] | select(.status != "completed") | .name] | unique | .[]' 2>/dev/null || true)"
+    total_count="$(echo "$runs_raw" | jq -r '.total_count // 0' 2>/dev/null || echo 0)"
+    [[ "$total_count" =~ ^[0-9]+$ ]] || total_count=0
+    [[ "$total_count" -gt 0 ]] && observed_checks=true
 
     if [[ -n "$failing" ]]; then
       # A check failed — classify against branch protection. A required failing
@@ -1525,6 +1537,21 @@ _wait_for_checks_then_sync_merge() {
       info "PR #$PR_NUMBER: ${n} check(s) still running (repo auto-merge disabled); waiting ${LOOM_AUTO_MERGE_POLL_INTERVAL}s for CI (timeout ${LOOM_AUTO_MERGE_TIMEOUT}s)..."
       sleep "$LOOM_AUTO_MERGE_POLL_INTERVAL"
       continue
+    fi
+
+    # Nothing failing, nothing pending -- but a zero-row rollup we have never
+    # seen non-empty is ambiguous (#6169: could be a transient forge read, not
+    # genuine settlement). Re-poll instead of trusting it, bounded by the same
+    # deadline as the pending-wait above; only fall through once the wait is
+    # fully exhausted (at which point continuing to wait cannot help either).
+    if [[ "$total_count" -eq 0 ]] && [[ "$observed_checks" != "true" ]]; then
+      if [[ "$(date +%s)" -ge "$deadline" ]]; then
+        warning "PR #$PR_NUMBER: check-runs rollup remained empty (zero rows) for the entire ${LOOM_AUTO_MERGE_TIMEOUT}s wait; proceeding on the assumption this repo genuinely has no checks configured for this commit"
+      else
+        info "PR #$PR_NUMBER: check-runs rollup is empty (zero rows) -- ambiguous between 'no checks configured' and a transient forge read; re-polling before trusting it (repo auto-merge disabled)"
+        sleep "$LOOM_AUTO_MERGE_POLL_INTERVAL"
+        continue
+      fi
     fi
 
     # Nothing failing (or only informational), nothing pending → effectively

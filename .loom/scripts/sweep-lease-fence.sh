@@ -81,11 +81,13 @@
 #
 # `defaults/.claude/commands/loom/sweep.md`'s Builder phase, immediately
 # before `git push` + `./.loom/scripts/create-pr.sh` (see "Creating the PR"
-# in `defaults/roles/builder-pr.md`). Only meaningful for a daemon-dispatched
-# sweep that has a lease at all (Step 1a's self-claim signal, the same gate
-# that starts `sweep-lease-renew.sh`) -- a manual `/loom:sweep`, GH Actions
-# cron, or `--no-daemon` run has no lease comment to fence against and this
-# check fails open for it (see "Fail-open cases").
+# in `defaults/roles/builder-pr.md`). Meaningful for BOTH dispatch paths
+# since #6320: a daemon-dispatched sweep's lease is written at dispatch
+# (Step 1a's self-claim signal, #6179), and an in-session sweep (manual
+# `/loom:sweep`, GH Actions cron, `--no-daemon`) publishes its own at
+# pre-flight Step 1b (`sweep-lease-publish.sh`). Only a run that predates
+# those writers -- or one whose lease write failed -- has nothing to fence
+# against, and this check fails open for it (see "Fail-open cases").
 #
 # ## Fail-open cases (never block on unverifiable evidence)
 #

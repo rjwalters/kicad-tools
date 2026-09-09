@@ -78,7 +78,12 @@
 #   verdict-staleness-guard.sh <pr-number> --anchor    # report + act on UNVERIFIABLE
 #
 # With --clear, a STALE verdict is cleared in one transition:
-#   - remove the stale verdict label (`loom:pr` / `loom:changes-requested`)
+#   - remove BOTH terminal verdict labels (`loom:pr` AND `loom:changes-requested`),
+#     not just the one detected as stale — a stray copy of the other, left
+#     behind by an earlier contradictory state or a manual label edit, must
+#     not survive this transition either (#7018). `gh ... --remove-label` on a
+#     label that isn't present is a no-op, so requesting removal of both is
+#     always safe.
 #   - remove its per-tree companions (`loom:ci-failure`, `loom:merge-conflict`)
 #     when present — those are findings about the OLD tree too
 #   - add `loom:review-requested` so a Judge picks the PR up again
@@ -446,7 +451,23 @@ Judge will re-evaluate the tree that is actually here now. No judgment about the
     # Comment first, then labels — the same ordering the roles use for their
     # own verdict writes, so the audit trail can never show a label flip with
     # no explanation attached.
-    EDIT_ARGS=(--remove-label "$VERDICT_LABEL" --add-label "loom:review-requested")
+    #
+    # Strip BOTH terminal verdict labels here, not just the one this pass
+    # detected as stale ($VERDICT_LABEL) — issue #7018. current_verdict_label()
+    # only ever picks ONE label to reason about (loom:pr first, since it is
+    # the dangerous direction), so if the OTHER verdict label is also present
+    # — leftover debris from an earlier contradictory state, a manual label
+    # edit, or a bug elsewhere — a single-label removal here leaves it behind
+    # and re-adds loom:review-requested on top of it, producing exactly the
+    # mutual-exclusion violation this guard exists to prevent. Removing a
+    # label that isn't present is a documented no-op for `gh ... --remove-label`
+    # (see champion-issue-promo.md's Pass 0b race-safety note), so it is safe
+    # to always request removal of both regardless of which one is actually
+    # on the PR.
+    EDIT_ARGS=(--add-label "loom:review-requested")
+    for verdict in "loom:pr" "loom:changes-requested"; do
+      EDIT_ARGS+=(--remove-label "$verdict")
+    done
     for companion in "loom:ci-failure" "loom:merge-conflict"; do
       if has_label "$companion"; then
         EDIT_ARGS+=(--remove-label "$companion")

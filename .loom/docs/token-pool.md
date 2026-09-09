@@ -43,7 +43,10 @@ machine profile root. Loom rejects traversal, separators, symlink escapes,
 non-directory targets, and a profile root located inside the repository.
 Codex owns `<profile>/auth.json` and may refresh it in place; Loom's registry
 does not open, parse, copy, serialize, or log that file. Operators should keep
-profile directories `0700` and `auth.json` `0600`.
+profile directories `0700` and `auth.json` `0600`. If `.loom/accounts.json` is
+committed and a host has not yet locally provisioned a directory for one of
+its listed entries, inventory simply skips that one name (with a warning) —
+the rest of the pool on that host is unaffected.
 
 Selected accounts expose the non-secret observability identity
 `LOOM_ACCOUNT_PROVIDER` and `LOOM_ACCOUNT_NAME`, plus `LOOM_ACCOUNT_UPSTREAM_ID`

@@ -1238,7 +1238,7 @@ This catches merge conflicts early in the evaluation cycle, preventing wasted ef
 > - **`git commit-tree`** piped from a `read-tree`-populated index.
 > - **`git reset`**, **`git rm --cached`**, **`git add`**, or **`git checkout .`** used "just to simulate" a merge or a conflicting state.
 > - **A throwaway test-merge branch** (`git checkout -b tmp-test && git merge <pr-branch>`, or the reverse — merging the PR branch into main on a scratch branch) created **in the main checkout** to eyeball how a merge resolves. There is no such thing as a disposable branch in shared state: the checkout, the index, and the stash stack it touches are all live for every other role.
-> - **Any stash-stack mutation** (`git stash pop` / `git stash drop` / `git stash clear`) run **in the main checkout** for any reason, including "just to get a clean tree for a test-merge." The main checkout's stash stack is **operator-owned** — it may hold deliberately preserved diagnostic state (e.g. sweep-contamination evidence parked for investigation) with no marker distinguishing "safe to pop" from "evidence, do not touch." The 2026-07-28 incident this rule exists for: a Judge's throwaway main-checkout test-merge inadvertently `git stash pop`'d a preserved stash entry; the pop happened to conflict, so nothing was lost that time, but a clean pop would have silently destroyed it with no recovery path. (`git stash push` / `apply` / `list` are non-destructive and are not the concern here — the danger is specifically `pop`/`drop`/`clear`.) The destructive-command guard asks for confirmation on these three subcommands when the cwd resolves to the main checkout (`guards.stashScope` / `LOOM_GUARD_STASH_SCOPE`, see `defaults/docs/guard-hooks.md`) — but do not rely on the guard catching it; the rule is to never issue the command there in the first place.
+> - **Any stash-stack mutation** (`git stash pop` / `git stash drop` / `git stash clear`) run **in the main checkout** for any reason, including "just to get a clean tree for a test-merge." The main checkout's stash stack is **operator-owned** — it may hold deliberately preserved diagnostic state (e.g. sweep-contamination evidence parked for investigation) with no marker distinguishing "safe to pop" from "evidence, do not touch." The 2026-07-28 incident this rule exists for: a Judge's throwaway main-checkout test-merge inadvertently `git stash pop`'d a preserved stash entry; the pop happened to conflict, so nothing was lost that time, but a clean pop would have silently destroyed it with no recovery path. (`git stash push` / `apply` / `list` are non-destructive and are not the concern here — the danger is specifically `pop`/`drop`/`clear`.) The destructive-command guard asks for confirmation on these three subcommands when the cwd resolves to the main checkout (`guards.stashScope` / `LOOM_GUARD_STASH_SCOPE`, see `defaults/docs/guard-hooks.md`) — but do not rely on the guard catching it; the rule is to never issue the command there in the first place. **In a headless run that ask has nobody to answer it, so it stalls exactly like a deny** — which is why "don't do it" now comes with a replacement rather than only a prohibition: when you genuinely need a clean tree in the primary clone (a baseline `shellcheck`/`cargo clippy`/test run to diff against), use `./.loom/scripts/worktree.sh stash-push main` … `./.loom/scripts/worktree.sh stash-pop main` (#6076). It anchors to `refs/loom/stash-baseline/main` instead of `refs/stash`, so the operator's stack is untouched and nothing asks. To reconcile a quarantined `loom-quarantine:` entry, **replay, don't pop**: `git stash show -p <ref> | git -C .loom/worktrees/issue-<N> apply -`.
 >
 > **Instead, use the index-free approach** (the same one `doctor.md` uses — see `doctor.md`'s merge-conflict check, `git merge-tree origin/main | grep -q "^+<<<<<<<"`):
 >
@@ -1585,9 +1585,37 @@ If checks are still running, **do not block on them and do not approve on a gues
 2. **Release your claim** — remove `loom:reviewing` so a later pass picks it up cleanly.
 3. **Skip and continue the batch** — move on to the next PR. The next cron tick re-evaluates this PR once CI has settled.
 
+**Trap: empty `gh pr checks` output is NOT proof nothing is pending.** `gh pr
+checks` is GraphQL-backed and can return completely empty output (zero rows)
+during a transient forge failure (e.g. an intermittent TLS handshake error) —
+that empty state is indistinguishable from "nothing pending" to a naive `grep
+-q pending`, and this has already happened in production: on kicad-tools PR
+#4792 (2026-08-13) a Judge poller read one empty response and declared CI
+"settled" 6 minutes into a ~40-minute board-test run (#6169). Guard against it
+by requiring at least one row back before trusting the absence of "pending" —
+retry once on a zero-row read before concluding there is genuinely nothing to
+wait for:
+
 ```bash
+# ci_still_pending: true (pending) if any row shows pending/queued/in_progress.
+# A ZERO-ROW read is retried once before being trusted — on a real forge blip
+# the retry almost always returns real rows; only a read that is STILL empty
+# after the retry is treated as "genuinely no checks reported" (not pending).
+ci_still_pending() {
+  local pr="$1" out rows
+  out="$(gh pr checks "$pr" 2>/dev/null)"
+  rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+  if [[ "$rows" -eq 0 ]]; then
+    sleep 3
+    out="$(gh pr checks "$pr" 2>/dev/null)"
+    rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+    [[ "$rows" -eq 0 ]] && return 1   # confirmed empty on retry -- not pending
+  fi
+  printf '%s\n' "$out" | grep -qE "(pending|queued|in_progress)"
+}
+
 # Check if any checks are still pending; if so, release the claim and skip (no end-state label)
-if gh pr checks <PR_NUMBER> | grep -qE "(pending|queued|in_progress)"; then
+if ci_still_pending <PR_NUMBER>; then
     gh pr comment <number> --body "Code evaluation looks good; CI is still running. Releasing the claim and skipping — a later tick will re-evaluate once CI settles."
     # Release the claim WITHOUT applying an end-state label — PR stays loom:review-requested
     gh pr edit <number> --remove-label "loom:reviewing"
@@ -1609,10 +1637,25 @@ This mirrors the orchestrator-level guardrail already documented in `sweep.md` (
 ```bash
 # Foreground block-poll — single-PR Judge invocation, no batch to fall back to.
 # Bounded: MAX_WAIT caps total wait time; never loop unboundedly.
+# ci_still_pending guards against the empty-output false-settle trap (#6169) —
+# see "When CI is Pending" above for the full rationale.
+ci_still_pending() {
+  local pr="$1" out rows
+  out="$(gh pr checks "$pr" 2>/dev/null)"
+  rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+  if [[ "$rows" -eq 0 ]]; then
+    sleep 3
+    out="$(gh pr checks "$pr" 2>/dev/null)"
+    rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+    [[ "$rows" -eq 0 ]] && return 1   # confirmed empty on retry -- not pending
+  fi
+  printf '%s\n' "$out" | grep -qE "(pending|queued|in_progress)"
+}
+
 MAX_WAIT=1800   # 30 min cap — tune to the repo's typical CI duration
 INTERVAL=60
 ELAPSED=0
-while gh pr checks <PR_NUMBER> | grep -qE "(pending|queued|in_progress)"; do
+while ci_still_pending <PR_NUMBER>; do
   if [[ "$ELAPSED" -ge "$MAX_WAIT" ]]; then
     echo "CI still pending after ${MAX_WAIT}s — falling back to a conditional verdict."
     break

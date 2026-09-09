@@ -16,13 +16,14 @@
 #     # <worktree-root>/.snapshots/issue-<N>-<UTC-timestamp>.patch — WITHOUT
 #     # touching `git stash` (which is repo-global and can be clobbered by a
 #     # concurrent builder in another worktree). Replay with `git apply`.
-#   pnpm worktree stash-push <issue-number> [--include-untracked] [--json]
-#   pnpm worktree stash-pop <issue-number> [--json]
+#   pnpm worktree stash-push <issue-number|main> [--include-untracked] [--json]
+#   pnpm worktree stash-pop <issue-number|main> [--json]
 #     # Clean-and-restore pair for a "clean baseline vs my diff" comparison
 #     # (clippy/shellcheck/test baseline diffing) — WITHOUT touching the
-#     # shared `refs/stash` stack. Anchors captured WIP to a PER-ISSUE ref
-#     # (refs/loom/stash-baseline/issue-<N>) instead, so no other worktree's
-#     # concurrent stash op can ever land "in between" push and pop (#5217).
+#     # shared `refs/stash` stack. Anchors captured WIP to a PER-TARGET ref
+#     # (refs/loom/stash-baseline/issue-<N>, or .../main for the primary
+#     # clone) instead, so no other worktree's concurrent stash op can ever
+#     # land "in between" push and pop (#5217, extended to `main` by #6076).
 #   pnpm worktree --check                              # Check if currently in a worktree
 #   pnpm worktree --json <issue-number>                # Machine-readable output
 #   pnpm worktree --return-to <dir> <issue-number>     # Store return directory
@@ -1167,9 +1168,34 @@ snapshot_worktree_command() {
 # create` — used below — is deliberately excluded from that deny, since it
 # writes no `refs/stash` entry; excluding it is what keeps this function
 # callable at all.
+#
+# THE `main` TARGET (#6076)
+# -------------------------
+# Both verbs also accept the literal target `main`, which operates on the
+# PRIMARY CLONE instead of an issue worktree and anchors to
+# refs/loom/stash-baseline/main. Until #6076 the pair was issue-keyed only,
+# which left the main checkout as the ONE context with no sanctioned
+# clean-and-restore path: roles that legitimately run in the primary clone
+# (Judge, Champion, Auditor, Guide, Hermit) reached for raw
+# `git stash` + `git stash pop` there, and the pop half is an unanswerable
+# `stash-scope:main-checkout` ask in a headless run (21 recurrences over the
+# 2026-08-09..12 audit window). The guard's own code comment named the gap:
+# "there is no `worktree.sh stash-push` equivalent for the main checkout …
+# so a raw create has nothing to be redirected to".
+#
+# `main` inherits every property of the issue-keyed path — capture via
+# `git stash create` (never `refs/stash`), a dedicated ref that survives gc,
+# a pending marker so `push && <check> && pop` cannot break its own chain,
+# and a hard refusal when a push is already pending rather than a silent
+# second capture. It is strictly SAFER than the raw `git stash` it replaces:
+# the shared stack lets two callers interleave silently, whereas a pending
+# `main` capture makes the second caller fail loudly with the ref named.
+# Nothing here relaxes the guard — `main` never invokes
+# `git stash pop|drop|clear`, so the ask on raw pops in the primary clone is
+# byte-for-byte as strict as before.
 stash_push_worktree_command() {
-    local issue_number="" json=false include_untracked=false
-    local usage="Usage: pnpm worktree stash-push <issue-number> [--include-untracked] [--json]"
+    local target="" json=false include_untracked=false
+    local usage="Usage: pnpm worktree stash-push <issue-number|main> [--include-untracked] [--json]"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1182,8 +1208,8 @@ stash_push_worktree_command() {
                 return 1
                 ;;
             *)
-                if [[ -z "$issue_number" ]]; then
-                    issue_number="$1"; shift
+                if [[ -z "$target" ]]; then
+                    target="$1"; shift
                 else
                     print_error "Unexpected argument: $1"
                     return 1
@@ -1192,26 +1218,31 @@ stash_push_worktree_command() {
         esac
     done
 
-    if [[ -z "$issue_number" ]]; then
-        print_error "stash-push requires an issue number"
+    if [[ -z "$target" ]]; then
+        print_error "stash-push requires an issue number (or 'main')"
         echo ""
         echo "$usage"
         return 1
     fi
-    if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
-        print_error "Issue number must be numeric (got: '$issue_number')"
+    if ! [[ "$target" =~ ^[0-9]+$ || "$target" == "main" ]]; then
+        print_error "Target must be an issue number or 'main' (got: '$target')"
         echo ""
         echo "$usage"
         return 1
     fi
+
+    # JSON keeps its historical shape for issue targets; `main` reports a null
+    # issueNumber so an existing consumer never mis-parses "main" as a number.
+    local json_issue="$target"
+    [[ "$target" == "main" ]] && json_issue="null"
 
     _sbp_info()    { if [[ "$json" == true ]]; then echo -e "${BLUE}ℹ $*${NC}" >&2; else print_info "$*"; fi; }
     _sbp_success() { if [[ "$json" == true ]]; then echo -e "${GREEN}✓ $*${NC}" >&2; else print_success "$*"; fi; }
     _sbp_json() {
         # $1=success(bool) $2=hasTrackedChanges(bool) $3=untrackedCount $4=ref
         [[ "$json" == true ]] || return 0
-        printf '{"success": %s, "issueNumber": %s, "hasTrackedChanges": %s, "untrackedCount": %s, "ref": "%s"}\n' \
-            "$1" "$issue_number" "$2" "$3" "$4"
+        printf '{"success": %s, "issueNumber": %s, "target": "%s", "hasTrackedChanges": %s, "untrackedCount": %s, "ref": "%s"}\n' \
+            "$1" "$json_issue" "$target" "$2" "$3" "$4"
     }
 
     local git_common repo_root
@@ -1221,9 +1252,15 @@ stash_push_worktree_command() {
     fi
     repo_root=$(cd "$(dirname "$git_common")" 2>/dev/null && pwd) || repo_root="$(pwd)"
 
-    local worktree_root_dir worktree_path
+    local worktree_root_dir worktree_path slug
     worktree_root_dir="$(loom_worktree_root "$repo_root")"
-    worktree_path="$worktree_root_dir/issue-$issue_number"
+    if [[ "$target" == "main" ]]; then
+        slug="main"
+        worktree_path="$repo_root"
+    else
+        slug="issue-$target"
+        worktree_path="$worktree_root_dir/issue-$target"
+    fi
 
     if [[ ! -d "$worktree_path" ]]; then
         print_error "No worktree found at $worktree_path — nothing to stash-push"
@@ -1236,8 +1273,8 @@ stash_push_worktree_command() {
         return 1
     fi
 
-    local ref="refs/loom/stash-baseline/issue-$issue_number"
-    local holding_dir="$worktree_root_dir/.stash-baseline/issue-$issue_number"
+    local ref="refs/loom/stash-baseline/$slug"
+    local holding_dir="$worktree_root_dir/.stash-baseline/$slug"
     local manifest_path="$holding_dir/untracked.manifest"
     # The pending marker is what makes the intended headless chain
     # `stash-push N && <baseline check> && stash-pop N` safe when the worktree
@@ -1245,10 +1282,15 @@ stash_push_worktree_command() {
     # that a push occurred, so the paired stash-pop can succeed as a no-op
     # instead of exiting 1 and breaking the `&&` chain mid-sweep. Without it,
     # "there was nothing to restore" and "you never pushed" are indistinguishable.
+    #
+    # For the `main` target the marker doubles as the concurrency interlock the
+    # shared `refs/stash` stack never had: a second caller pushing while a
+    # capture is outstanding fails loudly with the ref named, instead of
+    # silently stacking an entry the first caller may later pop by mistake.
     local pending_marker="$holding_dir/pending"
 
     if git -C "$worktree_path" rev-parse --verify --quiet "$ref" >/dev/null 2>&1 || [[ -f "$manifest_path" ]] || [[ -f "$pending_marker" ]]; then
-        print_error "A pending stash-push already exists for issue $issue_number — run 'stash-pop $issue_number' first (or resolve manually: ref $ref / $holding_dir)"
+        print_error "A pending stash-push already exists for $target — run 'stash-pop $target' first (or resolve manually: ref $ref / $holding_dir)"
         _sbp_json false false 0 ""
         return 1
     fi
@@ -1305,23 +1347,24 @@ stash_push_worktree_command() {
     fi
 
     if [[ "$has_tracked" == false && "$untracked_count" -eq 0 ]]; then
-        _sbp_info "No uncommitted changes to push for issue $issue_number — worktree was already clean"
+        _sbp_info "No uncommitted changes to push for $target — working tree was already clean"
     else
-        _sbp_success "Baseline captured for issue $issue_number (tracked: $has_tracked, untracked files moved: $untracked_count)"
+        _sbp_success "Baseline captured for $target (tracked: $has_tracked, untracked files moved: $untracked_count)"
     fi
-    _sbp_info "Restore with: ./.loom/scripts/worktree.sh stash-pop $issue_number"
+    _sbp_info "Restore with: ./.loom/scripts/worktree.sh stash-pop $target"
 
     _sbp_json true "$has_tracked" "$untracked_count" "$ref"
     return 0
 }
 
 # See stash_push_worktree_command's comment block above for the full design
-# rationale. stash-pop is the restore half: reads back the per-issue ref
+# rationale. stash-pop is the restore half: reads back the per-target ref
 # (tracked changes) and holding directory (untracked files) written by
-# stash-push for the SAME issue number, applies both, and clears them.
+# stash-push for the SAME target (issue number, or `main`), applies both, and
+# clears them.
 stash_pop_worktree_command() {
-    local issue_number="" json=false
-    local usage="Usage: pnpm worktree stash-pop <issue-number> [--json]"
+    local target="" json=false
+    local usage="Usage: pnpm worktree stash-pop <issue-number|main> [--json]"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1333,8 +1376,8 @@ stash_pop_worktree_command() {
                 return 1
                 ;;
             *)
-                if [[ -z "$issue_number" ]]; then
-                    issue_number="$1"; shift
+                if [[ -z "$target" ]]; then
+                    target="$1"; shift
                 else
                     print_error "Unexpected argument: $1"
                     return 1
@@ -1343,26 +1386,29 @@ stash_pop_worktree_command() {
         esac
     done
 
-    if [[ -z "$issue_number" ]]; then
-        print_error "stash-pop requires an issue number"
+    if [[ -z "$target" ]]; then
+        print_error "stash-pop requires an issue number (or 'main')"
         echo ""
         echo "$usage"
         return 1
     fi
-    if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
-        print_error "Issue number must be numeric (got: '$issue_number')"
+    if ! [[ "$target" =~ ^[0-9]+$ || "$target" == "main" ]]; then
+        print_error "Target must be an issue number or 'main' (got: '$target')"
         echo ""
         echo "$usage"
         return 1
     fi
+
+    local json_issue="$target"
+    [[ "$target" == "main" ]] && json_issue="null"
 
     _sbo_info()    { if [[ "$json" == true ]]; then echo -e "${BLUE}ℹ $*${NC}" >&2; else print_info "$*"; fi; }
     _sbo_success() { if [[ "$json" == true ]]; then echo -e "${GREEN}✓ $*${NC}" >&2; else print_success "$*"; fi; }
     _sbo_json() {
         # $1=success(bool) $2=restoredTracked(bool) $3=restoredUntrackedCount
         [[ "$json" == true ]] || return 0
-        printf '{"success": %s, "issueNumber": %s, "restoredTracked": %s, "restoredUntrackedCount": %s}\n' \
-            "$1" "$issue_number" "$2" "$3"
+        printf '{"success": %s, "issueNumber": %s, "target": "%s", "restoredTracked": %s, "restoredUntrackedCount": %s}\n' \
+            "$1" "$json_issue" "$target" "$2" "$3"
     }
 
     local git_common repo_root
@@ -1372,9 +1418,15 @@ stash_pop_worktree_command() {
     fi
     repo_root=$(cd "$(dirname "$git_common")" 2>/dev/null && pwd) || repo_root="$(pwd)"
 
-    local worktree_root_dir worktree_path
+    local worktree_root_dir worktree_path slug
     worktree_root_dir="$(loom_worktree_root "$repo_root")"
-    worktree_path="$worktree_root_dir/issue-$issue_number"
+    if [[ "$target" == "main" ]]; then
+        slug="main"
+        worktree_path="$repo_root"
+    else
+        slug="issue-$target"
+        worktree_path="$worktree_root_dir/issue-$target"
+    fi
 
     if [[ ! -d "$worktree_path" ]]; then
         print_error "No worktree found at $worktree_path"
@@ -1387,8 +1439,8 @@ stash_pop_worktree_command() {
         return 1
     fi
 
-    local ref="refs/loom/stash-baseline/issue-$issue_number"
-    local holding_dir="$worktree_root_dir/.stash-baseline/issue-$issue_number"
+    local ref="refs/loom/stash-baseline/$slug"
+    local holding_dir="$worktree_root_dir/.stash-baseline/$slug"
     local manifest_path="$holding_dir/untracked.manifest"
     local pending_marker="$holding_dir/pending"
 
@@ -1407,14 +1459,14 @@ stash_pop_worktree_command() {
     # means stash-push ran against an already-clean worktree — a legitimate
     # no-op restore, so the `push && check && pop` chain must not break.
     if [[ "$has_tracked" == false && "$has_manifest" == false && "$has_pending" == false ]]; then
-        print_error "Nothing to restore for issue $issue_number — run 'stash-push $issue_number' first"
+        print_error "Nothing to restore for $target — run 'stash-push $target' first"
         _sbo_json false false 0
         return 1
     fi
 
     if [[ "$has_tracked" == true ]]; then
         if ! git -C "$worktree_path" stash apply "$stash_commit" >/dev/null 2>&1; then
-            print_error "Failed to apply baseline commit $stash_commit for issue $issue_number (likely conflicts with the current tree). The captured baseline is PRESERVED at $ref — resolve manually with 'git -C $worktree_path stash apply $stash_commit', then delete the ref with 'git -C $worktree_path update-ref -d $ref'."
+            print_error "Failed to apply baseline commit $stash_commit for $target (likely conflicts with the current tree). The captured baseline is PRESERVED at $ref — resolve manually with 'git -C $worktree_path stash apply $stash_commit', then delete the ref with 'git -C $worktree_path update-ref -d $ref'."
             _sbo_json false false 0
             return 1
         fi
@@ -1440,7 +1492,7 @@ stash_pop_worktree_command() {
         done < "$manifest_path"
 
         if [[ "$restore_failed" == true ]]; then
-            print_error "Some untracked files for issue $issue_number could not be restored — remaining files are still under $holding_dir/untracked (manifest kept at $manifest_path for manual recovery)"
+            print_error "Some untracked files for $target could not be restored — remaining files are still under $holding_dir/untracked (manifest kept at $manifest_path for manual recovery)"
             _sbo_json false "$has_tracked" "$restored_untracked"
             return 1
         fi
@@ -1456,12 +1508,12 @@ stash_pop_worktree_command() {
     rmdir "$holding_dir" 2>/dev/null || true
 
     if [[ "$has_tracked" == false && "$restored_untracked" -eq 0 ]]; then
-        _sbo_info "Nothing was captured for issue $issue_number — the worktree was already clean at stash-push time"
+        _sbo_info "Nothing was captured for $target — the working tree was already clean at stash-push time"
         _sbo_json true false 0
         return 0
     fi
 
-    _sbo_success "Baseline restored for issue $issue_number (tracked: $has_tracked, untracked files restored: $restored_untracked)"
+    _sbo_success "Baseline restored for $target (tracked: $has_tracked, untracked files restored: $restored_untracked)"
     _sbo_json true "$has_tracked" "$restored_untracked"
     return 0
 }
@@ -1612,9 +1664,9 @@ Usage:
                                                         (--dry-run: report the plan only)
   pnpm worktree snapshot <N> [--include-untracked] [--json]
                                                          Save uncommitted WIP as a patch file
-  pnpm worktree stash-push <N> [--include-untracked] [--json]
+  pnpm worktree stash-push <N|main> [--include-untracked] [--json]
                                                          Capture WIP, reset to a clean baseline
-  pnpm worktree stash-pop <N> [--json]                  Restore WIP captured by stash-push
+  pnpm worktree stash-pop <N|main> [--json]             Restore WIP captured by stash-push
   pnpm worktree --check                                 Check if in a worktree
   pnpm worktree --json <issue-number>                   Machine-readable JSON output
   pnpm worktree --return-to <dir> <issue-number>        Store return directory
@@ -1709,9 +1761,19 @@ Examples:
     chain. Errors loudly, WITHOUT discarding the captured baseline, if no
     stash-push is pending at all or if re-applying conflicts with the tree.
 
+  pnpm worktree stash-push main / stash-pop main
+    Same clean-and-restore pair, but for the PRIMARY CLONE, anchored to
+    refs/loom/stash-baseline/main (#6076). This is what a role that
+    legitimately runs in the main checkout (Judge, Champion, Auditor, Guide,
+    Hermit) should use instead of raw 'git stash' + 'git stash pop' there:
+    the main checkout's refs/stash stack is operator-owned, and a raw pop in
+    it is an unanswerable stash-scope:main-checkout ask in a headless run.
+    Never touches refs/stash, so it needs no guard bypass.
+
   pnpm worktree stash-push 42 --json / stash-pop 42 --json
-    Output: {"success": true, "issueNumber": 42, "hasTrackedChanges": true, "untrackedCount": 0, "ref": "refs/loom/stash-baseline/issue-42"}
-            {"success": true, "issueNumber": 42, "restoredTracked": true, "restoredUntrackedCount": 0}
+    Output: {"success": true, "issueNumber": 42, "target": "42", "hasTrackedChanges": true, "untrackedCount": 0, "ref": "refs/loom/stash-baseline/issue-42"}
+            {"success": true, "issueNumber": 42, "target": "42", "restoredTracked": true, "restoredUntrackedCount": 0}
+    For 'main', issueNumber is null and target is "main".
 
   pnpm worktree --check
     Shows current worktree status
@@ -1853,9 +1915,10 @@ if [[ "$1" == "snapshot" ]]; then
     exit 1
 fi
 
-# Worktree-scoped clean-baseline stash verbs (issue #5217). Dispatched HERE
-# for the same reason `snapshot`/`remove` are: `stash-push <N>` / `stash-pop
-# <N>` must not be rejected as "Issue number must be numeric".
+# Worktree-scoped clean-baseline stash verbs (issue #5217; `main` target
+# added by #6076). Dispatched HERE for the same reason `snapshot`/`remove`
+# are: `stash-push <N|main>` / `stash-pop <N|main>` must not be rejected as
+# "Issue number must be numeric".
 if [[ "$1" == "stash-push" ]]; then
     shift
     stash_push_worktree_command "$@" && exit 0

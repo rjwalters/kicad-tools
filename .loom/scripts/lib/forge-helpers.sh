@@ -1177,6 +1177,14 @@ _forge_cmd_attempt() {
     personal-ambient)
       env -u GH_TOKEN -u GITHUB_TOKEN -u GH_CONFIG_DIR "$@" >"$out_file" 2>"$err_file" || rc=$?
       ;;
+    owner-config)
+      # `token` carries a directory path here, not a token -- points `gh` at
+      # an owner-partitioned GH_CONFIG_DIR (#446) instead of swapping the
+      # credential in-process. GH_TOKEN/GITHUB_TOKEN are dropped so they
+      # cannot outrank the directory's own stored credential the same way
+      # personal-token/personal-ambient already drop them for their swaps.
+      env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$token" gh "$@" >"$out_file" 2>"$err_file" || rc=$?
+      ;;
   esac
   return "$rc"
 }
@@ -1251,6 +1259,174 @@ forge_cmd_perm_safe() {
 # error text so an outer rate-limit check still sees what `gh` actually said.
 forge_gh_perm_safe() {
   forge_cmd_perm_safe gh "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Wrong-repo `GH_CONFIG_DIR` escalation (2am#446).
+#
+# Incident, 2026-08-21 (`/loom:sweep 438` on `loom-worker-2`): the dispatch
+# environment's `GH_CONFIG_DIR` pointed at a DIFFERENT owner's flat
+# `<workspace>/.loom/gh-config/` (the `loom` daemon-workspace checkout's own
+# credential, minted for `rjwalters/*`), not this repo's. Every `gh` call
+# against `2AMLogic/2am` failed with one of:
+#
+#   GraphQL: Could not resolve to a Repository with the name '2AMLogic/2am'. (repository)
+#   gh: Not Found (HTTP 404)
+#
+# This is a DIFFERENT failure from #6074's cached-permission-window 403
+# (`is_app_permission_error`, above) -- the credential here is not merely
+# missing a scope, it is scoped to the wrong repository entirely, so rung 1
+# (ambient) 404s/GraphQL-fails outright and #6074's ladder never fires (its
+# classifier doesn't match either signature above). `sweep-lease-renew.sh`'s
+# renewal loop failed on every cycle as a direct result, and
+# `resolve-tier-model.sh` (which does not source this file at all before this
+# fix) silently fell through to its tier-3 default with a misleading "likely
+# API quota" diagnosis.
+#
+# The fix borrows the SAME mechanism FLEET.md's "Private-repo clones over ssh"
+# contract already documents for a human ssh session on a locked keychain: a
+# GitHub-App daemon workspace maintains its flat `.loom/gh-config/` credential
+# AND a sibling directory partitioned per owner/org,
+# `<daemon_workspace>/.loom/gh-config-by-owner/<OWNER>/` -- so the correctly
+# scoped credential usually already exists on disk right next to the wrong one
+# that got exported. `_forge_owner_gh_config_dir` derives that sibling path
+# from the CURRENT (wrong) `GH_CONFIG_DIR` itself -- no `hosts.yml` lookup, no
+# hardcoded `loom` -- by recognizing the flat directory's own
+# `<X>/.loom/gh-config` shape and substituting `gh-config-by-owner/<owner>`
+# for its final segment.
+
+# is_repo_mismatch_error <text> -> 0 when the text carries one of the two
+# confirmed wrong-repo signatures above: GitHub's GraphQL "could not resolve
+# to a Repository" rejection (the credential's installation has no access to
+# the name/owner at all), or a REST 404 (`gh`'s own "HTTP 404" rendering,
+# reusing the same `http 404`/`not found` idiom
+# `forge_get_required_status_check_contexts`'s Gitea branch already uses
+# elsewhere in this file). Deliberately text-only and therefore loose on the
+# REST side -- a genuinely missing issue/PR on a CORRECTLY scoped repo also
+# 404s this way, so callers must treat a positive match as "worth trying a
+# different credential for," not as certain proof of a repo mismatch. That is
+# safe here because every caller of `forge_gh_repo_safe` only ever retries the
+# SAME read/write under a DIFFERENT credential and returns the last attempt's
+# real error on failure -- an over-firing match costs one extra (fast, local)
+# `gh` call, never a wrong result.
+is_repo_mismatch_error() {
+  local text
+  text=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$text" in
+    *"could not resolve to a repository"*) return 0 ;;
+    *"http 404"*) return 0 ;;
+  esac
+  return 1
+}
+
+# _forge_owner_from_remote -> echoes just the OWNER segment of
+# `git remote get-url origin`, reusing `_forge_nwo_from_remote`'s zero-API-call
+# parse (never `forge_get_repo_nwo`'s `gh repo view` -- that's GraphQL-backed,
+# so it would just fail the same way the credential this function exists to
+# route around already failed, per #4659's lesson).
+_forge_owner_from_remote() {
+  local nwo
+  nwo=$(_forge_nwo_from_remote) || return 1
+  [[ "$nwo" == */* ]] || return 1
+  printf '%s' "${nwo%%/*}"
+}
+
+# _forge_owner_gh_config_dir <owner> -> echoes the owner-partitioned
+# credential directory this host's daemon maintains for <owner>, IF one is
+# discoverable; returns 1 (nothing on stdout) otherwise so the caller falls
+# through to the `env -u GH_CONFIG_DIR` rung instead of guessing a path.
+#
+# Two sources, in order:
+#   1. LOOM_GH_CONFIG_BY_OWNER_ROOT (env override / test seam) -- the
+#      `.loom/gh-config-by-owner/` directory itself, named directly.
+#   2. The CURRENT `GH_CONFIG_DIR`, when it matches the flat
+#      `<daemon_workspace>/.loom/gh-config` shape the wrong-repo failure mode
+#      actually produces (FLEET.md's contract, and #4458's "Delivery
+#      mechanism") -- the owner-partitioned sibling is derived from it
+#      directly, so this works on ANY daemon_workspace checkout name, not
+#      just `loom`.
+# Either way, the directory must actually exist on disk -- a derived path
+# that isn't there is exactly the "doesn't exist" case the caller's further
+# `env -u GH_CONFIG_DIR` fallback exists for.
+_forge_owner_gh_config_dir() {
+  local owner="$1" root="" dir=""
+  [[ -n "$owner" ]] || return 1
+
+  if [[ -n "${LOOM_GH_CONFIG_BY_OWNER_ROOT:-}" ]]; then
+    dir="${LOOM_GH_CONFIG_BY_OWNER_ROOT%/}/$owner"
+  elif [[ -n "${GH_CONFIG_DIR:-}" ]]; then
+    local current="${GH_CONFIG_DIR%/}"
+    case "$current" in
+      */.loom/gh-config)
+        root="${current%/.loom/gh-config}"
+        dir="$root/.loom/gh-config-by-owner/$owner"
+        ;;
+    esac
+  fi
+
+  [[ -n "$dir" && -d "$dir" ]] || return 1
+  printf '%s' "$dir"
+}
+
+# Run `gh <args...>`, escalating credentials on a confirmed wrong-repo
+# `GH_CONFIG_DIR` (2am#446), ON TOP OF `forge_gh_perm_safe`'s existing #6074
+# ladder (tried first, unchanged) -- so an app-permission 403 still recovers
+# exactly as it did before this function existed.
+#
+# Only fires when `GH_CONFIG_DIR` is actually set: with no `GH_CONFIG_DIR` to
+# begin with, there is nothing this rung can route AROUND, and retrying with
+# `env -u GH_CONFIG_DIR` would be a verbatim replay of rung 1 -- the same
+# "skip an escalation that can't possibly differ" rule `forge_gh_perm_safe`'s
+# own rung 3 already applies to itself.
+#
+# Usage: forge_gh_repo_safe pr create --title T --body B ...
+# Stdout: the successful attempt's stdout. Returns the last attempt's exit
+# code; stderr carries the last attempt's error text.
+forge_gh_repo_safe() {
+  local out_file err_file rc=0
+  out_file=$(mktemp)
+  err_file=$(mktemp)
+
+  local out
+  out=$(forge_gh_perm_safe "$@" 2>"$err_file") || rc=$?
+
+  if [[ $rc -ne 0 && -n "${GH_CONFIG_DIR:-}" ]]; then
+    local first_err combined
+    first_err=$(cat "$err_file" 2>/dev/null || true)
+    combined=$(printf '%s\n%s' "$first_err" "$out")
+
+    if is_repo_mismatch_error "$combined"; then
+      local owner owner_dir escalated=false
+      owner=$(_forge_owner_from_remote 2>/dev/null || echo "")
+
+      if [[ -n "$owner" ]] && owner_dir=$(_forge_owner_gh_config_dir "$owner" 2>/dev/null); then
+        echo "forge: wrong-repo credential signature — retrying against the owner-partitioned directory $owner_dir (2am#446)" >&2
+        rc=0
+        _forge_cmd_attempt owner-config "$owner_dir" "$out_file" "$err_file" "$@" || rc=$?
+        [[ $rc -eq 0 ]] && escalated=true
+        out=$(cat "$out_file" 2>/dev/null || true)
+      fi
+
+      if [[ "$escalated" != "true" ]]; then
+        echo "forge: falling back to env -u GH_CONFIG_DIR (2am#446)" >&2
+        rc=0
+        _forge_cmd_attempt personal-ambient "" "$out_file" "$err_file" gh "$@" || rc=$?
+        out=$(cat "$out_file" 2>/dev/null || true)
+      fi
+    fi
+  fi
+
+  local err
+  err=$(cat "$err_file" 2>/dev/null || true)
+  rm -f "$out_file" "$err_file"
+
+  if [[ -n "$out" ]]; then
+    printf '%s\n' "$out"
+  fi
+  if [[ $rc -ne 0 && -n "$err" ]]; then
+    printf '%s\n' "$err" >&2
+  fi
+  return "$rc"
 }
 
 # Post a comment on an issue OR a pull request via `gh issue comment`, falling

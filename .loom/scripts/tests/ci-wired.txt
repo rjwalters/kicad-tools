@@ -153,6 +153,7 @@ test-merge-pr-primary-worktree-guard.sh
 test-merge-pr-rate-limit-fallback.sh
 test-merge-pr-stale-mergeable.sh
 test-merge-pr-unstable-fallback.sh
+test-merge-pr-wait-for-checks-empty-settle.sh
 test-merge-pr-worktree-awk.sh
 test-merge-pr-worktree-path.sh
 test-merge-pr-worktree-remove-diagnosis.sh
@@ -169,6 +170,7 @@ test-rebase-stacked-children.sh
 test-record-noop-release.sh
 test-recover-orphaned-shepherds-diagnostics.sh
 test-reconcile-stack.sh
+test-repo-mismatch-fallback.sh
 test-require-complexity-marker.sh
 test-resolve-tier-model.sh
 test-resync-installed.sh
@@ -185,6 +187,7 @@ test-sweep-checkpoint.sh
 test-sweep-experiment.sh
 test-sweep-lease-fence.sh
 test-sweep-lease-fence-race.sh
+test-sweep-lease-publish.sh
 test-sweep-lease-renew.sh
 test-sweep-pr-mode.sh
 test-sweep-run-registry.sh

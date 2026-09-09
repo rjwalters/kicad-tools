@@ -1509,8 +1509,22 @@ ad7_out=$( env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     HOME="$AD7_HOME" LOOM_MACHINE_CHECKOUT="$AD7_HOME" LOOM_LAUNCHD_LABEL="com.rjwalters.loom-daemon-ad7-test" LOOM_DAEMON_BIN="$FAKE_BIN" \
     LOOM_AUTONOMY_MARKER="$AD7_HOME/.loom/autonomy-desired" \
     bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
+ad7_rc=$?
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$ad7_out" | grep -qi 'autonomy downgrade' && echo "$ad7_out" | grep -q 'autonomy-desired marker'; then
+# #7391: this case was observed to fail intermittently in CI with the captured
+# output truncated right after the unconditional "Reliability daemon: ..."
+# banner (i.e. NEITHER the "autonomy downgrade" WARNING nor anything after it
+# ever appears) -- always with what looked like a clean run otherwise. Capture
+# and check the subprocess's own exit status FIRST so a future recurrence
+# fails loudly as "subprocess exited <rc>, output truncated" (a starved/killed
+# child under CI concurrency -- see run-ci-suites.sh's SERIAL_LANE_SUITES
+# entry for this suite) instead of silently as an opaque content mismatch that
+# looks identical to a real logic regression.
+if [[ "$ad7_rc" -ne 0 ]]; then
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} autonomy downgrade (plist): marker present + no readable prior value still warns"
+    echo "  subprocess exited $ad7_rc (expected 0) -- output: $ad7_out"
+elif echo "$ad7_out" | grep -qi 'autonomy downgrade' && echo "$ad7_out" | grep -q 'autonomy-desired marker'; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} autonomy downgrade (plist): marker present + no readable prior value still warns (#4693)"
 else

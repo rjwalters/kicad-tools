@@ -89,7 +89,7 @@ Full policy, TTL/invalidation semantics, and manual verification steps:
 the 6 safety criteria below are evaluated.** Part 1 resolves a *contradictory*
 verdict state; Part 2 resolves an *out-of-date* one.
 
-### Part 1: Contradictory verdict labels (#4570)
+### Part 1: Contradictory verdict labels (#4570, generalized #7018)
 
 It is a fail-safe against a real race
 (#4570, PR #4560 incident, 2026-07-30): two Judges reviewing the same PR
@@ -103,6 +103,16 @@ slips through (a pre-existing contradictory state from before this fix
 shipped, a manual label edit, or a bug elsewhere) — mechanizing exactly the
 manual correction the incident required a human-in-the-loop Judge to perform.
 
+**Also catches `loom:pr` + `loom:review-requested`** (#7018, twelve open PRs
+observed carrying one of these contradictory pairs on 2026-08-28): `loom:pr`
+here is stray debris left behind by an operator-ruling label swap, or by the
+staleness guard's own clear step which (before #7018) only stripped the ONE
+verdict label it detected as stale, never a second, already-stray one. Either
+co-occurring label means `loom:pr` does not currently describe reality:
+something is either actively re-requesting review or already rejected the
+tree. Whichever one is present, the resolution is the same — remove `loom:pr`
+and let a fresh Judge pass decide again.
+
 **Verification / resolution command** (run once per candidate `loom:pr` PR,
 before Step 1 of the 6 criteria below):
 
@@ -112,7 +122,17 @@ PR_NUMBER=<number>
 # eligible to merge, so it must be live (see "Cached forge reads").
 LABELS=$(gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | join(",")')
 
+# Whichever OTHER verdict-class label (if any) is standing beside loom:pr —
+# loom:changes-requested (a terminal rejection) or loom:review-requested (an
+# active or pending re-review) both mean loom:pr no longer describes reality.
+OTHER_VERDICT_LABEL=""
 if echo "$LABELS" | grep -qw "loom:changes-requested"; then
+  OTHER_VERDICT_LABEL="loom:changes-requested"
+elif echo "$LABELS" | grep -qw "loom:review-requested"; then
+  OTHER_VERDICT_LABEL="loom:review-requested"
+fi
+
+if [ -n "$OTHER_VERDICT_LABEL" ]; then
   JANITOR_MARKER="<!-- champion:verdict-janitor-notice -->"
   # Idempotency guard — mirrors the stale-PR notice pattern below: only
   # comment + relabel once per contradictory episode, so a 10-minute cron
@@ -129,15 +149,15 @@ if echo "$LABELS" | grep -qw "loom:changes-requested"; then
     gh pr comment "$PR_NUMBER" --body "$JANITOR_MARKER
 **Champion: Verdict-State Janitor**
 
-This PR carries both \`loom:pr\` and \`loom:changes-requested\` simultaneously — a contradictory verdict state that should never coexist (see the mutual-exclusion invariant in \`.github/labels.yml\`). This usually means two Judges reviewed the PR concurrently and their verdicts raced.
+This PR carries both \`loom:pr\` and \`$OTHER_VERDICT_LABEL\` simultaneously — a contradictory verdict state that should never coexist (see the mutual-exclusion invariant in \`.github/labels.yml\`). This usually means either two Judges reviewed the PR concurrently and their verdicts raced, or \`loom:pr\` is stray debris a label-transition step failed to strip (#7018).
 
-Resolving fail-safe: \`loom:changes-requested\` wins. Removing \`loom:pr\` so this PR is not auto-merged. Doctor will address the outstanding rejection; re-request Judge review once addressed.
+Resolving fail-safe: \`$OTHER_VERDICT_LABEL\` wins. Removing \`loom:pr\` so this PR is not auto-merged. $( [ "$OTHER_VERDICT_LABEL" = "loom:changes-requested" ] && echo "Doctor will address the outstanding rejection; re-request Judge review once addressed." || echo "Judge will pick this PR back up from the review queue." )
 
 ---
 *Automated by Champion role*"
     gh pr edit "$PR_NUMBER" --remove-label "loom:pr"
     "$GH_READ" --clear-cache   # your own write must not be masked by your own cache
-    echo "Resolved contradictory verdict state on #$PR_NUMBER (loom:pr removed) — skipping merge"
+    echo "Resolved contradictory verdict state on #$PR_NUMBER (loom:pr removed, $OTHER_VERDICT_LABEL kept) — skipping merge"
   fi
   # Skip this PR entirely for this pass — do not proceed to the 6 safety
   # criteria and do not merge. In a batch loop: `continue`. In a single-PR

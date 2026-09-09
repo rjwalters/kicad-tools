@@ -1041,6 +1041,44 @@ other than a pop, so a deny would strand work rather than protect it. Invoking
 the wrapper itself is not a raw stash command and is therefore ungated, exactly
 like `worktree.sh stash-pop`.
 
+#### Main-checkout clean baseline: `stash-push main` / `stash-pop main` (#6076)
+
+The ask above is correct, but until #6076 it was *unactionable in a headless
+run*: the message offered only "disable the guard", because the sanctioned
+clean-and-restore pair was issue-keyed and there was no main-checkout
+equivalent to redirect to. Roles that legitimately work in the primary clone
+(Judge, Champion, Auditor, Guide, Hermit) therefore kept reaching for raw
+`git stash` + `git stash pop` there, and every pop stalled on an ask with
+nobody present to answer it — 21 recurrences in the 2026-08-09..12 audit
+window, on the same command shapes.
+
+`worktree.sh stash-push main` / `stash-pop main` close that gap. They behave
+exactly like the per-issue verbs but operate on the primary clone and anchor
+to `refs/loom/stash-baseline/main`, so they never touch `refs/stash`:
+
+```bash
+./.loom/scripts/worktree.sh stash-push main    # capture WIP, reset main to HEAD
+shellcheck install.sh                          # clean-tree baseline
+./.loom/scripts/worktree.sh stash-pop main     # restore exactly what was captured
+```
+
+This is **not** a guard exemption. The tier is unchanged — a raw
+`git stash pop`/`drop`/`clear` in the main checkout still asks — and the pair
+is simply invisible to the check because it never invokes those subcommands.
+It is also strictly safer than the raw stash it replaces: `refs/stash` lets two
+callers interleave silently, whereas a second `stash-push main` while a capture
+is outstanding fails loudly and names the ref. The create-side deny (#5754) was
+deliberately **not** extended to the primary clone, which also hosts legitimate
+raw-stash producers the hook cannot distinguish (`check-main-clean.sh
+--quarantine`'s rescue push, an operator's own interactive shelf).
+
+Reconciling a quarantined entry is a separate case with its own rule — **replay,
+don't pop**: apply the diff inside the owning issue worktree
+(`git stash show -p <ref> | git -C .loom/worktrees/issue-<N> apply -`), then
+retire the entry with `loom-daemon stashes retire --issue <N> --execute`.
+Popping it back into the primary clone puts the contamination straight back
+where the sweep backstop will quarantine it again.
+
 The main-checkout test compares `git rev-parse --show-toplevel` against
 `git rev-parse --git-common-dir/..`, both resolved from the command's cwd: they
 are equal only when cwd **is** the main checkout, and diverge when cwd is a
@@ -1196,6 +1234,17 @@ cd .loom/worktrees/issue-42 && git stash   # DENY -> use snapshot/stash-push 42
 cargo clippy --message-format=short > /tmp/baseline.txt   # clean-tree baseline
 ./.loom/scripts/worktree.sh stash-pop 42
 cargo clippy --message-format=short > /tmp/with-wip.txt   # then diff the two
+
+# Same comparison, but in the PRIMARY CLONE (#6076) — the replacement for a
+# raw `git stash` + `git stash pop` pair there, likewise never gated:
+./.loom/scripts/worktree.sh stash-push main
+shellcheck install.sh
+./.loom/scripts/worktree.sh stash-pop main
+
+# Reconciling a quarantined entry — replay into the OWNING worktree, never pop
+# it back into main (which the sweep backstop would just re-quarantine):
+git stash show -p stash@{0} | git -C .loom/worktrees/issue-42 apply -
+loom-daemon stashes retire --issue 42 --execute
 
 # Ad-hoc "shelve my WIP" — the replacement for a bare `git stash`:
 ./.loom/scripts/worktree.sh snapshot 42
