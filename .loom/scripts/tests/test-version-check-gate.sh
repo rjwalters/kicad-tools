@@ -40,6 +40,18 @@
 # catch it today; T9 is the false-positive guard -- an ordinary rebase where
 # upstream never touches install-metadata.json passes the gate cleanly.
 #
+# T10-T11 (#7417) cover a different drop shape: `scripts/version.sh bump`
+# (no `--tag`) only rewrites the version-bearing files on disk -- the `git
+# add`/`git commit` pair lives exclusively inside `do_tag()`, invoked only
+# for `--tag`. A caller (e.g. Doctor's rebase recipes) that follows this
+# gate's own printed Fix: hint (`./scripts/version.sh bump patch`) and then
+# pushes WITHOUT an intervening commit pushes a head where the bump exists
+# on disk but never landed in the committed tree -- `version.sh check` can't
+# catch this on its own because it only compares the files against EACH
+# OTHER, never against git. T10 reproduces the bumped-but-uncommitted state
+# and confirms the gate's new dirty-worktree check catches it; T11 is the
+# false-positive guard -- the same bump, committed, passes cleanly.
+#
 # Usage:
 #   ./.loom/scripts/tests/test-version-check-gate.sh
 
@@ -205,7 +217,14 @@ EOF
   if [[ "$meta_version" != "__omit__" ]]; then
     printf '{"loom_version": "%s"}\n' "$meta_version" > "$dir/.loom/install-metadata.json"
   fi
-  (cd "$dir" && git init -q)
+  (
+    cd "$dir"
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    git add -A
+    git commit -q -m "base at $version"
+  )
 }
 
 # T5: package.json (and every other VERSION_FILES entry) says 1.2.3, but
@@ -403,6 +422,46 @@ fi
 run_gate_in "$FIXTURE9"
 assert_eq "0" "$EXIT_CODE" "T9: gate does not false-positive on an ordinary rebase with no install-metadata.json collision"
 rm -rf "$FIXTURE9"
+
+# === T10-T11: the uncommitted-bump gap (#7417) -- `scripts/version.sh bump`
+# (no --tag) rewrites every version-bearing file on disk but never commits
+# them. `version.sh check` alone can't catch this since it only compares the
+# files against EACH OTHER, never against git -- these exercise the gate's
+# new dirty-worktree check, which does.
+
+# T10: baseline fully committed at OLD_V (files agree with each other AND
+# with git HEAD), then every version-bearing file -- including
+# .loom/install-metadata.json -- is bumped to NEW_V ON DISK but never
+# committed. This is exactly the shape a Doctor rebase recipe produces if it
+# runs `./scripts/version.sh bump patch` (this gate's own printed Fix: hint)
+# and then pushes without an intervening commit. The gate must fail even
+# though every file still agrees with every OTHER file.
+FIXTURE10="$(mktemp -d)"
+make_fixture_repo "$FIXTURE10" "$OLD_V" "$OLD_V"
+bump_version_files "$FIXTURE10" "$OLD_V" "$NEW_V"
+sed -i.bak "s/\"loom_version\": \"$OLD_V\"/\"loom_version\": \"$NEW_V\"/" "$FIXTURE10/.loom/install-metadata.json"
+rm -f "$FIXTURE10"/.loom/*.bak
+unset LOOM_VERSION_CHECK_SCRIPT
+run_gate_in "$FIXTURE10" --fix-hint "then push."
+assert_eq "1" "$EXIT_CODE" "T10: bumped-but-uncommitted version-bearing files (real version.sh, no --tag) -> gate fails"
+assert_contains "$OUTPUT" "not committed" "T10: output explicitly calls out the uncommitted state"
+assert_contains "$OUTPUT" "BLOCKER" "T10: uncommitted-bump abort still uses the BLOCKER: message"
+assert_contains "$OUTPUT" "then push." "T10: custom --fix-hint text is still appended to the Fix: message"
+rm -rf "$FIXTURE10"
+
+# T11: false-positive guard -- same bump, but this time committed (mirrors
+# do_tag()'s git add + commit, or a caller that follows the fix and commits
+# by hand) -- the gate must NOT flag it.
+FIXTURE11="$(mktemp -d)"
+make_fixture_repo "$FIXTURE11" "$OLD_V" "$OLD_V"
+bump_version_files "$FIXTURE11" "$OLD_V" "$NEW_V"
+sed -i.bak "s/\"loom_version\": \"$OLD_V\"/\"loom_version\": \"$NEW_V\"/" "$FIXTURE11/.loom/install-metadata.json"
+rm -f "$FIXTURE11"/.loom/*.bak
+(cd "$FIXTURE11" && git add -A && git commit -q -m "chore: bump version to $NEW_V")
+unset LOOM_VERSION_CHECK_SCRIPT
+run_gate_in "$FIXTURE11"
+assert_eq "0" "$EXIT_CODE" "T11: bumped AND committed version-bearing files -> gate passes cleanly (no false positive)"
+rm -rf "$FIXTURE11"
 
 # --- Summary ---
 echo ""

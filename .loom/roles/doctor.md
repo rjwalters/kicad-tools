@@ -564,7 +564,13 @@ if [ "$PRIORITY_1" -eq 0 ] && [ "$PRIORITY_2" -eq 0 ]; then
       # VERSION/the files that WERE part of the conflict resolution --
       # invisible until CI's "Installer Integration Tests" fails. Run the
       # same gate create-pr.sh uses (#6730) here too, since this path pushes
-      # directly and never goes through create-pr.sh.
+      # directly and never goes through create-pr.sh. If the gate's Fix: line
+      # tells you to run `./scripts/version.sh bump patch`, that command only
+      # rewrites the files on disk -- it does NOT commit them (#7417; the
+      # commit only happens inside `--tag`) -- so `git add` the printed files
+      # and `git commit` before re-running the gate and pushing. The gate
+      # itself now also fails outright if a version-bearing file is bumped
+      # but left uncommitted.
       if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
         echo "Aborting: version-bearing files are out of sync after rebase (see BLOCKER:/Fix: above)." >&2
         exit 1
@@ -938,7 +944,11 @@ git push --force-with-lease
 **Never hand-patch VERSION/CLAUDE.md/`Cargo.toml`/… to "re-add a bump the rebase
 dropped"** — run the `./scripts/version.sh` command the gate prints. A hand-rolled
 bump reproduces `bef3e07a` (#7341): all 8 core files patched, `.loom/install-metadata.json`
-missed, CI red.
+missed, CI red. **That command (`bump patch`/`bump minor`/`bump major`) only
+rewrites the files on disk — it does NOT commit them** (#7417; only `--tag`
+commits) — `git add` the files it changed and `git commit` before re-running
+the gate and pushing. The gate itself also fails outright if it finds a
+version-bearing file bumped but left uncommitted.
 
 **Standing down** (a concurrent fix already landed):
 
@@ -1453,7 +1463,12 @@ git rebase --continue
 # files that WERE part of the conflict resolution -- invisible until CI's
 # "Installer Integration Tests" fails. Run the same gate create-pr.sh uses
 # (#6730) here too, since this path pushes directly and never goes through
-# create-pr.sh.
+# create-pr.sh. If the gate's Fix: line tells you to run
+# `./scripts/version.sh bump patch`, that command only rewrites the files on
+# disk -- it does NOT commit them (#7417; only `--tag` commits) -- so
+# `git add` the printed files and `git commit` before re-running the gate
+# and pushing. The gate itself also fails outright if it finds a
+# version-bearing file bumped but left uncommitted.
 if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
   echo "Aborting: version-bearing files are out of sync after rebase (see BLOCKER:/Fix: above)." >&2
   exit 1
