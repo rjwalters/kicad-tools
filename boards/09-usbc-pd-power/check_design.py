@@ -38,7 +38,9 @@ CRITICAL_NETS = {
 def critical_route_opens(pcb_path, drc_report):
     """Resolve native open findings by saved identity, not localized text."""
     board = PCB.load(pcb_path)
-    items = [p for f in board.footprints for p in f.pads] + board.segments + board.vias + board.zones
+    items = (
+        [p for f in board.footprints for p in f.pads] + board.segments + board.vias + board.zones
+    )
     by_uuid = {item.uuid: item.net_name for item in items}
     present_nets = {p.net_name for f in board.footprints for p in f.pads}
     if not present_nets >= CRITICAL_NETS:

@@ -12,7 +12,7 @@
     "output/board09.kicad_sym": "36f1e94f721256abb4ab91d033f3d099e7aee1a49c81a25856ddfb67d36b9e52",
     "output/board09.pretty/SRP7050TA.kicad_mod": "0e5569968f48e2d3f7f09ec4814306e0d63792d71fd3ccf00564d053394dd947",
     "generate_design.py": "48ad16fe5dc0a3198afb7b0999188035a8c1b0fd5ef3f24e078ca1a94772d357",
-    "check_design.py": "9081ddcdb17f46a156f91339a56552d7ed4362a3ea7496d320c3b656a2e1d575",
+    "check_design.py": "9cb492af0a85c8571352bebf99a76fbf0c1d0b1b93b99a3c8f4bddc1fcb100ca",
     "procurement.json": "dcbd7f3e94a74336da5ad1bd97e9384be9658b6b7af9239826351b526a89298a",
     "engineering/calculate.py": "31b8b2e51a6a84eacb539282be90e3e3154e61ddb90a2c8840ebdc86f85dcc7a",
     "output/development-check.json": "1899398bda45c3d6c37d4d1087d5a913dc3eb3790b2ffd6f526208c9a143d4ea",
