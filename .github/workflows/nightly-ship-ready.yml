@@ -35,7 +35,7 @@ jobs:
 
       # setup-uv publishes only immutable full-version tags since v8 (no
       # @v8/@v9 major tags exist), hence the exact pin.
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: "latest"
           # setup-uv >=5 auto-enables the Actions cache on hosted runners
