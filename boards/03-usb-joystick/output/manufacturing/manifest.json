@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.20.0",
-  "generated_at": "2026-09-10T07:25:15.605694+00:00",
+  "generated_at": "2026-09-10T18:44:00.840097+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -13,24 +13,24 @@
       "size": 896
     },
     "assembly-back.pdf": {
-      "sha256": "bfedc3f656fe4e95969cba4f053b3eeba0520db5ca3f5b8f732d1763a9f7b462",
-      "size": 86744
+      "sha256": "5ae31f3a0e5f3d63ddbba30d616df3dd993aa171f4a484cd961c9c46a05fea38",
+      "size": 22968
     },
     "assembly-bom.csv": {
       "sha256": "d699ced94327304215238928f381e41a8ea89f5028130f5d21ac489352892c21",
       "size": 2634
     },
     "assembly-front.pdf": {
-      "sha256": "740e64e3ac5f24be4d51ce7bb8d3a30e5a5858ee996256ff75a353471af704dd",
-      "size": 129298
+      "sha256": "b8c565de7b9ab4b2e9b7f66a39ddeedd8ffcabd5c2694e1abfebe7e323c76edb",
+      "size": 53519
     },
     "bom_jlcpcb.csv": {
       "sha256": "2faf53be9ce8deb27c7a1c4b659df78a40234997c8a69265415f36608527e5ab",
       "size": 982
     },
     "check-report.json": {
-      "sha256": "97ba3496130b26d528f6c5291a7f5a34c42ff7d05ce5968f49fd4f3a1dd307c5",
-      "size": 4797
+      "sha256": "fb8e32ca19567bab583f91e0f08d9cefebc1ad7e7645a5c0d60a070b1fcf435d",
+      "size": 4819
     },
     "cpl_jlcpcb.csv": {
       "sha256": "a2685952c4a28521fe6ad5df90bb1d252928fc1774014c4dc78bbbda57fd8de8",
@@ -53,16 +53,16 @@
       "size": 4160
     },
     "design-source/generate_design.py": {
-      "sha256": "a91021b2192c96b162289a154bb55337cd66f19db4879e63cbccfe3c2d4b7a83",
-      "size": 41786
+      "sha256": "393d97bf44cecb74b00fdeb93c285eef33f6ce70b34b54f1b3ca80cb127393ea",
+      "size": 44726
     },
     "design-source/generate_pcb.py": {
       "sha256": "3724dbddf1e655d999db3bae8cc64150f0a450fd055a089db921bfbf4cc82e0b",
       "size": 5824
     },
     "design-source/generate_schematic.py": {
-      "sha256": "5728e82980f61355312c3afbc88c20c224b8c6327fe29f7f930aa91768cdad31",
-      "size": 4129
+      "sha256": "f509834c144b688688971cfc0ea7614977457f4f56e402dcc569551fa909c464",
+      "size": 4291
     },
     "design-source/joystick_hardware.py": {
       "sha256": "ff31a60e7b453fd16e56cc04c2d176de951838f8a0a176a5d7838fb1658a5da0",
@@ -77,20 +77,20 @@
       "size": 7474
     },
     "design-source/route_demo.py": {
-      "sha256": "28c8d1673fd0e0b611a7769395665341a1a6a1ce918c438033299abe476c2dc2",
-      "size": 9688
+      "sha256": "6ce7891b359bdc5f511ca7dc795fcb445d08759b419877e847026853cfa1d0c2",
+      "size": 9828
     },
     "design-source/routing-plan.json": {
-      "sha256": "65e4c177e7bbd4ce967fb821796fff2a865a3d122b08de4662ab003d1226749b",
-      "size": 383163
+      "sha256": "b1779f32e41dac3ac0b2d72408785366a77c266e4ab0f5c20a5d339c05a05e59",
+      "size": 387118
     },
     "design-source/routing_plan.py": {
-      "sha256": "a1401ee18121d7c2abc00b22c7efc7206d4678e41b3e145cab578de86f49587f",
-      "size": 9641
+      "sha256": "6766175a321112db152f2d947b8b94349b6888f0915e310539e71bf01037b899",
+      "size": 10501
     },
     "fill-consistency.json": {
-      "sha256": "b1b562fad4fc0cf82b1e9e1b3b4218924e5f44b0be11d803419b979f8faaaa74",
-      "size": 67
+      "sha256": "a9c3c3a8c50811798e187e7843e295f89c36fb978017e2643dbe845375cd0d3e",
+      "size": 91
     },
     "firmware/.gitignore": {
       "sha256": "692b1af4436043e2e965c8d563bbf90d648cda3a6afa9bba38e1c38af1d38919",
@@ -169,48 +169,48 @@
       "size": 2109
     },
     "gerbers/gerbers.zip": {
-      "sha256": "5c832f1ce0081ba379ede250dfb40cd4043ef3efbd99d3e8700386040d4261aa",
-      "size": 211769
+      "sha256": "af4f2ac7ba2e858c39d45533cef5de7580539d29d011ffb84bad3d8add1cd2c0",
+      "size": 210880
     },
     "images/assembly.png": {
-      "sha256": "59248d0f4a9e5d6168e0b49e4432163404a018e60242ffba923c8dd6253509ed",
-      "size": 453673
+      "sha256": "e81ce4ef7f4c0117a3a92464c4062fd63735cbd510c6dd1ef97acd79da016244",
+      "size": 449871
     },
     "images/layer_B_Cu.png": {
-      "sha256": "ff44cc5507fb1175570e60831a76f36a8dcef36e9394047899106c95e086c49a",
-      "size": 317625
+      "sha256": "270b5858e625a8b2bab24e6e0ac56dfda0f3e49b2b7f9ea04eddc9f60ec3db7c",
+      "size": 313442
     },
     "images/layer_F_Cu.png": {
-      "sha256": "87b3cd03bbf09efddea3d7189d1e0afc4f044b6172bc39416e7e663b58f3b86b",
-      "size": 374941
+      "sha256": "d8190e24996212bd2c9b83c461bea886d1ceb34e20dccb587eac77414de1e30c",
+      "size": 369662
     },
     "images/layer_In1_Cu.png": {
-      "sha256": "5e47ae3b9e8b84a9aca9fc64e797d5394999a30b4d92ac5ea785b98bfe219c0c",
-      "size": 255141
+      "sha256": "525d00f6a04736f46c969098fc6afb39fd66f384ae6c385251a84d5147c8fd6c",
+      "size": 255155
     },
     "images/layer_In2_Cu.png": {
-      "sha256": "6f807c00352146cbfd5ffc7c3ec534abd5da80c36a6ba6535d3db5c03bc3afc5",
-      "size": 310018
+      "sha256": "dd1a6a7de80ec2d760c2987f656ea364099eab2816de60494be41e9d2d1f68d2",
+      "size": 307771
     },
     "images/pcb_back.png": {
-      "sha256": "cf14339fef0291ec6f7a57321d9d279d902d6d7d5d8c2268587b6643d1d4d2cc",
-      "size": 320568
+      "sha256": "4688ceb3258456eaddfaa5c78b85f19dabc3cab54ec3acea58216040edeb84ef",
+      "size": 316336
     },
     "images/pcb_copper.png": {
-      "sha256": "6855d2b2cfbaf78c651d85f0d67bb9de9208831faecfef17276add402fb2622a",
-      "size": 364196
+      "sha256": "c374d64dbbffd43db2279a180312fa4849ad803599a7b092227d2373f5346605",
+      "size": 360014
     },
     "images/pcb_front.png": {
-      "sha256": "6ecdf205ec72d7b2d5c5bcb8408591f487126808c11a9c00557ed471db7c58ed",
-      "size": 477432
+      "sha256": "142aa4f974ee21690f5c623e0524092696883e5cbc19d6d686934f84554dc2ec",
+      "size": 471567
     },
     "images/schematic_usb_joystick.png": {
       "sha256": "2d6b7e8086fa4e9f0d3b16a697bd10c45b0182f98666c8522a6de4f28b385c14",
       "size": 486477
     },
     "kicad_project.zip": {
-      "sha256": "9744b242d78305c488d294e7544683e26655a2b1c0264c86be58245517e61d02",
-      "size": 310304
+      "sha256": "700d3f73d57d29beee85248f9153d102a7d636436f7d79f456d9353e7bdb2067",
+      "size": 307241
     },
     "manual-assembly-bom.csv": {
       "sha256": "f51fef1b581623d69c00b1b3604f0a1b193c29e29134a3931e0853ab13030ef7",
@@ -221,11 +221,11 @@
       "size": 196
     },
     "native-drc.json": {
-      "sha256": "c99dd5709c610a683fd5fc4c409df14622a7fe71df1535676eafa530fb7491f6",
+      "sha256": "f9e0764073b0624fdc534f6b7a7b277dd8f7a83a46387325c86e3a8ff57b99ec",
       "size": 1211
     },
     "native-erc.json": {
-      "sha256": "896fde4177165cd289ea23a32435874079b75d3bf9d02a42e8b29b61031a8202",
+      "sha256": "7d56da9eb0713ad6b70f4339d30a06680147894a0110b7323f5b6c2194ddcbd2",
       "size": 985
     },
     "procurement-review.json": {
@@ -233,12 +233,12 @@
       "size": 2354
     },
     "report.md": {
-      "sha256": "bb2879a365a8ea5608b558dfed3f6c98b2d7e2be977783211cf46f2b2816f5db",
-      "size": 5660
+      "sha256": "fc09862a99c49a3be590184460358301eb2b77a519c2396ac99b58d3e8deea86",
+      "size": 6143
     },
     "report.pdf": {
-      "sha256": "54dc8ff9a62ff6961d422853bcdf8d6c2e154a36fb1d05f726d7f83b5ad7652b",
-      "size": 3421019
+      "sha256": "602b215babfb3b9df6c9af4cd9083dc5d205a74cd7dffd0be25022082d94a453",
+      "size": 3390741
     }
   },
   "board": {
@@ -255,7 +255,7 @@
     {
       "name": "schematic_file",
       "status": "OK",
-      "message": "Schematic auto-detected: usb_joystick.kicad_sch"
+      "message": "Schematic file found: usb_joystick.kicad_sch"
     },
     {
       "name": "schematic_footprints",
@@ -310,19 +310,13 @@
     },
     {
       "name": "drc",
-      "status": "OK",
-      "message": "DRC: 0 errors, 0 warnings"
+      "status": "WARN",
+      "message": "DRC passed with 20 warning(s)"
     },
     {
       "name": "erc",
-      "status": "OK",
-      "message": "Native ERC: 0 errors, 0 warnings; see native-erc.json"
+      "status": "WARN",
+      "message": "ERC passed with 3 warning(s)"
     }
-  ],
-  "mode": "assembly",
-  "native_warning_counts": {},
-  "manual_assembly": [
-    "J1 USB4085-GF-A through-hole connector"
-  ],
-  "warning_counts": {}
+  ]
 }
