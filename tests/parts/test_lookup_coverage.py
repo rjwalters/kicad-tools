@@ -115,14 +115,18 @@ def test_cli_json_distinguishes_outage_and_offline_empty(client, monkeypatch, ca
     assert result["parts"] == []
 
 
-def test_batch_availability_keeps_known_parts(client, monkeypatch):
+@pytest.mark.parametrize("missing_dependency", [False, True])
+def test_batch_availability_keeps_known_parts(client, monkeypatch, missing_dependency):
     from kicad_tools.cost.availability import LCSCAvailabilityChecker
 
     part = Part("C1", stock=20)
     failure = LCSCUnavailableError(
         "unavailable", partial_results={"C1": part}, unavailable_parts={"C2"}
     )
-    monkeypatch.setattr(client, "lookup_many", Mock(side_effect=failure))
+    if missing_dependency:
+        _missing_requests_with_cached_part(client, monkeypatch, part)
+    else:
+        monkeypatch.setattr(client, "lookup_many", Mock(side_effect=failure))
     items = [
         SimpleNamespace(
             reference="R1",
@@ -156,7 +160,10 @@ def test_batch_availability_keeps_known_parts(client, monkeypatch):
     assert "not verified" in result.items[1].error
 
 
-def test_cost_estimator_keeps_partial_prices_and_marks_unavailable(client, monkeypatch):
+@pytest.mark.parametrize("missing_dependency", [False, True])
+def test_cost_estimator_keeps_partial_prices_and_marks_unavailable(
+    client, monkeypatch, missing_dependency
+):
     import kicad_tools.parts
     from kicad_tools.cost.estimator import ManufacturingCostEstimator
     from kicad_tools.parts.models import PartPrice
@@ -165,7 +172,10 @@ def test_cost_estimator_keeps_partial_prices_and_marks_unavailable(client, monke
     failure = LCSCUnavailableError(
         "unavailable", partial_results={"C1": part}, unavailable_parts={"C2"}
     )
-    monkeypatch.setattr(client, "lookup_many", Mock(side_effect=failure))
+    if missing_dependency:
+        _missing_requests_with_cached_part(client, monkeypatch, part)
+    else:
+        monkeypatch.setattr(client, "lookup_many", Mock(side_effect=failure))
     monkeypatch.setattr(kicad_tools.parts, "LCSCClient", lambda: client)
     groups = [
         SimpleNamespace(
@@ -196,3 +206,79 @@ def test_offline_search_miss_cannot_become_bom_no_match(client, monkeypatch):
         suggester.suggest_for_component(
             reference="R1", value="10k", footprint="Resistor_SMD:R_0402_1005Metric"
         )
+
+
+@pytest.mark.parametrize(
+    "page_info",
+    [
+        None,
+        False,
+        {},
+        {"list": {}, "total": 0},
+        {"list": False, "total": 0},
+        {"list": []},
+        {"total": 0},
+        {"list": [], "total": -1},
+        {"list": [], "total": False},
+        {"list": None, "total": 1},
+        {"list": [], "total": 1},
+        {"list": [{}], "total": 0},
+    ],
+)
+def test_malformed_search_coverage_is_unavailable(client, monkeypatch, page_info):
+    monkeypatch.setattr(
+        client,
+        "_make_request",
+        Mock(return_value={"code": 200, "data": {"componentPageInfo": page_info}}),
+    )
+    with pytest.raises(LCSCUnavailableError):
+        client.search("missing")
+    catalog = SimpleNamespace(available=True, search=lambda *a, **kw: [])
+    monkeypatch.setattr(client, "_get_catalog", lambda: catalog)
+    result = client.search("missing")
+    assert result.coverage == "offline"
+    assert result.diagnostics
+
+
+@pytest.mark.parametrize("components", [None, []])
+def test_explicit_empty_search_coverage(client, monkeypatch, components):
+    monkeypatch.setattr(
+        client,
+        "_make_request",
+        Mock(
+            return_value={
+                "code": 200,
+                "data": {"componentPageInfo": {"list": components, "total": 0}},
+            }
+        ),
+    )
+    result = client.search("missing")
+    assert result.parts == []
+    assert result.coverage == "live"
+
+
+def _missing_requests_with_cached_part(client, monkeypatch, part):
+    import kicad_tools.parts.lcsc as lcsc
+
+    client.cache = SimpleNamespace(get_many=lambda numbers: {"C1": part})
+    monkeypatch.setattr(lcsc, "_requests_installed", lambda: False)
+
+
+def test_missing_dependency_retains_batch_results(client, monkeypatch):
+    from kicad_tools.parts.lcsc import LCSCDependencyMissingError
+
+    part = Part("C1", stock=20)
+    _missing_requests_with_cached_part(client, monkeypatch, part)
+    with pytest.raises(LCSCDependencyMissingError) as failure:
+        client.lookup_many(["C1", "C2"])
+    assert isinstance(failure.value, ImportError)
+    assert isinstance(failure.value, LCSCUnavailableError)
+    assert failure.value.partial_results["C1"] is part
+    assert failure.value.partial_results.sources == {"C1": "cache"}
+    assert failure.value.unavailable_parts == {"C2"}
+    monkeypatch.setattr(
+        client,
+        "_get_official_client",
+        lambda: SimpleNamespace(get_component_detail_by_codes=lambda numbers: {}),
+    )
+    assert client.lookup_many(["C1", "C2"]) == {"C1": part}

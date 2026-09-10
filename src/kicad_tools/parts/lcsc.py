@@ -110,7 +110,7 @@ class LCSCForbiddenError(LCSCUnavailableError):
     """
 
 
-class LCSCDependencyMissingError(ImportError):
+class LCSCDependencyMissingError(LCSCUnavailableError, ImportError):
     """Raised when the optional ``parts`` extra (``requests``) is absent.
 
     This is a *capability* failure -- the requested LCSC matcher cannot run
@@ -786,13 +786,20 @@ class LCSCClient:
             result_data = data.get("data")
             if not isinstance(result_data, dict) or "componentPageInfo" not in result_data:
                 raise LCSCUnavailableError("Anonymous search response is missing result coverage")
-            page_info = result_data["componentPageInfo"] or {}
-            if not isinstance(page_info, dict):
+            page_info = result_data["componentPageInfo"]
+            if not isinstance(page_info, dict) or not {"list", "total"} <= page_info.keys():
                 raise LCSCUnavailableError("Anonymous search response is malformed")
-            components = page_info.get("list") or []
-            total = page_info.get("total") or 0
-            if not isinstance(components, list) or not isinstance(total, int):
+            components = page_info["list"]
+            total = page_info["total"]
+            if type(total) is not int or total < 0:
+                raise LCSCUnavailableError("Anonymous search result count is malformed")
+            # Only null paired with total=0 is a supported empty envelope.
+            if components is None and total == 0:
+                components = []
+            if not isinstance(components, list) or total < len(components):
                 raise LCSCUnavailableError("Anonymous search result list/count is malformed")
+            if not components and total > (page - 1) * page_size:
+                raise LCSCUnavailableError("Anonymous search page is unexpectedly empty")
         except (LCSCForbiddenError, LCSCUnavailableError, _request_exception_type()) as exc:
             diagnostic = _source_failure("anonymous", exc)
             if catalog is not None and catalog.available:
@@ -961,7 +968,15 @@ class LCSCClient:
 
         if not _requests_installed():
             if catalog is None or not catalog.available:
-                raise LCSCDependencyMissingError(PARTS_INSTALL_HINT)
+                unavailable = set(parts) - verified_misses
+                if unavailable:
+                    result.diagnostics = source_diagnostics + [PARTS_INSTALL_HINT]
+                    raise LCSCDependencyMissingError(
+                        PARTS_INSTALL_HINT,
+                        partial_results=result,
+                        unavailable_parts=unavailable,
+                    )
+                return result
         else:
             # Fetch remaining from the live API (authoritative when reachable).
             for i, part_num in enumerate(parts):
