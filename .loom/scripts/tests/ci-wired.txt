@@ -26,6 +26,7 @@
 # date flags), so they were confirmed hermetic and ubuntu-portable the same
 # way as the tests/hooks/ suites above before being wired in here.
 
+test-agent-destroy.sh
 test-app-permission-fallback.sh
 test-archive-transcripts.sh
 test-blame-issue.sh

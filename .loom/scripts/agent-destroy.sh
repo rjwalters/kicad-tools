@@ -169,7 +169,7 @@ main() {
                         else
                             # Safety check: Don't remove worktree if other processes have their CWD inside it
                             local active_pids
-                            active_pids=$(lsof +d "$worktree_real" -F pt 2>/dev/null | awk '/^p/{pid=substr($0,2)} /^tcwd/{print pid}' | grep -v "$$" || true)
+                            active_pids=$(lsof +d "$worktree_real" -F pf 2>/dev/null | awk '/^p/{pid=substr($0,2)} /^fcwd/{print pid}' | grep -v "$$" || true)
                             if [[ -n "$active_pids" ]]; then
                                 log_warn "Skipping worktree removal: active processes detected (PIDs: $(echo "$active_pids" | tr '\n' ' '))"
                                 log_info "Use 'loom-clean' for deferred cleanup after processes exit"
