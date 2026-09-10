@@ -7,6 +7,7 @@ Analyzes component values and footprints to suggest matching LCSC parts.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -46,6 +47,7 @@ class ParsedValue:
     tolerance: str = ""
     voltage_rating: str = ""
     search_terms: list[str] = field(default_factory=list)
+    annotations: str = ""
 
 
 @dataclass
@@ -93,6 +95,7 @@ class PartSuggestion:
     # Status
     search_query: str = ""
     error: str | None = None
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def has_suggestion(self) -> bool:
@@ -150,6 +153,44 @@ CAPACITOR_PATTERN = re.compile(
     re.IGNORECASE,
 )
 INDUCTOR_PATTERN = re.compile(r"^(\d+(?:\.\d+)?)\s*([pnuμmµ]?)[hH]?$", re.IGNORECASE)
+
+# A resistance token must have a unit; bare description numbers may be
+# packages, voltages, powers, or digits embedded in a manufacturer part number.
+_RESISTANCE_DESCRIPTION = re.compile(
+    r"(?<![\w.])(?P<number>\d+(?:\.\d+)?)\s*(?P<scale>[mkKMG]?)"
+    r"\s*(?:Ω|[Oo][Hh][Mm][Ss]?)(?!\w)"
+)
+_RESISTANCE_SHORT_TOKEN = re.compile(r"(?<![\w.])(?:\d+(?:\.\d+)?[kKMG]|\d+[RrKkM]\d*)(?![\w.])")
+
+
+def _resistor_core(value: str) -> tuple[str, str]:
+    """Separate a parseable nominal/tolerance from whitespace annotations."""
+    value = value.strip()
+    ends = [len(value), *(match.start() for match in reversed(list(re.finditer(r"\s+", value))))]
+    for end in ends:
+        core = value[:end]
+        if RESISTOR_R_NOTATION_PATTERN.fullmatch(core) or RESISTOR_PATTERN.fullmatch(core):
+            return core, value[end:].strip()
+    return value, ""
+
+
+def _candidate_resistances(part: Part) -> list[float]:
+    """Read nominal resistance without substring or MPN-number matching."""
+    values = []
+    if part.value:
+        parsed = parse_component_value(part.value, "R")
+        if parsed.numeric_value is not None:
+            values.append(parsed.numeric_value)
+    multipliers = {"": 1.0, "m": 1e-3, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
+    for match in _RESISTANCE_DESCRIPTION.finditer(part.description):
+        values.append(float(match["number"]) * multipliers[match["scale"]])
+    # Short tokens such as 4R7 or 16k are also common in catalog descriptions.
+    for match in _RESISTANCE_SHORT_TOKEN.finditer(part.description):
+        parsed = parse_component_value(match.group(), "R")
+        if parsed.numeric_value is not None:
+            values.append(parsed.numeric_value)
+    return values
+
 
 # Common footprint to package mappings
 FOOTPRINT_PACKAGE_MAP = {
@@ -320,6 +361,7 @@ def parse_component_value(value: str, reference: str = "") -> ParsedValue:
 
     # Parse resistor values
     if component_type == ComponentType.RESISTOR:
+        resistor_value, parsed.annotations = _resistor_core(value)
         num: float | None = None
         tolerance: str | None = None
 
@@ -327,7 +369,7 @@ def parse_component_value(value: str, reference: str = "") -> ParsedValue:
         # This must precede RESISTOR_PATTERN because the latter cannot match
         # the trailing ``R`` and would otherwise leave the value unparsed,
         # producing a package-only search that mis-ranks a generic value.
-        r_match = RESISTOR_R_NOTATION_PATTERN.match(value.strip())
+        r_match = RESISTOR_R_NOTATION_PATTERN.match(resistor_value)
         if r_match:
             whole = r_match.group(1)
             unit = r_match.group(2).upper()
@@ -342,7 +384,7 @@ def parse_component_value(value: str, reference: str = "") -> ParsedValue:
 
             tolerance = r_match.group(4)
         else:
-            match = RESISTOR_PATTERN.match(value)
+            match = RESISTOR_PATTERN.match(resistor_value)
             if match:
                 num = float(match.group(1))
                 multiplier = match.group(2).upper() if match.group(2) else ""
@@ -534,6 +576,16 @@ class PartSuggester:
         if existing_lcsc:
             return suggestion
 
+        if parsed.component_type == ComponentType.RESISTOR:
+            if parsed.numeric_value is None:
+                suggestion.error = "Unable to parse resistor value; refusing a package-only search"
+                return suggestion
+            if parsed.annotations:
+                suggestion.warnings.append(
+                    f"Additional requirements {parsed.annotations!r} are not verified; "
+                    "resistance matching does not establish voltage, power, or MPN suitability."
+                )
+
         # Build search query
         search_terms = parsed.search_terms.copy()
         if package:
@@ -561,6 +613,16 @@ class PartSuggester:
                 # Skip parts with insufficient stock
                 if part.stock < self.min_stock:
                     continue
+
+                if parsed.component_type == ComponentType.RESISTOR:
+                    resistances = _candidate_resistances(part)
+                    if parsed.numeric_value is None:
+                        continue
+                    if not resistances or not all(
+                        math.isclose(r, parsed.numeric_value, rel_tol=1e-9, abs_tol=0.0)
+                        for r in resistances
+                    ):
+                        continue
 
                 # Calculate confidence score
                 confidence = self._calculate_confidence(part, parsed, package)
@@ -635,8 +697,10 @@ class PartSuggester:
             elif part.package.lower() in target_package.lower():
                 confidence += 0.2
 
-        # Value match
-        if parsed.search_terms:
+        # Resistors are ranked only after an explicit nominal-value match.
+        if parsed.component_type == ComponentType.RESISTOR:
+            confidence += 0.1
+        elif parsed.search_terms:
             desc_lower = part.description.lower()
             for term in parsed.search_terms:
                 if term.lower() in desc_lower:
@@ -648,7 +712,7 @@ class PartSuggester:
         elif part.stock > 1000:
             confidence += 0.05
 
-        return min(confidence, 1.0)
+        return min(confidence, 0.75 if parsed.annotations else 1.0)
 
     def close(self) -> None:
         """Close the LCSC client."""
