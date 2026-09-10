@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 from unittest import mock
 
 import pytest
@@ -176,6 +177,7 @@ class _FakeResponse:
         self.status_code = status_code
         self._json_data = json_data
         self._raise_json = raise_json
+        self.content = b"<html>Denied</html>" if raise_json else json.dumps(json_data).encode()
 
     def json(self):
         if self._raise_json:
@@ -334,13 +336,8 @@ def test_business_error_real_signature_failure_maps_to_auth():
         client.get_component_detail_by_codes(["C1"])
 
 
-def test_business_error_real_permission_denied_maps_to_whitelist():
-    """Confirmed live message (issue #4118 smoke): 403 insufficient permissions.
-
-    Signature verified but the app is not permitted -- a portal/IP matter, so
-    it maps to the actionable IP/permission exception rather than a generic auth
-    failure.
-    """
+def test_business_error_real_permission_denied_maps_to_permission():
+    """Product permission denial does not establish an IP or signature diagnosis."""
     resp = _FakeResponse(
         json_data={
             "code": 403,
@@ -349,7 +346,7 @@ def test_business_error_real_permission_denied_maps_to_whitelist():
         }
     )
     client, _ = _client_with_response(resp)
-    with pytest.raises(JLCIPNotWhitelistedError):
+    with pytest.raises(jlcpcb_api.JLCPermissionError):
         client.get_component_detail_by_codes(["C1"])
 
 
@@ -514,3 +511,76 @@ def test_lcsc_search_never_uses_official(monkeypatch):
     ):
         client.search("100nF 0402")
     fake_official.get_component_detail_by_codes.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "message", "error_type"),
+    [
+        (403, 7101, "The request client ip is not allowed", "JLCIPNotWhitelistedError"),
+        (403, 403, "API insufficient permissions, access denied", "JLCPermissionError"),
+        (401, 401, "The request signature verify failed", "JLCAuthError"),
+        (403, 429, "API quota exceeded", "JLCQuotaError"),
+    ],
+)
+def test_http_error_preserves_business_reason(status, code, message, error_type):
+    client, _ = _client_with_response(
+        _FakeResponse(status_code=status, json_data={"code": code, "message": message})
+    )
+    with pytest.raises(JLCAPIError) as exc:
+        client.get_component_detail_by_codes(["C1"])
+    assert type(exc.value).__name__ == error_type
+    assert exc.value.code == code
+    assert exc.value.http_status == status
+    assert message in str(exc.value)
+    assert "signature verified" not in str(exc.value).lower()
+
+
+def test_html_403_does_not_diagnose_credentials_or_ip():
+    client, _ = _client_with_response(_FakeResponse(status_code=403, raise_json=True))
+    with pytest.raises(JLCAPIError) as exc:
+        client.get_component_detail_by_codes(["C1"])
+    assert type(exc.value).__name__ == "JLCPermissionError"
+    assert exc.value.http_status == 403
+    assert "whitelist" not in str(exc.value).lower()
+
+
+def test_http_error_cannot_return_success_envelope():
+    client, _ = _client_with_response(
+        _FakeResponse(status_code=503, json_data={"code": 200, "success": True, "data": []})
+    )
+    with pytest.raises(JLCAPIError) as exc:
+        client.get_component_detail_by_codes(["C1"])
+    assert exc.value.http_status == 503
+
+
+def test_server_error_reason_redacts_credentials_and_controls():
+    reason = f"IP not allowed: {FAKE_APP_ID} {FAKE_ACCESS_KEY} {FAKE_SECRET_KEY}\n\x1b[31m"
+    client, _ = _client_with_response(_FakeResponse(json_data={"code": 403, "message": reason}))
+    with pytest.raises(JLCAPIError) as exc:
+        client.get_component_detail_by_codes(["C1"])
+    message = str(exc.value)
+    for secret in (FAKE_APP_ID, FAKE_ACCESS_KEY, FAKE_SECRET_KEY):
+        assert secret not in message
+    assert "\n" not in message and "\x1b" not in message
+
+
+def test_oversized_http_error_is_not_parsed():
+    response = _FakeResponse(status_code=403, json_data={"message": "x" * 100000})
+    response.content = b"x" * 100000
+    response.json = mock.Mock(side_effect=AssertionError("oversized body parsed"))
+    client, _ = _client_with_response(response)
+    with pytest.raises(JLCAPIError) as exc:
+        client.get_component_detail_by_codes(["C1"])
+    response.json.assert_not_called()
+    assert exc.value.http_status == 403
+    assert len(str(exc.value)) < 1024
+
+
+def test_transport_error_redacts_credentials():
+    requests = pytest.importorskip("requests")
+    client, session = _client_with_response(_FakeResponse())
+    session.post = mock.Mock(side_effect=requests.RequestException(f"failed for {FAKE_SECRET_KEY}"))
+    with pytest.raises(JLCAPIError) as exc:
+        client.get_component_detail_by_codes(["C1"])
+    assert FAKE_SECRET_KEY not in str(exc.value)
+    assert exc.value.__suppress_context__
