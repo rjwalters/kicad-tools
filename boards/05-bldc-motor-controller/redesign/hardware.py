@@ -472,11 +472,10 @@ def build_pcb():
             if part.footprint.startswith("board05_revB:")
             else pcb.add_footprint(part.footprint, part.ref, *part.xy, value=part.value)
         )
-        for n in pcb._sexp.find_all("footprint"):
-            if n.find("uuid").get_string(0) == fp.uuid:
-                n.set_value(0, part.footprint)
-                fp.name = part.footprint
-                break
+        # Use the placed footprint's backing node. A recursive UUID search can
+        # select a pad/property UUID instead of the footprint instance.
+        fp._sexp_node.set_value(0, part.footprint)
+        fp.name = part.footprint
         for number, net in part.nets.items():
             assert pcb.assign_net_to_footprint_pad(part.ref, number, net), (part.ref, number)
     for footprint in pcb._sexp.find_all("footprint"):

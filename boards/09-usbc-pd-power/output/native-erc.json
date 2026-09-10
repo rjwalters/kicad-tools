@@ -1,7 +1,7 @@
 {
     "$schema": "https://schemas.kicad.org/erc.v1.json",
     "coordinate_units": "mm",
-    "date": "2026-09-10T11:50:58",
+    "date": "2026-09-10T12:07:43",
     "ignored_checks": [
         {
             "description": "Global label only appears once in the schematic",
@@ -28,7 +28,7 @@
     "sheets": [
         {
             "path": "/",
-            "uuid_path": "/b17890cf-d5ec-4e27-ad22-baf9967ded78",
+            "uuid_path": "/24423f59-aee3-4b09-a416-1c74828878f1",
             "violations": []
         }
     ],

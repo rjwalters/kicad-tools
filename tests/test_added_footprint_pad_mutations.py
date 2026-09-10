@@ -39,3 +39,30 @@ def test_added_pad_geometry_survives_save(tmp_path, reload_first, initial_rotati
     assert [p.position for p in restored.pads] == [(-2, 1), (2, 2), (0, 6)]
     assert restored.pads[0].layers == ["B.Cu", "B.Paste", "B.Mask"]
     assert restored.pads[1].layers == ["F.Cu", "F.Paste", "F.Mask"]
+
+
+def test_added_pad_ids_are_unique_and_persistent(tmp_path):
+    library = tmp_path / "identities.kicad_mod"
+    old_id = "11111111-1111-4111-8111-111111111111"
+    library.write_text(f'''(footprint "identities" (layer "F.Cu")
+      (pad "SH" smd rect (at -2 0) (size 2 1) (layers "F.Cu") (uuid "{old_id}"))
+      (pad "SH" smd rect (at 2 0) (size 2 1) (layers "F.Cu") (tstamp "{old_id}"))
+      (pad "" np_thru_hole circle (at 0 3) (size 1 1) (drill 1) (layers "*.Cu")))''')
+    board = PCB.create(width=30, height=20)
+    for ref, x in [("J1", 8), ("J2", 22)]:
+        board.add_footprint_from_file(library, ref, x, 10)
+    identities = [p.uuid for f in board.footprints for p in f.pads]
+    footprint_ids = [f.uuid for f in board.footprints]
+    assert len(set(footprint_ids + identities)) == 8
+    assert all(footprint_ids)
+    assert old_id not in footprint_ids
+    assert len(set(identities)) == 6
+    assert "" not in identities
+    assert old_id not in identities
+    path = tmp_path / "board.kicad_pcb"
+    board.save(path)
+    restored = PCB.load(path)
+    assert [f.uuid for f in restored.footprints] == footprint_ids
+    assert [p.uuid for f in restored.footprints for p in f.pads] == identities
+    restored.save(path)
+    assert [p.uuid for f in PCB.load(path).footprints for p in f.pads] == identities

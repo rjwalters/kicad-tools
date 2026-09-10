@@ -1,11 +1,19 @@
 # Native/current-rule release gate for the real demo designs.
 # Boards absent from tolerances must produce zero blocking errors.
-# Historical synthetic routing witnesses live under regression-fixture/ and
-# are not manufacturing releases or targets of this output/ gate.
-# The 2026-09-10 readiness audit retires the old board05/06/07 allowances.
+# Historical synthetic routing witnesses are not manufacturing releases.
+# Their coverage gates canonicalize regression-output/ to regression-fixture/;
+# output/ never inherits these allowances.
 # Evidence: docs/demo-readiness-2026-09-09.md and each output/readiness.json.
 # Additions require a tracking issue and explicit review of the regression.
-tolerances: {}
+tolerances:
+  # Restore the final pre-redesign baseline, not obsolete historical maxima.
+  # Provenance: d95b6eff^:.github/routed-drc-tolerance.yml lines 1113-1140;
+  # #4019 ratcheted to 18 after runs 29075253404/29072031350/29070816533.
+  # Exactly 9 skew + 9 continuity; new via-in-pad errors must be repaired.
+  boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb: 18
+  # Provenance: same historical file lines 1754-1763; #4007 ratcheted 9 -> 8
+  # after via-aware ADDR_BUS tuning. Four pair-skew +four continuity errors.
+  boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb: 8
 
 # Preserve the fabrication processes selected by the reviewed real designs.
 manufacturers:
