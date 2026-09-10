@@ -74,7 +74,7 @@ def run_parts_command(args) -> int:
 
 def _run_suggest_command(args) -> int:
     """Suggest LCSC part numbers for components without them."""
-    from kicad_tools.cost.suggest import PartSuggester
+    from kicad_tools.cost.suggest import SuggestionResult
     from kicad_tools.schema.bom import extract_bom
 
     input_path = Path(args.schematic)
@@ -93,27 +93,33 @@ def _run_suggest_command(args) -> int:
         print("No components found in schematic.", file=sys.stderr)
         return 1
 
-    # Filter to non-DNP items
-    active_items = [item for item in bom.items if not item.dnp]
-
-    if not active_items:
-        print("No active (non-DNP) components found.", file=sys.stderr)
-        return 1
-
-    # Count items needing LCSC numbers
+    # Match BOM.total_components and the downstream matcher's population policy.
+    active_items = [item for item in bom.items if not item.dnp and not item.is_virtual]
     missing_lcsc = [item for item in active_items if not item.lcsc]
+    reference_counts = {
+        "active_references": len(active_items),
+        "missing_lcsc_references": len(missing_lcsc),
+    }
 
-    if not missing_lcsc and not args.show_all:
-        print("All components already have LCSC part numbers.")
+    if not active_items or (not missing_lcsc and not args.show_all):
+        if args.format == "json":
+            _print_json_result(SuggestionResult(), **reference_counts)
+        elif not active_items:
+            print("No populated components need suggestions.")
+        else:
+            print("All populated components already have LCSC part numbers.")
         return 0
 
     print(
-        f"Analyzing {len(active_items)} components ({len(missing_lcsc)} missing LCSC numbers)...",
+        f"Analyzing {len(active_items)} populated references "
+        f"({len(missing_lcsc)} missing LCSC numbers)...",
         file=sys.stderr,
     )
 
-    # Create suggester with options
+    # Load the optional suggester only when populated components need work.
     try:
+        from kicad_tools.cost.suggest import PartSuggester
+
         with PartSuggester(
             prefer_basic=not args.no_basic_preference,
             min_stock=args.min_stock,
@@ -132,23 +138,26 @@ def _run_suggest_command(args) -> int:
     if not args.show_all:
         result.suggestions = [s for s in result.suggestions if s.needs_lcsc]
 
-    if not result.suggestions:
+    if not result.suggestions and args.format != "json":
         print("No components need suggestions.")
         return 0
 
     # Output results
     if args.format == "json":
-        _print_json_result(result)
+        _print_json_result(result, **reference_counts)
     else:
         _print_table_result(result)
 
     return 0
 
 
-def _print_json_result(result) -> None:
+def _print_json_result(result, *, active_references: int, missing_lcsc_references: int) -> None:
     """Print suggestions as JSON."""
     output = {
         "summary": {
+            "active_references": active_references,
+            "missing_lcsc_references": missing_lcsc_references,
+            "count_unit": "grouped_parts",
             "total_components": result.total_components,
             "missing_lcsc": result.missing_lcsc,
             "found_suggestions": result.found_suggestions,
@@ -227,7 +236,7 @@ def _print_table_result(result) -> None:
 
     print()
     print(
-        f"Summary: {result.found_suggestions}/{result.missing_lcsc} components with suggestions found"
+        f"Summary: {result.found_suggestions}/{result.missing_lcsc} grouped parts with suggestions found"
     )
     if result.no_suggestions > 0:
-        print(f"         {result.no_suggestions} components could not be matched")
+        print(f"         {result.no_suggestions} grouped parts could not be matched")
