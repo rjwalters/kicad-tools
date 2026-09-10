@@ -5236,6 +5236,11 @@ class PCB:
         # rotation, or layer are automatically persisted.
         object.__setattr__(footprint, "_board_origin", self._board_origin)
         object.__setattr__(footprint, "_sexp_node", fp_sexp)
+        # New footprints need the same pad write-through links as loaded
+        # footprints (#5049). Use parser order, not pad numbers: shield and
+        # NPTH pads may share a number or have no number at all.
+        for pad, node in zip(footprint.pads, fp_sexp.find_all("pad"), strict=True):
+            object.__setattr__(pad, "_sexp_node", node)
 
         self._footprints.append(footprint)
 
