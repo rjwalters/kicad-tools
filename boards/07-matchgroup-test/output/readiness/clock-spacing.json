@@ -1,10 +1,10 @@
 {
   "required_edge_gap_mm": 0.54,
-  "minimum_nonpad_gap_mm": 0.5792388155424935,
+  "minimum_nonpad_gap_mm": 0.5401697699962895,
   "scope": "All signal tracks/vias on F/In2/In3/B; pad findings reported separately. Power/return structures excluded.",
   "findings": [
     {
-      "clock_item": "track:5489",
+      "clock_item": "track:5741",
       "foreign_item": "U2.37",
       "foreign_net": "SDCKE1",
       "clock_kind": "track",
@@ -16,7 +16,7 @@
       "scope": "package/pad review"
     },
     {
-      "clock_item": "track:5489",
+      "clock_item": "track:5741",
       "foreign_item": "U2.39",
       "foreign_net": "UDQM",
       "clock_kind": "track",
@@ -29,7 +29,7 @@
     },
     {
       "clock_item": "U2.38",
-      "foreign_item": "track:5142",
+      "foreign_item": "track:5376",
       "foreign_net": "SDCKE1",
       "clock_kind": "pad",
       "foreign_kind": "track",
@@ -41,7 +41,7 @@
     },
     {
       "clock_item": "U2.38",
-      "foreign_item": "track:5661",
+      "foreign_item": "track:5919",
       "foreign_net": "UDQM",
       "clock_kind": "pad",
       "foreign_kind": "track",

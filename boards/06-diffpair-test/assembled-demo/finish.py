@@ -19,6 +19,7 @@ from kicad_tools.cli.runner import (
     _snapshot_element_nets,
     _snapshot_net_declarations,
 )
+from kicad_tools.router.quantize import quantize_pcb_file
 from kicad_tools.sexp import parse_file, parse_string
 
 
@@ -92,6 +93,9 @@ def main():
     repair_drill_overlaps(pcb)
     path = args.output / "diffpair_test_routed.kicad_pcb"
     path.write_text(pcb.to_string() + "\n")
+    # The off-land drill repairs drag attached endpoints. Quantize their
+    # resulting chords before refill and all native/process checks.
+    quantize_pcb_file(path)
     result = _run_fill_zones_via_drc(path, None, "kicad-cli")
     check_process_geometry(path)
     print(f"Transferred {transferred} signal primitives; refill: {result}")

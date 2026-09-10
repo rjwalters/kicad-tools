@@ -9,7 +9,7 @@
 These tests assert:
 
 * ``resolve_committed_net_class_map`` returns the committed sidecar for
-  boards 03/06/07 and ``None`` for the no-sidecar boards (00/01/02/04/05).
+  boards 02/03/06/07 and ``None`` for the no-sidecar boards (00/01/04/05).
 * ``ReportDataCollector`` forwards ``net_class_map_path`` so the DRC snapshot
   evaluates the sidecar-gated families (board 07: passed=False, blocking > 0).
 * A no-sidecar board keeps the graceful no-op behavior (no exception, no
@@ -62,10 +62,10 @@ def _collect_drc(pcb_path: Path, sidecar: Path | None, tmp_path: Path) -> dict:
 
 @pytest.mark.parametrize(
     "board_dir",
-    ["03-usb-joystick", "06-diffpair-test", "07-matchgroup-test"],
+    ["02-charlieplex-led", "03-usb-joystick", "06-diffpair-test", "07-matchgroup-test"],
 )
 def test_resolver_finds_committed_sidecar(board_dir: str) -> None:
-    """Boards 03/06/07 all commit a net_class_map.json sidecar."""
+    """Boards 02/03/06/07 all commit a net_class_map.json sidecar."""
     output = REPO_ROOT / "boards" / board_dir / "output"
     routed = next(output.glob("*_routed.kicad_pcb"), None)
     if routed is None:
@@ -84,7 +84,6 @@ def test_resolver_finds_committed_sidecar(board_dir: str) -> None:
     [
         "00-simple-led",
         "01-voltage-divider",
-        "02-charlieplex-led",
         "04-stm32-devboard",
         "05-bldc-motor-controller",
     ],
@@ -132,10 +131,11 @@ def test_collector_init_coerces_net_class_map_to_path() -> None:
 
 @pytest.mark.slow
 def test_board_07_gates_with_sidecar(tmp_path: Path) -> None:
-    """With the committed sidecar, board 07's DRC snapshot gates (FAIL).
+    """A stricter test-local sidecar makes the clean board report real skew.
 
-    This is acceptance criterion 3: the report's DRC section must evaluate
-    the sidecar-gated families rather than reporting a false PASS.
+    Revision B satisfies its authored 5 mm SDRAM tolerance. Tighten the
+    tolerance only in this test's copy to retain a positive gating witness;
+    without a sidecar, the same board must still report PASS below.
     """
     if not BOARD_07_PCB.is_file():
         pytest.skip("board 07 routed PCB not checked in")
@@ -143,7 +143,15 @@ def test_board_07_gates_with_sidecar(tmp_path: Path) -> None:
     sidecar = resolve_committed_net_class_map(BOARD_07_PCB)
     assert sidecar is not None, "board 07 must have a committed sidecar"
 
-    drc = _collect_drc(BOARD_07_PCB, sidecar, tmp_path)
+    strict_map = json.loads(sidecar.read_text())
+    groups = [entry for entry in strict_map.values() if entry.get("length_match_group")]
+    assert groups, "positive witness requires actual length-matched nets"
+    for entry in groups:
+        entry["length_match_tolerance_mm"] = 0.001
+    strict_sidecar = tmp_path / "strict_net_class_map.json"
+    strict_sidecar.write_text(json.dumps(strict_map))
+
+    drc = _collect_drc(BOARD_07_PCB, strict_sidecar, tmp_path)
 
     assert drc["passed"] is False
     assert drc["blocking_count"] > 0

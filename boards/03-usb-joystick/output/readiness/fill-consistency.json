@@ -1,6 +1,6 @@
 {
-  "In1.Cu": 0.0,
-  "F.Cu": 0.0,
-  "B.Cu": 0.0,
-  "In2.Cu": 0.0
+  "GND / F.Cu": 0.0,
+  "GND / B.Cu": 0.0,
+  "GND / In1.Cu": 0.0,
+  "VCC / In2.Cu": 0.0
 }

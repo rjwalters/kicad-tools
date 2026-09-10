@@ -26,10 +26,15 @@ cannot silently return:
 
 What this test asserts
 ----------------------
+Board04's current reviewed process supersedes the historical microvia setup:
+it uses ordinary tented through vias with an explicitly selected paid drilling
+option. The board-local checker validates those options, the physical design
+and native floors; a generic tier1 check alone is insufficient.
+
 1. ``_resolve_effective_mfr`` precedence: explicit ``--mfr`` wins; else
    the spec's ``target_fab``; else the ``"jlcpcb"`` default.
-2. For each board that declares ``target_fab``, ``kct check`` against the
-   committed routed PCB at that profile reports **0 blocking DRC errors**.
+2. The committed routed PCB passes its declared fabrication process with
+   **0 blocking DRC errors**, including board04's explicit reviewed option.
 3. Negative control: board 03's committed PCB *does* report ``via_in_pad``
    errors at the base ``jlcpcb`` tier -- proving the two tiers genuinely
    disagree and that the ``target_fab`` declaration is load-bearing, not
@@ -214,21 +219,12 @@ def test_declarations_agree_across_files(board: str) -> None:
 
 
 @pytest.mark.parametrize("board", sorted(_BOARDS))
-def test_committed_pcb_within_gate_at_declared_tier(board: str) -> None:
-    """``kct check`` at ``project.kct target_fab`` passes the CI DRC gate.
+def test_committed_pcb_within_gate_at_declared_tier(board: str, tmp_path: Path) -> None:
+    """Declared fab plus explicit reviewed options must pass the release gate.
 
-    Core acceptance criterion: the profile the board declares is the
-    profile under which its committed copper meets the CI gate, so every
-    ``kct build`` stage (which now sources ``ctx.mfr`` from ``target_fab``)
-    agrees with the gate.
-
-    The bar is the ``tolerances:`` floor from
-    ``.github/routed-drc-tolerance.yml`` -- 0 for board 03 (strict clean),
-    2 for board 04 (two documented pre-existing sub-0.5mm drill pairs,
-    a layout issue tracked separately in #3847 and *out of scope* for the
-    profile-consistency fix). Anchoring to the same floor the CI gate uses
-    keeps this test honest about what "consistent" means without pretending
-    the drill residual is a profile bug.
+    Board04 selects paid 0.15 mm through drilling in addition to its base
+    profile. Its board-local checker validates that selection and the physical
+    fingerprint; the generic tier alone intentionally does not grant it.
     """
     pcb = _routed_pcb(board)
     if not pcb.exists():
@@ -236,7 +232,26 @@ def test_committed_pcb_within_gate_at_declared_tier(board: str) -> None:
 
     fab = _target_fab(board)
     floor = _tolerance_floor(board)
-    report = _run_check(pcb, fab)
+    if board == "04-stm32-devboard":
+        report_path = tmp_path / "board04-check.json"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "boards" / board / "check_manufacturing.py"),
+                str(pcb),
+                str(report_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        report = json.loads(report_path.read_text())
+        assert report["fabrication_overrides"]["suppressed_findings"] == 0
+        assert report["fabrication_overrides"]["via_in_pad"] is False
+    else:
+        report = _run_check(pcb, fab)
 
     assert report["manufacturer"] == fab
     errors = report["summary"]["errors"]
