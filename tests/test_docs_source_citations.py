@@ -199,6 +199,83 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
         "_route_pair_impl",
         "src/kicad_tools/router/lattice/pathfinder.py",
     ),
+    # docs/konnect-item8-design-rules-audit.md — the five overlapping
+    # design-rule mechanisms the decline verdict rests on (#4902).
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "DesignIntent",
+        "src/kicad_tools/spec/schema.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "derive_constraints",
+        "src/kicad_tools/intent/constraints.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "validate_intent",
+        "src/kicad_tools/intent/constraints.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "declare_interface",
+        "src/kicad_tools/mcp/tools/session.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "declare_power_rail",
+        "src/kicad_tools/mcp/tools/session.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "list_intents",
+        "src/kicad_tools/mcp/tools/session.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "clear_intent",
+        "src/kicad_tools/mcp/tools/session.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "start_session",
+        "src/kicad_tools/mcp/tools/registry.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "load_design_rules_from_yaml",
+        "src/kicad_tools/manufacturers/base.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "_resolve_effective_check_mfr",
+        "src/kicad_tools/cli/check_cmd.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "_write_fab_profile_sidecar",
+        "src/kicad_tools/cli/route_cmd.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "resolve_target_fab_for_pcb",
+        "src/kicad_tools/sync/discover.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "_run_spec_decide",
+        "src/kicad_tools/cli/commands/spec.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "_run_spec_status",
+        "src/kicad_tools/cli/commands/spec.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "append_decision",
+        "src/kicad_tools/spec/parser.py",
+    ),
 )
 
 
