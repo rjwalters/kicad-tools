@@ -50,7 +50,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BOARD_DIR = REPO_ROOT / "boards" / "05-bldc-motor-controller"
+BOARD_DIR = REPO_ROOT / "tests" / "fixtures" / "historical_demo_boards" / "05-bldc-motor-controller"
 SCH_PATH = BOARD_DIR / "output" / "bldc_controller.kicad_sch"
 
 # Issue #3004 acceptance criterion: ERC errors drop from 17 to ≤4.  The
