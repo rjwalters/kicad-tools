@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "geometry_sha256": "85d0be149d73f19fdf00d3eeb812d2b5b345ae4f1060ffedaa84919adee4ab3a",
+  "geometry_sha256": "a6c54a4cb8129270a9436cae6eaf3e2ea2251b7a7e86efbd46d6d998b01a64c6",
   "description": "Reviewed physical route with complete SMT drill clearance (#5012) and 45-degree copper (#5044); native refill and zero-violation DRC required. Narrow corridor doglegs preserve layer, width, via and pad geometry. Copper-only keepouts remove isolated pour fragments. No pad replacements or DRC waivers.",
   "copper": [
     "(segment\n\t(start 179.1 80.7)\n\t(end 179.1 80.8)\n\t(width 0.5)\n\t(layer \"F.Cu\")\n\t(net \"+5V\")\n\t(uuid \"00684d9c-d2bf-4c31-805f-6a69570078c1\")\n)",

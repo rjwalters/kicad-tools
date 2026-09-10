@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-09-10T18:52:17.001541+00:00",
+  "checked_at": "2026-09-10T19:21:49.331988+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -46,7 +46,7 @@
     "HARDWARE.md": "301365063b9e2ad5976afb06fdb0e855e90ac518761d9aed0ed1868ea1f689b9",
     "README.md": "1eb3c1551f87ebf7696f7d91b6fa27ae8ea496c6c661c922f3bd6ac9a3a64349",
     "design_spec.py": "4400d88ef6948f72165c0966c0275e7cab9f443c48574a43954ebccacad04762",
-    "finalize_routing.py": "132e6cc10bfae0fcd1fc7c3d49a1eb567fa318ce7a99a274c8f68b6076dd887a",
+    "finalize_routing.py": "88ffd5217242c8ce07c5f47775265f7ce12dea8fba6e4793fb0b7d3b90176e2b",
     "firmware/.gitignore": "0d3273dd7acb360b87531bf7241afa3e30b97feecf6d2d9b0d231cd36b91c179",
     "firmware/Makefile": "8f2c32f565080e8423a872dcb5c236a3a297a705a729f3d2585e0f6b21428f64",
     "firmware/charlieplex.hex": "7956fb57f17750f476cd50460e275e6282ca35babb4b9f62f08c0eedb862c9ad",
@@ -86,7 +86,7 @@
     "output/manufacturing/kct-check.json": "e0cb1d370907d0440d8742bcd4e70f4a7b1f09f3002624d09e7b10b08056d6da",
     "output/manufacturing/kicad_project.zip": "e4ca798cec3f14575e321e86cd7160957662219ea472067c9fb64369fd2fc4b1",
     "output/manufacturing/lvs.json": "356b61ec235c657fe133747d662656d6f96f88531c6e0e77250dee36c9dab123",
-    "output/manufacturing/manifest.json": "58984c7df4726460641575474c11df6fe9e75dc9e75c3f1f3cb334fb327656b9",
+    "output/manufacturing/manifest.json": "6a8dda3595a973b0bdd9ce0993d18078006cf9cde9f90945f588e94781069472",
     "output/manufacturing/native-drc.json": "10b4130104028acee503fb33c1ded8826543f6da10573be3811c41df99dc8385",
     "output/manufacturing/native-erc.json": "86f037fd6dd7c342b545bcff6602eff25c8e5f6879777d12284472037def736d",
     "output/manufacturing/project.kct": "e52c162177da27f8a160e17b034ec74dd379d644ec9f92096f1e208be0434499",
@@ -97,7 +97,7 @@
     "output/manufacturing/report.md": "674304d9b221030f3db400e34b425ce5010d539b975c76a02c7329ef24e7d019",
     "output/manufacturing/report.pdf": "802e9b199a594293e59c25a63d087e5d5ed4d6491fc6a574a99daa22b28e04a9",
     "output/manufacturing/schematic.pdf": "ace169510c61416a50ca523b472c3c0776cb199ebf8e1604c2cde2cdc38f3afb",
-    "output/manufacturing.zip": "310da18c0ee6f3a7a2217df162071b6193449141984cec7238ce6f471c30cbcc",
+    "output/manufacturing.zip": "ec8852e0dd5439aaffee0473083e8472046d56fa404bf8a46e73c9e95f3fd7e1",
     "output/net_class_map.json": "e865f486a97612a71ad8cc1667a482949ce0ccb4227b96049ba22489b397c9b3",
     "output/readiness/drill-relocations.json": "4d3443bb222e04df9d08885db6b87941bd1709593a87db443d91736f2d30389d",
     "output/readiness/drill-replay.txt": "440b6049e68ce3e1c4f198b75b5e5d221c0ba9ca0ab131dfa66f208b00b28239",
@@ -112,7 +112,7 @@
     "route_demo.py": "55fc9581468b2dc8a7ba628a74a2431eb457370f103d74075e2a79378c5c764d",
     "output/manufacturing/fill-consistency.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
     "output/readiness/fill-consistency.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
-    "output/manufacturing/design-source.zip": "5ecddea2d8690ea8b53af265b15835c4636539d5a601b8cac33c0bb30cd5f184"
+    "output/manufacturing/design-source.zip": "fe1fbe47ace138d45b1348bedf7beca58247fbbe1126893151862537aedd9799"
   },
   "evidence": {
     "kct_check": "output/readiness/kct-check.json",

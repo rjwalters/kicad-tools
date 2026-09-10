@@ -39,7 +39,8 @@ def _relocate_escapes(pcb):
         ("VCC", (140.665, 117.3)): (139.2, 115.5),
         ("VCC", (140.665, 117.2)): (139.2, 115.5),
         ("RESET", (141.1, 118.1)): (140.9, 118.5),
-        ("RESET", (141.4, 117.7)): (140.9, 118.5),
+        # CI reports board-relative (17.8, 40.8); origin is (123.5, 77.5).
+        ("RESET", (141.3, 118.3)): (140.9, 118.5),
     }
     # Only a present via activates a relocation. Quantization can create a
     # track-only waypoint at an old escape cell; moving it on a second pass
