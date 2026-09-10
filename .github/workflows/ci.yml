@@ -661,6 +661,9 @@ jobs:
             --seed 42
 
   matchgroup-routing-regression:
+    # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
+    # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
+    if: ${{ vars.BOARD_07_CI_ENABLED == 'true' }}
     # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
     # N-trace match-group testbench, #2724 Phase 3L) from scratch on
     # every PR and verify that
@@ -1526,6 +1529,9 @@ jobs:
             /tmp/board06-staging/06-diffpair-test
 
   board-07-end-to-end:
+    # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
+    # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
+    if: ${{ vars.BOARD_07_CI_ENABLED == 'true' }}
     # Issue #3779 (LVS honestly dirty per #4012): end-to-end gate for
     # board 07 ("matchgroup-test").  The fixture schematic is now FULLY
     # WIRED (#4012: 244/244 pads bound), so the copper comparator carries
