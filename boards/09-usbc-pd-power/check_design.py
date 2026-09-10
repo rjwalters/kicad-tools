@@ -12,8 +12,45 @@ from pathlib import Path
 from engineering.calculate import calculate
 
 from kicad_tools.lvs.board_lvs import compare_netlists
+from kicad_tools.schema.pcb import PCB
 
 ROOT = Path(__file__).resolve().parent
+CRITICAL_NETS = {
+    "BOOT",
+    "BOOT_CAP",
+    "BUCK_EN",
+    "FB",
+    "SW",
+    "VOUT_PRE",
+    "+5V_OUT",
+    "LED_A",
+    "VBUS_FUSED",
+    "VIN",
+    "PMOS_SOURCE",
+    "PMOS_GATE",
+    "KELVIN_P",
+    "KELVIN_N",
+    "SENSE_P",
+    "SENSE_N",
+}
+
+
+def critical_route_opens(pcb_path, drc_report):
+    """Resolve native open findings by saved identity, not localized text."""
+    board = PCB.load(pcb_path)
+    items = [p for f in board.footprints for p in f.pads] + board.segments + board.vias + board.zones
+    by_uuid = {item.uuid: item.net_name for item in items}
+    present_nets = {p.net_name for f in board.footprints for p in f.pads}
+    if not present_nets >= CRITICAL_NETS:
+        raise ValueError(f"Missing critical nets: {CRITICAL_NETS - present_nets}")
+    open_nets = set()
+    for finding in drc_report["unconnected_items"]:
+        for item in finding["items"]:
+            identity = item["uuid"]
+            if identity not in by_uuid:
+                raise ValueError(f"Native DRC item has no saved PCB identity: {identity}")
+            open_nets.add(by_uuid[identity])
+    return sorted(CRITICAL_NETS & open_nets)
 
 
 def check(output):
@@ -42,6 +79,7 @@ def check(output):
         check=False,
     )
     drc_report = json.loads(drc_path.read_text()) if drc_path.exists() else None
+    critical_opens = critical_route_opens(pcb, drc_report) if drc_report else sorted(CRITICAL_NETS)
     labels = compare_netlists(schematic, pcb)
     (output / "label-lvs.json").write_text(json.dumps(asdict(labels), indent=2) + "\n")
     circuit = json.loads((output / "circuit.json").read_text())
@@ -54,6 +92,9 @@ def check(output):
             drc.returncode == 0 and drc_report is not None and not drc_report["violations"]
         ),
         "unconnected_items": len(drc_report["unconnected_items"]) if drc_report else None,
+        "critical_routes_connected": drc.returncode == 0 and not critical_opens,
+        "critical_net_opens": critical_opens,
+        "completed_critical_nets": sorted(CRITICAL_NETS - set(critical_opens)),
         "label_lvs_clean": labels.clean,
         "analytical_screen_passed": calculations["screen_passed"],
         "manufacturing_ready": False,
@@ -106,6 +147,7 @@ def check(output):
                 for key in [
                     "native_erc_clean",
                     "native_drc_geometry_clean",
+                    "critical_routes_connected",
                     "label_lvs_clean",
                     "analytical_screen_passed",
                 ]
@@ -118,6 +160,7 @@ def check(output):
         for key in [
             "native_erc_clean",
             "native_drc_geometry_clean",
+            "critical_routes_connected",
             "label_lvs_clean",
             "analytical_screen_passed",
         ]

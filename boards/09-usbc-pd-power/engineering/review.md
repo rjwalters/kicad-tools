@@ -65,14 +65,37 @@ orientation. Linking new pads to their serialization nodes fixes the defect;
 native library-difference warnings are now zero.
 
 The current generated checkpoint has zero native geometry violations and
-109 unconnected items. C5/C6 are rotated beside U2 and directly connect VIN
+68 unconnected items. C5/C6 are rotated beside U2 and directly connect VIN
 and GND. A 0.35 mm, approximately 2.71 mm long SW escape passes between C6's
 lands to three 0.6/0.3 mm vias. A 2 mm bottom-layer trunk reaches three vias
 outside L1's solder lands. At nominal 35 µm copper and 20°C resistivity, the
 neck alone is approximately 3.8 mΩ and 35 mW at the screened 3.039 A RMS;
 this omits etch tolerance, hot copper, vias and heat spreading and is not an
 ampacity qualification. Final return-plane geometry and switch-loop EMI remain
-review gates. The boot capacitor's SW branch is still unconnected.
+review gates. C7/R9 have moved beside the regulator; BOOT and BOOT_CAP are
+connected, and a separate 0.25 mm bottom-layer SW branch returns C7 to the
+switch-node via array.
+
+The feedback/enable networks are connected. L1, C8/C9 and shunt force pin 1
+use 2 mm output copper, with 1.2 mm necks at C8 to clear Q2's gate pad.
+Shunt force pin 4 reaches J2 through a three-via array and a 2 mm bottom-layer
+trunk. LED, bus-sense and feedback branches use separate narrow taps. Fused
+VBUS and switched VIN join the parallel SOIC drain terminals; VIN uses via
+arrays and a 1.2 mm bottom-layer trunk. The common PMOS sources and both gates
+are now connected, including the gate clamp and slew capacitor. These are
+connectivity results, not current/thermal qualifications: the capacitor return
+loops, gate-drive pickup and final ground-plane paths still need review.
+
+Sixteen critical nets have no native opens. The development checker resolves
+native finding UUIDs against saved pad/track/via identities and refuses lost
+connections or unresolvable findings. A native regression removes the BOOT
+track and confirms the checker reports that net open. The remaining opens
+are GND (30), +3V3 (10), raw VBUS (7) and USB/PD/control/support nets (21).
+
+A subsequent [support-net experiment](routing-investigation/support-routing/README.md)
+reduced opens to 44 but introduced a +3V3-via/VIN short and a clearance
+violation. It was rejected; the clean critical-copper checkpoint remains
+canonical. The snapshot and native report provide another #4991 reproducer.
 
 RSH1 pins 2/3 now route independently to R10/R11. C11 was moved near U3's
 inputs and all four Kelvin/filter nets are connected in native KiCad's report,
@@ -93,10 +116,13 @@ copper proximity and filter placement still need a noise/layout review.
   metrics for development PCBs before manufacturing export. The current
   producer attaches renders/readiness but omits PCB dimensions and counts
   when no manufacturing directory exists.
+- [#5057](https://github.com/rjwalters/kicad-tools/issues/5057): filed and fixed
+  missing/shared pad UUIDs in newly placed footprints. Fresh instance IDs now
+  survive save/reload and make native findings traceable to the saved PCB.
 
-Next layout work: finish the boot/feedback loops and power trunks
-with explicit endpoint/current assumptions, review the Kelvin routing,
-complete signal routing and ground planes, then rerun native DRC and physical
+Next layout work: finish raw VBUS and low-voltage/control connections, review
+power and Kelvin routing with explicit endpoint/current assumptions, add
+ground planes and stitching, then rerun native DRC and physical
 copper LVS. Routing percentage alone cannot close these gates.
 
 ## Primary component references

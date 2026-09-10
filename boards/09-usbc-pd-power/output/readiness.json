@@ -2,22 +2,22 @@
   "schema_version": 1,
   "mode": "assembly",
   "status": "blocked",
-  "checked_at": "2026-09-10T18:51:03.094155+00:00",
+  "checked_at": "2026-09-10T19:07:48.695164+00:00",
   "inputs": {
-    "output/usbc_pd_power.kicad_sch": "a80db0b1aa081f488c643ea033274001188a745a7b9556b6208606efbd767793",
-    "output/usbc_pd_power.kicad_pcb": "7d8f09c3fd9d66e47571f6be9f11471a2e0bd01a30e7bdb57a38d405e78a1fa8",
-    "output/circuit.json": "d1ae91f114416f9d44af95de8ed066c8156d12f1e15edf7684cc8b8e871675fc",
+    "output/usbc_pd_power.kicad_sch": "f619c957a8ae2afa663f28b281b2fe941978a4c3d9dd27376e35a7a32d78e66e",
+    "output/usbc_pd_power.kicad_pcb": "d78b61bb846302beb76afd5670e8dee8de48f1baafe73165d9679be36a38a2a7",
+    "output/circuit.json": "c6a76090109a1a8105be5224882c720b467091c01cc882ce41787e8552e45515",
     "output/net_class_map.json": "aecfc117903d74e544f93fa8f2ab29117130bc8a202b6f71830cfa2166535a61",
     "output/usbc_pd_power.kicad_pro": "46e70ad622f62a250039b8ed3a792497b33bf6c7a0d18eb689a5f513a4ae2c22",
     "output/board09.kicad_sym": "36f1e94f721256abb4ab91d033f3d099e7aee1a49c81a25856ddfb67d36b9e52",
     "output/board09.pretty/SRP7050TA.kicad_mod": "0e5569968f48e2d3f7f09ec4814306e0d63792d71fd3ccf00564d053394dd947",
-    "generate_design.py": "2be2a6b9eb3de4083c6810f96fc960cb9e75f9fec86987ceafae16a999262966",
-    "check_design.py": "be3ff214286efe9ce6ad95477b5dd83d06e5e0d8beafb61c58afee9e96854c4c",
+    "generate_design.py": "48ad16fe5dc0a3198afb7b0999188035a8c1b0fd5ef3f24e078ca1a94772d357",
+    "check_design.py": "9081ddcdb17f46a156f91339a56552d7ed4362a3ea7496d320c3b656a2e1d575",
     "procurement.json": "dcbd7f3e94a74336da5ad1bd97e9384be9658b6b7af9239826351b526a89298a",
     "engineering/calculate.py": "31b8b2e51a6a84eacb539282be90e3e3154e61ddb90a2c8840ebdc86f85dcc7a",
-    "output/development-check.json": "5d96b6ecee043119d8aa55eb895a460b81b8d1e6043ab4fa66d3fcfe3ef2e871",
-    "output/native-erc.json": "52e94cab6d019ab593b48d98af353949225f400a50890a554e970a57c08b9d36",
-    "output/placement-drc.json": "fa999fb0ab9df4228e3d115cd025899fbd208c1caed4554046898a78fbb3ef61",
+    "output/development-check.json": "1899398bda45c3d6c37d4d1087d5a913dc3eb3790b2ffd6f526208c9a143d4ea",
+    "output/native-erc.json": "5797884e8055cc1ecec3df4383d019f2ffa23d18023fdef3e11c790f01c30ee0",
+    "output/placement-drc.json": "00fe850780bddf270d1f732410ca70330385b99c12174792e0967b4aeec59fd8",
     "output/label-lvs.json": "6f69e242fd4c0e6c87a4bf0900ecf432a578e1932c15420fa35b60ec0ce1d744",
     "output/calculations.json": "82e319f0c0af2f9cde2ed97416f9d3ab84aa7aed5dcc9454d5c1af5f7d4ae310"
   },
@@ -35,6 +35,10 @@
     },
     {
       "name": "native_drc_geometry_clean",
+      "status": "passed"
+    },
+    {
+      "name": "critical_routes_connected",
       "status": "passed"
     },
     {
