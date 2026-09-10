@@ -63,6 +63,7 @@ class SuggestedPart:
     is_preferred: bool
     unit_price: float | None
     confidence: float  # 0.0 to 1.0
+    inventory: dict = field(default_factory=dict)
 
     @property
     def type_str(self) -> str:
@@ -637,6 +638,7 @@ class PartSuggester:
                         description=part.description,
                         package=part.package,
                         stock=part.stock,
+                        inventory=part.inventory_provenance(),
                         is_basic=part.is_basic,
                         is_preferred=part.is_preferred,
                         unit_price=part.best_price,

@@ -99,6 +99,7 @@ class TestPartAvailability:
             lcsc_part="C123456",
             quantity_needed=100,
             quantity_available=500,
+            part=Part("C123456", stock_source="live", fetched_at=datetime.now()),
         )
         assert avail.sufficient_stock is True
 
@@ -111,6 +112,7 @@ class TestPartAvailability:
             value="10k",
             footprint="0402",
             lcsc_part="C123456",
+            part=Part("C123456", stock_source="live", fetched_at=datetime.now()),
             matched=True,
             in_stock=True,
             quantity_needed=10,
@@ -134,6 +136,7 @@ class TestPartAvailability:
             value="10k",
             footprint="0402",
             lcsc_part="C123456",
+            part=Part("C123456", stock_source="live", fetched_at=datetime.now()),
             matched=True,
             in_stock=False,
         )
@@ -145,6 +148,7 @@ class TestPartAvailability:
             value="10k",
             footprint="0402",
             lcsc_part="C123456",
+            part=Part("C123456", stock_source="live", fetched_at=datetime.now()),
             matched=True,
             in_stock=True,
             quantity_needed=100,
@@ -211,6 +215,7 @@ class TestBOMAvailability:
                     value="10k",
                     footprint="0402",
                     lcsc_part="C123",
+                    part=Part("C123456", stock_source="live", fetched_at=datetime.now()),
                     matched=True,
                     in_stock=True,
                     quantity_needed=10,
@@ -222,6 +227,7 @@ class TestBOMAvailability:
                     value="100nF",
                     footprint="0402",
                     lcsc_part="C456",
+                    part=Part("C123456", stock_source="live", fetched_at=datetime.now()),
                     matched=True,
                     in_stock=False,
                     quantity_needed=5,
@@ -233,6 +239,7 @@ class TestBOMAvailability:
                     value="STM32",
                     footprint="LQFP48",
                     lcsc_part="C789",
+                    part=Part("C123456", stock_source="live", fetched_at=datetime.now()),
                     matched=True,
                     in_stock=True,
                     quantity_needed=100,

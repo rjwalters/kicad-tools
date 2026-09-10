@@ -271,6 +271,7 @@ def _lookup(args) -> int:
             "package": part.package,
             "package_type": part.package_type.value,
             "stock": part.stock,
+            "inventory": part.inventory_provenance(),
             "is_basic": part.is_basic,
             "is_preferred": part.is_preferred,
             "prices": [{"quantity": p.quantity, "unit_price": p.unit_price} for p in part.prices],
@@ -286,6 +287,10 @@ def _lookup(args) -> int:
         print(f"Category:     {part.category.value}")
         print(f"Package:      {part.package} ({part.package_type.value})")
         print(f"Stock:        {part.stock:,}")
+        if not part.stock_verified:
+            print(
+                "Stock unverified: catalog identity only; refresh live inventory before ordering."
+            )
         if part.is_basic:
             print("Type:         JLCPCB Basic (no extra fee)")
         elif part.is_preferred:
@@ -332,6 +337,9 @@ def _search(args) -> int:
         print(f"No parts found for: {args.query}", file=sys.stderr)
         return 1
 
+    if args.format != "json" and any(not p.stock_verified for p in results.parts):
+        print("Warning: snapshot/unknown stock is unverified; matches establish identity only.")
+
     if args.format == "json":
         data = {
             "query": results.query,
@@ -343,6 +351,7 @@ def _search(args) -> int:
                     "description": p.description,
                     "package": p.package,
                     "stock": p.stock,
+                    "inventory": p.inventory_provenance(),
                     "is_basic": p.is_basic,
                     "best_price": p.best_price,
                 }
@@ -626,7 +635,7 @@ def _availability(args) -> int:
         _availability_table(result, items, schematic_path, args.quantity)
 
     # Return error code if issues found
-    if result.out_of_stock or result.missing:
+    if not result.all_available:
         return 1
     return 0
 
@@ -757,6 +766,7 @@ def _suggest_json(result, suggestions) -> None:
                 "description": s.best_suggestion.description,
                 "package": s.best_suggestion.package,
                 "stock": s.best_suggestion.stock,
+                "inventory": s.best_suggestion.inventory,
                 "is_basic": s.best_suggestion.is_basic,
                 "unit_price": s.best_suggestion.unit_price,
                 "confidence": s.best_suggestion.confidence,
@@ -770,6 +780,7 @@ def _suggest_json(result, suggestions) -> None:
                     "description": sug.description,
                     "package": sug.package,
                     "stock": sug.stock,
+                    "inventory": sug.inventory,
                     "is_basic": sug.is_basic,
                     "unit_price": sug.unit_price,
                     "confidence": sug.confidence,
@@ -783,6 +794,13 @@ def _suggest_json(result, suggestions) -> None:
 
 def _suggest_table(result, suggestions, schematic_path: Path) -> None:
     """Output suggestions as formatted table."""
+    if any(
+        s.best_suggestion and not s.best_suggestion.inventory.get("stock_verified", False)
+        for s in suggestions
+    ):
+        print(
+            "Warning: suggested part identities include unverified stock; refresh before ordering."
+        )
     print()
     print("=" * 90)
     print("LCSC PART SUGGESTIONS")
@@ -1047,6 +1065,8 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
     print()
     if summary["all_available"]:
         print("✓ All parts available for ordering")
+    elif summary.get("unverified", 0) > 0:
+        print("Stock unverified: refresh live inventory before ordering.")
     elif summary["out_of_stock"] > 0:
         print("✗ Some parts out of stock - check alternatives above")
     else:

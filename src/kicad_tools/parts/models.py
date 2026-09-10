@@ -7,7 +7,7 @@ Defines dataclasses for parts, availability, and search results.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -99,6 +99,32 @@ class Part:
 
     # Cache metadata
     fetched_at: datetime | None = None
+    stock_source: str = "unknown"
+    snapshot_revision: str | None = None
+    snapshot_at: datetime | None = None
+    read_at: datetime | None = None
+    from_cache: bool = False
+
+    @property
+    def stock_verified(self) -> bool:
+        """Live observation within 24 hours; not a supplier reservation guarantee."""
+        if self.stock_source != "live" or self.fetched_at is None:
+            return False
+        age = datetime.now(tz=self.fetched_at.tzinfo) - self.fetched_at
+        return timedelta(0) <= age <= timedelta(hours=24)
+
+    def inventory_provenance(self) -> dict:
+        """JSON-safe provenance; read/cache time never replaces observation time."""
+        return {
+            "source": self.stock_source,
+            "observed_at": self.fetched_at.isoformat() if self.fetched_at else None,
+            "snapshot_revision": self.snapshot_revision,
+            "snapshot_at": self.snapshot_at.isoformat() if self.snapshot_at else None,
+            "read_at": self.read_at.isoformat() if self.read_at else None,
+            "from_cache": self.from_cache,
+            "stock_verified": self.stock_verified,
+            "verification_max_age_hours": 24,
+        }
 
     @property
     def in_stock(self) -> bool:
@@ -234,7 +260,11 @@ class PartAvailability:
     @property
     def sufficient_stock(self) -> bool:
         """Check if enough stock for needed quantity."""
-        return self.quantity_available >= self.quantity_needed
+        return (
+            self.part is not None
+            and self.part.stock_verified
+            and self.quantity_available >= self.quantity_needed
+        )
 
     @property
     def status(self) -> str:
@@ -243,6 +273,8 @@ class PartAvailability:
             return f"Error: {self.error}"
         if not self.matched:
             return "Not found"
+        if self.part is not None and not self.part.stock_verified:
+            return "Stock unverified (refresh live inventory)"
         if not self.in_stock:
             return "Out of stock"
         if not self.sufficient_stock:
@@ -296,7 +328,14 @@ class BOMAvailability:
     @property
     def out_of_stock(self) -> list[PartAvailability]:
         """Get items that are out of stock."""
-        return [item for item in self.items if item.matched and not item.in_stock]
+        return [
+            item
+            for item in self.items
+            if item.matched
+            and item.part is not None
+            and item.part.stock_verified
+            and not item.in_stock
+        ]
 
     @property
     def low_stock(self) -> list[PartAvailability]:
@@ -304,7 +343,11 @@ class BOMAvailability:
         return [
             item
             for item in self.items
-            if item.matched and item.in_stock and not item.sufficient_stock
+            if item.matched
+            and item.part is not None
+            and item.part.stock_verified
+            and item.in_stock
+            and not item.sufficient_stock
         ]
 
     @property
@@ -320,4 +363,8 @@ class BOMAvailability:
             "missing": len(self.missing_parts),
             "out_of_stock": len(self.out_of_stock),
             "low_stock": len(self.low_stock),
+            "unverified": sum(
+                item.matched and item.part is not None and not item.part.stock_verified
+                for item in self.items
+            ),
         }
