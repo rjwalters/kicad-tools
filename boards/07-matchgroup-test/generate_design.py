@@ -584,6 +584,8 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
 
 def _relocate_pad_drills(pcb_path: Path) -> int:
     """Clear partial pad/drill overlaps before repairing plane connectivity."""
+    from dataclasses import replace
+
     from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias
     from kicad_tools.manufacturers import get_profile
     from kicad_tools.schema.pcb import PCB
@@ -591,13 +593,118 @@ def _relocate_pad_drills(pcb_path: Path) -> int:
 
     pcb = PCB.load(pcb_path)
     rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    # KiCad's default hole-to-copper floor is 0.25 mm, independently of
+    # the manufacturer's copper-to-copper floor. Preserve project overrides.
+    project_path = pcb_path.with_suffix(".kicad_pro")
+    project = json.loads(project_path.read_text()) if project_path.exists() else {}
+    native_rules = project.get("board", {}).get("design_settings", {}).get("rules", {})
+    hole_clearance = native_rules.get("min_hole_clearance", 0.25)
+    # The relocation helper accepts one copper floor. Use the strictest
+    # equivalent annulus clearance among these vias so every drill clears
+    # foreign copper, including on layers without an attached signal stub.
+    effective_clearance = max(
+        [rules.min_clearance_mm] + [hole_clearance - (via.size - via.drill) / 2 for via in pcb.vias]
+    )
+    rules = replace(rules, min_clearance_mm=effective_clearance)
     result = relocate_in_pad_vias(pcb, rules)
+    extended = _extend_blocked_power_stubs(pcb, rules, result)
     remaining = ViaInPadRule().check(pcb, rules).violations
     if result.skipped or result.unresolvable or remaining:
         raise RuntimeError(f"Unresolved pad/drill overlaps: {result}; findings: {remaining}")
-    if result.changed:
+    if result.changed or extended:
         pcb.save(pcb_path)
-    return len(result.moved)
+    return len(result.moved) + extended
+
+
+def _extend_blocked_power_stubs(pcb, rules, result) -> int:
+    """Try a straight continuation when sliding back along a stitch stub is blocked.
+
+    The U4 power-pad escape can point toward a crowded drill cluster. A short
+    extension in the opposite direction preserves its existing copper. Use
+    the production candidate's drill/copper checks and additionally check the
+    entire new stub against foreign copper before accepting the extension.
+    """
+
+    from shapely.geometry import LineString, Point, box
+
+    from kicad_tools.cli import relocate_in_pad_vias as relocation
+    from kicad_tools.validate.rules.via_pad_geometry import pad_absolute_bbox
+
+    fixed = 0
+    pads = relocation._collect_smd_pads_by_net(pcb)
+    tht = relocation._collect_tht_pads(pcb)
+    for skipped in list(result.skipped):
+        if skipped.net_name not in POUR_NETS:
+            continue
+        via = next(v for v in pcb.vias if v.uuid == skipped.uuid)
+        attached = [
+            s
+            for s in pcb.segments_in_net(via.net_number)
+            if relocation._endpoint_at(s, *via.position) is not None
+        ]
+        if len(attached) != 1 or attached[0].layer != "F.Cu":
+            continue
+        segment = attached[0]
+        far = relocation._endpoint_at(segment, *via.position)
+        containing = next(
+            (
+                (f, p, b)
+                for f, p, b in pads[via.net_number]
+                if relocation.via_inside_pad(via, b, p, f)
+            ),
+            None,
+        )
+        if containing is None:
+            continue
+        target = relocation._first_offpad_signal_candidate(
+            pcb,
+            via,
+            containing[2],
+            pads,
+            tht,
+            rules.min_clearance_mm,
+            rules.min_hole_to_hole_mm,
+        )
+        if target is None:
+            continue
+        vx, vy = via.position
+        dx, dy = vx - far[0], vy - far[1]
+        tx, ty = target[0] - vx, target[1] - vy
+        # Restrict this fallback to an exact axis-aligned continuation.
+        if (
+            not ((abs(dx) < 1e-6 and abs(tx) < 1e-6) or (abs(dy) < 1e-6 and abs(ty) < 1e-6))
+            or dx * tx + dy * ty <= 0
+        ):
+            continue
+        if not all(
+            via.size / 2 <= x <= limit - via.size / 2
+            for x, limit in zip(target, pcb.board_size, strict=True)
+        ):
+            continue
+        copper = LineString([via.position, target]).buffer(segment.width / 2)
+        obstacles = [
+            box(*pad_absolute_bbox(p, f))
+            for f in pcb.footprints
+            for p in f.pads
+            if p.net_number != via.net_number and (segment.layer in p.layers or "*.Cu" in p.layers)
+        ]
+        obstacles.extend(
+            LineString([s.start, s.end]).buffer(s.width / 2)
+            for s in pcb.segments
+            if s.net_number != via.net_number and s.layer == segment.layer
+        )
+        obstacles.extend(
+            Point(v.position).buffer(v.size / 2) for v in pcb.vias if v.net_number != via.net_number
+        )
+        if any(copper.distance(shape) < rules.min_clearance_mm - 1e-6 for shape in obstacles):
+            continue
+        old = via.position
+        if not pcb.relocate_via(via, target):
+            continue
+        pcb.add_trace(old, target, width=segment.width, layer=segment.layer, net=skipped.net_name)
+        result.skipped.remove(skipped)
+        fixed += 1
+    return fixed
 
 
 def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int, int]:
