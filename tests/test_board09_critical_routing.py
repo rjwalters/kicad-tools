@@ -44,3 +44,7 @@ def test_native_gate_detects_removed_boot_route(tmp_path, monkeypatch):
     ]
     board.save(path)
     assert check_opens() == ["BOOT"]
+    board = PCB.load(path)
+    assert checker.inner_ground_planes_valid(board)
+    board.add_trace((40, 58), (41, 58), net="SDA", layer="In1.Cu", width=0.2)
+    assert not checker.inner_ground_planes_valid(board)

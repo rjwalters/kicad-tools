@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import subprocess
+import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathlib import Path
 from engineering.calculate import calculate
 
 from kicad_tools.lvs.board_lvs import compare_netlists
+from kicad_tools.lvs.copper_lvs import compare_copper_netlist
 from kicad_tools.schema.pcb import PCB
 
 ROOT = Path(__file__).resolve().parent
@@ -32,7 +34,34 @@ CRITICAL_NETS = {
     "KELVIN_N",
     "SENSE_P",
     "SENSE_N",
+    "GND",
+    "+3V3",
+    "VBUS_RAW",
+    "CC1",
+    "CC2",
+    "VBUS_SENSE",
+    "VREG_1V2",
+    "VREG_2V7",
+    "DISCHARGE",
+    "SINK_GATE",
+    "PD_OK2",
+    "PD_OK3",
+    "SDA",
+    "SCL",
+    "PD_ALERT",
+    "MON_ALERT",
 }
+
+
+def inner_ground_planes_valid(board):
+    inner = {"In1.Cu", "In2.Cu"}
+    zones = [z for z in board.zones if z.layer in inner and z.keepout is None]
+    return (
+        len(zones) == 2
+        and {z.layer for z in zones} == inner
+        and all(z.net_name == "GND" and z.filled_polygons for z in zones)
+        and not any(s.layer in inner and s.net_name != "GND" for s in board.segments)
+    )
 
 
 def critical_route_opens(pcb_path, drc_report):
@@ -77,33 +106,71 @@ def check(output):
     drc_path = output / "placement-drc.json"
     drc_path.unlink(missing_ok=True)
     drc = subprocess.run(
-        ["kicad-cli", "pcb", "drc", str(pcb), "--format", "json", "--output", str(drc_path)],
+        [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            str(pcb),
+            "--refill-zones",
+            "--save-board",
+            "--format",
+            "json",
+            "--output",
+            str(drc_path),
+        ],
         check=False,
     )
     drc_report = json.loads(drc_path.read_text()) if drc_path.exists() else None
     critical_opens = critical_route_opens(pcb, drc_report) if drc_report else sorted(CRITICAL_NETS)
     labels = compare_netlists(schematic, pcb)
     (output / "label-lvs.json").write_text(json.dumps(asdict(labels), indent=2) + "\n")
+    copper = compare_copper_netlist(schematic, pcb)
+    (output / "copper-lvs.json").write_text(json.dumps(asdict(copper), indent=2) + "\n")
+    # Record independent tool findings even while manufacturing remains blocked.
+    tool_reports = {}
+    for name, args in [
+        ("manufacturer-check", ["check", str(pcb), "--mfr", "jlcpcb", "--format", "json"]),
+        ("net-status", ["net-status", str(pcb), "--strict", "--format", "json"]),
+    ]:
+        result = subprocess.run(
+            [sys.executable, "-m", "kicad_tools.cli", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{name} did not produce JSON: {result.stderr}") from exc
+        (output / f"{name}.json").write_text(json.dumps(data, indent=2) + "\n")
+        tool_reports[name] = {"returncode": result.returncode, "summary": data["summary"]}
     circuit = json.loads((output / "circuit.json").read_text())
     calculations = calculate({p["ref"]: p["value"] for p in circuit["parts"]})
     (output / "calculations.json").write_text(json.dumps(calculations, indent=2) + "\n")
     report = {
-        "scope": "Development schematic/placement checkpoint; no manufacturing release",
+        "scope": "Routed development checkpoint; no manufacturing release",
         "native_erc_clean": erc.returncode == 0 and erc_path.exists(),
         "native_drc_geometry_clean": (
             drc.returncode == 0 and drc_report is not None and not drc_report["violations"]
         ),
         "unconnected_items": len(drc_report["unconnected_items"]) if drc_report else None,
+        "all_nets_connected": drc_report is not None and not drc_report["unconnected_items"],
         "critical_routes_connected": drc.returncode == 0 and not critical_opens,
+        "inner_ground_planes_valid": inner_ground_planes_valid(PCB.load(pcb)),
         "critical_net_opens": critical_opens,
         "completed_critical_nets": sorted(CRITICAL_NETS - set(critical_opens)),
         "label_lvs_clean": labels.clean,
+        "copper_lvs_clean": copper.clean,
+        "copper_lvs_bound_pads": copper.bound_pad_count,
+        "manufacturer_rules_passed": tool_reports["manufacturer-check"]["summary"]["passed"],
+        "tool_reports": tool_reports,
         "analytical_screen_passed": calculations["screen_passed"],
         "manufacturing_ready": False,
         "hardware_tested": False,
         "unselected_mpn_refs": [p["ref"] for p in circuit["parts"] if not p["mpn"]],
         "pending": [
-            "Complete routing and ground planes; native DRC and copper LVS",
+            "Resolve manufacturer ampacity findings through branch-current and thermal review",
+            "Reconcile strict GND connectivity disagreement with native KiCad (#5061)",
             "Power-path, Kelvin, switch-loop, thermal and capacitor bias review",
             "Complete procurement and assembly-library package verification",
             "PD configuration readback and attach/inrush/unsupported-source tests",
@@ -129,11 +196,15 @@ def check(output):
             "generate_design.py",
             "check_design.py",
             "procurement.json",
+            "project.kct",
             "engineering/calculate.py",
             "output/development-check.json",
             "output/native-erc.json",
             "output/placement-drc.json",
             "output/label-lvs.json",
+            "output/copper-lvs.json",
+            "output/manufacturer-check.json",
+            "output/net-status.json",
             "output/calculations.json",
         ]:
             inputs[name] = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
@@ -150,8 +221,12 @@ def check(output):
                     "native_erc_clean",
                     "native_drc_geometry_clean",
                     "critical_routes_connected",
+                    "inner_ground_planes_valid",
+                    "all_nets_connected",
                     "label_lvs_clean",
+                    "copper_lvs_clean",
                     "analytical_screen_passed",
+                    "manufacturer_rules_passed",
                 ]
             ]
             + [{"name": "manufacturing_release", "status": "not_run"}],
@@ -163,7 +238,10 @@ def check(output):
             "native_erc_clean",
             "native_drc_geometry_clean",
             "critical_routes_connected",
+            "inner_ground_planes_valid",
+            "all_nets_connected",
             "label_lvs_clean",
+            "copper_lvs_clean",
             "analytical_screen_passed",
         ]
     )
