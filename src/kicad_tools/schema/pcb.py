@@ -5099,6 +5099,19 @@ class PCB:
             # Add UUID if not present
             fp_sexp.append(SExp.list("uuid", new_uuid))
 
+        # Library pad identities are not placed-instance identities. Persist
+        # fresh IDs even when the library omits them, so native DRC findings
+        # can be correlated with the saved board instead of transient IDs.
+        for pad_node in fp_sexp.find_all("pad"):
+            pad_uuid = pad_node.find("uuid")
+            if pad_uuid is not None:
+                pad_uuid.set_value(0, str(uuid.uuid4()))
+            else:
+                pad_node.append(SExp.list("uuid", str(uuid.uuid4())))
+            legacy_stamp = pad_node.find("tstamp")
+            if legacy_stamp is not None:
+                pad_node.remove(legacy_stamp)
+
         # Update layer first (at node must come after layer)
         layer_node = fp_sexp.find("layer")
         if layer_node:
