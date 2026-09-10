@@ -25,6 +25,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from kicad_tools._shapely import require_shapely
+
 from .base import DRC_TOLERANCE
 
 if TYPE_CHECKING:
@@ -104,7 +106,8 @@ def via_inside_pad(
     if distance >= radius - DRC_TOLERANCE:
         return False
     if pad is not None and footprint is not None and hasattr(pad, "shape"):
-        from shapely.geometry import Point
+        require_shapely("via-in-pad copper overlap geometry")
+        from shapely.geometry import Point  # type: ignore[import-untyped]
 
         from .clearance import _pad_polygon
 

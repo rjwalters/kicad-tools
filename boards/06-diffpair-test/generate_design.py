@@ -1222,9 +1222,32 @@ def _parse_pads(pcb_path: Path):
                     "is_th": is_th,
                     "drill": float(getattr(pad, "drill", 0.0) or 0.0),
                     "layers": layers,
+                    "pad": pad,
+                    "footprint": fp,
+                    "origin": (origin_x, origin_y),
                 }
             )
     return pads
+
+
+def _via_overlaps_smd_pad(via, pad):
+    """Use the DRC detector, including partial drill overlap and pad rotation."""
+    from types import SimpleNamespace
+
+    from kicad_tools.validate.rules.via_pad_geometry import (
+        is_smd_pad,
+        pad_absolute_bbox,
+        via_inside_pad,
+    )
+
+    physical_pad, footprint = pad["pad"], pad["footprint"]
+    if not is_smd_pad(physical_pad) or via["net"] != pad["net"]:
+        return False
+    ox, oy = pad["origin"]
+    physical_via = SimpleNamespace(position=(via["x"] - ox, via["y"] - oy), drill=via["drill"])
+    return via_inside_pad(
+        physical_via, pad_absolute_bbox(physical_pad, footprint), physical_pad, footprint
+    )
 
 
 def _legalize_signal_vias(pcb_path: Path) -> int:
@@ -1249,8 +1272,8 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
       every layer the via previously joined plus the pad's copper layer
       (compass directions keep connectors axis/45 by construction).
 
-    Returns the number of defects repaired.  Unrepairable defects are
-    printed and left in place (never silently dropped).
+    Returns the number of defects repaired. Unrepairable pad overlaps
+    raise an error; the final routed-board gate also checks all rules.
     """
     import math
 
@@ -1369,16 +1392,28 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
         cands.append([(p0, mid_b), (mid_b, p1)])
         return cands
 
+    import re
+
+    used_uuids = set(re.findall(r'\(uuid "([^"]+)"\)', pcb_path.read_text()))
+
     def _seg_line(net_name, p0, p1, layer, width, net_num):
+        # A standalone cleanup may start the deterministic counter at zero
+        # on an already repaired board. Never reuse an existing identity.
+        identity = _generate_uuid()
+        while identity in used_uuids:
+            identity = _generate_uuid()
+        used_uuids.add(identity)
         return (
             f"  (segment (start {p0[0]:.3f} {p0[1]:.3f}) (end {p1[0]:.3f} {p1[1]:.3f}) "
             f'(width {width}) (layer "{layer}") (net {net_num}) '
-            f'(uuid "{_generate_uuid()}"))'
+            f'(uuid "{identity}"))'
         )
 
-    # Iterate: re-parse after every applied repair so obstacle state is
-    # always current.
-    for _round in range(8):
+    # Re-parse after every repair. A via may need a drill-pair repair and
+    # then a pad-overlap repair; allow a final pass to confirm convergence.
+    # A fixed eight-pass cap silently left defects on larger routed boards.
+    original_via_count = len(_parse_copper(pcb_path.read_text())[2])
+    for _round in range(2 * original_via_count + 1):
         text = pcb_path.read_text()
         net_ids, segs, vias = _parse_copper(text)
         net_num_by_name = {v: k for k, v in net_ids.items()}
@@ -1645,14 +1680,7 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
             for p in pads:
                 if p["is_th"]:
                     continue
-                # Drill circle fully inside the pad bbox (rule geometry).
-                r = v["drill"] / 2
-                if (
-                    p["x"] - p["w"] / 2 <= v["x"] - r
-                    and v["x"] + r <= p["x"] + p["w"] / 2
-                    and p["y"] - p["h"] / 2 <= v["y"] - r
-                    and v["y"] + r <= p["y"] + p["h"] / 2
-                ):
+                if _via_overlaps_smd_pad(v, p):
                     in_pad = p
                     break
             if in_pad is None:
@@ -1721,6 +1749,18 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
             )
         if not repair_applied:
             break
+    else:
+        raise RuntimeError("Via legalization did not converge within its physical-via bound")
+    from types import SimpleNamespace
+
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    residual = ViaInPadRule().check(PCB.load(pcb_path), SimpleNamespace(via_in_pad_supported=False))
+    if residual.violations:
+        raise RuntimeError(
+            f"Via legalization left {len(residual.violations)} unrepaired via-in-pad overlaps"
+        )
     return fixed
 
 

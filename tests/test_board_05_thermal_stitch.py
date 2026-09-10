@@ -37,7 +37,7 @@ import pytest
 from kicad_tools.cli.stitch_cmd import run_thermal_stitch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BOARD_DIR = REPO_ROOT / "boards" / "05-bldc-motor-controller"
+BOARD_DIR = REPO_ROOT / "tests" / "fixtures" / "historical_demo_boards" / "05-bldc-motor-controller"
 ROUTED_PCB = BOARD_DIR / "output" / "bldc_controller_routed.kicad_pcb"
 
 # The six TO-220 IRLZ44N MOSFETs.  Their drain (pad 2) is the heat-sink

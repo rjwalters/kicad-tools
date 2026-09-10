@@ -52,12 +52,17 @@ def test_added_pad_ids_are_unique_and_persistent(tmp_path):
     for ref, x in [("J1", 8), ("J2", 22)]:
         board.add_footprint_from_file(library, ref, x, 10)
     identities = [p.uuid for f in board.footprints for p in f.pads]
+    footprint_ids = [f.uuid for f in board.footprints]
+    assert len(set(footprint_ids + identities)) == 8
+    assert all(footprint_ids)
+    assert old_id not in footprint_ids
     assert len(set(identities)) == 6
     assert "" not in identities
     assert old_id not in identities
     path = tmp_path / "board.kicad_pcb"
     board.save(path)
     restored = PCB.load(path)
+    assert [f.uuid for f in restored.footprints] == footprint_ids
     assert [p.uuid for f in restored.footprints for p in f.pads] == identities
     restored.save(path)
     assert [p.uuid for f in PCB.load(path).footprints for p in f.pads] == identities
