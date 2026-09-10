@@ -58,6 +58,9 @@ def build(output):
     )
     native = json.loads((evidence / "native-drc.json").read_text())
     if native["violations"] or native["unconnected_items"]:
+        # main() removes failed staging directories; keep the actual native
+        # findings in the CI log so a missing library or copper fault is clear.
+        print(json.dumps(native, indent=2), file=sys.stderr)
         raise RuntimeError("Fresh native refill/DRC failed; do not manufacture")
     subprocess.run(
         [
@@ -74,6 +77,7 @@ def build(output):
     )
     erc = json.loads((evidence / "native-erc.json").read_text())
     if any(sheet["violations"] for sheet in erc["sheets"]):
+        print(json.dumps(erc, indent=2), file=sys.stderr)
         raise RuntimeError("Fresh native schematic ERC failed")
     from kicad_tools.lvs import write_lvs_report
 
