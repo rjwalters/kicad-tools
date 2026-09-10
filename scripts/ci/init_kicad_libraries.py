@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Initialize KiCad's stock footprint table for headless native checks.
+"""Initialize stock footprint and symbol tables for headless native checks.
 
-The GUI normally installs this table on first launch. A fresh CI container has
-the footprint libraries but no table, causing native DRC library warnings.
-Existing configuration is preserved; missing templates are an error.
+The GUI normally installs these tables on first launch. Fresh CI containers
+need both tables for native DRC/ERC. Preserve existing configuration and fail
+if a missing table has no template matching the installed KiCad major version.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 
-def initialize() -> Path:
+def initialize() -> tuple[Path, Path]:
     version = subprocess.check_output(["kicad-cli", "--version"], text=True).strip()
     match = re.match(r"(\d+)\.(\d+)", version)
     if not match:
@@ -27,37 +27,51 @@ def initialize() -> Path:
         root = Path.home() / "Library/Preferences/kicad"
     else:
         root = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "kicad"
-    target = root / config_version / "fp-lib-table"
-    if target.exists():
-        return target
-
-    candidates = [
-        Path("/usr/share/kicad/template/fp-lib-table"),
-        Path("/usr/local/share/kicad/template/fp-lib-table"),
-        Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/template/fp-lib-table"),
+    templates = [
+        Path("/usr/share/kicad/template"),
+        Path("/usr/local/share/kicad/template"),
+        Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/template"),
     ]
-    template = next((path for path in candidates if path.is_file()), None)
-    if template is None:
-        raise FileNotFoundError(
-            "KiCad stock footprint table is unavailable; install the KiCad library "
-            "templates. Searched: " + ", ".join(map(str, candidates))
+    targets = (root / config_version / "fp-lib-table", root / config_version / "sym-lib-table")
+    pending = []
+    for target, kind, variable in zip(
+        targets, ("footprint", "symbol"), ("FOOTPRINT", "SYMBOL"), strict=True
+    ):
+        if target.exists():
+            continue
+        candidates = [directory / target.name for directory in templates]
+        available = [path for path in candidates if path.is_file()]
+        if not available:
+            raise FileNotFoundError(
+                f"KiCad stock {kind} table is unavailable; install the KiCad library "
+                "templates. Searched: " + ", ".join(map(str, candidates))
+            )
+        data = next(
+            (
+                text
+                for path in available
+                if f"KICAD{match[1]}_{variable}_DIR" in (text := path.read_text())
+            ),
+            None,
         )
-    data = template.read_text()
-    if f"KICAD{match[1]}_FOOTPRINT_DIR" not in data:
-        raise RuntimeError(f"Stock footprint table {template} does not match KiCad {version}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    # Exclusive creation also preserves configuration created concurrently.
-    try:
-        with target.open("x") as stream:
-            stream.write(data)
-    except FileExistsError:
-        pass
-    return target
+        if data is None:
+            raise RuntimeError(f"Stock {kind} tables {available} do not match KiCad {version}")
+        pending.append((target, data))
+    for target, data in pending:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Exclusive creation preserves configuration created concurrently.
+        try:
+            with target.open("x") as stream:
+                stream.write(data)
+        except FileExistsError:
+            pass
+    return targets
 
 
 if __name__ == "__main__":
     try:
-        print(f"KiCad footprint library table: {initialize()}")
+        for table in initialize():
+            print(f"KiCad library table: {table}")
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"Cannot initialize KiCad libraries: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
