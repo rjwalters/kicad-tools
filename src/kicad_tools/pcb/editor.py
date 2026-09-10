@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # Import SExp parsing and builders
+from kicad_tools.core.layers import validate_copper_layer
 from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp, parse_file
 from kicad_tools.sexp.builders import (
@@ -208,11 +209,13 @@ class PCBEditor:
         self.doc: SExp | None = None
         self.nets: dict[str, int] = {}
         self.footprints: dict[str, dict] = {}
+        self.copper_layers: set[str] = set()
 
         if self.path.exists():
             self.doc = parse_file(self.path)
             self._parse_nets()
             self._parse_footprints()
+            self._parse_copper_layers()
 
     def _parse_nets(self):
         """Extract net name to net number mapping using SExp."""
@@ -225,6 +228,30 @@ class PCBEditor:
                 net_num = int(atoms[0])
                 net_name = str(atoms[1])
                 self.nets[net_name] = net_num
+
+    def _parse_copper_layers(self):
+        """Extract enabled copper layer names from the board's ``(layers ...)`` table.
+
+        Mirrors the ``signal``/``power`` type filter used by
+        :attr:`kicad_tools.schema.pcb.PCB.copper_layers` -- entries such as
+        ``(31 "F.CrtYd" user "F.Courtyard")`` are not copper and are
+        excluded. Populates :attr:`copper_layers` with the layer names this
+        specific board declares as enabled (e.g. ``{"F.Cu", "B.Cu"}`` for a
+        2-layer board), used by :meth:`add_zone` to reject inner layers that
+        are not part of this board's stackup (Issue #4907).
+        """
+        if not self.doc:
+            return
+
+        layers_node = self.doc.find("layers")
+        if layers_node is None:
+            return
+
+        for entry in layers_node.iter_children():
+            name = entry.get_string(0) or ""
+            layer_type = entry.get_string(1) or "user"
+            if name and layer_type in ("signal", "power"):
+                self.copper_layers.add(name)
 
     def _parse_footprints(self):
         """Extract footprint references and positions using SExp."""
@@ -426,7 +453,27 @@ class PCBEditor:
                 thermal_gap=0.5,
                 thermal_spoke_width=0.5
             )
+
+        Raises:
+            ValueError: If net_name is not declared in this PCB's net table
+                (unlike :meth:`get_net_number`, this does not silently fall
+                back to net 0), or layer is not a valid, board-declared
+                copper layer (Issue #4907).
         """
+        # Reject an undeclared net before any mutation-adjacent state is
+        # built. get_net_number()'s dict.get(name, 0) fallback is kept as-is
+        # for its other callers (Issue #4907) -- this is a narrow guard
+        # local to add_zone.
+        if net_name not in self.nets:
+            raise ValueError(
+                f"Net {net_name!r} not found in PCB. "
+                f"Declared nets: {', '.join(sorted(self.nets)) or '(none)'}."
+            )
+
+        # Reject unknown/non-copper/disabled-on-this-board layers before
+        # any mutation.
+        validate_copper_layer(layer, self.copper_layers)
+
         # Handle boundary parameter
         if boundary == "board_outline" or boundary is None:
             boundary = self._get_board_outline()

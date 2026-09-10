@@ -56,6 +56,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.core.layers import validate_copper_layer
 from kicad_tools.core.sexp_file import save_pcb, verify_pcb_write
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import SExp, parse_file
@@ -687,8 +688,18 @@ class ZoneGenerator:
             GeneratedZone object
 
         Raises:
-            ValueError: If net not found in PCB
+            ValueError: If net not found in PCB, or layer is not a valid,
+                board-declared copper layer.
         """
+        # Resolve net number (raises ValueError for an undeclared net)
+        # before any mutation-adjacent state is built, so a rejected call
+        # leaves both the queued-zone list and the PCB untouched.
+        net_number = self.get_net_number(net)
+
+        # Reject unknown/non-copper/disabled-on-this-board layers before
+        # the zone is queued (Issue #4907).
+        validate_copper_layer(layer, (declared.name for declared in self._pcb.copper_layers))
+
         config = ZoneConfig(
             net=net,
             layer=layer,
@@ -700,9 +711,6 @@ class ZoneGenerator:
             pad_connection=pad_connection,
             boundary=boundary,
         )
-
-        # Resolve net number
-        net_number = self.get_net_number(net)
 
         # Use board outline if no boundary specified
         actual_boundary = boundary if boundary is not None else self.board_outline

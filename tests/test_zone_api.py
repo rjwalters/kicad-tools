@@ -261,6 +261,36 @@ class TestPCBEditorZoneAPI:
         pcb_path.write_text(pcb_content)
         return pcb_path
 
+    @pytest.fixture
+    def four_layer_pcb(self, tmp_path):
+        """Create a 4-layer PCB (declares In1.Cu/In2.Cu) for testing."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "kicad_tools")
+  (general
+    (thickness 1.6)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (4 "In1.Cu" signal)
+    (6 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (32 "B.Adhes" user)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (gr_line (start 0 0) (end 100 0) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 100 0) (end 100 80) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 100 80) (end 0 80) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 0 80) (end 0 0) (layer "Edge.Cuts") (width 0.1))
+)"""
+        pcb_path = tmp_path / "test_board_4layer.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+        return pcb_path
+
     def test_add_zone_basic(self, simple_pcb):
         """add_zone creates a zone with basic parameters."""
         pcb = PCBEditor(str(simple_pcb))
@@ -382,9 +412,9 @@ class TestPCBEditorZoneAPI:
 
         assert zone.layer == "F.Cu"
 
-    def test_setup_4layer_stackup(self, simple_pcb):
+    def test_setup_4layer_stackup(self, four_layer_pcb):
         """setup_4layer_stackup creates GND and VCC zones."""
-        pcb = PCBEditor(str(simple_pcb))
+        pcb = PCBEditor(str(four_layer_pcb))
         zones = pcb.setup_4layer_stackup()
 
         assert len(zones) == 2
@@ -401,9 +431,9 @@ class TestPCBEditorZoneAPI:
         assert vcc_zone.layer == "In2.Cu"
         assert vcc_zone.priority == 0
 
-    def test_setup_4layer_stackup_custom(self, simple_pcb):
+    def test_setup_4layer_stackup_custom(self, four_layer_pcb):
         """setup_4layer_stackup accepts custom parameters."""
-        pcb = PCBEditor(str(simple_pcb))
+        pcb = PCBEditor(str(four_layer_pcb))
         zones = pcb.setup_4layer_stackup(
             gnd_layer="In2.Cu",
             vcc_layer="In1.Cu",
@@ -436,6 +466,92 @@ class TestPCBEditorZoneAPI:
         assert zones[0]["net"] == "GND"
         assert zones[0]["layer"] == "B.Cu"
         assert zones[0]["priority"] == 2
+
+    def test_add_zone_unknown_net_raises(self, simple_pcb):
+        """add_zone rejects a net that is not declared in the PCB (#4907).
+
+        Regression for the ``PCBEditor.add_zone`` -> ``get_net_number``
+        default-zero fallback silently binding the zone to net 0 instead of
+        rejecting the unknown net.
+        """
+        pcb = PCBEditor(str(simple_pcb))
+        with pytest.raises(ValueError, match="DOES_NOT_EXIST"):
+            pcb.add_zone(
+                net_name="DOES_NOT_EXIST",
+                layer="B.Cu",
+                boundary=[(10, 10), (90, 10), (90, 70), (10, 70)],
+            )
+
+        # No mutation on rejected input: no zone was appended to the
+        # in-memory document.
+        assert pcb.get_zones() == []
+
+    def test_add_zone_known_net_still_works(self, simple_pcb):
+        """A declared net still resolves correctly (no regression)."""
+        pcb = PCBEditor(str(simple_pcb))
+        zone = pcb.add_zone(
+            net_name="GND",
+            layer="B.Cu",
+            boundary=[(10, 10), (90, 10), (90, 70), (10, 70)],
+        )
+        assert zone.net == 1
+        assert zone.net_name == "GND"
+
+    def test_add_zone_invalid_layer_spelling_raises(self, simple_pcb):
+        """add_zone rejects a misspelled/unrecognized layer name."""
+        pcb = PCBEditor(str(simple_pcb))
+        with pytest.raises(ValueError, match="DefinitelyNotALayer"):
+            pcb.add_zone(
+                net_name="GND",
+                layer="DefinitelyNotALayer",
+                boundary=[(10, 10), (90, 10), (90, 70), (10, 70)],
+            )
+        assert pcb.get_zones() == []
+
+    def test_add_zone_non_copper_layer_raises(self, simple_pcb):
+        """add_zone rejects a real but non-copper layer (e.g. silkscreen)."""
+        pcb = PCBEditor(str(simple_pcb))
+        with pytest.raises(ValueError, match="copper"):
+            pcb.add_zone(
+                net_name="GND",
+                layer="F.SilkS",
+                boundary=[(10, 10), (90, 10), (90, 70), (10, 70)],
+            )
+        assert pcb.get_zones() == []
+
+    def test_add_zone_absent_inner_layer_on_2layer_board_raises(self, simple_pcb):
+        """add_zone rejects an inner copper layer not declared on a 2-layer board."""
+        pcb = PCBEditor(str(simple_pcb))
+        with pytest.raises(ValueError, match="In1.Cu"):
+            pcb.add_zone(
+                net_name="GND",
+                layer="In1.Cu",
+                boundary=[(10, 10), (90, 10), (90, 70), (10, 70)],
+            )
+        assert pcb.get_zones() == []
+
+    def test_add_zone_valid_inner_layer_on_multilayer_board(self, four_layer_pcb):
+        """add_zone accepts a declared inner layer on a multilayer board."""
+        pcb = PCBEditor(str(four_layer_pcb))
+        zone = pcb.add_zone(
+            net_name="GND",
+            layer="In1.Cu",
+            boundary=[(10, 10), (90, 10), (90, 70), (10, 70)],
+        )
+        assert zone.layer == "In1.Cu"
+
+    def test_add_zone_rejected_net_no_document_mutation(self, simple_pcb):
+        """A rejected add_zone call does not append a zone node to the doc."""
+        pcb = PCBEditor(str(simple_pcb))
+        assert pcb.doc is not None
+        zone_count_before = len(pcb.doc.find_all("zone"))
+        with pytest.raises(ValueError):
+            pcb.add_zone(
+                net_name="DOES_NOT_EXIST",
+                layer="B.Cu",
+                boundary=[(10, 10), (90, 10), (90, 70), (10, 70)],
+            )
+        assert len(pcb.doc.find_all("zone")) == zone_count_before
 
 
 class TestBoardOutlineExtraction:
