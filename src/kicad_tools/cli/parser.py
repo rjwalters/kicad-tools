@@ -2140,6 +2140,18 @@ def _add_pcb_parser(subparsers) -> None:
         "reported but not anchored. Composes with --all-runs.",
     )
     pcb_reinforce.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        help="Path to a JSON sidecar declaring branch-specific current-path "
+        "intent (Issue #4980; see kicad_tools.router.current_paths."
+        "CurrentPathSpec). When any declared path targets --net, reinforcement "
+        "gates to an allow-list: only runs fully covered by a resolved, "
+        "reinforcement-eligible path are anchored -- a declared sense/Kelvin "
+        "branch (reinforcement_eligible=false) is never anchored or bridged, "
+        "even with --all-runs.",
+    )
+    pcb_reinforce.add_argument(
         "-o",
         "--output",
         dest="output",
@@ -2155,6 +2167,32 @@ def _add_pcb_parser(subparsers) -> None:
         "--dry-run",
         action="store_true",
         help="Report anchors that would be placed/refused without writing files",
+    )
+
+    # pcb current-paths-audit (issue #4980)
+    pcb_current_paths_audit = pcb_subparsers.add_parser(
+        "current-paths-audit",
+        help="Audit declared branch-specific current-path intent against routed copper",
+        description="Independent post-write audit (Issue #4980): resolves every "
+        "declared current-path (kicad_tools.router.current_paths.CurrentPathSpec) "
+        "against the routed board and reports which physical copper each branch "
+        "covers, which paths failed to resolve (moved/removed pad, off-net, no "
+        "continuous copper) or are ambiguous (a loop/parallel return reachable "
+        "from the endpoints), and which routed copper on a declared net no "
+        "resolved path covers. Read-only -- never mutates or saves the board.",
+    )
+    pcb_current_paths_audit.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_current_paths_audit.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        required=True,
+        help="Path to a JSON sidecar declaring branch-specific current-path intent",
+    )
+    pcb_current_paths_audit.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
     )
 
     # pcb dedupe (issue #4175)
