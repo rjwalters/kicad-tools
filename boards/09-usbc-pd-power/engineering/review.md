@@ -59,8 +59,25 @@ The first routing experiment connected 18/31 non-ground nets. Native KiCad
 reported 18 violations and 68 unconnected items; ground planes were not yet
 added. Its snapshots are diagnostic artifacts only. C5/L1 courtyard overlap
 and a feedback-capacitor reference collision were subsequently moved in the
-placement source. Native library-difference warnings on rotated footprints
-remain to be audited before release.
+placement source. The subsequent audit found that edits to pad rotation on
+newly added footprints were lost on save. This changed the physical L1 pad
+orientation. Linking new pads to their serialization nodes fixes the defect;
+native library-difference warnings are now zero.
+
+The current generated checkpoint has zero native geometry violations and
+109 unconnected items. C5/C6 are rotated beside U2 and directly connect VIN
+and GND. A 0.35 mm, approximately 2.71 mm long SW escape passes between C6's
+lands to three 0.6/0.3 mm vias. A 2 mm bottom-layer trunk reaches three vias
+outside L1's solder lands. At nominal 35 µm copper and 20°C resistivity, the
+neck alone is approximately 3.8 mΩ and 35 mW at the screened 3.039 A RMS;
+this omits etch tolerance, hot copper, vias and heat spreading and is not an
+ampacity qualification. Final return-plane geometry and switch-loop EMI remain
+review gates. The boot capacitor's SW branch is still unconnected.
+
+RSH1 pins 2/3 now route independently to R10/R11. C11 was moved near U3's
+inputs and all four Kelvin/filter nets are connected in native KiCad's report,
+without force-pad shorts. Routing is not symmetric; input pickup, final force
+copper proximity and filter placement still need a noise/layout review.
 
 - [#4980](https://github.com/rjwalters/kicad-tools/issues/4980): added concrete
   force-current, feedback, LED and Kelvin branch requirements for this board.
@@ -69,9 +86,16 @@ remain to be audited before release.
 - [#5032](https://github.com/rjwalters/kicad-tools/issues/5032): filed loss of
   the source project's preservation flag and native rule floors when routing
   to a new output basename/directory.
+- [#5049](https://github.com/rjwalters/kicad-tools/issues/5049): filed and locally
+  fixed lost pad geometry edits on newly added footprints, with round-trip
+  tests covering rotations, positions, layers and repeated/blank pad numbers.
+- [#5055](https://github.com/rjwalters/kicad-tools/issues/5055): requested gallery
+  metrics for development PCBs before manufacturing export. The current
+  producer attaches renders/readiness but omits PCB dimensions and counts
+  when no manufacturing directory exists.
 
-Next layout work: compact the VIN bypass/SW return loop, route power trunks
-with explicit endpoint/current assumptions, route the separate Kelvin taps,
+Next layout work: finish the boot/feedback loops and power trunks
+with explicit endpoint/current assumptions, review the Kelvin routing,
 complete signal routing and ground planes, then rerun native DRC and physical
 copper LVS. Routing percentage alone cannot close these gates.
 
@@ -88,6 +112,7 @@ The finer-grid experiment was stopped after more than four minutes despite a
 90 s requested total budget. Its initial 23-net count reduced to 16 after
 validation, and only an unvalidated partial snapshot was saved. Filed
 [#5035](https://github.com/rjwalters/kicad-tools/issues/5035) for deadline
-propagation through post-pass work. The final placed source has no native
-geometric violations besides three library-difference warnings; it remains
-unrouted (119 unconnected items), which is not a native DRC pass.
+propagation through post-pass work. Those old snapshots retain their original
+violations; the current generator/checker results described above supersede
+the earlier placement checkpoint. Zero geometry violations with opens is not
+a complete native DRC pass.

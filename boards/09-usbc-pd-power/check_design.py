@@ -35,6 +35,13 @@ def check(output):
         ],
         check=False,
     )
+    drc_path = output / "placement-drc.json"
+    drc_path.unlink(missing_ok=True)
+    drc = subprocess.run(
+        ["kicad-cli", "pcb", "drc", str(pcb), "--format", "json", "--output", str(drc_path)],
+        check=False,
+    )
+    drc_report = json.loads(drc_path.read_text()) if drc_path.exists() else None
     labels = compare_netlists(schematic, pcb)
     (output / "label-lvs.json").write_text(json.dumps(asdict(labels), indent=2) + "\n")
     circuit = json.loads((output / "circuit.json").read_text())
@@ -43,6 +50,10 @@ def check(output):
     report = {
         "scope": "Development schematic/placement checkpoint; no manufacturing release",
         "native_erc_clean": erc.returncode == 0 and erc_path.exists(),
+        "native_drc_geometry_clean": (
+            drc.returncode == 0 and drc_report is not None and not drc_report["violations"]
+        ),
+        "unconnected_items": len(drc_report["unconnected_items"]) if drc_report else None,
         "label_lvs_clean": labels.clean,
         "analytical_screen_passed": calculations["screen_passed"],
         "manufacturing_ready": False,
@@ -78,6 +89,7 @@ def check(output):
             "engineering/calculate.py",
             "output/development-check.json",
             "output/native-erc.json",
+            "output/placement-drc.json",
             "output/label-lvs.json",
             "output/calculations.json",
         ]:
@@ -91,13 +103,24 @@ def check(output):
             "blockers": report["pending"],
             "checks": [
                 {"name": key, "status": "passed" if report[key] else "failed"}
-                for key in ["native_erc_clean", "label_lvs_clean", "analytical_screen_passed"]
+                for key in [
+                    "native_erc_clean",
+                    "native_drc_geometry_clean",
+                    "label_lvs_clean",
+                    "analytical_screen_passed",
+                ]
             ]
             + [{"name": "manufacturing_release", "status": "not_run"}],
         }
         (output / "readiness.json").write_text(json.dumps(readiness, indent=2) + "\n")
     return all(
-        report[key] for key in ["native_erc_clean", "label_lvs_clean", "analytical_screen_passed"]
+        report[key]
+        for key in [
+            "native_erc_clean",
+            "native_drc_geometry_clean",
+            "label_lvs_clean",
+            "analytical_screen_passed",
+        ]
     )
 
 

@@ -264,20 +264,30 @@ def parts() -> list[Part]:
         ("C2", "1u 16V", "VREG_1V2", "GND", (20, 19), C),
         ("C3", "1u 16V", "VREG_2V7", "GND", (10, 23), C),
         ("C4", "4.7n 50V", "PMOS_SOURCE", "PMOS_GATE", (39, 31), C),
-        ("C5", "10u 50V", "VIN", "GND", (54.5, 25), "Capacitor_SMD:C_1206_3216Metric"),
-        ("C6", "100n 50V", "VIN", "GND", (55, 33), C),
+        ("C5", "10u 50V", "VIN", "GND", (53, 29), "Capacitor_SMD:C_1206_3216Metric"),
+        ("C6", "100n 50V", "VIN", "GND", (55.15, 29), C),
         ("C7", "100n 50V", "BOOT_CAP", "SW", (62, 20), C),
         ("C8", "22u 25V", "VOUT_PRE", "GND", (50, 16), "Capacitor_SMD:C_1206_3216Metric"),
         ("C9", "22u 25V", "VOUT_PRE", "GND", (56, 16), "Capacitor_SMD:C_1206_3216Metric"),
         ("C10", "75p C0G", "VOUT_PRE", "FB", (66, 22), C),
-        ("C11", "100n 50V", "SENSE_P", "SENSE_N", (73, 23), C),
+        ("C11", "100n 50V", "SENSE_P", "SENSE_N", (79, 29), C),
         ("C12", "100n 50V", "+3V3", "GND", (79, 34), C),
         ("C13", "1u 50V", "VBUS_RAW", "GND", (11, 43), C),
         ("C14", "1u 16V", "+3V3", "GND", (20, 43), C),
         ("C15", "1u 16V", "+5V_OUT", "GND", (81, 20), C),
     ]
     for ref, value, a, b, xy, fp in capacitors:
-        result.append(Part(ref, "Device:C", fp, value, {"1": a, "2": b}, xy))
+        result.append(
+            Part(
+                ref,
+                "Device:C",
+                fp,
+                value,
+                {"1": a, "2": b},
+                xy,
+                rotation=90 if ref in {"C5", "C6"} else 0,
+            )
+        )
     # The catalog binds exact MPNs later; blank entries stay explicit blockers.
     catalog_path = ROOT / "procurement.json"
     catalog = json.loads(catalog_path.read_text()).get("parts", {}) if catalog_path.exists() else {}
@@ -331,6 +341,65 @@ def write_inductor(output: Path) -> Path:
     path = library / "SRP7050TA.kicad_mod"
     path.write_text(data)
     return path
+
+
+def add_critical_copper(pcb: PCB) -> None:
+    """Reviewed geometry for the local bypass loop and switch-node escape.
+
+    The short TSOT escape is narrower than the power trunk. Its current and
+    temperature limits still require review; these connections are not a 3 A
+    qualification or a complete power-stage route.
+    """
+    pcb.add_trace(("U2", "3"), ("C6", "1"), width=0.45, net="VIN")
+    pcb.add_trace(("C6", "1"), ("C5", "1"), width=0.8, net="VIN")
+    pcb.add_trace(("U2", "1"), ("C6", "2"), width=0.45, net="GND")
+    pcb.add_trace(("C6", "2"), ("C5", "2"), width=0.8, net="GND")
+    # Escape between C6's lands; keep vias outside the solderable pads.
+    pcb.add_trace(("U2", "2"), (54.15, 29), width=0.35, net="SW")
+    for x in (54.15, 53.35, 52.55):
+        pcb.add_via(x, 29, net="SW")
+    pcb.add_trace((54.15, 29), (52.55, 29), width=0.6, net="SW")
+    for x in (46.8, 47.6, 48.4):
+        pcb.add_via(x, 31.6, net="SW")
+        pcb.add_trace((x, 31.6), (x, 29.95), width=0.6, net="SW")
+    pcb.add_trace((46.8, 31.6), (48.4, 31.6), width=0.6, net="SW")
+    pcb.add_trace(
+        (54.15, 29), (48.4, 31.6), width=2.0, layer="B.Cu", waypoints=[(51, 29)], net="SW"
+    )
+    pcb.add_trace((48.4, 31.6), (46.8, 31.6), width=2.0, layer="B.Cu", net="SW")
+    # Dedicated shunt sense terminals: never tap the 3 A force pads.
+    pcb.add_trace(
+        ("RSH1", "2"),
+        ("R10", "1"),
+        width=0.25,
+        net="KELVIN_P",
+        waypoints=[(66.57, 20), (69.225, 22.655)],
+    )
+    pcb.add_trace(
+        ("RSH1", "3"),
+        ("R11", "1"),
+        width=0.25,
+        net="KELVIN_N",
+        waypoints=[(73.43, 15.8), (75.5, 15.8), (75.5, 21), (75.225, 21.275)],
+    )
+    pcb.add_trace(
+        ("R10", "2"),
+        ("C11", "1"),
+        width=0.25,
+        net="SENSE_P",
+        waypoints=[(72.775, 28), (77.225, 28)],
+    )
+    pcb.add_trace(("C11", "1"), ("U3", "10"), width=0.25, net="SENSE_P", waypoints=[(78.225, 31)])
+    pcb.add_trace(
+        ("R11", "2"),
+        ("C11", "2"),
+        width=0.25,
+        net="SENSE_N",
+        waypoints=[(78.5, 26), (80.5, 28), (80.5, 29)],
+    )
+    pcb.add_trace(
+        ("C11", "2"), ("U3", "9"), width=0.25, net="SENSE_N", waypoints=[(80.5, 29), (80.5, 31.5)]
+    )
 
 
 def generate(output: Path) -> dict:
@@ -408,6 +477,17 @@ def generate(output: Path) -> dict:
                 pcb.assign_net_to_footprint_pad(part.ref, pad.number, part.pins[pad.number])
             pad.rotation += part.rotation
         fp.rotation = part.rotation
+        if part.ref in {"C5", "C6"}:
+            # Move the rotated reference text out of the compact bypass loop.
+            for node in fp._sexp_node.children:
+                if node.name in {"property", "fp_text"} and node.get_atoms()[0] in {
+                    "Reference",
+                    "reference",
+                }:
+                    at = node.get("at")
+                    at.set_value(0, 4 if part.ref == "C5" else -4)
+                    at.set_value(1, 0)
+                    at.set_value(2, 0)
         assignments[part.ref] = part.pins
     for i, name in enumerate(["VBUS_RAW", "GND", "VIN", "VOUT_PRE"]):
         flag = sch.add_symbol("power:PWR_FLAG", x=50.8 + i * 50.8, y=566.42, ref=f"#FLG0{i + 1}")
@@ -415,6 +495,7 @@ def generate(output: Path) -> dict:
         end = (pos[0], pos[1] + 5.08)
         sch.add_wire(pos, end)
         sch.add_label(name, *end)
+    add_critical_copper(pcb)
     sch.write(output / f"{NAME}.kicad_sch")
     pcb.save(output / f"{NAME}.kicad_pcb")
     pro = create_minimal_project(NAME)
@@ -464,7 +545,7 @@ def generate(output: Path) -> dict:
         "parts": [asdict(p) for p in components],
         "pin_nets": assignments,
         "nets": net_names,
-        "status": "placed, not routed",
+        "status": "placed with partial critical copper; routing incomplete",
         "hardware_tested": False,
         "manufacturing_ready": False,
     }

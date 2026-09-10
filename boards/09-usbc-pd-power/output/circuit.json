@@ -717,12 +717,12 @@
         "2": "GND"
       },
       "xy": [
-        54.5,
-        25
+        53,
+        29
       ],
       "mpn": "CL31B106KBHNNNE",
       "lcsc": "C89632",
-      "rotation": 0,
+      "rotation": 90,
       "assembly": "smt"
     },
     {
@@ -735,12 +735,12 @@
         "2": "GND"
       },
       "xy": [
-        55,
-        33
+        55.15,
+        29
       ],
       "mpn": "CC0603KRX7R9BB104",
       "lcsc": "C14663",
-      "rotation": 0,
+      "rotation": 90,
       "assembly": "smt"
     },
     {
@@ -825,8 +825,8 @@
         "2": "SENSE_N"
       },
       "xy": [
-        73,
-        23
+        79,
+        29
       ],
       "mpn": "CC0603KRX7R9BB104",
       "lcsc": "C14663",
@@ -1189,7 +1189,7 @@
     "VREG_1V2",
     "VREG_2V7"
   ],
-  "status": "placed, not routed",
+  "status": "placed with partial critical copper; routing incomplete",
   "hardware_tested": false,
   "manufacturing_ready": false
 }
