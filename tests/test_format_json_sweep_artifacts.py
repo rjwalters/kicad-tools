@@ -243,7 +243,10 @@ class TestBoardMetricsEmission:
         assert len(payload["boards"]) == 1
         entry = payload["boards"][0]
         assert entry["slug"] == "01-demo"
-        assert entry["status"] == "ok"
+        # An export report alone is not a current manufacturing-readiness audit.
+        assert entry["status"] == "partial"
+        assert entry["metrics"]["status"] == "partial"
+        assert entry["metrics"]["readiness"]["status"] == "unverified"
         assert entry["output_path"] is None, "--dry-run must not claim a written file"
         assert entry["metrics"]["layer_count"] == 2
         assert entry["metrics"]["board_size_mm"] == {"width": 50.0, "height": 40.0}

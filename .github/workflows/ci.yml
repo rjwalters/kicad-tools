@@ -119,6 +119,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad footprint libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         # Official one-liner instead of setup-uv: avoids action-host
         # coupling inside the container (mirrors the smoke job).
@@ -299,6 +302,9 @@ jobs:
           }
 
       - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad footprint libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
         # setup-uv should work inside the container, but installing via
@@ -609,6 +615,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad footprint libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         # Official one-liner instead of setup-uv: avoids action-host
         # coupling inside the container (mirrors the test + smoke jobs).
@@ -841,6 +850,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad footprint libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         # Official one-liner instead of setup-uv: avoids action-host
         # coupling inside the container (mirrors the test + smoke +
@@ -967,6 +979,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad footprint libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         # Official one-liner instead of setup-uv: avoids action-host
         # coupling inside the container (mirrors the test + smoke jobs).
@@ -1051,12 +1066,14 @@ jobs:
 
       - name: Assert artifacts + lvs.json + board.json fields
         # The gate-side asserter: presence of every required artifact,
-        # lvs.json clean=true, and board.json status=ok / drc_violations=0
-        # / lvs_clean=true.  Sibling of scripts/ci/check_routed_drc.py;
+        # lvs.json clean=true, and board.json drc_violations=0 / lvs_clean=true.
+        # Fresh recipe output remains readiness=unverified and status=partial;
+        # this routing gate does not manufacture a release-readiness verdict.  Sibling of scripts/ci/check_routed_drc.py;
         # see its docstring for the GitHub-Actions annotation contract.
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
+            --routing-only \
             /tmp/board00-staging/00-simple-led
 
   board-01-end-to-end:
@@ -1091,6 +1108,9 @@ jobs:
           kicad-cli --version
 
       - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad footprint libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
         run: |
@@ -1145,6 +1165,7 @@ jobs:
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
             --stem voltage_divider \
+            --routing-only \
             /tmp/board01-staging/01-voltage-divider
 
   board-02-end-to-end:
@@ -1187,6 +1208,9 @@ jobs:
           kicad-cli --version
 
       - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad footprint libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
         run: |
@@ -1241,6 +1265,7 @@ jobs:
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
             --stem charlieplex_3x3 \
+            --routing-only \
             /tmp/board02-staging/02-charlieplex-led
 
   board-03-end-to-end:
@@ -1290,6 +1315,9 @@ jobs:
           kicad-cli --version
 
       - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad footprint libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
         run: |
@@ -1437,6 +1465,9 @@ jobs:
           kicad-cli --version
 
       - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad footprint libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
         run: |
@@ -1601,6 +1632,9 @@ jobs:
           kicad-cli --version
 
       - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad footprint libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
         run: |
@@ -1808,6 +1842,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad footprint libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         run: |
           set -euo pipefail
@@ -1923,6 +1960,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad footprint libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         run: |
           set -euo pipefail
@@ -1989,8 +2029,10 @@ jobs:
           # SKIPPED the board-metrics + --lvs-only asserter steps below under
           # ``set -euo pipefail``.  Every other board e2e job already avoids any
           # git usage here; this matches that pattern.
-          cp /tmp/board04-ci/stm32_devboard_routed.kicad_pcb \
-            boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
+          # The reviewed-process validator checks matching constraints and
+          # manifest freshness as well as copper. Preserve the entire fresh
+          # bundle and its mtimes instead of mixing a new PCB with old evidence.
+          cp -a /tmp/board04-ci/. boards/04-stm32-devboard/output/
           uv run python scripts/ci/check_routed_drc.py \
             boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
 
