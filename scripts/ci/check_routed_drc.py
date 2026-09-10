@@ -92,7 +92,19 @@ def _run_paid_drill_check(pcb_path: Path) -> tuple[int, dict[str, int]]:
             timeout=180,
         )
         if proc.returncode != 0 or not report.is_file():
-            raise RuntimeError(f"Reviewed paid-drill validation failed: {proc.stderr.strip()}")
+            detail = proc.stderr.strip() or proc.stdout.strip()
+            if report.is_file():
+                try:
+                    failed = json.loads(report.read_text())
+                    detail += "\n" + json.dumps(
+                        {"summary": failed.get("summary"), "meta_checks": failed.get("meta_checks")}
+                    )
+                except (OSError, ValueError):
+                    pass
+            raise RuntimeError(
+                f"Reviewed paid-drill validation failed (exit {proc.returncode}): "
+                f"{detail.strip() or 'no report or diagnostic output'}"
+            )
         try:
             data = json.loads(report.read_text())
             if data.get("meta_checks", {}).get("overall") != "PASSED":

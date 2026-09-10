@@ -1,5 +1,5 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5044/boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
@@ -154,23 +154,6 @@
       "rule_id": "diffpair_routing_continuity",
       "type": "diffpair_routing_continuity",
       "severity": "info",
-      "message": "Engaged differential pair LVDS2_N/LVDS2_P coupled 85.1% of its length (>= 80.0% required)",
-      "location": null,
-      "layer": null,
-      "actual_value": 0.8507,
-      "required_value": 0.8,
-      "items": [],
-      "nets": [
-        "LVDS2_N",
-        "LVDS2_P"
-      ],
-      "status": "info",
-      "waived": false
-    },
-    {
-      "rule_id": "diffpair_routing_continuity",
-      "type": "diffpair_routing_continuity",
-      "severity": "info",
       "message": "Engaged differential pair LVDS4_N/LVDS4_P coupled 85.1% of its length (>= 80.0% required)",
       "location": null,
       "layer": null,
@@ -188,15 +171,15 @@
       "rule_id": "diffpair_routing_continuity",
       "type": "diffpair_routing_continuity",
       "severity": "info",
-      "message": "Engaged differential pair LVDS1_N/LVDS1_P coupled 85.1% of its length (>= 80.0% required)",
+      "message": "Engaged differential pair LVDS2_N/LVDS2_P coupled 85.1% of its length (>= 80.0% required)",
       "location": null,
       "layer": null,
       "actual_value": 0.8507,
       "required_value": 0.8,
       "items": [],
       "nets": [
-        "LVDS1_N",
-        "LVDS1_P"
+        "LVDS2_N",
+        "LVDS2_P"
       ],
       "status": "info",
       "waived": false
@@ -214,6 +197,23 @@
       "nets": [
         "LVDS3_N",
         "LVDS3_P"
+      ],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "diffpair_routing_continuity",
+      "type": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair LVDS1_N/LVDS1_P coupled 85.1% of its length (>= 80.0% required)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.8507,
+      "required_value": 0.8,
+      "items": [],
+      "nets": [
+        "LVDS1_N",
+        "LVDS1_P"
       ],
       "status": "info",
       "waived": false
@@ -245,17 +245,17 @@
     "schematic_missing": false
   },
   "routing_quality": {
-    "total_segments": 188,
+    "total_segments": 196,
     "nets_with_copper": 18,
-    "segments_per_net": 10.444444444444445,
+    "segments_per_net": 10.88888888888889,
     "zero_length_count": 0,
     "median_length_mm": 1.1999999999999886,
-    "fragment_count": 27,
-    "fragment_fraction": 0.14361702127659576,
-    "orthogonal_count": 127,
-    "diagonal_45_count": 53,
-    "off_axis_count": 8,
+    "fragment_count": 35,
+    "fragment_fraction": 0.17857142857142858,
+    "orthogonal_count": 135,
+    "diagonal_45_count": 61,
+    "off_axis_count": 0,
     "staircase_step_count": 2,
-    "staircase_fraction": 0.010638297872340425
+    "staircase_fraction": 0.01020408163265306
   }
 }

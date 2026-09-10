@@ -587,7 +587,7 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "Device:C_Small"
+		(symbol "board04_symbols:C_Small"
 			(pin_numbers (hide yes))
 			(pin_names (offset 0.254) (hide yes))
 			(exclude_from_sim no)
@@ -2640,7 +2640,7 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:C_Small")
+		(lib_id "board04_symbols:C_Small")
 		(at 64.77 100.33 0)
 		(unit 1)
 		(exclude_from_sim no)
@@ -2694,7 +2694,7 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:C_Small")
+		(lib_id "board04_symbols:C_Small")
 		(at 134.62 100.33 0)
 		(unit 1)
 		(exclude_from_sim no)
@@ -2748,7 +2748,7 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:C_Small")
+		(lib_id "board04_symbols:C_Small")
 		(at 149.86 100.33 0)
 		(unit 1)
 		(exclude_from_sim no)
@@ -2948,7 +2948,7 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:C_Small")
+		(lib_id "board04_symbols:C_Small")
 		(at 160.02 85.09 0)
 		(unit 1)
 		(exclude_from_sim no)
@@ -3002,7 +3002,7 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:C_Small")
+		(lib_id "board04_symbols:C_Small")
 		(at 167.64 85.09 0)
 		(unit 1)
 		(exclude_from_sim no)
@@ -3056,7 +3056,7 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:C_Small")
+		(lib_id "board04_symbols:C_Small")
 		(at 175.26 85.09 0)
 		(unit 1)
 		(exclude_from_sim no)
@@ -3110,7 +3110,7 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:C_Small")
+		(lib_id "board04_symbols:C_Small")
 		(at 182.88 85.09 0)
 		(unit 1)
 		(exclude_from_sim no)
@@ -3164,7 +3164,7 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:C_Small")
+		(lib_id "board04_symbols:C_Small")
 		(at 190.5 85.09 0)
 		(unit 1)
 		(exclude_from_sim no)

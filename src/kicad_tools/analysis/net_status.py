@@ -1190,8 +1190,19 @@ class NetStatusAnalyzer:
         for chain in extended_chains:
             pads_in_chain: set[str] = set()
             for s in chain:
-                pads_in_chain.update(self._find_pads_at_point(segments[s].start, pad_positions))
-                pads_in_chain.update(self._find_pads_at_point(segments[s].end, pad_positions))
+                segment = segments[s]
+                if self.strict:
+                    pads_in_chain.update(
+                        self._find_pads_touching_geom(
+                            self._segment_poly(segment),
+                            pad_positions,
+                            layer=segment.layer,
+                            pad_layers=pad_layers,
+                        )
+                    )
+                else:
+                    pads_in_chain.update(self._find_pads_at_point(segment.start, pad_positions))
+                    pads_in_chain.update(self._find_pads_at_point(segment.end, pad_positions))
             chain_pads.append(pads_in_chain)
             chain_seg_indices.append(chain)
 

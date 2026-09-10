@@ -119,6 +119,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         # Official one-liner instead of setup-uv: avoids action-host
         # coupling inside the container (mirrors the smoke job).
@@ -143,6 +146,12 @@ jobs:
         # step in the routing-regression jobs below.
         run: uv run kct build-native
 
+      - name: Run Board05 manufacturing regression
+        # The redesigned board has over 8,000 segments. Run its single full
+        # DRC report without competing xdist workers, retaining the test's
+        # 120-second subprocess cap and every manufacturing assertion.
+        run: uv run pytest tests/test_board_05_drc_allowlist.py -o addopts= --benchmark-disable --timeout=60 -m "not slow"
+
       - name: Run tests
         # Issue #3436: continue-on-error was removed from this step. It
         # made the job green regardless of pytest's exit code, hiding 162
@@ -151,7 +160,8 @@ jobs:
         # now gates: if it is red, fix the tests -- do NOT re-add
         # continue-on-error. Known-broken tests must be xfail'd with a
         # tracking issue instead.
-        run: uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow"
+        # The file above already ran in this job; all other tests use xdist.
+        run: uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow" --ignore=tests/test_board_05_drc_allowlist.py
 
   cpp-build-check:
     # Issue #2501: catch source/.so drift by rebuilding the C++ extension
@@ -300,6 +310,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         # setup-uv should work inside the container, but installing via
         # the official one-liner avoids any action-host coupling and keeps
@@ -447,13 +460,9 @@ jobs:
     # (USB-C blockers) clears.  Today board 03 is omitted because its
     # NetClassRouting declarations do not yet exercise coupled_routing.
     #
-    # Allowlist:
-    #   .github/routed-drc-tolerance.yml currently has
-    #   boards/06-diffpair-test/.../diffpair_test_routed.kicad_pcb: 28
-    #   (25x ImpedanceRule per #2672 + 3x diffpair_clearance_intra per
-    #   #2677).  The gate respects the allowlist so it doesn't fail
-    #   immediately; when #2672 + #2677 land, the allowlist should be
-    #   tightened in a separate PR.
+    # The synthetic fixture retains the final historical18-error pair-quality
+    # baseline (#4019). New physical errors fail independently; active board06
+    # remains at zero. See .github/routed-drc-tolerance.yml for provenance.
     #
     # IMPORTANT (branch-protection note): adding this job to the list of
     # *required* status checks on `main` is a separate repo-admin action.
@@ -609,6 +618,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         # Official one-liner instead of setup-uv: avoids action-host
         # coupling inside the container (mirrors the test + smoke jobs).
@@ -708,15 +720,9 @@ jobs:
     # rule degrades to a no-op and the assertion-of-engagement check
     # would fail with "rule not exercised".
     #
-    # Allowlist:
-    #   .github/routed-drc-tolerance.yml currently has
-    #   boards/07-matchgroup-test/.../matchgroup_test_routed.kicad_pcb: 80
-    #   (55x impedance per #2672 + 4x diffpair_length_skew + 4x
-    #   diffpair_routing_continuity + 1x match_group_length_skew, with
-    #   ~25% headroom over the empirical 64).  The gate respects the
-    #   allowlist so it doesn't fail immediately; the floor will tighten
-    #   iteratively as match-group tuning (Phase 3H #2723) lands and
-    #   reduces skew.
+    # The synthetic fixture retains the final historical 8-error baseline
+    # (#4007), with at most one match-group error. New physical errors fail
+    # independently; the active SDRAM release keeps zero tolerance.
     #
     # IMPORTANT (branch-protection note): adding this job to the list of
     # *required* status checks on `main` is a separate repo-admin action.
@@ -840,6 +846,9 @@ jobs:
           kicad-cli --version
 
       - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
         # Official one-liner instead of setup-uv: avoids action-host
@@ -967,6 +976,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         # Official one-liner instead of setup-uv: avoids action-host
         # coupling inside the container (mirrors the test + smoke jobs).
@@ -1051,12 +1063,14 @@ jobs:
 
       - name: Assert artifacts + lvs.json + board.json fields
         # The gate-side asserter: presence of every required artifact,
-        # lvs.json clean=true, and board.json status=ok / drc_violations=0
-        # / lvs_clean=true.  Sibling of scripts/ci/check_routed_drc.py;
+        # lvs.json clean=true, and board.json drc_violations=0 / lvs_clean=true.
+        # Fresh recipe output remains readiness=unverified and status=partial;
+        # this routing gate does not manufacture a release-readiness verdict.  Sibling of scripts/ci/check_routed_drc.py;
         # see its docstring for the GitHub-Actions annotation contract.
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
+            --routing-only \
             /tmp/board00-staging/00-simple-led
 
   board-01-end-to-end:
@@ -1091,6 +1105,9 @@ jobs:
           kicad-cli --version
 
       - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
         run: |
@@ -1145,6 +1162,7 @@ jobs:
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
             --stem voltage_divider \
+            --routing-only \
             /tmp/board01-staging/01-voltage-divider
 
   board-02-end-to-end:
@@ -1187,6 +1205,9 @@ jobs:
           kicad-cli --version
 
       - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
         run: |
@@ -1241,6 +1262,7 @@ jobs:
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
             --stem charlieplex_3x3 \
+            --routing-only \
             /tmp/board02-staging/02-charlieplex-led
 
   board-03-end-to-end:
@@ -1290,6 +1312,9 @@ jobs:
           kicad-cli --version
 
       - uses: actions/checkout@v7
+
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
         run: |
@@ -1438,6 +1463,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         run: |
           set -euo pipefail
@@ -1483,22 +1511,16 @@ jobs:
             > /tmp/board06-copper.json
           uv run python scripts/ci/check_copper_lvs.py /tmp/board06-copper.json
 
-      - name: Independent DRC re-check within allowlist (out-of-process, issue #3840)
-        # Validate the REGENERATED routed PCB's DRC out-of-process against the
-        # per-board allowlist (.github/routed-drc-tolerance.yml: 33 for board
-        # 06's diff-pair + drill residuals).  This is the SAME tolerance
-        # mechanism the routed-pcb-drc-check + matchgroup/diffpair regression
-        # jobs use, so it does NOT double-fail on the already-grandfathered
-        # errors -- it only catches a NEW DRC regression above the allowlist.
-        # check_routed_drc.py keys tolerance off the repo-relative path, so
-        # stage the fresh PCB over the committed path (throwaway CI checkout;
-        # mirrors the board-04 job).
+      - name: Independent synthetic routing gate (matching PCB and sidecars)
+        # Preserve the regenerated bundle's routing context. The active release
+        # has a different circuit and must retain its zero-error acceptance.
+        # Historical pair/group baselines never permit new physical errors.
         run: |
           set -euo pipefail
-          cp /tmp/board06-ci/diffpair_test_routed.kicad_pcb \
-            boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb
-          uv run python scripts/ci/check_routed_drc.py \
-            boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb
+          mkdir -p boards/06-diffpair-test/regression-output
+          cp -a /tmp/board06-ci/. boards/06-diffpair-test/regression-output/
+          uv run python scripts/ci/check_diffpair_coverage.py \
+            boards/06-diffpair-test --skip-route --seed 42
 
       - name: Emit board.json via kct board-metrics
         run: |
@@ -1602,6 +1624,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         run: |
           set -euo pipefail
@@ -1649,21 +1674,16 @@ jobs:
             --expect-opens "DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N" \
             /tmp/board07-copper.json
 
-      - name: Independent DRC re-check within allowlist (out-of-process, issue #3840)
-        # Validate the REGENERATED routed PCB's DRC out-of-process against the
-        # per-board allowlist (.github/routed-drc-tolerance.yml: 120 for board
-        # 07's matchgroup baseline).  This is the SAME tolerance mechanism the
-        # routed-pcb-drc-check + matchgroup regression jobs use, so it does NOT
-        # double-fail on the already-grandfathered errors -- it only catches a
-        # NEW DRC regression above the allowlist.  check_routed_drc.py keys
-        # tolerance off the repo-relative path, so stage the fresh PCB over the
-        # committed path (throwaway CI checkout; mirrors the board-04 job).
+      - name: Independent synthetic routing gate (matching PCB and sidecars)
+        # Preserve the regenerated bundle's routing context. The active release
+        # has a different circuit and must retain its zero-error acceptance.
+        # Historical pair/group baselines never permit new physical errors.
         run: |
           set -euo pipefail
-          cp /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
-            boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb
-          uv run python scripts/ci/check_routed_drc.py \
-            boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb
+          mkdir -p boards/07-matchgroup-test/regression-output
+          cp -a /tmp/board07-ci/. boards/07-matchgroup-test/regression-output/
+          uv run python scripts/ci/check_matchgroup_coverage.py \
+            boards/07-matchgroup-test --skip-route --seed 42
 
       - name: Emit board.json via kct board-metrics
         run: |
@@ -1808,6 +1828,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         run: |
           set -euo pipefail
@@ -1923,6 +1946,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Initialize stock KiCad libraries
+        run: python3 scripts/ci/init_kicad_libraries.py
+
       - name: Install uv
         run: |
           set -euo pipefail
@@ -1989,8 +2015,10 @@ jobs:
           # SKIPPED the board-metrics + --lvs-only asserter steps below under
           # ``set -euo pipefail``.  Every other board e2e job already avoids any
           # git usage here; this matches that pattern.
-          cp /tmp/board04-ci/stm32_devboard_routed.kicad_pcb \
-            boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
+          # The reviewed-process validator checks matching constraints and
+          # manifest freshness as well as copper. Preserve the entire fresh
+          # bundle and its mtimes instead of mixing a new PCB with old evidence.
+          cp -a /tmp/board04-ci/. boards/04-stm32-devboard/output/
           uv run python scripts/ci/check_routed_drc.py \
             boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb
 
