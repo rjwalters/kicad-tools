@@ -571,12 +571,23 @@ def _reject_lost_route_only_bindings(args, nets_to_route: int) -> int | None:
     letting the caller fall through to a "SUCCESS: All signal nets
     routed! (0/0)" banner.
 
+    This is NOT triggered when every requested net was already reported
+    by preflight (:func:`_resolve_route_only_nets`) as having fewer than
+    2 pads -- that is the legitimate, warned "nothing to route" outcome
+    (e.g. a scripted single-pad ``--nets`` debug request), not a lost
+    binding.
+
     Returns a non-zero exit code to return immediately, or ``None`` when
     the denominator is trustworthy (including when ``--nets`` was not
     used at all).
     """
     requested = getattr(args, "_route_only_nets", None)
     if not requested or nets_to_route != 0:
+        return None
+    under_two = getattr(args, "_route_only_nets_under_two", None) or set()
+    if set(requested) <= under_two:
+        # Preflight already warned every requested net has <2 pads -- a
+        # zero routable count is expected here, not a loader bug.
         return None
     print(
         "Error: --nets requested "
@@ -11368,6 +11379,11 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
     # Marker: route-only mode.  The (large) inverted skip set must NOT be
     # forwarded as force_pour_nets (that would try to pour ~every net).
     args._route_only_nets = requested_unique
+    # Remember which requested nets preflight already warned have <2 pads,
+    # so _reject_lost_route_only_bindings can tell "every requested net was
+    # already known to be unroutable" apart from "the loader lost a binding
+    # preflight confirmed was routable" (issue #4983 follow-up).
+    args._route_only_nets_under_two = set(under_two)
 
     # Issue #4355: --nets promises (per --help) that every OTHER board net is a
     # "fixed obstacle" -- its copper must be RETAINED in the output AND honored

@@ -76,6 +76,23 @@ _NUMERIC_FIXTURE = """\
 (gr_rect (start 0 0) (end 30 20) (stroke (width .05) (type solid)) (fill none) (layer "Edge.Cuts") (uuid "439c88ec-f215-4ad2-bff5-bc09ae692c4a")))
 """
 
+# 3-pad/2-net board (SIGNAL: 2 pads, LONELY: 1 pad) -- the exact shape of
+# the Judge's PR #5121 repro for the single-pad ``--nets`` regression.
+_SINGLE_PAD_NET_FIXTURE = """\
+(kicad_pcb (version 20260206) (generator "pcbnew")
+(general (thickness 1.6)) (paper "A4")
+(layers (0 "F.Cu" signal) (2 "B.Cu" signal) (5 "F.SilkS" user "F.Silkscreen") (1 "F.Mask" user) (3 "B.Mask" user) (13 "F.Paste" user) (25 "Edge.Cuts" user))
+ (footprint "Test:Pad" (layer "F.Cu") (uuid "5ed2da21-2c5b-4dc0-92f1-d541550cca3c") (at 10 10)
+(property "Reference" "J1" (at 0 -2) (layer "F.SilkS") (effects (font (size 1 1) (thickness .15))))
+(attr smd) (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net "SIGNAL") (uuid "aa25d89c-8530-4928-9336-1ce04555242d")))(footprint "Test:Pad" (layer "F.Cu") (uuid "c71740f5-8a42-4d3f-a6d4-92591d06b536") (at 20 10)
+(property "Reference" "J2" (at 0 -2) (layer "F.SilkS") (effects (font (size 1 1) (thickness .15))))
+(attr smd) (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net "SIGNAL") (uuid "7271acd3-564c-461a-9ba2-473f671e3596")))
+(footprint "Test:Pad" (layer "F.Cu") (uuid "d8e2f3a1-9a51-4d3f-a6d4-92591d06b537") (at 15 15)
+(property "Reference" "J3" (at 0 -2) (layer "F.SilkS") (effects (font (size 1 1) (thickness .15))))
+(attr smd) (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask") (net "LONELY") (uuid "e9f3a4b2-1a62-4d3f-a6d4-92591d06b538")))
+(gr_rect (start 0 0) (end 30 20) (stroke (width .05) (type solid)) (fill none) (layer "Edge.Cuts") (uuid "439c88ec-f215-4ad2-bff5-bc09ae692c4a")))
+"""
+
 
 # ---------------------------------------------------------------------------
 # 1. Unit tests for the shared dialect-normalization helper.
@@ -324,6 +341,27 @@ class TestRouteCliNameOnlyDialect:
         assert not out_path.exists()
 
 
+class TestRouteCliSinglePadOnlyNetsRequest:
+    """Issue #5121 Judge follow-up: a --nets request naming ONLY single-pad
+    net(s) is a pre-existing, intentionally-supported workflow (e.g.
+    scripted per-net debug/escape routing over test-point nets) -- it must
+    exit 0 with a graceful warning, not be treated as a #4983-style lost
+    binding."""
+
+    def test_single_pad_only_nets_request_succeeds_gracefully(self, tmp_path: Path, capsys):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(_SINGLE_PAD_NET_FIXTURE)
+        out_path = tmp_path / "out.kicad_pcb"
+
+        rc = route_main(_route_argv(pcb_path, out_path, nets="LONELY"))
+
+        err = capsys.readouterr().err
+        assert "fewer than 2 pads" in err
+        assert "loader bug" not in err
+        assert rc == 0
+        assert out_path.exists()
+
+
 # ---------------------------------------------------------------------------
 # 6. Defense-in-depth: the "fail loudly on lost bindings" guard itself.
 # ---------------------------------------------------------------------------
@@ -347,3 +385,34 @@ class TestRejectLostRouteOnlyBindings:
         err = capsys.readouterr().err
         assert "SIGNAL" in err
         assert "0 routable net" in err
+
+    def test_zero_denominator_when_all_requested_nets_are_sub_two_pad_is_not_a_bug(self):
+        """Issue #5121 Judge follow-up: --nets naming ONLY single-pad net(s)
+        is a legitimate, preflight-warned outcome (see
+        ``_resolve_route_only_nets``'s ``under_two`` reporting), not a lost
+        binding -- must not be flagged."""
+        args = type(
+            "Args",
+            (),
+            {
+                "_route_only_nets": ["LONELY"],
+                "_route_only_nets_under_two": {"LONELY"},
+            },
+        )()
+        assert _reject_lost_route_only_bindings(args, 0) is None
+
+    def test_zero_denominator_with_mixed_sub_two_and_routable_nets_still_fails_loudly(self):
+        """A genuine lost binding must still be caught even when SOME of the
+        requested nets are sub-two-pad -- only an ALL-sub-two request is
+        exempt."""
+        args = type(
+            "Args",
+            (),
+            {
+                "_route_only_nets": ["LONELY", "SIGNAL"],
+                "_route_only_nets_under_two": {"LONELY"},
+            },
+        )()
+        rc = _reject_lost_route_only_bindings(args, 0)
+        assert rc is not None
+        assert rc != 0
