@@ -22,4 +22,4 @@ requirements:
       preferred: 4
 decisions: []
 progress:
-  phase: layout
+  phase: review
