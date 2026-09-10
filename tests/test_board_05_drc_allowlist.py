@@ -52,8 +52,8 @@ import yaml
 
 from kicad_tools.validate.checker import DRCChecker
 
-# Issue #4160: CI runs the suite with `-n auto --timeout=60`. This DRC
-# subprocess test averages ~19s unloaded but comfortably exceeds 60s under
+# Issue #4160: CI runs the suite with `-n auto --timeout=60`. The current DRC
+# subprocess takes about 50s unloaded and can exceed 60s under
 # full-suite xdist CPU contention (concurrent routing-regression jobs share
 # the runner pool). The timeout marker overrides the CLI default with a
 # contention-tolerant budget; it does NOT slow the happy path. 180 stays
@@ -119,8 +119,8 @@ def board_05_allowlist_value() -> int:
     return 0 if actual is None else actual
 
 
-def _run_kct_check(pcb_path: Path) -> int:
-    """Run ``kct check`` on *pcb_path* and return the *blocking* error count.
+def _run_kct_check(pcb_path: Path) -> dict:
+    """Run ``kct check`` on *pcb_path* and return its complete JSON report.
 
     Mirrors ``scripts/ci/check_routed_drc.py::_count_blocking_errors`` --
     uses ``--mfr jlcpcb-tier1 --errors-only --format json`` to get a
@@ -180,6 +180,10 @@ def _run_kct_check(pcb_path: Path) -> int:
             f"stdout (first 500 chars):\n{proc.stdout[:500]}"
         ) from e
 
+    return data
+
+
+def _count_blocking_errors(data: dict) -> int:
     # Filter advisory rules (e.g. ``connectivity``) out of the count so
     # the test's comparison matches the CI gate's verdict.  Prefer the
     # per-violation ``violations`` list (richer payload) and fall back to
@@ -205,7 +209,7 @@ def _run_kct_check(pcb_path: Path) -> int:
     if not isinstance(errors, int):
         raise RuntimeError(
             f"kct check JSON missing both violations array and summary.errors "
-            f"field for {pcb_path}: keys={list(summary)!r}"
+            f"field: keys={list(summary)!r}"
         )
     return errors
 
@@ -246,7 +250,19 @@ class TestBoard05DRCAllowlistGuard:
         regenerate and re-check, OR update the allowlist value with
         reviewer sign-off if the new floor is the new reality.
         """
-        errors = _run_kct_check(routed_pcb_path)
+        from tests.test_board_05_drc_hotspot_regression import Board05DRCHotspotAssertions
+
+        report = _run_kct_check(routed_pcb_path)
+        errors = _count_blocking_errors(report)
+        # Check the same real-board result once, including every former
+        # hotspot guard. Separate subprocesses repeated this 8,114-segment
+        # check five times and competed for CPU under xdist.
+        violations = report.get("violations", [])
+        hotspot = Board05DRCHotspotAssertions()
+        hotspot.assert_pad_segment_count_at_or_below_documented_floor(violations)
+        hotspot.assert_pad_segment_violations_at_known_hotspots_only(violations)
+        hotspot.assert_pad_segment_shortfalls_within_documented_band(violations)
+        hotspot.assert_committed_pcb_absent_rule_families(violations)
         assert errors <= board_05_allowlist_value, (
             f"Board 05 routed PCB reports {errors} blocking DRC error(s) "
             f"under JLCPCB rules (excluding advisory rules per "
