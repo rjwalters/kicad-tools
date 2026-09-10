@@ -530,7 +530,7 @@
 			)
 		)
 	)
-	(footprint "D_SMA"
+	(footprint "Diode_SMD:D_SMA"
 		(layer "F.Cu")
 		(uuid "1d10b337-3b06-40e0-8523-57bafc3b5d75")
 		(at 136.5 68)
@@ -4386,7 +4386,7 @@
 			)
 		)
 	)
-	(footprint "D_SMB"
+	(footprint "Diode_SMD:D_SMB"
 		(layer "F.Cu")
 		(uuid "86a3c063-8588-493b-abf0-8dacccf32cb7")
 		(at 145.5 68)
