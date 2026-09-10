@@ -754,3 +754,38 @@ class TestDefaultNetStatusGenuineOpens:
             f"improvement on the committed artifact means the connectivity "
             f"model started over-connecting; more means a regression."
         )
+
+
+def test_relocates_signal_and_stitch_pad_edge_drills(generate_design_mod, tmp_path):
+    """Retain the archived witness; repair the seven observed CI overlaps in a copy."""
+    import shutil
+
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    source = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+    original = source.read_bytes()
+    candidate = tmp_path / source.name
+    shutil.copy2(source, candidate)
+    pcb = PCB.load(candidate)
+    # CI stitching selected these alternate +1V8 sites. Together with the
+    # archived signal escapes, they reproduce all seven reported pad cuts.
+    for uid, xy in [
+        ("0de3e62a-2521-486b-a847-963011236afa", (85.19, 56.27)),
+        ("91bd6227-0458-43fc-9f1b-5cec0fbfdb8c", (83.73, 56.47)),
+    ]:
+        via = next(v for v in pcb.vias if v.uuid == uid)
+        assert pcb.relocate_via(via, xy)
+    pcb.save(candidate)
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    assert len(ViaInPadRule().check(pcb, rules).violations) == 7
+    assert generate_design_mod._relocate_pad_drills(candidate) == 7
+    after = PCB.load(candidate)
+    assert not ViaInPadRule().check(after, rules).violations
+    assert len(after.vias) == len(pcb.vias)
+    assert [(v.uuid, v.net_number, v.size, v.drill) for v in after.vias] == [
+        (v.uuid, v.net_number, v.size, v.drill) for v in pcb.vias
+    ]
+    assert generate_design_mod._relocate_pad_drills(candidate) == 0
+    assert source.read_bytes() == original
