@@ -25,6 +25,7 @@ from kicad_tools.core.geometry import (
 )
 from kicad_tools.core.layers import via_spans_layer as _via_spans_layer
 
+from ..spatial import candidate_pairs
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
 
@@ -132,6 +133,31 @@ class CopperElement:
             net_name=via.net_name if via.net_number != 0 else "",
             explicit_layers=tuple(via.layers),
         )
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        """Enclose both analytic and polygon shapes used by exact predicates."""
+        if self.element_type == "segment":
+            x1, y1, x2, y2, width = self.geometry
+            radius = width / 2
+            return (
+                min(x1, x2) - radius,
+                min(y1, y2) - radius,
+                max(x1, x2) + radius,
+                max(y1, y2) + radius,
+            )
+        x, y, width, height = self.geometry
+        if self.polygon is None or abs(width - height) < 0.001:
+            width = height = max(width, height)
+        bounds = (x - width / 2, y - height / 2, x + width / 2, y + height / 2)
+        if self.polygon is not None and not self.polygon.is_empty:
+            px1, py1, px2, py2 = self.polygon.bounds
+            bounds = (
+                min(bounds[0], px1),
+                min(bounds[1], py1),
+                max(bounds[2], px2),
+                max(bounds[3], py2),
+            )
+        return bounds
 
     def on_layer(self, layer: str) -> bool:
         """Check if this element is on the specified layer."""
@@ -955,86 +981,87 @@ class ClearanceRule(DRCRule):
         # Collect all copper elements on this layer
         elements = self._collect_elements(pcb, layer_name)
 
-        # Check all pairs (O(n²) - acceptable for typical board sizes)
-        for i, elem1 in enumerate(elements):
-            for elem2 in elements[i + 1 :]:
-                # Skip if same net (same net elements can touch)
-                if elem1.net_number == elem2.net_number:
-                    continue
+        # Broad phase only: all reporting and exact predicates remain below.
+        bounds = [element.bounds() for element in elements]
+        for i, j in candidate_pairs(bounds, max(0.0, min_clearance) + DRC_TOLERANCE):
+            elem1, elem2 = elements[i], elements[j]
+            # Skip if same net (same net elements can touch)
+            if elem1.net_number == elem2.net_number:
+                continue
 
-                # Skip net 0 (unconnected) elements
-                if elem1.net_number == 0 or elem2.net_number == 0:
-                    continue
+            # Skip net 0 (unconnected) elements
+            if elem1.net_number == 0 or elem2.net_number == 0:
+                continue
 
-                # Vias are collected on every copper layer their barrel
-                # spans (issue #3487) so SEGMENT-via conflicts on inner
-                # layers are caught.  Pairs of layer-spanning elements
-                # (via-via, pad-via) have layer-independent geometry and
-                # are already evaluated on the via's explicitly-declared
-                # endpoint layers -- re-running them on each spanned
-                # inner layer would only duplicate the same report, so
-                # restrict non-segment pairs to declared layers.
-                if elem1.element_type != "segment" and elem2.element_type != "segment":
-                    if (
-                        elem1.element_type == "via"
-                        and elem1.explicit_layers
-                        and layer_name not in elem1.explicit_layers
-                    ) or (
-                        elem2.element_type == "via"
-                        and elem2.explicit_layers
-                        and layer_name not in elem2.explicit_layers
-                    ):
-                        continue
-
-                # Skip same-pair segment-to-segment edges -- they are
-                # validated by DiffPairClearanceIntraRule against a
-                # tighter per-class threshold.  Pad/via combinations
-                # remain in scope here (issue #2560 scopes the new
-                # rule to segments only).
+            # Vias are collected on every copper layer their barrel
+            # spans (issue #3487) so SEGMENT-via conflicts on inner
+            # layers are caught.  Pairs of layer-spanning elements
+            # (via-via, pad-via) have layer-independent geometry and
+            # are already evaluated on the via's explicitly-declared
+            # endpoint layers -- re-running them on each spanned
+            # inner layer would only duplicate the same report, so
+            # restrict non-segment pairs to declared layers.
+            if elem1.element_type != "segment" and elem2.element_type != "segment":
                 if (
-                    elem1.element_type == "segment"
-                    and elem2.element_type == "segment"
-                    and diff_pair_set
+                    elem1.element_type == "via"
+                    and elem1.explicit_layers
+                    and layer_name not in elem1.explicit_layers
+                ) or (
+                    elem2.element_type == "via"
+                    and elem2.explicit_layers
+                    and layer_name not in elem2.explicit_layers
                 ):
-                    key = (
-                        (elem1.net_number, elem2.net_number)
-                        if elem1.net_number <= elem2.net_number
-                        else (elem2.net_number, elem1.net_number)
-                    )
-                    if key in diff_pair_set:
-                        continue
+                    continue
 
-                # Skip segment/via pairs where the segment endpoint
-                # coincides with the via center.  The router's in-pad
-                # escape places segment endpoints exactly at via centers
-                # (router invariant); when a neighboring net's escape
-                # segment terminates at the same coordinates as a
-                # cross-net in-pad via, the geometric distance is zero
-                # and the rule reports a spurious "negative clearance"
-                # violation at the via center.  The Via schema has no
-                # ``in_pad`` flag (dropped at serialization), so the
-                # detection is geometric.  See Issue #2706 and the
-                # ``_COLOCATION_EPSILON_MM`` constant above.
-                if {elem1.element_type, elem2.element_type} == {"segment", "via"}:
-                    seg = elem1 if elem1.element_type == "segment" else elem2
-                    via = elem2 if elem1.element_type == "segment" else elem1
-                    sx1, sy1, sx2, sy2, _ = seg.geometry
-                    vx, vy, _, _ = via.geometry
-                    if (
-                        math.hypot(sx1 - vx, sy1 - vy) < _COLOCATION_EPSILON_MM
-                        or math.hypot(sx2 - vx, sy2 - vy) < _COLOCATION_EPSILON_MM
-                    ):
-                        continue
+            # Skip same-pair segment-to-segment edges -- they are
+            # validated by DiffPairClearanceIntraRule against a
+            # tighter per-class threshold.  Pad/via combinations
+            # remain in scope here (issue #2560 scopes the new
+            # rule to segments only).
+            if (
+                elem1.element_type == "segment"
+                and elem2.element_type == "segment"
+                and diff_pair_set
+            ):
+                key = (
+                    (elem1.net_number, elem2.net_number)
+                    if elem1.net_number <= elem2.net_number
+                    else (elem2.net_number, elem1.net_number)
+                )
+                if key in diff_pair_set:
+                    continue
 
-                # Calculate clearance
-                clearance, loc_x, loc_y = _calculate_clearance(elem1, elem2)
+            # Skip segment/via pairs where the segment endpoint
+            # coincides with the via center.  The router's in-pad
+            # escape places segment endpoints exactly at via centers
+            # (router invariant); when a neighboring net's escape
+            # segment terminates at the same coordinates as a
+            # cross-net in-pad via, the geometric distance is zero
+            # and the rule reports a spurious "negative clearance"
+            # violation at the via center.  The Via schema has no
+            # ``in_pad`` flag (dropped at serialization), so the
+            # detection is geometric.  See Issue #2706 and the
+            # ``_COLOCATION_EPSILON_MM`` constant above.
+            if {elem1.element_type, elem2.element_type} == {"segment", "via"}:
+                seg = elem1 if elem1.element_type == "segment" else elem2
+                via = elem2 if elem1.element_type == "segment" else elem1
+                sx1, sy1, sx2, sy2, _ = seg.geometry
+                vx, vy, _, _ = via.geometry
+                if (
+                    math.hypot(sx1 - vx, sy1 - vy) < _COLOCATION_EPSILON_MM
+                    or math.hypot(sx2 - vx, sy2 - vy) < _COLOCATION_EPSILON_MM
+                ):
+                    continue
 
-                # Check against minimum
-                if clearance + DRC_TOLERANCE < min_clearance:
-                    violation = self._create_violation(
-                        elem1, elem2, clearance, min_clearance, layer_name, loc_x, loc_y
-                    )
-                    violations.append(violation)
+            # Calculate clearance
+            clearance, loc_x, loc_y = _calculate_clearance(elem1, elem2)
+
+            # Check against minimum
+            if clearance + DRC_TOLERANCE < min_clearance:
+                violation = self._create_violation(
+                    elem1, elem2, clearance, min_clearance, layer_name, loc_x, loc_y
+                )
+                violations.append(violation)
 
         return violations
 
