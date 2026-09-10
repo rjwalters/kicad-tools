@@ -768,6 +768,44 @@ jobs:
             "${{ matrix.board }}" \
             --seed 42
 
+      - name: Collect failed routing bundle (diagnostic reproduction, #5067)
+        # Runs ONLY when the re-route/check step above failed.  The board's
+        # re-route output lives in a git-ignored `regression-output/`
+        # directory (see scripts/ci/board_recipe_artifacts.py
+        # recipe_output_dir) that is otherwise discarded when the job ends
+        # -- the motivating incident (#5044 / PR #5045) needed a full
+        # ~30-minute re-route to diagnose a Board07 failure because CI
+        # artifacts were unavailable (run 34524705221: total_count 0).
+        # `if: failure()` (not `always()`) is deliberate: this is a hard
+        # gate, not a warn-only job, so uploading on every green run is
+        # needless churn -- see nightly-ship-ready.yml for the `always()`
+        # counterpart pattern this mirrors for a warn-only job.
+        if: failure()
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/failed-bundle \
+            --source "regression-output=${{ matrix.board }}/regression-output" \
+            --job diffpair-routing-regression \
+            --board "${{ matrix.board }}" \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "python ${{ matrix.board }}/generate_design.py ${{ matrix.board }}/regression-output --step route --seed 42" \
+            --python-version "$(uv run python3 --version)" \
+            --kicad-version "$(kicad-cli --version)"
+
+      - name: Upload failed routing bundle (diagnostic reproduction, #5067)
+        # Bounded, explicit: only the staging dir this job's collection
+        # step just populated (never repo-root, `.venv`, or `.git`).  The
+        # name distinguishes board + job + commit + run so the four jobs'
+        # bundles never collide within one workflow run's Artifacts tab.
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board06-diffpair-routing-regression-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/failed-bundle/
+          retention-days: 14
+
   matchgroup-routing-regression:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
@@ -992,6 +1030,31 @@ jobs:
           uv run python scripts/ci/check_matchgroup_coverage.py \
             "${{ matrix.board }}" \
             --seed 42
+
+      - name: Collect failed routing bundle (diagnostic reproduction, #5067)
+        # Sibling of the diffpair-routing-regression collection step; see
+        # its comment for the #5044/#5045 rationale.
+        if: failure()
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/failed-bundle \
+            --source "regression-output=${{ matrix.board }}/regression-output" \
+            --job matchgroup-routing-regression \
+            --board "${{ matrix.board }}" \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "python ${{ matrix.board }}/generate_design.py ${{ matrix.board }}/regression-output --step route --seed 42" \
+            --python-version "$(uv run python3 --version)" \
+            --kicad-version "$(kicad-cli --version)"
+
+      - name: Upload failed routing bundle (diagnostic reproduction, #5067)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board07-matchgroup-routing-regression-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/failed-bundle/
+          retention-days: 14
 
   board-00-end-to-end:
     # Issue #3751: regenerate board 00 ("simple-led", the canonical
@@ -1673,6 +1736,38 @@ jobs:
             --lvs-only \
             /tmp/board06-staging/06-diffpair-test
 
+      - name: Collect failed routing bundle (diagnostic reproduction, #5067)
+        # Sibling of the diffpair-routing-regression collection step (see
+        # its comment for the #5044/#5045 rationale). Collects the
+        # regenerated schematic+PCB+lvs.json tree, the out-of-process
+        # copper-LVS re-check, and board.json -- but NOT the
+        # /tmp/board06-staging tree wholesale, since it is mostly a copy of
+        # board06-ci (board.json is the only addition), keeping the bundle
+        # bounded.
+        if: failure()
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/failed-bundle \
+            --source "board06-ci=/tmp/board06-ci" \
+            --source "board06-copper.json=/tmp/board06-copper.json" \
+            --source "board.json=/tmp/board06-staging/06-diffpair-test/output/board.json" \
+            --job board-06-end-to-end \
+            --board boards/06-diffpair-test \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "python boards/06-diffpair-test/generate_design.py /tmp/board06-ci --step all --seed 42" \
+            --python-version "$(uv run python3 --version)" \
+            --kicad-version "$(kicad-cli --version)"
+
+      - name: Upload failed routing bundle (diagnostic reproduction, #5067)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board06-end-to-end-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/failed-bundle/
+          retention-days: 14
+
   board-07-end-to-end:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
@@ -1845,6 +1940,34 @@ jobs:
             --stem matchgroup_test \
             --lvs-known-opens "DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N" \
             /tmp/board07-staging/07-matchgroup-test
+
+      - name: Collect failed routing bundle (diagnostic reproduction, #5067)
+        # Sibling of board-06-end-to-end's collection step; see its comment
+        # for the #5044/#5045 rationale and why /tmp/board07-staging is not
+        # collected wholesale.
+        if: failure()
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/failed-bundle \
+            --source "board07-ci=/tmp/board07-ci" \
+            --source "board07-copper.json=/tmp/board07-copper.json" \
+            --source "board.json=/tmp/board07-staging/07-matchgroup-test/output/board.json" \
+            --job board-07-end-to-end \
+            --board boards/07-matchgroup-test \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "python boards/07-matchgroup-test/generate_design.py /tmp/board07-ci --step all --seed 42" \
+            --python-version "$(uv run python3 --version)" \
+            --kicad-version "$(kicad-cli --version)"
+
+      - name: Upload failed routing bundle (diagnostic reproduction, #5067)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board07-end-to-end-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/failed-bundle/
+          retention-days: 14
 
   board-05-routing-regression:
     # Issue #3822: blocking-net baseline gate for board 05 ("bldc-motor-
