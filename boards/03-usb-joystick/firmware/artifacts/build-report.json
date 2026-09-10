@@ -10,11 +10,12 @@
   "usb_pid": "0x27DC",
   "test_identity": false,
   "manufacturing_identity_review": "shared joystick identity with domain-prefixed serial",
-  "flash_image_bytes": 7104,
+  "flash_image_bytes": 7158,
   "device_descriptor_hex": "1201000200000040c016dc27000101020301",
+  "usb_suspend_resume_clock_patch": "applied (see patches/apply_usbcore_patch.py)",
   "sha256": {
-    "firmware.hex": "7637638b3d85d90a861eaa629a6ae5b23098e8e5c3b62c6ca0494232a6f517ac",
-    "firmware.elf": "2a9de8ac92d1564020ee68e5f3bdd4efe2bf35e1f04a834b43a1dd04956ca4a6",
-    "firmware.bin": "477e4b8c07890e584a39c5207f8eb0d3ef1e9e1e9b94e55c8de3f995f61c0c3d"
+    "firmware.hex": "4303534bb38551dfc79e6f67f93cddb06b930943cfe2ff5913c08f0812bbf70b",
+    "firmware.elf": "e168602b524909fd660c5a0aa5740ab92d2f8daa20f2df5cb1d529fb40f41ced",
+    "firmware.bin": "5fb2047b391b0f83bfb0d46ab3d9e79ec87870164addddce3dc91ff422a2e0b3"
   }
 }
