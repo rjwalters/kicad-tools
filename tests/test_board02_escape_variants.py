@@ -19,7 +19,7 @@ REPAIR = runpy.run_path(
         ("VCC", (140.665, 117.3), (139.2, 115.5)),
         ("VCC", (140.665, 117.2), (139.2, 115.5)),
         ("RESET", (141.1, 118.1), (140.9, 118.5)),
-        ("RESET", (141.4, 117.7), (140.9, 118.5)),
+        ("RESET", (141.3, 118.3), (140.9, 118.5)),
     ],
 )
 def test_escape_variant_moves_via_and_both_layers_only_on_its_net(named_nets, name, old, new):
@@ -58,3 +58,23 @@ def test_quantized_waypoint_without_escape_via_is_not_relocated():
     before = serialize_sexp(doc)
     REPAIR(doc)
     assert serialize_sexp(doc) == before
+
+
+def test_ci_reset_position_uses_actual_board_origin():
+    """Translate the reported normalized finding before selecting its escape."""
+    from kicad_tools.schema.pcb import PCB
+
+    board = (
+        Path(__file__).resolve().parents[1]
+        / "boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb"
+    )
+    origin = PCB.load(board).board_origin
+    assert origin == (123.5, 77.5)
+    reported = (17.8, 40.8)
+    raw = tuple(round(a + b, 3) for a, b in zip(origin, reported, strict=True))
+    assert raw == (141.3, 118.3)
+    doc = parse_string(f"""(kicad_pcb
+      (via (at {raw[0]} {raw[1]}) (net "RESET")))""")
+    REPAIR(doc)
+    at = doc.find_all("via")[0].find("at")
+    assert (at.get_float(0), at.get_float(1)) == (140.9, 118.5)
