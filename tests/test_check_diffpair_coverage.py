@@ -215,7 +215,7 @@ class TestCheckZeroViolations:
         """The board-06 entry must exist with the measured 18-error count
         and be a non-negative int (loud, explicit, tracked)."""
         mod = _load_helper_module()
-        key = "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb"
+        key = "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb"
         assert key in mod.DIFFPAIR_VIOLATION_BASELINE
         assert mod.DIFFPAIR_VIOLATION_BASELINE[key] == 18
 
