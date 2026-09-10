@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate board09's real circuit and placed four-layer PCB; no release claim.
+"""Generate board09's real circuit and routed four-layer PCB; no release claim.
 
 Run with uv run python boards/09-usbc-pd-power/generate_design.py [OUTPUT].
-Critical power routing and manufacturing release are separate checked stages.
+Native zone refill, verification and manufacturing release are separate stages.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from kicad_tools.router.rules import NetClassRouting, net_class_map_to_dict
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schematic.models.schematic import Schematic
 from kicad_tools.sexp import SExp
+from kicad_tools.sexp.builders import zone_node
 
 ROOT = Path(__file__).resolve().parent
 NAME = "usbc_pd_power"
@@ -438,9 +440,9 @@ def add_critical_copper(pcb: PCB) -> None:
         pcb.add_trace(endpoint, via, width=0.25, net="+5V_OUT")
         pcb.add_via(*via, net="+5V_OUT")
         pcb.add_trace(via, (81.5, 20.5), width=0.25, layer="B.Cu", net="+5V_OUT")
-    pcb.add_trace(("U3", "8"), (77.5, 32.35), width=0.15, net="+5V_OUT", waypoints=[(77.5, 32)])
-    pcb.add_via(77.5, 32.35, net="+5V_OUT")
-    pcb.add_trace((77.5, 32.35), (73, 20.5), width=0.25, layer="B.Cu", net="+5V_OUT")
+    pcb.add_trace(("U3", "8"), (78.6, 32.1), width=0.15, net="+5V_OUT", waypoints=[(78.6, 32)])
+    pcb.add_via(78.6, 32.1, net="+5V_OUT")
+    pcb.add_trace((78.6, 32.1), (73, 20.5), width=0.25, layer="B.Cu", net="+5V_OUT")
     pcb.add_trace(("R16", "2"), ("D2", "2"), width=0.25, net="LED_A")
     # Fused input and switched VIN use the SOIC's parallel force terminals.
     for ref in ("Q1", "Q2"):
@@ -476,13 +478,14 @@ def add_critical_copper(pcb: PCB) -> None:
             waypoints=None if endpoint[0] == "R5" else [(23.5, 35.5), (39.8, 35.5)],
         )
     for ref in ("Q1", "Q2"):
-        pcb.add_trace((ref, "1"), (ref, "3"), width=1.2, net="PMOS_SOURCE")
+        pcb.add_trace((ref, "1"), (ref, "2"), width=1.2, net="PMOS_SOURCE")
+        pcb.add_trace((ref, "2"), (ref, "3"), width=1.2, net="PMOS_SOURCE")
     pcb.add_trace(
         ("Q1", "3"),
         ("Q2", "1"),
         width=1.2,
         net="PMOS_SOURCE",
-        waypoints=[(29.5, 18.635), (29.5, 22), (46.475, 22)],
+        waypoints=[(29.5, 18.635), (29.5, 22), (34, 22), (46.475, 22)],
     )
     pcb.add_trace((34, 22), ("R1", "1"), width=0.25, net="PMOS_SOURCE", waypoints=[(32.175, 25)])
     pcb.add_trace(
@@ -551,6 +554,321 @@ def add_critical_copper(pcb: PCB) -> None:
     pcb.add_trace(
         ("C11", "2"), ("U3", "9"), width=0.25, net="SENSE_N", waypoints=[(80.5, 29), (80.5, 31.5)]
     )
+
+
+def add_support_connections(pcb: PCB) -> None:
+    """Local low-voltage supply distribution; host bus routing follows."""
+    pcb.add_trace(
+        ("U4", "1"),
+        ("C14", "1"),
+        width=0.4,
+        net="+3V3",
+        waypoints=[(15.0625, 41.5), (19.225, 41.5)],
+    )
+    pcb.add_trace(
+        ("C14", "1"),
+        (35.175, 49),
+        width=0.4,
+        net="+3V3",
+        waypoints=[(19.225, 49), (22.3, 49), (29.175, 49)],
+    )
+    for top, bottom in [("R12", "R13"), ("R14", "R15")]:
+        pcb.add_trace((top, "1"), (bottom, "1"), width=0.25, net="+3V3")
+        x, y = pcb.get_pad_position(bottom, "1")
+        pcb.add_trace((bottom, "1"), (x, 49), width=0.25, net="+3V3")
+    pcb.add_trace(("R17", "1"), (22.3, 49), width=0.25, net="+3V3", waypoints=[(22.3, 35)])
+    pcb.add_trace(
+        ("R17", "1"),
+        ("R18", "1"),
+        width=0.25,
+        net="+3V3",
+        waypoints=[(22.3, 35), (22.3, 33), (29.175, 33)],
+    )
+    pcb.add_trace((35.175, 49), ("C12", "1"), width=0.4, net="+3V3", waypoints=[(78.225, 49)])
+    pcb.add_trace(
+        ("U3", "6"), ("C12", "1"), width=0.25, net="+3V3", waypoints=[(76.1, 34.5), (77.725, 34.5)]
+    )
+    pcb.add_trace((78.225, 49), ("J3", "4"), width=0.4, net="+3V3", waypoints=[(84.5, 49)])
+    # Separate USB VBUS necks join on B.Cu; duplicated USB pads share lands.
+    for pin, x in [("A9", 7.55), ("A4", 12.45)]:
+        pcb.add_trace(("J1", pin), (x, 13.4), width=0.4, net="VBUS_RAW")
+        for y in (12.6, 13.4):
+            pcb.add_via(x, y, net="VBUS_RAW")
+        pcb.add_trace((x, 12.6), (x, 13.4), width=1.2, layer="B.Cu", net="VBUS_RAW")
+    pcb.add_trace((7.55, 13.4), (12.45, 13.4), width=1.2, layer="B.Cu", net="VBUS_RAW")
+    pcb.add_trace(
+        (12.45, 13.4),
+        (22.125, 11.8),
+        width=1.2,
+        layer="B.Cu",
+        net="VBUS_RAW",
+        waypoints=[(20.525, 13.4)],
+    )
+    for x in (22.125, 22.925):
+        pcb.add_via(x, 11.8, net="VBUS_RAW")
+        pcb.add_trace((x, 11.8), (x, 10), width=0.6, net="VBUS_RAW")
+    pcb.add_trace((22.125, 11.8), (22.925, 11.8), width=1.2, layer="B.Cu", net="VBUS_RAW")
+    for endpoint, via, target in [
+        (("C1", "1"), (13.3, 18), (12.45, 13.4)),
+        (("R3", "1"), (22.6, 22), (22.125, 11.8)),
+    ]:
+        pcb.add_trace(endpoint, via, width=0.25, net="VBUS_RAW")
+        pcb.add_via(*via, net="VBUS_RAW")
+        pcb.add_trace(via, target, width=0.4, layer="B.Cu", net="VBUS_RAW")
+    pcb.add_trace(
+        ("C1", "1"), ("U1", "24"), width=0.25, net="VBUS_RAW", waypoints=[(16.75, 20.525)]
+    )
+    pcb.add_trace(
+        (7.55, 13.4),
+        (10.225, 44.6),
+        width=0.4,
+        layer="B.Cu",
+        net="VBUS_RAW",
+        waypoints=[(7.55, 44.6)],
+    )
+    pcb.add_via(10.225, 44.6, net="VBUS_RAW")
+    pcb.add_trace((10.225, 44.6), ("C13", "1"), width=0.4, net="VBUS_RAW")
+    pcb.add_trace(
+        ("U4", "2"),
+        (10.225, 44.6),
+        width=0.4,
+        net="VBUS_RAW",
+        waypoints=[(14, 46.95), (10.225, 46.95)],
+    )
+    pcb.add_trace(("U1", "1"), ("U1", "2"), width=0.2, net="CC1")
+    pcb.add_trace(("U1", "4"), ("U1", "5"), width=0.2, net="CC2")
+    pcb.add_trace(
+        ("J1", "A5"),
+        ("U1", "1"),
+        width=0.2,
+        net="CC1",
+        waypoints=[(11.25, 16), (14.5, 21.25), (14.5, 23.75)],
+    )
+    pcb.add_trace(
+        ("J1", "B5"),
+        ("U1", "4"),
+        width=0.2,
+        net="CC2",
+        waypoints=[(8.25, 14), (9.5, 15.25), (9.5, 20.5), (12.5, 21.5), (13, 22), (13, 25.25)],
+    )
+    pcb.add_trace(
+        ("U1", "21"),
+        ("C2", "1"),
+        width=0.25,
+        net="VREG_1V2",
+        waypoints=[(18.25, 21.5), (19.225, 20.525)],
+    )
+    pcb.add_trace(
+        ("U1", "23"),
+        (17.65, 21.4),
+        width=0.2,
+        net="VREG_2V7",
+        waypoints=[(17.25, 22.1), (17.65, 21.7)],
+    )
+    pcb.add_via(17.65, 21.4, net="VREG_2V7")
+    pcb.add_trace(
+        (17.65, 21.4),
+        (8.3, 23),
+        width=0.25,
+        layer="B.Cu",
+        net="VREG_2V7",
+        waypoints=[(12, 21.8), (8.3, 22)],
+    )
+    pcb.add_via(8.3, 23, net="VREG_2V7")
+    pcb.add_trace((8.3, 23), ("C3", "1"), width=0.25, net="VREG_2V7")
+    pcb.add_trace(
+        ("R3", "2"),
+        ("U1", "18"),
+        width=0.25,
+        net="VBUS_SENSE",
+        waypoints=[(26.475, 23.5), (21.5, 23.5)],
+    )
+    pcb.add_trace(
+        ("U1", "16"),
+        ("R2", "2"),
+        width=0.25,
+        net="SINK_GATE",
+        waypoints=[(21.75, 24.75), (22.5, 25.5), (22.5, 28.5), (26, 32), (30.6, 32), (30.6, 30)],
+    )
+    pcb.add_trace(("U1", "9"), (17.75, 28), width=0.2, net="DISCHARGE")
+    pcb.add_via(17.75, 28, net="DISCHARGE")
+    pcb.add_trace((17.75, 28), (24.5, 24.5), width=0.25, layer="B.Cu", net="DISCHARGE")
+    pcb.add_via(24.5, 24.5, net="DISCHARGE")
+    pcb.add_trace(
+        (24.5, 24.5), ("R4", "2"), width=0.25, net="DISCHARGE", waypoints=[(27.475, 24.5)]
+    )
+    pcb.add_trace(
+        ("U1", "20"), (20.5, 21.25), width=0.2, net="PD_OK2", waypoints=[(18.75, 22), (19.5, 21.25)]
+    )
+    pcb.add_via(20.5, 21.25, net="PD_OK2")
+    pcb.add_trace((20.5, 21.25), (21.25, 25.5), width=0.2, layer="B.Cu", net="PD_OK2")
+    pcb.add_via(21.25, 25.5, net="PD_OK2")
+    pcb.add_trace(
+        (21.25, 25.5), (24.5, 32), width=0.2, net="PD_OK2", waypoints=[(21.25, 29), (24.5, 31.25)]
+    )
+    pcb.add_via(24.5, 32, net="PD_OK2")
+    pcb.add_trace((24.5, 32), (25.7, 34.8), width=0.2, layer="B.Cu", net="PD_OK2")
+    pcb.add_via(25.7, 34.8, net="PD_OK2")
+    pcb.add_trace((25.7, 34.8), ("R17", "2"), width=0.2, net="PD_OK2")
+    pcb.add_trace(
+        ("U1", "14"),
+        ("R18", "2"),
+        width=0.2,
+        net="PD_OK3",
+        waypoints=[
+            (20.65, 25.75),
+            (20.65, 29.5),
+            (23.725, 32.575),
+            (30.8, 32.575),
+            (31.7, 33.7),
+            (31.7, 35),
+        ],
+    )
+
+
+def add_host_bus_connections(pcb: PCB) -> None:
+    """Keep host-bus trunks outside the power stage on the outer layers."""
+    for ref, via, lower, net in [
+        ("R12", (32.5, 44), (32.5, 54.5), "SCL"),
+        ("R13", (31.7, 48), (31.7, 57), "SDA"),
+        ("R14", (38.5, 44), (38.5, 51), "PD_ALERT"),
+        ("R15", (37.7, 48), (37.7, 53.5), "MON_ALERT"),
+    ]:
+        pcb.add_trace((ref, "2"), via, width=0.25, net=net)
+        pcb.add_via(*via, net=net)
+        pcb.add_trace(via, lower, width=0.25, layer="B.Cu", net=net)
+        pcb.add_via(*lower, net=net)
+    pcb.add_trace(
+        (32.5, 54.5),
+        ("J3", "2"),
+        width=0.25,
+        net="SCL",
+        waypoints=[(32.5, 56), (88, 56), (88, 44.54)],
+    )
+    pcb.add_trace(("J3", "3"), (89, 47.08), width=0.25, layer="B.Cu", net="SDA")
+    pcb.add_via(89, 47.08, net="SDA")
+    pcb.add_trace((89, 47.08), (31.7, 57), width=0.25, net="SDA", waypoints=[(89, 57)])
+    pcb.add_trace((37.7, 53.5), ("J3", "6"), width=0.25, net="MON_ALERT", waypoints=[(37.7, 54.7)])
+    pcb.add_trace((38.5, 51), ("J3", "5"), width=0.25, net="PD_ALERT", waypoints=[(38.5, 52.16)])
+    # Staggered monitor fanout keeps ordinary through-vias clear of
+    # neighboring MSOP pads and the local ground/supply vias.
+    pcb.add_trace(("U3", "3"), (69.8, 31.9), width=0.2, net="MON_ALERT")
+    pcb.add_via(69.8, 31.9, net="MON_ALERT")
+    pcb.add_trace((69.8, 31.9), (69.8, 54.7), width=0.25, layer="B.Cu", net="MON_ALERT")
+    pcb.add_via(69.8, 54.7, net="MON_ALERT")
+    pcb.add_trace(("U3", "4"), (68.9, 32.5), width=0.2, net="SDA")
+    pcb.add_via(68.9, 32.5, net="SDA")
+    pcb.add_trace((68.9, 32.5), (68.9, 57), width=0.25, layer="B.Cu", net="SDA")
+    pcb.add_via(68.9, 57, net="SDA")
+    pcb.add_trace(("U3", "5"), (70.4, 33.5), width=0.2, net="SCL", waypoints=[(70.4, 33)])
+    pcb.add_via(70.4, 33.5, net="SCL")
+    pcb.add_trace((70.4, 33.5), (70.4, 56), width=0.25, layer="B.Cu", net="SCL")
+    pcb.add_via(70.4, 56, net="SCL")
+    # PD controller fanout crosses the lower power routing on F.Cu before
+    # joining the bus trunks; both internal layers remain ground only.
+    pcb.add_trace(
+        ("U1", "7"), (16.25, 28.2), width=0.2, net="SCL", waypoints=[(16.75, 27.6), (16.25, 28.1)]
+    )
+    pcb.add_via(16.25, 28.2, net="SCL")
+    pcb.add_trace(
+        (16.25, 28.2), (32.5, 44), width=0.25, layer="B.Cu", net="SCL", waypoints=[(16.25, 38)]
+    )
+    pcb.add_trace(
+        ("U1", "8"),
+        (17.25, 29),
+        width=0.2,
+        net="SDA",
+        waypoints=[(17.25, 27.6), (16.95, 27.9), (16.95, 28.6), (17.25, 28.9)],
+    )
+    pcb.add_via(17.25, 29, net="SDA")
+    pcb.add_trace(
+        (17.25, 29), (34, 43.5), width=0.25, layer="B.Cu", net="SDA", waypoints=[(17.25, 37.5)]
+    )
+    pcb.add_via(34, 43.5, net="SDA")
+    pcb.add_trace((34, 43.5), (31.7, 48), width=0.25, net="SDA", waypoints=[(34, 46)])
+    pcb.add_trace(
+        ("U1", "19"),
+        (27.5, 23.6),
+        width=0.2,
+        net="PD_ALERT",
+        waypoints=[(19.25, 22.3), (21.2, 22.3), (21.2, 21), (22.5, 19.7), (27.5, 19.7)],
+    )
+    pcb.add_trace(
+        (27.5, 23.6),
+        (33, 37),
+        width=0.25,
+        net="PD_ALERT",
+        waypoints=[(28.8, 23.6), (28.8, 27.7), (31.5, 29.7), (33, 29.7)],
+    )
+    pcb.add_via(33, 37, net="PD_ALERT")
+    pcb.add_trace((33, 37), (38.5, 44), width=0.25, layer="B.Cu", net="PD_ALERT")
+
+
+def add_ground_connections(pcb: PCB) -> None:
+    """Connect ground pads to two inner planes without vias in SMT lands."""
+    for pin, point in [
+        ("6", (17, 26.25)),
+        ("10", (18.25, 25)),
+        ("12", (19.25, 25)),
+        ("13", (19, 26.25)),
+        ("22", (17.75, 25)),
+    ]:
+        pcb.add_trace(("U1", pin), point, width=0.2, net="GND")
+    # These points lie inside U1's exposed ground pad.
+    pcb.add_trace(("U1", "6"), (15.1, 26.25), width=0.2, net="GND")
+    pcb.add_via(15.1, 26.25, net="GND")
+    pcb.add_trace(("U3", "1"), ("U3", "2"), width=0.25, net="GND")
+    pcb.add_trace(("U3", "1"), (70.6, 31.25), width=0.25, net="GND")
+    pcb.add_via(70.6, 31.25, net="GND")
+    pcb.add_trace(("U3", "7"), (77.2, 33.5), width=0.15, net="GND", waypoints=[(77.2, 32.5)])
+    pcb.add_via(77.2, 33.5, net="GND")
+    for endpoint, via in [
+        (("U4", "3"), (18, 45)),
+        (("D2", "1"), (84.3, 30)),
+        (("R6", "2"), (65.7, 39)),
+        (("R8", "2"), (67.7, 29)),
+        (("C1", "2"), (16.7, 18)),
+        (("C2", "2"), (21.7, 19)),
+        (("C3", "2"), (11.7, 23)),
+        (("C12", "2"), (80.7, 34)),
+        (("C13", "2"), (12.7, 43)),
+        (("C14", "2"), (21.7, 43)),
+        (("C15", "2"), (83.8, 21.5)),
+    ]:
+        pcb.add_trace(endpoint, via, width=0.25, net="GND")
+        pcb.add_via(*via, net="GND")
+    for x in (52.2, 53, 53.8):
+        pcb.add_trace((x, 27.525), (x, 26.25), width=0.6, net="GND")
+        pcb.add_via(x, 26.25, net="GND")
+    for ref, center in [("C8", 51.475), ("C9", 57.475)]:
+        for dx in (-0.4, 0.4):
+            pcb.add_trace((ref, "2"), (center + dx, 16), width=0.6, net="GND")
+            pcb.add_trace((center + dx, 16), (center + dx, 18), width=0.6, net="GND")
+            pcb.add_via(center + dx, 18, net="GND")
+    pcb.add_trace(
+        ("J1", "A1"), (14.32, 10.13), width=0.4, net="GND", waypoints=[(13.91875, 10.473125)]
+    )
+    pcb.add_trace(
+        ("J1", "A12"), (5.68, 10.13), width=0.4, net="GND", waypoints=[(6.08125, 10.473125)]
+    )
+    for point in [(3, 3), (50, 3), (97, 3), (97, 60), (50, 60), (3, 60)]:
+        pcb.add_via(*point, net="GND")
+    ox, oy = pcb._board_origin
+    boundary = [(ox + x, oy + y) for x, y in [(0.5, 0.5), (99.5, 0.5), (99.5, 64.5), (0.5, 64.5)]]
+    for layer in ("In1.Cu", "In2.Cu"):
+        pcb._sexp.add(
+            zone_node(
+                pcb.add_net("GND").number,
+                "GND",
+                layer,
+                boundary,
+                str(uuid.uuid4()),
+                clearance=0.2,
+                min_thickness=0.2,
+                thermal_gap=0.3,
+                thermal_bridge_width=0.5,
+            )
+        )
 
 
 def generate(output: Path) -> dict:
@@ -647,6 +965,9 @@ def generate(output: Path) -> dict:
         sch.add_wire(pos, end)
         sch.add_label(name, *end)
     add_critical_copper(pcb)
+    add_ground_connections(pcb)
+    add_support_connections(pcb)
+    add_host_bus_connections(pcb)
     sch.write(output / f"{NAME}.kicad_sch")
     pcb.save(output / f"{NAME}.kicad_pcb")
     pro = create_minimal_project(NAME)
@@ -696,7 +1017,7 @@ def generate(output: Path) -> dict:
         "parts": [asdict(p) for p in components],
         "pin_nets": assignments,
         "nets": net_names,
-        "status": "placed with partial critical copper; routing incomplete",
+        "status": "routed development circuit; native refill and independent checks required",
         "hardware_tested": False,
         "manufacturing_ready": False,
     }

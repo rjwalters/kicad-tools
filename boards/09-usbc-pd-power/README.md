@@ -34,27 +34,32 @@ behavior. Test equipment, conditions and limits must accompany every result.
 
 ## Current checkpoint and reproduction
 
-47 components, 32 nets, a generated schematic and four-layer PCB with partial
-critical copper. Native ERC and label LVS pass. Native DRC reports zero
-geometry violations and 68 unconnected items. Sixteen critical nets now have
-checked connectivity: buck boot/feedback/enable, switched power paths,
-MOSFET gates/sources, output indicator and Kelvin/sense connections.
-Ground, USB/PD control and low-voltage support routing remain incomplete,
-as do procurement and physical power-layout review.
+47 components and all 32 nets are routed on a four-layer PCB, with filled
+GND planes on both inner layers. Native ERC and refilled native DRC pass:
+zero violations and zero unconnected items. Label and physical copper LVS
+pass, with 153 bound pads. The development check guards every net and rejects
+signal traces on the inner ground layers.
+
+Manufacturing remains blocked. The manufacturer check reports 51 ampacity
+errors requiring branch-current and thermal review, and 22 component MPNs
+remain unselected. Strict KiCad-tools net status still reports four USB ground
+pads disconnected despite native KiCad's clean result; this disagreement is
+tracked in [#5061](https://github.com/rjwalters/kicad-tools/issues/5061).
+Physical copper LVS does not independently prove plane connectivity.
 
 From the repository root:
 
 ```sh
 uv run python boards/09-usbc-pd-power/generate_design.py
 uv run python boards/09-usbc-pd-power/check_design.py
-uv run pytest tests/test_board09_telemetry.py --no-cov -q
+uv run pytest tests/test_board09_telemetry.py tests/test_board09_critical_routing.py --no-cov -q
 uv run kct render boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb --no-3d
 ```
 
 The check command validates a development checkpoint; its successful exit
 does **not** indicate manufacturing readiness. `output/development-check.json`
 records source hashes, checks and outstanding gates. It reruns native DRC,
-rejects geometry violations and records opens separately. No manufacturing ZIP exists.
+rejects geometry violations and opens. No manufacturing ZIP exists.
 Critical-net opens are correlated using saved PCB item UUIDs; removing a
 previously completed critical connection fails the development check.
 
@@ -62,4 +67,4 @@ See the [engineering review](engineering/review.md),
 [telemetry instructions](host/README.md), and
 [routing investigation](engineering/routing-investigation/README.md).
 Open the [schematic PDF](output/schematic.pdf) or
-[placement preview](output/renders/pcb-front.svg) for review.
+[routed PCB preview](output/renders/pcb-front.svg) for review.
