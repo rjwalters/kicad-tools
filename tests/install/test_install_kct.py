@@ -603,3 +603,236 @@ def test_conventions_rerun_idempotent(target_repo: Path, fake_uv_env: dict[str, 
 
     meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
     assert meta["installed_files"].count(".kct/CONVENTIONS.md") == 1
+
+
+# --- --client selection (issue #4905) ----------------------------------------
+
+
+def test_default_client_is_claude_parity(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    """Omitting --client must produce byte-identical output to --client claude.
+
+    Backward compatibility is the explicit acceptance criterion: existing
+    callers of install-kct.sh (no --client flag) must see no behavior change.
+    """
+    default_target = target_repo
+    explicit_target = target_repo.parent / "explicit-claude-repo"
+    explicit_target.mkdir()
+    for name in ("pyproject.toml", "CLAUDE.md"):
+        (explicit_target / name).write_text((default_target / name).read_text())
+    (explicit_target / ".claude" / "commands" / "loom").mkdir(parents=True)
+    (explicit_target / ".claude" / "commands" / "loom" / "seed.md").write_text(
+        (default_target / ".claude" / "commands" / "loom" / "seed.md").read_text()
+    )
+    subprocess.run(["git", "init", "-q"], cwd=explicit_target, check=True)
+
+    default_result = run_installer(default_target, "--path", str(REPO_ROOT), env=fake_uv_env)
+    explicit_result = run_installer(
+        explicit_target, "--client", "claude", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert default_result.returncode == 0, default_result.stderr
+    assert explicit_result.returncode == 0, explicit_result.stderr
+
+    assert not (default_target / ".agents").exists()
+    assert not (explicit_target / ".agents").exists()
+    assert _snapshot(default_target) == _snapshot(explicit_target)
+
+
+def test_client_unknown_value_rejected_before_any_write(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    before = _snapshot(target_repo)
+    result = run_installer(
+        target_repo, "--client", "bogus", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert result.returncode != 0
+    assert "unknown --client" in result.stderr
+    assert _snapshot(target_repo) == before, "a rejected --client value must write nothing"
+
+
+def test_client_codex_installs_agents_skills_and_agents_md(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    result = run_installer(
+        target_repo, "--client", "codex", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert result.returncode == 0, result.stderr
+
+    # No Claude-side artifacts written for a codex-only install.
+    assert not (target_repo / ".claude" / "commands" / "kct").exists()
+    claude_md = (target_repo / "CLAUDE.md").read_text()
+    assert "BEGIN KICAD-TOOLS" not in claude_md
+    assert "Existing content stays." in claude_md  # untouched
+
+    # SKILL.md landed for every selected skill plus the always-vendored help.
+    skills_dir = target_repo / ".agents" / "skills"
+    for name in ("help", "ee-review", "tapeout"):
+        skill_md = skills_dir / f"kct-{name}" / "SKILL.md"
+        assert skill_md.exists(), f"{skill_md} missing"
+        text = skill_md.read_text()
+        assert text.startswith("---\n")
+        # Only the FRONTMATTER (between the two leading '---' fences) is
+        # checked for Claude-specific dispatch metadata -- the body (shared
+        # workflow content) is allowed to discuss `suggestedModel`/model
+        # resolution in prose, as help.md's own body legitimately does.
+        frontmatter = text.split("---", 2)[1]
+        assert f"name: kct-{name}" in frontmatter
+        assert "description:" in frontmatter
+        assert "invocation:" not in frontmatter
+        assert "suggestedModel:" not in frontmatter
+
+    # The body is derived from the shared source, not hand-duplicated: a
+    # distinctive sentence from ee-review.md's body must survive verbatim.
+    ee_review_body = (skills_dir / "kct-ee-review" / "SKILL.md").read_text()
+    source_body = (SKILLS_SRC / "ee-review.md").read_text().split("---", 2)[2]
+    assert source_body.strip() in ee_review_body
+
+    # A guarded AGENTS.md block was created, pointing at the SKILL.md layout.
+    agents_md = (target_repo / "AGENTS.md").read_text()
+    assert agents_md.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+    assert agents_md.count("<!-- END KICAD-TOOLS -->") == 1
+    assert ".agents/skills/kct-<name>/SKILL.md" in agents_md
+    assert ".kct/CONVENTIONS.md" in agents_md
+
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert meta["clients_installed"] == ["codex"]
+    assert ".agents/skills/kct-help/SKILL.md" in meta["installed_files"]
+    assert ".agents/skills/kct-ee-review/SKILL.md" in meta["installed_files"]
+    assert ".claude/commands/kct/README.md" not in meta["installed_files"]
+
+
+def test_client_codex_dry_run_writes_nothing(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    before = _snapshot(target_repo)
+    result = run_installer(
+        target_repo, "--client", "codex", "--dry-run", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert result.returncode == 0, result.stderr
+    assert _snapshot(target_repo) == before
+    assert not (target_repo / ".agents").exists()
+    assert "vendor .agents/skills/kct-help/SKILL.md" in result.stdout
+    assert "create AGENTS.md with kicad-tools marker block" in result.stdout
+
+
+def test_client_both_installs_both_client_trees(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    result = run_installer(
+        target_repo, "--client", "both", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert result.returncode == 0, result.stderr
+
+    assert (target_repo / ".claude" / "commands" / "kct" / "ee-review.md").exists()
+    assert (target_repo / ".agents" / "skills" / "kct-ee-review" / "SKILL.md").exists()
+
+    claude_md = (target_repo / "CLAUDE.md").read_text()
+    assert claude_md.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+    agents_md = (target_repo / "AGENTS.md").read_text()
+    assert agents_md.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert set(meta["clients_installed"]) == {"claude", "codex"}
+
+
+def test_client_codex_rerun_idempotent(target_repo: Path, fake_uv_env: dict[str, str]) -> None:
+    first = run_installer(
+        target_repo, "--client", "codex", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert first.returncode == 0, first.stderr
+    second = run_installer(
+        target_repo, "--client", "codex", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert second.returncode == 0, second.stderr
+    assert "already present and up to date" in second.stdout
+
+    agents_md = (target_repo / "AGENTS.md").read_text()
+    assert agents_md.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+    assert agents_md.count("<!-- END KICAD-TOOLS -->") == 1
+
+    skills_dir = target_repo / ".agents" / "skills"
+    vendored = sorted(p.name for p in skills_dir.iterdir())
+    assert len(vendored) == len(set(vendored)), "no duplicate skill directories"
+
+
+def test_switching_client_preserves_prior_install(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """Installing claude then codex (or vice versa) is additive, never a wipe.
+
+    Neither run may remove, overwrite, or duplicate the other client's files,
+    and install-metadata.json must accumulate (union) clients/skills/files
+    across the two runs rather than reflecting only the most recent one.
+    """
+    claude_result = run_installer(
+        target_repo, "--client", "claude", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert claude_result.returncode == 0, claude_result.stderr
+    claude_md_after_first = (target_repo / "CLAUDE.md").read_text()
+
+    codex_result = run_installer(
+        target_repo, "--client", "codex", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert codex_result.returncode == 0, codex_result.stderr
+
+    # Claude's artifacts are untouched by the codex run.
+    assert (target_repo / ".claude" / "commands" / "kct" / "ee-review.md").exists()
+    assert (target_repo / "CLAUDE.md").read_text() == claude_md_after_first
+
+    # Codex's artifacts now exist too.
+    assert (target_repo / ".agents" / "skills" / "kct-ee-review" / "SKILL.md").exists()
+    assert (target_repo / "AGENTS.md").exists()
+
+    meta = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert set(meta["clients_installed"]) == {"claude", "codex"}
+    assert ".claude/commands/kct/ee-review.md" in meta["installed_files"]
+    assert ".agents/skills/kct-ee-review/SKILL.md" in meta["installed_files"]
+    # No duplicate entries from the union merge.
+    assert len(meta["installed_files"]) == len(set(meta["installed_files"]))
+
+    # Switching back to claude does not disturb the codex artifacts either.
+    back_result = run_installer(
+        target_repo, "--client", "claude", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert back_result.returncode == 0, back_result.stderr
+    assert (target_repo / ".agents" / "skills" / "kct-ee-review" / "SKILL.md").exists()
+    meta_after = json.loads((target_repo / ".kct" / "install-metadata.json").read_text())
+    assert set(meta_after["clients_installed"]) == {"claude", "codex"}
+
+
+def test_client_codex_preserves_existing_loom_agents_md_block(
+    target_repo: Path, fake_uv_env: dict[str, str]
+) -> None:
+    """A pre-existing Loom AGENTS.md block (different markers) is untouched.
+
+    Loom's own guarded block uses `<!-- BEGIN LOOM ORCHESTRATION (AGENTS) -->`
+    -- distinct marker text from this installer's `<!-- BEGIN KICAD-TOOLS -->`
+    -- so the two coexist additively in the same file, exactly like the
+    already-tested `.claude/commands/loom/` coexistence for the claude client.
+    """
+    agents_md = target_repo / "AGENTS.md"
+    loom_block = (
+        "<!-- BEGIN LOOM ORCHESTRATION (AGENTS) -->\n"
+        "This repository uses Loom for AI-powered development orchestration.\n"
+        "<!-- END LOOM ORCHESTRATION (AGENTS) -->\n"
+    )
+    agents_md.write_text(loom_block)
+
+    result = run_installer(
+        target_repo, "--client", "codex", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert result.returncode == 0, result.stderr
+
+    text = agents_md.read_text()
+    assert "BEGIN LOOM ORCHESTRATION (AGENTS)" in text
+    assert "This repository uses Loom for AI-powered development orchestration." in text
+    assert text.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+    assert text.count("<!-- END KICAD-TOOLS -->") == 1
+
+    # Re-running is still idempotent with both blocks present.
+    second = run_installer(
+        target_repo, "--client", "codex", "--path", str(REPO_ROOT), env=fake_uv_env
+    )
+    assert second.returncode == 0, second.stderr
+    text_second = agents_md.read_text()
+    assert text_second.count("<!-- BEGIN KICAD-TOOLS -->") == 1
+    assert "BEGIN LOOM ORCHESTRATION (AGENTS)" in text_second
