@@ -1,4 +1,4 @@
-"""Fleet policy: every committed routed artifact is 100% 45-degree aligned.
+"""Fleet policy: active routed artifacts are 100% 45-degree aligned.
 
 Issue #3532: 204 arbitrary-angle segments (0.8-22.5 degrees off the
 0/45/90/135 set) shipped on softstart's committed routed PCB, and every
@@ -51,6 +51,7 @@ Any NEW off-angle segment outside the pinned sets still fails.
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -137,7 +138,21 @@ def _artifact_id(path: Path) -> str:
     return str(path.relative_to(REPO_ROOT))
 
 
-ARTIFACTS = _committed_routed_artifacts()
+# The redesign archives this synthetic match-group defect witness explicitly
+# (see its README). Rewriting it to satisfy a release policy would erase the
+# geometry used by regression tests. Pin its bytes instead; no active output
+# or future archive path is excluded from the angle census. Issue #5044.
+HISTORICAL_WITNESS = (
+    REPO_ROOT / "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
+)
+HISTORICAL_WITNESS_SHA256 = "ab3a2c2d4aea466f828e540189ac851ddb8c41505c8185be65924ec5ff92a9a6"
+ARTIFACTS = [p for p in _committed_routed_artifacts() if p != HISTORICAL_WITNESS]
+
+
+def test_historical_matchgroup_witness_is_unchanged() -> None:
+    assert hashlib.sha256(HISTORICAL_WITNESS.read_bytes()).hexdigest() == HISTORICAL_WITNESS_SHA256
+    total, bad = segment_angle_census(HISTORICAL_WITNESS)
+    assert (total, len(bad)) == (841, 12)
 
 
 def test_fleet_has_routed_artifacts() -> None:

@@ -4,13 +4,12 @@ project:
   revision: A
   created: 2026-09-10
   author: ''
-  description: Simultaneous differential acquisition with USB streaming. Precision
-    analog placement and return-path demonstration; circuit implementation deferred
-    while board09 is developed.
+  description: Four-channel ADS131M04IPWR acquisition with a socketed Pico H USB host.
+    Pin/package interface and nominal 8 kSPS transfer budget checked; analog
+    circuitry, procurement and PCB implementation pending.
 intent:
-  summary: Simultaneous differential acquisition with USB streaming. Precision analog
-    placement and return-path demonstration; circuit implementation deferred while
-    board09 is developed.
+  summary: Four simultaneous differential channels with USB streaming and a continuous
+    ground reference; demonstrate analog filtering, clock and return-path placement.
 requirements:
   manufacturing:
     target_fab: jlcpcb

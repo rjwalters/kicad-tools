@@ -46,7 +46,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BOARD_DIR = REPO_ROOT / "boards" / "05-bldc-motor-controller"
+BOARD_DIR = REPO_ROOT / "tests" / "fixtures" / "historical_demo_boards" / "05-bldc-motor-controller"
 UNROUTED_PCB = BOARD_DIR / "output" / "bldc_controller.kicad_pcb"
 ROUTED_PCB = BOARD_DIR / "output" / "bldc_controller_routed.kicad_pcb"
 
@@ -164,7 +164,7 @@ class TestBoard05ZonePreservation:
             f"create_zones_for_pcb (issue #2899 fix) or the router write "
             f"path is dropping zones again (regression of PR #2770).  "
             f"Regenerate via `uv run python "
-            f"boards/05-bldc-motor-controller/design.py`."
+            f"tests/fixtures/historical_demo_boards/05-bldc-motor-controller/design.py`."
         )
 
     def test_routed_pcb_zones_include_required_nets(

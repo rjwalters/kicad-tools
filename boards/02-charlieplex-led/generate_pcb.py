@@ -36,7 +36,9 @@ def main():
     print(f"Generated: {output_path}")
     print(f"  Board size: {BOARD_WIDTH}mm x {BOARD_HEIGHT}mm")
     print("  Components: 1 MCU, 5 resistors, 9 LEDs, 2 capacitors, power and ISP headers")
-    print(f"  Nets: {len([n for n in NETS.values() if n > 0])} (4 LINE + 4 NODE + VCC + GND + RESET + ISP_SCK)")
+    print(
+        f"  Nets: {len([n for n in NETS.values() if n > 0])} (4 LINE + 4 NODE + VCC + GND + RESET + ISP_SCK)"
+    )
 
 
 if __name__ == "__main__":

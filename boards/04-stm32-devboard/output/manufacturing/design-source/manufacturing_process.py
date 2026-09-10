@@ -143,11 +143,62 @@ def repair(pcb_path):
         via.remove_child("tenting")
         via.add(parse_string("(tenting (front yes) (back yes))"))
     pcb_path.write_text(serialize_sexp(doc))
+    trim_obsolete_nrst_tail(pcb_path)
     (pcb_path.parent / "manufacturing-requirements.json").write_text(
         json.dumps(OPTIONS, indent=2) + "\n"
     )
     validate_process(pcb_path, check_native=False)
     return changed
+
+
+def trim_obsolete_nrst_tail(pcb_path):
+    """Remove the unbonded back-layer remnant of U2.7's relocated escape.
+
+    Some router builds leave the pad-to-old-via hop on both copper layers.
+    The front hop still connects the SMT pad; its back-layer duplicate may
+    terminate in empty space after the via moves. Only remove that exact hop
+    when the shared topology checker confirms the old pad end is unbonded.
+    """
+    from kicad_tools.validate.rules.dangling_copper import DanglingCopperRule
+
+    pcb_path = Path(pcb_path)
+    pcb = PCB.load(pcb_path)
+    old = next(old for ref, _, old, _ in MOVES if ref == "U2.7")
+    pad_end = (old[0] - 0.5, old[1])
+    candidates = [
+        segment
+        for segment in pcb.segments
+        if segment.layer == "B.Cu"
+        and pcb.nets[segment.net_number].name == "NRST"
+        and any(
+            math.dist(a, pad_end) < 0.001 and math.dist(b, old) < 0.001
+            for a, b in [(segment.start, segment.end), (segment.end, segment.start)]
+        )
+    ]
+    if not candidates:
+        return 0
+    findings = DanglingCopperRule().check(pcb, process_rules()).violations
+    if not any(
+        finding.rule_id == "track_dangling"
+        and finding.layer == "B.Cu"
+        and "NRST" in finding.nets
+        and math.dist(finding.location, pad_end) < 0.001
+        for finding in findings
+    ):
+        return 0
+    remove = {segment.uuid for segment in candidates}
+    doc = parse_file(pcb_path)
+    doc.children = [
+        node
+        for node in doc.children
+        if not (
+            node.name == "segment"
+            and node.find_child("uuid")
+            and node.find_child("uuid").get_string(0) in remove
+        )
+    ]
+    pcb_path.write_text(serialize_sexp(doc))
+    return len(remove)
 
 
 def process_rules():

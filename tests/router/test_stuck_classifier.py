@@ -669,7 +669,9 @@ class TestPinOrderVerification:
 
 _BOARD07_ARTIFACT = (
     Path(__file__).resolve().parents[2]
-    / "boards"
+    / "tests"
+    / "fixtures"
+    / "historical_demo_boards"
     / "07-matchgroup-test"
     / "output"
     / "matchgroup_test_routed.kicad_pcb"

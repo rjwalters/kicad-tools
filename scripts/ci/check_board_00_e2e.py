@@ -19,6 +19,12 @@ board directory it:
 - asserts ``output/board.json`` reports ``status: ok``, ``drc_violations: 0``,
   ``lvs_clean: true``;
 
+``--routing-only`` retains artifact, DRC and LVS assertions for freshly
+generated CI boards that have not undergone the separate manufacturing
+readiness audit. It additionally requires their readiness to be explicitly
+unverified and their gallery status to remain partial; it never promotes an
+unaudited board to ready. The default mode still requires ``status: ok``.
+
 ``--lvs-only`` mode (issue #3779) restricts the gate to artifact presence
 + ``lvs.json clean: true`` and **skips** the ``board.json``
 ``status``/``drc_violations`` assertions.  This is for boards with
@@ -329,6 +335,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
+        "--routing-only",
+        action="store_true",
+        help=(
+            "Assert artifacts, zero DRC violations and clean LVS for a fresh CI "
+            "recipe without a manufacturing readiness audit. Require unverified "
+            "readiness and status=partial rather than claiming the board is ready."
+        ),
+    )
+    mode_group.add_argument(
         "--lvs-only",
         action="store_true",
         help=(
@@ -485,10 +500,27 @@ def main(argv: list[str] | None = None) -> int:
             required_fields: dict[str, Any] = {"lvs_clean": False}
         elif args.lvs_only:
             required_fields = LVS_ONLY_BOARD_JSON_FIELDS
+        elif args.routing_only:
+            required_fields = {
+                "status": "partial",
+                "drc_violations": 0,
+                "lvs_clean": True,
+            }
         else:
             required_fields = REQUIRED_BOARD_JSON_FIELDS
         if board_json_path.is_file():
             field_errors = assert_board_json_fields(board_json_path, required_fields)
+            if args.routing_only:
+                try:
+                    data = json.loads(board_json_path.read_text())
+                    readiness = data.get("readiness", {})
+                    if not isinstance(readiness, dict) or readiness.get("status") != "unverified":
+                        field_errors.append(
+                            "routing-only CI output must report readiness.status='unverified'; "
+                            "audit manufacturing readiness separately"
+                        )
+                except (OSError, json.JSONDecodeError):
+                    pass  # assert_board_json_fields already reports the read error.
             if field_errors:
                 for msg in field_errors:
                     _err(msg, file=board_json_path)

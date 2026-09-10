@@ -1,40 +1,16 @@
-"""Copper-LVS coverage for board 04 (stm32-devboard) — issues #3794 / #3797.
+"""Copper-LVS and escape safety for the reviewed board04 construction.
 
-Board 04 carries a GND plane on ``B.Cu`` only (the ``+3.3V`` / ``+5V`` rails
-pour on ``F.Cu``).  Every GND SMD pad therefore reaches the plane through a
-``pad -> F.Cu trace -> stitch via -> B.Cu pour`` path, and the four LQFP-48
-VSS / VDD power pads that the dense 0.5 mm-pitch escape leaves un-stitched are
-tied in by the #3794 Leg B recipe step (``tie_power_pads``):
-
-  * four GND micro-via-in-pads (U2.8 / U2.23 / U2.35 / U2.47 — the 4th VSS pad
-    added in #3797 so the fresh deterministic regen bonds it too), and
-  * a +3.3V / GND zone connect-pad clearance tighten so the re-pour bonds the
-    moated-out +3.3V VDD pads (U2.9 / U2.24 / U2.36 / U2.48).
-
-Before #3794 the committed routed PCB read ``0 shorts / 20 opens`` under
-``compare_copper_netlist`` — all *same-net* power-pad opens.  The 16 GND opens
-were an extractor gap (the label-free partition never bonded a via / trace
-endpoint landing in a pour, only pad boxes); the 4 +3.3V opens were a genuine
-board defect (pads moated out of their own F.Cu pour).  This test pins the
-post-fix outcome on the committed artifact: copper-LVS must be clean and the
-GND tie vias must be present.
-
-Per #3797 the *committed* artifact is now the **fresh deterministic** route
-(no longer hand-fixed): the recipe's deterministic ``fix_osc_escape`` step
-re-aims the OSC_OUT B.Cu escape off the OSC_IN pad column (clearing the
-``OSC_IN<->OSC_OUT`` escape-stub short) and the 4th ``_GND_TIE_VIAS`` entry
-bonds U2.47, so a fresh regen reproduces a copper-LVS-clean board.  This module
-also unit-tests ``fix_osc_escape`` directly (fast, hermetic) so a router drift
-that moves the escape fails loudly.
-
-The committed-artifact tests are fast (sub-second) and hermetic — they read the
-committed files only, never spawn ``kicad-cli`` and never invoke the router.
+The paid mechanical-drilling process replaces historical microvia-in-pad
+stitches with tented through vias outside SMT lands. Copper-LVS must still
+prove every power pad connected, while the process validator checks exact
+physical identity, selected options, drill/land/ring floors and pad clearance.
+The OSC escape mutation tests retain the original short-prevention coverage.
 """
 
 from __future__ import annotations
 
 import importlib.util
-import re
+import runpy
 from pathlib import Path
 
 import pytest
@@ -108,42 +84,30 @@ class TestBoard04CopperLVSClean:
         assert result.clean is True, (
             "copper-LVS unexpectedly dirty on the committed board 04 routed "
             f"PCB: shorts={list(result.shorts)} opens={list(result.opens)}.  "
-            "The #3794 power-pad ties (tie_power_pads: 3 GND micro-via-in-pads "
-            "+ tightened +3.3V/GND zone clearance) or the via-into-pour "
+            "The reviewed through-via power ties and +3.3V/GND zone clearances "
+            "or the via-into-pour "
             "extractor bond may be missing / regressed — regenerate via "
             "generate_design.py."
         )
         assert result.shorts == ()
         assert result.opens == ()
 
-    def test_gnd_tie_micro_vias_present(self, board04_artifacts: tuple[Path, Path]) -> None:
-        """The four GND micro-via-in-pads (#3794 Leg B + #3797) must be present."""
-        _, pcb = board04_artifacts
-        text = pcb.read_text()
-        net_table = dict(re.findall(r'\(net (\d+) "([^"]*)"\)', text))
-        gnd_ids = {nid for nid, name in net_table.items() if name == "GND"}
-        assert gnd_ids, 'board 04 PCB has no (net N "GND") entry'
-
-        # The serializer may emit either the compact single-line via form or
-        # kicad-cli's pretty-printed multi-line form (after a zone re-fill), so
-        # match a ``(via micro ...)`` block non-greedily up to its net atom and
-        # tolerate newlines/indentation between children.
-        gnd_micro_vias = 0
-        for via in re.finditer(
-            r"\(via micro\b.*?\(layers\s+([^\)]*)\).*?\(net\s+(\d+)\)",
-            text,
-            re.S,
-        ):
-            layers, net_id = via.group(1), via.group(2)
-            if net_id in gnd_ids and '"F.Cu"' in layers and '"B.Cu"' in layers:
-                gnd_micro_vias += 1
-
-        assert gnd_micro_vias >= 4, (
-            "board 04 routed PCB is missing the 4 GND micro-via-in-pads added "
-            "by tie_power_pads (#3794 + #3797); the LQFP-48 VSS pads "
-            "U2.8/U2.23/U2.35/U2.47 are unbonded and copper-LVS will report "
-            f"opens (found {gnd_micro_vias})."
-        )
+    def test_reviewed_through_vias_keep_gnd_connected(
+        self, board04_artifacts: tuple[Path, Path]
+    ) -> None:
+        """Paid mechanical drills replace the historical GND microvias."""
+        _, pcb_path = board04_artifacts
+        process = runpy.run_path(str(BOARD_DIR / "manufacturing_process.py"))
+        pcb = process["validate_process"](pcb_path)
+        assert pcb.vias, "The reviewed ground-plane stitches must remain present"
+        assert all(v.via_type in (None, "through") for v in pcb.vias)
+        assert all(v.drill >= 0.15 - 1e-6 for v in pcb.vias)
+        assert all(v.size >= 0.30 - 1e-6 for v in pcb.vias)
+        assert all((v.size - v.drill) / 2 >= 0.075 - 1e-6 for v in pcb.vias)
+        # validate_process checks the physical fingerprint, paid option,
+        # front/back tenting, native floors and clearance from every SMT land.
+        # The adjacent copper-LVS test proves these through vias still bond
+        # every power pad, without pinning an obsolete microvia count.
 
     def test_osc_escape_does_not_cross_osc_in_pad(
         self, board04_artifacts: tuple[Path, Path]

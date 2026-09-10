@@ -34,7 +34,8 @@ from kicad_tools.lvs import compare_copper_netlist
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "03-usb-joystick"
-BOARD_OUTPUT = BOARD_DIR / "output"
+# Legacy USB-C stitch geometry remains a stable regression witness.
+BOARD_OUTPUT = REPO_ROOT / "tests/fixtures/historical_demo_boards/03-usb-joystick/output"
 BOARD_SCH = BOARD_OUTPUT / "usb_joystick.kicad_sch"
 BOARD_PCB = BOARD_OUTPUT / "usb_joystick_routed.kicad_pcb"
 

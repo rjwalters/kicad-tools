@@ -66,8 +66,14 @@ def test_connected_zone_fill_island_stays_clean(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("relative_board", "expected"),
     [
-        ("boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb", 13),
-        ("boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb", 57),
+        (
+            "tests/fixtures/historical_demo_boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
+            13,
+        ),
+        (
+            "tests/fixtures/historical_demo_boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
+            57,
+        ),
     ],
 )
 def test_native_fleet_relationship_parity(relative_board: str, expected: int) -> None:
@@ -200,7 +206,10 @@ def test_board03_connectivity_and_geometry_contracts_native(tmp_path) -> None:
 
     if find_kicad_cli() is None:
         pytest.skip("kicad-cli is not installed")
-    src = Path(__file__).parents[1] / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
+    src = (
+        Path(__file__).parents[1]
+        / "tests/fixtures/historical_demo_boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
+    )
     if not src.exists():
         pytest.skip(f"committed routed board not found at {src!s}")
 
