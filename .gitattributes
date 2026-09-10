@@ -9,3 +9,6 @@
 # Board readiness and manufacturing manifests bind exact file bytes.
 # Preserve exported CSV line endings and checked source bytes on every platform.
 boards/** -text
+
+# Native PDF cross-reference records contain significant trailing spaces.
+boards/**/*.pdf binary
