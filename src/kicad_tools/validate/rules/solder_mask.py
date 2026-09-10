@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from kicad_tools.core.geometry import rotate_pad_offset
 
 from ..violations import DRCResults, DRCViolation
-from .base import DRCRule
+from .base import DRC_TOLERANCE, DRCRule
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
@@ -209,7 +209,7 @@ class SolderMaskPadRules(DRCRule):
                 # Annular ring = (pad dimension - drill) / 2
                 annular_ring = (min_pad_dim - pad.drill) / 2
 
-                if annular_ring < min_annular:
+                if annular_ring + DRC_TOLERANCE < min_annular:
                     # Rotate footprint-local pad offset into board frame
                     # before translating (KiCad negated-angle convention;
                     # see core.geometry.rotate_pad_offset, issue #3739;

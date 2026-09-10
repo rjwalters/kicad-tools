@@ -457,6 +457,38 @@ class TestRotatedViolationLocation:
 class TestPTHAnnularRing:
     """Tests for PTH pad annular ring validation."""
 
+    @pytest.mark.parametrize(
+        ("pad_size", "expected_violations"),
+        [(0.70, 0), (0.68, 1)],
+        ids=["exact-minimum-rounding", "undersized-ring"],
+    )
+    def test_annular_ring_minimum_boundary(self, pad_size, expected_violations):
+        """Accept the USB4085's exact minimum but reject a real shortfall."""
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    pads=[
+                        MockPad(
+                            type="thru_hole",
+                            size=(pad_size, pad_size),
+                            drill=0.40,
+                            layers=["*.Cu", "*.Mask"],
+                        ),
+                    ]
+                ),
+            ],
+        )
+        rules = MockDesignRules(min_annular_ring_mm=0.15)
+
+        results = SolderMaskPadRules().check(pcb, rules)
+
+        violations = [v for v in results.violations if v.rule_id == "pth_annular_ring"]
+        assert len(violations) == expected_violations
+        if expected_violations:
+            assert violations[0].severity == "error"
+            assert violations[0].actual_value == pytest.approx(0.14)
+            assert violations[0].required_value == pytest.approx(0.15)
+
     def test_adequate_annular_ring_passes(self):
         """Through-hole pad with adequate ring should pass."""
         pcb = MockPCB(
