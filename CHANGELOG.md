@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Konnect item 8 audit: natural-language design-rule store** (#4902, Part
+  of #4880) — `docs/konnect-item8-design-rules-audit.md` decides **decline**
+  on adding a Konnect-style free-text design-rule store: the repo already
+  has five overlapping mechanisms in this space (`DesignIntent.constraints`,
+  the typed `kicad_tools.intent` package, manufacturer profiles,
+  recipe-embedded intent, and — not previously catalogued — `project.kct`'s
+  `decisions:` log written by `kct spec decide`), and
+  `.claude/commands/kct/board-recipe-scaffold.md` has already settled the
+  adjacent "how do we record project *why*" question on that same
+  `decisions:` surface with an explicit "do not invent a fifth artifact"
+  principle. Two follow-ups are recommended rather than bundled: registering
+  the fully-implemented-but-unwired `declare_interface`/`declare_power_rail`/
+  `list_intents`/`clear_intent` MCP tools, and surfacing
+  `intent.constraints`/`decisions` into MCP session context so an LLM agent
+  can see prior human-recorded guidance without a human re-pasting it.
 - **kicad-tools.org benchmarks section** (#4952, Epic #4932 Phase 3) — a new
   `/benchmarks` page on the demo-gallery site presenting Phase 2's committed
   results (PocketBeagle + BeagleConnect Freedom, #4942) side by side with
