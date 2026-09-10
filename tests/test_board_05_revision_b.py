@@ -59,6 +59,11 @@ def test_reference_copper_rejects_a_changed_real_net(tmp_path, hardware):
     routing.apply_routing(path)
     assert routing.geometry_fingerprint(path) == original
     assert PCB.load(path).segments
+    from kicad_tools.router.quantize import segment_angle_census
+
+    assert not segment_angle_census(path)[1], (
+        "Reviewed copper must preserve the fleet 45-degree policy"
+    )
     hardware.build_pcb().save(path)
     changed = PCB.load(path)
     changed.assign_net_to_footprint_pad("U2", "12", "GND")
