@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from kicad_tools.router.quantize import quantize_pcb_file
 from kicad_tools.sexp import parse_file, serialize_sexp
 
 
@@ -40,6 +41,9 @@ def finalize_routing(path: Path) -> bool:
                 for i, value in enumerate(moves[old]):
                     point.set_value(i, value)
     path.write_text(serialize_sexp(pcb))
+    # Endpoint relocations preserve connectivity but can skew attached tracks.
+    # Restore exact 45-degree geometry before the independent native DRC gate.
+    quantize_pcb_file(path)
     subprocess.run(
         [
             sys.executable,
@@ -60,9 +64,16 @@ def finalize_routing(path: Path) -> bool:
         check=True,
     )
     data = json.loads(report.read_text())
+    clean = not data["violations"] and not data["unconnected_items"] and not data["schematic_parity"]
+    if not clean:
+        print(json.dumps(data, indent=2), file=sys.stderr)
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
 
-    if ViaInPadRule().check(PCB.load(path), None).violations:
+    via_findings = ViaInPadRule().check(PCB.load(path), None).violations
+    if via_findings:
+        print("Board02 via-in-pad findings:", file=sys.stderr)
+        for finding in via_findings:
+            print(finding, file=sys.stderr)
         return False
-    return not data["violations"] and not data["unconnected_items"] and not data["schematic_parity"]
+    return clean
