@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.20.0",
-  "generated_at": "2026-09-10T09:17:24.047619+00:00",
+  "generated_at": "2026-09-10T19:03:24.012451+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "README.txt": {
@@ -9,40 +9,40 @@
       "size": 2460
     },
     "assembly-back.pdf": {
-      "sha256": "8e7811bf9a061bb373e90503ec0223787c4aaa02b7450ecea44b3b20d6a3c7bb",
-      "size": 82699
+      "sha256": "6e87a0235daf0b21e48d0432a5c5292002e60655d8be068d9a9d0697c036dc21",
+      "size": 83290
     },
     "assembly-front.pdf": {
-      "sha256": "72a834234a82dbe1ab8605b3b1fbb6356ee3e977d40aeedc5e550e9535910790",
-      "size": 124620
+      "sha256": "56ed6c94df47bd293ea0b82287692ebcf6279e5678fc4572cb9ed8a11ccfdc44",
+      "size": 127197
     },
     "bom_jlcpcb.csv": {
       "sha256": "bcc742cd8eda3875255937f69aac3f9e1c580deb5f5b7326c666ab660aa96bdd",
       "size": 860
     },
     "check-report.json": {
-      "sha256": "4011ff7850ffce4e8c0ab54f8fb959b8f20e91b40e1992181a5414f9e49ad315",
-      "size": 3512
+      "sha256": "a78d10814489cafbbb71333c869e1ce80c485c185e6761a7ed8af2d5457006e5",
+      "size": 3536
     },
     "cpl_jlcpcb.csv": {
       "sha256": "fcfd09f56fedca12282e66a638d6ea80b9ebf06e83d99b06911239e7bef5324a",
       "size": 2404
     },
     "design-source.zip": {
-      "sha256": "6776740dcdc81bacc70ffa188a883842ee92f81fd0fe6e14a0f958779a31b12f",
-      "size": 680364
+      "sha256": "df5ff814a81da4cb4feb6c805d1468a97405c8c8f2ef70c80c4093e610731f02",
+      "size": 1100596
     },
     "engineering/README.md": {
-      "sha256": "a77fa87bd9a7f78164f176966fea8c9b0582f81640830ccff747399e5da73962",
-      "size": 3285
+      "sha256": "539341a88badbaaebf417c584ca02b0405d7f9bd26f89bbddc6ae1f2c2d15dd0",
+      "size": 3691
     },
     "engineering/clock_spacing.py": {
       "sha256": "c4646ecba440bf22f66654faa04b67465da3045172cfa18df2d3edc853ecc35f",
       "size": 3909
     },
     "engineering/escape-coupling-scenarios.json": {
-      "sha256": "3904f2a88b4af52452749ab8b2a43190fba712254a3dd5a5619a8b83c9240343",
-      "size": 1717
+      "sha256": "93ca591868e8b924658e8977fa3e4ecbba1e8ea135f1f206e0a075c726d0e2c5",
+      "size": 1736
     },
     "engineering/experiments/README.md": {
       "sha256": "c8cf83d7e3b9dc39261f17e3cc0cb91f55e65604b974989daf5e4881d191eed5",
@@ -93,11 +93,11 @@
       "size": 3409
     },
     "engineering/package-escape-spacing.json": {
-      "sha256": "8b87673dd9d3d51924394e4d6dff38606ea7e57c11af209d886ba662cc75d202",
-      "size": 9293
+      "sha256": "6796b96f648cbaee10851ecb584916303485774ec5444effa1ebc6863774a995",
+      "size": 9235
     },
     "fill-consistency.json": {
-      "sha256": "dd355513b59e8276ea7b7c84a6417b9082014910fd2514c94f6ab2388c2aee5a",
+      "sha256": "032a59d1574a03687971c2972c46e9d470171dd2b20cdea2f3b96d94ff2c257a",
       "size": 37
     },
     "firmware/include/ARM-LICENSE.txt": {
@@ -169,68 +169,72 @@
       "size": 2237
     },
     "gerbers/gerbers.zip": {
-      "sha256": "e013aceb483cf04ffe813c938ed01eb8df2848cd4f18935af893925848251275",
-      "size": 177054
+      "sha256": "4ff60c7cee154adfb5b753b97583abc7f5afc0e5cb9aa95979f373f3ed4d50d0",
+      "size": 180368
     },
     "images/assembly.png": {
-      "sha256": "ab8de11b5a133356d7415baa1c07b82f998897e8c810515c43c2a9ba31576d1c",
-      "size": 675693
+      "sha256": "b454d415aa45b43953b854794fff2f7c69c440b0cd9c57b25915c4be127ca90b",
+      "size": 641379
     },
     "images/layer_B_Cu.png": {
-      "sha256": "ac010e228b2d4c03fabd4f418a24dba154f17713b23811399979b4b1d329c0ca",
-      "size": 273152
+      "sha256": "cedb5522a9ed489d71e6157f134fadf1b4d4c1340ce29736f3557f4a2104fa2e",
+      "size": 270069
     },
     "images/layer_F_Cu.png": {
-      "sha256": "9b7201227c60c4b8ad3e8ac5ccd1e2c69b98298b14e1b4bb41d4a14b48136c99",
-      "size": 345453
+      "sha256": "5b5d5ee2b1c5087d3b979a007aca4bbf5353a245382213b168589c697d4dab48",
+      "size": 311860
     },
     "images/layer_In1_Cu.png": {
       "sha256": "a67e2b7746192db2af84b724453c48c114c0d8d5143522cfe81fd1b1ae7f3b6f",
       "size": 217240
     },
     "images/layer_In2_Cu.png": {
-      "sha256": "62ac46e5b1a5044c199e670ef8365ca3c7e37285ffad54e67a0730c796036a5f",
-      "size": 258163
+      "sha256": "9cd1c5ff328e35169720742665ddb3fad07a9d83e62a80c8f16036a831b1399e",
+      "size": 256829
     },
     "images/layer_In3_Cu.png": {
-      "sha256": "2fd052a107aef76c340433748f988a7e4fcbc66f89702cda139c5f8edde7b600",
-      "size": 217406
+      "sha256": "4946f5ae829d97ec36b2b039e7eede1de19a57cb3a8484b13ee5d68e86807261",
+      "size": 217424
     },
     "images/layer_In4_Cu.png": {
       "sha256": "6389587bc87385c0ea4de711ef6d6eac3e6a140e745e0d6e59caf64f072d409c",
       "size": 236867
     },
     "images/pcb_back.png": {
-      "sha256": "6d8dbf1868e80821660694f7ab99755df6f6d0b8d3668099713210bb2ba1c517",
-      "size": 339264
+      "sha256": "45b4d8c8e310566732220e4c72768c2a476a5cc5573347aac5175de652f34791",
+      "size": 335837
     },
     "images/pcb_copper.png": {
-      "sha256": "87190a9acf5f7572c7371f72e4e69cfc46a74eb686affeda5cc5d0e021be0a7a",
-      "size": 493563
+      "sha256": "bb8cededb3fe6f2f0d6c8b8e119c9dd6c5fb08fc7462b8db0d71f32a339c23f7",
+      "size": 459695
     },
     "images/pcb_front.png": {
-      "sha256": "5f861a08e29de7751aa554adc9f5b5869981016901cd0d2856bd96559d023214",
-      "size": 477257
+      "sha256": "e9eb451eb517de48b04950974d3fcab5edaa39a1ff8cf3cf0e205881b9465dff",
+      "size": 442681
     },
     "images/schematic_matchgroup_test.png": {
       "sha256": "0fd77eca8fe556d6b51d31dfca19a04d9cc9efb7943118801d4a0a8dfc3fbb6a",
       "size": 396485
     },
     "kicad_project.zip": {
-      "sha256": "409b397a600b95e1e3b3c9f9118e18df9a7f8e94ea4368801d4b18704e15b4ea",
-      "size": 435608
+      "sha256": "16fb43ed22d470f759db9d953153e2ace9a277e36ff94b239f6bbfbe0051a837",
+      "size": 448058
+    },
+    "lvs.json": {
+      "sha256": "590e87395d997669151b91020f3a030c33cd470fb216132160e7144ff711fc4d",
+      "size": 215
     },
     "manual-assembly-bom.csv": {
       "sha256": "30198f6ac99155e14cb04a604fec7dba41c0eeda6d12ae130cadae3ddecb204a",
       "size": 518
     },
     "native-drc.json": {
-      "sha256": "6fe9503ed39b2a821d0fc1c9222b033e9205c9ff312aafbee31b3f3728365ff5",
+      "sha256": "8be9086f679ed8cbc3db25261bead69d2b04c291485a812ff4299d8af2791877",
       "size": 1214
     },
     "native-erc.json": {
-      "sha256": "4abff38eef5be2b9b0d07249fb2e3ac40e127455878b8f7b3ba041e4c2fb191b",
-      "size": 980
+      "sha256": "b7865cd8d2f82efd02054e0a462dc9d14562aacb9219305e036c0bd15c48d85b",
+      "size": 988
     },
     "procurement-review.md": {
       "sha256": "ccdb8e173be8fd27e75782a4c86d6c1b13801bf37e0cb893eb8d670420d9ad25",
@@ -241,15 +245,15 @@
       "size": 5172
     },
     "report.md": {
-      "sha256": "e3b4fddd804ccb7dc0a923678294360688c0d781ee8559d3e951fab7ef2c2d51",
+      "sha256": "c14b57a2d27b94c9671b4bc414609cb58d8e456bd3457497b9560ce39a92e3dd",
       "size": 4984
     },
     "report.pdf": {
-      "sha256": "3fa2d7a4ce65a84b890cf338489f617de021236553c2093996758d79700af9db",
-      "size": 4085337
+      "sha256": "c856b077a3a313ebc5d5744b332f128f7d5be7faed35acc84007634d61bae227",
+      "size": 3956243
     },
     "schematic.pdf": {
-      "sha256": "9422315a4c2b48a14834802a03264fb93938e6b9324eff222a25791e8f074da9",
+      "sha256": "d54cce8a55e920e82c95a44efe3a6b4829a90d1cb4f392a8fc0f3b2df87e50e9",
       "size": 198729
     }
   },
@@ -267,7 +271,7 @@
     {
       "name": "schematic_file",
       "status": "OK",
-      "message": "Schematic auto-detected: matchgroup_test.kicad_sch"
+      "message": "Schematic file found: matchgroup_test.kicad_sch"
     },
     {
       "name": "schematic_footprints",
@@ -332,9 +336,6 @@
     }
   ],
   "mode": "assembly",
-  "warning_counts": {},
-  "native_warning_counts": {},
-  "acknowledged_warning_rules": [],
   "manual_assembly": [
     "J1",
     "J2",

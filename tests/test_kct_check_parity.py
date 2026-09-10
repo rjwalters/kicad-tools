@@ -64,14 +64,26 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_DIR = REPO_ROOT / "scripts" / "ci"
 
 BOARD_07_PCB = (
-    REPO_ROOT / "boards" / "07-matchgroup-test" / "regression-fixture" / "matchgroup_test_routed.kicad_pcb"
+    REPO_ROOT
+    / "boards"
+    / "07-matchgroup-test"
+    / "regression-fixture"
+    / "matchgroup_test_routed.kicad_pcb"
 )
-BOARD_07_SIDECAR = REPO_ROOT / "boards" / "07-matchgroup-test" / "regression-fixture" / "net_class_map.json"
+BOARD_07_SIDECAR = (
+    REPO_ROOT / "boards" / "07-matchgroup-test" / "regression-fixture" / "net_class_map.json"
+)
 
 BOARD_06_PCB = (
-    REPO_ROOT / "boards" / "06-diffpair-test" / "regression-fixture" / "diffpair_test_routed.kicad_pcb"
+    REPO_ROOT
+    / "boards"
+    / "06-diffpair-test"
+    / "regression-fixture"
+    / "diffpair_test_routed.kicad_pcb"
 )
-BOARD_06_SIDECAR = REPO_ROOT / "boards" / "06-diffpair-test" / "regression-fixture" / "net_class_map.json"
+BOARD_06_SIDECAR = (
+    REPO_ROOT / "boards" / "06-diffpair-test" / "regression-fixture" / "net_class_map.json"
+)
 
 # The three rule families gated on the net_class_map.  Pinning these by name
 # is the load-bearing assertion: a regression that disables any one of them

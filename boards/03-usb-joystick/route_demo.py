@@ -155,10 +155,22 @@ def main():
     from kicad_tools.cli.runner import find_kicad_cli
 
     native_report = output_path.parent / "native-drc.json"
-    native = subprocess.run([
-        str(find_kicad_cli()), "pcb", "drc", str(output_path), "--refill-zones",
-        "--save-board", "--format", "json", "--output", str(native_report)
-    ], capture_output=True, text=True)
+    native = subprocess.run(
+        [
+            str(find_kicad_cli()),
+            "pcb",
+            "drc",
+            str(output_path),
+            "--refill-zones",
+            "--save-board",
+            "--format",
+            "json",
+            "--output",
+            str(native_report),
+        ],
+        capture_output=True,
+        text=True,
+    )
     if native.returncode != 0 or not native_report.is_file():
         drc_passed = False
         print(native.stderr)

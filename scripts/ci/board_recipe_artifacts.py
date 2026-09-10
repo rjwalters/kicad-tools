@@ -25,17 +25,17 @@ def recipe_output_dir(board_dir: Path, *, prepare: bool = False) -> Path:
 
 
 def recipe_baseline_key(pcb: Path) -> str:
-    """Retain existing synthetic tolerances without applying them to a new board.
+    """Canonicalize generated witnesses to their archived synthetic identity.
 
-    Coverage gates use these legacy baseline identifiers only after selecting
-    the isolated synthetic recipe artifact. The measured PCB path stays real.
+    Active output paths never inherit a synthetic baseline. The measured PCB
+    path stays real; only the isolated regeneration shares its fixture's key.
     """
     path = pcb.resolve()
     if (
         path.parent.name in {"regression-output", "regression-fixture"}
         and (path.parent.parent / "regression-fixture").is_dir()
     ):
-        path = path.parent.parent / "output" / path.name
+        path = path.parent.parent / "regression-fixture" / path.name
     try:
         return str(path.relative_to(Path.cwd()))
     except ValueError:

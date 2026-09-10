@@ -1,1 +1,1 @@
-(sym_lib_table (version 7) (lib (name "kicad_tools_pwr") (type "KiCad") (uri "${KIPRJMOD}/kicad_tools_pwr.kicad_sym") (options "") (descr "Power symbols")))
+(sym_lib_table (version 7) (lib (name "kicad_tools_pwr") (type "KiCad") (uri "${KIPRJMOD}/kicad_tools_pwr.kicad_sym") (options "") (descr "Portable board symbols")) (lib (name "board04_symbols") (type "KiCad") (uri "${KIPRJMOD}/board04_symbols.kicad_sym") (options "") (descr "Portable board symbols")))

@@ -61,7 +61,9 @@ from kicad_tools.router.optimizer.pcb import parse_net_names, parse_segments, pa
 # parsing/serialization rather than a hand-rolled stub.
 _BOARD = (
     Path(__file__).resolve().parents[2]
-    / "boards"
+    / "tests"
+    / "fixtures"
+    / "historical_demo_boards"
     / "02-charlieplex-led"
     / "output"
     / "charlieplex_3x3_routed.kicad_pcb"
@@ -82,6 +84,37 @@ _ALL_SIGNAL_NETS = (
     "NODE_C",
     "NODE_D",
 )
+
+
+def _composition_board_text() -> str:
+    """Eight separated routed lanes isolate preservation/sidecar plumbing.
+
+    These tests need real pads and copper on skipped nets, plus one net to
+    reroute. Dense charlieplex topology adds an unrelated congestion search
+    under the 1 mm sidecar clearance and makes CLI plumbing checks time out.
+    """
+    nodes = [
+        '(kicad_pcb (version 20240108) (generator "test")',
+        "(general (thickness 1.6))",
+        '(layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))',
+        '(net 0 "")',
+        "(gr_rect (start 0 0) (end 24 52) (stroke (width 0.1) (type default)) "
+        '(fill none) (layer "Edge.Cuts"))',
+    ]
+    for number, name in enumerate(_ALL_SIGNAL_NETS, 1):
+        y = 5 + (number - 1) * 6
+        nodes.append(f'(net {number} "{name}")')
+        for side, x in enumerate((5, 19)):
+            nodes.append(
+                f'(footprint "Test:Pad" (layer "F.Cu") (at {x} {y}) '
+                f'(property "Reference" "J{number}{side}" (at 0 -1) (layer "F.SilkS")) '
+                f'(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") '
+                f'(net {number} "{name}")))'
+            )
+        nodes.append(
+            f'(segment (start 5 {y}) (end 19 {y}) (width 0.25) (layer "F.Cu") (net {number}))'
+        )
+    return "\n".join([*nodes, ")"])
 
 
 def _seg_key(seg) -> tuple:
@@ -525,6 +558,10 @@ class TestPreserveExistingHardAvoidLayers:
     In1/In2 are routable.
     """
 
+    @pytest.fixture
+    def board_text(self):
+        return _composition_board_text()
+
     def test_preserve_existing_with_hard_avoid_map_keeps_skipped_nets(self, tmp_path, board_text):
         """A ``--preserve-existing`` composition run with a net-class map that
         declares ``avoid_layers`` + ``target_ampacity`` on the routed net keeps
@@ -726,6 +763,10 @@ class TestPreservedNetClassMapResolution:
     defect, because the resolution domain is only wrong once the loader has
     zeroed the skipped nets.
     """
+
+    @pytest.fixture
+    def board_text(self):
+        return _composition_board_text()
 
     @staticmethod
     def _spy_sidecar(monkeypatch) -> list[dict]:

@@ -688,7 +688,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "1d800015-c493-4096-b980-67e8ddfe2c45")
+		(uuid "66277823-30a3-4f49-a33d-33db78b85f29")
 	)
 	(footprint "board05_revB:TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias"
 		(version 20260206)
@@ -1401,7 +1401,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "6669bb94-0398-486b-b515-7ad4196cd688")
+		(uuid "e1f0d209-5d0b-4524-8b90-a8b3218b4b5c")
 	)
 	(footprint "Package_SO:HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias"
 		(version 20260206)
@@ -1768,7 +1768,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "6a08c8f7-715f-4263-98df-b2ce63eb1037")
+		(uuid "fadf9d61-6681-4f36-b674-25e79486d6f1")
 	)
 	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
 		(version 20260206)
@@ -1950,7 +1950,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "b65a860b-956a-48bd-b9e5-8e18dff91f96")
+		(uuid "95280e9c-68a3-49b0-b1af-40c3de90d816")
 	)
 	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical"
 		(version 20260206)
@@ -2140,7 +2140,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "c8d285d8-1edb-4237-8790-ff319e1d70d6")
+		(uuid "0d36bbaf-8a62-459c-93b3-f7aecc6659bb")
 	)
 	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"
 		(version 20260206)
@@ -2354,7 +2354,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "02c923e7-6a17-4893-a121-0d0daa020f37")
+		(uuid "bc12ebd2-c8e6-4e50-b389-72840e9a7be7")
 	)
 	(footprint "Connector_PinHeader_2.54mm:PinHeader_2x03_P2.54mm_Vertical"
 		(version 20260206)
@@ -2586,7 +2586,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "16e58f70-bafe-4f40-9c38-7a11883cfa2a")
+		(uuid "5fd59bb5-974b-4a35-b13b-9db20784df96")
 	)
 	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
 		(version 20260206)
@@ -2768,7 +2768,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "3847c35c-90c7-4d89-93d1-161978a82675")
+		(uuid "fa4a609f-b745-46a7-b40e-7f38dae09236")
 	)
 	(footprint "Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical"
 		(version 20260206)
@@ -2931,7 +2931,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "8a652240-9203-4020-92cf-1aa7d0b198b8")
+		(uuid "9820822b-a2dd-4bb0-bf23-bbc0242d3cd7")
 	)
 	(footprint "Fuse:Fuse_1206_3216Metric"
 		(version 20260206)
@@ -3038,9 +3038,9 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "495ae83b-91e5-4a80-a971-4dcbfcd191cc")
+		(uuid "24c57bf7-cf8e-474c-9358-2185ebf4043f")
 	)
-	(footprint "D_SMA"
+	(footprint "Diode_SMD:D_SMA"
 		(version 20260206)
 		(generator "pcbnew")
 		(generator_version "10.0")
@@ -3051,7 +3051,7 @@
 		(property "Reference" "D1"
 			(at 0 -2.5 0)
 			(layer "F.SilkS")
-			(uuid "7ed36e01-ed97-49bd-82a7-3f8474b13876")
+			(uuid "d46b9403-db67-4d76-a896-1deb596799b1")
 			(effects
 				(font
 					(size 1 1)
@@ -3303,7 +3303,7 @@
 			)
 		)
 	)
-	(footprint "D_SMB"
+	(footprint "Diode_SMD:D_SMB"
 		(version 20260206)
 		(generator "pcbnew")
 		(generator_version "10.0")
@@ -3314,7 +3314,7 @@
 		(property "Reference" "D2"
 			(at 0 -3 0)
 			(layer "F.SilkS")
-			(uuid "e8dc8b7a-515d-46b2-b37a-496abe93f209")
+			(uuid "020ce6a1-7740-4c9f-ad80-bb581798164a")
 			(effects
 				(font
 					(size 1 1)
@@ -3717,7 +3717,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "0ab3394a-67b1-4574-97bb-74d8b2aa472b")
+		(uuid "75b787c4-a80d-4081-8ffd-5fb6a6e31d78")
 	)
 	(footprint "board05_revB:CP_Elec_8x10.5_PolarityMark"
 		(version 20260206)
@@ -4080,7 +4080,7 @@
 				)
 			)
 		)
-		(uuid "aadf2eab-5e2e-4899-b696-5db9c12333d8")
+		(uuid "348d3fa0-8a03-47ef-b331-8ed71ee22a4d")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -4187,7 +4187,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "bfe2206f-db58-4bef-ab0e-cc82a73afdb4")
+		(uuid "470ffec9-7df6-4ddd-b6c4-13dfe48aca74")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -4294,7 +4294,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "77ce1ed5-893d-4bce-8f35-a1dc578a00e3")
+		(uuid "6544e6ed-170b-4f2c-8e00-d27ea069ca32")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -4401,7 +4401,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "bcb2afd4-7b0b-4b9f-967e-74376f5a3bb6")
+		(uuid "cd74a1cd-8f3c-4f0c-b3c1-24775074932f")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -4508,7 +4508,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "01980d48-8f9a-44b0-be83-3c990e655c04")
+		(uuid "97a09cea-00f3-49e3-b1b3-920d5887cf5a")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -4615,7 +4615,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "91a6d044-6c72-444b-be58-a785db7b1970")
+		(uuid "bee6a040-7f5a-4d3f-b0c2-7154f7ef84ab")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -4722,7 +4722,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "1149609f-4849-4026-9fd1-93c855b2a677")
+		(uuid "6e016b0b-ab02-408a-bce0-7923362c6214")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -4829,7 +4829,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "02004fe2-5ee4-4b81-8acb-6a4fdf16c648")
+		(uuid "3062e45e-a56c-48b9-b7b3-164507b4959a")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -4936,7 +4936,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "e33b4b2e-8639-4a30-a880-eba1ff78f679")
+		(uuid "65efd90b-32ff-4587-aefd-9932b0ff371e")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -5043,7 +5043,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "055c5f6f-5003-4c35-9d59-468448f672b0")
+		(uuid "bbc72a77-7d6e-44bd-946f-58bcfd91ca60")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -5150,7 +5150,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "2f55bf06-bf5e-4001-bcc4-d8b054f5caaf")
+		(uuid "67f17341-15d1-4751-8758-8e8965e29b4d")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -5257,7 +5257,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "8610e654-f954-46a3-92f4-c8af72d81a65")
+		(uuid "5f7dd5a9-69e9-4d86-953f-0f1dc0525d29")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -5364,7 +5364,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "961078a8-d860-40fd-a152-674659d85ab5")
+		(uuid "f745d58d-0e93-4314-b6c7-52bd358599c4")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -5471,7 +5471,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "b316e294-aefa-49b2-a4ce-f0a72dc8a257")
+		(uuid "c617575d-bb03-4c5a-9cfa-c7d088a0b851")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -5578,7 +5578,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "7ea888ad-f736-4d95-a2fe-bd0bd9da92d8")
+		(uuid "302d70d4-96c5-4635-b178-dbde0ac4d585")
 	)
 	(footprint "Capacitor_SMD:C_0805_2012Metric"
 		(version 20260206)
@@ -5685,7 +5685,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "b79e6eb1-e2ed-4eb6-8522-f7ceef3dae84")
+		(uuid "08d7f85a-acf3-46b0-bc52-d9e5221ffffc")
 	)
 	(footprint "Resistor_SMD:R_2512_6332Metric"
 		(version 20260206)
@@ -5792,7 +5792,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "5eb271cd-34b8-4d28-ab71-f79f8f1e204b")
+		(uuid "737d19e7-8628-4468-b4c4-abfffc30e1e5")
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(version 20260206)
@@ -5899,7 +5899,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "fbe65bd4-2f34-4f6a-a850-c1a3bc3da414")
+		(uuid "27bf5101-b9b2-4ab4-b0ee-543632b65018")
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(version 20260206)
@@ -6006,7 +6006,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "4985e77d-7dbf-4f09-96ba-64395e52d7cc")
+		(uuid "4ede02ba-9e5d-456a-8b8e-a6bc50e23fc3")
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(version 20260206)
@@ -6113,7 +6113,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "cc66f00d-da4e-4bca-9b92-ab613a660686")
+		(uuid "acf608c5-087f-41b2-95df-294f3cd43337")
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(version 20260206)
@@ -6220,7 +6220,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "b632e98c-1f3a-4426-a38f-93ad3322a54d")
+		(uuid "9707bf04-f0d5-4ce0-a49f-2cb33672cc47")
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(version 20260206)
@@ -6327,7 +6327,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "1ce485ca-ba7d-41ba-bfc8-c54f12e3ceda")
+		(uuid "ce568459-3b3f-485b-9c79-45470f807a01")
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(version 20260206)
@@ -6434,7 +6434,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "be44a0cc-6122-4079-bec4-6cc6ffae08f5")
+		(uuid "e4fb385b-acca-4268-a7eb-6689b941e930")
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(version 20260206)
@@ -6541,7 +6541,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "bde6d7a6-ec57-4684-9511-87b46a9e63ca")
+		(uuid "9ff01982-e973-4979-b6d8-79a6b5c8d8a7")
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(version 20260206)
@@ -6648,7 +6648,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "0a80cbe1-4299-4082-a8b5-b2640a982139")
+		(uuid "f3ef4eea-a1f8-418b-be5e-bcd3e02aba7c")
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(version 20260206)
@@ -6755,7 +6755,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "9d6a8822-155d-4e7e-9b2c-e8fc53d127b8")
+		(uuid "f2c48a81-382c-4b64-b206-e21c19ac0e82")
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(version 20260206)
@@ -6862,7 +6862,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "7dd5257f-c47e-44ae-b204-66d600c9d0e9")
+		(uuid "b5b12484-515b-4c2a-801e-7cd07941da80")
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(version 20260206)
@@ -6969,7 +6969,7 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "5ea49665-e76d-41c7-afb9-cfe679e0b068")
+		(uuid "27773ff9-3c00-4cd3-b1f7-77caa52e0e4a")
 	)
 	(footprint "Resistor_SMD:R_0805_2012Metric"
 		(version 20260206)
@@ -7076,6 +7076,6 @@
 			(rotate (xyz 0 0 0)
 			)
 		)
-		(uuid "63daf6de-7bd7-489d-8a04-49be64d909e1")
+		(uuid "61d95df9-6c6b-4768-8aed-578cdd1623cf")
 	)
 )

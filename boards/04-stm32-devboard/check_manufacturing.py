@@ -30,7 +30,7 @@ def check(pcb_path, report_path):
     )
     meta = run_meta_checks(pcb_path, drc, schematic=str(sch), strict=True)
     write_json_report(
-        results.violations, results, pcb_path, "jlcpcb-tier1", 2, report_path, meta=meta
+        results.violations, results, pcb_path, "jlcpcb-tier1", 0, report_path, meta=meta
     )
     data = json.loads(report_path.read_text())
     data["fabrication_overrides"] = {
@@ -46,5 +46,7 @@ if __name__ == "__main__":
     pcb = Path(sys.argv[1]).resolve()
     report = Path(sys.argv[2]) if len(sys.argv) > 2 else pcb.parent / "check-report.json"
     data = check(pcb, report)
-    print(json.dumps({"summary": data["summary"], "meta_checks": data["meta_checks"]}, indent=2))
+    failed = data["meta_checks"]["overall"] != "PASSED"
+    display = data if failed else {"summary": data["summary"], "meta_checks": data["meta_checks"]}
+    print(json.dumps(display, indent=2))
     sys.exit(0 if data["meta_checks"]["overall"] == "PASSED" else 2)
