@@ -871,19 +871,19 @@ def _refill_zones_in_place(pcb_path: Path) -> None:
 
 
 def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
-    """Compare ``output/manufacturing/manifest.json`` mtime against the PCB.
+    """Verify bundle integrity and its archived PCB against current bytes.
 
-    Resolution path (issue #3750):
-
-    * Look for ``<pcb-dir>/manufacturing/manifest.json`` first (recipes
-      that place the routed PCB next to a ``manufacturing/`` peer).
-    * Then ``<pcb-dir>/../manufacturing/manifest.json`` for layouts where
-      the PCB is one level deeper.
-
-    Returns ``NOT RUN`` when neither manifest is present, ``FAILED``
-    (rendered as ``STALE`` in human output) when the routed PCB is newer
-    than the manifest, and ``PASSED`` otherwise.
+    A missing bundle is NOT RUN. Existing bundles must carry SHA-256 hashes
+    and an unambiguous PCB in the hashed kicad_project.zip. Timestamps never
+    establish freshness. Broader check-input provenance (rules, sidecars,
+    schematic and results) remains the independent readiness.json contract.
     """
+    import hashlib
+    import re
+    import zipfile
+
+    from kicad_tools.export import verify_manifest
+
     candidates = [
         pcb_path.parent / "manufacturing" / "manifest.json",
         pcb_path.parent.parent / "manufacturing" / "manifest.json",
@@ -901,32 +901,43 @@ def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
         )
 
     try:
-        pcb_mtime = pcb_path.stat().st_mtime
-        manifest_mtime = manifest_path.stat().st_mtime
-    except OSError as e:
-        return SubCheckResult(
-            status="FAILED",
-            detail=f"failed to stat manifest or PCB: {e}",
-        )
-
-    # Allow a small mtime tolerance so a fresh ``git checkout`` (which
-    # writes files sequentially with sub-microsecond gaps) does not
-    # spuriously flag the manifest as stale: the PCB and manifest are
-    # written within milliseconds of each other by ``kct export``, while
-    # a *real* stale manifest lags by minutes or longer (any rebuild of
-    # the routed PCB that skipped ``kct export`` produces a multi-second
-    # gap).  ``MANIFEST_FRESHNESS_TOLERANCE_S`` carves that gap.
-    MANIFEST_FRESHNESS_TOLERANCE_S = 5.0
-    delta = pcb_mtime - manifest_mtime
-    if delta > MANIFEST_FRESHNESS_TOLERANCE_S:
-        return SubCheckResult(
-            status="FAILED",
-            detail=f"STALE: routed PCB is {delta:.1f}s newer than manifest.json",
-        )
+        manifest = json.loads(manifest_path.read_text())
+        files = manifest.get("files")
+        if not isinstance(files, dict) or "kicad_project.zip" not in files:
+            raise ValueError("missing hash-bound kicad_project.zip")
+        bundle = manifest_path.parent.resolve()
+        for name, info in files.items():
+            path = Path(name)
+            if path.is_absolute() or ".." in path.parts or "\\" in name:
+                raise ValueError(f"unsafe manifest path: {name}")
+            if not (bundle / path).resolve().is_relative_to(bundle):
+                raise ValueError(f"manifest path leaves bundle: {name}")
+            if name == "manifest.json":
+                continue
+            digest = info.get("sha256") if isinstance(info, dict) else None
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError(f"missing or invalid SHA-256: {name}")
+        archive_path = bundle / "kicad_project.zip"
+        if not archive_path.is_file():
+            raise ValueError("missing kicad_project.zip")
+        problems = verify_manifest(manifest_path)
+        if problems:
+            raise ValueError("; ".join(problems))
+        # The exporter stores the selected source PCB at the archive root.
+        # Do not accept a same-basename nested file or a duplicate ZIP member.
+        with zipfile.ZipFile(archive_path) as archive:
+            matches = [n for n in archive.namelist() if Path(n).name == pcb_path.name]
+            if matches != [pcb_path.name]:
+                raise ValueError("project archive must contain one exact source PCB member")
+            archived_digest = hashlib.sha256(archive.read(pcb_path.name)).hexdigest()
+        if archived_digest != hashlib.sha256(pcb_path.read_bytes()).hexdigest():
+            raise ValueError("routed PCB content differs from the manifest-bound project archive")
+    except (OSError, ValueError, TypeError, AttributeError, zipfile.BadZipFile, RuntimeError) as e:
+        return SubCheckResult(status="FAILED", detail=f"STALE/unverified: {e}")
 
     return SubCheckResult(
         status="PASSED",
-        detail="manifest.json mtime within tolerance of routed PCB mtime",
+        detail="bundle SHA-256 hashes verified; archived PCB matches current content",
     )
 
 

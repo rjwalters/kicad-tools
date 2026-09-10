@@ -147,6 +147,16 @@ verification must check manifest hashes **and** source correspondence (for
 example, compare the project's archived PCB against the checked PCB); mtime
 or internal bundle consistency alone does not establish freshness.
 
+`kct check`'s Manifest subcheck verifies every bundle SHA-256 and compares
+its hashed `kicad_project.zip` source PCB member with the current PCB bytes.
+The source member must occur exactly once at the archive root; nested or
+ambiguous same-name members are not accepted. Missing/invalid hashes or
+mismatched content report STALE/unverified, regardless of file modification
+times. A missing manufacturing bundle remains NOT RUN. This subcheck binds
+the PCB only; readiness independently binds schematic, project, rules,
+sidecars and check results as described above. No readiness schema change
+or timestamp-based migration is required.
+
 ### Producing the report: `kct readiness`
 
 `kct readiness <board-dir|board.kicad_pcb>` is the scripted producer for this

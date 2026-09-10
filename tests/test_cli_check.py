@@ -3,7 +3,6 @@
 import json
 import os
 import shutil
-import time
 from pathlib import Path
 
 import pytest
@@ -521,17 +520,7 @@ def _stage_board00_copy(dest_dir: Path, with_manifest: bool = True) -> tuple[Pat
     shutil.copy(BOARD_00_SCH, sch_dest)
 
     if with_manifest:
-        manifest_dest.parent.mkdir(parents=True, exist_ok=True)
-        if BOARD_00_MANIFEST.exists():
-            shutil.copy(BOARD_00_MANIFEST, manifest_dest)
-        else:
-            manifest_dest.write_text('{"version": "1.0"}\n')
-        # Ensure the manifest is at least as new as the PCB so the
-        # freshness gate passes (mirrors a real ``kct export`` run).
-        now = time.time()
-        os.utime(manifest_dest, (now + 1.0, now + 1.0))
-        os.utime(pcb_dest, (now, now))
-        os.utime(sch_dest, (now, now))
+        shutil.copytree(BOARD_00_MANIFEST.parent, manifest_dest.parent)
 
     return pcb_dest, manifest_dest
 
@@ -650,15 +639,13 @@ class TestCheckMetaCheck:
         assert "FAILED" in overall_line
 
     def test_meta_check_stale_manifest_fails_overall(self, tmp_path: Path, capsys):
-        """If routed PCB is significantly newer than manifest, Manifest -> FAILED."""
+        """Changed PCB content is stale even with identical checkout timestamps."""
         from kicad_tools.cli.check_cmd import main
 
         pcb, manifest = _stage_board00_copy(tmp_path)
-        # Push the PCB mtime well past the manifest's freshness tolerance
-        # (5s in check_cmd._manifest_subcheck).  Use 60s to be unambiguous.
-        manifest_mtime = manifest.stat().st_mtime
-        new_pcb_mtime = manifest_mtime + 60.0
-        os.utime(pcb, (new_pcb_mtime, new_pcb_mtime))
+        pcb.write_text(pcb.read_text() + "\n")
+        # Simulate a checkout writing both files at exactly the same time.
+        os.utime(pcb, ns=(manifest.stat().st_atime_ns, manifest.stat().st_mtime_ns))
 
         result = main([str(pcb)])
         assert result == 2
@@ -1592,3 +1579,113 @@ class TestClearanceSegmentViaNetRelationship:
             _print_violation(self._violation(("A", "B"), rule_id=rid), verbose=False)
             out = capsys.readouterr().out
             assert f"{rid} (different-net)" in out
+
+
+class TestManifestContentFreshness:
+    def bundle(self, tmp_path):
+        import hashlib
+        import zipfile
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)\n")
+        bundle = tmp_path / "manufacturing"
+        bundle.mkdir()
+        archive = bundle / "kicad_project.zip"
+        with zipfile.ZipFile(archive, "w") as z:
+            z.writestr(pcb.name, pcb.read_bytes())
+        manifest = bundle / "manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "files": {
+                        archive.name: {
+                            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                            "size": archive.stat().st_size,
+                        }
+                    }
+                }
+            )
+        )
+        return pcb, manifest, archive
+
+    def test_matching_content_ignores_mtime(self, tmp_path):
+        from kicad_tools.cli.check_cmd import _manifest_subcheck
+
+        pcb, manifest, _ = self.bundle(tmp_path)
+        os.utime(manifest, (1, 1))
+        os.utime(pcb, (999999, 999999))
+        assert _manifest_subcheck(pcb).status == "PASSED"
+
+    def test_changed_content_with_identical_mtime(self, tmp_path):
+        from kicad_tools.cli.check_cmd import _manifest_subcheck
+
+        pcb, manifest, _ = self.bundle(tmp_path)
+        pcb.write_text("(kicad_pcb (version 20240108))")
+        for p in (pcb, manifest):
+            os.utime(p, (100, 100))
+        assert _manifest_subcheck(pcb).status == "FAILED"
+
+    @pytest.mark.parametrize(
+        "mutation",
+        ["no_hash", "no_files", "bad_hash", "archive_changed", "archive_missing", "invalid_json"],
+    )
+    def test_unverified_manifest_cannot_pass(self, tmp_path, mutation):
+        from kicad_tools.cli.check_cmd import _manifest_subcheck
+
+        pcb, manifest, archive = self.bundle(tmp_path)
+        data = json.loads(manifest.read_text())
+        if mutation == "no_hash":
+            del data["files"][archive.name]["sha256"]
+        elif mutation == "no_files":
+            del data["files"]
+        elif mutation == "bad_hash":
+            data["files"][archive.name]["sha256"] = "0" * 64
+        elif mutation == "archive_changed":
+            archive.write_bytes(archive.read_bytes() + b"changed")
+        elif mutation == "archive_missing":
+            archive.unlink()
+        manifest.write_text("invalid" if mutation == "invalid_json" else json.dumps(data))
+        assert _manifest_subcheck(pcb).status == "FAILED"
+
+    @pytest.mark.parametrize(
+        "members",
+        [
+            ["other.kicad_pcb"],
+            ["nested/board.kicad_pcb"],
+            ["board.kicad_pcb", "nested/board.kicad_pcb"],
+            ["board.kicad_pcb", "board.kicad_pcb"],
+        ],
+    )
+    def test_archive_requires_unambiguous_exact_source(self, tmp_path, members):
+        import hashlib
+        import warnings
+        import zipfile
+
+        from kicad_tools.cli.check_cmd import _manifest_subcheck
+
+        pcb, manifest, archive = self.bundle(tmp_path)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            with zipfile.ZipFile(archive, "w") as z:
+                for name in members:
+                    z.writestr(name, pcb.read_bytes())
+        manifest.write_text(
+            json.dumps(
+                {
+                    "files": {
+                        archive.name: {
+                            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                            "size": archive.stat().st_size,
+                        }
+                    }
+                }
+            )
+        )
+        assert _manifest_subcheck(pcb).status == "FAILED"
+
+    def test_no_bundle_is_not_run(self, tmp_path):
+        from kicad_tools.cli.check_cmd import _manifest_subcheck
+
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.touch()
+        assert _manifest_subcheck(pcb).status == "NOT RUN"
