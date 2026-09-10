@@ -453,13 +453,9 @@ jobs:
     # (USB-C blockers) clears.  Today board 03 is omitted because its
     # NetClassRouting declarations do not yet exercise coupled_routing.
     #
-    # Allowlist:
-    #   .github/routed-drc-tolerance.yml currently has
-    #   boards/06-diffpair-test/.../diffpair_test_routed.kicad_pcb: 28
-    #   (25x ImpedanceRule per #2672 + 3x diffpair_clearance_intra per
-    #   #2677).  The gate respects the allowlist so it doesn't fail
-    #   immediately; when #2672 + #2677 land, the allowlist should be
-    #   tightened in a separate PR.
+    # The synthetic fixture retains the final historical18-error pair-quality
+    # baseline (#4019). New physical errors fail independently; active board06
+    # remains at zero. See .github/routed-drc-tolerance.yml for provenance.
     #
     # IMPORTANT (branch-protection note): adding this job to the list of
     # *required* status checks on `main` is a separate repo-admin action.
@@ -717,15 +713,9 @@ jobs:
     # rule degrades to a no-op and the assertion-of-engagement check
     # would fail with "rule not exercised".
     #
-    # Allowlist:
-    #   .github/routed-drc-tolerance.yml currently has
-    #   boards/07-matchgroup-test/.../matchgroup_test_routed.kicad_pcb: 80
-    #   (55x impedance per #2672 + 4x diffpair_length_skew + 4x
-    #   diffpair_routing_continuity + 1x match_group_length_skew, with
-    #   ~25% headroom over the empirical 64).  The gate respects the
-    #   allowlist so it doesn't fail immediately; the floor will tighten
-    #   iteratively as match-group tuning (Phase 3H #2723) lands and
-    #   reduces skew.
+    # The synthetic fixture retains the final historical 8-error baseline
+    # (#4007), with at most one match-group error. New physical errors fail
+    # independently; the active SDRAM release keeps zero tolerance.
     #
     # IMPORTANT (branch-protection note): adding this job to the list of
     # *required* status checks on `main` is a separate repo-admin action.
@@ -1514,22 +1504,16 @@ jobs:
             > /tmp/board06-copper.json
           uv run python scripts/ci/check_copper_lvs.py /tmp/board06-copper.json
 
-      - name: Independent DRC re-check within allowlist (out-of-process, issue #3840)
-        # Validate the REGENERATED routed PCB's DRC out-of-process against the
-        # per-board allowlist (.github/routed-drc-tolerance.yml: 33 for board
-        # 06's diff-pair + drill residuals).  This is the SAME tolerance
-        # mechanism the routed-pcb-drc-check + matchgroup/diffpair regression
-        # jobs use, so it does NOT double-fail on the already-grandfathered
-        # errors -- it only catches a NEW DRC regression above the allowlist.
-        # check_routed_drc.py keys tolerance off the repo-relative path, so
-        # stage the fresh PCB over the committed path (throwaway CI checkout;
-        # mirrors the board-04 job).
+      - name: Independent synthetic routing gate (matching PCB and sidecars)
+        # Preserve the regenerated bundle's routing context. The active release
+        # has a different circuit and must retain its zero-error acceptance.
+        # Historical pair/group baselines never permit new physical errors.
         run: |
           set -euo pipefail
-          cp /tmp/board06-ci/diffpair_test_routed.kicad_pcb \
-            boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb
-          uv run python scripts/ci/check_routed_drc.py \
-            boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb
+          mkdir -p boards/06-diffpair-test/regression-output
+          cp -a /tmp/board06-ci/. boards/06-diffpair-test/regression-output/
+          uv run python scripts/ci/check_diffpair_coverage.py \
+            boards/06-diffpair-test --skip-route --seed 42
 
       - name: Emit board.json via kct board-metrics
         run: |
@@ -1683,21 +1667,16 @@ jobs:
             --expect-opens "DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N" \
             /tmp/board07-copper.json
 
-      - name: Independent DRC re-check within allowlist (out-of-process, issue #3840)
-        # Validate the REGENERATED routed PCB's DRC out-of-process against the
-        # per-board allowlist (.github/routed-drc-tolerance.yml: 120 for board
-        # 07's matchgroup baseline).  This is the SAME tolerance mechanism the
-        # routed-pcb-drc-check + matchgroup regression jobs use, so it does NOT
-        # double-fail on the already-grandfathered errors -- it only catches a
-        # NEW DRC regression above the allowlist.  check_routed_drc.py keys
-        # tolerance off the repo-relative path, so stage the fresh PCB over the
-        # committed path (throwaway CI checkout; mirrors the board-04 job).
+      - name: Independent synthetic routing gate (matching PCB and sidecars)
+        # Preserve the regenerated bundle's routing context. The active release
+        # has a different circuit and must retain its zero-error acceptance.
+        # Historical pair/group baselines never permit new physical errors.
         run: |
           set -euo pipefail
-          cp /tmp/board07-ci/matchgroup_test_routed.kicad_pcb \
-            boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb
-          uv run python scripts/ci/check_routed_drc.py \
-            boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb
+          mkdir -p boards/07-matchgroup-test/regression-output
+          cp -a /tmp/board07-ci/. boards/07-matchgroup-test/regression-output/
+          uv run python scripts/ci/check_matchgroup_coverage.py \
+            boards/07-matchgroup-test --skip-route --seed 42
 
       - name: Emit board.json via kct board-metrics
         run: |

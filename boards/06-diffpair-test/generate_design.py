@@ -1222,9 +1222,32 @@ def _parse_pads(pcb_path: Path):
                     "is_th": is_th,
                     "drill": float(getattr(pad, "drill", 0.0) or 0.0),
                     "layers": layers,
+                    "pad": pad,
+                    "footprint": fp,
+                    "origin": (origin_x, origin_y),
                 }
             )
     return pads
+
+
+def _via_overlaps_smd_pad(via, pad):
+    """Use the DRC detector, including partial drill overlap and pad rotation."""
+    from types import SimpleNamespace
+
+    from kicad_tools.validate.rules.via_pad_geometry import (
+        is_smd_pad,
+        pad_absolute_bbox,
+        via_inside_pad,
+    )
+
+    physical_pad, footprint = pad["pad"], pad["footprint"]
+    if not is_smd_pad(physical_pad) or via["net"] != pad["net"]:
+        return False
+    ox, oy = pad["origin"]
+    physical_via = SimpleNamespace(position=(via["x"] - ox, via["y"] - oy), drill=via["drill"])
+    return via_inside_pad(
+        physical_via, pad_absolute_bbox(physical_pad, footprint), physical_pad, footprint
+    )
 
 
 def _legalize_signal_vias(pcb_path: Path) -> int:
@@ -1645,14 +1668,7 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
             for p in pads:
                 if p["is_th"]:
                     continue
-                # Drill circle fully inside the pad bbox (rule geometry).
-                r = v["drill"] / 2
-                if (
-                    p["x"] - p["w"] / 2 <= v["x"] - r
-                    and v["x"] + r <= p["x"] + p["w"] / 2
-                    and p["y"] - p["h"] / 2 <= v["y"] - r
-                    and v["y"] + r <= p["y"] + p["h"] / 2
-                ):
+                if _via_overlaps_smd_pad(v, p):
                     in_pad = p
                     break
             if in_pad is None:

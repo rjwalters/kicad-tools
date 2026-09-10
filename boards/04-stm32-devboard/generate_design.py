@@ -606,24 +606,49 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # Write schematic
     sch_path = output_dir / "stm32_devboard.kicad_sch"
     sch.write(sch_path)
-    # Keep the synthesized +3.3V power symbol portable for native ERC.
-    from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
-
-    doc = parse_file(sch_path)
-    custom = parse_string('(kicad_symbol_lib (version 20250114) (generator "kicad_tools"))')
-    for symbol in doc.find_child("lib_symbols").find_children("symbol"):
-        if symbol.get_string(0).startswith("kicad_tools_pwr:"):
-            copy = parse_string(serialize_sexp(symbol))
-            copy.set_atom(0, copy.get_string(0).split(":", 1)[1])
-            custom.add(copy)
-    (output_dir / "kicad_tools_pwr.kicad_sym").write_text(serialize_sexp(custom))
-    (output_dir / "sym-lib-table").write_text(
-        '(sym_lib_table (version 7) (lib (name "kicad_tools_pwr") (type "KiCad") '
-        '(uri "${KIPRJMOD}/kicad_tools_pwr.kicad_sym") (options "") (descr "Power symbols")))\n'
-    )
+    write_portable_symbols(sch_path)
     print(f"   Schematic: {sch_path}")
 
     return sch_path
+
+
+def write_portable_symbols(sch_path: Path) -> None:
+    """Bind generated power and reviewed capacitor symbols to local libraries.
+
+    KiCad 10.0.5 and 10.0.6 ship different Device:C_Small definitions. Preserve
+    the schematic's exact cached pins/graphics instead of depending on which
+    stock library a native ERC host has installed.
+    """
+    from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
+
+    doc = parse_file(sch_path)
+    libraries = {
+        name: parse_string('(kicad_symbol_lib (version 20250114) (generator "kicad_tools"))')
+        for name in ("kicad_tools_pwr", "board04_symbols")
+    }
+    for symbol in doc.find_child("lib_symbols").find_children("symbol"):
+        lib_id = symbol.get_string(0)
+        if lib_id == "Device:C_Small":
+            lib_id = "board04_symbols:C_Small"
+            symbol.set_atom(0, lib_id)
+        namespace, name = lib_id.split(":", 1)
+        if namespace in libraries:
+            copy = parse_string(serialize_sexp(symbol))
+            copy.set_atom(0, name)
+            libraries[namespace].add(copy)
+    for symbol in doc.find_children("symbol"):
+        lib_id = symbol.find_child("lib_id")
+        if lib_id and lib_id.get_string(0) == "Device:C_Small":
+            lib_id.set_atom(0, "board04_symbols:C_Small")
+    sch_path.write_text(serialize_sexp(doc))
+    for name, library in libraries.items():
+        (sch_path.parent / f"{name}.kicad_sym").write_text(serialize_sexp(library))
+    entries = " ".join(
+        f'(lib (name "{name}") (type "KiCad") '
+        f'(uri "${{KIPRJMOD}}/{name}.kicad_sym") (options "") (descr "Portable board symbols"))'
+        for name in libraries
+    )
+    (sch_path.parent / "sym-lib-table").write_text(f"(sym_lib_table (version 7) {entries})\n")
 
 
 def create_project(output_dir: Path, project_name: str) -> Path:
@@ -1807,6 +1832,25 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
         for error in result.errors:
             print(f"   Export error: {error}")
         return False
+
+    # The schematic's local symbol bindings must travel with the native project.
+    import hashlib
+    import json
+    import zipfile
+
+    project_zip = mfr_dir / "kicad_project.zip"
+    with zipfile.ZipFile(project_zip, "a", zipfile.ZIP_DEFLATED) as archive:
+        for source in [*output_dir.glob("*.kicad_sym"), output_dir / "sym-lib-table"]:
+            if source.is_file():
+                archive.write(source, source.name)
+    manifest_path = mfr_dir / "manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        manifest["files"][project_zip.name] = {
+            "sha256": hashlib.sha256(project_zip.read_bytes()).hexdigest(),
+            "size": project_zip.stat().st_size,
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
     process["validate_process"](routed_path)
 

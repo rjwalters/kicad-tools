@@ -45,8 +45,8 @@
       "size": 1869
     },
     "design-source/generate_design.py": {
-      "sha256": "897ef5b7c4253c1b0a9c41e4fd18763ab11ad4f0af14612706bd1db4a09379de",
-      "size": 107415
+      "sha256": "67bb8aa3b2c1ce4825d3d20778c080fd5a75c06633d40895ee65b88a9e147216",
+      "size": 109172
     },
     "design-source/manufacturing_process.py": {
       "sha256": "72a88b1c0cd2f28876544ca4e200326d190fdd4b7a64b93c187d66145ef214f9",
@@ -93,8 +93,8 @@
       "size": 278127
     },
     "kicad_project.zip": {
-      "sha256": "f07a137ca13f7fb54de97aab0384ba465bebdf212cbb43356df386e8256192bd",
-      "size": 68859
+      "sha256": "63bd271103b061ac02d52a59fff5707b5ce3402f7df46043ae410f74a0c45929",
+      "size": 69587
     },
     "manual-assembly-bom.csv": {
       "sha256": "0d1620494f1492c9a57ccf7d29840d0643984cd23bdb2969e0d0ea660a4839a1",
@@ -105,11 +105,15 @@
       "size": 323
     },
     "native-drc.json": {
-      "sha256": "1c3fdb121409fd362ba09c3c42bd39e784a3a8856f42b2eaa93039935a5ec1d5",
+      "sha256": "c3fb69e2f59f2ffd07db5c4a64c3fa13d8fe08efb6fecabfb32beb76e4661a8b",
       "size": 1213
     },
+    "native-erc-linux.json": {
+      "sha256": "175aaa61bf18b3ac08a1d94650e97e171fbd0c469d1a432664ec73b2977e05bb",
+      "size": 987
+    },
     "native-erc.json": {
-      "sha256": "fd040b4e217a1a750d69f8dc0647f15dbdf5fa0619320573e347246f1a74f18c",
+      "sha256": "1e1244c1b8e14a832c30cfd4e376f7eebb359580260630523240d962ecee9c1a",
       "size": 987
     },
     "procurement-review.md": {
