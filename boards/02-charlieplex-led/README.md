@@ -1,172 +1,21 @@
-# Charlieplexed LED Grid Demo
+# ATtiny85 Charlieplex LED Grid
 
-This demo demonstrates the kicad-tools autorouter by routing a 3x3 LED grid PCB.
+A working 3 × 3 red LED sequencer built around a real ATtiny85-20PU. Four GPIO pins drive nine LEDs through four 330 Ω resistors. The 50 × 55 mm, two-layer board includes regulated 3.3–5 V power input, supply decoupling, reset pullup, and a standard six-pin AVR ISP header.
 
-## Quick Start
+See [HARDWARE.md](HARDWARE.md) for the complete pinout, verified component identities, power instructions and firmware programming. U1, J1 and J2 are hand-soldered after the sixteen SMT components are assembled. The supplied firmware advances through D1–D9; physical hardware testing has not yet been performed.
 
-```bash
-# One-command build (recommended)
-kct build boards/02-charlieplex-led
+## Rebuild
 
-# Or run specific steps
-kct build boards/02-charlieplex-led --step schematic
-kct build boards/02-charlieplex-led --step pcb
-kct build boards/02-charlieplex-led --step route
-kct build boards/02-charlieplex-led --step verify
+From the repository root, with KiCad and the project Python environment installed:
 
-# Preview what would happen
-kct build boards/02-charlieplex-led --dry-run
+```sh
+uv run python boards/02-charlieplex-led/generate_design.py /tmp/charlieplex-rebuild
 ```
 
-## What is Charlieplexing?
+The schematic and PCB generators share `hardware_design.py` and `design_spec.py`. Native library footprints preserve the actual DIP and header geometry. The deterministic routing recipe traces all twelve nets, then `finalize_routing.py` applies two reviewed escape-via corrections, raises silkscreen widths to the fabrication minimum, and requires native KiCad DRC to have zero findings. These explicit corrections address router defects; they do not suppress checks.
 
-Charlieplexing is a technique for driving many LEDs with fewer GPIO pins. With N pins,
-you can control N*(N-1) LEDs by using the tri-state capability of GPIO pins:
+`output/manufacturing.zip` contains the fabrication and assembly package. Its manifest records the package files and SHA256 hashes. `output/readiness.json` records current validation evidence and input hashes.
 
-- Each LED is connected between two GPIO pins
-- To light an LED, set one pin HIGH (anode) and one LOW (cathode)
-- Other pins are set to high-impedance (input mode) so they don't interfere
+## Charlieplexing
 
-With 4 GPIO pins, we can drive 4*(4-1) = 12 LEDs. This demo uses 9 for a 3x3 grid.
-
-## Circuit Design
-
-```
-                    +----[R1]----+----[R2]----+----[R3]----+----[R4]----+
-                    |            |            |            |            |
-                 LINE_A       LINE_B       LINE_C       LINE_D          |
-                    |            |            |            |            |
-                +---+---+    +---+---+    +---+---+    +---+---+        |
-                |  U1   |    (GPIO)       (GPIO)       (GPIO)           |
-                | (MCU) |                                               |
-                +-------+                                               |
-                                                                        |
-                             LED Grid (9 LEDs)                          |
-               +----------------+----------------+----------------+     |
-               |     D1         |     D2         |     D3         |     |
-               |   A -> B       |   B -> A       |   A -> C       |     |
-               +----------------+----------------+----------------+     |
-               |     D4         |     D5         |     D6         |     |
-               |   C -> A       |   A -> D       |   D -> A       |     |
-               +----------------+----------------+----------------+     |
-               |     D7         |     D8         |     D9         |     |
-               |   B -> C       |   C -> B       |   B -> D       |     |
-               +----------------+----------------+----------------+     |
-```
-
-## Files
-
-| File | Description |
-|------|-------------|
-| `generate_pcb.py` | Script to generate the unrouted PCB file |
-| `generate_schematic.py` | Script to generate the schematic file |
-| `route_demo.py` | Script to run the autorouter on the PCB |
-| `output/charlieplex_3x3.kicad_sch` | Generated schematic |
-| `output/charlieplex_3x3.kicad_pcb` | Generated unrouted PCB |
-| `output/charlieplex_3x3_routed.kicad_pcb` | Routed PCB (after running route_demo.py) |
-
-## Advanced: Manual Build
-
-For more control over individual steps, you can run Python scripts directly. See [Prerequisites](../README.md#prerequisites-for-manual-build) for environment setup.
-
-### Step 1: Generate the PCB
-
-```bash
-# From repository root
-uv run python boards/02-charlieplex-led/generate_pcb.py
-```
-
-This creates `output/charlieplex_3x3.kicad_pcb` with:
-- 1 MCU (U1) - 8-pin DIP footprint
-- 4 Resistors (R1-R4) - 0805 SMD
-- 9 LEDs (D1-D9) - 0805 SMD, arranged in 3x3 grid
-- Board outline (50mm x 55mm)
-- Net definitions for all connections
-
-### Step 2: Run the Autorouter
-
-```bash
-# From repository root
-uv run python boards/02-charlieplex-led/route_demo.py
-```
-
-This:
-1. Loads the unrouted PCB
-2. Parses components and net assignments
-3. Uses A* pathfinding to route connections
-4. Saves the routed result to `output/charlieplex_3x3_routed.kicad_pcb`
-
-**Note:** The dense charlieplex topology was historically a routing challenge,
-but as of 2026-07-05 the negotiated router completes **all 8 signal nets**
-(plus pour-carried VCC/GND) on 2 layers in a few seconds, clean under both
-`kct check` and `kicad-cli pcb drc`.
-
-### Step 3: View in KiCad (Optional)
-
-Open `charlieplex_3x3_routed.kicad_pcb` in KiCad to visualize the routes.
-
-## Routing Strategy
-
-The autorouter uses:
-
-1. **Minimum Spanning Tree (MST)** - Connects multi-pin nets by finding the shortest
-   total connection distance, reducing wire length.
-
-2. **Net Priority** - Routes nets in priority order (power nets first, then signals).
-
-3. **A* Pathfinding** - Finds optimal paths around obstacles with minimal length.
-
-4. **Via Management** - Can place vias to route on bottom layer when needed.
-
-## Customization
-
-### Change Design Rules
-
-Edit `route_demo.py` to adjust:
-
-```python
-rules = DesignRules(
-    grid_resolution=0.25,  # Routing grid (finer = more options, slower)
-    trace_width=0.3,  # Trace width in mm
-    trace_clearance=0.2,  # Minimum clearance in mm
-    via_drill=0.3,  # Via drill diameter
-    via_diameter=0.6,  # Via pad diameter
-)
-```
-
-### Change Board Layout
-
-Edit `generate_pcb.py` to adjust component positions, board size, etc.
-
-### Skip Different Nets
-
-By default, VCC and GND are skipped (assuming power planes). To route them:
-
-```python
-skip_nets = []  # Route everything
-```
-
-## Technical Details
-
-### Net Assignments
-
-| Net | Purpose | Components |
-|-----|---------|------------|
-| LINE_A - LINE_D | MCU GPIO to resistor | U1.1-4 → R1-4.1 |
-| NODE_A - NODE_D | Resistor to LED matrix | R1-4.2 → D1-9 anodes/cathodes |
-| VCC | Power supply | U1.7 |
-| GND | Ground | U1.8 |
-
-### LED Charlieplex Mapping
-
-| LED | Anode | Cathode | To Light |
-|-----|-------|---------|----------|
-| D1 | NODE_A | NODE_B | A=HIGH, B=LOW, C=HiZ, D=HiZ |
-| D2 | NODE_B | NODE_A | B=HIGH, A=LOW, C=HiZ, D=HiZ |
-| D3 | NODE_A | NODE_C | A=HIGH, C=LOW, B=HiZ, D=HiZ |
-| D4 | NODE_C | NODE_A | C=HIGH, A=LOW, B=HiZ, D=HiZ |
-| D5 | NODE_A | NODE_D | A=HIGH, D=LOW, B=HiZ, C=HiZ |
-| D6 | NODE_D | NODE_A | D=HIGH, A=LOW, B=HiZ, C=HiZ |
-| D7 | NODE_B | NODE_C | B=HIGH, C=LOW, A=HiZ, D=HiZ |
-| D8 | NODE_C | NODE_B | C=HIGH, B=LOW, A=HiZ, D=HiZ |
-| D9 | NODE_B | NODE_D | B=HIGH, D=LOW, A=HiZ, C=HiZ |
+Each LED connects between two GPIO nodes. To light it, one GPIO drives high, another drives low, and the other two remain inputs without pullups. Four GPIOs can address twelve directed pairs; this board populates nine. The current path contains two 330 Ω resistors, yielding about 4.5 mA with a 5 V supply and a 2 V LED drop. The firmware blanks the matrix before changing direction to avoid ghosting.

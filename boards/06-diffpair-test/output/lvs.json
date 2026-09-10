@@ -4,5 +4,6 @@
   "mismatches": [],
   "copper_mismatches": [],
   "copper_vacuous": false,
-  "copper_bound_pad_count": 198
+  "copper_bound_pad_count": 108,
+  "netlist_vacuous": false
 }

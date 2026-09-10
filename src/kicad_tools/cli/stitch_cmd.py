@@ -205,6 +205,15 @@ class ViaPlacement:
     drill: float
     layers: tuple[str, str]
     via_type: str | None = None  # None for standard, "micro" for micro-via
+    target_layer: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.target_layer = self.layers[1]
+        # A plane target controls where the barrel must make contact, not
+        # how far a mechanically drilled through via extends. Keep explicit
+        # micro/blind spans, but never serialize a standard via as F->InN.
+        if self.via_type is None or self.via_type == "through":
+            self.layers = ("F.Cu", "B.Cu")
 
 
 @dataclass
@@ -2975,7 +2984,10 @@ def calculate_extended_escape_position(
 
 
 def get_via_layers(pad_layer: str, target_layer: str | None) -> tuple[str, str]:
-    """Determine the layers for the via.
+    """Resolve the pad and desired plane-contact layers for placement checks.
+
+    ``ViaPlacement`` separately normalizes standard vias to the full physical
+    F.Cu/B.Cu span. The requested inner plane remains the fill-gate target.
 
     Args:
         pad_layer: The layer the pad is on (F.Cu or B.Cu)
@@ -5758,7 +5770,7 @@ def output_result(
     # Output vias by net
     for net_name in sorted(vias_by_net.keys()):
         vias = vias_by_net[net_name]
-        layer_target = vias[0].layers[1] if vias else ""
+        layer_target = vias[0].target_layer if vias else ""
         print(f"\n{net_name} -> {layer_target}:")
         for via in vias[:10]:  # Limit output
             print(
@@ -5924,6 +5936,7 @@ def result_document(
                 "size_mm": via.size,
                 "drill_mm": via.drill,
                 "layers": list(via.layers),
+                "target_layer": via.target_layer,
                 "via_type": via.via_type or "standard",
             }
             for via in result.vias_added

@@ -229,6 +229,13 @@ def run_move_footprint(
             # fp existence already validated above
             fp.position = _assign_coords(x, y)  # type: ignore[union-attr]
             if rot is not None:
+                # KiCad pad angles are absolute board-frame angles, while
+                # pad positions remain footprint-local. Preserve each pad's
+                # orientation relative to the part when changing its angle.
+                rotation_delta = rot - fp.rotation  # type: ignore[union-attr]
+                if rotation_delta != 0.0:
+                    for pad in fp.pads:  # type: ignore[union-attr]
+                        pad.rotation += rotation_delta
                 fp.rotation = rot  # type: ignore[union-attr]
 
         result["moved"] = True

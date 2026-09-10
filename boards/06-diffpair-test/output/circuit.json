@@ -1,0 +1,857 @@
+{
+  "datasheet": "https://www.ti.com/lit/ds/symlink/sn65lvds1.pdf",
+  "components": [
+    {
+      "ref": "J1",
+      "value": "3.3V regulated input",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+      "xy": [
+        12,
+        12
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "",
+      "mpn": "Samtec TSW-102-07-G-S"
+    },
+    {
+      "ref": "J2",
+      "value": "IN1-4 / GND",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+      "xy": [
+        12,
+        26
+      ],
+      "pins": {
+        "1": "IN1",
+        "2": "GND",
+        "3": "IN2",
+        "4": "GND",
+        "5": "IN3",
+        "6": "GND",
+        "7": "IN4",
+        "8": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "",
+      "mpn": "Samtec TSW-108-07-G-S"
+    },
+    {
+      "ref": "J3",
+      "value": "OUT1-4 / GND",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+      "xy": [
+        88,
+        26
+      ],
+      "pins": {
+        "1": "OUT1",
+        "2": "GND",
+        "3": "OUT2",
+        "4": "GND",
+        "5": "OUT3",
+        "6": "GND",
+        "7": "OUT4",
+        "8": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "",
+      "mpn": "Samtec TSW-108-07-G-S"
+    },
+    {
+      "ref": "C17",
+      "value": "10uF",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "xy": [
+        19,
+        12
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C15850",
+      "mpn": "CL21A106KAYNNNE"
+    },
+    {
+      "ref": "U1",
+      "value": "SN65LVDS1DR",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "xy": [
+        34,
+        24
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "IN1",
+        "3": null,
+        "4": "GND",
+        "5": null,
+        "6": null,
+        "7": "LVDS1_P",
+        "8": "LVDS1_N"
+      },
+      "names": {
+        "1": "VCC",
+        "2": "D",
+        "3": "NC",
+        "4": "GND",
+        "5": "NC",
+        "6": "NC",
+        "7": "Y",
+        "8": "Z"
+      },
+      "types": {
+        "1": "power_in",
+        "2": "input",
+        "3": "no_connect",
+        "4": "power_in",
+        "5": "no_connect",
+        "6": "no_connect",
+        "7": "output",
+        "8": "output"
+      },
+      "angle": 0,
+      "lcsc": "C2671256",
+      "mpn": "SN65LVDS1DR"
+    },
+    {
+      "ref": "U2",
+      "value": "SN65LVDS2DR",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "xy": [
+        68,
+        24
+      ],
+      "pins": {
+        "1": "LVDS1_N",
+        "2": "LVDS1_P",
+        "3": null,
+        "4": null,
+        "5": "GND",
+        "6": null,
+        "7": "OUT1",
+        "8": "+3V3"
+      },
+      "names": {
+        "1": "B",
+        "2": "A",
+        "3": "NC",
+        "4": "NC",
+        "5": "GND",
+        "6": "NC",
+        "7": "R",
+        "8": "VCC"
+      },
+      "types": {
+        "1": "input",
+        "2": "input",
+        "3": "no_connect",
+        "4": "no_connect",
+        "5": "power_in",
+        "6": "no_connect",
+        "7": "output",
+        "8": "power_in"
+      },
+      "angle": 0,
+      "lcsc": "C2671054",
+      "mpn": "SN65LVDS2DR"
+    },
+    {
+      "ref": "C1",
+      "value": "1nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        29,
+        20.5
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C1588",
+      "mpn": "CL10B102KB8NNNC"
+    },
+    {
+      "ref": "C2",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        29,
+        18
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C14663",
+      "mpn": "CC0603KRX7R9BB104"
+    },
+    {
+      "ref": "C3",
+      "value": "1nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        73,
+        20.5
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C1588",
+      "mpn": "CL10B102KB8NNNC"
+    },
+    {
+      "ref": "C4",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        73,
+        18
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C14663",
+      "mpn": "CC0603KRX7R9BB104"
+    },
+    {
+      "ref": "R1",
+      "value": "100",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "xy": [
+        63,
+        22.73
+      ],
+      "pins": {
+        "1": "LVDS1_P",
+        "2": "LVDS1_N"
+      },
+      "names": {},
+      "types": {},
+      "angle": 90,
+      "lcsc": "C22775",
+      "mpn": "0603WAF1000T5E"
+    },
+    {
+      "ref": "R5",
+      "value": "100k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "xy": [
+        23,
+        24
+      ],
+      "pins": {
+        "1": "IN1",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C25803",
+      "mpn": "0603WAF1003T5E"
+    },
+    {
+      "ref": "U3",
+      "value": "SN65LVDS1DR",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "xy": [
+        34,
+        36
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "IN2",
+        "3": null,
+        "4": "GND",
+        "5": null,
+        "6": null,
+        "7": "LVDS2_P",
+        "8": "LVDS2_N"
+      },
+      "names": {
+        "1": "VCC",
+        "2": "D",
+        "3": "NC",
+        "4": "GND",
+        "5": "NC",
+        "6": "NC",
+        "7": "Y",
+        "8": "Z"
+      },
+      "types": {
+        "1": "power_in",
+        "2": "input",
+        "3": "no_connect",
+        "4": "power_in",
+        "5": "no_connect",
+        "6": "no_connect",
+        "7": "output",
+        "8": "output"
+      },
+      "angle": 0,
+      "lcsc": "C2671256",
+      "mpn": "SN65LVDS1DR"
+    },
+    {
+      "ref": "U4",
+      "value": "SN65LVDS2DR",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "xy": [
+        68,
+        36
+      ],
+      "pins": {
+        "1": "LVDS2_N",
+        "2": "LVDS2_P",
+        "3": null,
+        "4": null,
+        "5": "GND",
+        "6": null,
+        "7": "OUT2",
+        "8": "+3V3"
+      },
+      "names": {
+        "1": "B",
+        "2": "A",
+        "3": "NC",
+        "4": "NC",
+        "5": "GND",
+        "6": "NC",
+        "7": "R",
+        "8": "VCC"
+      },
+      "types": {
+        "1": "input",
+        "2": "input",
+        "3": "no_connect",
+        "4": "no_connect",
+        "5": "power_in",
+        "6": "no_connect",
+        "7": "output",
+        "8": "power_in"
+      },
+      "angle": 0,
+      "lcsc": "C2671054",
+      "mpn": "SN65LVDS2DR"
+    },
+    {
+      "ref": "C5",
+      "value": "1nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        29,
+        32.5
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C1588",
+      "mpn": "CL10B102KB8NNNC"
+    },
+    {
+      "ref": "C6",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        29,
+        30
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C14663",
+      "mpn": "CC0603KRX7R9BB104"
+    },
+    {
+      "ref": "C7",
+      "value": "1nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        73,
+        32.5
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C1588",
+      "mpn": "CL10B102KB8NNNC"
+    },
+    {
+      "ref": "C8",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        73,
+        30
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C14663",
+      "mpn": "CC0603KRX7R9BB104"
+    },
+    {
+      "ref": "R2",
+      "value": "100",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "xy": [
+        63,
+        34.73
+      ],
+      "pins": {
+        "1": "LVDS2_P",
+        "2": "LVDS2_N"
+      },
+      "names": {},
+      "types": {},
+      "angle": 90,
+      "lcsc": "C22775",
+      "mpn": "0603WAF1000T5E"
+    },
+    {
+      "ref": "R6",
+      "value": "100k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "xy": [
+        23,
+        36
+      ],
+      "pins": {
+        "1": "IN2",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C25803",
+      "mpn": "0603WAF1003T5E"
+    },
+    {
+      "ref": "U5",
+      "value": "SN65LVDS1DR",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "xy": [
+        34,
+        48
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "IN3",
+        "3": null,
+        "4": "GND",
+        "5": null,
+        "6": null,
+        "7": "LVDS3_P",
+        "8": "LVDS3_N"
+      },
+      "names": {
+        "1": "VCC",
+        "2": "D",
+        "3": "NC",
+        "4": "GND",
+        "5": "NC",
+        "6": "NC",
+        "7": "Y",
+        "8": "Z"
+      },
+      "types": {
+        "1": "power_in",
+        "2": "input",
+        "3": "no_connect",
+        "4": "power_in",
+        "5": "no_connect",
+        "6": "no_connect",
+        "7": "output",
+        "8": "output"
+      },
+      "angle": 0,
+      "lcsc": "C2671256",
+      "mpn": "SN65LVDS1DR"
+    },
+    {
+      "ref": "U6",
+      "value": "SN65LVDS2DR",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "xy": [
+        68,
+        48
+      ],
+      "pins": {
+        "1": "LVDS3_N",
+        "2": "LVDS3_P",
+        "3": null,
+        "4": null,
+        "5": "GND",
+        "6": null,
+        "7": "OUT3",
+        "8": "+3V3"
+      },
+      "names": {
+        "1": "B",
+        "2": "A",
+        "3": "NC",
+        "4": "NC",
+        "5": "GND",
+        "6": "NC",
+        "7": "R",
+        "8": "VCC"
+      },
+      "types": {
+        "1": "input",
+        "2": "input",
+        "3": "no_connect",
+        "4": "no_connect",
+        "5": "power_in",
+        "6": "no_connect",
+        "7": "output",
+        "8": "power_in"
+      },
+      "angle": 0,
+      "lcsc": "C2671054",
+      "mpn": "SN65LVDS2DR"
+    },
+    {
+      "ref": "C9",
+      "value": "1nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        29,
+        44.5
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C1588",
+      "mpn": "CL10B102KB8NNNC"
+    },
+    {
+      "ref": "C10",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        29,
+        42
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C14663",
+      "mpn": "CC0603KRX7R9BB104"
+    },
+    {
+      "ref": "C11",
+      "value": "1nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        73,
+        44.5
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C1588",
+      "mpn": "CL10B102KB8NNNC"
+    },
+    {
+      "ref": "C12",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        73,
+        42
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C14663",
+      "mpn": "CC0603KRX7R9BB104"
+    },
+    {
+      "ref": "R3",
+      "value": "100",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "xy": [
+        63,
+        46.73
+      ],
+      "pins": {
+        "1": "LVDS3_P",
+        "2": "LVDS3_N"
+      },
+      "names": {},
+      "types": {},
+      "angle": 90,
+      "lcsc": "C22775",
+      "mpn": "0603WAF1000T5E"
+    },
+    {
+      "ref": "R7",
+      "value": "100k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "xy": [
+        23,
+        48
+      ],
+      "pins": {
+        "1": "IN3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C25803",
+      "mpn": "0603WAF1003T5E"
+    },
+    {
+      "ref": "U7",
+      "value": "SN65LVDS1DR",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "xy": [
+        34,
+        60
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "IN4",
+        "3": null,
+        "4": "GND",
+        "5": null,
+        "6": null,
+        "7": "LVDS4_P",
+        "8": "LVDS4_N"
+      },
+      "names": {
+        "1": "VCC",
+        "2": "D",
+        "3": "NC",
+        "4": "GND",
+        "5": "NC",
+        "6": "NC",
+        "7": "Y",
+        "8": "Z"
+      },
+      "types": {
+        "1": "power_in",
+        "2": "input",
+        "3": "no_connect",
+        "4": "power_in",
+        "5": "no_connect",
+        "6": "no_connect",
+        "7": "output",
+        "8": "output"
+      },
+      "angle": 0,
+      "lcsc": "C2671256",
+      "mpn": "SN65LVDS1DR"
+    },
+    {
+      "ref": "U8",
+      "value": "SN65LVDS2DR",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "xy": [
+        68,
+        60
+      ],
+      "pins": {
+        "1": "LVDS4_N",
+        "2": "LVDS4_P",
+        "3": null,
+        "4": null,
+        "5": "GND",
+        "6": null,
+        "7": "OUT4",
+        "8": "+3V3"
+      },
+      "names": {
+        "1": "B",
+        "2": "A",
+        "3": "NC",
+        "4": "NC",
+        "5": "GND",
+        "6": "NC",
+        "7": "R",
+        "8": "VCC"
+      },
+      "types": {
+        "1": "input",
+        "2": "input",
+        "3": "no_connect",
+        "4": "no_connect",
+        "5": "power_in",
+        "6": "no_connect",
+        "7": "output",
+        "8": "power_in"
+      },
+      "angle": 0,
+      "lcsc": "C2671054",
+      "mpn": "SN65LVDS2DR"
+    },
+    {
+      "ref": "C13",
+      "value": "1nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        29,
+        56.5
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C1588",
+      "mpn": "CL10B102KB8NNNC"
+    },
+    {
+      "ref": "C14",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        29,
+        54
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C14663",
+      "mpn": "CC0603KRX7R9BB104"
+    },
+    {
+      "ref": "C15",
+      "value": "1nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        73,
+        56.5
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C1588",
+      "mpn": "CL10B102KB8NNNC"
+    },
+    {
+      "ref": "C16",
+      "value": "100nF",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "xy": [
+        73,
+        54
+      ],
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C14663",
+      "mpn": "CC0603KRX7R9BB104"
+    },
+    {
+      "ref": "R4",
+      "value": "100",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "xy": [
+        63,
+        58.73
+      ],
+      "pins": {
+        "1": "LVDS4_P",
+        "2": "LVDS4_N"
+      },
+      "names": {},
+      "types": {},
+      "angle": 90,
+      "lcsc": "C22775",
+      "mpn": "0603WAF1000T5E"
+    },
+    {
+      "ref": "R8",
+      "value": "100k",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "xy": [
+        23,
+        60
+      ],
+      "pins": {
+        "1": "IN4",
+        "2": "GND"
+      },
+      "names": {},
+      "types": {},
+      "angle": 0,
+      "lcsc": "C25803",
+      "mpn": "0603WAF1003T5E"
+    }
+  ]
+}

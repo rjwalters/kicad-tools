@@ -27,6 +27,42 @@ from kicad_tools.router.primitives import Pad
 class TestCacheKey:
     """Tests for cache key computation."""
 
+    def test_recipe_and_resolved_classes_invalidate_cached_copper(self, tmp_path):
+        """A sidecar edit or coupled-routing request must not replay old traces."""
+        from kicad_tools.router.cache import routing_cache_context
+        from kicad_tools.router.rules import NetClassRouting
+
+        rules = DesignRules()
+        options = {"net_class_map": "same.json", "differential_pairs": False, "seed": 42}
+        classes = {"MIPI_P": NetClassRouting(name="MIPI", trace_width=0.375)}
+
+        def key(opts, mapping):
+            return CacheKey.compute(
+                "same PCB",
+                rules,
+                0.1,
+                routing_context=routing_cache_context(opts, mapping),
+            )
+
+        original = key(options, classes)
+        assert key({**options, "differential_pairs": True}, classes) != original
+        assert key({**options, "seed": 43}, classes) != original
+        classes["MIPI_P"].trace_width = 0.225
+        assert key(options, classes) != original
+        # Filename identity cannot stand in for the data loaded from that file.
+        assert key(options, classes) == key(dict(reversed(list(options.items()))), classes)
+
+    def test_output_and_display_options_do_not_change_routing_identity(self):
+        from kicad_tools.router.cache import routing_cache_context
+
+        first = routing_cache_context({"seed": 42, "output": "a.pcb", "quiet": True}, {})
+        second = routing_cache_context({"seed": 42, "output": "b.pcb", "quiet": False}, {})
+        assert first == second
+        # The CLI's enriched identity must never hit a pre-fix entry.
+        assert CacheKey.compute("pcb", DesignRules(), 0.1, routing_context=first) != (
+            CacheKey.compute("pcb", DesignRules(), 0.1)
+        )
+
     def test_compute_from_string(self):
         """Test computing cache key from string content."""
         pcb_content = "(kicad_pcb (test content))"

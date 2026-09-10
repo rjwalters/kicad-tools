@@ -1,8 +1,8 @@
 ---
 title: "stm32_devboard_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.14.0"
-date: "Rev 1 | 2026-07-10 | jlcpcb-tier1"
+author: "kicad-tools 0.20.0"
+date: "Rev 1 | 2026-09-10 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 2 copper (F.Cu, B.Cu) |
 | Footprints | 17 (15 SMD, 2 THT, 0 other) |
 | Nets | 12 |
-| Traces | 147 segments |
+| Traces | 158 segments |
 | Vias | 29 |
 | Board Size | 60.0 x 40.0 mm |
 
@@ -36,11 +36,11 @@ Demonstrates circuit blocks API
 
 ### Power Architecture
 
-**Power Rails**: +5V, GND, PWR_FLAG
+**Power Rails**: +5V, +3.3V, GND
 
 | Regulator | Device |
 |-----------|--------|
-| U1 | AMS1117-3.3 |
+| U1 | MCP1825S-3302E/DB |
 
 ## Assembly Notes
 
@@ -49,17 +49,19 @@ Demonstrates circuit blocks API
 - **Fine-pitch components**: 1 (U2)
 - **Polarized components**: 1 -- check orientation markings
 
+## Hand-Solder (THT) Components
+
+The following 2 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
+
+| Value | Package | Qty | References |
+|-------|---------|-----|------------|
+| SWD | PinHeader_1x06_P2.54mm_Vertical | 1 | J1 |
+| 8MHz | Crystal_HC49-4H_Vertical | 1 | Y1 |
+
 ## ERC Status
 
-| Metric | Count |
-|--------|-------|
-| Errors | 0 |
-| Warnings | 0 |
-
-**Status**: SKIPPED -- ERC skipped by user request
-
-
-\newpage
+Native KiCad ERC: **0 errors, 0 warnings**. The real MCP1825S pinout and
+portable symbol library are checked; see native-erc.json.
 
 ## Schematic Overview
 
@@ -102,19 +104,19 @@ Demonstrates circuit blocks API
 
 ## Bill of Materials
 
-| Value | Package | Qty | References |
-|-------|---------|-----|------------|
-| 100nF | C_0805_2012Metric | 5 | C3, C12, C13, C14, C15 |
-| 10uF | C_0805_2012Metric | 2 | C1, C2 |
-| 20pF | C_0805_2012Metric | 2 | C10, C11 |
-| 4.7uF | C_0805_2012Metric | 1 | C16 |
-| LED | LED_0805_2012Metric | 1 | D1 |
-| SWD-6 | PinHeader_1x06_P2.54mm_Vertical | 1 | J1 |
-| 10k | R_0805_2012Metric | 1 | R2 |
-| 330R | R_0805_2012Metric | 1 | R1 |
-| AMS1117-3.3 | SOT-223-3_TabPin2 | 1 | U1 |
-| STM32F103C8T6 | LQFP-48_7x7mm_P0.5mm | 1 | U2 |
-| 8MHz | Crystal_HC49-4H_Vertical | 1 | Y1 |
+| Value | Package | Qty | References | MPN | LCSC |
+|-------|---------|-----|------------|-----|------|
+| 100nF | C_0805_2012Metric | 5 | C3, C12, C13, C14, C15 |  |  |
+| 10uF | C_0805_2012Metric | 2 | C1, C2 |  |  |
+| 20pF | C_0805_2012Metric | 2 | C10, C11 |  |  |
+| 4.7uF | C_0805_2012Metric | 1 | C16 |  |  |
+| LED | LED_0805_2012Metric | 1 | D1 |  |  |
+| SWD-6 | PinHeader_1x06_P2.54mm_Vertical | 1 | J1 |  |  |
+| 10k | R_0805_2012Metric | 1 | R2 |  |  |
+| 330R | R_0805_2012Metric | 1 | R1 |  |  |
+| MCP1825S-3302E/DB | SOT-223-3_TabPin2 | 1 | U1 | MCP1825S-3302E/DB | C148031 |
+| STM32F103C8T6 | LQFP-48_7x7mm_P0.5mm | 1 | U2 |  |  |
+| 8MHz | Crystal_HC49-4H_Vertical | 1 | Y1 |  |  |
 
 
 \newpage
@@ -122,33 +124,32 @@ Demonstrates circuit blocks API
 ## DRC Status
 
 | Metric | Count |
-|--------|-------|
+|---|---|
 | Errors | 0 |
-| Warnings | 1 |
-| Blocking | 0 |
+| Warnings | 0 |
 
-**Status**: PASS
-### Violations by Type
+**PASS: 0 errors, 0 warnings** with the explicitly reviewed two-layer mechanical
+drilling process. Ordinary through vias use a minimum 0.15mm drill, 0.30mm
+diameter and 0.075mm annular ring. This paid JLC drilling option is documented
+in manufacturing-requirements.json. No findings are suppressed. All eight
+SMT-land drill overlaps were repaired with explicit connectivity tails.
 
-| Violation Type | Count |
-|----------------|-------|
-| copper_sliver | 1 |
-
-
-\newpage
+Native DRC also has zero violations and opens. Schematic/copper LVS is clean.
+See check-report.json for complete checks and override provenance,
+native-drc.json for independent native evidence, and fill-consistency.json
+for exact exported-copper parity against an independent native refill.
 
 ## Manufacturing Readiness
 
-**Verdict**: WARNING
+**READY for fabrication and assembly with the specified process.** Select the
+paid 0.15mm mechanical-drill option, two layers, 1.6mm FR4, 1oz copper and
+tented through vias. There are no laser microvias or drill overlaps with SMT
+lands. U1 must be MCP1825S-3302E/DB (C148031); do not fit AMS1117.
 
-### Action Items
-
-- **[OPTIONAL]** Verify zone fill in KiCad: 2 nets appear incomplete but may be connected via zone fills
-- **[OPTIONAL]** Verify zone fill in KiCad for 3 zone-connected nets
-- **[OPTIONAL]** Review 1 DRC warnings
-
-
-\newpage
+Use the 15-placement SMT BOM/CPL, then manually solder J1 and Y1 from the
+separate through-hole BOM. Power only from regulated 5V. First-article supply,
+thermal/load, SWD, crystal, reset and LED tests remain unperformed; see
+DESIGN_REVIEW.md. Geometric readiness does not claim physical qualification.
 
 ## Routing Status
 

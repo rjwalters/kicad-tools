@@ -3552,6 +3552,11 @@ def _add_route_parser(subparsers) -> None:
     )
     route_parser.add_argument("--clearance", type=float, default=0.15, help="Clearance in mm")
     route_parser.add_argument(
+        "--strict-pad-clearance",
+        action="store_true",
+        help="Enforce authored clearance against all foreign pads, including fine-pitch and NC pads.",
+    )
+    route_parser.add_argument(
         "--fine-pitch-clearance",
         type=float,
         default=None,
@@ -3890,6 +3895,15 @@ def _add_route_parser(subparsers) -> None:
             "Print advisory routing-quality metrics per post-route stage "
             "(pre-optimize / post-optimize / post-nudge / post-consolidate / "
             "post-finalize). Read-only diagnostic -- never changes routed copper"
+        ),
+    )
+    route_parser.add_argument(
+        "--auto-pour",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Automatically add missing power copper zones (enabled by default). "
+            "Use --no-auto-pour to preserve the authored plane configuration."
         ),
     )
     # Issue #4502: tri-state default.  ``BooleanOptionalAction`` with

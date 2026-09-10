@@ -237,7 +237,43 @@ def addr_bus_net_class() -> NetClassRouting:
     )
 
 
-def build_net_class_map() -> dict[str, NetClassRouting]:
+def _size_tightly_coupled_class(net_class: NetClassRouting) -> NetClassRouting:
+    """Size an impedance-constrained pair without changing its authored gap.
+
+    The unconstrained impedance resolver can choose an approximately 8 mm
+    gap, which defeats the compact coupled routing this testbench exercises.
+    As on board 06, solve width at the declared gap on the JLCPCB stackup.
+    Classes without an explicit impedance target keep their declared width.
+    """
+    from dataclasses import replace
+
+    from kicad_tools.physics import CoupledLines
+    from kicad_tools.physics.stackup import Stackup
+
+    target = net_class.target_diff_impedance
+    gap = net_class.intra_pair_clearance
+    if target is None or gap is None:
+        return net_class
+
+    coupled_lines = CoupledLines(Stackup.jlcpcb_4layer())
+    lo, hi = 0.15, 1.0  # Board specification's minimum trace width.
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if coupled_lines.edge_coupled_microstrip(mid, gap, "F.Cu").zdiff > target:
+            lo = mid
+        else:
+            hi = mid
+    width = round(round(((lo + hi) / 2) / 0.025) * 0.025, 4)
+    actual = coupled_lines.edge_coupled_microstrip(width, gap, "F.Cu").zdiff
+    if abs(actual - target) > target * net_class.impedance_tolerance_percent / 100:
+        raise ValueError(
+            f"{net_class.name}: cannot meet {target:g} ohm at authored gap {gap:g} mm "
+            f"with a manufacturable width (resolved {actual:.3f} ohm at {width:g} mm)"
+        )
+    return replace(net_class, trace_width=width)
+
+
+def build_net_class_map(*, preserve_authored_gap: bool = False) -> dict[str, NetClassRouting]:
     """Build the canonical net-name -> NetClassRouting mapping.
 
     This is the single source of truth for both the router (consumed
@@ -246,11 +282,18 @@ def build_net_class_map() -> dict[str, NetClassRouting]:
     (``tests/test_board_07_matchgroup_test.py::test_phase_features_exercised``).
     Importing this function from the test guarantees test/implementation
     parity --- the test cannot drift from the routing config.
+
+    ``preserve_authored_gap`` opts into the fixed-gap width sizing measured
+    by ``repair_mipi.py``. Keep the historical full-board recipe unchanged
+    until its expensive regeneration gate has been remeasured.
     """
     ddr = ddr_data_byte_0_net_class()
     dqs = ddr_dqs_pair_net_class()
     mipi = mipi_csi_net_class()
     hdmi = hdmi_tmds_net_class()
+    if preserve_authored_gap:
+        mipi = _size_tightly_coupled_class(mipi)
+        hdmi = _size_tightly_coupled_class(hdmi)
     addr = addr_bus_net_class()
 
     return {
@@ -2122,7 +2165,7 @@ def main() -> int:
 
     .. code-block:: bash
 
-        # Default: run all steps (schematic + PCB + route + DRC) into ./output/
+        # Default: run synthetic regression steps into ./regression-output/
         python generate_design.py
 
         # Custom output dir (positional, backwards compatible)
@@ -2142,7 +2185,7 @@ def main() -> int:
         "output_dir",
         nargs="?",
         default=None,
-        help="Output directory (default: ./output relative to this script).",
+        help="Synthetic regression output directory (default: ./regression-output).",
     )
     parser.add_argument(
         "--step",
@@ -2180,7 +2223,7 @@ def main() -> int:
     if args.output_dir is not None:
         output_dir = Path(args.output_dir)
     else:
-        output_dir = Path(__file__).parent / "output"
+        output_dir = Path(__file__).parent / "regression-output"
 
     output_dir = output_dir.resolve()
 

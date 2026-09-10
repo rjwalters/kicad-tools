@@ -1,8 +1,8 @@
 ---
 title: "charlieplex_3x3_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.14.0"
-date: "Rev 1 | 2026-07-09 | jlcpcb-tier1"
+author: "kicad-tools 0.20.0"
+date: "Rev 1 | 2026-09-10 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,31 +18,37 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 2 copper (F.Cu, B.Cu) |
-| Footprints | 14 (13 SMD, 1 THT, 0 other) |
-| Nets | 10 |
-| Traces | 197 segments |
-| Vias | 24 |
+| Footprints | 19 (16 SMD, 3 THT, 0 other) |
+| Nets | 12 |
+| Traces | 440 segments |
+| Vias | 28 |
 | Board Size | 50.0 x 55.0 mm |
 
 ## Design Overview
 
 ### Theory of Operation
 
-Charlieplex LED Grid
-
-3x3 LED matrix using charlieplexing technique
-
-9 LEDs driven by 4 GPIO pins
+ATtiny85 Charlieplex LED Grid
 
 ### Power Architecture
 
-**Power Rails**: GND, PWR_FLAG, VCC
+**Power Rails**: PWR_FLAG
 
 ## Assembly Notes
 
 9 polarized components
 
 - **Polarized components**: 9 -- check orientation markings
+
+## Hand-Solder (THT) Components
+
+The following 3 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
+
+| Value | Package | Qty | References |
+|-------|---------|-----|------------|
+| POWER | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
+| AVR-ISP | PinHeader_2x03_P2.54mm_Vertical | 1 | J2 |
+| ATtiny85-20PU | DIP-8_W7.62mm | 1 | U1 |
 
 ## ERC Status
 
@@ -99,9 +105,14 @@ Charlieplex LED Grid
 
 | Value | Package | Qty | References |
 |-------|---------|-----|------------|
+| 100nF | C_0805_2012Metric | 1 | C1 |
+| 4.7uF | C_0805_2012Metric | 1 | C2 |
 | LED | LED_0805_2012Metric | 9 | D1, D2, D3, D4, D5, D6, D7, D8, D9 |
+| AVR-ISP | PinHeader_2x03_P2.54mm_Vertical | 1 | J2 |
+| POWER | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
+| 10k | R_0805_2012Metric | 1 | R5 |
 | 330R | R_0805_2012Metric | 4 | R1, R2, R3, R4 |
-| MCU | DIP-8_W7.62mm | 1 | U1 |
+| ATtiny85-20PU | DIP-8_W7.62mm | 1 | U1 |
 
 
 \newpage
@@ -111,27 +122,20 @@ Charlieplex LED Grid
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Warnings | 6 |
+| Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| copper_sliver | 6 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: WARNING
+**Verdict**: READY
 
 ### Action Items
 
-- **[OPTIONAL]** Verify zone fill in KiCad for 1 zone-connected nets
-- **[OPTIONAL]** Review 6 DRC warnings
 - **[OPTIONAL]** Analog net: LINE_A — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_B — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_C — audio signal; keep short, away from digital/switching nets
@@ -144,22 +148,11 @@ Charlieplex LED Grid
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 100.0% (8/8) |
+| Signal Net Completion | 100.0% (12/12) |
 | Overall Completion | 100.0% |
-| Complete Nets | 10 / 10 |
-| Zone-Connected Nets | 2 |
-| Single-Pad Nets | 1 (no routing needed) |
+| Complete Nets | 12 / 12 |
 | Incomplete Nets | 0 |
 | Unconnected Pads | 0 |
-
-### Zone-Connected Nets
-
-- GND
-- VCC
-
-### Single-Pad Nets
-
-1 single-pad net (no routing needed) -- not listed individually.
 
 
 ## Cost Estimate
@@ -167,9 +160,9 @@ Charlieplex LED Grid
 | Metric | Per Board (estimated) |
 |--------|-------|
 | PCB Fabrication | ~0.95 USD |
-| Components (estimated) | ~0.56 USD |
-| Assembly (estimated) | ~2.01 USD |
-| **Total (estimated)** | **~3.52 USD** |
+| Components (estimated) | ~0.78 USD |
+| Assembly (estimated) | ~2.04 USD |
+| **Total (estimated)** | **~3.77 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~17.62 USD |
+| Batch Total (estimated) | ~18.86 USD |
 

@@ -64,14 +64,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_DIR = REPO_ROOT / "scripts" / "ci"
 
 BOARD_07_PCB = (
-    REPO_ROOT / "boards" / "07-matchgroup-test" / "output" / "matchgroup_test_routed.kicad_pcb"
+    REPO_ROOT / "boards" / "07-matchgroup-test" / "regression-fixture" / "matchgroup_test_routed.kicad_pcb"
 )
-BOARD_07_SIDECAR = REPO_ROOT / "boards" / "07-matchgroup-test" / "output" / "net_class_map.json"
+BOARD_07_SIDECAR = REPO_ROOT / "boards" / "07-matchgroup-test" / "regression-fixture" / "net_class_map.json"
 
 BOARD_06_PCB = (
-    REPO_ROOT / "boards" / "06-diffpair-test" / "output" / "diffpair_test_routed.kicad_pcb"
+    REPO_ROOT / "boards" / "06-diffpair-test" / "regression-fixture" / "diffpair_test_routed.kicad_pcb"
 )
-BOARD_06_SIDECAR = REPO_ROOT / "boards" / "06-diffpair-test" / "output" / "net_class_map.json"
+BOARD_06_SIDECAR = REPO_ROOT / "boards" / "06-diffpair-test" / "regression-fixture" / "net_class_map.json"
 
 # The three rule families gated on the net_class_map.  Pinning these by name
 # is the load-bearing assertion: a regression that disables any one of them
@@ -82,65 +82,12 @@ NET_CLASS_GATED_FAMILIES: tuple[str, ...] = (
     "match_group_length_skew",
 )
 
-# Expected per-family counts on board 07's committed routed artifact.
-#
-# Re-baselined 2026-06-13 (Issue #3617 / PR #3632, doctor pass) for the
-# FILLED committed artifact.  Until #3617 the committed routed PCB carried
-# zone OUTLINES with zero ``filled_polygon`` copper -- a dead pour (#3482
-# boundary-test illusion).  #3617 wires the fill -> stitch -> repair loop
-# into the recipe and commits the genuinely-filled artifact, so the
-# committed file these pins measure is now the post-fill PCB.
-#
-# Two things change as a direct, MEASURED consequence of filling the pour:
-#   * The net-class-gated delta rises 5+5+0 -> 7+7+1 (=15).  This is
-#     ENGAGEMENT-over-silence, not a regression: the filled pour completes
-#     two more diff pairs and the ADDR_BUS group end-to-end, so two more
-#     pairs/the group get HONESTLY measured by the skew/continuity/
-#     match-group rules (the dead-pour artifact left them disconnected, so
-#     they contributed only advisory ``connectivity``).
-#   * Advisory ``connectivity`` drops 5 -> 1: the filled pour + stitch +
-#     repair geometry physically connects the pads the analyzer previously
-#     reported as floating.
-#
-# These pins measure the COMMITTED artifact and are deterministic across
-# machines (no re-route -- ``kct check`` on a fixed file).  The allowlist
-# floor in .github/routed-drc-tolerance.yml is a SEPARATE, larger number
-# (it gates the seed-42 RE-ROUTE, whose DRC profile varies with machine
-# load + platform per the #3466 wall-clock-budget cliff, and which now
-# also carries the stitcher's cross-net clearance residual -- see the
-# board-07 entry in that file for the full forensic breakdown).
-#
-# Previous re-baselines: 2026-06-10 (Issue #3440: 5+5+0=10 delta, blocking
-# 14); 2026-06-09 (issue #3458 inventory, PR #3462: 5+5+2=12, blocking 16);
-# 2026-06-06 (Issue #3263: 5+5+1=11, blocking 17).
-BOARD_07_EXPECTED_FAMILY_DELTA: dict[str, int] = {
-    # Re-baselined 2026-07-08 (board-07 fresh re-route, fix/board07-gallery-ready):
-    # 26/31 nets routed (DQ3/DQ4/MIPI_DAT0_N/TMDS_D0_N/TMDS_D1_N stranded, the
-    # #3438 negotiated-reach residual).  4 pairs carry both legs but fail
-    # skew/continuity (DQS, MIPI_CLK, MIPI_DAT1, TMDS_D2); ADDR_BUS carries
-    # the via-inclusive 1.069mm residual (route-side tuner converges the
-    # via-BLIND skew to 0.000 -- see the #3928/#3931 note in
-    # scripts/ci/check_matchgroup_coverage.py).
-    #
-    # Re-baselined 2026-08-04 (Issue #4592): match_group_length_skew 1 -> 0.
-    # PR #4030 (commit de0d91ec, closes #4007, "measure standard vias as
-    # through-vias in match-group skew") made the route-side tuner and the
-    # file-based checker measure via length the same way, collapsing the
-    # spurious via-inclusive ADDR_BUS 1.069mm residual described above to
-    # ~0.0015mm -- well inside the 0.500mm tolerance.  The rule still RUNS on
-    # the committed artifact (summary.rules_checked_by_rule.match_group_length_skew
-    # = 1); it simply finds nothing, i.e. gated-but-clean.  #4030 updated
-    # .github/routed-drc-tolerance.yml, tests/test_board_07_matchgroup_test.py
-    # and tests/test_match_group_length.py; PR #4211 (commit 2985cd4e, Issue
-    # #4207) then re-baselined the sibling `blocking == 8` assertion in THIS
-    # file (see TestCiGateCountsGatedFamilies below) -- but both missed this
-    # dict, leaving the file self-contradictory (9 here vs 8 there) until
-    # #4592.  KEEP THE TWO IN SYNC: the sum of the values in this dict MUST
-    # equal the `blocking ==` pin in
-    # TestCiGateCountsGatedFamilies.test_board_07_gate_counts_diffpair_and_matchgroup
-    # (currently 4 + 4 + 0 = 8).
-    "diffpair_length_skew": 4,
-    "diffpair_routing_continuity": 4,
+# The archived synthetic witness includes the September MIPI repair: only
+# DQS/TMDS residuals contribute two skew and two continuity errors. The real
+# assembled SDRAM demo has its own zero-error readiness checks.
+BOARD_07_EXPECTED_FAMILY_DELTA = {
+    "diffpair_length_skew": 2,
+    "diffpair_routing_continuity": 2,
     "match_group_length_skew": 0,
 }
 
@@ -434,70 +381,16 @@ class TestCiGateCountsGatedFamilies:
         return module
 
     def test_board_07_gate_counts_diffpair_and_matchgroup(self) -> None:
-        """``check_routed_drc.count_errors`` on board 07 includes the families.
+        """The preserved synthetic witness retains both real and gated findings.
 
-        Before #3151 the gate ran bare and saw 11 blocking errors; now it
-        resolves the sidecar and sees the gated-family errors too.
-
-        Re-baselined 2026-06-13 (Issue #3617 / PR #3632, doctor pass 2) for
-        the FILLED + 45-QUANTIZED committed artifact: 70 total - 1 advisory
-        connectivity = 69 blocking.  Doctor pass 1 (straight-chord filled
-        artifact) was 61 total / 60 blocking; pass 2 routes the pour-repair
-        stubs/bridges through the #3532 quantizer so the committed artifact
-        passes tests/test_fleet_45_census.py.  The +9 (+8 blocking) is the
-        quantization doglegs grazing the 0.10mm-clearance DDR/MIPI/HDMI
-        copper (+4 clearance_pad_segment, +3 clearance_segment_segment, +2
-        clearance_segment_via); no new family, gated diff-pair/match-group
-        families (15) and the connectivity advisory (1) unchanged.  See the
-        board-07 entry in .github/routed-drc-tolerance.yml (note 4) for the
-        per-family forensics and the #3633 interleave-fix exit clause.
-
-        Earlier in this PR: the dead-pour artifact measured 19 total - 5
-        advisory = 14 blocking; filling the pour completes more nets (honest
-        diff-pair/match-group measurement) and physically connects the
-        formerly-floating pads (advisory connectivity 5 -> 1).
-
-        Previous re-baselines: 2026-07-08 (fix/board07-gallery-ready fresh
-        re-route: 9 blocking = 4+4+1); 2026-06-13 pass 1 (Issue #3617: 60
-        blocking); 2026-06-10 (Issue #3440: 14 blocking); 2026-06-09 (issue
-        #3458 inventory, PR #3462: 16); 2026-06-06 (Issue #3263: 17).
+        The MIPI repair removes two skew/continuity pairs and one open. The
+        corrected drill/pad intersection check (#5012) also exposes five
+        unsupported partial drill overlaps under the default manufacturer.
+        These are preserved fixture findings, not manufacturing waivers.
         """
         if not BOARD_07_PCB.is_file():
-            pytest.skip("board 07 routed PCB not present")
+            pytest.skip("board 07 regression fixture not present")
         gate = self._load_gate()
         blocking, advisory = gate.count_errors(BOARD_07_PCB)
-        # Re-baselined 2026-07-15 (Issue #4207): 9 -> 8 blocking.  This is an
-        # honest shift, NOT a masked short.  PR #4030 (commit de0d91ec, closes
-        # #4007, "measure standard vias as through-vias in match-group skew")
-        # re-routed/re-generated the board-07 artifact after fixing a
-        # via-length measurement inconsistency: the router-side tuner measured
-        # ADDR_BUS escape vias by their transient partial layer span while the
-        # file-based checker measured KiCad's actual post-save through-hole
-        # promotion (this board's stackup has no blind/buried support).  That
-        # inconsistency produced a spurious "Match group 'ADDR_BUS' (8 members)
-        # length-skew 1.069 mm exceeds tolerance 0.500 mm" violation.  With
-        # both sides now measuring the same via-inclusive length, the true
-        # ADDR_BUS skew collapses to ~0.0015 mm (well within 0.500 mm), so the
-        # lone match_group_length_skew violation is legitimately eliminated.
-        # The rule still RUNS (summary.rules_checked_by_rule.match_group_length_skew
-        # = 1) and simply finds nothing.  #4030 already updated
-        # .github/routed-drc-tolerance.yml, tests/test_board_07_matchgroup_test.py,
-        # and tests/test_match_group_length.py for the 9 -> 8 shift but MISSED
-        # this assertion.  The remaining 8 blocking errors are the sidecar-gated
-        # diff-pair families ONLY: 4 diffpair_length_skew +
-        # 4 diffpair_routing_continuity + 0 match_group_length_skew = 8.  These
-        # diffpair families (and clearance, which is zero) are byte-identical
-        # before/after #4030, so no clearance/short violation vanished.
-        # Advisory connectivity is unchanged at 5 (the DQ3/DQ4/MIPI_DAT0_N/
-        # TMDS_D0_N/TMDS_D1_N #3438 negotiated-reach residual).
-        #
-        # KEEP IN SYNC with BOARD_07_EXPECTED_FAMILY_DELTA at the top of this
-        # file: this pin must equal sum(BOARD_07_EXPECTED_FAMILY_DELTA.values()).
-        # #4211 updated only this assertion and left that dict stale, which is
-        # what Issue #4592 had to clean up -- re-baseline BOTH together.
-        assert blocking == 8, (
-            f"expected 8 blocking errors (4 diffpair_length_skew + "
-            f"4 diffpair_routing_continuity + 0 match_group_length_skew) on "
-            f"the post-#4030/#4007 re-routed artifact, got {blocking}"
-        )
-        assert advisory.get("connectivity", 0) == 5
+        assert blocking == 5 + sum(BOARD_07_EXPECTED_FAMILY_DELTA.values())
+        assert advisory.get("connectivity", 0) == 4

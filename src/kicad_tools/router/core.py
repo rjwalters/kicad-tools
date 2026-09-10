@@ -1461,6 +1461,7 @@ class Autorouter:
 
         # Physics integration
         self._stackup = stackup
+        self._impedance_source_pcb_path: str | None = None
         self._physics_enabled = physics_enabled
         self._transmission_line: TransmissionLine | None = None
         self._init_physics()
@@ -4956,7 +4957,11 @@ class Autorouter:
         width.  The derived stackup is stored on ``self._stackup`` so
         subsequent calls (in the same router instance) reuse it.
 
-        Stackup selection mirrors :meth:`Stackup._create_default_stackup`
+        Prefer the source PCB's explicit stackup, when available.  Falling
+        back to a preset despite authored dielectric dimensions can widen
+        fine-pitch escape traces enough to make otherwise routable pads
+        inaccessible.  When the source has no explicit stackup, selection
+        mirrors :meth:`Stackup._create_default_stackup`
         so the router's auto-derived stackup matches what the validator
         uses by default (``ImpedanceRule.from_pcb`` -> ``_create_default_stackup``).
         Otherwise the router and validator would compute slightly
@@ -4997,6 +5002,15 @@ class Autorouter:
 
         try:
             from kicad_tools.physics import Stackup
+
+            if self._impedance_source_pcb_path is not None:
+                from kicad_tools.schema.pcb import PCB
+
+                source_stackup = Stackup.from_pcb(PCB.load(self._impedance_source_pcb_path))
+                if source_stackup.has_explicit_data:
+                    self._stackup = source_stackup
+                    logger.info("Using source PCB stackup for impedance-driven sizing")
+                    return
 
             # Mirror Stackup._create_default_stackup's layer-count
             # branching so the router and validator agree on stackup

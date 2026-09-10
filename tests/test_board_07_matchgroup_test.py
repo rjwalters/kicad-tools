@@ -53,7 +53,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "07-matchgroup-test"
-OUTPUT_DIR = BOARD_DIR / "output"
+OUTPUT_DIR = BOARD_DIR / "regression-fixture"
 
 
 def _load_module(name: str, path: Path):
@@ -342,6 +342,38 @@ class TestDeterministicGeneration:
             "generate_pcb() is not deterministic modulo UUIDs --- "
             "two invocations produced different non-UUID content"
         )
+
+    def test_sidecar_geometry_meets_impedance_at_authored_gap(
+        self, generate_design_mod, tmp_path
+    ) -> None:
+        """The routing/check sidecar must describe compact, physical pairs."""
+        from kicad_tools.physics import CoupledLines
+        from kicad_tools.physics.stackup import Stackup
+
+        classes = generate_design_mod.build_net_class_map(preserve_authored_gap=True)
+        sidecar = generate_design_mod.write_sidecar(classes, tmp_path)
+        serialized = json.loads(sidecar.read_text())
+        physics = CoupledLines(Stackup.jlcpcb_4layer())
+        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N"):
+            cls = classes[name]
+            assert cls.intra_pair_clearance == pytest.approx(0.10)
+            assert cls.clearance == pytest.approx(0.10)
+            assert cls.trace_width >= 0.15
+            actual = physics.edge_coupled_microstrip(
+                cls.trace_width, cls.intra_pair_clearance, "F.Cu"
+            ).zdiff
+            assert actual == pytest.approx(
+                cls.target_diff_impedance, rel=cls.impedance_tolerance_percent / 100
+            )
+            assert serialized[name]["intra_pair_clearance"] == cls.intra_pair_clearance
+            assert serialized[name]["trace_width"] == cls.trace_width
+            assert serialized[name]["coupled_routing"] is True
+            assert serialized[name]["coupled_continuity_threshold"] == 0.85
+
+        # Sizing must not invent a target or alter unrelated routing geometry.
+        assert classes["DQS_P"] == generate_design_mod.ddr_dqs_pair_net_class()
+        assert classes["DQ0"] == generate_design_mod.ddr_data_byte_0_net_class()
+        assert classes["A0"] == generate_design_mod.addr_bus_net_class()
 
 
 # =============================================================================
@@ -668,18 +700,36 @@ class TestNetCountBudget:
 # =============================================================================
 
 
+def test_generated_j1_faces_mipi_receiver(generate_pcb_mod, tmp_path):
+    """The repaired source rotates both pad row positions and copper angles."""
+    from kicad_tools.schema.pcb import PCB
+
+    path = tmp_path / "generated.kicad_pcb"
+    path.write_text(generate_pcb_mod.generate_pcb(mipi_source_rotation=-90))
+    board = PCB.load(path)
+    connector = board.get_footprint("J1")
+    assert connector.rotation == -90
+    assert all(pad.rotation == -90 for pad in connector.pads)
+    for index, net in enumerate(
+        ["MIPI_CLK_P", "MIPI_CLK_N", "MIPI_DAT0_P", "MIPI_DAT0_N", "MIPI_DAT1_P", "MIPI_DAT1_N"]
+    ):
+        number = str(index + 1)
+        assert board.get_pad_position("J1", number) == pytest.approx((15, 52.5 + index))
+        assert next(p for p in connector.pads if p.number == number).net_name == net
+
+
 class TestDefaultNetStatusGenuineOpens:
     """The DEFAULT ``NetStatusAnalyzer`` path still reports board 07's real opens.
 
     Issue #4557 flipped the analyzer default to strict (real copper
     geometry).  The flip removes board 06's 16 FALSE opens but must not mask
-    board 07's 5 GENUINE opens (#3438) -- measured identical under both
-    connectivity models.  No ``strict`` argument may appear in these tests:
+    board 07's GENUINE opens (#3438). The 2026-09-09 targeted MIPI repair
+    closes MIPI_DAT0_N; the other four remain. No ``strict`` argument may appear in these tests:
     they pin the default code path consumers actually hit.
     """
 
-    # The 5 known-unroutable nets on the committed artifact (#3438).
-    EXPECTED_OPEN_NETS = {"DQ3", "DQ4", "MIPI_DAT0_N", "TMDS_D0_N", "TMDS_D1_N"}
+    # The four remaining opens on the repaired committed artifact.
+    EXPECTED_OPEN_NETS = {"DQ3", "DQ4", "TMDS_D0_N", "TMDS_D1_N"}
 
     @pytest.fixture(scope="class")
     def default_result(self):
@@ -697,7 +747,7 @@ class TestDefaultNetStatusGenuineOpens:
             n.net_name for n in default_result.unrouted
         }
         assert open_nets == self.EXPECTED_OPEN_NETS, (
-            f"Default (strict) connectivity must keep reporting board 07's 5 "
+            f"Default (strict) connectivity must keep reporting board 07's 4 "
             f"genuine opens (#3438) -- the #4557 default flip must not mask "
             f"real opens.  Expected {sorted(self.EXPECTED_OPEN_NETS)}, got "
             f"{sorted(open_nets)}.  Fewer nets here WITHOUT a router "

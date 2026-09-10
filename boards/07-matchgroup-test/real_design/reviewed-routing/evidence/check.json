@@ -1,0 +1,130 @@
+{
+  "file": "/private/tmp/board07-sdram/reproduced-bound-rules/validation/checked.kicad_pcb",
+  "manufacturer": "jlcpcb",
+  "layers": 6,
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "infos": 4,
+    "waived": 0,
+    "rules_checked": 55,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "copper_sliver": 1,
+      "track_dangling": 1,
+      "via_dangling": 1,
+      "doc_drift_stale_pin": 1,
+      "doc_drift_unresolvable_pin": 1,
+      "isolated_copper": 1,
+      "match_group_length_skew": 4,
+      "sch_field_offset": 1,
+      "sch_field_overlap": 1
+    },
+    "passed": true
+  },
+  "violations": [
+    {
+      "rule_id": "match_group_length_skew",
+      "type": "match_group_length_skew",
+      "severity": "info",
+      "message": "Match group 'SDRAM_ADDRESS' (14 members) length-skew 4.227 mm within tolerance 5.000 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 4.227,
+      "required_value": 5.0,
+      "items": [
+        "SDRAM_ADDRESS"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "match_group_length_skew",
+      "type": "match_group_length_skew",
+      "severity": "info",
+      "message": "Match group 'SDRAM_BYTE0' (9 members) length-skew 2.628 mm within tolerance 5.000 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 2.6284,
+      "required_value": 5.0,
+      "items": [
+        "SDRAM_BYTE0"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "match_group_length_skew",
+      "type": "match_group_length_skew",
+      "severity": "info",
+      "message": "Match group 'SDRAM_BYTE1' (9 members) length-skew 2.719 mm within tolerance 5.000 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 2.7188,
+      "required_value": 5.0,
+      "items": [
+        "SDRAM_BYTE1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "match_group_length_skew",
+      "type": "match_group_length_skew",
+      "severity": "info",
+      "message": "Match group 'SDRAM_COMMAND' (6 members) length-skew 3.198 mm within tolerance 5.000 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 3.1976,
+      "required_value": 5.0,
+      "items": [
+        "SDRAM_COMMAND"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    }
+  ],
+  "meta_checks": {
+    "drc": {
+      "status": "PASSED",
+      "detail": "55 rules checked, 0 error(s), 0 warning(s)"
+    },
+    "erc": {
+      "status": "PASSED",
+      "detail": "0 error(s), 0 warning(s)"
+    },
+    "lvs": {
+      "status": "PASSED",
+      "detail": "label + copper: 0 mismatch(es)",
+      "mismatches": [],
+      "copper_mismatches": [],
+      "copper_vacuous": false,
+      "copper_bound_pad_count": 216,
+      "netlist_vacuous": false
+    },
+    "manifest": {
+      "status": "NOT RUN",
+      "detail": "no manufacturing bundle; run `kct export` first"
+    },
+    "overall": "INCOMPLETE",
+    "schematic_missing": false
+  },
+  "routing_quality": {
+    "total_segments": 8394,
+    "nets_with_copper": 55,
+    "segments_per_net": 152.61818181818182,
+    "zero_length_count": 0,
+    "median_length_mm": 0.07071067811865073,
+    "fragment_count": 7051,
+    "fragment_fraction": 0.8400047653085537,
+    "orthogonal_count": 4175,
+    "diagonal_45_count": 4010,
+    "off_axis_count": 209,
+    "staircase_step_count": 0,
+    "staircase_fraction": 0.0
+  }
+}

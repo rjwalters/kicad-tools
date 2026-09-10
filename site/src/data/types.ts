@@ -37,6 +37,23 @@ export interface CostEstimate {
   batch_total_usd?: number;
 }
 
+export interface Readiness {
+  schema_version?: number;
+  checked_at?: string;
+  mode?: "assembly" | "pcb_only";
+  status: "ready" | "blocked" | "unverified";
+  blockers: string[];
+  inputs?: Record<string, string>;
+  checks?: Array<{ name: string; status: "passed" | "failed" | "not_run"; detail?: string }>;
+  evidence?: Record<string, string>;
+  metrics?: {
+    drc_violations?: number;
+    nets_routed_pct?: number;
+    lvs_clean?: boolean;
+    lvs_mismatches?: number;
+  };
+}
+
 /**
  * A fully-parsed board record matching `board.json` schema v1.
  *
@@ -64,6 +81,8 @@ export interface Board {
   renders?: Record<string, string>;
   manufacturing_package?: string;
   manifest_generated_at?: string;
+  /** Fresh report validated against current source and manufacturing hashes. */
+  readiness?: Readiness;
   /**
    * LVS (Layout-vs-Schematic) verification result (#3748, #3749). Sourced from
    * `output/lvs.json` → `clean`. Omitted when the board has not run LVS yet

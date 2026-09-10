@@ -151,3 +151,9 @@ scripts/corpus/.cache/
 # these, they stay referenced by pinned commit SHA in
 # benchmarks/external/boards.toml instead.
 .cache/kct-benchmarks/
+
+# Disposable synthetic recipe runs; reviewed witnesses live in regression-fixture.
+boards/*/regression-output/
+
+# KiCad editor/session state is not part of a board release.
+boards/**/*.kicad_prl

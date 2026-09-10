@@ -1473,6 +1473,9 @@ class RoutingGrid:
             Clearance distance in mm to pad outside the pad's metal.
         """
         standard = self.rules.trace_clearance + self.rules.trace_width / 2
+        if self.rules.strict_pad_clearance:
+            required = self.rules.get_clearance_for_component(pad.ref if pad else "", pin_pitch)
+            return required + self.rules.trace_width / 2
 
         # Issue #3371 / P_FP3 -- fine-pitch escape region halo.  Consult
         # installed regions before the legacy fine-pitch shrink so the
@@ -2645,6 +2648,8 @@ class RoutingGrid:
         A reduced clearance of ``trace_width / 2`` is maintained around each
         pad's metal area so traces cannot physically overlap pad copper.
         """
+        if self.rules.strict_pad_clearance:
+            return
         component_pads = self._component_pads.get(pad.ref, [])
         reduced_clearance = self.rules.trace_width / 2
 
@@ -3018,7 +3023,7 @@ class RoutingGrid:
         and sub-clearance copper is rejected (the routing-diagnostic
         NET3-vs-J1.1 0.127mm defect).
         """
-        return (
+        return not self.rules.strict_pad_clearance and (
             required_clearance < min_clearance
             or ref in self._relaxed_clearance_refs
             or self._component_is_fine_pitch(ref, component_pitches)

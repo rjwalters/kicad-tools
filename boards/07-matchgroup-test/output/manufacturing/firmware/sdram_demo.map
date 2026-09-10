@@ -1,0 +1,152 @@
+
+Discarded input sections
+
+ .group         0x00000000        0xc /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .group         0x00000000        0xc /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .group         0x00000000        0xc /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .group         0x00000000        0xc /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .group         0x00000000        0xc /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .group         0x00000000        0xc /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .group         0x00000000        0xc /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .group         0x00000000        0xc /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .group         0x00000000        0xc /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .text          0x00000000        0x0 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .data          0x00000000        0x0 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .bss           0x00000000        0x0 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+FLASH            0x08000000         0x00200000         xr
+RAM              0x20000000         0x00020000         xrw
+*default*        0x00000000         0xffffffff
+
+Linker script and memory map
+
+LOAD /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+LOAD /Applications/ArmGNUToolchain/15.3.rel1/arm-none-eabi/bin/../lib/gcc/arm-none-eabi/15.3.1/thumb/v7e-m/nofp/libgcc.a
+                0x20020000                        _estack = (ORIGIN (RAM) + LENGTH (RAM))
+
+.isr_vector     0x08000000       0x40
+ *(.isr_vector)
+ .isr_vector    0x08000000       0x40 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+                0x08000000                vectors
+
+.text           0x08000040      0x4bc
+ *(.text*)
+ .text.fault    0x08000040        0x4 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .text.delay_ms
+                0x08000044       0x28 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .text.alternate
+                0x0800006c       0x4e /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ *fill*         0x080000ba        0x2 
+ .text.uart_puts
+                0x080000bc       0x1c /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .text.uart_hex
+                0x080000d8       0x54 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .text.command  0x0800012c       0x1c /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .text.failed   0x08000148       0x54 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .text.Reset_Handler
+                0x0800019c      0x2a0 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+                0x0800019c                Reset_Handler
+ *(.rodata*)
+ .rodata.uart_hex.str1.1
+                0x0800043c       0x9b /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+                                 0x11 (size before relaxing)
+ .rodata.failed.str1.1
+                0x080004d7        0x0 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+                                 0x25 (size before relaxing)
+ .rodata.Reset_Handler.str1.1
+                0x080004d7        0x0 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+                                 0x68 (size before relaxing)
+ *fill*         0x080004d7        0x1 
+ .rodata        0x080004d8       0x24 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+.glue_7         0x080004fc        0x0
+ .glue_7        0x080004fc        0x0 linker stubs
+
+.glue_7t        0x080004fc        0x0
+ .glue_7t       0x080004fc        0x0 linker stubs
+
+.vfp11_veneer   0x080004fc        0x0
+ .vfp11_veneer  0x080004fc        0x0 linker stubs
+
+.v4_bx          0x080004fc        0x0
+ .v4_bx         0x080004fc        0x0 linker stubs
+
+.iplt           0x080004fc        0x0
+ .iplt          0x080004fc        0x0 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+.rel.dyn        0x080004fc        0x0
+ .rel.iplt      0x080004fc        0x0 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+.ARM.exidx
+ *(.ARM.exidx*)
+
+.data           0x20000000        0x0 load address 0x080004fc
+                0x20000000                        _sdata = .
+ *(.data*)
+                0x20000000                        _edata = .
+                0x080004fc                        _sidata = LOADADDR (.data)
+
+.igot.plt       0x20000000        0x0 load address 0x080004fc
+ .igot.plt      0x20000000        0x0 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+.bss            0x20000000        0x0 load address 0x080004fc
+                0x20000000                        _sbss = .
+ *(.bss*)
+ *(COMMON)
+                0x20000000                        _ebss = .
+OUTPUT(/private/tmp/board07-sdram/firmware-final-review/sdram_demo.elf elf32-littlearm)
+LOAD linker stubs
+
+.debug_info     0x00000000      0xecc
+ .debug_info    0x00000000      0xecc /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+.debug_abbrev   0x00000000      0x304
+ .debug_abbrev  0x00000000      0x304 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+.debug_loclists
+                0x00000000      0x3c8
+ .debug_loclists
+                0x00000000      0x3c8 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+.debug_aranges  0x00000000       0x58
+ .debug_aranges
+                0x00000000       0x58 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+.debug_rnglists
+                0x00000000      0x125
+ .debug_rnglists
+                0x00000000      0x125 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+.debug_macro    0x00000000    0x1a17a
+ .debug_macro   0x00000000       0x80 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .debug_macro   0x00000080      0xad8 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .debug_macro   0x00000b58       0x28 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .debug_macro   0x00000b80      0x34e /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .debug_macro   0x00000ece       0x1c /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .debug_macro   0x00000eea       0x22 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .debug_macro   0x00000f0c      0x107 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .debug_macro   0x00001013     0x1057 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .debug_macro   0x0000206a      0x11f /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+ .debug_macro   0x00002189    0x17ff1 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+.debug_line     0x00000000      0x913
+ .debug_line    0x00000000      0x913 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+.debug_str      0x00000000    0x93079
+ .debug_str     0x00000000    0x93079 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+                              0x931f1 (size before relaxing)
+
+.comment        0x00000000       0x46
+ .comment       0x00000000       0x46 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+                                 0x47 (size before relaxing)
+
+.ARM.attributes
+                0x00000000       0x2e
+ .ARM.attributes
+                0x00000000       0x2e /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o
+
+.debug_frame    0x00000000       0xd8
+ .debug_frame   0x00000000       0xd8 /var/folders/0h/l9gwswj97wb82mh27zyw305r0000gn/T//ccCyK0fD.o

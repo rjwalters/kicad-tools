@@ -817,6 +817,7 @@ def check_silk_overlap(
     del design_rules  # bare intersection; no profile field participates
     require_shapely("silk-overlap geometry")
     from shapely import STRtree
+    from shapely.geometry import Point
 
     results = DRCResults(rules_checked=1)
 
@@ -825,6 +826,23 @@ def check_silk_overlap(
     by_side: dict[str, list[tuple[_Geometry, str, tuple[float, float], str]]] = {"F": [], "B": []}
     for side, geom, label, location, layer in _iter_silk_geometries(pcb):
         by_side[side].append((geom, label, location, layer))
+
+    # A library outline is often several joined line primitives. Their round
+    # stroke caps overlap at the common vertex, which is intentional artwork,
+    # not the line crossings or text collisions this rule detects.
+    line_endpoints = {}
+    for footprint in pcb.footprints:
+        transform = _fp_transform(footprint)
+        for graphic in footprint.graphics:
+            if graphic.graphic_type != "line" or _silk_side(graphic.layer) is None:
+                continue
+            geom = _stroke_geometry(graphic, transform)
+            if geom is not None:
+                label = f"{footprint.reference} (fp_line)"
+                line_endpoints[(label, geom.wkb)] = (
+                    (transform(graphic.start), transform(graphic.end)),
+                    graphic.stroke_width,
+                )
 
     found: list[DRCViolation] = []
     for entries in by_side.values():
@@ -843,8 +861,18 @@ def check_silk_overlap(
                 other_geom, label_b, _, _ = entries[j]
                 if not geom.intersects(other_geom):
                     continue
-                if geom.intersection(other_geom).area < _MIN_SILK_OVERLAP_AREA_MM2:
+                overlap = geom.intersection(other_geom)
+                if overlap.area < _MIN_SILK_OVERLAP_AREA_MM2:
                     continue
+                a = line_endpoints.get((label_a, geom.wkb))
+                b = line_endpoints.get((label_b, other_geom.wkb))
+                if label_a == label_b and a is not None and b is not None:
+                    common = set(a[0]) & set(b[0])
+                    # Duplicate lines share both endpoints and must still flag.
+                    if len(common) == 1:
+                        joint = Point(next(iter(common))).buffer(max(a[1], b[1]))
+                        if overlap.difference(joint).area < 1e-9:
+                            continue
                 found.append(
                     DRCViolation(
                         rule_id="silk_overlap",

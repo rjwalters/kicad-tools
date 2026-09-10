@@ -457,6 +457,62 @@ class TestRotatedViolationLocation:
 class TestPTHAnnularRing:
     """Tests for PTH pad annular ring validation."""
 
+    @pytest.mark.parametrize("manufacturer", ["jlcpcb", "jlcpcb-tier1"])
+    @pytest.mark.parametrize(
+        "layers,copper,minimum", [(2, 1, 0.18), (4, 1, 0.15), (2, 2, 0.254), (4, 2, 0.254)]
+    )
+    def test_component_ring_uses_layer_specific_floor(self, manufacturer, layers, copper, minimum):
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.manufacturers.dru_generator import generate_dru
+
+        rules = get_profile(manufacturer).get_design_rules(layers=layers, copper_oz=copper)
+        assert rules.min_pth_annular_ring_mm == minimum
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    pads=[
+                        MockPad(
+                            type="thru_hole",
+                            size=(0.7, 0.7),
+                            drill=0.4,
+                            layers=["*.Cu", "*.Mask"],
+                            net_name="USB_DP",
+                        )
+                    ]
+                )
+            ]
+        )
+        violations = SolderMaskPadRules().check(pcb, rules).violations
+        rings = [v for v in violations if v.rule_id == "pth_annular_ring"]
+        assert bool(rings) == (minimum > 0.15)
+        dru = generate_dru(rules)
+        assert "PTH Annular Ring" in dru
+        assert (
+            f"(condition \"A.Type == 'pad'\")\n  (constraint annular_width (min {minimum}mm))"
+            in dru
+        )
+        assert f"(constraint annular_width (min {rules.min_annular_ring_mm}mm))" in dru
+
+    def test_exact_minimum_ring_survives_floating_point_rounding(self):
+        # GCT USB4085: (0.70 - 0.40)/2 is 0.14999999999999997 in Python.
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    pads=[
+                        MockPad(
+                            type="thru_hole",
+                            size=(0.7, 0.7),
+                            drill=0.4,
+                            layers=["*.Cu", "*.Mask"],
+                            net_name="USB_DP",
+                        )
+                    ]
+                )
+            ]
+        )
+        results = SolderMaskPadRules().check(pcb, MockDesignRules(min_annular_ring_mm=0.15))
+        assert not [v for v in results.violations if v.rule_id == "pth_annular_ring"]
+
     def test_adequate_annular_ring_passes(self):
         """Through-hole pad with adequate ring should pass."""
         pcb = MockPCB(

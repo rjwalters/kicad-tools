@@ -7,21 +7,17 @@ geometry, reused by:
 * the ``fix-vias --relocate-in-pad`` command
   (:mod:`kicad_tools.cli.relocate_in_pad_vias`).
 
-Keeping the pad-bbox / containment math in one module prevents the two
+Keeping the pad-bbox / overlap math in one module prevents the two
 consumers from drifting (the previous copy lived privately in
 ``via_in_pad.py``; the DRC rule now imports these functions so both paths
 share exactly one implementation).
 
-Geometry of "via inside pad":
+A drilled via needs the via-in-pad process whenever its hole overlaps SMT
+copper, including holes whose centers lie outside the land. Tangency within
+DRC tolerance is excluded. Consumers with pad/footprint context use the same
+true copper outline as the clearance checker; the two-argument compatibility
+helper tests an axis-aligned rectangle.
 
-* SMD pads are modelled as axis-aligned rectangles (post footprint
-  rotation transformation).  For rotated footprints the axis-aligned
-  bounding box is used; pads with non-cardinal rotations are
-  conservatively reported when the BB contains the via even if the actual
-  pad polygon does not.
-* A via is "in the pad" when its drill circle is fully contained inside
-  the pad rectangle, i.e. every point on the drill circle lies on or
-  inside the pad edge.
 """
 
 from __future__ import annotations
@@ -52,7 +48,8 @@ def pad_absolute_bbox(
 
     # cos/sin magnitudes for the (orientation-independent) AABB below; the
     # signed center rotation goes through the shared KiCad-convention helper.
-    angle_rad = math.radians(footprint.rotation)
+    total_rotation = getattr(pad, "rotation", footprint.rotation) % 360
+    angle_rad = math.radians(total_rotation)
     cos_a = math.cos(angle_rad)
     sin_a = math.sin(angle_rad)
 
@@ -62,7 +59,6 @@ def pad_absolute_bbox(
     abs_y = footprint.position[1] + rotated_y
 
     width, height = pad.size
-    total_rotation = footprint.rotation % 360
 
     # For cardinal rotations, swap dimensions.
     if abs(total_rotation - 90) < 0.001 or abs(total_rotation - 270) < 0.001:
@@ -87,32 +83,31 @@ def is_smd_pad(pad: Pad) -> bool:
     return pad.type == "smd"
 
 
-def via_inside_pad(via: Via, pad_bbox: tuple[float, float, float, float]) -> bool:
-    """Return True if the via's drill circle is fully inside ``pad_bbox``.
+def via_inside_pad(
+    via: Via,
+    pad_bbox: tuple[float, float, float, float],
+    pad: Pad | None = None,
+    footprint: Footprint | None = None,
+) -> bool:
+    """Return whether a drilled hole overlaps pad copper beyond DRC tolerance.
 
-    Args:
-        via: The via to test.  ``via.position`` is the center, ``via.drill``
-            is the drill diameter.
-        pad_bbox: Axis-aligned (min_x, min_y, max_x, max_y) of the pad.
-
-    Returns:
-        ``True`` when every point on the drill circle is on or inside
-        the pad bounding box.  A small DRC tolerance is applied so that
-        edge-touching vias (within manufacturing rounding) are not
-        flagged.
+    The historical name is retained for callers. Full containment is not
+    required: partial overlap also permits solder to wick into the drill.
+    With pad context, rounded corners and absolute pad angles are honored.
     """
     cx, cy = via.position
     radius = via.drill / 2.0
+    if radius <= DRC_TOLERANCE:
+        return False
     min_x, min_y, max_x, max_y = pad_bbox
+    distance = math.hypot(max(min_x - cx, 0.0, cx - max_x), max(min_y - cy, 0.0, cy - max_y))
+    if distance >= radius - DRC_TOLERANCE:
+        return False
+    if pad is not None and footprint is not None and hasattr(pad, "shape"):
+        from shapely.geometry import Point
 
-    # Every point on the drill circle lies in [cx - r, cx + r] x [cy - r, cy + r].
-    # The drill is fully inside the pad iff the circle's bounding box is.
-    # We require strict containment minus DRC_TOLERANCE so a via whose
-    # drill edge merely touches the pad edge is allowed (it would be a
-    # neckdown rather than an in-pad via).
-    return (
-        cx - radius >= min_x - DRC_TOLERANCE
-        and cx + radius <= max_x + DRC_TOLERANCE
-        and cy - radius >= min_y - DRC_TOLERANCE
-        and cy + radius <= max_y + DRC_TOLERANCE
-    )
+        from .clearance import _pad_polygon
+
+        copper = _pad_polygon(pad, footprint)
+        return copper is not None and copper.distance(Point(cx, cy)) < radius - DRC_TOLERANCE
+    return True

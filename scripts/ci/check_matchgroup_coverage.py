@@ -93,8 +93,7 @@ the name set and their in-directory precedence to
 after #4601/PR #4629 taught ``kct check`` about the stem-keyed
 ``<pcb_stem>.net_class_map.json`` name, so this gate could have passed a
 different sidecar to ``kct check`` than a developer's local ``kct check``
-would have auto-discovered.  The directory this gate searches
-(``board_dir/output``) is unchanged.
+would have auto-discovered.  The directory follows the selected recipe artifact, including isolated legacy fixtures.
 """
 
 from __future__ import annotations
@@ -107,6 +106,9 @@ import sys
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from board_recipe_artifacts import recipe_baseline_key, recipe_output_dir  # noqa: E402
 
 # Issue #4634: the sidecar filename rules are shared with ``kct check``, the
 # routed-DRC gate and the ``kct export`` report surface via the stdlib-only
@@ -306,6 +308,7 @@ def re_route_board(board_dir: Path, seed: int) -> bool:
     cmd = [
         sys.executable,
         str(script),
+        str(recipe_output_dir(board_dir, prepare=True)),
         "--step",
         "route",
         "--seed",
@@ -325,11 +328,11 @@ def re_route_board(board_dir: Path, seed: int) -> bool:
 def find_routed_pcb(board_dir: Path) -> Path | None:
     """Locate the board's freshly-routed PCB.
 
-    Walks ``board_dir/output`` looking for the canonical
+    Walks the isolated recipe output (or legacy fixture) looking for the canonical
     ``*_routed.kicad_pcb`` artifact emitted by ``generate_design.py``.
     Returns ``None`` if not found (caller emits the error).
     """
-    out = board_dir / "output"
+    out = recipe_output_dir(board_dir)
     if not out.is_dir():
         return None
     candidates = list(out.glob("*_routed.kicad_pcb"))
@@ -357,8 +360,8 @@ def find_net_class_map_sidecar(board_dir: Path, routed_pcb: Path) -> Path | None
     (stem-keyed ``<pcb_stem>.net_class_map.json`` first, then the bare
     ``net_class_map.json``) via :mod:`kicad_tools.sidecars`, so this gate
     can never resolve a different file than the ``kct check`` invocation
-    it goes on to gate.  The **directory** scope is unchanged:
-    ``board_dir/output`` only.
+    it goes on to gate.  The directory follows the selected routed PCB, so a synthetic fixture
+    cannot accidentally consume the assembled board's sidecar.
 
     Args:
         board_dir: The board directory (``boards/NN-name``).
@@ -366,7 +369,7 @@ def find_net_class_map_sidecar(board_dir: Path, routed_pcb: Path) -> Path | None
             the exact stem for the stem-keyed candidate.  The caller
             already holds it from :func:`find_routed_pcb`.
     """
-    return first_existing_net_class_map_sidecar([board_dir / "output"], routed_pcb.stem)
+    return first_existing_net_class_map_sidecar([routed_pcb.parent], routed_pcb.stem)
 
 
 def _import_module_from_path(module_name: str, path: Path):
@@ -755,11 +758,7 @@ def check_board(
 
     # Compute the allowlist key in the same way check_routed_drc.py does:
     # repo-relative path string.
-    try:
-        rel = routed_pcb.resolve().relative_to(Path.cwd())
-        lookup_key = str(rel)
-    except ValueError:
-        lookup_key = str(routed_pcb)
+    lookup_key = recipe_baseline_key(routed_pcb)
     allowed = allowlist.get(lookup_key, 0)
 
     # Two-pass strategy (see docstrings on count_errors_via_kct_check

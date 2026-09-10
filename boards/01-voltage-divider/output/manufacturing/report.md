@@ -1,8 +1,8 @@
 ---
 title: "voltage_divider_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.14.0"
-date: "Rev 1 | 2026-07-09 | jlcpcb"
+author: "kicad-tools 0.20.0"
+date: "Rev 1 | 2026-09-10 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -37,6 +37,15 @@ Simple 2-resistor voltage divider
 ### Power Architecture
 
 **Power Rails**: GND, PWR_FLAG
+
+## Hand-Solder (THT) Components
+
+The following 2 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
+
+| Value | Package | Qty | References |
+|-------|---------|-----|------------|
+| IN | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
+| OUT | PinHeader_1x02_P2.54mm_Vertical | 1 | J2 |
 
 ## ERC Status
 

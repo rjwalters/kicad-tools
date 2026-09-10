@@ -5741,6 +5741,7 @@ def route_with_layer_escalation(
         via_drill=args.via_drill,
         via_diameter=args.via_diameter,
         fine_pitch_clearance=fine_pitch_cl,
+        strict_pad_clearance=getattr(args, "strict_pad_clearance", False),
         # Issue #2695: forward manufacturer so the escape router can opt in
         # to in-pad escape for fine-pitch LQFP/QFP (and SSOP/TSSOP) when the
         # manufacturer supports via-in-pad processing.
@@ -7063,6 +7064,7 @@ def route_with_rule_relaxation(
             via_drill=tier.via_drill,
             via_diameter=tier.via_diameter,
             fine_pitch_clearance=fine_pitch_cl,
+            strict_pad_clearance=getattr(args, "strict_pad_clearance", False),
             # Issue #2695: forward manufacturer so the escape router can opt
             # in to in-pad escape for fine-pitch LQFP/QFP/SSOP/TSSOP when
             # the manufacturer supports via-in-pad processing.
@@ -9326,6 +9328,7 @@ def route_with_combined_escalation(
                 via_drill=tier.via_drill,
                 via_diameter=tier.via_diameter,
                 fine_pitch_clearance=fine_pitch_cl,
+                strict_pad_clearance=getattr(args, "strict_pad_clearance", False),
                 # Issue #2695: forward manufacturer so the escape router
                 # can opt in to in-pad escape for fine-pitch LQFP/QFP/SSOP/
                 # TSSOP when the manufacturer supports via-in-pad processing.
@@ -11771,6 +11774,11 @@ def _main_impl(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--strict-pad-clearance",
+        action="store_true",
+        help="Enforce authored clearance against all foreign pads, including fine-pitch and NC pads.",
+    )
+    parser.add_argument(
         "--fine-pitch-clearance",
         type=float,
         default=None,
@@ -14173,6 +14181,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         via_drill=args.via_drill,
         via_diameter=args.via_diameter,
         fine_pitch_clearance=fine_pitch_cl,
+        strict_pad_clearance=getattr(args, "strict_pad_clearance", False),
         # Issue #2605: forward manufacturer so the escape router can opt in
         # to in-pad escape for fine-pitch SSOP/TSSOP when the manufacturer
         # supports via-in-pad processing.
@@ -14776,11 +14785,17 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     if use_cache:
         from kicad_tools.router import CacheKey, RoutingCache
+        from kicad_tools.router.cache import routing_cache_context
 
         try:
             # Compute cache key from PCB content and rules
             pcb_content = pcb_path.read_bytes()
-            cache_key = CacheKey.compute(pcb_content, rules, args.grid)
+            cache_key = CacheKey.compute(
+                pcb_content,
+                rules,
+                args.grid,
+                routing_context=routing_cache_context(vars(args), router.net_class_map),
+            )
 
             cache = RoutingCache()
 

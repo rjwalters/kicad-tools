@@ -1,8 +1,8 @@
 ---
 title: "bldc_controller_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.14.0"
-date: "Rev 1 | 2026-07-09 | jlcpcb-tier1"
+author: "kicad-tools 0.20.0"
+date: "Rev 1 | 2026-09-10 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,37 +18,62 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
-| Footprints | 55 (40 SMD, 11 THT, 4 other) |
-| Nets | 52 |
-| Traces | 951 segments |
-| Vias | 79 |
-| Board Size | 80.0 x 100.0 mm |
+| Footprints | 42 (36 SMD, 6 THT, 0 other) |
+| Nets | 37 |
+| Traces | 7983 segments |
+| Vias | 136 |
+| Board Size | 70.0 x 90.0 mm |
+
+## Stackup
+
+| Layer | Type | Thickness (mm) | Material |
+|-------|------|----------------|----------|
+| F.Mask | Top Solder Mask | 0.01 | -- |
+| F.Cu | copper | 0.035 | -- |
+| dielectric 1 | prepreg | 0.2 | FR4 |
+| In1.Cu | copper | 0.035 | -- |
+| dielectric 2 | core | 1.0 | FR4 |
+| In2.Cu | copper | 0.035 | -- |
+| dielectric 3 | prepreg | 0.2 | FR4 |
+| B.Cu | copper | 0.035 | -- |
+| B.Mask | Bottom Solder Mask | 0.01 | -- |
 
 ## Design Overview
 
 ### Theory of Operation
 
-BLDC Motor Controller
+Sensored BLDC Controller
 
-3-Phase Brushless DC Motor Driver
+### Communication Interfaces
 
-Thermal analysis and high-current routing demo
+| Protocol | Signals |
+|----------|---------|
+| SPI | MISO, MOSI, SCK |
 
 ### Power Architecture
 
-**Power Rails**: +24V, +3V3, +5V, GND, PWR_FLAG
-
-| Regulator | Device |
-|-----------|--------|
-| U1 | LM2596-5.0 |
-| U2 | AMS1117-3.3 |
+**Power Rails**: PWR_FLAG
 
 ## Assembly Notes
 
-1 fine-pitch component; 4 polarized components
+1 fine-pitch component; 2 thermal pads; 4 polarized components
 
-- **Fine-pitch components**: 1 (U10)
+- **Fine-pitch components**: 1 (U1)
+- **Thermal pads**: 2 -- verify solder paste apertures
 - **Polarized components**: 4 -- check orientation markings
+
+## Hand-Solder (THT) Components
+
+The following 6 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
+
+| Value | Package | Qty | References |
+|-------|---------|-----|------------|
+| 12-24V INPUT | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
+| MOTOR ABC | PinHeader_1x03_P2.54mm_Vertical | 1 | J2 |
+| HALL | PinHeader_1x06_P2.54mm_Vertical | 1 | J3 |
+| AVR ISP | PinHeader_2x03_P2.54mm_Vertical | 1 | J4 |
+| RUN SWITCH | PinHeader_1x02_P2.54mm_Vertical | 1 | J5 |
+| 10k | Potentiometer_Bourns_3296W_Vertical | 1 | RV1 |
 
 ## ERC Status
 
@@ -111,35 +136,31 @@ Thermal analysis and high-current routing demo
 
 ## Bill of Materials
 
-| Value | Package | Qty | References |
-|-------|---------|-----|------------|
-| 100nF | C_0805_2012Metric | 7 | C2, C7, C8, C12, C13, C14, C15 |
-| 10nF | C_0805_2012Metric | 3 | C30, C31, C32 |
-| 10uF | C_0805_2012Metric | 3 | C5, C6, C16 |
-| 20pF | C_0805_2012Metric | 2 | C10, C11 |
-| 220uF | C_0805_2012Metric | 2 | C3, C4 |
-| 4.7uF | C_0805_2012Metric | 1 | C9 |
-| 470uF | C_0805_2012Metric | 1 | C1 |
-| PWR | LED_0805_2012Metric | 1 | D3 |
-| SMBJ24A | D_SMA | 1 | D1 |
-| SS34 | D_SMA | 1 | D2 |
-| STATUS | LED_0805_2012Metric | 1 | D4 |
-| 15A | Fuse_1206_3216Metric | 1 | F1 |
-| Hall Sensors | PinHeader_1x05_P2.54mm_Vertical | 1 | J3 |
-| Motor Output | PinHeader_1x03_P2.54mm_Vertical | 1 | J2 |
-| Power Input | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
-| SWD-6 | PinHeader_1x06_P2.54mm_Vertical | 1 | J4 |
-| 33uH | L_1210_3225Metric | 1 | L1 |
-| IRLZ44N | TO-220-3_Vertical | 6 | Q1, Q2, Q3, Q4, Q5, Q6 |
-| 10k | R_0805_2012Metric | 3 | R30, R31, R32 |
-| 1k | R_0805_2012Metric | 2 | R3, R4 |
-| 22 | R_0805_2012Metric | 3 | R20, R21, R22 |
-| 5mR | R_2512_6332Metric | 3 | R10, R11, R12 |
-| AMS1117-3.3 | SOT-223-3_TabPin2 | 1 | U2 |
-| DRV8301 | HTSSOP-56-1EP_6.1x14mm_P0.5mm_EP3.61x6.35mm | 1 | U3 |
-| LM2596-5.0 | TO-263-5_TabPin3 | 1 | U1 |
-| STM32G431K8Tx | LQFP-32_7x7mm_P0.8mm | 1 | U10 |
-| 8MHz | Crystal_HC49-4H_Vertical | 1 | Y1 |
+| Value | Package | Qty | References | MPN | LCSC |
+|-------|---------|-----|------------|-----|------|
+| 100nF | C_0805_2012Metric | 10 | C2, C3, C5, C9, C10, C11, C12, C14, C15, C16 | CC0805KRX7R9BB104 | C49678 |
+| 10nF | C_0805_2012Metric | 2 | C4, C13 | CL21B103KBANNNC | C1710 |
+| 10uF | C_0805_2012Metric | 1 | C8 | CL21A106KAYNNNE | C15850 |
+| 1uF | C_0805_2012Metric | 1 | C7 | CL21B105KBFNNNE | C28323 |
+| 220uF 50V | CP_Elec_8x10.5_PolarityMark | 1 | C1 | EEEFT1H221AP | C178594 |
+| 470nF | C_0805_2012Metric | 1 | C6 | CL21B474KBFNNNE | C13967 |
+| RED | LED_0805_2012Metric | 1 | D3 | 17-21SURC/S530-A2/TR8 | C131244 |
+| SMBJ24A | D_SMB | 1 | D2 | SMBJ24A | C224017 |
+| SS36 | D_SMA | 1 | D1 | SS36 | C16015 |
+| 1A 63V | Fuse_1206_3216Metric | 1 | F1 | SF-1206S100-2 | C3167176 |
+| 12-24V INPUT | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 | ZX-PZ2.54-1-2PZZ | C7501260 |
+| AVR ISP | PinHeader_2x03_P2.54mm_Vertical | 1 | J4 | 2.54-2*3P | C65114 |
+| HALL | PinHeader_1x06_P2.54mm_Vertical | 1 | J3 | 2.54-1*6P | C37208 |
+| MOTOR ABC | PinHeader_1x03_P2.54mm_Vertical | 1 | J2 | 2.54-1*3P | C49257 |
+| RUN SWITCH | PinHeader_1x02_P2.54mm_Vertical | 1 | J5 | ZX-PZ2.54-1-2PZZ | C7501260 |
+| 0.5R | R_2512_6332Metric | 1 | R1 | WSL2512R5000FEA | C511023 |
+| 10k | Potentiometer_Bourns_3296W_Vertical | 1 | RV1 | 3296W-1-103LF | C34846 |
+| 10k | R_0805_2012Metric | 9 | R3, R5, R6, R7, R8, R9, R10, R11, R12 | 0805W8F1002T5E | C17414 |
+| 1k | R_0805_2012Metric | 2 | R4, R13 | 0805W8F1001T5E | C17513 |
+| 56k | R_0805_2012Metric | 1 | R2 | 0805W8F5602T5E | C17756 |
+| ATmega328P-AU | TQFP-32_7x7mm_P0.8mm | 1 | U1 | ATMEGA328P-AU | C14877 |
+| DRV8313PWPR | TI_PWP0028C_EP3.4x9.7_Mask3.1x5.18_ThermalVias | 1 | U2 | DRV8313PWPR | C92482 |
+| TPS7A1650DGNR | HVSSOP-8-1EP_3x3mm_P0.65mm_EP1.57x1.89mm_ThermalVias | 1 | U3 | TPS7A1650DGNR | C468238 |
 
 
 \newpage
@@ -149,18 +170,10 @@ Thermal analysis and high-current routing demo
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Warnings | 11 |
+| Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| single_pad_net | 8 |
-| silk_over_copper | 6 |
-| copper_sliver | 3 |
-| silk_edge_clearance | 2 |
 
 
 \newpage
@@ -171,15 +184,9 @@ Thermal analysis and high-current routing demo
 
 ### Action Items
 
-- **[OPTIONAL]** Verify zone fill in KiCad: 10 nets appear incomplete but may be connected via zone fills
-- **[OPTIONAL]** Verify zone fill in KiCad for 5 zone-connected nets
-- **[OPTIONAL]** Review 11 DRC warnings
-- **[OPTIONAL]** Analog net: ISENSE_A+ — analog signal; noise-sensitive, avoid crossing digital signals
-- **[OPTIONAL]** Analog net: ISENSE_A- — analog signal; noise-sensitive, avoid crossing digital signals
-- **[OPTIONAL]** Analog net: ISENSE_B+ — analog signal; noise-sensitive, avoid crossing digital signals
-- **[OPTIONAL]** Analog net: ISENSE_B- — analog signal; noise-sensitive, avoid crossing digital signals
-- **[OPTIONAL]** Analog net: ISENSE_C+ — analog signal; noise-sensitive, avoid crossing digital signals
-- **[OPTIONAL]** Analog net: ISENSE_C- — analog signal; noise-sensitive, avoid crossing digital signals
+- **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
+- **[OPTIONAL]** Analog net: GND_SENSE — analog signal; noise-sensitive, avoid crossing digital signals
+- **[OPTIONAL]** Analog net: SENSE_IN — analog signal; noise-sensitive, avoid crossing digital signals
 
 
 \newpage
@@ -188,43 +195,27 @@ Thermal analysis and high-current routing demo
 
 | Metric | Value |
 |--------|-------|
-| Signal Net Completion | 100.0% (39/39) |
-| Overall Completion | 90.4% |
-| Complete Nets | 47 / 52 |
-| Zone-Connected Nets | 5 |
-| Single-Pad Nets | 8 (no routing needed) |
-| Incomplete Nets | 5 |
-| Unconnected Pads | 53 |
+| Signal Net Completion | 100.0% (35/35) |
+| Overall Completion | 100.0% |
+| Complete Nets | 37 / 37 |
+| Zone-Connected Nets | 2 |
+| Incomplete Nets | 0 |
+| Unconnected Pads | 0 |
 
 ### Zone-Connected Nets
 
-- +24V
-- +3V3
 - +5V
 - GND
-- VIN
-
-### Single-Pad Nets
-
-8 single-pad nets (no routing needed) -- not listed individually.
-
-### Incomplete Nets
-
-- +24V
-- +3V3
-- +5V
-- GND
-- VIN
 
 
 ## Cost Estimate
 
 | Metric | Per Board (estimated) |
 |--------|-------|
-| PCB Fabrication | ~3.6 USD |
-| Components (estimated) | ~3.17 USD |
-| Assembly (estimated) | ~2.35 USD |
-| **Total (estimated)** | **~9.12 USD** |
+| PCB Fabrication | ~3.26 USD |
+| Components (estimated) | ~2.23 USD |
+| Assembly (estimated) | ~2.19 USD |
+| **Total (estimated)** | **~7.67 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~45.61 USD |
+| Batch Total (estimated) | ~38.36 USD |
 

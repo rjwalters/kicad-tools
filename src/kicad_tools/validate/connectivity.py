@@ -2081,7 +2081,7 @@ class ConnectivityValidator:
             for pad in fp.pads:
                 if pad.number is None or pad.number == "":
                     continue
-                poly = self._pad_copper_polygon(fp, pad)
+                poly = self._pad_copper_polygon(fp, pad, shape_aware=True)
                 if poly is not None:
                     pad_polygons[f"{fp.reference}.{pad.number}"] = poly
         via_radius = self._synthetic_via_radii(synthetic_nodes)

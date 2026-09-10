@@ -1,4 +1,9 @@
 Comment,Designator,Footprint,LCSC Part #
+100nF,C1,Capacitor_SMD:C_0805_2012Metric,C49678
+10k,R5,Resistor_SMD:R_0805_2012Metric,C17414
 330R,"R1,R2,R3,R4",Resistor_SMD:R_0805_2012Metric,C17630
-LED,"D1,D2,D3,D4,D5,D6,D7,D8,D9",LED_SMD:LED_0805_2012Metric,C72038
-MCU,U1,Package_DIP:DIP-8_W7.62mm,C57215
+4.7uF,C2,Capacitor_SMD:C_0805_2012Metric,C1779
+ATtiny85-20PU,U1,Package_DIP:DIP-8_W7.62mm,C965497
+AVR-ISP,J2,Connector_PinHeader_2.54mm:PinHeader_2x03_P2.54mm_Vertical,C65114
+LED,"D1,D2,D3,D4,D5,D6,D7,D8,D9",LED_SMD:LED_0805_2012Metric,C131244
+POWER,J1,Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical,C7501260

@@ -661,6 +661,10 @@ def run_route_command(args) -> int:
         sub_argv.append("--quiet")
     if getattr(args, "power_nets", None):
         sub_argv.extend(["--power-nets", args.power_nets])
+    if getattr(args, "auto_pour", None) is not None:
+        sub_argv.append("--auto-pour" if args.auto_pour else "--no-auto-pour")
+    if getattr(args, "strict_pad_clearance", False):
+        sub_argv.append("--strict-pad-clearance")
     if getattr(args, "layers", "auto") != "auto":
         sub_argv.extend(["--layers", args.layers])
     if getattr(args, "force", False):

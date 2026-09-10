@@ -1,0 +1,11 @@
+{
+  "description": "Reviewed six-layer placement, power routing and package escape source. Bus trunks remain unrouted; this is not an order package.",
+  "stackup": "JLC06161H-2116A",
+  "parts": 43,
+  "bound_pads": 216,
+  "sha256": {
+    "net_class_map.json": "585f0a4f1611d7582fdbe257465fde740d31ad7badec1dd6982bcca9cb4b3c28",
+    "sdram_demo.kicad_pcb": "eab9fc57cd7860278aa82fbb70a83d84e608aa85406e31f186cda8ba04412ff2",
+    "sdram_demo.kicad_pro": "f6ee5e69e9cd153a3ca4b57f8fa9005f8c755774db97a6c5a6ad0c6378b79198"
+  }
+}

@@ -1,0 +1,32 @@
+(version 1)
+
+# BEGIN kct fab floors (Issue #4600) -- managed, do not edit
+(rule "Trace Width - jlcpcb"
+  (condition "A.Type == 'track'")
+  (constraint track_width (min 0.0889mm)))
+(rule "Clearance - jlcpcb"
+  (constraint clearance (min 0.0889mm)))
+(rule "Via Drill - jlcpcb"
+  (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
+  (constraint hole_size (min 0.2mm)))
+(rule "Via Diameter - jlcpcb"
+  (condition "A.Type == 'via' && A.Via_Type != 'Micro'")
+  (constraint via_diameter (min 0.45mm)))
+(rule "Annular Ring - jlcpcb"
+  (condition "A.Via_Type != 'Micro'")
+  (constraint annular_width (min 0.15mm)))
+(rule "PTH Annular Ring - jlcpcb"
+  (condition "A.Type == 'pad'")
+  (constraint annular_width (min 0.15mm)))
+(rule "Copper to Edge - jlcpcb"
+  (constraint edge_clearance (min 0.3mm)))
+(rule "Hole to Edge - jlcpcb"
+  (condition "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'")
+  (constraint physical_hole_clearance (min 0.4mm)))
+(rule "Silkscreen Width - jlcpcb"
+  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (constraint text_thickness (min 0.15mm)))
+(rule "Silkscreen Height - jlcpcb"
+  (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
+  (constraint text_height (min 1.0mm)))
+# END kct fab floors

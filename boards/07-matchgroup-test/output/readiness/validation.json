@@ -1,0 +1,947 @@
+{
+  "status": "pass",
+  "errors": [],
+  "lengths_including_vias_mm": {
+    "A0": 78.99984020467595,
+    "A1": 78.99995262741268,
+    "A10": 76.5816092569823,
+    "A11": 79.0003944820525,
+    "A2": 79.0004217589818,
+    "A3": 78.99980098715096,
+    "A4": 78.21801292551692,
+    "A5": 78.19329494931895,
+    "A6": 78.99955277306125,
+    "A7": 79.0007103957322,
+    "A8": 79.00245292640152,
+    "A9": 78.99530949437128,
+    "BA0": 78.99981072761167,
+    "BA1": 78.99965786658494,
+    "DQ0": 64.00108972352412,
+    "DQ1": 64.00114377634512,
+    "DQ10": 74.00037737580604,
+    "DQ11": 74.00174774516591,
+    "DQ12": 74.00050191394573,
+    "DQ13": 74.00044460740301,
+    "DQ14": 76.7182937817466,
+    "DQ15": 74.00053143604822,
+    "DQ2": 64.00027414767568,
+    "DQ3": 64.00033026542515,
+    "DQ4": 63.99928186010617,
+    "DQ5": 64.00095386854365,
+    "DQ6": 63.999069227727105,
+    "DQ7": 64.00067547193638,
+    "DQ8": 74.00053222105029,
+    "DQ9": 73.99949007551973,
+    "LDQM": 63.999313741019755,
+    "SDCKE1": 71.99974969674777,
+    "SDCLK": 72.95317999527626,
+    "SDNCAS": 72.00132647553366,
+    "SDNE1": 72.00139050167157,
+    "SDNRAS": 71.99897584081981,
+    "SDNWE": 71.99618613452635,
+    "UDQM": 74.00002418176848
+  },
+  "impedance": {
+    "A0": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "A1": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "A10": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "A11": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "A2": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "A3": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "A4": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "A5": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "A6": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      }
+    ],
+    "A7": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "A8": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "A9": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "BA0": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "BA1": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ0": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ1": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ10": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ11": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ12": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ13": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ14": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ15": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ2": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      }
+    ],
+    "DQ3": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ4": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ5": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ6": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ7": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ8": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "DQ9": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "LDQM": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      }
+    ],
+    "SDCKE1": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "SDCLK": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      }
+    ],
+    "SDNCAS": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      }
+    ],
+    "SDNE1": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      }
+    ],
+    "SDNRAS": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "SDNWE": [
+      {
+        "layer": "B.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In3.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ],
+    "UDQM": [
+      {
+        "layer": "F.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 51.72012633176089
+      },
+      {
+        "layer": "In2.Cu",
+        "width_mm": 0.18,
+        "impedance_ohm": 48.087672137930916
+      }
+    ]
+  },
+  "trace_capacitance_pf": {
+    "A0": 10.25455895130363,
+    "A1": 9.099809465300812,
+    "A10": 9.778965594218985,
+    "A11": 10.130559820217696,
+    "A2": 9.688315532911668,
+    "A3": 9.088914481448892,
+    "A4": 9.657320913380829,
+    "A5": 10.325303894507767,
+    "A6": 8.714234370549686,
+    "A7": 10.01799914299876,
+    "A8": 10.360999284239426,
+    "A9": 9.100361160470504,
+    "BA0": 10.868669648254988,
+    "BA1": 10.866991547867256,
+    "DQ0": 8.951635256738351,
+    "DQ1": 8.919176294814996,
+    "DQ10": 10.413693207939055,
+    "DQ11": 10.447842716325356,
+    "DQ12": 9.206966007743093,
+    "DQ13": 9.942374820300337,
+    "DQ14": 9.307758764005035,
+    "DQ15": 8.779155803736487,
+    "DQ2": 7.342512263110804,
+    "DQ3": 8.99538080508575,
+    "DQ4": 8.455013434181264,
+    "DQ5": 8.534213805533696,
+    "DQ6": 8.508454339114184,
+    "DQ7": 7.612056655808689,
+    "DQ8": 10.380177374487012,
+    "DQ9": 10.415788523500419,
+    "LDQM": 7.342402079244522,
+    "SDCKE1": 9.889316752146406,
+    "SDCLK": 8.020556619017146,
+    "SDNCAS": 7.911354022083443,
+    "SDNE1": 7.911361367562957,
+    "SDNRAS": 9.50414505152351,
+    "SDNWE": 9.58456895205321,
+    "UDQM": 9.945945220832511
+  },
+  "external_load_estimates": {
+    "A0": {
+      "trace_pf": 10.25455895130363,
+      "full_through_via_count": 5,
+      "via_allowance_pf": 5.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 19.05455895130363,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "A1": {
+      "trace_pf": 9.099809465300812,
+      "full_through_via_count": 5,
+      "via_allowance_pf": 5.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 17.899809465300812,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "A10": {
+      "trace_pf": 9.778965594218985,
+      "full_through_via_count": 4,
+      "via_allowance_pf": 4.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 17.578965594218985,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "A11": {
+      "trace_pf": 10.130559820217696,
+      "full_through_via_count": 4,
+      "via_allowance_pf": 4.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 17.930559820217695,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "A2": {
+      "trace_pf": 9.688315532911668,
+      "full_through_via_count": 3,
+      "via_allowance_pf": 3.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 16.488315532911667,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "A3": {
+      "trace_pf": 9.088914481448892,
+      "full_through_via_count": 5,
+      "via_allowance_pf": 5.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 17.888914481448893,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "A4": {
+      "trace_pf": 9.657320913380829,
+      "full_through_via_count": 4,
+      "via_allowance_pf": 4.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 17.45732091338083,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "A5": {
+      "trace_pf": 10.325303894507767,
+      "full_through_via_count": 4,
+      "via_allowance_pf": 4.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 18.125303894507766,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "A6": {
+      "trace_pf": 8.714234370549686,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 14.514234370549687,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "A7": {
+      "trace_pf": 10.01799914299876,
+      "full_through_via_count": 3,
+      "via_allowance_pf": 3.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 16.817999142998758,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "A8": {
+      "trace_pf": 10.360999284239426,
+      "full_through_via_count": 3,
+      "via_allowance_pf": 3.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 17.160999284239427,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "A9": {
+      "trace_pf": 9.100361160470504,
+      "full_through_via_count": 4,
+      "via_allowance_pf": 4.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 16.900361160470503,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "BA0": {
+      "trace_pf": 10.868669648254988,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 16.668669648254987,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "BA1": {
+      "trace_pf": 10.866991547867256,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 16.666991547867255,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "DQ0": {
+      "trace_pf": 8.951635256738351,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 20.95163525673835,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ1": {
+      "trace_pf": 8.919176294814996,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 20.919176294814996,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ10": {
+      "trace_pf": 10.413693207939055,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 22.413693207939055,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ11": {
+      "trace_pf": 10.447842716325356,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 22.447842716325354,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ12": {
+      "trace_pf": 9.206966007743093,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 21.20696600774309,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ13": {
+      "trace_pf": 9.942374820300337,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 21.942374820300337,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ14": {
+      "trace_pf": 9.307758764005035,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 21.307758764005037,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ15": {
+      "trace_pf": 8.779155803736487,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 20.779155803736487,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ2": {
+      "trace_pf": 7.342512263110804,
+      "full_through_via_count": 0,
+      "via_allowance_pf": 0.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 17.342512263110805,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ3": {
+      "trace_pf": 8.99538080508575,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 20.99538080508575,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ4": {
+      "trace_pf": 8.455013434181264,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 20.455013434181264,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ5": {
+      "trace_pf": 8.534213805533696,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 20.534213805533696,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ6": {
+      "trace_pf": 8.508454339114184,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 20.508454339114184,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ7": {
+      "trace_pf": 7.612056655808689,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 19.61205665580869,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ8": {
+      "trace_pf": 10.380177374487012,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 22.380177374487012,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "DQ9": {
+      "trace_pf": 10.415788523500419,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 10.0,
+      "estimated_external_load_pf": 22.415788523500417,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "engineering reserve"
+    },
+    "LDQM": {
+      "trace_pf": 7.342402079244522,
+      "full_through_via_count": 0,
+      "via_allowance_pf": 0.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 11.142402079244523,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "SDCKE1": {
+      "trace_pf": 9.889316752146406,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 15.689316752146407,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "SDCLK": {
+      "trace_pf": 8.020556619017146,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 3.5,
+      "estimated_external_load_pf": 13.520556619017146,
+      "external_limit_pf": 15.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "SDNCAS": {
+      "trace_pf": 7.911354022083443,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 13.711354022083444,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "SDNE1": {
+      "trace_pf": 7.911361367562957,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 13.711361367562958,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "SDNRAS": {
+      "trace_pf": 9.50414505152351,
+      "full_through_via_count": 4,
+      "via_allowance_pf": 4.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 17.30414505152351,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "SDNWE": {
+      "trace_pf": 9.58456895205321,
+      "full_through_via_count": 3,
+      "via_allowance_pf": 3.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 16.38456895205321,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    },
+    "UDQM": {
+      "trace_pf": 9.945945220832511,
+      "full_through_via_count": 2,
+      "via_allowance_pf": 2.0,
+      "receiver_allowance_pf": 3.8,
+      "estimated_external_load_pf": 15.74594522083251,
+      "external_limit_pf": 30.0,
+      "receiver_basis": "ISSI maximum"
+    }
+  },
+  "validation_scope": "Physical/electrical design preflight; manufacturing bundle is a separate gate",
+  "manufacturing_complete": false,
+  "manufacturing_manifest_status": "NOT RUN",
+  "capacitance_scope": "Traces only; package and full through-via barrel capacitance excluded",
+  "hardware_tested": false,
+  "assembly_inventory_verified": false
+}

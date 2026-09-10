@@ -16,15 +16,11 @@
 (rule "Copper to Edge - Seeed Fusion"
   (constraint edge_clearance (min 0.5mm)))
 (rule "Hole to Edge - Seeed Fusion"
-  (condition "A.Type == 'via' || A.Type == 'pad'")
-  (constraint hole_clearance (min 0.5mm)))
+  (condition "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'")
+  (constraint physical_hole_clearance (min 0.5mm)))
 (rule "Silkscreen Width - Seeed Fusion"
   (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
   (constraint text_thickness (min 0.15mm)))
 (rule "Silkscreen Height - Seeed Fusion"
   (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
   (constraint text_height (min 0.8mm)))
-(rule "Solder Mask Clearance - Seeed Fusion"
-  (constraint solder_mask_margin (min 0.05mm)))
-(rule "Solder Mask Dam - Seeed Fusion"
-  (constraint physical_hole_clearance (min 0.1mm)))

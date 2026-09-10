@@ -113,7 +113,7 @@ def test_route_demo_invokes_kct_route_subprocess() -> None:
     # Positive: the script must invoke ``kct route`` via subprocess.
     # Match the literal CLI invocation pattern used by both
     # ``generate_design.py:route_pcb`` and the post-#3207 demo.
-    assert '"route"' in source or "'route'" in source, (
+    assert "kicad_tools.cli.route_cmd" in source, (
         "route_demo.py does not invoke `kct route` — Issue #3207 fix is "
         "missing.  Expected a subprocess.run([...,'-m','kicad_tools.cli',"
         "'route',...]) call that mirrors generate_design.py:route_pcb()."

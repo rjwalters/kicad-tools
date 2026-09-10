@@ -94,7 +94,7 @@ OUTPUT_DIR = BOARD_DIR / "output"
 SCH_FILE = OUTPUT_DIR / "usb_joystick.kicad_sch"
 PCB_FILE = OUTPUT_DIR / "usb_joystick.kicad_pcb"
 ROUTED_PCB_FILE = OUTPUT_DIR / "usb_joystick_routed.kicad_pcb"
-UNROUTED_PCB = PCB_FILE  # alias for the #2760 fixture below
+UNROUTED_PCB = BOARD_DIR / "regression-fixture" / "usb_joystick.kicad_pcb"
 
 # Issue #3410: ``generate_design.py:route_pcb()`` now delegates to the
 # production ``kct route`` CLI invocation (pinned by
@@ -128,18 +128,18 @@ REQUIRED_PCB_REFS = ("C5", "C6", "C10", "C11", "R10", "R11", "R12")
 
 @pytest.fixture(scope="module")
 def unrouted_pcb_path() -> Path:
-    """Verify the committed unrouted board 03 PCB exists."""
-    if not UNROUTED_PCB.exists():
-        pytest.skip(
-            f"Board 03 unrouted PCB not found at {UNROUTED_PCB!s}; "
-            "regenerate via `python3 boards/03-usb-joystick/generate_pcb.py`."
-        )
+    """Keep old 32-pad escape regressions on their frozen historical geometry."""
+    assert UNROUTED_PCB.is_file(), "Historical board03 routing fixture is missing"
     return UNROUTED_PCB
 
 
 @pytest.fixture(scope="module")
 def routed_board_03(unrouted_pcb_path: Path):
-    """Load board 03 and route it with the in-process ``route_all`` path.
+    """Route the frozen synthetic board03 geometry with ``route_all``.
+
+    Revision B has a real 44-pin MCU and different connections. Applying
+    this fixture's old 32-pad rescue list to revision B is not a regression
+    comparison and can cause unbounded searches.
 
     Issue #3308: this fixture WAS introduced as a mirror of
     ``generate_design.py:route_pcb()``.  It no longer mirrors that recipe
@@ -744,21 +744,10 @@ def regenerated_board(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def test_generated_pcb_contains_required_refs(regenerated_board: Path) -> None:
-    """Generator emits C5/C6 + R10/C10/R11/C11/R12 in the PCB.
-
-    Direct text check on the generated ``.kicad_pcb`` file: cheap and
-    precisely targets the issue #2744 root cause (PCB generator missed
-    the schematic-emitted load caps + joystick filter parts).
-    """
-    pcb_text = (regenerated_board / "usb_joystick.kicad_pcb").read_text()
-    missing = [ref for ref in REQUIRED_PCB_REFS if f'reference "{ref}"' not in pcb_text]
-    assert not missing, (
-        f"generate_pcb.py is missing schematic-side refs from the PCB "
-        f"output (regression of issue #2744): {missing}. "
-        f"Schematic calls create_crystal_with_loads(cap_ref_start=5) and "
-        f"create_analog_joystick(filter_ref_start=10) — both helpers must "
-        f"be mirrored in the PCB generator or sync drift will block export."
-    )
+    """Real-package revision B preserves the clock/filter/support placements."""
+    footprints = _revision_b_footprints(regenerated_board)
+    assert set(REQUIRED_PCB_REFS) <= footprints.keys()
+    assert {"U2", "F1", "J3", "C8", "C9", "C12", "R16", "SW5"} <= footprints.keys()
 
 
 def test_pcb_sync_clean_against_schematic(regenerated_board: Path) -> None:
@@ -804,7 +793,7 @@ def test_schematic_pcb_lvs_clean_and_net_counts_match(regenerated_board: Path) -
     ``generate_pcb.py``, and a third simplified inline schematic inside
     ``generate_design.py:main()``.  After the #3764 reconciliation the
     schematic and PCB must agree on every ``(ref, pad)`` net AND expose
-    the same 16-net label set, so that ``kct fleet ship-ready`` no longer
+    the same revision-B 27-net label set, so that ``kct fleet ship-ready`` no longer
     reports a schematic-drift blocker.
 
     This pins both halves so a future generator edit that re-diverges the
@@ -829,7 +818,7 @@ def test_schematic_pcb_lvs_clean_and_net_counts_match(regenerated_board: Path) -
     )
 
     # 2. Named-net label sets must be identical and both equal to the
-    #    canonical 16-net model (drift detector parity).
+    #    revision-B 27-net model (drift detector parity).
     sch_nets = _extract_schematic_nets(sch)
     pcb_nets = _extract_pcb_named_nets(pcb)
     assert sch_nets is not None and pcb_nets is not None
@@ -838,8 +827,8 @@ def test_schematic_pcb_lvs_clean_and_net_counts_match(regenerated_board: Path) -
         f"only-in-sch={sorted(sch_nets - pcb_nets)}, "
         f"only-in-pcb={sorted(pcb_nets - sch_nets)}"
     )
-    assert len(sch_nets) == 16, (
-        f"expected the canonical 16-net board-03 model, got "
+    assert len(sch_nets) == 27, (
+        f"expected the revision-B 27-net board-03 model, got "
         f"{len(sch_nets)} schematic nets: {sorted(sch_nets)}"
     )
     # The spurious ``+5V`` rail must be gone (folded into VCC).
@@ -960,30 +949,10 @@ def test_parse_routed_net_count_returns_none_without_summary() -> None:
 
 @pytest.mark.slow
 def test_route_demo_achieves_minimum_completion(regenerated_board: Path) -> None:
-    """route_demo.py routes at least ``MIN_FULLY_ROUTED_NETS`` signal nets.
+    """The reviewed revision-B routing replays cleanly in an isolated directory.
 
-    Issue #3308 (June 2026): ``route_demo.py`` now delegates to
-    ``generate_design.py:route_pcb()`` so this test exercises the
-    canonical recipe.  Routable population is 13 nets (16 NETS minus
-    3 skipped power nets VCC/GND/VBUS); the canonical recipe lands at
-    11/13 under current router HEAD with USB_D-/USB_CC1 partial.  This
-    matches the floor pinned by ``tests/router/test_board03_routing_baseline.py``.
-
-    Issue #2744 background: original curator floor was "≥9/16" which
-    counted 5 skipped power nets in the denominator.  Post-#3308 the
-    accounting is corrected to "≥11/13".
-
-    A hard timeout of 600 s guards against router hangs (the curator
-    observed a 355 s timeout on net 2/13 in the pre-fix audit; this
-    test budget is generous).
-
-    Issue #3580: the demo is pointed at the regenerated TEMP input and a
-    TEMP output path so it never rewrites the committed
-    ``boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb`` (the
-    in-place rewrite clobbered PR #3589's refill-only artifact and races
-    parallel xdist readers of the committed file).  ``route_demo.py``
-    joins its positional args onto the board dir; absolute paths
-    short-circuit the join (pathlib semantics).
+    Revision B is a real circuit with saved manual repairs; generic autorouter
+    reach counts from the revision-A synthetic fixture do not describe it.
     """
     routed_tmp = regenerated_board / "usb_joystick_routed.kicad_pcb"
     # PYTHONDONTWRITEBYTECODE: route_demo.py imports generate_design
@@ -1004,34 +973,10 @@ def test_route_demo_achieves_minimum_completion(regenerated_board: Path) -> None
         cwd=str(BOARD_DIR),
         env=env,
     )
-    # route_demo.py returns 0 on DRC-clean, 1 on DRC errors.  Either
-    # exit code is acceptable here — we are pinning routing completion,
-    # not DRC cleanliness (the diffpair_clearance_intra DRC errors are
-    # a known consequence of partial USB_D+/D- routes and are tracked
-    # separately in the curator note).
-    assert proc.returncode in (0, 1), (
-        f"route_demo.py returned unexpected exit code {proc.returncode}\n"
-        f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}\n"
-        f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}"
-    )
-
-    parsed = _parse_routed_net_count(proc.stdout)
-    assert parsed is not None, (
-        "Could not find 'Routed N/M nets' or 'SUCCESS: All nets routed' "
-        "line in route_demo.py output.  This typically means the router "
-        "crashed before producing a summary.\n"
-        f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}"
-    )
-    routed, total = parsed
-    assert routed >= MIN_FULLY_ROUTED_NETS, (
-        f"Board 03 fully-routed net count regressed: routed {routed}/{total}, "
-        f"expected >= {MIN_FULLY_ROUTED_NETS} (issue #3308 / #2744 floor).  "
-        f"This typically indicates either a router-quality regression on "
-        f"USB-C-class pad-density boards or a placement change that pushed "
-        f"a previously-routable net out of reach.  See "
-        f"tests/router/test_board03_routing_baseline.py for the parallel "
-        f"`kct route` floor and per-net reach assertions."
-    )
+    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
+    assert "SUCCESS: All nets routed, DRC passed!" in proc.stdout
+    assert "Native errors and opens: 0" in proc.stdout
+    assert "Applying reviewed routing plan" in proc.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -1163,159 +1108,21 @@ def test_fix_drc_preserves_safe_nudges_on_routed_board(tmp_path) -> None:
 
 
 def test_crystal_placed_west_of_mcu(regenerated_board: Path) -> None:
-    """Issue #2918: Y1 placement literal must be west of U1's XTAL pins.
-
-    ``generate_crystal()`` and ``generate_xtal_load_caps()`` must agree on
-    the crystal centre being on the WEST side of U1 (at
-    ``BOARD_ORIGIN_X + 22``, ``BOARD_ORIGIN_Y + 30``), not the pre-fix
-    east-side hardcode (``BOARD_ORIGIN_X + 55``).
-
-    The check inspects the source of ``generate_pcb.py`` rather than the
-    runtime output so the failure message points directly at the offending
-    literal.  An integration check (XTAL1 actually routing fully) lives
-    in the route-demo completion test above.
-
-    Acceptance criteria from issue #2918:
-
-      1. ``generate_pcb.py`` regenerates a PCB where Y1 sits west of U1
-         (``BOARD_ORIGIN_X + 22``).
-      2. ``kct route ... --manufacturer jlcpcb --auto-layers`` produces
-         ``XTAL1`` fully connected (3/3 pads).
-      3. No regression on any other board.
-
-    Criterion (1) is pinned here; (2) is pinned by the route-demo test
-    above (the 9-net floor is unattainable without XTAL1 routing); (3) is
-    a manual fleet-status check in the PR description.
-    """
-    src = (BOARD_DIR / "generate_pcb.py").read_text()
-
-    # Match ``x = BOARD_ORIGIN_X + 22`` allowing for whitespace variance.
-    crystal_x_pat = re.compile(
-        r"def\s+generate_crystal\b.*?x\s*=\s*BOARD_ORIGIN_X\s*\+\s*22\b",
-        re.DOTALL,
-    )
-    assert crystal_x_pat.search(src), (
-        "generate_crystal() no longer hardcodes x = BOARD_ORIGIN_X + 22.  "
-        "Issue #2918 fix moved Y1 from the east side of U1 "
-        "(BOARD_ORIGIN_X + 55) to the west side (BOARD_ORIGIN_X + 22) so "
-        "the autorouter can reach U1's west-edge XTAL pins (pin 2/3) "
-        "without crossing the MCU body.  If you intentionally moved the "
-        "crystal again, update this regression test to match -- but "
-        "verify XTAL1 still routes 3/3 pads after the move, per the "
-        "issue #2918 acceptance criteria."
-    )
-
-    # Match ``y = BOARD_ORIGIN_Y + 30`` inside ``generate_crystal``.
-    crystal_y_pat = re.compile(
-        r"def\s+generate_crystal\b.*?y\s*=\s*BOARD_ORIGIN_Y\s*\+\s*30\b",
-        re.DOTALL,
-    )
-    assert crystal_y_pat.search(src), (
-        "generate_crystal() no longer pins y = BOARD_ORIGIN_Y + 30.  "
-        "The XTAL pad row on U1 sits at y ~= BOARD_ORIGIN_Y + 30 (mid "
-        "between pin 2 at y_offset -2.0 and pin 3 at y_offset -1.2 "
-        "relative to U1's centre).  Misaligning this row reintroduces "
-        "the channel-blocked routing failure from issue #2918."
-    )
-
-    # And the load-cap helper must reference the SAME centre so C5/C6
-    # follow the crystal.  Without this, the caps would drift back to
-    # the east side and break XTAL1/XTAL2 trace lengths.
-    load_caps_cx_pat = re.compile(
-        r"def\s+generate_xtal_load_caps\b.*?xtal_cx\s*=\s*BOARD_ORIGIN_X\s*\+\s*22\b",
-        re.DOTALL,
-    )
-    assert load_caps_cx_pat.search(src), (
-        "generate_xtal_load_caps() xtal_cx is no longer aligned to "
-        "BOARD_ORIGIN_X + 22 -- the crystal moved but the load caps did "
-        "not follow.  This breaks the XTAL1/XTAL2 trace geometry per "
-        "issue #2918.  Both ``generate_crystal()`` and "
-        "``generate_xtal_load_caps()`` must share the same crystal centre."
-    )
-    load_caps_cy_pat = re.compile(
-        r"def\s+generate_xtal_load_caps\b.*?xtal_cy\s*=\s*BOARD_ORIGIN_Y\s*\+\s*30\b",
-        re.DOTALL,
-    )
-    assert load_caps_cy_pat.search(src), (
-        "generate_xtal_load_caps() xtal_cy is no longer aligned to "
-        "BOARD_ORIGIN_Y + 30 -- see xtal_cx note above."
-    )
-
-    # Negative assertion: the pre-fix east-side literal must NOT reappear
-    # in either helper.  A diff that introduces ``BOARD_ORIGIN_X + 55``
-    # back into the crystal block is exactly the regression we are
-    # guarding against.
-    east_side_pat = re.compile(
-        r"def\s+generate_(crystal|xtal_load_caps)\b.*?BOARD_ORIGIN_X\s*\+\s*55\b",
-        re.DOTALL,
-    )
-    assert not east_side_pat.search(src), (
-        "Pre-issue-#2918 east-side crystal literal (BOARD_ORIGIN_X + 55) "
-        "has reappeared in generate_crystal() or generate_xtal_load_caps().  "
-        "This is the exact regression issue #2918 was opened to prevent; "
-        "the crystal must stay on the MCU's XTAL-pin side."
-    )
+    """Keep the crystal and load caps close to the real west-facing XTAL pins."""
+    parts = _revision_b_footprints(regenerated_board)
+    x, y = parts["Y1"].find_child("at").get_float(0), parts["Y1"].find_child("at").get_float(1)
+    mcu_x = parts["U1"].find_child("at").get_float(0)
+    assert 0 < mcu_x - x <= 12
+    for ref in ("C8", "C9"):
+        at = parts[ref].find_child("at")
+        assert abs(at.get_float(0) - x) <= 6
+        assert abs(at.get_float(1) - y) <= 4
 
 
 def test_generated_pcb_places_crystal_west_of_mcu(regenerated_board: Path) -> None:
-    """Issue #2918: regenerated PCB places Y1 to the west of U1.
-
-    Stronger than the source-literal check above: this regenerates the
-    actual PCB and asserts the absolute x coordinate of Y1 is *less*
-    than U1's absolute x.  Catches the case where someone refactors the
-    generator to compute the position differently (e.g. via a placement
-    strategy) but accidentally re-introduces an east-of-U1 result.
-
-    Parses the ``.kicad_pcb`` text directly with regex; no KiCad
-    dependency required for the assertion.
-    """
-    pcb_text = (regenerated_board / "usb_joystick.kicad_pcb").read_text()
-
-    # Each ``(footprint ...)`` block contains a ``(reference "REF")`` and
-    # an ``(at X Y [ROT])`` line for the footprint origin.  We use
-    # non-greedy footprint blocks and pull the first ``(at X Y...)`` line
-    # which is the footprint position (subsequent ``(at ...)`` lines
-    # inside the block belong to pads / text and have a different scope).
-    def _find_footprint_x(ref: str) -> float | None:
-        # Iterate over footprint blocks and find the one with the matching
-        # reference.  The footprint ``(at X Y ...)`` is the first ``(at``
-        # token immediately after ``(footprint ...`` and before any
-        # ``(pad`` or ``(fp_text reference``.
-        for m in re.finditer(
-            r'\(footprint\s+"[^"]+"\s*\(layer\s+"[^"]+"\)\s*'
-            r"\(uuid\s+\"[^\"]+\"\)\s*"
-            r"\(at\s+([\-0-9.]+)\s+([\-0-9.]+)",
-            pcb_text,
-        ):
-            # Look forward to the corresponding reference within this
-            # footprint block (bounded by the next ``(footprint`` or end
-            # of string).
-            block_start = m.start()
-            next_fp = pcb_text.find("(footprint", m.end())
-            block_end = next_fp if next_fp != -1 else len(pcb_text)
-            block = pcb_text[block_start:block_end]
-            ref_m = re.search(rf'\(fp_text\s+reference\s+"{re.escape(ref)}"', block)
-            if ref_m:
-                return float(m.group(1))
-        return None
-
-    y1_x = _find_footprint_x("Y1")
-    u1_x = _find_footprint_x("U1")
-
-    assert y1_x is not None, (
-        "Y1 (crystal) footprint not found in regenerated board 03 PCB.  "
-        "Did generate_crystal() get removed?"
-    )
-    assert u1_x is not None, (
-        "U1 (MCU) footprint not found in regenerated board 03 PCB.  Did the MCU helper get renamed?"
-    )
-
-    assert y1_x < u1_x, (
-        f"Issue #2918 regression: Y1 (crystal) at x={y1_x:.3f} is NOT "
-        f"west of U1 (MCU) at x={u1_x:.3f}.  The MCU's XTAL pins sit on "
-        "U1's west edge; placing Y1 east of U1 forces 17-22 mm "
-        "channel-blocked traces that the autorouter cannot complete."
-    )
+    """The revision-B TQFP44 clock pins are on the west side after rotation."""
+    parts = _revision_b_footprints(regenerated_board)
+    assert parts["Y1"].find_child("at").get_float(0) < parts["U1"].find_child("at").get_float(0)
 
 
 # ---------------------------------------------------------------------------
@@ -1346,144 +1153,39 @@ def test_generated_pcb_places_crystal_west_of_mcu(regenerated_board: Path) -> No
 
 
 def test_joystick_nudged_west_to_clear_joy_y_channel(regenerated_board: Path) -> None:
-    """Issue #2943: J2 placement literal must sit at BOARD_ORIGIN_X + 13.
-
-    ``generate_joystick()`` and ``generate_joystick_filter()`` must agree
-    on the joystick connector centre being at ``BOARD_ORIGIN_X + 13``
-    (the post-nudge x), not the pre-nudge ``BOARD_ORIGIN_X + 15``.
-
-    The check inspects the source of ``generate_pcb.py`` rather than the
-    runtime output so the failure message points directly at the offending
-    literal.  An integration check (the 6 J2-5 ``clearance_pad_segment``
-    errors actually disappearing) is implicit in the routed-drc-tolerance
-    floor of 4 (down from 9) set in the same PR.
-
-    Acceptance criteria from issue #2943:
-
-      1. ``generate_joystick()`` uses ``x = BOARD_ORIGIN_X + 13``.
-      2. ``generate_joystick_filter()`` uses ``joy_cx = BOARD_ORIGIN_X + 13``
-         (so the filter column references stay consistent).
-      3. The pre-nudge literal ``BOARD_ORIGIN_X + 15`` must NOT appear in
-         either helper any longer.
-
-    Criterion (1) and (2) are pinned here; the DRC count drop is pinned
-    by the floor of 4 in ``.github/routed-drc-tolerance.yml``.
-    """
-    src = (BOARD_DIR / "generate_pcb.py").read_text()
-
-    # Match ``x = BOARD_ORIGIN_X + 13`` inside ``generate_joystick()``.
-    joystick_x_pat = re.compile(
-        r"def\s+generate_joystick\b(?!_filter).*?x\s*=\s*BOARD_ORIGIN_X\s*\+\s*13\b",
-        re.DOTALL,
-    )
-    assert joystick_x_pat.search(src), (
-        "generate_joystick() no longer hardcodes x = BOARD_ORIGIN_X + 13.  "
-        "Issue #2943 fix nudged J2 from BOARD_ORIGIN_X + 15 to "
-        "BOARD_ORIGIN_X + 13 (2 mm west) so the JOY_Y routing channel "
-        "between Y1 (BOARD_ORIGIN_X + 22) and J2-5 widens from ~3.4 mm "
-        "to >5 mm.  If you intentionally moved J2 again, verify the "
-        "J2-5 ``clearance_pad_segment`` errors haven't returned (check "
-        "DRC against the post-#2943 baseline of 4 errors at jlcpcb "
-        "tier-1)."
-    )
-
-    # Match ``joy_cx = BOARD_ORIGIN_X + 13`` inside ``generate_joystick_filter()``.
-    filter_cx_pat = re.compile(
-        r"def\s+generate_joystick_filter\b.*?joy_cx\s*=\s*BOARD_ORIGIN_X\s*\+\s*13\b",
-        re.DOTALL,
-    )
-    assert filter_cx_pat.search(src), (
-        "generate_joystick_filter() joy_cx is no longer aligned to "
-        "BOARD_ORIGIN_X + 13 -- the joystick moved but the filter helper "
-        "did not follow.  Both ``generate_joystick()`` and "
-        "``generate_joystick_filter()`` must share the same J2 centre, "
-        "otherwise the filter column drifts relative to the connector "
-        "pads."
-    )
-
-    # Negative assertion: the pre-#2943 literal ``BOARD_ORIGIN_X + 15``
-    # must NOT reappear inside either joystick helper.  A diff that
-    # restores the old position is exactly the regression we are
-    # guarding against.
-    pre_nudge_pat = re.compile(
-        r"def\s+generate_joystick(?:_filter)?\b.*?(?:x|joy_cx)\s*=\s*BOARD_ORIGIN_X\s*\+\s*15\b",
-        re.DOTALL,
-    )
-    assert not pre_nudge_pat.search(src), (
-        "Pre-issue-#2943 J2 position literal (BOARD_ORIGIN_X + 15) has "
-        "reappeared in generate_joystick() or generate_joystick_filter().  "
-        "This is the exact regression issue #2943 was opened to prevent; "
-        "with Y1 on the west side (issue #2918), J2 must stay west of "
-        "x = +15 or the JOY_Y channel collapses and the 6 J2-5 "
-        "clearance_pad_segment errors return."
+    """Keep the real joystick connector out of the MCU/clock escape region."""
+    parts = _revision_b_footprints(regenerated_board)
+    assert parts["J2"].find_child("at").get_float(0) + 10 < parts["U1"].find_child("at").get_float(
+        0
     )
 
 
 def test_joystick_j2_pin1_inside_pcb_edge(regenerated_board: Path) -> None:
-    """Issue #2943 guard: J2-1 (GND) absolute x stays inside PCB west edge.
+    """All actual JST connector pads must remain inside the board outline."""
+    import math
 
-    The nudge moves J2-1 from absolute x = BOARD_ORIGIN_X + 11 to
-    BOARD_ORIGIN_X + 9.  Curator flagged this as a guard: confirm J2's
-    body doesn't overhang the PCB west edge after the nudge.
-
-    Acceptance: J2-1 pad centre absolute x must be > BOARD_ORIGIN_X + 0.8
-    (i.e., pad edge stays inside the PCB by at least the pad radius
-    plus a small safety margin).  J2's body (which extends beyond the
-    PCB south edge by design) is unaffected -- the nudge is in X only.
-    """
-    pcb_text = (regenerated_board / "usb_joystick.kicad_pcb").read_text()
-
-    # Find J2's footprint position.
-    def _find_footprint_xy(ref: str) -> tuple[float, float] | None:
-        for m in re.finditer(
-            r'\(footprint\s+"[^"]+"\s*\(layer\s+"[^"]+"\)\s*'
-            r"\(uuid\s+\"[^\"]+\"\)\s*"
-            r"\(at\s+([\-0-9.]+)\s+([\-0-9.]+)",
-            pcb_text,
-        ):
-            block_start = m.start()
-            next_fp = pcb_text.find("(footprint", m.end())
-            block_end = next_fp if next_fp != -1 else len(pcb_text)
-            block = pcb_text[block_start:block_end]
-            ref_m = re.search(rf'\(fp_text\s+reference\s+"{re.escape(ref)}"', block)
-            if ref_m:
-                return float(m.group(1)), float(m.group(2))
-        return None
-
-    j2_xy = _find_footprint_xy("J2")
-    assert j2_xy is not None, (
-        "J2 (joystick) footprint not found in regenerated board 03 PCB.  "
-        "Did generate_joystick() get removed?"
-    )
-    j2_cx, _ = j2_xy
-
-    # J2-1 (GND) sits at pad offset -4 mm from J2 centre.  Pad diameter
-    # is 1.6 mm, so the pad's west edge is at j2_cx - 4 - 0.8 = j2_cx - 4.8.
-    # We need pad-west-edge > BOARD_ORIGIN_X (>= 0 mm slack), and ideally
-    # with some safety margin.
-    pad1_centre_x = j2_cx - 4.0
-    pad1_west_edge_x = pad1_centre_x - 0.8  # 1.6 mm dia / 2
-
-    # The generator derives BOARD_ORIGIN_X from centered_origin() (sheet
-    # centering); compute the same value here instead of pinning 100.0.
     from kicad_tools.pcb.center_sheet import centered_origin
 
-    board_west_x, _ = centered_origin(80.0, 60.0)  # board 03 is 80x60 mm
-    edge_clearance = pad1_west_edge_x - board_west_x
-
-    assert edge_clearance > 0.0, (
-        f"J2-1 (GND) pad west edge at x={pad1_west_edge_x:.3f} mm is "
-        f"OUTSIDE the PCB west edge (x={board_west_x:.3f} mm).  J2 is at "
-        f"cx={j2_cx:.3f}; the issue #2943 nudge moved J2 too far west.  "
-        "Pull J2 back east until the pad sits fully inside the PCB."
-    )
-    assert edge_clearance >= 0.5, (
-        f"J2-1 (GND) pad west edge has only {edge_clearance:.3f} mm of "
-        f"clearance to the PCB west edge.  This is below the safe margin "
-        "of 0.5 mm; the JLCPCB process requires at least 0.4 mm "
-        "edge-to-copper clearance, so this will likely DRC-fail.  Pull "
-        "J2 back east."
-    )
+    parts = _revision_b_footprints(regenerated_board)
+    j2 = parts["J2"]
+    at = j2.find_child("at")
+    theta = math.radians(at.get_float(2) or 0)
+    ox, oy = centered_origin(80, 60)
+    for pad in j2.find_children("pad"):
+        local, size = pad.find_child("at"), pad.find_child("size")
+        x = (
+            at.get_float(0)
+            + local.get_float(0) * math.cos(theta)
+            + local.get_float(1) * math.sin(theta)
+        )
+        y = (
+            at.get_float(1)
+            - local.get_float(0) * math.sin(theta)
+            + local.get_float(1) * math.cos(theta)
+        )
+        radius = max(size.get_float(0), size.get_float(1)) / 2
+        assert ox + radius < x < ox + 80 - radius
+        assert oy + radius < y < oy + 60 - radius
 
 
 # ---------------------------------------------------------------------------
@@ -1623,3 +1325,16 @@ def test_route_demo_run_drc_never_reports_zero_errors_on_failure() -> None:
     assert passed is True and errors == 0, (
         f"committed board-03 expected DRC-clean, got passed={passed}, errors={errors}"
     )
+
+
+def _revision_b_footprints(output: Path):
+    """Read library-style Reference properties without depending on serialization."""
+    from kicad_tools.sexp import parse_file
+
+    doc = parse_file(output / "usb_joystick.kicad_pcb")
+    return {
+        p.get_string(1): fp
+        for fp in doc.find_children("footprint")
+        for p in fp.find_children("property")
+        if p.get_string(0) == "Reference"
+    }

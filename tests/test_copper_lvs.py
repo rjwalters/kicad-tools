@@ -743,6 +743,43 @@ _POUR_SCHEMATIC: dict[tuple[str, str], str | None] = {
 }
 
 
+@requires_shapely
+@pytest.mark.parametrize("moat_radius,bonded", [(1.05, False), (0.6, True)])
+def test_round_pad_pour_bond_uses_copper_not_bounding_box(tmp_path, moat_radius, bonded):
+    """A 1.7mm round header must clear a 2.1mm antipad (#4992).
+
+    Its enclosing square reaches the plane despite the real 0.2mm clearance.
+    The smaller moat is a real copper overlap and must continue to bond.
+    """
+    import math
+
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    hole = [
+        (
+            5 + moat_radius * math.cos(-math.pi / 2 - i * math.tau / 128),
+            10 + moat_radius * math.sin(-math.pi / 2 - i * math.tau / 128),
+        )
+        for i in range(129)
+    ]
+    ring = [(0, 0), (5, 0), *hole, (5, 0), (20, 0), (20, 20), (0, 20), (0, 0)]
+    text = (
+        _pcb_pour_adversarial()
+        .replace(_POUR_FILL_RING, " ".join(f"(xy {x} {y})" for x, y in ring))
+        .replace(
+            "smd roundrect (at 0 0) (size 1.5 1.5)",
+            "thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0)",
+            1,
+        )
+    )
+    path = tmp_path / "round-header.kicad_pcb"
+    path.write_text(text)
+    partition = ConnectivityValidator(path).extract_pad_partition()
+    ground = next(group for group in partition if "R3.1" in group)
+    assert ("R1.1" in ground) is bonded
+    assert "R2.1" in ground  # Existing genuine foreign-net bond remains visible.
+
+
 def _declared_net_pour_partition(pcb_path: Path) -> list[frozenset[str]]:
     """Extract the partition under the LEGACY declared-net pour model.
 
@@ -954,7 +991,7 @@ def test_pour_extraction_unions_pads_across_disjoint_fill_islands_of_one_zone(
 
 @requires_shapely
 def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
-    """End-to-end: pour-heavy extraction reports board 07's 5 honest opens.
+    """End-to-end: pour-heavy extraction reports board 07's four remaining opens.
 
     Board 07 (match-group test) carries the GND / +1V2 / +1V8 plane pours
     (one zone per net since #3818 de-duplicated the router/recipe overlap),
@@ -965,14 +1002,14 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
 
     The fixture schematic is fully wired since #4012 (244/244 pads bound),
     so the comparator carries real evidence — and board 07 routes PARTIAL
-    by design (5 seed-invariant unroutable nets, #3438), so the honest
-    verdict is ``clean=False`` with exactly those 5 opens and no shorts.
+    after the MIPI repair (DDR/HDMI residuals, #3438), so the honest
+    verdict is ``clean=False`` with exactly four opens and no shorts.
     (History: pre-#4012 the schematic bound 0 pins; this test pinned the
     #4006 vacuous verdict, and before that a zero-evidence ``clean=True``
     that masked these same 5 real opens.)
     """
     repo_root = Path(__file__).resolve().parent.parent
-    board_out = repo_root / "boards" / "07-matchgroup-test" / "output"
+    board_out = repo_root / "boards" / "07-matchgroup-test" / "regression-fixture"
     sch = board_out / "matchgroup_test.kicad_sch"
     pcb = board_out / "matchgroup_test_routed.kicad_pcb"
     if not (sch.exists() and pcb.exists()):
@@ -989,10 +1026,9 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
     assert sorted({m.net_a for m in result.opens}) == [
         "DQ3",
         "DQ4",
-        "MIPI_DAT0_N",
         "TMDS_D0_N",
         "TMDS_D1_N",
-    ], "expected exactly the 5 seed-invariant unroutable nets (#3438)"
+    ], "expected four remaining DDR/HDMI opens after the MIPI repair"
 
 
 def test_compare_copper_netlist_on_board06_wired_fixture_is_clean() -> None:
@@ -1006,7 +1042,7 @@ def test_compare_copper_netlist_on_board06_wired_fixture_is_clean() -> None:
     routed to copper completion).
     """
     repo_root = Path(__file__).resolve().parent.parent
-    board_out = repo_root / "boards" / "06-diffpair-test" / "output"
+    board_out = repo_root / "boards" / "06-diffpair-test" / "regression-fixture"
     sch = board_out / "diffpair_test.kicad_sch"
     pcb = board_out / "diffpair_test_routed.kicad_pcb"
     if not (sch.exists() and pcb.exists()):

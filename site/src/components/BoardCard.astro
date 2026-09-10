@@ -93,7 +93,7 @@ const statusLabel = displayStatusLabel(board);
       {
         board.nets_routed_pct !== undefined && (
           <li class="badge">
-            <span class="badge-label">Nets</span>
+            <span class="badge-label">{board.readiness?.metrics?.nets_routed_pct !== undefined ? "Nets" : "Export nets"}</span>
             <span class="badge-value">{board.nets_routed_pct.toFixed(1)}%</span>
           </li>
         )
@@ -101,7 +101,7 @@ const statusLabel = displayStatusLabel(board);
       {
         board.drc_violations !== undefined && (
           <li class:list={["badge", { "badge-warn": board.drc_violations > 0 }]}>
-            <span class="badge-label">DRC</span>
+            <span class="badge-label">{board.readiness?.metrics?.drc_violations !== undefined ? "DRC" : "Export DRC"}</span>
             <span class="badge-value">
               {board.drc_violations} violation{board.drc_violations === 1 ? "" : "s"}
             </span>
@@ -197,7 +197,7 @@ const statusLabel = displayStatusLabel(board);
 
   /* DRC-violation chip (#3717): a distinct red warn tone so a violating board
      is never confused with the amber "Partial" or green "Ready" states. */
-  .chip-drc {
+  .chip-drc, .chip-blocked {
     background: rgba(214, 84, 79, 0.92);
     color: #1c0605;
   }

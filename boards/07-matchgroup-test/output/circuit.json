@@ -1,0 +1,1354 @@
+{
+  "parts": [
+    {
+      "ref": "U1",
+      "symbol": "MCU_ST_STM32F4:STM32F429ZITx",
+      "footprint": "Package_QFP:LQFP-144_20x20mm_P0.5mm",
+      "value": "STM32F429ZIT6",
+      "pins": {
+        "85": "DQ0",
+        "86": "DQ1",
+        "114": "DQ2",
+        "115": "DQ3",
+        "58": "DQ4",
+        "59": "DQ5",
+        "60": "DQ6",
+        "63": "DQ7",
+        "64": "DQ8",
+        "65": "DQ9",
+        "66": "DQ10",
+        "67": "DQ11",
+        "68": "DQ12",
+        "77": "DQ13",
+        "78": "DQ14",
+        "79": "DQ15",
+        "10": "A0",
+        "11": "A1",
+        "12": "A2",
+        "13": "A3",
+        "14": "A4",
+        "15": "A5",
+        "50": "A6",
+        "53": "A7",
+        "54": "A8",
+        "55": "A9",
+        "56": "A10",
+        "57": "A11",
+        "89": "BA0",
+        "90": "BA1",
+        "93": "SDCLK",
+        "135": "SDCKE1",
+        "136": "SDNE1",
+        "26": "SDNWE",
+        "49": "SDNRAS",
+        "132": "SDNCAS",
+        "141": "LDQM",
+        "142": "UDQM",
+        "6": "+3V3",
+        "16": "GND",
+        "17": "+3V3",
+        "30": "+3V3",
+        "31": "GND",
+        "32": "+3V3_A",
+        "33": "+3V3_A",
+        "38": "GND",
+        "39": "+3V3",
+        "51": "GND",
+        "52": "+3V3",
+        "61": "GND",
+        "62": "+3V3",
+        "72": "+3V3",
+        "83": "GND",
+        "84": "+3V3",
+        "94": "GND",
+        "95": "+3V3",
+        "107": "GND",
+        "108": "+3V3",
+        "120": "GND",
+        "121": "+3V3",
+        "130": "GND",
+        "131": "+3V3",
+        "143": "+3V3",
+        "144": "+3V3",
+        "71": "VCAP1",
+        "106": "VCAP2",
+        "138": "BOOT0",
+        "25": "NRST",
+        "105": "SWDIO",
+        "109": "SWCLK",
+        "133": "SWO",
+        "36": "UART_TX",
+        "37": "UART_RX",
+        "128": "LED_PASS",
+        "129": "LED_FAIL"
+      },
+      "xy": [
+        35,
+        40
+      ],
+      "schematic_xy": [
+        106.68,
+        127
+      ],
+      "mpn": "STM32F429ZIT6",
+      "lcsc": "C84808",
+      "decouples": ""
+    },
+    {
+      "ref": "U2",
+      "symbol": "Memory_RAM:IS42S16400J-xT",
+      "footprint": "Package_SO:TSOP-II-54_22.2x10.16mm_P0.8mm",
+      "value": "IS42S16400J-6TLI-TR",
+      "pins": {
+        "2": "DQ0",
+        "4": "DQ1",
+        "5": "DQ2",
+        "7": "DQ3",
+        "8": "DQ4",
+        "10": "DQ5",
+        "11": "DQ6",
+        "13": "DQ7",
+        "42": "DQ8",
+        "44": "DQ9",
+        "45": "DQ10",
+        "47": "DQ11",
+        "48": "DQ12",
+        "50": "DQ13",
+        "51": "DQ14",
+        "53": "DQ15",
+        "23": "A0",
+        "24": "A1",
+        "25": "A2",
+        "26": "A3",
+        "29": "A4",
+        "30": "A5",
+        "31": "A6",
+        "32": "A7",
+        "33": "A8",
+        "34": "A9",
+        "22": "A10",
+        "35": "A11",
+        "20": "BA0",
+        "21": "BA1",
+        "15": "LDQM",
+        "39": "UDQM",
+        "16": "SDNWE",
+        "17": "SDNCAS",
+        "18": "SDNRAS",
+        "19": "SDNE1",
+        "37": "SDCKE1",
+        "38": "SDCLK",
+        "1": "+3V3",
+        "3": "+3V3",
+        "9": "+3V3",
+        "14": "+3V3",
+        "27": "+3V3",
+        "43": "+3V3",
+        "49": "+3V3",
+        "6": "GND",
+        "12": "GND",
+        "28": "GND",
+        "41": "GND",
+        "46": "GND",
+        "52": "GND",
+        "54": "GND"
+      },
+      "xy": [
+        72,
+        40
+      ],
+      "schematic_xy": [
+        238.76,
+        81.28
+      ],
+      "mpn": "IS42S16400J-6TLI-TR",
+      "lcsc": "C17216754",
+      "decouples": ""
+    },
+    {
+      "ref": "U3",
+      "symbol": "Regulator_Linear:AP2112K-3.3",
+      "footprint": "Package_TO_SOT_SMD:SOT-23-5",
+      "value": "AP2112K-3.3TRG1",
+      "pins": {
+        "1": "+5V",
+        "2": "GND",
+        "3": "+5V",
+        "5": "+3V3"
+      },
+      "xy": [
+        12,
+        15
+      ],
+      "schematic_xy": [
+        335.28,
+        45.72
+      ],
+      "mpn": "AP2112K-3.3TRG1",
+      "lcsc": "C51118",
+      "decouples": ""
+    },
+    {
+      "ref": "J1",
+      "symbol": "Connector_Generic:Conn_01x02",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+      "value": "5V_INPUT",
+      "pins": {
+        "1": "+5V",
+        "2": "GND"
+      },
+      "xy": [
+        5,
+        10
+      ],
+      "schematic_xy": [
+        304.8,
+        45.72
+      ],
+      "mpn": "B-2100S02P-A110",
+      "lcsc": "C124375",
+      "decouples": ""
+    },
+    {
+      "ref": "J2",
+      "symbol": "Connector_Generic:Conn_01x06",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+      "value": "SWD_3V3",
+      "pins": {
+        "1": "+3V3",
+        "2": "SWDIO",
+        "3": "GND",
+        "4": "SWCLK",
+        "5": "NRST",
+        "6": "SWO"
+      },
+      "xy": [
+        5,
+        45
+      ],
+      "schematic_xy": [
+        335.28,
+        86.36
+      ],
+      "mpn": "2.54-1x6P",
+      "lcsc": "C37208",
+      "decouples": ""
+    },
+    {
+      "ref": "J3",
+      "symbol": "Connector_Generic:Conn_01x03",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+      "value": "UART_3V3",
+      "pins": {
+        "1": "GND",
+        "2": "UART_TX",
+        "3": "UART_RX"
+      },
+      "xy": [
+        5,
+        68
+      ],
+      "schematic_xy": [
+        378.46,
+        86.36
+      ],
+      "mpn": "2.54-1*3P",
+      "lcsc": "C49257",
+      "decouples": ""
+    },
+    {
+      "ref": "C1",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        21.3375,
+        39.25
+      ],
+      "schematic_xy": [
+        210.82,
+        160.02
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U1.17"
+    },
+    {
+      "ref": "C2",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        21.3375,
+        45.75
+      ],
+      "schematic_xy": [
+        233.68,
+        160.02
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U1.30"
+    },
+    {
+      "ref": "C3",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        27.25,
+        53.6625
+      ],
+      "schematic_xy": [
+        256.53999999999996,
+        160.02
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U1.39"
+    },
+    {
+      "ref": "C4",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        33.75,
+        53.6625
+      ],
+      "schematic_xy": [
+        279.4,
+        160.02
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U1.52"
+    },
+    {
+      "ref": "C5",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        38.75,
+        53.6625
+      ],
+      "schematic_xy": [
+        302.26,
+        160.02
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U1.62"
+    },
+    {
+      "ref": "C6",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        43.75,
+        53.6625
+      ],
+      "schematic_xy": [
+        325.12,
+        160.02
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U1.72"
+    },
+    {
+      "ref": "C7",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        48.6625,
+        43.25
+      ],
+      "schematic_xy": [
+        347.98,
+        160.02
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U1.84"
+    },
+    {
+      "ref": "C8",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        48.6625,
+        37.75
+      ],
+      "schematic_xy": [
+        370.84,
+        160.02
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U1.95"
+    },
+    {
+      "ref": "C9",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        48.6625,
+        31.25
+      ],
+      "schematic_xy": [
+        210.82,
+        187.96
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U1.108"
+    },
+    {
+      "ref": "C10",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        37.75,
+        26.3375
+      ],
+      "schematic_xy": [
+        233.68,
+        187.96
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U1.121"
+    },
+    {
+      "ref": "C11",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        32.75,
+        26.3375
+      ],
+      "schematic_xy": [
+        256.53999999999996,
+        187.96
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U1.131"
+    },
+    {
+      "ref": "C12",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        26.25,
+        26.3375
+      ],
+      "schematic_xy": [
+        279.4,
+        187.96
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U1.144"
+    },
+    {
+      "ref": "C13",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        63.25,
+        29.6
+      ],
+      "schematic_xy": [
+        302.26,
+        187.96
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U2.1"
+    },
+    {
+      "ref": "C14",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        63.25,
+        31.2
+      ],
+      "schematic_xy": [
+        325.12,
+        187.96
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U2.3"
+    },
+    {
+      "ref": "C15",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        63.25,
+        36.0
+      ],
+      "schematic_xy": [
+        347.98,
+        187.96
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U2.9"
+    },
+    {
+      "ref": "C16",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        63.25,
+        40.0
+      ],
+      "schematic_xy": [
+        370.84,
+        187.96
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U2.14"
+    },
+    {
+      "ref": "C17",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        63.25,
+        50.4
+      ],
+      "schematic_xy": [
+        210.82,
+        215.9
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U2.27"
+    },
+    {
+      "ref": "C18",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        80.75,
+        38.4
+      ],
+      "schematic_xy": [
+        233.68,
+        215.9
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U2.43"
+    },
+    {
+      "ref": "C19",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        80.75,
+        33.6
+      ],
+      "schematic_xy": [
+        256.53999999999996,
+        215.9
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": "U2.49"
+    },
+    {
+      "ref": "C20",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "4.7uF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        52,
+        24
+      ],
+      "schematic_xy": [
+        279.4,
+        215.9
+      ],
+      "mpn": "CL10A475KP8NNNC",
+      "lcsc": "C1705",
+      "decouples": ""
+    },
+    {
+      "ref": "C21",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "4.7uF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        85,
+        27
+      ],
+      "schematic_xy": [
+        302.26,
+        215.9
+      ],
+      "mpn": "CL10A475KP8NNNC",
+      "lcsc": "C1705",
+      "decouples": ""
+    },
+    {
+      "ref": "C22",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "+3V3_A",
+        "2": "GND"
+      },
+      "xy": [
+        22,
+        24
+      ],
+      "schematic_xy": [
+        325.12,
+        215.9
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": ""
+    },
+    {
+      "ref": "C23",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "1uF",
+      "pins": {
+        "1": "+3V3_A",
+        "2": "GND"
+      },
+      "xy": [
+        19,
+        24
+      ],
+      "schematic_xy": [
+        347.98,
+        215.9
+      ],
+      "mpn": "CL10A105KB8NNNC",
+      "lcsc": "C15849",
+      "decouples": ""
+    },
+    {
+      "ref": "C24",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "2.2uF",
+      "pins": {
+        "1": "VCAP1",
+        "2": "GND"
+      },
+      "xy": [
+        43.25,
+        57.1625
+      ],
+      "schematic_xy": [
+        370.84,
+        215.9
+      ],
+      "mpn": "CL10A225KO8NNNC",
+      "lcsc": "C23630",
+      "decouples": "U1.71"
+    },
+    {
+      "ref": "C25",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "2.2uF",
+      "pins": {
+        "1": "VCAP2",
+        "2": "GND"
+      },
+      "xy": [
+        52.1625,
+        32.25
+      ],
+      "schematic_xy": [
+        210.82,
+        243.84000000000003
+      ],
+      "mpn": "CL10A225KO8NNNC",
+      "lcsc": "C23630",
+      "decouples": "U1.106"
+    },
+    {
+      "ref": "C26",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "10uF",
+      "pins": {
+        "1": "+5V",
+        "2": "GND"
+      },
+      "xy": [
+        8,
+        17
+      ],
+      "schematic_xy": [
+        233.68,
+        243.84000000000003
+      ],
+      "mpn": "CL10A106KP8NNNC",
+      "lcsc": "C19702",
+      "decouples": ""
+    },
+    {
+      "ref": "C27",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "10uF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        16,
+        17
+      ],
+      "schematic_xy": [
+        256.53999999999996,
+        243.84000000000003
+      ],
+      "mpn": "CL10A106KP8NNNC",
+      "lcsc": "C19702",
+      "decouples": ""
+    },
+    {
+      "ref": "C28",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "100nF",
+      "pins": {
+        "1": "NRST",
+        "2": "GND"
+      },
+      "xy": [
+        17,
+        33
+      ],
+      "schematic_xy": [
+        279.4,
+        243.84000000000003
+      ],
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "decouples": ""
+    },
+    {
+      "ref": "C29",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "10nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        35,
+        20
+      ],
+      "schematic_xy": [
+        302.26,
+        243.84000000000003
+      ],
+      "mpn": "CL10B103KB8NNNC",
+      "lcsc": "C1589",
+      "decouples": ""
+    },
+    {
+      "ref": "C30",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "value": "10nF",
+      "pins": {
+        "1": "+3V3",
+        "2": "GND"
+      },
+      "xy": [
+        72,
+        20
+      ],
+      "schematic_xy": [
+        325.12,
+        243.84000000000003
+      ],
+      "mpn": "CL10B103KB8NNNC",
+      "lcsc": "C1589",
+      "decouples": ""
+    },
+    {
+      "ref": "R1",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "value": "0R",
+      "pins": {
+        "1": "+3V3",
+        "2": "+3V3_A"
+      },
+      "xy": [
+        19,
+        20
+      ],
+      "schematic_xy": [
+        304.8,
+        279.4
+      ],
+      "mpn": "0603WAF0000T5E",
+      "lcsc": "C21189",
+      "decouples": ""
+    },
+    {
+      "ref": "R2",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "value": "10k",
+      "pins": {
+        "1": "BOOT0",
+        "2": "GND"
+      },
+      "xy": [
+        30,
+        58
+      ],
+      "schematic_xy": [
+        327.66,
+        279.4
+      ],
+      "mpn": "0603WAF1002T5E",
+      "lcsc": "C25804",
+      "decouples": ""
+    },
+    {
+      "ref": "R3",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "value": "10k",
+      "pins": {
+        "1": "NRST",
+        "2": "+3V3"
+      },
+      "xy": [
+        17,
+        30
+      ],
+      "schematic_xy": [
+        350.52,
+        279.4
+      ],
+      "mpn": "0603WAF1002T5E",
+      "lcsc": "C25804",
+      "decouples": ""
+    },
+    {
+      "ref": "R4",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "value": "1k",
+      "pins": {
+        "1": "LED_PASS",
+        "2": "LED_PASS_A"
+      },
+      "xy": [
+        40,
+        66
+      ],
+      "schematic_xy": [
+        373.38,
+        279.4
+      ],
+      "mpn": "0603WAF1001T5E",
+      "lcsc": "C21190",
+      "decouples": ""
+    },
+    {
+      "ref": "R5",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "value": "1k",
+      "pins": {
+        "1": "LED_FAIL",
+        "2": "LED_FAIL_A"
+      },
+      "xy": [
+        46,
+        66
+      ],
+      "schematic_xy": [
+        396.24,
+        279.4
+      ],
+      "mpn": "0603WAF1001T5E",
+      "lcsc": "C21190",
+      "decouples": ""
+    },
+    {
+      "ref": "D1",
+      "symbol": "Device:LED",
+      "footprint": "LED_SMD:LED_0603_1608Metric",
+      "value": "GREEN",
+      "pins": {
+        "1": "GND",
+        "2": "LED_PASS_A"
+      },
+      "xy": [
+        40,
+        70
+      ],
+      "schematic_xy": [
+        358.14,
+        307.34
+      ],
+      "mpn": "LTST-C190KGKT",
+      "lcsc": "C125094",
+      "decouples": ""
+    },
+    {
+      "ref": "D2",
+      "symbol": "Device:LED",
+      "footprint": "LED_SMD:LED_0603_1608Metric",
+      "value": "RED",
+      "pins": {
+        "1": "GND",
+        "2": "LED_FAIL_A"
+      },
+      "xy": [
+        46,
+        70
+      ],
+      "schematic_xy": [
+        386.08,
+        307.34
+      ],
+      "mpn": "LTST-C190KRKT",
+      "lcsc": "C94869",
+      "decouples": ""
+    }
+  ],
+  "pin_nets": {
+    "U1": {
+      "85": "DQ0",
+      "86": "DQ1",
+      "114": "DQ2",
+      "115": "DQ3",
+      "58": "DQ4",
+      "59": "DQ5",
+      "60": "DQ6",
+      "63": "DQ7",
+      "64": "DQ8",
+      "65": "DQ9",
+      "66": "DQ10",
+      "67": "DQ11",
+      "68": "DQ12",
+      "77": "DQ13",
+      "78": "DQ14",
+      "79": "DQ15",
+      "10": "A0",
+      "11": "A1",
+      "12": "A2",
+      "13": "A3",
+      "14": "A4",
+      "15": "A5",
+      "50": "A6",
+      "53": "A7",
+      "54": "A8",
+      "55": "A9",
+      "56": "A10",
+      "57": "A11",
+      "89": "BA0",
+      "90": "BA1",
+      "93": "SDCLK",
+      "135": "SDCKE1",
+      "136": "SDNE1",
+      "26": "SDNWE",
+      "49": "SDNRAS",
+      "132": "SDNCAS",
+      "141": "LDQM",
+      "142": "UDQM",
+      "6": "+3V3",
+      "16": "GND",
+      "17": "+3V3",
+      "30": "+3V3",
+      "31": "GND",
+      "32": "+3V3_A",
+      "33": "+3V3_A",
+      "38": "GND",
+      "39": "+3V3",
+      "51": "GND",
+      "52": "+3V3",
+      "61": "GND",
+      "62": "+3V3",
+      "72": "+3V3",
+      "83": "GND",
+      "84": "+3V3",
+      "94": "GND",
+      "95": "+3V3",
+      "107": "GND",
+      "108": "+3V3",
+      "120": "GND",
+      "121": "+3V3",
+      "130": "GND",
+      "131": "+3V3",
+      "143": "+3V3",
+      "144": "+3V3",
+      "71": "VCAP1",
+      "106": "VCAP2",
+      "138": "BOOT0",
+      "25": "NRST",
+      "105": "SWDIO",
+      "109": "SWCLK",
+      "133": "SWO",
+      "36": "UART_TX",
+      "37": "UART_RX",
+      "128": "LED_PASS",
+      "129": "LED_FAIL"
+    },
+    "U2": {
+      "2": "DQ0",
+      "4": "DQ1",
+      "5": "DQ2",
+      "7": "DQ3",
+      "8": "DQ4",
+      "10": "DQ5",
+      "11": "DQ6",
+      "13": "DQ7",
+      "42": "DQ8",
+      "44": "DQ9",
+      "45": "DQ10",
+      "47": "DQ11",
+      "48": "DQ12",
+      "50": "DQ13",
+      "51": "DQ14",
+      "53": "DQ15",
+      "23": "A0",
+      "24": "A1",
+      "25": "A2",
+      "26": "A3",
+      "29": "A4",
+      "30": "A5",
+      "31": "A6",
+      "32": "A7",
+      "33": "A8",
+      "34": "A9",
+      "22": "A10",
+      "35": "A11",
+      "20": "BA0",
+      "21": "BA1",
+      "15": "LDQM",
+      "39": "UDQM",
+      "16": "SDNWE",
+      "17": "SDNCAS",
+      "18": "SDNRAS",
+      "19": "SDNE1",
+      "37": "SDCKE1",
+      "38": "SDCLK",
+      "1": "+3V3",
+      "3": "+3V3",
+      "9": "+3V3",
+      "14": "+3V3",
+      "27": "+3V3",
+      "43": "+3V3",
+      "49": "+3V3",
+      "6": "GND",
+      "12": "GND",
+      "28": "GND",
+      "41": "GND",
+      "46": "GND",
+      "52": "GND",
+      "54": "GND"
+    },
+    "U3": {
+      "1": "+5V",
+      "2": "GND",
+      "3": "+5V",
+      "5": "+3V3"
+    },
+    "J1": {
+      "1": "+5V",
+      "2": "GND"
+    },
+    "J2": {
+      "1": "+3V3",
+      "2": "SWDIO",
+      "3": "GND",
+      "4": "SWCLK",
+      "5": "NRST",
+      "6": "SWO"
+    },
+    "J3": {
+      "1": "GND",
+      "2": "UART_TX",
+      "3": "UART_RX"
+    },
+    "C1": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C2": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C3": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C4": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C5": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C6": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C7": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C8": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C9": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C10": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C11": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C12": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C13": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C14": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C15": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C16": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C17": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C18": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C19": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C20": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C21": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C22": {
+      "1": "+3V3_A",
+      "2": "GND"
+    },
+    "C23": {
+      "1": "+3V3_A",
+      "2": "GND"
+    },
+    "C24": {
+      "1": "VCAP1",
+      "2": "GND"
+    },
+    "C25": {
+      "1": "VCAP2",
+      "2": "GND"
+    },
+    "C26": {
+      "1": "+5V",
+      "2": "GND"
+    },
+    "C27": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C28": {
+      "1": "NRST",
+      "2": "GND"
+    },
+    "C29": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "C30": {
+      "1": "+3V3",
+      "2": "GND"
+    },
+    "R1": {
+      "1": "+3V3",
+      "2": "+3V3_A"
+    },
+    "R2": {
+      "1": "BOOT0",
+      "2": "GND"
+    },
+    "R3": {
+      "1": "NRST",
+      "2": "+3V3"
+    },
+    "R4": {
+      "1": "LED_PASS",
+      "2": "LED_PASS_A"
+    },
+    "R5": {
+      "1": "LED_FAIL",
+      "2": "LED_FAIL_A"
+    },
+    "D1": {
+      "1": "GND",
+      "2": "LED_PASS_A"
+    },
+    "D2": {
+      "1": "GND",
+      "2": "LED_FAIL_A"
+    }
+  },
+  "placement": {
+    "U2_rotation_degrees": 0
+  },
+  "routing_clearance_mm": 0.175,
+  "strict_pad_clearance_required": true,
+  "physical_source": {
+    "stackup": "JLC06161H-2116A",
+    "fixture_sha256": {
+      "net_class_map.json": "585f0a4f1611d7582fdbe257465fde740d31ad7badec1dd6982bcca9cb4b3c28",
+      "sdram_demo.kicad_pcb": "eab9fc57cd7860278aa82fbb70a83d84e608aa85406e31f186cda8ba04412ff2",
+      "sdram_demo.kicad_pro": "f6ee5e69e9cd153a3ca4b57f8fa9005f8c755774db97a6c5a6ad0c6378b79198"
+    }
+  }
+}

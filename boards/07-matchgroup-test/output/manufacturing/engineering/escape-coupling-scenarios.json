@@ -1,0 +1,48 @@
+{
+  "scope": "Illustrative single-aggressor quasi-TEM scenarios, not a PCB-wide or IBIS corner qualification. Assumed parallel length deliberately uses whole longest package escape; actual paths bend. Rise times are explicit assumptions, not verified driver minima.",
+  "width_mm": 0.18,
+  "gap_mm": 0.32,
+  "parallel_length_mm": 5.1084,
+  "layer": "F.Cu",
+  "scenarios": [
+    {
+      "assumed_rise_time_ns": 1,
+      "next_coefficient": 0.0003030770321913305,
+      "fext_coefficient": 0.000606154064382661,
+      "next_db": -70.3689394825131,
+      "fext_db": -64.34833956923347,
+      "next_percent": 0.03030770321913305,
+      "fext_percent": 0.0606154064382661,
+      "coupled_length_mm": 5.1084,
+      "saturation_length_mm": 84.27560417668131,
+      "severity": "acceptable",
+      "recommendation": null
+    },
+    {
+      "assumed_rise_time_ns": 0.1,
+      "next_coefficient": 0.003030770321913305,
+      "fext_coefficient": 0.00606154064382661,
+      "next_db": -50.3689394825131,
+      "fext_db": -44.348339569233474,
+      "next_percent": 0.3030770321913305,
+      "fext_percent": 0.606154064382661,
+      "coupled_length_mm": 5.1084,
+      "saturation_length_mm": 8.427560417668131,
+      "severity": "acceptable",
+      "recommendation": null
+    },
+    {
+      "assumed_rise_time_ns": 0.05,
+      "next_coefficient": 0.004999999999999975,
+      "fext_coefficient": 0.01212308128765322,
+      "next_db": -46.02059991327967,
+      "fext_db": -38.32773965595385,
+      "next_percent": 0.4999999999999975,
+      "fext_percent": 1.212308128765322,
+      "coupled_length_mm": 5.1084,
+      "saturation_length_mm": 4.2137802088340655,
+      "severity": "acceptable",
+      "recommendation": null
+    }
+  ]
+}

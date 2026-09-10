@@ -141,7 +141,7 @@ def test_extract_full_metrics(tmp_path: Path):
 
     assert m["schema_version"] == SCHEMA_VERSION
     assert m["slug"] == "05-bldc-motor-controller"
-    assert m["status"] == "ok"
+    assert m["status"] == "partial"
     assert m["name"] == "bldc_controller_routed"
     assert m["layer_count"] == 4
     assert m["board_size_mm"] == {"width": 80.0, "height": 100.0}
@@ -193,7 +193,7 @@ def test_partial_when_report_missing(tmp_path: Path):
 
 def test_unparseable_fields_omitted(tmp_path: Path):
     # report.md present but missing several rows -> those fields omitted,
-    # status still ok (report parsed, just sparse).
+    # no current readiness evidence, so status remains partial.
     sparse_report = """---
 title: "sparse_board"
 ---
@@ -207,7 +207,7 @@ title: "sparse_board"
     board = _make_board(tmp_path, report=sparse_report)
     m = extract_board_metrics(board)
 
-    assert m["status"] == "ok"
+    assert m["status"] == "partial"
     assert m["layer_count"] == 2
     for omitted in ("board_size_mm", "part_count", "nets_routed_pct", "cost"):
         assert omitted not in m
@@ -230,13 +230,13 @@ def test_status_downgraded_to_partial_when_drc_violations(tmp_path: Path):
     assert m["status"] == "partial"
 
 
-def test_status_ok_requires_zero_drc(tmp_path: Path):
-    # The mirror case: report parses and drc_violations == 0 -> status "ok".
+def test_zero_drc_without_current_readiness_is_partial(tmp_path: Path):
+    # Zero historical DRC alone does not establish current readiness.
     board = _make_board(tmp_path)
     m = extract_board_metrics(board)
 
     assert m["drc_violations"] == 0
-    assert m["status"] == "ok"
+    assert m["status"] == "partial"
 
 
 def test_bom_fallback_for_part_count(tmp_path: Path):
@@ -293,8 +293,8 @@ def test_corrupt_manifest_does_not_crash(tmp_path: Path):
     board = _make_board(tmp_path)
     (board / "output" / "manufacturing" / "manifest.json").write_text("{not json")
     m = extract_board_metrics(board)
-    # Still ok from report.md; name simply omitted.
-    assert m["status"] == "ok"
+    # Missing readiness evidence keeps status partial; name is omitted.
+    assert m["status"] == "partial"
     assert "name" not in m
 
 
@@ -306,7 +306,7 @@ def test_emit_board_json_default_path(tmp_path: Path):
     assert out.is_file()
     data = json.loads(out.read_text())
     assert data["slug"] == "05-bldc-motor-controller"
-    assert data["status"] == "ok"
+    assert data["status"] == "partial"
 
 
 def test_emit_board_json_override_path(tmp_path: Path):
@@ -325,7 +325,7 @@ def test_main_single_board(tmp_path: Path, capsys):
     assert (board / "output" / "board.json").is_file()
     out = capsys.readouterr().out
     assert "05-bldc-motor-controller" in out
-    assert "ok" in out
+    assert "partial" in out
 
 
 def test_main_dry_run_writes_nothing(tmp_path: Path, capsys):
@@ -352,7 +352,7 @@ def test_main_all_mode(tmp_path: Path, capsys):
         (boards_dir / "05-bldc-motor-controller" / "output" / "board.json").read_text()
     )
     minimal = json.loads((boards_dir / "00-simple-led" / "output" / "board.json").read_text())
-    assert full["status"] == "ok"
+    assert full["status"] == "partial"
     assert minimal["status"] == "no_artifacts"
 
 
@@ -382,7 +382,7 @@ def test_main_requires_board_or_all(capsys):
 
 
 def test_lvs_clean_when_lvs_json_present_and_clean(tmp_path: Path):
-    # An LVS-clean board: lvs_clean=True, lvs_mismatches=0, status stays ok.
+    # Saved clean LVS is preserved, but readiness still needs current evidence.
     board = _make_board(
         tmp_path,
         lvs={
@@ -394,7 +394,7 @@ def test_lvs_clean_when_lvs_json_present_and_clean(tmp_path: Path):
     m = extract_board_metrics(board)
     assert m["lvs_clean"] is True
     assert m["lvs_mismatches"] == 0
-    assert m["status"] == "ok"
+    assert m["status"] == "partial"
 
 
 def test_lvs_dirty_downgrades_status_to_partial(tmp_path: Path):
@@ -469,7 +469,7 @@ def test_vacuous_lvs_json_treated_as_lvs_not_run(tmp_path: Path):
     m = extract_board_metrics(board)
     assert "lvs_clean" not in m
     assert "lvs_mismatches" not in m
-    assert m["status"] == "ok"
+    assert m["status"] == "partial"
 
 
 def test_legacy_vacuous_clean_true_lvs_json_not_rendered_clean(tmp_path: Path):
@@ -492,14 +492,13 @@ def test_legacy_vacuous_clean_true_lvs_json_not_rendered_clean(tmp_path: Path):
 
 def test_lvs_fields_omitted_when_lvs_json_absent(tmp_path: Path):
     # No lvs.json on disk -> both LVS fields are OMITTED (never null), and
-    # status follows the existing DRC-only logic (does NOT downgrade).
+    # readiness evidence is still required for status ok.
     board = _make_board(tmp_path)
     m = extract_board_metrics(board)
     assert "lvs_clean" not in m
     assert "lvs_mismatches" not in m
-    # status stays "ok" — a missing lvs.json must not downgrade boards that
-    # have not run LVS yet. The site layer renders "LVS not run" instead.
-    assert m["status"] == "ok"
+    # Without current readiness evidence, the historical report is partial.
+    assert m["status"] == "partial"
 
 
 def test_lvs_fields_omitted_when_lvs_json_malformed(tmp_path: Path):
@@ -508,4 +507,4 @@ def test_lvs_fields_omitted_when_lvs_json_malformed(tmp_path: Path):
     m = extract_board_metrics(board)
     assert "lvs_clean" not in m
     assert "lvs_mismatches" not in m
-    assert m["status"] == "ok"
+    assert m["status"] == "partial"

@@ -1716,7 +1716,9 @@ class CppPathfinder:
         layer = Layer(layer_value)
         return layer.kicad_name in self._rules.allowed_layers
 
-    def _compute_pad_bounds(self, pad: Pad) -> router_cpp.PadBounds:
+    def _compute_pad_bounds(
+        self, pad: Pad, trace_width: float | None = None
+    ) -> router_cpp.PadBounds:
         """Compute pad metal area and approach zone bounds in grid coordinates.
 
         This mirrors the Python pathfinder's ``_get_pad_metal_bounds()`` logic
@@ -1745,6 +1747,13 @@ class CppPathfinder:
         else:
             effective_width = pad.width
             effective_height = pad.height
+
+        # Strict routing seeds the trace CENTER inside the pad by its radius.
+        # Seeding directly on a metal edge lets the reconstructed pad-center
+        # tail run closer to a neighboring pad than the authored clearance.
+        if self._rules.strict_pad_clearance and trace_width is not None:
+            effective_width = max(0.0, effective_width - trace_width)
+            effective_height = max(0.0, effective_height - trace_width)
 
         # Metal area bounds in world coordinates
         metal_x1 = pad.x - effective_width / 2
@@ -2040,8 +2049,8 @@ class CppPathfinder:
         # This mirrors the Python pathfinder's _get_pad_metal_bounds() logic
         # so the C++ A* search can use expanded goal/start regions and
         # geometry-derived approach zone relaxation.
-        start_pad_bounds = self._compute_pad_bounds(start)
-        end_pad_bounds = self._compute_pad_bounds(end)
+        start_pad_bounds = self._compute_pad_bounds(start, net_trace_width)
+        end_pad_bounds = self._compute_pad_bounds(end, net_trace_width)
 
         # Issue #2447: Use resumable A* so that when post-route validation
         # fails, the search continues from the preserved open set rather
@@ -2639,6 +2648,8 @@ class CppPathfinder:
         rejected at route construction time.  Mirrors
         ``RoutingGrid._same_component_carveout_active``.
         """
+        if self._rules.strict_pad_clearance:
+            return False
         relaxed_refs = getattr(py_grid, "_relaxed_clearance_refs", None)
         if relaxed_refs and ref in relaxed_refs:
             return True

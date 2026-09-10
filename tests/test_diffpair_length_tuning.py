@@ -443,6 +443,60 @@ class TestPostInsertionRollback:
 
 
 class TestSuccessfulTuning:
+    @pytest.mark.parametrize(
+        ("skew", "neighbor_y", "expected_success"),
+        [(0.12, -0.55, True), (0.76, -1.0, True), (0.12, -0.31, False)],
+    )
+    def test_small_deficit_uses_available_clearance(self, skew, neighbor_y, expected_success):
+        """A small correction fits where the default 1 mm bulge cannot."""
+        from kicad_tools.core.geometry import segment_clearance
+        from kicad_tools.router.length import LengthTracker
+
+        p = _straight_route(1, "USB_D+", 20.0)
+        n = _straight_route(2, "USB_D-", 20.0 + skew, y=0.5)
+        neighbor = _straight_route(3, "NEIGHBOR", 20.0, y=neighbor_y)
+        p_out, n_out, result = tune_diff_pair_skew(
+            _make_pair(),
+            {1: p, 2: n, 3: neighbor},
+            tolerance_mm=0.05,
+            intra_pair_clearance_mm=0.1,
+        )
+
+        assert result.success is expected_success
+        assert n_out is n
+        if expected_success:
+            assert result.inserts_applied == 1
+            assert (
+                abs(
+                    LengthTracker.calculate_route_length(p_out)
+                    - LengthTracker.calculate_route_length(n_out)
+                )
+                <= 0.05
+            )
+            assert p_out.segments[0].start == p.segments[0].start
+            assert p_out.segments[-1].end == p.segments[-1].end
+            for segment in p_out.segments:
+                for other in (n.segments[0], neighbor.segments[0]):
+                    assert (
+                        segment_clearance(
+                            segment.x1,
+                            segment.y1,
+                            segment.x2,
+                            segment.y2,
+                            segment.width,
+                            other.x1,
+                            other.y1,
+                            other.x2,
+                            other.y2,
+                            other.width,
+                        )
+                        >= 0.1 - 1e-9
+                    )
+        else:
+            assert result.reason == "post_insertion_drc_violation"
+            assert p_out is p
+            assert p_out.segments is p.segments
+
     def test_small_skew_can_be_tuned_in_one_insert(self):
         # Skew = 4mm; amplitude=1.0 -> 2 loops add 4mm -> exact match in 1 insert.
         # The shorter side has to be long enough that 2 loops fit (gap_factor*2*amplitude*2 ~ 1.6mm forward).

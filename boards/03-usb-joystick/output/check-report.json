@@ -1,0 +1,177 @@
+{
+  "file": "/Users/rwalters/GitHub/kicad-tools/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
+  "manufacturer": "jlcpcb-tier1",
+  "layers": 4,
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "infos": 6,
+    "waived": 0,
+    "rules_checked": 51,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "copper_sliver": 1,
+      "track_dangling": 1,
+      "via_dangling": 1,
+      "diffpair_clearance_intra": 2,
+      "diffpair_length_skew": 2,
+      "diffpair_routing_continuity": 2,
+      "doc_drift_stale_pin": 1,
+      "doc_drift_unresolvable_pin": 1,
+      "isolated_copper": 1,
+      "sch_field_offset": 1,
+      "sch_field_overlap": 1
+    },
+    "passed": true
+  },
+  "violations": [
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J2 (Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal): 7.40mm from nearest board edge",
+      "location": [
+        123.5,
+        99.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 7.4,
+      "required_value": null,
+      "items": [
+        "J2"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_USB:USB_C_Receptacle_GCT_USB4085): 0.00mm from nearest board edge",
+      "location": [
+        149.475,
+        63.3
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.0,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "diffpair_length_skew",
+      "type": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair USB_D+/USB_D- length-skew 0.197 mm within tolerance 0.500 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.1966,
+      "required_value": 0.5,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "diffpair_length_skew",
+      "type": "diffpair_length_skew",
+      "severity": "info",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- length-skew 0.000 mm within tolerance 0.500 mm",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.0,
+      "required_value": 0.5,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "diffpair_routing_continuity",
+      "type": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- coupled 73.5% of its length (>= 70.0% required)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.7355,
+      "required_value": 0.7,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "diffpair_routing_continuity",
+      "type": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair USB_D+/USB_D- coupled 31.1% of its length (>= 25.0% required)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.3106,
+      "required_value": 0.25,
+      "items": [],
+      "nets": [
+        "USB_D+",
+        "USB_D-"
+      ],
+      "status": "info",
+      "waived": false
+    }
+  ],
+  "meta_checks": {
+    "drc": {
+      "status": "PASSED",
+      "detail": "0 errors, 0 warnings; reviewed 0.45 mm pad-hole floor"
+    },
+    "erc": {
+      "status": "PASSED",
+      "detail": "0 error(s), 0 warning(s)"
+    },
+    "lvs": {
+      "status": "PASSED",
+      "detail": "label + copper: 0 mismatch(es)",
+      "mismatches": [],
+      "copper_mismatches": [],
+      "copper_vacuous": false,
+      "copper_bound_pad_count": 129,
+      "netlist_vacuous": false
+    },
+    "manifest": {
+      "status": "FAILED",
+      "detail": "STALE: routed PCB is 3492093.8s newer than manifest.json"
+    },
+    "overall": "FAILED",
+    "schematic_missing": false
+  },
+  "fabrication_overrides": {
+    "min_hole_to_hole_mm": 0.45,
+    "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
+    "reason": "Published pad-hole minimum; native project has the same explicit floor",
+    "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006",
+    "suppressed_findings": 0
+  },
+  "usb_geometry": {
+    "lengths_mm": {
+      "USB_D+": 15.071732959284686,
+      "USB_D-": 15.26829121195474,
+      "USB_MCU_D+": 3.5352272242640455,
+      "USB_MCU_D-": 3.5352272242640455
+    },
+    "common_coupled_mm": 4.711269837220797,
+    "branch_skew_mm": 0.19655825267005334
+  }
+}

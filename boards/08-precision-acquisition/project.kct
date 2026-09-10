@@ -1,0 +1,21 @@
+kct_version: '1.0'
+project:
+  name: Four-channel precision acquisition
+  revision: A
+  created: 2026-09-10
+  author: ''
+  description: Simultaneous differential acquisition with USB streaming. Precision
+    analog placement and return-path demonstration; circuit implementation deferred
+    while board09 is developed.
+intent:
+  summary: Simultaneous differential acquisition with USB streaming. Precision analog
+    placement and return-path demonstration; circuit implementation deferred while
+    board09 is developed.
+requirements:
+  manufacturing:
+    target_fab: jlcpcb
+    layers:
+      preferred: 4
+decisions: []
+progress:
+  phase: concept

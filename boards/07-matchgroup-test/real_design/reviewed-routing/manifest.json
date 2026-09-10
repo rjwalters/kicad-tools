@@ -1,0 +1,16 @@
+{
+  "reviewed_on": "2026-09-10",
+  "method": "Reviewed physical routing with independently regenerated logical circuit and fresh validation on every build. Not a promise of fresh autorouter equivalence.",
+  "authored_source_sha256": {
+    "net_class_map.json": "585f0a4f1611d7582fdbe257465fde740d31ad7badec1dd6982bcca9cb4b3c28",
+    "sdram_demo.kicad_pcb": "eab9fc57cd7860278aa82fbb70a83d84e608aa85406e31f186cda8ba04412ff2",
+    "sdram_demo.kicad_pro": "f6ee5e69e9cd153a3ca4b57f8fa9005f8c755774db97a6c5a6ad0c6378b79198"
+  },
+  "sha256": {
+    "sdram_demo.kicad_pcb": "5984db8537a847c60ec8cf44f6105d78a98ab51f5b54cb19f45343cbb2725468"
+  },
+  "parts": 43,
+  "bound_pads": 216,
+  "hardware_tested": false,
+  "manufacturing_release": "Requires a separately generated and verified order package; build.py validates the design before export."
+}

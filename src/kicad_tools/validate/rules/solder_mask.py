@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from kicad_tools.core.geometry import rotate_pad_offset
 
 from ..violations import DRCResults, DRCViolation
-from .base import DRCRule
+from .base import DRC_TOLERANCE, DRCRule
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
@@ -190,11 +190,12 @@ class SolderMaskPadRules(DRCRule):
         around the drill hole: (min(pad_width, pad_height) - drill) / 2.
         This must meet the manufacturer's minimum annular ring.
 
-        Note: This reuses min_annular_ring_mm from the design rules,
-        which is the same constraint used for vias. Manufacturers
-        typically apply the same minimum to both.
+        A manufacturer may specify a separate PTH floor; otherwise use
+        the profile's existing shared annular-ring constraint.
         """
-        min_annular = design_rules.min_annular_ring_mm
+        min_annular = getattr(design_rules, "min_pth_annular_ring_mm", None)
+        if min_annular is None:
+            min_annular = design_rules.min_annular_ring_mm
 
         for fp in pcb.footprints:
             for pad in fp.pads:
@@ -209,7 +210,7 @@ class SolderMaskPadRules(DRCRule):
                 # Annular ring = (pad dimension - drill) / 2
                 annular_ring = (min_pad_dim - pad.drill) / 2
 
-                if annular_ring < min_annular:
+                if annular_ring + DRC_TOLERANCE < min_annular:
                     # Rotate footprint-local pad offset into board frame
                     # before translating (KiCad negated-angle convention;
                     # see core.geometry.rotate_pad_offset, issue #3739;

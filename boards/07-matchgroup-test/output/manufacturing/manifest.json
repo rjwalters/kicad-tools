@@ -1,72 +1,256 @@
 {
   "version": "1.0",
-  "kicad_tools_version": "0.14.0",
-  "generated_at": "2026-07-09T19:16:37.670936+00:00",
+  "kicad_tools_version": "0.20.0",
+  "generated_at": "2026-09-10T09:17:24.047619+00:00",
   "manufacturer": "jlcpcb",
   "files": {
+    "README.txt": {
+      "sha256": "8735d92cfd82f379f8d105b08695117522b81b3c900a352fee01f92259cedae4",
+      "size": 2460
+    },
+    "assembly-back.pdf": {
+      "sha256": "8e7811bf9a061bb373e90503ec0223787c4aaa02b7450ecea44b3b20d6a3c7bb",
+      "size": 82699
+    },
+    "assembly-front.pdf": {
+      "sha256": "72a834234a82dbe1ab8605b3b1fbb6356ee3e977d40aeedc5e550e9535910790",
+      "size": 124620
+    },
     "bom_jlcpcb.csv": {
-      "sha256": "50f8099e0a50276067a08f7e9e2342750b592983881da79f16c1d252dbaf66e1",
-      "size": 533
+      "sha256": "bcc742cd8eda3875255937f69aac3f9e1c580deb5f5b7326c666ab660aa96bdd",
+      "size": 860
+    },
+    "check-report.json": {
+      "sha256": "4011ff7850ffce4e8c0ab54f8fb959b8f20e91b40e1992181a5414f9e49ad315",
+      "size": 3512
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "0a3a84fccd4e77e6b0cbe1521c2a0235713079d067b5a42efdc02cfd676745c6",
-      "size": 702
+      "sha256": "fcfd09f56fedca12282e66a638d6ea80b9ebf06e83d99b06911239e7bef5324a",
+      "size": 2404
     },
-    "gerbers.zip": {
-      "sha256": "e23bed1e017d4ee2255231060148f1159485bac24c39f2693f02f4f093d92898",
-      "size": 179121
+    "design-source.zip": {
+      "sha256": "6776740dcdc81bacc70ffa188a883842ee92f81fd0fe6e14a0f958779a31b12f",
+      "size": 680364
     },
-    "report.pdf": {
-      "sha256": "84278370797c1ccfed28190ae2c3a8ad1b4a834d1b4daabb0b0a7463a2783c58",
-      "size": 2430154
+    "engineering/README.md": {
+      "sha256": "a77fa87bd9a7f78164f176966fea8c9b0582f81640830ccff747399e5da73962",
+      "size": 3285
     },
-    "report.md": {
-      "sha256": "d123df917085421c1a75452e1742089fb179106b0199b4f2ce452619d0e9ab64",
-      "size": 3427
+    "engineering/clock_spacing.py": {
+      "sha256": "c4646ecba440bf22f66654faa04b67465da3045172cfa18df2d3edc853ecc35f",
+      "size": 3909
     },
-    "assembly.png": {
-      "sha256": "78974ebe664560567c6a5858bbdffce1a75ead98af523b3fbbd0ca4b4fdba8ab",
-      "size": 303229
+    "engineering/escape-coupling-scenarios.json": {
+      "sha256": "3904f2a88b4af52452749ab8b2a43190fba712254a3dd5a5619a8b83c9240343",
+      "size": 1717
     },
-    "layer_B_Cu.png": {
-      "sha256": "3f4a00c96c7dc4c18664667dad69c732f936070d1726e9378b159cee52648865",
-      "size": 158086
+    "engineering/experiments/README.md": {
+      "sha256": "c8cf83d7e3b9dc39261f17e3cc0cb91f55e65604b974989daf5e4881d191eed5",
+      "size": 3032
     },
-    "layer_F_Cu.png": {
-      "sha256": "107ac234e5e8a903e464cc5551f167952efd9ee516569f75b3f3aa9b55a26c9f",
-      "size": 260902
+    "engineering/experiments/a10-detour-68.py.txt": {
+      "sha256": "be4a91d7f3dc042bcb171f32c979342ba500195840088b40741978436d55e59f",
+      "size": 9164
     },
-    "layer_In1_Cu.png": {
-      "sha256": "526959cc7f25bd877377714944223132805527a7a855511cf1d068c4b322c809",
-      "size": 174887
+    "engineering/experiments/aux-final.py.txt": {
+      "sha256": "3d7226820be01bfa36cf8b2998124c8a217129a74ff5bb01452fef71781c5cae",
+      "size": 8441
     },
-    "layer_In2_Cu.png": {
-      "sha256": "dbca27de027fb94f99c8c9a61c5b92e72cc064074833adabdcb91e20bf303a22",
-      "size": 246714
+    "engineering/experiments/clock-corridor.py.txt": {
+      "sha256": "55cddde29f082e54013e92d6950bf23ce7368901dbc3abe8c7900f095d2334a7",
+      "size": 1296
     },
-    "pcb_back.png": {
-      "sha256": "9dc9afa4882de86df998e9b0768154b82c6a35eb3401d3c27e8f4c1f251ed94d",
-      "size": 159818
+    "engineering/experiments/dq14-detour-48.py.txt": {
+      "sha256": "61395aba86dfa9a20df6d90bbe460dd5d46bc4f78683160f2baa82c9019f6917",
+      "size": 9156
     },
-    "pcb_copper.png": {
-      "sha256": "1ad1debad8d6771147039d6981fcb7972963424b9680fe21e3d542ce8fb57f81",
-      "size": 295376
+    "engineering/experiments/hybrid-ports.py.txt": {
+      "sha256": "7985c94b9b17c6a7b4224802a8e0589134a7788d34d54f35c12e7dd5936a9807",
+      "size": 4057
     },
-    "pcb_front.png": {
-      "sha256": "cdeded02092994f6366b6af76e090443651ba28de884aefd350d3a17cc257cec",
-      "size": 274121
+    "engineering/experiments/planar-ports.py.txt": {
+      "sha256": "cea1f5d607c781fef3badd1af82a8db0c0798f3855703ba48850e2ff4c0f9b53",
+      "size": 4340
     },
-    "schematic_matchgroup_test.png": {
-      "sha256": "86a8e8d7ee300939d50f0871d21bbd24d9e7f33e9cdb44e58b81455f25340d43",
-      "size": 431022
+    "engineering/experiments/remove-unused-vias.py.txt": {
+      "sha256": "3a02d040b7dd2bc786ee56a300d9717bb03d15452a7b4208e6193c6e50bab62c",
+      "size": 1290
+    },
+    "engineering/experiments/route-and-tune.py.txt": {
+      "sha256": "b4f2e54eb5ab8a679547ea05d655d951d4f5741fb3ea1ee9310a658a0899eaba",
+      "size": 4388
+    },
+    "engineering/experiments/tune-local.py.txt": {
+      "sha256": "bb55709770b8cd0407cbdceebdc669e4b3efa2ba1ac971e578204dddff6591e5",
+      "size": 4319
+    },
+    "engineering/load-review.md": {
+      "sha256": "7cc94e01fdd02d3edddec8c565be3c4e46751a167635ef3bba2ae9e3180b0177",
+      "size": 3827
+    },
+    "engineering/measure_escapes.py": {
+      "sha256": "b9c8210c57fda74a7695b9c8428f01436d45e44c84c5e71604c9631ef54d5598",
+      "size": 3409
+    },
+    "engineering/package-escape-spacing.json": {
+      "sha256": "8b87673dd9d3d51924394e4d6dff38606ea7e57c11af209d886ba662cc75d202",
+      "size": 9293
+    },
+    "fill-consistency.json": {
+      "sha256": "dd355513b59e8276ea7b7c84a6417b9082014910fd2514c94f6ab2388c2aee5a",
+      "size": 37
+    },
+    "firmware/include/ARM-LICENSE.txt": {
+      "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
+      "size": 11357
+    },
+    "firmware/include/ST-LICENSE.md": {
+      "sha256": "dadb755f51d36614173b28c5790cb4a991e8f4cc822e5b634fd66a4f4145824d",
+      "size": 9757
+    },
+    "firmware/include/cmsis_compiler.h": {
+      "sha256": "747c5edd04a88d4e228c7856750ec475908545c77464a162a305b38d9e362d82",
+      "size": 10265
+    },
+    "firmware/include/cmsis_gcc.h": {
+      "sha256": "2f92cd832b6f58e4d4803b28d7340443f5e46b0f357a307cda76a42a0e530108",
+      "size": 63620
+    },
+    "firmware/include/cmsis_version.h": {
+      "sha256": "184c19fd3ee73632edf35a0b4d49cd48be75fbf49e6ccb19d9db05fa83bea4b3",
+      "size": 1680
+    },
+    "firmware/include/core_cm4.h": {
+      "sha256": "6b355b3974b13104dac0c987aff54795a2c64e6e268c9a0e058fb3443b3406a3",
+      "size": 122776
+    },
+    "firmware/include/mpu_armv7.h": {
+      "sha256": "29206b52ee02290ed6f5a5415ebd4187de802cf176d9b3cb844390d8e5571372",
+      "size": 11731
+    },
+    "firmware/include/stm32f429xx.h": {
+      "sha256": "d0cdc158b50180069860ece77ee91e4ef59c1694361ee1beb4f7bca6fba7e2d5",
+      "size": 1311476
+    },
+    "firmware/include/system_stm32f4xx.h": {
+      "sha256": "02c067d5a135f540c03215dc834b1e60a97bbd4e55bfd3994b0c82a15ea3012a",
+      "size": 2214
+    },
+    "firmware/sdram_demo.bin": {
+      "sha256": "f45bd59464bf69b8c226e8f228a143e25ecb5a6507e1ea5e66522b390707929e",
+      "size": 1276
+    },
+    "firmware/sdram_demo.elf": {
+      "sha256": "b1cdafa140248ccdd72b12acc381b7b5c30a0813dee8283e3064d5e10d82b35b",
+      "size": 724808
+    },
+    "firmware/sdram_demo.map": {
+      "sha256": "701565885e31a17f893fb6305667b12589ab0a54f1421243d0214ce9c2a85252",
+      "size": 7768
+    },
+    "firmware/source/README.md": {
+      "sha256": "a54b484da54ea74a8af1098f614ae9b1e81bb319ebc96fd92df40fef19b71de4",
+      "size": 2347
+    },
+    "firmware/source/build.py": {
+      "sha256": "816c09e041994a7270737ec0135ec0fe3b9b128c4bee25d39613c51bd384f533",
+      "size": 2799
+    },
+    "firmware/source/linker.ld": {
+      "sha256": "f998456a20f60963eea153f1bc60e821b0edf59c8fc9fc46e86e429224d302ab",
+      "size": 480
+    },
+    "firmware/source/main.c": {
+      "sha256": "8b5fbebd25820af758516429c0c5b0da553546f7043e544c96e4a3fcf64c7572",
+      "size": 7120
+    },
+    "firmware/vendor-manifest.json": {
+      "sha256": "c31c44e7faad55f686bde1ba3c9256dfe57efa0ee9c089fd6385afa75aa3410e",
+      "size": 2237
+    },
+    "gerbers/gerbers.zip": {
+      "sha256": "e013aceb483cf04ffe813c938ed01eb8df2848cd4f18935af893925848251275",
+      "size": 177054
+    },
+    "images/assembly.png": {
+      "sha256": "ab8de11b5a133356d7415baa1c07b82f998897e8c810515c43c2a9ba31576d1c",
+      "size": 675693
+    },
+    "images/layer_B_Cu.png": {
+      "sha256": "ac010e228b2d4c03fabd4f418a24dba154f17713b23811399979b4b1d329c0ca",
+      "size": 273152
+    },
+    "images/layer_F_Cu.png": {
+      "sha256": "9b7201227c60c4b8ad3e8ac5ccd1e2c69b98298b14e1b4bb41d4a14b48136c99",
+      "size": 345453
+    },
+    "images/layer_In1_Cu.png": {
+      "sha256": "a67e2b7746192db2af84b724453c48c114c0d8d5143522cfe81fd1b1ae7f3b6f",
+      "size": 217240
+    },
+    "images/layer_In2_Cu.png": {
+      "sha256": "62ac46e5b1a5044c199e670ef8365ca3c7e37285ffad54e67a0730c796036a5f",
+      "size": 258163
+    },
+    "images/layer_In3_Cu.png": {
+      "sha256": "2fd052a107aef76c340433748f988a7e4fcbc66f89702cda139c5f8edde7b600",
+      "size": 217406
+    },
+    "images/layer_In4_Cu.png": {
+      "sha256": "6389587bc87385c0ea4de711ef6d6eac3e6a140e745e0d6e59caf64f072d409c",
+      "size": 236867
+    },
+    "images/pcb_back.png": {
+      "sha256": "6d8dbf1868e80821660694f7ab99755df6f6d0b8d3668099713210bb2ba1c517",
+      "size": 339264
+    },
+    "images/pcb_copper.png": {
+      "sha256": "87190a9acf5f7572c7371f72e4e69cfc46a74eb686affeda5cc5d0e021be0a7a",
+      "size": 493563
+    },
+    "images/pcb_front.png": {
+      "sha256": "5f861a08e29de7751aa554adc9f5b5869981016901cd0d2856bd96559d023214",
+      "size": 477257
+    },
+    "images/schematic_matchgroup_test.png": {
+      "sha256": "0fd77eca8fe556d6b51d31dfca19a04d9cc9efb7943118801d4a0a8dfc3fbb6a",
+      "size": 396485
     },
     "kicad_project.zip": {
-      "sha256": "3ad0a96bab654f450edf06b45a61e6815f1a1e5b721fe0336c3a85170a87211c",
-      "size": 231701
+      "sha256": "409b397a600b95e1e3b3c9f9118e18df9a7f8e94ea4368801d4b18704e15b4ea",
+      "size": 435608
     },
-    "README.txt": {
-      "sha256": "7b06e75c9ecd3abba96fb150f9d5da7a16757fe49745f85bb37547680a4feea6",
-      "size": 881
+    "manual-assembly-bom.csv": {
+      "sha256": "30198f6ac99155e14cb04a604fec7dba41c0eeda6d12ae130cadae3ddecb204a",
+      "size": 518
+    },
+    "native-drc.json": {
+      "sha256": "6fe9503ed39b2a821d0fc1c9222b033e9205c9ff312aafbee31b3f3728365ff5",
+      "size": 1214
+    },
+    "native-erc.json": {
+      "sha256": "4abff38eef5be2b9b0d07249fb2e3ac40e127455878b8f7b3ba041e4c2fb191b",
+      "size": 980
+    },
+    "procurement-review.md": {
+      "sha256": "ccdb8e173be8fd27e75782a4c86d6c1b13801bf37e0cb893eb8d670420d9ad25",
+      "size": 9959
+    },
+    "procurement.json": {
+      "sha256": "bf93404c4f9bbcb5f1ec27ed6457cef9b455d01d1615809763c74a378a53509d",
+      "size": 5172
+    },
+    "report.md": {
+      "sha256": "e3b4fddd804ccb7dc0a923678294360688c0d781ee8559d3e951fab7ef2c2d51",
+      "size": 4984
+    },
+    "report.pdf": {
+      "sha256": "3fa2d7a4ce65a84b890cf338489f617de021236553c2093996758d79700af9db",
+      "size": 4085337
+    },
+    "schematic.pdf": {
+      "sha256": "9422315a4c2b48a14834802a03264fb93938e6b9324eff222a25791e8f074da9",
+      "size": 198729
     }
   },
   "board": {
@@ -78,7 +262,7 @@
       "name": "pcb_file",
       "status": "OK",
       "message": "PCB file parsed successfully",
-      "details": "Footprints: 8"
+      "details": "Footprints: 43"
     },
     {
       "name": "schematic_file",
@@ -98,55 +282,62 @@
     {
       "name": "footprints",
       "status": "OK",
-      "message": "All 8 footprints have library footprint names"
+      "message": "All 43 footprints have library footprint names"
     },
     {
       "name": "board_dimensions",
       "status": "OK",
-      "message": "Board dimensions within limits (110.00 x 95.00 mm)"
+      "message": "Board dimensions within limits (100.00 x 80.00 mm)"
     },
     {
       "name": "drill_holes",
       "status": "OK",
-      "message": "Drill holes present (209 vias, 13 TH pads)"
+      "message": "Drill holes present (192 vias, 11 TH pads)"
     },
     {
       "name": "tht_in_cpl",
       "status": "OK",
-      "message": "No through-hole components in CPL-eligible footprints"
+      "message": "3 through-hole component(s) excluded from CPL",
+      "details": "THT references: J1, J2, J3"
     },
     {
       "name": "bom_fields",
       "status": "OK",
-      "message": "All 8 BOM items have required fields",
-      "details": "8 active item(s) will receive LCSC from spec overlay"
+      "message": "All 43 BOM items have required fields"
     },
     {
       "name": "bom_lcsc_values",
       "status": "OK",
-      "message": "No LCSC value/package mismatches detected (0 assigned item(s) checked against local parts cache)"
+      "message": "No LCSC value/package mismatches detected (43 assigned item(s) checked against local parts cache)"
     },
     {
       "name": "bom_pcb_match",
       "status": "OK",
-      "message": "BOM and PCB references match (8 components)"
+      "message": "BOM and PCB references match (43 components)"
     },
     {
       "name": "bom_cpl_match",
       "status": "OK",
-      "message": "BOM and CPL references match (8 components)"
+      "message": "BOM and CPL references match (40 components, 3 THT excluded)"
     },
     {
       "name": "drc",
-      "status": "WARN",
-      "message": "No DRC report found; run kicad-cli or kct check first",
-      "details": "Use --drc-report to specify a report file, or --skip-drc to skip"
+      "status": "OK",
+      "message": "DRC: 0 errors, 0 warnings"
     },
     {
       "name": "erc",
-      "status": "WARN",
-      "message": "No ERC report found; run kicad-cli first",
-      "details": "Use --erc-report to specify a report file, or --skip-erc to skip"
+      "status": "OK",
+      "message": "ERC: 0 errors, 0 warnings"
     }
+  ],
+  "mode": "assembly",
+  "warning_counts": {},
+  "native_warning_counts": {},
+  "acknowledged_warning_rules": [],
+  "manual_assembly": [
+    "J1",
+    "J2",
+    "J3"
   ]
 }

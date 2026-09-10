@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-09-10T07:47:02.048541+00:00",
+  "mode": "assembly",
+  "status": "ready",
+  "blockers": [],
+  "checks": [
+    {
+      "name": "kct_check",
+      "status": "passed",
+      "detail": "Zero errors/warnings; ERC, label/copper LVS and manifest pass; all four LVDS pair constraints pass."
+    },
+    {
+      "name": "native_drc",
+      "status": "passed",
+      "detail": "Independent KiCad zone refill: zero violations and zero unconnected items."
+    },
+    {
+      "name": "artifacts",
+      "status": "passed",
+      "detail": "Full manufacturing archive, drawings, source ZIP and SHA256 manifest verified."
+    },
+    {
+      "name": "bom",
+      "status": "passed",
+      "detail": "Reviewed supplier identities;33 SMT placements and three explicitly sourced manual Samtec headers. Auto-matching disabled."
+    },
+    {
+      "name": "drill_pad_overlap",
+      "status": "passed",
+      "detail": "Zero actual drill/SMT-pad overlaps; four repaired positions reproduced from source. Standard through-vias only; signals confined to F.Cu/B.Cu and reference planes reserved."
+    }
+  ],
+  "metrics": {
+    "drc_violations": 0,
+    "lvs_clean": true,
+    "lvs_mismatches": 0,
+    "nets_routed_pct": 100.0
+  },
+  "inputs": {
+    "assembled-demo/README.md": "5897ac7e674aeceedcad1d1b7440500266c1ca1a81f030752780bc6703e1bd94",
+    "assembled-demo/build.py": "8c527a450c589dd4e1bc4b8702f1c4271b891b26828d295fc5fa8a97ca801e79",
+    "assembled-demo/finish.py": "7573c882f01de7ab8f131676339259d65e1bc42f24df3e62af9d557cb2a29ee9",
+    "assembled-demo/generate.py": "fd9a3ae3c614b3a9723832d03714b0d6c9354eed17bcc87d4adf295b086b7069",
+    "output/circuit.json": "06f64b6c5d5bd1e2471552bd0e5b72cd13b3189752647dd87137bb21ef33de09",
+    "output/diffpair_lvs.kicad_sym": "eee7bbb6eef703e082191a9150b892f353293e076cf27fc22d4a790cf8e28b48",
+    "output/diffpair_test.kicad_pcb": "00d277c4d84358d9de1ae9cf4c605a4a4c8b3a2bfef83c174f3aa2a56ec32b4c",
+    "output/diffpair_test.kicad_pro": "48e2bf25ed4c9aa03d2bd7b818adedcfad1d524134b3d3e97cfe816ad395567c",
+    "output/diffpair_test.kicad_sch": "a611040032e1e237cfce91ee058bd69a57b47109bc0e3ba9db59e16914929f2f",
+    "output/diffpair_test_routed.kicad_dru": "9006a6ab3092e14891c1c8bfec0507caf7ce61d24a454e3954817144c42e49bb",
+    "output/diffpair_test_routed.kicad_pcb": "9a3897541df63496298d45a082a9b3d5d95398a196a9e4144ac94a9e39940952",
+    "output/diffpair_test_routed.kicad_pro": "6f2436ff36cd15a6f4abd1a8e2d871dbb9ab3bd42371f1fc759bfa3452f80efa",
+    "output/lvds_demo.kicad_sym": "57b72a1ebf6ba00daedc83e37d16e21e1fc5d956f2d287f09fcb39f30e7b9ca1",
+    "output/lvs.json": "8a44e465f8db5c6f95b19b46257bd87290819ef27e8b68a85cbf490bd0f47a68",
+    "output/manufacturing/README.txt": "2e622cd4ba1117c739fcbd041a7cf5f7f242618cf0c8c57b87bd33a08ad4ee47",
+    "output/manufacturing/assembly-back.pdf": "7100b7c80db5332ea2f915639be7c5a90e06a227560c167bb4504e81f64909a8",
+    "output/manufacturing/assembly-front.pdf": "44bc57d95443f148e3f2ce604a495bb1c349970a10c391a9f052913a57590d8d",
+    "output/manufacturing/bom_jlcpcb.csv": "7c53d58c9732fb72e9e59ef8e5a8fc0c143e0e429f0ae1afa21906e4436e042e",
+    "output/manufacturing/check-report.json": "ce290abea6cb4fc1eb46ef6a8604413bff42e7c7a84619d1472a80778ba85f08",
+    "output/manufacturing/cpl_jlcpcb.csv": "7950374d56ad12e42652468937efb367bb8816e45bb4af026447c440000ebfc1",
+    "output/manufacturing/gerbers/gerbers.zip": "799a25332ce8b28628f286bb38465cea10e6c63785615d1523e413f984258e77",
+    "output/manufacturing/images/assembly.png": "07171985b5024856547e9d1924e3514c66d1404af74d2cc3fd5c1f119c8b0ef1",
+    "output/manufacturing/images/layer_B_Cu.png": "138314c4515daf5a1cf1a0e6e06c139d1361583826fa6a5d7ee8f6b13abf3dfb",
+    "output/manufacturing/images/layer_F_Cu.png": "603a1ac697127d37e3f3df388bac939fc50843fbba6cd5c1201a45505145bc58",
+    "output/manufacturing/images/layer_In1_Cu.png": "589d2fb0a54c15264ce406cea4ed5d3a126670d94f96bd77d9bf212d66220071",
+    "output/manufacturing/images/layer_In2_Cu.png": "b582cb525e07d065cdca751320428eb9a08cc6a6759fa14556dcda133db2906d",
+    "output/manufacturing/images/pcb_back.png": "89448c119011fd9a5a6c53681d60f5189c6912bbb45dcfb96b27dd035cadaf16",
+    "output/manufacturing/images/pcb_copper.png": "d2649d86bdccd44c3c33a1c9609e563f14f80b174d3dbb4fe8a5d17b441746a2",
+    "output/manufacturing/images/pcb_front.png": "81e933dc8198accaab924963f2fe8fad5ffb0ff8f9969b9c15c0f25634971975",
+    "output/manufacturing/images/schematic_diffpair_test.png": "6e2505c68852ac1d387f672572cf126eada16b0620a1c82ab80ada6b24ec1899",
+    "output/manufacturing/kicad_project.zip": "cdbedd84dee6df881ea21b5207a1b959f78c597bdc60fef7c27fe409fbd823bd",
+    "output/manufacturing/manifest.json": "fe126d6863d69b0e00e37b2b380a0ff9e99f937a3a87fa4eb28a20faf6d3b9e8",
+    "output/manufacturing/manual-assembly-bom.csv": "82c744bf3eb2a5345fdd83267d57e7ed7c6631f4790b7995ddd59f4cdfc5219c",
+    "output/manufacturing/native-drc.json": "0142519352d6b6b00abf6f13781b64575369560ddf1012f40a1a3fa3e38947d2",
+    "output/manufacturing/procurement-review.md": "5897ac7e674aeceedcad1d1b7440500266c1ca1a81f030752780bc6703e1bd94",
+    "output/manufacturing/report.md": "6976ca92c3aec5fbfbde792c3103bbb0bebfdaee3a9026f1f409a590d94fd3d6",
+    "output/manufacturing/report.pdf": "f9cb6952e154119c15e95df6f54e74955c66b564c8bc509f35aa037c7dab3523",
+    "output/manufacturing.zip": "a4080d1f986f4a53eb1b9af4e958f53336e04aa0c3439554a026eaa5b7d728c9",
+    "output/net_class_map.json": "5a4f58f1ec7a889f8392ed3ae78bb37c1be721c51e12601ffec2f367c683f2b6",
+    "output/readiness/kct-check.json": "ce290abea6cb4fc1eb46ef6a8604413bff42e7c7a84619d1472a80778ba85f08",
+    "output/readiness/native-drc.json": "0142519352d6b6b00abf6f13781b64575369560ddf1012f40a1a3fa3e38947d2",
+    "output/sym-lib-table": "90389d0ac68d104c9cde91ec7ab47b4b6a27d71fc6fe85befae8bc94b767d7aa",
+    "project.kct": "1cfb8b27a2b2c5ba7991415f2f8d07a7374d98fbf0f5b7d8f3d380ab8d62c08c",
+    "output/readiness/fill-consistency.json": "4fb9d04962c5e4244f497524ff4b8c4bdb809f26d0f4e0bea788dd80b725575f",
+    "README.md": "f32226a8a08cef76e2b1935acb6206f13f23c26710a50547a19a591c78efd504",
+    "assembled-demo/pad-drill-repairs.json": "90d31ee83a27a40355b5ba069914888f267d5375906b3eadd2880b456ef0282e",
+    "output/manufacturing/fill-consistency.json": "4fb9d04962c5e4244f497524ff4b8c4bdb809f26d0f4e0bea788dd80b725575f",
+    "output/manufacturing/design-source.zip": "2ca7e264f264efda6dcaca49437b7b942e14d915645f7520f43c4bfbc8b0d030",
+    "output/renders/pcb-back.svg": "b632c0914cbb46b68a7b30c1c643031919cba44c2402c4190ba1fcf99ae7a3a6",
+    "output/renders/3d-back.png": "8376fd5541c5d2249f6271835c62b3a6c5fd80dd7333164abca628c11b85b960",
+    "output/renders/pcb-front.svg": "ccfbae1736f997a6806bb36ec7911e4dee203235c252540bea1043952d77a3dc",
+    "output/renders/3d-front.png": "82096ffb3330e0fd9b367d8252e37bbf10d031a0bb9d4ec59d4ecc5aa510b199"
+  },
+  "evidence": {
+    "kct_check": "output/readiness/kct-check.json",
+    "native_drc": "output/readiness/native-drc.json"
+  }
+}

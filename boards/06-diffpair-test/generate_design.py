@@ -3543,7 +3543,7 @@ def main() -> int:
     if args.output_dir is not None:
         output_dir = Path(args.output_dir)
     else:
-        output_dir = Path(__file__).parent / "output"
+        output_dir = Path(__file__).parent / "regression-output"
 
     output_dir = output_dir.resolve()
 

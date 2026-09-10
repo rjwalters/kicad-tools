@@ -3942,6 +3942,9 @@ def load_pcb_for_routing(
     # can build attach regions from the canonical board model.  Do not parse it
     # here: absent --voltage-map the loading path remains byte-for-byte inert.
     router._pairwise_attach_zone_pcb_path = str(pcb_path)
+    # Keep impedance synthesis lazy, but use authored dielectric geometry
+    # when it activates instead of silently substituting a generic stackup.
+    router._impedance_source_pcb_path = str(pcb_path)
 
     # Issue #3371 / P_FP3 -- fine-pitch escape region detection.  Must run
     # BEFORE pads land on the grid so the per-pad halos

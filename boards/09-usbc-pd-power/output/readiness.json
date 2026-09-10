@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "mode": "assembly",
+  "status": "blocked",
+  "checked_at": "2026-09-10T17:31:12.411944+00:00",
+  "inputs": {
+    "output/usbc_pd_power.kicad_sch": "5738274b608eb755023159647a6fe29f5a0d10c149315ec59766f1df1d8025c1",
+    "output/usbc_pd_power.kicad_pcb": "dab639509bf95fc1d35426d03e9efeb33899d0785c69bb4005552faa84e6b19e",
+    "output/circuit.json": "7a77a517a9aa3ffdc3f212858146e12e18180dc47d649ec7a7e7caedcfd1595c",
+    "output/net_class_map.json": "aecfc117903d74e544f93fa8f2ab29117130bc8a202b6f71830cfa2166535a61",
+    "output/usbc_pd_power.kicad_pro": "46e70ad622f62a250039b8ed3a792497b33bf6c7a0d18eb689a5f513a4ae2c22",
+    "output/board09.kicad_sym": "36f1e94f721256abb4ab91d033f3d099e7aee1a49c81a25856ddfb67d36b9e52",
+    "output/board09.pretty/SRP7050TA.kicad_mod": "0e5569968f48e2d3f7f09ec4814306e0d63792d71fd3ccf00564d053394dd947",
+    "generate_design.py": "597ad42345c312d7748c9d6f29b0d844f83e5a77b370d9d7a48e0911252f69ac",
+    "check_design.py": "2f551feb00ddd2d9ccaba4e85fcb5015e47098c9cb4bde5720a23b82a489c5d1",
+    "procurement.json": "dcbd7f3e94a74336da5ad1bd97e9384be9658b6b7af9239826351b526a89298a",
+    "engineering/calculate.py": "31b8b2e51a6a84eacb539282be90e3e3154e61ddb90a2c8840ebdc86f85dcc7a",
+    "output/development-check.json": "5559750b5f5a4a136c3be4f387a94d162ad813010c9f074e53da399c4fff48a0",
+    "output/native-erc.json": "440eea9970fefe7d81b96bdecf28e87f35895e7028410f77bed3050aefd631d7",
+    "output/label-lvs.json": "6f69e242fd4c0e6c87a4bf0900ecf432a578e1932c15420fa35b60ec0ce1d744",
+    "output/calculations.json": "82e319f0c0af2f9cde2ed97416f9d3ab84aa7aed5dcc9454d5c1af5f7d4ae310"
+  },
+  "blockers": [
+    "Complete routing and ground planes; native DRC and copper LVS",
+    "Power-path, Kelvin, switch-loop, thermal and capacitor bias review",
+    "Complete procurement and assembly-library package verification",
+    "PD configuration readback and attach/inrush/unsupported-source tests",
+    "Manufacturing export and independent refill identity"
+  ],
+  "checks": [
+    {
+      "name": "native_erc_clean",
+      "status": "passed"
+    },
+    {
+      "name": "label_lvs_clean",
+      "status": "passed"
+    },
+    {
+      "name": "analytical_screen_passed",
+      "status": "passed"
+    },
+    {
+      "name": "manufacturing_release",
+      "status": "not_run"
+    }
+  ]
+}

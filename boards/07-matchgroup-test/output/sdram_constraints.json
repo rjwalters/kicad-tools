@@ -1,0 +1,58 @@
+{
+  "groups": {
+    "SDRAM_BYTE0": [
+      "DQ0",
+      "DQ1",
+      "DQ2",
+      "DQ3",
+      "DQ4",
+      "DQ5",
+      "DQ6",
+      "DQ7",
+      "LDQM"
+    ],
+    "SDRAM_BYTE1": [
+      "DQ8",
+      "DQ9",
+      "DQ10",
+      "DQ11",
+      "DQ12",
+      "DQ13",
+      "DQ14",
+      "DQ15",
+      "UDQM"
+    ],
+    "SDRAM_ADDRESS": [
+      "A0",
+      "A1",
+      "A2",
+      "A3",
+      "A4",
+      "A5",
+      "A6",
+      "A7",
+      "A8",
+      "A9",
+      "A10",
+      "A11",
+      "BA0",
+      "BA1"
+    ],
+    "SDRAM_COMMAND": [
+      "SDNWE",
+      "SDNRAS",
+      "SDNCAS",
+      "SDNE1",
+      "SDCKE1",
+      "SDCLK"
+    ]
+  },
+  "group_skew_mm": 5.0,
+  "clock_reference": "SDCLK",
+  "clock_relative_tolerance_mm": 10.0,
+  "max_trace_length_mm": 120.0,
+  "target_impedance_ohm": 50.0,
+  "impedance_tolerance_percent": 10.0,
+  "stackup": "JLC06161H-2116A",
+  "trace_width_mm": 0.18
+}

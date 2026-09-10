@@ -11,10 +11,10 @@
       "rules": {
         "min_clearance": 0.127,
         "min_track_width": 0.127,
-        "min_via_diameter": 0.6,
-        "min_via_annular_width": 0.05,
+        "min_via_diameter": 0.3,
+        "min_via_annular_width": 0.075,
         "min_through_hole_diameter": 0.3,
-        "min_via_hole": 0.3,
+        "min_via_hole": 0.15,
         "min_hole_to_hole": 0.5,
         "min_copper_edge_clearance": 0.3,
         "min_silk_clearance": 0.05,
@@ -30,8 +30,8 @@
       "defaults": {
         "track_min_width": 0.127,
         "clearance_min": 0.127,
-        "via_min_diameter": 0.6,
-        "via_min_drill": 0.3
+        "via_min_diameter": 0.3,
+        "via_min_drill": 0.15
       }
     }
   },
@@ -50,8 +50,8 @@
         "pcb_color": "rgba(0, 0, 0, 0.000)",
         "schematic_color": "rgba(0, 0, 0, 0.000)",
         "track_width": 0.127,
-        "via_diameter": 0.6,
-        "via_drill": 0.3,
+        "via_diameter": 0.3,
+        "via_drill": 0.15,
         "wire_width": 6
       }
     ],

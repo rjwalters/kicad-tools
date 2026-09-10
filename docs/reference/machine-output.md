@@ -351,6 +351,10 @@ Three conventions this batch adds or reinforces:
   (N more)`); the JSON document carries every entry, because a machine caller
   must not have to re-run with different flags to see the pads a run could not
   place. `len(vias_added) == vias_added_count` is asserted in the tests.
+  Each via's `layers` describes its physical barrel span; standard vias use
+  `["F.Cu", "B.Cu"]`. The separate `target_layer` records the requested or
+  inferred plane contact (for example `"In2.Cu"`). An inner-plane target does
+  not request a blind via. Explicit micro-vias retain their adjacent-layer span.
 - **A multi-step run reports the ledger, not just the verdict.** All three
   emit one entry per executed step with that step's own classification —
   including `pipeline`'s `skipped` / `warning` axes, which its exit code

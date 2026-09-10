@@ -1,0 +1,25 @@
+kct_version: '1.0'
+project:
+  name: USB-C PD 5 V power supply
+  revision: A
+  created: 2026-09-10
+  author: ''
+  description: Standalone USB-C PD sink and 5 V / 3 A target buck regulator with I2C
+    voltage/current telemetry. Switching-loop placement, Kelvin sensing, ampacity
+    and thermal construction demonstration. Hardware performance unverified.
+  artifacts:
+    pcb: output/usbc_pd_power.kicad_pcb
+    schematic: output/usbc_pd_power.kicad_sch
+    net_class_map_sidecar: output/net_class_map.json
+intent:
+  summary: Standalone USB-C PD sink and 5 V / 3 A target buck regulator with I2C voltage/current
+    telemetry. Switching-loop placement, Kelvin sensing, ampacity and thermal construction
+    demonstration. Hardware performance unverified.
+requirements:
+  manufacturing:
+    target_fab: jlcpcb
+    layers:
+      preferred: 4
+decisions: []
+progress:
+  phase: layout

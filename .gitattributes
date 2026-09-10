@@ -5,3 +5,7 @@
 # fully re-derived by the next resync regardless of which side "wins".
 .loom/install-metadata.json merge=ours
 # END LOOM-MANAGED (merge drivers, #4528)
+
+# Board readiness and manufacturing manifests bind exact file bytes.
+# Preserve exported CSV line endings and checked source bytes on every platform.
+boards/** -text

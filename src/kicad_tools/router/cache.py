@@ -23,7 +23,7 @@ import math
 import os
 import sqlite3
 import zlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -36,11 +36,32 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def routing_cache_context(options: Mapping[str, object], net_class_map: dict) -> dict:
+    """Bind cached copper to the effective CLI recipe and resolved net classes.
+
+    Output locations and display/cache controls do not affect the route. Keep
+    other public options, including future routing flags, in the identity.
+    Hash class contents rather than only the sidecar's filename.
+    """
+    from .rules import net_class_map_to_dict
+
+    controls = {"output", "verbose", "quiet", "no_cache", "cache_only", "func"}
+    return {
+        "options": {
+            name: value
+            for name, value in options.items()
+            if not name.startswith("_") and name not in controls
+        },
+        "net_classes": net_class_map_to_dict(net_class_map),
+    }
+
+
 # Version tag for cache invalidation when router algorithms change.
 # Bump this constant whenever routing logic is modified to ensure stale
 # cached results are not reused.  The value is included in every cache key
 # so incrementing it automatically invalidates all existing entries.
-CACHE_VERSION = "2.0.0"
+CACHE_VERSION = "2.2.0"
 
 
 def get_default_cache_path() -> Path:
@@ -86,6 +107,8 @@ class CacheKey:
         pcb_content: str | bytes,
         rules: DesignRules,
         grid_resolution: float,
+        *,
+        routing_context: Mapping[str, object] | None = None,
     ) -> CacheKey:
         """Compute cache key from routing inputs.
 
@@ -93,6 +116,7 @@ class CacheKey:
             pcb_content: PCB file content or extracted routing-relevant data
             rules: Design rules for routing
             grid_resolution: Routing grid resolution in mm
+            routing_context: Effective routing options and resolved net classes
 
         Returns:
             CacheKey for this configuration
@@ -137,7 +161,11 @@ class CacheKey:
         min_trace_floor = getattr(rules, "min_trace_width_floor", None)
         if min_trace_floor:
             rules_data["min_trace_width_floor"] = float(min_trace_floor)
-        rules_json = json.dumps(rules_data, sort_keys=True)
+        if rules.strict_pad_clearance:
+            rules_data["strict_pad_clearance"] = True
+        if routing_context is not None:
+            rules_data["routing_context"] = routing_context
+        rules_json = json.dumps(rules_data, sort_keys=True, default=str)
         rules_hash = hashlib.sha256(rules_json.encode()).hexdigest()
 
         # Combine the package version with CACHE_VERSION so that either a
@@ -312,6 +340,8 @@ class SubProblemSignature:
         min_trace_floor = getattr(rules, "min_trace_width_floor", None)
         if min_trace_floor:
             rules_data["min_trace_width_floor"] = float(min_trace_floor)
+        if rules.strict_pad_clearance:
+            rules_data["strict_pad_clearance"] = True
         rules_json = json.dumps(rules_data, sort_keys=True)
         rules_hash = hashlib.sha256(rules_json.encode()).hexdigest()
 

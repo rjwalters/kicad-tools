@@ -10,8 +10,8 @@ board so future changes to:
 
 cannot silently drop any of the Phase 1-3 features the board exercises.
 
-The board's role is exactly this regression coverage --- it is not a
-working device.  See ``boards/06-diffpair-test/README.md`` for the
+These archived artifacts retain the historical synthetic regression coverage;
+the current gallery assembly is tested in test_board06_real_hardware.py.  See ``boards/06-diffpair-test/README.md`` for the
 testbench rationale.
 
 Acceptance criteria covered (see issue #2658):
@@ -44,7 +44,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "06-diffpair-test"
-OUTPUT_DIR = BOARD_DIR / "output"
+OUTPUT_DIR = BOARD_DIR / "regression-fixture"
 
 
 def _load_module(name: str, path: Path):
@@ -708,222 +708,27 @@ class TestManufacturabilityFloor:
 # test's setup; the tests themselves are pure assertions over the parsed JSON.
 @pytest.mark.timeout(180)
 class TestBoard06StrictGateGuard:
-    """Issue #3338 -- pin the strict CI gate's blocking-error count on the
-    committed routed PCB so a future artifact refresh that drifts on the
-    impedance sidecar (the PR #3273 trap) trips this fast unit test before
-    the CI ``routed-pcb-drc-check`` job catches it.
+    """The real assembled demo has a strict zero-error release gate.
 
-    The strict gate (``scripts/ci/check_routed_drc.py``) runs ``kct check``
-    with ``--net-class-map`` auto-resolved by
-    ``scripts/ci/net_class_map_resolver.py`` (in-process derivation for
-    board 06 because no committed ``net_class_map.json`` sidecar lives
-    next to the routed PCB).  Without the sidecar the impedance /
-    diff-pair-skew / diff-pair-continuity / match-group-skew rule families
-    short-circuit to a no-op (see #3151), so a naive ``kct check`` would
-    report a count that hides ~hundreds of impedance violations whenever
-    the trace widths drift off the 50 / 90 / 100 Ω impedance-resolved
-    targets.  PR #3273 fell into this trap; PR #3315 codified the
-    impedance modal-width tripwire (see ``test_impedance_sidecar_trap_lifted``
-    above) and this test pins the strict-gate count itself so a refresh
-    PR is caught by an exact-count assertion rather than only the modal-
-    width invariant.
-
-    Mirrors ``tests/test_board_05_drc_allowlist.py`` in shape (per-board
-    strict-gate guard) but routes through the sidecar resolver so the
-    impedance / diff-pair rule families are actually counted.
-
-    The expected count is sourced from the live measurement on the
-    committed PCB (Issue #3413 phases 4-6 refresh):
-
-    *   strict gate WITH sidecar = ``33`` blocking errors
-    *   advisory ``connectivity`` = ``2`` (GND + +1V2 -- the analyzer's
-        per-net model cannot follow the pad -> stub -> via -> plane-fill
-        chain the phase-4 stitching uses; the recipe's copper-union
-        audit (and ``TestPourCopperUnionAudit`` below) verifies all 5
-        pour nets are GENUINELY one copper component, so these 2 are
-        analyzer false positives, tracked with the #3482 analyzer gap)
-
-    Blocking composition (Issue #3507 refresh -- the optimizer/nudge
-    grid re-marking fix): 9 ``diffpair_length_skew`` + 9
-    ``diffpair_routing_continuity`` (single-ended fallback measurements
-    -- the coupled phase still converges 0/9, the board's remaining
-    quality phase; 8+8 -> 9+9 because the refreshed route engages one
-    more measurable pair) + 2 ``clearance_segment_via`` (USB_CC2 vs
-    USB2_D+ grid-quantization grazes at the J1 fan-out).  The previous
-    17-error USB3_RX1+/RX1- overlap cluster (7 intra + 10 seg-via) is
-    RETIRED: the grid-transactional optimize/nudge passes
-    (``optimize_routes_grid_synced`` + the resync inside
-    ``drc_verify_and_nudge``) collision-check against the TRUE copper
-    state and never introduce the overlap (the recipe's 6b solo
-    re-route repair reports "No physically-overlapping pair sides
-    detected").  33 -> 20.
-
-    Issue #3527 (2026-06-11): +2 ``clearance_segment_zone`` (the new
-    segment-vs-foreign-zone-fill rule surfaced two pre-existing USB_CC1
-    grazes against the GND In1.Cu fill at (14.397, 12.083) -- stale-fill
-    defects that were always in the committed copper, newly visible).
-    Artifact fix tracked in Issue #3554.  20 -> 22.
-
-    PR #3548 (2026-06-11, issues #3515 + #3554): the USB_CC1 In1.Cu
-    corridor moved to clear the USB2_D- via barrel and the GND In1.Cu
-    fill was regenerated via ``kct zones fill``, retiring both
-    ``clearance_segment_zone`` findings.  22 -> 20.
-
-    Re-baselined 2026-06-13 (Issue #3556): the new ``clearance_pad_zone``
-    rule (the via/pad sibling of #3527's segment-vs-zone-fill rule)
-    surfaces 1 pre-existing finding -- a GND pad 0.093mm from the +3V3
-    fill (< 0.102mm jlcpcb minimum), a stale-pour-carve that was invisible
-    because no gate compared pad copper to zone fill.  20 -> 21; the
-    tolerance floor in .github/routed-drc-tolerance.yml rises to match.
-
-    Re-baselined 2026-06-16 (Issue #3740): the residual combined-engine
-    cleanup retired the 3 fixable findings.  The 2 ``clearance_segment_via``
-    near-shorts (USB_CC2 vs USB2_D+ via, ~0.011/0.014mm) were re-routed to
-    clear the via by >= 0.1016mm; the 2 sub-minimum 0.100mm MIPI_RST
-    neck-down escapes were widened to 0.1016mm (and the recipe's
-    ``min_trace_width`` corrected 0.10 -> 0.1016 so a future regenerate
-    keeps them legal); the 1 ``clearance_pad_zone`` (J1-S2 GND vs +3V3 fill)
-    was cleared by regenerating the +3V3 B.Cu fill via ``kct zones fill``.
-    The +1V8 B.Cu zone was preserved from the pre-refill artifact because a
-    fresh fill strands U4.6 (the historical incident behind PR #3725) -- the
-    copper-union audit below confirms all 5 pour nets remain one component.
-    kicad-cli now reports 0 errors / 0 unconnected against the board's own
-    ``.kicad_dru``.  The remaining 21 -> 18 is the diff-pair quality block
-    (9 ``diffpair_length_skew`` + 9 ``diffpair_routing_continuity``; coupled
-    convergence is still 0/9, exit clause (a) tracked in #3540-#3544).
-
-    Re-baselined 2026-06-21 (Issue #3842, 18 -> 24): the corrected
-    drill-to-drill gate now keys off a dedicated ``min_hole_to_hole_mm``
-    spec (canonical 0.5 mm fab default; the old code keyed off
-    ``min_clearance_mm`` and never fired below 0.5 mm).  The committed
-    board-06 artifact carries 6 genuine pre-existing
-    ``hole_to_hole_clearance`` violations -- sub-0.5 mm drill pairs that
-    were always present but invisible to the broken check.  These are TRUE
-    POSITIVES, NOT new regressions from this PR; the board-layout fix
-    (re-spacing the drills to >= 0.5 mm) is tracked in **#3847**, the rule
-    change refs #3842 / #3830.  The +6 are ``hole_to_hole_clearance``,
-    a DISTINCT family from the 18 diff-pair quality defects
-    (``diffpair_length_skew`` / ``diffpair_routing_continuity``), so the
-    diff-pair-only baseline (``DIFFPAIR_VIOLATION_BASELINE`` = 18 in
-    ``scripts/ci/check_diffpair_coverage.py``) is UNCHANGED -- the drill
-    errors do not leak into the diff-pair slice.  The pinned strict-gate
-    count rises 18 -> 24 (= 18 diff-pair + 6 drill); the gate still catches
-    a 25th (NEW) blocking error.  Exit clause: when #3847 re-spaces the
-    drills, drop this back to 18.
+    Historical capability tests above use regression-fixture/. This gate
+    deliberately checks output/, the same path selected by manufacturing CI.
     """
 
-    # Re-baselined 2026-06-22 (Issue #3855 -- router hole-to-hole guard +
-    # board-06 ``_repair_pour_connectivity`` edge-to-edge drill fix).  The
-    # blocking count is unchanged at 24, but its COMPOSITION shifted:
-    #
-    #   * 18 diff-pair quality defects (9 ``diffpair_length_skew`` + 9
-    #     ``diffpair_routing_continuity``) -- UNCHANGED; coupled
-    #     convergence is tracked in #3540-#3544.
-    #   * ``hole_to_hole_clearance`` dropped 6 -> 1.  The router /
-    #     recipe via placers now reject sub-0.5mm drill pairs (#3855), so
-    #     5 of the 6 prior drill true-positives are gone.  The lone
-    #     remainder is a same-net USB2_D+ coupled-route via pair placed by
-    #     the A* path (``diffpair_routing._build_route_from_path``);
-    #     fixing it requires changing the A* via decision, which #3855
-    #     explicitly held out of scope.
-    #   * +5 fresh-route clearance/via errors (1 ``clearance_pad_via`` +
-    #     3 ``clearance_segment_via`` + 1 ``via_in_pad``).  These are a
-    #     property of re-routing board-06 fresh on the current recipe --
-    #     they appear identically WITHOUT the #3855 guard, so they are NOT
-    #     caused by this PR (the committed artifact is now a fresh
-    #     ``--step all --seed 42`` route, replacing the older hand-snapshot
-    #     that happened to lack them).  Well within the CI tolerance floor
-    #     of 33 in ``.github/routed-drc-tolerance.yml``.
-    #
-    # Net: 18 diff-pair + 1 drill + 5 clearance/via = 24.  When #3540-#3544
-    # drive the diff-pair errors down, tighten this AND the tolerance entry.
-    #
-    # Re-baselined 2026-07-08 (fix/board06-gallery-ready, 24 -> 18): the
-    # committed artifact is a fresh recipe re-route on the current router
-    # (45-by-construction #3975, min_hole_to_hole #3857, connectivity-
-    # fallback via fixes #3930) plus the recipe's new step-13 legalization
-    # passes (``_split_offangle_chords`` + ``_legalize_signal_vias``).
-    # All 6 non-diff-pair errors are GONE: the June artifact's 2 kicad-cli
-    # shorts (a USB_CC1 In1.Cu track through the USB2_D-/USB3_RX1- via
-    # barrels) and the U2-F1 clearance pair do not re-appear on the fresh
-    # route, and the residual same-net via_in_pad (USB_CC1 at U1-12) + 2
-    # ``hole_to_hole_clearance`` staples (USB2_D+, MIPI_RST) are
-    # repaired by step 13.  kicad-cli reports 0 errors / 0 unconnected and
-    # the manufacturing bundle's report.md shows Errors = 0.  What remains
-    # is EXACTLY the diff-pair quality block: 9 ``diffpair_length_skew`` +
-    # 9 ``diffpair_routing_continuity`` -- coupled convergence is the
-    # #3540-#3544 tracked problem (shadow constructor stays OFF per the
-    # #3921 measurement).  When that work lands, tighten this toward 0 AND
-    # the tolerance entry.
-    EXPECTED_STRICT_GATE_ERRORS = 18
-    # Advisory ``connectivity`` is now 0 (Issue #3914).  The residual entries
-    # were ``NetStatusAnalyzer`` false positives on GND / +1V2 pour nets: the
-    # pre-#3914 per-net model bulk-connected every pad inside a zone boundary
-    # and then flagged a stitching residual as "partially routed" even though
-    # the net owns filled pour copper and kicad-cli reports it clean.  The
-    # ``ConnectivityRule`` now defers to the pour classification (``has_filled_zone``
-    # + ``is_advisory_incomplete``) and emits nothing for these nets, so the
-    # advisory count drops to 0.  The copper-union audit still PASSES (see
-    # ``TestPourCopperUnionAudit``).
-    EXPECTED_ADVISORY_CONNECTIVITY = 0
-
     @pytest.fixture(scope="class")
-    def routed_pcb(self) -> Path:
-        routed = OUTPUT_DIR / "diffpair_test_routed.kicad_pcb"
-        if not routed.exists():
-            pytest.skip(
-                f"Routed PCB artifact missing: {routed}.  Re-run "
-                "`python boards/06-diffpair-test/generate_design.py --step route "
-                "--seed 42` to regenerate."
-            )
-        return routed
-
-    @pytest.fixture(scope="class")
-    def strict_gate_result(self, routed_pcb: Path) -> dict:
-        """Invoke ``kct check`` with the auto-resolved impedance sidecar.
-
-        Mirrors the exact invocation used by
-        ``scripts/ci/check_routed_drc.py`` so this fast unit test produces
-        the same number CI gates on.
-        """
+    def strict_gate_result(self) -> dict:
         import json
         import subprocess
 
-        # Import the resolver the same way the strict gate script does.
-        ci_dir = REPO_ROOT / "scripts" / "ci"
-        sys.path.insert(0, str(ci_dir))
-        try:
-            from net_class_map_resolver import resolve_net_class_map_sidecar  # type: ignore
-        finally:
-            sys.path.pop(0)
-
-        with resolve_net_class_map_sidecar(routed_pcb) as sidecar:
-            assert sidecar is not None, (
-                "Board 06 net-class-map sidecar resolution returned None; the "
-                "in-process derivation from "
-                "``boards/06-diffpair-test/generate_design.py::build_net_class_map`` "
-                "failed.  Without the sidecar the impedance / diff-pair / "
-                "match-group rule families short-circuit to a no-op and the "
-                "PR #3273 trap re-opens."
-            )
-
-            # Issue #4853: invoke the CLI in the interpreter that is ALREADY
-            # running this test rather than shelling out to ``uv run kct``.
-            # A nested ``uv run`` re-syncs the project environment before
-            # exec'ing, and CI installs with ``uv sync --extra dev`` while
-            # the nested call resolves the DEFAULT extras -- so it churns
-            # (and can uninstall) dev packages out from under the running
-            # ``pytest -n auto`` session.  That unbounded, partly
-            # network-dependent cost is what pushed this fixture past CI's
-            # ``--timeout=60`` reaper and turned ``main`` red.  ``kct`` is a
-            # console script for ``kicad_tools.cli:main``, so
-            # ``-m kicad_tools.cli`` runs the identical command.
-            cmd = [
+        routed = BOARD_DIR / "output" / "diffpair_test_routed.kicad_pcb"
+        sidecar = routed.parent / "net_class_map.json"
+        assert routed.is_file() and sidecar.is_file()
+        proc = subprocess.run(
+            [
                 sys.executable,
                 "-m",
                 "kicad_tools.cli",
                 "check",
-                str(routed_pcb),
+                str(routed),
                 "--mfr",
                 "jlcpcb",
                 "--errors-only",
@@ -931,147 +736,41 @@ class TestBoard06StrictGateGuard:
                 "json",
                 "--net-class-map",
                 str(sidecar),
-            ]
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-                cwd=REPO_ROOT,
-                timeout=180,
-            )
-            assert proc.returncode in (0, 2), (
-                f"kct check exited {proc.returncode} on {routed_pcb}.\nstderr:\n{proc.stderr}"
-            )
-            return json.loads(proc.stdout)
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=REPO_ROOT,
+            timeout=180,
+        )
+        assert proc.returncode in (0, 2), proc.stderr
+        return json.loads(proc.stdout)
 
     def test_strict_gate_blocking_count_pinned(self, strict_gate_result: dict) -> None:
-        """Blocking-error count under the impedance sidecar matches the floor.
-
-        The CI gate's ``_count_blocking_errors`` filters advisory rules
-        (``connectivity``) out of the count it compares against the
-        allowlist.  We apply the same filter here so the pinned value
-        matches what the CI gate sees.
-
-        A FAILURE here means one of:
-
-        * A real routing regression that introduced new DRC violations
-          (e.g., a refresh PR drifted on impedance widths and triggered
-          ~hundreds of impedance violations -- the PR #3273 trap).
-        * A router improvement that DROPPED the count below 18 -- in that
-          case tighten ``EXPECTED_STRICT_GATE_ERRORS`` in the SAME PR
-          and tighten the allowlist in ``.github/routed-drc-tolerance.yml``
-          (currently 24 = 18 diff-pair + 6 drill; the strict gate's drift
-          warning will be your guide).  Driving the 18 diff-pair errors to
-          0 is the coupled-convergence work tracked in #3540-#3544; the 6
-          ``hole_to_hole_clearance`` true-positives (Issue #3842 gate)
-          are the board-layout fix tracked in #3847.
-        """
         from kicad_tools.validate.checker import DRCChecker
 
-        violations = strict_gate_result.get("violations", [])
-        blocking = 0
-        for v in violations:
-            if not isinstance(v, dict):
-                continue
-            if v.get("severity", "error") != "error":
-                continue
-            rule_id = v.get("rule_id", "")
-            if not isinstance(rule_id, str):
-                continue
-            if DRCChecker.is_advisory_rule(rule_id):
-                continue
-            blocking += 1
-
-        assert blocking == self.EXPECTED_STRICT_GATE_ERRORS, (
-            f"Strict-gate blocking-error count on the committed routed PCB "
-            f"is {blocking}; expected {self.EXPECTED_STRICT_GATE_ERRORS} "
-            f"(pinned by Issue #3338).  If a refresh PR INCREASED this, "
-            f"the impedance sidecar likely drifted -- re-run "
-            f"``scripts/ci/check_routed_drc.py "
-            f"boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb`` "
-            f"to confirm and either revert the refresh or accept the new "
-            f"floor.  If a router improvement DECREASED this, tighten "
-            f"``EXPECTED_STRICT_GATE_ERRORS`` AND the board-06 "
-            f"``tolerances:`` entry in "
-            f"``.github/routed-drc-tolerance.yml`` in the same PR."
-        )
+        blocking = [
+            v
+            for v in strict_gate_result["violations"]
+            if v.get("severity") == "error"
+            and not DRCChecker.is_advisory_rule(v.get("rule_id", ""))
+        ]
+        assert blocking == [], blocking
 
     def test_strict_gate_within_allowlist(self, strict_gate_result: dict) -> None:
-        """Belt-and-braces: also verify the blocking count is within the
-        committed allowlist (the CI gate's actual comparison)."""
         import yaml
 
-        from kicad_tools.validate.checker import DRCChecker
-
-        allowlist_path = REPO_ROOT / ".github" / "routed-drc-tolerance.yml"
-        if not allowlist_path.exists():
-            pytest.skip(f"Allowlist file not found at {allowlist_path}")
-
-        data = yaml.safe_load(allowlist_path.read_text())
-        tolerances = data.get("tolerances", {})
+        data = yaml.safe_load((REPO_ROOT / ".github/routed-drc-tolerance.yml").read_text())
         key = "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb"
-        assert key in tolerances, (
-            f"Board 06 entry {key!r} missing from allowlist {allowlist_path}.  "
-            f"Issue #3740 tightened the floor to 18 (the residual diff-pair "
-            f"coupled-convergence block); if board 06 now reaches 0 the entry "
-            f"should be removed entirely (per the file's policy header) and "
-            f"this test updated."
+        assert key not in (data.get("tolerances") or {}), (
+            "Released board must have no error allowance"
         )
-        allowed = tolerances[key]
-
-        violations = strict_gate_result.get("violations", [])
-        blocking = sum(
-            1
-            for v in violations
-            if isinstance(v, dict)
-            and v.get("severity", "error") == "error"
-            and isinstance(v.get("rule_id", ""), str)
-            and not DRCChecker.is_advisory_rule(v.get("rule_id", ""))
-        )
-        assert blocking <= allowed, (
-            f"Board 06 routed PCB strict-gate blocking-error count "
-            f"({blocking}) exceeds allowlist value ({allowed}) from "
-            f"{allowlist_path.relative_to(REPO_ROOT)}.  This is a routing "
-            f"regression -- revert the offending change or raise the "
-            f"allowlist with reviewer sign-off and a tracking-issue link."
-        )
+        self.test_strict_gate_blocking_count_pinned(strict_gate_result)
 
     def test_advisory_connectivity_pinned(self, strict_gate_result: dict) -> None:
-        """Advisory ``connectivity`` count pinned at 0 (Issue #3914).
-
-        Issue #3413 phases 4-6: all 21 signal nets are routed (the
-        historical USB3_TX1+/USB3_TX1-/MIPI_RST incompletes are gone)
-        and every pour net is GENUINELY one copper component per the
-        copper-union audit (``TestPourCopperUnionAudit``).  The formerly
-        pinned advisory entries were ``NetStatusAnalyzer`` false positives
-        on the GND / +1V2 pour nets -- its per-net model bulk-connected
-        every pad inside a zone boundary and then reported a stitching
-        residual as "partially routed", even though the net owns filled
-        pour copper and kicad-cli reports it clean.  Issue #3914 taught
-        ``ConnectivityRule`` to defer to the pour classification
-        (``has_filled_zone`` + ``is_advisory_incomplete``), so no
-        connectivity violation is emitted for these nets and the advisory
-        count is now 0.  A drift ABOVE 0 means a genuinely-unrouted net
-        regressed -- investigate with the copper-union audit before
-        updating the pin.
-        """
-        violations = strict_gate_result.get("violations", [])
-        connectivity = sum(
-            1 for v in violations if isinstance(v, dict) and v.get("rule_id") == "connectivity"
-        )
-        assert connectivity == self.EXPECTED_ADVISORY_CONNECTIVITY, (
-            f"Advisory connectivity count on the committed routed PCB is "
-            f"{connectivity}; expected {self.EXPECTED_ADVISORY_CONNECTIVITY} "
-            f"(GND + +1V2 pour false positives removed by #3914).  A change "
-            f"here indicates the stitch/repair pipeline gained or lost "
-            f"coverage -- investigate before updating the pin."
-        )
-
-
-# =============================================================================
-# Issue #3413 phase 4: copper-union pour-connectivity audit on the artifact
-# =============================================================================
+        assert not [
+            v for v in strict_gate_result["violations"] if v.get("rule_id") == "connectivity"
+        ]
 
 
 class TestPourCopperUnionAudit:

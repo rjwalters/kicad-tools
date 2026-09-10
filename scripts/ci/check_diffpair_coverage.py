@@ -80,6 +80,9 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from board_recipe_artifacts import recipe_baseline_key, recipe_output_dir  # noqa: E402
+
 # --- shared with check_routed_drc.py ------------------------------------------
 
 DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
@@ -266,6 +269,7 @@ def re_route_board(board_dir: Path, seed: int) -> bool:
     cmd = [
         sys.executable,
         str(script),
+        str(recipe_output_dir(board_dir, prepare=True)),
         "--step",
         "route",
         "--seed",
@@ -285,11 +289,11 @@ def re_route_board(board_dir: Path, seed: int) -> bool:
 def find_routed_pcb(board_dir: Path) -> Path | None:
     """Locate the board's freshly-routed PCB.
 
-    Walks ``board_dir/output`` looking for the canonical
+    Walks the isolated recipe output (or legacy fixture) looking for the canonical
     ``*_routed.kicad_pcb`` artifact emitted by ``generate_design.py``.
     Returns ``None`` if not found (caller emits the error).
     """
-    out = board_dir / "output"
+    out = recipe_output_dir(board_dir)
     if not out.is_dir():
         return None
     candidates = list(out.glob("*_routed.kicad_pcb"))
@@ -723,11 +727,7 @@ def check_board(
 
     # Compute the allowlist key in the same way check_routed_drc.py does:
     # repo-relative path string.
-    try:
-        rel = routed_pcb.resolve().relative_to(Path.cwd())
-        lookup_key = str(rel)
-    except ValueError:
-        lookup_key = str(routed_pcb)
+    lookup_key = recipe_baseline_key(routed_pcb)
     allowed = allowlist.get(lookup_key, 0)
 
     # Two-pass strategy (see docstrings on count_errors_via_kct_check

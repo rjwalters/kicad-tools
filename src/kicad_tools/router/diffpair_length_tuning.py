@@ -339,10 +339,19 @@ def tune_diff_pair_skew(
         # partner trace at the insertion segment's midpoint.
         hint = _outer_normal_hint(insertion_segment, longer_route)
 
+        # A trombone adds twice its amplitude. For a sub-loop deficit,
+        # using the configured maximum (1 mm by default) needlessly adds
+        # 2 mm and can hit a neighboring lane before the DRC guard rejects
+        # it. Scale that final loop to the actual remaining target instead.
+        length_needed = serpentine_target - LengthTracker.calculate_route_length(current_shorter)
+        amplitude = base_config.amplitude
+        if length_needed > 0:
+            amplitude = min(amplitude, length_needed / 2.0)
+
         # Build the per-attempt config with side="outer" + the hint.
         attempt_config = SerpentineConfig(
             style=base_config.style,
-            amplitude=base_config.amplitude,
+            amplitude=amplitude,
             min_spacing=base_config.min_spacing,
             min_segment_length=base_config.min_segment_length,
             gap_factor=base_config.gap_factor,

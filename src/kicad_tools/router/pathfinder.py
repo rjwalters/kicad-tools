@@ -1424,7 +1424,9 @@ class Router:
             return net_class.via_size
         return self.rules.via_diameter
 
-    def _get_pad_metal_bounds(self, pad: Pad) -> tuple[int, int, int, int]:
+    def _get_pad_metal_bounds(
+        self, pad: Pad, trace_width: float | None = None
+    ) -> tuple[int, int, int, int]:
         """Calculate the grid coordinate bounds of a pad's metal area.
 
         This is used to expand goal regions for off-grid pads, ensuring
@@ -1448,6 +1450,10 @@ class Router:
         else:
             effective_width = pad.width
             effective_height = pad.height
+
+        if self.rules.strict_pad_clearance and trace_width is not None:
+            effective_width = max(0.0, effective_width - trace_width)
+            effective_height = max(0.0, effective_height - trace_width)
 
         # Metal area bounds in world coordinates
         metal_x1 = pad.x - effective_width / 2
@@ -3302,9 +3308,11 @@ class Router:
         # Issue #977: Apply same expansion to START pad - if the grid-snapped center
         # falls on a cell blocked by another net's clearance, we need alternate entry points.
         start_metal_gx1, start_metal_gy1, start_metal_gx2, start_metal_gy2 = (
-            self._get_pad_metal_bounds(start)
+            self._get_pad_metal_bounds(start, net_trace_width)
         )
-        end_metal_gx1, end_metal_gy1, end_metal_gx2, end_metal_gy2 = self._get_pad_metal_bounds(end)
+        end_metal_gx1, end_metal_gy1, end_metal_gx2, end_metal_gy2 = self._get_pad_metal_bounds(
+            end, net_trace_width
+        )
 
         # Issue #1618: Precompute geometry-derived pad approach bounds.
         # The approach zone is the pad metal area expanded by a small escape margin
@@ -4902,8 +4910,8 @@ class Router:
                     return None
 
         # Get pad metal bounds for goal checking (Issue #956)
-        start_metal_bounds = self._get_pad_metal_bounds(start)
-        end_metal_bounds = self._get_pad_metal_bounds(end)
+        start_metal_bounds = self._get_pad_metal_bounds(start, net_trace_width)
+        end_metal_bounds = self._get_pad_metal_bounds(end, net_trace_width)
 
         # Heuristic contexts for both directions
         forward_context = HeuristicContext(

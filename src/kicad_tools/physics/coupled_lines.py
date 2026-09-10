@@ -33,6 +33,7 @@ from dataclasses import dataclass
 
 from .constants import SPEED_OF_LIGHT
 from .stackup import Stackup
+from .stripline import stripline_impedance
 from .transmission_line import TransmissionLine
 
 
@@ -294,25 +295,11 @@ class CoupledLines:
         Returns:
             DifferentialPairResult
         """
-        # Total height between planes
-        b = h1 + h2 + t
-
-        # For stripline, epsilon_eff = er (fully embedded)
         eps_eff = er
-
-        # Effective width with thickness correction
-        h_min = min(h1, h2)
-        if t > 0 and h_min > 0:
-            w_eff = w + (t / math.pi) * (1 + math.log(2 * h_min / t))
-        else:
-            w_eff = w
-
-        # Single-ended stripline impedance
-        denominator = 0.67 * math.pi * (0.8 * w_eff + t)
-        if denominator > 0 and b > 0:
-            z0_single = (60 / math.sqrt(er)) * math.log(4 * b / denominator)
-        else:
-            z0_single = 50.0
+        # Use the same finite-thickness, offset-aware single-line geometry
+        # as TransmissionLine. The coupling coefficient below remains an
+        # empirical approximation, not a coupled-conductor field solution.
+        z0_single = stripline_impedance(w, h1, h2, t, er)
 
         # Normalized dimensions for coupling calculation
         # Use effective height (smaller of h1, h2) for coupling

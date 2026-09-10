@@ -562,6 +562,42 @@ def _silk_line(
 
 
 class TestSilkOverlap:
+    def test_joined_outline_corner_is_not_a_collision(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                graphics=[
+                    _silk_line(start=(0, 0), end=(2, 0)),
+                    _silk_line(start=(2, 0), end=(2, 2)),
+                ]
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 0
+
+    def test_collinear_overlap_with_shared_endpoint_still_flags(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                graphics=[
+                    _silk_line(start=(0, 0), end=(2, 0)),
+                    _silk_line(start=(0, 0), end=(1, 0)),
+                ]
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 1
+
+    def test_duplicate_outline_still_flags(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                graphics=[
+                    _silk_line(start=(0, 0), end=(2, 0)),
+                    _silk_line(start=(0, 0), end=(2, 0)),
+                ]
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 1
+
     def test_two_footprints_refdes_overlap_flags(self):
         """Two footprints whose reference fields overlap yield one pair.
 
@@ -976,8 +1012,8 @@ class TestSilkSeverity:
         assert over.violations or edge.violations  # at least one fired
 
 
-# Real-board regression. These boards live under boards/*/output and are
-# checked into the repo, so no KiCad install is required to load them.
+# Historical defect witnesses are frozen under regression-fixture/.
+# Manufacturing output must be allowed to become clean without erasing detector coverage.
 _BOARD_ROOT = "boards"
 
 
@@ -990,7 +1026,7 @@ _BOARD_ROOT = "boards"
         # silk_over_copper detector itself is exercised by the synthetic unit
         # tests above (see the ``silk_over_copper`` section).
         (
-            "05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
+            "05-bldc-motor-controller/regression-fixture/bldc_controller_routed.kicad_pcb",
             "silk_edge_clearance",
         ),
     ],
@@ -1024,13 +1060,13 @@ def test_real_board_regression(rel_path, rule_id):
 # each violation's two items to (silk owner refdes, "<footprint>:<pad>").
 # Before #4612 kct emitted 2/6/4/3 against kicad-cli's 4/12/7/5.
 _KICAD_CLI_SILK_OVER_COPPER_PAIRS: dict[str, set[tuple[str, str]]] = {
-    "03-usb-joystick/output/usb_joystick_routed.kicad_pcb": {
+    "03-usb-joystick/regression-fixture/usb_joystick_routed.kicad_pcb": {
         ("C11", "C10:1"),
         ("C11", "C10:2"),
         ("R11", "R10:1"),
         ("R11", "R10:2"),
     },
-    "05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb": {
+    "05-bldc-motor-controller/regression-fixture/bldc_controller_routed.kicad_pcb": {
         ("C7", "C4:2"),
         ("C8", "C5:1"),
         ("Q1", "R20:1"),
@@ -1044,7 +1080,7 @@ _KICAD_CLI_SILK_OVER_COPPER_PAIRS: dict[str, set[tuple[str, str]]] = {
         ("U10", "U10:29"),
         ("U10", "U10:30"),
     },
-    "06-diffpair-test/output/diffpair_test_routed.kicad_pcb": {
+    "06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb": {
         ("U1", "U1:12"),
         ("U1", "U1:13"),
         ("U2", "U2:A4"),
@@ -1053,7 +1089,7 @@ _KICAD_CLI_SILK_OVER_COPPER_PAIRS: dict[str, set[tuple[str, str]]] = {
         ("U4", "U4:9"),
         ("U4", "U4:10"),
     },
-    "07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb": {
+    "07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb": {
         ("U3", "U3:9"),
         ("U3", "U3:10"),
         ("U4", "U4:A4"),
@@ -1104,7 +1140,7 @@ def test_board_05_u10_names_all_four_straddled_pads():
     import os
 
     path = os.path.join(
-        _BOARD_ROOT, "05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb"
+        _BOARD_ROOT, "05-bldc-motor-controller/regression-fixture/bldc_controller_routed.kicad_pcb"
     )
     if not os.path.exists(path):
         pytest.skip(f"board fixture not present: {path}")

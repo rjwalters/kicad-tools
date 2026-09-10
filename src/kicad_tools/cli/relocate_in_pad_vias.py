@@ -553,9 +553,9 @@ def relocate_in_pad_vias(
         if not candidates:
             continue
 
-        # First same-net pad whose AABB fully contains the via drill.
+        # First same-net pad whose copper overlaps the via drill.
         containing = next(
-            ((fp, pad, bbox) for fp, pad, bbox in candidates if via_inside_pad(via, bbox)),
+            ((fp, pad, bbox) for fp, pad, bbox in candidates if via_inside_pad(via, bbox, pad, fp)),
             None,
         )
         if containing is None:
