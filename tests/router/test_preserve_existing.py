@@ -211,6 +211,10 @@ def _inject_stitch_via(pcb_text: str, *, net: int, x: float, y: float) -> str:
 class TestPreserveExistingCLI:
     """End-to-end CLI behaviour of ``kct route --preserve-existing``."""
 
+    @pytest.fixture
+    def board_text(self):
+        return _composition_board_text()
+
     def test_preserve_keeps_skipped_nets_byte_identical(self, tmp_path, board_text):
         """AC #1/#2: skipped nets keep byte-identical geometry; only LINE_A routes."""
         orig = parse_segments(board_text)
@@ -452,6 +456,10 @@ class TestNameBasedDialectParsing:
 
 class TestPreserveExistingNameBasedCLI:
     """End-to-end: --preserve-existing must round-trip a name-based board."""
+
+    @pytest.fixture
+    def board_text(self):
+        return _composition_board_text()
 
     def test_preserve_keeps_other_nets_on_name_based_board(self, tmp_path, board_text):
         """AC #1: every OTHER net's copper survives a single-net re-route."""
