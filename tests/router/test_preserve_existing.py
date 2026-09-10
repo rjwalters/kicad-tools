@@ -61,7 +61,9 @@ from kicad_tools.router.optimizer.pcb import parse_net_names, parse_segments, pa
 # parsing/serialization rather than a hand-rolled stub.
 _BOARD = (
     Path(__file__).resolve().parents[2]
-    / "boards"
+    / "tests"
+    / "fixtures"
+    / "historical_demo_boards"
     / "02-charlieplex-led"
     / "output"
     / "charlieplex_3x3_routed.kicad_pcb"

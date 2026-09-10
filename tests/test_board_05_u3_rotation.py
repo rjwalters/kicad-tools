@@ -44,7 +44,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BOARD_DIR = REPO_ROOT / "boards" / "05-bldc-motor-controller"
+BOARD_DIR = REPO_ROOT / "tests" / "fixtures" / "historical_demo_boards" / "05-bldc-motor-controller"
 UNROUTED_PCB = BOARD_DIR / "output" / "bldc_controller.kicad_pcb"
 
 # Library-canonical (long-axis-vertical) HTSSOP-56 pad centres, per the

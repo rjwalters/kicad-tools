@@ -83,54 +83,15 @@ def routed_pcb_path() -> Path:
     return ROUTED_PCB
 
 
-# Issue #3527 (2026-06-11): the new ``clearance_segment_zone`` DRC rule
-# (segments vs foreign-net zone *fill* copper) revealed 10 pre-existing
-# stale-fill defects in board 05's committed artifact (6 shorts + 4
-# sub-clearance grazes: SW_OUT/PWM_AL/PWM_BH/GATE_CL/SWDIO vs the
-# +24V/+3V3/GND fills).  These were NOT a routing regression introduced
-# by a code change -- they were always in the copper; the gate simply
-# could not see them before the rule existed.
-#
-# Issue #3553 (2026-06-11) fixed the artifact: the fills were stale
-# (computed before the offending traces existed), so regenerating the
-# zone fills against the final copper (``kct zones fill``, same recipe
-# as board 06 / PR #3548) cleared all 10 findings with zero trace, via,
-# or zone-outline changes.  The allowlist entry was removed, restoring
-# the #3470 strict-0 gate (``None`` = entry absent = 0 blocking errors).
-#
-# Issue #3556 (2026-06-13) re-added a tolerance of 30: the new
-# ``clearance_via_zone`` / ``clearance_pad_zone`` rule (the via/pad
-# sibling of #3527, vias/pads vs foreign-net zone *fill* copper) surfaced
-# 30 pre-existing ``clearance_pad_zone`` defects in the committed artifact
-# (foreign-net pad-vs-pour gaps: PHASE_A/B/C vs GND, +24V vs GND, SWDIO/
-# SWO vs +3V3, ...).  Like the #3527 findings these were always in the
-# copper -- the gate simply could not see pad-vs-fill spacing before the
-# rule existed; #3553-style zone refill against the final placement clears
-# them.  This fixture pins the entry to EXACTLY 30: any other value fails
-# loudly and requires an explicit update here with reviewer sign-off.
-BOARD_05_EXPECTED_TOLERANCE: int | None = 30
+# Issue #5044: the redesigned board landed in d95b6eff with a clean
+# manufacturing check and no tolerance entry. Keep the active board at strict
+# zero; the historical DRV8301 geometry lives in dedicated regression fixtures.
+BOARD_05_EXPECTED_TOLERANCE: int | None = None
 
 
 @pytest.fixture(scope="module")
 def board_05_allowlist_value() -> int:
-    """Resolve board 05's effective allowlist value.
-
-    Issue #3470 (2026-06-10) removed the board-05 ``tolerances:`` entry
-    from ``.github/routed-drc-tolerance.yml`` -- per the file's policy
-    header, the ABSENCE of an entry is the strict 0-blocking-error gate.
-    The single residual blocking violation (ISENSE_A-/ISENSE_B- escape
-    stub overlap on In1.Cu at (18.75, 53.75)) was fixed at the source:
-    conflict-aware in-pad escape stub direction (escape.py) plus the
-    transactional rip-up rollback (negotiated.py ``targeted_ripup``).
-
-    Issue #3527 (2026-06-11) re-added a tolerance of 10 because the new
-    ``clearance_segment_zone`` rule surfaced 10 pre-existing stale-fill
-    defects in the committed artifact (tracked in Issue #3553 -- see
-    ``BOARD_05_EXPECTED_TOLERANCE`` above).  This fixture pins the entry
-    to EXACTLY that value: any other value (loosening beyond 10, or a
-    stale entry after #3553 fixes the artifact) fails loudly and requires
-    an explicit update to this test with reviewer sign-off.
-    """
+    """Require the retired tolerance to remain absent (strict zero errors)."""
     if not ALLOWLIST_PATH.exists():
         pytest.skip(f"Allowlist file not found at {ALLOWLIST_PATH!s}")
 
@@ -298,22 +259,5 @@ class TestBoard05DRCAllowlistGuard:
         )
 
     def test_allowlist_value_matches_documented_floor(self, board_05_allowlist_value: int) -> None:
-        """The allowlist value is sane (>= 0 and not absurdly large).
-
-        Sanity check on the YAML parse.  If the allowlist accidentally
-        gets bumped to 1000 by a botched merge, the upper-bound assertion
-        in :meth:`test_routed_drc_error_count_at_or_below_allowlist`
-        would silently pass even with serious routing damage.  This test
-        catches the "allowlist itself regressed" case.
-
-        The 200 upper bound is generous (the highest value across all
-        boards in the file is 120 for board 07 after Issue #3556 added the
-        via/pad-vs-zone-fill rule) but tight enough to flag a typo like
-        530 vs 53.
-        """
-        assert 0 <= board_05_allowlist_value <= 200, (
-            f"Board 05 allowlist value {board_05_allowlist_value} is "
-            f"outside the expected 0..200 range.  If a routing regression "
-            f"genuinely requires loosening above 200, update this test's "
-            f"sanity bound in the same PR."
-        )
+        """The redesigned active board must retain its strict-zero gate."""
+        assert board_05_allowlist_value == 0

@@ -2658,9 +2658,7 @@ class PCB:
                     if item.is_atom and item.value == "addsublayer":
                         layers.append(layer)
                         sublayer += 1
-                        layer = StackupLayer(
-                            name=f"{name} (sublayer {sublayer})", type=layer_type
-                        )
+                        layer = StackupLayer(name=f"{name} (sublayer {sublayer})", type=layer_type)
                     elif item.tag == "thickness":
                         layer.thickness = item.get_float(0) or 0.0
                     elif item.tag == "material":

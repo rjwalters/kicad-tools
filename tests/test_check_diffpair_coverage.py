@@ -238,14 +238,17 @@ class TestAllowlistLoading:
         mod = _load_helper_module()
         data = mod.load_allowlist(ALLOWLIST_PATH)
         assert isinstance(data, dict)
-        # Today board 06 IS in the allowlist (28 errors); curator notes
-        # the eventual goal is to remove it once #2672 and #2677 close.
-        # Pin the schema, not the value: the value can change as the
-        # baseline tightens.
+        # The real board-06 release retired its allowance in the 2026-09-10
+        # readiness audit; historical routing witnesses are separate fixtures.
         key = "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb"
-        assert key in data
-        assert isinstance(data[key], int)
-        assert data[key] >= 0
+        assert data.get(key, 0) == 0
+
+    def test_load_explicit_nonzero_allowance(self, tmp_path):
+        """Retired release allowances must not remove loader coverage."""
+        mod = _load_helper_module()
+        path = tmp_path / "tolerance.yml"
+        path.write_text("tolerances:\n  boards/fixture/output/routed.kicad_pcb: 18\n")
+        assert mod.load_allowlist(path) == {"boards/fixture/output/routed.kicad_pcb": 18}
 
     def test_missing_file_returns_empty(self, tmp_path):
         mod = _load_helper_module()
