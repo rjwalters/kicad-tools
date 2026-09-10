@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.20.0",
-  "generated_at": "2026-09-10T18:38:12.085360+00:00",
+  "generated_at": "2026-09-10T18:52:16.898251+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "HARDWARE.md": {
@@ -33,8 +33,8 @@
       "size": 1085
     },
     "design-source.zip": {
-      "sha256": "8bce26a7328f113d720f4a71b7cbdbb0daa55bfa85bb86693d1e462c6d1da9e6",
-      "size": 24624
+      "sha256": "5ecddea2d8690ea8b53af265b15835c4636539d5a601b8cac33c0bb30cd5f184",
+      "size": 25023
     },
     "fill-consistency.json": {
       "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",

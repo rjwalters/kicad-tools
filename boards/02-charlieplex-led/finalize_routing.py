@@ -15,11 +15,10 @@ from kicad_tools.router.quantize import quantize_pcb_file
 from kicad_tools.sexp import parse_file, serialize_sexp
 
 
-def finalize_routing(path: Path) -> bool:
-    pcb = parse_file(path)
+def _relocate_escapes(pcb):
+    """Repair reviewed escape variants, moving only their own net endpoints."""
     moves = {
         (154.385, 117.5): (156.8, 117.5),  # C1 GND escape, outside pad courtyard
-        (140.665, 117.3): (139.2, 115.5),  # R5 VCC escape, above the resistor
         # Keep the complete drill/annulus clear of SMT copper (issue #5012).
         (133.1, 113.5): (133.4, 112.8),  # LINE_A
         (148.1, 85.5): (148.4, 85.5),  # NODE_A
@@ -31,15 +30,44 @@ def finalize_routing(path: Path) -> bool:
         (158.9, 95.5): (158.6, 95.5),  # NODE_D
         (148.1, 95.5): (148.4, 95.5),  # NODE_D
         (157.1, 105.9): (156.7, 105.9),  # NODE_D
-        (141.1, 118.1): (140.9, 118.5),  # RESET
     }
+    # Linux seed-42 routing chooses adjacent escape grid cells at R5. Both
+    # observed variants need the same reviewed destinations. Net qualification
+    # prevents an unrelated endpoint at the same coordinate from moving.
+    net_names = {net.get_int(0): net.get_string(1) for net in pcb.find_children("net")}
+    r5_moves = {
+        ("VCC", (140.665, 117.3)): (139.2, 115.5),
+        ("VCC", (140.665, 117.2)): (139.2, 115.5),
+        ("RESET", (141.1, 118.1)): (140.9, 118.5),
+        ("RESET", (141.4, 117.7)): (140.9, 118.5),
+    }
+    # Only a present via activates a relocation. Quantization can create a
+    # track-only waypoint at an old escape cell; moving it on a second pass
+    # would distort an already repaired route.
+    active_moves = {}
+    for via in pcb.find_all("via"):
+        net = via.find("net")
+        net_name = net_names.get(net.get_int(0), net.get_string(0)) if net else None
+        point = via.find("at")
+        old = tuple(round(point.get_float(i), 3) for i in range(2))
+        destination = r5_moves.get((net_name, old), moves.get(old))
+        if destination is not None:
+            active_moves[net_name, old] = destination
     for item in pcb.find_all("segment") + pcb.find_all("via"):
+        net = item.find("net")
+        net_name = net_names.get(net.get_int(0), net.get_string(0)) if net else None
         for key in ("at",) if item.name == "via" else ("start", "end"):
             point = item.find(key)
             old = tuple(round(point.get_float(i), 3) for i in range(2))
-            if old in moves:
-                for i, value in enumerate(moves[old]):
+            destination = active_moves.get((net_name, old))
+            if destination is not None:
+                for i, value in enumerate(destination):
                     point.set_value(i, value)
+
+
+def finalize_routing(path: Path) -> bool:
+    pcb = parse_file(path)
+    _relocate_escapes(pcb)
     path.write_text(serialize_sexp(pcb))
     # Endpoint relocations preserve connectivity but can skew attached tracks.
     # Restore exact 45-degree geometry before the independent native DRC gate.

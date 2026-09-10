@@ -49,8 +49,8 @@
       "size": 107415
     },
     "design-source/manufacturing_process.py": {
-      "sha256": "9b32f1d5f2bcf29a4a14c2f2b6bf78a9578ff298315d14d0baaaf1a29be282c3",
-      "size": 8632
+      "sha256": "72a88b1c0cd2f28876544ca4e200326d190fdd4b7a64b93c187d66145ef214f9",
+      "size": 10439
     },
     "design-source/project.kct": {
       "sha256": "ab100511243df8b8a25dd5e094e15d7ab57240d3c60b14ca16bf32bc94592702",
@@ -105,11 +105,11 @@
       "size": 323
     },
     "native-drc.json": {
-      "sha256": "bd150e9819bac035222ab2129c856f4f25475a56ecca469408c65745a28a38e4",
+      "sha256": "1c3fdb121409fd362ba09c3c42bd39e784a3a8856f42b2eaa93039935a5ec1d5",
       "size": 1213
     },
     "native-erc.json": {
-      "sha256": "d8aae125bd31da73493206b940dcf905d118f33cd7bba48883636387a6fe815b",
+      "sha256": "fd040b4e217a1a750d69f8dc0647f15dbdf5fa0619320573e347246f1a74f18c",
       "size": 987
     },
     "procurement-review.md": {
