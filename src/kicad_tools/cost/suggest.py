@@ -655,6 +655,12 @@ class PartSuggester:
 
             # Take top suggestions
             suggestion.suggestions = candidates[: self.max_suggestions]
+            if not suggestion.suggestions and results.coverage in {"offline", "incomplete"}:
+                from ..parts.lcsc import LCSCUnavailableError
+
+                raise LCSCUnavailableError(
+                    "No matching candidates in partial search coverage; catalog absence is not verified"
+                )
             if suggestion.suggestions:
                 suggestion.best_suggestion = suggestion.suggestions[0]
 
@@ -665,9 +671,10 @@ class PartSuggester:
                 PARTS_INSTALL_HINT,
                 LCSCDependencyMissingError,
                 LCSCForbiddenError,
+                LCSCUnavailableError,
             )
 
-            if isinstance(e, LCSCForbiddenError):
+            if isinstance(e, (LCSCForbiddenError, LCSCUnavailableError)):
                 raise
 
             # An ImportError here means the optional ``parts`` extra

@@ -20,7 +20,9 @@ from typing import TYPE_CHECKING, Literal
 
 from .cache import PartsCache
 from .models import (
+    BatchLookupResult,
     BOMAvailability,
+    LookupResult,
     PackageType,
     Part,
     PartAvailability,
@@ -71,7 +73,36 @@ PARTS_INSTALL_HINT = (
 PARTS_DOWNLOAD_INSTALL_HINT = PARTS_EXTRA_INSTALL_HINT
 
 
-class LCSCForbiddenError(Exception):
+class LCSCUnavailableError(RuntimeError):
+    """No authoritative answer is available; this is not catalog absence.
+
+    Batch failures retain successfully resolved parts in ``partial_results``.
+    Diagnostics contain source/error types and codes, never raw server bodies.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        partial_results: dict[str, Part] | None = None,
+        unavailable_parts: set[str] | None = None,
+    ):
+        super().__init__(message)
+        self.partial_results = partial_results or {}
+        self.unavailable_parts = unavailable_parts or set()
+
+
+def _source_failure(source: str, error: BaseException) -> str:
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    suffix = f" (HTTP {status})" if isinstance(status, int) else ""
+    code = getattr(error, "code", None)
+    if isinstance(code, int):
+        suffix += f" (code {code})"
+    detail = f": {error}" if isinstance(error, LCSCUnavailableError) else ""
+    return f"{source}: {type(error).__name__}{suffix}{detail}"
+
+
+class LCSCForbiddenError(LCSCUnavailableError):
     """Raised when the JLCPCB API returns 403 Forbidden.
 
     This indicates the API is globally unavailable (e.g. authentication
@@ -529,133 +560,112 @@ class LCSCClient:
         return None
 
     def lookup(self, lcsc_part: str, bypass_cache: bool = False) -> Part | None:
+        """Return a part or verified live no-match; raise on incomplete absence.
+
+        Use :meth:`lookup_result` for explicit cache/offline coverage. Offline
+        hits remain useful identity matches, not current inventory verification.
         """
-        Look up a single part by LCSC number.
+        result = self.lookup_result(lcsc_part, bypass_cache=bypass_cache)
+        if result.status in {"unavailable", "offline_miss"}:
+            raise LCSCUnavailableError(
+                f"Lookup unavailable for {lcsc_part}; catalog absence is not verified. "
+                + "; ".join(result.diagnostics)
+            )
+        return result.part
 
-        Resolution order: local response cache -> official JLCPCB open-platform
-        API (only when BYO keys are present, issue #4118) -> live JLCPCB scrape
-        API -> offline jlcparts catalog. The official tier is a silent no-op
-        without the three credential env vars, so the keyless path is
-        byte-for-byte unchanged. The catalog is only consulted when the higher
-        tiers are unavailable (403 circuit breaker, network error, or the
-        ``requests`` extra is not installed) and a synced catalog exists.
-
-        Args:
-            lcsc_part: LCSC part number (e.g., "C123456")
-            bypass_cache: If True, always fetch from API
-
-        Returns:
-            Part if found, None otherwise
-
-        Raises:
-            LCSCDependencyMissingError: If the ``requests`` extra is missing
-                *and* no offline catalog is available. Subclasses
-                ``ImportError``, so callers that historically caught the bare
-                ``ImportError`` (no offline fallback configured) still work.
-        """
-        # Normalize part number
+    def lookup_result(self, lcsc_part: str, bypass_cache: bool = False) -> LookupResult:
+        """Resolve a part with explicit source coverage and safe diagnostics."""
         lcsc_part = lcsc_part.upper()
         if not lcsc_part.startswith("C"):
             lcsc_part = f"C{lcsc_part}"
-
-        # Check cache first
         if self.cache and not bypass_cache:
             cached = self.cache.get(lcsc_part)
             if cached:
-                logger.debug(f"Cache hit for {lcsc_part}")
-                return cached
-
+                return LookupResult(
+                    cached, "cache", "found", ["Cached observation; not a live lookup"]
+                )
         catalog = self._get_catalog()
-
-        # Tier 0: official JLCPCB open-platform API (only when BYO keys are
-        # present -- see issue #4118). Silent no-op without keys/deps, so the
-        # keyless path below is byte-for-byte unchanged.
+        diagnostics: list[str] = []
+        verified_miss = False
         official = self._get_official_client()
         if official is not None:
             try:
                 found = official.get_component_detail_by_codes([lcsc_part])
-            except Exception as e:
-                # Auth/quota/whitelist/network failure -- log the actionable
-                # message and fall through to the anonymous / offline tiers.
-                logger.warning(f"Official JLCPCB API lookup failed for {lcsc_part}: {e}")
+            except Exception as exc:
+                diagnostics.append(_source_failure("official", exc))
             else:
-                official_part = found.get(lcsc_part.upper())
-                if official_part is not None:
+                part = found.get(lcsc_part)
+                if part is not None:
                     if self.cache:
-                        self.cache.put(official_part)
-                    return official_part
-
-        # If requests is unavailable, the live API cannot be reached. Preserve
-        # the historical (Import)Error only when there is no offline fallback.
+                        self.cache.put(part)
+                    return LookupResult(part, "official", "found", diagnostics)
+                verified_miss = True
         if not _requests_installed():
             if catalog is None or not catalog.available:
+                if verified_miss:
+                    return LookupResult(None, "official", "not_found", diagnostics)
                 raise LCSCDependencyMissingError(PARTS_INSTALL_HINT)
+            diagnostics.append("anonymous: optional requests dependency unavailable")
         else:
-            # Fetch from live API (authoritative for freshness/pricing).
-            part: Part | None = None
             try:
                 part = self._fetch_part(lcsc_part)
-            except Exception as e:
-                # 403 circuit breaker (LCSCForbiddenError) or other API failure
-                # -- fall through to the offline catalog rather than giving up.
-                logger.warning(f"Live API lookup failed for {lcsc_part}: {e}")
-
-            if part is not None:
-                if self.cache:
-                    self.cache.put(part)
-                return part
-
-        # Live API unavailable / miss -- try the offline jlcparts catalog.
-        if catalog is not None:
-            catalog_part = catalog.lookup(lcsc_part)
-            if catalog_part is not None:
-                logger.debug(f"Offline catalog hit for {lcsc_part}")
-                if self.cache:
-                    self.cache.put(catalog_part)
-                return catalog_part
-
-        return None
+            except Exception as exc:
+                diagnostics.append(_source_failure("anonymous", exc))
+            else:
+                if part is not None:
+                    if self.cache:
+                        self.cache.put(part)
+                    return LookupResult(part, "anonymous", "found", diagnostics)
+                verified_miss = True
+        if catalog is not None and catalog.available:
+            try:
+                part = catalog.lookup(lcsc_part)
+            except Exception as exc:
+                diagnostics.append(_source_failure("offline", exc))
+            else:
+                diagnostics.append("Offline catalog coverage only; current inventory not verified")
+                if part is not None:
+                    if self.cache:
+                        self.cache.put(part)
+                    return LookupResult(part, "offline", "found", diagnostics)
+                if not verified_miss:
+                    return LookupResult(None, "offline", "offline_miss", diagnostics)
+        if verified_miss:
+            return LookupResult(None, "live", "not_found", diagnostics)
+        diagnostics.append(
+            "Retry the live service or configure the official API; sync-catalog provides partial offline coverage"
+        )
+        return LookupResult(None, "none", "unavailable", diagnostics)
 
     def _fetch_part(
         self,
         lcsc_part: str,
         _failures: list[tuple[str, str]] | None = None,
     ) -> Part | None:
-        """Fetch part from JLCPCB API.
+        """Fetch a part; only a successful empty envelope returns None.
 
-        Args:
-            lcsc_part: LCSC part number to fetch.
-            _failures: Optional collector for deferred live-API failures. When a
-                list is supplied, a transport-level failure (e.g. a 404 from a
-                drifted endpoint) appends ``(part, reason)`` here instead of
-                emitting a per-part warning, so the caller can summarize the
-                situation once after the offline-catalog fallback runs. The log
-                is demoted to ``debug`` because the failure is transparently
-                handled by that fallback (see issue #4299).
+        Transport and business failures propagate to the source orchestrator.
+        ``_failures`` remains accepted for compatibility with existing adapters;
+        lookup_many now records failures at its orchestration boundary.
         """
-        import requests
-
         payload = {"componentCode": lcsc_part}
 
-        try:
-            data = self._make_request(PART_LOOKUP_URL, payload)
-        except requests.RequestException as e:
-            logger.debug(f"API request failed for {lcsc_part}: {e}")
-            if _failures is not None:
-                _failures.append((lcsc_part, str(e)))
+        data = self._make_request(PART_LOOKUP_URL, payload)
+        if not isinstance(data, dict) or data.get("code") != 200:
+            code = data.get("code") if isinstance(data, dict) else None
+            safe_code = code if isinstance(code, int) else "invalid"
+            raise LCSCUnavailableError(
+                f"Anonymous detail business response unavailable (code {safe_code})"
+            )
+        if "data" not in data:
+            raise LCSCUnavailableError("Anonymous detail response is missing data")
+        component = data["data"]
+        if component is None or component == {}:
             return None
-
-        if data is None:
-            return None
-
-        # Check for success
-        if data.get("code") != 200:
-            logger.debug(f"API returned error for {lcsc_part}: {data.get('message')}")
-            return None
-
-        component = data.get("data")
-        if not component:
-            return None
+        if not isinstance(component, dict) or component.get("componentCode") != lcsc_part:
+            raise LCSCUnavailableError(
+                "Anonymous detail response has malformed or mismatched identity"
+            )
 
         return self._parse_component(component)
 
@@ -767,48 +777,50 @@ class LCSCClient:
 
         try:
             data = self._make_request(SEARCH_URL, payload)
-        except LCSCForbiddenError:
-            # 403 circuit breaker -- fall through to the offline catalog rather
-            # than propagating the error, when a catalog is available.
+            if not isinstance(data, dict) or data.get("code") != 200:
+                code = data.get("code") if isinstance(data, dict) else None
+                safe_code = code if isinstance(code, int) else "invalid"
+                raise LCSCUnavailableError(
+                    f"Anonymous search business response unavailable (code {safe_code})"
+                )
+            result_data = data.get("data")
+            if not isinstance(result_data, dict) or "componentPageInfo" not in result_data:
+                raise LCSCUnavailableError("Anonymous search response is missing result coverage")
+            page_info = result_data["componentPageInfo"] or {}
+            if not isinstance(page_info, dict):
+                raise LCSCUnavailableError("Anonymous search response is malformed")
+            components = page_info.get("list") or []
+            total = page_info.get("total") or 0
+            if not isinstance(components, list) or not isinstance(total, int):
+                raise LCSCUnavailableError("Anonymous search result list/count is malformed")
+        except (LCSCForbiddenError, LCSCUnavailableError, _request_exception_type()) as exc:
+            diagnostic = _source_failure("anonymous", exc)
             if catalog is not None and catalog.available:
-                logger.warning("Live search API 403'd -- falling back to offline catalog")
-                return self._catalog_search(query, page, page_size, in_stock, package, catalog)
-            raise
-        except _request_exception_type() as e:
-            logger.error(f"Search request failed: {e}")
-            # Other network failure -- fall through to the offline catalog when
-            # available, else preserve the historical empty-result behavior.
-            if catalog is not None and catalog.available:
-                logger.warning("Live search API failed -- falling back to offline catalog")
-                return self._catalog_search(query, page, page_size, in_stock, package, catalog)
-            return SearchResult(query=query)
-
-        if data is None or data.get("code") != 200:
-            message = data.get("message") if data else "Unknown error"
-            logger.warning(f"Search API returned error: {message}")
-            return SearchResult(query=query)
-
-        result_data = data.get("data") or {}
-        # The live JLCPCB API returns the keys present but explicitly null for a
-        # no-match query (e.g. "componentPageInfo": {"list": null, "total": 0}).
-        # dict.get(key, default) only substitutes the default when the key is
-        # ABSENT, not when it is present-but-null, so use `... or {}` / `... or []`
-        # to coerce explicit null. A genuine no-match then flows through the
-        # existing unmatched path instead of raising 'NoneType' is not iterable.
-        page_info = result_data.get("componentPageInfo") or {}
-        components = page_info.get("list") or []
-        total = page_info.get("total") or 0
+                result = self._catalog_search(query, page, page_size, in_stock, package, catalog)
+                result.diagnostics.insert(0, diagnostic)
+                return result
+            if isinstance(exc, LCSCForbiddenError):
+                raise
+            raise LCSCUnavailableError(
+                "Parts search unavailable; no-match is not verified. "
+                + diagnostic
+                + ". Retry the live service or use sync-catalog for partial offline coverage."
+            ) from exc
 
         parts = []
+        parse_failures = 0
         for comp in components:
             try:
                 part = self._parse_component(comp)
+                if not part.lcsc_part:
+                    raise ValueError("Missing catalog identity")
                 parts.append(part)
                 # Cache search results
                 if self.cache:
                     self.cache.put(part)
             except Exception as e:
-                logger.warning(f"Failed to parse component: {e}")
+                parse_failures += 1
+                logger.debug("Failed to parse component: %s", type(e).__name__)
                 continue
 
         return SearchResult(
@@ -817,6 +829,11 @@ class LCSCClient:
             total_count=total,
             page=page,
             page_size=page_size,
+            source="anonymous",
+            coverage="incomplete" if parse_failures else "live",
+            diagnostics=[f"{parse_failures} unparseable results; coverage incomplete"]
+            if parse_failures
+            else [],
         )
 
     def _catalog_search(
@@ -838,12 +855,17 @@ class LCSCClient:
         confidence re-ranking).
         """
         min_stock = 1 if in_stock else 0
-        parts = catalog.search(
-            query,
-            package=package,
-            min_stock=min_stock,
-            limit=max(page_size * 5, page_size),
-        )
+        try:
+            parts = catalog.search(
+                query,
+                package=package,
+                min_stock=min_stock,
+                limit=max(page_size * 5, page_size),
+            )
+        except Exception as exc:
+            raise LCSCUnavailableError(
+                "Offline search unavailable: " + _source_failure("offline", exc)
+            ) from exc
         if self.cache:
             for part in parts:
                 self.cache.put(part)
@@ -853,13 +875,18 @@ class LCSCClient:
             total_count=len(parts),
             page=page,
             page_size=page_size,
+            source="offline",
+            coverage="offline",
+            diagnostics=[
+                "Offline snapshot coverage only; current inventory and catalog absence are not verified"
+            ],
         )
 
     def lookup_many(
         self,
         lcsc_parts: list[str],
         bypass_cache: bool = False,
-    ) -> dict[str, Part]:
+    ) -> BatchLookupResult:
         """
         Look up multiple parts.
 
@@ -873,26 +900,33 @@ class LCSCClient:
             bypass_cache: If True, always fetch from API
 
         Returns:
-            Dict mapping part numbers to Parts
+            Part mapping with per-part sources and diagnostics.
 
         Raises:
+            LCSCUnavailableError: Unresolved IDs have incomplete source coverage;
+                partial_results retains resolved parts.
             LCSCDependencyMissingError: If the ``requests`` extra is missing
                 *and* no offline catalog is available. Subclasses
                 ``ImportError`` for backward compatibility.
         """
         if not lcsc_parts:
-            return {}
+            return BatchLookupResult()
 
         # Normalize part numbers
         parts = [p.upper() if p.upper().startswith("C") else f"C{p.upper()}" for p in lcsc_parts]
 
-        result = {}
+        result = BatchLookupResult()
+        verified_misses: set[str] = set()
+        source_diagnostics: list[str] = []
 
         # Check cache first
         if self.cache and not bypass_cache:
             cached = self.cache.get_many(parts)
             result.update(cached)
+            result.sources.update(dict.fromkeys(cached, "cache"))
             parts = [p for p in parts if p not in cached]
+        if not parts:
+            return result
 
         catalog = self._get_catalog()
 
@@ -904,15 +938,20 @@ class LCSCClient:
             try:
                 found = official.get_component_detail_by_codes(parts)
             except Exception as e:
-                logger.warning(f"Official JLCPCB API batch lookup failed: {e}")
+                source_diagnostics.append(_source_failure("official batch", e))
+                logger.warning(source_diagnostics[-1])
             else:
+                verified_misses.update(p for p in parts if p not in found)
                 for part_num in parts:
                     official_part = found.get(part_num.upper())
                     if official_part is not None:
                         result[part_num] = official_part
+                        result.sources[part_num] = "official"
                         if self.cache:
                             self.cache.put(official_part)
                 parts = [p for p in parts if p not in result]
+        if not parts:
+            return result
 
         # Live-API failures are deferred here and summarized once below, rather
         # than logged per-part: when the offline catalog then resolves the part
@@ -933,21 +972,34 @@ class LCSCClient:
                     # hammering the API and fall back to the offline catalog for
                     # the rest. Every remaining part would hit the same wall, so
                     # record them all and defer the log to the summary below.
-                    logger.debug(f"Live API lookup failed for {part_num}: {e}")
-                    live_failures.extend((p, str(e)) for p in parts[i:])
+                    logger.debug(
+                        "Live API lookup failed for %s: %s",
+                        part_num,
+                        _source_failure("anonymous", e),
+                    )
+                    live_failures.extend((p, _source_failure("anonymous", e)) for p in parts[i:])
                     break
+                if part is None:
+                    verified_misses.add(part_num)
                 if part:
                     result[part_num] = part
+                    result.sources[part_num] = "anonymous"
                     if self.cache:
                         self.cache.put(part)
 
         # Fill any still-missing parts from the offline jlcparts catalog.
         missing = [p for p in parts if p not in result]
         if missing and catalog is not None:
-            for part_num, part in catalog.lookup_many(missing).items():
-                result[part_num] = part
-                if self.cache:
-                    self.cache.put(part)
+            try:
+                offline_parts = catalog.lookup_many(missing)
+            except Exception as exc:
+                live_failures.extend((p, _source_failure("offline", exc)) for p in missing)
+            else:
+                for part_num, part in offline_parts.items():
+                    result[part_num] = part
+                    result.sources[part_num] = "offline"
+                    if self.cache:
+                        self.cache.put(part)
 
         # Summarize any live-API failures in a single line. If the catalog
         # covered them the failure is transparently handled (one WARNING so the
@@ -966,6 +1018,21 @@ class LCSCClient:
                 details.append(f"{len(unresolved)} unresolved ({preview})")
             logger.warning(f"Live JLC API unavailable ({reason}); " + "; ".join(details))
 
+        result.diagnostics = source_diagnostics + list(
+            dict.fromkeys(reason for _, reason in live_failures)
+        )
+        if "offline" in result.sources.values():
+            result.diagnostics.append("Offline snapshot coverage; current inventory not verified")
+        unavailable = set(parts) - result.keys() - verified_misses
+        if unavailable:
+            raise LCSCUnavailableError(
+                "Batch lookup unavailable for "
+                + ", ".join(sorted(unavailable))
+                + "; offline misses are not catalog absence. "
+                + "; ".join(result.diagnostics),
+                partial_results=result,
+                unavailable_parts=unavailable,
+            )
         return result
 
     def check_bom(
@@ -990,7 +1057,12 @@ class LCSCClient:
                 lcsc_parts.append(item.lcsc)
 
         # Fetch all parts
-        parts_map = self.lookup_many(list(set(lcsc_parts)), bypass_cache=bypass_cache)
+        unavailable: set[str] = set()
+        try:
+            parts_map = self.lookup_many(list(set(lcsc_parts)), bypass_cache=bypass_cache)
+        except LCSCUnavailableError as exc:
+            parts_map = exc.partial_results
+            unavailable = exc.unavailable_parts
 
         # Build availability results
         results = []
@@ -1014,7 +1086,11 @@ class LCSCClient:
                 avail.in_stock = part.in_stock
                 avail.quantity_available = part.stock
             else:
-                avail.error = "Part not found"
+                avail.error = (
+                    "Lookup unavailable; catalog absence not verified"
+                    if lcsc.upper() in unavailable
+                    else "Part not found"
+                )
 
             results.append(avail)
 

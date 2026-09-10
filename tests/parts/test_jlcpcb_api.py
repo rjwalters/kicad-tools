@@ -510,7 +510,11 @@ def test_lcsc_search_never_uses_official(monkeypatch):
     with (
         mock.patch.dict("sys.modules", {"requests": requests_stub}),
         mock.patch.object(lcsc_mod, "_requests_installed", return_value=True),
-        mock.patch.object(client, "_make_request", return_value=None),
+        mock.patch.object(
+            client,
+            "_make_request",
+            return_value={"code": 200, "data": {"componentPageInfo": {"list": [], "total": 0}}},
+        ),
     ):
         client.search("100nF 0402")
     fake_official.get_component_detail_by_codes.assert_not_called()

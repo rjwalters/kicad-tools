@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from kicad_tools.parts.cache import PartsCache
+from kicad_tools.parts.lcsc import LCSCUnavailableError
 from kicad_tools.parts.models import (
     BOMAvailability,
     PackageType,
@@ -739,8 +740,7 @@ class TestLCSCClientExtended:
     def test_lookup_api_error(self, tmp_path):
         """Test handling of API errors.
 
-        ``_fetch_part`` raises, so ``lookup`` swallows the error and returns
-        ``None``. ``use_local_catalog=False`` keeps this deterministic even when
+        ``_fetch_part`` raises, so ``lookup`` reports unavailable. ``use_local_catalog=False`` keeps this deterministic even when
         a real jlcparts catalog is synced on the test machine (#4132) --
         otherwise the offline fallback would resolve the part and break the
         assertion.
@@ -753,8 +753,8 @@ class TestLCSCClientExtended:
         with patch("kicad_tools.parts.lcsc.LCSCClient._fetch_part") as mock_fetch:
             mock_fetch.side_effect = Exception("Network error")
 
-            part = client.lookup("C123456")
-            assert part is None
+            with pytest.raises(LCSCUnavailableError):
+                client.lookup("C123456")
 
     def test_lookup_many(self, tmp_path):
         """Test lookup_many method."""
@@ -809,8 +809,7 @@ class TestLCSCClientExtended:
     def test_search_error_handling(self, tmp_path):
         """Test search error handling.
 
-        A generic RequestException with no offline catalog returns an empty
-        result (unchanged). ``use_local_catalog=False`` keeps this deterministic
+        A generic RequestException with no offline catalog reports unavailable. ``use_local_catalog=False`` keeps this deterministic
         even when a real catalog is synced on the test machine (#4126).
         """
         with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
@@ -823,9 +822,8 @@ class TestLCSCClientExtended:
             cache = PartsCache(db_path=tmp_path / "cache.db")
             client = LCSCClient(cache=cache, use_local_catalog=False)
 
-            results = client.search("test")
-            assert len(results.parts) == 0
-            assert results.total_count == 0
+            with pytest.raises(LCSCUnavailableError):
+                client.search("test")
 
     def test_search_api_error_code(self, tmp_path):
         """Test search with non-200 API response."""
@@ -838,10 +836,10 @@ class TestLCSCClientExtended:
             from kicad_tools.parts import LCSCClient, PartsCache
 
             cache = PartsCache(db_path=tmp_path / "cache.db")
-            client = LCSCClient(cache=cache)
+            client = LCSCClient(cache=cache, use_local_catalog=False)
 
-            results = client.search("test")
-            assert len(results.parts) == 0
+            with pytest.raises(LCSCUnavailableError):
+                client.search("test")
 
     def test_search_with_filters(self, tmp_path):
         """Test search with in_stock and basic_only filters."""
@@ -1100,9 +1098,8 @@ class TestLCSCClientAdditional:
             from kicad_tools.parts import LCSCClient
 
             client = LCSCClient(use_cache=False)
-            part = client._fetch_part("C123456")
-
-            assert part is None
+            with pytest.raises(LCSCUnavailableError):
+                client._fetch_part("C123456")
 
     def test_fetch_part_request_exception(self, tmp_path):
         """Test _fetch_part with request exception."""
@@ -1114,9 +1111,8 @@ class TestLCSCClientAdditional:
             from kicad_tools.parts import LCSCClient
 
             client = LCSCClient(use_cache=False)
-            part = client._fetch_part("C123456")
-
-            assert part is None
+            with pytest.raises(requests.RequestException):
+                client._fetch_part("C123456")
 
     def test_lookup_caches_result(self, tmp_path):
         """Test that lookup stores result in cache."""
@@ -1677,7 +1673,8 @@ class TestLCSCLiveApiFailureNoise:
         assert "resolved from the offline catalog" in summaries[0].message
         # The old per-part message is demoted to DEBUG, not gone entirely.
         assert any(
-            r.levelname == "DEBUG" and "API request failed for" in r.message for r in caplog.records
+            r.levelname == "DEBUG" and "Live API lookup failed for" in r.message
+            for r in caplog.records
         )
 
     def test_403_falls_back_quietly_with_catalog(self, tmp_path, caplog):
@@ -1721,7 +1718,9 @@ class TestLCSCLiveApiFailureNoise:
         err = requests.RequestException("C232604: 404 Client Error for selectSmtComponentDetail")
         with patch.object(client, "_make_request", side_effect=err):
             with caplog.at_level(logging.DEBUG, logger="kicad_tools.parts.lcsc"):
-                result = client.lookup_many(["C1"])
+                with pytest.raises(LCSCUnavailableError) as failure:
+                    client.lookup_many(["C1"])
+                result = failure.value.partial_results
 
         # Nothing resolved -- and the user is told, once, with the part visible.
         assert result == {}
