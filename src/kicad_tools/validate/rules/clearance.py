@@ -149,8 +149,8 @@ class CopperElement:
         if self.polygon is None or abs(width - height) < 0.001:
             width = height = max(width, height)
         bounds = (x - width / 2, y - height / 2, x + width / 2, y + height / 2)
-        if self.polygon is not None and not self.polygon.is_empty:
-            px1, py1, px2, py2 = self.polygon.bounds
+        if self.polygon is not None and not self.polygon.is_empty:  # type: ignore[attr-defined]
+            px1, py1, px2, py2 = self.polygon.bounds  # type: ignore[attr-defined]
             bounds = (
                 min(bounds[0], px1),
                 min(bounds[1], py1),

@@ -20,8 +20,8 @@ def candidate_pairs(bounds: Sequence[Bounds], margin: float) -> Iterator[tuple[i
     if not has_shapely():
         yield from combinations(range(len(bounds)), 2)
         return
-    from shapely import STRtree
-    from shapely.geometry import box
+    from shapely import STRtree  # type: ignore[import-untyped]
+    from shapely.geometry import box  # type: ignore[import-untyped]
 
     tree = STRtree([box(*bound) for bound in bounds])
     for i, (xmin, ymin, xmax, ymax) in enumerate(bounds):
