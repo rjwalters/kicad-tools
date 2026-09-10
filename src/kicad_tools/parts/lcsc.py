@@ -798,7 +798,7 @@ class LCSCClient:
                 components = []
             if not isinstance(components, list) or total < len(components):
                 raise LCSCUnavailableError("Anonymous search result list/count is malformed")
-            if not components and total > (page - 1) * page_size:
+            if not components and total > (page - 1) * min(page_size, 100):
                 raise LCSCUnavailableError("Anonymous search page is unexpectedly empty")
         except (LCSCForbiddenError, LCSCUnavailableError, _request_exception_type()) as exc:
             diagnostic = _source_failure("anonymous", exc)
@@ -1072,6 +1072,7 @@ class LCSCClient:
                 lcsc_parts.append(item.lcsc)
 
         # Fetch all parts
+        parts_map: dict[str, Part]
         unavailable: set[str] = set()
         try:
             parts_map = self.lookup_many(list(set(lcsc_parts)), bypass_cache=bypass_cache)

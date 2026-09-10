@@ -21,7 +21,10 @@ the snapshot did not resolve it. Neither a cached response nor an offline result
 verifies current inventory. Query coverage is separate from the part's original
 stock observation timestamp and provenance; this change does not refresh them.
 The optional dependency error remains `LCSCDependencyMissingError` when neither
-the requests capability nor an offline fallback is available.
+the requests capability nor an offline fallback is available. It remains an
+`ImportError` and also subclasses `LCSCUnavailableError`, carrying partial batch
+results and unresolved IDs so consumers preserve cached prices and mark unknown
+availability explicitly.
 
 Search returns a `SearchResult` with `source`, `coverage` (`live`, `offline`, or
 `incomplete`; `unknown` for externally constructed legacy results), and

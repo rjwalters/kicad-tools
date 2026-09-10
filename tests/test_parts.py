@@ -895,13 +895,8 @@ class TestLCSCClientExtended:
             assert result.parts == []
             assert result.total_count == 0
 
-    def test_search_null_component_page_info_returns_empty(self, tmp_path):
-        """``componentPageInfo: null`` must also coerce to an empty result.
-
-        Regression for #4407: guarding only the inner ``list`` key would still
-        raise ``AttributeError`` on ``None.get("list")`` if the whole
-        ``componentPageInfo`` object comes back null.
-        """
+    def test_search_null_component_page_info_is_unavailable(self, tmp_path):
+        """Missing page coverage is unavailable, rather than a false no-match."""
         with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
             mock_resp = MagicMock()
             mock_resp.json.return_value = {
@@ -911,14 +906,12 @@ class TestLCSCClientExtended:
             mock_resp.raise_for_status = MagicMock()
             mock_session.return_value.post.return_value = mock_resp
 
-            from kicad_tools.parts import LCSCClient
+            from kicad_tools.parts import LCSCClient, LCSCUnavailableError
 
             client = LCSCClient(use_cache=False, use_local_catalog=False)
 
-            result = client.search("PinHeader_1x02")
-
-            assert result.parts == []
-            assert result.total_count == 0
+            with pytest.raises(LCSCUnavailableError):
+                client.search("PinHeader_1x02")
 
     def test_context_manager(self, tmp_path):
         """Test LCSCClient as context manager."""
