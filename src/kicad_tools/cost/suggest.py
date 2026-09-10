@@ -389,7 +389,10 @@ def parse_component_value(value: str, reference: str = "") -> ParsedValue:
                 num = float(match.group(1))
                 multiplier = match.group(2).upper() if match.group(2) else ""
 
-                if multiplier == "K":
+                if match.group(2) == "m" and match.group(3):
+                    # Explicit mΩ/mOhm denotes milli, not the legacy M shorthand.
+                    num *= 1e-3
+                elif multiplier == "K":
                     num *= 1000
                 elif multiplier == "M":
                     num *= 1_000_000

@@ -87,3 +87,9 @@ def test_annotation_warning_is_visible_in_both_cli_json_formats(capsys):
     assert json.loads(capsys.readouterr().out)["suggestions"][0]["warnings"]
     _suggest_json(result, result.suggestions)
     assert json.loads(capsys.readouterr().out)["suggestions"][0]["warnings"]
+
+
+def test_structured_milliohm_value_matches_inline_decimal_request():
+    result, _ = suggest("0R5", part("Cright", "resistor", value="500mΩ"))
+    assert result.best_suggestion is not None
+    assert result.best_suggestion.lcsc_part == "Cright"
