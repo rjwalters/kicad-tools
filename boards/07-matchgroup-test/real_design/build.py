@@ -15,6 +15,8 @@ import json
 import shutil
 from pathlib import Path
 
+from kicad_tools.router.quantize import segment_angle_census
+
 ROOT = Path(__file__).resolve().parent
 
 
@@ -45,6 +47,11 @@ def build(output: Path) -> dict:
     source_builder.build(output)
     candidate = output / "sdram_demo_routed.kicad_pcb"
     shutil.copy2(fixture / "sdram_demo.kicad_pcb", candidate)
+    # Hash identity and electrical validation complement the fleet angle policy.
+    # Check both shared escape source and routing before any release evidence.
+    for pcb in (output / "sdram_demo.kicad_pcb", candidate):
+        if segment_angle_census(pcb)[1]:
+            raise RuntimeError(f"Reviewed source contains off-angle copper: {pcb}")
     evidence = output / "validation"
     if not validator.check(candidate, output, evidence):
         raise RuntimeError(f"Reviewed routing failed fresh validation; inspect {evidence}")

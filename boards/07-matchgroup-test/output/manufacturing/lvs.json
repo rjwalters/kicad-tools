@@ -1,0 +1,9 @@
+{
+  "$schema": "https://kicad-tools.org/schemas/lvs/v1.json",
+  "clean": true,
+  "mismatches": [],
+  "copper_mismatches": [],
+  "copper_vacuous": false,
+  "copper_bound_pad_count": 216,
+  "netlist_vacuous": false
+}
