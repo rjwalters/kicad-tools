@@ -41,6 +41,11 @@ def board(tmp_path):
 
 
 def test_export_preserves_reviewed_floors_in_project_zip(monkeypatch, board):
+    recipe = load_recipe()
+    schematic = board.parent / "stm32_devboard.kicad_sch"
+    shutil.copy2(BOARD / "output/stm32_devboard.kicad_sch", schematic)
+    recipe.write_portable_symbols(schematic)
+
     def export(package, output_dir):
         # Exercise the export's actual constraint writer if enabled, then its
         # actual ZIP writer. Rendering/assembly are independent of this bug.
@@ -52,9 +57,11 @@ def test_export_preserves_reviewed_floors_in_project_zip(monkeypatch, board):
         return result
 
     monkeypatch.setattr(ManufacturingPackage, "export", export)
-    assert load_recipe().generate_manufacturing(board, board.parent)
+    assert recipe.generate_manufacturing(board, board.parent)
     with zipfile.ZipFile(board.parent / "manufacturing/kicad_project.zip") as archive:
         project = json.loads(archive.read("stm32_devboard_routed.kicad_pro"))
+        for name in ("board04_symbols.kicad_sym", "kicad_tools_pwr.kicad_sym", "sym-lib-table"):
+            assert archive.read(name) == (board.parent / name).read_bytes()
     rules = project["board"]["design_settings"]["rules"]
     assert rules["min_via_hole"] == 0.15
     assert rules["min_via_diameter"] == 0.30
@@ -88,3 +95,37 @@ def test_paid_gate_reports_failure_from_json_when_stderr_empty(monkeypatch, tmp_
     monkeypatch.setattr(gate.subprocess, "run", check)
     with pytest.raises(RuntimeError, match="STALE"):
         gate._run_paid_drill_check(tmp_path / "board.kicad_pcb")
+
+
+def test_portable_capacitor_preserves_cached_symbol_and_instance_fields(tmp_path):
+    from kicad_tools.sexp import parse_file, serialize_sexp
+
+    recipe = load_recipe()
+    schematic = tmp_path / "stm32_devboard.kicad_sch"
+    shutil.copy2(BOARD / "output/stm32_devboard.kicad_sch", schematic)
+    before = parse_file(schematic)
+    # Exercise a stock binding even once the committed artifact is portable.
+    for symbol in before.find_child("lib_symbols").find_children("symbol"):
+        if symbol.get_string(0).endswith(":C_Small"):
+            symbol.set_atom(0, "Device:C_Small")
+    for symbol in before.find_children("symbol"):
+        if symbol.find_child("lib_id").get_string(0).endswith(":C_Small"):
+            symbol.find_child("lib_id").set_atom(0, "Device:C_Small")
+    schematic.write_text(serialize_sexp(before))
+    recipe.write_portable_symbols(schematic)
+    after = parse_file(schematic)
+    for symbol in after.find_child("lib_symbols").find_children("symbol"):
+        if symbol.get_string(0) == "board04_symbols:C_Small":
+            cached = serialize_sexp(symbol)
+            symbol.set_atom(0, "Device:C_Small")
+    for symbol in after.find_children("symbol"):
+        if symbol.find_child("lib_id").get_string(0) == "board04_symbols:C_Small":
+            symbol.find_child("lib_id").set_atom(0, "Device:C_Small")
+    assert serialize_sexp(after) == serialize_sexp(before)
+    local = parse_file(tmp_path / "board04_symbols.kicad_sym").find_child("symbol")
+    local.set_atom(0, "board04_symbols:C_Small")
+    assert serialize_sexp(local) == cached
+    assert "${KIPRJMOD}/board04_symbols.kicad_sym" in (tmp_path / "sym-lib-table").read_text()
+    content = schematic.read_bytes()
+    recipe.write_portable_symbols(schematic)
+    assert schematic.read_bytes() == content
