@@ -1,5 +1,5 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5044/boards/02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
   "layers": 2,
   "summary": {
@@ -87,17 +87,17 @@
     "schematic_missing": false
   },
   "routing_quality": {
-    "total_segments": 440,
+    "total_segments": 452,
     "nets_with_copper": 12,
-    "segments_per_net": 36.666666666666664,
+    "segments_per_net": 37.666666666666664,
     "zero_length_count": 0,
     "median_length_mm": 0.14142135623732155,
-    "fragment_count": 270,
-    "fragment_fraction": 0.6136363636363636,
-    "orthogonal_count": 99,
-    "diagonal_45_count": 329,
-    "off_axis_count": 12,
-    "staircase_step_count": 2,
-    "staircase_fraction": 0.004545454545454545
+    "fragment_count": 274,
+    "fragment_fraction": 0.6061946902654868,
+    "orthogonal_count": 111,
+    "diagonal_45_count": 341,
+    "off_axis_count": 0,
+    "staircase_step_count": 4,
+    "staircase_fraction": 0.008849557522123894
   }
 }

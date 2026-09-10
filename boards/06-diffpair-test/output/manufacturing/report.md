@@ -20,7 +20,7 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 36 (33 SMD, 3 THT, 0 other) |
 | Nets | 18 |
-| Traces | 188 segments |
+| Traces | 196 segments |
 | Vias | 63 |
 | Board Size | 90.0 x 70.0 mm |
 
@@ -63,7 +63,7 @@ The following 3 through-hole components are **excluded from the SMT pick-and-pla
 | Errors | 0 |
 | Warnings | 0 |
 
-**Status**: PASSED -- independent native ERC: zero errors and warnings.
+**Status**: SKIPPED -- ERC skipped by user request
 
 
 \newpage

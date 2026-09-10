@@ -1120,6 +1120,36 @@ class TestAppendDecision:
         assert after_second[: len(after_first)] == after_first
         assert [d["topic"] for d in after_second[-2:]] == ["FIRST", "SECOND"]
 
+    @pytest.mark.parametrize("indent", ["", "  "])
+    def test_preserves_block_sequence_indentation_and_comments(self, tmp_path, indent):
+        from kicad_tools.spec import append_decision
+
+        original = (
+            'kct_version: "1.0"\nproject:\n  name: "T"\n'
+            "decisions:\n"
+            f"{indent}- date: '2026-01-01'\n"
+            f"{indent}  topic: First\n{indent}  choice: A\n{indent}  rationale: R1\n"
+            "# Preserve the comment between decisions.\n"
+            f"{indent}- topic: Second\n{indent}  choice: B\n{indent}  rationale: R2\n"
+        )
+        suffix = "\n# Preserve the next section.\nprogress:\n  phase: concept\n"
+        path = tmp_path / "p.kct"
+        path.write_text(original + suffix, encoding="utf-8")
+
+        append_decision(path, self._decision())
+
+        updated = path.read_text(encoding="utf-8")
+        before = yaml.safe_load(original + suffix)
+        after = yaml.safe_load(updated)
+        assert after == {
+            **before,
+            "decisions": [*before["decisions"], after["decisions"][-1]],
+        }
+        assert [d["topic"] for d in after["decisions"]] == ["First", "Second", "PROBE"]
+        assert updated.startswith(original)
+        assert updated.endswith(suffix)
+        assert updated[len(original) : -len(suffix)].startswith(f"{indent}- ")
+
     def test_creates_the_list_when_no_decisions_key_exists(self, tmp_path):
         from kicad_tools.spec import append_decision
 
@@ -1205,25 +1235,6 @@ class TestAppendDecision:
     # comparison in ``append_decision`` can catch them. Each entry is
     # (source text, topics the splice alone would have written).
     _UNSPLICEABLE_SHAPES = {
-        # A column-0 comment terminates the block scan early, so the entry is
-        # inserted *between* the two existing decisions instead of after them.
-        "comment_inside_block": (
-            'kct_version: "1.0"\n'
-            "project:\n"
-            '  name: "T"\n'
-            "decisions:\n"
-            "  - topic: First\n"
-            "    choice: A\n"
-            "    rationale: R1\n"
-            "# column-0 comment inside the decisions block\n"
-            "  - topic: Second\n"
-            "    choice: B\n"
-            "    rationale: R2\n"
-            "progress:\n"
-            "  phase: concept\n",
-            ["First", "PROBE", "Second"],
-            ["First", "Second", "PROBE"],
-        ),
         # A quoted key misses the top-level-key regex, so the splice starts a
         # *second* ``decisions:`` block; pyyaml resolves the duplicate
         # last-wins and the pre-existing entry disappears silently.
@@ -1246,7 +1257,7 @@ class TestAppendDecision:
     def test_unfaithful_splice_falls_back_to_a_structural_rewrite(self, shape, tmp_path):
         """A splice that parses but says the wrong thing must never be written.
 
-        ``_splice_decision`` returns text for both of these shapes and that text
+        ``_splice_decision`` returns text for this shape and that text
         is valid YAML, so nothing but the ``reparsed != expected`` comparison in
         :func:`append_decision` detects that it is wrong. Deleting that guard
         makes this test fail.

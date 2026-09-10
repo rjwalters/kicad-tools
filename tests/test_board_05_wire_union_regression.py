@@ -33,7 +33,13 @@ from kicad_tools.schematic.models.schematic import Schematic
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_05_SCH = (
-    REPO_ROOT / "boards" / "05-bldc-motor-controller" / "output" / "bldc_controller.kicad_sch"
+    REPO_ROOT
+    / "tests"
+    / "fixtures"
+    / "historical_demo_boards"
+    / "05-bldc-motor-controller"
+    / "output"
+    / "bldc_controller.kicad_sch"
 )
 
 
