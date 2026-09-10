@@ -513,3 +513,25 @@ def test_through_via_bonds_pads_legitimately():
     """
     board = _blind_via_board(via_layers='"F.Cu" "B.Cu"')
     assert _status(board, "SIG", strict=True) == "complete"
+
+
+@pytest.mark.parametrize(
+    "endpoint_y,track_layer,expected",
+    [(19.8, "F.Cu", "complete"), (19.4, "F.Cu", "incomplete"), (19.8, "B.Cu", "incomplete")],
+)
+def test_off_center_pad_trace_via_pour_bond(endpoint_y, track_layer, expected):
+    """A real pad-edge landing reaches the plane; a gap or wrong layer cannot."""
+    board = _lone_pour_pad_board()
+    # Only U1 moves to the front. Its pad spans y=19.7..20.3; the back
+    # plane is reached through an off-center front trace and through-via.
+    start = board.index('  (footprint "Package_QFP:LQFP-48"')
+    end = board.index("  (segment", start)
+    board = board[:start] + board[start:end].replace("B.Cu", "F.Cu") + board[end:]
+    extra = f'''
+  (segment (start 30 {endpoint_y}) (end 30 18) (width 0.15)
+    (layer "{track_layer}") (net 1) (uuid "off-center"))
+  (via (at 30 18) (size 0.6) (drill 0.3)
+    (layers "F.Cu" "B.Cu") (net 1) (uuid "stitch"))
+'''
+    board = board.rstrip()[:-1] + extra + ")"
+    assert _status(board, "GND", strict=True) == expected

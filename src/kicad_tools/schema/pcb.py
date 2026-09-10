@@ -5250,8 +5250,8 @@ class PCB:
         # New footprints need the same pad write-through links as loaded
         # footprints (#5049). Use parser order, not pad numbers: shield and
         # NPTH pads may share a number or have no number at all.
-        for pad, node in zip(footprint.pads, fp_sexp.find_all("pad"), strict=True):
-            object.__setattr__(pad, "_sexp_node", node)
+        for pad_obj, pad_node in zip(footprint.pads, fp_sexp.find_all("pad"), strict=True):
+            object.__setattr__(pad_obj, "_sexp_node", pad_node)
 
         self._footprints.append(footprint)
 
