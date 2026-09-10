@@ -64,7 +64,9 @@ def finalize_routing(path: Path) -> bool:
         check=True,
     )
     data = json.loads(report.read_text())
-    clean = not data["violations"] and not data["unconnected_items"] and not data["schematic_parity"]
+    clean = (
+        not data["violations"] and not data["unconnected_items"] and not data["schematic_parity"]
+    )
     if not clean:
         print(json.dumps(data, indent=2), file=sys.stderr)
     from kicad_tools.schema.pcb import PCB
