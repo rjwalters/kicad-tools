@@ -333,6 +333,8 @@ def _first_offpad_signal_candidate(
     tht_pads: list[ThtPad],
     min_clearance: float,
     min_hole_to_hole: float,
+    stub_layers: list[str] | None = None,
+    stub_width: float = 0.2,
 ) -> tuple[float, float] | None:
     """Find the first clearance-safe off-pad location for a **signal** via.
 
@@ -368,6 +370,13 @@ def _first_offpad_signal_candidate(
             if (
                 _check_clearance(
                     pcb, via, nx, ny, pads_by_net, tht_pads, min_clearance, min_hole_to_hole
+                )
+                is not None
+            ):
+                continue
+            if (
+                _check_stub_clearance(
+                    pcb, via, (nx, ny), stub_layers or [], stub_width, min_clearance
                 )
                 is not None
             ):
@@ -506,6 +515,145 @@ def _check_clearance(
     return None
 
 
+def _check_stub_clearance(
+    pcb: PCB,
+    via: Via,
+    target: tuple[float, float],
+    stub_layers: list[str],
+    stub_width: float,
+    min_clearance: float,
+) -> str | None:
+    """Validate the entire swept copper of a proposed set of straight stubs.
+
+    Centerline distances include both conductors' radii, avoiding polygonal
+    approximations of round caps. Pad AABBs conservatively include rotations.
+    Net zero is physical copper, never a same-net exemption. Existing zone
+    fills are checked on their actual layers; native DRC with refill remains
+    required because an outline cannot predict future poured copper.
+
+    Copper drawings / arcs and custom-pad primitives are not modeled by this
+    relocator. Refuse moves on their layers rather than silently ignoring them.
+    """
+    from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
+
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    path = LineString([via.position, target])
+    radius = stub_width / 2.0
+    layers = set(stub_layers)
+    copper_layers = [layer.name for layer in pcb.copper_layers]
+
+    def overlaps(item_layers: list[str]) -> bool:
+        return (
+            bool(layers.intersection(item_layers))
+            or ("*.Cu" in item_layers and bool(layers))
+            or ("F&B.Cu" in item_layers and bool(layers & {"F.Cu", "B.Cu"}))
+        )
+
+    def foreign(net: int) -> bool:
+        return net == 0 or net != via.net_number
+
+    def too_close(shape, other_radius: float = 0.0) -> bool:
+        return bool(path.distance(shape) - radius - other_radius < min_clearance - 1e-6)
+
+    for seg in pcb.segments:
+        if seg.layer in layers and foreign(seg.net_number):
+            if too_close(LineString([seg.start, seg.end]), seg.width / 2.0):
+                return f"stub clearance to track on {seg.layer}, net {seg.net_number}"
+
+    for other in pcb.vias:
+        if other is via or not foreign(other.net_number):
+            continue
+        # KiCad records the endpoints of a blind/buried span, not every layer.
+        span = list(other.layers)
+        if len(span) >= 2 and all(layer in copper_layers for layer in span):
+            indices = [copper_layers.index(layer) for layer in span]
+            span = copper_layers[min(indices) : max(indices) + 1]
+        if overlaps(span) and too_close(Point(other.position), other.size / 2.0):
+            return f"stub clearance to via on net {other.net_number}"
+
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if not foreign(pad.net_number) or not overlaps(pad.layers):
+                continue
+            if pad.shape == "custom":
+                return f"stub clearance unproven for custom pad {fp.reference}-{pad.number}"
+            if too_close(box(*pad_absolute_bbox(pad, fp))):
+                return f"stub clearance to pad {fp.reference}-{pad.number}"
+
+    for zone in pcb.zones:
+        if not foreign(zone.net_number):
+            continue
+        for index, points in enumerate(zone.filled_polygons):
+            if zone.filled_polygon_layer(index) not in layers:
+                continue
+            solid = ConnectivityValidator._fill_solid_region(points)
+            if solid is not None and too_close(solid):
+                return f"stub clearance to filled zone on {zone.filled_polygon_layer(index)}"
+
+    # Inspect source nodes too: routed arcs and copper text are not represented
+    # by pcb.segments. Unknown copper cannot be treated as empty space.
+    for node in pcb._sexp.children:
+        if node.is_atom:
+            continue
+        nodes = node.children if node.name in ("footprint", "module") else [node]
+        for item in nodes:
+            if item.is_atom or not (
+                item.name in ("arc", "property", "dimension")
+                or (item.name or "").startswith(("gr_", "fp_"))
+            ):
+                continue
+            layer_node = item.find("layer")
+            layer = layer_node.get_string(0) if layer_node is not None else ""
+            if layer in layers:
+                return f"stub clearance unproven for {item.name} on {layer}"
+
+    return None
+
+
+def _persist_via_with_stubs(
+    pcb: PCB,
+    via: Via,
+    target: tuple[float, float],
+    stub_layers: list[str],
+    stub_width: float,
+    net_name: str,
+) -> bool:
+    """Commit a validated move and its copper, rolling back failed writes.
+
+    Preserve object identities used by the caller's remaining worklist and
+    footprint bindings. A false relocate_via result still changes Via.position,
+    so restore that explicitly. No stubs are emitted until persistence works.
+    """
+    import copy
+
+    old_position = via.position
+    old_children = list(pcb._sexp.children)
+    old_segments = list(pcb._segments)
+    via_positions = [
+        (at, copy.deepcopy(at.children))
+        for node in old_children
+        if not node.is_atom and node.name == "via"
+        if (at := node.find("at")) is not None
+    ]
+    committed = False
+    try:
+        if not pcb.relocate_via(via, target):
+            return False
+        for layer in stub_layers:
+            pcb.add_trace(old_position, target, width=stub_width, layer=layer, net=net_name or None)
+        committed = True
+        return True
+    finally:
+        if not committed:
+            pcb._sexp.children[:] = old_children
+            pcb._segments[:] = old_segments
+            for at, children in via_positions:
+                at.children[:] = children
+            via.position = old_position
+            pcb._invalidate_dedup_keys()
+
+
 def relocate_in_pad_vias(
     pcb: PCB,
     design_rules: DesignRules,
@@ -531,6 +679,13 @@ def relocate_in_pad_vias(
         as *skipped* and left untouched (an already-routed board is never made
         worse).
     """
+    if dry_run:
+        import copy
+
+        # Later candidates must see earlier planned vias AND their stubs.
+        # Simulating the normal mutation path also keeps reports equivalent.
+        return relocate_in_pad_vias(copy.deepcopy(pcb), design_rules, nets=nets)
+
     result = RelocationResult()
 
     # Capability gate: a no-op on profiles that support via-in-pad.
@@ -674,6 +829,18 @@ def relocate_in_pad_vias(
         )
         _, far = escape
 
+        # Layers needing a connectivity stub: the pad's copper layer (pad->via
+        # path) plus every connected segment's layer (route->via path).
+        stub_layers: list[str] = []
+        seen_layers: set[str] = set()
+        for layer in [_pad_copper_layer(pad), *(seg.layer for seg, _ in connected)]:
+            if layer and layer not in seen_layers:
+                seen_layers.add(layer)
+                stub_layers.append(layer)
+
+        # Stub width: the escape track's width (fall back to a sane default).
+        stub_width = escape[0].width if escape[0].width > 0 else 0.2
+
         if _dist_point_to_aabb(far[0], far[1], bbox) <= 1e-6:
             # Gap A (Phase 3): no connected branch leaves the pad boundary, so
             # there is no single reliable slide direction (multi-branch fan-out
@@ -683,7 +850,15 @@ def relocate_in_pad_vias(
             # does.  The via is reported unresolvable only when no clearing
             # off-pad location exists (boxed in) -- never mis-placed.
             target = _first_offpad_signal_candidate(
-                pcb, via, bbox, pads_by_net, tht_pads, min_clearance, min_hole_to_hole
+                pcb,
+                via,
+                bbox,
+                pads_by_net,
+                tht_pads,
+                min_clearance,
+                min_hole_to_hole,
+                stub_layers,
+                stub_width,
             )
             if target is None:
                 result.unresolvable.append(
@@ -752,31 +927,28 @@ def relocate_in_pad_vias(
                 )
                 continue
 
-        # Layers needing a connectivity stub: the pad's copper layer (pad->via
-        # path) plus every connected segment's layer (route->via path).
-        stub_layers: list[str] = []
-        seen_layers: set[str] = set()
-        for layer in [_pad_copper_layer(pad), *(seg.layer for seg, _ in connected)]:
-            if layer and layer not in seen_layers:
-                seen_layers.add(layer)
-                stub_layers.append(layer)
-
-        # Stub width: the escape track's width (fall back to a sane default).
-        stub_width = escape[0].width if escape[0].width > 0 else 0.2
+        reason = _check_stub_clearance(
+            pcb, via, (new_x, new_y), stub_layers, stub_width, min_clearance
+        )
+        if reason is not None:
+            result.unresolvable.append(
+                ViaRelocationSkip(
+                    x=vx,
+                    y=vy,
+                    net=via.net_number,
+                    net_name=net_name,
+                    pad_ref=pad_ref,
+                    reason=reason,
+                    uuid=via.uuid,
+                    category="unresolvable",
+                )
+            )
+            continue
 
         if not dry_run:
-            # Add stubs from the old (in-pad) location to the new via location
-            # on each connected layer BEFORE moving the via, so connectivity is
-            # continuous at every step.  No existing copper is mutated.
-            for layer in stub_layers:
-                pcb.add_trace(
-                    (vx, vy),
-                    (new_x, new_y),
-                    width=stub_width,
-                    layer=layer,
-                    net=net_name or None,
-                )
-            moved_ok = pcb.relocate_via(via, (new_x, new_y))
+            moved_ok = _persist_via_with_stubs(
+                pcb, via, (new_x, new_y), stub_layers, stub_width, net_name
+            )
             if not moved_ok:
                 # Could not find the backing S-expression node -- record as
                 # unresolvable rather than claiming a move that will not persist.
