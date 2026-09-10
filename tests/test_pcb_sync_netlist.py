@@ -2934,10 +2934,11 @@ class TestGetBoardOutlineGrPoly:
         assert outline, "gr_poly outline should not return an empty list"
         xs = [pt[0] for pt in outline]
         ys = [pt[1] for pt in outline]
-        assert min(xs) == pytest.approx(116.5)
-        assert max(xs) == pytest.approx(181.5)
-        assert min(ys) == pytest.approx(100.0)
-        assert max(ys) == pytest.approx(175.0)
+        assert pcb.board_origin == (116.5, 100.0)
+        assert min(xs) == pytest.approx(0.0)
+        assert max(xs) == pytest.approx(65.0)
+        assert min(ys) == pytest.approx(0.0)
+        assert max(ys) == pytest.approx(75.0)
 
     def test_gr_curve_outline_returns_nonempty_polygon(self, tmp_path):
         """A gr_curve Edge.Cuts outline also contributes its vertex chain."""
@@ -2949,7 +2950,7 @@ class TestGetBoardOutlineGrPoly:
   (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
   (net 0 "")
   (gr_curve
-    (pts (xy 10 10) (xy 40 5) (xy 70 10) (xy 70 60) (xy 10 60))
+    (pts (xy 10 10) (xy 40 5) (xy 70 10) (xy 70 60))
     (stroke (width 0.1) (type default))
     (layer "Edge.Cuts")
     (uuid "curve-1")
@@ -2964,8 +2965,8 @@ class TestGetBoardOutlineGrPoly:
 
         assert outline, "gr_curve outline should not return an empty list"
         xs = [pt[0] for pt in outline]
-        assert min(xs) == pytest.approx(10.0)
-        assert max(xs) == pytest.approx(70.0)
+        assert min(xs) == pytest.approx(0.0)
+        assert max(xs) == pytest.approx(60.0)
 
     def test_get_board_edge_position_uses_gr_poly_outline(self, tmp_path):
         """Staging position is derived from the gr_poly outline, not (0, 0)."""
@@ -2978,8 +2979,9 @@ class TestGetBoardOutlineGrPoly:
 
         x, y = _get_board_edge_position(pcb)
 
-        # Staged 10mm to the right of the outline's max_x (181.5), not at origin.
-        assert x == pytest.approx(191.5)
+        # Staging uses board-relative coordinates, 10mm beyond the 65mm outline.
+        assert x == pytest.approx(75.0)
+        assert x + pcb.board_origin[0] == pytest.approx(191.5)
         assert (x, y) != (0.0, 0.0)
 
 
@@ -2999,7 +3001,7 @@ class TestOutlineBboxHelpers:
 
         assert bbox is not None
         min_x, min_y, max_x, max_y = bbox
-        assert (min_x, min_y, max_x, max_y) == pytest.approx((116.5, 100.0, 181.5, 175.0))
+        assert (min_x, min_y, max_x, max_y) == pytest.approx((0.0, 0.0, 65.0, 75.0))
 
     def test_outline_bbox_none_when_no_outline(self, tmp_path):
         """_outline_bbox returns None when no Edge.Cuts geometry exists."""
