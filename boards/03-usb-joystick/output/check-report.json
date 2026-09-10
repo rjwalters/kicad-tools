@@ -1,5 +1,5 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5044/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
@@ -67,10 +67,10 @@
       "rule_id": "diffpair_length_skew",
       "type": "diffpair_length_skew",
       "severity": "info",
-      "message": "Engaged differential pair USB_D+/USB_D- length-skew 0.197 mm within tolerance 0.500 mm",
+      "message": "Engaged differential pair USB_D+/USB_D- length-skew 0.166 mm within tolerance 0.500 mm",
       "location": null,
       "layer": null,
-      "actual_value": 0.1966,
+      "actual_value": 0.1657,
       "required_value": 0.5,
       "items": [],
       "nets": [
@@ -101,10 +101,10 @@
       "rule_id": "diffpair_routing_continuity",
       "type": "diffpair_routing_continuity",
       "severity": "info",
-      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- coupled 73.5% of its length (>= 70.0% required)",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- coupled 73.0% of its length (>= 70.0% required)",
       "location": null,
       "layer": null,
-      "actual_value": 0.7355,
+      "actual_value": 0.7296,
       "required_value": 0.7,
       "items": [],
       "nets": [
@@ -118,10 +118,10 @@
       "rule_id": "diffpair_routing_continuity",
       "type": "diffpair_routing_continuity",
       "severity": "info",
-      "message": "Engaged differential pair USB_D+/USB_D- coupled 31.1% of its length (>= 25.0% required)",
+      "message": "Engaged differential pair USB_D+/USB_D- coupled 34.2% of its length (>= 25.0% required)",
       "location": null,
       "layer": null,
-      "actual_value": 0.3106,
+      "actual_value": 0.3425,
       "required_value": 0.25,
       "items": [],
       "nets": [
@@ -151,10 +151,10 @@
       "netlist_vacuous": false
     },
     "manifest": {
-      "status": "FAILED",
-      "detail": "STALE: routed PCB is 3492093.8s newer than manifest.json"
+      "status": "PASSED",
+      "detail": "manifest.json mtime within tolerance of routed PCB mtime"
     },
-    "overall": "FAILED",
+    "overall": "PASSED",
     "schematic_missing": false
   },
   "fabrication_overrides": {
@@ -166,12 +166,12 @@
   },
   "usb_geometry": {
     "lengths_mm": {
-      "USB_D+": 15.071732959284686,
-      "USB_D-": 15.26829121195474,
-      "USB_MCU_D+": 3.5352272242640455,
-      "USB_MCU_D-": 3.5352272242640455
+      "USB_D+": 15.3633648891664,
+      "USB_D-": 15.52905031411567,
+      "USB_MCU_D+": 3.563528137423848,
+      "USB_MCU_D-": 3.563528137423848
     },
     "common_coupled_mm": 4.711269837220797,
-    "branch_skew_mm": 0.19655825267005334
+    "branch_skew_mm": 0.1656854249492703
   }
 }
