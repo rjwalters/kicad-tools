@@ -37,14 +37,18 @@ def test_real_driver_current_comparator_and_power(hardware):
     assert parts["U2"].nets["29"] == parts["U3"].nets["9"] == "GND"
 
 
-def test_all_parts_have_exact_procurement_and_physical_pins(hardware):
+def test_all_parts_have_exact_procurement_and_physical_pins(hardware, tmp_path):
     parts = hardware.parts()
     assert len(parts) == 42
     assert len({part.ref for part in parts}) == 42
     assert all(part.mpn and part.lcsc[0] == "C" and part.lcsc[1:].isdigit() for part in parts)
     pcb = hardware.build_pcb()
+    path = tmp_path / "board.kicad_pcb"
+    pcb.save(path)
+    pcb = PCB.load(path)
     for part in parts:
         fp = pcb.get_footprint(part.ref)
+        assert fp.name == part.footprint, part.ref
         actual = {pad.number: pad.net_name for pad in fp.pads if pad.number in part.nets}
         assert actual == part.nets, part.ref
     assert pcb.get_footprint("U1").name.endswith("TQFP-32_7x7mm_P0.8mm")
@@ -59,6 +63,11 @@ def test_reference_copper_rejects_a_changed_real_net(tmp_path, hardware):
     routing.apply_routing(path)
     assert routing.geometry_fingerprint(path) == original
     assert PCB.load(path).segments
+    from kicad_tools.router.quantize import segment_angle_census
+
+    assert not segment_angle_census(path)[1], (
+        "Reviewed copper must preserve the fleet 45-degree policy"
+    )
     hardware.build_pcb().save(path)
     changed = PCB.load(path)
     changed.assign_net_to_footprint_pad("U2", "12", "GND")

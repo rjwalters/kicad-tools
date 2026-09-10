@@ -249,7 +249,9 @@ target-version = "py310"
 # repo source -- ruff's markdown formatting on them just gets clobbered by
 # the next resync (#4895, #4930, #4938, #4940, #4950), breaking `main` CI
 # repeatedly. Exclude the vendored surface instead of re-formatting it.
-extend-exclude = [".claude", ".loom"]
+# Manufacturing bundles contain immutable, hash-bound source snapshots. Format
+# the source recipes, not the archived copies used to reproduce a release.
+extend-exclude = [".claude", ".loom", "boards/*/output/manufacturing"]
 
 [tool.ruff.lint]
 select = [

@@ -1,14 +1,14 @@
 {
   "scope": "Authored front-side package escape paths only; this measures deviations, not a transient SI pass.",
-  "max_escape_length_mm": 5.1083824337013075,
+  "max_escape_length_mm": 5.11989898732233,
   "clock_escapes": [
     {
       "ref": "U2",
-      "length_mm": 4.545544879967412
+      "length_mm": 4.64911688245431
     },
     {
       "ref": "U1",
-      "length_mm": 3.262566458613541
+      "length_mm": 3.3278721497261428
     }
   ],
   "spacing_deviations": [
@@ -64,70 +64,70 @@
     {
       "a": "U2.15:LDQM",
       "b": "U2.16:SDNWE",
-      "edge_gap_mm": 0.617077,
+      "edge_gap_mm": 0.54111,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U2.15:LDQM",
       "b": "U2.17:SDNCAS",
-      "edge_gap_mm": 1.414155,
+      "edge_gap_mm": 1.343155,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U2.15:LDQM",
       "b": "U2.18:SDNRAS",
-      "edge_gap_mm": 2.211232,
+      "edge_gap_mm": 2.149979,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U2.15:LDQM",
       "b": "U2.19:SDNE1",
-      "edge_gap_mm": 3.008309,
+      "edge_gap_mm": 3.02,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U2.15:LDQM",
       "b": "U2.20:BA0",
-      "edge_gap_mm": 3.805387,
+      "edge_gap_mm": 3.766239,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U2.15:LDQM",
       "b": "U2.21:BA1",
-      "edge_gap_mm": 4.602464,
+      "edge_gap_mm": 4.574787,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U2.33:A8",
       "b": "U2.39:UDQM",
-      "edge_gap_mm": 4.550987,
+      "edge_gap_mm": 4.479957,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U2.34:A9",
       "b": "U2.39:UDQM",
-      "edge_gap_mm": 3.762489,
+      "edge_gap_mm": 3.671298,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U2.35:A11",
       "b": "U2.39:UDQM",
-      "edge_gap_mm": 2.973991,
+      "edge_gap_mm": 2.862581,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U2.37:SDCKE1",
       "b": "U2.39:UDQM",
-      "edge_gap_mm": 1.396996,
+      "edge_gap_mm": 1.364668,
       "clock": false,
       "mixed_group": true
     },
@@ -239,224 +239,224 @@
     {
       "a": "U1.55:A9",
       "b": "U1.58:DQ4",
-      "edge_gap_mm": 1.319476,
+      "edge_gap_mm": 1.32,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.55:A9",
       "b": "U1.59:DQ5",
-      "edge_gap_mm": 1.819301,
+      "edge_gap_mm": 1.82,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.55:A9",
       "b": "U1.60:DQ6",
-      "edge_gap_mm": 2.319126,
+      "edge_gap_mm": 2.32,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.55:A9",
       "b": "U1.63:DQ7",
-      "edge_gap_mm": 3.818602,
+      "edge_gap_mm": 3.82,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.55:A9",
       "b": "U1.64:DQ8",
-      "edge_gap_mm": 4.318427,
+      "edge_gap_mm": 4.32,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.55:A9",
       "b": "U1.65:DQ9",
-      "edge_gap_mm": 4.818252,
+      "edge_gap_mm": 4.82,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.56:A10",
       "b": "U1.58:DQ4",
-      "edge_gap_mm": 0.816754,
+      "edge_gap_mm": 0.82,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.56:A10",
       "b": "U1.59:DQ5",
-      "edge_gap_mm": 1.315131,
+      "edge_gap_mm": 1.32,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.56:A10",
       "b": "U1.60:DQ6",
-      "edge_gap_mm": 1.813508,
+      "edge_gap_mm": 1.82,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.56:A10",
       "b": "U1.63:DQ7",
-      "edge_gap_mm": 3.308638,
+      "edge_gap_mm": 3.26638,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.56:A10",
       "b": "U1.64:DQ8",
-      "edge_gap_mm": 3.807015,
+      "edge_gap_mm": 3.771852,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.56:A10",
       "b": "U1.65:DQ9",
-      "edge_gap_mm": 4.305392,
+      "edge_gap_mm": 4.277032,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.56:A10",
       "b": "U1.66:DQ10",
-      "edge_gap_mm": 4.803769,
+      "edge_gap_mm": 4.782614,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.57:A11",
       "b": "U1.58:DQ4",
-      "edge_gap_mm": 0.315546,
+      "edge_gap_mm": 0.32,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.57:A11",
       "b": "U1.59:DQ5",
-      "edge_gap_mm": 0.811091,
+      "edge_gap_mm": 0.82,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.57:A11",
       "b": "U1.60:DQ6",
-      "edge_gap_mm": 1.306637,
+      "edge_gap_mm": 1.32,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.57:A11",
       "b": "U1.63:DQ7",
-      "edge_gap_mm": 2.793274,
+      "edge_gap_mm": 2.703247,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.57:A11",
       "b": "U1.64:DQ8",
-      "edge_gap_mm": 3.288819,
+      "edge_gap_mm": 3.207877,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.57:A11",
       "b": "U1.65:DQ9",
-      "edge_gap_mm": 3.784365,
+      "edge_gap_mm": 3.712392,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.57:A11",
       "b": "U1.66:DQ10",
-      "edge_gap_mm": 4.279911,
+      "edge_gap_mm": 4.217512,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.57:A11",
       "b": "U1.67:DQ11",
-      "edge_gap_mm": 4.775456,
+      "edge_gap_mm": 4.72257,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.79:DQ15",
       "b": "U1.89:BA0",
-      "edge_gap_mm": 4.804076,
+      "edge_gap_mm": 4.783425,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.85:DQ0",
       "b": "U1.89:BA0",
-      "edge_gap_mm": 1.813631,
+      "edge_gap_mm": 1.752431,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.85:DQ0",
       "b": "U1.90:BA1",
-      "edge_gap_mm": 2.319127,
+      "edge_gap_mm": 2.317221,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.86:DQ1",
       "b": "U1.89:BA0",
-      "edge_gap_mm": 1.315223,
+      "edge_gap_mm": 1.248562,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.86:DQ1",
       "b": "U1.90:BA1",
-      "edge_gap_mm": 1.819302,
+      "edge_gap_mm": 1.811887,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.132:SDNCAS",
       "b": "U1.141:LDQM",
-      "edge_gap_mm": 4.136948,
+      "edge_gap_mm": 4.050306,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.132:SDNCAS",
       "b": "U1.142:UDQM",
-      "edge_gap_mm": 4.616609,
+      "edge_gap_mm": 4.59968,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.135:SDCKE1",
       "b": "U1.141:LDQM",
-      "edge_gap_mm": 2.550632,
+      "edge_gap_mm": 2.421444,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.135:SDCKE1",
       "b": "U1.142:UDQM",
-      "edge_gap_mm": 3.005737,
+      "edge_gap_mm": 2.981071,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.136:SDNE1",
       "b": "U1.141:LDQM",
-      "edge_gap_mm": 2.047732,
+      "edge_gap_mm": 1.912155,
       "clock": false,
       "mixed_group": true
     },
     {
       "a": "U1.136:SDNE1",
       "b": "U1.142:UDQM",
-      "edge_gap_mm": 2.493279,
+      "edge_gap_mm": 2.470654,
       "clock": false,
       "mixed_group": true
     }

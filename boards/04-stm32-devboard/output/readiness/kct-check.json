@@ -1,7 +1,7 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5044/boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "layers": 2,
+  "layers": 0,
   "summary": {
     "errors": 0,
     "warnings": 0,
