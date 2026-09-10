@@ -273,3 +273,44 @@ Same rules as `board.json`: additive changes are allowed within v1; renames,
 type changes, or removed fields require bumping the version in the `$schema`
 URL. Consumers should reject documents whose `$schema` references a major
 version they do not understand.
+
+### Development boards without manufacturing export
+
+`board-metrics` also reads boards that have no `output/manufacturing/` directory.
+A usable PCB or schematic produces `status: partial`; no usable artifact produces
+`no_artifacts`. Project identity alone does not certify that artifacts exist.
+The original `readiness` verdict and blockers are retained, including stale or
+blocked evidence. Static geometry and renders never produce `ok`.
+
+Source selection uses explicit `project.artifacts.pcb` and `.schematic` paths,
+relative to the board directory. A missing/invalid explicit path is diagnosed;
+it is not replaced with another revision. Without an explicit path, exactly one
+matching file directly under `output/` is required. Ambiguous candidates are
+reported without choosing by name or modification time. Paths outside the board
+directory are rejected. Invalid project specifications prevent fallback.
+
+Additive development fields:
+
+| Field | Meaning |
+|---|---|
+| `sources` | Selected artifact paths relative to the board directory and SHA-256 hashes; PCB/schematic also record `selection` (`project.artifacts` or `unambiguous_output`). |
+| `diagnostics` | Explanations of missing, ambiguous, malformed or unsupported metadata/evidence. |
+| `native_drc_geometry_violations` | Count of all entries in the bound native `violations` array, including warnings. |
+| `native_drc_unconnected_items` | Separate count from the bound native `unconnected_items` array. |
+
+`part_count` counts PCB footprints (including non-BOM footprints), not unique
+BOM rows or schematic symbols. `layer_count` counts actual PCB copper layers.
+`board_size_mm` describes the Edge.Cuts bounding envelope for supported closed
+linear outlines; missing/open or curved outlines currently omit dimensions with
+a diagnostic rather than supply an inaccurate or zero size. The project supplies
+name/description. Schematic-only boards identify their source but do not invent
+PCB counts or dimensions.
+
+Native measurements require fresh readiness hashing both the selected PCB and
+the report. `evidence.native_drc` selects the report when present; otherwise one
+hash-bound `native-drc.json` or `placement-drc.json` is required. Missing, stale,
+ambiguous or malformed reports omit measurements. `drc_violations` counts native
+error-severity geometry findings in this development path; opens are separate.
+Zero geometry errors with nonzero opens is not a clean connectivity result.
+Neither label LVS nor an unbound report supplies copper-LVS proof. This command
+does not reroute, refill, export manufacturing files or alter readiness evidence.

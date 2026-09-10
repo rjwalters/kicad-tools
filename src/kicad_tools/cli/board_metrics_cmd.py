@@ -65,7 +65,7 @@ absent or unparseable.
                         could recover), OR ``report.md`` parsed but the board
                         still has ``drc_violations > 0`` (not manufacturable),
                         OR an explicit ``lvs_clean == False`` LVS mismatch.
-* ``"no_artifacts"`` — no ``output/manufacturing/`` directory at all.
+* ``"no_artifacts"`` — no manufacturing directory or usable development artifact.
 
 Schema versioning policy: this schema is the Phase 2 (Astro site) data contract.
 Field additions must be additive — no renames, no type changes. Bump
@@ -305,6 +305,152 @@ def _count_bom_parts(bom_path: Path, slug: str) -> int | None:
     return len(data_rows)
 
 
+def _development_metrics(board_dir: Path, readiness: dict) -> dict:
+    """Recover static development metadata without upgrading release evidence."""
+    import hashlib
+    import math
+
+    from kicad_tools.exceptions import KiCadToolsError
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.schema.schematic import Schematic
+    from kicad_tools.spec.parser import load_spec
+
+    result: dict = {"sources": {}, "diagnostics": []}
+    diagnostics = result["diagnostics"]
+    root = board_dir.resolve()
+    project_path = board_dir / "project.kct"
+    artifacts: dict = {}
+    project_valid = True
+    if project_path.exists():
+        try:
+            project = load_spec(project_path).project.model_dump(exclude_unset=True)
+            artifacts = project.get("artifacts") or {}
+            for field in ("name", "description"):
+                if isinstance(project.get(field), str):
+                    result[field] = project[field]
+        except (OSError, ValueError) as exc:
+            project_valid = False
+            diagnostics.append(f"Cannot select artifacts from project.kct: {exc}")
+
+    selected: dict[str, Path] = {}
+    usable = False
+    for kind, suffix in (("pcb", ".kicad_pcb"), ("schematic", ".kicad_sch")):
+        if not project_valid:
+            continue
+        if kind in artifacts:
+            value = artifacts[kind]
+            if not isinstance(value, str) or not value:
+                diagnostics.append(f"Invalid explicit {kind} path")
+                continue
+            path = board_dir / value
+            selection = "project.artifacts"
+        else:
+            candidates = list((board_dir / "output").glob(f"*{suffix}"))
+            if len(candidates) != 1:
+                if candidates:
+                    diagnostics.append(
+                        f"Ambiguous {kind} candidates: "
+                        + ", ".join(sorted(p.name for p in candidates))
+                    )
+                continue
+            path = candidates[0]
+            selection = "unambiguous_output"
+        if not path.resolve().is_relative_to(root) or not path.is_file():
+            diagnostics.append(f"Missing or outside-board {kind} source: {path}")
+            continue
+        try:
+            raw = path.read_bytes()
+            if kind == "pcb":
+                pcb = PCB.load(path)
+                if pcb._sexp.tag != "kicad_pcb" or not pcb.copper_layers:
+                    raise ValueError("missing PCB root or copper layer definitions")
+                result["part_count"] = len(pcb.footprints)
+                result["layer_count"] = len(pcb.copper_layers)
+                # The existing raw bounds helper does not calculate curved extrema.
+                # Omit unsupported curved outlines instead of reporting a false size.
+                curved = any(
+                    node.tag in {"gr_arc", "gr_circle", "gr_curve"}
+                    and (layer := node.find_child("layer")) is not None
+                    and layer.get_string(0) == "Edge.Cuts"
+                    for node in pcb._sexp.iter_children()
+                )
+                outline = pcb.get_board_outline()
+                closed = len(outline) >= 4 and math.dist(outline[0], outline[-1]) < 1e-6
+                bounds = pcb._edge_cuts_bbox_sexp() if closed and not curved else None
+                if bounds is not None:
+                    width, height = bounds[2] - bounds[0], bounds[3] - bounds[1]
+                    if all(math.isfinite(v) and v > 0 for v in (width, height)):
+                        result["board_size_mm"] = {"width": width, "height": height}
+                if "board_size_mm" not in result:
+                    diagnostics.append(
+                        "PCB outline is missing, open, or curved/unsupported; dimensions unknown"
+                    )
+            else:
+                schematic = Schematic.load(path)
+                if schematic._sexp.tag != "kicad_sch":
+                    raise ValueError("missing schematic root")
+            selected[kind] = path
+            result["sources"][kind] = {
+                "path": path.resolve().relative_to(root).as_posix(),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "selection": selection,
+            }
+            usable = True
+        except (OSError, ValueError, TypeError, AttributeError, IndexError, KiCadToolsError) as exc:
+            diagnostics.append(f"Cannot parse {kind} source {path.name}: {exc}")
+
+    result["status"] = "partial" if usable else "no_artifacts"
+    pcb_path = selected.get("pcb")
+    if pcb_path is None:
+        return result
+    inputs = readiness.get("inputs", {})
+    pcb_key = result["sources"]["pcb"]["path"]
+    if (
+        readiness.get("status") not in {"ready", "blocked"}
+        or inputs.get(pcb_key) != result["sources"]["pcb"]["sha256"]
+    ):
+        diagnostics.append(
+            "Native DRC measurements unavailable: no fresh readiness binding for selected PCB"
+        )
+        return result
+    evidence = readiness.get("evidence", {})
+    explicit_report = evidence.get("native_drc") if isinstance(evidence, dict) else None
+    if explicit_report is not None:
+        reports = [explicit_report] if isinstance(explicit_report, str) else []
+    else:
+        reports = [
+            name for name in inputs if Path(name).name in {"native-drc.json", "placement-drc.json"}
+        ]
+    if len(reports) != 1 or reports[0] not in inputs:
+        diagnostics.append(
+            "Native DRC measurements unavailable: missing or ambiguous hash-bound report"
+        )
+        return result
+    try:
+        report_path = board_dir / reports[0]
+        raw = report_path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != inputs[reports[0]]:
+            raise ValueError("report changed after readiness validation")
+        report = json.loads(raw)
+        violations, opens = report["violations"], report["unconnected_items"]
+        if not isinstance(violations, list) or not isinstance(opens, list):
+            raise ValueError("missing native finding arrays")
+        if not all(
+            isinstance(item, dict) and item.get("severity") in {"error", "warning", "ignore"}
+            for item in violations
+        ):
+            raise ValueError("invalid native violation severity")
+        if not all(isinstance(item, dict) for item in opens):
+            raise ValueError("invalid native unconnected item")
+        result["drc_violations"] = sum(item["severity"] == "error" for item in violations)
+        result["native_drc_geometry_violations"] = len(violations)
+        result["native_drc_unconnected_items"] = len(opens)
+        result["sources"]["native_drc"] = {"path": reports[0], "sha256": inputs[reports[0]]}
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        diagnostics.append(f"Native DRC measurements unavailable: {exc}")
+    return result
+
+
 def extract_board_metrics(board_dir: Path) -> dict:
     """Read existing artifacts under ``board_dir`` and return a board.json dict.
 
@@ -332,9 +478,9 @@ def extract_board_metrics(board_dir: Path) -> dict:
     metrics["readiness"] = read_readiness(board_dir)
 
     if not mfg_dir.is_dir():
-        # No manufacturing artifacts at all — identity-only board.json.
-        logger.info("board %s: no output/manufacturing directory; status=no_artifacts", slug)
-        metrics["status"] = "no_artifacts"
+        # Development metadata is independent of manufacturing export.
+        logger.info("board %s: extracting development artifacts", slug)
+        metrics.update(_development_metrics(board_dir, metrics["readiness"]))
         _attach_render_paths(metrics, output_dir)
         return metrics
 
