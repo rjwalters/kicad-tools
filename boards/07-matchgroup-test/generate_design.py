@@ -582,6 +582,24 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     return results
 
 
+def _relocate_pad_drills(pcb_path: Path) -> int:
+    """Clear partial pad/drill overlaps before repairing plane connectivity."""
+    from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    pcb = PCB.load(pcb_path)
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    result = relocate_in_pad_vias(pcb, rules)
+    remaining = ViaInPadRule().check(pcb, rules).violations
+    if result.skipped or result.unresolvable or remaining:
+        raise RuntimeError(f"Unresolved pad/drill overlaps: {result}; findings: {remaining}")
+    if result.changed:
+        pcb.save(pcb_path)
+    return len(result.moved)
+
+
 def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int, int]:
     """Repair pour-net connectivity: offset vias + stubs + island bridges.
 
@@ -1921,6 +1939,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
                 print(f"   stderr: {stitch_result.stderr.strip()}")
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   Stitch step skipped: {exc}")
+
+    # Both routed signal escapes and stitched power vias can partially cut an
+    # SMT land. The shared drill-overlap detector includes these edge cuts.
+    # Relocate now so the following pour repair/re-fill rechecks moved plane
+    # vias; the existing final quantizer also handles the new signal stubs.
+    moved = _relocate_pad_drills(output_path)
+    print(f"\n6b. Relocated {moved} via drill(s) clear of SMT lands.")
 
     # Issue #3617: repair the stitcher's residual then iterate repair <->
     # re-fill (max ``MAX_POUR_REPAIR_ROUNDS``).  ``_repair_pour_connectivity``
