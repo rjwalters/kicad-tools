@@ -1,0 +1,11 @@
+{
+  "source_pcb": "output/usbc_pd_power.kicad_pcb",
+  "source_sha256": "d78b61bb846302beb76afd5670e8dee8de48f1baafe73165d9679be36a38a2a7",
+  "elapsed_seconds": 102.8,
+  "returncode": 2,
+  "native_violations": 2,
+  "native_unconnected_items": 44,
+  "critical_nets_connected": 16,
+  "existing_trace_geometries_preserved": 129,
+  "release_accepted": false
+}

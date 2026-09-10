@@ -12,6 +12,7 @@ import math
 from collections import defaultdict
 from pathlib import Path
 
+from kicad_tools.router.quantize import OffAngleSegmentError, verify_segment_45
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
 from kicad_tools.validate.rules.clearance import CopperElement
@@ -198,12 +199,31 @@ def usb_geometry(path):
     return {"lengths_mm": lengths, "common_coupled_mm": coupled, "branch_skew_mm": skew}
 
 
+def _require_45_degree_copper(path):
+    # Parse the nodes rather than relying on KiCad's pretty-print layout.
+    for segment in parse_file(path).find_children("segment"):
+        start, end = segment.find_child("start"), segment.find_child("end")
+        try:
+            verify_segment_45(
+                start.get_float(0),
+                start.get_float(1),
+                end.get_float(0),
+                end.get_float(1),
+                strict=True,
+            )
+        except OffAngleSegmentError as exc:
+            raise ValueError(
+                "Routing plan contains off-angle copper; repair and revalidate before replay"
+            ) from exc
+
+
 def save_plan(reviewed_board, plan_path=PLAN):
+    _require_45_degree_copper(reviewed_board)
     doc = parse_file(reviewed_board)
     data = {
         "schema_version": 1,
         "physical_sha256": fingerprint(reviewed_board),
-        "description": "Revision B fixed-placement copper, manually completed and USB pair repaired",
+        "description": "Revision B fixed-placement copper, manually completed, USB pair repaired, and 45-degree aligned",
         "required_factory_options": {
             "layers": 4,
             "stackup": "JLC7628",
@@ -247,6 +267,7 @@ def apply_plan(input_path, output_path, plan_path=PLAN):
     candidate = output_path.with_name(f".{output_path.stem}.candidate.kicad_pcb")
     try:
         candidate.write_text(serialize_sexp(doc))
+        _require_45_degree_copper(candidate)
         usb_geometry(candidate)
         candidate.replace(output_path)
     finally:

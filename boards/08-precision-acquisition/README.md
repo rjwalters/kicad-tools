@@ -1,9 +1,10 @@
 # 08 — Four-channel precision acquisition
 
 Planned working demonstration of four simultaneous differential ADC inputs,
-with USB streaming and an ADS131M04-family converter. This example is scoped;
-schematic, procurement and PCB implementation are intentionally pending while
-board09 is developed. It has no manufacturing release.
+with USB streaming. The ADS131M04IPWR TSSOP converter and a socketed RP2040
+Pico H host now have a checked pin/package interface and an 8 kSPS transfer
+budget. Schematic, procurement and PCB implementation remain pending.
+It has no manufacturing release.
 
 ## Requirements
 
@@ -23,5 +24,7 @@ manufacturer checks and an integrity-checked assembly package. A later bench
 report will measure shorted-input noise, channel crosstalk, gain/offset,
 frequency response and USB sample loss against documented test conditions.
 
-The initial ADC candidate is [TI ADS131M04](https://www.ti.com/product/ADS131M04).
-Exact package, MCU, reference/filter choices and sourced BOM remain open.
+See the [interface review](engineering/interface-review.md) and run
+`uv run python boards/08-precision-acquisition/check_interface.py` to check
+the selected symbols, packages and nominal timing. Analog regulator, clock,
+input protection/filter choices and sourced BOM remain open.

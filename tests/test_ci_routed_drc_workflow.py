@@ -182,14 +182,18 @@ class TestAllowlist:
         The board directory may be nested (e.g.
         ``boards/external/softstart/output/softstart_routed.kicad_pcb``,
         grandfathered by Issue #3527), so the pattern allows one or more
-        path components between ``boards/`` and ``output/``."""
+        path components between ``boards/`` and ``output/``. Historical
+        synthetic baselines use their canonical ``regression-fixture/``
+        identity; transient ``regression-output/`` paths are not stored."""
         import re
 
-        pattern = re.compile(r"^boards/(?:[^/]+/)+output/[^/]+_routed\.kicad_pcb$")
+        pattern = re.compile(
+            r"^boards/(?:[^/]+/)+(?:output|regression-fixture)/[^/]+_routed\.kicad_pcb$"
+        )
         for key in allowlist_data["tolerances"]:
             assert pattern.match(key), (
                 f"Allowlist key {key!r} does not match the expected pattern "
-                f"'boards/<name>/output/<file>_routed.kicad_pcb'."
+                f"'boards/<name>/(output|regression-fixture)/<file>_routed.kicad_pcb'."
             )
 
     def test_allowlist_values_are_non_negative_ints(self, allowlist_data: dict) -> None:

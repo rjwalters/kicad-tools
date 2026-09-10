@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from kicad_tools.cli import check_cmd
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate import DRCChecker
@@ -298,29 +300,34 @@ class TestDispatcherIntegration:
 
 
 class TestCommittedArtifactsClean:
-    """The onboarded markers must be clean on the committed tree.
+    """Live tolerance claims stay checked after the real-board redesign.
 
-    This is the self-maintaining ratchet contract from Issue #4540: any
-    future PR that ratchets ``.github/routed-drc-tolerance.yml`` for
-    board 06 / board 07 without updating the board README's doc-pin
-    marker (and prose) fails HERE, closing the cross-PR staleness gap
-    that ``annotate_drift_warning`` (#2590) explicitly does not cover.
+    The 2026-09-10 release audit retired the 06/07 allowances. Their real
+    READMEs need no historical marker; any future allowance requires one.
+    Synthetic fixtures above keep the stale/missing-entry diagnostics covered.
     """
+
+    def _assert_active_allowance_has_marker(self, pcb: Path) -> None:
+        tolerance_path = REPO_ROOT / ".github/routed-drc-tolerance.yml"
+        tolerances = yaml.safe_load(tolerance_path.read_text())["tolerances"]
+        key = pcb.relative_to(REPO_ROOT).as_posix()
+        pins = parse_doc_pins(pcb.parent.parent / "README.md")
+        if key in tolerances:
+            assert any(p.resolver == "drc-tolerance" and p.key == key for p in pins)
+        assert check_doc_drift(pcb).violations == []
 
     def test_board06_markers_clean(self) -> None:
         assert BOARD_06_PCB.is_file(), "board-06 committed artifact missing"
         results = check_doc_drift(BOARD_06_PCB)
         assert results.violations == [], [v.message for v in results.violations]
 
-    def test_board06_readme_has_marker(self) -> None:
-        pins = parse_doc_pins(BOARD_06_PCB.parent.parent / "README.md")
-        assert any(p.resolver == "drc-tolerance" for p in pins)
+    def test_board06_live_allowance_is_documented(self) -> None:
+        self._assert_active_allowance_has_marker(BOARD_06_PCB)
 
     def test_board07_markers_clean(self) -> None:
         assert BOARD_07_PCB.is_file(), "board-07 committed artifact missing"
         results = check_doc_drift(BOARD_07_PCB)
         assert results.violations == [], [v.message for v in results.violations]
 
-    def test_board07_readme_has_marker(self) -> None:
-        pins = parse_doc_pins(BOARD_07_PCB.parent.parent / "README.md")
-        assert any(p.resolver == "drc-tolerance" for p in pins)
+    def test_board07_live_allowance_is_documented(self) -> None:
+        self._assert_active_allowance_has_marker(BOARD_07_PCB)

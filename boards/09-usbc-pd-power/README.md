@@ -34,9 +34,13 @@ behavior. Test equipment, conditions and limits must accompany every result.
 
 ## Current checkpoint and reproduction
 
-47 components, 32 nets, a generated schematic and placed four-layer PCB.
-Native ERC and label LVS pass. Routing experiments have opens and native DRC
-errors; procurement and physical power-layout review are incomplete.
+47 components, 32 nets, a generated schematic and four-layer PCB with partial
+critical copper. Native ERC and label LVS pass. Native DRC reports zero
+geometry violations and 68 unconnected items. Sixteen critical nets now have
+checked connectivity: buck boot/feedback/enable, switched power paths,
+MOSFET gates/sources, output indicator and Kelvin/sense connections.
+Ground, USB/PD control and low-voltage support routing remain incomplete,
+as do procurement and physical power-layout review.
 
 From the repository root:
 
@@ -49,7 +53,10 @@ uv run kct render boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb --no-3d
 
 The check command validates a development checkpoint; its successful exit
 does **not** indicate manufacturing readiness. `output/development-check.json`
-records source hashes, checks and outstanding gates. No manufacturing ZIP exists.
+records source hashes, checks and outstanding gates. It reruns native DRC,
+rejects geometry violations and records opens separately. No manufacturing ZIP exists.
+Critical-net opens are correlated using saved PCB item UUIDs; removing a
+previously completed critical connection fails the development check.
 
 See the [engineering review](engineering/review.md),
 [telemetry instructions](host/README.md), and

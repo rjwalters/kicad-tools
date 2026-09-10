@@ -908,7 +908,9 @@ class TestLatticeRescue:
 
         pcb = (
             pathlib.Path(__file__).parent.parent
-            / "boards"
+            / "tests"
+            / "fixtures"
+            / "historical_demo_boards"
             / "07-matchgroup-test"
             / "output"
             / "matchgroup_test.kicad_pcb"

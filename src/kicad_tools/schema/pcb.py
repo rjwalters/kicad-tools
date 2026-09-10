@@ -2658,9 +2658,7 @@ class PCB:
                     if item.is_atom and item.value == "addsublayer":
                         layers.append(layer)
                         sublayer += 1
-                        layer = StackupLayer(
-                            name=f"{name} (sublayer {sublayer})", type=layer_type
-                        )
+                        layer = StackupLayer(name=f"{name} (sublayer {sublayer})", type=layer_type)
                     elif item.tag == "thickness":
                         layer.thickness = item.get_float(0) or 0.0
                     elif item.tag == "material":
@@ -5092,12 +5090,25 @@ class PCB:
         new_uuid = str(uuid.uuid4())
 
         # Update the UUID in the footprint
-        uuid_node = fp_sexp.find("uuid")
+        uuid_node = fp_sexp.find_child("uuid")
         if uuid_node:
             uuid_node.set_value(0, new_uuid)
         else:
             # Add UUID if not present
             fp_sexp.append(SExp.list("uuid", new_uuid))
+
+        # Library pad identities are not placed-instance identities. Persist
+        # fresh IDs even when the library omits them, so native DRC findings
+        # can be correlated with the saved board instead of transient IDs.
+        for pad_node in fp_sexp.find_all("pad"):
+            pad_uuid = pad_node.find_child("uuid")
+            if pad_uuid is not None:
+                pad_uuid.set_value(0, str(uuid.uuid4()))
+            else:
+                pad_node.append(SExp.list("uuid", str(uuid.uuid4())))
+            legacy_stamp = pad_node.find_child("tstamp")
+            if legacy_stamp is not None:
+                pad_node.remove(legacy_stamp)
 
         # Update layer first (at node must come after layer)
         layer_node = fp_sexp.find("layer")
@@ -5236,6 +5247,11 @@ class PCB:
         # rotation, or layer are automatically persisted.
         object.__setattr__(footprint, "_board_origin", self._board_origin)
         object.__setattr__(footprint, "_sexp_node", fp_sexp)
+        # New footprints need the same pad write-through links as loaded
+        # footprints (#5049). Use parser order, not pad numbers: shield and
+        # NPTH pads may share a number or have no number at all.
+        for pad_obj, pad_node in zip(footprint.pads, fp_sexp.find_all("pad"), strict=True):
+            object.__setattr__(pad_obj, "_sexp_node", pad_node)
 
         self._footprints.append(footprint)
 

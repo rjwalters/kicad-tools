@@ -754,3 +754,112 @@ class TestDefaultNetStatusGenuineOpens:
             f"improvement on the committed artifact means the connectivity "
             f"model started over-connecting; more means a regression."
         )
+
+
+@pytest.mark.parametrize("hole_clearance", [0.25, 0.3])
+def test_relocates_signal_and_stitch_pad_edge_drills(generate_design_mod, tmp_path, hole_clearance):
+    """Retain the archived witness; repair the seven observed CI overlaps in a copy."""
+    import shutil
+
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    source = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+    original = source.read_bytes()
+    candidate = tmp_path / source.name
+    shutil.copy2(source, candidate)
+    pcb = PCB.load(candidate)
+    # CI stitching selected these alternate +1V8 sites. Together with the
+    # archived signal escapes, they reproduce all seven reported pad cuts.
+    for uid, xy in [
+        ("0de3e62a-2521-486b-a847-963011236afa", (85.19, 56.27)),
+        ("91bd6227-0458-43fc-9f1b-5cec0fbfdb8c", (83.73, 56.47)),
+    ]:
+        via = next(v for v in pcb.vias if v.uuid == uid)
+        assert pcb.relocate_via(via, xy)
+    pcb.save(candidate)
+    candidate.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {"board": {"design_settings": {"rules": {"min_hole_clearance": hole_clearance}}}}
+        )
+    )
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    assert len(ViaInPadRule().check(pcb, rules).violations) == 7
+    if hole_clearance == 0.3:
+        # This tighter project cannot clear its crowded signal escapes.
+        # Reject atomically instead of silently falling back to 0.25 mm.
+        before = candidate.read_bytes()
+        with pytest.raises(RuntimeError, match="Unresolved pad/drill overlaps"):
+            generate_design_mod._relocate_pad_drills(candidate)
+        assert candidate.read_bytes() == before
+        assert source.read_bytes() == original
+        return
+    assert generate_design_mod._relocate_pad_drills(candidate) == 7
+    after = PCB.load(candidate)
+    assert not ViaInPadRule().check(after, rules).violations
+    assert len(after.vias) == len(pcb.vias)
+    assert [(v.uuid, v.net_number, v.size, v.drill) for v in after.vias] == [
+        (v.uuid, v.net_number, v.size, v.drill) for v in pcb.vias
+    ]
+    from shapely.geometry import LineString, Point
+
+    for before, moved in zip(pcb.vias, after.vias, strict=True):
+        if before.position == moved.position:
+            continue
+        for segment in after.segments:
+            if segment.net_number == moved.net_number:
+                continue
+            hole_gap = (
+                Point(moved.position).distance(LineString([segment.start, segment.end]))
+                - moved.drill / 2
+                - segment.width / 2
+            )
+            assert hole_gap >= hole_clearance - 1e-6
+    assert generate_design_mod._relocate_pad_drills(candidate) == 0
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("obstruct_extension", [False, True])
+def test_power_stub_uses_safe_alternate_escape(generate_design_mod, tmp_path, obstruct_extension):
+    """The fresh seed42 U4.E4 stub cannot slide toward its neighboring drill."""
+    import math
+
+    from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    pcb = PCB.load(OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb")
+    via = next(v for v in pcb.vias if v.uuid == "0de3e62a-2521-486b-a847-963011236afa")
+    original = (85.19, 56.27)
+    assert pcb.relocate_via(via, original)
+    pcb.add_trace((83.82, 56.27), original, width=0.2, layer="F.Cu", net="+1V8")
+    blocker = pcb.add_via(84.52, 55.85, size=0.6, drill=0.2, net="+1V8")
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    result = relocate_in_pad_vias(pcb, rules)
+    assert len(result.skipped) == 1
+    assert "hole-to-hole" in result.skipped[0].reason
+    old_segments = [(s.uuid, s.start, s.end) for s in pcb.segments]
+    if obstruct_extension:
+        pcb.add_trace((85.4, 56.0), (85.4, 56.5), width=0.2, layer="F.Cu", net="GND")
+    fixed = generate_design_mod._extend_blocked_power_stubs(pcb, rules, result)
+    if obstruct_extension:
+        assert fixed == 0
+        assert via.position == original
+        assert result.skipped
+        return
+    assert fixed == 1
+    assert not result.skipped
+    assert via.position[0] > original[0]
+    assert via.position[1] == pytest.approx(original[1])
+    assert math.dist(via.position, blocker.position) - (via.drill + blocker.drill) / 2 >= (
+        rules.min_hole_to_hole_mm
+    )
+    assert [(s.uuid, s.start, s.end) for s in pcb.segments[: len(old_segments)]] == old_segments
+    stub = pcb.segments[-1]
+    assert stub.start == original and stub.end == via.position
+    assert stub.width == 0.2 and stub.layer == "F.Cu" and stub.net_number == via.net_number
+    assert not ViaInPadRule().check(pcb, rules).violations
+    uuids = [v.uuid for v in pcb.vias] + [s.uuid for s in pcb.segments]
+    assert len(set(uuids)) == len(uuids)

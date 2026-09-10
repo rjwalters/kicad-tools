@@ -245,7 +245,7 @@ def parts() -> list[Part]:
         ("R6", "100k", "BUCK_EN", "GND", (64, 39)),
         ("R7", "100k 0.1%", "VOUT_PRE", "FB", (66, 25)),
         ("R8", "13.3k 0.1%", "FB", "GND", (66, 29)),
-        ("R9", "49.9", "BOOT", "BOOT_CAP", (62, 24)),
+        ("R9", "49.9", "BOOT", "BOOT_CAP", (61.7, 26.5)),
         ("R10", "10", "KELVIN_P", "SENSE_P", (70, 26)),
         ("R11", "10", "KELVIN_N", "SENSE_N", (76, 26)),
         ("R12", "4.7k", "+3V3", "SCL", (30, 44)),
@@ -264,20 +264,30 @@ def parts() -> list[Part]:
         ("C2", "1u 16V", "VREG_1V2", "GND", (20, 19), C),
         ("C3", "1u 16V", "VREG_2V7", "GND", (10, 23), C),
         ("C4", "4.7n 50V", "PMOS_SOURCE", "PMOS_GATE", (39, 31), C),
-        ("C5", "10u 50V", "VIN", "GND", (54.5, 25), "Capacitor_SMD:C_1206_3216Metric"),
-        ("C6", "100n 50V", "VIN", "GND", (55, 33), C),
-        ("C7", "100n 50V", "BOOT_CAP", "SW", (62, 20), C),
+        ("C5", "10u 50V", "VIN", "GND", (53, 29), "Capacitor_SMD:C_1206_3216Metric"),
+        ("C6", "100n 50V", "VIN", "GND", (55.15, 29), C),
+        ("C7", "100n 50V", "BOOT_CAP", "SW", (61, 23), C),
         ("C8", "22u 25V", "VOUT_PRE", "GND", (50, 16), "Capacitor_SMD:C_1206_3216Metric"),
         ("C9", "22u 25V", "VOUT_PRE", "GND", (56, 16), "Capacitor_SMD:C_1206_3216Metric"),
         ("C10", "75p C0G", "VOUT_PRE", "FB", (66, 22), C),
-        ("C11", "100n 50V", "SENSE_P", "SENSE_N", (73, 23), C),
+        ("C11", "100n 50V", "SENSE_P", "SENSE_N", (79, 29), C),
         ("C12", "100n 50V", "+3V3", "GND", (79, 34), C),
         ("C13", "1u 50V", "VBUS_RAW", "GND", (11, 43), C),
         ("C14", "1u 16V", "+3V3", "GND", (20, 43), C),
         ("C15", "1u 16V", "+5V_OUT", "GND", (81, 20), C),
     ]
     for ref, value, a, b, xy, fp in capacitors:
-        result.append(Part(ref, "Device:C", fp, value, {"1": a, "2": b}, xy))
+        result.append(
+            Part(
+                ref,
+                "Device:C",
+                fp,
+                value,
+                {"1": a, "2": b},
+                xy,
+                rotation=90 if ref in {"C5", "C6"} else 180 if ref == "C7" else 0,
+            )
+        )
     # The catalog binds exact MPNs later; blank entries stay explicit blockers.
     catalog_path = ROOT / "procurement.json"
     catalog = json.loads(catalog_path.read_text()).get("parts", {}) if catalog_path.exists() else {}
@@ -331,6 +341,216 @@ def write_inductor(output: Path) -> Path:
     path = library / "SRP7050TA.kicad_mod"
     path.write_text(data)
     return path
+
+
+def add_critical_copper(pcb: PCB) -> None:
+    """Reviewed geometry for the local bypass loop and switch-node escape.
+
+    The short TSOT escape is narrower than the power trunk. Its current and
+    temperature limits still require review; these connections are not a 3 A
+    qualification or a complete power-stage route.
+    """
+    pcb.add_trace(("U2", "3"), ("C6", "1"), width=0.45, net="VIN")
+    pcb.add_trace(("C6", "1"), ("C5", "1"), width=0.8, net="VIN")
+    pcb.add_trace(("U2", "1"), ("C6", "2"), width=0.45, net="GND")
+    pcb.add_trace(("C6", "2"), ("C5", "2"), width=0.8, net="GND")
+    # Escape between C6's lands; keep vias outside the solderable pads.
+    pcb.add_trace(("U2", "2"), (54.15, 29), width=0.35, net="SW")
+    for x in (54.15, 53.35, 52.55):
+        pcb.add_via(x, 29, net="SW")
+    pcb.add_trace((54.15, 29), (52.55, 29), width=0.6, net="SW")
+    for x in (46.8, 47.6, 48.4):
+        pcb.add_via(x, 31.6, net="SW")
+        pcb.add_trace((x, 31.6), (x, 29.95), width=0.6, net="SW")
+    pcb.add_trace((46.8, 31.6), (48.4, 31.6), width=0.6, net="SW")
+    pcb.add_trace(
+        (54.15, 29), (48.4, 31.6), width=2.0, layer="B.Cu", waypoints=[(51, 29)], net="SW"
+    )
+    pcb.add_trace((48.4, 31.6), (46.8, 31.6), width=2.0, layer="B.Cu", net="SW")
+    # Bootstrap components sit beside the regulator; the small SW branch
+    # returns on B.Cu to the existing switch-node via array.
+    pcb.add_trace(("U2", "6"), ("R9", "1"), width=0.25, net="BOOT")
+    pcb.add_trace(("R9", "2"), ("C7", "1"), width=0.25, net="BOOT_CAP")
+    pcb.add_trace(("C7", "2"), (59.5, 23), width=0.25, net="SW")
+    pcb.add_via(59.5, 23, net="SW")
+    pcb.add_trace((59.5, 23), (54.15, 29), width=0.25, layer="B.Cu", net="SW")
+    # Quiet feedback stays on the regulator's right side, away from L1/SW.
+    pcb.add_trace(
+        ("U2", "4"),
+        ("R8", "1"),
+        width=0.25,
+        net="FB",
+        waypoints=[(60.2, 29.95), (61.15, 29), (64, 29)],
+    )
+    pcb.add_trace(
+        ("R8", "1"),
+        ("R7", "2"),
+        width=0.25,
+        net="FB",
+        waypoints=[(64.5, 28.275), (64.5, 26.5), (66.825, 26.5)],
+    )
+    pcb.add_trace(("R7", "2"), ("C10", "2"), width=0.25, net="FB")
+    pcb.add_trace(("R7", "1"), ("C10", "1"), width=0.25, net="VOUT_PRE")
+    pcb.add_trace(("U2", "5"), (60.3, 28.75), width=0.25, net="BUCK_EN")
+    pcb.add_via(60.3, 28.75, net="BUCK_EN")
+    pcb.add_trace((60.3, 28.75), (65.6, 35), width=0.25, layer="B.Cu", net="BUCK_EN")
+    pcb.add_via(65.6, 35, net="BUCK_EN")
+    pcb.add_trace((65.6, 35), ("R5", "2"), width=0.25, net="BUCK_EN")
+    pcb.add_trace(
+        ("R5", "2"),
+        ("R6", "1"),
+        width=0.25,
+        net="BUCK_EN",
+        waypoints=[(64.825, 36), (63.175, 37.65)],
+    )
+    # Force current: L1 -> output capacitors -> shunt pin 1, then pin 4
+    # through a via array to the output connector. Sense taps stay separate.
+    pcb.add_trace(("L1", "2"), (49, 18), width=2.0, net="VOUT_PRE", waypoints=[(49, 22)])
+    pcb.add_trace((49, 18), ("C8", "1"), width=1.2, net="VOUT_PRE")
+    pcb.add_trace(("C8", "1"), (48.525, 14), width=1.2, net="VOUT_PRE")
+    pcb.add_trace(
+        (48.525, 14),
+        ("C9", "1"),
+        width=2.0,
+        net="VOUT_PRE",
+        waypoints=[(48.525, 13.5), (54.525, 13.5)],
+    )
+    pcb.add_trace(
+        ("C9", "1"),
+        ("RSH1", "1"),
+        width=2.0,
+        net="VOUT_PRE",
+        waypoints=[(54.525, 13.5), (63.15, 13.5)],
+    )
+    pcb.add_trace(("RSH1", "1"), (65.25, 17.365), width=0.25, net="VOUT_PRE")
+    pcb.add_via(65.25, 17.365, net="VOUT_PRE")
+    pcb.add_trace((65.25, 17.365), (64.4, 25), width=0.25, layer="B.Cu", net="VOUT_PRE")
+    pcb.add_via(64.4, 25, net="VOUT_PRE")
+    pcb.add_trace((64.4, 25), ("R7", "1"), width=0.25, net="VOUT_PRE")
+    for x in (72.2, 73, 73.8):
+        pcb.add_via(x, 20.5, net="+5V_OUT")
+        pcb.add_trace((x, 20.5), (x, 18.635), width=0.6, net="+5V_OUT")
+    pcb.add_trace((72.2, 20.5), (73.8, 20.5), width=2.0, layer="B.Cu", net="+5V_OUT")
+    pcb.add_trace(
+        (73.8, 20.5), ("J2", "1"), width=2.0, layer="B.Cu", net="+5V_OUT", waypoints=[(81.5, 20.5)]
+    )
+    for endpoint, via in [(("C15", "1"), (79.45, 20)), (("R16", "1"), (84.4, 26))]:
+        pcb.add_trace(endpoint, via, width=0.25, net="+5V_OUT")
+        pcb.add_via(*via, net="+5V_OUT")
+        pcb.add_trace(via, (81.5, 20.5), width=0.25, layer="B.Cu", net="+5V_OUT")
+    pcb.add_trace(("U3", "8"), (77.5, 32.35), width=0.15, net="+5V_OUT", waypoints=[(77.5, 32)])
+    pcb.add_via(77.5, 32.35, net="+5V_OUT")
+    pcb.add_trace((77.5, 32.35), (73, 20.5), width=0.25, layer="B.Cu", net="+5V_OUT")
+    pcb.add_trace(("R16", "2"), ("D2", "2"), width=0.25, net="LED_A")
+    # Fused input and switched VIN use the SOIC's parallel force terminals.
+    for ref in ("Q1", "Q2"):
+        for a, b in [("5", "6"), ("6", "7"), ("7", "8")]:
+            pcb.add_trace((ref, a), (ref, b), width=1.2, net="VBUS_FUSED" if ref == "Q1" else "VIN")
+    pcb.add_trace(
+        ("F1", "2"), ("Q1", "8"), width=1.2, net="VBUS_FUSED", waypoints=[(29, 10), (36.475, 13)]
+    )
+    for y in (16.1, 17.4, 18.7):
+        pcb.add_via(39.8, y, net="VIN")
+        pcb.add_trace((39.8, y), (41.525, y), width=0.6, net="VIN")
+    pcb.add_trace(
+        (39.8, 16.1),
+        (53, 31.75),
+        width=1.2,
+        layer="B.Cu",
+        net="VIN",
+        waypoints=[(39.8, 33.5), (52, 33.5), (53, 32.5)],
+    )
+    for x in (52.2, 53, 53.8):
+        pcb.add_via(x, 31.75, net="VIN")
+        pcb.add_trace((x, 31.75), (x, 30.475), width=0.6, net="VIN")
+    pcb.add_trace((52.2, 31.75), (53.8, 31.75), width=1.2, layer="B.Cu", net="VIN")
+    for endpoint, via in [(("R5", "1"), (62.4, 35)), (("R4", "1"), (23.5, 26))]:
+        pcb.add_trace(endpoint, via, width=0.25, net="VIN")
+        pcb.add_via(*via, net="VIN")
+        pcb.add_trace(
+            via,
+            (52, 33.5) if endpoint[0] == "R5" else (39.8, 33.5),
+            width=0.25,
+            layer="B.Cu",
+            net="VIN",
+            waypoints=None if endpoint[0] == "R5" else [(23.5, 35.5), (39.8, 35.5)],
+        )
+    for ref in ("Q1", "Q2"):
+        pcb.add_trace((ref, "1"), (ref, "3"), width=1.2, net="PMOS_SOURCE")
+    pcb.add_trace(
+        ("Q1", "3"),
+        ("Q2", "1"),
+        width=1.2,
+        net="PMOS_SOURCE",
+        waypoints=[(29.5, 18.635), (29.5, 22), (46.475, 22)],
+    )
+    pcb.add_trace((34, 22), ("R1", "1"), width=0.25, net="PMOS_SOURCE", waypoints=[(32.175, 25)])
+    pcb.add_trace(
+        ("R1", "1"),
+        ("D1", "1"),
+        width=0.25,
+        net="PMOS_SOURCE",
+        waypoints=[(32.175, 29), (35.35, 29)],
+    )
+    pcb.add_trace(("D1", "1"), ("C4", "1"), width=0.25, net="PMOS_SOURCE")
+    pcb.add_trace(
+        ("R1", "2"),
+        ("D1", "2"),
+        width=0.25,
+        net="PMOS_GATE",
+        waypoints=[(34.5, 26.325), (34.5, 24.5), (40.65, 24.5)],
+    )
+    pcb.add_trace(("D1", "2"), ("C4", "2"), width=0.25, net="PMOS_GATE")
+    for endpoint, via in [
+        (("Q1", "4"), (33, 20.5)),
+        (("Q2", "4"), (44.5, 14.5)),
+        (("R1", "2"), (34.6, 27)),
+        (("R2", "1"), (27.4, 30)),
+    ]:
+        pcb.add_trace(endpoint, via, width=0.25, net="PMOS_GATE")
+        pcb.add_via(*via, net="PMOS_GATE")
+        if endpoint[0] != "R1":
+            pcb.add_trace(
+                via,
+                (34.6, 27),
+                width=0.25,
+                layer="B.Cu",
+                net="PMOS_GATE",
+                waypoints=[(38.5, 14.5)] if endpoint[0] == "Q2" else None,
+            )
+    # Dedicated shunt sense terminals: never tap the 3 A force pads.
+    pcb.add_trace(
+        ("RSH1", "2"),
+        ("R10", "1"),
+        width=0.25,
+        net="KELVIN_P",
+        waypoints=[(66.57, 20), (69.225, 22.655)],
+    )
+    pcb.add_trace(
+        ("RSH1", "3"),
+        ("R11", "1"),
+        width=0.25,
+        net="KELVIN_N",
+        waypoints=[(73.43, 15.8), (75.5, 15.8), (75.5, 21), (75.225, 21.275)],
+    )
+    pcb.add_trace(
+        ("R10", "2"),
+        ("C11", "1"),
+        width=0.25,
+        net="SENSE_P",
+        waypoints=[(72.775, 28), (77.225, 28)],
+    )
+    pcb.add_trace(("C11", "1"), ("U3", "10"), width=0.25, net="SENSE_P", waypoints=[(78.225, 31)])
+    pcb.add_trace(
+        ("R11", "2"),
+        ("C11", "2"),
+        width=0.25,
+        net="SENSE_N",
+        waypoints=[(78.5, 26), (80.5, 28), (80.5, 29)],
+    )
+    pcb.add_trace(
+        ("C11", "2"), ("U3", "9"), width=0.25, net="SENSE_N", waypoints=[(80.5, 29), (80.5, 31.5)]
+    )
 
 
 def generate(output: Path) -> dict:
@@ -408,6 +628,17 @@ def generate(output: Path) -> dict:
                 pcb.assign_net_to_footprint_pad(part.ref, pad.number, part.pins[pad.number])
             pad.rotation += part.rotation
         fp.rotation = part.rotation
+        if part.ref in {"C5", "C6", "C7"}:
+            # Move the rotated reference text out of the compact bypass loop.
+            for node in fp._sexp_node.children:
+                if node.name in {"property", "fp_text"} and node.get_atoms()[0] in {
+                    "Reference",
+                    "reference",
+                }:
+                    at = node.get("at")
+                    at.set_value(0, 4 if part.ref == "C5" else -4 if part.ref == "C6" else 0)
+                    at.set_value(1, 1.8 if part.ref == "C7" else 0)
+                    at.set_value(2, 0)
         assignments[part.ref] = part.pins
     for i, name in enumerate(["VBUS_RAW", "GND", "VIN", "VOUT_PRE"]):
         flag = sch.add_symbol("power:PWR_FLAG", x=50.8 + i * 50.8, y=566.42, ref=f"#FLG0{i + 1}")
@@ -415,6 +646,7 @@ def generate(output: Path) -> dict:
         end = (pos[0], pos[1] + 5.08)
         sch.add_wire(pos, end)
         sch.add_label(name, *end)
+    add_critical_copper(pcb)
     sch.write(output / f"{NAME}.kicad_sch")
     pcb.save(output / f"{NAME}.kicad_pcb")
     pro = create_minimal_project(NAME)
@@ -464,7 +696,7 @@ def generate(output: Path) -> dict:
         "parts": [asdict(p) for p in components],
         "pin_nets": assignments,
         "nets": net_names,
-        "status": "placed, not routed",
+        "status": "placed with partial critical copper; routing incomplete",
         "hardware_tested": False,
         "manufacturing_ready": False,
     }
