@@ -119,7 +119,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Initialize stock KiCad footprint libraries
+      - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
@@ -303,7 +303,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Initialize stock KiCad footprint libraries
+      - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
@@ -615,7 +615,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Initialize stock KiCad footprint libraries
+      - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
@@ -847,7 +847,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Initialize stock KiCad footprint libraries
+      - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
@@ -976,7 +976,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Initialize stock KiCad footprint libraries
+      - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
@@ -1106,7 +1106,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Initialize stock KiCad footprint libraries
+      - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
@@ -1206,7 +1206,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Initialize stock KiCad footprint libraries
+      - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
@@ -1313,7 +1313,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Initialize stock KiCad footprint libraries
+      - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
@@ -1463,7 +1463,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Initialize stock KiCad footprint libraries
+      - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
@@ -1627,7 +1627,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Initialize stock KiCad footprint libraries
+      - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
@@ -1836,7 +1836,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Initialize stock KiCad footprint libraries
+      - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
@@ -1954,7 +1954,7 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - name: Initialize stock KiCad footprint libraries
+      - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
 
       - name: Install uv
