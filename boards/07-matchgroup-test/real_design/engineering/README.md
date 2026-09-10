@@ -4,8 +4,8 @@ The physical source is a six-layer SDR SDRAM bench demonstration. A native
 manufacturing DRC pass alone does not approve its electrical interface.
 
 `package-escape-spacing.json` measures the authored front-side bus escape paths
-used by the physical source. The longest is 5.1084 mm; the two SDCLK escapes are
-3.2625 and 4.5455 mm. No clock-to-other-bus escape pair is closer than 0.54 mm
+used by the physical source. The longest is 5.1199 mm; the two SDCLK escapes are
+3.3279 and 4.6491 mm. No clock-to-other-bus escape pair is closer than 0.54 mm
 edge-to-edge. There are 64 data/control escape pairs closer than 5 mm. These
 are measured deviations from the same-layer separation recommendation, not
 an automatic footprint exemption or a transient signal-integrity pass.
@@ -47,9 +47,14 @@ impossible package requirement. Final traces and vias remain subject to the
 explicit 0.54 mm screen.
 
 `escape-coupling-scenarios.json` records illustrative existing-model results for
-one aggressor, a 0.32 mm gap and the full 5.1084 mm escape length treated as
+one aggressor, the measured 0.320000 mm minimum gap and the full 5.1199 mm escape length treated as
 parallel. Rise times of 1, 0.1 and 0.05 ns are assumptions, not measured or
 manufacturer-guaranteed minima. These scenarios give context for the short
 coupled length; their automatic `acceptable` labels are not a board sign-off.
 Multiple aggressors, package parasitics and receiver/driver corners remain
 outside that calculation.
+
+The issue #5044 angle repair subdivides fourteen authored clock/neighbor/data escape chords into four
+45-degree doglegs to retain the clock-spacing screen and the original 0.320 mm minimum data/control gap. These measurements and
+the illustrative coupling scenarios were rerun on that geometry; placement,
+trace widths, layer assignments and through-via construction are unchanged.
