@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from kicad_tools.schema.pcb import _is_footprint_tag
+from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
 
 
 def find_kicad_cli() -> Path | None:
@@ -1424,10 +1424,10 @@ def _restore_net_declarations(
             output_sexp.children.remove(node)
 
         # Find insertion point: nets go after ``setup`` / ``title_block`` and
-        # before ``footprint`` / ``segment`` / ``via`` / ``zone`` / ``gr_*``.
+        # before modern/legacy footprints, segments, vias, zones, or graphics.
         insert_index = len(output_sexp.children)
         content_tags = {
-            "footprint",
+            *FOOTPRINT_TAGS,
             "segment",
             "via",
             "zone",
