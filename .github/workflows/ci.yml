@@ -1392,12 +1392,30 @@ jobs:
     # comparators carry real evidence: copper binds 198/198 pads and the
     # label comparator agrees pin-for-pin.  The recipe hard-gates on both
     # (``write_lvs_report(..., require_clean=True)``, boards 00-02 style)
-    # and emits ``lvs.json``; this job asserts:
+    # and emits ``lvs.json``.
+    #
+    # #4982 removed ``compare_copper_netlist()``'s blanket zone-ownership
+    # waiver (a pad's ``open`` was previously suppressed wholesale whenever
+    # its net owned a zone anywhere on the board).  That correctly surfaced
+    # a genuine, seed-invariant open on this board's LIVE regen: GND pad
+    # U1.15 has zero copper contact (verified via
+    # ``ConnectivityValidator.extract_pad_partition()``; same underlying
+    # defect as the three disconnected pads on the frozen regression-fixture
+    # tracked by #5133, which scopes the actual routing/stitching fix
+    # separately). Until that lands, this job asserts the honest
+    # known-opens contract (board 07's pattern, #4012) instead of a plain
+    # clean assertion:
     #
     # * a fresh out-of-process copper-LVS re-check on the REGENERATED
-    #   schematic+PCB pair is clean (``check_copper_lvs.py``, no flags);
-    # * ``lvs.json`` reports ``clean: true`` and ``board.json`` carries
-    #   ``lvs_clean: true`` (``check_board_00_e2e.py --lvs-only``).
+    #   schematic+PCB pair reports ONLY the expected GND open
+    #   (``check_copper_lvs.py --expect-opens GND``);
+    # * ``lvs.json`` reports the honest ``clean: false`` with exactly that
+    #   open and ``board.json`` carries ``lvs_clean: false``
+    #   (``check_board_00_e2e.py --lvs-known-opens GND``).
+    #
+    # A NEW open, a short, or the GND open disappearing (routing improved)
+    # all fail the gate -- see #5133 to shrink this back to a plain clean
+    # assertion once the live board's stitching gap is fixed.
     #
     # (History: before #4012 the schematic had ZERO wires, the copper
     # comparator bound 0 pins, and this job asserted the #4006
@@ -1408,14 +1426,12 @@ jobs:
     # (which keeps its allowlist-based DRC coverage gate on the ``--step
     # route`` re-route).  Board 06 carries allowlisted DRC *quality*
     # residuals (.github/routed-drc-tolerance.yml: diff-pair length-skew /
-    # continuity measurements), so ``--lvs-only`` skips the ``status:ok``
-    # / ``drc_violations:0`` assertions -- but all 21 nets route to
-    # completion, which is exactly what the copper-LVS clean assertion
-    # proves (no opens, no shorts).
+    # continuity measurements), so this job skips the ``status:ok`` /
+    # ``drc_violations:0`` assertions regardless.
     #
     # Advisory until a repo admin adds it to branch protection (same as the
     # board 00/01 e2e jobs).
-    name: Board 06 End-to-End (LVS)
+    name: Board 06 End-to-End (LVS known opens)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -1452,11 +1468,12 @@ jobs:
 
       - name: Regenerate board 06 from recipe (--step all, clean tmp directory)
         # The recipe hard-gates on LVS (#4012: require_clean=True on both
-        # comparators), so a copper open/short or label divergence exits
-        # non-zero -- tolerate the exit code (|| true) and let the explicit
-        # asserters below be the gate (a dirty regen leaves lvs.json with
-        # clean=false, which check_board_00_e2e.py --lvs-only rejects; an
-        # aborted recipe also fails the manifest presence check).
+        # comparators), so the expected GND open (#4982/#5133) -- or any
+        # OTHER copper open/short or label divergence -- exits non-zero;
+        # tolerate the exit code (|| true) and let the explicit asserters
+        # below be the gate (lvs.json is written honestly before the raise,
+        # #4982/#5133; an aborted recipe also fails the manifest presence
+        # check).
         run: |
           set -uo pipefail
           rm -rf /tmp/board06-ci
@@ -1467,21 +1484,24 @@ jobs:
           test -f /tmp/board06-ci/diffpair_test.kicad_sch
           test -f /tmp/board06-ci/diffpair_test_routed.kicad_pcb
 
-      - name: Copper-LVS clean re-check (out-of-process, #3838/#4012)
+      - name: Copper-LVS known-opens re-check (out-of-process, #3838/#4012/#4982)
         # Re-run compare_copper_netlist in a process the CI job controls (NOT
         # the recipe) on the REGENERATED schematic + routed PCB.  Board 06's
-        # schematic is fully wired (#4012: 198/198 pads bound), so the honest
-        # verdict is a genuinely-evidenced clean -- the plain assertion also
-        # rejects a vacuous result (the #4006 guard forces clean=false when
-        # zero pins bind, so a schematic wiring regression fails here too).
-        # Entrypoint from #3838.
+        # schematic is fully wired (#4012: 198/198 pads bound); since #4982
+        # removed the blanket zone-ownership open-waiver, the honest verdict
+        # is exactly one open (GND, U1.15 -- #5133) rather than a genuine
+        # clean.  --expect-opens asserts that set and nothing else: a NEW
+        # open, a short, the vacuous verdict, or the GND open disappearing
+        # (routing improved) all fail. Entrypoint from #3838.
         run: |
           set -euo pipefail
           uv run python -m kicad_tools.lvs.copper_lvs \
             /tmp/board06-ci/diffpair_test.kicad_sch \
             /tmp/board06-ci/diffpair_test_routed.kicad_pcb \
             > /tmp/board06-copper.json
-          uv run python scripts/ci/check_copper_lvs.py /tmp/board06-copper.json
+          uv run python scripts/ci/check_copper_lvs.py \
+            --expect-opens "GND" \
+            /tmp/board06-copper.json
 
       - name: Independent DRC re-check within allowlist (out-of-process, issue #3840)
         # Validate the REGENERATED routed PCB's DRC out-of-process against the
@@ -1508,24 +1528,30 @@ jobs:
           cp -r /tmp/board06-ci/. /tmp/board06-staging/06-diffpair-test/output/
           uv run kct board-metrics /tmp/board06-staging/06-diffpair-test
 
-      - name: Assert plane-net completion (no floating pads, #4531)
+      - name: Assert plane-net completion (known open tolerated, #4531/#4982)
         # See board-00's step: raw total_unconnected_pads gate; catches a
         # floating power/plane pad that blocking_incomplete_count would
-        # name-exclude (scripts/ci/check_net_status.py).
+        # name-exclude (scripts/ci/check_net_status.py). GND carries the
+        # single known open (#5133) -- --known-open-nets excludes ONLY
+        # GND's pads from the gated count, so a different net going open is
+        # still caught.
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_net_status.py \
+            --known-open-nets "GND" \
             /tmp/board06-ci/diffpair_test_routed.kicad_pcb
 
-      - name: Assert artifacts + LVS clean (#4012)
-        # --lvs-only: assert lvs.json clean=true + board.json lvs_clean=true,
-        # but NOT status:ok / drc_violations:0 (board 06 carries allowlisted
-        # DRC quality residuals -> status='partial').
+      - name: Assert artifacts + honest known-opens LVS state (#4012/#4982)
+        # --lvs-known-opens: lvs.json must be present, clean=false, NOT
+        # vacuous, with ONLY kind='open' copper mismatches on exactly GND
+        # (#5133) and an empty label-mismatch list; board.json must carry
+        # the honest lvs_clean=false. No status/drc_violations assertions
+        # (board 06 carries allowlisted DRC residuals -> status='partial').
         run: |
           set -euo pipefail
           uv run python scripts/ci/check_board_00_e2e.py \
             --stem diffpair_test \
-            --lvs-only \
+            --lvs-known-opens "GND" \
             /tmp/board06-staging/06-diffpair-test
 
   board-07-end-to-end:
