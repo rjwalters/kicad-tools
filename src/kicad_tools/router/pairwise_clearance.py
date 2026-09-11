@@ -499,11 +499,20 @@ def build_signal_clearance_table(
             :meth:`PairwiseClearanceTable.required_clearance` never returns
             less than this floor even for an unwidened pair.
 
+    Zero distances are valid: a zero requirement still resolves to the DRU
+    floor, and a zero DRU leaves the explicit pair requirement in force.
+    Boolean, negative, and nonfinite distances raise ``ValueError``, including
+    when either net collection is empty.
+
     Returns:
         A frozen :class:`PairwiseClearanceTable` with ``net_voltages`` empty
         (this builder has no voltage concept -- ``net_voltages`` is retained
         on the dataclass purely for the HV builder's provenance reporting).
     """
+    for name, value in (("required_mm", required_mm), ("dru", dru)):
+        if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be a finite nonnegative distance, not a boolean")
+
     widened = {_norm_net_key(n) for n in widened_nets}
     others = {_norm_net_key(n) for n in other_nets} - widened
 

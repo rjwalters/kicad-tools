@@ -298,3 +298,22 @@ def test_front_layer_pad_gets_no_automatic_pass() -> None:
     front_pad = _pad("BA1", 5.0, 0.54, layers=("F.Cu", "B.Cu"))
     violation = route_pairwise_violation(sdclk, 1, [], table, foreign_pads=(front_pad,))
     assert violation is not None
+
+
+@pytest.mark.parametrize("field", ["required_mm", "dru"])
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), -1.0, True, False])
+@pytest.mark.parametrize("empty", [False, True])
+def test_builder_rejects_invalid_distances_even_without_pairs(field, invalid, empty):
+    values = {"required_mm": CLOCK_REQUIRED_MM, "dru": DRU}
+    values[field] = invalid
+    with pytest.raises(ValueError, match=field):
+        build_signal_clearance_table([] if empty else ["SDCLK"], ["BA1"], **values)
+
+
+@pytest.mark.parametrize(
+    "required,dru,expected", [(0, 0.15, 0.15), (0.05, 0.15, 0.15), (0, 0, 0), (0.54, 0, 0.54)]
+)
+def test_zero_and_subfloor_distances_remain_valid(required, dru, expected):
+    table = build_signal_clearance_table(["SDCLK"], ["BA1"], required, dru=dru)
+    assert table.required_clearance("SDCLK", "BA1") == expected
+    assert table.required_clearance("BA1", "SDCLK") == expected
