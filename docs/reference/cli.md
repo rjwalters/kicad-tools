@@ -1562,3 +1562,6 @@ LCSC column (#4116); pass `--no-auto-lcsc` to export without enrichment.
 `kct mfr apply-rules` writes a sibling `.kicad_pro` (rules + Default netclass)
 so `kicad-cli pcb drc` uses the applied constraints instead of factory
 defaults (#4109).
+
+See [KiCad lock-marker advisories](kicad-lock-policy.md) for the covered write
+paths and `KCT_KICAD_LOCK_POLICY=warn|error|ignore` configuration.
