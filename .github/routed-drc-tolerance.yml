@@ -10,7 +10,14 @@ tolerances:
   # Provenance: d95b6eff^:.github/routed-drc-tolerance.yml lines 1113-1140;
   # #4019 ratcheted to 18 after runs 29075253404/29072031350/29070816533.
   # Exactly 9 skew + 9 continuity; new via-in-pad errors must be repaired.
-  boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb: 18
+  # PR #5152 added a new different-net SMD pad/pad factory clearance floor
+  # (0.15mm, verified against JLCPCB's capabilities page); this synthetic
+  # fixture is a historical routing witness, not a manufacturing release
+  # (see this file's header), and was never re-routed to the new floor, so
+  # it now measures 0.141mm at 2 pad/pad sites -- 2 new `clearance_pad_pad`
+  # errors. Ratcheted 18 -> 20 for exactly those 2; the skew+continuity count
+  # is unchanged. Tracked in #5204 alongside the related board-05 findings.
+  boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb: 20
   # Provenance: same historical file lines 1754-1763; #4007 ratcheted 9 -> 8
   # after via-aware ADDR_BUS tuning. Four pair-skew +four continuity errors.
   boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb: 8

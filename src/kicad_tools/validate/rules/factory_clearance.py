@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 
 def _hole_geometry(pad: Pad, footprint: Footprint):
     """Actual round/slotted drill including its offset and absolute pad angle."""
-    from shapely.affinity import rotate, translate
-    from shapely.geometry import LineString, Point
+    from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
+    from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
     from .clearance import _transform_pad_position
 
@@ -52,6 +52,8 @@ def check_pth_hole_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
     if rules.min_pth_hole_to_track_mm is None and rules.min_inner_pth_hole_to_copper_mm is None:
         return results
     require_shapely("PTH hole clearance")
+    import shapely  # type: ignore[import-untyped]
+    from shapely import STRtree
     from shapely.geometry import LineString
 
     from .clearance import (
@@ -95,10 +97,16 @@ def check_pth_hole_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
                 (fill.net_number, fill.polygon, f"Zone [{fill.net_name}]", None)
                 for fill in fills.get(layer.name, [])
             )
+        if not copper:
+            continue
+        tree = STRtree([geom for _, geom, _, _ in copper])
         for fp, pad, hole in holes:
             if hole is None or not _pad_on_layer(pad, layer.name):
                 continue
-            for net, geom, reference, source_pad in copper:
+            minx, miny, maxx, maxy = hole.bounds
+            query_box = shapely.box(minx - minimum, miny - minimum, maxx + minimum, maxy + minimum)
+            for idx in tree.query(query_box):
+                net, geom, reference, source_pad = copper[int(idx)]
                 # A hole is part of its own pad even without an assigned net.
                 # Other net-0 objects have no proven electrical relationship.
                 if source_pad is pad or (net != 0 and net == pad.net_number):
@@ -132,6 +140,9 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
     if minimum is None:
         return results
     require_shapely("silk pad clearance")
+    import shapely
+    from shapely import STRtree
+
     from .clearance import _pad_polygon
     from .silkscreen import _fp_transform, _silk_side, _stroke_geometry
 
@@ -155,16 +166,28 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
                 exposed = "*.Mask" in pad.layers or f"{side}.Mask" in pad.layers
                 geom = copper.buffer(max(margin or 0, 0)) if exposed else copper
                 apertures.append((side, geom, f"{fp.reference}-{pad.number}"))
+    apertures_by_side: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
+    for pad_side, aperture, pad_reference in apertures:
+        if not aperture.is_empty:
+            apertures_by_side[pad_side].append((aperture, pad_reference))
+    trees: dict[str, Any] = {
+        side: STRtree([geom for geom, _ in entries])
+        for side, entries in apertures_by_side.items()
+        if entries
+    }
+
     for graphic, transform, reference, location in strokes:
         silk_side = _silk_side(graphic.layer)
-        if silk_side is None:
+        if silk_side is None or silk_side not in trees:
             continue
         geom = _stroke_geometry(graphic, transform)
         if geom is None:
             continue
-        for pad_side, aperture, pad_reference in apertures:
-            if pad_side != silk_side or aperture.is_empty:
-                continue
+        side_entries = apertures_by_side[silk_side]
+        minx, miny, maxx, maxy = geom.bounds
+        query_box = shapely.box(minx - minimum, miny - minimum, maxx + minimum, maxy + minimum)
+        for idx in trees[silk_side].query(query_box):
+            aperture, pad_reference = side_entries[int(idx)]
             distance = geom.distance(aperture)
             if distance + DRC_TOLERANCE < minimum:
                 results.add(
