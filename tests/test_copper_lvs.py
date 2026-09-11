@@ -1095,30 +1095,15 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
     ], "expected four remaining DDR/HDMI opens after the MIPI repair"
 
 
-def test_compare_copper_netlist_on_board06_wired_fixture_is_clean() -> None:
-    """End-to-end #4012 pin: board 06's wired schematic yields real evidence.
+def test_compare_copper_netlist_on_board06_wired_fixture_reports_unbonded_pads() -> None:
+    """The wired snapshot binds all 198 pads but still contains opens.
 
-    History: board 06's schematic was unwired pre-#4012 (0/198 pins bound)
-    and its #4004 ``lvs.json`` claimed ``clean=true`` on zero evidence —
-    the vacuity hole from PR #4005's review, pinned here as a VACUOUS
-    verdict until #4012 wired the schematic.  The comparator binds all 198
-    pads (genuine evidence, not vacuous).
-
-    Update (#4982): this fixture is NOT actually fully copper-complete.
-    Three of U1's power/ground pads (U1.15/GND, U1.17/+3V3, U1.32/GND) are
-    each a singleton copper component -- zero trace/via/pour-fill contact
-    to their net's island, confirmed directly against
-    :meth:`ConnectivityValidator.extract_pad_partition`.  Before #4982 this
-    was silently waived: GND and +3V3 both own a zone elsewhere on this
-    board, so the old net-wide ``advisory_net_names`` suppression (derived
-    from zone *ownership*, not per-pad copper contact) dropped these opens
-    from the diff entirely, and this test asserted a ``clean=True`` that
-    had no evidence behind it for exactly these three pads -- the same
-    false-clean shape #4982 fixes on board 05.  Removing that blanket
-    waiver correctly surfaces the three opens; a real re-route of this
-    pinned fixture is a separate concern (the fixture is a frozen snapshot
-    for LVS-pin stability, not a shipping board), so this test now pins
-    the newly-correct dirty verdict instead of the stale, unevidenced one.
+    Removing the zone-ownership waiver (#4982) exposes U1.17/+3V3 and
+    U1.32/GND as singleton copper components. U1.15 now belongs to the
+    main GND component; the earlier three-open expectation is stale.
+    Check the partition as well as the report so a waiver cannot make
+    this frozen snapshot appear clean. Live Board06 regeneration has
+    its own clean-LVS gate and must not inherit this snapshot's opens.
     """
     repo_root = Path(__file__).resolve().parent.parent
     board_out = repo_root / "boards" / "06-diffpair-test" / "regression-fixture"
@@ -1129,16 +1114,18 @@ def test_compare_copper_netlist_on_board06_wired_fixture_is_clean() -> None:
     result = compare_copper_netlist(sch, pcb)
     assert not result.vacuous
     assert result.bound_pad_count == 198
-    # Three genuinely disconnected power/ground pads on U1 (#4982) -- see
-    # docstring.  Not a false positive: each is a singleton copper
-    # component with zero copper contact to its net's pour/island.
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    partition = ConnectivityValidator(pcb).extract_pad_partition()
+    assert frozenset({"U1.17"}) in partition
+    assert frozenset({"U1.32"}) in partition
+    assert any({"U1.15", "J1.A1"} <= component for component in partition)
     assert not result.clean
     assert result.shorts == ()
-    assert len(result.opens) == 3
-    assert {o.net_a for o in result.opens} == {"GND", "+3V3"}
-    disconnected_pads = {"U1.15", "U1.17", "U1.32"}
-    witnessed_pads = {p for o in result.opens for p in (o.pad_a, o.pad_b)}
-    assert disconnected_pads <= witnessed_pads
+    assert {(o.net_a, o.pad_a, o.pad_b) for o in result.opens} == {
+        ("+3V3", "J1.A8", "U1.17"),
+        ("GND", "J1.A1", "U1.32"),
+    }
 
 
 # ---------------------------------------------------------------------------
