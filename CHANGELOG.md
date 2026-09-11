@@ -2165,7 +2165,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `boards/03-usb-joystick/check_manufacturing.py`'s previously bespoke
   `dataclasses.replace(checker.design_rules, min_hole_to_hole_mm=0.45)` patch
   is migrated onto this shared contract, backed by a new
-  `boards/03-usb-joystick/output/fabrication_overrides.json` sidecar.
+  `boards/03-usb-joystick/output/fabrication_overrides.json` sidecar. The
+  board resolves that sidecar through the module's shared three-directory
+  probe (`discover_fabrication_overrides_sidecar`) with a fallback to its own
+  committed copy, and `route_pcb` now stages the sidecar next to every
+  generated board, so a board copy generated outside
+  `boards/03-usb-joystick/output/` still resolves the identical cited floor
+  instead of failing on a missing file. `routing_plan.apply_native_fab_floor`
+  reads the floor it writes into the `.kicad_pro` from that same sidecar
+  rather than restating the literal value.
 
 ## [0.20.0] - 2026-08-06
 
