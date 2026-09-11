@@ -28,7 +28,7 @@ Declared in `pyproject.toml`:
 
 ## Layout
 
-Most of the suite is a flat set of ~850 `test_*.py` modules at the root of
+Most of the suite is a flat set of ~880 `test_*.py` modules at the root of
 `tests/`. Focused test data and subsystems live in subpackages:
 
 | Directory | Contents |
