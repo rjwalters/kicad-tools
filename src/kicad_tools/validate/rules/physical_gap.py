@@ -103,6 +103,8 @@ def _raw_geometry_issues(pcb):
             if layer is None or layer.get_string(0) not in layers:
                 issues.append(f"unresolved {node.name} copper layer")
         elif node.name == "via":
+            if node.find_child("padstack") is not None:
+                issues.append("unsupported via padstack: layer-specific copper unresolved")
             numeric(node, "at", {2})
             numeric(node, "size", {1}, positive=True)
             span = node.find_child("layers")
@@ -117,6 +119,8 @@ def _raw_geometry_issues(pcb):
             for pad in node.find_all("pad"):
                 if pad.get_string(1) == "np_thru_hole":
                     continue
+                if pad.find_child("padstack") is not None:
+                    issues.append("unsupported pad padstack: layer-specific copper unresolved")
                 numeric(pad, "at", {2, 3})
                 numeric(pad, "size", {2}, positive=True)
                 numeric(pad, "roundrect_rratio", {1}, required=False)

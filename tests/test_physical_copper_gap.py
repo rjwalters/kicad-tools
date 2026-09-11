@@ -244,3 +244,68 @@ def test_rotated_parallel_rect_pads_measure_physical_air(angle, gap):
         assert findings[0].items == ("pad0", "pad1")
     else:
         assert not findings  # Overlapping copper and a wide air gap are valid.
+
+
+@pytest.mark.parametrize("kind", ["pad", "via"])
+def test_layer_specific_padstack_is_incomplete_through_cli(kind, tmp_path, capsys):
+    import json
+
+    from kicad_tools.cli import main
+    from kicad_tools.sexp import serialize_sexp
+    from kicad_tools.validate.checker import DRCChecker
+
+    if kind == "pad":
+        item = """(footprint "Stack" (layer "F.Cu") (at 10 10)
+          (property "Reference" "U1")
+          (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill .4)
+            (layers "*.Cu" "*.Mask")
+            (padstack (mode custom)
+              (layer "F.Cu" (shape circle) (size 1 1))
+              (layer "B.Cu" (shape rect) (size 3 1)))
+            (net 1 "GND") (uuid "pad")))"""
+    else:
+        item = """(via (at 10 10) (size 1) (drill .4)
+          (layers "F.Cu" "B.Cu") (net 1) (uuid "via")
+          (padstack (mode custom) (layer "B.Cu" (size 3))))"""
+    near = track((11.7, 8), (11.7, 12), "near").replace('"F.Cu"', '"B.Cu"')
+    pcb = board(item, near)
+    result = DRCChecker(pcb, physical_copper_gap_mm=0.25).check_physical_copper_gap()
+    assert result.violations
+    assert all(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+    assert any(f"unsupported {kind} padstack" in v.message for v in result.violations)
+
+    path = tmp_path / "padstack.kicad_pcb"
+    original = serialize_sexp(pcb._sexp)
+    path.write_text(original)
+    assert (
+        main(
+            [
+                "check",
+                str(path),
+                "--drc-only",
+                "--only",
+                "physical_copper_gap",
+                "--physical-copper-gap",
+                ".25",
+                "--format",
+                "json",
+            ]
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert any(v["rule_id"] == "physical_copper_gap_incomplete" for v in payload["violations"])
+    assert path.read_text() == original
+
+
+def test_ordinary_rear_rectangle_reports_padstack_witness_gap():
+    pad = """(footprint "Stack" (layer "F.Cu") (at 10 10)
+      (property "Reference" "U1")
+      (pad "1" thru_hole rect (at 0 0) (size 3 1) (drill .4)
+       (layers "*.Cu" "*.Mask") (net 1 "GND") (uuid "pad")))"""
+    near = track((11.7, 8), (11.7, 12), "near").replace('"F.Cu"', '"B.Cu"')
+    result = check_physical_copper_gap(board(pad, near), 0.25)
+    assert not any(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+    assert any(
+        v.layer == "B.Cu" and v.actual_value == pytest.approx(0.1) for v in result.violations
+    )

@@ -52,3 +52,9 @@ invalid via spans, malformed pad sizes/ratios and unsupported chamfer modifiers
 produce `physical_copper_gap_incomplete`. For these raw-source failures the
 geometry collection is stopped; an empty result must never be read as a clean
 gap verdict. Native chamfered pads require a future exact geometry implementation.
+
+Explicit pad and via `padstack` definitions are unsupported, including stacks
+whose current values happen to match the nominal size. They produce blocking
+`physical_copper_gap_incomplete` findings before any nominal geometry is used;
+the nominal pad/via shape must not substitute for layer-specific copper. Ordinary
+pads and vias without a `padstack` retain the supported behavior above.
