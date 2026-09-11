@@ -6,6 +6,8 @@ import pytest
 
 from tests._mask_gerbonara_oracle import read_native_gerber
 
+pytest.importorskip("gerbonara", minversion="1.6.3")
+
 
 def _gerber(tmp_path, commands):
     path = tmp_path / "control.gbr"

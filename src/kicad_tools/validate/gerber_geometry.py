@@ -53,7 +53,13 @@ def _arc(start, end, center, clockwise, tolerance):
 def parse_gerber_geometry(data: str) -> GerberGeometry:
     """Read native macro-free Gerber; reject incomplete or unknown command streams."""
     from shapely.affinity import scale, translate  # type: ignore[import-untyped]
-    from shapely.geometry import GeometryCollection, LineString, Point, Polygon, box  # type: ignore[import-untyped]
+    from shapely.geometry import (  # type: ignore[import-untyped]
+        GeometryCollection,
+        LineString,
+        Point,
+        Polygon,
+        box,
+    )
     from shapely.ops import unary_union  # type: ignore[import-untyped]
 
     from .mask_geometry import _buffer

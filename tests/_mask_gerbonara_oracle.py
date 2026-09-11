@@ -6,13 +6,13 @@ Shapely only combines the resulting polygons. Coordinates are returned in the
 board's millimetre, y-down frame.
 """
 
-from pathlib import Path
 import math
+from pathlib import Path
 
 
 def read_native_gerber(path: Path, *, chord_error_mm: float = 0.000001):
-    from gerbonara.rs274x import GerberFile
     from gerbonara.graphic_primitives import Rectangle
+    from gerbonara.rs274x import GerberFile
     from gerbonara.utils import MM
     from shapely.affinity import scale
     from shapely.geometry import GeometryCollection, Polygon
@@ -40,9 +40,9 @@ def read_native_gerber(path: Path, *, chord_error_mm: float = 0.000001):
                     )
                 ]
             else:
-                vertices = primitive.to_arc_poly().approximate_arcs(
-                    max_error=chord_error_mm
-                ).outline
+                vertices = (
+                    primitive.to_arc_poly().approximate_arcs(max_error=chord_error_mm).outline
+                )
             shape = Polygon(vertices)
             if not shape.is_valid:
                 raise ValueError(f"Invalid independent oracle polygon in {path}")

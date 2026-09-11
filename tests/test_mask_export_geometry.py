@@ -4,7 +4,6 @@ import uuid
 from pathlib import Path
 
 import pytest
-from _mask_gerbonara_oracle import read_native_gerber
 from shapely.geometry import Point
 
 from kicad_tools.validate.gerber_geometry import GerberGeometryError, parse_gerber_geometry
@@ -12,6 +11,7 @@ from kicad_tools.validate.mask_export_geometry import (
     MaskExportOptions,
     inspect_exported_mask_geometry,
 )
+from tests._mask_gerbonara_oracle import read_native_gerber
 
 HEADER = "%FSLAX46Y46*%\n%MOMM*%\n%LPD*%\n"
 
@@ -332,3 +332,69 @@ def test_unknown_nested_padstack_option_stays_visible(tmp_path, option):
     result = inspect_exported_mask_geometry(path)
     assert not result.complete
     assert any(d["source_uuid"] and d["feature"] == "padstack" for d in result.unsupported)
+
+
+def test_standalone_custom_pad_does_not_claim_neighbor_or_merge_bridge(tmp_path):
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if find_kicad_cli() is None:
+        pytest.skip("native KiCad required")
+    body = """(footprint "Composite" (layer "F.Cu") (at 10 10)
+      (pad "1" smd custom (at -.6 0) (size .5 .5) (layers "F.Cu" "F.Mask")
+       (options (clearance outline) (anchor rect))
+       (primitives (gr_poly (pts (xy -.5 -1) (xy .5 -1) (xy .5 1) (xy -.5 1)) (width 0) (fill yes))))
+      (pad "2" smd rect (at .6 0) (size 1 2) (layers "F.Cu" "F.Mask")))"""
+    path = _board(
+        tmp_path / "composite.kicad_pcb",
+        body,
+        setup="(pad_to_mask_clearance 0) (solder_mask_min_width .3)",
+    )
+    result = inspect_exported_mask_geometry(path)
+    assert result.complete, result.unsupported
+    _, part = next(iter(result.source_geometries.items()))
+    assert part["derivative_sha256"] != result.source_sha256
+    center = Point(10, 10)
+    assert result.layers["F.Mask"].contains(center)
+    assert not part["layers"]["F.Mask"].intersects(center)
+    assert not part["layers"]["F.Mask"].intersects(Point(10.6, 10))
+
+
+def test_native_plot_variables_change_geometry_and_export_identity(tmp_path):
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if find_kicad_cli() is None:
+        pytest.skip("native KiCad required")
+    path = _board(
+        tmp_path / "variable.kicad_pcb",
+        """(gr_text "${SIGN}" (at 10 10)
+      (layer "F.Mask") (effects (font (size 1 1) (thickness .15))))""",
+    )
+    a = inspect_exported_mask_geometry(path, options=MaskExportOptions(variables=(("SIGN", "I"),)))
+    b = inspect_exported_mask_geometry(
+        path, options=MaskExportOptions(variables=(("SIGN", "MMMM"),))
+    )
+    assert a.complete and b.complete, (a.unsupported, b.unsupported)
+    assert a.source_sha256 == b.source_sha256
+    assert a.export_identity != b.export_identity
+    assert b.layers["F.Mask"].area > 3 * a.layers["F.Mask"].area
+
+
+def test_duplicate_uuid_case_is_not_distinct_source_identity(tmp_path):
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    if find_kicad_cli() is None:
+        pytest.skip("native KiCad required")
+    path = _board(tmp_path / "duplicate.kicad_pcb", NATIVE_CASES["merged"])
+    lower = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    source = (
+        path.read_text()
+        .replace(str(uuid.UUID(int=2)), lower)
+        .replace(str(uuid.UUID(int=3)), lower.upper())
+    )
+    path.write_text(source)
+    result = inspect_exported_mask_geometry(path)
+    assert not result.complete
+    assert any(
+        d["feature"] == "source-identity" and d["source_uuid"] == lower.upper()
+        for d in result.unsupported
+    )

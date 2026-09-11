@@ -114,7 +114,7 @@ def _inventory(tree):
             # Property metadata with no physical layer is not plotted geometry.
             if any(name in {*LAYERS, "*.Cu", "*.Mask"} for name in names):
                 identity = node.find_child("uuid")
-                uuid = identity.get_string(0) if identity else ""
+                uuid = (identity.get_string(0) or "") if identity else ""
                 kind = node.name
                 if node.name == "pad":
                     kind = "pad:" + (node.get_string(2) or "unknown")
@@ -219,7 +219,7 @@ def inspect_exported_mask_geometry(
         {
             "command": list(native_command),
             "arguments": args,
-            "profile": "macro-free-gerber-4.6",
+            "profile": "macro-free-native-gerber",
             "board_plot_params": options.board_plot_params,
             "variables": sorted(options.variables),
         },
