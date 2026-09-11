@@ -47,12 +47,42 @@ future tuned-net exemption that the emitter fix makes unnecessary fails
 here instead of silently masking off-angle copper.
 
 Any NEW off-angle segment outside the pinned sets still fails.
+
+Discovery (issue #5084): the original #3532 discovery rule matched only
+``*_routed.kicad_pcb`` filenames.  Board 09's generator overwrites its
+single committed output in place across the placement -> routed
+lifecycle instead of keeping a separate ``_routed`` sibling next to an
+unsuffixed pre-route snapshot (as boards 00-07 do), so its canonical
+routed output -- ``boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb``
+-- was silently excluded from the census by filename accident, not
+policy.  ``_CANONICAL_ROUTED_OUTPUTS_WITHOUT_ROUTED_SUFFIX`` below is the
+explicit, board-by-board metadata that closes that gap: entries are
+added deliberately, never inferred from directory location alone.
+Investigation/diagnostic PCB snapshots (board09's
+``engineering/routing-investigation/`` and
+``engineering/connectivity-investigation/`` fixtures) are excluded from
+discovery outright by ``_is_investigation_fixture`` -- they are never a
+board's release candidate, regardless of filename.
+
+Board 09 is a *blocked development checkpoint*, not a historical fixture:
+its README documents clean native ERC/DRC and full routing, but
+explicitly blocks manufacturing release (51 ampacity errors, 22
+unselected MPNs, no manufacturing ZIP).  Now that it is discovered, its
+318-segment output carries 61 off-angle segments -- pending a source
+emitter repair, it is an EXPLICIT, hash-pinned exemption from the strict
+``ARTIFACTS`` enforcement below (``BLOCKED_DEVELOPMENT_CHECKPOINT``),
+distinct from the ``HISTORICAL_WITNESS`` mechanism (which pins a
+*historical*, intentionally-defective regression fixture).  Both
+mechanisms are "discovered but explicitly carved out", never a silent
+skip; see ``test_blocked_development_checkpoint_is_tracked`` for the
+ratchet that keeps this exemption honest.
 """
 
 from __future__ import annotations
 
 import hashlib
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -109,8 +139,67 @@ def _net_ids_by_name(pcb_path: Path, names: frozenset[str]) -> set[int]:
     }
 
 
+#: Directories that hold investigation/diagnostic PCB snapshots rather
+#: than any board's canonical output -- e.g. board09's
+#: ``engineering/routing-investigation/`` (issue #5072 benchmark/
+#: experiment fixtures) and ``engineering/connectivity-investigation/``
+#: (issue #5061 repro), plus board07's ``diagnostic-runs/`` notes.  A
+#: ``.kicad_pcb`` under any of these path segments is never a discovery
+#: candidate, no matter what its filename is -- an explicit, visible
+#: exclusion (issue #5084 AC2), not an incidental filename miss.
+_INVESTIGATION_DIR_SEGMENTS = frozenset({"engineering", "diagnostic-runs"})
+
+#: Canonical active routed outputs whose filename does NOT end in
+#: ``_routed.kicad_pcb`` -- because their generator overwrites the single
+#: committed artifact in place across the placement -> routed lifecycle
+#: instead of keeping a separate ``_routed`` sibling next to an
+#: unsuffixed pre-route snapshot (boards 00-07 keep both; board09 does
+#: not).  Each entry here is deliberate, board-by-board classification
+#: metadata -- never inferred from directory location -- so this is the
+#: explicit "artifact metadata/classification" signal the discovery
+#: mechanism uses for non-``_routed``-suffixed canonical outputs (issue
+#: #5084 AC1).  Add a board here only once its single ``output/*.kicad_pcb``
+#: is confirmed to be its committed **routed** (not pre-route placement)
+#: state.
+_CANONICAL_ROUTED_OUTPUTS_WITHOUT_ROUTED_SUFFIX = frozenset(
+    {
+        "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb",
+    }
+)
+
+
+def _is_investigation_fixture(rel_posix: str) -> bool:
+    """True if *rel_posix* lives under an investigation/diagnostic dir."""
+    return bool(set(Path(rel_posix).parts) & _INVESTIGATION_DIR_SEGMENTS)
+
+
+def _match_routed_artifact_names(names: Iterable[str]) -> list[str]:
+    """Pure matching logic: canonical active routed output names from *names*.
+
+    Split out from :func:`_committed_routed_artifacts` so the discovery
+    rule itself is directly unit-testable (issue #5084) without a real
+    git checkout.  A name is a match when it is either the original
+    ``_routed.kicad_pcb`` filename convention OR explicitly listed in
+    ``_CANONICAL_ROUTED_OUTPUTS_WITHOUT_ROUTED_SUFFIX`` -- and, either
+    way, is NOT under an investigation/diagnostic directory.
+    """
+    matched = {
+        name
+        for name in names
+        if (
+            name.endswith("_routed.kicad_pcb")
+            or name in _CANONICAL_ROUTED_OUTPUTS_WITHOUT_ROUTED_SUFFIX
+        )
+        and not _is_investigation_fixture(name)
+    }
+    return sorted(matched)
+
+
 def _committed_routed_artifacts() -> list[Path]:
-    """Every ``*_routed.kicad_pcb`` tracked by git under ``boards/``."""
+    """Canonical active routed outputs tracked by git under ``boards/``.
+
+    See :func:`_match_routed_artifact_names` for the discovery rule.
+    """
     try:
         result = subprocess.run(
             ["git", "ls-files", "boards"],
@@ -127,11 +216,17 @@ def _committed_routed_artifacts() -> list[Path]:
         # ownership" (exit 128).  Fall back to a filesystem walk -- on
         # a clean CI checkout the on-disk tree IS the committed tree.
         # Local developer runs keep the git path so stray untracked
-        # artifacts cannot widen (or accidentally gate) the census.
+        # artifacts cannot widen (or accidentally gate) the census.  The
+        # explicit non-suffixed allowlist is unioned in by hand since it
+        # cannot be recovered from a glob.
         names = [
             str(p.relative_to(REPO_ROOT)) for p in REPO_ROOT.glob("boards/**/*_routed.kicad_pcb")
+        ] + [
+            name
+            for name in _CANONICAL_ROUTED_OUTPUTS_WITHOUT_ROUTED_SUFFIX
+            if (REPO_ROOT / name).exists()
         ]
-    return sorted(REPO_ROOT / line for line in names if line.endswith("_routed.kicad_pcb"))
+    return [REPO_ROOT / name for name in _match_routed_artifact_names(names)]
 
 
 def _artifact_id(path: Path) -> str:
@@ -146,13 +241,61 @@ HISTORICAL_WITNESS = (
     REPO_ROOT / "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
 )
 HISTORICAL_WITNESS_SHA256 = "ab3a2c2d4aea466f828e540189ac851ddb8c41505c8185be65924ec5ff92a9a6"
-ARTIFACTS = [p for p in _committed_routed_artifacts() if p != HISTORICAL_WITNESS]
+
+# Board09's routed development checkpoint (issue #5084): discovered by
+# _committed_routed_artifacts() now that discovery no longer relies solely
+# on the `_routed` filename suffix, but explicitly exempted from the
+# strict 45-degree enforcement below pending a source-emitter repair of
+# its 61 off-angle segments.  Unlike HISTORICAL_WITNESS this is NOT a
+# frozen historical fixture -- it is board09's live, actively-developed
+# routed output, currently blocked from manufacturing release for
+# unrelated reasons (ampacity, MPN selection, no manufacturing ZIP; see
+# boards/09-usbc-pd-power/README.md).  Pinned by hash + exact census
+# counts so any change to the file (repair or regression) is caught by
+# test_blocked_development_checkpoint_is_tracked below instead of being
+# silently masked -- once the off-angle count reaches 0, delete this
+# exemption and let board09 into the strict ARTIFACTS census.
+BLOCKED_DEVELOPMENT_CHECKPOINT = (
+    REPO_ROOT / "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb"
+)
+BLOCKED_DEVELOPMENT_CHECKPOINT_SHA256 = (
+    "39bf81159243f6827792cc0ce1fa23d907a419595d200edf478f25819905bdc7"
+)
+
+ARTIFACTS = [
+    p
+    for p in _committed_routed_artifacts()
+    if p not in (HISTORICAL_WITNESS, BLOCKED_DEVELOPMENT_CHECKPOINT)
+]
 
 
 def test_historical_matchgroup_witness_is_unchanged() -> None:
     assert hashlib.sha256(HISTORICAL_WITNESS.read_bytes()).hexdigest() == HISTORICAL_WITNESS_SHA256
     total, bad = segment_angle_census(HISTORICAL_WITNESS)
     assert (total, len(bad)) == (841, 12)
+
+
+def test_blocked_development_checkpoint_is_tracked() -> None:
+    """Board09's routed output is discovered, but deliberately exempted.
+
+    This documents the issue #5084 policy decision explicitly: the file
+    IS now found by discovery (closing the filename-suffix gap) but is
+    NOT yet held to the strict fleet angle census, because board09 is a
+    blocked development checkpoint whose 61 off-angle segments need a
+    source-emitter repair, not a quantize-to-pass shortcut.  If this
+    assertion's counts ever change, board09's routing changed -- update
+    the pin, and if bad == 0, remove the exemption entirely.
+    """
+    assert BLOCKED_DEVELOPMENT_CHECKPOINT in _committed_routed_artifacts(), (
+        "board09's routed output must be discovered (issue #5084) even "
+        "though it is exempted from strict enforcement below"
+    )
+    assert (
+        hashlib.sha256(BLOCKED_DEVELOPMENT_CHECKPOINT.read_bytes()).hexdigest()
+        == BLOCKED_DEVELOPMENT_CHECKPOINT_SHA256
+    )
+    total, bad = segment_angle_census(BLOCKED_DEVELOPMENT_CHECKPOINT)
+    assert (total, len(bad)) == (318, 61)
 
 
 def test_fleet_has_routed_artifacts() -> None:
@@ -205,3 +348,65 @@ def test_committed_artifact_is_45_aligned(artifact: Path) -> None:
             f"{stale_tuned} carry no off-angle segment -- remove them "
             f"from EXEMPT_TUNED_NETS to lock in the improvement."
         )
+
+
+# --- Discovery-logic unit tests (issue #5084) -------------------------
+#
+# _match_routed_artifact_names() is the pure matching rule underneath
+# _committed_routed_artifacts(); these cases exercise it directly with
+# synthetic names so the discovery mechanism itself is tested in
+# isolation from git/filesystem state.
+
+
+def test_discovery_matches_ordinary_routed_suffix() -> None:
+    """The original #3532 rule: a `_routed.kicad_pcb` sibling is found."""
+    names = [
+        "boards/00-simple-led/output/simple_led.kicad_pcb",
+        "boards/00-simple-led/output/simple_led_routed.kicad_pcb",
+    ]
+    assert _match_routed_artifact_names(names) == [
+        "boards/00-simple-led/output/simple_led_routed.kicad_pcb",
+    ]
+
+
+def test_discovery_matches_canonical_output_without_routed_suffix() -> None:
+    """Board09's non-`_routed`-suffixed canonical output is found (issue #5084)."""
+    names = ["boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb"]
+    assert _match_routed_artifact_names(names) == names
+
+
+def test_discovery_excludes_investigation_fixtures_regardless_of_filename() -> None:
+    """Investigation/diagnostic dirs are excluded even if named like a match."""
+    names = [
+        "boards/09-usbc-pd-power/engineering/routing-investigation/first.kicad_pcb",
+        "boards/09-usbc-pd-power/engineering/routing-investigation/first_routed.kicad_pcb",
+        "boards/09-usbc-pd-power/engineering/connectivity-investigation/before-split.kicad_pcb",
+        "boards/07-matchgroup-test/diagnostic-runs/scratch_routed.kicad_pcb",
+    ]
+    assert _match_routed_artifact_names(names) == []
+
+
+def test_discovery_does_not_widen_to_every_non_suffixed_output() -> None:
+    """A non-`_routed` file NOT in the explicit allowlist stays excluded.
+
+    Discovery is deliberate metadata, not "any .kicad_pcb under output/"
+    -- this guards against re-introducing a silent, incidental widening
+    of the census in the other direction.
+    """
+    names = ["boards/99-hypothetical-board/output/hypothetical_board.kicad_pcb"]
+    assert _match_routed_artifact_names(names) == []
+
+
+def test_discovery_is_a_pure_union_of_both_signals() -> None:
+    """Both signals compose: suffix match + explicit metadata, sorted."""
+    names = [
+        "boards/00-simple-led/output/simple_led_routed.kicad_pcb",
+        "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb",
+        "boards/09-usbc-pd-power/engineering/routing-investigation/first.kicad_pcb",
+    ]
+    assert _match_routed_artifact_names(names) == sorted(
+        [
+            "boards/00-simple-led/output/simple_led_routed.kicad_pcb",
+            "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb",
+        ]
+    )
