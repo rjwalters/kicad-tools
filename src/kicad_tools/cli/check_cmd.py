@@ -1108,6 +1108,7 @@ def print_routing_quality_stanza(metrics: RoutingQualityMetrics) -> None:
 
 
 CHECK_CATEGORIES = [
+    "physical_copper_gap",
     "ampacity",
     "clearance",
     "connectivity",
@@ -1214,6 +1215,13 @@ def main(argv: list[str] | None = None) -> int:
         description="Pure Python DRC for PCBs (no kicad-cli required)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
+    )
+    parser.add_argument(
+        "--physical-copper-gap",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Opt-in physical copper slit minimum, independent of net identity (mm)",
     )
     parser.add_argument(
         "pcb",
@@ -1617,6 +1625,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             skip_set.add(cat)
 
+    if only_set and "physical_copper_gap" in only_set and args.physical_copper_gap is None:
+        print("Error: physical_copper_gap requires --physical-copper-gap MM", file=sys.stderr)
+        return 1
+
     # Load PCB - resolve to absolute path for reliable file access
     # Handles both file paths and directory paths (like kct build)
     input_path = Path(args.pcb).resolve()
@@ -2017,6 +2029,7 @@ def main(argv: list[str] | None = None) -> int:
             # sidecar the skew rules produce no info findings, so this is a
             # graceful no-op (AC5).
             emit_measurements=True,
+            physical_copper_gap_mm=getattr(args, "physical_copper_gap", None),
             courtyard_waivers=courtyard_waivers,
             # Issue #4673: strict (real-geometry) connectivity is the
             # default; --legacy-connectivity is the explicit opt-out and
@@ -2504,6 +2517,7 @@ def run_selected_checks(
     check_methods = {
         "ampacity": checker.check_ampacity,
         "clearance": checker.check_clearances,
+        "physical_copper_gap": checker.check_physical_copper_gap,
         "connectivity": checker.check_connectivity,
         "connector_access": checker.check_connector_access,
         "segment_zone": checker.check_segment_zone_clearances,

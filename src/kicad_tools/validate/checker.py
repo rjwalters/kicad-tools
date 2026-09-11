@@ -79,6 +79,7 @@ class DRCChecker:
         strict_connectivity: bool = True,
         copper_oz_outer: float | None = None,
         copper_oz_inner: float | None = None,
+        physical_copper_gap_mm: float | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -176,6 +177,12 @@ class DRCChecker:
         self.strict_connectivity = strict_connectivity
         self.warn_on_inactive_skew_rules = warn_on_inactive_skew_rules
         self.verbose = verbose
+        if physical_copper_gap_mm is not None:
+            import math
+
+            if not math.isfinite(physical_copper_gap_mm) or physical_copper_gap_mm <= 0:
+                raise ValueError("Physical copper gap must be finite and positive")
+        self.physical_copper_gap_mm = physical_copper_gap_mm
         self.emit_measurements = emit_measurements
         # The skew / continuity rules surface their measured info findings
         # when either the user asked for --verbose OR a caller wants the
@@ -229,6 +236,7 @@ class DRCChecker:
     CHECK_ALL_METHODS: tuple[str, ...] = (
         "check_ampacity",
         "check_clearances",
+        "check_physical_copper_gap",
         "check_connectivity",
         "check_connector_access",
         "check_segment_zone_clearances",
@@ -542,6 +550,14 @@ class DRCChecker:
             results.violations = filter_result.kept
 
         return results
+
+    def check_physical_copper_gap(self) -> DRCResults:
+        """Opt-in net-independent slit preflight on unioned copper geometry."""
+        if self.physical_copper_gap_mm is None:
+            return DRCResults()
+        from .rules.physical_gap import check_physical_copper_gap
+
+        return check_physical_copper_gap(self.pcb, self.physical_copper_gap_mm)
 
     def check_clearances(self) -> DRCResults:
         """Check clearance rules (trace-to-trace, trace-to-pad, etc.).

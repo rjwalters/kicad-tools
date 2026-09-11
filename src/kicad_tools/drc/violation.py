@@ -80,6 +80,8 @@ def _init_type_category_map() -> None:
             # (the etch process cannot reliably reproduce sub-min-width
             # copper), categorized with the other manufacturing defects.
             ViolationType.COPPER_SLIVER: ViolationCategory.MANUFACTURING,
+            ViolationType.PHYSICAL_COPPER_GAP: ViolationCategory.MANUFACTURING,
+            ViolationType.PHYSICAL_COPPER_GAP_INCOMPLETE: ViolationCategory.MANUFACTURING,
             ViolationType.EDGE_CLEARANCE_TRACE: ViolationCategory.MANUFACTURING,
             ViolationType.EDGE_CLEARANCE_PAD: ViolationCategory.MANUFACTURING,
             ViolationType.EDGE_CLEARANCE_PAD_HOLE: ViolationCategory.MANUFACTURING,
@@ -190,6 +192,8 @@ class ViolationType(Enum):
     # (Issue #3843).  A fab-capability defect (under/over-etch hazard),
     # not a clearance gap between two features.
     COPPER_SLIVER = "copper_sliver"
+    PHYSICAL_COPPER_GAP = "physical_copper_gap"
+    PHYSICAL_COPPER_GAP_INCOMPLETE = "physical_copper_gap_incomplete"
     EDGE_CLEARANCE_TRACE = "edge_clearance_trace"
     EDGE_CLEARANCE_PAD = "edge_clearance_pad"
     EDGE_CLEARANCE_PAD_HOLE = "edge_clearance_pad_hole"
@@ -413,6 +417,8 @@ class ViolationType(Enum):
             # for downstream consumers that filter by exact type value.
             # Do NOT delete this as "redundant".
             "copper_sliver": cls.COPPER_SLIVER,
+            "physical_copper_gap": cls.PHYSICAL_COPPER_GAP,
+            "physical_copper_gap_incomplete": cls.PHYSICAL_COPPER_GAP_INCOMPLETE,
         }
 
         alias_match = _ALIASES.get(s_lower)
