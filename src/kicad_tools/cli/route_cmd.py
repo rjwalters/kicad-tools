@@ -5840,6 +5840,98 @@ def _warn_layer_selection_advisories(args, layer_stack, *, is_auto: bool) -> Non
         print("\n".join(lines), file=sys.stderr)
 
 
+def _warn_plane_layer_reservation(args, layer_stack) -> None:
+    """Emit the Issue #5014 Tier-3 plane-layer reservation advisory.
+
+    Deliberately a SEPARATE function from :func:`_warn_layer_selection_advisories`
+    (Tiers 1 & 2) rather than folded into it: that function's
+    ``test_route_cmd_helper_silent_on_plane_stack`` pins byte-identical
+    silence for a plane-aware stack, and Tier 3 is the one guard that DOES
+    fire on exactly that stack shape (a bare ``--layers 4`` with no
+    ``--reserve-plane-layers``). Keeping it separate means the pre-existing
+    Tier 1/2 no-new-warnings contract for other net-class-map shapes stays
+    untouched.
+
+    Advisory only -- stderr, never suppressed by ``--quiet``, exit code
+    unchanged. A pure no-op when ``layer_stack`` declares no ``PLANE``
+    layers, or when ``--reserve-plane-layers`` was already passed.
+    """
+    from kicad_tools.router.layer_advisories import plane_layer_reservation_advisory
+
+    msg = plane_layer_reservation_advisory(
+        layer_stack,
+        reserve_plane_layers=getattr(args, "reserve_plane_layers", False),
+    )
+    if msg:
+        print(msg, file=sys.stderr)
+
+
+def _apply_plane_layer_reservation(rules, layer_stack, args) -> None:
+    """Hard-restrict ``rules.allowed_layers`` to non-PLANE layers (#5014).
+
+    A strict no-op unless ``--reserve-plane-layers`` was passed: the early
+    ``return`` leaves ``rules.allowed_layers`` completely untouched,
+    preserving pre-#5014 routing byte for byte.
+
+    When the flag IS passed, the assignment is **unconditional** -- a
+    ``layer_stack`` that declares no ``PLANE`` layers writes ``None``,
+    which *clears* any restriction rather than leaving a stale one in
+    place.  That distinction matters in
+    :func:`route_with_layer_escalation`, where a single ``DesignRules``
+    instance is built once and shared by reference across every rung of
+    the ladder: only the first iteration runs against a freshly
+    constructed ``rules``, so a plane-free rung (e.g.
+    ``four_layer_all_signal``) reached after a plane-bearing one must
+    reset ``allowed_layers`` or it would inherit the previous stack's
+    ``['F.Cu', 'B.Cu']`` and silently degenerate into a 2-layer route.
+    At the three call sites that *do* construct ``rules`` immediately
+    beforehand, this writes ``None`` over an already-``None`` field.
+
+    Mutates ``rules`` in place (``DesignRules`` is not frozen) so callers
+    can invoke this immediately after each ``DesignRules(...)`` construction
+    without threading a new constructor argument through every relaxation
+    tier / escalation loop in this module.
+    """
+    if not getattr(args, "reserve_plane_layers", False):
+        return
+    from kicad_tools.router.layer_advisories import reserve_plane_layers_allowed_layers
+
+    # Assign unconditionally: a stack with no PLANE layers must CLEAR any
+    # restriction left behind by a previous escalation rung, not keep it.
+    rules.allowed_layers = reserve_plane_layers_allowed_layers(layer_stack)
+
+
+def _audit_plane_layer_reservation(router: "Autorouter", layer_stack) -> "list":
+    """Post-route audit: report committed signal on a declared plane layer.
+
+    Issue #5014.  Closes the loop on :func:`_apply_plane_layer_reservation`:
+    even when ``--reserve-plane-layers`` was not passed (or, as a
+    defense-in-depth check, when it WAS passed but something still slipped
+    through), scan the committed ``router.routes`` for any segment on a
+    layer the resolved stack designates ``PLANE`` and print one line per
+    offending ``(net, layer)`` pair.
+
+    Advisory only -- stderr, never suppressed by ``--quiet``, exit code
+    unaffected. Mirrors the ``_audit_pairwise_clearance`` pattern (#4588):
+    the search-time constraint is enforced elsewhere; this audits the
+    actually-committed copper engine-agnostically. A strict no-op when the
+    stack declares no ``PLANE`` layers.
+
+    Returns the list of :class:`~kicad_tools.router.layer_advisories.PlaneLayerSignalViolation`
+    found (empty when clean), so a future caller can fold this into a
+    harder gate without re-scanning.
+    """
+    from kicad_tools.router.layer_advisories import plane_layer_signal_violations
+
+    violations = plane_layer_signal_violations(router.routes, layer_stack)
+    if violations:
+        print(
+            "\n".join(v.message for v in violations),
+            file=sys.stderr,
+        )
+    return violations
+
+
 def _resolve_analog_net_names(router: "Autorouter", args) -> set[str]:
     """Resolve the set of analog net names selected by the analog flags (#3171).
 
@@ -6474,6 +6566,15 @@ def route_with_layer_escalation(
     _attempted_rung_fingerprints: set[tuple[int, str, bool, tuple[str, ...]]] = set()
 
     for attempt_num, (layer_count, layer_stack, via_in_pad_fallback) in enumerate(layer_configs, 1):
+        # Issue #5014: recompute the --reserve-plane-layers hard restriction
+        # for THIS attempt's stack. ``rules`` is a single mutable object
+        # shared across every rung of this ladder (only ``layer_stack``
+        # varies per attempt), so allowed_layers must be re-derived here
+        # rather than once before the loop.  A strict no-op unless
+        # --reserve-plane-layers was passed.
+        _apply_plane_layer_reservation(rules, layer_stack, args)
+        _warn_plane_layer_reservation(args, layer_stack)
+
         # Issue #3371 / P_FP5: stamp / clear the via-in-pad fallback env var
         # *around* this attempt so the lazily-constructed EscapeRouter
         # picks up the per-attempt opt-in.  The env var is sticky across
@@ -7358,6 +7459,9 @@ def route_with_layer_escalation(
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
+    # Each escalation flow returns before the direct-route audit. Use the
+    # selected router's stack, which can differ from the last attempted rung.
+    _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
     # Final summary
     if not quiet:
@@ -7543,6 +7647,9 @@ def route_with_rule_relaxation(
     # Issue #4314: warn if auto is pour-net-blind and/or a target_ampacity
     # net would be stranded on an inner layer (advisory, never suppressed).
     _warn_layer_selection_advisories(args, layer_stack, is_auto=args.layers == "auto")
+    # Issue #5014: recommend --reserve-plane-layers when the resolved stack
+    # declares reference planes and the hard restriction is not already on.
+    _warn_plane_layer_reservation(args, layer_stack)
 
     if not quiet:
         flush_print("=" * 60)
@@ -7632,6 +7739,9 @@ def route_with_rule_relaxation(
             # bit-for-bit pre-#4475.
             via_in_pad_last_resort=getattr(args, "via_in_pad_last_resort", False),
         )
+        # Issue #5014: hard-restrict to non-PLANE layers when
+        # --reserve-plane-layers was passed. No-op otherwise.
+        _apply_plane_layer_reservation(rules, layer_stack, args)
 
         # Issue #2823: divide the remaining wall-clock budget fairly across
         # the remaining rule-relaxation tiers so the looser-rule attempts
@@ -8187,6 +8297,9 @@ def route_with_rule_relaxation(
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
+    # Each escalation flow returns before the direct-route audit. Use the
+    # selected router's stack, which can differ from the last attempted rung.
+    _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
     # Final summary
     if not quiet:
@@ -9867,6 +9980,10 @@ def route_with_combined_escalation(
                 )
             break
 
+        # Issue #5014: recommend --reserve-plane-layers once per column (this
+        # stack is fixed across every tier in the inner loop below).
+        _warn_plane_layer_reservation(args, layer_stack)
+
         best_completion_for_layer: float | None = None
         for _tier_idx, tier in enumerate(tiers):
             # Issue #2802: honor the deadline before each tier within the
@@ -9920,6 +10037,9 @@ def route_with_combined_escalation(
                 # bit-for-bit pre-#4475.
                 via_in_pad_last_resort=getattr(args, "via_in_pad_last_resort", False),
             )
+            # Issue #5014: hard-restrict to non-PLANE layers when
+            # --reserve-plane-layers was passed. No-op otherwise.
+            _apply_plane_layer_reservation(rules, layer_stack, args)
 
             # Issue #2823: divide the remaining wall-clock budget fairly
             # across all remaining cells of the 2D combined-escalation
@@ -10518,6 +10638,9 @@ def route_with_combined_escalation(
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
+    # Each escalation flow returns before the direct-route audit. Use the
+    # selected router's stack, which can differ from the last attempted rung.
+    _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
     # Final summary
     if not quiet:
@@ -13176,6 +13299,25 @@ def _main_impl(argv: list[str] | None = None) -> int:
             "avoided layer must never carry a given net."
         ),
     )
+    # Issue #5014: opt-in HARD signal-layer eligibility for controlled-impedance
+    # plane assignments.  Mirror of the outer parser.py flag; both sites must
+    # stay in sync per ``tests/test_cli_parser_drift.py``.
+    parser.add_argument(
+        "--reserve-plane-layers",
+        action="store_true",
+        default=False,
+        help=(
+            "Hard-restrict signal routing to the resolved layer stack's "
+            "non-PLANE layers (e.g. with --layers 4, only F.Cu/B.Cu stay "
+            "routable -- In1.Cu/In2.Cu are reserved for the GND/PWR "
+            "reference planes). By default LayerDefinition.is_routable "
+            "treats every copper layer -- including declared reference "
+            "planes -- as signal-eligible, so a controlled-impedance recipe "
+            "can silently lose its continuous reference construction to "
+            "ordinary signal. A no-op on a stack with no PLANE layers "
+            "(--layers 2, 4-all, or an all-signal auto-detected board)."
+        ),
+    )
     # Issue #3154: advisory schematic/PCB drift banner.  When a schematic is
     # auto-discovered (or passed via --schematic) and the component sets have
     # drifted, kct route prints a one-line, non-blocking warning before
@@ -14858,6 +15000,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
     # Issue #4314: warn if auto is pour-net-blind and/or a target_ampacity
     # net would be stranded on an inner layer (advisory, never suppressed).
     _warn_layer_selection_advisories(args, layer_stack, is_auto=args.layers == "auto")
+    # Issue #5014: recommend --reserve-plane-layers when the resolved stack
+    # declares reference planes and the hard restriction is not already on.
+    _warn_plane_layer_reservation(args, layer_stack)
 
     # Configure design rules
     grid_origin_offset = getattr(args, "_grid_origin_offset", (0.0, 0.0))
@@ -14894,6 +15039,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         # Default off preserves that pre-#4475 behaviour bit-for-bit.
         via_in_pad_last_resort=getattr(args, "via_in_pad_last_resort", False),
     )
+    # Issue #5014: hard-restrict to non-PLANE layers when
+    # --reserve-plane-layers was passed. No-op otherwise.
+    _apply_plane_layer_reservation(rules, layer_stack, args)
 
     # Import progress helpers
     from kicad_tools.cli.progress import flush_print, spinner
@@ -16757,6 +16905,13 @@ def _main_impl(argv: list[str] | None = None) -> int:
             router, args, id_to_name={v: k for k, v in net_map.items()}
         )
     layer_intent_new_count = len(_new_layer_intent_violations(layer_intent_violations))
+
+    # Issue #5014: post-route audit for signal committed onto a declared
+    # controlled-impedance reference-plane layer.  Runs whenever any copper
+    # was committed (mirrors the pairwise audit's dry-run guard above);
+    # a strict no-op when the resolved stack has no PLANE layers.
+    if not args.dry_run:
+        _audit_plane_layer_reservation(router, layer_stack)
 
     # Summary
     all_nets_routed = stats["nets_routed"] == nets_to_route

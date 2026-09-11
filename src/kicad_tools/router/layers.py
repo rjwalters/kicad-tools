@@ -62,6 +62,18 @@ class LayerDefinition:
         so routing on a ground/power plane layer produces correct copper
         when zones are refilled.  The LayerType designation is metadata
         describing the layer's *primary* function, not a routing constraint.
+
+        This is intentional but NOT a hard contract for controlled-impedance
+        designs (Issue #5014): a ``--layers 4``-style stack's PLANE layers
+        exist to be a continuous GND/PWR reference for return-current paths,
+        and letting ordinary signal land there silently breaks that
+        construction. Nothing in this property (or the pathfinder that
+        consults it) enforces plane-layer exclusivity by default -- pass
+        ``kct route --reserve-plane-layers`` to hard-restrict routing to the
+        stack's non-PLANE layers, or see
+        :mod:`kicad_tools.router.layer_advisories` for the route-time
+        advisory and post-route violation report that surface the
+        consequence without changing this default.
         """
         return True
 
