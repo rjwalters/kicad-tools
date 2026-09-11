@@ -1241,6 +1241,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frame), and all in-pad nodes are shorted through the pad. This is a *false*
   fail-closed being removed, not a relaxation — copper outside the pad extent
   still never attaches, so genuinely moved/removed pads still fail closed.
+- **`kct route` left in-pad vias on boards whose fab tier has no orderable
+  via-in-pad process** (#5009) — the router's same-net via-in-pad repair
+  sweep (`router/drc_nudge.py::_scan_and_repair_via_in_pad`, #3112) no-oped
+  whenever `MfrLimits.via_in_pad_supported` was `True`, so a 2-layer board
+  routed at `jlcpcb-tier1` kept escape vias drilled into SMT lands even
+  though JLCPCB's POFV process requires 4+ layers and cannot actually build
+  them. The sweep is now gated on process *eligibility* (the same predicate
+  the `via_in_pad` DRC rule applies) rather than the bare capability flag,
+  and its detector was corrected from full drill *containment* to the
+  drill/land *overlap* test the DRC rule uses — a drill that merely clips a
+  land edge is still a via-in-pad defect, and every one of board 02's five
+  offending vias was of exactly that shape, so the old predicate matched
+  none of them. Board 02 (`charlieplex_3x3`) now routes strictly DRC-clean
+  at `jlcpcb-tier1` (0 errors, unchanged 22 routes / 24 vias / 8-of-8 reach;
+  total length re-baselined 327.93 → 329.23 mm for the relocated vias).
 - **`kct route` accepted KiCad 10 name-only nets but wrote zero copper and
   reported a vacuous "SUCCESS" (0/0 nets)** (#4983) — a PCB saved in KiCad
   10's name-only net syntax (`(net "SIGNAL")` on pads, no numeric net table

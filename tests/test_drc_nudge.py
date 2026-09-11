@@ -17,12 +17,15 @@ from kicad_tools.router.drc_nudge import (
     _perpendicular_unit,
     _reconnect_segments,
     _router_pad_bbox,
+    _router_via_in_pad_process_eligible,
+    _router_via_in_pad_supported,
     _scan_and_repair_via_in_pad,
     _segment_endpoints_anchored_to_net_pads,
     _segment_endpoints_anchored_to_net_vias,
     _segment_length,
     _try_nudge_via_pad,
     _via_drill_inside_bbox,
+    _via_drill_overlaps_bbox,
     drc_verify_and_nudge,
 )
 from kicad_tools.router.layers import Layer
@@ -2057,3 +2060,136 @@ class TestNudgeViaPad:
         # Via untouched.
         assert math.isclose(via.x, 10.0)
         assert math.isclose(via.y, 10.0)
+
+
+# ---------------------------------------------------------------------------
+# Issue #5009: process-eligibility gate for the via-in-pad sweep
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _StubLayerStack:
+    """Minimal stand-in exposing only ``num_layers``."""
+
+    num_layers: int = 2
+
+
+class TestViaInPadProcessEligibilityGate:
+    """The sweep gate must match the DRC rule's process-eligibility test.
+
+    Issue #5009: ``MfrLimits.via_in_pad_supported`` is a bare capability
+    flag.  ``jlcpcb-tier1`` sets it on EVERY layer configuration, but its
+    via-in-pad-specific POFV process publishes a 4-layer minimum, so a
+    2-layer board at that tier has no orderable process and the DRC rule
+    fails closed.  If the sweep kept no-oping on the bare flag, the router
+    would emit exactly the in-pad vias the very next DRC pass rejects --
+    the board 02 regression this class pins.
+    """
+
+    def test_two_layer_tier1_is_not_eligible(self):
+        router = _StubAutorouter(rules=DesignRules(manufacturer="jlcpcb-tier1"))
+        router.layer_stack = _StubLayerStack(num_layers=2)  # type: ignore[attr-defined]
+        assert _router_via_in_pad_supported(router) is True
+        assert _router_via_in_pad_process_eligible(router) is False
+
+    def test_four_layer_tier1_is_eligible(self):
+        router = _StubAutorouter(rules=DesignRules(manufacturer="jlcpcb-tier1"))
+        router.layer_stack = _StubLayerStack(num_layers=4)  # type: ignore[attr-defined]
+        assert _router_via_in_pad_process_eligible(router) is True
+
+    def test_pcbway_is_eligible_at_two_layers(self):
+        """PCBWay publishes via-in-pad at every layer count."""
+        router = _StubAutorouter(rules=DesignRules(manufacturer="pcbway"))
+        router.layer_stack = _StubLayerStack(num_layers=2)  # type: ignore[attr-defined]
+        assert _router_via_in_pad_process_eligible(router) is True
+
+    def test_base_tier_is_not_eligible(self):
+        """Plain ``jlcpcb`` has no via-in-pad capability at all."""
+        router = _StubAutorouter(rules=DesignRules(manufacturer="jlcpcb"))
+        router.layer_stack = _StubLayerStack(num_layers=4)  # type: ignore[attr-defined]
+        assert _router_via_in_pad_process_eligible(router) is False
+
+    def test_sweep_runs_on_two_layer_tier1(self):
+        """The board-02 shape: tier1, 2 layers, via clipping a land edge."""
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1)
+        # Pad bbox (9.5, 9.35)-(10.5, 10.65).  The via centre sits exactly
+        # on the right edge, so its 0.3mm drill straddles the land -- the
+        # exact geometry board 02's router output produced.
+        via = Via(
+            x=10.5,
+            y=9.7,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+        )
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        router = _StubAutorouter(
+            routes=[route],
+            rules=DesignRules(manufacturer="jlcpcb-tier1", trace_clearance=0.2),
+            pads={("U1", "1"): pad},
+            nets={1: [("U1", "1")]},
+        )
+        router.layer_stack = _StubLayerStack(num_layers=2)  # type: ignore[attr-defined]
+
+        nudged = _scan_and_repair_via_in_pad(
+            router,
+            max_displacement=2.0,
+            result=DRCNudgeResult(),
+        )
+        assert nudged == 1
+        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
+
+    def test_sweep_no_ops_on_four_layer_tier1(self):
+        """Same geometry at 4 layers: POFV is orderable, leave it alone."""
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1)
+        via = Via(
+            x=10.5,
+            y=9.7,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+        )
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        router = _StubAutorouter(
+            routes=[route],
+            rules=DesignRules(manufacturer="jlcpcb-tier1", trace_clearance=0.2),
+            pads={("U1", "1"): pad},
+            nets={1: [("U1", "1")]},
+        )
+        router.layer_stack = _StubLayerStack(num_layers=4)  # type: ignore[attr-defined]
+
+        nudged = _scan_and_repair_via_in_pad(
+            router,
+            max_displacement=2.0,
+            result=DRCNudgeResult(),
+        )
+        assert nudged == 0
+        assert math.isclose(via.x, 10.5)
+
+
+class TestViaDrillOverlapsBbox:
+    """``_via_drill_overlaps_bbox`` mirrors the DRC rule's overlap test."""
+
+    _BBOX = (9.5, 9.35, 10.5, 10.65)  # 1.0 x 1.3 land centred on (10, 10)
+
+    def test_fully_contained_drill_overlaps(self):
+        via = Via(x=10.0, y=10.0, drill=0.3, diameter=0.6, layers=(), net=1)
+        assert _via_drill_overlaps_bbox(via, self._BBOX) is True
+        assert _via_drill_inside_bbox(via, self._BBOX) is True
+
+    def test_edge_clipping_drill_overlaps_but_is_not_contained(self):
+        """The case the containment predicate silently missed on board 02."""
+        via = Via(x=10.6, y=10.0, drill=0.3, diameter=0.6, layers=(), net=1)
+        assert _via_drill_overlaps_bbox(via, self._BBOX) is True
+        assert _via_drill_inside_bbox(via, self._BBOX) is False
+
+    def test_clear_drill_does_not_overlap(self):
+        via = Via(x=11.0, y=10.0, drill=0.3, diameter=0.6, layers=(), net=1)
+        assert _via_drill_overlaps_bbox(via, self._BBOX) is False
+
+    def test_tangent_drill_does_not_overlap(self):
+        """Tangency within tolerance is excluded, matching the DRC rule."""
+        via = Via(x=10.65, y=10.0, drill=0.3, diameter=0.6, layers=(), net=1)
+        assert _via_drill_overlaps_bbox(via, self._BBOX) is False

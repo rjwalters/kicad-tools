@@ -1164,6 +1164,40 @@ def _via_drill_inside_bbox(
     )
 
 
+def _via_drill_overlaps_bbox(
+    via: Via,
+    pad_bbox: tuple[float, float, float, float],
+    tol: float = 0.005,
+) -> bool:
+    """Return True if ``via``'s drill circle overlaps ``pad_bbox`` copper.
+
+    This is the predicate the via-in-pad **DRC rule** actually uses
+    (:func:`kicad_tools.validate.rules.via_pad_geometry.via_inside_pad`):
+    full containment is NOT required, because a drill that merely clips
+    the edge of an SMT land still lets solder wick into the hole.
+
+    :func:`_via_drill_inside_bbox` (full containment) is the older,
+    stricter predicate this module shipped with; it is retained for the
+    callers/tests that assert the containment property directly, but the
+    nudge sweep must use *this* function or it silently declines to
+    repair exactly the edge-clipping cases DRC then rejects.  Board 02
+    is the concrete instance: every one of its five in-pad vias sits on
+    or just outside the land boundary (offsets +-0.4..0.6 mm against a
+    1.0 x 1.3 mm land), so the containment test matched none of them
+    while DRC flagged all five (issue #5009).
+
+    Tangency within ``tol`` is excluded, matching the DRC rule's
+    ``distance >= radius - DRC_TOLERANCE`` early-out.
+    """
+    min_x, min_y, max_x, max_y = pad_bbox
+    radius = via.drill / 2.0
+    if radius <= tol:
+        return False
+    dx = max(min_x - via.x, 0.0, via.x - max_x)
+    dy = max(min_y - via.y, 0.0, via.y - max_y)
+    return math.hypot(dx, dy) < radius - tol
+
+
 def _snap_chain_endpoints(
     segments: list[Segment],
     old_x: float,
@@ -1206,6 +1240,66 @@ def _router_via_in_pad_supported(router: Autorouter) -> bool:
     except (ValueError, ImportError):
         return False
     return bool(getattr(limits, "via_in_pad_supported", False))
+
+
+def _router_via_in_pad_process_eligible(router: Autorouter) -> bool:
+    """Return True when an in-pad via on THIS board has a real fab process.
+
+    Issue #5009: :func:`_router_via_in_pad_supported` reads the bare
+    ``MfrLimits.via_in_pad_supported`` capability flag, which only says
+    the manufacturer offers via-in-pad *somewhere* in its catalog.  The
+    ``via_in_pad`` DRC rule no longer accepts that flag on its own -- it
+    additionally requires the profile's
+    ``DesignRules.via_in_pad_process_id`` to name a real, orderable
+    :class:`~kicad_tools.manufacturers.fabrication_process.FabricationProcess`
+    whose layer floor this board actually meets.  The canonical example
+    is JLCPCB Capability Plus (``jlcpcb-tier1``): every layer config sets
+    ``via_in_pad_supported: true``, but its via-in-pad-specific POFV
+    process publishes a 4-layer minimum, so a 2-layer board routed at
+    that tier has NO eligible process.
+
+    The nudge sweep must use the same predicate as the DRC rule,
+    otherwise the router happily leaves in-pad vias the very next DRC
+    pass rejects -- which is exactly what regressed board 02
+    (``charlieplex_3x3``, a 2-layer ``jlcpcb-tier1`` board) when the
+    process model landed.  Gating the sweep on process eligibility makes
+    the router relocate those vias off their SMT lands instead, using the
+    existing connectivity-preserving chain-snap machinery (#3112/#4359).
+
+    Fails closed (returns False, i.e. "run the sweep") whenever the
+    manufacturer, profile, or process cannot be resolved -- relocating a
+    via off a pad is always manufacturable, while leaving it there may
+    not be.
+    """
+    if not _router_via_in_pad_supported(router):
+        return False
+
+    rules = getattr(router, "rules", None)
+    mfr_id = getattr(rules, "manufacturer", None) if rules is not None else None
+    if not mfr_id:
+        return False
+
+    layer_stack = getattr(router, "layer_stack", None)
+    raw_layers = getattr(layer_stack, "num_layers", None)
+    try:
+        num_layers = int(raw_layers) if raw_layers else None
+    except (TypeError, ValueError):
+        num_layers = None
+
+    try:
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.manufacturers.fabrication_process import get_fabrication_process
+
+        design_rules = get_profile(mfr_id).get_design_rules(layers=num_layers or 2)
+    except (ValueError, KeyError, ImportError, IndexError):
+        return False
+
+    process = get_fabrication_process(getattr(design_rules, "via_in_pad_process_id", None))
+    if process is None:
+        return False
+    if num_layers is not None and num_layers < process.min_layer_count:
+        return False
+    return True
 
 
 def _try_nudge_via_pad(
@@ -1321,10 +1415,15 @@ def _scan_and_repair_via_in_pad(
 
     Issue #3112: runs the explicit detection sweep that the
     :func:`validate_routes` stream cannot surface (it intentionally
-    skips same-net pads at ``router/io.py:1756``).  Gated on the
-    manufacturer's ``via_in_pad_supported`` capability flag -- when the
-    profile supports via-in-pad (e.g. ``jlcpcb-tier1``, ``pcbway``)
-    this is a no-op.
+    skips same-net pads at ``router/io.py:1756``).  Gated on
+    :func:`_router_via_in_pad_process_eligible` -- when the profile
+    supports via-in-pad AND declares a real fabrication process this
+    board's layer count is eligible for (e.g. ``pcbway`` at any layer
+    count, ``jlcpcb-tier1`` at 4+ layers) this is a no-op.  Issue #5009
+    tightened this from the bare ``via_in_pad_supported`` capability
+    flag: a 2-layer ``jlcpcb-tier1`` board has no eligible POFV process,
+    so the sweep now runs there and relocates the vias instead of
+    leaving findings for DRC.
 
     Note on the displacement budget: the via-in-pad sweep uses its own
     budget (``_VIA_IN_PAD_MAX_DISPLACEMENT``, default 2.0 mm) rather
@@ -1341,8 +1440,12 @@ def _scan_and_repair_via_in_pad(
         Number of vias successfully nudged.
     """
     via_pad_budget = max(max_displacement, _VIA_IN_PAD_MAX_DISPLACEMENT)
-    if _router_via_in_pad_supported(router):
-        # Manufacturer supports via-in-pad -- nothing to do.
+    if _router_via_in_pad_process_eligible(router):
+        # Manufacturer supports via-in-pad AND declares a real, orderable
+        # process this board's layer count is eligible for (#5009) --
+        # nothing to do.  A bare capability flag is NOT enough: the DRC
+        # rule fails closed without a declared process, so the sweep must
+        # too, or the router leaves vias the next DRC pass rejects.
         return 0
 
     pads = getattr(router, "pads", None) or {}
@@ -1370,7 +1473,11 @@ def _scan_and_repair_via_in_pad(
         for via in route.vias:
             for pad in candidates:
                 bbox = _router_pad_bbox(pad)
-                if not _via_drill_inside_bbox(via, bbox):
+                # #5009: overlap, not containment -- see
+                # :func:`_via_drill_overlaps_bbox`.  A drill that merely
+                # clips the land edge is still a via-in-pad defect and
+                # DRC reports it, so the sweep must repair it too.
+                if not _via_drill_overlaps_bbox(via, bbox):
                     continue
                 # Skip vias that sit DEAD-CENTRE on a pad of the same
                 # net.  Such a via is a deliberate in-pad escape: the

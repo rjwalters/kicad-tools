@@ -11,10 +11,16 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 24 vias / 327.93mm total
+- **Deterministic output**: 22 routes / 24 vias / 329.23mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
-  has fully converged.  Segment count is 274 on macOS-arm64 as of the
-  2026-08-11 #4732 re-baseline (down from 476; routes/vias/length/reach
+  has fully converged.  (327.93mm before the 2026-09-10 #5009
+  re-baseline: ``jlcpcb-tier1`` 2-layer declares no orderable via-in-pad
+  process, so the #3112 via-in-pad sweep now relocates five escape vias
+  off the SMT lands they clipped -- same 22 routes / 24 vias / 8/8
+  reach, and the board is strictly DRC-clean afterwards.)
+  Segment count is 295 on macOS-arm64 as of that re-baseline
+  (274 as of the 2026-08-11 #4732 measurement, down from 476;
+  routes/vias/length/reach
   are byte-identical, only the collinear resplit count moved -- see the
   #4732 note in ``test_routing_output_deterministic_across_seeds``).
   Segment count is platform- and KiCad-version-sensitive collinear
@@ -624,9 +630,26 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # DRC 0 at jlcpcb-tier1, with a -0.23 mm length and -4 segment
     # delta from grid-relative pad alignment at the new absolute
     # coordinates.  Prior pin (22, 397, 24, 328.16), #3545 era.
+    #
+    # Re-baselined 2026-09-10 for Issue #5009 (via-in-pad fabrication
+    # process eligibility).  ``jlcpcb-tier1``'s 2-layer configurations
+    # advertise ``via_in_pad_supported: true`` but declare NO orderable
+    # via-in-pad process -- JLCPCB's POFV process publishes a 4-layer
+    # minimum -- so the router's #3112 same-net via-in-pad sweep, which
+    # used to no-op on the bare capability flag, now runs on this board
+    # and slides five escape vias off the SMT lands they were clipping
+    # (R1-1, R1-2, D2-1, R4-2, D6-2; offsets +-0.4..0.6 mm against
+    # 1.0 x 1.3 mm lands).  Routes (22), vias (24) and reach (8/8) are
+    # UNCHANGED and the board is now STRICTLY DRC-clean at jlcpcb-tier1
+    # ("DRC PASSED", 0 errors, 0 grandfathered findings); total length
+    # moves +1.30 mm (327.93 -> 329.23) and the segment count moves
+    # 274 -> 295, still inside the documented platform band below.
+    # This is a manufacturability IMPROVEMENT, not a regression: those
+    # five drills previously broke into solder lands.
+    # Prior pin (22, 274-segment-era, 24, 327.93).
     EXPECTED_ROUTES = 22
     EXPECTED_VIAS = 24
-    EXPECTED_LENGTH = 327.93
+    EXPECTED_LENGTH = 329.23
     # Re-baselined 2026-07-14 for Issue #4196: the macOS-arm64 segment
     # count drifted from 393 to 476 (a +83 delta) while routes (22),
     # vias (24), total length (327.93mm) and reach (8/8) stayed

@@ -40,15 +40,39 @@ from kicad_tools.sync.discover import resolve_target_fab_for_pcb
 
 # A synthetic routed board with a single via dead-centre inside an SMD pad on
 # the same net -- the canonical via-in-pad geometry.  Illegal at ``jlcpcb``
-# (via_in_pad_supported=False), legal at ``jlcpcb-tier1`` (=True).
-_VIA_IN_PAD_PCB = """(kicad_pcb (version 20240108) (generator "test_fixture")
-  (general (thickness 1.6))
-  (paper "A4")
-  (layers
+# (via_in_pad_supported=False).
+#
+# Issue #5009 (layer count now matters): ``via_in_pad_supported`` alone no
+# longer suppresses the finding -- the profile's layer/copper configuration
+# must ALSO declare a real, orderable ``via_in_pad_process_id``.  For
+# ``jlcpcb-tier1`` that is the 4+ layer POFV process, so the "tier1 makes the
+# check pass" acceptance criteria of issue #3920 are exercised on the FOUR-
+# layer variant below.  The two-layer variant is deliberately retained (it is
+# what every base-tier ``jlcpcb`` assertion in this file uses, where
+# ``via_in_pad_supported=False`` decides the verdict before layer count is
+# ever consulted) and additionally pins the new #5009 fail-closed behavior in
+# ``test_two_layer_tier1_fails_closed_without_declared_process``.
+_LAYERS_2L = """  (layers
     (0 "F.Cu" signal)
     (31 "B.Cu" signal)
     (44 "Edge.Cuts" user)
-  )
+  )"""
+
+_LAYERS_4L = """  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )"""
+
+# Via drill 0.3mm / size 0.6mm -> 0.15mm annular ring: comfortably inside
+# JLCPCB's POFV envelope (0.2-0.5mm drill, >= 0.10mm ring), so the four-layer
+# board is genuinely process-eligible rather than merely "not checked".
+_VIA_IN_PAD_PCB_TEMPLATE = """(kicad_pcb (version 20240108) (generator "test_fixture")
+  (general (thickness 1.6))
+  (paper "A4")
+{layers}
   (setup (pad_to_mask_clearance 0))
   (net 0 "")
   (net 1 "DATA")
@@ -62,10 +86,21 @@ _VIA_IN_PAD_PCB = """(kicad_pcb (version 20240108) (generator "test_fixture")
 )
 """
 
+_VIA_IN_PAD_PCB = _VIA_IN_PAD_PCB_TEMPLATE.format(layers=_LAYERS_2L)
+_VIA_IN_PAD_PCB_4L = _VIA_IN_PAD_PCB_TEMPLATE.format(layers=_LAYERS_4L)
 
-def _write_pcb(directory: Path) -> Path:
+
+def _write_pcb(directory: Path, *, layers: int = 2) -> Path:
+    """Write the via-in-pad fixture board.
+
+    Args:
+        directory: Destination directory.
+        layers: Copper-layer count -- ``2`` (default, the historical
+            fixture) or ``4``.  Issue #5009: only the four-layer variant
+            is eligible for ``jlcpcb-tier1``'s POFV via-in-pad process.
+    """
     pcb = directory / "routed.kicad_pcb"
-    pcb.write_text(_VIA_IN_PAD_PCB)
+    pcb.write_text(_VIA_IN_PAD_PCB_4L if layers == 4 else _VIA_IN_PAD_PCB)
     return pcb
 
 
@@ -389,8 +424,18 @@ class TestCheckCliEndToEnd:
         assert "jlcpcb-tier1" in err
 
     def test_sidecar_makes_bare_check_pass(self, tmp_path: Path, capsys) -> None:
-        """AC: with the sidecar present, bare check reports 0 blocking via_in_pad."""
-        pcb = _write_pcb(tmp_path)
+        """AC: with the sidecar present, bare check reports 0 blocking via_in_pad.
+
+        Issue #5009: the board is the FOUR-layer variant of the fixture,
+        because ``jlcpcb-tier1`` only declares a real via-in-pad process
+        (POFV) on its 4+ layer configurations.  The #3920 acceptance
+        criterion under test here is the profile *resolution* chain
+        (sidecar -> effective ``--mfr``); a two-layer board at the same
+        tier now correctly fails closed, which
+        ``test_two_layer_tier1_fails_closed_without_declared_process``
+        pins separately.
+        """
+        pcb = _write_pcb(tmp_path, layers=4)
         _write_sidecar(tmp_path, "jlcpcb-tier1")
         rc = main([str(pcb), "--drc-only", "--only", "via_in_pad"])
         assert rc == 0
@@ -398,14 +443,44 @@ class TestCheckCliEndToEnd:
         assert "auto-loaded fab profile: jlcpcb-tier1" in err
         # No advisory when the resolved tier already permits via-in-pad.
         assert "via_in_pad finding(s)" not in err
+        # #5009: nor the process-eligibility advisory -- a real process is
+        # declared for this layer configuration and the geometry meets it.
+        assert "via_in_pad_process_missing" not in err
+        assert "via_in_pad_process_ineligible" not in err
 
     def test_project_kct_makes_bare_check_pass(self, tmp_path: Path, capsys) -> None:
-        pcb = _write_pcb(tmp_path)
+        """Same AC as above, resolved via ``project.kct`` instead of the sidecar."""
+        pcb = _write_pcb(tmp_path, layers=4)
         _write_project_kct(tmp_path, "jlcpcb-tier1")
         rc = main([str(pcb), "--drc-only", "--only", "via_in_pad"])
         assert rc == 0
         err = capsys.readouterr().err
         assert "project.kct target_fab" in err
+
+    def test_two_layer_tier1_fails_closed_without_declared_process(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """#5009: tier1 + 2 layers = capability flag but NO orderable process.
+
+        ``jlcpcb-tier1``'s 2-layer configurations set
+        ``via_in_pad_supported: true`` (Capability Plus is orderable on
+        2-layer boards) but carry no ``via_in_pad_process_id`` -- JLCPCB's
+        via-in-pad-specific POFV process publishes a 4-layer minimum.  The
+        bare capability flag must therefore NOT suppress the finding: this
+        is the intentional behavior change this fixture pair documents, and
+        the reason ``test_sidecar_makes_bare_check_pass`` above moved to the
+        four-layer variant.
+        """
+        pcb = _write_pcb(tmp_path, layers=2)
+        _write_sidecar(tmp_path, "jlcpcb-tier1")
+        rc = main([str(pcb), "--drc-only", "--only", "via_in_pad"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "auto-loaded fab profile: jlcpcb-tier1" in err
+        # The tier-gate advisory must NOT fire (the tier DOES claim
+        # support); the process advisory is the one that applies.
+        assert "via_in_pad finding(s) at profile" not in err
+        assert "via_in_pad_process_missing finding(s)" in err
 
     def test_project_kct_declared_base_tier_advisory_is_not_defaulted(
         self, tmp_path: Path, capsys
