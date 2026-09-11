@@ -462,6 +462,7 @@ def _orientation_fixture(tmp_path, *, angle, fp_angle=0, obstacle=(0, 2), kind="
     path.write_text(f"""(kicad_pcb (version 20240108) (generator test)
       (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user))
       (setup (pad_to_mask_clearance 0)) (net 0 "")
+      (gr_rect (start 0 0) (end 40 40) (layer "Edge.Cuts") (width .05))
       (footprint "Test" (layer "F.Cu") (at 10 10 {fp_angle})
         (fp_text reference "R11111111" (at 5 0 {angle}) (layer "F.SilkS")
           (effects (font (size 1 1) (thickness .15)))))

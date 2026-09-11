@@ -5302,7 +5302,7 @@ def _add_place_silk_refs_parser(subparsers) -> None:
         "--step",
         type=float,
         default=DEFAULT_STEP_MM,
-        help=f"Search ring spacing in mm (default: {DEFAULT_STEP_MM})",
+        help=f"Positive search ring spacing in mm; at most 4096 rings (default: {DEFAULT_STEP_MM})",
     )
     place_refs_parser.add_argument(
         "--allow-rotate",
@@ -5318,7 +5318,7 @@ def _add_place_silk_refs_parser(subparsers) -> None:
     place_refs_parser.add_argument(
         "--verify-drc",
         action="store_true",
-        help="After applying, run an independent native `kicad-cli pcb drc` pass",
+        help="After applying, run native DRC; fail on silk findings or unavailable/failed verification",
     )
     place_refs_parser.add_argument(
         "--render",

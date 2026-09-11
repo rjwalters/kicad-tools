@@ -112,8 +112,10 @@ def _print_text(result: PlaceSilkRefsResult, dry_run: bool) -> None:
                 else ""
             )
             print(f"  {p.footprint_ref}: ({ox:.3f}, {oy:.3f}) -> ({nx:.3f}, {ny:.3f}){rot}")
-    else:
+    elif not result.unplaceable and not result.under_component_fallback:
         print("No collisions found -- every visible reference is already clear.")
+    else:
+        print("No references could be moved to a clear location.")
 
     if result.under_component_fallback:
         print(
@@ -141,6 +143,13 @@ def _print_results(
         _print_summary(result, dry_run)
     else:
         _print_text(result, dry_run)
+    if output_format != "json" and drc_summary is not None:
+        if not drc_summary.get("available"):
+            print(f"Native DRC: {drc_summary.get('message', 'unavailable')}")
+        elif drc_summary.get("error"):
+            print(f"Native DRC error: {drc_summary['error']}")
+        else:
+            print(f"Native DRC: {drc_summary['silk_violations']} silk violation(s)")
 
 
 def _run_verify_drc(pcb_path: Path) -> dict:
@@ -155,14 +164,25 @@ def _run_verify_drc(pcb_path: Path) -> dict:
             "message": "kicad-cli not found; skipped native DRC verification",
         }
 
-    drc_result = run_drc(pcb_path, None)
-    if not drc_result.success or not drc_result.output_path:
-        return {"available": True, "error": drc_result.stderr or "DRC run failed"}
-
     try:
+        drc_result = run_drc(pcb_path, None)
+    except Exception as e:
+        return {"available": True, "error": f"DRC run failed: {e}"}
+    try:
+        if not drc_result.success or drc_result.return_code != 0 or not drc_result.output_path:
+            return {"available": True, "error": drc_result.stderr or "DRC run failed"}
+        raw_report = json.loads(drc_result.output_path.read_text())
+        if not isinstance(raw_report, dict) or not isinstance(raw_report.get("violations"), list):
+            return {
+                "available": True,
+                "error": "Invalid native DRC report: missing violations array",
+            }
         report = DRCReport.load(drc_result.output_path)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as e:
+        return {"available": True, "error": f"Invalid native DRC report: {e}"}
     finally:
-        drc_result.output_path.unlink(missing_ok=True)
+        if drc_result.output_path:
+            drc_result.output_path.unlink(missing_ok=True)
 
     silk_types = {"silk_over_copper", "silk_overlap", "silk_edge_clearance", "silkscreen"}
     silk_violations = [v for v in report.violations if any(t in v.type_str for t in silk_types)]
@@ -213,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
         "--step",
         type=float,
         default=DEFAULT_STEP_MM,
-        help=f"Search ring spacing in mm (default: {DEFAULT_STEP_MM})",
+        help=f"Positive search ring spacing in mm; at most 4096 rings (default: {DEFAULT_STEP_MM})",
     )
     parser.add_argument(
         "--allow-rotate",
@@ -227,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--verify-drc",
         action="store_true",
-        help="After applying, run an independent native `kicad-cli pcb drc` pass",
+        help="After applying, run native DRC; fail on silk findings or unavailable/failed verification",
     )
     parser.add_argument(
         "--render",
@@ -266,21 +286,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error parsing PCB file: {e}", file=sys.stderr)
         return 1
 
-    result = placer.plan(
-        clearance_mm=args.clearance,
-        edge_clearance_mm=args.edge_clearance,
-        mask_clearance_mm=mask_clearance,
-        max_offset_mm=args.max_offset,
-        step_mm=args.step,
-        allow_rotate=args.allow_rotate,
-    )
+    try:
+        result = placer.plan(
+            clearance_mm=args.clearance,
+            edge_clearance_mm=args.edge_clearance,
+            mask_clearance_mm=mask_clearance,
+            max_offset_mm=args.max_offset,
+            step_mm=args.step,
+            allow_rotate=args.allow_rotate,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
     drc_summary: dict | None = None
     output_path = Path(args.output) if args.output else pcb_path
 
     if not args.dry_run:
         applied = placer.apply(result)
-        if applied > 0:
+        if applied > 0 or args.output:
             try:
                 placer.save(output_path)
             except Exception as e:
@@ -306,6 +330,12 @@ def main(argv: list[str] | None = None) -> int:
         if render_path is not None and args.format == "text":
             print(f"Review artifact: {render_path}")
 
+    if drc_summary is not None and (
+        not drc_summary.get("available")
+        or drc_summary.get("error")
+        or drc_summary.get("silk_violations", 0) > 0
+    ):
+        return 1
     return 0
 
 

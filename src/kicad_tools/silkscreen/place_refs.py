@@ -289,8 +289,8 @@ def _candidate_points(
     half_w, half_h = text_w / 2.0, text_h / 2.0
 
     points: list[tuple[float, float]] = []
-    offset = 0.0
-    while offset <= max_offset_mm + _EPSILON_MM:
+    for ring in range(math.floor(max_offset_mm / step_mm) + 1):
+        offset = ring * step_mm
         top_y = min_y - offset - half_h
         bottom_y = max_y + offset + half_h
         left_x = min_x - offset - half_w
@@ -307,8 +307,78 @@ def _candidate_points(
                 (right_x, bottom_y),
             ]
         )
-        offset += step_mm
     return points
+
+
+def _board_material(pcb: PCB, Polygon: Any) -> tuple[list, Any | None, str]:
+    """Resolve closed polygon contours without guessing missing board material.
+
+    Reuse the schema's segment stitching and 0.01mm endpoint tolerance.
+    Nested contours alternate material/cutout (including islands). Curved
+    outlines are explicitly unsupported here: the schema's two-chord arc
+    approximation is not sufficiently accurate to prove containment.
+    """
+    segments = pcb.get_board_outline_segments()
+    ox, oy = pcb._board_origin
+    for node in pcb._sexp.children:
+        if node.is_atom:
+            continue
+        if _is_footprint_tag(node.name):
+            for element in node.iter_all():
+                element_layer = element.find("layer")
+                if element_layer is not None and element_layer.get_string(0) == "Edge.Cuts":
+                    return segments, None, "board outline unavailable: footprint-local Edge.Cuts"
+        layer = node.find("layer")
+        if layer is None or layer.get_string(0) != "Edge.Cuts":
+            continue
+        if node.name not in {"gr_line", "gr_rect", "gr_poly"}:
+            return segments, None, f"board outline unavailable: unsupported {node.name}"
+        if node.name in {"gr_line", "gr_rect"}:
+            for endpoint in ("start", "end"):
+                point = node.find(endpoint)
+                if point is None or len(point.get_atoms()) != 2:
+                    return segments, None, "board outline unavailable: malformed endpoint"
+                for coordinate in (point.get_float(0), point.get_float(1)):
+                    if coordinate is None or not math.isfinite(coordinate):
+                        return segments, None, "board outline unavailable: malformed endpoint"
+        if node.name == "gr_poly":
+            pts = node.find("pts")
+            vertices = []
+            if pts is not None:
+                for xy in pts.children:
+                    if xy.is_atom or xy.name != "xy":
+                        return segments, None, "board outline unavailable: malformed polygon"
+                    x, y = xy.get_float(0), xy.get_float(1)
+                    if x is None or y is None or not math.isfinite(x) or not math.isfinite(y):
+                        return segments, None, "board outline unavailable: malformed polygon"
+                    vertices.append((x - ox, y - oy))
+            if len(vertices) > 1 and vertices[-1] == vertices[0]:
+                vertices.pop()
+            if len(vertices) < 3:
+                return segments, None, "board outline unavailable: malformed polygon"
+            segments.extend(zip(vertices, vertices[1:] + vertices[:1], strict=True))
+    if not segments:
+        return segments, None, "board outline unavailable: missing Edge.Cuts"
+    if any(not math.isfinite(v) for segment in segments for point in segment for v in point):
+        return segments, None, "board outline unavailable: non-finite coordinates"
+    contours: list[Any] = []
+    for indices in PCB._group_segments_by_connectivity(segments, 0.01):
+        ring = PCB._chain_segment_indices(segments, indices, 0.01)
+        if not ring:
+            return segments, None, "board outline unavailable: open or branched contour"
+        polygon = Polygon(ring)
+        if not polygon.is_valid or polygon.is_empty or polygon.area <= 0:
+            return segments, None, "board outline unavailable: invalid contour"
+        for other in contours:
+            # Separate islands and strictly nested cutouts are valid; touching
+            # or crossing contours do not define an unambiguous material side.
+            if polygon.boundary.intersects(other.boundary):
+                return segments, None, "board outline unavailable: intersecting contours"
+        contours.append(polygon)
+    material = Polygon()
+    for polygon in contours:
+        material = material.symmetric_difference(polygon)
+    return segments, material, ""
 
 
 def _candidate_clear(
@@ -318,6 +388,8 @@ def _candidate_clear(
     silk_obstacles: list[tuple[Any, str]],
     courtyards: list[tuple[Any, str]],
     outline: Any | None,
+    board_material: Any | None,
+    outline_error: str,
     clearance_mm: float,
     edge_clearance_mm: float,
 ) -> tuple[bool, str]:
@@ -330,6 +402,10 @@ def _candidate_clear(
     Board edge uses true distance, matching
     ``validate.rules.silkscreen.check_silk_edge_clearance``.
     """
+    if outline_error:
+        return False, outline_error
+    if board_material is None or not board_material.covers(geom):
+        return False, "outside board material or inside a cutout"
     expanded = geom.buffer(clearance_mm) if clearance_mm > 0 else geom
     for ap_geom, label in apertures:
         if expanded.intersects(ap_geom):
@@ -648,6 +724,20 @@ class SilkRefPlacer:
             per visible reference designator.  Nothing is written to the
             S-expression tree -- call :meth:`apply` to do that.
         """
+        values = {
+            "clearance_mm": clearance_mm,
+            "edge_clearance_mm": edge_clearance_mm,
+            "mask_clearance_mm": mask_clearance_mm,
+            "max_offset_mm": max_offset_mm,
+        }
+        for name, value in values.items():
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        if not math.isfinite(step_mm) or step_mm <= 0:
+            raise ValueError("step_mm must be finite and positive")
+        if max_offset_mm / step_mm >= 4096:
+            raise ValueError("search exceeds 4096 rings; increase step_mm or reduce max_offset_mm")
+
         require_shapely("silk reference placement")
         from shapely.geometry import MultiLineString, Polygon  # type: ignore[import-untyped]
 
@@ -677,10 +767,10 @@ class SilkRefPlacer:
                     courtyards[crtyd_side].append((poly, footprint.reference))
                     own_courtyard[(id(footprint), crtyd_side)] = poly
 
-        outline_segments = pcb.get_board_outline_segments()
+        outline_segments, board_material, outline_error = _board_material(pcb, Polygon)
         outline = (
             MultiLineString([[start, end] for start, end in outline_segments])
-            if outline_segments
+            if outline_segments and not outline_error
             else None
         )
 
@@ -758,6 +848,8 @@ class SilkRefPlacer:
                     silk_obstacles=combined_silk,
                     courtyards=combined_courtyards,
                     outline=outline,
+                    board_material=board_material,
+                    outline_error=outline_error,
                     clearance_mm=clearance_mm,
                     edge_clearance_mm=edge_clearance_mm,
                 )
