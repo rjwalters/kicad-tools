@@ -1489,7 +1489,10 @@ jobs:
     # What it buys: the two ~30-min jobs of every main run leave the account's
     # 20-job GitHub-hosted pool to PR runs.
     runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    # The measured recipe takes 28m; allow the independent synthetic/LVS,
+    # plane-net and artifact gates to finish within the whole-job deadline.
+    # Internal routing budgets and all validation gates remain unchanged.
+    timeout-minutes: 35
     container:
       image: kicad/kicad:10.0
       # On the runner this is a sibling container of the runner's own, created by

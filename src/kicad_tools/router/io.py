@@ -58,6 +58,7 @@ from .geometry import (
     segment_to_segment_distance as _geom_seg_to_seg_dist,
 )
 from .layers import Layer, LayerDefinition, LayerStack, LayerType
+from .pad_geometry import pad_local_point, pad_point_distance
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 
 # Floating-point tolerance for clearance comparisons in validate_routes
@@ -2324,16 +2325,14 @@ def validate_routes(
                 # 1.475 x 0.3 mm) along their short axis by ~0.6 mm and
                 # produced false-positive ``[pad]`` clearance violations
                 # for traces that legally clear the rectangular copper.
-                # Pad ``width``/``height`` are already rotated into PCB
-                # space at load time, so the bounding box is correct.
+                # Transform to the residual-angle local pad frame so the
+                # rectangle represents rotated copper, not its enlarged AABB.
                 effective_dist = (
                     _segment_to_aabb_distance(
-                        segment.x1,
-                        segment.y1,
-                        segment.x2,
-                        segment.y2,
-                        pad.x,
-                        pad.y,
+                        *pad_local_point(pad, segment.x1, segment.y1),
+                        *pad_local_point(pad, segment.x2, segment.y2),
+                        0.0,
+                        0.0,
                         pad.width / 2,
                         pad.height / 2,
                     )
@@ -2519,12 +2518,7 @@ def validate_routes(
                 # rectangle rather than a bounding circle so anisotropic
                 # SMD lands do not produce false-positive via-clearance
                 # violations along their short axis.
-                effective_dist = (
-                    _point_to_aabb_distance(
-                        via.x, via.y, pad.x, pad.y, pad.width / 2, pad.height / 2
-                    )
-                    - via_radius
-                )
+                effective_dist = pad_point_distance(pad, via.x, via.y) - via_radius
 
                 if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
                     # Issue #2757: cross-net pad on the same component is

@@ -35,6 +35,16 @@ Explicitly OUT OF SCOPE here (deferred to follow-up architect phases):
 Backward compatibility: absent a voltage map, :attr:`DesignRules.pairwise_clearance`
 is ``None`` and every consumer falls through to the pre-existing scalar path
 byte-identically.
+
+**Issue #5021** generalises the same data carrier + resolver + validator
+past voltage-derived (HV) requirements to a flat, non-voltage signal-integrity
+spacing rule -- e.g. ST AN4488 Section 8.4.2's SDRAM clock-to-signal guideline
+(three trace widths, 0.54 mm edge-to-edge for a 0.18 mm bus).  See
+:func:`build_signal_clearance_table`.  Every consumer below reads only
+:attr:`PairwiseClearanceTable.required_by_pair` and has no notion of *why* a
+pair was widened, so a table built from a flat mm value gets route-time
+avoidance, post-route audit and track/pad/via coverage identically to an HV
+table -- with no separate implementation to keep in sync.
 """
 
 from __future__ import annotations
@@ -417,6 +427,107 @@ def build_pairwise_clearance_table(
         dru=float(dru),
         net_voltages=normalised,
         required_by_pair=required,
+    )
+
+
+def build_signal_clearance_table(
+    widened_nets: Iterable[str],
+    other_nets: Iterable[str],
+    required_mm: float,
+    *,
+    dru: float,
+) -> PairwiseClearanceTable:
+    """Build a :class:`PairwiseClearanceTable` for a non-voltage spacing rule (#5021).
+
+    :func:`build_pairwise_clearance_table` derives ``required_by_pair`` from a
+    per-net *voltage* map through the IEC creepage standard -- the right model
+    for HV isolation (#4431), but wrong for a signal-integrity spacing rule
+    such as ST AN4488 Section 8.4.2's "three trace widths" SDRAM clock-to-signal
+    guideline: that requirement is a flat mm value with no voltage dependence,
+    and every consumer downstream of a :class:`PairwiseClearanceTable`
+    (:func:`segment_pair_violation`, :func:`route_pairwise_violation`,
+    :func:`path_pairwise_violation`, :func:`find_pairwise_violations`,
+    :class:`PairwisePathChecker`, the C++ ``Grid3D`` projection) only ever
+    consults :attr:`PairwiseClearanceTable.required_by_pair` -- it has no idea
+    (and does not need to know) whether a requirement came from a creepage
+    lookup or a flat spacing rule.  This builder is the flat-mm counterpart:
+    it populates the SAME data carrier directly, so a clock-spacing rule gets
+    the exact same route-time avoidance + post-route audit machinery the HV
+    epic already built, for free, with no fork.
+
+    The concrete motivating defect (#5021): a board-local exact-obstacle
+    router was needed because the ordinary DRU-only clearance check let a
+    routed SDCLK track pass an already-placed BA1 through-via at the fab
+    clearance floor, even though the same track correctly kept the AN4488
+    3x-trace-width gap from every *track* on the board -- the via's copper
+    was never widened.  Because ``required_by_pair`` is looked up by an
+    order-independent (sorted) key and every walk in this module treats
+    "moving" and "foreign" copper symmetrically, a table built here enforces
+    the SAME requirement whether the clock net or the foreign net is routed
+    first -- there is no "reciprocal guard" to remember to apply by hand.
+
+    Every pair ``(w, o)`` with ``w`` in ``widened_nets`` and ``o`` in
+    ``other_nets`` (excluding only ``w == o``) receives ``required_mm``.
+    Distinct widened nets are included when explicitly listed in ``other_nets``.  Pads and via spans are covered
+    automatically -- they are not special-cased here at all, because the
+    shared walk (:func:`_segments_pairwise_violation` / :func:`find_pairwise_violations`)
+    already treats trace, via and pad copper uniformly once a table widens a
+    pair.
+
+    Deliberately **out of scope** here, matching #5021's explicit
+    requirement: this builder applies NO package-escape exemption of any
+    kind.  Unlike the HV epic's :class:`AttachZone` mechanism -- which a
+    caller may still opt into by passing ``attach_zones=`` explicitly to the
+    consumer functions above -- nothing here waives same-footprint or
+    front-layer copper automatically.  A genuine package-escape waiver for
+    this rule must be its own explicitly-scoped :class:`AttachZone`, built
+    from MEASURED pad geometry for the specific package under review, never
+    a blanket "same footprint" or "front layer" rule.
+
+    Args:
+        widened_nets: Net names that require ``required_mm`` from every net
+            in ``other_nets`` (e.g. ``{"SDCLK"}``).  ``/``-stripped for
+            matching, same convention as the rest of this module.
+        other_nets: Every net the widened nets must keep ``required_mm``
+            from.  Callers scope this explicitly -- e.g. excluding the
+            widened net's own return/power rail -- there is no implicit
+            "signal nets only" filter here.
+        required_mm: The flat edge-to-edge spacing requirement (mm), e.g.
+            ``0.54`` for AN4488's three 0.18 mm trace widths.
+        dru: Scalar clearance floor (mm), typically ``DesignRules.trace_clearance``.
+            Mirrors :func:`build_pairwise_clearance_table`'s ``dru`` --
+            :meth:`PairwiseClearanceTable.required_clearance` never returns
+            less than this floor even for an unwidened pair.
+
+    Zero distances are valid: a zero requirement still resolves to the DRU
+    floor, and a zero DRU leaves the explicit pair requirement in force.
+    Boolean, negative, and nonfinite distances raise ``ValueError``, including
+    when either net collection is empty.
+
+    Returns:
+        A frozen :class:`PairwiseClearanceTable` with ``net_voltages`` empty
+        (this builder has no voltage concept -- ``net_voltages`` is retained
+        on the dataclass purely for the HV builder's provenance reporting).
+    """
+    for name, value in (("required_mm", required_mm), ("dru", dru)):
+        if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be a finite nonnegative distance, not a boolean")
+
+    widened = {_norm_net_key(n) for n in widened_nets}
+    others = {_norm_net_key(n) for n in other_nets}
+
+    required_by_pair: dict[tuple[str, str], float] = {}
+    for w in widened:
+        for o in others:
+            if w == o:
+                continue
+            key = (w, o) if w <= o else (o, w)
+            required_by_pair[key] = max(required_by_pair.get(key, 0.0), float(required_mm))
+
+    return PairwiseClearanceTable(
+        dru=float(dru),
+        net_voltages={},
+        required_by_pair=required_by_pair,
     )
 
 
