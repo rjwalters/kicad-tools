@@ -2588,17 +2588,26 @@ class CppPathfinder:
                 float(cpp_seg.x2),
                 float(cpp_seg.y2),
             )
-            # Issue #1018: compute the (possibly necked-down) width once per
-            # C++ segment, BEFORE the dogleg split -- matching the Python
-            # backend, where ``_emit_segment`` computes the width on the
-            # merged segment endpoints and applies it to both dogleg legs.
-            seg_width = _segment_width(
-                float(cpp_seg.x1),
-                float(cpp_seg.y1),
-                float(cpp_seg.x2),
-                float(cpp_seg.y2),
-            )
-            for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
+            from .neck_down import taper_points
+
+            centers = []
+            if start_needs_neckdown:
+                centers.append((start.x, start.y))
+            if end_needs_neckdown:
+                centers.append((end.x, end.y))
+            split_points = [points[0]]
+            for a, b in zip(points, points[1:], strict=False):
+                split_points.extend(
+                    taper_points(
+                        a,
+                        b,
+                        centers,
+                        self._rules.neck_down_distance,
+                        self._rules.grid_resolution,
+                    )[1:]
+                )
+            for (sx, sy), (ex, ey) in zip(split_points, split_points[1:], strict=False):
+                seg_width = _segment_width(sx, sy, ex, ey)
                 if sx == ex and sy == ey:
                     continue
                 seg = Segment(
