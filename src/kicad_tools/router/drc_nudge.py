@@ -1449,6 +1449,19 @@ def _try_nudge_via_pad_violation(
     segment feeding the via) moves along with it and is repaired in the
     same step.
 
+    Before attempting the move, this handler declines (structured skip
+    ``via_pad_anchored``) when the via is itself pad-anchored to its
+    OWN net (:func:`_via_is_pad_anchored`) -- the same chain-protection
+    contract :func:`_nudge_via_with_chain` enforces for the via-via
+    handler. Without this guard, a via that is also part of a via-via
+    clearance violation (e.g. two adjacent pad-anchored escape vias on
+    different nets, each within clearance of the other's pad) could be
+    silently relocated here first, moving it away from the coordinates
+    ``validate_routes`` recorded for the sibling via-via violation and
+    causing that violation's own :func:`_find_via_at` lookup to fail
+    (``via_via_not_found``) instead of correctly declining with
+    ``via_via_anchored``.
+
     Uses the same generous ``_VIA_IN_PAD_MAX_DISPLACEMENT`` budget as
     the same-net via-in-pad sweep -- clearing a foreign SMD pad requires
     roughly ``pad_half_width + via_radius + clearance`` of travel, well
@@ -1456,14 +1469,19 @@ def _try_nudge_via_pad_violation(
 
     Returns:
         True when the via was moved (and its chain snapped) within
-        budget; False when no matching via/pad was found or the move
-        exceeded budget (recorded as a structured skip by
-        :func:`_try_nudge_via_pad`).
+        budget; False when no matching via/pad was found, the via is
+        pad-anchored to its own net, or the move exceeded budget
+        (recorded as a structured skip by :func:`_try_nudge_via_pad`).
     """
     via_hit = _find_via_at(router, violation.net, violation.x1, violation.y1)
     if via_hit is None:
         return False
     _route, via = via_hit
+
+    if _via_is_pad_anchored(via, via.net, router):
+        if result is not None:
+            result._bump_skipped("via_pad_anchored")
+        return False
 
     if violation.location is None:
         return False
