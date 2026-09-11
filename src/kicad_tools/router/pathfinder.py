@@ -4402,9 +4402,27 @@ class Router:
             """
             if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
                 # Issue #1018: Calculate width with neck-down support
-                width = _calculate_segment_width(x1, y1, x2, y2)
-                points = dogleg_points(x1, y1, x2, y2)
+                from .neck_down import taper_points
+
+                centers = []
+                if start_needs_neckdown:
+                    centers.append((start_pad.x, start_pad.y))
+                if end_needs_neckdown:
+                    centers.append((end_pad.x, end_pad.y))
+                dogleg = dogleg_points(x1, y1, x2, y2)
+                points = [dogleg[0]]
+                for a, b in zip(dogleg, dogleg[1:], strict=False):
+                    points.extend(
+                        taper_points(
+                            a,
+                            b,
+                            centers,
+                            self.rules.neck_down_distance,
+                            self.rules.grid_resolution,
+                        )[1:]
+                    )
                 for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
+                    width = _calculate_segment_width(sx, sy, ex, ey)
                     if sx == ex and sy == ey:
                         continue
                     seg = Segment(
@@ -4485,19 +4503,8 @@ class Router:
                     # tolerance (~0.6 deg) would otherwise let a slightly
                     # skewed tail absorb the whole last segment.
                     # Issue #1018: Recalculate width for the extended segment
-                    extended_width = _calculate_segment_width(
-                        last_seg.x1, last_seg.y1, end_pad.x, end_pad.y
-                    )
-                    route.segments[-1] = Segment(
-                        x1=last_seg.x1,
-                        y1=last_seg.y1,
-                        x2=end_pad.x,
-                        y2=end_pad.y,
-                        width=extended_width,
-                        layer=last_seg.layer,
-                        net=start_pad.net,
-                        net_name=start_pad.net_name,
-                    )
+                    route.segments.pop()
+                    _emit_segment(last_seg.x1, last_seg.y1, end_pad.x, end_pad.y, current_layer_idx)
                 else:
                     _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
             else:

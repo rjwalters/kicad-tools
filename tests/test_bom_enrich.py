@@ -21,6 +21,7 @@ def _make_item(
     footprint: str,
     lcsc: str = "",
     dnp: bool = False,
+    mpn: str = "",
 ) -> BOMItem:
     """Build a BOMItem with minimal required fields."""
     return BOMItem(
@@ -30,6 +31,7 @@ def _make_item(
         lib_id="Device:R",
         lcsc=lcsc,
         dnp=dnp,
+        mpn=mpn,
     )
 
 
@@ -331,6 +333,145 @@ class TestEnrichBomLcsc:
         assert items[0].lcsc == ""
         assert report.unmatched == 1
         assert report.unmatched_entries[0].error == "API timeout"
+
+
+class TestEnrichBomLcscExplicitSourcing:
+    """Regression coverage for #4995: an explicit MPN/supplier with no LCSC
+    (a spec-overlay/CSV-preserved non-LCSC part) must never be silently
+    assigned a generic (value, footprint) auto-match.
+
+    Board06's fixture is the real-world reproduction: J1 is a Samtec
+    connector (``mpn="Samtec TSW-102-07-G-S"``, no ``lcsc``) grouped by
+    (value, footprint) with other 2-pin-header-shaped parts; the bug
+    assigned it an unrelated JLCPCB catalog LCSC ID (``C404027``).
+    """
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_explicit_mpn_no_lcsc_skips_auto_match(self, MockSuggester):
+        """An item with mpn set, lcsc empty, ref in spec_refs is never
+        sent to the generic auto-matcher and stays unresolved."""
+        mock_instance = MagicMock()
+        _make_suggester_mock(mock_instance)
+        MockSuggester.return_value = mock_instance
+
+        items = [
+            _make_item(
+                "J1",
+                "Conn_02x01",
+                "Connector_PinHeader_2.54mm:PinHeader_2x01_P2.54mm_Vertical",
+                mpn="Samtec TSW-102-07-G-S",
+            ),
+        ]
+
+        report = enrich_bom_lcsc(items, spec_refs={"J1"})
+
+        # (a) LCSC stays empty -- no generic guess was substituted.
+        assert items[0].lcsc == ""
+
+        # (b) The catalog search path was never invoked for this group.
+        mock_instance.suggest_for_component.assert_not_called()
+
+        assert report.entries[0].source == "spec_unresolved"
+        assert report.spec_unresolved == 1
+        assert report.unmatched == 0  # distinct bucket from "no match found"
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_shared_group_protects_only_spec_sourced_ref(self, MockSuggester):
+        """Explicit intent protects its reference without blocking an unselected peer."""
+        mock_instance = MagicMock()
+        _make_suggester_mock(mock_instance)
+        MockSuggester.return_value = mock_instance
+
+        items = [
+            _make_item(
+                "J2",
+                "Conn_02x08",
+                "Samtec_TSW:TSW-108-07-G-S",
+                mpn="Samtec TSW-108-07-G-S",
+            ),
+            _make_item("J3", "Conn_02x08", "Samtec_TSW:TSW-108-07-G-S"),
+        ]
+
+        report = enrich_bom_lcsc(items, spec_refs={"J2"})
+
+        assert items[0].lcsc == ""
+        mock_instance.suggest_for_component.assert_called_once()
+        assert report.spec_unresolved == 1
+        assert report.spec_unresolved_entries[0].references == ["J2"]
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_mpn_and_lcsc_both_set_takes_existing_lcsc_path(self, MockSuggester):
+        """No regression: an item with BOTH mpn and lcsc set already takes
+        the existing_lcsc branch and is reported as 'spec', not
+        'spec_unresolved'."""
+        mock_instance = MagicMock()
+        _make_suggester_mock(mock_instance)
+        MockSuggester.return_value = mock_instance
+
+        items = [
+            _make_item(
+                "U1",
+                "STM32G031F6P6",
+                "Package_QFP:LQFP-32_7x7mm_P0.8mm",
+                lcsc="C529330",
+                mpn="STM32G031F6P6",
+            ),
+        ]
+
+        report = enrich_bom_lcsc(items, spec_refs={"U1"})
+
+        assert items[0].lcsc == "C529330"
+        mock_instance.suggest_for_component.assert_not_called()
+        assert report.entries[0].source == "spec"
+        assert report.spec_unresolved == 0
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_mpn_without_spec_ref_still_auto_matched(self, MockSuggester):
+        """An item with mpn set but whose ref is NOT in spec_refs (e.g. an
+        mpn carried over from the schematic library, not the project spec)
+        is unaffected and still eligible for generic auto-matching."""
+        mock_instance = MagicMock()
+        _make_suggester_mock(mock_instance)
+        mock_instance.suggest_for_component.return_value = _mock_suggestion("C25744")
+        MockSuggester.return_value = mock_instance
+
+        items = [
+            _make_item(
+                "R1",
+                "10k",
+                "Resistor_SMD:R_0402_1005Metric",
+                mpn="RC0402FR-0710KL",
+            ),
+        ]
+
+        report = enrich_bom_lcsc(items)  # no spec_refs at all
+
+        assert items[0].lcsc == "C25744"
+        mock_instance.suggest_for_component.assert_called_once()
+        assert report.entries[0].source == "auto"
+
+    def test_summary_lines_mentions_spec_unresolved(self):
+        """The report summary distinguishes spec-unresolved from unmatched."""
+        from kicad_tools.export.bom_enrich import EnrichmentEntry
+
+        report = EnrichmentReport(
+            entries=[
+                EnrichmentEntry(
+                    value="Conn_02x01",
+                    footprint="TSW-102-07-G-S",
+                    references=["J1"],
+                    lcsc_part="",
+                    source="spec_unresolved",
+                    error="explicit MPN set via project spec/CSV with no LCSC",
+                ),
+            ]
+        )
+        lines = report.summary_lines()
+        assert "1 explicitly sourced (no LCSC)" in lines[0]
+        assert "0 unmatched" in lines[0]
+        assert any("Explicitly-sourced parts left unresolved" in line for line in lines)
+        assert report.spec_unresolved == 1
+        assert report.unmatched == 0
 
 
 class TestEnrichBomLcscCircuitBreaker:
@@ -899,3 +1040,89 @@ class TestEnrichmentReport:
         assert report.already_populated == 1
         assert report.cache_matched == 1
         assert report.unmatched == 1
+
+
+class TestExplicitSourcingMixedGroups:
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_peer_lcsc_never_reaches_explicit_mpn(self, MockSuggester):
+        for reverse in (False, True):
+            mock = MockSuggester.return_value
+            _make_suggester_mock(mock)
+            mock.suggest_for_component.reset_mock()
+            items = [
+                _make_item("J1", "CONN", "Header", mpn="Samtec TSW-102-07-G-S"),
+                _make_item("J2", "CONN", "Header", lcsc="C12345"),
+                _make_item("J3", "CONN", "Header"),
+            ]
+            if reverse:
+                items.reverse()
+            report = enrich_bom_lcsc(items, spec_refs={"J1"})
+            by_ref = {item.reference: item for item in items}
+            assert by_ref["J1"].lcsc == ""
+            assert by_ref["J2"].lcsc == by_ref["J3"].lcsc == "C12345"
+            assert [(e.source, e.references) for e in report.entries if "J1" in e.references] == [
+                ("spec_unresolved", ["J1"])
+            ]
+            assert not any(e.source == "spec" for e in report.entries)
+            mock.suggest_for_component.assert_not_called()
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_unprotected_peer_still_matches(self, MockSuggester):
+        for reverse in (False, True):
+            mock = MockSuggester.return_value
+            _make_suggester_mock(mock)
+            mock.suggest_for_component.reset_mock()
+            mock.suggest_for_component.return_value = _mock_suggestion("C12345")
+            items = [
+                _make_item("J1", "CONN", "Header", mpn="Samtec TSW-102-07-G-S"),
+                _make_item("J2", "CONN", "Header"),
+            ]
+            if reverse:
+                items.reverse()
+            report = enrich_bom_lcsc(items, spec_refs={"J1"})
+            assert next(it for it in items if it.reference == "J1").lcsc == ""
+            assert next(it for it in items if it.reference == "J2").lcsc == "C12345"
+            assert [(e.source, e.references) for e in report.entries if "J2" in e.references] == [
+                ("auto", ["J2"])
+            ]
+            mock.suggest_for_component.assert_called_once()
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_report_tracks_actual_spec_and_conflicting_existing_parts(self, MockSuggester):
+        _make_suggester_mock(MockSuggester.return_value)
+        items = [
+            _make_item("J1", "CONN", "Header", lcsc="C111", mpn="Reviewed"),
+            _make_item("J2", "CONN", "Header", lcsc="C222"),
+            _make_item("J3", "CONN", "Header"),
+        ]
+        report = enrich_bom_lcsc(items, spec_refs={"J1"})
+        entries = {ref: e for e in report.entries for ref in e.references}
+        assert entries["J1"].source == "spec"
+        assert entries["J1"].references == ["J1"]
+        assert entries["J2"].lcsc_part == "C222"
+        assert entries["J2"].source == entries["J3"].source == "schematic"
+        assert items[0].lcsc == "C111" and items[1].lcsc == "C222"
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_cache_hit_only_enriches_unprotected_peer(self, MockSuggester, tmp_path):
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        cache = PartsCache(db_path=tmp_path / "parts.db")
+        cache.put_enrichment_match("CONN", "Header", "C12345", confidence=0.9, part_type="Basic")
+        mock = MockSuggester.return_value
+        _make_suggester_mock(mock)
+        mock._get_client.return_value.cache = cache
+        mock.suggest_for_component.side_effect = LCSCForbiddenError("offline fixture")
+        for reverse in (False, True):
+            items = [
+                _make_item("J1", "CONN", "Header", mpn="Samtec TSW-102-07-G-S"),
+                _make_item("J2", "CONN", "Header"),
+            ]
+            if reverse:
+                items.reverse()
+            report = enrich_bom_lcsc(items, spec_refs={"J1"})
+            assert next(it for it in items if it.reference == "J1").lcsc == ""
+            assert next(it for it in items if it.reference == "J2").lcsc == "C12345"
+            assert [(e.source, e.references) for e in report.entries if "J2" in e.references] == [
+                ("cache", ["J2"])
+            ]
