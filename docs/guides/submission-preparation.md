@@ -349,3 +349,187 @@ no stage is ever inferred from an earlier or later stage's success, and this
 slice adds no upload, factory-matching, or order/purchase operation. Full
 factory-matching/upload/order tracking is left to later slices (#5145,
 #5146).
+
+## Gerber upload transport and durable upload state (#5145)
+
+`kicad_tools.manufacturers.jlc_upload` implements the third slice of #5056:
+the network transport that hands an already-prepared, already-reviewed Gerber
+bundle to JLCPCB's official API, plus the durable record of what was attempted
+and what came back. There is **no order, payment, quote, fabrication-parameter,
+BOM/CPL, or PCBA-submission operation anywhere in it** — where JLCPCB has no
+first-party-verified assembly API, the workflow falls back to the explicit
+manual website hand-off spelled out in `jlc_upload.PCBA_WEBSITE_HANDOFF`
+rather than pretending to automate it.
+
+```python
+from kicad_tools.manufacturers.jlc_upload import (
+    RequestsUploadTransport,
+    UploadBlockedError,
+    UploadLedger,
+    UploadUncertainError,
+    fetch_preview,
+    pending_reconciliations,
+    reconcile_upload,
+    upload_gerber,
+)
+from kicad_tools.parts import JLCCredentials
+
+ledger = UploadLedger.open(Path("uploads/board-run-1.jsonl"))  # outside the handoff
+credentials = JLCCredentials.from_env()  # explicit; this module never reads env itself
+assert credentials is not None
+
+with RequestsUploadTransport() as transport:  # or any injected transport
+    try:
+        receipt = upload_gerber(
+            plan,
+            record,  # the #5143 review record
+            ledger=ledger,
+            transport=transport,
+            credentials=credentials,
+            requested_at="2026-01-02T00:00:00Z",  # caller clock, never invented here
+            source_root=Path("release/source"),  # optional: re-check source bytes
+        )
+    except UploadBlockedError:
+        ...  # an earlier uncertain attempt must be reconciled first
+    except UploadUncertainError:
+        ...  # this attempt's outcome is unknown; it is now recorded as such
+
+print(receipt.file_key, receipt.is_factory_receipt, receipt.states["upload"])
+```
+
+### The pre-network gate
+
+Immediately before any request is built — never trusting a value computed in
+an earlier call or process — `upload_gerber`:
+
+1. re-verifies the published handoff with `verify_submission(plan.directory,
+   plan.sha256)` (every published output is re-read and re-hashed, and the
+   published file set is re-inventoried);
+2. re-verifies the human review with `verify_review(record, plan,
+   source_root=...)` — the fail-closed re-hash, not a "a review record
+   exists" check;
+3. re-reads the Gerber bytes and re-checks them against the plan's own bound
+   hash and size;
+4. consults the durable ledger for this exact `(file sha256, app identity,
+   endpoint)` binding.
+
+A failure at any of those steps raises `UploadGateError` and **nothing is
+sent**. The upload filename is the plan's own bound `artifacts["gerber"]
+["output_name"]`; nothing is guessed or globbed.
+
+### Wire format (carried from #5056's observations, not first-party verified)
+
+`POST /overseas/openapi/pcb/uploadGerber`, multipart fields `meta` (the exact
+string `{}` for this request class) and `file`. The **metadata JSON string** is
+signed — not the encoded multipart body — using the same
+`METHOD\nPATH\nTIMESTAMP\nNONCE\nBODY\n` construction and `Authorization`
+assembly as `kicad_tools.parts.jlcpcb_api`. `Content-MD5` carries the
+lowercase hex MD5 of the raw file bytes (a transport checksum the endpoint
+requires; integrity itself is established by the SHA-256 binding). No
+`Content-Type` is set for the upload request, so the transport's HTTP library
+generates the multipart content type and its own boundary — nothing here
+hand-rolls one.
+
+These details come from the parent issue's **user-reported SDK observations**
+and have not been exercised against a live endpoint here; the public API docs
+fetched 2026-09-11 "only returned shell". Whether the same `open.jlcpcb.com`
+application credentials are valid for both the component-search surface and
+this PCB surface has not been traced — so this module never reads credentials
+from the environment and never builds a client: the caller passes an explicit
+`JLCCredentials` and an explicit transport, or nothing happens.
+
+### Durable state machine, not a retry flag
+
+Every attempt is appended to a JSONL `UploadLedger` (written outside the
+read-only handoff, and distinct from the plan and review records — this module
+reads those rather than duplicating their fields). The intent (bundle hash,
+app identity, endpoint, plan/review digests, caller timestamp) is appended and
+`fsync`-ed **before** the request is built or sent, so a crash mid-request
+always leaves evidence of exactly what was attempted.
+
+```text
+intent --success-------------------> succeeded
+       --failure-------------------> failed
+       --uncertain-----------------> uncertain --reconciliation--> succeeded|failed
+       --(no outcome ever written)-> uncertain --reconciliation--> succeeded|failed
+```
+
+| state | meaning |
+|---|---|
+| `not-attempted` | No intent exists for this exact binding. |
+| `succeeded` | A file key is bound to these exact bytes, app id and endpoint. |
+| `failed` | A definite failure (business error, or a request the transport proved was never sent). A fresh attempt is allowed. |
+| `uncertain` | The request may or may not have been received: a timeout, a dropped connection, an unclassified transport fault, or an intent whose outcome was never written at all. |
+
+An attempt whose intent was persisted but whose outcome never was folds to
+`uncertain` **by construction** — there is no boolean "retry me" flag
+anywhere. For a binding, an unresolved `uncertain` attempt *dominates*: the
+next `upload_gerber` call raises `UploadBlockedError` and makes no network
+call. Nothing assumes, in either direction, whether the request reached the
+factory.
+
+Resolving it is an explicit, human act:
+
+```python
+for intent in pending_reconciliations(ledger):
+    print(intent["attempt_id"], intent["file"]["sha256"], intent["requested_at"])
+
+reconcile_upload(
+    ledger,
+    attempt_id=...,
+    resolution="succeeded",  # or "failed"
+    file_key="...",  # required iff resolution == "succeeded"
+    reconciled_by="alice@example.com",  # never synthesized here
+    reconciled_at="2026-01-09T00:00:00Z",
+    evidence="Checked the JLCPCB portal by hand; the file is present exactly once.",
+)
+```
+
+A successful file key is reused **only** for the exact same file hash, under
+the same app identity and the same endpoint — never selected by filename,
+upload order, or revision. Re-running `upload_gerber` for an unchanged bundle
+returns the prior receipt with `reused=True` and performs no request.
+
+### Receipts, evidence, and what is never claimed
+
+A receipt binds the file hash/MD5/size and upload name, the app identity, the
+plan and review digests, the request state, and the file key. `evidence` is
+one of:
+
+| evidence | `is_factory_receipt` | `states["upload"]` |
+|---|---|---|
+| `live-factory-response` | `True` | `uploaded` |
+| `mock-protocol-only` | `False` | `mock-protocol-only` |
+| `human-reconciliation` | `False` | `reconciled` |
+
+The injected transport must declare a `TransportIdentity(name, live)`. A
+success produced by a transport that did not declare `live=True` is recorded
+and labeled `mock-protocol-only` — **a mocked protocol success is never
+logged or labeled as a real factory receipt** — and a human reconciliation is
+recorded as a human attestation, never as a protocol receipt.
+
+### Failure handling
+
+An HTTP 200 carrying a business-level error (`code != 200` or a falsy
+`success`) is a failure, not a success. Failures retain only a fixed
+classification word (`auth-failed`, `ip-not-whitelisted`, `permission-denied`,
+`quota-exceeded`, `incomplete-response`, `identity-mismatch`,
+`transport-unsent`, `transport-uncertain`, `request-failed`), a whitelisted
+plain-prose reason, the HTTP status, the business code, and a whitelisted
+`J-Trace-ID`. Credential material is redacted, and any reason that redaction
+touched — or that contains markup/raw-payload characters — is withheld
+entirely rather than surfaced or persisted. The raw response body is never
+logged, raised, or written to the ledger.
+
+A response that echoes a *different* app id, file MD5, or file SHA-256 fails
+closed as `UploadIdentityError` and is recorded as a failure, even on HTTP 200.
+
+### Preview retrieval is a separate call
+
+`fetch_preview(receipt, ...)` issues `POST /overseas/openapi/pcb/audit/get` as
+its **own** request — never issued by `upload_gerber`, and never inferred from
+an upload succeeding. It requires a receipt whose file key is actually
+recorded as successful in the ledger for the same app identity and file hash,
+and it persists its own record binding the attempt, file key, file hash and
+payload digest. Interpreting the preview/DFM payload is #5146's scope; nothing
+here derives a verdict from it.
