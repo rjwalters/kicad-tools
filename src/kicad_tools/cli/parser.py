@@ -3835,7 +3835,7 @@ def _add_route_parser(subparsers) -> None:
         "--timeout",
         type=float,
         default=None,
-        help="Timeout in seconds for routing (default: no timeout). Returns best partial result if reached.",
+        help="Total routing invocation budget in seconds (default: unbounded). Includes cleanup/native work; allows up to 5 extra seconds for raw partial serialization, then terminates the process group and exits 124.",
     )
     route_parser.add_argument(
         "--per-net-timeout",
