@@ -22,6 +22,30 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Detect whether a PR touches anything CI can act on. 55 of the last 60 PRs
+  # touched src/ or tests/ (measured 2026-09-11, 2AMLogic/2am#29), and every
+  # board job legitimately depends on the router source, so this is NOT a
+  # per-job path map -- it is a single "docs/site/agent-config only?" gate
+  # that spares the ~8% of PRs which change nothing under test the full
+  # ~115 job-minutes. main pushes always run everything. If detection itself
+  # fails, every job runs (fail-open), so a broken filter can only cost
+  # minutes, never a false green.
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            code:
+              - '!(docs/**|site/**|.claude/**|.loom/**|.github/ISSUE_TEMPLATE/**|**/*.md|LICENSE|.gitignore|.gitattributes)'
+
   lint:
     name: Lint & Format
     runs-on: ubuntu-latest
@@ -95,6 +119,8 @@ jobs:
 
   test:
     name: Test
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # main pushes run this on the fleet's dedicated CI runner (2AMLogic/2am#29;
     # 2 slots for this repo); PR runs stay on GitHub-hosted. Push-only on
     # purpose: PR volume alone (~200 runs/day) exceeds the whole box, while
@@ -210,6 +236,8 @@ jobs:
     # ROUTER_CPP_BUILD_VERSION (or vice versa) the import-time guard will
     # fall back to Python and fail this check with an actionable message.
     name: C++ Build Check
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -291,6 +319,8 @@ jobs:
 
   kicad-cli-smoke:
     name: kicad-cli Round-trip Smoke
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Separate job: a regression gate that PCB files emitted by kicad-tools'
@@ -386,6 +416,8 @@ jobs:
     # error counts. The gate is "allowed minus epsilon" -- regressions still
     # fail, but the gate can land before every board reaches 0 errors.
     name: Routed PCB DRC Check
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -511,6 +543,8 @@ jobs:
     # job runs on every PR but is advisory -- its failure does not block
     # the merge button.
     name: Diff-Pair Routing Regression
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     # Issue #3509: run inside the official KiCad 10 container (same image
     # as the test + kicad-cli-smoke jobs).  The board 06 recipe's pour
@@ -715,7 +749,8 @@ jobs:
   matchgroup-routing-regression:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
-    if: ${{ vars.BOARD_07_CI_ENABLED == 'true' }}
+    needs: changes
+    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
     # N-trace match-group testbench, #2724 Phase 3L) from scratch on
     # every PR and verify that
@@ -984,6 +1019,8 @@ jobs:
     # block the merge button.  Same pattern as
     # ``diffpair-routing-regression`` and ``matchgroup-routing-regression``.
     name: Board 00 End-to-End
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     # The recipe is ~30 seconds locally (1 signal net + 2 pour nets),
     # the C++ backend build is ~2 min, ``kct export`` + ``kct check`` +
@@ -1127,6 +1164,8 @@ jobs:
     # advisory (non-required-check) status until a repo admin flips the
     # branch-protection setting.
     name: Board 01 End-to-End
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
@@ -1219,6 +1258,8 @@ jobs:
     # the C++ backend build, and the advisory (non-required-check) status
     # until a repo admin flips the branch-protection setting.
     name: Board 02 End-to-End
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
@@ -1331,6 +1372,8 @@ jobs:
     # Advisory until a repo admin adds it to branch protection (same as the
     # board 00/01/02/06/07 e2e jobs).
     name: Board 03 End-to-End (LVS-only)
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
@@ -1481,6 +1524,8 @@ jobs:
     # Advisory until a repo admin adds it to branch protection (same as the
     # board 00/01 e2e jobs).
     name: Board 06 End-to-End (LVS)
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # main pushes run this on the fleet's dedicated CI runner (2AMLogic/2am#29;
     # 2 slots for this repo); PR runs stay on GitHub-hosted. Push-only on
     # purpose: PR volume alone (~200 runs/day) exceeds the whole box, while
@@ -1605,7 +1650,8 @@ jobs:
   board-07-end-to-end:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
-    if: ${{ vars.BOARD_07_CI_ENABLED == 'true' }}
+    needs: changes
+    if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # Issue #3779 (LVS honestly dirty per #4012): end-to-end gate for
     # board 07 ("matchgroup-test").  The fixture schematic is now FULLY
     # WIRED (#4012: 244/244 pads bound), so the copper comparator carries
@@ -1858,6 +1904,8 @@ jobs:
     # intentionally higher than every other job (next-highest is the 45-min
     # Test job) because no other job runs the board-05 rescue loop from clean.
     name: Board 05 Routing Regression (blocking <= 7)
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     container:
@@ -1976,6 +2024,8 @@ jobs:
     # needs 90 min), so 45 min leaves comfortable headroom over board 03's
     # 30 min for the LQFP-48 escape work.
     name: Board 04 End-to-End (LVS-only + DRC allowlist)
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
