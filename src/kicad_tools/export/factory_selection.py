@@ -32,8 +32,8 @@ class SelectionMapping:
 
     reference: str
     selected: str
-    selected_values: tuple[str, ...]
-    unselected_values: tuple[str, ...]
+    selected_values: tuple[str, ...] | list[str]
+    unselected_values: tuple[str, ...] | list[str] | list[str]
     catalog_id: str | None = None
     mpn: str | None = None
     group_separator: Literal[",", ";"] = ","
@@ -70,6 +70,10 @@ def compare_factory_selection(
         raise ValueError("Unsupported identity policy or grouped-reference separator")
     selected = mapping.selected_values
     unselected = mapping.unselected_values
+    if not isinstance(selected, (tuple, list)) or not isinstance(unselected, (tuple, list)):
+        raise ValueError(
+            "Selection tokens must be tuple/list sequences, not scalar or mapping values"
+        )
     if (
         not selected
         or not unselected

@@ -41,7 +41,9 @@ use a caller-chosen comma or semicolon; comma groups must be CSV-quoted.
 Surrounding reference whitespace is stripped. Ranges, empty members and implicit
 separator detection are rejected. CSV quoting and UTF-8 BOM are supported.
 Identity and selection strings are exact and case-sensitive, including their
-whitespace. Selection token sets must be nonempty, unique and disjoint.
+whitespace. Selection tokens must be tuple/list sequences with nonempty, unique and disjoint
+string members. Scalar strings/bytes, mappings, sets and malformed members are
+rejected before membership checks.
 
 Identity policy is `catalog_id`, `mpn`, or `both`. Every expected reference must
 provide the configured approved identities. Both means both must match; it does

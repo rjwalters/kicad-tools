@@ -160,3 +160,38 @@ def test_invalid_plan_rejected(expected):
 def test_non_utf8_reports_incomplete():
     result = compare_factory_selection(PLAN, b"\xff", MAPPING, source_kind="factory_selected_csv")
     assert result["status"] == "incomplete" and len(result["coverage"]) == 2
+
+
+@pytest.mark.parametrize("field", ["selected_values", "unselected_values"])
+@pytest.mark.parametrize(
+    "tokens",
+    ["yes", b"yes", bytearray(b"yes"), None, 1, True, {"yes": True}, {"yes"}, [["yes"]], [None]],
+)
+def test_invalid_token_containers_fail_before_membership(field, tokens):
+    mapping = replace(MAPPING, **{field: tokens})
+    with pytest.raises(ValueError):
+        compare(mapping=mapping)
+
+
+def test_missing_tuple_comma_cannot_select_single_character():
+    mapping = SelectionMapping(
+        "Ref", "Selected", "yes", "no", catalog_id="ID", identity="catalog_id"
+    )
+    with pytest.raises(ValueError):
+        compare_factory_selection(
+            [ExpectedPart("R1", "C1")],
+            b"Ref,Selected,ID\nR1,y,C1\n",
+            mapping,
+            source_kind="factory_selected_csv",
+        )
+
+
+@pytest.mark.parametrize("container", [tuple, list])
+def test_valid_token_sequences_require_whole_token(container):
+    mapping = replace(
+        MAPPING, selected_values=container(["yes"]), unselected_values=container(["no"])
+    )
+    assert compare(mapping=mapping)["comparison_matches"]
+    report = compare(GOOD.replace("R1,yes", "R1,y"), mapping=mapping)
+    assert report["status"] == "incomplete"
+    assert not report["comparison_matches"]
