@@ -2940,3 +2940,30 @@ class TestUnassignedSmdObstacles:
         assert not report.skipped
         assert not report.unresolvable
         assert pcb._sexp.to_string() == original
+
+
+def test_stub_does_not_exempt_new_clearance_near_original_via(tmp_path):
+    from shapely.geometry import LineString, Point, box
+
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    text = _STUB_CROSSING_BOARD[: _STUB_CROSSING_BOARD.rfind(" (segment (start 11 8)")]
+    text += """(footprint "test" (layer "B.Cu") (at 10.19 10.4)
+      (pad "1" smd rect (at 0 0) (size .01 .01) (layers "B.Cu") (net 2 "OTHER"))))"""
+    pcb = PCB.load(_write(tmp_path, text))
+    obstacle = box(10.185, 10.395, 10.195, 10.405)
+    assert Point(10, 10).distance(obstacle) - 0.3 > 0.127
+    assert LineString([(10, 10), (12, 10)]).distance(obstacle) - 0.3 < 0.127
+    assert _check_stub_clearance(pcb, pcb.vias[0], (12, 10), ["B.Cu"], 0.6, 0.127)
+
+
+def test_stub_checks_new_extent_of_already_overlapping_obstacle():
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    pcb = PCB.create(width=20, height=20)
+    via = pcb.add_via(10, 10, size=0.6, drill=0.3, net="SIG")
+    # This one conductor overlaps the old via AND runs into newly occupied
+    # space. Exempting the entire obstacle because its nearest point is old
+    # copper would miss the new short along the rest of the stub.
+    pcb.add_trace((10, 10), (11.5, 10), width=0.1, layer="B.Cu", net="OTHER")
+    assert _check_stub_clearance(pcb, via, (12, 10), ["B.Cu"], 0.2, 0.127)
