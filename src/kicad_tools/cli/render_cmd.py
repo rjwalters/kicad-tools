@@ -20,6 +20,12 @@ logic:
 The routed PCB (``*_routed.kicad_pcb``) is preferred; the command falls back
 to the unrouted ``*.kicad_pcb`` when no routed artifact exists.
 
+Before 3D rendering, referenced model files are checked using native configured
+paths, the render environment, and the PCB directory. Unresolved models identify
+their component and path in text diagnostics and JSON ``model_check``. Images
+are retained, but incomplete model coverage reports ``partial`` and exits
+nonzero. ``--no-3d`` skips this check. File availability does not validate geometry.
+
 This command only writes image files — it makes no assumptions about hosting
 or any website. Generated renders are git-ignored build artifacts.
 
@@ -52,6 +58,7 @@ from kicad_tools.cli.export_cmd import _find_pcb_for_export
 from kicad_tools.cli.runner import (
     find_kicad_cli,
     get_kicad_version,
+    inspect_pcb_models,
     run_pcb_export_svg,
     run_pcb_render,
 )
@@ -154,6 +161,7 @@ def _render_pcb(
         "status": "skipped",
         "outputs": {},
         "errors": [],
+        "model_check": {"status": "not_run", "checked_models": 0, "unresolved_models": []},
     }
 
     renders_dir.mkdir(parents=True, exist_ok=True)
@@ -176,6 +184,15 @@ def _render_pcb(
 
     # --- 3D ray-traced renders ---
     if do_3d:
+        try:
+            result["model_check"] = inspect_pcb_models(pcb_path, kicad_cli)
+            for missing in result["model_check"]["unresolved_models"]:
+                errors.append(
+                    f"3D model {missing['reference']}: {missing['reason']}: {missing['model']}"
+                )
+        except (OSError, ValueError, RuntimeError) as exc:
+            result["model_check"]["status"] = "failed"
+            errors.append(f"3D model inspection failed: {exc}")
         renders = [
             ("3d-front", "front"),
             ("3d-back", "back"),
@@ -192,7 +209,7 @@ def _render_pcb(
     result["errors"] = errors
 
     expected = 2 + (2 if do_3d else 0)
-    if len(written) == expected:
+    if len(written) == expected and not errors:
         result["status"] = "ok"
     elif written:
         result["status"] = "partial"
@@ -302,7 +319,9 @@ def run_render(args: argparse.Namespace) -> int:
         )
         if args.format == "json":
             print(json.dumps({"boards": [result]}, indent=2))
-        return 1 if result["status"] == "error" else 0
+        return (
+            1 if result["status"] == "error" or result["model_check"]["status"] == "failed" else 0
+        )
 
     boards = _discover_boards(root)
     if not boards:
@@ -317,9 +336,12 @@ def run_render(args: argparse.Namespace) -> int:
     if args.format == "json":
         print(json.dumps({"boards": results}, indent=2))
 
-    # Exit non-zero only if a board with a PCB failed every render. Boards
+    # Incomplete model coverage also fails, even if images were produced. Boards
     # skipped for lack of a PCB are a non-fatal condition (exit 0).
-    has_error = any(r["status"] == "error" for r in results)
+    has_error = any(
+        r["status"] == "error" or r.get("model_check", {}).get("status") == "failed"
+        for r in results
+    )
     return 1 if has_error else 0
 
 
