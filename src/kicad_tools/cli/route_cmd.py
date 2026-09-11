@@ -5829,11 +5829,23 @@ def _warn_plane_layer_reservation(args, layer_stack) -> None:
 def _apply_plane_layer_reservation(rules, layer_stack, args) -> None:
     """Hard-restrict ``rules.allowed_layers`` to non-PLANE layers (#5014).
 
-    A strict no-op unless ``--reserve-plane-layers`` was passed, or the
-    resolved ``layer_stack`` declares no ``PLANE`` layers at all -- in
-    either case ``rules.allowed_layers`` (already ``None`` at every
-    ``DesignRules(...)`` construction site in this module) is left
-    untouched, preserving pre-#5014 routing byte for byte.
+    A strict no-op unless ``--reserve-plane-layers`` was passed: the early
+    ``return`` leaves ``rules.allowed_layers`` completely untouched,
+    preserving pre-#5014 routing byte for byte.
+
+    When the flag IS passed, the assignment is **unconditional** -- a
+    ``layer_stack`` that declares no ``PLANE`` layers writes ``None``,
+    which *clears* any restriction rather than leaving a stale one in
+    place.  That distinction matters in
+    :func:`route_with_layer_escalation`, where a single ``DesignRules``
+    instance is built once and shared by reference across every rung of
+    the ladder: only the first iteration runs against a freshly
+    constructed ``rules``, so a plane-free rung (e.g.
+    ``four_layer_all_signal``) reached after a plane-bearing one must
+    reset ``allowed_layers`` or it would inherit the previous stack's
+    ``['F.Cu', 'B.Cu']`` and silently degenerate into a 2-layer route.
+    At the three call sites that *do* construct ``rules`` immediately
+    beforehand, this writes ``None`` over an already-``None`` field.
 
     Mutates ``rules`` in place (``DesignRules`` is not frozen) so callers
     can invoke this immediately after each ``DesignRules(...)`` construction
@@ -5844,9 +5856,9 @@ def _apply_plane_layer_reservation(rules, layer_stack, args) -> None:
         return
     from kicad_tools.router.layer_advisories import reserve_plane_layers_allowed_layers
 
-    reserved = reserve_plane_layers_allowed_layers(layer_stack)
-    if reserved is not None:
-        rules.allowed_layers = reserved
+    # Assign unconditionally: a stack with no PLANE layers must CLEAR any
+    # restriction left behind by a previous escalation rung, not keep it.
+    rules.allowed_layers = reserve_plane_layers_allowed_layers(layer_stack)
 
 
 def _audit_plane_layer_reservation(router: "Autorouter", layer_stack) -> "list":

@@ -428,7 +428,12 @@ def plane_layer_signal_violations(
     counts: dict[tuple[str, str], int] = {}
     for route in routes:
         for segment in route.segments:
-            layer_name = getattr(segment.layer, "kicad_name", str(segment.layer))
+            # ``Segment.layer`` is always a ``CopperLayer`` (``router.layers``
+            # aliases ``Layer = CopperLayer``), so read ``kicad_name``
+            # directly: a getattr fallback to ``str(...)`` would yield
+            # ``"CopperLayer.IN1_CU"``, which can never match a stack name and
+            # would degrade this audit into a silent false clean (#5014).
+            layer_name = segment.layer.kicad_name
             if layer_name in plane_names:
                 key = (route.net_name, layer_name)
                 counts[key] = counts.get(key, 0) + 1

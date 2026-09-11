@@ -191,3 +191,76 @@ class TestPlaneLayerReservationAdvisory:
         route_cmd_module.main(argv)
         err = capsys.readouterr().err
         assert "--reserve-plane-layers" not in err
+
+
+class _FlagArgs:
+    """Minimal stand-in for the parsed ``argparse.Namespace``."""
+
+    def __init__(self, reserve_plane_layers: bool):
+        self.reserve_plane_layers = reserve_plane_layers
+
+
+class TestReservationAcrossEscalationRungs:
+    """``rules`` is shared by reference across every escalation rung (#5014).
+
+    ``route_with_layer_escalation`` builds ``DesignRules`` **once**, outside
+    the ladder loop, and hands the same object to every rung; only
+    ``layer_stack`` varies per attempt.  So ``_apply_plane_layer_reservation``
+    must be able to *clear* a restriction, not merely tighten one -- otherwise
+    a plane-free rung reached after a plane-bearing one inherits the previous
+    stack's ``['F.Cu', 'B.Cu']`` and silently degenerates into a 2-layer
+    route.  These tests walk one ``DesignRules`` instance through the real
+    ladder, which no other test in the suite does.
+    """
+
+    @staticmethod
+    def _ladder():
+        from kicad_tools.router.layers import LayerStack
+
+        # The exact ladder built by ``route_with_layer_escalation``.
+        return [
+            ("two_layer", LayerStack.two_layer()),
+            ("four_layer_sig_gnd_pwr_sig", LayerStack.four_layer_sig_gnd_pwr_sig()),
+            ("four_layer_all_signal", LayerStack.four_layer_all_signal()),
+            ("six_layer_sig_gnd_sig_sig_pwr_sig", LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()),
+        ]
+
+    def test_plane_free_rung_clears_previous_rungs_restriction(self):
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        args = _FlagArgs(reserve_plane_layers=True)
+
+        observed: dict[str, list[str] | None] = {}
+        for name, stack in self._ladder():
+            route_cmd_module._apply_plane_layer_reservation(rules, stack, args)
+            observed[name] = rules.allowed_layers
+
+        # Plane-bearing rungs are restricted to their non-PLANE layers...
+        assert observed["four_layer_sig_gnd_pwr_sig"] == ["F.Cu", "B.Cu"]
+        assert observed["six_layer_sig_gnd_sig_sig_pwr_sig"] == [
+            "F.Cu",
+            "In2.Cu",
+            "In3.Cu",
+            "B.Cu",
+        ]
+        # ...and plane-free rungs are UNRESTRICTED, even when they follow a
+        # plane-bearing rung on the same shared ``DesignRules`` instance.
+        assert observed["two_layer"] is None
+        assert observed["four_layer_all_signal"] is None, (
+            "four_layer_all_signal inherited the previous rung's allowed_layers "
+            "-- the all-signal 4L rung would degenerate into a 2-layer route"
+        )
+
+    def test_flag_off_never_touches_allowed_layers_across_rungs(self):
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules()
+        # A pre-existing restriction from some other mechanism must survive
+        # untouched when the flag is off: the helper early-``return``s.
+        rules.allowed_layers = ["F.Cu", "In1.Cu"]
+        args = _FlagArgs(reserve_plane_layers=False)
+
+        for _name, stack in self._ladder():
+            route_cmd_module._apply_plane_layer_reservation(rules, stack, args)
+            assert rules.allowed_layers == ["F.Cu", "In1.Cu"]
