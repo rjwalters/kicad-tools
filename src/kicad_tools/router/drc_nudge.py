@@ -31,7 +31,7 @@ import logging
 import math
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .core import Autorouter
@@ -1411,6 +1411,58 @@ def _scan_and_repair_via_in_pad(
     return nudged
 
 
+def _via_pad_contacts(via: Via, router: Autorouter) -> set[tuple[int, int]]:
+    """Record same-net copper contacts that a via/chain move must retain.
+
+    IDs remain stable throughout the in-place transaction. Test copper
+    intersection, not endpoint proximity, so preserved track interiors and
+    off-centre pad contacts are protected too. Preserved routes are observed
+    only; this helper never moves them.
+    """
+    from shapely.affinity import rotate  # type: ignore[import-untyped]
+    from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
+
+    copper: list[tuple[int, set[Layer], Any, float]] = []
+    moving = {id(via)} | {
+        id(seg) for route in router.routes if route.net == via.net for seg in route.segments
+    }
+    all_layers = set(Layer)
+    for route in [*router.routes, *getattr(router, "existing_routes", [])]:
+        if route.net != via.net:
+            continue
+        for seg in route.segments:
+            line = LineString([(seg.x1, seg.y1), (seg.x2, seg.y2)])
+            copper.append((id(seg), {seg.layer}, line, seg.width / 2))
+        for other in route.vias:
+            lo, hi = sorted(layer.value for layer in other.layers)
+            layers = {layer for layer in Layer if lo <= layer.value <= hi}
+            copper.append((id(other), layers, Point(other.x, other.y), other.diameter / 2))
+    for pad in (getattr(router, "pads", None) or {}).values():
+        if pad.net != via.net:
+            continue
+        layers = all_layers if pad.through_hole else {pad.layer}
+        # This head's router Pad stores rectangular, cardinal-normalized
+        # dimensions, not schema shape metadata. Preserve those represented
+        # contacts; honor residual rotation if a caller supplies it (KiCad
+        # uses clockwise-positive angles). Do not claim schema shape fidelity.
+        shape = box(*_router_pad_bbox(pad))
+        angle = getattr(pad, "rotation", 0.0)
+        if angle:
+            shape = rotate(shape, -angle, origin=(pad.x, pad.y))
+        copper.append((id(pad), layers, shape, 0.0))
+    contacts: set[tuple[int, int]] = set()
+    for index, (first, layers, shape, radius) in enumerate(copper):
+        for second, other_layers, other_shape, other_radius in copper[index + 1 :]:
+            if first not in moving and second not in moving:
+                continue
+            if (
+                layers & other_layers
+                and shape.distance(other_shape) <= radius + other_radius + 1e-9
+            ):
+                contacts.add((min(first, second), max(first, second)))
+    return contacts
+
+
 def _via_pad_process_findings(via: Via, router: Autorouter) -> set[tuple[str, int, float]]:
     """Process constraints not included in the copper-only route validator.
 
@@ -1496,7 +1548,10 @@ def _try_nudge_via_pad_violation(
     unsupported via-in-pad placement and board edges. Restore geometry in
     place if any new finding appears. Unrelated pre-existing findings are
     retained without vetoing a legal repair; a blocked proposal records
-    ``via_pad_destination_blocked``.
+    ``via_pad_destination_blocked``. Original same-net copper contacts are
+    checked separately, including fixed preserved-route interiors and pad
+    edges; a disconnect records ``via_pad_contact_blocked`` and restores the
+    move without modifying preserved copper.
 
     Uses the same generous ``_VIA_IN_PAD_MAX_DISPLACEMENT`` budget as
     the same-net via-in-pad sweep -- clearing a foreign SMD pad requires
@@ -1539,6 +1594,7 @@ def _try_nudge_via_pad_violation(
     # and reject NEW findings rather than requiring an otherwise clean board.
     before = Counter(dataclasses.astuple(v) for v in validate_routes(router))
     process_before = _via_pad_process_findings(via, router)
+    contacts_before = _via_pad_contacts(via, router)
     old_x, old_y = via.x, via.y
     chain = [
         (seg, seg.x1, seg.y1, seg.x2, seg.y2)
@@ -1576,6 +1632,10 @@ def _try_nudge_via_pad_violation(
         ):
             if result is not None:
                 result._bump_skipped("via_pad_destination_blocked")
+            return False
+        if contacts_before - _via_pad_contacts(via, router):
+            if result is not None:
+                result._bump_skipped("via_pad_contact_blocked")
             return False
         accepted = True
         return True
