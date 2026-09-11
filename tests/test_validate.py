@@ -712,7 +712,7 @@ class TestClearanceRule:
             assert len(violation.items) == 2
 
     def test_rules_checked_count(self, tmp_path: Path):
-        """Test that rules_checked reflects number of copper layers checked."""
+        """Test that rules_checked counts each copper layer plus the PTH-hole rule."""
         from kicad_tools.schema.pcb import PCB
 
         pcb_file = tmp_path / "clearance_pass.kicad_pcb"
@@ -722,8 +722,10 @@ class TestClearanceRule:
         checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
         results = checker.check_clearances()
 
-        # Should check both F.Cu and B.Cu
-        assert results.rules_checked == 2
+        # Two copper layers (F.Cu, B.Cu) plus the object-specific PTH
+        # hole-to-copper rule (#5059), which spans layers and so is counted
+        # once rather than per-layer.
+        assert results.rules_checked == 3
 
 
 class TestClearanceRuleDistanceCalculations:
@@ -1845,10 +1847,12 @@ class TestSilkscreenRules:
         # checks contribute no violations, and its refdes sits clear of its
         # silk line so silk_overlap contributes none either.
         assert len(results) == 2
-        # 6 rule types checked: line width, text height, legacy over-pad,
-        # geometric silk_over_copper, silk_overlap (added by #4612),
+        # 7 rule types checked: line width, text height, legacy over-pad,
+        # geometric silk_over_copper, the object-specific silk-to-pad factory
+        # floor (added by #5059 -- counted as checked even on a fixture with no
+        # pads, same as every other rule here), silk_overlap (added by #4612),
         # silk_edge_clearance.
-        assert results.rules_checked == 6
+        assert results.rules_checked == 7
 
         # Check that both rule types are represented
         rule_ids = {v.rule_id for v in results.violations}

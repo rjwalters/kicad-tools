@@ -38,6 +38,11 @@ design_rules:
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
     min_solder_mask_clearance_mm: 0.05
+    # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
+    min_silk_to_pad_clearance_mm: 0.15
+    min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
+    min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
+    min_inner_pth_hole_to_copper_mm: 0.30
     min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
@@ -60,6 +65,11 @@ design_rules:
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
     min_solder_mask_clearance_mm: 0.05
+    # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
+    min_silk_to_pad_clearance_mm: 0.15
+    min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
+    min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
+    min_inner_pth_hole_to_copper_mm: 0.30
     min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 2.0
@@ -82,6 +92,11 @@ design_rules:
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
     min_solder_mask_clearance_mm: 0.05
+    # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
+    min_silk_to_pad_clearance_mm: 0.15
+    min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
+    min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
+    min_inner_pth_hole_to_copper_mm: 0.30
     min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
@@ -104,6 +119,11 @@ design_rules:
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
     min_solder_mask_clearance_mm: 0.05
+    # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
+    min_silk_to_pad_clearance_mm: 0.15
+    min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
+    min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
+    min_inner_pth_hole_to_copper_mm: 0.30
     min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 2.0
@@ -126,6 +146,11 @@ design_rules:
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
     min_solder_mask_clearance_mm: 0.05
+    # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
+    min_silk_to_pad_clearance_mm: 0.15
+    min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
+    min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
+    min_inner_pth_hole_to_copper_mm: 0.30
     min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0

@@ -985,6 +985,9 @@ def check_all_silkscreen(
     )
     results.merge(check_silkscreen_over_pads(pcb, design_rules))
     results.merge(check_silk_over_copper(pcb, design_rules))
+    from .factory_clearance import check_silk_pad_clearance
+
+    results.merge(check_silk_pad_clearance(pcb, design_rules))
     results.merge(check_silk_overlap(pcb, design_rules))
     results.merge(check_silk_edge_clearance(pcb, design_rules))
 

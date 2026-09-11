@@ -141,6 +141,12 @@ class DesignRules:
     min_solder_mask_dam_mm: float = 0.1
     min_solder_mask_clearance_mm: float = 0.05
 
+    # Optional process-specific clearances; None preserves legacy profiles.
+    min_silk_to_pad_clearance_mm: float | None = None
+    min_smd_pad_clearance_mm: float | None = None
+    min_pth_hole_to_track_mm: float | None = None
+    min_inner_pth_hole_to_copper_mm: float | None = None
+
     # Pad constraints
     min_pad_size_mm: float = 0.25
 
@@ -202,6 +208,10 @@ class DesignRules:
             "min_solder_mask_dam_mm": self.min_solder_mask_dam_mm,
             "min_solder_mask_clearance_mm": self.min_solder_mask_clearance_mm,
             "min_pad_size_mm": self.min_pad_size_mm,
+            "min_silk_to_pad_clearance_mm": self.min_silk_to_pad_clearance_mm,
+            "min_smd_pad_clearance_mm": self.min_smd_pad_clearance_mm,
+            "min_pth_hole_to_track_mm": self.min_pth_hole_to_track_mm,
+            "min_inner_pth_hole_to_copper_mm": self.min_inner_pth_hole_to_copper_mm,
             "board_thickness_mm": self.board_thickness_mm,
             "outer_copper_oz": self.outer_copper_oz,
             "inner_copper_oz": self.inner_copper_oz,

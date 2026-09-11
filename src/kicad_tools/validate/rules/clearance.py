@@ -85,6 +85,21 @@ class CopperElement:
     # rounded corners and produce phantom sub-10um shorts (issue #3826).
     # ``None`` for segments and vias (which use the analytic disc path).
     polygon: object | None = None
+    pad_type: str = ""
+    source_pad: Pad | None = None
+    # Owning ``Footprint`` OBJECT for pads (``None`` for segments/vias).  The
+    # object-specific SMD pad floor is a placement constraint, so it must be
+    # able to tell package-internal pad geometry from pads the designer
+    # positioned relative to one another -- see ``_check_layer``.
+    #
+    # This deliberately holds the footprint *object* rather than its
+    # ``reference`` string: references are not guaranteed unique (or even
+    # present).  A bare board or a synthesized fixture can carry several
+    # footprints whose reference is "", and two footprints sharing a blank or
+    # duplicated reference would compare equal and silently suppress a REAL
+    # different-footprint violation.  Identity comparison ("is this the same
+    # placed footprint?") is exactly the question the floor needs answered.
+    source_footprint: Footprint | None = None
 
     @classmethod
     def from_segment(cls, seg: Segment) -> CopperElement:
@@ -118,6 +133,9 @@ class CopperElement:
             reference=f"{footprint.reference}-{pad.number}",
             net_name=pad.net_name if pad.net_number != 0 else "",
             polygon=polygon,
+            pad_type=pad.type,
+            source_pad=pad,
+            source_footprint=footprint,
         )
 
     @classmethod
@@ -910,7 +928,13 @@ class ClearanceRule(DRCRule):
         # Process each copper layer
         for layer in pcb.copper_layers:
             layer_name = layer.name
-            violations = self._check_layer(pcb, layer_name, min_clearance, diff_pair_set)
+            violations = self._check_layer(
+                pcb,
+                layer_name,
+                min_clearance,
+                diff_pair_set,
+                design_rules.min_smd_pad_clearance_mm,
+            )
             for v in violations:
                 results.add(v)
 
@@ -924,8 +948,12 @@ class ClearanceRule(DRCRule):
             for v in self._check_net0_bridges(pcb, layer_name, min_clearance):
                 results.add(v)
 
+        from .factory_clearance import check_pth_hole_clearance
+
+        results.merge(check_pth_hole_clearance(pcb, design_rules))
+
         # Count rules checked (one per layer)
-        results.rules_checked = len(pcb.copper_layers)
+        results.rules_checked += len(pcb.copper_layers)
 
         return results
 
@@ -935,6 +963,7 @@ class ClearanceRule(DRCRule):
         layer_name: str,
         min_clearance: float,
         diff_pair_set: set[tuple[int, int]] | None = None,
+        min_smd_pad_clearance: float | None = None,
     ) -> list[DRCViolation]:
         """Check clearance on a single copper layer.
 
@@ -1030,9 +1059,28 @@ class ClearanceRule(DRCRule):
                 clearance, loc_x, loc_y = _calculate_clearance(elem1, elem2)
 
                 # Check against minimum
-                if clearance + DRC_TOLERANCE < min_clearance:
+                required = min_clearance
+                # The factory SMD pad floor constrains copper the DESIGNER
+                # places: it is a placement/layout limit, not a statement
+                # about a package's internal geometry.  Two pads of the SAME
+                # footprint are fixed by the component vendor and no
+                # placement or routing change can move them -- and stock
+                # library packages routinely sit under this floor: the
+                # diagonal corner gap between adjacent pad rows of
+                # ``Package_QFP:LQFP-48_7x7mm_P0.5mm`` is 0.1414 mm (board
+                # 06's U3, pads 24/36 and 25/37), which JLCPCB fabricates
+                # routinely.  Applying the floor there would declare every
+                # fine-pitch QFP/QFN unmanufacturable, so restrict it to
+                # pads from different footprints.  Compared by IDENTITY, not
+                # by reference string -- see ``CopperElement.source_footprint``.
+                if (
+                    elem1.pad_type == elem2.pad_type == "smd"
+                    and elem1.source_footprint is not elem2.source_footprint
+                ):
+                    required = max(required, min_smd_pad_clearance or 0)
+                if clearance + DRC_TOLERANCE < required:
                     violation = self._create_violation(
-                        elem1, elem2, clearance, min_clearance, layer_name, loc_x, loc_y
+                        elem1, elem2, clearance, required, layer_name, loc_x, loc_y
                     )
                     violations.append(violation)
 
@@ -1330,7 +1378,9 @@ def _repair_fill_polygon(poly):
     return MultiPolygon(polys)
 
 
-def _collect_zone_fills(pcb: PCB) -> dict[str, list[_ZoneFill]]:
+def _collect_zone_fills(
+    pcb: PCB, *, include_unassigned: bool = False
+) -> dict[str, list[_ZoneFill]]:
     """Group every zone's filled polygons by copper layer, resolving nets.
 
     Shared by :class:`SegmentZoneClearanceRule` and
@@ -1347,6 +1397,8 @@ def _collect_zone_fills(pcb: PCB) -> dict[str, list[_ZoneFill]]:
 
     Args:
         pcb: The PCB whose zones to collect.
+        include_unassigned: Include net-0 physical copper for hole checks;
+            default electrical clearance callers retain their existing scope.
 
     Returns:
         Mapping of copper-layer name -> list of :class:`_ZoneFill`, each
@@ -1363,7 +1415,7 @@ def _collect_zone_fills(pcb: PCB) -> dict[str, list[_ZoneFill]]:
         if net_number == 0 and zone.net_name:
             # KiCad 9 name-only ``(net "X")`` format -- resolve by name.
             net_number = name_to_number.get(zone.net_name, 0)
-        if net_number == 0:
+        if net_number == 0 and not include_unassigned:
             continue
         net_name = zone.net_name or number_to_name.get(net_number, "")
         for i, points in enumerate(zone.filled_polygons):
