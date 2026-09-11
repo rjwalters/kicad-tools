@@ -745,6 +745,7 @@ def _suggest_json(result, suggestions) -> None:
             "existing_lcsc": s.existing_lcsc,
             "search_query": s.search_query,
             "error": s.error,
+            "warnings": s.warnings,
             "best_suggestion": None,
             "all_suggestions": [],
         }
@@ -805,6 +806,8 @@ def _suggest_table(result, suggestions, schematic_path: Path) -> None:
 
     # Show found suggestions
     for s in found:
+        for warning in s.warnings:
+            print(f"Warning: {s.reference}: {warning}", file=sys.stderr)
         best = s.best_suggestion
         # Truncate long values
         value = s.value[:11] if len(s.value) > 11 else s.value

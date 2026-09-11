@@ -1,3 +1,51 @@
+# Board00 Simple LED — procurement reconciliation
+
+## Current package — 2026-09-10
+
+The committed [project.kct](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/00-simple-led/project.kct),
+[BOM](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/00-simple-led/output/manufacturing/bom_jlcpcb.csv) and
+[SMT CPL](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/00-simple-led/output/manufacturing/cpl_jlcpcb.csv)
+agree on the following corrected selections and assembly treatment.
+
+| Reference | Reviewed manufacturer part | LCSC | Current footprint / assembly |
+|---|---|---|---|
+| R1 | 0805W8F3300T5E | C17630 | 330 Ω, 0805 resistor; SMT CPL includes R1 |
+| D1 | 333-2SURD/S530-A3 | C87271 | 5 mm through-hole LED; hand-solder, excluded from SMT CPL |
+| J1 | ZX-PZ2.54-1-2PZZ | C7501260 | 2-pin 2.54 mm through-hole header; hand-solder, excluded from SMT CPL |
+
+## Fleet audit context
+
+The source corrections and redesigns were integrated in commit
+[d95b6eff](https://github.com/rjwalters/kicad-tools/commit/d95b6eff369c1479c4dce6d4a7bc2b4ef73f9350).
+The original fleet findings below describe the retired designs:
+
+- Board02 is now a real ATtiny85-20PU circuit. Its [hardware guide](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/02-charlieplex-led/HARDWARE.md) specifies the pinout, programming and manual through-hole assembly; the synthetic MCU warning below is historical.
+- Board03 revision B uses the real 44-pin ATmega32U4-AU. See its [design review](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/03-usb-joystick/DESIGN_REVIEW.md) and [assembly/firmware guide](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/03-usb-joystick/README.md). [Issue #5000](https://github.com/rjwalters/kicad-tools/issues/5000) still tracks USB firmware identity and suspend qualification as of this reconciliation.
+- Board05 revision B replaces the former shunt/buck topology with the DRV8313-based design. Its [hardware guide](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/05-bldc-motor-controller/redesign/HARDWARE.md) and [README](https://github.com/rjwalters/kicad-tools/blob/27ea2695a91c632faed2df8fc518c5a077e6d2d7/boards/05-bldc-motor-controller/README.md) describe the current BOM, conservative operating targets and pending motor/thermal bench validation. The old DRV8301 source is an archived regression witness; [#4993](https://github.com/rjwalters/kicad-tools/issues/4993) and the part-reconciliation issues [#5046](https://github.com/rjwalters/kicad-tools/issues/5046)/[#5047](https://github.com/rjwalters/kicad-tools/issues/5047) are closed.
+
+The broader [procurement audit #4971](https://github.com/rjwalters/kicad-tools/issues/4971) remains the cross-board tracker. These references do not establish live supplier stock, assembly-service eligibility, or completed hardware qualification.
+
+## Evidence and limits
+
+This 2026-09-10 update reconciles documentation with committed source/BOM/CPL
+identities at `27ea2695a91c632faed2df8fc518c5a077e6d2d7`. The supplier links in the dated audit below retain their
+original provenance; no new supplier lookup or stock check was performed.
+The corrected BOM/CPL already exist in this package. This update replaces the
+procurement document and refreshes its manifest/archive/readiness hashes only.
+Existing native DRC, electrical check, board geometry, and manufacturing output
+bytes remain the previously verified evidence; no new native refill or bench
+verification is claimed. Follow the package README for assembly handling.
+
+## Historical audit — 2026-09-09
+
+The following audit and its subsequent local-correction notes are preserved
+verbatim for provenance. Its references to “current blockers,” a synthetic MCU,
+and pending regeneration describe that earlier state and are superseded by the
+reconciliation above; they are not ordering instructions for this package.
+
+<details>
+<summary>Original fleet procurement audit and correction notes (historical)</summary>
+
 Demo manufacturing BOMs can be geometrically DRC-clean while ordering electrically unrelated or physically incompatible parts. Audited the committed `boards/00`–`05` `project.kct`, current schematic/PCB values and footprints, and LCSC primary product pages on 2026-09-09.
 
 Concrete blockers (supplier pages linked):
@@ -49,3 +97,5 @@ Sources for corrections:
 - https://www.lcsc.com/product-detail/C15850.html (10uF25V0805; unchanged correct)
 
 Caveats: this is identity/package verification, not a claim of hardware bring-up or live JLCPCB assembly eligibility. Bulk caps/current/thermal ratings and custom footprint geometry on05 remain unresolved. Board03 is a real pinout/layout redesign to use ATmega32U4. Board02 cannot be called a completed standalone MCU design. No generators, schematics, boards or export artifacts edited by this audit.
+
+</details>

@@ -319,6 +319,33 @@ class TestRestoreNetDeclarations:
         pcb.write_text(content)
         return pcb
 
+    @pytest.mark.parametrize("footprint_tag", ["module", "footprint"])
+    @pytest.mark.parametrize("remaining_nets", ["", '(net 0 "")'])
+    def test_restored_headers_precede_footprints(self, tmp_path, footprint_tag, remaining_nets):
+        """A footprint-only board keeps restored nets between setup and content."""
+        from kicad_tools.cli.runner import _restore_net_declarations
+        from kicad_tools.core.sexp_file import load_pcb
+
+        pcb = self._write_pcb(
+            tmp_path,
+            f"""(kicad_pcb
+              (version 20240108) (generator "test")
+              (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+              (setup (pad_to_mask_clearance 0))
+              {remaining_nets}
+              ({footprint_tag} "Test:Pad" (layer "F.Cu") (at 10 10)
+                (fp_text reference "U1" (at 0 0) (layer "F.SilkS"))
+                (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "SIG"))))""",
+        )
+        _restore_net_declarations(pcb, [_net_node(0, ""), _net_node(1, "SIG")])
+
+        restored = load_pcb(str(pcb))
+        tags = [child.name for child in restored.children]
+        assert tags == ["version", "generator", "layers", "setup", "net", "net", footprint_tag]
+        assert [node.get_first_atom() for node in restored.children if node.name == "net"] == [0, 1]
+        footprint = restored.get(footprint_tag)
+        assert footprint.get("pad").get("net").get_first_atom() == 1
+
     def test_restores_name_only_segment(self, tmp_path):
         """A segment with ``(net "SYNC_R")`` should be restored to ``(net 18)`` numeric-only."""
         from kicad_tools.cli.runner import _restore_net_declarations

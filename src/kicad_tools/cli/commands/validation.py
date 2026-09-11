@@ -271,6 +271,13 @@ def run_check_command(args) -> int:
     # Issue #4601: forward the sidecar auto-discovery opt-out.
     if getattr(args, "no_net_class_map", False):
         sub_argv.append("--no-net-class-map")
+    # Issue #4980/#5124: forward the declared branch-specific current-path
+    # sidecar and its auto-discovery opt-out, mirroring --net-class-map /
+    # --no-net-class-map immediately above.
+    if getattr(args, "current_paths", None):
+        sub_argv.extend(["--current-paths", args.current_paths])
+    if getattr(args, "no_current_paths", False):
+        sub_argv.append("--no-current-paths")
     # Issue #4633: forward the zone-refill opt-in (#4096/#4113) and the two
     # waiver-sidecar path overrides (#4137 / #4417).  All three were declared
     # on the inner check_cmd parser only, so `kct check --refill-zones` (and

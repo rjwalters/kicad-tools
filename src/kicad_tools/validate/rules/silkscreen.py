@@ -870,8 +870,19 @@ def check_silk_overlap(
                     common = set(a[0]) & set(b[0])
                     # Duplicate lines share both endpoints and must still flag.
                     if len(common) == 1:
-                        joint = Point(next(iter(common))).buffer(max(a[1], b[1]))
-                        if overlap.difference(joint).area < 1e-9:
+                        point = next(iter(common))
+                        end_a = a[0][1] if a[0][0] == point else a[0][0]
+                        end_b = b[0][1] if b[0][0] == point else b[0][0]
+                        da = (end_a[0] - point[0], end_a[1] - point[1])
+                        db = (end_b[0] - point[0], end_b[1] - point[1])
+                        # Same-direction collinear lines overlap, even if the
+                        # shorter line fits entirely inside the joint buffer.
+                        # Opposite directions form a valid straight continuation.
+                        collinear_overlap = da[0] * db[0] + da[1] * db[1] > 0 and abs(
+                            da[0] * db[1] - da[1] * db[0]
+                        ) <= 1e-9 * math.hypot(*da) * math.hypot(*db)
+                        joint = Point(point).buffer(max(a[1], b[1]))
+                        if not collinear_overlap and overlap.difference(joint).area < 1e-9:
                             continue
                 found.append(
                     DRCViolation(
