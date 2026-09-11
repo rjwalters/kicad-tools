@@ -57,7 +57,7 @@ class PartsCache:
         print(f"Cached parts: {stats['total']}")
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     DEFAULT_TTL_DAYS = 7
 
     def __init__(
@@ -107,6 +107,7 @@ class PartsCache:
                     datasheet_url TEXT,
                     product_url TEXT,
                     fetched_at TEXT,
+                    inventory TEXT,
                     cached_at TEXT
                 );
 
@@ -150,6 +151,8 @@ class PartsCache:
                     PRIMARY KEY (component_value, footprint)
                 );
             """)
+        if from_version < 3:
+            conn.execute("ALTER TABLE parts ADD COLUMN inventory TEXT")
         conn.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
             (str(self.SCHEMA_VERSION),),
@@ -196,6 +199,7 @@ class PartsCache:
             "product_url": part.product_url,
             "fetched_at": part.fetched_at.isoformat() if part.fetched_at else None,
             "cached_at": datetime.now().isoformat(),
+            "inventory": json.dumps(part.inventory_provenance()),
         }
 
     def _row_to_part(self, row: sqlite3.Row) -> Part:
@@ -216,7 +220,15 @@ class PartsCache:
         if row["fetched_at"]:
             fetched_at = datetime.fromisoformat(row["fetched_at"])
 
+        inventory = json.loads(row["inventory"]) if row["inventory"] else {}
         return Part(
+            stock_source=inventory.get("source", "unknown"),
+            snapshot_revision=inventory.get("snapshot_revision"),
+            snapshot_at=datetime.fromisoformat(inventory["snapshot_at"])
+            if inventory.get("snapshot_at")
+            else None,
+            read_at=datetime.now(),
+            from_cache=True,
             lcsc_part=row["lcsc_part"],
             mfr_part=row["mfr_part"] or "",
             manufacturer=row["manufacturer"] or "",
@@ -320,14 +332,14 @@ class PartsCache:
                     tolerance, voltage_rating, power_rating, temperature_range,
                     specs, stock, min_order, prices,
                     is_basic, is_preferred, datasheet_url, product_url,
-                    fetched_at, cached_at
+                    fetched_at, cached_at, inventory
                 ) VALUES (
                     :lcsc_part, :mfr_part, :manufacturer, :description,
                     :category, :package, :package_type, :value,
                     :tolerance, :voltage_rating, :power_rating, :temperature_range,
                     :specs, :stock, :min_order, :prices,
                     :is_basic, :is_preferred, :datasheet_url, :product_url,
-                    :fetched_at, :cached_at
+                    :fetched_at, :cached_at, :inventory
                 )
                 """,
                 row,
@@ -353,14 +365,14 @@ class PartsCache:
                     tolerance, voltage_rating, power_rating, temperature_range,
                     specs, stock, min_order, prices,
                     is_basic, is_preferred, datasheet_url, product_url,
-                    fetched_at, cached_at
+                    fetched_at, cached_at, inventory
                 ) VALUES (
                     :lcsc_part, :mfr_part, :manufacturer, :description,
                     :category, :package, :package_type, :value,
                     :tolerance, :voltage_rating, :power_rating, :temperature_range,
                     :specs, :stock, :min_order, :prices,
                     :is_basic, :is_preferred, :datasheet_url, :product_url,
-                    :fetched_at, :cached_at
+                    :fetched_at, :cached_at, :inventory
                 )
                 """,
                 rows,

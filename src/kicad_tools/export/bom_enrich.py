@@ -45,6 +45,7 @@ class EnrichmentEntry:
     confidence: float = 0.0
     part_type: str = ""  # "Basic" | "Pref" | "Ext" | ""
     error: str = ""
+    inventory: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -98,6 +99,13 @@ class EnrichmentReport:
         parts.append(f"{self.already_populated} from schematic")
         parts.append(f"{self.unmatched} unmatched")
         lines = [f"LCSC enrichment: {', '.join(parts)}"]
+        if any(
+            e.source in ("auto", "cache") and not e.inventory.get("stock_verified", False)
+            for e in self.entries
+        ):
+            lines.append(
+                "Stock unverified for identity matches; refresh live inventory before ordering."
+            )
         if self.unmatched_entries:
             lines.append("Unmatched parts:")
             for entry in self.unmatched_entries:
@@ -230,7 +238,9 @@ def enrich_bom_lcsc(
                     footprint,
                     lcsc,
                 )
+                cached_part = cache.get(lcsc, ignore_expiry=True)
                 return EnrichmentEntry(
+                    inventory=cached_part.inventory_provenance() if cached_part is not None else {},
                     value=value,
                     footprint=footprint,
                     references=refs,
@@ -399,6 +409,7 @@ def enrich_bom_lcsc(
                         source="auto",
                         confidence=best.confidence,
                         part_type=best.type_str,
+                        inventory=best.inventory,
                     )
                 )
                 logger.info(

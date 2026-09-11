@@ -699,6 +699,7 @@ class LCSCClient:
             datasheet_url=data.get("dataManualUrl") or "",
             product_url=f"https://jlcpcb.com/partdetail/{data.get('componentCode', '')}",
             fetched_at=datetime.now(),
+            stock_source="live",
         )
 
     def search(
