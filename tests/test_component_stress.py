@@ -505,13 +505,17 @@ def test_explicit_pin_fields_win_over_library_names():
 # Advisory robustness contract
 # ---------------------------------------------------------------------------
 def test_analyzer_never_raises_on_missing_file(manifest):
-    assert ComponentStressAnalyzer(manifest).analyze(FIXTURES / "nope.kicad_sch") == []
+    rows = ComponentStressAnalyzer(manifest).analyze(FIXTURES / "nope.kicad_sch")
+    assert rows and rows[0].status == "UNRESOLVED"
+    assert rows[0].check == "analysis"
 
 
 def test_analyzer_never_raises_on_garbage(manifest, tmp_path):
     junk = tmp_path / "junk.kicad_sch"
     junk.write_text("this is not a schematic")
-    assert ComponentStressAnalyzer(manifest).analyze(junk) == []
+    rows = ComponentStressAnalyzer(manifest).analyze(junk)
+    assert rows and rows[0].status == "UNRESOLVED"
+    assert rows[0].check == "analysis"
 
 
 def test_analyzer_never_infers_states(manifest):
@@ -642,3 +646,114 @@ def test_cli_via_kct_dispatch(capsys):
     rc = run_analyze_command(args)
     assert rc == 1
     assert '"mains_negative"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "value", [float("inf"), -float("inf"), float("nan"), "100A", "100ohm", "10k", "1e999", 10**400]
+)
+def test_invalid_voltage_manifest_is_rejected(value):
+    with pytest.raises(ValueError):
+        OperatingStateManifest.from_dict({"states": {"startup": {"D": value}}})
+
+
+@pytest.mark.parametrize(
+    ("value", "volts"),
+    [
+        (100, 100),
+        (-2.5, -2.5),
+        ("100", 100),
+        ("100V", 100),
+        ("2kV", 2000),
+        ("250mV", 0.25),
+        ("±20V", 20),
+        ("+/-20V", 20),
+    ],
+)
+def test_valid_voltage_manifest_controls(value, volts):
+    m = OperatingStateManifest.from_dict({"states": {"startup": {"D": value}}})
+    assert m.get("startup").potential("D") == pytest.approx(volts)
+
+
+@pytest.mark.parametrize("allow", [False, True])
+def test_corrupt_schematic_cli_blocks(capsys, tmp_path, allow):
+    path = tmp_path / "corrupt.kicad_sch"
+    path.write_text("(kicad_sch (broken")
+    argv = ["component-stress", str(path), "--states", str(STATES), "--format", "json"]
+    if allow:
+        argv.append("--allow-unresolved")
+    assert analyze_main(argv) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["summary"]["unresolved"] > 0
+    assert output["census"][0]["reason"]
+
+
+def test_netlist_failure_is_visible(monkeypatch, manifest, capsys):
+    def broken(*args):
+        raise ValueError("cannot build netlist")
+
+    monkeypatch.setattr(
+        "kicad_tools.analysis.component_stress.build_netlist_from_schematic", broken
+    )
+    rows = ComponentStressAnalyzer(manifest).analyze(SCH)
+    assert rows and all(r.status == "UNRESOLVED" for r in rows)
+    assert "cannot build netlist" in rows[0].reason
+    assert (
+        analyze_main(["component-stress", str(SCH), "--states", str(STATES), "--allow-unresolved"])
+        == 1
+    )
+
+
+def test_valid_empty_schematic_cli_control(tmp_path, capsys):
+    path = tmp_path / "empty.kicad_sch"
+    path.write_text(
+        '(kicad_sch (version 20250114) (generator "eeschema") (uuid "11111111-1111-1111-1111-111111111111") (paper "A4") (lib_symbols))'
+    )
+    assert (
+        analyze_main(["component-stress", str(path), "--states", str(STATES), "--format", "json"])
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["census"] == []
+
+
+@pytest.mark.parametrize(("high", "low"), [(float("inf"), float("inf")), (1e308, -1e308)])
+def test_nonfinite_derived_stress_never_passes(manifest, high, low):
+    state = manifest.get("mains_negative")
+    state.potentials.update(BANK_POS=high, GATE_A=high, SRC_POS=low)
+    rows = _rows(_analyze(manifest))
+    for check in ("vds", "vgs"):
+        row = rows[("Q1A", "mains_negative", check)]
+        assert row.status == "UNRESOLVED"
+        json.dumps(row.to_dict(), allow_nan=False)
+
+
+@pytest.mark.parametrize("value", ["100A", "100ohm", "1e999", "nan", "inf"])
+def test_invalid_voltage_rating_is_unresolved(manifest, tmp_path, value):
+    path = tmp_path / "bad-rating.kicad_sch"
+    text = SCH.read_text().replace('(property "Vds_max" "100V"', f'(property "Vds_max" "{value}"')
+    assert text != SCH.read_text()
+    path.write_text(text)
+    row = _rows(ComponentStressAnalyzer(manifest).analyze(path))[("Q1A", "mains_negative", "vds")]
+    assert row.status == "UNRESOLVED"
+
+
+@pytest.mark.parametrize("potential", [".inf", "-.inf", ".nan", "100A", "100ohm"])
+def test_invalid_yaml_voltage_cli_blocks(tmp_path, capsys, potential):
+    path = tmp_path / "invalid.yaml"
+    path.write_text(f"states:\n  startup:\n    BANK_POS: {potential}\n")
+    assert analyze_main(["component-stress", str(SCH), "--states", str(path)]) == 1
+    assert "invalid operating-state manifest" in capsys.readouterr().err
+
+
+def test_schematic_load_failure_is_visible(monkeypatch, manifest):
+    from kicad_tools.schema.schematic import Schematic
+
+    def broken(*args):
+        raise ValueError("cannot load schematic")
+
+    monkeypatch.setattr(
+        "kicad_tools.analysis.component_stress.build_netlist_from_schematic", lambda *args: None
+    )
+    monkeypatch.setattr(Schematic, "load", broken)
+    rows = ComponentStressAnalyzer(manifest).analyze(SCH)
+    assert rows and rows[0].status == "UNRESOLVED"
+    assert "cannot load schematic" in rows[0].reason

@@ -64,6 +64,7 @@ human-readable reason (mirroring the advisory contract of
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -196,14 +197,18 @@ def _normalize_net_name(name: str | None) -> str:
 def _parse_voltage(raw: object) -> float | None:
     """Parse a voltage-ish value to volts, or ``None``. Never raises.
 
-    Accepts plain numbers (``-169.3``), unit strings (``"100V"``) and the
-    ``±20V`` / ``+/-20V`` absolute-maximum notation datasheets use for VGS.
+    Accepts finite plain numbers (``-169.3``), voltage unit strings
+    (``"100V"``) and the ``±20V`` / ``+/-20V`` absolute-maximum notation
+    datasheets use for VGS. Non-voltage units and non-finite values are invalid.
     """
     if raw is None or isinstance(raw, bool):
         return None
     if isinstance(raw, (int, float)):
-        value = float(raw)
-        return value if value == value else None  # reject NaN
+        try:
+            value = float(raw)
+        except OverflowError:
+            return None
+        return value if math.isfinite(value) else None
     text = str(raw).strip()
     if not text:
         return None
@@ -212,8 +217,15 @@ def _parse_voltage(raw: object) -> float | None:
             text = text[len(marker) :].strip()
             break
     try:
-        return float(parse_unit_value(text).value)
-    except (ValueError, TypeError):
+        try:
+            value = float(text)
+        except ValueError:
+            parsed = parse_unit_value(text)
+            if parsed.unit != "V":
+                return None
+            value = float(parsed.value)
+        return value if math.isfinite(value) else None
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
@@ -620,7 +632,8 @@ class ComponentStressResult:
         reference: Component reference designator (e.g. ``Q1A``).
         mpn: Manufacturer part number read from the symbol, or ``None``.
         state: Normalized operating-state name this row was evaluated in.
-        check: ``"vds"`` or ``"vgs"``.
+        check: ``"vds"`` or ``"vgs"``; ``"analysis"`` identifies a schematic
+            or netlist load failure (reference ``"?"``, empty state).
         status: ``"PASS"``, ``"FAIL"`` or ``"UNRESOLVED"``. UNRESOLVED means
             the data needed to judge the terminal pair was absent -- it is
             never a silent pass.
@@ -718,21 +731,34 @@ class ComponentStressAnalyzer:
     def analyze(self, sch_path: str | Path) -> list[ComponentStressResult]:
         """Return one census row per (MOSFET, state, terminal pair).
 
-        Never raises: an unreadable schematic yields an empty census and a
-        per-part failure yields an UNRESOLVED row.
+        Never raises: unreadable schematics and netlist failures yield an
+        UNRESOLVED analysis-error row, distinct from a valid empty census.
         """
+
+        def load_error(exc: Exception) -> list[ComponentStressResult]:
+            return [
+                ComponentStressResult(
+                    reference="?",
+                    state="",
+                    check="analysis",
+                    status=STATUS_UNRESOLVED,
+                    reason=f"schematic/netlist analysis failed: {exc}",
+                    assumptions=list(_MODEL_ASSUMPTIONS),
+                )
+            ]
+
         try:
             netlist = build_netlist_from_schematic(sch_path)
-        except Exception:
-            return []
+        except Exception as exc:
+            return load_error(exc)
 
         try:
             from kicad_tools.schema.schematic import Schematic
 
             sch = Schematic.load(sch_path)
             symbols = [s for s in sch.symbols if s.reference and not s.reference.startswith("#")]
-        except Exception:
-            return []
+        except Exception as exc:
+            return load_error(exc)
 
         states = self.manifest.coverage_states()
         results: list[ComponentStressResult] = []
@@ -913,6 +939,13 @@ class ComponentStressAnalyzer:
 
         assert high_v is not None and low_v is not None
         stress = high_v - low_v
+        if not all(math.isfinite(v) for v in (high_v, low_v, stress)):
+            return row(
+                STATUS_UNRESOLVED,
+                "terminal potentials and differential stress must be finite voltages",
+                high_net=high_net,
+                low_net=low_net,
+            )
 
         # 5. Sourced absolute-maximum rating. Never a built-in default.
         rating_fields = _CHECK_RATING_FIELDS[check]

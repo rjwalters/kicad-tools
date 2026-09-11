@@ -1710,6 +1710,9 @@ def _run_component_stress_analysis(args: argparse.Namespace) -> int:
     else:
         _output_component_stress_text(results, sch_path.name, manifest, quiet=args.quiet)
 
+    # A failed analysis is not a user-waivable gap in declared operating data.
+    if any(r.check == "analysis" for r in results):
+        return 1
     if any(r.status == "FAIL" for r in results):
         return 1
     if not args.allow_unresolved and any(r.status == "UNRESOLVED" for r in results):
