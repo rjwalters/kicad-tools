@@ -20,6 +20,7 @@ from pathlib import Path
 import kicad_tools
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.parts.lcsc import LCSCDependencyMissingError
+from kicad_tools.sexp import parse_file
 
 from .assembly import AssemblyConfig, AssemblyPackage, AssemblyPackageResult
 from .preflight import PreflightChecker, PreflightConfig, PreflightResult
@@ -225,6 +226,58 @@ def verify_manifest(manifest_path: str | Path) -> list[str]:
     return problems
 
 
+def _project_symbol_files(project_dir: Path) -> list[Path]:
+    """Collect portable symbol-table dependencies before writing an archive.
+
+    Keep lexical paths for archive names, but resolve symlinks when checking
+    containment. Never expand host environment variables or copy global libraries.
+    """
+    table_path = project_dir / "sym-lib-table"
+    if not table_path.exists() and not table_path.is_symlink():
+        return []
+    root = project_dir.resolve()
+    if not table_path.resolve().is_relative_to(root):
+        raise ValueError("Nonportable sym-lib-table: table resolves outside the project")
+    try:
+        table = parse_file(table_path)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Cannot read sym-lib-table: {exc}") from exc
+    if table.name != "sym_lib_table":
+        raise ValueError("Malformed sym-lib-table: expected sym_lib_table root")
+
+    files = [table_path]
+    for lib in table.find_all("lib"):
+        name_node = lib.get("name")
+        name = name_node.get_first_atom() if name_node else "<unnamed>"
+        uri_node = lib.get("uri")
+        uri = uri_node.get_first_atom() if uri_node else None
+        type_node = lib.get("type")
+        if type_node is None or type_node.get_first_atom() != "KiCad":
+            raise ValueError(f"Nonportable symbol library {name!r}: expected KiCad library type")
+        if not isinstance(uri, str) or not uri:
+            raise ValueError(f"Malformed sym-lib-table: library {name!r} has no URI")
+        relative_uri = uri.removeprefix("${KIPRJMOD}/")
+        relative = Path(relative_uri)
+        if (
+            "$" in relative_uri
+            or "\\" in relative_uri
+            or ":" in relative_uri
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative.suffix != ".kicad_sym"
+        ):
+            raise ValueError(f"Nonportable symbol library {name!r}: {uri!r}")
+        target = project_dir / relative
+        if not target.resolve().is_relative_to(root):
+            raise ValueError(
+                f"Nonportable symbol library {name!r}: {uri!r} resolves outside project"
+            )
+        if not target.is_file():
+            raise FileNotFoundError(f"Missing project symbol library {name!r}: {uri!r}")
+        files.append(target)
+    return files
+
+
 def _create_project_zip(
     pcb_path: Path,
     output_dir: Path,
@@ -233,7 +286,8 @@ def _create_project_zip(
     """Create a ZIP containing the KiCad project files.
 
     Includes only the specific PCB being exported, plus .kicad_sch and
-    .kicad_pro files.  Other .kicad_pcb variants (intermediate builds,
+    .kicad_pro files and project-local symbol-table dependencies.
+    Other .kicad_pcb variants (intermediate builds,
     working copies, etc.) and backup files are excluded to keep the
     manufacturing package clean.
     """
@@ -256,9 +310,11 @@ def _create_project_zip(
     if not project_files:
         raise FileNotFoundError(f"No KiCad project files found in {project_dir}")
 
+    project_files.extend(_project_symbol_files(project_dir))
+    project_files = sorted(set(project_files))
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in sorted(project_files):
-            zf.write(f, f.name)
+        for f in project_files:
+            zf.write(f, f.relative_to(project_dir).as_posix())
 
     logger.info(f"Created project ZIP: {zip_path} ({len(project_files)} files)")
     return zip_path
@@ -719,7 +775,11 @@ class ManufacturingPackage:
         actual capabilities rather than KiCad's stricter built-in defaults.
         """
         try:
-            from ..manufacturers import get_profile, write_drc_constraints
+            from ..manufacturers import (
+                get_profile,
+                resolve_pcb_fabrication_overrides,
+                write_drc_constraints,
+            )
 
             profile = get_profile(self.manufacturer)
         except Exception as e:
@@ -735,6 +795,21 @@ class ManufacturingPackage:
 
         layers, copper_oz = self._detect_layer_config()
         rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
+
+        # Issue #5006: retain (or reject) a validated, cited per-board
+        # fabrication-floor override the same way `kct check
+        # --emit-drc-constraints` does, so the packaged sidecars agree with
+        # a reviewed project floor instead of silently reverting it to the
+        # profile's conservative default.
+        rules, fab_override_msg = resolve_pcb_fabrication_overrides(
+            self.pcb_path, rules, manufacturer_id=profile.id
+        )
+        if fab_override_msg is not None:
+            if fab_override_msg.startswith("ignoring"):
+                logger.warning(fab_override_msg)
+                result.warnings.append(fab_override_msg)
+            else:
+                logger.info(fab_override_msg)
 
         try:
             written = write_drc_constraints(

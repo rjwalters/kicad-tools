@@ -244,11 +244,9 @@ class SchematicNetlistMixin:
         for pwr in self.power_symbols:
             pwr_pos = (round(pwr.x, 2), round(pwr.y, 2))
             # Power symbol net name comes from lib_id (e.g., "power:+3.3V" -> "+3.3V")
-            net_name = pwr.lib_id.split(":")[1] if ":" in pwr.lib_id else pwr.lib_id
-
-            if pwr_pos not in point_to_net_names:
-                point_to_net_names[pwr_pos] = []
-            point_to_net_names[pwr_pos].append(net_name)
+            net_name = pwr.net_name
+            if net_name is not None:
+                point_to_net_names.setdefault(pwr_pos, []).append(net_name)
 
             # Power symbols connect through their pin — same endpoint-or-
             # junction rule as symbol pins.
