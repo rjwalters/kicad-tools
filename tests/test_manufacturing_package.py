@@ -1902,7 +1902,7 @@ class TestPreflightLCSCReconciliation:
         (project_dir / "board.kicad_sch").write_text("(kicad_sch)")
         return pcb
 
-    def _enrichment(self, *, auto=0, unmatched_refs=()):
+    def _enrichment(self, *, auto=0, unmatched_refs=(), spec_unresolved_refs=()):
         from kicad_tools.export.bom_enrich import EnrichmentEntry, EnrichmentReport
 
         entries = [
@@ -1924,6 +1924,17 @@ class TestPreflightLCSCReconciliation:
                 source="unmatched",
             )
             for ref in unmatched_refs
+        ]
+        entries += [
+            EnrichmentEntry(
+                value="Samtec TSW-102-07-G-S",
+                footprint="Connector:TSW",
+                references=[ref],
+                lcsc_part="",
+                source="spec_unresolved",
+                error="explicit MPN set via project spec/CSV with no LCSC",
+            )
+            for ref in spec_unresolved_refs
         ]
         return EnrichmentReport(entries=entries)
 
@@ -1987,6 +1998,33 @@ class TestPreflightLCSCReconciliation:
         assert "U7" in entry["details"]
         assert "U9" in entry["details"]
         assert "10/10" not in entry["details"]
+
+    def test_spec_unresolved_names_explicitly_sourced_parts(self, tmp_path, monkeypatch):
+        """Issue #4995: explicit MPN/supplier (no LCSC) items must surface as
+        WARN with a distinct 'explicitly sourced' clause -- not a silent OK,
+        and not the generic 'no match found' wording used for real misses.
+        """
+        preflight = [
+            PreflightResult(
+                name="bom_fields",
+                status="WARN",
+                message="BOM field issues: 1 problem(s)",
+                details="3/3 active item(s) missing LCSC part number",
+            )
+        ]
+        _, entry = self._run_export(
+            tmp_path,
+            monkeypatch,
+            preflight,
+            self._enrichment(auto=2, spec_unresolved_refs=("J1",)),
+        )
+        assert entry["status"] == "WARN"
+        assert "explicitly sourced outside LCSC" in entry["details"]
+        assert "J1" in entry["details"]
+        # Must not be conflated with the generic "still missing LCSC"
+        # (no-match) wording, which is reserved for entries actually sent
+        # through -- and rejected by -- the auto-matcher.
+        assert "still missing LCSC part number after enrichment" not in entry["details"]
 
     def test_fail_is_never_downgraded(self, tmp_path, monkeypatch):
         """A FAIL (missing footprint) survives reconciliation verbatim."""

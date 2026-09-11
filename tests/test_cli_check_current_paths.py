@@ -303,3 +303,34 @@ class TestErrorPaths:
         captured = capsys.readouterr()
         assert "--no-current-paths" in captured.err
         assert "--current-paths" in captured.err
+
+
+@pytest.mark.parametrize("bridge", [False, True])
+def test_cli_cross_layer_path_requires_via(tmp_path, bridge):
+    board = tmp_path / "layers.kicad_pcb"
+    copper = _T_NETWORK_PCB_TEMPLATE.format(
+        trunk_width=ADEQUATE_TRUNK_WIDTH_MM, sense_width=SENSE_WIDTH_MM
+    )
+    copper = copper.replace(
+        f'(end 120 50) (width {ADEQUATE_TRUNK_WIDTH_MM}) (layer "F.Cu")',
+        f'(end 120 50) (width {ADEQUATE_TRUNK_WIDTH_MM}) (layer "B.Cu")',
+    )
+    assert f'(end 120 50) (width {ADEQUATE_TRUNK_WIDTH_MM}) (layer "B.Cu")' in copper
+    if bridge:
+        copper = (
+            copper.rstrip()[:-1]
+            + '(via (at 60 50) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1))\n)\n'
+        )
+    board.write_text(copper)
+    before = board.read_bytes()
+    sidecar = _write_sidecar(tmp_path / "cp.json", [_trunk_spec(), _sense_spec()])
+    report = tmp_path / "report.json"
+    status = _run_check(board, report, extra=["--current-paths", str(sidecar)])
+    violations = _path_ampacity_violations(report)
+    if bridge:
+        assert status == 0
+        assert violations == []
+    else:
+        assert status == 2
+        assert any("unresolved" in v["message"].lower() for v in violations)
+    assert board.read_bytes() == before
