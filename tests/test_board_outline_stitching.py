@@ -187,3 +187,47 @@ class TestPlacementAnalyzerRoundedOutline:
 
         off_board = [c for c in conflicts if c.type == ConflictType.OFF_BOARD]
         assert not off_board, f"unexpected OFF_BOARD conflicts: {off_board}"
+
+
+_SQUARE = [((0, 0), (10, 0)), ((10, 0), (10, 10)), ((10, 10), (0, 10)), ((0, 10), (0, 0))]
+
+
+def _line_board(tmp_path, segments):
+    path = tmp_path / "contours.kicad_pcb"
+    edges = "".join(
+        f'(gr_line (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (layer "Edge.Cuts"))'
+        for a, b in segments
+    )
+    path.write_text(f"(kicad_pcb (version 20240108) {edges})")
+    return PCB.load(path)
+
+
+@pytest.mark.parametrize("fragment_first", [False, True])
+def test_larger_open_fragment_cannot_replace_closed_outline(tmp_path, fragment_first):
+    fragment = [((20, 20), (50, 50))]
+    segments = fragment + _SQUARE if fragment_first else _SQUARE + fragment
+    pcb = _line_board(tmp_path, segments)
+    outline = pcb.get_board_outline()
+    assert len(outline) == 5
+    assert outline[0] == outline[-1]
+    assert set(outline) == {(0, 0), (10, 0), (10, 10), (0, 10)}
+
+
+@pytest.mark.parametrize(
+    "segments",
+    [
+        _SQUARE[:-1],
+        _SQUARE + [((10, 10), (50, 50))],
+        [((0, 0), (10, 10)), ((10, 10), (20, 20)), ((20, 20), (0, 0))],
+    ],
+    ids=["incomplete", "branched", "zero-area"],
+)
+def test_invalid_component_does_not_produce_partial_outline(tmp_path, segments):
+    assert _line_board(tmp_path, segments).get_board_outline() == []
+
+
+def test_closing_gap_uses_same_tolerance_as_stitching(tmp_path):
+    segments = _SQUARE[:-1] + [((0, 10), (0, 0.0015))]
+    outline = _line_board(tmp_path, segments).get_board_outline()
+    assert len(outline) == 5
+    assert outline[0] == outline[-1]

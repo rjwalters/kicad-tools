@@ -3856,7 +3856,8 @@ class PCB:
         holes, fiducial marks, stray shapes) alongside the real board edge.
         Segments are first grouped into connected components by endpoint
         proximity (order-independent), each component is chained into a
-        polygon, and the component with the largest bounding-box area is
+        complete nondegenerate closed polygon, and the valid component with
+        the largest bounding-box area is
         returned as the board outline -- the real edge is essentially always
         the largest closed shape on the layer. Endpoint matching uses a
         0.01mm tolerance to absorb the small sub-DRC gaps real-world exports
@@ -3933,7 +3934,7 @@ class PCB:
         best_area = -1.0
         for indices in components:
             candidate = self._chain_segment_indices(segments, indices, tolerance)
-            if len(candidate) < 2:
+            if not candidate:
                 continue
             xs = [p[0] for p in candidate]
             ys = [p[1] for p in candidate]
@@ -4009,8 +4010,25 @@ class PCB:
         into path order -- this handles ``gr_line``/``gr_arc`` mixes stored
         in arbitrary order in the source file.
         """
-        if not indices:
+        if len(indices) < 3:
             return []
+
+        # Every endpoint must have exactly one mate in another segment.
+        # Use the same 0.01mm tolerance as grouping and walking: incomplete
+        # or branched components must not become partial outline candidates.
+        for i in indices:
+            start, end = segments[i]
+            if PCB._points_close(start, end, tolerance):
+                return []
+            for point in (start, end):
+                mates = sum(
+                    PCB._points_close(point, endpoint, tolerance)
+                    for j in indices
+                    if j != i
+                    for endpoint in segments[j]
+                )
+                if mates != 1:
+                    return []
 
         start_idx = indices[0]
         polygon: list[tuple[float, float]] = [
@@ -4040,6 +4058,17 @@ class PCB:
                 # No more connected segments found within this component.
                 break
 
+        if remaining or not PCB._points_close(polygon[-1], polygon[0], tolerance):
+            return []
+        # Snap only the closing gap; keep all other source vertices intact.
+        polygon[-1] = polygon[0]
+        ox, oy = polygon[0]
+        twice_area = sum(
+            (a[0] - ox) * (b[1] - oy) - (b[0] - ox) * (a[1] - oy)
+            for a, b in zip(polygon, polygon[1:], strict=False)
+        )
+        if abs(twice_area) <= tolerance * tolerance:
+            return []
         return polygon
 
     @staticmethod
