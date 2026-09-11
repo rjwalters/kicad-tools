@@ -473,3 +473,34 @@ merged `main` SHA.
 
 - **Issues**: https://github.com/rjwalters/kicad-tools/issues
 - **Discussions**: https://github.com/rjwalters/kicad-tools/discussions
+
+
+### Content checks on docs-only pull requests
+
+The always-running **Lint & Format** job runs
+`bash scripts/ci/check-content-contracts.sh` after Ruff. The local equivalent,
+`bash scripts/ci/local-gate.sh lint`, invokes the same script and explicit pytest
+selection. Neither needs a native build. Changes to the runner, tests, or workflow
+also run this gate; it does not depend on changed-file detection.
+
+The selection covers source citations in guarded Markdown globs, diff-pair and
+match-group guide contracts, shipped command contracts and installation, board06
+and board07 README tolerance markers, and the board07 inventory in
+`boards/README.md`. An initial local run passed all 102 tests in 8.43 seconds,
+without skips (test execution only; dependency setup is additional).
+
+New documents matching the citation globs are checked automatically. Deleting or
+renaming required guides or commands fails their existing presence contracts;
+deleting an optional document need not fail. Citation checks intentionally omit
+research and investigation notes. Command-specific contracts enumerate known
+skills, so adding a command may also require extending those test lists.
+
+This is a maintained selection of Python content consumers, not a general
+validator for every excluded file. The audit found no Python test consumers of
+repository `site/**` or `.loom/**` inputs; their Node and shell checks remain
+separate. When adding a Python test that reads a path excluded by `changes.code`
+in `.github/workflows/ci.yml`, add it to the shared runner. If it requires native
+builds or routing and cannot run here, conservatively restore the full-Test
+trigger for that input instead of leaving the consumer untested. Ordinary
+content-only PRs still skip the unrelated native board jobs; main pushes and
+change-detection failures run the full gate.

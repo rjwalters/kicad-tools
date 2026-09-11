@@ -114,6 +114,7 @@ SKIP_RC=75
 job_lint() {
   uv run ruff format . --check
   uv run ruff check .
+  bash scripts/ci/check-content-contracts.sh
 }
 
 job_typecheck() {
