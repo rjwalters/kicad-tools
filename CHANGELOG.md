@@ -1207,6 +1207,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`_reject_lost_route_only_bindings`) now aborts with a non-zero exit
   instead of reporting vacuous success if a requested net's pad bindings are
   ever lost after preflight already confirmed the net exists with 2+ pads.
+- **`--strict-layers` was silently inert on the lattice engine, which shipped
+  copper onto explicitly forbidden layers** (#4979) — `avoid_layers` is
+  promoted to a HARD no-go set by
+  `NetClassRouting.hard_avoided_layer_indices()` (`--strict-layers`, or
+  unconditionally for a class declaring `target_ampacity`), and both grid
+  backends have honoured that during search since #4433. The lattice engine —
+  the `--complete` default — had no `avoid_layers` plumbing at all, so a
+  4-layer softstart rev-C completion pass committed 29 × 2.6 mm `/PGND`
+  segments plus 8 thin ones onto the `In2.Cu` reference plane the routing map
+  forbade, and reported no layer-intent failure anywhere: not in the banner,
+  not in the exit code, not in the completion report. The lattice A* now
+  filters hard-avoided layers out of its pad-escape seeds/goals and its
+  via-hop landing layers, so no state it visits can carry a forbidden layer;
+  a connection with no legal route DECLINES with a layer-attributed reason
+  (`layer-constrained-start`/`-end`, `no-path-layer-constrained`) instead of
+  shipping forbidden copper as partial progress. A via may still *step over*
+  a forbidden layer to reach an allowed one — the emitted through via's
+  barrel is DRC's antipad concern and commits no copper there — which keeps
+  an F/B-only net able to cross F↔B on a 4-layer board exactly as the grid
+  backend already does. Blocking an **outer** layer is the opposite case and
+  drops vias from the search entirely: the lattice emits every layer change
+  as a through via spanning the whole stack, so its annular ring is real
+  copper on both outer layers, and such a net now routes planar or declines
+  rather than shipping an annulus onto a layer it forbade (the grid backend
+  needs no equivalent — its via spans only the two layers it hops between).
+  A `--complete` residual carries a machine-readable `layer_constrained`
+  flag in `--complete-report` JSON (and a named line in the printed report),
+  so a consumer can tell a deliberate layer-intent refusal from congestion
+  without string-matching the reason.
+- **No gate caught forbidden-layer copper after the fact** (#4979) — a new
+  post-route, engine-agnostic audit (`router/layer_intent.py`) checks the
+  copper the output board actually carries against each net's hard layer
+  intent, distinguishing violations this run CREATED from ones it INHERITED
+  from its input under `--preserve-existing` / `--complete`. Newly created
+  ones replace the SUCCESS banner and exit 3 (or 4 below
+  `--min-completion`) — checked before the `--complete` exit-8 branch, since
+  forbidden copper outranks an unclosed link; inherited ones are reported as
+  a NOTE and leave the exit code alone. Wired into `main()` and all three
+  escalation wrapper flows (`--auto-layers` is on by default, so gating only
+  `main()` would leave it dead on the default path). A strict no-op when no
+  net class carries a hard layer constraint.
+- **Matrix layer preferences could point a net at a hard-blocked layer**
+  (#4979) — `_inject_matrix_layer_preferences` (#2432) already preserved
+  `avoid_layers` through its `dataclasses.replace`, so the hard block itself
+  was never lost, but the injected `preferred_layers` could still name a
+  layer the class forbids. Assignments are now filtered against the net's
+  hard-avoided set, and a net whose entire assignment is hard-blocked keeps
+  its authored class untouched.
 - **`PCB.remove_segments()` silently left copper behind on boards with a
   non-zero `board_origin`** (#4933) — the coordinate-fallback match (for
   segments/vias with no UUID) rebuilt an in-memory removal key without
