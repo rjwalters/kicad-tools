@@ -564,3 +564,78 @@ class TestRoundrectPadSegmentClearance:
         cx, cy, w, h = pad_elem.geometry
         aabb_clearance = _rect_segment_centerline_distance(cx, cy, w, h, 11.5, 4.0, 11.5, 6.0) - 0.1
         assert abs(clearance - aabb_clearance) > 0.05
+
+
+@pytest.mark.parametrize(
+    "shape,size,rotation,radius",
+    [
+        ("roundrect", (2.0, 1.0), 45, 0.25),
+        ("roundrect", (1.0, 1.0), 0, 0.25),
+        ("oval", (2.0, 1.0), 45, 0.5),
+        ("circle", (1.0, 1.0), 0, 0.5),
+    ],
+)
+@pytest.mark.parametrize("gap", [0.2, 0.05])
+def test_equal_aabb_rounded_pad_clearance(shape, size, rotation, radius, gap):
+    """Analytic rounded-corner clearance, independent of polygon buffering."""
+    import math
+
+    # A point beyond the upper-right core corner, along its 45-degree normal.
+    # Distance to the circular corner is gap + trace radius, by construction.
+    trace_radius = 0.05
+    distance = radius + gap + trace_radius
+    x = size[0] / 2 - radius + distance / math.sqrt(2)
+    y = size[1] / 2 - radius + distance / math.sqrt(2)
+    angle = math.radians(rotation)
+    x, y = x * math.cos(angle) - y * math.sin(angle), x * math.sin(angle) + y * math.cos(angle)
+    fp = Footprint(name="U1", reference="U1", value="", position=(0, 0), rotation=0, layer="F.Cu")
+    pad = Pad(
+        number="1",
+        type="smd",
+        shape=shape,
+        position=(0, 0),
+        size=size,
+        rotation=rotation,
+        layers=["F.Cu"],
+        net_number=1,
+        roundrect_rratio=0.25,
+    )
+    elem = CopperElement.from_pad(pad, fp)
+    seg = CopperElement(
+        element_type="segment",
+        layer="F.Cu",
+        net_number=2,
+        geometry=(x, y, x, y, trace_radius * 2),
+        reference="trace",
+        net_name="other",
+    )
+    clearance, _, _ = _segment_circle_clearance(seg, elem)
+    assert clearance == pytest.approx(gap, abs=0.001)
+    assert (clearance < 0.1016) == (gap < 0.1016)
+
+
+def test_45_degree_roundrect_short_segment_clears():
+    """Judge's nondegenerate short trace clears despite an equal-width AABB."""
+    fp = Footprint(name="U1", reference="U1", value="", position=(0, 0), rotation=45, layer="F.Cu")
+    pad = Pad(
+        number="1",
+        type="smd",
+        shape="roundrect",
+        position=(0, 0),
+        size=(2, 1),
+        rotation=45,
+        layers=["F.Cu"],
+        net_number=1,
+        roundrect_rratio=0.25,
+    )
+    seg = CopperElement(
+        element_type="segment",
+        layer="F.Cu",
+        net_number=2,
+        geometry=(0, 1.2, 0.05, 1.2, 0.1),
+        reference="trace",
+        net_name="other",
+    )
+    clearance, _, _ = _segment_circle_clearance(seg, CopperElement.from_pad(pad, fp))
+    assert clearance == pytest.approx(0.2791, abs=0.001)
+    assert clearance > 0.1016

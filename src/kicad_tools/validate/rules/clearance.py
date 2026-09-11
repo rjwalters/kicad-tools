@@ -549,29 +549,23 @@ def _segment_circle_clearance(
     cx, cy, w, h = circle.geometry
     seg_half = seg_width / 2
 
-    # Vias are always circular; square pads (w == h within a micron) are
-    # equally well-modeled as discs and the circle path is simpler/faster.
-    is_circular = circle.element_type == "via" or abs(w - h) < 0.001
+    # Shape-aware copper geometry takes precedence over AABB dimensions:
+    # a rotated non-square pad can have a square AABB without being a disc.
+    poly_clearance = None
+    if circle.polygon is not None and circle.pad_shape in _POLYGON_DIVERGENT_SHAPES:
+        poly_clearance = _segment_polygon_clearance(seg, circle)
 
-    if is_circular:
+    if poly_clearance is not None:
+        clearance = poly_clearance
+    elif circle.element_type == "via" or abs(w - h) < 0.001:
+        # Preserve the legacy analytic fallback when no eligible polygon exists.
         radius = max(w, h) / 2
         center_dist = _point_to_segment_distance(cx, cy, x1, y1, x2, y2)
         clearance = center_dist - seg_half - radius
     else:
-        poly_clearance = None
-        if circle.polygon is not None and circle.pad_shape in _POLYGON_DIVERGENT_SHAPES:
-            poly_clearance = _segment_polygon_clearance(seg, circle)
-        if poly_clearance is not None:
-            clearance = poly_clearance
-        else:
-            # Rectangular pad (or no true-geometry polygon available):
-            # compute true segment-to-rectangle distance.
-            # ``_rect_segment_centerline_distance`` returns a signed
-            # centerline distance (negative when the segment overlaps the
-            # rectangle, mirroring ``_rect_circle_clearance``'s sign
-            # convention for the rect-vs-disc case).
-            center_dist = _rect_segment_centerline_distance(cx, cy, w, h, x1, y1, x2, y2)
-            clearance = center_dist - seg_half
+        # Signed centerline distance retains negative clearance on overlap.
+        center_dist = _rect_segment_centerline_distance(cx, cy, w, h, x1, y1, x2, y2)
+        clearance = center_dist - seg_half
 
     # Location is at the pad/via center (sufficient for repair tooling
     # and human readability; the previous behaviour also reported the
