@@ -4,8 +4,9 @@ This module aggregates already-computed manufacturing artifacts into a single,
 stable ``board.json`` data contract consumed by the kicad-tools.org demo gallery
 (Epic #3674, Phase 1, issue #3676).
 
-It does **not** recompute anything from KiCad. All metrics are parsed from
-artifacts that already exist under a board's ``output/manufacturing/`` directory:
+It does **not** invoke KiCad or run any manufacturing export. For a board with
+an ``output/manufacturing/`` directory, all metrics are parsed from artifacts
+that already exist there:
 
 * ``report.md``      -> routing %, DRC errors, layer count, board size, part
                         count, description, cost estimate.
@@ -17,6 +18,12 @@ artifacts that already exist under a board's ``output/manufacturing/`` directory
 * ``../lvs.json``    -> Layout-vs-Schematic verification (#3748, #3749);
                         sourced from ``output/lvs.json`` (NOT under
                         ``manufacturing/``).
+
+For a board with no ``output/manufacturing/`` directory (issue #5055), static
+identity/geometry metadata is instead read directly from a selected
+``.kicad_pcb``/``.kicad_sch`` source (footprint/layer counts, Edge.Cuts bounds)
+without altering readiness evidence or synthesizing manufacturing output — see
+"Development boards without manufacturing export" in ``docs/board-json-schema.md``.
 
 Output is written to ``boards/<id>/output/board.json``.
 
@@ -65,7 +72,7 @@ absent or unparseable.
                         could recover), OR ``report.md`` parsed but the board
                         still has ``drc_violations > 0`` (not manufacturable),
                         OR an explicit ``lvs_clean == False`` LVS mismatch.
-* ``"no_artifacts"`` — no ``output/manufacturing/`` directory at all.
+* ``"no_artifacts"`` — no manufacturing directory or usable development artifact.
 
 Schema versioning policy: this schema is the Phase 2 (Astro site) data contract.
 Field additions must be additive — no renames, no type changes. Bump
@@ -89,9 +96,14 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .board_readiness import read_readiness
 from .format_options import FORMAT_JSON, add_format_flag, emit_json
+
+if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import SExp
 
 logger = logging.getLogger(__name__)
 
@@ -305,6 +317,228 @@ def _count_bom_parts(bom_path: Path, slug: str) -> int | None:
     return len(data_rows)
 
 
+def _development_outline_bounds(pcb: PCB) -> tuple[float, float, float, float] | None:
+    """Measure only fully validated straight Edge.Cuts contours.
+
+    This is local metadata policy: no first-contour walk or bounds from
+    unchecked leftovers. Curves and footprint-local geometry need other
+    transforms/extrema and remain explicitly unsupported here.
+    """
+    import math
+    from collections import Counter
+
+    from shapely.errors import GEOSException  # type: ignore[import-untyped]
+    from shapely.geometry import MultiLineString  # type: ignore[import-untyped]
+    from shapely.ops import polygonize_full  # type: ignore[import-untyped]
+
+    segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+
+    def point(node: SExp, tag: str) -> tuple[float, float]:
+        matches = [child for child in node.iter_children() if child.tag == tag]
+        if len(matches) != 1:
+            raise ValueError("missing or duplicate outline coordinate")
+        return xy(matches[0])
+
+    def xy(node: SExp) -> tuple[float, float]:
+        values = node.get_atoms()
+        if (
+            len(values) != 2
+            or list(node.iter_children())
+            or any(type(v) not in (int, float) for v in values)
+            or any(not math.isfinite(float(v)) for v in values)
+        ):
+            raise ValueError("malformed outline coordinate")
+        return float(values[0]), float(values[1])
+
+    def visit(node: SExp, top_level: bool) -> None:
+        layers = [child for child in node.iter_children() if child.tag == "layer"]
+        if any(layer.get_string(0) == "Edge.Cuts" for layer in layers):
+            if (
+                not top_level
+                or len(layers) != 1
+                or layers[0].get_atoms() != ["Edge.Cuts"]
+                or node.tag not in {"gr_line", "gr_rect", "gr_poly"}
+            ):
+                raise ValueError("unsupported outline geometry")
+            if node.tag == "gr_line":
+                points = [point(node, "start"), point(node, "end")]
+            elif node.tag == "gr_rect":
+                a, b = point(node, "start"), point(node, "end")
+                points = [a, (b[0], a[1]), b, (a[0], b[1]), a]
+            else:
+                containers = [child for child in node.iter_children() if child.tag == "pts"]
+                if len(containers) != 1:
+                    raise ValueError("missing or duplicate outline polygon")
+                children = list(containers[0].iter_children())
+                if containers[0].get_atoms() or any(child.tag != "xy" for child in children):
+                    raise ValueError("unsupported polygon edge")
+                points = [xy(child) for child in children]
+                if len(points) > 1 and points[-1] == points[0]:
+                    points.pop()
+                if len(points) < 3:
+                    raise ValueError("degenerate outline polygon")
+                points.append(points[0])
+            segments.extend(zip(points, points[1:], strict=False))
+        for child in node.iter_children():
+            visit(child, False)
+
+    try:
+        for node in pcb._sexp.iter_children():
+            visit(node, True)
+        if not segments or any(a == b for a, b in segments):
+            return None
+        # Exact endpoints: do not silently close a physical gap by snapping.
+        degrees = Counter(point for segment in segments for point in segment)
+        if any(degree != 2 for degree in degrees.values()):
+            return None
+        lines = MultiLineString(segments)
+        if not lines.is_simple:  # Reject crossings and overlapping edges.
+            return None
+        polygons, cuts, dangles, invalid = polygonize_full(lines)
+        if polygons.is_empty or not all(g.is_empty for g in (cuts, dangles, invalid)):
+            return None
+        left, bottom, right, top = lines.bounds
+        return float(left), float(bottom), float(right), float(top)
+    except (ValueError, TypeError, OverflowError, GEOSException):
+        return None
+
+
+def _development_metrics(board_dir: Path, readiness: dict) -> dict:
+    """Recover static development metadata without upgrading release evidence."""
+    import hashlib
+    import math
+
+    from kicad_tools.exceptions import KiCadToolsError
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.schema.schematic import Schematic
+    from kicad_tools.spec.parser import load_spec
+
+    result: dict = {"sources": {}, "diagnostics": []}
+    diagnostics = result["diagnostics"]
+    root = board_dir.resolve()
+    project_path = board_dir / "project.kct"
+    artifacts: dict = {}
+    project_valid = True
+    if project_path.exists():
+        try:
+            project = load_spec(project_path).project.model_dump(exclude_unset=True)
+            artifacts = project.get("artifacts") or {}
+            for field in ("name", "description"):
+                if isinstance(project.get(field), str):
+                    result[field] = project[field]
+        except (OSError, ValueError) as exc:
+            project_valid = False
+            diagnostics.append(f"Cannot select artifacts from project.kct: {exc}")
+
+    selected: dict[str, Path] = {}
+    usable = False
+    for kind, suffix in (("pcb", ".kicad_pcb"), ("schematic", ".kicad_sch")):
+        if not project_valid:
+            continue
+        if kind in artifacts:
+            value = artifacts[kind]
+            if not isinstance(value, str) or not value:
+                diagnostics.append(f"Invalid explicit {kind} path")
+                continue
+            path = board_dir / value
+            selection = "project.artifacts"
+        else:
+            candidates = list((board_dir / "output").glob(f"*{suffix}"))
+            if len(candidates) != 1:
+                if candidates:
+                    diagnostics.append(
+                        f"Ambiguous {kind} candidates: "
+                        + ", ".join(sorted(p.name for p in candidates))
+                    )
+                continue
+            path = candidates[0]
+            selection = "unambiguous_output"
+        if not path.resolve().is_relative_to(root) or not path.is_file():
+            diagnostics.append(f"Missing or outside-board {kind} source: {path}")
+            continue
+        try:
+            raw = path.read_bytes()
+            if kind == "pcb":
+                pcb = PCB.load(path)
+                if pcb._sexp.tag != "kicad_pcb" or not pcb.copper_layers:
+                    raise ValueError("missing PCB root or copper layer definitions")
+                result["part_count"] = len(pcb.footprints)
+                result["layer_count"] = len(pcb.copper_layers)
+                bounds = _development_outline_bounds(pcb)
+                if bounds is not None:
+                    width, height = bounds[2] - bounds[0], bounds[3] - bounds[1]
+                    if all(math.isfinite(v) and v > 0 for v in (width, height)):
+                        result["board_size_mm"] = {"width": width, "height": height}
+                if "board_size_mm" not in result:
+                    diagnostics.append(
+                        "PCB outline is missing, open, malformed, or curved/unsupported; dimensions unknown"
+                    )
+            else:
+                schematic = Schematic.load(path)
+                if schematic._sexp.tag != "kicad_sch":
+                    raise ValueError("missing schematic root")
+            selected[kind] = path
+            result["sources"][kind] = {
+                "path": path.resolve().relative_to(root).as_posix(),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "selection": selection,
+            }
+            usable = True
+        except (OSError, ValueError, TypeError, AttributeError, IndexError, KiCadToolsError) as exc:
+            diagnostics.append(f"Cannot parse {kind} source {path.name}: {exc}")
+
+    result["status"] = "partial" if usable else "no_artifacts"
+    pcb_path = selected.get("pcb")
+    if pcb_path is None:
+        return result
+    inputs = readiness.get("inputs", {})
+    pcb_key = result["sources"]["pcb"]["path"]
+    if (
+        readiness.get("status") not in {"ready", "blocked"}
+        or inputs.get(pcb_key) != result["sources"]["pcb"]["sha256"]
+    ):
+        diagnostics.append(
+            "Native DRC measurements unavailable: no fresh readiness binding for selected PCB"
+        )
+        return result
+    evidence = readiness.get("evidence", {})
+    explicit_report = evidence.get("native_drc") if isinstance(evidence, dict) else None
+    if explicit_report is not None:
+        reports = [explicit_report] if isinstance(explicit_report, str) else []
+    else:
+        reports = [
+            name for name in inputs if Path(name).name in {"native-drc.json", "placement-drc.json"}
+        ]
+    if len(reports) != 1 or reports[0] not in inputs:
+        diagnostics.append(
+            "Native DRC measurements unavailable: missing or ambiguous hash-bound report"
+        )
+        return result
+    try:
+        report_path = board_dir / reports[0]
+        raw = report_path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != inputs[reports[0]]:
+            raise ValueError("report changed after readiness validation")
+        report = json.loads(raw)
+        violations, opens = report["violations"], report["unconnected_items"]
+        if not isinstance(violations, list) or not isinstance(opens, list):
+            raise ValueError("missing native finding arrays")
+        if not all(
+            isinstance(item, dict) and item.get("severity") in {"error", "warning", "ignore"}
+            for item in violations
+        ):
+            raise ValueError("invalid native violation severity")
+        if not all(isinstance(item, dict) for item in opens):
+            raise ValueError("invalid native unconnected item")
+        result["drc_violations"] = sum(item["severity"] == "error" for item in violations)
+        result["native_drc_geometry_violations"] = len(violations)
+        result["native_drc_unconnected_items"] = len(opens)
+        result["sources"]["native_drc"] = {"path": reports[0], "sha256": inputs[reports[0]]}
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        diagnostics.append(f"Native DRC measurements unavailable: {exc}")
+    return result
+
+
 def extract_board_metrics(board_dir: Path) -> dict:
     """Read existing artifacts under ``board_dir`` and return a board.json dict.
 
@@ -332,9 +566,9 @@ def extract_board_metrics(board_dir: Path) -> dict:
     metrics["readiness"] = read_readiness(board_dir)
 
     if not mfg_dir.is_dir():
-        # No manufacturing artifacts at all — identity-only board.json.
-        logger.info("board %s: no output/manufacturing directory; status=no_artifacts", slug)
-        metrics["status"] = "no_artifacts"
+        # Development metadata is independent of manufacturing export.
+        logger.info("board %s: extracting development artifacts", slug)
+        metrics.update(_development_metrics(board_dir, metrics["readiness"]))
         _attach_render_paths(metrics, output_dir)
         return metrics
 

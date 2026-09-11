@@ -641,6 +641,7 @@ class ManufacturingPackage:
         notes = [c for c in other_clauses if c not in remaining_issues]
 
         unmatched_entries = report.unmatched_entries
+        spec_unresolved_entries = report.spec_unresolved_entries
         if unmatched_entries:
             refs = [ref for e in unmatched_entries for ref in e.references]
             shown = ", ".join(sorted(refs)[:10])
@@ -649,7 +650,20 @@ class ManufacturingPackage:
                 f"{len(unmatched_entries)} component group(s) still missing LCSC "
                 f"part number after enrichment: {shown}{suffix}"
             )
-        else:
+        if spec_unresolved_entries:
+            # Explicit MPN/supplier sourcing (issue #4995): never auto-matched
+            # in the first place, so this is a deliberate "manually sourced"
+            # gap, not a search failure -- surfaced with its own wording so a
+            # reviewer can tell the two apart at a glance.
+            refs = [ref for e in spec_unresolved_entries for ref in e.references]
+            shown = ", ".join(sorted(refs)[:10])
+            suffix = f" (and {len(refs) - 10} more)" if len(refs) > 10 else ""
+            remaining_issues.append(
+                f"{len(spec_unresolved_entries)} component group(s) explicitly "
+                f"sourced outside LCSC (spec/CSV MPN set, no LCSC assigned) -- "
+                f"verify supplier manually: {shown}{suffix}"
+            )
+        if not unmatched_entries and not spec_unresolved_entries:
             resolved = report.auto_matched + report.cache_matched
             if resolved:
                 notes.append(f"{resolved} group(s) received LCSC from enrichment")

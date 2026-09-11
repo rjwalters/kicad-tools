@@ -154,9 +154,13 @@ jobs:
       # can write $GITHUB_WORKSPACE (mirrors the smoke job).
       # On the runner this is a sibling container of the runner's own, created by
       # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
-      # to the two kicad slots' cores (24-31) and 6 GB itself. GitHub-hosted
-      # runs get the plain --user 0:0 (4 vCPU / 16 GB VM, nothing to contain).
-      options: ${{ github.event_name == 'push' && '--user 0:0 --cpuset-cpus 24-31 --memory 6g' || '--user 0:0' }}
+      # to the two kicad slots' cores (24-31) and cap its memory. 12 GB, not
+      # the 6 GB first tried: at 6 GB four xdist workers each spawning
+      # kicad-cli DRC pushed the cgroup over its cap and the kernel SIGKILLed
+      # kicad-cli / crashed workers (31 failures, 2026-09-11 run 34645135306);
+      # a GitHub-hosted VM has 16 GB. GitHub-hosted runs get the plain
+      # --user 0:0 (nothing to contain).
+      options: ${{ github.event_name == 'push' && '--user 0:0 --cpuset-cpus 24-31 --memory 12g' || '--user 0:0' }}
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the smoke job).
@@ -1535,9 +1539,10 @@ jobs:
       image: kicad/kicad:10.0
       # On the runner this is a sibling container of the runner's own, created by
       # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
-      # to the two kicad slots' cores (24-31) and 6 GB itself. GitHub-hosted
-      # runs get the plain --user 0:0 (4 vCPU / 16 GB VM, nothing to contain).
-      options: ${{ github.event_name == 'push' && '--user 0:0 --cpuset-cpus 24-31 --memory 6g' || '--user 0:0' }}
+      # to the two kicad slots' cores (24-31) and 8 GB (it passed at 6 GB on
+      # 2026-09-11; headroom, since the cap SIGKILLs rather than swaps).
+      # GitHub-hosted runs get the plain --user 0:0 (nothing to contain).
+      options: ${{ github.event_name == 'push' && '--user 0:0 --cpuset-cpus 24-31 --memory 8g' || '--user 0:0' }}
     defaults:
       run:
         shell: bash
