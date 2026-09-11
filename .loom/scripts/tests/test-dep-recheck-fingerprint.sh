@@ -380,6 +380,20 @@ out_merged="$("$TARGET_SCRIPT" named-dependency --number 6335 --repo owner/repo)
 assert_eq "clear" "$(field "$out_merged" VERDICT)" \
     "T15c: live mode falls back to gh pr view when the reference is a PR (not an issue), and reports VERDICT=clear once merged"
 
+# T15d: a `PR #N (closes #M): ...` checklist item shape (#7501) — the exact
+# phrasing that on #7498 caused DEPS to come back empty and VERDICT=clear
+# even though the named PR was still OPEN. A `PR `/`Issue ` token before the
+# `#N` must not cause the item to be silently dropped.
+jq -n '{body: "## Dependencies\n\n- [ ] PR #7496 (closes #7495): must merge before this issue is buildable.\n"}' \
+    >"$STUB_DIR/issue-7498.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/pr-7496.json"
+
+out_pr_prefix="$("$TARGET_SCRIPT" named-dependency --number 7498 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_pr_prefix" VERDICT)" \
+    "T15d: a '- [ ] PR #N (closes #M): ...' checklist item is parsed into DEPS, not silently dropped, so a still-OPEN named PR reports VERDICT=blocked (#7501)"
+assert_eq "7496:OPEN" "$(field "$out_pr_prefix" DEPS)" \
+    "T15d: DEPS reports the PR-prefixed reference (#7496), not the parenthetical closes-target (#7495)"
+
 # --- T16: dep-recheck - narrowed label fingerprint (#7362): a pure label flip
 # among loom:pr/loom:review-requested/loom:reviewing/loom:operator/loom:treating
 # — none of them a superseding-block label — with no merge-state change must
