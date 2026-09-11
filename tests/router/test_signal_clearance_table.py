@@ -81,17 +81,13 @@ def test_same_net_returns_dru() -> None:
 
 def test_widened_net_never_widens_against_itself_even_if_listed_in_other_nets() -> None:
     # A caller passing an overlapping widened/other set must not self-widen.
-    table = build_signal_clearance_table(
-        ["SDCLK"], ["SDCLK", "BA1"], CLOCK_REQUIRED_MM, dru=DRU
-    )
+    table = build_signal_clearance_table(["SDCLK"], ["SDCLK", "BA1"], CLOCK_REQUIRED_MM, dru=DRU)
     assert ("SDCLK", "SDCLK") not in table.required_by_pair
     assert table.required_clearance("SDCLK", "SDCLK") == pytest.approx(DRU)
 
 
 def test_multiple_widened_nets_each_get_the_requirement() -> None:
-    table = build_signal_clearance_table(
-        ["SDCLK", "SDNCS"], ["BA1"], CLOCK_REQUIRED_MM, dru=DRU
-    )
+    table = build_signal_clearance_table(["SDCLK", "SDNCS"], ["BA1"], CLOCK_REQUIRED_MM, dru=DRU)
     assert table.required_clearance("SDCLK", "BA1") == pytest.approx(CLOCK_REQUIRED_MM)
     assert table.required_clearance("SDNCS", "BA1") == pytest.approx(CLOCK_REQUIRED_MM)
     # The two widened nets are not "other" to each other unless explicitly listed.
