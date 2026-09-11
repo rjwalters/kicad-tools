@@ -438,13 +438,21 @@ class Route:
                 )
 
                 if not has_via:
-                    # Insert missing via
+                    # Issue #5013: a missing-via insertion here is always a
+                    # defensive, ordinary through-hole (no blind/buried
+                    # process selection exists in this codepath) -- mirror
+                    # the same-issue fix in ``CppPathfinder._convert_result_to_route``
+                    # and ``Router._convert_path_to_route`` and normalize
+                    # the physical span to the full copper stack instead
+                    # of the bare logical ``seg1.layer``/``seg2.layer``
+                    # transition, which would under-report the drilled
+                    # extent on a 4+ layer board.
                     new_via = Via(
                         x=transition_x,
                         y=transition_y,
                         drill=via_drill,
                         diameter=via_diameter,
-                        layers=(seg1.layer, seg2.layer),
+                        layers=(Layer.F_CU, Layer.B_CU),
                         net=self.net,
                         net_name=self.net_name,
                     )

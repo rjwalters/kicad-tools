@@ -4437,21 +4437,41 @@ class Router:
                     )
                     route.segments.append(seg)
 
+        # Issue #5013: mirrors the C++ backend fix in
+        # ``CppPathfinder._convert_result_to_route`` (cpp_backend.py).
+        # ``current_layer_idx``/``layer_idx`` below are the LOGICAL search
+        # transition (e.g. F.Cu -> In2.Cu), not the via's physical drilled
+        # span.  This Python A* pathfinder has no blind/buried process
+        # selection either (Issue #4007: ``blind_buried_supported`` is
+        # False for every current board), so every via this loop
+        # constructs is an ordinary through-hole whose barrel contacts
+        # every copper layer from the top of the stack to the bottom.
+        # Reporting the logical pair verbatim under-reported the drilled
+        # span; DRC/connectivity code trusts ``via.layers`` as the
+        # physical barrel extent (``validate/connectivity.py``,
+        # ``validate/rules/clearance.py``).  The grid-side obstacle
+        # checks already block every layer for a placed via
+        # (``RoutingGrid._mark_via`` -- "Mark cells around a via as
+        # blocked on ALL layers"), so this normalization only corrects
+        # the reported span, not route acceptance.  Router counterpart of
+        # stitch issue #5001.
+        physical_top_layer = Layer(self.grid.index_to_layer(0))
+        physical_bottom_layer = Layer(self.grid.index_to_layer(self.grid.num_layers - 1))
+
         for _i, (wx, wy, layer_idx, is_via) in enumerate(path):
             if is_via:
                 # Emit pending segment before via
                 _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
 
-                # Add via - convert grid indices back to Layer enum values
+                # Add via - the physical span always covers the full stack
+                # (see the Issue #5013 note above); the logical
+                # current/next search layers are not the drilled extent.
                 via = Via(
                     x=current_x,
                     y=current_y,
                     drill=self.rules.via_drill,
                     diameter=net_via_diameter,
-                    layers=(
-                        Layer(self.grid.index_to_layer(current_layer_idx)),
-                        Layer(self.grid.index_to_layer(layer_idx)),
-                    ),
+                    layers=(physical_top_layer, physical_bottom_layer),
                     net=start_pad.net,
                     net_name=start_pad.net_name,
                 )
