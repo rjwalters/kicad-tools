@@ -86,6 +86,7 @@ class CopperElement:
     # ``None`` for segments and vias (which use the analytic disc path).
     polygon: object | None = None
     pad_type: str = ""
+    source_pad: Pad | None = None
 
     @classmethod
     def from_segment(cls, seg: Segment) -> CopperElement:
@@ -120,6 +121,7 @@ class CopperElement:
             net_name=pad.net_name if pad.net_number != 0 else "",
             polygon=polygon,
             pad_type=pad.type,
+            source_pad=pad,
         )
 
     @classmethod
@@ -1346,7 +1348,9 @@ def _repair_fill_polygon(poly):
     return MultiPolygon(polys)
 
 
-def _collect_zone_fills(pcb: PCB) -> dict[str, list[_ZoneFill]]:
+def _collect_zone_fills(
+    pcb: PCB, *, include_unassigned: bool = False
+) -> dict[str, list[_ZoneFill]]:
     """Group every zone's filled polygons by copper layer, resolving nets.
 
     Shared by :class:`SegmentZoneClearanceRule` and
@@ -1363,6 +1367,8 @@ def _collect_zone_fills(pcb: PCB) -> dict[str, list[_ZoneFill]]:
 
     Args:
         pcb: The PCB whose zones to collect.
+        include_unassigned: Include net-0 physical copper for hole checks;
+            default electrical clearance callers retain their existing scope.
 
     Returns:
         Mapping of copper-layer name -> list of :class:`_ZoneFill`, each
@@ -1379,7 +1385,7 @@ def _collect_zone_fills(pcb: PCB) -> dict[str, list[_ZoneFill]]:
         if net_number == 0 and zone.net_name:
             # KiCad 9 name-only ``(net "X")`` format -- resolve by name.
             net_number = name_to_number.get(zone.net_name, 0)
-        if net_number == 0:
+        if net_number == 0 and not include_unassigned:
             continue
         net_name = zone.net_name or number_to_name.get(net_number, "")
         for i, points in enumerate(zone.filled_polygons):

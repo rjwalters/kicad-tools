@@ -66,9 +66,13 @@ def check_pth_hole_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
         (fp, pad, _hole_geometry(pad, fp))
         for fp in pcb.footprints
         for pad in fp.pads
-        if pad.type == "thru_hole" and pad.net_number
+        if pad.type == "thru_hole"
     ]
-    fills = _collect_zone_fills(pcb) if rules.min_inner_pth_hole_to_copper_mm is not None else {}
+    fills = (
+        _collect_zone_fills(pcb, include_unassigned=True)
+        if rules.min_inner_pth_hole_to_copper_mm is not None
+        else {}
+    )
     for layer in pcb.copper_layers:
         inner = layer.name not in ("F.Cu", "B.Cu")
         inner_minimum = rules.min_inner_pth_hole_to_copper_mm if inner else None
@@ -85,16 +89,19 @@ def check_pth_hole_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
             else:
                 continue
             if geom is not None:
-                copper.append((elem.net_number, geom, elem.reference))
-        copper.extend(
-            (fill.net_number, fill.polygon, f"Zone [{fill.net_name}]")
-            for fill in fills.get(layer.name, [])
-        )
+                copper.append((elem.net_number, geom, elem.reference, elem.source_pad))
+        if inner_minimum is not None:
+            copper.extend(
+                (fill.net_number, fill.polygon, f"Zone [{fill.net_name}]", None)
+                for fill in fills.get(layer.name, [])
+            )
         for fp, pad, hole in holes:
             if hole is None or not _pad_on_layer(pad, layer.name):
                 continue
-            for net, geom, reference in copper:
-                if not net or net == pad.net_number:
+            for net, geom, reference, source_pad in copper:
+                # A hole is part of its own pad even without an assigned net.
+                # Other net-0 objects have no proven electrical relationship.
+                if source_pad is pad or (net != 0 and net == pad.net_number):
                     continue
                 distance = hole.distance(geom)
                 if distance + DRC_TOLERANCE < minimum:

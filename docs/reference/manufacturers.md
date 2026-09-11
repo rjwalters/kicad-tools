@@ -251,3 +251,10 @@ silk primitives still require native KiCad DRC; Python text bounding-box checks
 remain advisory. Native DRC and the manufacturer's DFM review are separate
 checks. Emitting these rules neither certifies a board nor clears an existing
 manufacturing hold, and no board artifacts are regenerated automatically.
+
+PTH spacing checks include unassigned holes and counterpart copper; only an
+assigned same-net connection is exempt. KiCad 10.0.6 skips hole-clearance pairs
+when both objects have net code zero, so Python deliberately retains that
+otherwise unchecked physical spacing case. A hole is never checked against
+its own pad copper. Outer-layer filled zones are outside the PTH-to-track
+rule; inner fills participate in the separate hole-to-copper rule.

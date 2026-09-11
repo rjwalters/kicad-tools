@@ -217,3 +217,74 @@ def test_custom_rule_survives_repeated_emission(tmp_path):
     assert dru.read_bytes() == first
     assert custom.strip() in first.decode()
     assert first.count(b'(rule "Silk to Pad') == 1
+
+
+@pytest.mark.parametrize("layer", ["F.Cu", "In1.Cu"])
+@pytest.mark.parametrize(
+    "hole_net,track_net,gap,expected",
+    [
+        (0, 2, 0.27, True),
+        (1, 0, 0.27, True),
+        (0, 0, 0.27, True),
+        (1, 1, 0.27, False),
+        (0, 2, 0.31, False),
+    ],
+)
+def test_unassigned_pth_native_python_parity(tmp_path, layer, hole_net, track_net, gap, expected):
+    from kicad_tools.validate.rules.factory_clearance import check_pth_hole_clearance
+
+    path = board_fixture(tmp_path / "probe.kicad_pcb", "pth", gap, layer=layer)
+    text = path.read_text().replace(
+        '(net 1 "A")))', f'(net {hole_net} "{"A" if hole_net else ""}")))'
+    )
+    text = text.replace("(net 2))", f"(net {track_net}))")
+    path.write_text(text)
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    violations = check_pth_hole_clearance(PCB.load(path), rules).violations
+    assert bool(violations) == expected, violations
+    assert all(v.actual_value == pytest.approx(gap, abs=0.0001) for v in violations)
+    # Native hole_clearance skips equal net codes, including two net-0
+    # objects. Python deliberately does not infer a connection from that.
+    _assert_native_pth_scope(path, rules, expected and (hole_net != 0 or track_net != 0))
+
+
+def _assert_native_pth_scope(path, rules, expected):
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("Native KiCad CLI is not installed")
+    write_drc_constraints(path, rules, manufacturer_id="jlcpcb", layers=4)
+    report = path.with_suffix(".json")
+    subprocess.run(
+        [str(cli), "pcb", "drc", "--format", "json", "-o", str(report), str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    violations = json.loads(report.read_text())["violations"]
+    relevant = [
+        v
+        for v in violations
+        if any(
+            f"rule '{name}" in v["description"]
+            for name in ("PTH Hole to Track", "Inner PTH Hole to Copper")
+        )
+    ]
+    assert bool(relevant) == expected, violations
+
+
+@pytest.mark.parametrize("layer,expected", [("F.Cu", False), ("In1.Cu", True)])
+@pytest.mark.parametrize("zone_net", [0, 2])
+def test_pth_zone_layer_native_python_parity(tmp_path, layer, expected, zone_net):
+    from kicad_tools.validate.rules.factory_clearance import check_pth_hole_clearance
+
+    path = board_fixture(tmp_path / "probe.kicad_pcb", "pth", 0.4, layer=layer)
+    zone = f'''(zone (net {zone_net}) (net_name "{"B" if zone_net else ""}") (layer "{layer}") (hatch edge .5)
+      (connect_pads (clearance .1)) (min_thickness .1) (fill yes)
+      (polygon (pts (xy 10.47 9) (xy 11 9) (xy 11 11) (xy 10.47 11)))
+      (filled_polygon (layer "{layer}") (pts (xy 10.47 9) (xy 11 9) (xy 11 11) (xy 10.47 11))))'''
+    path.write_text(path.read_text()[:-1] + zone + ")")
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    violations = check_pth_hole_clearance(PCB.load(path), rules).violations
+    assert bool(violations) == expected, violations
+    _assert_native_pth_scope(path, rules, expected)
