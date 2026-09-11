@@ -1800,9 +1800,11 @@ class TestGetBoardOuterLayers:
         assert end == "B.Cu"
 
 
-# ===========================================================================
+# ====================================================================
+
 # Issue #4359 -- fix-vias --relocate-in-pad (Phase 1: signal-via slide-out)
-# ===========================================================================
+# ====================================================================
+
 
 from kicad_tools.cli.fix_vias_cmd import get_mfr_design_rules  # noqa: E402
 from kicad_tools.cli.relocate_in_pad_vias import (  # noqa: E402
@@ -2151,9 +2153,11 @@ class TestRelocateInPadVias:
         assert "skipped" in data and "unresolvable" in data
 
 
-# ===========================================================================
+# ====================================================================
+
 # Issue #4367 -- fix-vias --relocate-in-pad (Phase 2: plane-stitch off-pad)
-# ===========================================================================
+# ====================================================================
+
 
 from kicad_tools.cli.stitch_cmd import point_in_polygon  # noqa: E402
 
@@ -2693,6 +2697,196 @@ class TestRelocatePhase3:
         assert p.read_text() == original
 
 
+_STUB_CROSSING_BOARD = """(kicad_pcb (version 20240108) (generator "test")
+ (general (thickness 1.6))
+ (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+ (net 0 "") (net 1 "SIG") (net 2 "OTHER")
+ (gr_rect (start 0 0) (end 20 20)
+  (stroke (width .1) (type default)) (fill none) (layer "Edge.Cuts"))
+ (footprint "Test:Pad" (layer "F.Cu") (at 10 10)
+  (property "Reference" "U1" (at 0 -2) (layer "F.SilkS"))
+  (pad "1" smd rect (at 0 0) (size 4 1) (layers "F.Cu") (net 1 "SIG")))
+ (via (at 10 10) (size .6) (drill .3) (layers "F.Cu" "B.Cu") (net 1)
+  (uuid "11111111-1111-4111-8111-111111111111"))
+ (segment (start 10 10) (end 10.1 10) (width .2) (layer "B.Cu") (net 1))
+ (segment (start 11 8) (end 11 12) (width .2) (layer "B.Cu") (net 2)))"""
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_internal_escape_stub_avoids_foreign_track(tmp_path, dry_run):
+    """Issue #5065: landing is clear but the first B.Cu stub crosses OTHER."""
+    from shapely.geometry import LineString
+
+    pcb = PCB.load(_write(tmp_path, _STUB_CROSSING_BOARD))
+    rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+    result = relocate_in_pad_vias(pcb, rules, dry_run=dry_run)
+    assert len(result.moved) == 1  # a safe alternative exists
+    move = result.moved[0]
+    proposed = LineString([(move.old_x, move.old_y), (move.new_x, move.new_y)])
+    obstacle = LineString([(11, 8), (11, 12)])
+    assert proposed.distance(obstacle) - 0.2 >= rules.min_clearance_mm - 1e-6
+    if not dry_run:
+        saved = tmp_path / "saved.kicad_pcb"
+        pcb.save(saved)
+        for seg in PCB.load(saved).segments:
+            if seg.net_number == 1 and seg.layer == "B.Cu":
+                assert (
+                    LineString([seg.start, seg.end]).distance(obstacle) - seg.width / 2 - 0.1
+                    >= rules.min_clearance_mm - 1e-6
+                )
+
+
+def test_failed_stub_move_leaves_copper_unchanged(tmp_path, monkeypatch):
+    pcb = PCB.load(_write(tmp_path, _STUB_CROSSING_BOARD))
+    before = pcb._sexp.to_string()
+    old_position = pcb.vias[0].position
+
+    def fail(via, target):
+        via.position = target  # actual relocate_via also mutates on False
+        return False
+
+    monkeypatch.setattr(pcb, "relocate_via", fail)
+    result = relocate_in_pad_vias(pcb, get_mfr_design_rules("jlcpcb", 2, 1.0))
+    assert not result.moved
+    assert result.unresolvable
+    assert pcb._sexp.to_string() == before
+    assert pcb.vias[0].position == old_position
+
+
+@pytest.mark.parametrize("kind", ["track", "via", "pad", "tht", "zone", "graphic", "arc"])
+@pytest.mark.parametrize("net", [0, 2])
+@pytest.mark.parametrize("layer,blocked", [("B.Cu", True), ("F.Cu", False)])
+def test_stub_obstacles_are_physical_and_layer_aware(tmp_path, kind, net, layer, blocked):
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    # All obstacles lie in the middle of the proposed stub, far from either
+    # landing. Existing copper with net 0 remains an obstacle.
+    obstacles = {
+        "track": f'(segment (start 11 9) (end 11 11) (width .2) (layer "{layer}") (net {net}))',
+        "via": f'(via (at 11 10) (size .6) (drill .3) (layers "{layer}" "{layer}") (net {net}))',
+        "pad": f'(footprint "test" (layer "{layer}") (at 11 10) (pad "1" smd rect (at 0 0) (size .4 .4) (layers "{layer}") (net {net})))',
+        "tht": f'(footprint "test" (layer "{layer}") (at 11 10) (pad "1" thru_hole circle (at 0 0) (size .6 .6) (drill .3) (layers "{layer}") (net {net})))',
+        "zone": f'(zone (net {net}) (layer "{layer}") (polygon (pts (xy 10.8 9) (xy 11.2 9) (xy 11.2 11) (xy 10.8 11))) (filled_polygon (layer "{layer}") (pts (xy 10.8 9) (xy 11.2 9) (xy 11.2 11) (xy 10.8 11))))',
+        "graphic": f'(gr_line (start 11 9) (end 11 11) (stroke (width .2) (type default)) (layer "{layer}"))',
+        "arc": f'(arc (start 11 9) (mid 11.2 10) (end 11 11) (width .2) (layer "{layer}") (net {net}))',
+    }
+    text = (
+        _STUB_CROSSING_BOARD[: _STUB_CROSSING_BOARD.rfind(" (segment (start 11 8)")]
+        + obstacles[kind]
+        + ")"
+    )
+    pcb = PCB.load(_write(tmp_path, text))
+    reason = _check_stub_clearance(pcb, pcb.vias[0], (12.427, 10), ["B.Cu"], 0.2, 0.127)
+    assert (reason is not None) == blocked
+
+
+@pytest.mark.parametrize("gap,blocked", [(0.126, True), (0.128, False)])
+def test_stub_full_width_and_clearance_near_miss(tmp_path, gap, blocked):
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    pcb = PCB.load(_write(tmp_path, _STUB_CROSSING_BOARD))
+    # Move the vertical obstacle beyond the top of the path. Centerlines do
+    # not intersect; the distance must include BOTH trace half-widths.
+    pcb.segments[-1].start = (11, 10 + 0.1 + 0.1 + gap)
+    pcb.segments[-1].end = (11, 12)
+    reason = _check_stub_clearance(pcb, pcb.vias[0], (12.427, 10), ["B.Cu"], 0.2, 0.127)
+    assert (reason is not None) == blocked
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_stub_boxed_in_is_unresolved_and_unchanged(tmp_path, dry_run):
+    text = _STUB_CROSSING_BOARD[: _STUB_CROSSING_BOARD.rfind(" (segment (start 11 8)")]
+    for start, end in [
+        ((9.5, 9.5), (10.5, 9.5)),
+        ((10.5, 9.5), (10.5, 10.5)),
+        ((10.5, 10.5), (9.5, 10.5)),
+        ((9.5, 10.5), (9.5, 9.5)),
+    ]:
+        text += f'(segment (start {start[0]} {start[1]}) (end {end[0]} {end[1]}) (width .1) (layer "B.Cu") (net 2))'
+    pcb = PCB.load(_write(tmp_path, text + ")"))
+    before = pcb._sexp.to_string()
+    result = relocate_in_pad_vias(pcb, get_mfr_design_rules("jlcpcb", 2, 1.0), dry_run=dry_run)
+    assert not result.moved
+    assert result.unresolvable
+    assert pcb._sexp.to_string() == before
+    assert pcb.vias[0].position == (10, 10)
+
+
+def test_stub_write_exception_rolls_back_entire_move(tmp_path, monkeypatch):
+    pcb = PCB.load(_write(tmp_path, _STUB_CROSSING_BOARD))
+    before = pcb._sexp.to_string()
+    old_segments = list(pcb.segments)
+    add_trace = pcb.add_trace
+
+    def fail_after_write(*args, **kwargs):
+        add_trace(*args, **kwargs)
+        raise RuntimeError("injected trace persistence failure")
+
+    monkeypatch.setattr(pcb, "add_trace", fail_after_write)
+    with pytest.raises(RuntimeError, match="injected"):
+        relocate_in_pad_vias(pcb, get_mfr_design_rules("jlcpcb", 2, 1.0))
+    assert pcb._sexp.to_string() == before
+    assert pcb.segments == old_segments
+    assert pcb.vias[0].position == (10, 10)
+
+
+def test_stub_via_obstacle_spans_inner_layers():
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    pcb = PCB.create(width=20, height=20, layers=4)
+    via = pcb.add_via(10, 10, net="SIG")
+    pcb.add_via(11, 10, net="OTHER")
+    assert _check_stub_clearance(pcb, via, (12, 10), ["In1.Cu"], 0.2, 0.127)
+
+
+def test_stub_ignores_via_own_preexisting_violation():
+    """PR #5078 Judge review: a via's own pre-relocation position can already
+    be too close to foreign copper -- exactly the violation a different-net-
+    short repair exists to fix. Every candidate must not be permanently boxed
+    in because the stub's start point re-triggers that pre-existing clearance
+    failure; only obstacles beyond the via's own footprint should block."""
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    pcb = PCB.create(width=40, height=40, layers=2)
+    via = pcb.add_via(20, 20, net="NRST")
+    pcb.add_via(20.3, 20, net="OSC_IN")  # 0.3mm away: already violates at via's own position
+    assert _check_stub_clearance(pcb, via, (5, 20), ["B.Cu"], 0.2, 0.127) is None
+
+    # A genuinely new obstacle further along the escape route is still caught.
+    pcb.add_via(5.05, 20, net="OTHER")
+    assert _check_stub_clearance(pcb, via, (5, 20), ["B.Cu"], 0.2, 0.127) is not None
+
+
+def test_dry_run_accounts_for_previously_planned_moves(tmp_path):
+    import copy
+
+    text = _STUB_CROSSING_BOARD[: _STUB_CROSSING_BOARD.rfind(" (segment (start 11 8)")]
+    text += """(via (at 11 10) (size .6) (drill .3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-second"))
+    (segment (start 11 10) (end 11.1 10) (width .2) (layer "B.Cu") (net 1)))"""
+    pcb = PCB.load(_write(tmp_path, text))
+    before = pcb._sexp.to_string()
+    rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+    preview = relocate_in_pad_vias(pcb, rules, dry_run=True)
+    actual = relocate_in_pad_vias(copy.deepcopy(pcb), rules)
+    assert preview == actual
+    assert pcb._sexp.to_string() == before
+
+
+@pytest.mark.parametrize(
+    "wildcard,layer,blocked",
+    [("F&B.Cu", "B.Cu", True), ("F&B.Cu", "In1.Cu", False), ("*.Cu", "In1.Cu", True)],
+)
+def test_stub_pad_wildcards(tmp_path, wildcard, layer, blocked):
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    text = _STUB_CROSSING_BOARD[: _STUB_CROSSING_BOARD.rfind(" (segment (start 11 8)")]
+    text += f'(module "legacy" (layer "F.Cu") (at 11 10) (pad "1" smd rect (at 0 0) (size .4 .4) (layers "{wildcard}"))) )'
+    pcb = PCB.load(_write(tmp_path, text))
+    assert (
+        bool(_check_stub_clearance(pcb, pcb.vias[0], (12.427, 10), [layer], 0.2, 0.127)) == blocked
+    )
+
+
 class TestUnassignedSmdObstacles:
     """Net-zero pads are physical obstacles, not an electrical net (#5010)."""
 
@@ -2746,3 +2940,30 @@ class TestUnassignedSmdObstacles:
         assert not report.skipped
         assert not report.unresolvable
         assert pcb._sexp.to_string() == original
+
+
+def test_stub_does_not_exempt_new_clearance_near_original_via(tmp_path):
+    from shapely.geometry import LineString, Point, box
+
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    text = _STUB_CROSSING_BOARD[: _STUB_CROSSING_BOARD.rfind(" (segment (start 11 8)")]
+    text += """(footprint "test" (layer "B.Cu") (at 10.19 10.4)
+      (pad "1" smd rect (at 0 0) (size .01 .01) (layers "B.Cu") (net 2 "OTHER"))))"""
+    pcb = PCB.load(_write(tmp_path, text))
+    obstacle = box(10.185, 10.395, 10.195, 10.405)
+    assert Point(10, 10).distance(obstacle) - 0.3 > 0.127
+    assert LineString([(10, 10), (12, 10)]).distance(obstacle) - 0.3 < 0.127
+    assert _check_stub_clearance(pcb, pcb.vias[0], (12, 10), ["B.Cu"], 0.6, 0.127)
+
+
+def test_stub_checks_new_extent_of_already_overlapping_obstacle():
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    pcb = PCB.create(width=20, height=20)
+    via = pcb.add_via(10, 10, size=0.6, drill=0.3, net="SIG")
+    # This one conductor overlaps the old via AND runs into newly occupied
+    # space. Exempting the entire obstacle because its nearest point is old
+    # copper would miss the new short along the rest of the stub.
+    pcb.add_trace((10, 10), (11.5, 10), width=0.1, layer="B.Cu", net="OTHER")
+    assert _check_stub_clearance(pcb, via, (12, 10), ["B.Cu"], 0.2, 0.127)
