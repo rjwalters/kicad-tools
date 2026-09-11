@@ -164,3 +164,28 @@ class TestViaLayerSpanAwarePourAudit:
         assert info["connected"] is True, (
             f"through via unexpectedly failed to bridge the pour: pad_groups={info['pad_groups']}"
         )
+
+    def test_unparseable_via_span_fails_safe_not_all_layers(
+        self, generate_design_mod, tmp_path: Path
+    ) -> None:
+        """A via whose ``(layers ...)`` can't be parsed must bridge NOTHING.
+
+        A degenerate via declaring only one layer name (``(layers "F.Cu")``)
+        does not match ``_via_layer_span``'s two-endpoint regex, so it falls
+        back to the "can't resolve the span" path. The fallback must assume
+        the via bridges no copper (a false disconnect, which fails the audit
+        safe) rather than ``all_layers`` (a false ``POUR CONNECTIVITY: PASS``
+        -- the exact defect class issue #5176 fixes).
+        """
+        pytest.importorskip("shapely")
+        pcb_path = _fixture(tmp_path, '"F.Cu"')
+
+        audit = generate_design_mod._audit_pour_nets(pcb_path, ["GND"])
+        info = audit["GND"]
+
+        assert info["connected"] is False, (
+            f"unparseable via span falsely bridged R1.1 to the B.Cu pour: "
+            f"pad_groups={info['pad_groups']}"
+        )
+        stranded_names = {name for name, _ in info["stranded_pads"]}
+        assert "R1.1" in stranded_names

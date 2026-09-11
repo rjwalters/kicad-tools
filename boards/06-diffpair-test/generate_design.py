@@ -432,13 +432,15 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         ``(layers "F.Cu" "B.Cu")`` is a through-hole via that also joins
         every inner copper layer between the endpoints; a via naming two
         adjacent layers (e.g. a blind ``F.Cu``/``In1.Cu`` via) bridges only
-        those.  Falls back to the literal named layers (never to
-        ``all_layers``) when the span can't be resolved, so an
-        unrecognised or degenerate via never over-connects.
+        those.  Falls back to bridging *no* layers (never to ``all_layers``)
+        when the span can't be resolved, so an unrecognised or degenerate
+        via never over-connects: a false disconnect fails the audit safe,
+        while ``all_layers`` would be the false-PASS this audit exists to
+        catch.
         """
         m = re.search(r'\(layers "([^"]+)" "([^"]+)"\)', via_text)
         if not m:
-            return all_layers
+            return frozenset()
         named = frozenset(m.groups())
         copper_named = frozenset(layer for layer in named if layer.endswith(".Cu"))
         indices = [
