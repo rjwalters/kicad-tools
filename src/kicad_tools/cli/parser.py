@@ -7356,7 +7356,16 @@ def _add_impedance_parser(subparsers) -> None:
             "--preset",
             "-p",
             dest="impedance_preset",
-            choices=["jlcpcb-4", "oshpark-4", "generic-2", "generic-4", "generic-6"],
+            choices=[
+                "jlcpcb-4",
+                "jlcpcb-4-legacy",
+                "jlcpcb-3313",
+                "jlcpcb-7628",
+                "oshpark-4",
+                "generic-2",
+                "generic-4",
+                "generic-6",
+            ],
             help="Use a preset stackup instead of reading from PCB",
         )
         parser.add_argument(
