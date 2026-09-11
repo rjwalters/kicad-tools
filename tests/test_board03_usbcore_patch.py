@@ -81,3 +81,110 @@ def test_partial_patch_never_changes_installed_core(hook, files, monkeypatch, re
     with pytest.raises(SystemExit, match="failed to apply|does not match reviewed content"):
         hook.apply_patch(core, patch)
     assert core.read_bytes() == BASELINE
+
+
+def test_resume_register_state_machine(tmp_path):
+    """Compile the actual added core helpers against instrumented registers."""
+    import shutil
+
+    patch = (ROOT / "firmware/patches/usbcore-suspend-resume.patch").read_text()
+    added = "\n".join(
+        line[1:]
+        for line in patch.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    helpers = added.split("// BEGIN kicad-tools USB clock state machine", 1)[1].split("\n", 1)[1]
+    helpers = helpers.split("// END kicad-tools USB clock state machine", 1)[0]
+    harness = (
+        r"""
+#include <cassert>
+#include <cstdint>
+#define OTGPADE 4
+#define FRZCLK 5
+#define PLLE 1
+#define PLOCK 0
+#define WAKEUPI 4
+#define SUSPI 0
+#define EORSTI 3
+#define WAKEUPE 4
+#define SUSPE 0
+uint8_t USBCON = 0, PLLCSR = 0, UDIEN = 0, SREG = 0x80;
+uint8_t _usbSuspendState = 0, _usbConfiguration = 1;
+bool _usbClockResumePending = false;
+struct InterruptFlags {
+    uint8_t value = 0;
+    operator uint8_t() const { return value; }
+    void operator=(int mask) { // UDINT: zero clears, one preserves latched flags
+        assert(!(mask & 0x82)); // ATmega32U4 reserved bits stay zero
+        if ((value & (1<<WAKEUPI)) && !(mask & (1<<WAKEUPI)))
+            assert(!(USBCON & (1<<FRZCLK))); // clock BEFORE acknowledgement
+        value &= mask;
+    }
+} UDINT;
+void cli() { SREG &= ~0x80; }
+void USB_ClockDisable() { USBCON |= 1<<FRZCLK; PLLCSR &= ~(1<<PLLE); }
+"""
+        + helpers
+        + r"""
+void suspend_then_wake() {
+    USBCON = 0; PLLCSR = 1<<PLLE; _usbConfiguration = 1;
+    UDINT.value = 1<<SUSPI;
+    USB_SuspendClock();
+    assert(USBCON & (1<<FRZCLK));
+    assert(!(PLLCSR & (1<<PLLE)));
+    UDINT.value = 1<<WAKEUPI;
+    USB_RequestClockResume();
+    assert(PLLCSR & (1<<PLLE));
+    assert(_usbClockResumePending && (_usbSuspendState & (1<<SUSPI)));
+    assert(UDINT.value & (1<<WAKEUPI));
+    USB_PollClockResume(); // PLL not locked: no acknowledgement or sendable state
+    assert(USBCON & (1<<FRZCLK));
+    assert(_usbClockResumePending && (UDINT.value & (1<<WAKEUPI)));
+    assert(SREG == 0x80);
+}
+int main() {
+    suspend_then_wake();
+    PLLCSR |= 1<<PLOCK;
+    USB_PollClockResume();
+    assert(!(USBCON & (1<<FRZCLK)) && !_usbClockResumePending);
+    assert(!(UDINT.value & (1<<WAKEUPI)) && !(_usbSuspendState & (1<<SUSPI)));
+    assert(UDIEN & (1<<SUSPE));
+    USB_PollClockResume(); // idempotent
+    suspend_then_wake();
+    UDINT.value |= 1<<SUSPI; // later event, while its IRQ is masked
+    PLLCSR |= 1<<PLOCK;
+    USB_PollClockResume();
+    assert(UDINT.value & (1<<SUSPI));
+    assert(_usbSuspendState & (1<<SUSPI));
+    USB_SuspendClock(); // ISR services preserved event after clocks restart
+    assert(USBCON & (1<<FRZCLK));
+    suspend_then_wake();
+    UDINT.value |= 1<<EORSTI;
+    PLLCSR |= 1<<PLOCK;
+    USB_PollClockResume();
+    assert(UDINT.value & (1<<EORSTI));
+    assert(_usbConfiguration == 0 && (_usbSuspendState & (1<<SUSPI)));
+    USB_CancelClockResume(); // reset ISR cancels stale pending work
+    assert(!_usbClockResumePending && (UDIEN & (1<<SUSPE)));
+    USB_PollClockResume();
+    assert(_usbConfiguration == 0);
+    SREG = 0; USB_PollClockResume(); assert(SREG == 0);
+}
+"""
+    )
+    source = tmp_path / "state.cpp"
+    source.write_text(harness)
+    compiler = shutil.which("c++") or shutil.which("g++")
+    assert compiler, "C++ compiler required for firmware state-machine regression"
+    binary = tmp_path / "state"
+    subprocess.run([compiler, "-std=c++11", str(source), "-o", str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
+
+def test_application_polls_before_cadence_or_sends():
+    source = (ROOT / "firmware/src/main.cpp").read_text()
+    loop = source.split("void loop() {", 1)[1]
+    assert (
+        loop.index("USBDevice.poll()") < loop.index("millis()") < loop.index("joystick.sendState()")
+    )
+    assert "!USBDevice.isSuspended()" in loop

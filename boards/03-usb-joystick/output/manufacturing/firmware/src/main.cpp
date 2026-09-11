@@ -39,6 +39,7 @@ void setup() {
 }
 
 void loop() {
+    USBDevice.poll(); // Restore clocks before cadence checks or endpoint traffic.
     static uint32_t previous = 0;
     const uint32_t now = millis();
     if (uint32_t(now - previous) < 2) return;
@@ -58,7 +59,4 @@ void loop() {
     joystick.setXAxis(readAxis(0));
     joystick.setYAxis(readAxis(1));
     if (USBDevice.configured() && !USBDevice.isSuspended()) joystick.sendState();
-    // Issue #5000: services a USB clock-restart request the WAKEUPI ISR
-    // branch defers to main-loop context; see patches/apply_usbcore_patch.py.
-    USBDevice.poll();
 }

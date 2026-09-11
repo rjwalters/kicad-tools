@@ -1,36 +1,10 @@
-"""PlatformIO pre-build hook: patch the pinned AVR core's suspend/resume clock handling.
+"""Verify and apply the pinned AVR USB clock patch (issues #5000/#5251).
 
-Issue #5000: framework-arduino-avr 5.4.0's ``USB_GEN_vect`` ISR (in
-``cores/arduino/USBCore.cpp``) has the ``USB_ClockDisable()`` /
-``USB_ClockEnable()`` calls left as commented-out ``//TODO`` lines, so the
-MCU's USB PLL/clock is never actually frozen while the host suspends the
-device -- the application-level report suppression in ``src/main.cpp`` does
-not, by itself, get suspend current anywhere near USB-compliant.
-
-This is not merely a stale package: as of 2026-09-10 the same ``//TODO`` /
-commented calls are still present, byte-for-byte, in the ``master`` branch of
-upstream https://github.com/arduino/ArduinoCore-avr -- there is no newer
-released core version to bump to that fixes this.
-
-``patches/usbcore-suspend-resume.patch`` applies a conservative fix, run
-automatically by this script before every build:
-
-- On ``SUSPI`` (suspend), call ``USB_ClockDisable()`` directly from the ISR.
-  That function only writes ``USBCON``/``PLLCSR`` -- no blocking wait, no
-  ``delay()`` -- so it is safe there.
-- On ``WAKEUPI`` (resume), do **not** call ``USB_ClockEnable()`` from the ISR.
-  That function busy-waits on the ``PLOCK`` bit and then calls ``delay(1)``,
-  and ``delay()`` spins on ``millis()``, which only advances via Timer0's own
-  ISR -- but global interrupts are cleared for the duration of *this* ISR (no
-  ``ISR_NOBLOCK`` in scope), so Timer0 could never fire and ``delay(1)``
-  would hang forever. Instead, the ISR sets a flag that
-  ``USBDevice_::poll()`` (invoked from ``loop()`` in ``src/main.cpp``, in
-  main-loop context with interrupts enabled) services safely.
-
-This still leaves bench current and host suspend/resume behavior as unverified
-hardware qualification steps (see ``README.md`` "Identity and validation
-status") -- this patch is a code-level fix for the documented core defect,
-not a substitute for measuring the result on real silicon.
+Wake requests start the PLL without waiting in the ISR. Poll keeps sends gated
+until PLOCK, restores USB clock inputs, then acknowledges WAKEUPI. Pending
+suspend/reset events remain visible. No delay() or blocking PLL wait runs in the
+resume path. The pinned core's unrelated attach helper uses delay()/micros();
+physical USB behavior and current measurements still require bench qualification.
 """
 
 from __future__ import annotations
@@ -46,7 +20,7 @@ from tempfile import TemporaryDirectory
 # changed surrounding code in a way this patch's line-anchored hunks could
 # silently misapply to, or upstream may have finally shipped its own fix.
 EXPECTED_BASELINE_SHA256 = "9750200cafecc523c388b7d9474f2b3b94d71bcca59ab4bc481c668b57e2c836"
-EXPECTED_PATCHED_SHA256 = "254511c6d316c82b2a19559fdfaee24cb1b2011123a0c6c74d6ba0f0f933ed92"
+EXPECTED_PATCHED_SHA256 = "9d4103bae42a2b7a88b36798a74cad50a058766f239c19a2ac11dfeaaac4aa47"
 
 
 def _core_file() -> Path:

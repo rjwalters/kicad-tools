@@ -1,73 +1,150 @@
 --- USBCore.cpp
 +++ USBCore.cpp
-@@ -88,6 +88,11 @@
+@@ -88,6 +88,7 @@
  volatile u8 _usbConfiguration = 0;
  volatile u8 _usbCurrentStatus = 0; // meaning of bits see usb_20.pdf, Figure 9-4. Information Returned by a GetStatus() Request to a Device
  volatile u8 _usbSuspendState = 0; // copy of UDINT to check SUSPI and WAKEUPI bits
-+// kicad-tools issue #5000: deferred USB PLL restart request, serviced by
-+// USBDevice_::poll() from the main loop instead of from USB_GEN_vect. See
-+// the comment at the WAKEUPI branch below for why USB_ClockEnable() must
-+// never be called directly from that ISR.
 +static volatile bool _usbClockResumePending = false;
  
  static inline void WaitIN(void)
  {
-@@ -786,9 +791,16 @@
- 	{
- 		UDIEN = (UDIEN & ~(1<<WAKEUPE)) | (1<<SUSPE); // Disable interrupts for WAKEUP and enable interrupts for SUSPEND
+@@ -753,15 +754,76 @@
+ #endif
+ }
  
++// BEGIN kicad-tools USB clock state machine (issue #5251)
++// Called with interrupts disabled (ISR or poll's saved-SREG critical section).
++static void USB_CancelClockResume()
++{
++	UDIEN = (UDIEN & ~(1<<WAKEUPE)) | (1<<SUSPE);
++	_usbClockResumePending = false;
++	_usbSuspendState = 0;
++}
++
++static void USB_SuspendClock()
++{
++	UDIEN = (UDIEN & ~(1<<SUSPE)) | (1<<WAKEUPE);
++	// Acknowledge while the USB clocks are still running.
++	UDINT = 0x7D & ~((1<<WAKEUPI) | (1<<SUSPI));
++	_usbSuspendState = (1<<SUSPI);
++	_usbClockResumePending = false;
++	USB_ClockDisable();
++}
++
++static void USB_RequestClockResume()
++{
++	// Leave WAKEUPI pending until poll restores USB clock inputs (datasheet
++	// 22.18.1). Mask both events while the PLL locks; flags remain latched.
++	UDIEN &= ~((1<<WAKEUPE) | (1<<SUSPE));
++	_usbSuspendState = (1<<SUSPI);
++	_usbClockResumePending = true;
++	PLLCSR |= (1<<PLLE);
++}
++
++static void USB_PollClockResume()
++{
++	uint8_t savedSREG = SREG;
++	cli();
++	if (_usbClockResumePending && (PLLCSR & (1<<PLOCK)))
++	{
++		// This is resume, not attach/reset: the regulator, divider and USB
++		// controller remain configured. PLOCK qualifies the restarted PLL.
++#if defined(OTGPADE)
++		USBCON = (USBCON & ~(1<<FRZCLK)) | (1<<OTGPADE);
++#else
++		USBCON &= ~(1<<FRZCLK);
++#endif
++		UDINT = 0x7D & ~(1<<WAKEUPI);
++		_usbClockResumePending = false;
++		// Preserve any later suspend/reset event for the normal ISR. Do
++		// not expose a sendable state before that event has been serviced.
++		if (UDINT & ((1<<SUSPI) | (1<<EORSTI)))
++		{
++			_usbSuspendState = (1<<SUSPI);
++			if (UDINT & (1<<EORSTI))
++				_usbConfiguration = 0;
++		}
++		else
++			_usbSuspendState = (1<<WAKEUPI);
++		UDIEN = (UDIEN & ~(1<<WAKEUPE)) | (1<<SUSPE);
++	}
++	SREG = savedSREG;
++}
++// END kicad-tools USB clock state machine
++
+ //	General interrupt
+ ISR(USB_GEN_vect)
+ {
+ 	u8 udint = UDINT;
+-	UDINT &= ~((1<<EORSTI) | (1<<SOFI)); // clear the IRQ flags for the IRQs which are handled here, except WAKEUPI and SUSPI (see below)
++	UDINT = 0x7D & ~((1<<EORSTI) | (1<<SOFI)); // clear the IRQ flags for the IRQs which are handled here, except WAKEUPI and SUSPI (see below)
+ 
+ 	//	End of Reset
+ 	if (udint & (1<<EORSTI))
+ 	{
++		USB_CancelClockResume();
+ 		InitEP(0,EP_TYPE_CONTROL,EP_SINGLE_64);	// init ep0
+ 		_usbConfiguration = 0;			// not configured yet
+ 		UEIENX = 1 << RXSTPE;			// Enable interrupts for ep0
+@@ -782,25 +844,12 @@
+ 	// the WAKEUPI interrupt is triggered as soon as there are non-idle patterns on the data
+ 	// lines. Thus, the WAKEUPI interrupt can occur even if the controller is not in the "suspend" mode.
+ 	// Therefore the we enable it only when USB is suspended
+-	if (udint & (1<<WAKEUPI))
+-	{
+-		UDIEN = (UDIEN & ~(1<<WAKEUPE)) | (1<<SUSPE); // Disable interrupts for WAKEUP and enable interrupts for SUSPEND
+-
 -		//TODO
 -		// WAKEUPI shall be cleared by software (USB clock inputs must be enabled before).
 -		//USB_ClockEnable();
-+		// kicad-tools issue #5000: WAKEUPI shall be cleared by software (USB
-+		// clock inputs must be enabled before). The upstream TODO called
-+		// USB_ClockEnable() directly here, but that function busy-waits on
-+		// PLOCK and then calls delay(1); delay() spins on millis(), which
-+		// only advances via Timer0's own ISR. Global interrupts are cleared
-+		// for the duration of *this* ISR (no ISR_NOBLOCK / sei() in scope),
-+		// so Timer0 could never fire and delay(1) would hang forever --
-+		// deferring the actual clock restart to USBDevice_::poll(), which
-+		// runs in the main loop with interrupts enabled, avoids that deadlock.
-+		_usbClockResumePending = true;
- 		UDINT &= ~(1<<WAKEUPI);
- 		_usbSuspendState = (_usbSuspendState & ~(1<<SUSPI)) | (1<<WAKEUPI);
- 	}
-@@ -796,8 +808,11 @@
- 	{
- 		UDIEN = (UDIEN & ~(1<<SUSPE)) | (1<<WAKEUPE); // Disable interrupts for SUSPEND and enable interrupts for WAKEUP
- 
+-		UDINT &= ~(1<<WAKEUPI);
+-		_usbSuspendState = (_usbSuspendState & ~(1<<SUSPI)) | (1<<WAKEUPI);
+-	}
+-	else if (udint & (1<<SUSPI)) // only one of the WAKEUPI / SUSPI bits can be active at time
+-	{
+-		UDIEN = (UDIEN & ~(1<<SUSPE)) | (1<<WAKEUPE); // Disable interrupts for SUSPEND and enable interrupts for WAKEUP
+-
 -		//TODO
 -		//USB_ClockDisable();
-+		// kicad-tools issue #5000: USB_ClockDisable() only writes USBCON /
-+		// PLLCSR -- no blocking wait, no delay() -- so unlike
-+		// USB_ClockEnable() it is safe to call directly from this ISR.
-+		USB_ClockDisable();
-+		_usbClockResumePending = false;
+-
+-		UDINT &= ~((1<<WAKEUPI) | (1<<SUSPI)); // clear any already pending WAKEUP IRQs and the SUSPI request
+-		_usbSuspendState = (_usbSuspendState & ~(1<<WAKEUPI)) | (1<<SUSPI);
++	if (!(udint & (1<<EORSTI)))
++	{
++		if (udint & (1<<WAKEUPI))
++			USB_RequestClockResume();
++		else if (udint & (1<<SUSPI))
++			USB_SuspendClock();
+ 	}
+ }
  
- 		UDINT &= ~((1<<WAKEUPI) | (1<<SUSPI)); // clear any already pending WAKEUP IRQs and the SUSPI request
- 		_usbSuspendState = (_usbSuspendState & ~(1<<WAKEUPI)) | (1<<SUSPI);
-@@ -827,6 +842,7 @@
+@@ -826,10 +875,10 @@
+ {
  	_usbConfiguration = 0;
  	_usbCurrentStatus = 0;
- 	_usbSuspendState = 0;
-+	_usbClockResumePending = false;
+-	_usbSuspendState = 0;
++	USB_CancelClockResume();
  	USB_ClockEnable();
  
- 	UDINT &= ~((1<<WAKEUPI) | (1<<SUSPI)); // clear already pending WAKEUP / SUSPEND requests
-@@ -848,6 +864,16 @@
+-	UDINT &= ~((1<<WAKEUPI) | (1<<SUSPI)); // clear already pending WAKEUP / SUSPEND requests
++	UDINT = 0x7D & ~((1<<WAKEUPI) | (1<<SUSPI)); // clear already pending WAKEUP / SUSPEND requests
+ 	UDIEN = (1<<EORSTE) | (1<<SOFE) | (1<<SUSPE);	// Enable interrupts for EOR (End of Reset), SOF (start of frame) and SUSPEND
+ 	
+ 	TX_RX_LED_INIT;
+@@ -848,6 +897,7 @@
  
  void USBDevice_::poll()
  {
-+	// kicad-tools issue #5000: service a clock-restart request the WAKEUPI
-+	// branch of USB_GEN_vect deferred (see the comment there). This runs in
-+	// the main loop with interrupts enabled, so USB_ClockEnable()'s PLOCK
-+	// wait and delay(1) call behave as they do everywhere else they're used
-+	// (USBDevice_::attach(), USBDevice_::wakeupHost()).
-+	if (_usbClockResumePending)
-+	{
-+		_usbClockResumePending = false;
-+		USB_ClockEnable();
-+	}
++	USB_PollClockResume();
  }
  
  bool USBDevice_::wakeupHost()
+@@ -872,7 +922,7 @@
+ 
+ bool USBDevice_::isSuspended()
+ {
+-	return (_usbSuspendState & (1 << SUSPI));
++	return _usbClockResumePending || (_usbSuspendState & (1 << SUSPI));
+ }
+ 
+ 

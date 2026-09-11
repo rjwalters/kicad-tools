@@ -25,7 +25,7 @@ which also refuses (hard assertion failure, not just a report field) to
 export a build configured with the pid.codes 1209:0001 private-test-only
 identity — see "USB suspend/resume clock handling" below for the corresponding
 build-time regression guard on the suspend-clock patch.
-The current build uses 7,158 bytes of flash and 261 bytes of RAM. No physical
+The current build uses 7,284 bytes of flash and 261 bytes of RAM. No physical
 USB enumeration or joystick-motion test has been performed. The application
 suppresses reports while suspended and does not request remote wakeup; this
 is not USB compliance certification.
@@ -45,18 +45,31 @@ newer released core version that already fixes this.
 installed core before every build (`platformio.ini`'s
 `extra_scripts = pre:patches/apply_usbcore_patch.py`):
 
-- On suspend (`SUSPI`), the ISR now calls `USB_ClockDisable()` directly. That
-  function only writes `USBCON`/`PLLCSR` — no blocking wait, no `delay()` —
-  so it is safe there.
-- On resume (`WAKEUPI`), the ISR does **not** call `USB_ClockEnable()`
-  directly, unlike the naive fix. `USB_ClockEnable()` busy-waits on the
-  `PLOCK` bit and then calls `delay(1)`, and `delay()` spins on `millis()`,
-  which only advances via Timer0's own ISR — but global interrupts are
-  cleared for the duration of *this* ISR (no `ISR_NOBLOCK` in scope), so
-  Timer0 could never fire and `delay(1)` would hang forever. Instead the ISR
-  sets a flag that `USBDevice_::poll()` — now called every `loop()` iteration
-  from `src/main.cpp` — services safely from main-loop context, where
-  interrupts are enabled again.
+- On suspend (`SUSPI`), acknowledge flags while clocks run, then freeze the
+  USB clock and disable the PLL.
+- On wake (`WAKEUPI`), mask wake/suspend interrupts, retain the pending wake
+  flag and non-sendable suspended state, and start the PLL without waiting.
+- `USBDevice.poll()` runs before the application's cadence gate and sends.
+  Until `PLOCK`, it returns with resume still pending. Once locked, a short
+  saved-SREG critical section restores USB clock inputs before acknowledging
+  `WAKEUPI`, as required by the [ATmega32U4 datasheet, UDINT/WAKEUPI,
+  section 22.18.1](https://ww1.microchip.com/downloads/en/devicedoc/atmel-7766-8-bit-avr-atmega16u4-32u4_datasheet.pdf#page=282).
+- Acknowledgements write ones only to the other defined UDINT flags (mask
+  `0x7D`); reserved bits stay zero. This avoids losing a newly latched event
+  through read/modify/write.
+- Later suspend/reset flags remain pending for the ISR. They prevent a sendable
+  state; reset also clears configuration and cancels stale resume work. The
+  reset path rearms suspend handling. Interrupt-enable state is restored.
+
+The resume path performs no blocking PLL wait and calls no delay function.
+The pinned core's separate attach helper uses `delay(1)`, which calls `micros()`
+(TCNT0 plus pending-overflow accounting), not `millis()`. That distinction does
+not establish ISR safety for the attach helper; it is not used for resume here.
+Host tests compile the actual patch helpers with instrumented registers and
+exercise pending lock, acknowledgement ordering, repeat polls, later
+suspend/reset events, send gating and saved interrupt state. They also check
+that application polling precedes its cadence gate and USB sends. They are not
+a silicon or USB-host simulator.
 
 `apply_usbcore_patch.py` accepts only the exact SHA256 of the pinned baseline
 or the complete reviewed patched core. A marker comment alone is insufficient:
