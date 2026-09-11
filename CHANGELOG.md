@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`kct route --current-paths` / `--no-current-paths`** (#4980) — the third
+  and final consumer of the declared branch-specific current-path model
+  (after `kct pcb reinforce`, #5125, and `kct check`, #5184). The route
+  command now loads the same `current_paths.json` sidecar (explicit path, or
+  auto-discovered next to the input board with the `--net-class-map` probe
+  order), runs the `path_ampacity` rule in the post-route DRC so each
+  declared branch is judged against its **own** current rather than one
+  whole-net `target_ampacity`, and re-emits the declarations as
+  `current_paths.json` next to the routed board. That re-emission is what
+  makes route-time intent and the later independent final-copper audit read
+  identical declarations — a bare `kct check` on the routed board
+  auto-discovers it instead of silently passing with `path_ampacity`
+  inactive. An explicit sidecar is strict (missing file / malformed JSON
+  exits 1 before any routing work); an auto-discovered one degrades to a
+  warning; the authored input file is never overwritten (a collision diverts
+  the derived sidecar to `current_paths.effective.json`, the #4428 rule).
 - **Konnect item 8 audit: natural-language design-rule store** (#4902, Part
   of #4880) — `docs/konnect-item8-design-rules-audit.md` decides **decline**
   on adding a Konnect-style free-text design-rule store: the repo already
@@ -1186,6 +1202,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Declared current paths reported `unresolved` on real boards whenever a
+  trace did not land on the exact pad center** (#4980) — endpoint resolution
+  (`router/current_paths.py`) attached a `RefDes.pad` endpoint to the copper
+  graph only by an exact pad-center node match. A router may legitimately
+  terminate a trace anywhere inside a pad's copper, and a wide power pad is
+  routinely entered by several stubs at once (all shorted by the pad itself),
+  so ordinary boards failed to resolve: on board09 the `+5V_OUT` force path
+  enters the 2.29 × 2.03 mm shunt pad `RSH1.4` through three stubs 0.015,
+  0.785 and 0.815 mm off center, and every declaration on the net reported
+  "source pad has no routed copper touching it". Endpoints now bind by the
+  pad's real extent (exact rectangle/ellipse test in the pad's own rotated
+  frame), and all in-pad nodes are shorted through the pad. This is a *false*
+  fail-closed being removed, not a relaxation — copper outside the pad extent
+  still never attaches, so genuinely moved/removed pads still fail closed.
+- **`kct route` accepted KiCad 10 name-only nets but wrote zero copper and
+  reported a vacuous "SUCCESS" (0/0 nets)** (#4983) — a PCB saved in KiCad
+  10's name-only net syntax (`(net "SIGNAL")` on pads, no numeric net table
+  entries at all) made the router's pad-extraction paths
+  (`load_pcb_for_routing`, `load_pads_for_analysis` in `router/io.py`)
+  resolve every name-only pad's net to `net_num=0` — the "no net" obstacle
+  sentinel — because their name-to-id map was built only from the
+  numeric-plus-name dialect's top-level `(net N "NAME")` table, which a
+  name-only board may not have at all. `--nets <NAME>` preflight is
+  schema-level and dialect-aware so it still accepted the request, but the
+  routing graph never received a bound pad pair for that net, and `kct
+  route` reported `Nets routed: 0/0` / "SUCCESS: All signal nets routed!"
+  and exited 0 while writing an unrouted output. A new shared
+  `_build_net_number_map()` normalizes both dialects (numeric-plus-name and
+  name-only, including synthesizing stable ids for name-only nets with no
+  header table) before the routing graph, net-class auto-classification, and
+  output connectivity verification are built, so a name-only board routes
+  identically to its numeric-dialect equivalent. A `--nets`-specific guard
+  (`_reject_lost_route_only_bindings`) now aborts with a non-zero exit
+  instead of reporting vacuous success if a requested net's pad bindings are
+  ever lost after preflight already confirmed the net exists with 2+ pads.
+- **`--strict-layers` was silently inert on the lattice engine, which shipped
+  copper onto explicitly forbidden layers** (#4979) — `avoid_layers` is
+  promoted to a HARD no-go set by
+  `NetClassRouting.hard_avoided_layer_indices()` (`--strict-layers`, or
+  unconditionally for a class declaring `target_ampacity`), and both grid
+  backends have honoured that during search since #4433. The lattice engine —
+  the `--complete` default — had no `avoid_layers` plumbing at all, so a
+  4-layer softstart rev-C completion pass committed 29 × 2.6 mm `/PGND`
+  segments plus 8 thin ones onto the `In2.Cu` reference plane the routing map
+  forbade, and reported no layer-intent failure anywhere: not in the banner,
+  not in the exit code, not in the completion report. The lattice A* now
+  filters hard-avoided layers out of its pad-escape seeds/goals and its
+  via-hop landing layers, so no state it visits can carry a forbidden layer;
+  a connection with no legal route DECLINES with a layer-attributed reason
+  (`layer-constrained-start`/`-end`, `no-path-layer-constrained`) instead of
+  shipping forbidden copper as partial progress. A via may still *step over*
+  a forbidden layer to reach an allowed one — the emitted through via's
+  barrel is DRC's antipad concern and commits no copper there — which keeps
+  an F/B-only net able to cross F↔B on a 4-layer board exactly as the grid
+  backend already does. Blocking an **outer** layer is the opposite case and
+  drops vias from the search entirely: the lattice emits every layer change
+  as a through via spanning the whole stack, so its annular ring is real
+  copper on both outer layers, and such a net now routes planar or declines
+  rather than shipping an annulus onto a layer it forbade (the grid backend
+  needs no equivalent — its via spans only the two layers it hops between).
+  A `--complete` residual carries a machine-readable `layer_constrained`
+  flag in `--complete-report` JSON (and a named line in the printed report),
+  so a consumer can tell a deliberate layer-intent refusal from congestion
+  without string-matching the reason.
+- **No gate caught forbidden-layer copper after the fact** (#4979) — a new
+  post-route, engine-agnostic audit (`router/layer_intent.py`) checks the
+  copper the output board actually carries against each net's hard layer
+  intent, distinguishing violations this run CREATED from ones it INHERITED
+  from its input under `--preserve-existing` / `--complete`. Newly created
+  ones replace the SUCCESS banner and exit 3 (or 4 below
+  `--min-completion`) — checked before the `--complete` exit-8 branch, since
+  forbidden copper outranks an unclosed link; inherited ones are reported as
+  a NOTE and leave the exit code alone. Wired into `main()` and all three
+  escalation wrapper flows (`--auto-layers` is on by default, so gating only
+  `main()` would leave it dead on the default path). A strict no-op when no
+  net class carries a hard layer constraint.
+- **Matrix layer preferences could point a net at a hard-blocked layer**
+  (#4979) — `_inject_matrix_layer_preferences` (#2432) already preserved
+  `avoid_layers` through its `dataclasses.replace`, so the hard block itself
+  was never lost, but the injected `preferred_layers` could still name a
+  layer the class forbids. Assignments are now filtered against the net's
+  hard-avoided set, and a net whose entire assignment is hard-blocked keeps
+  its authored class untouched.
 - **`PCB.remove_segments()` silently left copper behind on boards with a
   non-zero `board_origin`** (#4933) — the coordinate-fallback match (for
   segments/vias with no UUID) rebuilt an in-memory removal key without
@@ -2112,6 +2211,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reworded to `(all pads connected)`. Exit codes for the normal status path
   are deliberately unchanged (board-wide even under `--net`, documented in
   the `--net` help text); `--incomplete` keeps its board-wide header.
+
+### Fixed
+
+- **Validated per-board fabrication-floor overrides for native DRC-constraint
+  emission** (#5006) — `kct check --mfr jlcpcb-tier1 --emit-drc-constraints`
+  (and the manufacturing export path, `kct route`'s sidecar emission, and
+  `kct mfr apply-rules`) previously overwrote a reviewed project's narrower,
+  actually-fab-verified `min_hole_to_hole` floor with the manufacturer
+  profile's conservative default, causing native KiCad DRC to report
+  spurious `hole_to_hole` warnings on a board that a native DRC pass with
+  the reviewed floor showed was clean. A new
+  `kicad_tools.manufacturers.fabrication_overrides` module defines a
+  validated, cited per-board override contract: a `fabrication_overrides.json`
+  sidecar next to the routed board declares a field, an overriding value, the
+  manufacturer it applies to, a mandatory `source` citation, a mandatory
+  `reason`, and a mandatory `tracking_issue` recording the review that
+  approved it — any of the three provenance fields missing fails closed; an
+  override is only retained if it names a manufacturer-verified capability
+  floor on record (e.g. JLCPCB's published pad-hole-spacing minimum) and does
+  not ask for anything looser than that floor — an unrecognized field,
+  missing provenance, manufacturer mismatch, unregistered field, or a value
+  below the verified floor is rejected and the emission falls back to the
+  profile's conservative default instead of silently applying an unsafe
+  override. All four native-constraint-emission call sites (`kct check
+  --emit-drc-constraints`, the manufacturing export path, `kct route`'s
+  sidecar emission, `kct mfr apply-rules`) resolve the same sidecar through
+  one shared entry point, `resolve_pcb_fabrication_overrides`, so the Python
+  `DRCChecker` and every native-emission surface agree on the identical
+  resolved floor for the same board.
+  `boards/03-usb-joystick/check_manufacturing.py`'s previously bespoke
+  `dataclasses.replace(checker.design_rules, min_hole_to_hole_mm=0.45)` patch
+  is migrated onto this shared contract, backed by a new
+  `boards/03-usb-joystick/output/fabrication_overrides.json` sidecar. The
+  board resolves that sidecar through the module's shared three-directory
+  probe (`discover_fabrication_overrides_sidecar`) with a fallback to its own
+  committed copy, and `route_pcb` now stages the sidecar next to every
+  generated board, so a board copy generated outside
+  `boards/03-usb-joystick/output/` still resolves the identical cited floor
+  instead of failing on a missing file. `routing_plan.apply_native_fab_floor`
+  reads the floor it writes into the `.kicad_pro` from that same sidecar
+  rather than restating the literal value.
 
 ## [0.20.0] - 2026-08-06
 

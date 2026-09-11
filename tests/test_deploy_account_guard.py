@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -11,22 +12,34 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts/deploy-site.sh"
 
 
 @pytest.mark.parametrize(
-    "account,accessible,expected",
+    "account,projects,expected",
     [
-        ("a" * 32, True, 0),
-        ("b" * 32, True, 1),
-        ("a" * 32, False, 1),
+        ("a" * 32, "kicad-tools", 0),
+        ("", "kicad-tools", 0),
+        ("", "other-project", 0),
+        ("a" * 32, "│ kicad-tools │ kicad-tools.pages.dev │", 0),
+        ("b" * 32, "kicad-tools", 1),
+        ("a" * 32, None, 1),
+        ("a" * 32, "", 1),
+        ("a" * 32, "other-project", 1),
+        ("a" * 32, "kicad-tools-preview", 1),
+        ("a" * 32, "old-kicad-tools", 1),
+        ("a" * 32, "kicad-tools.pages.dev", 1),
     ],
 )
-def test_scoped_pages_account_guard(tmp_path, account, accessible, expected):
+def test_scoped_pages_account_guard(tmp_path, account, projects, expected):
     source = SCRIPT.read_text()
     guard = source[source.index("# --- Logging helpers") : source.index("# --- Parse flags")]
-    # whoami intentionally cannot return account information with this token.
+    # Scoped tokens cannot use whoami; OAuth falls back to it without an explicit account.
     mock = tmp_path / "wrangler"
     mock.write_text(
         "#!/bin/bash\n"
-        'if [ "$1" = whoami ]; then exit 99; fi\n'
-        + ("echo kicad-tools\n" if accessible else "exit 1\n")
+        + (
+            'if [ "$1" = whoami ]; then exit 99; fi\n'
+            if account
+            else 'if [ "$1" = whoami ]; then echo ' + "a" * 32 + "; exit 0; fi\n"
+        )
+        + ("printf '%s\\n' " + shlex.quote(projects) + "\n" if projects is not None else "exit 1\n")
     )
     mock.chmod(0o700)
     env = {
