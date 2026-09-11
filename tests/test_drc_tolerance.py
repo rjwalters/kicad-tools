@@ -35,6 +35,13 @@ class MockDesignRules:
         # Drill-to-drill spec (#3842). Mirror min_clearance_mm when unset so
         # these tolerance tests keep treating it as the drill threshold.
         self.min_hole_to_hole_mm = kwargs.get("min_hole_to_hole_mm", self.min_clearance_mm)
+        # Object-specific factory floors (#5059).  All default to ``None`` --
+        # the real ``DesignRules`` defaults -- so these general-clearance
+        # tolerance tests keep exercising the ``min_clearance_mm`` floor
+        # rather than the stricter object-specific ones.
+        self.min_smd_pad_clearance_mm = kwargs.get("min_smd_pad_clearance_mm")
+        self.min_pth_hole_to_track_mm = kwargs.get("min_pth_hole_to_track_mm")
+        self.min_inner_pth_hole_to_copper_mm = kwargs.get("min_inner_pth_hole_to_copper_mm")
 
 
 class MockNet:

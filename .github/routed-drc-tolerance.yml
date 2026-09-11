@@ -10,14 +10,19 @@ tolerances:
   # Provenance: d95b6eff^:.github/routed-drc-tolerance.yml lines 1113-1140;
   # #4019 ratcheted to 18 after runs 29075253404/29072031350/29070816533.
   # Exactly 9 skew + 9 continuity; new via-in-pad errors must be repaired.
-  # PR #5152 added a new different-net SMD pad/pad factory clearance floor
-  # (0.15mm, verified against JLCPCB's capabilities page); this synthetic
-  # fixture is a historical routing witness, not a manufacturing release
-  # (see this file's header), and was never re-routed to the new floor, so
-  # it now measures 0.141mm at 2 pad/pad sites -- 2 new `clearance_pad_pad`
-  # errors. Ratcheted 18 -> 20 for exactly those 2; the skew+continuity count
-  # is unchanged. Tracked in #5204 alongside the related board-05 findings.
-  boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb: 20
+  # PR #5152 added a different-net SMD pad/pad factory floor (0.15mm) and this
+  # entry was briefly ratcheted 18 -> 20 to absorb 2 new `clearance_pad_pad`
+  # errors it raised here.  That ratchet is REVERTED: the 2 errors were
+  # `U3-24 <-> U3-36` and `U3-25 <-> U3-37`, both pairs of pads on the SAME
+  # footprint (an LQFP-48), measuring 0.1414mm == 0.1 * sqrt(2) -- the diagonal
+  # gap between adjacent pad rows at 0.5mm pitch.  That is vendor-fixed package
+  # geometry: no re-route or placement change can widen it, and JLCPCB
+  # fabricates fine-pitch QFP/QFN routinely, so the floor must not apply there.
+  # The floor is now scoped to pads of DIFFERENT footprints (a placement limit,
+  # which is what it actually expresses) -- see
+  # `validate.rules.clearance.CopperElement.source_footprint`.  The count is
+  # back to exactly 9 skew + 9 continuity.
+  boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb: 18
   # Provenance: same historical file lines 1754-1763; #4007 ratcheted 9 -> 8
   # after via-aware ADDR_BUS tuning. Four pair-skew +four continuity errors.
   boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb: 8

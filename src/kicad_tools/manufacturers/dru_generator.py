@@ -252,19 +252,32 @@ def generate_dru(
     # silk-to-pad as a silk-layer restriction: native cross-layer pairs need
     # an explicit rule. No blanket same-net physical_clearance is emitted.
     if rules.min_silk_to_pad_clearance_mm is not None:
+        # Severity is deliberately left to the project's DRC severity map
+        # (KiCad classifies ``silk_over_copper`` -- "Silkscreen clipped by
+        # solder mask" -- as a WARNING by default).  The factory floor is a
+        # legibility limit, not a fabrication stop: JLCPCB clips silkscreen
+        # that encroaches on a mask aperture rather than rejecting the
+        # panel, so nothing on the capabilities page supports promoting it
+        # to a blocking error.  Forcing ``(severity error)`` here overrode
+        # the board's own severity map and turned a cosmetic DFM advisory
+        # into "do not manufacture" on already-released designs.  The
+        # 0.15 mm floor itself is unchanged and still reported (visibly
+        # under ``kicad-cli pcb drc --severity-all`` and in ``kct check``).
         lines.append(
             f'(rule "Silk to Pad{label_suffix}"\n'
             "  (condition \"A.Type == 'Pad' || B.Type == 'Pad'\")\n"
-            "  (severity error)\n"
             f"  (constraint silk_clearance (min {rules.min_silk_to_pad_clearance_mm}mm)))"
         )
-    if rules.min_smd_pad_clearance_mm is not None:
-        minimum = max(rules.min_clearance_mm, rules.min_smd_pad_clearance_mm)
-        lines.append(
-            f'(rule "SMD Pad Clearance{label_suffix}"\n'
-            "  (condition \"A.Pad_Type == 'SMD' && B.Pad_Type == 'SMD'\")\n"
-            f"  (constraint clearance (min {minimum}mm)))"
-        )
+    # The different-net SMD pad floor is deliberately NOT emitted as a native
+    # rule.  It is a placement limit on copper the designer positions, and
+    # KiCad's rule language has no predicate for "these two pads belong to
+    # the same footprint" -- so a native rule would also police package
+    # geometry the designer cannot change.  Stock library packages sit under
+    # the floor (the diagonal corner gap between adjacent pad rows of
+    # ``Package_QFP:LQFP-48_7x7mm_P0.5mm`` is 0.1414 mm), so emitting it
+    # would report every fine-pitch QFP/QFN as a hard clearance error.
+    # ``kct check`` enforces this floor instead, where the different-footprint
+    # scope is expressible (``validate.rules.clearance._check_layer``).
     if rules.min_pth_hole_to_track_mm is not None:
         lines.append(
             f'(rule "PTH Hole to Track{label_suffix}"\n'

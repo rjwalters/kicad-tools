@@ -96,8 +96,24 @@ def test_native_object_specific_clearance(tmp_path, kind, gap, options, expected
     rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
     write_drc_constraints(path, rules, manufacturer_id="jlcpcb", layers=4)
     report = tmp_path / "native.json"
+    # ``--severity-all`` is REQUIRED here: the ``Silk to Pad`` rule no longer
+    # forces ``(severity error)``, so its violations now carry KiCad's default
+    # ``silk_over_copper`` severity (warning) and would be filtered out of the
+    # report by kicad-cli's default error-only severity mask.  Asking for all
+    # severities keeps this test's verdict independent of that default and lets
+    # it assert the per-rule severity explicitly below.
     proc = subprocess.run(
-        [str(cli), "pcb", "drc", "--format", "json", "-o", str(report), str(path)],
+        [
+            str(cli),
+            "pcb",
+            "drc",
+            "--severity-all",
+            "--format",
+            "json",
+            "-o",
+            str(report),
+            str(path),
+        ],
         capture_output=True,
         text=True,
         timeout=30,
@@ -105,23 +121,50 @@ def test_native_object_specific_clearance(tmp_path, kind, gap, options, expected
     assert proc.returncode == 0, proc.stderr
     violations = json.loads(report.read_text())["violations"]
     assert not [v for v in violations if v["type"] == "drc_rule_error"], violations
+    if kind == "smd":
+        # The different-net SMD pad floor is intentionally Python-only (no
+        # native rule is emitted -- see
+        # ``test_optional_constraints_preserve_other_profiles_and_stricter_general_clearance``),
+        # so native DRC must stay silent on every SMD probe regardless of
+        # ``expected``.  ``expected`` describes the ``kct check`` verdict, which
+        # ``test_python_object_specific_clearance`` asserts.
+        assert not [v for v in violations if "rule 'SMD Pad Clearance" in v["description"]], (
+            violations
+        )
+        return
     names = {
         "silk": ("Silk to Pad",),
-        "smd": ("SMD Pad Clearance",),
         "pth": ("PTH Hole to Track", "Inner PTH Hole to Copper"),
         "via": ("PTH Hole to Track", "Inner PTH Hole to Copper"),
     }[kind]
     relevant = [v for v in violations if any(f"rule '{name}" in v["description"] for name in names)]
     assert bool(relevant) == expected, violations
     if expected:
-        assert relevant[0]["severity"] == "error"
+        # ``Silk to Pad`` deliberately carries NO ``(severity error)``
+        # override: KiCad classifies ``silk_over_copper`` as a warning by
+        # default, and the factory limit is a legibility/DFM limit (JLCPCB
+        # clips encroaching silkscreen) rather than a fabrication stop.  The
+        # PTH hole rules ARE hard errors.
+        expected_severity = "warning" if kind == "silk" else "error"
+        assert relevant[0]["severity"] == expected_severity
 
 
 def test_optional_constraints_preserve_other_profiles_and_stricter_general_clearance(tmp_path):
     from kicad_tools.manufacturers.dru_generator import generate_dru
 
     rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
-    assert "SMD Pad Clearance" in generate_dru(rules)
+    emitted = generate_dru(rules)
+    assert "Silk to Pad" in emitted
+    assert "PTH Hole to Track" in emitted
+    assert "Inner PTH Hole to Copper" in emitted
+    # The different-net SMD pad floor is deliberately NOT emitted as a native
+    # rule: KiCad's rule language has no "same footprint" predicate, so a
+    # native rule would also police package-internal geometry the designer
+    # cannot change (stock fine-pitch QFP/QFN pad rows sit under the floor by
+    # construction).  ``kct check`` enforces it instead, where the
+    # different-footprint scope is expressible -- see
+    # ``test_python_smd_floor_is_scoped_to_different_footprints``.
+    assert "SMD Pad Clearance" not in emitted
     legacy = replace(
         rules,
         min_silk_to_pad_clearance_mm=None,
@@ -135,6 +178,57 @@ def test_optional_constraints_preserve_other_profiles_and_stricter_general_clear
     violations = ClearanceRule().check(PCB.load(path), strict).violations
     assert violations and violations[0].required_value == 0.2
     assert "(constraint clearance (min 0.2mm))" in generate_dru(strict)
+
+
+def _two_pad_board(path, gap, *, same_footprint):
+    """Two different-net SMD pads ``gap`` apart, in one or two footprints."""
+    pad_a = '(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "A"))'
+    pad_b = f'(pad "2" smd rect (at {1 + gap} 0) (size 1 1) (layers "F.Cu") (net 2 "B"))'
+    if same_footprint:
+        # One placed footprint owning both pads -- package-internal geometry.
+        bodies = f'(footprint "T" (layer "F.Cu") (at 10 10) {pad_a} {pad_b})'
+    else:
+        # Two independently placed footprints.  Note both carry a BLANK
+        # reference, exactly like the shared ``board_fixture`` boards: the
+        # different-footprint scope must not be keyed on the reference string.
+        pad_b_local = '(pad "2" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 2 "B"))'
+        bodies = (
+            f'(footprint "T" (layer "F.Cu") (at 10 10) {pad_a}) '
+            f'(footprint "T" (layer "F.Cu") (at {11 + gap} 10) {pad_b_local})'
+        )
+    path.write_text(f"""(kicad_pcb (version 20240108) (generator pcbnew)
+      (general (thickness 1.6)) (paper "A4")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+      (setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "A") (net 2 "B")
+      (gr_rect (start 0 0) (end 20 20) (stroke (width .1) (type default))
+       (fill none) (layer "Edge.Cuts")) {bodies})""")
+    return path
+
+
+@pytest.mark.parametrize("same_footprint,expected", [(False, True), (True, False)])
+def test_python_smd_floor_is_scoped_to_different_footprints(tmp_path, same_footprint, expected):
+    """The 0.15 mm SMD floor is a PLACEMENT limit, not a package-geometry one.
+
+    A gap of 0.12 mm clears the general copper floor (0.1016 mm) but is under
+    the different-net SMD pad floor (0.15 mm).  Between two independently
+    placed footprints that is a real, fixable violation.  Between two pads of
+    the SAME footprint it is vendor-fixed package geometry no placement or
+    routing change can alter -- and stock fine-pitch packages routinely sit
+    below the floor (``Package_QFP:LQFP-48_7x7mm_P0.5mm`` has a 0.1414 mm
+    diagonal gap between adjacent pad rows, board 06's U3 pads 24/36 and
+    25/37), so flagging it would declare every such package unmanufacturable.
+
+    The two-footprint board deliberately gives both footprints a BLANK
+    reference, pinning the scope to footprint IDENTITY rather than to the
+    reference string (which is neither unique nor guaranteed present).
+    """
+    path = _two_pad_board(tmp_path / "probe.kicad_pcb", 0.12, same_footprint=same_footprint)
+    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
+    assert rules.min_smd_pad_clearance_mm == 0.15
+    violations = ClearanceRule().check(PCB.load(path), rules).violations
+    assert bool(violations) == expected, violations
+    if expected:
+        assert violations[0].required_value == pytest.approx(0.15)
 
 
 @pytest.mark.parametrize("kind,gap", [("silk", 0.085), ("smd", 0.12), ("pth", 0.27)])

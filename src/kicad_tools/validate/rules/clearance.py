@@ -87,6 +87,19 @@ class CopperElement:
     polygon: object | None = None
     pad_type: str = ""
     source_pad: Pad | None = None
+    # Owning ``Footprint`` OBJECT for pads (``None`` for segments/vias).  The
+    # object-specific SMD pad floor is a placement constraint, so it must be
+    # able to tell package-internal pad geometry from pads the designer
+    # positioned relative to one another -- see ``_check_layer``.
+    #
+    # This deliberately holds the footprint *object* rather than its
+    # ``reference`` string: references are not guaranteed unique (or even
+    # present).  A bare board or a synthesized fixture can carry several
+    # footprints whose reference is "", and two footprints sharing a blank or
+    # duplicated reference would compare equal and silently suppress a REAL
+    # different-footprint violation.  Identity comparison ("is this the same
+    # placed footprint?") is exactly the question the floor needs answered.
+    source_footprint: Footprint | None = None
 
     @classmethod
     def from_segment(cls, seg: Segment) -> CopperElement:
@@ -122,6 +135,7 @@ class CopperElement:
             polygon=polygon,
             pad_type=pad.type,
             source_pad=pad,
+            source_footprint=footprint,
         )
 
     @classmethod
@@ -1046,7 +1060,23 @@ class ClearanceRule(DRCRule):
 
                 # Check against minimum
                 required = min_clearance
-                if elem1.pad_type == elem2.pad_type == "smd":
+                # The factory SMD pad floor constrains copper the DESIGNER
+                # places: it is a placement/layout limit, not a statement
+                # about a package's internal geometry.  Two pads of the SAME
+                # footprint are fixed by the component vendor and no
+                # placement or routing change can move them -- and stock
+                # library packages routinely sit under this floor: the
+                # diagonal corner gap between adjacent pad rows of
+                # ``Package_QFP:LQFP-48_7x7mm_P0.5mm`` is 0.1414 mm (board
+                # 06's U3, pads 24/36 and 25/37), which JLCPCB fabricates
+                # routinely.  Applying the floor there would declare every
+                # fine-pitch QFP/QFN unmanufacturable, so restrict it to
+                # pads from different footprints.  Compared by IDENTITY, not
+                # by reference string -- see ``CopperElement.source_footprint``.
+                if (
+                    elem1.pad_type == elem2.pad_type == "smd"
+                    and elem1.source_footprint is not elem2.source_footprint
+                ):
                     required = max(required, min_smd_pad_clearance or 0)
                 if clearance + DRC_TOLERANCE < required:
                     violation = self._create_violation(
