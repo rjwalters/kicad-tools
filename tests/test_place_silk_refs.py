@@ -443,3 +443,117 @@ class TestCLIWiring:
         bogus.write_text("not a pcb")
         rc = cli_main([str(bogus)])
         assert rc == 1
+
+
+def _orientation_fixture(tmp_path, *, angle, fp_angle=0, obstacle=(0, 2), kind="pad"):
+    import math
+
+    # Reference local (5,0) moves with the footprint, but its stored angle is
+    # already board-frame. Place the obstacle in board coordinates independently.
+    theta = math.radians(fp_angle)
+    cx, cy = 10 + 5 * math.cos(theta), 10 - 5 * math.sin(theta)
+    ox, oy = cx + obstacle[0], cy + obstacle[1]
+    extra = (
+        _footprint_block("Z", (ox, oy), pads=_pad("1", (0, 0)), hidden=True)
+        if kind == "pad"
+        else _footprint_block("A", (ox, oy), ref_local=(0, 0, 90))
+    )
+    path = tmp_path / "orientation.kicad_pcb"
+    path.write_text(f"""(kicad_pcb (version 20240108) (generator test)
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (37 "F.SilkS" user))
+      (setup (pad_to_mask_clearance 0)) (net 0 "")
+      (footprint "Test" (layer "F.Cu") (at 10 10 {fp_angle})
+        (fp_text reference "R11111111" (at 5 0 {angle}) (layer "F.SilkS")
+          (effects (font (size 1 1) (thickness .15)))))
+      {extra})""")
+    return path, (cx, cy)
+
+
+@pytest.mark.parametrize(
+    "angle,fp_angle,obstacle,collides",
+    [
+        (90, 0, (0, 2), True),
+        (90, 0, (2, 0), False),
+        (30, 90, (2.598, -1.5), True),
+        (30, 90, (1.5, 2.598), False),
+        (-30, 45, (2.598, 1.5), True),
+        (-30, 45, (1.5, -2.598), False),
+    ],
+)
+def test_existing_text_orientation_is_absolute(tmp_path, angle, fp_angle, obstacle, collides):
+    path, center = _orientation_fixture(tmp_path, angle=angle, fp_angle=fp_angle, obstacle=obstacle)
+    placer = SilkRefPlacer(path)
+    result = placer.plan()
+    ref = next(p for p in result.placements if p.footprint_ref == "R11111111")
+    assert ref.old_position == pytest.approx(center)
+    assert (ref.status == "moved") == collides
+    assert ref.new_rotation == angle
+    if not collides:
+        assert ref.status == "unchanged"
+    placer.apply(result)
+    # Text dimensions and footprint placement survive the coordinate update.
+    placer.save()
+    reparsed = SilkRefPlacer(path)
+    text = next(t for t in reparsed.pcb.footprints[0].texts if t.text_type == "reference")
+    assert text.rotation == angle
+    assert text.font_size == (1, 1) and text.font_thickness == 0.15 and not text.hidden
+    assert reparsed.pcb.footprints[0].position == (10, 10)
+    assert reparsed.pcb.footprints[0].rotation == fp_angle
+
+
+def test_square_font_rotates_complete_label_and_svg(tmp_path):
+    import xml.etree.ElementTree as ET
+
+    path, center = _orientation_fixture(tmp_path, angle=0, obstacle=(2, 0))
+    placer = SilkRefPlacer(path)
+    result = placer.plan(allow_rotate=True)
+    ref = result.placements[0]
+    assert ref.status == "moved" and ref.new_rotation == 90
+    assert ref.new_position == center
+    svg = placer.render_svg(result, tmp_path / "rotated.svg")
+    root = ET.parse(svg).getroot()
+    ns = {"s": "http://www.w3.org/2000/svg"}
+    poly = next(p for p in root.findall("s:polygon", ns) if p.find("s:title", ns) is not None)
+    points = [tuple(map(float, pair.split(","))) for pair in poly.attrib["points"].split()]
+    assert max(y for x, y in points) - min(y for x, y in points) > 5 * (
+        max(x for x, y in points) - min(x for x, y in points)
+    )
+    label = root.find("s:text", ns)
+    assert label is not None and label.attrib["transform"].startswith("rotate(-90 ")
+    placer.apply(result)
+    placer.save()
+    assert SilkRefPlacer(path).plan().placements[0].status == "unchanged"
+
+
+@pytest.mark.parametrize("kind", ["fp_text", "property", "gr_text"])
+def test_rotated_static_text_obstacle(tmp_path, kind):
+    path, _ = _orientation_fixture(tmp_path, angle=90, obstacle=(8, 8))
+    # A short reference at (15,12) intersects the vertical static label but
+    # clears its incorrect horizontal envelope. No footprint angle is added.
+    source = path.read_text().replace('"R11111111" (at 5 0 90)', '"R" (at 5 2)')
+    effects = '(layer "F.SilkS") (effects (font (size 1 1) (thickness .15)))'
+    if kind == "gr_text":
+        extra = f'(gr_text "STATICLONG" (at 15 10 90) {effects})'
+    else:
+        tag = "fp_text user" if kind == "fp_text" else 'property "Value"'
+        extra = f'(footprint "Static" (layer "F.Cu") (at 10 10 90) ({tag} "STATICLONG" (at 0 5 90) {effects}))'
+    path.write_text(source.rstrip()[:-1] + extra + ")")
+    placer = SilkRefPlacer(path)
+    ref = next(p for p in placer.plan().placements if p.footprint_ref == "R")
+    assert ref.status == "moved"
+
+
+def test_rotated_dynamic_reference_obstacles(tmp_path):
+    from shapely.affinity import rotate
+
+    from kicad_tools.validate.rules.silkscreen import _text_bbox_geometry
+
+    path, _ = _orientation_fixture(tmp_path, angle=90, obstacle=(0, 2), kind="reference")
+    placer = SilkRefPlacer(path)
+    result = placer.plan()
+    assert result.moved
+    geoms = []
+    for ref in result.placements:
+        box = _text_bbox_geometry(ref.footprint_ref, (1, 1), 0.15, ref.new_position)
+        geoms.append(rotate(box, -ref.new_rotation, origin=ref.new_position))
+    assert geoms[0].distance(geoms[1]) >= 0.15 - 1e-4

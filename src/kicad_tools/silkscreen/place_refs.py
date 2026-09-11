@@ -13,11 +13,8 @@ Design, in one pass:
 
 * **Read geometry through the same helpers ``kct check``'s geometric
   silk DRC rules use** (:mod:`kicad_tools.validate.rules.silkscreen`,
-  :mod:`kicad_tools.geometry.courtyard`) -- so this solver and
-  ``check_all_silkscreen`` / native ``kicad-cli pcb drc`` agree on what
-  counts as a collision, and the "concrete result" this module targets
-  (native silk DRC reporting zero findings after a solve) is not a
-  coincidence.
+  :mod:`kicad_tools.geometry.courtyard`). Text uses an oriented approximate
+  envelope, not native glyph strokes; a clear plan is not a native DRC verdict.
 * **Write back through the SAME shared S-expression tree** the schema
   parsed from (:attr:`~kicad_tools.schema.pcb.Footprint._sexp_node`),
   following the exact parse-mutate-save pattern already established by
@@ -132,6 +129,25 @@ def _read_text_angle(ref_node: SExp) -> float:
     return 0.0
 
 
+def _oriented_text_geometry(
+    text: str,
+    font_size: tuple[float, float],
+    thickness: float,
+    center: tuple[float, float],
+    angle: float,
+) -> Any:
+    """Rotate the complete text envelope, retaining glyph dimensions.
+
+    KiCad 10 parsePCB_TEXT stores an absolute board-frame angle (subtracting
+    the footprint orientation before its position transform). Do not add the
+    footprint angle again. KiCad positive angles turn toward negative board y.
+    """
+    from shapely.affinity import rotate  # type: ignore[import-untyped]
+
+    geom = _text_bbox_geometry(text, font_size, thickness, center)
+    return rotate(geom, -angle, origin=center) if geom is not None else None
+
+
 def _set_text_at(ref_node: SExp, x: float, y: float, angle: float) -> None:
     """Write ``(at x y [angle])`` on *ref_node* in place.
 
@@ -187,8 +203,8 @@ def _iter_static_silk_obstacles(pcb: PCB):
             if side is None or fp_text.hidden:
                 continue
             center = transform(fp_text.position)
-            geom = _text_bbox_geometry(
-                fp_text.text, fp_text.font_size, fp_text.font_thickness, center
+            geom = _oriented_text_geometry(
+                fp_text.text, fp_text.font_size, fp_text.font_thickness, center, fp_text.rotation
             )
             if geom is None:
                 continue
@@ -207,7 +223,9 @@ def _iter_static_silk_obstacles(pcb: PCB):
         side = _silk_side(text.layer)
         if side is None or text.hidden:
             continue
-        geom = _text_bbox_geometry(text.text, text.font_size, text.font_thickness, text.position)
+        geom = _oriented_text_geometry(
+            text.text, text.font_size, text.font_thickness, text.position, text.rotation
+        )
         if geom is None:
             continue
         yield side, geom, (text.text[:20] if text.text else "gr_text")
@@ -411,7 +429,6 @@ def _render_svg(
     output_path: Path,
 ) -> Path:
     """Build and write the SVG review artifact described by :meth:`SilkRefPlacer.render_svg`."""
-    from kicad_tools.validate.rules.silkscreen import _text_bbox_geometry
 
     margin_mm = 3.0
     xs: list[float] = []
@@ -496,16 +513,19 @@ def _render_svg(
                 f"<title>{_svg_escape(label)}</title></rect>"
             )
 
-    # Static silk (non-reference text/graphics that never move).
+    # Static obstacles use the same oriented polygons as collision detection.
     for side_geoms in context["static_silk"].values():
         for geom, label in side_geoms:
-            b = geom.bounds
-            parts.append(
-                f'<rect x="{b[0] * scale:.2f}" y="{b[1] * scale:.2f}" '
-                f'width="{(b[2] - b[0]) * scale:.2f}" height="{(b[3] - b[1]) * scale:.2f}" '
-                f'fill="#666666" fill-opacity="0.4">'
-                f"<title>{_svg_escape(label)}</title></rect>"
-            )
+            for polygon in getattr(geom, "geoms", [geom]):
+                if not hasattr(polygon, "exterior"):
+                    continue
+                points = " ".join(
+                    f"{x * scale:.2f},{y * scale:.2f}" for x, y in polygon.exterior.coords
+                )
+                parts.append(
+                    f'<polygon points="{points}" fill="#666666" fill-opacity="0.4">'
+                    f"<title>{_svg_escape(label)}</title></polygon>"
+                )
 
     # Reference placements: the actual review content.
     ref_texts_by_ref = {
@@ -519,12 +539,15 @@ def _render_svg(
         text = ref_text.text if ref_text is not None else placement.footprint_ref
 
         if placement.status == "moved":
-            old_geom = _text_bbox_geometry(text, font_size, font_thickness, placement.old_position)
+            old_geom = _oriented_text_geometry(
+                text, font_size, font_thickness, placement.old_position, placement.old_rotation
+            )
             if old_geom is not None:
-                b = old_geom.bounds
+                points = " ".join(
+                    f"{x * scale:.2f},{y * scale:.2f}" for x, y in old_geom.exterior.coords
+                )
                 parts.append(
-                    f'<rect x="{b[0] * scale:.2f}" y="{b[1] * scale:.2f}" '
-                    f'width="{(b[2] - b[0]) * scale:.2f}" height="{(b[3] - b[1]) * scale:.2f}" '
+                    f'<polygon points="{points}" '
                     f'fill="none" stroke="#999999" stroke-width="0.5" stroke-dasharray="1,1"/>'
                 )
             ox, oy = placement.old_position
@@ -540,20 +563,22 @@ def _render_svg(
         else:  # unplaceable / under_component_fallback
             color = "#cc3333"
 
-        geom = _text_bbox_geometry(text, font_size, font_thickness, placement.new_position)
+        geom = _oriented_text_geometry(
+            text, font_size, font_thickness, placement.new_position, placement.new_rotation
+        )
         if geom is not None:
-            b = geom.bounds
+            points = " ".join(f"{x * scale:.2f},{y * scale:.2f}" for x, y in geom.exterior.coords)
             parts.append(
-                f'<rect x="{b[0] * scale:.2f}" y="{b[1] * scale:.2f}" '
-                f'width="{(b[2] - b[0]) * scale:.2f}" height="{(b[3] - b[1]) * scale:.2f}" '
+                f'<polygon points="{points}" '
                 f'fill="{color}" fill-opacity="0.35" stroke="{color}" stroke-width="0.4">'
                 f"<title>{_svg_escape(placement.footprint_ref)}: {_svg_escape(placement.status)}"
                 f"{' -- ' + _svg_escape(placement.reason) if placement.reason else ''}"
-                f"</title></rect>"
+                f"</title></polygon>"
             )
         nx, ny = placement.new_position
         parts.append(
             f'<text x="{nx * scale:.2f}" y="{ny * scale:.2f}" font-size="{max(font_size[1] * scale * 0.6, 4):.1f}" '
+            f'transform="rotate({-placement.new_rotation:g} {nx * scale:.2f} {ny * scale:.2f})" '
             f'fill="{color}" text-anchor="middle" dominant-baseline="middle">'
             f"{_svg_escape(placement.footprint_ref)}</text>"
         )
@@ -615,7 +640,7 @@ class SilkRefPlacer:
             max_offset_mm: How far from the component body to search.
             step_mm: Search ring spacing.
             allow_rotate: If True, also try each candidate with the text
-                rotated 90 degrees (width/height swapped) when the
+                rotated 90 degrees about its anchor when the
                 original orientation does not fit.
 
         Returns:
@@ -682,8 +707,12 @@ class SilkRefPlacer:
 
             transform = _fp_transform(footprint)
             original_center = transform(ref_text.position)
-            geom0 = _text_bbox_geometry(
-                ref_text.text, ref_text.font_size, ref_text.font_thickness, original_center
+            geom0 = _oriented_text_geometry(
+                ref_text.text,
+                ref_text.font_size,
+                ref_text.font_thickness,
+                original_center,
+                _read_text_angle(ref_node),
             )
             if geom0 is None:
                 continue
@@ -747,8 +776,8 @@ class SilkRefPlacer:
             chosen_geom = None
             last_reason = ""
             for point in ordered:
-                geom = _text_bbox_geometry(
-                    ref_text.text, ref_text.font_size, ref_text.font_thickness, point
+                geom = _oriented_text_geometry(
+                    ref_text.text, ref_text.font_size, ref_text.font_thickness, point, old_rotation
                 )
                 ok, why = clears(geom)
                 if ok:
@@ -757,9 +786,12 @@ class SilkRefPlacer:
                 last_reason = why
 
                 if allow_rotate:
-                    swapped = (ref_text.font_size[1], ref_text.font_size[0])
-                    geom_r = _text_bbox_geometry(
-                        ref_text.text, swapped, ref_text.font_thickness, point
+                    geom_r = _oriented_text_geometry(
+                        ref_text.text,
+                        ref_text.font_size,
+                        ref_text.font_thickness,
+                        point,
+                        old_rotation + 90.0,
                     )
                     ok_r, why_r = clears(geom_r)
                     if ok_r:
