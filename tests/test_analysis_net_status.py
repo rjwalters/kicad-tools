@@ -1183,24 +1183,27 @@ def _generate_large_zone_pcb(num_filled_polygons: int = 500) -> str:
     )"""
         )
 
-    # Fill fragments covering the two stitching vias at (50, 52) and (150, 52).
-    # The pads reach the In1.Cu pour through F.Cu->B.Cu through-vias, so the
-    # island-aware connectivity model (#3914) requires each via's copper to
-    # actually land on filled pour copper (not merely inside the zone
-    # boundary).  These fragments belong to the same zone object as every tile,
-    # so the per-zone union still ties both pads into one GND island.
-    for vx in (50, 150):
-        filled_parts.append(
-            f"""    (filled_polygon
+    # A SINGLE bridging fill fragment spanning both stitching vias at
+    # (50, 52) and (150, 52).  The pads reach the In1.Cu pour through
+    # F.Cu->B.Cu through-vias, so the island-aware connectivity model (#3914)
+    # requires each via's copper to actually land on filled pour copper (not
+    # merely inside the zone boundary).  Issue #5031: sharing a ``zone``
+    # object is NOT enough to prove two islands are physically bonded (KiCad
+    # can leave genuinely disjoint pad-bearing fill islands under one zone
+    # UUID), so this must be ONE geometrically-continuous fragment that
+    # actually touches both via footprints -- a real copper bridge -- rather
+    # than two separate same-zone fragments relying on zone-identity alone.
+    filled_parts.append(
+        """    (filled_polygon
       (layer "In1.Cu")
       (pts
-        (xy {vx - 1} 51)
-        (xy {vx + 1} 51)
-        (xy {vx + 1} 53)
-        (xy {vx - 1} 53)
+        (xy 49 51)
+        (xy 151 51)
+        (xy 151 53)
+        (xy 49 53)
       )
     )"""
-        )
+    )
 
     footer = """  )
 )
@@ -1720,6 +1723,159 @@ DISCONTINUOUS_FILL_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
 """,
 )
 
+# Issue #5031: TWO genuinely disjoint fill islands under the SAME zone
+# object/UUID, where BOTH islands cover a real pad (unlike #3914's
+# DISCONTINUOUS_FILL_ZONE_PCB above, where only one island reaches a pad and
+# the other is a padless remnant).  This is the exact failure mode from the
+# field report: KiCad's native refill can retain two pad-bearing fragments of
+# one zone with no via/track/fill bridging them, and the pre-#5031
+# implementation unioned every fragment of a ``zone`` object unconditionally
+# -- same net/zone identity, not real copper contact -- so it falsely
+# reported this net ``complete``.  Island A (10..18) covers C1.2 (15, 15.25);
+# island B (22..30) covers C2.2 (25, 15.25); the gap (18..22) has no copper at
+# all.  Native `kicad-cli pcb drc` reports a real unconnected-items error
+# here, so strict net-status must report ``incomplete`` with island_count=2.
+DISJOINT_ISLANDS_BOTH_PADS_OPEN_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fill_clause="(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))",
+    filled_polygons="""    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 10 10)
+        (xy 18 10)
+        (xy 18 20)
+        (xy 10 20)
+      )
+    )
+    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 22 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 22 20)
+      )
+    )
+""",
+)
+
+# Control for the fixture above: a THIRD filled_polygon "neck" fragment (17..23)
+# geometrically touches/overlaps BOTH island A and island B.  This is exactly
+# what KiCad's thermal-relief fragmentation of one continuous pour looks like
+# on a real board -- many ``filled_polygon`` entries that are still physically
+# one piece of copper because adjacent fragments touch.  The fix must cluster
+# by real geometric adjacency (not by zone identity) so this reads
+# ``complete``/island_count=1, proving the #5031 fix does not regress into
+# "no clustering at all, only via/track bonds" (which would wrongly split any
+# thermal-relief-fragmented pour into many false opens).
+DISJOINT_ISLANDS_BOTH_PADS_FILL_BRIDGED_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fill_clause="(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))",
+    filled_polygons="""    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 10 10)
+        (xy 18 10)
+        (xy 18 20)
+        (xy 10 20)
+      )
+    )
+    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 22 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 22 20)
+      )
+    )
+    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 17 14)
+        (xy 23 14)
+        (xy 23 16)
+        (xy 17 16)
+      )
+    )
+""",
+)
+
+# A second control: same two disjoint islands, but bridged by a real copper
+# TRACK (not another fill fragment) laid straight across the gap between
+# them, same as the field report's stitched/connected control.  A track
+# whose own copper touches fill on both islands is a genuine physical bond
+# and must also cluster the islands together.  This must sit alongside the
+# footprints/zone as a top-level board element (not nested inside the zone
+# like a ``filled_polygon``), so it is written out directly rather than via
+# the ``_ZONE_FILL_PCB_TEMPLATE`` placeholder.
+DISJOINT_ISLANDS_BOTH_PADS_TRACK_BRIDGED_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 15 15)
+    (property "Reference" "C1")
+    (pad "1" smd rect (at 0 -0.25) (size 0.4 0.4) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 25 15)
+    (property "Reference" "C2")
+    (pad "1" smd rect (at 0 -0.25) (size 0.4 0.4) (layers "F.Cu") (net 0 ""))
+    (pad "2" smd rect (at 0 0.25) (size 0.4 0.4) (layers "F.Cu") (net 1 "GND"))
+  )
+
+  (segment (start 15 15.25) (end 25 15.25) (width 0.3) (layer "F.Cu") (net 1))
+
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.15)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))
+    (polygon
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 10 10)
+        (xy 18 10)
+        (xy 18 20)
+        (xy 10 20)
+      )
+    )
+    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 22 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 22 20)
+      )
+    )
+  )
+)
+"""
+
 
 class TestZeroFillZoneConnectivity:
     """Regression tests for Issue #3482.
@@ -1865,6 +2021,105 @@ class TestZeroFillZoneConnectivity:
         assert gnd.status == "complete", (
             f"Fully filled zone should connect both pads; got {gnd.status}"
         )
+
+
+class TestDisjointZoneIslandConnectivity:
+    """Regression tests for Issue #5031.
+
+    KiCad's native refill can retain TWO genuinely disjoint pad-bearing fill
+    islands under the SAME ``zone`` object/UUID once a stitching via that used
+    to bridge them is removed. The pre-#5031 implementation unioned every
+    ``filled_polygon`` fragment of a zone into one group unconditionally --
+    same net/zone identity was mistaken for a physical bond -- so it
+    incorrectly reported those boards ``complete``. Real copper contact
+    (geometric fragment adjacency, or a via/track whose own copper spans both
+    fragments) must be required before two fragments of one zone are treated
+    as connected.
+    """
+
+    @pytest.fixture
+    def disjoint_open_pcb(self, tmp_path: Path) -> Path:
+        pcb_file = tmp_path / "disjoint_open.kicad_pcb"
+        pcb_file.write_text(DISJOINT_ISLANDS_BOTH_PADS_OPEN_PCB)
+        return pcb_file
+
+    @pytest.fixture
+    def disjoint_fill_bridged_pcb(self, tmp_path: Path) -> Path:
+        pcb_file = tmp_path / "disjoint_fill_bridged.kicad_pcb"
+        pcb_file.write_text(DISJOINT_ISLANDS_BOTH_PADS_FILL_BRIDGED_PCB)
+        return pcb_file
+
+    @pytest.fixture
+    def disjoint_track_bridged_pcb(self, tmp_path: Path) -> Path:
+        pcb_file = tmp_path / "disjoint_track_bridged.kicad_pcb"
+        pcb_file.write_text(DISJOINT_ISLANDS_BOTH_PADS_TRACK_BRIDGED_PCB)
+        return pcb_file
+
+    def test_disjoint_pad_bearing_islands_are_not_complete(self, disjoint_open_pcb: Path):
+        """Two same-zone, pad-bearing islands with NO copper bridge must open.
+
+        Island A (10..18) carries C1.2; island B (22..30) carries C2.2; there
+        is no fill, via, or track between x=18 and x=22. Native
+        ``kicad-cli pcb drc`` reports a real unconnected-items error here, so
+        strict net-status must report the net ``incomplete`` with both pads
+        split across two islands -- NOT ``complete`` merely because both
+        fragments belong to the same zone UUID.
+        """
+        analyzer = NetStatusAnalyzer(disjoint_open_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status != "complete", (
+            f"Disjoint same-zone islands must not read complete; got status={gnd.status}"
+        )
+        assert gnd.island_count == 2
+        assert gnd.connected_count == 1
+        assert gnd.unconnected_count == 1
+
+    def test_thermal_relief_fragments_still_cluster_by_geometry(
+        self, disjoint_fill_bridged_pcb: Path
+    ):
+        """A geometrically-touching third fragment re-joins the two islands.
+
+        This is exactly what KiCad's thermal-relief fragmentation of one
+        continuous pour looks like on a real board: many ``filled_polygon``
+        entries that are still physically one piece of copper because
+        adjacent fragments touch. The fix must cluster by real geometric
+        adjacency (not by zone identity alone), so a neck fragment spanning
+        both islands (17..23) restores ``complete``/island_count == 1 --
+        proving the #5031 fix does not regress into "only via/track bonds
+        count", which would wrongly split any thermal-relief-fragmented pour
+        into false opens.
+        """
+        analyzer = NetStatusAnalyzer(disjoint_fill_bridged_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status == "complete", (
+            f"A geometrically-bridged fill neck must connect both islands; got {gnd.status}"
+        )
+        assert gnd.island_count == 1
+
+    def test_track_bridge_reconnects_disjoint_islands(self, disjoint_track_bridged_pcb: Path):
+        """A real copper track across the gap also counts as a physical bond.
+
+        Same two disjoint islands as ``disjoint_open_pcb``, but a track
+        segment is laid directly across the gap between them (the field
+        report's stitched/connected control). A track whose own copper
+        touches fill on both islands is a genuine physical bond and must
+        cluster the islands together.
+        """
+        analyzer = NetStatusAnalyzer(disjoint_track_bridged_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None
+        assert gnd.status == "complete", (
+            f"A real copper track bridge must connect both islands; got {gnd.status}"
+        )
+        assert gnd.island_count == 1
 
 
 # ---------------------------------------------------------------------------
