@@ -2589,6 +2589,91 @@ else
 fi
 rm -rf "$STUB53"
 
+# ===================================================================
+# #7508: STATIC guard against the bash-3.2 heredoc-in-command-substitution
+#        parser bug that silently dropped escalate_peer_coordination_degraded()'s
+#        issue body 1099x on a host whose launchd plist hardcodes /bin/bash
+#        (macOS's stock, pre-GPLv3 3.2.57) instead of resolving a modern bash
+#        off PATH. Confirmed (against a locally built bash 3.2.0 release,
+#        outside this suite -- 3.2 is not assumed present in CI) that
+#        wrapping a heredoc in `$(...)` trips bash 3.2's lexer whenever the
+#        heredoc body contains EITHER a bare (unescaped) apostrophe anywhere,
+#        OR a `#` sharing a physical line with a backtick -- producing
+#        `bad substitution: no closing )` / `unexpected EOF` and an empty
+#        body. These cases are dynamic-test-suite-independent (no daemon
+#        stub, no forge stub) precisely because the bug is a PARSE-TIME
+#        failure under bash 3.2 -- something this suite's bash (whatever
+#        runs it) cannot reproduce at runtime. They instead statically assert
+#        the two structural properties that make each function safe.
+# ===================================================================
+
+extract_func_body() {
+    # Prints the source lines of function $1 (its `NAME() {` line through the
+    # matching `^}` at column 0 -- this file's own brace style throughout).
+    awk -v fn="$1" '
+        $0 ~ "^"fn"\\(\\)" { printing = 1 }
+        printing { print }
+        printing && /^}/ { exit }
+    ' "$WATCHDOG"
+}
+
+# ---- 54. escalate_peer_coordination_degraded() must not rebuild its body ----
+#          via the vulnerable `body="$(cat <<EOF ... EOF)"` construct --
+#          #7508's fix moved it to `read -r -d '' body <<EOF ... EOF`, which
+#          reads the heredoc directly with no `$(...)` wrapper and so never
+#          enters bash 3.2's buggy quote-tracking scan at all, regardless of
+#          what punctuation the body prose contains.
+PCD_FUNC_BODY="$(extract_func_body escalate_peer_coordination_degraded)"
+PCD_FUNC_CODE_ONLY="$(echo "$PCD_FUNC_BODY" | grep -Ev '^\s*#')"
+if echo "$PCD_FUNC_CODE_ONLY" | grep -Eq 'body="\$\(cat <<'; then
+    fail "#7508 static: escalate_peer_coordination_degraded() reverted to the vulnerable \$(cat <<EOF) body construction"
+else
+    pass "#7508 static: escalate_peer_coordination_degraded() does not use the vulnerable \$(cat <<EOF) body construction"
+fi
+if echo "$PCD_FUNC_BODY" | grep -Eq "read (-[a-zA-Z]+ )*-d ''.*body.*<<EOF"; then
+    pass "#7508 static: escalate_peer_coordination_degraded() builds its body via read -d '' (no \$(...) wrapper)"
+else
+    fail "#7508 static: expected escalate_peer_coordination_degraded() to build its body via read -d '' <<EOF"
+fi
+
+# ---- 55. Both escalation heredoc bodies stay free of the two confirmed ----
+#          bash-3.2 trigger shapes, as a defense-in-depth belt-and-suspenders
+#          check even though #54 already proves escalate_peer_coordination_degraded()
+#          no longer goes through the vulnerable construct at all: a bare
+#          apostrophe anywhere in either body, or a `#` sharing a physical
+#          line with a backtick.
+check_heredoc_body_safety() {
+    # $1: function name, $2: human label for messages
+    local fn="$1" label="$2" body heredoc_lines bad_apostrophe=0 bad_hash_backtick=0
+    body="$(extract_func_body "$fn")"
+    # Slice out everything between the first `<<EOF` (or `<<'EOF'`) and its
+    # closing `EOF` delimiter line -- the actual issue-body prose, not the
+    # surrounding bash.
+    heredoc_lines="$(echo "$body" | awk '
+        /<<-?'"'"'?EOF'"'"'?$/ { inside = 1; next }
+        inside && /^EOF$/ { inside = 0; next }
+        inside { print }
+    ')"
+    if echo "$heredoc_lines" | grep -q "'"; then
+        bad_apostrophe=1
+    fi
+    if echo "$heredoc_lines" | grep -q '`' && echo "$heredoc_lines" | grep '`' | grep -q '#'; then
+        bad_hash_backtick=1
+    fi
+    if [[ "$bad_apostrophe" -eq 0 ]]; then
+        pass "#7508 static: $label heredoc body has no bare apostrophe"
+    else
+        fail "#7508 static: $label heredoc body contains a bare apostrophe -- reintroduces the bash-3.2 parse trap ($(echo "$heredoc_lines" | grep -n "'"))"
+    fi
+    if [[ "$bad_hash_backtick" -eq 0 ]]; then
+        pass "#7508 static: $label heredoc body has no backtick+# sharing a line"
+    else
+        fail "#7508 static: $label heredoc body has a backtick and # on the same line -- reintroduces the bash-3.2 parse trap ($(echo "$heredoc_lines" | grep '`' | grep -n '#'))"
+    fi
+}
+check_heredoc_body_safety escalate_daemon_outage "escalate_daemon_outage() (#5391)"
+check_heredoc_body_safety escalate_peer_coordination_degraded "escalate_peer_coordination_degraded() (#6222)"
+
 echo
 echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed"
 [[ "$TESTS_FAILED" -eq 0 ]]
