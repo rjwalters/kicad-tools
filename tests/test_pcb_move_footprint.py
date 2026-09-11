@@ -77,6 +77,19 @@ NONZERO_ORIGIN_PCB = """(kicad_pcb
 """
 
 
+# MINIMAL_PCB with J3 pre-rotated to 45 degrees and rectangular pads carrying
+# EXPLICIT absolute angles -- pads 1 and 3 sit square to the part (45), pad 2
+# carries an intentional extra 30-degree relative angle (75 absolute).  Every
+# pad is rectangular (1.7 x 0.8) so a stale angle is geometrically meaningful.
+ROTATED_PADS_PCB = (
+    MINIMAL_PCB.replace("(at 120 100 90)", "(at 120 100 45)")
+    .replace("(at -2.5 0)", "(at -2.5 0 45)")
+    .replace("(at 0 0)", "(at 0 0 75)")
+    .replace("(at 2.5 0)", "(at 2.5 0 45)")
+    .replace("(size 1.7 1.7)", "(size 1.7 0.8)")
+)
+
+
 def _at_node_values(pcb_path, uuid):
     """Return the raw footprint-level (at X Y) written into the S-expression.
 
@@ -183,13 +196,7 @@ class TestRunMoveFootprint:
         pcb = tmp_path / "test.kicad_pcb"
         # J3 starts at 45 degrees; its middle pad has an intentional extra
         # 30-degree angle. KiCad stores these pad angles in board coordinates.
-        pcb.write_text(
-            MINIMAL_PCB.replace("(at 120 100 90)", "(at 120 100 45)")
-            .replace("(at -2.5 0)", "(at -2.5 0 45)")
-            .replace("(at 0 0)", "(at 0 0 75)")
-            .replace("(at 2.5 0)", "(at 2.5 0 45)")
-            .replace("(size 1.7 1.7)", "(size 1.7 0.8)")
-        )
+        pcb.write_text(ROTATED_PADS_PCB)
         kwargs = (
             {"batch_map": {"J3": {"x": 100.0, "y": 100.0, "rotation": -90.0}}}
             if batch
@@ -207,11 +214,106 @@ class TestRunMoveFootprint:
             assert [pad.position for pad in fp.pads] == [(-2.5, 0.0), (0.0, 0.0), (2.5, 0.0)]
             assert board.get_pad_position("J3", "1") == pytest.approx((100.0, 97.5))
             assert all(pad.size == (1.7, 0.8) for pad in fp.pads)
+            # Net bindings survive the pad-angle rewrite.
+            assert [(p.number, p.net_number, p.net_name) for p in fp.pads] == [
+                ("1", 1, "GND"),
+                ("2", 0, ""),
+                ("3", 0, ""),
+            ]
 
             # The other connector is unaffected by J3's rotation.
             j2 = board.get_footprint("J2")
             assert j2 is not None
             assert [pad.rotation for pad in j2.pads] == [0.0, 0.0]
+
+    @pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+    def test_rotation_writes_angle_onto_pads_that_had_none(self, tmp_path, batch):
+        """A part authored at 0 degrees gains absolute pad angles when rotated.
+
+        This is the shape of the original report: the pads carry no third
+        ``(at x y ANGLE)`` token at all, so the fix must *add* one rather than
+        only update an existing token.
+        """
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(MINIMAL_PCB)
+        kwargs = (
+            {"batch_map": {"J2": {"x": 15.0, "y": 55.0, "rotation": -90.0}}}
+            if batch
+            else {"reference": "J2", "to": (15.0, 55.0), "rotation": -90.0}
+        )
+
+        assert run_move_footprint(pcb, **kwargs) == 0
+
+        board = PCB.load(pcb)
+        fp = board.get_footprint("J2")
+        assert fp is not None
+        assert fp.rotation == pytest.approx(-90.0)
+        assert [pad.rotation for pad in fp.pads] == pytest.approx([-90.0, -90.0])
+        # Pad-local geometry and net bindings are untouched.
+        assert [pad.position for pad in fp.pads] == [(-1.25, 0.0), (1.25, 0.0)]
+        assert [(p.net_number, p.net_name) for p in fp.pads] == [(1, "GND"), (0, "")]
+
+    @pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+    @pytest.mark.parametrize(
+        "rotation",
+        [None, 45.0],
+        ids=["rotation-omitted", "rotation-unchanged"],
+    )
+    def test_translation_only_move_leaves_pad_angles_untouched(self, tmp_path, batch, rotation):
+        """Moving without a rotation change must not perturb pad angles."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROTATED_PADS_PCB)
+
+        spec: dict = {"x": 100.0, "y": 100.0}
+        if rotation is not None:
+            spec["rotation"] = rotation
+        kwargs = (
+            {"batch_map": {"J3": spec}}
+            if batch
+            else {"reference": "J3", "to": (100.0, 100.0), "rotation": rotation}
+        )
+
+        assert run_move_footprint(pcb, **kwargs) == 0
+
+        board = PCB.load(pcb)
+        fp = board.get_footprint("J3")
+        assert fp is not None
+        assert fp.position == pytest.approx((100.0, 100.0))
+        assert fp.rotation == pytest.approx(45.0)
+        # Absolute pad angles (including pad 2's custom +30 relative angle)
+        # are exactly as authored.
+        assert [pad.rotation for pad in fp.pads] == pytest.approx([45.0, 75.0, 45.0])
+        assert [pad.position for pad in fp.pads] == [(-2.5, 0.0), (0.0, 0.0), (2.5, 0.0)]
+
+    @pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+    def test_dry_run_with_rotation_leaves_pad_angles_untouched(self, tmp_path, batch):
+        """A dry-run rotation reports the move but writes no pad angles."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        pcb.write_text(ROTATED_PADS_PCB)
+        original = pcb.read_text()
+        kwargs = (
+            {"batch_map": {"J3": {"x": 100.0, "y": 100.0, "rotation": -90.0}}}
+            if batch
+            else {"reference": "J3", "to": (100.0, 100.0), "rotation": -90.0}
+        )
+
+        assert run_move_footprint(pcb, dry_run=True, **kwargs) == 0
+
+        assert pcb.read_text() == original
+        board = PCB.load(pcb)
+        fp = board.get_footprint("J3")
+        assert fp is not None
+        assert fp.rotation == pytest.approx(45.0)
+        assert [pad.rotation for pad in fp.pads] == pytest.approx([45.0, 75.0, 45.0])
 
     def test_dry_run_does_not_modify(self, tmp_path):
         """dry_run=True leaves file unchanged."""
