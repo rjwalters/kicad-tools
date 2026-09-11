@@ -885,7 +885,10 @@ finished. A stalled native call or slow serialization may leave **no snapshot**;
 this is reported explicitly. Partial snapshots are atomically published and have
 not passed final cleanup/DRC, so they are not manufacturing-ready.
 
-Timed runs require distinct input and output paths. If a canonical output exists
+Timed runs reject aliases between the input (including its project/rule sidecars)
+and every reserved derived output: canonical/partial PCB, temporary saves, timeout
+report, project/rule sidecars and escalation/placement artifacts. Symlinks and
+existing hardlinks are checked before launching. If a canonical output exists
 when timeout occurs (including an older successful result), it is preserved under
 an `_timeout_unverified_` name recorded in the report. It cannot be mistaken for
 this run's canonical output. The input remains untouched. Sidecar generation and

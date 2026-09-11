@@ -216,3 +216,82 @@ def test_startup_timeout_cannot_leave_old_canonical_output(tmp_path):
     assert not output.exists()
     assert Path(report["unverified_output"]).read_text() == "old successful result"
     assert source.read_text() == "(kicad_pcb)"
+
+
+@pytest.mark.parametrize(
+    "source_name",
+    [
+        "out_partial.kicad_pcb",
+        "out_partial.kicad_pcb.tmp",
+        "out.timeout.json",
+        "out.kicad_pcb.tmp",
+        "out.kicad_pro",
+        "out.kicad_dru",
+        "out.kicad_prl",
+        "out_4layer.kicad_pcb",
+        "out_6layer.kicad_prl",
+        "out_placement_diff.json",
+        "out_placement_delta.json",
+    ],
+)
+def test_all_derived_artifacts_preserve_input_before_worker_launch(tmp_path, source_name):
+    source = tmp_path / source_name
+    original = b"(kicad_pcb (version 20240108))"
+    source.write_bytes(original)
+    output = tmp_path / "out.kicad_pcb"
+    assert route_cmd.main([str(source), "-o", str(output), "--timeout", "0.001"]) == 1
+    assert source.read_bytes() == original
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+@pytest.mark.parametrize(
+    "artifact", ["out_partial.kicad_pcb", "out.timeout.json", "out.kicad_pcb.tmp", "out.kicad_pro"]
+)
+def test_derived_aliases_preserve_read_only_source_sidecars(tmp_path, kind, artifact):
+    source = tmp_path / "input.kicad_pcb"
+    source.write_text("(kicad_pcb)")
+    sidecar = source.with_suffix(".kicad_pro")
+    original = b'{"reviewed": true}'
+    sidecar.write_bytes(original)
+    sidecar.chmod(0o444)
+    alias = tmp_path / artifact
+    if kind == "symlink":
+        alias.symlink_to(sidecar)
+    else:
+        os.link(sidecar, alias)
+    assert (
+        route_cmd.main([str(source), "-o", str(tmp_path / "out.kicad_pcb"), "--timeout", "0.001"])
+        == 1
+    )
+    assert sidecar.read_bytes() == original
+    assert source.read_text() == "(kicad_pcb)"
+    assert alias.read_bytes() == original
+
+
+def test_interruption_hard_kills_group_only_once_after_reaping(tmp_path, monkeypatch):
+    class Process:
+        pid = 12345
+        calls = 0
+
+        def wait(self, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise KeyboardInterrupt
+            if self.calls == 2:
+                raise subprocess.TimeoutExpired("worker", timeout)
+            return -9
+
+    calls = []
+    monkeypatch.setattr(route_deadline.subprocess, "Popen", lambda *a, **kw: Process())
+
+    def signal_group(process, *, kill):
+        if kill and True in calls:
+            raise PermissionError("reaped process group no longer belongs to worker")
+        calls.append(kill)
+
+    monkeypatch.setattr(route_deadline, "_signal_group", signal_group)
+    assert (
+        route_deadline._supervise(["worker"], 1, tmp_path / "control.json", save_seconds=0.1) == 130
+    )
+    assert calls == [False, True]

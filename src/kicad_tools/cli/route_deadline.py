@@ -50,15 +50,50 @@ def record_stage(stage: str, **fields) -> None:
     temporary.replace(path)
 
 
-def _output_identity(args) -> dict:
-    source = Path(args.pcb).resolve()
-    output = (
-        Path(args.output).resolve() if args.output else source.with_stem(source.stem + "_routed")
+def _paths_alias(left: Path, right: Path) -> bool:
+    """Compare names, symlink destinations and existing hardlink identities."""
+    return left.resolve() == right.resolve() or (
+        left.exists() and right.exists() and left.samefile(right)
     )
-    if source == output or (output.exists() and source.exists() and source.samefile(output)):
-        raise ValueError(
-            "Timed routing requires a separate output path; input cannot be overwritten"
+
+
+def _output_identity(args) -> dict:
+    # Retain the requested stem: derived outputs use this name even if the
+    # canonical PCB is a symlink. Resolve only when comparing identities.
+    source = Path(args.pcb).absolute()
+    output = (
+        Path(args.output).absolute() if args.output else source.with_stem(source.stem + "_routed")
+    )
+    protected = set()
+    for board in (source, source.resolve()):
+        protected.add(board)
+        protected.update(
+            board.with_suffix(suffix) for suffix in (".kicad_pro", ".kicad_dru", ".kicad_prl")
         )
+    partial = output.with_stem(output.stem + "_partial")
+    targets = {
+        output,
+        output.with_suffix(output.suffix + ".tmp"),
+        partial,
+        partial.with_suffix(partial.suffix + ".tmp"),
+        output.with_suffix(".timeout.json"),
+        *(output.with_suffix(suffix) for suffix in (".kicad_pro", ".kicad_dru", ".kicad_prl")),
+        output.with_name(output.stem + "_placement_diff.json"),
+        output.with_name(output.stem + "_placement_delta.json"),
+        # The escalation pipeline removes these stale output siblings.
+        *(
+            output.with_name(f"{output.stem}_{layers}layer{suffix}")
+            for layers in (4, 6)
+            for suffix in (".kicad_pcb", ".kicad_prl")
+        ),
+    }
+    for target in sorted(targets):
+        for original in sorted(protected):
+            if _paths_alias(target, original):
+                raise ValueError(
+                    "Timed routing requires a separate output path and derived artifacts: "
+                    f"{target} aliases protected input {original}"
+                )
     return {"input": str(source), "output": str(output), "snapshot_saved": False}
 
 
@@ -108,6 +143,7 @@ def _supervise(
         creationflags=0 if os.name == "posix" else subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
     )
     timed_out = False
+    group_killed = False
     try:
         try:
             result = process.wait(timeout=max(0.0, deadline - time.monotonic()))
@@ -121,6 +157,7 @@ def _supervise(
                 process.wait(timeout=save_seconds)
             except subprocess.TimeoutExpired:
                 _signal_group(process, kill=True)
+                group_killed = True
                 process.wait()
     except KeyboardInterrupt:
         _signal_group(process, kill=False)
@@ -128,11 +165,15 @@ def _supervise(
             process.wait(timeout=save_seconds)
         except subprocess.TimeoutExpired:
             _signal_group(process, kill=True)
+            group_killed = True
             process.wait()
         return 130
     finally:
         # Also terminate descendants left behind by a worker that exited first.
-        _signal_group(process, kill=True)
+        # Do not signal the same numeric group again after hard-kill + reap:
+        # it no longer identifies a live worker group and may be recycled.
+        if not group_killed:
+            _signal_group(process, kill=True)
         process.wait()
     if timed_out:
         state = _read_control(control)
