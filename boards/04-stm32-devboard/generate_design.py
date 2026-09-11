@@ -1346,6 +1346,13 @@ _OSC_REAIM = (
     _OSC_ORIGIN_X + 27.45,
     _OSC_ORIGIN_Y + 21.25,
 )  # re-aimed first-hop endpoint, off the U2.5 column
+# Reviewed follow-on endpoints from the inset and historical routes. Select
+# only an exact existing leg; never infer a new escape from arbitrary copper.
+_OSC_REAIM_VARIANTS = (
+    _OSC_REAIM,
+    (_OSC_ORIGIN_X + 26.4, _OSC_ORIGIN_Y + 21.25),
+    (_OSC_ORIGIN_X + 26.6875, _OSC_ORIGIN_Y + 21.1),
+)
 
 
 def fix_osc_escape(routed_path: Path) -> bool:
@@ -1355,8 +1362,10 @@ def fix_osc_escape(routed_path: Path) -> bool:
     north from the U2.6 via-in-pad into the U2.5 OSC_IN pad centre, shorting
     the two HSE crystal pins.  This deterministic post-route surgery (mirroring
     the :func:`tie_power_pads` s-expression edit) re-aims that single B.Cu hop
-    east of the U2.5 pad column so the escape no longer crosses the OSC_IN
-    pad, clearing the short.  Routed copper for every other net is untouched.
+    to the reviewed follow-on endpoint off the U2.5 pad column, clearing
+    the short. Both eastbound and westbound route variants are supported;
+    an unknown or ambiguous follow-on fails before writing the board.
+    Routed copper for every other net is untouched.
 
     The edit is exact-match on deterministic pad-centre coordinates, so it is
     idempotent: a second pass finds no offending hop and no-ops.  It asserts the
@@ -1380,14 +1389,14 @@ def fix_osc_escape(routed_path: Path) -> bool:
 
     via_x, via_y = _fmt(_OSC_VIA[0]), _fmt(_OSC_VIA[1])
     pad_x, pad_y = _fmt(_OSC_IN_PAD[0]), _fmt(_OSC_IN_PAD[1])
-    new_x, new_y = _fmt(_OSC_REAIM[0]), _fmt(_OSC_REAIM[1])
-
     text = routed_path.read_text()
 
     # Idempotency: if the offending hop is already re-aimed, no-op.
     offending_hop = f"(start {via_x} {via_y})\n\t\t(end {pad_x} {pad_y})"
-    reaimed_hop = f"(start {via_x} {via_y})\n\t\t(end {new_x} {new_y})"
-    if offending_hop not in text and reaimed_hop in text:
+    variants = [(_fmt(x), _fmt(y)) for x, y in _OSC_REAIM_VARIANTS]
+    if offending_hop not in text and any(
+        f"(start {via_x} {via_y})\n\t\t(end {x} {y})" in text for x, y in variants
+    ):
         print("   Escape already re-aimed (idempotent no-op)")
         print("\n   SUCCESS: fix_osc_escape completed")
         return True
@@ -1399,6 +1408,14 @@ def fix_osc_escape(routed_path: Path) -> bool:
         "The router escape geometry changed — re-derive the OSC_OUT B.Cu "
         "escape and update _OSC_VIA / _OSC_IN_PAD / _OSC_REAIM (#3797)."
     )
+
+    matches = [(x, y) for x, y in variants if f"(start {pad_x} {pad_y})\n\t\t(end {x} {y})" in text]
+    assert len(matches) == 1, (
+        "fix_osc_escape: expected exactly 1 reviewed follow-on segment; "
+        f"found {len(matches)} (#3797)."
+    )
+    new_x, new_y = matches[0]
+    reaimed_hop = f"(start {via_x} {via_y})\n\t\t(end {new_x} {new_y})"
 
     # 1. Re-aim the first B.Cu hop's endpoint off the U2.5 pad column.
     text = text.replace(offending_hop, reaimed_hop)
