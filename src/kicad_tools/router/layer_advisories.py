@@ -37,6 +37,40 @@ Drift-prevention contract
     result / ``None``), so a board without those declarations sees
     byte-identical behavior and no new warnings -- mirroring the
     declarative drift-prevention contract of the sibling ampacity DRC.
+
+Tier 3 -- plane-layer signal-reservation guardrail (Issue #5014)
+    :meth:`kicad_tools.router.layers.LayerDefinition.is_routable`
+    deliberately returns ``True`` for every copper layer, including layers
+    a ``--layers 4``-style stack designates ``LayerType.PLANE`` (the
+    continuous GND/PWR reference a controlled-impedance design depends
+    on).  That is intentional -- KiCad zone fills flow around traces, so
+    routing on a plane layer produces manufacturable copper -- but it
+    means the CLI never surfaces the impedance-integrity consequence: the
+    router is free to consume the reference plane with ordinary signal.
+    Two independent guardrails close that gap:
+
+    * :func:`plane_layer_reservation_advisory` -- a route-time warning
+      (like Tiers 1 & 2, stderr-only, exit code unchanged) recommending
+      ``--reserve-plane-layers`` whenever the resolved stack declares one
+      or more ``PLANE`` layers and the user has not opted into the hard
+      restriction.
+    * :func:`reserve_plane_layers_allowed_layers` -- computes the
+      ``DesignRules.allowed_layers`` value that makes the restriction
+      HARD: every ``PLANE``-typed layer is dropped from the routable set,
+      so the A* engine physically refuses to place signal there.  Wired
+      to ``kct route --reserve-plane-layers`` (opt-in; off by default
+      preserves the historical mixed-layer-routing behaviour byte for
+      byte -- PLANE metadata remains advisory-only until this flag is
+      passed).
+
+    :func:`plane_layer_signal_violations` closes the loop post-route: it
+    scans the committed ``Autorouter.routes`` for any segment that landed
+    on a declared ``PLANE`` layer, so a recipe that intentionally routes
+    mixed-layer (``--layers 4-all`` or a stack with no planes at all)
+    sees nothing, while a plane-bearing stack that still leaked signal
+    onto the reference layer -- e.g. because ``--reserve-plane-layers``
+    was not passed -- gets an explicit, per-net report naming the layer
+    and segment count.
 """
 
 from __future__ import annotations
@@ -50,6 +84,7 @@ from kicad_tools.router.layers import LayerType
 if TYPE_CHECKING:
     from kicad_tools.manufacturers.base import DesignRules
     from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.primitives import Route
     from kicad_tools.router.rules import NetClassRouting
 
 # Mirrors ``validate/rules/ampacity.py::_EXTERNAL_LAYERS`` /
@@ -255,3 +290,150 @@ def ampacity_inner_layer_conflicts(
                 )
             )
     return conflicts
+
+
+# --- Tier 3: plane-layer signal-reservation guardrail (Issue #5014) -----
+
+
+def plane_layer_names(layer_stack: LayerStack) -> list[str]:
+    """Return the KiCad names of the stack's ``LayerType.PLANE`` layers.
+
+    Empty for a stack with no dedicated reference planes (``--layers 2``,
+    ``4-all``, or an ``auto``-detected all-signal board).
+    """
+    return [layer.name for layer in layer_stack.layers if layer.layer_type == LayerType.PLANE]
+
+
+def non_plane_layer_names(layer_stack: LayerStack) -> list[str]:
+    """Return the KiCad names of every layer that is NOT ``LayerType.PLANE``.
+
+    Includes ``SIGNAL`` and ``MIXED`` layers (a split plane that still
+    carries signal intentionally keeps its signal eligibility) -- only pure
+    reference-plane layers are excluded.
+    """
+    return [layer.name for layer in layer_stack.layers if layer.layer_type != LayerType.PLANE]
+
+
+def reserve_plane_layers_allowed_layers(layer_stack: LayerStack) -> list[str] | None:
+    """Compute the ``--reserve-plane-layers`` hard ``allowed_layers`` value.
+
+    Returns the KiCad names of every non-``PLANE`` layer in ``layer_stack``
+    (suitable for :attr:`~kicad_tools.router.rules.DesignRules.allowed_layers`,
+    which both the Python and C++ backends already enforce as a HARD
+    constraint -- see Issue #715). Returns ``None`` when the stack declares
+    no ``PLANE`` layers at all: there is nothing to reserve, so the caller
+    should leave ``allowed_layers`` untouched (the drift-prevention no-op --
+    a 2-layer or all-signal board sees byte-identical behavior).
+    """
+    if not plane_layer_names(layer_stack):
+        return None
+    return non_plane_layer_names(layer_stack)
+
+
+def plane_layer_reservation_advisory(
+    layer_stack: LayerStack, *, reserve_plane_layers: bool
+) -> str | None:
+    """Build the Tier-3 plane-layer signal-reservation warning, or ``None``.
+
+    Fires whenever ``layer_stack`` declares one or more ``PLANE`` layers
+    (e.g. ``--layers 4``'s SIG-GND-PWR-SIG stack) and the caller has not
+    passed ``--reserve-plane-layers``. ``LayerDefinition.is_routable``
+    returns ``True`` for those layers by design (KiCad zone fills flow
+    around traces), so nothing today stops the router from consuming a
+    controlled-impedance reference plane with ordinary signal.
+
+    Args:
+        layer_stack: The resolved stack for this route.
+        reserve_plane_layers: Whether ``--reserve-plane-layers`` was passed
+            (``args.reserve_plane_layers``). When ``True`` the hard
+            restriction is already in effect, so the advisory is silent.
+
+    Returns:
+        A loud, actionable warning string, or ``None`` when the condition
+        does not hold (no plane layers, or the restriction is already
+        active).
+    """
+    if reserve_plane_layers:
+        return None
+    planes = plane_layer_names(layer_stack)
+    if not planes:
+        return None
+    plane_joined = ", ".join(planes)
+    signal_joined = ", ".join(non_plane_layer_names(layer_stack))
+    return (
+        f"WARNING: layer stack '{layer_stack.name}' designates {plane_joined} as "
+        "controlled-impedance reference plane(s), but PLANE metadata is NOT a "
+        "hard routing constraint today -- LayerDefinition.is_routable treats "
+        "every copper layer as signal-eligible, so the router may freely "
+        "route signal onto those planes and break the continuous reference "
+        "construction the design depends on. Pass --reserve-plane-layers to "
+        f"hard-restrict signal routing to the non-plane layers ({signal_joined}), "
+        "or accept this warning if mixed-layer routing on the plane is "
+        "intentional for this recipe."
+    )
+
+
+@dataclass(frozen=True)
+class PlaneLayerSignalViolation:
+    """One net's committed copper found on a declared reference-plane layer.
+
+    Attributes:
+        net_name: The net whose segment(s) landed on the plane layer.
+        layer_name: The KiCad name of the offending ``PLANE`` layer.
+        segment_count: How many committed :class:`~kicad_tools.router.primitives.Segment`
+            instances of this net sit on that layer.
+    """
+
+    net_name: str
+    layer_name: str
+    segment_count: int
+
+    @property
+    def message(self) -> str:
+        """The loud, per-net post-route violation line."""
+        plural = "s" if self.segment_count != 1 else ""
+        return (
+            f"WARNING: net '{self.net_name}' has {self.segment_count} segment{plural} "
+            f"routed on reference-plane layer '{self.layer_name}' -- this "
+            "consumes copper reserved for a continuous GND/PWR reference and "
+            "breaks controlled-impedance return-current paths. Re-route with "
+            "--reserve-plane-layers to hard-block signal from this layer, or "
+            f'add avoid_layers=["{self.layer_name}"] plus --strict-layers '
+            "for this net specifically."
+        )
+
+
+def plane_layer_signal_violations(
+    routes: list[Route], layer_stack: LayerStack
+) -> list[PlaneLayerSignalViolation]:
+    """Scan committed routes for signal segments on a declared plane layer.
+
+    Args:
+        routes: The router's committed ``Autorouter.routes`` (each a
+            :class:`~kicad_tools.router.primitives.Route` with ``segments``
+            carrying a ``.layer`` :class:`~kicad_tools.core.types.CopperLayer`).
+        layer_stack: The resolved stack this route ran against.
+
+    Returns:
+        One :class:`PlaneLayerSignalViolation` per ``(net, plane layer)``
+        pair with at least one segment on it, sorted by net name then layer
+        name for deterministic output. Empty when the stack declares no
+        ``PLANE`` layers (the drift-prevention no-op -- a 2-layer or
+        all-signal board is never scanned) or no segment landed on one.
+    """
+    plane_names = set(plane_layer_names(layer_stack))
+    if not plane_names:
+        return []
+
+    counts: dict[tuple[str, str], int] = {}
+    for route in routes:
+        for segment in route.segments:
+            layer_name = getattr(segment.layer, "kicad_name", str(segment.layer))
+            if layer_name in plane_names:
+                key = (route.net_name, layer_name)
+                counts[key] = counts.get(key, 0) + 1
+
+    return [
+        PlaneLayerSignalViolation(net_name=net_name, layer_name=layer_name, segment_count=count)
+        for (net_name, layer_name), count in sorted(counts.items())
+    ]

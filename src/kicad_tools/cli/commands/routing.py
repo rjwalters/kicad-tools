@@ -743,6 +743,12 @@ def run_route_command(args) -> int:
     # path stays byte-identical.
     if getattr(args, "strict_layers", False):
         sub_argv.append("--strict-layers")
+    # Issue #5014: forward --reserve-plane-layers so a controlled-impedance
+    # recipe's declared reference planes are hard-excluded from the routable
+    # set.  Defaults off; forward only when set so the flag-off path stays
+    # byte-identical.
+    if getattr(args, "reserve_plane_layers", False):
+        sub_argv.append("--reserve-plane-layers")
     # Issue #3154: forward the advisory drift-banner flags.  --sync-check
     # defaults on; forward --no-sync-check only when explicitly disabled.
     if getattr(args, "sync_check", True) is False:

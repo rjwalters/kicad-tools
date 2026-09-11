@@ -25,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exits 1 before any routing work); an auto-discovered one degrades to a
   warning; the authored input file is never overwritten (a collision diverts
   the derived sidecar to `current_paths.effective.json`, the #4428 rule).
+- **`kct route --reserve-plane-layers`: controlled-impedance signal-layer
+  reservation guardrail** (#5014) — `LayerDefinition.is_routable` treats
+  every copper layer as signal-eligible by design, including layers a
+  `--layers 4`-style stack designates as a GND/PWR reference plane, so
+  ordinary signal could silently consume the continuous plane a
+  controlled-impedance recipe depends on. `--reserve-plane-layers`
+  hard-restricts routing to the resolved stack's non-`PLANE` layers (via
+  `DesignRules.allowed_layers`, issue #715's pre-existing enforcement); a
+  new route-time advisory recommends the flag whenever a plane-bearing
+  stack is resolved without it, and a post-route audit reports any
+  committed signal segment that still landed on a declared plane layer. A
+  no-op on stacks with no `PLANE` layers (`--layers 2`, `4-all`, or an
+  all-signal `auto`-detected board). See
+  `kicad_tools.router.layer_advisories` for the full contract.
 - **Konnect item 8 audit: natural-language design-rule store** (#4902, Part
   of #4880) — `docs/konnect-item8-design-rules-audit.md` decides **decline**
   on adding a Konnect-style free-text design-rule store: the repo already
