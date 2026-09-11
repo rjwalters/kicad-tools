@@ -228,6 +228,11 @@ class Router:
         """
         self.grid = grid
         self.rules = rules
+        from .mfr_limits import get_mfr_limits
+
+        self._allow_smd_vias = not rules.manufacturer or bool(
+            get_mfr_limits(rules.manufacturer).via_in_pad_supported
+        )
         # Issue #3524: copy the default map instead of aliasing the
         # module-level singleton -- in-place writes must stay local.
         self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
@@ -2724,6 +2729,18 @@ class Router:
             cache_key = (gx, gy, net, effective_radius)
             if cache_key in self._via_cache:
                 return self._via_cache[cache_key]
+
+        # Process restrictions also apply to own-net copper and plane layers.
+        if not self._allow_smd_vias:
+            wx, wy = self.grid.grid_to_world(gx, gy)
+            drill_radius = self.rules.via_drill / 2.0
+            for pad in self.grid._pads:
+                if pad.through_hole:
+                    continue
+                dx = max(abs(wx - pad.x) - pad.width / 2.0, 0.0)
+                dy = max(abs(wy - pad.y) - pad.height / 2.0, 0.0)
+                if dx * dx + dy * dy < drill_radius * drill_radius:
+                    return False
 
         # Check all layers using priority ordering.
         # Issue #2325: Skip plane layers when checking via blockage.  On plane

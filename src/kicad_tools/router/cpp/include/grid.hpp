@@ -374,6 +374,7 @@ public:
                              int layer = -1) const;
 
     // Accessors for validation data sizes (for testing/debugging)
+    const std::vector<PadInfo>& pads() const { return pads_; }
     size_t pad_count() const { return pads_.size(); }
     size_t stored_segment_count() const { return stored_segments_.size(); }
     size_t stored_via_count() const { return stored_vias_.size(); }

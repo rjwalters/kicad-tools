@@ -55,6 +55,7 @@ NB_MODULE(router_cpp, m) {
         .def(nb::init<>())
         .def_rw("trace_width", &DesignRules::trace_width)
         .def_rw("trace_clearance", &DesignRules::trace_clearance)
+        .def_rw("allow_smd_vias", &DesignRules::allow_smd_vias)
         .def_rw("via_drill", &DesignRules::via_drill)
         .def_rw("via_diameter", &DesignRules::via_diameter)
         .def_rw("via_clearance", &DesignRules::via_clearance)

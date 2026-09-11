@@ -550,6 +550,7 @@ struct PadChannelBudget {
 struct DesignRules {
     float trace_width = 0.127f;
     float trace_clearance = 0.127f;
+    bool allow_smd_vias = true;
     float via_drill = 0.3f;
     float via_diameter = 0.6f;
     float via_clearance = 0.127f;

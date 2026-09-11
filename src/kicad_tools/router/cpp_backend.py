@@ -1171,6 +1171,11 @@ class CppPathfinder:
         cpp_rules = router_cpp.DesignRules()
         cpp_rules.trace_width = rules.trace_width
         cpp_rules.trace_clearance = rules.trace_clearance
+        from .mfr_limits import get_mfr_limits
+
+        cpp_rules.allow_smd_vias = not rules.manufacturer or bool(
+            get_mfr_limits(rules.manufacturer).via_in_pad_supported
+        )
         cpp_rules.via_drill = rules.via_drill
         cpp_rules.via_diameter = rules.via_diameter
         cpp_rules.via_clearance = rules.via_clearance
