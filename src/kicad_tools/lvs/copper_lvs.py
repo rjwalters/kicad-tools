@@ -176,38 +176,15 @@ def compare_partitions(
             Without this mapping, legacy REF.PAD groups remain supported,
             including repeated logical membership in separate islands.
             ``bound_pad_count`` continues to count distinct logical pins.
-        advisory_net_names: nets whose completeness diff should be
-            suppressed for ``open`` reporting only (``short`` reporting is
-            NOT suppressed — a pour net copper-fused to a foreign net is
-            still a hard defect).  **Historical, no longer auto-populated**
-            (Issue #4982): this was added in #3914 because pour-routed
-            power/ground nets used to be stitched incrementally under a
-            *per-fill-fragment* extraction model, so a pad not yet touched
-            by a stitching via/segment landed in its own singleton copper
-            island and a strict opens diff reported one advisory "open" per
-            stranded pad (88-105 of them on board 05), drowning any real
-            signal opens in noise.  Issue #3947 changed
-            :meth:`ConnectivityValidator.extract_pad_partition` to union a
-            zone's *entire* fill (every ``filled_polygon`` fragment) into
-            one graph component before the pad partition is built, so a pad
-            genuinely bonded to the pour no longer lands in a singleton —
-            the stitching-residual noise this parameter existed to hide is
-            gone at the geometry layer.  :func:`compare_copper_netlist` (the
-            only production caller) stopped deriving this set from
-            :func:`kicad_tools.analysis.net_status.build_zone_net_map` in
-            #4982: net-wide suppression by zone *ownership* was blanket-
-            hiding genuine opens on disconnected pad-bearing islands of the
-            same net (a real defect is indistinguishable from a stitching
-            residual once you only look at the net name), not just
-            stitching residuals.  The parameter remains for direct callers /
-            unit tests that want to model a residual advisory case
-            explicitly, but nothing in this codebase supplies it today.
+        advisory_net_names: deprecated compatibility argument, ignored.
+            Every disconnected schematic net reports opens, including nets
+            listed here. A net name or zone ownership cannot prove copper
+            continuity or turn an incomplete board into a clean result (#4982).
 
     Returns:
         :class:`CopperLVSResult`.  A short is reported once per offending
         net pair (the lexicographically smallest pad witnesses are used);
-        an open is reported once per pair of same-net copper islands, except
-        for nets in ``advisory_net_names`` (opens suppressed).
+        an open is reported once per pair of same-net copper islands.
 
         **Vacuity guard (#4005 review):** if zero pads end up bound (no
         schematic pin carries a real net AND matches a board pad), the
@@ -324,12 +301,6 @@ def compare_partitions(
         # unnamed nets — those are true positives, not a regression.
         if len(pads) < 2:
             continue
-        # Pour-routed nets (own a copper zone) are stitched incrementally;
-        # pads not yet bonded to the pour form advisory singleton islands that
-        # are not real opens (Issue #3914).  Suppress opens for these nets so
-        # genuine signal-net opens stay visible.  Shorts are still reported.
-        if net in advisory_net_names:
-            continue
         # Group these pads by copper component.
         comps: dict[int, list[str]] = {}
         for pad_id in sorted(pads):
@@ -395,17 +366,9 @@ def compare_copper_netlist(sch_path: str | Path, pcb_path: str | Path) -> Copper
     validator = ConnectivityValidator(pcb_path)
     copper_partition, pad_bindings = validator.extract_pad_occurrences()
 
-    # No advisory net-wide open suppression here (Issue #4982; historically
-    # derived from `build_zone_net_map()` per #3914).  #3947 already unions
-    # a zone's entire fill (every `filled_polygon` fragment) into one graph
-    # component before `extract_pad_partition()` returns, so a pad
-    # genuinely bonded to the pour lands in that component, not a
-    # singleton — the stitching-residual noise the old net-wide waiver
-    # existed to hide is gone at the geometry layer.  Suppressing opens for
-    # every pad on a zone-owning net (regardless of whether that specific
-    # pad's island is actually fill-bonded) was hiding real disconnected
-    # islands, not just residuals; see `compare_partitions`'
-    # `advisory_net_names` docstring for the full history.
+    # Compare actual copper components, without exemptions based on net
+    # names or zone ownership. Disconnected pad-bearing islands must remain
+    # visible even when their net owns a pour elsewhere on the board (#4982).
     return compare_partitions(schematic_net_of_pad, copper_partition, pad_bindings=pad_bindings)
 
 

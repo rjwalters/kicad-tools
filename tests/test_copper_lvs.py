@@ -92,23 +92,8 @@ def test_open_detected_when_same_net_splits_across_islands() -> None:
     assert {open_rec.pad_a, open_rec.pad_b} == {"R1.1", "R2.1"}
 
 
-def test_pour_opens_suppressed() -> None:
-    """Advisory pour nets suppress opens; signal nets still report them (#3914).
-
-    A pour-routed net (GND) whose fill has not yet been stitched leaves its
-    pads in separate copper islands.  Reporting one advisory "open" per
-    stranded pad drowns real signal opens in noise (88-105 of them on board
-    05), so opens are suppressed for nets in ``advisory_net_names``.  A signal
-    net split across two islands is a genuine open and is still reported, and
-    a pour net copper-fused to a *foreign* net is still a short.
-
-    ``advisory_net_names`` itself is unchanged and still honored directly by
-    :func:`compare_partitions` -- only its production auto-population from
-    zone ownership (:func:`compare_copper_netlist` deriving it from
-    ``build_zone_net_map``) was removed in #4982.  See
-    ``test_zone_owning_net_pad_with_no_copper_contact_reports_open`` below
-    for the production-path behavior post-#4982.
-    """
+def test_legacy_advisory_argument_cannot_suppress_opens() -> None:
+    """Net-level advisory hints cannot hide disconnected copper (#4982)."""
     sch = {
         ("U1", "1"): "GND",
         ("U2", "1"): "GND",
@@ -128,14 +113,28 @@ def test_pour_opens_suppressed() -> None:
     strict = compare_partitions(sch, partition)
     assert {o.net_a for o in strict.opens} == {"GND", "SIG"}
 
-    # With GND marked advisory, only the SIG open survives.
+    # Legacy callers get the same strict findings, even with an advisory hint.
     filtered = compare_partitions(sch, partition, advisory_net_names=frozenset({"GND"}))
-    assert [o.net_a for o in filtered.opens] == ["SIG"]
+    assert filtered == strict
+    assert not filtered.clean
     assert filtered.shorts == ()
 
 
+def test_legacy_advisory_result_json_distinguishes_disconnected_copper() -> None:
+    """A manufacturing consumer must never see false-clean serialized evidence."""
+    sch = {("U1", "1"): "GND", ("U2", "1"): "GND"}
+    disconnected = compare_partitions(
+        sch, [frozenset({"U1.1"}), frozenset({"U2.1"})], frozenset({"GND"})
+    )
+    connected = compare_partitions(sch, [frozenset({"U1.1", "U2.1"})], frozenset({"GND"}))
+    assert result_to_json(disconnected)["clean"] is False
+    assert result_to_json(disconnected)["mismatches"][0]["kind"] == "open"
+    assert result_to_json(connected)["clean"] is True
+    assert result_to_json(connected)["mismatches"] == []
+
+
 def test_pour_advisory_filter_does_not_suppress_shorts() -> None:
-    """Opens are suppressed for advisory nets, but shorts never are (#3914)."""
+    """The ignored legacy argument cannot suppress shorts either (#4982)."""
     sch = {
         ("U1", "1"): "GND",
         ("R1", "1"): "SIG",
@@ -186,9 +185,8 @@ def test_zone_owning_net_correctly_bonded_stays_clean() -> None:
 
     Same topology as the sibling test above, but the pad is actually copper-
     bonded (a real trace/via/pour connection) into the rest of the net's
-    island -- per #3947, ``ConnectivityValidator.extract_pad_partition``
-    already unions an entire zone's fill into one graph component, so a
-    genuinely-bonded pad lands in the same component as its net-mates.  This
+    island. A genuinely bonded pad lands in the same extracted copper
+    component as its net-mates; shared zone identity alone is insufficient. This
     must stay clean: removing the net-wide advisory waiver must not
     reintroduce false opens on correctly filled and stitched plane nets.
     """
