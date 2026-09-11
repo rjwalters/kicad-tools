@@ -225,7 +225,15 @@ def _save_changes(changed: dict[Path, Schematic], snapshots: dict[Path, bytes]) 
                 collection[path].chmod(stat.S_IMODE(path.stat().st_mode))
             backups[path].write_bytes(snapshots[path])
             sch.invalidate_cache()
-            sch.save(staged[path])
+            try:
+                sch.save(staged[path])
+            finally:
+                # The atomic writer retains its own temporary on failure. This
+                # destination is already private staging, so we own its cleanup.
+                staged[path].with_suffix(staged[path].suffix + ".tmp").unlink(missing_ok=True)
+            # Saving atomically replaces the staging inode; restore source mode
+            # on the completed file before publishing it over the original.
+            staged[path].chmod(stat.S_IMODE(path.stat().st_mode))
         for path, original in snapshots.items():
             if path.read_bytes() != original:
                 raise ValueError(f"Schematic changed since planning: {path}")

@@ -1,6 +1,8 @@
 """Safety and round-trip regressions for wire-stub repair."""
 
 import json
+import stat
+from pathlib import Path
 
 import pytest
 
@@ -235,7 +237,8 @@ def test_concurrent_edit_aborts_before_writes(tmp_path, monkeypatch, capsys):
     assert not list(tmp_path.glob(".board*"))
 
 
-def test_second_write_failure_rolls_back(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("phase", ["staging", "replacement"])
+def test_second_write_failure_rolls_back(tmp_path, monkeypatch, capsys, phase):
     from kicad_tools.cli import sch_fix_wire_stubs as fix
 
     path = design(tmp_path)
@@ -248,14 +251,20 @@ def test_second_write_failure_rolls_back(tmp_path, monkeypatch, capsys):
 
     def fail_second(*args):
         nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise OSError("write failed")
+        is_original = Path(args[1]) in originals
+        if is_original == (phase == "replacement"):
+            calls += 1
+            if calls == 2:
+                if phase == "replacement":
+                    assert any(p.read_bytes() != data for p, data in originals.items())
+                raise OSError("write failed")
         return real(*args)
 
     monkeypatch.setattr(fix.os, "replace", fail_second)
     assert fix.main([str(path), "--format", "json"]) == 1
     result = json.loads(capsys.readouterr().out)
+    assert "write failed" in result["error"]
+    assert calls >= 2
     assert result["applied"] == []
     assert all(p.read_bytes() == data for p, data in originals.items())
     assert not list(tmp_path.glob(".*.kicad_sch.*"))
@@ -357,3 +366,14 @@ def test_duplicate_pin_numbers_do_not_hide_intervening_pin(tmp_path):
     before = path.read_bytes()
     assert main([str(path)]) == 1
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o640])
+def test_apply_preserves_file_permissions(tmp_path, capsys, mode):
+    from kicad_tools.cli.sch_fix_wire_stubs import main
+
+    path = design(tmp_path)
+    path.chmod(mode)
+    assert main([str(path), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["applied"]
+    assert stat.S_IMODE(path.stat().st_mode) == mode
