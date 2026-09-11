@@ -436,7 +436,10 @@ class TestRunPlacementFeedbackDeadline:
 
 
 # =============================================================================
-# main() integration: deadline is stamped onto args after argparse
+# Worker integration: deadline is stamped onto args after argparse
+# Finite main() calls now run this worker in a supervised subprocess; spies
+# exercise the worker directly. Real subprocess coverage lives in
+# test_route_invocation_deadline.py.
 # =============================================================================
 
 
@@ -482,7 +485,7 @@ class TestMainStampsDeadline:
             captured.append(getattr(args, "_wall_clock_deadline", None))
 
         with patch.object(route_cmd_mod, "_set_wall_clock_deadline", _spy):
-            route_cmd_mod.main(
+            route_cmd_mod._in_process_main(
                 [
                     str(pcb_path),
                     "--timeout",
@@ -512,7 +515,7 @@ class TestMainStampsDeadline:
             captured.append(getattr(args, "_wall_clock_deadline", None))
 
         with patch.object(route_cmd_mod, "_set_wall_clock_deadline", _spy):
-            route_cmd_mod.main(
+            route_cmd_mod._in_process_main(
                 [
                     str(pcb_path),
                     "--dry-run",
@@ -1061,7 +1064,9 @@ class TestMainStampsAutoFixState:
             captured.append(getattr(args, "_auto_fix_status", "<missing>"))
 
         with patch.object(route_cmd_mod, "_set_wall_clock_deadline", _spy):
-            route_cmd_mod.main([str(pcb_path), "--timeout", "60", "--dry-run", "--quiet"])
+            route_cmd_mod._in_process_main(
+                [str(pcb_path), "--timeout", "60", "--dry-run", "--quiet"]
+            )
 
         assert captured, "main() did not invoke _set_wall_clock_deadline"
         # _set_wall_clock_deadline is called BEFORE main() stamps

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Flat signal-clearance table builder for clock-to-signal spacing**
+  (#5021) — `build_signal_clearance_table()` in
+  `router/pairwise_clearance.py` generalises the HV pairwise-clearance
+  resolver (#4431) past voltage-derived requirements to a flat,
+  non-voltage signal-integrity spacing rule, e.g. ST AN4488 §8.4.2's SDRAM
+  clock-to-signal guideline (three trace widths, 0.54 mm edge-to-edge). It
+  populates the same `PairwiseClearanceTable` data carrier the HV epic
+  built, so every downstream consumer (`route_pairwise_violation`,
+  `find_pairwise_violations`, `PairwisePathChecker`, the C++ `Grid3D`
+  projection) gets identical route-time avoidance and post-route audit
+  coverage across tracks, pads and via spans — with no separate
+  implementation to keep in sync and no routing-order dependence (the
+  board07 "reciprocal clock guard" defect this issue tracks: a clock track
+  cleared a foreign net's tracks by the full requirement but passed a
+  foreign through-via at the ordinary fabrication clearance because the
+  via's copper was never widened). No automatic package-escape exemption
+  is applied; a genuine waiver must be an explicit, measured `AttachZone`.
 - **`kct route --current-paths` / `--no-current-paths`** (#4980) — the third
   and final consumer of the declared branch-specific current-path model
   (after `kct pcb reinforce`, #5125, and `kct check`, #5184). The route
@@ -1216,6 +1233,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Noncardinal pad clearance geometry** (#5227) — orient rect, roundrect,
+  and oval copper polygons using KiCad's negative-angle board transform.
+  This removes mirrored false overlaps and missed physical overlaps while
+  preserving absolute pad angles, footprint-local centers, and clearance floors.
 - Grid routing acceptance now retains non-cardinal pad rotation in Python
   segment/via backstops and the native validator, including late pad additions
   (#5182). Native candidate vias now check foreign pad copper using the same
@@ -1257,6 +1278,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`_reject_lost_route_only_bindings`) now aborts with a non-zero exit
   instead of reporting vacuous success if a requested net's pad bindings are
   ever lost after preflight already confirmed the net exists with 2+ pads.
+- **`check_silk_overlap` falsely flagged legitimate footprint-outline
+  corner joins as `silk_overlap` violations** (#4987) — the same-footprint
+  shared-endpoint exemption matched candidate corners by **exact
+  floating-point tuple equality**, which silently stopped covering
+  real-world footprint outlines whose nominally-shared endpoints differ by
+  a few ULPs (independent rounding at export time). Reproduced against
+  chorus v25 (75 of 79 reported warnings were intentional joins, not real
+  collisions). The exemption now matches shared endpoints by **distance
+  within `_CLEARANCE_EPSILON_MM`** (0.1 micron, the same tolerance already
+  used by `check_silk_edge_clearance`), and duplicate-line pairs that
+  coincide at *both* endpoints still flag as a real overlap. `silk_overlap`
+  violation items now also carry each graphic's own UUID
+  (`"U1 (fp_line) {<uuid>}"`) so same-footprint sibling strokes are
+  individually addressable for a per-element waiver. The four unrelated
+  reference-bounding-box false positives noted in the issue are a separate,
+  already-documented AABB-approximation limitation and are out of scope
+  here.
 - **`PCBEditor.add_zone` silently bound an unknown net to net 0 instead of
   rejecting it, and both `PCBEditor.add_zone` / `ZoneGenerator.add_zone`
   accepted arbitrary/disabled layer strings** (#4907) — `PCBEditor.add_zone`

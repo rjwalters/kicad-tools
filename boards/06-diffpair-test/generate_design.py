@@ -944,7 +944,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 best_touches = False
                 for off in offsets:
                     for dx, dy in directions:
-                        vx, vy = x0 + dx * off, y0 + dy * off
+                        vx, vy = round(x0 + dx * off, 3), round(y0 + dy * off, 3)
                         if not _via_ok(net, vx, vy):
                             continue
                         if not _path_ok(net, (x0, y0), (vx, vy), "F.Cu", STUB_W):
@@ -958,6 +958,31 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                             best = (vx, vy)
                     if best_touches:
                         break
+                # Keep the established compass search preference. A narrow
+                # escape corridor can lie between its rays (J1.B8, #5223),
+                # so try the interleaved 15-degree rays only when none of
+                # the original candidates passes both clearance guards.
+                if best is None:
+                    for off in offsets:
+                        for angle in range(15, 360, 15):
+                            if angle % 45 == 0:
+                                continue
+                            radians = math.radians(angle)
+                            vx = round(x0 + math.cos(radians) * off, 3)
+                            vy = round(y0 + math.sin(radians) * off, 3)
+                            if not _via_ok(net, vx, vy):
+                                continue
+                            if not _path_ok(net, (x0, y0), (vx, vy), "F.Cu", STUB_W):
+                                continue
+                            vgeom = Point(vx, vy).buffer(VIA_R)
+                            if any(vgeom.intersects(own[i][0]) for i in primary_set):
+                                best = (vx, vy)
+                                best_touches = True
+                                break
+                            if best is None:
+                                best = (vx, vy)
+                        if best_touches:
+                            break
                 if best is not None:
                     vx, vy = best
                     _emit_via(net, vx, vy)
