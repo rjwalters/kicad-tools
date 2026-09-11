@@ -473,8 +473,12 @@ def _development_metrics(board_dir: Path, readiness: dict) -> dict:
                     or not layer.get_string(0)
                     or not layer.get_string(1)
                     for layer in layers
-                ) or len({layer.tag for layer in layers}) != len(layers):
+                ):
                     raise ValueError("malformed PCB layer definitions")
+                # KiCad layer identity is numeric: 0 and 00 are the same ID.
+                layer_ids = {int(layer.tag) for layer in layers if layer.tag is not None}
+                if len(layer_ids) != len(layers):
+                    raise ValueError("duplicate PCB layer definitions")
                 copper_count = sum(layer.get_string(1) in {"signal", "power"} for layer in layers)
                 if not copper_count:
                     raise ValueError("missing copper layer definitions")

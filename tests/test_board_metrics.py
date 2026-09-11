@@ -793,6 +793,7 @@ def test_development_any_malformed_contributing_geometry_is_unknown(development_
         ("", None),
         ('(layers (bad "F.Cu" signal) (31 "B.Cu" signal))', None),
         ('(layers (0 "F.Cu" signal) (0 "B.Cu" signal))', None),
+        ('(layers (0 "F.Cu" signal) (00 "B.Cu" signal))', None),
     ],
 )
 def test_development_bad_outline_uses_only_declared_layers(development_board, layers, expected):
