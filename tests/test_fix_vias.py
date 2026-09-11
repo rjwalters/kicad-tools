@@ -1800,10 +1800,11 @@ class TestGetBoardOuterLayers:
         assert end == "B.Cu"
 
 
-# ====================================================================
+# =============================================================
+
 
 # Issue #4359 -- fix-vias --relocate-in-pad (Phase 1: signal-via slide-out)
-# ====================================================================
+# =============================================================
 
 
 from kicad_tools.cli.fix_vias_cmd import get_mfr_design_rules  # noqa: E402
@@ -2153,10 +2154,11 @@ class TestRelocateInPadVias:
         assert "skipped" in data and "unresolvable" in data
 
 
-# ====================================================================
+# =============================================================
+
 
 # Issue #4367 -- fix-vias --relocate-in-pad (Phase 2: plane-stitch off-pad)
-# ====================================================================
+# =============================================================
 
 
 from kicad_tools.cli.stitch_cmd import point_in_polygon  # noqa: E402
@@ -2166,7 +2168,7 @@ class TestPlaneStitchRelocation:
     """Phase-2 plane-stitch in-pad via relocation (issue #4367)."""
 
     def test_plane_stitch_via_moved_into_zone(self, tmp_path: Path):
-        """A plane-stitch via is slid off-pad into the same-net zone, no stub."""
+        """A plane-stitch via retains a stub when fill evidence is unavailable."""
         p = _write(tmp_path, _PCB_PLANE_STITCH_WITH_ZONE)
         pcb = PCB.load(p)
         assert _via_in_pad_count(pcb) == 1  # precondition: it IS in-pad
@@ -2179,8 +2181,8 @@ class TestPlaneStitchRelocation:
         assert not result.unresolvable
 
         moved = result.moved[0]
-        # Plane-stitch move: NO stub (pour overlap carries the net after refill).
-        assert moved.stub_layers == []
+        # Unfilled zone boundaries cannot prove surface continuity.
+        assert moved.stub_layers == ["F.Cu"]
         assert moved.kind == "plane-stitch"
 
         via = pcb.vias[0]
@@ -2206,8 +2208,8 @@ class TestPlaneStitchRelocation:
         zone = pcb.zones[0]
         assert point_in_polygon(via.position[0], via.position[1], zone.polygon)
 
-        # No stub segment was appended (plane-stitch relies on pour overlap).
-        assert len(pcb.segments) == 0
+        # Surface copper explicitly preserves the pad connection.
+        assert len(pcb.segments) == 1
 
     def test_plane_stitch_move_persists_through_save(self, tmp_path: Path):
         """The plane-stitch move round-trips to disk and clears the DRC count."""
@@ -2316,7 +2318,7 @@ class TestPlaneStitchRelocation:
         assert result2.moved[0].kind == "plane-stitch"
 
     def test_plane_stitch_json_report_includes_kind(self, tmp_path: Path, capsys):
-        """--format json marks the plane-stitch move with kind + empty stub_layers."""
+        """--format json marks the plane-stitch move with kind + generated stub_layers."""
         import json as _json
 
         p = _write(tmp_path, _PCB_PLANE_STITCH_WITH_ZONE)
@@ -2325,7 +2327,7 @@ class TestPlaneStitchRelocation:
         data = _json.loads(capsys.readouterr().out)
         assert len(data["moved"]) == 1
         assert data["moved"][0]["kind"] == "plane-stitch"
-        assert data["moved"][0]["stub_layers"] == []
+        assert data["moved"][0]["stub_layers"] == ["F.Cu"]
 
 
 # ---------------------------------------------------------------------------
@@ -2884,6 +2886,186 @@ def test_stub_pad_wildcards(tmp_path, wildcard, layer, blocked):
     pcb = PCB.load(_write(tmp_path, text))
     assert (
         bool(_check_stub_clearance(pcb, pcb.vias[0], (12.427, 10), [layer], 0.2, 0.127)) == blocked
+    )
+
+
+@pytest.mark.parametrize(
+    "fill,expected",
+    [
+        ([(95, 95), (108, 95), (108, 108), (95, 108)], []),
+        ([(99.6, 99.6), (100.4, 99.6), (100.4, 100.4), (99.6, 100.4)], ["F.Cu"]),
+        # KiCad encodes a hole by walking a doubled bridge to its inner ring.
+        (
+            [
+                (95, 95),
+                (108, 95),
+                (108, 108),
+                (95, 108),
+                (95, 95),
+                (100.5, 99.5),
+                (100.5, 100.5),
+                (102, 100.5),
+                (102, 99.5),
+                (100.5, 99.5),
+                (95, 95),
+            ],
+            ["F.Cu"],
+        ),
+    ],
+)
+def test_plane_fill_proof_respects_holes_and_islands(tmp_path, fill, expected):
+    from kicad_tools.cli.relocate_in_pad_vias import _plane_stub_layers
+
+    pcb = PCB.load(_write(tmp_path, _PCB_PLANE_STITCH_WITH_ZONE))
+    pcb.zones[0].filled_polygons = [fill]
+    assert (
+        _plane_stub_layers(pcb, pcb.vias[0], pcb.footprints[0].pads[0], (100.9016, 100), "GND")
+        == expected
+    )
+    if not expected:
+        result = relocate_in_pad_vias(pcb, get_mfr_design_rules("jlcpcb", 2, 1.0))
+        assert len(result.moved) == 1
+        assert result.moved[0].stub_layers == []
+        assert not pcb.segments
+
+
+def test_plane_required_stub_blocked_is_atomic(tmp_path, monkeypatch):
+    import importlib
+
+    relocation = importlib.import_module("kicad_tools.cli.relocate_in_pad_vias")
+    pcb = PCB.load(_write(tmp_path, _PCB_PLANE_STITCH_WITH_ZONE))
+    before = str(pcb._sexp)
+    monkeypatch.setattr(relocation, "_check_stub_clearance", lambda *args: "blocked required stub")
+    result = relocate_in_pad_vias(pcb, get_mfr_design_rules("jlcpcb", 2, 1.0))
+    assert not result.moved
+    assert len(result.unresolvable) == 1
+    assert str(pcb._sexp) == before
+    assert pcb.vias[0].position == (100, 100)
+    assert not pcb.segments
+
+
+@pytest.mark.parametrize("via_x", [10.0, 10.64])
+def test_plane_stitch_native_refill_preserves_connection(tmp_path, via_x):
+    import json
+    import shutil
+    import subprocess
+
+    native = shutil.which("kicad-cli")
+    if native is None:
+        pytest.skip("native KiCad CLI unavailable")
+    fixture = Path(__file__).parent / "fixtures/via_relocation/isolated_inner_plane.kicad_pcb"
+    board = tmp_path / "isolated.kicad_pcb"
+    shutil.copyfile(fixture, board)
+    original = PCB.load(board)
+    assert original.relocate_via(original.vias[0], (via_x, 10.0))
+    original.save(board)
+
+    def refill(name):
+        report = tmp_path / f"{name}.json"
+        subprocess.run(
+            [
+                native,
+                "pcb",
+                "drc",
+                "--refill-zones",
+                "--save-board",
+                "--format",
+                "json",
+                "-o",
+                str(report),
+                str(board),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return json.loads(report.read_text())["unconnected_items"]
+
+    assert refill("before") == []
+    pcb = PCB.load(board)
+    result = relocate_in_pad_vias(pcb, get_mfr_design_rules("jlcpcb", 4, 1.0))
+    assert len(result.moved) == 1
+    assert "F.Cu" in result.moved[0].stub_layers
+    pcb.save(board)
+    loaded = PCB.load(board)
+    assert any(s.layer == "F.Cu" and s.end == loaded.vias[0].position for s in loaded.segments)
+    assert refill("after") == []
+
+
+def test_plane_stitch_partial_success_preserves_blocked_via(tmp_path, monkeypatch):
+    import importlib
+
+    relocation = importlib.import_module("kicad_tools.cli.relocate_in_pad_vias")
+    board = (
+        _PCB_PLANE_STITCH_WITH_ZONE.rstrip()[:-1]
+        + """
+      (footprint "test:pad" (layer "F.Cu") (at 105 105)
+        (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "GND")))
+      (via (at 105 105) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "legal-via"))
+    )"""
+    )
+    pcb = PCB.load(_write(tmp_path, board))
+    gate = relocation._check_stub_clearance
+
+    def blocked_first(pcb, via, *args):
+        return "blocked required stub" if via.uuid == "via-stitch" else gate(pcb, via, *args)
+
+    monkeypatch.setattr(relocation, "_check_stub_clearance", blocked_first)
+    rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+    dry = relocate_in_pad_vias(pcb, rules, dry_run=True)
+    assert len(dry.unresolvable) == len(dry.moved) == 1
+    assert dry.moved[0].stub_layers == ["F.Cu"]
+    assert [v.position for v in pcb.vias] == [(100, 100), (105, 105)]
+    assert not pcb.segments
+    result = relocate_in_pad_vias(pcb, rules)
+    assert result.moved == dry.moved
+    assert pcb.vias[0].position == (100, 100)
+    assert len(pcb.segments) == 1
+    assert pcb.segments[0].start == (105, 105)
+
+
+def test_plane_separate_filled_islands_do_not_prove_connection(tmp_path):
+    from kicad_tools.cli.relocate_in_pad_vias import _plane_stub_layers
+
+    pcb = PCB.load(_write(tmp_path, _PCB_PLANE_STITCH_WITH_ZONE))
+    pcb.zones[0].filled_polygons = [
+        [(99.6, 99.6), (100.4, 99.6), (100.4, 100.4), (99.6, 100.4)],
+        [(100.5, 99.6), (102, 99.6), (102, 100.4), (100.5, 100.4)],
+    ]
+    assert _plane_stub_layers(
+        pcb, pcb.vias[0], pcb.footprints[0].pads[0], (100.9016, 100), "GND"
+    ) == ["F.Cu"]
+
+
+def test_plane_stub_preserves_edge_only_pad_contact(tmp_path):
+    board = _PCB_PLANE_STITCH_WITH_ZONE.replace(
+        "(at 100 100) (size 0.6)", "(at 100.64 100) (size 0.6)"
+    )
+    pcb = PCB.load(_write(tmp_path, board))
+    result = relocate_in_pad_vias(pcb, get_mfr_design_rules("jlcpcb", 2, 1.0))
+    assert len(result.moved) == 1
+    stub = pcb.segments[0]
+    # The old centre is outside the pad; preserve the original annular overlap.
+    assert stub.start[0] - stub.width / 2 < 100.5
+
+
+@pytest.mark.parametrize(
+    "pad_layer,zone_layer", [("F.Cu", "In1.Cu"), ("B.Cu", "F.Cu"), ("F.Cu", "B.Cu")]
+)
+def test_plane_stitch_preserves_isolated_land(tmp_path, pad_layer, zone_layer):
+    board = _PCB_PLANE_STITCH_WITH_ZONE.replace(
+        '(0 "F.Cu" signal)', '(0 "F.Cu" signal) (1 "In1.Cu" power)'
+    )
+    board = board.replace('(layers "F.Cu")', f'(layers "{pad_layer}")')
+    board = board.replace(
+        '(layer "F.Cu") (uuid "zone-gnd")', f'(layer "{zone_layer}") (uuid "zone-gnd")'
+    )
+    pcb = PCB.load(_write(tmp_path, board))
+    result = relocate_in_pad_vias(pcb, get_mfr_design_rules("jlcpcb", 4, 1.0))
+    assert len(result.moved) == 1
+    assert pad_layer in result.moved[0].stub_layers
+    assert any(
+        s.layer == pad_layer and s.start == (100, 100) and s.end == pcb.vias[0].position
+        for s in pcb.segments
     )
 
 
