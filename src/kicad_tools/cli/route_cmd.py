@@ -71,6 +71,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 from kicad_tools.core.kicad_lock import check_kicad_lock
 
+from .route_deadline import record_stage
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
@@ -337,6 +339,11 @@ def _set_wall_clock_deadline(args) -> None:
     """
     timeout = getattr(args, "timeout", None)
     now = time.monotonic()
+    from .route_deadline import remaining_deadline
+
+    invocation_deadline = remaining_deadline()
+    if invocation_deadline is not None and timeout and timeout > 0:
+        timeout = max(0.000001, min(timeout, invocation_deadline - now))
     if timeout and timeout > 0:
         args._wall_clock_deadline = now + float(timeout)
         reserve = _auto_fix_budget(args)
@@ -995,6 +1002,7 @@ def _write_routed_pcb(
             the save would drop >90% of a non-trivial input's copper
             (issue #4413).  The output file is left untouched.
     """
+    record_stage("serialization")
     check_kicad_lock(output_path)
     original_content = pcb_path.read_text()
 
@@ -1833,7 +1841,7 @@ def _finalize_routes(
 
 
 # Global state for Ctrl+C handling
-_interrupt_state = {
+_interrupt_state: dict[str, Any] = {
     "interrupted": False,
     "router": None,
     "output_path": None,
@@ -1845,6 +1853,12 @@ _interrupt_state = {
 
 def _handle_interrupt(signum, frame):
     """Handle Ctrl+C by setting the interrupted flag and saving partial results."""
+    # Adaptive/combined routing also installs this handler for SIGTERM.
+    # A supervisor deadline must never promote its best-completed attempt.
+    from .route_deadline import CONTROL_ENV, _deadline_signal
+
+    if signum == signal.SIGTERM and CONTROL_ENV in os.environ:
+        _deadline_signal(signum, frame)
     _interrupt_state["interrupted"] = True
     if not _interrupt_state["quiet"]:
         print("\n\n⚠ Interrupt received! Saving partial results...")
@@ -1980,22 +1994,11 @@ def _save_partial_results() -> bool:
             # ``tests/test_route_zones_preserved.py``'s AST-based
             # zone-preservation audit, which discovers PCB-write sites by the
             # ``<path>.write_text(<content variable>)`` shape.
-            # mypy infers ``save_path`` as ``bool | Path`` because it is
-            # ultimately sourced from the untyped ``_interrupt_state`` dict
-            # literal (whose declared-from-initializer value type is
-            # ``bool | None``) -- a pre-existing typing gap already covered
-            # by several baselined ``"bool" has no attribute ...`` errors
-            # elsewhere in this exact function (e.g. ``.read_text``,
-            # ``.with_stem``, the old ``.write_text``). These three lines are
-            # new attribute-access spellings of that same known-safe
-            # false positive (the guard above already establishes
-            # ``output_path``/``pcb_path`` are real ``Path`` objects), so
-            # they are ignored inline rather than growing the baseline file.
-            tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")  # type: ignore[attr-defined]
+            tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
             tmp_path.write_text(output_content)
             with open(tmp_path, "rb") as f:
                 os.fsync(f.fileno())
-            os.replace(tmp_path, save_path)  # type: ignore[arg-type]
+            os.replace(tmp_path, save_path)
 
             if not quiet:
                 stats = router.get_statistics()
@@ -2835,6 +2838,7 @@ def run_post_route_drc(
     Returns:
         Tuple of (error_count, warning_count)
     """
+    record_stage("post-route-drc")
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate import DRCChecker
 
@@ -3038,6 +3042,7 @@ def _run_auto_fix(
         Returns a non-zero "skipped" code (1) when the wall-clock
         deadline has already expired.
     """
+    record_stage("auto-fix")
     from kicad_tools.cli.fix_drc_cmd import main as fix_drc_main
 
     # Issue #2802 + #3238: skip auto-fix when the *total* wall-clock
@@ -3688,6 +3693,7 @@ def _fill_zones_after_route(output_path: Path, quiet: bool = False) -> None:
         output_path: Path to the routed PCB file (modified in place).
         quiet: Suppress informational output.
     """
+    record_stage("native-zone-fill")
     from kicad_tools.cli.runner import (
         find_kicad_cli,
         run_fill_zones,
@@ -6336,6 +6342,7 @@ def route_with_layer_escalation(
     Returns:
         Exit code (0 = success, 1 = failure)
     """
+    record_stage("layer-escalation")
     from kicad_tools.cli.progress import flush_print, spinner
     from kicad_tools.router import (
         DesignRules,
@@ -7256,6 +7263,7 @@ def route_with_layer_escalation(
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
+    record_stage("optimization")
     # Optimize traces
     if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
@@ -7304,6 +7312,7 @@ def route_with_layer_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
+    record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate)
     if _post_passes_enabled and final_result.router.routes:
@@ -7328,6 +7337,7 @@ def route_with_layer_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
+    record_stage("consolidation")
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -7338,6 +7348,7 @@ def route_with_layer_escalation(
         quiet=quiet,
     )
 
+    record_stage("finalization")
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -8101,6 +8112,7 @@ def route_with_rule_relaxation(
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
+    record_stage("optimization")
     # Optimize traces
     if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
@@ -8146,6 +8158,7 @@ def route_with_rule_relaxation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
+    record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate)
     if _post_passes_enabled and final_result.router.routes:
@@ -8168,6 +8181,7 @@ def route_with_rule_relaxation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
+    record_stage("consolidation")
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -8178,6 +8192,7 @@ def route_with_rule_relaxation(
         quiet=quiet,
     )
 
+    record_stage("finalization")
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -9810,6 +9825,7 @@ def route_with_combined_escalation(
     Returns:
         Exit code (0 = success, 1 = failure)
     """
+    record_stage("combined-routing")
     from kicad_tools.cli.progress import flush_print, spinner
     from kicad_tools.router import (
         DesignRules,
@@ -10443,6 +10459,7 @@ def route_with_combined_escalation(
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
+    record_stage("optimization")
     # Optimize traces
     if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
@@ -10488,6 +10505,7 @@ def route_with_combined_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
+    record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate)
     if _post_passes_enabled and final_result.router.routes:
@@ -10510,6 +10528,7 @@ def route_with_combined_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
+    record_stage("consolidation")
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -10520,6 +10539,7 @@ def route_with_combined_escalation(
         quiet=quiet,
     )
 
+    record_stage("finalization")
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -12345,6 +12365,12 @@ def format_dry_run_grid_plan(plan: DryRunGridPlan) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .route_deadline import run
+
+    return run(argv)
+
+
+def _in_process_main(argv: list[str] | None = None) -> int:
     """Entry point for the route command.
 
     Thin wrapper (issue #4559): ``_process_state_guard`` restores the
@@ -12355,6 +12381,8 @@ def main(argv: list[str] | None = None) -> int:
     suite) are not poisoned.  The state stays stamped for the entire
     invocation; only the outermost exit (return *or* raise) restores it.
     """
+    from .route_deadline import TIMEOUT_EXIT, RouteDeadlineExpired, record_stage
+
     with _process_state_guard():
         try:
             return _main_impl(argv)
@@ -12363,10 +12391,23 @@ def main(argv: list[str] | None = None) -> int:
             # clear. Abort every route flow before its ordinary DRC handling.
             print(f"Error: {exc}", file=sys.stderr)
             return 1
+        except RouteDeadlineExpired:
+            # Do not promote a best-attempt result on an invocation timeout.
+            _interrupt_state["best_completed_attempt"] = False
+            _interrupt_state["quiet"] = True
+            saved = _save_partial_results()
+            output = _interrupt_state.get("output_path")
+            snapshot = (
+                str(output.with_stem(output.stem + "_partial"))
+                if saved and isinstance(output, Path)
+                else None
+            )
+            record_stage("partial-save", snapshot_saved=saved, snapshot=snapshot)
+            return TIMEOUT_EXIT
 
 
-def _main_impl(argv: list[str] | None = None) -> int:
-    """Main entry point for route command."""
+def _route_parser() -> argparse.ArgumentParser:
+    """Shared parser for supervisor preflight and worker execution."""
     parser = argparse.ArgumentParser(
         prog="kicad-tools route",
         description="Autoroute a KiCad PCB file",
@@ -12735,7 +12776,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
             "auto-layer escalation, placement-routing feedback, auto-fix "
             "passes, and inner negotiated/two-phase/escape calls all share "
             "the same deadline.  The command returns the best partial "
-            "result available when the deadline fires (issue #2802)."
+            "result available when the deadline fires. Cleanup and native calls are "
+            "supervised too; up to 5 additional seconds are allowed for raw partial "
+            "serialization, then the process group is terminated. Timeout exits 124; "
+            "a snapshot may be unavailable if serialization cannot finish."
         ),
     )
     parser.add_argument(
@@ -14150,7 +14194,19 @@ def _main_impl(argv: list[str] | None = None) -> int:
         ),
     )
 
+    return parser
+
+
+def _main_impl(argv: list[str] | None = None) -> int:
+    parser = _route_parser()
     args = parser.parse_args(argv)
+    from .route_deadline import configure_output
+
+    try:
+        configure_output(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
     # Issue #4471 (epic #4465): stamp the --complete mode implications
     # (--preserve-existing + the lattice engine, unless the user overrode
@@ -15263,6 +15319,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     _interrupt_state["interrupted"] = False
     signal.signal(signal.SIGINT, _handle_interrupt)
 
+    record_stage("routing-conflict-fallback-conversion")
     # Count nets by category for accurate status reporting (Issue #812)
     # - Multi-pad nets: 2+ pads, need actual routing
     # - Single-pad nets: 1 pad, trivially complete (no routing needed)
@@ -16269,6 +16326,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
         _rss.mark("post-cache-write")
 
+    record_stage("optimization")
     # Get pre-optimization statistics (also used in the no-optimize path
     # below so the segment/via summary print does not raise
     # UnboundLocalError when --no-optimize is set).
@@ -16334,6 +16392,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
 
+    record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate)
     if _post_passes_enabled and router.routes:
@@ -16356,6 +16415,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, router)
 
+    record_stage("consolidation")
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -16366,6 +16426,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         quiet=quiet,
     )
 
+    record_stage("finalization")
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize

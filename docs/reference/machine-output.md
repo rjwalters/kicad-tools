@@ -392,6 +392,25 @@ exit code, so the verdict is hoisted out of the guard (prose unchanged).
 promoted helper, and the now-closed backlog.
 
 
+### Exact-grid wire-stub repair
+
+`kct sch fix-wire-stubs design.kicad_sch [--dry-run] [--format text|json]`
+repairs the root schematic and its child sheets. The default applies repairs;
+`--dry-run` previews them without writing. JSON uses the envelope above and
+adds `planned`, `applied`, and `skipped` arrays. Each action identifies the
+sheet, wire UUID, endpoint index (0=start, 1=end), original endpoints, target
+pin, target position, axis, and grid-step count. Skipped actions include a
+`reason`; a preview always has an empty `applied` array.
+
+Only existing exact-grid detector findings qualify. Repairs must extend a
+straight wire outward toward a uniquely nearest pin with no intervening
+connections or competing extensions. Ambiguous findings remain unchanged.
+Missing sheets, unresolved library definitions, and unsupported multi-unit or
+alternate-body pin geometry fail before any file is written. Repeated references
+to one child file are processed once, using that
+file's embedded library definitions. Unchanged files are never rewritten.
+
+
 ## Interop note (survey idea 7)
 
 A stable machine-output contract is the enabling precondition for external
