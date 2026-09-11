@@ -1,4 +1,4 @@
-"""Observed R5 escape cells must move their own copper on both KiCad schemas."""
+"""Observed escape cells must move their own copper on both KiCad schemas."""
 
 import runpy
 from pathlib import Path
@@ -20,6 +20,9 @@ REPAIR = runpy.run_path(
         ("VCC", (140.665, 117.2), (139.2, 115.5)),
         ("RESET", (141.1, 118.1), (140.9, 118.5)),
         ("RESET", (141.3, 118.3), (140.9, 118.5)),
+        ("NODE_B", (148.1, 105.5), (148.4, 105.5)),
+        ("NODE_B", (158.9, 105.5), (158.6, 105.5)),
+        ("NODE_C", (138.1, 106.0), (138.4, 106.0)),
     ],
 )
 def test_escape_variant_moves_via_and_both_layers_only_on_its_net(named_nets, name, old, new):

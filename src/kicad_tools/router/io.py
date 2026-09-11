@@ -1901,121 +1901,32 @@ class PadPosition:
     y: float
 
 
-def extract_board_dimensions(pcb_path_or_text: str | Path) -> tuple[float, float] | None:
-    """Extract board width and height from a KiCad PCB file.
+def _read_outline_bounds(pcb_path_or_text: str | Path) -> tuple[float, float, float, float] | None:
+    from kicad_tools.core.board_outline import board_outline_bounds
+    from kicad_tools.sexp import parse_string
 
-    Parses the Edge.Cuts outline (``gr_rect`` or four ``gr_line`` segments)
-    to determine board dimensions. This is a lightweight extraction that
-    avoids full PCB parsing.
-
-    Args:
-        pcb_path_or_text: Path to .kicad_pcb file or PCB file contents
-
-    Returns:
-        Tuple of (width_mm, height_mm) or None if no board outline found.
-
-    Example:
-        >>> dims = extract_board_dimensions("board.kicad_pcb")
-        >>> if dims:
-        ...     width, height = dims
-        ...     print(f"Board: {width}mm x {height}mm")
-    """
-    # Read file if path provided
-    if isinstance(pcb_path_or_text, Path):
-        pcb_text = pcb_path_or_text.read_text()
-    elif not pcb_path_or_text.startswith("("):
-        # Looks like a path string
-        pcb_text = Path(pcb_path_or_text).read_text()
+    if isinstance(pcb_path_or_text, str) and pcb_path_or_text.lstrip().startswith("("):
+        text = pcb_path_or_text
     else:
-        pcb_text = pcb_path_or_text
-
-    edge_match = re.search(
-        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)",
-        pcb_text,
-    )
-    if edge_match:
-        x1, y1, x2, y2 = map(float, edge_match.groups())
-        return (abs(x2 - x1), abs(y2 - y1))
-
-    # Fallback: board outlines emitted as four gr_line Edge.Cuts segments
-    # (PCB.create / replace_outline; issue #3805).  Derive the size from the
-    # bounding box of all Edge.Cuts gr_line endpoints.
-    bbox = _edge_cuts_gr_line_bbox(pcb_text)
-    if bbox is not None:
-        min_x, min_y, max_x, max_y = bbox
-        return (max_x - min_x, max_y - min_y)
-    return None
+        text = Path(pcb_path_or_text).read_text()
+    return board_outline_bounds(parse_string(text))
 
 
-def _edge_cuts_gr_line_bbox(pcb_text: str) -> tuple[float, float, float, float] | None:
-    """Bounding box (min_x, min_y, max_x, max_y) of Edge.Cuts gr_line endpoints.
+def extract_board_dimensions(pcb_path_or_text: str | Path) -> tuple[float, float] | None:
+    """Read outline dimensions using the same bounds as schema and routing.
 
-    Lightweight regex scan used by :func:`extract_board_dimensions` and
-    :func:`extract_board_origin` to support board outlines written as four
-    ``gr_line`` segments (issue #3805) rather than a single ``gr_rect``.
-    Returns ``None`` when no Edge.Cuts gr_line geometry is present.
+    Returns None for missing geometry; malformed/unsupported outlines raise ValueError.
     """
-    xs: list[float] = []
-    ys: list[float] = []
-    # Split on the gr_line opener; each chunk holds one gr_line's body up to
-    # the next graphic element.  Only consider chunks on the Edge.Cuts layer.
-    chunks = pcb_text.split("(gr_line")
-    for chunk in chunks[1:]:
-        # Bound the chunk at the next graphic opener so a later element's
-        # layer/coords cannot leak in.
-        next_gr = re.search(r"\(gr_", chunk)
-        body = chunk[: next_gr.start()] if next_gr else chunk
-        if "Edge.Cuts" not in body:
-            continue
-        for cx, cy in re.findall(r"\((?:start|end)\s+(-?[\d.]+)\s+(-?[\d.]+)\)", body):
-            xs.append(float(cx))
-            ys.append(float(cy))
-    if xs and ys:
-        return (min(xs), min(ys), max(xs), max(ys))
-    return None
+    bounds = _read_outline_bounds(pcb_path_or_text)
+    if bounds is None:
+        return None
+    return bounds[2] - bounds[0], bounds[3] - bounds[1]
 
 
 def extract_board_origin(pcb_path_or_text: str | Path) -> tuple[float, float] | None:
-    """Extract board outline origin (bottom-left corner) from a KiCad PCB file.
-
-    Issue #3352 (P_AS4): companion to :func:`extract_board_dimensions`.
-    Used by the auto-pcb-size escalation loop to normalise a recipe's
-    mounting-hole-group anchor against the board outline origin -- KiCad's
-    default origin is ``(100, 100)``, but a hole group declared at
-    ``anchor=(5, 5)`` in the spec typically means "5 mm in from the
-    envelope's bottom-left corner", not "absolute board coord (5, 5)".
-
-    Parses the Edge.Cuts gr_rect to find the start coordinate, then
-    returns ``(min_x, min_y)`` -- the bottom-left corner of the outline.
-
-    Args:
-        pcb_path_or_text: Path to .kicad_pcb file or PCB file contents.
-
-    Returns:
-        ``(origin_x, origin_y)`` in mm, or ``None`` if no board outline
-        gr_rect is detected.
-    """
-    if isinstance(pcb_path_or_text, Path):
-        pcb_text = pcb_path_or_text.read_text()
-    elif not pcb_path_or_text.startswith("("):
-        pcb_text = Path(pcb_path_or_text).read_text()
-    else:
-        pcb_text = pcb_path_or_text
-
-    edge_match = re.search(
-        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)",
-        pcb_text,
-    )
-    if edge_match:
-        x1, y1, x2, y2 = map(float, edge_match.groups())
-        return (min(x1, x2), min(y1, y2))
-
-    # Fallback: four gr_line Edge.Cuts segments (issue #3805).
-    bbox = _edge_cuts_gr_line_bbox(pcb_text)
-    if bbox is not None:
-        min_x, min_y, _max_x, _max_y = bbox
-        return (min_x, min_y)
-    return None
+    """Return the sheet-absolute minimum outline corner, or None if missing."""
+    bounds = _read_outline_bounds(pcb_path_or_text)
+    return bounds[:2] if bounds is not None else None
 
 
 def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
@@ -3358,66 +3269,11 @@ def _extract_pad_blocks(section: str) -> list[str]:
 def _extract_edge_segments(
     pcb_text: str,
 ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
-    """Extract board edge segments from Edge.Cuts layer.
+    """Read layer-qualified straight outline edges without crossing S-expression nodes."""
+    from kicad_tools.core.board_outline import board_outline_segments
+    from kicad_tools.sexp import parse_string
 
-    Parses gr_rect and gr_line elements on the Edge.Cuts layer to build
-    a list of line segments defining the board outline.
-
-    Args:
-        pcb_text: Contents of a .kicad_pcb file
-
-    Returns:
-        List of ((x1, y1), (x2, y2)) tuples for each edge segment.
-    """
-    segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
-
-    # Look for gr_rect on Edge.Cuts (simple rectangular boards)
-    # Use .*? with re.DOTALL to match nested parentheses in stroke/fill attributes
-    for rect_match in re.finditer(
-        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)"
-        r'.*?\(layer\s+"Edge\.Cuts"\)',
-        pcb_text,
-        re.DOTALL,
-    ):
-        x1, y1, x2, y2 = map(float, rect_match.groups())
-        # Convert rectangle to 4 line segments
-        segments.extend(
-            [
-                ((x1, y1), (x2, y1)),  # Top
-                ((x2, y1), (x2, y2)),  # Right
-                ((x2, y2), (x1, y2)),  # Bottom
-                ((x1, y2), (x1, y1)),  # Left
-            ]
-        )
-
-    # Also handle gr_rect where layer comes before coordinates
-    for rect_match in re.finditer(
-        r'\(gr_rect.*?\(layer\s+"Edge\.Cuts"\).*?'
-        r"\(start\s+([\d.]+)\s+([\d.]+)\)\s*\(end\s+([\d.]+)\s+([\d.]+)\)",
-        pcb_text,
-        re.DOTALL,
-    ):
-        x1, y1, x2, y2 = map(float, rect_match.groups())
-        segments.extend(
-            [
-                ((x1, y1), (x2, y1)),
-                ((x2, y1), (x2, y2)),
-                ((x2, y2), (x1, y2)),
-                ((x1, y2), (x1, y1)),
-            ]
-        )
-
-    # Look for gr_line elements on Edge.Cuts (complex board outlines)
-    for line_match in re.finditer(
-        r"\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+"
-        r'\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)',
-        pcb_text,
-        re.DOTALL,
-    ):
-        x1, y1, x2, y2 = map(float, line_match.groups())
-        segments.append(((x1, y1), (x2, y2)))
-
-    return segments
+    return board_outline_segments(parse_string(pcb_text))
 
 
 def _install_fine_pitch_regions_from_components(
@@ -3705,23 +3561,15 @@ def load_pcb_for_routing(
     if rules is None and use_pcb_rules:
         pcb_rules = parse_pcb_design_rules(pcb_text)
 
-    # Parse board dimensions from Edge.Cuts gr_rect
-    edge_match = re.search(
-        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)",
-        pcb_text,
-    )
-    if edge_match:
-        x1, y1, x2, y2 = map(float, edge_match.groups())
-        board_width = x2 - x1
-        board_height = y2 - y1
-        origin_x = x1
-        origin_y = y1
-    else:
-        # Default HAT dimensions
-        board_width = 65.0
-        board_height = 56.0
-        origin_x = 115.0
-        origin_y = 75.0
+    bounds = _read_outline_bounds(pcb_text)
+    if bounds is None:
+        raise ValueError("Cannot route PCB: missing supported Edge.Cuts outline")
+    origin_x, origin_y, max_x, max_y = bounds
+    board_width, board_height = max_x - origin_x, max_y - origin_y
+    if board_width <= 0 or board_height <= 0:
+        raise ValueError("Cannot route PCB: Edge.Cuts outline has zero width or height")
+
+    edge_segments = _extract_edge_segments(pcb_text)
 
     # Parse nets. Resolves both the numeric-plus-name dialect (top-level
     # ``(net N "NAME")`` table) and the KiCad 9/10 name-only dialect, where
@@ -4058,7 +3906,6 @@ def load_pcb_for_routing(
     # Extract edge segments for board bbox and optional edge clearance
     # (Issue #2039).  The bbox derived from actual edge cuts is more
     # accurate than grid origin/dimensions for OOB filtering.
-    edge_segments = _extract_edge_segments(pcb_text)
     if edge_segments:
         all_xs = [p[0] for seg in edge_segments for p in seg]
         all_ys = [p[1] for seg in edge_segments for p in seg]

@@ -12,7 +12,7 @@ From the repository root, with KiCad and the project Python environment installe
 uv run python boards/02-charlieplex-led/generate_design.py /tmp/charlieplex-rebuild
 ```
 
-The schematic and PCB generators share `hardware_design.py` and `design_spec.py`. Native library footprints preserve the actual DIP and header geometry. The deterministic routing recipe traces all twelve nets, then `finalize_routing.py` applies two reviewed escape-via corrections, raises silkscreen widths to the fabrication minimum, and requires native KiCad DRC to have zero findings. These explicit corrections address router defects; they do not suppress checks.
+The schematic and PCB generators share `hardware_design.py` and `design_spec.py`. Native library footprints preserve the actual DIP and header geometry. The deterministic routing recipe traces all twelve nets, then `finalize_routing.py` applies reviewed escape-via corrections, raises silkscreen widths to the fabrication minimum, and requires native KiCad DRC to have zero findings. These explicit corrections address router defects; they do not suppress checks.
 
 `output/manufacturing.zip` contains the fabrication and assembly package. Its manifest records the package files and SHA256 hashes. `output/readiness.json` records current validation evidence and input hashes.
 

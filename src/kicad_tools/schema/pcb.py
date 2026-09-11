@@ -6,7 +6,6 @@ Provides classes for parsing and manipulating KiCad PCB files (.kicad_pcb).
 from __future__ import annotations
 
 import logging
-import math
 import re
 import tempfile
 import uuid
@@ -20,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 from kicad_tools.sexp import SExp
 
+from ..core.board_outline import board_outline_bounds, legacy_arc_points
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
 from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
 from ..footprints.library_path import (
@@ -1637,23 +1637,6 @@ class GraphicLine:
         return line
 
 
-def _rotate_point(
-    point: tuple[float, float], center: tuple[float, float], angle_deg: float
-) -> tuple[float, float]:
-    """Rotate ``point`` about ``center`` by ``angle_deg`` degrees (CCW-positive).
-
-    Used to normalize pre-KiCad-6 legacy ``gr_arc`` encodings (center + signed
-    sweep angle) into modern on-arc start/mid/end points.
-    """
-    theta = math.radians(angle_deg)
-    dx, dy = point[0] - center[0], point[1] - center[1]
-    cos_t, sin_t = math.cos(theta), math.sin(theta)
-    return (
-        center[0] + dx * cos_t - dy * sin_t,
-        center[1] + dx * sin_t + dy * cos_t,
-    )
-
-
 def _arc_points_from_sexp(
     sexp: SExp,
 ) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
@@ -1661,6 +1644,8 @@ def _arc_points_from_sexp(
 
     Preserve GraphicArc's tolerant defaults and explicit-mid precedence. Points
     stay in the input coordinate frame (footprint graphics use local space).
+    Legacy normalization is delegated to ``legacy_arc_points`` so schema
+    parsing and routing share the exact same arc math.
     """
     start = mid = end = (0.0, 0.0)
     if node := sexp.find("start"):
@@ -1673,9 +1658,7 @@ def _arc_points_from_sexp(
     if mid_node is None and (angle := sexp.find("angle")) is not None:
         angle_deg = angle.get_float(0) or 0.0
         center, on_arc_point = start, end
-        start = on_arc_point
-        mid = _rotate_point(on_arc_point, center, angle_deg / 2.0)
-        end = _rotate_point(on_arc_point, center, angle_deg)
+        start, mid, end = legacy_arc_points(on_arc_point, center, angle_deg)
     return start, mid, end
 
 
@@ -2709,8 +2692,8 @@ class PCB:
         detects that offset so footprint positions can be specified relative
         to the board corner.
 
-        Sets self._board_origin to the start position of the first gr_rect
-        found on Edge.Cuts, or (0, 0) if none found.
+        Uses the minimum corner of shared Edge.Cuts bounds, or (0, 0)
+        if no outline geometry is present.
 
         Coordinate-space invariant
         --------------------------
@@ -2737,21 +2720,8 @@ class PCB:
         for adding ``self._board_origin`` back when writing new copper
         primitives to the tree.
         """
-        origin = (0.0, 0.0)
-
-        # Look for gr_rect on Edge.Cuts layer - this is how PCB.create() makes outlines
-        for graphic in self._graphics:
-            if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
-                origin = graphic.start
-                break
-        else:
-            # Fallback: check for gr_line forming a rectangle on Edge.Cuts
-            # Find the minimum x, y coordinates from all Edge.Cuts lines
-            edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
-            if edge_lines:
-                min_x = min(min(line.start[0], line.end[0]) for line in edge_lines)
-                min_y = min(min(line.start[1], line.end[1]) for line in edge_lines)
-                origin = (min_x, min_y)
+        bounds = board_outline_bounds(self._sexp)
+        origin = bounds[:2] if bounds is not None else (0.0, 0.0)
 
         self._board_origin = origin
 
@@ -2905,81 +2875,21 @@ class PCB:
     def board_size(self) -> tuple[float, float]:
         """Board dimensions (width, height) in mm.
 
-        Computes the board size from the Edge.Cuts outline.  For a gr_rect
-        outline (as created by ``PCB.create()``), the size is derived from
-        the rectangle's start and end coordinates.  For outlines composed
-        of gr_line segments, the bounding box of all Edge.Cuts geometry is
-        used.
+        Uses the same layer-aware outline bounds as routing and planning,
+        including extrema of arcs, circles and cubic curves.
 
         Returns:
             Tuple (width, height) in mm.  Returns (0.0, 0.0) if no
             Edge.Cuts geometry is found.
         """
-        # Try gr_rect first (standard board outline from PCB.create)
-        for graphic in self._graphics:
-            if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
-                width = abs(graphic.end[0] - graphic.start[0])
-                height = abs(graphic.end[1] - graphic.start[1])
-                return (width, height)
-
-        # Fallback: bounding box of all Edge.Cuts line segments
-        edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
-        if edge_lines:
-            xs = [coord for line in edge_lines for coord in (line.start[0], line.end[0])]
-            ys = [coord for line in edge_lines for coord in (line.start[1], line.end[1])]
-            return (max(xs) - min(xs), max(ys) - min(ys))
-
-        return (0.0, 0.0)
+        bounds = board_outline_bounds(self._sexp)
+        if bounds is None:
+            return (0.0, 0.0)
+        return bounds[2] - bounds[0], bounds[3] - bounds[1]
 
     def _edge_cuts_bbox_sexp(self) -> tuple[float, float, float, float] | None:
-        """Compute the Edge.Cuts bounding box in sheet-absolute coordinates.
-
-        Walks ``self._sexp`` directly (the source of truth that ``save()``
-        serialises) rather than the in-memory, board-relative collections,
-        so the returned box is in the same coordinate space as the values
-        :meth:`page_fit` rewrites.
-
-        Returns:
-            ``(min_x, min_y, max_x, max_y)`` of all graphics on the
-            ``Edge.Cuts`` layer, or ``None`` if no Edge.Cuts geometry is
-            found.
-        """
-        xs: list[float] = []
-        ys: list[float] = []
-
-        def _on_edge_cuts(node: SExp) -> bool:
-            layer_node = node.find_child("layer")
-            return bool(layer_node and layer_node.get_string(0) == "Edge.Cuts")
-
-        for child in self._sexp.iter_children():
-            if child.tag not in (
-                "gr_rect",
-                "gr_line",
-                "gr_arc",
-                "gr_circle",
-                "gr_poly",
-                "gr_curve",
-            ):
-                continue
-            if not _on_edge_cuts(child):
-                continue
-            for coord_tag in ("start", "end", "mid", "center"):
-                for n in child.find_children(coord_tag):
-                    x, y = n.get_float(0), n.get_float(1)
-                    if x is not None and y is not None:
-                        xs.append(x)
-                        ys.append(y)
-            # gr_poly / gr_curve carry a (pts (xy ...)) child.
-            for pts in child.find_all("pts"):
-                for xy in pts.find_children("xy"):
-                    x, y = xy.get_float(0), xy.get_float(1)
-                    if x is not None and y is not None:
-                        xs.append(x)
-                        ys.append(y)
-
-        if not xs or not ys:
-            return None
-        return (min(xs), min(ys), max(xs), max(ys))
+        """Return shared outline bounds in sheet-absolute coordinates."""
+        return board_outline_bounds(self._sexp)
 
     def _edge_cuts_poly_chains_sexp(self) -> list[list[tuple[float, float]]]:
         """Collect ``gr_poly``/``gr_curve`` Edge.Cuts vertex chains.
