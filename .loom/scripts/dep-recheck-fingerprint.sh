@@ -489,7 +489,8 @@ _run_operator_premise() {
             '{verdict: $verdict, refs: $refs, conclusion_hash: $hash}'
     else
         echo "VERDICT=$verdict"
-        echo "REFS=$refs"
+        # Consumers eval these assignments; lists may contain spaces/newlines.
+        printf 'REFS=%q\n' "$refs"
         echo "CONCLUSION_HASH=$hash"
     fi
 }
@@ -559,7 +560,8 @@ _run_extract_refs() {
     if [[ "$JSON_OUTPUT" == true ]]; then
         jq -n --arg refs "$refs" '{refs: $refs}'
     else
-        echo "REFS=$refs"
+        # Consumers eval these assignments; lists may contain spaces/newlines.
+        printf 'REFS=%q\n' "$refs"
     fi
 }
 

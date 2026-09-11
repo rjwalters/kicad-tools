@@ -1627,6 +1627,7 @@ count):
 ISSUE_NUMBER=<number>
 eval "$(./.loom/scripts/dep-recheck-fingerprint.sh extract-refs --number "$ISSUE_NUMBER")"
 # REFS is now a space-separated (possibly empty) list of referenced numbers.
+# The helper shell-quotes the assignment so multiple refs remain one value.
 ```
 
 **Why not just scan `[.body] + [.comments[].body]` directly (#4963):** an

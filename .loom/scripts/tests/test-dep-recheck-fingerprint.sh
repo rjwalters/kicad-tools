@@ -455,6 +455,10 @@ assert_ne "$(field "$out_pr" CONCLUSION_HASH)" "$(field "$out_pr_conflicting" CO
 assert_eq "blocked" "$(field "$out_pr_conflicting" VERDICT)" \
     "T18b: CONFLICTING merge state alone (no superseding label) is still VERDICT=blocked"
 
+shell_refs() {
+    printf '%s\n' "$1" | bash -euc 'eval "$(cat)"; printf "%s" "$REFS"'
+}
+
 # --- T19-T26: extract-refs (#4963) - the "Extracting the stated reference"
 # extraction behind curator.md's "Checking Operator-Only Premises" section.
 # The regression under test is the #4507 self-perpetuation loop: the old
@@ -482,7 +486,7 @@ FIXTURE_4507="$(jq -n '{
     ]
 }')"
 out="$(echo "$FIXTURE_4507" | "$TARGET_SCRIPT" extract-refs --stdin)"
-assert_eq "" "$(field "$out" REFS)" \
+assert_eq "" "$(shell_refs "$out")" \
     "T19: #4507 shape (body already fixed, N automation heartbeat comments quoting the stale phrase) extracts zero references (#4963)"
 
 # T20: a genuine NEW human-authored "Blocked by #N" comment (different login,
@@ -495,7 +499,7 @@ FIXTURE_HUMAN="$(jq -n '{
     ]
 }')"
 out="$(echo "$FIXTURE_HUMAN" | "$TARGET_SCRIPT" extract-refs --stdin)"
-assert_eq "321" "$(field "$out" REFS)" "T20: a genuine new human-authored 'Blocked by #N' comment is still detected"
+assert_eq "321" "$(shell_refs "$out")" "T20: a genuine new human-authored 'Blocked by #N' comment is still detected"
 
 # T21: login-based exclusion alone (no marker present) still excludes an
 # automation-authored comment.
@@ -506,7 +510,7 @@ FIXTURE_NO_MARKER="$(jq -n '{
     ]
 }')"
 out="$(echo "$FIXTURE_NO_MARKER" | "$TARGET_SCRIPT" extract-refs --stdin)"
-assert_eq "" "$(field "$out" REFS)" "T21: an automation-authored comment is excluded even without the marker (login match alone suffices)"
+assert_eq "" "$(shell_refs "$out")" "T21: an automation-authored comment is excluded even without the marker (login match alone suffices)"
 
 # T22: marker-based exclusion alone (different login) still excludes a
 # comment carrying the curator marker (belt-and-suspenders, per #4963 AC).
@@ -517,19 +521,19 @@ FIXTURE_MARKER_DIFF_LOGIN="$(jq -n '{
     ]
 }')"
 out="$(echo "$FIXTURE_MARKER_DIFF_LOGIN" | "$TARGET_SCRIPT" extract-refs --stdin)"
-assert_eq "" "$(field "$out" REFS)" "T22: a comment carrying the curator marker is excluded even under a different login (belt-and-suspenders)"
+assert_eq "" "$(shell_refs "$out")" "T22: a comment carrying the curator marker is excluded even under a different login (belt-and-suspenders)"
 
 # T23: a body-only reference is found with no comments at all.
 FIXTURE_BODY_ONLY='{"body": "This issue is Blocked by #42.", "comments": []}'
 out="$(echo "$FIXTURE_BODY_ONLY" | "$TARGET_SCRIPT" extract-refs --stdin)"
-assert_eq "42" "$(field "$out" REFS)" "T23: a body-only reference is found with no comments at all"
+assert_eq "42" "$(shell_refs "$out")" "T23: a body-only reference is found with no comments at all"
 
 # T24: --bot-login overrides the default automation identity.
 FIXTURE_CUSTOM_BOT='{"body": "no blockers", "comments": [{"author": {"login": "my-custom-bot"}, "body": "Depends on #88"}]}'
 out_default="$(echo "$FIXTURE_CUSTOM_BOT" | "$TARGET_SCRIPT" extract-refs --stdin)"
-assert_eq "88" "$(field "$out_default" REFS)" "T24a: a non-default automation login is NOT excluded without --bot-login"
+assert_eq "88" "$(shell_refs "$out_default")" "T24a: a non-default automation login is NOT excluded without --bot-login"
 out_custom="$(echo "$FIXTURE_CUSTOM_BOT" | "$TARGET_SCRIPT" extract-refs --stdin --bot-login my-custom-bot)"
-assert_eq "" "$(field "$out_custom" REFS)" "T24b: --bot-login excludes the named identity's comments"
+assert_eq "" "$(shell_refs "$out_custom")" "T24b: --bot-login excludes the named identity's comments"
 
 # T25: login match is case-insensitive and tolerant of an 'app/' prefix or a
 # '[bot]' suffix, since different `gh` views/API paths normalize a GitHub
@@ -542,7 +546,7 @@ FIXTURE_LOGIN_VARIANTS="$(jq -n '{
     ]
 }')"
 out="$(echo "$FIXTURE_LOGIN_VARIANTS" | "$TARGET_SCRIPT" extract-refs --stdin)"
-assert_eq "" "$(field "$out" REFS)" "T25: login match tolerates an 'app/' prefix and a '[bot]' suffix, case-insensitively"
+assert_eq "" "$(shell_refs "$out")" "T25: login match tolerates an 'app/' prefix and a '[bot]' suffix, case-insensitively"
 
 # T26: live --number mode (stubbed gh) reproduces the #4507 shape end to end
 # via `gh issue view --json body,comments`.
@@ -553,14 +557,44 @@ jq -n '{
     ]
 }' >"$STUB_DIR/issue-4507.json"
 out="$("$TARGET_SCRIPT" extract-refs --number 4507 --repo owner/repo)"
-assert_eq "" "$(field "$out" REFS)" "T26a: live --number mode reproduces the #4507 shape end to end (zero refs via gh issue view body,comments)"
+assert_eq "" "$(shell_refs "$out")" "T26a: live --number mode reproduces the #4507 shape end to end (zero refs via gh issue view body,comments)"
 
 jq -n '{
     body: "Blocked by #200",
     comments: []
 }' >"$STUB_DIR/issue-4508.json"
 out="$("$TARGET_SCRIPT" extract-refs --number 4508 --repo owner/repo)"
-assert_eq "200" "$(field "$out" REFS)" "T26b: live --number mode still finds a genuine body reference"
+assert_eq "200" "$(shell_refs "$out")" "T26b: live --number mode still finds a genuine body reference"
+
+# Execute the documented shell consumer, rather than merely inspecting fields.
+consume_extract_refs() {
+    "$TARGET_SCRIPT" extract-refs --stdin | bash -euc '
+        REFS=previous-value
+        eval "$(cat)"
+        printf "%s" "$REFS"
+    '
+}
+for fixture_expected in 'none|' 'Blocked by #42|42' 'Blocked by #42. Requires #43.|42 43'; do
+    fixture="${fixture_expected%%|*}"
+    expected="${fixture_expected#*|}"
+    rc=0
+    actual="$(jq -n --arg body "$fixture" '{body:$body,comments:[]}' | consume_extract_refs)" || rc=$?
+    assert_eq "0" "$rc" "T27: eval consumer succeeds for '$fixture'"
+    assert_eq "$expected" "$actual" "T27: eval consumer retains all references for '$fixture'"
+done
+rc=0
+# The shell-looking issue text must stay literal input, never a command.
+# shellcheck disable=SC2016
+actual="$(printf '%s' '{"body":"Requires #43; $(exit 91)","comments":[{"author":{"login":"human"},"body":"Blocked by #42; exit 92"}]}' | consume_extract_refs)" || rc=$?
+assert_eq "0" "$rc" "T28: consumer accepts mixed body/comment refs without executing source text"
+assert_eq "42 43" "$actual" "T28: only sorted numeric refs reach the consumer"
+
+# The next documented consumer overwrites REFS with one number:state per line.
+rc=0
+actual="$(printf '%s' '{"refs":[{"number":42,"state":"OPEN"},{"number":43,"state":"CLOSED"}]}' |
+    "$TARGET_SCRIPT" operator-premise --stdin | bash -euc 'eval "$(cat)"; printf "%s\n%s" "$VERDICT" "$REFS"')" || rc=$?
+assert_eq "0" "$rc" "T29: operator-premise eval consumer retains multiline refs"
+assert_eq $'stale-premise\n42:OPEN\n43:CLOSED' "$actual" "T29: both reference states survive eval"
 
 # --- Summary ---
 echo ""
