@@ -4443,6 +4443,10 @@ class DiffPairRouter:
             layer=Layer(grid.index_to_layer(layer_idx)),
             ref=template.ref,
             pin=template.pin,
+            # The virtual pad copies the template's copper shape, so it must
+            # copy its rotation too or the shape is silently un-rotated
+            # (issue #4910).
+            rotation=template.rotation,
         )
 
     def _segment_cells_clear(

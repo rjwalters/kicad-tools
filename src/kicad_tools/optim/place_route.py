@@ -327,6 +327,12 @@ class PlaceRouteOptimizer:
                         "layer": Layer.F_CU,
                         "through_hole": is_pth,
                         "drill": pad.drill if is_pth else 0.0,
+                        # Issue #4910: absolute board-frame pad angle (it
+                        # already includes the footprint rotation).  No
+                        # width/height swap is applied here, so the full
+                        # angle is what the obstacle models need to build a
+                        # correct rotated-pad bounding box.
+                        "rotation": pad.rotation,
                     }
                 )
 

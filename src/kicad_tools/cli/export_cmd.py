@@ -56,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to .kicad_pcb file or directory containing one",
     )
     parser.add_argument(
+        "--stackup-id",
+        choices=["JLC04161H-3313", "JLC04161H-7628"],
+        help="Verify this factory construction against actual PCB layers and bundle ordering metadata",
+    )
+    parser.add_argument(
         "--mfr",
         "-m",
         default="jlcpcb",
@@ -285,6 +290,7 @@ def run_export(args: argparse.Namespace) -> int:
     # Build configuration
     auto_lcsc = args.auto_lcsc and not args.no_auto_lcsc
     config = ManufacturingConfig(
+        stackup_id=getattr(args, "stackup_id", None),
         output_dir=output_dir,
         include_bom=not args.no_bom,
         include_pnp=not args.no_cpl,

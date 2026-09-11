@@ -273,7 +273,7 @@ def _size_tightly_coupled_class(net_class: NetClassRouting) -> NetClassRouting:
     return replace(net_class, trace_width=width)
 
 
-def build_net_class_map(*, preserve_authored_gap: bool = False) -> dict[str, NetClassRouting]:
+def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetClassRouting]:
     """Build the canonical net-name -> NetClassRouting mapping.
 
     This is the single source of truth for both the router (consumed
@@ -284,8 +284,20 @@ def build_net_class_map(*, preserve_authored_gap: bool = False) -> dict[str, Net
     parity --- the test cannot drift from the routing config.
 
     ``preserve_authored_gap`` opts into the fixed-gap width sizing measured
-    by ``repair_mipi.py``. Keep the historical full-board recipe unchanged
-    until its expensive regeneration gate has been remeasured.
+    by ``repair_mipi.py`` (Issue #4969): resolve ``trace_width`` for the
+    impedance-constrained MIPI/HDMI classes at their authored 0.10mm
+    ``intra_pair_clearance`` gap via the JLCPCB four-layer coupled-
+    microstrip model, instead of leaving them at the raw declared width
+    (0.15mm, which models to ~127.6 ohm -- outside the classes' 10%
+    tolerance of the 100 ohm target).  Defaults to
+    ``True`` so the router (``route_pcb`` below), the committed JSON
+    sidecar, and every validation script that imports this function via
+    ``build_net_class_map_for_board`` (``scripts/ci/net_class_map_resolver.py``,
+    ``check_diffpair_coverage.py``, ``check_matchgroup_coverage.py``) all
+    derive the SAME geometry -- the generator and the committed sidecar
+    must never disagree about pair sizing again (#4969).  Kept as an
+    explicit opt-out (rather than removed outright) only so a future
+    diagnostic run can still request the raw, un-widened declaration.
     """
     ddr = ddr_data_byte_0_net_class()
     dqs = ddr_dqs_pair_net_class()
