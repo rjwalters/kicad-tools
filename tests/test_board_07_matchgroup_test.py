@@ -375,6 +375,47 @@ class TestDeterministicGeneration:
         assert classes["DQ0"] == generate_design_mod.ddr_data_byte_0_net_class()
         assert classes["A0"] == generate_design_mod.addr_bus_net_class()
 
+    def test_default_build_net_class_map_meets_impedance_at_authored_gap(
+        self, generate_design_mod
+    ) -> None:
+        """Issue #4969: the DEFAULT call must not regress to the naive width.
+
+        ``build_net_class_map()``'s default ``preserve_authored_gap=True``
+        is what ``route_pcb`` (the board's main pipeline), the committed
+        sidecar, and every CI validator that derives the map in-process
+        (``build_net_class_map_for_board`` in
+        ``scripts/ci/net_class_map_resolver.py`` /
+        ``check_diffpair_coverage.py`` / ``check_matchgroup_coverage.py``)
+        all actually call.  Before #4969 the default resolved MIPI/HDMI to
+        the raw declared ``trace_width=0.15`` mm, which models to ~127.6
+        ohm at the authored 0.10mm gap -- outside the classes' 10%
+        tolerance of the 100 ohm target, and inconsistent with the
+        committed sidecar. Pinning the DEFAULT call (no explicit
+        ``preserve_authored_gap`` argument) here -- rather than only the
+        opt-in path exercised above -- is what actually guards against the
+        generator and the committed sidecar silently diverging again.
+        """
+        from kicad_tools.physics import CoupledLines
+        from kicad_tools.physics.stackup import Stackup
+
+        classes = generate_design_mod.build_net_class_map()
+        physics = CoupledLines(Stackup.jlcpcb_4layer())
+        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N"):
+            cls = classes[name]
+            assert cls.intra_pair_clearance == pytest.approx(0.10)
+            actual = physics.edge_coupled_microstrip(
+                cls.trace_width, cls.intra_pair_clearance, "F.Cu"
+            ).zdiff
+            assert actual == pytest.approx(
+                cls.target_diff_impedance, rel=cls.impedance_tolerance_percent / 100
+            ), (
+                f"{name}: default build_net_class_map() resolved trace_width="
+                f"{cls.trace_width}mm, modeling to {actual:.3f} ohm -- outside "
+                f"the {cls.impedance_tolerance_percent:g}% tolerance of "
+                f"{cls.target_diff_impedance:g} ohm at the authored "
+                f"{cls.intra_pair_clearance:g}mm gap."
+            )
+
 
 # =============================================================================
 # AC#5: boards/README.md lists board 07

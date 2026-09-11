@@ -3783,6 +3783,18 @@ class PCB:
         :meth:`_edge_cuts_bbox_sexp`).  Without this, a board whose outline is
         a single ``gr_poly`` would silently return ``[]``.
 
+        Segments do not need to be stored in end-to-end path order, and the
+        Edge.Cuts layer may contain more than one closed contour (mounting
+        holes, fiducial marks, stray shapes) alongside the real board edge.
+        Segments are first grouped into connected components by endpoint
+        proximity (order-independent), each component is chained into a
+        complete nondegenerate closed polygon, and the valid component with
+        the largest bounding-box area is
+        returned as the board outline -- the real edge is essentially always
+        the largest closed shape on the layer. Endpoint matching uses a
+        0.01mm tolerance to absorb the small sub-DRC gaps real-world exports
+        commonly leave between segments that are otherwise continuous.
+
         Returns:
             List of (x, y) coordinate tuples in mm. Empty list if no outline found.
         """
@@ -3825,35 +3837,43 @@ class PCB:
         if not segments:
             return []
 
-        # Build ordered polygon by connecting segments
-        # Start with the first segment
-        polygon: list[tuple[float, float]] = [segments[0][0], segments[0][1]]
-        used = {0}
+        # Real-world Edge.Cuts exports frequently have sub-micron-to-several-
+        # micron gaps between the endpoints of segments that are visually and
+        # functionally continuous (e.g. a rounded-corner outline where a
+        # gr_line's end and the next gr_arc's start were independently
+        # rounded during export/normalization). A too-tight tolerance here
+        # makes the very first segment look "isolated" -- nothing else
+        # connects to it within tolerance -- so the loop below terminates
+        # after a single segment and returns a degenerate 2-point sliver
+        # instead of the closed board outline (#4948). 0.01mm mirrors the
+        # gap tolerance KiCad itself uses when stitching Edge.Cuts graphics
+        # into board polygons.
+        tolerance = 0.01
 
-        # Keep finding the next connected segment
-        while len(used) < len(segments):
-            current_end = polygon[-1]
-            found = False
+        # Segments on Edge.Cuts may include more than one closed contour --
+        # the board edge itself, but also mounting holes, stray fiducial
+        # marks, or other small shapes drawn on the same layer. Chaining
+        # blindly from segments[0] can walk one of those unrelated shapes
+        # (or an unclosed fragment) instead of the actual board outline.
+        # Group segments into connected components first (by endpoint
+        # proximity, independent of file order), chain each component into
+        # its own polygon, and keep the one with the largest bounding-box
+        # area -- the real board edge is essentially always the largest
+        # closed shape on Edge.Cuts.
+        components = self._group_segments_by_connectivity(segments, tolerance)
 
-            for i, (start, end) in enumerate(segments):
-                if i in used:
-                    continue
-
-                # Check if this segment connects to current end
-                if self._points_close(current_end, start):
-                    polygon.append(end)
-                    used.add(i)
-                    found = True
-                    break
-                elif self._points_close(current_end, end):
-                    polygon.append(start)
-                    used.add(i)
-                    found = True
-                    break
-
-            if not found:
-                # No more connected segments found
-                break
+        polygon: list[tuple[float, float]] = []
+        best_area = -1.0
+        for indices in components:
+            candidate = self._chain_segment_indices(segments, indices, tolerance)
+            if not candidate:
+                continue
+            xs = [p[0] for p in candidate]
+            ys = [p[1] for p in candidate]
+            area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+            if area > best_area:
+                best_area = area
+                polygon = candidate
 
         # Transform from sheet-absolute to board-relative coordinates
         # so that outline coordinates match footprint positions (which are
@@ -3862,6 +3882,125 @@ class PCB:
         if ox != 0.0 or oy != 0.0:
             polygon = [(x - ox, y - oy) for x, y in polygon]
 
+        return polygon
+
+    @staticmethod
+    def _group_segments_by_connectivity(
+        segments: list[tuple[tuple[float, float], tuple[float, float]]],
+        tolerance: float,
+    ) -> list[list[int]]:
+        """Partition segment indices into connected components by endpoint proximity.
+
+        Two segments are in the same component if any of their endpoints are
+        within ``tolerance`` of each other, regardless of the order the
+        segments appear in ``segments``. Used to separate the board's actual
+        Edge.Cuts outline from unrelated closed shapes (mounting holes, stray
+        marks) that may also live on the Edge.Cuts layer.
+        """
+        n = len(segments)
+        parent = list(range(n))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for i in range(n):
+            si, ei = segments[i]
+            for j in range(i + 1, n):
+                sj, ej = segments[j]
+                if (
+                    PCB._points_close(si, sj, tolerance)
+                    or PCB._points_close(si, ej, tolerance)
+                    or PCB._points_close(ei, sj, tolerance)
+                    or PCB._points_close(ei, ej, tolerance)
+                ):
+                    union(i, j)
+
+        groups: dict[int, list[int]] = {}
+        for i in range(n):
+            groups.setdefault(find(i), []).append(i)
+        return list(groups.values())
+
+    @staticmethod
+    def _chain_segment_indices(
+        segments: list[tuple[tuple[float, float], tuple[float, float]]],
+        indices: list[int],
+        tolerance: float,
+    ) -> list[tuple[float, float]]:
+        """Chain a subset of segments (by index) into an ordered point list.
+
+        Greedily walks from the first segment, repeatedly appending whichever
+        remaining segment (in any order) connects to the current chain's
+        endpoint within ``tolerance``. Segments do not need to be pre-sorted
+        into path order -- this handles ``gr_line``/``gr_arc`` mixes stored
+        in arbitrary order in the source file.
+        """
+        if len(indices) < 3:
+            return []
+
+        # Every endpoint must have exactly one mate in another segment.
+        # Use the same 0.01mm tolerance as grouping and walking: incomplete
+        # or branched components must not become partial outline candidates.
+        for i in indices:
+            start, end = segments[i]
+            if PCB._points_close(start, end, tolerance):
+                return []
+            for point in (start, end):
+                mates = sum(
+                    PCB._points_close(point, endpoint, tolerance)
+                    for j in indices
+                    if j != i
+                    for endpoint in segments[j]
+                )
+                if mates != 1:
+                    return []
+
+        start_idx = indices[0]
+        polygon: list[tuple[float, float]] = [
+            segments[start_idx][0],
+            segments[start_idx][1],
+        ]
+        remaining = set(indices) - {start_idx}
+
+        while remaining:
+            current_end = polygon[-1]
+            found = False
+
+            for i in remaining:
+                start, end = segments[i]
+                if PCB._points_close(current_end, start, tolerance):
+                    polygon.append(end)
+                    remaining.discard(i)
+                    found = True
+                    break
+                elif PCB._points_close(current_end, end, tolerance):
+                    polygon.append(start)
+                    remaining.discard(i)
+                    found = True
+                    break
+
+            if not found:
+                # No more connected segments found within this component.
+                break
+
+        if remaining or not PCB._points_close(polygon[-1], polygon[0], tolerance):
+            return []
+        # Snap only the closing gap; keep all other source vertices intact.
+        polygon[-1] = polygon[0]
+        ox, oy = polygon[0]
+        twice_area = sum(
+            (a[0] - ox) * (b[1] - oy) - (b[0] - ox) * (a[1] - oy)
+            for a, b in zip(polygon, polygon[1:], strict=False)
+        )
+        if abs(twice_area) <= tolerance * tolerance:
+            return []
         return polygon
 
     @staticmethod
