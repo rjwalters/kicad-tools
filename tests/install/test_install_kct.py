@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts" / "install-kct.sh"
@@ -665,7 +666,7 @@ def test_client_codex_installs_agents_skills_and_agents_md(
 
     # SKILL.md landed for every selected skill plus the always-vendored help.
     skills_dir = target_repo / ".agents" / "skills"
-    for name in ("help", "ee-review", "tapeout"):
+    for name in sorted(path.stem for path in SKILLS_SRC.glob("*.md") if path.name != "README.md"):
         skill_md = skills_dir / f"kct-{name}" / "SKILL.md"
         assert skill_md.exists(), f"{skill_md} missing"
         text = skill_md.read_text()
@@ -679,6 +680,14 @@ def test_client_codex_installs_agents_skills_and_agents_md(
         assert "description:" in frontmatter
         assert "invocation:" not in frontmatter
         assert "suggestedModel:" not in frontmatter
+        metadata = yaml.safe_load(frontmatter)
+        assert metadata["name"] == f"kct-{name}"
+        source_description = next(
+            line.removeprefix("description:").strip()
+            for line in (SKILLS_SRC / f"{name}.md").read_text().splitlines()
+            if line.startswith("description:")
+        )
+        assert metadata["description"] == source_description
 
     # The body is derived from the shared source, not hand-duplicated: a
     # distinctive sentence from ee-review.md's body must survive verbatim.
