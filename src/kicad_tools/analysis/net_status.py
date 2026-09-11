@@ -1281,10 +1281,20 @@ class NetStatusAnalyzer:
                 for other in touched[1:]:
                     _union(touched[0], other)
 
-            # 3. A segment chain whose own copper touches more than one
-            #    fragment of this zone likewise bridges them physically (a
-            #    trace laid across a fill gap between two islands).
+            # 3. A segment chain and the vias it physically contacts form
+            #    one bridge. Include the vias' fill contacts even when the
+            #    chain has no pads: fill -> via -> trace -> via -> fill is a
+            #    real connection between islands on the opposite layer.
             for chain in chain_seg_indices:
+                chain_vias = [
+                    (via, via_geom)
+                    for via, via_geom, _via_raw in via_geoms
+                    if any(
+                        self._via_spans_layer(via.layers, segments[s].layer)
+                        and self._segment_touches_via(segments[s], via, via_geom)
+                        for s in chain
+                    )
+                ]
                 touched = []
                 for i in range(n_fragments):
                     region_i = regions[i]
@@ -1294,6 +1304,10 @@ class NetStatusAnalyzer:
                         self._via_spans_layer([segments[s].layer], fill_layers[i])
                         and region_i.intersects(self._segment_poly(segments[s]))
                         for s in chain
+                    ) or any(
+                        self._via_spans_layer(via.layers, fill_layers[i])
+                        and region_i.intersects(via_geom)
+                        for via, via_geom in chain_vias
                     ):
                         touched.append(i)
                 for other in touched[1:]:

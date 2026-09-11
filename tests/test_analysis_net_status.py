@@ -2102,6 +2102,40 @@ class TestDisjointZoneIslandConnectivity:
         )
         assert gnd.island_count == 1
 
+    @pytest.mark.parametrize(
+        ("bridge_present", "right_via_end", "connected"),
+        [(False, "B.Cu", False), (True, "B.Cu", True), (True, "In1.Cu", False)],
+    )
+    def test_padless_trace_and_vias_bridge_fill_islands(
+        self, tmp_path: Path, bridge_present: bool, right_via_end: str, connected: bool
+    ):
+        """A B.Cu trace connects F.Cu islands only through its two vias.
+
+        Neither trace nor via touches a pad directly: pads reach the bridge
+        through their fill islands. Removing the right via or limiting it to
+        F.Cu/In1.Cu leaves a real open because it cannot reach the B.Cu trace.
+        """
+        copper = """
+  (segment (start 17 17) (end 23 17) (width 0.3) (layer "B.Cu") (net 1))
+  (via (at 17 17) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+"""
+        if bridge_present:
+            copper += f"""
+  (via (at 23 17) (size 0.6) (drill 0.3) (layers "F.Cu" "{right_via_end}") (net 1))
+"""
+        board = DISJOINT_ISLANDS_BOTH_PADS_OPEN_PCB.replace(
+            '(0 "F.Cu" signal)',
+            '(0 "F.Cu" signal)\n    (1 "In1.Cu" signal)\n'
+            '    (2 "In2.Cu" signal)\n    (31 "B.Cu" signal)',
+        )
+        board = board.rstrip()[:-1] + copper + ")\n"
+        path = tmp_path / "via_trace_bridge.kicad_pcb"
+        path.write_text(board)
+        gnd = NetStatusAnalyzer(path).analyze().get_net("GND")
+        assert gnd is not None
+        assert gnd.island_count == (1 if connected else 2)
+        assert (gnd.status == "complete") == connected
+
     def test_track_bridge_reconnects_disjoint_islands(self, disjoint_track_bridged_pcb: Path):
         """A real copper track across the gap also counts as a physical bond.
 
