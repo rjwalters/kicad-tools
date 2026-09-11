@@ -101,6 +101,13 @@ def test_pour_opens_suppressed() -> None:
     05), so opens are suppressed for nets in ``advisory_net_names``.  A signal
     net split across two islands is a genuine open and is still reported, and
     a pour net copper-fused to a *foreign* net is still a short.
+
+    ``advisory_net_names`` itself is unchanged and still honored directly by
+    :func:`compare_partitions` -- only its production auto-population from
+    zone ownership (:func:`compare_copper_netlist` deriving it from
+    ``build_zone_net_map``) was removed in #4982.  See
+    ``test_zone_owning_net_pad_with_no_copper_contact_reports_open`` below
+    for the production-path behavior post-#4982.
     """
     sch = {
         ("U1", "1"): "GND",
@@ -138,6 +145,63 @@ def test_pour_advisory_filter_does_not_suppress_shorts() -> None:
     result = compare_partitions(sch, partition, advisory_net_names=frozenset({"GND"}))
     assert len(result.shorts) == 1
     assert {result.shorts[0].net_a, result.shorts[0].net_b} == {"GND", "SIG"}
+
+
+def test_zone_owning_net_pad_with_no_copper_contact_reports_open() -> None:
+    """AC1/AC4a (#4982): a zone-owning net's disconnected island is a real open.
+
+    Before #4982, :func:`compare_copper_netlist` derived ``advisory_net_names``
+    from every net that owns a copper zone *anywhere* on the board
+    (``build_zone_net_map``) and suppressed ``open`` reporting for the whole
+    net -- so a pad with literally zero copper contact (no trace, no via, no
+    pour-fill overlap) on a zone-owning net was silently dropped from the
+    diff, producing a non-vacuous clean LVS result for an electrically
+    incomplete board (the board05 false-clean this issue reports).
+
+    This fixture models that exact shape directly against
+    :func:`compare_partitions` with the production default
+    (``advisory_net_names`` empty, matching #4982's fixed
+    ``compare_copper_netlist`` -- it no longer auto-populates this set): a
+    GND pad (GND owns a zone on real boards) stranded in its own singleton
+    island, with no trace/via/pour bond to the rest of the net, must be
+    reported as an open -- not silently waived by net identity.
+    """
+    sch = {
+        ("U1", "1"): "GND",
+        ("U2", "1"): "GND",
+    }
+    # U1.1 has zero copper contact: it is alone in its own island, with no
+    # trace/via/pour-fill overlap tying it to U2.1's island.
+    partition = [
+        frozenset({"U1.1"}),
+        frozenset({"U2.1"}),
+    ]
+    result = compare_partitions(sch, partition)
+    assert [o.net_a for o in result.opens] == ["GND"]
+    assert result.shorts == ()
+
+
+def test_zone_owning_net_correctly_bonded_stays_clean() -> None:
+    """AC2/AC4b (#4982): a genuinely fill-bonded zone-owning net stays clean.
+
+    Same topology as the sibling test above, but the pad is actually copper-
+    bonded (a real trace/via/pour connection) into the rest of the net's
+    island -- per #3947, ``ConnectivityValidator.extract_pad_partition``
+    already unions an entire zone's fill into one graph component, so a
+    genuinely-bonded pad lands in the same component as its net-mates.  This
+    must stay clean: removing the net-wide advisory waiver must not
+    reintroduce false opens on correctly filled and stitched plane nets.
+    """
+    sch = {
+        ("U1", "1"): "GND",
+        ("U2", "1"): "GND",
+    }
+    # U1.1 and U2.1 share one copper island (bonded via trace/via/pour).
+    partition = [frozenset({"U1.1", "U2.1"})]
+    result = compare_partitions(sch, partition)
+    assert result.clean
+    assert result.opens == ()
+    assert result.shorts == ()
 
 
 def test_floating_schematic_pin_excluded_from_diff() -> None:
@@ -1032,14 +1096,29 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
 
 
 def test_compare_copper_netlist_on_board06_wired_fixture_is_clean() -> None:
-    """End-to-end #4012 pin: board 06's wired schematic yields a real clean.
+    """End-to-end #4012 pin: board 06's wired schematic yields real evidence.
 
     History: board 06's schematic was unwired pre-#4012 (0/198 pins bound)
     and its #4004 ``lvs.json`` claimed ``clean=true`` on zero evidence —
     the vacuity hole from PR #4005's review, pinned here as a VACUOUS
-    verdict until #4012 wired the schematic.  Now the comparator binds all
-    198 pads and the clean verdict is genuinely evidenced (21/21 nets
-    routed to copper completion).
+    verdict until #4012 wired the schematic.  The comparator binds all 198
+    pads (genuine evidence, not vacuous).
+
+    Update (#4982): this fixture is NOT actually fully copper-complete.
+    Three of U1's power/ground pads (U1.15/GND, U1.17/+3V3, U1.32/GND) are
+    each a singleton copper component -- zero trace/via/pour-fill contact
+    to their net's island, confirmed directly against
+    :meth:`ConnectivityValidator.extract_pad_partition`.  Before #4982 this
+    was silently waived: GND and +3V3 both own a zone elsewhere on this
+    board, so the old net-wide ``advisory_net_names`` suppression (derived
+    from zone *ownership*, not per-pad copper contact) dropped these opens
+    from the diff entirely, and this test asserted a ``clean=True`` that
+    had no evidence behind it for exactly these three pads -- the same
+    false-clean shape #4982 fixes on board 05.  Removing that blanket
+    waiver correctly surfaces the three opens; a real re-route of this
+    pinned fixture is a separate concern (the fixture is a frozen snapshot
+    for LVS-pin stability, not a shipping board), so this test now pins
+    the newly-correct dirty verdict instead of the stale, unevidenced one.
     """
     repo_root = Path(__file__).resolve().parent.parent
     board_out = repo_root / "boards" / "06-diffpair-test" / "regression-fixture"
@@ -1050,8 +1129,16 @@ def test_compare_copper_netlist_on_board06_wired_fixture_is_clean() -> None:
     result = compare_copper_netlist(sch, pcb)
     assert not result.vacuous
     assert result.bound_pad_count == 198
-    assert result.clean
-    assert result.mismatches == ()
+    # Three genuinely disconnected power/ground pads on U1 (#4982) -- see
+    # docstring.  Not a false positive: each is a singleton copper
+    # component with zero copper contact to its net's pour/island.
+    assert not result.clean
+    assert result.shorts == ()
+    assert len(result.opens) == 3
+    assert {o.net_a for o in result.opens} == {"GND", "+3V3"}
+    disconnected_pads = {"U1.15", "U1.17", "U1.32"}
+    witnessed_pads = {p for o in result.opens for p in (o.pad_a, o.pad_b)}
+    assert disconnected_pads <= witnessed_pads
 
 
 # ---------------------------------------------------------------------------
