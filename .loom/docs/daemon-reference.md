@@ -4200,6 +4200,25 @@ its cooldown automatically. Defaults **on**; disable with
 `LOOM_WORK_FINDER_NOOP_COOLDOWN=0` or
 `autonomous.workFinder.noopCooldown.enabled = false`.
 
+**Both brakes are fleet-wide as of #7477.** The dispatch backoff and the no-op
+cooldown were each a plain per-process `HashMap` — correct on one host, nearly
+useless on a fleet: host A arms its window and stops offering the issue, but
+B/C/D never saw it and re-claim the same freshly-released row, so an N-host
+fleet round-robins the claim/release bail loop up to N× faster than a
+single-host brake was designed to prevent (evidence: #7466/#7468 flapping
+`loom:issue` ↔ `loom:building` every 1-2 minutes for hours across four hosts).
+Arming either window now also broadcasts it over the **peer-claim channel**
+(two new `ClaimKind`s, `DispatchBackoffArmed` / `NoopCooldownArmed`, carrying
+the remaining seconds), and `dispatch_backoff_issues` / `noop_cooldown_issues`
+union the local map with the peer view before the work finder reads them.
+Publish is fail-open and one-shot (a re-arm re-broadcasts), the expiry is
+measured against **local receipt** rather than the advertiser's clock, and a
+host with no peer-claim view attached (`safehouse.enabled` false) degrades
+byte-for-byte to the pre-#7477 per-host behavior. The lease-reclaim path
+(`claim_reconciliation`) reads none of this, so a genuinely orphaned claim that
+never armed a window is still reclaimed promptly. Full mechanism:
+[`safehouse.md` → "Fleet-wide no-op cooldown / dispatch backoff"](safehouse.md).
+
 **First in-repo caller (#6740).** `defaults/scripts/record-noop-release.sh`
 is the shell helper that actually makes this call — resolving the daemon
 binary defensively (same `lib/locate-daemon-bin.sh` resolution
