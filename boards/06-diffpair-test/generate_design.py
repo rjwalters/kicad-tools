@@ -390,6 +390,19 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     conservative (an audit "connected" verdict implies real overlap; a
     thermal-spoke connection always overlaps the inscribed circle).
 
+    Via layer span (issue #5176): a via's declared endpoint layers are
+    expanded across the board's *physical* copper stack between them (see
+    ``_via_layer_span`` below), mirroring
+    ``ConnectivityValidator._via_bridged_layers``, instead of assuming every
+    via bridges all 4 copper layers regardless of its declared span.  A via
+    that does not physically reach a given layer can no longer fuse copper
+    on that layer into a net's "connected" verdict -- the false
+    ``POUR CONNECTIVITY: PASS`` mode a non-through (blind/buried) via would
+    otherwise create.  Board 06's stitching only ever emits through vias
+    today, so this is a no-op on its current committed/regenerated
+    artifacts; it is exercised directly by a constructed fixture in
+    ``tests/test_board_06_pour_audit_fixtures.py``.
+
     Returns:
         ``{net_name: {"connected": bool, "pad_groups": [[(pad, is_th)]],
         "zero_fill_zones": int}}``.  Requires shapely; raises
@@ -405,6 +418,36 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
 
     text = pcb_path.read_text()
     all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
+    # Board 06's fixed 4-layer stackup in *physical* stack order (issue
+    # #5176): F.Cu, then inner layers ascending, then B.Cu.  Needed so a
+    # via's declared endpoints (e.g. ``(layers "F.Cu" "B.Cu")``) expand to
+    # every copper layer physically bridged between them, mirroring
+    # ``ConnectivityValidator._copper_layer_order`` /
+    # ``_via_bridged_layers``.
+    copper_layer_order = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+
+    def _via_layer_span(via_text: str) -> frozenset[str]:
+        """Expand a via's declared endpoint layers to its full bridged span.
+
+        ``(layers "F.Cu" "B.Cu")`` is a through-hole via that also joins
+        every inner copper layer between the endpoints; a via naming two
+        adjacent layers (e.g. a blind ``F.Cu``/``In1.Cu`` via) bridges only
+        those.  Falls back to the literal named layers (never to
+        ``all_layers``) when the span can't be resolved, so an
+        unrecognised or degenerate via never over-connects.
+        """
+        m = re.search(r'\(layers "([^"]+)" "([^"]+)"\)', via_text)
+        if not m:
+            return all_layers
+        named = frozenset(m.groups())
+        copper_named = frozenset(layer for layer in named if layer.endswith(".Cu"))
+        indices = [
+            copper_layer_order.index(layer) for layer in copper_named if layer in copper_layer_order
+        ]
+        if len(indices) < 2:
+            return copper_named
+        lo, hi = min(indices), max(indices)
+        return frozenset(copper_layer_order[lo : hi + 1])
 
     # Zone fills per net (+ zero-fill bookkeeping for the explicit gate).
     fills: dict[str, list] = {n: [] for n in net_names}
@@ -456,7 +499,10 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         sz = re.search(r"\(size ([\d.]+)\)", via)
         radius = (float(sz.group(1)) if sz else 0.6) / 2.0
         vias[name].append(
-            (Point(float(at.group(1)), float(at.group(2))).buffer(radius), all_layers)
+            (
+                Point(float(at.group(1)), float(at.group(2))).buffer(radius),
+                _via_layer_span(via),
+            )
         )
 
     # Pads (absolute sheet coordinates via the analyzer's PCB model).
