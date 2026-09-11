@@ -5994,20 +5994,40 @@ class Autorouter:
 
         Issue #2432.
 
+        Issue #4979: a matrix assignment is a SOFT optimisation hint and can
+        never overrule a HARD user constraint.  ``replace(existing, ...)``
+        already carried every other field of the authored class through
+        (``avoid_layers`` included, so the hard block itself was never lost),
+        but the injected preference could still POINT AT a layer the class
+        hard-blocks -- a preference the search can only ever decline to
+        follow.  Assigned layers are therefore filtered against
+        :meth:`NetClassRouting.hard_avoided_layer_indices` first, and a net
+        whose entire assignment is hard-blocked keeps its authored class
+        untouched (no preference is injected at all) rather than being
+        steered at a layer it may not use.
+
         Args:
             net_layer_prefs: Dict mapping net_id -> preferred layer indices,
                 as returned by :meth:`_assign_matrix_layer_preferences`.
         """
         from dataclasses import replace
 
+        injected: list[str] = []
         for net_id, layers in net_layer_prefs.items():
             net_name = self.net_names.get(net_id, "")
             if not net_name:
                 continue
             existing = self.net_class_map.get(net_name)
             if existing is not None:
+                # Issue #4979: never prefer a layer this class hard-blocks.
+                hard_avoided = existing.hard_avoided_layer_indices(self.rules.strict_layers)
+                allowed = [x for x in layers if x not in hard_avoided] if hard_avoided else layers
+                if not allowed:
+                    # Every assigned layer is off-limits for this net -- leave
+                    # the authored class exactly as the user wrote it.
+                    continue
                 # Copy existing net class and add layer preference
-                override = replace(existing, preferred_layers=layers)
+                override = replace(existing, preferred_layers=allowed)
             else:
                 # Create a new net class entry with default values + layer pref
                 override = NetClassRouting(
@@ -6015,11 +6035,12 @@ class Autorouter:
                     preferred_layers=layers,
                 )
             self.net_class_map[net_name] = override
+            injected.append(net_name)
 
-        if net_layer_prefs:
-            names = [self.net_names.get(n, f"Net {n}") for n in net_layer_prefs]
+        if injected:
             flush_print(
-                f"  Matrix conflict: assigned layer preferences for {len(names)} net(s): {names}"
+                f"  Matrix conflict: assigned layer preferences for "
+                f"{len(injected)} net(s): {injected}"
             )
 
     # Cache of net IDs detected as matrix-conflicting (Issue #2432).
