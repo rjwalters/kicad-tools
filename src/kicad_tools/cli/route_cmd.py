@@ -2446,12 +2446,17 @@ def _write_fab_profile_sidecar(
         print(f"  Fab-profile sidecar: {sidecar_path}")
 
 
+class DRCConstraintPropagationError(ValueError):
+    """Authored source constraints could not safely reach the routed output."""
+
+
 def _write_drc_constraint_sidecars(
     output_path: Path,
     manufacturer: str,
     layers: int,
     copper_oz: float = 1.0,
     quiet: bool = False,
+    source_pcb_path: Path | None = None,
 ) -> None:
     """Emit ``.kicad_pro`` + ``.kicad_dru`` next to the routed PCB.
 
@@ -2490,6 +2495,8 @@ def _write_drc_constraint_sidecars(
         copper_oz: Copper weight in oz (defaults to 1.0, the system default
             and the correct value for all 8 demo boards).
         quiet: If True, suppress the confirmation line.
+        source_pcb_path: Original PCB for renamed outputs. Source propagation
+            failures are blocking and printed even in quiet mode.
     """
     try:
         from kicad_tools.manufacturers import get_profile, write_drc_constraints
@@ -2502,8 +2509,13 @@ def _write_drc_constraint_sidecars(
             manufacturer_id=profile.id,
             layers=layers,
             copper_oz=copper_oz,
+            source_pcb_path=source_pcb_path,
         )
     except (ValueError, OSError, KeyError) as e:
+        if source_pcb_path is not None:
+            raise DRCConstraintPropagationError(
+                f"cannot preserve source DRC constraints: {e}"
+            ) from e
         # Non-fatal: an unknown manufacturer (ValueError) or a read-only /
         # blocked output directory (OSError) must not fail the route.
         if not quiet:
@@ -2523,11 +2535,15 @@ def run_post_route_drc(
     strict_drc: bool = False,
     net_class_map_input_path: Path | None = None,
     loaded_net_class_map: dict | None = None,
+    source_pcb_path: Path | None = None,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
     Args:
         output_path: Path to the routed PCB file
+        source_pcb_path: Original PCB before staging/renaming; carry authored
+            project and DRU into the destination before native DRC. Conflicting
+            destination constraints raise DRCConstraintPropagationError before DRC.
         manufacturer: Manufacturer profile for DRC rules (e.g., "jlcpcb")
         layers: Number of PCB layers
         quiet: If True, suppress output
@@ -2594,7 +2610,12 @@ def run_post_route_drc(
     # route flow -- makes the verdict deterministic and independent of any
     # sidecars a prior run may have left behind.
     _write_drc_constraint_sidecars(
-        output_path, manufacturer, layers, copper_oz=copper_oz, quiet=quiet
+        output_path,
+        manufacturer,
+        layers,
+        copper_oz=copper_oz,
+        quiet=quiet,
+        source_pcb_path=source_pcb_path,
     )
 
     try:
@@ -6836,6 +6857,7 @@ def route_with_layer_escalation(
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
@@ -7644,6 +7666,7 @@ def route_with_rule_relaxation(
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
@@ -9954,6 +9977,7 @@ def route_with_combined_escalation(
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
@@ -11656,7 +11680,13 @@ def main(argv: list[str] | None = None) -> int:
     invocation; only the outermost exit (return *or* raise) restores it.
     """
     with _process_state_guard():
-        return _main_impl(argv)
+        try:
+            return _main_impl(argv)
+        except DRCConstraintPropagationError as exc:
+            # A rule conflict is not a copper violation that --auto-fix may
+            # clear. Abort every route flow before its ordinary DRC handling.
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
 
 
 def _main_impl(argv: list[str] | None = None) -> int:
@@ -16061,6 +16091,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         drc_ran = True
         drc_errors, drc_warnings = run_post_route_drc(
             output_path=output_path,
+            source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=layer_stack.num_layers,
             quiet=quiet,
