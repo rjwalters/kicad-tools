@@ -184,3 +184,35 @@ def test_via_gap_and_unfilled_zone():
         check_physical_copper_gap(board(zone), 0.25).violations[0].rule_id
         == "physical_copper_gap_incomplete"
     )
+
+
+@pytest.mark.parametrize(
+    "field,replacement",
+    [("width", "banana"), ("width", "0"), ("start", "banana 0"), ("end", "0 banana")],
+)
+def test_malformed_track_geometry_is_incomplete_not_clean(field, replacement):
+    text = track((0, 0), (4, 0), "bad")
+    import re
+
+    text = re.sub(r"\(" + field + r" [^)]*\)", "(" + field + " " + replacement + ")", text)
+    result = check_physical_copper_gap(board(text), 0.25)
+    assert any(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+
+
+@pytest.mark.parametrize(
+    "modifier",
+    ["(chamfer_ratio 0.3) (chamfer top_left)", "(roundrect_rratio banana)", "(at banana 0)"],
+)
+def test_unsupported_or_recovered_pad_geometry_is_incomplete(modifier):
+    pad_at = "" if modifier.startswith("(at") else "(at 0 0)"
+    pcb = board(f"""(footprint "X" (layer "F.Cu") (at 0 0)
+      (property "Reference" "U1")
+      (pad "1" smd roundrect {pad_at} (size 1 1) (layers "F.Cu") (net 1 "GND") {modifier}))""")
+    result = check_physical_copper_gap(pcb, 0.25)
+    assert any(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+
+
+def test_malformed_via_position_is_incomplete():
+    pcb = board('(via (at banana 0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))')
+    result = check_physical_copper_gap(pcb, 0.25)
+    assert any(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)

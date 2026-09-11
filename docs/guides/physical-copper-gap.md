@@ -45,3 +45,10 @@ turning ordinary valid joins into a flood of artificial manufacturing defects.
 The check samples nearest and midpoint projections of boundary edges, not a full
 medial-axis solution. A clean result is not an unconditional manufacturability
 certificate, and it does not validate fill freshness or factory acceptance.
+
+Malformed numeric source geometry is rejected before tolerant schema defaults can
+become copper. Missing/repeated segment fields, invalid coordinates or widths,
+invalid via spans, malformed pad sizes/ratios and unsupported chamfer modifiers
+produce `physical_copper_gap_incomplete`. For these raw-source failures the
+geometry collection is stopped; an empty result must never be read as a clean
+gap verdict. Native chamfered pads require a future exact geometry implementation.

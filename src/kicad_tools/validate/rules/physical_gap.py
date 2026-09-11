@@ -63,11 +63,94 @@ def _arc_geometry(node):
     ).buffer(width.get_float(0) / 2, quad_segs=64)
 
 
+def _raw_geometry_issues(pcb):
+    """Do not let tolerant schema recovery manufacture supported copper.
+
+    An invalid source primitive makes this invocation incomplete before any
+    recovered/defaulted geometry is used. Chamfer modifiers are native geometry
+    outside this rule's current supported pad subset.
+    """
+    issues = []
+    layers = {layer.name for layer in pcb.copper_layers}
+
+    def numeric(node, tag, lengths, *, required=True, positive=False):
+        fields = [c for c in node.children if c.name == tag]
+        if not fields and not required:
+            return
+        if len(fields) != 1:
+            issues.append(f"invalid {node.name} {tag}: missing or repeated field")
+            return
+        atoms = fields[0].children
+        values = [fields[0].get_float(i) for i in range(len(atoms))]
+        if len(values) not in lengths or any(
+            not c.is_atom
+            or isinstance(v, bool)
+            or not isinstance(v, (int, float))
+            or not math.isfinite(v)
+            or (positive and v <= 0)
+            for c, v in zip(atoms, values, strict=True)
+        ):
+            issues.append(f"invalid {node.name} {tag}: finite numeric geometry required")
+
+    for node in pcb._sexp.children:
+        if node.name in {"segment", "arc"}:
+            for tag in ("start", "end"):
+                numeric(node, tag, {2})
+            if node.name == "arc":
+                numeric(node, "mid", {2})
+            numeric(node, "width", {1}, positive=True)
+            layer = node.find_child("layer")
+            if layer is None or layer.get_string(0) not in layers:
+                issues.append(f"unresolved {node.name} copper layer")
+        elif node.name == "via":
+            numeric(node, "at", {2})
+            numeric(node, "size", {1}, positive=True)
+            span = node.find_child("layers")
+            if (
+                span is None
+                or len(span.children) != 2
+                or any(c.value not in layers for c in span.children)
+            ):
+                issues.append("unresolved via layer span")
+        elif node.name in {"footprint", "module"}:
+            numeric(node, "at", {2, 3}, required=False)
+            for pad in node.find_all("pad"):
+                if pad.get_string(1) == "np_thru_hole":
+                    continue
+                numeric(pad, "at", {2, 3})
+                numeric(pad, "size", {2}, positive=True)
+                numeric(pad, "roundrect_rratio", {1}, required=False)
+                ratio = pad.find_child("roundrect_rratio")
+                if ratio is not None:
+                    value = ratio.get_float(0)
+                    if value is None or not 0 <= value <= 0.5:
+                        issues.append("invalid pad roundrect ratio")
+                if any(pad.find_child(tag) is not None for tag in ("chamfer", "chamfer_ratio")):
+                    issues.append("unsupported pad chamfer geometry")
+        elif node.name == "zone":
+            for fill in node.find_all("filled_polygon"):
+                pts = fill.find_child("pts")
+                if pts is None:
+                    issues.append("invalid filled polygon: missing points")
+                else:
+                    for xy in pts.children:
+                        if xy.name == "xy":
+                            values = [xy.get_float(i) for i in range(len(xy.children))]
+                            if len(values) != 2 or any(
+                                not isinstance(v, (int, float)) or not math.isfinite(v)
+                                for v in values
+                            ):
+                                issues.append("invalid filled polygon coordinates")
+    return issues
+
+
 def _collect(pcb):
     from shapely.geometry import LineString, Point, Polygon
 
-    sources = []
-    unsupported = []
+    sources: list[CopperSource] = []
+    unsupported = _raw_geometry_issues(pcb)
+    if unsupported:
+        return sources, unsupported
     layer_names = [layer.name for layer in pcb.copper_layers]
 
     def net_name(number):
