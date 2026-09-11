@@ -71,7 +71,8 @@ merged openings, use the explicit native export API:
 
 ```python
 from kicad_tools.validate.mask_export_geometry import (
-    MaskExportOptions, inspect_exported_mask_geometry,
+    MaskExportOptions,
+    inspect_exported_mask_geometry,
 )
 
 snapshot = inspect_exported_mask_geometry(
