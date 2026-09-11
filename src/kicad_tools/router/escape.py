@@ -4295,6 +4295,7 @@ class EscapeRouter:
         package_pads: list[Pad],
         min_clearance: float,
         max_length: float,
+        foreign_pads: list[Pad] | None = None,
     ) -> float:
         """Find the maximum escape-segment length that respects pad clearance.
 
@@ -4310,6 +4311,23 @@ class EscapeRouter:
         the candidate segment from ``pad`` to ``(pad + (dx,dy) * L)`` keeps
         at least ``min_clearance`` mm of edge-to-edge gap from every other
         pad in ``package_pads`` on the same layer.
+
+        Issue #4991: ``package_pads`` only ever covered pads on the SAME
+        footprint.  For ordinary (non-dense) passives dispatched to
+        ``_escape_radial``, the binding obstacle is frequently a pad on a
+        DIFFERENT, physically adjacent component (e.g. a bypass cap or
+        pull-up resistor placed right next to the pin it decouples) -- a
+        class of obstacle every fine-pitch escape path already guards
+        against via the ``foreign_pads`` parameter threaded through
+        :meth:`_can_place_via` (see ``staggered_via_fanout``,
+        ``_try_in_pad_escape``, ``_try_lateral_via_escape``).  The optional
+        ``foreign_pads`` parameter here closes that asymmetry: when
+        supplied, candidate segments are ALSO checked against every pad in
+        the list whose net differs from ``pad.net`` (own-net foreign-ref
+        pads -- e.g. a stitched plane pour anchor -- never need clearance
+        from their own net and are skipped), on the same layer rule as
+        ``package_pads``.  ``None`` (the default) preserves the pre-#4991
+        same-package-only behaviour exactly for every existing call site.
 
         The search is a coarse binary search bracketed by 0 and
         ``max_length`` -- a 1-D search is sufficient because the candidate
@@ -4328,6 +4346,10 @@ class EscapeRouter:
             min_clearance: Required minimum edge-to-edge clearance in mm
             max_length: Upper bound on the search (typically the original
                 requested launch distance)
+            foreign_pads: Optional board-wide pads belonging to OTHER
+                components (Issue #4991).  Pads whose ``net`` matches
+                ``pad.net`` are skipped automatically.  ``None`` (default)
+                disables the board-wide check, preserving legacy behaviour.
 
         Returns:
             The maximum safe length in mm, in the range
@@ -4344,7 +4366,8 @@ class EscapeRouter:
 
         def _gap_at(length: float) -> float:
             """Minimum edge-to-edge gap from the candidate segment to any
-            other pad on the same layer."""
+            other pad on the same layer (same-package OR foreign, Issue
+            #4991)."""
             ex = pad.x + dx * length
             ey = pad.y + dy * length
             candidate = Segment(
@@ -4372,6 +4395,19 @@ class EscapeRouter:
                 gap = self._segment_to_pad_edge_gap(candidate, other)
                 if gap < min_gap:
                     min_gap = gap
+            # Issue #4991: board-wide foreign-component pads.  Same
+            # filtering rules as above, plus a same-net skip (own-net
+            # copper on another component, e.g. a plane stitching pad,
+            # never needs clearance from itself).
+            if foreign_pads:
+                for other in foreign_pads:
+                    if other.net == pad.net:
+                        continue
+                    if not other.through_hole and other.layer != pad.layer:
+                        continue
+                    gap = self._segment_to_pad_edge_gap(candidate, other)
+                    if gap < min_gap:
+                        min_gap = gap
             return min_gap
 
         # If the full-length segment is already clear, no clipping needed.
@@ -6557,6 +6593,15 @@ class EscapeRouter:
         can pick the pad up cleanly instead of having to fight an
         already-violating escape segment.
 
+        Issue #4991: the #2756 clipping only ever considered pads on the
+        SAME package.  Ordinary (non-dense) passives -- the exact class
+        dispatched here -- are frequently placed with a decoupling cap or
+        pull-up resistor immediately adjacent (different component,
+        different net), and the radial launch direction has no notion of
+        that neighbour.  This clips (or drops, per the same threshold
+        logic) segments against every OTHER component's pads on the board
+        as well, using the same edge-to-edge predicate.
+
         Args:
             package: Package info
 
@@ -6577,6 +6622,17 @@ class EscapeRouter:
         # ``_escape_qfp_alternating``.
         min_useful_length = self.escape_clearance * 0.5
 
+        # Issue #4991: board-wide pads belonging to OTHER components.
+        # ``self.grid._pads`` accumulates every pad registered on the
+        # board (mirrors the pattern already used by ``subgrid.py`` for
+        # the analogous off-grid-pad escape problem).  Computed once per
+        # package call -- cheap relative to the per-pad binary search
+        # below, and the grid's pad registry does not change mid-call.
+        board_pads = getattr(self.grid, "_pads", None)
+        foreign_pads: list[Pad] | None = None
+        if board_pads:
+            foreign_pads = [p for p in board_pads if p.ref != package.ref]
+
         for pad in package.pads:
             # Issue #2513: Skip plane-net pads (net=0) -- they are stitched
             # via planes, not routed via escapes.
@@ -6587,7 +6643,8 @@ class EscapeRouter:
             dx, dy = self._direction_to_vector(direction)
             trace_w = self._get_trace_width_for_net(pad.net_name)
 
-            # Issue #2756: clip the radial escape against neighbour pads.
+            # Issue #2756 / #4991: clip the radial escape against same-
+            # package AND board-wide foreign-component neighbour pads.
             requested_dist = self.escape_clearance
             safe_dist = self._compute_max_safe_escape_length(
                 pad=pad,
@@ -6597,14 +6654,22 @@ class EscapeRouter:
                 package_pads=package.pads,
                 min_clearance=effective_clearance,
                 max_length=requested_dist,
+                foreign_pads=foreign_pads,
             )
             escape_dist = min(requested_dist, safe_dist)
 
-            # Drop stubs that are too short to exit the pad halo.
+            # Drop stubs that are too short to exit the pad halo.  Issue
+            # #4991: never emit degenerate/invalid geometry when neither a
+            # same-package nor a foreign-component neighbour leaves room
+            # for a useful stub -- the pin is left at its original pad
+            # location for the main router (or the failure-analysis path)
+            # to handle explicitly, rather than shipping a clipped stub
+            # that still violates clearance.
             if escape_dist < min_useful_length:
                 logger.debug(
                     "Radial escape for %s pin %s skipped: clipped length "
-                    "%.3fmm < %.3fmm threshold (Issue #2756)",
+                    "%.3fmm < %.3fmm threshold (board-wide foreign-pad "
+                    "clearance considered, Issue #2756 / #4991)",
                     pad.net_name,
                     pad.pin,
                     escape_dist,

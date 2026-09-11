@@ -508,3 +508,279 @@ def test_lvs_fields_omitted_when_lvs_json_malformed(tmp_path: Path):
     assert "lvs_clean" not in m
     assert "lvs_mismatches" not in m
     assert m["status"] == "partial"
+
+
+@pytest.fixture
+def development_board(tmp_path):
+    import hashlib
+
+    import yaml
+
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "development"
+    output = board / "output"
+    output.mkdir(parents=True)
+    PCB.create(width=30, height=20, layers=4).save(output / "actual.kicad_pcb")
+    project = {
+        "project": {
+            "name": "Development",
+            "description": "Unqualified prototype",
+            "artifacts": {"pcb": "output/actual.kicad_pcb"},
+        }
+    }
+    (board / "project.kct").write_text(yaml.safe_dump(project))
+    report = output / "native-drc.json"
+    report.write_text(
+        json.dumps({"violations": [], "unconnected_items": [{"type": "unconnected_items"}]})
+    )
+    inputs = {
+        p.relative_to(board).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in [output / "actual.kicad_pcb", board / "project.kct", report]
+    }
+    (output / "readiness.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "mode": "assembly",
+                "status": "blocked",
+                "checked_at": "2026-09-10T00:00:00Z",
+                "blockers": ["Routing incomplete"],
+                "checks": [],
+                "inputs": inputs,
+                "evidence": {"native_drc": "output/native-drc.json"},
+            }
+        )
+    )
+    return board
+
+
+def test_development_metadata_preserves_blocked_evidence(development_board):
+    before = {p: p.read_bytes() for p in development_board.rglob("*") if p.is_file()}
+    result = extract_board_metrics(development_board)
+    assert result["status"] == "partial"
+    assert result["name"] == "Development"
+    assert result["description"] == "Unqualified prototype"
+    assert result["layer_count"] == 4
+    assert result["part_count"] == 0
+    assert result["board_size_mm"] == {"width": 30, "height": 20}
+    assert result["readiness"]["blockers"] == ["Routing incomplete"]
+    assert result["drc_violations"] == 0
+    assert result["native_drc_unconnected_items"] == 1
+    assert "lvs_clean" not in result
+    assert result["sources"]["pcb"]["path"] == "output/actual.kicad_pcb"
+    assert before == {p: p.read_bytes() for p in development_board.rglob("*") if p.is_file()}
+
+
+def test_development_stale_evidence_keeps_static_metadata(development_board):
+    pcb = development_board / "output/actual.kicad_pcb"
+    pcb.write_text(pcb.read_text() + "\n")
+    result = extract_board_metrics(development_board)
+    assert result["layer_count"] == 4
+    assert result["readiness"]["status"] == "unverified"
+    assert "drc_violations" not in result
+    assert "native_drc_unconnected_items" not in result
+
+
+@pytest.mark.parametrize("scenario", ["missing_explicit", "ambiguous", "malformed"])
+def test_development_never_guesses_artifacts(development_board, scenario):
+    pcb = development_board / "output/actual.kicad_pcb"
+    if scenario == "missing_explicit":
+        pcb.rename(pcb.with_name("different.kicad_pcb"))
+    elif scenario == "ambiguous":
+        (development_board / "project.kct").unlink()
+        pcb.with_name("other.kicad_pcb").write_bytes(pcb.read_bytes())
+    else:
+        pcb.write_text("(not_a_board)")
+    result = extract_board_metrics(development_board)
+    assert "part_count" not in result
+    assert "layer_count" not in result
+    assert result["diagnostics"]
+    assert result["status"] != "ok"
+
+
+def test_development_unambiguous_fallback(development_board):
+    (development_board / "project.kct").unlink()
+    result = extract_board_metrics(development_board)
+    assert result["layer_count"] == 4
+    assert result["sources"]["pcb"]["selection"] == "unambiguous_output"
+
+
+@pytest.mark.parametrize(
+    "scenario", ["unbound_pcb", "unbound_report", "invalid_report", "ambiguous_report"]
+)
+def test_development_requires_complete_native_binding(development_board, scenario):
+    import hashlib
+
+    output = development_board / "output"
+    path = output / "readiness.json"
+    readiness = json.loads(path.read_text())
+    if scenario == "unbound_pcb":
+        del readiness["inputs"]["output/actual.kicad_pcb"]
+    elif scenario == "unbound_report":
+        del readiness["inputs"]["output/native-drc.json"]
+    elif scenario == "invalid_report":
+        report = output / "native-drc.json"
+        report.write_text(json.dumps({"violations": []}))
+        readiness["inputs"]["output/native-drc.json"] = hashlib.sha256(
+            report.read_bytes()
+        ).hexdigest()
+    else:
+        readiness.pop("evidence")
+        second = output / "placement-drc.json"
+        second.write_bytes((output / "native-drc.json").read_bytes())
+        readiness["inputs"]["output/placement-drc.json"] = hashlib.sha256(
+            second.read_bytes()
+        ).hexdigest()
+    path.write_text(json.dumps(readiness))
+    result = extract_board_metrics(development_board)
+    assert result["status"] == "partial"
+    assert "drc_violations" not in result
+    assert "native_drc_unconnected_items" not in result
+    assert any("Native DRC" in message for message in result["diagnostics"])
+
+
+def test_development_missing_outline_does_not_report_zero_size(development_board):
+    from kicad_tools.schema.pcb import PCB
+
+    path = development_board / "output/actual.kicad_pcb"
+    pcb = PCB.load(path)
+    for child in list(pcb._sexp.iter_children()):
+        if child.tag.startswith("gr_"):
+            pcb._sexp.children.remove(child)
+    pcb.save(path)
+    result = extract_board_metrics(development_board)
+    assert result["layer_count"] == 4
+    assert "board_size_mm" not in result
+    assert result["diagnostics"]
+
+
+def test_development_schematic_only_and_invalid_project(tmp_path):
+    board = tmp_path / "schematic-only"
+    output = board / "output"
+    output.mkdir(parents=True)
+    (output / "only.kicad_sch").write_text("(kicad_sch (version 20250114) (generator test))")
+    result = extract_board_metrics(board)
+    assert result["status"] == "partial"
+    assert result["sources"]["schematic"]["path"] == "output/only.kicad_sch"
+    assert "part_count" not in result
+    (board / "project.kct").write_text("project: [broken")
+    result = extract_board_metrics(board)
+    assert result["status"] == "no_artifacts"
+    assert not result["sources"]
+    assert result["diagnostics"]
+
+
+def test_development_cli_dry_run_leaves_sources_unchanged(development_board, capsys):
+    before = {p: p.read_bytes() for p in development_board.rglob("*") if p.is_file()}
+    assert main([str(development_board), "--format", "json", "--dry-run"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["boards"][0]["metrics"]["status"] == "partial"
+    assert before == {p: p.read_bytes() for p in development_board.rglob("*") if p.is_file()}
+    assert not (development_board / "output/manufacturing").exists()
+
+
+def test_development_curved_outline_omits_inexact_dimensions(development_board):
+    pcb = development_board / "output/actual.kicad_pcb"
+    text = pcb.read_text().rstrip()
+    pcb.write_text(
+        text[:-1]
+        + '\n(gr_circle (center 10 10) (end 15 10) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts")))'
+    )
+    result = extract_board_metrics(development_board)
+    assert "board_size_mm" not in result
+    assert any("curved/unsupported" in d for d in result["diagnostics"])
+
+
+def test_development_explicit_source_cannot_escape_board(development_board):
+    import yaml
+
+    project = development_board / "project.kct"
+    data = yaml.safe_load(project.read_text())
+    outside = development_board.parent / "outside.kicad_pcb"
+    outside.write_bytes((development_board / "output/actual.kicad_pcb").read_bytes())
+    data["project"]["artifacts"]["pcb"] = "../outside.kicad_pcb"
+    project.write_text(yaml.safe_dump(data))
+    result = extract_board_metrics(development_board)
+    assert "part_count" not in result
+    assert any("outside-board" in d for d in result["diagnostics"])
+
+
+def _replace_development_outline(board, graphics):
+    from kicad_tools.schema.pcb import PCB
+
+    path = board / "output/actual.kicad_pcb"
+    pcb = PCB.load(path)
+    for child in list(pcb._sexp.iter_children()):
+        if child.tag.startswith("gr_"):
+            pcb._sexp.children.remove(child)
+    pcb.save(path)
+    text = path.read_text().rstrip()
+    path.write_text(text[:-1] + "\n" + "\n".join(graphics) + ")")
+
+
+def _outline_lines(points):
+    return [
+        f'(gr_line (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (layer "Edge.Cuts"))'
+        for a, b in zip(points, points[1:], strict=False)
+    ]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_development_stray_open_edge_omits_dimensions(development_board, reverse):
+    graphics = _outline_lines([(0, 0), (30, 0), (30, 20), (0, 20), (0, 0)])
+    graphics += _outline_lines([(100, 100), (101, 100)])
+    _replace_development_outline(development_board, graphics[::-1] if reverse else graphics)
+    result = extract_board_metrics(development_board)
+    assert "board_size_mm" not in result
+    assert any("outline" in d and "unknown" in d for d in result["diagnostics"])
+
+
+@pytest.mark.parametrize(
+    "graphic",
+    [
+        '(gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts"))',
+        '(gr_poly (pts (xy 0 0) (xy 30 0) (xy 30 20) (xy 0 20)) (layer "Edge.Cuts"))',
+    ],
+)
+@pytest.mark.parametrize("cutout_first", [False, True])
+def test_development_closed_graphics_with_cutout(development_board, graphic, cutout_first):
+    cutout = _outline_lines([(5, 5), (10, 5), (10, 10), (5, 10), (5, 5)])
+    graphics = cutout + [graphic] if cutout_first else [graphic] + cutout[::-1]
+    _replace_development_outline(development_board, graphics)
+    assert extract_board_metrics(development_board)["board_size_mm"] == {"width": 30, "height": 20}
+
+
+@pytest.mark.parametrize(
+    "points",
+    [
+        [(0, 0), (30, 20), (0, 20), (30, 0), (0, 0)],  # crossing
+        [(0, 0), (30, 0), (0, 0)],  # overlapping/degenerate
+        [(0, 0), (30, 0), (30, 20), (0, 20), (0, 0.00000001)],  # real gap
+    ],
+)
+def test_development_malformed_line_contours_omit_dimensions(development_board, points):
+    _replace_development_outline(development_board, _outline_lines(points))
+    assert "board_size_mm" not in extract_board_metrics(development_board)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        '(gr_line (start 30 20) (end 31 21) (layer "Edge.Cuts"))',
+        '(gr_line (start 0) (end 30 0) (layer "Edge.Cuts"))',
+        '(gr_rect (start 0 0) (end 0 20) (layer "Edge.Cuts"))',
+        '(gr_poly (pts (xy 0 0) (xy 20 0)) (layer "Edge.Cuts"))',
+        '(gr_poly (pts (xy 0 0) (xy bad 5) (xy 2 2)) (layer "Edge.Cuts"))',
+        '(gr_line (start nan 0) (end 30 0) (layer "Edge.Cuts"))',
+        '(gr_line (start 0 0) (start 20 20) (end 30 0) (layer "Edge.Cuts"))',
+        '(gr_text "unsupported" (at 10 10) (layer "Edge.Cuts"))',
+    ],
+)
+def test_development_any_malformed_contributing_geometry_is_unknown(development_board, extra):
+    valid = '(gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts"))'
+    _replace_development_outline(development_board, [valid, extra])
+    result = extract_board_metrics(development_board)
+    assert "board_size_mm" not in result
+    assert result["layer_count"] == 4
+    assert any("outline" in d and "unknown" in d for d in result["diagnostics"])
