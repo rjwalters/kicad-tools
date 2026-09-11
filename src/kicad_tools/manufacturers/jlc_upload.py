@@ -905,26 +905,33 @@ def reconcile_upload(
     elif file_key is not None:
         raise LedgerError("A reconciliation to failed cannot carry a file key")
 
-    attempts = ledger.attempts()
-    attempt = attempts.get(attempt_id)
-    if attempt is None:
-        raise LedgerError("Unknown upload attempt")
-    if attempt.state != STATE_UNCERTAIN:
-        raise LedgerError("Only an uncertain attempt can be reconciled")
+    # Fence the check-then-act read of `attempt.state` against the eventual
+    # `_append` the same way `upload_gerber` fences its own durable-state
+    # decision -- two concurrent reconciliations for the same attempt_id would
+    # otherwise both observe "uncertain" and both append a reconciliation
+    # event, which permanently poisons `UploadLedger.attempts()` for every
+    # binding sharing this ledger file.
+    with _upload_lock(ledger):
+        attempts = ledger.attempts()
+        attempt = attempts.get(attempt_id)
+        if attempt is None:
+            raise LedgerError("Unknown upload attempt")
+        if attempt.state != STATE_UNCERTAIN:
+            raise LedgerError("Only an uncertain attempt can be reconciled")
 
-    ledger._append(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "kind": _RECONCILE_KIND,
-            "attempt_id": attempt_id,
-            "resolution": resolution,
-            "file_key": file_key,
-            "reconciled_by": reconciled_by,
-            "reconciled_at": reconciled_at,
-            "evidence": evidence,
-        }
-    )
-    return ledger.attempts()[attempt_id].state
+        ledger._append(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": _RECONCILE_KIND,
+                "attempt_id": attempt_id,
+                "resolution": resolution,
+                "file_key": file_key,
+                "reconciled_by": reconciled_by,
+                "reconciled_at": reconciled_at,
+                "evidence": evidence,
+            }
+        )
+        return ledger.attempts()[attempt_id].state
 
 
 # --------------------------------------------------------------------------
@@ -1441,6 +1448,21 @@ def fetch_preview(
     ):
         raise UploadGateError(
             "No persisted successful upload matches this receipt's file key binding"
+        )
+
+    # An attempt's endpoint binding is (file_sha256, app_identity, endpoint) --
+    # endpoints are deliberately non-interchangeable (see upload_gerber). The
+    # persisted intent's endpoint is `<upload base_url> + UPLOAD_GERBER_PATH`;
+    # recover that base_url and require the caller's base_url to match it, so
+    # a file key issued by a non-default host can't be silently previewed
+    # against production (or vice versa).
+    upload_endpoint = attempt.intent["endpoint"]
+    if not upload_endpoint.endswith(UPLOAD_GERBER_PATH):
+        raise UploadGateError("Persisted attempt endpoint has an unexpected shape")
+    upload_base_url = upload_endpoint[: -len(UPLOAD_GERBER_PATH)]
+    if base_url.rstrip("/") != upload_base_url:
+        raise UploadGateError(
+            "base_url does not match the host this file key was actually issued by"
         )
 
     body = {"key": receipt.file_key}

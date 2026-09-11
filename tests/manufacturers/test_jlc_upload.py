@@ -866,6 +866,48 @@ def test_reconciliation_cannot_be_applied_twice(handoff):
         ju.reconcile_upload(handoff["ledger"], **args)
 
 
+def test_concurrent_reconciliation_against_the_same_ledger_is_blocked(handoff):
+    """reconcile_upload fences its check-then-act window the same as upload_gerber.
+
+    A held upload lock (the same lock upload_gerber uses) must block a second
+    reconciler from racing the state check against the ledger append -- the
+    race that would otherwise let two concurrent reconciliations for one
+    attempt both pass the "still uncertain" check and both append, poisoning
+    UploadLedger.attempts() for every binding sharing the ledger file.
+    """
+    transport = FakeTransport(error=ju.TransportError("read timed out", request_sent=True))
+    with pytest.raises(ju.UploadUncertainError):
+        upload(handoff, transport)
+    attempt_id = ju.pending_reconciliations(handoff["ledger"])[0]["attempt_id"]
+
+    ledger_path = handoff["ledger"].path
+    lock = ledger_path.parent / ("." + ledger_path.name + ".upload-lock")
+    lock.write_bytes(b"")  # a peer reconciler (or upload) is mid-operation
+
+    with pytest.raises(ju.UploadBlockedError):
+        ju.reconcile_upload(
+            handoff["ledger"],
+            attempt_id=attempt_id,
+            resolution="failed",
+            reconciled_by="alice",
+            reconciled_at="t",
+            evidence="checked",
+        )
+    assert [e["kind"] for e in handoff["ledger"].events()] == ["intent", "uncertain"]
+
+    lock.unlink()
+    state = ju.reconcile_upload(
+        handoff["ledger"],
+        attempt_id=attempt_id,
+        resolution="failed",
+        reconciled_by="alice",
+        reconciled_at="t",
+        evidence="checked",
+    )
+    assert state == ju.STATE_FAILED
+    assert not lock.exists()
+
+
 def test_an_uncertain_attempt_blocks_even_when_another_attempt_succeeded(handoff):
     """Fail-closed precedence: unresolved uncertainty dominates a later success."""
     transport = FakeTransport(responses=[response(200, ok_body())])
@@ -988,6 +1030,44 @@ def test_preview_requires_a_recorded_successful_upload(handoff):
             requested_at="2026-01-12T00:00:00Z",
         )
     assert transport.json_calls == []
+
+
+def test_preview_requires_the_upload_s_own_base_url(handoff):
+    """A file key is bound to (sha256, app_identity, endpoint), not just a key.
+
+    fetch_preview must reject a base_url that doesn't match the host the
+    upload actually used -- otherwise a caller who uploaded against a
+    non-default base_url and calls fetch_preview with the default would
+    silently send the preview request, keyed by that host's file key, to the
+    wrong host.
+    """
+    transport = FakeTransport(responses=[response(200, ok_body("file-key-0001"))])
+    receipt = upload(handoff, transport, base_url="https://staging.example.invalid")
+
+    with pytest.raises(ju.UploadGateError):
+        ju.fetch_preview(
+            receipt,
+            ledger=handoff["ledger"],
+            transport=transport,
+            credentials=fake_credentials(),
+            requested_at="2026-01-12T00:00:00Z",
+            # base_url defaults to JLC_OPENAPI_BASE, which does not match the
+            # staging host the upload was actually bound to.
+        )
+    assert transport.json_calls == []
+
+    preview_transport = FakeTransport(
+        responses=[response(200, {"code": 200, "success": True, "data": {"ok": True}})]
+    )
+    preview = ju.fetch_preview(
+        receipt,
+        ledger=handoff["ledger"],
+        transport=preview_transport,
+        credentials=fake_credentials(),
+        requested_at="2026-01-12T00:00:00Z",
+        base_url="https://staging.example.invalid",
+    )
+    assert preview.data == {"ok": True}
 
 
 def test_preview_business_error_is_not_persisted_as_a_result(handoff):
