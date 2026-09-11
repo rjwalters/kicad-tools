@@ -67,7 +67,9 @@ import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+
+from kicad_tools.core.kicad_lock import check_kicad_lock
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -993,6 +995,7 @@ def _write_routed_pcb(
             the save would drop >90% of a non-trivial input's copper
             (issue #4413).  The output file is left untouched.
     """
+    check_kicad_lock(output_path)
     original_content = pcb_path.read_text()
 
     # Update layer stackup for terminal writes when we escalated above 2L.
@@ -1960,6 +1963,8 @@ def _save_partial_results() -> bool:
                 save_path = output_path
             else:
                 save_path = output_path.with_stem(output_path.stem + "_partial")
+
+            check_kicad_lock(cast(Path, save_path))
 
             # Insert routes before final closing parenthesis
             output_content = _insert_sexp_before_closing(original_content, route_sexp)
