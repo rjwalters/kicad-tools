@@ -1450,7 +1450,10 @@ jobs:
     # board 00/01 e2e jobs).
     name: Board 06 End-to-End (LVS)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The measured recipe takes 28m; allow the independent synthetic/LVS,
+    # plane-net and artifact gates to finish within the whole-job deadline.
+    # Internal routing budgets and all validation gates remain unchanged.
+    timeout-minutes: 35
     container:
       image: kicad/kicad:10.0
       options: --user 0:0
