@@ -55,6 +55,19 @@ def _is_footprint_tag(tag: str | None) -> bool:
     return tag in FOOTPRINT_TAGS
 
 
+def _find_all_footprints(doc: SExp) -> list[SExp]:
+    """Return every footprint node in *doc*, in document order.
+
+    Matches both the modern ``(footprint ...)`` spelling and the legacy
+    pre-KiCad-6 ``(module ...)`` spelling (issue #4891).  Search semantics
+    match :meth:`SExp.find_all` -- descendants of the root, not the root
+    itself -- so this is a drop-in replacement for ``doc.find_all("footprint")``.
+    """
+    return [
+        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
+    ]
+
+
 # Default regex for detecting power/ground net names.
 # Matches names like GND, +3V3, +5V, VCC, VDD, VBUS, or names starting with '+'.
 _DEFAULT_POWER_NET_PATTERN = re.compile(

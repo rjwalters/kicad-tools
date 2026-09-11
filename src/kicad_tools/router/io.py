@@ -2086,6 +2086,54 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
     return positions
 
 
+def _build_net_number_map(pcb_text: str) -> dict[str, int]:
+    """Resolve net name -> net number for BOTH KiCad net-reference dialects.
+
+    KiCad 7/8 write inline pad/segment/via/zone net references as
+    ``(net N "NAME")`` (numeric id + name) and emit a top-level
+    ``(net N "NAME")`` declaration table.  KiCad 9/10 may instead emit
+    name-only inline references -- ``(net "NAME")`` with no numeric id at
+    all -- and a board can lose its top-level table entirely (e.g.
+    ``kicad-cli --save-board``), leaving NO numeric net ids anywhere in the
+    file. Issue #4983: a router pad-extraction path that only understood
+    the numeric-plus-name dialect resolved every name-only pad to
+    ``net_num=0`` (the "no net" sentinel / obstacle id), silently dropping
+    the net from the routing graph -- ``kct route --nets <name>`` then
+    reported a vacuous "0/0 nets" SUCCESS instead of routing or failing
+    loudly.
+
+    This mirrors :meth:`kicad_tools.schema.pcb.PCB._synthesize_net_table`:
+    any ``(net N "NAME")`` declaration found anywhere in the file is
+    honored verbatim (numeric-dialect boards keep their authored ids
+    byte-for-byte); any net name that never appears with a numeric id is
+    assigned a synthetic id -- the lowest unused positive integer, in
+    first-seen order -- so name-only nets get a stable, routable id
+    instead of collapsing to ``net_num=0``.
+    """
+    net_map: dict[str, int] = {}
+    for match in re.finditer(r'\(net\s+(\d+)\s+"([^"]*)"\)', pcb_text):
+        net_num, net_name = int(match.group(1)), match.group(2)
+        if net_num > 0 and net_name and net_name not in net_map:
+            net_map[net_name] = net_num
+
+    used_ids = set(net_map.values())
+    next_id = 1
+    # Name-only inline references, e.g. pad/segment/via ``(net "NAME")``
+    # with no numeric id -- never matched by the pattern above (which
+    # requires a digit immediately after ``(net``).
+    for match in re.finditer(r'\(net\s+"([^"]*)"\)', pcb_text):
+        net_name = match.group(1)
+        if not net_name or net_name in net_map:
+            continue
+        while next_id in used_ids:
+            next_id += 1
+        net_map[net_name] = next_id
+        used_ids.add(next_id)
+        next_id += 1
+
+    return net_map
+
+
 def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
     """Extract pad objects with ref/pin info for grid analysis.
 
@@ -2110,6 +2158,11 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
         pcb_text = pcb_path_or_text
 
     pads: list[Pad] = []
+
+    # Resolve net name <-> number for both KiCad net-reference dialects
+    # (numeric-plus-name and KiCad 9/10 name-only) -- issue #4983.
+    net_name_to_num = _build_net_number_map(pcb_text)
+    net_num_to_name = {v: k for k, v in net_name_to_num.items()}
 
     # Split by footprint for easier parsing
     footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
@@ -2183,13 +2236,22 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             if abs(total_rot - 90) < 1 or abs(total_rot - 270) < 1:
                 width, height = height, width
 
-            # Extract net
+            # Extract net. Handles both the numeric-plus-name dialect
+            # (``(net N "NAME")``) and the KiCad 9/10 name-only dialect
+            # (``(net "NAME")`` with no numeric id) -- issue #4983.
             net_match = re.search(r"\(net\s+(\d+)", pad_block)
-            net_num = int(net_match.group(1)) if net_match else 0
-
-            # Extract net name
-            net_name_match = re.search(r'\(net\s+\d+\s+"?([^"\)]+)"?\)', pad_block)
-            net_name = net_name_match.group(1).strip() if net_name_match else ""
+            if net_match:
+                net_num = int(net_match.group(1))
+                net_name_match = re.search(r'\(net\s+\d+\s+"?([^"\)]+)"?\)', pad_block)
+                net_name = (
+                    net_name_match.group(1).strip()
+                    if net_name_match
+                    else net_num_to_name.get(net_num, "")
+                )
+            else:
+                net_name_match = re.search(r'\(net\s+"([^"]*)"\)', pad_block)
+                net_name = net_name_match.group(1).strip() if net_name_match else ""
+                net_num = net_name_to_num.get(net_name, 0) if net_name else 0
 
             # Determine layer
             layer = Layer.F_CU
@@ -3630,12 +3692,10 @@ def load_pcb_for_routing(
         origin_x = 115.0
         origin_y = 75.0
 
-    # Parse nets
-    net_map: dict[str, int] = {}
-    for match in re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text):
-        net_num, net_name = int(match.group(1)), match.group(2)
-        if net_num > 0:
-            net_map[net_name] = net_num
+    # Parse nets. Resolves both the numeric-plus-name dialect (top-level
+    # ``(net N "NAME")`` table) and the KiCad 9/10 name-only dialect, where
+    # a board may carry no numeric net ids anywhere -- issue #4983.
+    net_map: dict[str, int] = _build_net_number_map(pcb_text)
 
     # Parse footprints and their pads
     components: list[dict] = []
@@ -3878,11 +3938,10 @@ def load_pcb_for_routing(
     try:
         from .net_class import classify_and_apply_rules as _classify_rules
 
-        _net_names_for_class: dict[int, str] = {}
-        for _m in re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text):
-            _nid, _nm = int(_m.group(1)), _m.group(2)
-            if _nid > 0:
-                _net_names_for_class[_nid] = _nm
+        # Reuse the dialect-normalized net_map (issue #4983) so name-only
+        # boards get auto-classified nets too, instead of every net falling
+        # back to DEFAULT_NET_CLASS_MAP's generic DIGITAL class.
+        _net_names_for_class: dict[int, str] = {v: k for k, v in net_map.items()}
         if _net_names_for_class:
             _auto_rules = _classify_rules(_net_names_for_class)
             for _name, _routing in _auto_rules.items():
@@ -4514,10 +4573,22 @@ def verify_output_connectivity(
     net_ref_re = re.compile(r'\(net\s+(?:(\d+)|"((?:[^"\\]|\\.)*)")\s*\)')
     # Header net table, used to resolve a name-only reference back to its id
     # so both dialects key ``segments_by_net`` identically.
-    name_to_id = {
-        m.group(2): int(m.group(1))
-        for m in re.finditer(r'\(net\s+(\d+)\s+"([^"]*)"\)', pcb_content)
-    }
+    #
+    # Issue #4983: a KiCad-10 name-only board can have NO top-level
+    # ``(net N "NAME")`` table anywhere in the OUTPUT file either (the
+    # writer preserves the input's dialect), so scanning ``pcb_content``
+    # alone left ``name_to_id`` empty and every ``(net "NAME")`` segment/via
+    # resolved to ``net_id=None`` -- silently dropping all copper from
+    # ``segments_by_net``/``vias_by_net`` and producing a false
+    # "0 pads connected" report for a net the router actually routed.
+    # ``net_names`` (id -> name) is the SAME map ``load_pcb_for_routing``
+    # built to key ``net_pads`` in the first place (including any
+    # synthetic ids assigned to name-only nets), so reversing it here is
+    # authoritative; any additional header-table entries found in the
+    # output text are merged in without overriding it.
+    name_to_id: dict[str, int] = {name: nid for nid, name in (net_names or {}).items() if name}
+    for m in re.finditer(r'\(net\s+(\d+)\s+"([^"]*)"\)', pcb_content):
+        name_to_id.setdefault(m.group(2), int(m.group(1)))
 
     def _block_net_id(block: str) -> int | None:
         m = net_ref_re.search(block)

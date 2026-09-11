@@ -586,6 +586,33 @@ class TestSilkOverlap:
         )
         assert len(check_silk_overlap(pcb, _rules())) == 1
 
+    @pytest.mark.parametrize("endpoints", [((0, 0), (0.02, 0)), ((0.02, 0), (0, 0))])
+    @pytest.mark.parametrize("rotation", [0, 37, 90])
+    def test_short_collinear_overlap_inside_joint_still_flags(self, endpoints, rotation):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                rotation=rotation,
+                graphics=[
+                    _silk_line(start=(0, 0), end=(2, 0)),
+                    _silk_line(start=endpoints[0], end=endpoints[1]),
+                ],
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 1
+
+    def test_straight_outline_continuation_is_not_a_collision(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                graphics=[
+                    _silk_line(start=(0, 0), end=(2, 0)),
+                    _silk_line(start=(2, 0), end=(4, 0)),
+                ]
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) == 0
+
     def test_duplicate_outline_still_flags(self):
         pcb = _empty_pcb()
         pcb._footprints.append(
