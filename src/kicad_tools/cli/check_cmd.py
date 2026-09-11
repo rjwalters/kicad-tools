@@ -40,6 +40,12 @@ from kicad_tools.analysis.routing_quality import (
 )
 from kicad_tools.cli.copper_weight import parse_copper_weight_arg
 from kicad_tools.manufacturers import get_manufacturer_ids, get_profile
+from kicad_tools.router.current_paths import (
+    CurrentPathSpec,
+    current_paths_sidecar_candidates,
+    discover_current_paths_sidecar,
+    load_current_path_specs,
+)
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
 from kicad_tools.sync.discover import resolve_target_fab_for_pcb
@@ -1109,6 +1115,7 @@ def print_routing_quality_stanza(metrics: RoutingQualityMetrics) -> None:
 
 CHECK_CATEGORIES = [
     "ampacity",
+    "path_ampacity",
     "clearance",
     "connectivity",
     "connector_access",
@@ -1463,6 +1470,34 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        help=(
+            "Path to a JSON sidecar declaring branch-specific current-path "
+            "intent (see kicad_tools.router.current_paths.CurrentPathSpec, "
+            "Issue #4980). When supplied, enables the path_ampacity rule to "
+            "check each declared branch (stable RefDes.pad source/sink "
+            "endpoints) against its OWN declared current, independent of "
+            "--net-class-map's whole-net target_ampacity. Auto-discovered "
+            "next to the board when this flag is omitted -- as "
+            "<board-stem>.current_paths.json or current_paths.json, in the "
+            "board dir then output/ then ../output/ (mirrors --net-class-map, "
+            "Issue #5124). Use --no-current-paths to suppress that "
+            "auto-discovery."
+        ),
+    )
+    parser.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help=(
+            "Suppress current-paths sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (path_ampacity stays inactive). Cannot be "
+            "combined with --current-paths."
+        ),
+    )
+    parser.add_argument(
         "--courtyard-waivers",
         dest="courtyard_waivers",
         default=None,
@@ -1588,6 +1623,19 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "Error: --no-net-class-map cannot be combined with "
             f"--net-class-map {args.net_class_map!r}: one disables sidecar "
+            "auto-discovery, the other names a sidecar to load. Pass exactly "
+            "one of them.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Issue #5124: --no-current-paths suppresses sidecar auto-discovery.
+    # Pairing it with an explicit --current-paths is a usage error, mirroring
+    # the --net-class-map / --no-net-class-map exclusivity check above.
+    if getattr(args, "no_current_paths", False) and args.current_paths is not None:
+        print(
+            "Error: --no-current-paths cannot be combined with "
+            f"--current-paths {args.current_paths!r}: one disables sidecar "
             "auto-discovery, the other names a sidecar to load. Pass exactly "
             "one of them.",
             file=sys.stderr,
@@ -1885,6 +1933,60 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
 
+    # Load optional current-paths sidecar (Issue #4980/#5124).  When
+    # supplied, path_ampacity checks each declared branch-specific
+    # current-path against its OWN declared current.  Same
+    # explicit-wins / auto-discover / degrade-gracefully-on-auto-discovered-
+    # malformed-file contract as --net-class-map above.
+    current_path_specs: list[CurrentPathSpec] = []
+    cp_explicit = args.current_paths is not None
+    cp_suppressed = bool(getattr(args, "no_current_paths", False))
+    cp_candidates: list[Path] = []
+    if cp_explicit:
+        cp_path: Path | None = Path(args.current_paths).resolve()
+    elif cp_suppressed:
+        cp_path = None
+    else:
+        cp_candidates = current_paths_sidecar_candidates(pcb_path)
+        cp_path = discover_current_paths_sidecar(pcb_path)
+
+    if cp_path is not None:
+        if not cp_path.exists():
+            # Only reachable via an explicit flag (the auto-probe returns
+            # existing files only).
+            print(f"Error: current-paths file not found: {cp_path}", file=sys.stderr)
+            return 1
+        try:
+            current_path_specs = load_current_path_specs(cp_path)
+        except (OSError, ValueError) as e:
+            if cp_explicit:
+                print(f"Error: parsing current-paths JSON: {e}", file=sys.stderr)
+                return 1
+            print(
+                f"WARNING: ignoring malformed current-paths sidecar {cp_path}: {e}",
+                file=sys.stderr,
+            )
+            current_path_specs = []
+        else:
+            if not cp_explicit:
+                print(
+                    f"[INFO] auto-loaded current-paths sidecar: {cp_path}",
+                    file=sys.stderr,
+                )
+    elif not cp_suppressed and cp_candidates and (only_set is None or "path_ampacity" in only_set):
+        # No sidecar found anywhere probed -- name what was probed so a
+        # user who forgot to place one isn't left guessing (mirrors the
+        # --net-class-map "INACTIVE" warning below).
+        if "path_ampacity" not in skip_set:
+            _probed = "".join(f"\n  {candidate}" for candidate in cp_candidates)
+            print(
+                "WARNING: path_ampacity is INACTIVE without --current-paths "
+                f"and will silently pass. No sidecar was found at any of:{_probed}\n"
+                "Pass one explicitly with --current-paths, or place it at one "
+                "of the paths above, to validate declared branch current paths.",
+                file=sys.stderr,
+            )
+
     # Issue #4321 (Tier 1/2): resolve the loaded net-class-map's user keys
     # onto the board's actual net names *before* handing the map to
     # DRCChecker, mirroring ``route_cmd._apply_net_class_map_sidecar``.
@@ -2023,6 +2125,9 @@ def main(argv: list[str] | None = None) -> int:
             # takes precedence over --strict-connectivity, which is now a
             # compatibility no-op restating the default.
             strict_connectivity=not getattr(args, "legacy_connectivity", False),
+            # Issue #4980/#5124: declared branch-specific current-path
+            # intent (--current-paths sidecar, auto-discovered).
+            current_path_specs=current_path_specs,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -2503,6 +2608,7 @@ def run_selected_checks(
     # Issue #3046.
     check_methods = {
         "ampacity": checker.check_ampacity,
+        "path_ampacity": checker.check_path_ampacity,
         "clearance": checker.check_clearances,
         "connectivity": checker.check_connectivity,
         "connector_access": checker.check_connector_access,
