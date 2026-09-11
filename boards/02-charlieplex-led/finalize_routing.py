@@ -35,12 +35,18 @@ def _relocate_escapes(pcb):
     # observed variants need the same reviewed destinations. Net qualification
     # prevents an unrelated endpoint at the same coordinate from moving.
     net_names = {net.get_int(0): net.get_string(1) for net in pcb.find_children("net")}
-    r5_moves = {
+    net_qualified_moves = {
         ("VCC", (140.665, 117.3)): (139.2, 115.5),
         ("VCC", (140.665, 117.2)): (139.2, 115.5),
         ("RESET", (141.1, 118.1)): (140.9, 118.5),
         # CI reports board-relative (17.8, 40.8); origin is (123.5, 77.5).
         ("RESET", (141.3, 118.3)): (140.9, 118.5),
+        # The authoritative four-line outline (#4978) produces alternate
+        # bottom-row LED escape cells. Move their attached endpoints with
+        # the via, using the same off-pad x offsets as the upper rows.
+        ("NODE_B", (148.1, 105.5)): (148.4, 105.5),  # D8-1
+        ("NODE_B", (158.9, 105.5)): (158.6, 105.5),  # D9-2
+        ("NODE_C", (138.1, 106.0)): (138.4, 106.0),  # D7-1
     }
     # Only a present via activates a relocation. Quantization can create a
     # track-only waypoint at an old escape cell; moving it on a second pass
@@ -51,7 +57,7 @@ def _relocate_escapes(pcb):
         net_name = net_names.get(net.get_int(0), net.get_string(0)) if net else None
         point = via.find("at")
         old = tuple(round(point.get_float(i), 3) for i in range(2))
-        destination = r5_moves.get((net_name, old), moves.get(old))
+        destination = net_qualified_moves.get((net_name, old), moves.get(old))
         if destination is not None:
             active_moves[net_name, old] = destination
     for item in pcb.find_all("segment") + pcb.find_all("via"):
