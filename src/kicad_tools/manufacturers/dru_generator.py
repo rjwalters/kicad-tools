@@ -248,6 +248,39 @@ def generate_dru(
         f"  (constraint clearance (min {rules.min_clearance_mm}mm)))"
     )
 
+    # These factory constraints have distinct applicability. Do not encode
+    # silk-to-pad as a silk-layer restriction: native cross-layer pairs need
+    # an explicit rule. No blanket same-net physical_clearance is emitted.
+    if rules.min_silk_to_pad_clearance_mm is not None:
+        lines.append(
+            f'(rule "Silk to Pad{label_suffix}"\n'
+            "  (condition \"A.Type == 'Pad' || B.Type == 'Pad'\")\n"
+            "  (severity error)\n"
+            f"  (constraint silk_clearance (min {rules.min_silk_to_pad_clearance_mm}mm)))"
+        )
+    if rules.min_smd_pad_clearance_mm is not None:
+        minimum = max(rules.min_clearance_mm, rules.min_smd_pad_clearance_mm)
+        lines.append(
+            f'(rule "SMD Pad Clearance{label_suffix}"\n'
+            "  (condition \"A.Pad_Type == 'SMD' && B.Pad_Type == 'SMD'\")\n"
+            f"  (constraint clearance (min {minimum}mm)))"
+        )
+    if rules.min_pth_hole_to_track_mm is not None:
+        lines.append(
+            f'(rule "PTH Hole to Track{label_suffix}"\n'
+            "  (condition \"(A.Pad_Type == 'Through-hole' && B.Type == 'Track') || "
+            "(B.Pad_Type == 'Through-hole' && A.Type == 'Track')\")\n"
+            f"  (constraint hole_clearance (min {rules.min_pth_hole_to_track_mm}mm)))"
+        )
+    if rules.min_inner_pth_hole_to_copper_mm is not None:
+        minimum = max(rules.min_pth_hole_to_track_mm or 0, rules.min_inner_pth_hole_to_copper_mm)
+        lines.append(
+            f'(rule "Inner PTH Hole to Copper{label_suffix}"\n'
+            "  (layer inner)\n"
+            "  (condition \"A.Pad_Type == 'Through-hole' || B.Pad_Type == 'Through-hole'\")\n"
+            f"  (constraint hole_clearance (min {minimum}mm)))"
+        )
+
     # --- Via Drill ---
     # Issue #3118 / #3734: exempt micro vias from the standard through-via
     # floors.  The router's ``--micro-via-in-pad-fallback`` (and ``kct stitch

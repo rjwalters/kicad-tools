@@ -219,3 +219,35 @@ Then import in KiCad: **Board Setup > Design Rules > Import**
 
 - [DRC & Validation Guide](../guides/drc-and-validation.md)
 - [Manufacturing Export Guide](../guides/manufacturing-export.md)
+
+### Object-specific JLCPCB spacing
+
+The `jlcpcb` and `jlcpcb-tier1` profiles include these rigid-board limits,
+verified against the [JLCPCB capabilities table](https://jlcpcb.com/capabilities/pcb-capabilities/)
+on 2026-09-10:
+
+| Constraint | Minimum | Applicability |
+| --- | --- | --- |
+| Pad to silkscreen | 0.15 mm | Same board side, explicit cross-layer `silk_clearance` |
+| SMD pad to pad | 0.15 mm | Different nets; never weaker than general copper clearance |
+| PTH to track | 0.28 mm | Plated component-hole edge to different-net track copper; 0.35 mm is a recommendation |
+| Inner PTH hole to copper | 0.30 mm | Inner copper layers, different nets |
+
+The PTH distances are measured from the drilled hole, not the pad's copper edge.
+They do not replace the distinct via-hole spacing limits. These constraints do
+not impose a same-net physical clearance on valid copper joins. Other profiles
+can leave the optional object-specific fields unset.
+
+Export and `check --emit-dru` place the explicit constraints in the managed fab
+rule block while retaining custom rules outside it. The silk rule is not
+restricted to a silk layer: it must compare objects across layers. KiCad also
+checks pad copper when no mask opening is present. The project-wide silk floor
+is unchanged, so the pad-specific limit does not become a silk-to-silk limit.
+
+Python checks cover SMD pad pairs, round/slotted PTH holes (including drill
+offsets and rotation), inner filled-zone copper, and modeled silk line/rectangle
+strokes against pad copper and mask openings. Text glyph rendering and unsupported
+silk primitives still require native KiCad DRC; Python text bounding-box checks
+remain advisory. Native DRC and the manufacturer's DFM review are separate
+checks. Emitting these rules neither certifies a board nor clears an existing
+manufacturing hold, and no board artifacts are regenerated automatically.

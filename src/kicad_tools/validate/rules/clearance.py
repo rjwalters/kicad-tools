@@ -85,6 +85,7 @@ class CopperElement:
     # rounded corners and produce phantom sub-10um shorts (issue #3826).
     # ``None`` for segments and vias (which use the analytic disc path).
     polygon: object | None = None
+    pad_type: str = ""
 
     @classmethod
     def from_segment(cls, seg: Segment) -> CopperElement:
@@ -118,6 +119,7 @@ class CopperElement:
             reference=f"{footprint.reference}-{pad.number}",
             net_name=pad.net_name if pad.net_number != 0 else "",
             polygon=polygon,
+            pad_type=pad.type,
         )
 
     @classmethod
@@ -910,7 +912,13 @@ class ClearanceRule(DRCRule):
         # Process each copper layer
         for layer in pcb.copper_layers:
             layer_name = layer.name
-            violations = self._check_layer(pcb, layer_name, min_clearance, diff_pair_set)
+            violations = self._check_layer(
+                pcb,
+                layer_name,
+                min_clearance,
+                diff_pair_set,
+                design_rules.min_smd_pad_clearance_mm,
+            )
             for v in violations:
                 results.add(v)
 
@@ -924,8 +932,12 @@ class ClearanceRule(DRCRule):
             for v in self._check_net0_bridges(pcb, layer_name, min_clearance):
                 results.add(v)
 
+        from .factory_clearance import check_pth_hole_clearance
+
+        results.merge(check_pth_hole_clearance(pcb, design_rules))
+
         # Count rules checked (one per layer)
-        results.rules_checked = len(pcb.copper_layers)
+        results.rules_checked += len(pcb.copper_layers)
 
         return results
 
@@ -935,6 +947,7 @@ class ClearanceRule(DRCRule):
         layer_name: str,
         min_clearance: float,
         diff_pair_set: set[tuple[int, int]] | None = None,
+        min_smd_pad_clearance: float | None = None,
     ) -> list[DRCViolation]:
         """Check clearance on a single copper layer.
 
@@ -1030,9 +1043,12 @@ class ClearanceRule(DRCRule):
                 clearance, loc_x, loc_y = _calculate_clearance(elem1, elem2)
 
                 # Check against minimum
-                if clearance + DRC_TOLERANCE < min_clearance:
+                required = min_clearance
+                if elem1.pad_type == elem2.pad_type == "smd":
+                    required = max(required, min_smd_pad_clearance or 0)
+                if clearance + DRC_TOLERANCE < required:
                     violation = self._create_violation(
-                        elem1, elem2, clearance, min_clearance, layer_name, loc_x, loc_y
+                        elem1, elem2, clearance, required, layer_name, loc_x, loc_y
                     )
                     violations.append(violation)
 
