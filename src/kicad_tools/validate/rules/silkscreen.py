@@ -845,10 +845,10 @@ def check_silk_overlap(
 
     **Detection is bare intersection, not clearance.**  KiCad's silk-to-silk
     test enforces a configurable *clearance* (silk must be some distance apart);
-    this check requires the geometries to actually overlap.  That is the
-    deliberately conservative choice for an advisory rule -- it under-reports
-    rather than over-reports relative to kicad-cli on boards that configure a
-    non-zero silk clearance, and it needs no new profile field.
+    this check requires the modeled geometries to actually overlap and needs
+    no new profile field. It can miss clearance-only findings. Text bounding
+    boxes can also overlap when the actual glyph strokes do not, so this
+    approximation can report false positives relative to native KiCad.
 
     Args:
         pcb: The PCB to check.
