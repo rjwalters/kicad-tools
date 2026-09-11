@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # Import SExp parsing and builders
-from kicad_tools.core.layers import validate_copper_layer
+from kicad_tools.core.layers import is_declared_copper_layer, validate_copper_layer
 from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp, parse_file
 from kicad_tools.sexp.builders import (
@@ -232,10 +232,9 @@ class PCBEditor:
     def _parse_copper_layers(self):
         """Extract enabled copper layer names from the board's ``(layers ...)`` table.
 
-        Mirrors the ``signal``/``power`` type filter used by
-        :attr:`kicad_tools.schema.pcb.PCB.copper_layers` -- entries such as
-        ``(31 "F.CrtYd" user "F.Courtyard")`` are not copper and are
-        excluded. Populates :attr:`copper_layers` with the layer names this
+        Requires a canonical copper name and a supported copper type
+        (signal, power, mixed, or jumper). User/graphic declarations such
+        as ``(31 "F.CrtYd" user "F.Courtyard")`` are excluded. Populates :attr:`copper_layers` with the layer names this
         specific board declares as enabled (e.g. ``{"F.Cu", "B.Cu"}`` for a
         2-layer board), used by :meth:`add_zone` to reject inner layers that
         are not part of this board's stackup (Issue #4907).
@@ -250,7 +249,7 @@ class PCBEditor:
         for entry in layers_node.iter_children():
             name = entry.get_string(0) or ""
             layer_type = entry.get_string(1) or "user"
-            if name and layer_type in ("signal", "power"):
+            if is_declared_copper_layer(name, layer_type):
                 self.copper_layers.add(name)
 
     def _parse_footprints(self):

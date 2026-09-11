@@ -553,6 +553,55 @@ class TestPCBEditorZoneAPI:
             )
         assert len(pcb.doc.find_all("zone")) == zone_count_before
 
+    @pytest.mark.parametrize("api", ["editor", "generator", "cli"])
+    @pytest.mark.parametrize("kind", ["mixed", "jumper", "empty", "missing", "unknown", "user"])
+    def test_declared_copper_evidence(self, simple_pcb, api, kind):
+        import re
+
+        from kicad_tools.cli.zones_cmd import main
+        from kicad_tools.zones import ZoneGenerator
+
+        text = simple_pcb.read_text()
+        if kind in ("empty", "missing"):
+            text = re.sub(
+                r"\(layers\s*(?:\([^()]*\)\s*)*\)",
+                "(layers)" if kind == "empty" else "",
+                text,
+                count=1,
+            )
+        else:
+            text = text.replace('(0 "F.Cu" signal)', f'(0 "F.Cu" {kind})')
+        simple_pcb.write_text(text)
+        before = simple_pcb.read_bytes()
+        valid = kind in ("mixed", "jumper")
+        layer = "In1.Cu" if kind in ("empty", "missing") else "F.Cu"
+        if api == "cli":
+            output = simple_pcb.with_name("new-zone.kicad_pcb")
+            ret = main(
+                ["add", str(simple_pcb), "--net", "GND", "--layer", layer, "-o", str(output)]
+            )
+            assert ret == (0 if valid else 1)
+            assert output.exists() == valid
+        elif api == "editor":
+            editor = PCBEditor(str(simple_pcb))
+            original = editor.doc.to_string()
+            if valid:
+                assert editor.add_zone(net_name="GND", layer=layer).layer == layer
+            else:
+                with pytest.raises(ValueError, match="available"):
+                    editor.add_zone(net_name="GND", layer=layer)
+                assert editor.doc.to_string() == original
+        else:
+            generator = ZoneGenerator.from_pcb(simple_pcb)
+            if valid:
+                generator.add_zone(net="GND", layer=layer)
+                assert len(generator.zones) == 1
+            else:
+                with pytest.raises(ValueError, match="available"):
+                    generator.add_zone(net="GND", layer=layer)
+                assert generator.zones == []
+        assert simple_pcb.read_bytes() == before
+
 
 class TestBoardOutlineExtraction:
     """Tests for board outline extraction."""

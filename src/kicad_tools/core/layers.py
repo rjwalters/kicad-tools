@@ -27,6 +27,15 @@ COPPER_LAYER_ORDER: tuple[str, ...] = (
 _COPPER_LAYER_INDEX: dict[str, int] = {name: idx for idx, name in enumerate(COPPER_LAYER_ORDER)}
 
 
+def is_declared_copper_layer(name: str, layer_type: str) -> bool:
+    """Recognize canonical copper declarations, including mixed/jumper types.
+
+    KiCad layer types: https://dev-docs.kicad.org/en/file-formats/sexpr-pcb/#layers-section
+    User/graphic declarations cannot establish enabled copper membership.
+    """
+    return name in COPPER_LAYER_ORDER and layer_type in ("signal", "power", "mixed", "jumper")
+
+
 def validate_copper_layer(layer: str, available_layers: Iterable[str]) -> None:
     """Reject a layer that is not a real, board-enabled copper layer.
 
@@ -45,15 +54,13 @@ def validate_copper_layer(layer: str, available_layers: Iterable[str]) -> None:
        this rejects layers that are merely undeclared/disabled on *this*
        board without hardcoding a stackup.
 
-    An empty ``available_layers`` skips check 2 -- callers that cannot
-    determine the board's layer table (e.g. a malformed or missing
-    ``(layers ...)`` block) fall back to spelling validation only, rather
-    than rejecting every copper layer outright.
+    Empty or missing layer evidence rejects every requested copper layer;
+    canonical spelling alone cannot establish that a layer is enabled.
 
     Args:
         layer: Layer name to validate (e.g. ``"F.Cu"``, ``"In1.Cu"``).
         available_layers: Copper layer names declared as enabled
-            (``signal``/``power`` type) in the board's own layer table.
+            (``signal``/``power``/``mixed``/``jumper`` type) in the board's own layer table.
 
     Raises:
         ValueError: If *layer* is not a recognised copper layer name, or
@@ -66,7 +73,7 @@ def validate_copper_layer(layer: str, available_layers: Iterable[str]) -> None:
         )
 
     available = set(available_layers)
-    if available and layer not in available:
+    if layer not in available:
         raise ValueError(
             f"Layer {layer!r} is not available on this board. "
             f"Declared copper layers: {', '.join(sorted(available, key=_COPPER_LAYER_INDEX.__getitem__))}."

@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from kicad_tools.core.layers import validate_copper_layer
+from kicad_tools.core.layers import is_declared_copper_layer, validate_copper_layer
 from kicad_tools.core.sexp_file import save_pcb, verify_pcb_write
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import SExp, parse_file
@@ -698,7 +698,14 @@ class ZoneGenerator:
 
         # Reject unknown/non-copper/disabled-on-this-board layers before
         # the zone is queued (Issue #4907).
-        validate_copper_layer(layer, (declared.name for declared in self._pcb.copper_layers))
+        validate_copper_layer(
+            layer,
+            (
+                declared.name
+                for declared in self._pcb.layers.values()
+                if is_declared_copper_layer(declared.name, declared.type)
+            ),
+        )
 
         config = ZoneConfig(
             net=net,
