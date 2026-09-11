@@ -163,6 +163,39 @@ def _pad_rect_segment_centerline_distance(
     )
 
 
+def _sync_pad_via_policies(py_grid: RoutingGrid, cpp_grid: Any) -> None:
+    """Refresh lazily before via acceptance when pad policy inputs change.
+
+    Via-pad acceptance follows the finalization backstop's component trace
+    clearance, not the separate via-to-track/via floor or escape-region rule.
+    """
+    pitches = py_grid._component_pitch_cache
+    if pitches is None:
+        pitches = py_grid.compute_component_pitches()
+        py_grid._component_pitch_cache = pitches
+    rules = py_grid.rules
+    policy_key = (
+        id(pitches),
+        len(py_grid._pads),
+        frozenset(py_grid._relaxed_clearance_refs),
+        rules.trace_clearance,
+        rules.trace_width,
+        rules.strict_pad_clearance,
+        rules.fine_pitch_clearance,
+        rules.fine_pitch_threshold,
+        tuple(sorted(rules.component_clearances.items())),
+    )
+    if getattr(cpp_grid, "_pad_via_policy_key", None) == policy_key:
+        return
+    for index, pad in enumerate(py_grid._pads):
+        clearance = py_grid.rules.get_clearance_for_component(pad.ref, pitches.get(pad.ref))
+        eligible = py_grid._same_component_carveout_active(
+            pad.ref, clearance, py_grid.rules.trace_clearance, pitches
+        )
+        cpp_grid._impl.set_pad_via_policy(index, clearance, eligible)
+    cpp_grid._pad_via_policy_key = policy_key
+
+
 def _sync_pad_to_cpp_grid(
     py_grid: RoutingGrid,
     cpp_grid: Any,
@@ -230,6 +263,7 @@ def _sync_pad_to_cpp_grid(
             ref_hash,
             clearance_override,
             is_plane_net,
+            pad.rotation,
         )
     except (AttributeError, TypeError):
         # Older C++ binding without is_plane_net argument; ignore -- the

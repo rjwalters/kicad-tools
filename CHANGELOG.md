@@ -1202,6 +1202,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Grid routing acceptance now retains non-cardinal pad rotation in Python
+  segment/via backstops and the native validator, including late pad additions
+  (#5182). Native candidate vias now check foreign pad copper using the same
+  component clearance and exclusions as finalization. Requires native build v22.
+
+
 - **Declared current paths reported `unresolved` on real boards whenever a
   trace did not land on the exact pad center** (#4980) — endpoint resolution
   (`router/current_paths.py`) attached a `RefDes.pad` endpoint to the copper
