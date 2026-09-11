@@ -57,7 +57,14 @@ def build(output):
         check=True,
     )
     native = json.loads((evidence / "native-drc.json").read_text())
-    if native["violations"] or native["unconnected_items"]:
+    # Only "error"-severity findings are a fab-stop. kicad-cli's default JSON
+    # includes warnings in `violations` too (e.g. the JLCPCB "Silk to Pad"
+    # floor is a legibility/DFM limit KiCad itself classifies as a warning,
+    # per dru_generator.py's rationale for leaving it unforced) -- gating on
+    # any violation regardless of severity turned a cosmetic advisory into
+    # "do not manufacture".
+    blocking = [v for v in native["violations"] if v.get("severity") == "error"]
+    if blocking or native["unconnected_items"]:
         # main() removes failed staging directories; keep the actual native
         # findings in the CI log so a missing library or copper fault is clear.
         print(json.dumps(native, indent=2), file=sys.stderr)
