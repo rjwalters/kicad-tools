@@ -265,6 +265,58 @@ def test_get_component_detail_empty_codes_no_request():
 
 
 # --------------------------------------------------------------------------
+# get_component_detail_raw -- no Part projection, no stock coercion
+# --------------------------------------------------------------------------
+
+
+def test_get_component_detail_raw_preserves_exact_component_objects():
+    resp = _FakeResponse(json_data={"code": 200, "success": True, "data": [_SAMPLE_COMPONENT]})
+    client, session = _client_with_response(resp)
+    raw = client.get_component_detail_raw(["c2040"])
+    assert raw == [_SAMPLE_COMPONENT]
+    assert session.calls[0]["data"] == b'{"componentCodes":["C2040"]}'
+
+
+def test_get_component_detail_raw_preserves_missing_and_malformed_stock():
+    """The Part projection coerces absent/bad stockCount to 0; raw must not."""
+    missing = {"componentCode": "C1"}
+    malformed = {"componentCode": "C2", "stockCount": "not-a-number"}
+    resp = _FakeResponse(
+        json_data={
+            "code": 200,
+            "success": True,
+            "data": [missing, malformed, None, "not-an-object"],
+        }
+    )
+    client, _ = _client_with_response(resp)
+    raw = client.get_component_detail_raw(["C1", "C2"])
+    # Non-dict entries are dropped, not coerced into placeholders.
+    assert raw == [missing, malformed]
+    assert "stockCount" not in raw[0]
+    assert raw[1]["stockCount"] == "not-a-number"
+
+
+def test_get_component_detail_raw_empty_codes_no_request():
+    client, session = _client_with_response(_FakeResponse(json_data={}))
+    assert client.get_component_detail_raw(["", "  "]) == []
+    assert session.calls == []
+
+
+def test_get_component_detail_raw_nonlist_data_raises_incomplete_response():
+    resp = _FakeResponse(json_data={"code": 200, "success": True, "data": {"unexpected": "shape"}})
+    client, _ = _client_with_response(resp)
+    with pytest.raises(jlcpcb_api.JLCIncompleteResponseError):
+        client.get_component_detail_raw(["C1"])
+
+
+def test_get_component_detail_raw_propagates_business_errors():
+    resp = _FakeResponse(json_data={"code": 401, "success": False, "message": "bad auth"})
+    client, _ = _client_with_response(resp)
+    with pytest.raises(JLCAuthError):
+        client.get_component_detail_raw(["C1"])
+
+
+# --------------------------------------------------------------------------
 # Error mapping -> distinct exception types
 # --------------------------------------------------------------------------
 

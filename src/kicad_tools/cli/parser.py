@@ -186,6 +186,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_fleet_parser(subparsers)
     _add_render_parser(subparsers)
     _add_board_metrics_parser(subparsers)
+    _add_readiness_parser(subparsers)
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
@@ -858,6 +859,33 @@ def _add_check_parser(subparsers) -> None:
             "no-sidecar behaviour (the diff-pair / match-group skew rules "
             "stay inactive).  Cannot be combined with --net-class-map "
             "(Issue #4601)."
+        ),
+    )
+    check_parser.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        help=(
+            "Path to a JSON sidecar declaring branch-specific current-path "
+            "intent (stable RefDes.pad source/sink endpoints with their own "
+            "declared current, Issue #4980).  When supplied, enables the "
+            "path_ampacity DRC rule to check each declared branch "
+            "independently of --net-class-map's whole-net target_ampacity.  "
+            "Auto-discovered next to the board when this flag is omitted -- "
+            "as <board-stem>.current_paths.json or current_paths.json, in "
+            "the board dir then output/ then ../output/ (mirrors "
+            "--net-class-map, Issue #5124).  Use --no-current-paths to "
+            "suppress that auto-discovery."
+        ),
+    )
+    check_parser.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help=(
+            "Suppress current-paths sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (path_ampacity stays inactive).  Cannot "
+            "be combined with --current-paths."
         ),
     )
     check_parser.add_argument(
@@ -4680,6 +4708,37 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON sidecar declaring branch-specific current-path "
+            "intent (Issue #4980): stable RefDes.pad source/sink endpoints, "
+            "a continuous current, and reinforcement eligibility, per "
+            "physical branch. Lets a net that carries BOTH a high-current "
+            "trunk and low-current sense taps (a Kelvin shunt, an INA181 "
+            "input) be checked per branch instead of at one whole-net "
+            "target_ampacity. The post-route DRC runs the path_ampacity "
+            "rule against each declared branch's OWN current, and the "
+            "declarations are re-emitted as current_paths.json next to the "
+            "routed board so a later kct check audits the finished copper "
+            "against identical intent. Auto-discovered next to the input "
+            "board when omitted (mirrors --net-class-map); use "
+            "--no-current-paths to suppress that."
+        ),
+    )
+    route_parser.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help=(
+            "Suppress current-paths sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (path_ampacity stays inactive in the "
+            "post-route DRC). Cannot be combined with --current-paths."
+        ),
+    )
+    route_parser.add_argument(
         "--analog-nets",
         dest="analog_nets",
         default=None,
@@ -6936,6 +6995,126 @@ def _add_board_metrics_parser(subparsers) -> None:
         help="Print board.json to stdout without writing any file",
     )
     add_format_flag(bm_parser)
+
+
+def _add_readiness_parser(subparsers) -> None:
+    """Add the ``readiness`` parser (scriptable manufacturing sign-off, #4977).
+
+    Implements the ``/kct:manufacturing-readiness`` + ``/kct:tapeout`` skill
+    contracts as an orchestrated command and writes the hash-bound
+    ``output/readiness.json`` evidence the demo gallery validates.
+    """
+    rd_parser = subparsers.add_parser(
+        "readiness",
+        help="Run the manufacturing-readiness gates and write output/readiness.json",
+        description=(
+            "Refill and save the canonical PCB, run kct check at the resolved "
+            "fab tier, run the mandatory independent kicad-cli pcb drc "
+            "--refill-zones cross-gate, review LVS and per-rule warnings, export "
+            "and package the manufacturing bundle, then emit hash-bound "
+            "readiness-v1 evidence. Exits non-zero unless every applicable gate "
+            "passes; there is no flag that produces Ready on a partial run."
+        ),
+    )
+    rd_parser.add_argument(
+        "readiness_board",
+        metavar="board",
+        help="Board directory or routed .kicad_pcb to sign off",
+    )
+    rd_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="readiness_manufacturer",
+        metavar="TIER",
+        default=None,
+        help="Fabrication tier (default: discovered from the board's recipe/manifest)",
+    )
+    rd_mode = rd_parser.add_mutually_exclusive_group()
+    rd_mode.add_argument(
+        "--assembly",
+        dest="readiness_assembly",
+        action="store_true",
+        help="Full assembly package including BOM/CPL procurement identities (default)",
+    )
+    rd_mode.add_argument(
+        "--pcb-only",
+        dest="readiness_pcb_only",
+        action="store_true",
+        help="Bare-board package; makes no component procurement or assembly claim",
+    )
+    rd_parser.add_argument(
+        "--output",
+        "-o",
+        dest="readiness_output",
+        metavar="DIR",
+        default=None,
+        help="Manufacturing bundle directory (default: <pcb-dir>/manufacturing/)",
+    )
+    rd_parser.add_argument(
+        "--sch",
+        dest="readiness_schematic",
+        metavar="PATH",
+        default=None,
+        help="Path to the .kicad_sch (auto-detected by default)",
+    )
+    rd_parser.add_argument(
+        "--net-class-map",
+        dest="readiness_net_class_map",
+        metavar="PATH",
+        default=None,
+        help="Net-class map sidecar (auto-discovered by default)",
+    )
+    rd_parser.add_argument(
+        "--ack-warnings",
+        dest="readiness_ack_warnings",
+        metavar="RULES",
+        default="",
+        help=(
+            "Comma-separated rule_ids whose assembly-affecting warnings are "
+            "explicitly accepted; each becomes an accepted-risk line in README.txt"
+        ),
+    )
+    rd_parser.add_argument(
+        "--include-tht",
+        dest="readiness_include_tht",
+        action="store_true",
+        help="Accept through-hole parts in the CPL (excluded by default)",
+    )
+    rd_parser.add_argument(
+        "--no-archive",
+        dest="readiness_no_archive",
+        action="store_true",
+        help="Skip building output/manufacturing.zip",
+    )
+    rd_parser.add_argument(
+        "--hv-net-class",
+        dest="readiness_hv_net_class",
+        metavar="NAME",
+        default="HV",
+        help="Net-class name identifying high-voltage nets (default: HV)",
+    )
+    rd_parser.add_argument(
+        "--hv-requirement",
+        dest="readiness_hv_requirement",
+        metavar="TEXT",
+        default=None,
+        help=(
+            "Record the isolation requirement an HV board was gated against. "
+            "Required when HV nets are present; otherwise the HV gate is not run."
+        ),
+    )
+    rd_parser.add_argument(
+        "--fill-tolerance",
+        dest="readiness_fill_tolerance",
+        metavar="MM2",
+        type=float,
+        default=None,
+        help=(
+            "Per-layer filled-copper area tolerance in mm^2 for the "
+            "saved-vs-refilled equivalence check"
+        ),
+    )
+    add_format_flag(rd_parser)
 
 
 def _add_fleet_parser(subparsers) -> None:
