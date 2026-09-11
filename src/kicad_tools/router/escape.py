@@ -5076,50 +5076,15 @@ class EscapeRouter:
 
     @staticmethod
     def _segment_to_pad_edge_gap(seg: Segment, pad: Pad) -> float:
-        """Return the minimum edge-to-edge gap between a segment and a pad.
+        """Minimum gap to the rotated rectangular envelope of a router pad.
 
-        The pad is modelled as a rectangle centred at (pad.x, pad.y) with
-        half-extents (pad.width/2, pad.height/2).  The segment centre-line
-        runs from (seg.x1, seg.y1) to (seg.x2, seg.y2).
-
-        The closest distance from the segment centre-line to the pad
-        rectangle boundary is computed, then both the segment half-width
-        and pad half-extent (in the direction of the closest approach) are
-        subtracted to yield the edge-to-edge gap.
-
-        A negative return value means the segment copper overlaps the pad
-        copper.
+        Centerline intersections have zero geometric distance, hence a negative
+        edge gap after subtracting the trace radius. All rectangle edges are
+        considered; projecting only the pad center can miss the nearest corner.
         """
-        # Closest point on the segment to the pad centre
-        sx, sy = seg.x2 - seg.x1, seg.y2 - seg.y1
-        seg_len_sq = sx * sx + sy * sy
-        if seg_len_sq < 1e-12:
-            # Degenerate segment (zero length)
-            cpx, cpy = seg.x1, seg.y1
-        else:
-            t = max(0.0, min(1.0, ((pad.x - seg.x1) * sx + (pad.y - seg.y1) * sy) / seg_len_sq))
-            cpx = seg.x1 + t * sx
-            cpy = seg.y1 + t * sy
+        from .pad_geometry import pad_segment_distance
 
-        # Distance from closest point on segment to the pad rectangle edge.
-        # The pad is axis-aligned (no rotation support needed for SOP pads).
-        half_w = pad.width / 2
-        half_h = pad.height / 2
-        dx_abs = abs(cpx - pad.x)
-        dy_abs = abs(cpy - pad.y)
-
-        # Signed distance from pad rectangle (negative = inside)
-        outside_x = max(0.0, dx_abs - half_w)
-        outside_y = max(0.0, dy_abs - half_h)
-
-        if outside_x == 0.0 and outside_y == 0.0:
-            # Point is inside the pad rectangle
-            rect_dist = -min(half_w - dx_abs, half_h - dy_abs)
-        else:
-            rect_dist = math.sqrt(outside_x * outside_x + outside_y * outside_y)
-
-        # Edge-to-edge gap = centre-to-rect distance minus half-segment-width
-        return rect_dist - seg.width / 2
+        return pad_segment_distance(pad, seg.x1, seg.y1, seg.x2, seg.y2) - seg.width / 2
 
     @staticmethod
     def _segment_clears_foreign_via(
@@ -8200,13 +8165,9 @@ class EscapeRouter:
         # mm so square pads (where the calculation gives a tiny value)
         # still get the spec-mandated minimum search budget.
         if max_offset_mm is None:
-            half_x = pad.width / 2
-            half_y = pad.height / 2
-            # Projected half-extent of the pad rectangle along (dx, dy).
-            # For axis-aligned escape directions this is exactly
-            # ``half_x`` (E/W) or ``half_y`` (N/S); for diagonals it
-            # blends both extents proportionally.
-            proj_half = abs(dx) * half_x + abs(dy) * half_y
+            from .pad_geometry import pad_directional_extent
+
+            proj_half = pad_directional_extent(pad, dx, dy)
             auto_budget = proj_half + via_diameter / 2 + effective_clearance + step_mm
             max_offset_mm = max(0.5, auto_budget)
 
