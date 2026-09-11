@@ -33,7 +33,7 @@ class SelectionMapping:
     reference: str
     selected: str
     selected_values: tuple[str, ...] | list[str]
-    unselected_values: tuple[str, ...] | list[str] | list[str]
+    unselected_values: tuple[str, ...] | list[str]
     catalog_id: str | None = None
     mpn: str | None = None
     group_separator: Literal[",", ";"] = ","
