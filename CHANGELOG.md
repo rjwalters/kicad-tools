@@ -25,6 +25,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exits 1 before any routing work); an auto-discovered one degrades to a
   warning; the authored input file is never overwritten (a collision diverts
   the derived sidecar to `current_paths.effective.json`, the #4428 rule).
+- **`kct analyze component-stress` — operating-state MOSFET VDS/VGS gate**
+  (#5039) — a new advisory analyzer
+  (`kicad_tools.analysis.component_stress.ComponentStressAnalyzer`) that asks
+  the question ERC, DRC, creepage and `analyze electrical-rating` all
+  structurally miss: *is the device itself rated for the potential difference
+  its own terminals will see?* Stress is computed as a terminal-to-terminal
+  differential (`VDS = V(D)-V(S)`, `VGS = V(G)-V(S)`) inside a **single** entry
+  of an explicit, reviewed operating-state manifest (`--states`, YAML or JSON),
+  so correlated nets are never combined across unrelated states and shifting a
+  floating gate-driver domain's reference leaves both differentials unchanged.
+  Ratings come only from sourced `Vds_max` / `Vgs_max` symbol fields (no
+  built-in defaults); an undeclared state from the required coverage checklist
+  (startup, precharge, both mains polarities, support, trip, loss-of-drive), an
+  unresolved D/G/S pin role, an unbound terminal or an uncited rating is
+  reported `UNRESOLVED` — a release blocker, never a silent pass. Pin-role
+  mappings are cached under a part identity that includes the MPN and
+  footprint, so a part swap cannot carry a stale pinout forward, and a
+  footprint creepage/spacing waiver can never suppress a device-stress finding
+  (the two read disjoint inputs). No automatic circuit-state inference is
+  performed in this pass.
 - **Konnect item 8 audit: natural-language design-rule store** (#4902, Part
   of #4880) — `docs/konnect-item8-design-rules-audit.md` decides **decline**
   on adding a Konnect-style free-text design-rule store: the repo already

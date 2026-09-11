@@ -6,6 +6,7 @@ Provides analysis subcommands:
 - `analyze trace-lengths`: Trace length analysis for timing-critical nets
 - `analyze signal-integrity`: Signal integrity analysis (crosstalk and impedance)
 - `analyze thermal`: Thermal analysis and hotspot detection
+- `analyze component-stress`: MOSFET VDS/VGS stress per declared operating state
 
 Usage:
     kicad-tools analyze complexity board.kicad_pcb
@@ -18,6 +19,8 @@ Usage:
     kicad-tools analyze signal-integrity board.kicad_pcb --format json
     kicad-tools analyze thermal board.kicad_pcb
     kicad-tools analyze thermal board.kicad_pcb --format json
+    kicad-tools analyze component-stress design.kicad_sch --states states.yaml
+    kicad-tools analyze component-stress design.kicad_sch --states states.yaml --format json
 """
 
 from __future__ import annotations
@@ -395,6 +398,59 @@ def main(argv: list[str] | None = None) -> int:
         help="Suppress informational output",
     )
 
+    # Component-stress subcommand (operates on a schematic, not a PCB)
+    stress_parser = subparsers.add_parser(
+        "component-stress",
+        help="Check MOSFET VDS/VGS against declared operating states (advisory)",
+        description=(
+            "Evaluate each MOSFET's terminal-to-terminal stress (VDS = V(D)-V(S), "
+            "VGS = V(G)-V(S)) in every state of an explicit, reviewed "
+            "operating-state manifest, against Vds_max/Vgs_max symbol fields. "
+            "No circuit-state inference is performed: a missing state, pin role, "
+            "node potential or source-backed rating is reported UNRESOLVED -- "
+            "never a silent pass."
+        ),
+    )
+    stress_parser.add_argument(
+        "schematic",
+        help="Schematic file to analyze (.kicad_sch)",
+    )
+    stress_parser.add_argument(
+        "--states",
+        required=True,
+        metavar="MANIFEST",
+        help="Operating-state manifest (.yaml/.yml/.json) declaring per-net node potentials",
+    )
+    stress_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    stress_parser.add_argument(
+        "--allow-unresolved",
+        action="store_true",
+        help=(
+            "Do not gate on UNRESOLVED rows (default: an unresolved state, pin "
+            "role or rating is a release blocker and exits non-zero)"
+        ),
+    )
+    stress_parser.add_argument(
+        "--allow-uncited-ratings",
+        action="store_true",
+        help=(
+            "Accept Vds_max/Vgs_max fields without a Rating_Source/Datasheet "
+            "citation (default: an uncited rating is UNRESOLVED)"
+        ),
+    )
+    stress_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
     if argv is None:
         argv = sys.argv[1:]
 
@@ -424,6 +480,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "electrical-rating":
         return _run_electrical_rating_analysis(args)
+
+    if args.subcommand == "component-stress":
+        return _run_component_stress_analysis(args)
 
     return 0
 
@@ -1605,6 +1664,173 @@ def _output_electrical_rating_text(
     console.print(
         f"[{summary_style}]checked={checked}  fail={fail_count}  "
         f"skipped={skip_count} (no rating field / unknown rail)[/{summary_style}]"
+    )
+
+
+def _run_component_stress_analysis(args: argparse.Namespace) -> int:
+    """Run the operating-state MOSFET VDS/VGS stress gate on a schematic.
+
+    Returns non-zero when any row FAILs, and (by default) when any row is
+    UNRESOLVED -- an unknown state or an unsourced rating is a visible release
+    blocker, not a quiet pass. ``--allow-unresolved`` downgrades the latter.
+    File-not-found / bad-suffix / malformed-manifest errors return 1.
+    """
+    from kicad_tools.analysis.component_stress import (
+        ComponentStressAnalyzer,
+        OperatingStateManifest,
+    )
+
+    sch_path = Path(args.schematic)
+
+    if not sch_path.exists():
+        print(f"Error: File not found: {sch_path}", file=sys.stderr)
+        return 1
+
+    if sch_path.suffix != ".kicad_sch":
+        print(f"Error: Expected .kicad_sch file, got: {sch_path.suffix}", file=sys.stderr)
+        return 1
+
+    try:
+        manifest = OperatingStateManifest.load(args.states)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"Error: invalid operating-state manifest: {exc}", file=sys.stderr)
+        return 1
+
+    analyzer = ComponentStressAnalyzer(
+        manifest,
+        require_rating_source=not args.allow_uncited_ratings,
+    )
+    results = analyzer.analyze(sch_path)
+
+    if args.format == "json":
+        _output_component_stress_json(results, manifest)
+    else:
+        _output_component_stress_text(results, sch_path.name, manifest, quiet=args.quiet)
+
+    if any(r.status == "FAIL" for r in results):
+        return 1
+    if not args.allow_unresolved and any(r.status == "UNRESOLVED" for r in results):
+        return 1
+    return 0
+
+
+def _output_component_stress_json(results: list, manifest) -> None:
+    """Output the component-stress census as JSON (mirrors sibling analyzers)."""
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    unresolved_count = sum(1 for r in results if r.status == "UNRESOLVED")
+    pass_count = sum(1 for r in results if r.status == "PASS")
+    output = {
+        "census": [r.to_dict() for r in results],
+        "parameters": {
+            "states_manifest": manifest.source_path,
+            "declared_states": sorted(manifest.states),
+            "required_states": list(manifest.required_states),
+            "missing_states": [s for s in manifest.required_states if s not in manifest.states],
+        },
+        "summary": {
+            "total": len(results),
+            "checked": pass_count + fail_count,
+            "pass": pass_count,
+            "fail": fail_count,
+            "unresolved": unresolved_count,
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+def _output_component_stress_text(
+    results: list,
+    filename: str,
+    manifest,
+    quiet: bool = False,
+) -> None:
+    """Output the component-stress census as a formatted table + summary line."""
+    console = Console()
+
+    if not results:
+        if not quiet:
+            console.print(f"[green]No MOSFETs with stress data found in {filename}[/green]")
+        return
+
+    if not quiet:
+        console.print(f"\n[bold]Operating-State Component Stress: {filename}[/bold]")
+        console.print(
+            "[dim]VDS=V(D)-V(S) and VGS=V(G)-V(S) are evaluated per declared state; "
+            "FAIL when |stress| > the sourced absolute-maximum rating. UNRESOLVED = "
+            "undeclared state, unresolved pin role, unbound terminal or missing "
+            "source-backed rating (never a pass).[/dim]\n"
+        )
+
+    table = Table(show_header=True)
+    table.add_column("ref", style="cyan")
+    table.add_column("mpn")
+    table.add_column("state")
+    table.add_column("check")
+    table.add_column("nets (high - low)")
+    table.add_column("stress", justify="right")
+    table.add_column("rated", justify="right")
+    table.add_column("margin", justify="right")
+    table.add_column("status", justify="center")
+
+    for r in results:
+        if r.status == "FAIL":
+            status_style = "red bold"
+        elif r.status == "PASS":
+            status_style = "green"
+        else:
+            status_style = "yellow"
+
+        if r.high_net and r.low_net:
+            terminals = f"{r.high_net} - {r.low_net}"
+        else:
+            terminals = f"{r.high_terminal} - {r.low_terminal}"
+        stress = "-" if r.stress_v is None else f"{r.stress_v:.2f}V"
+        rated = "-" if r.rated_v is None else f"{r.rated_v:.1f}V"
+        margin = "-" if r.margin_v is None else f"{r.margin_v:.2f}V"
+
+        table.add_row(
+            r.reference,
+            r.mpn or "-",
+            r.state,
+            r.check,
+            terminals,
+            stress,
+            rated,
+            margin,
+            f"[{status_style}]{r.status}[/{status_style}]",
+        )
+
+    console.print(table)
+
+    unresolved = [r for r in results if r.status == "UNRESOLVED"]
+    if unresolved and not quiet:
+        console.print("\n[yellow]Unresolved rows (each is a release blocker):[/yellow]")
+        grouped: dict[tuple[str, str], int] = {}
+        for r in unresolved:
+            key = (r.reference, r.reason or "unresolved")
+            grouped[key] = grouped.get(key, 0) + 1
+        for (ref, reason), count in grouped.items():
+            suffix = f" ({count} rows)" if count > 1 else ""
+            console.print(f"[dim]  {ref}: {reason}{suffix}[/dim]")
+
+    missing = [s for s in manifest.required_states if s not in manifest.states]
+    if missing and not quiet:
+        console.print(
+            f"\n[yellow]Coverage gap: required state(s) not declared: {', '.join(missing)}[/yellow]"
+        )
+
+    fail_count = sum(1 for r in results if r.status == "FAIL")
+    unresolved_count = len(unresolved)
+    checked = len(results) - unresolved_count
+    console.print()
+    summary_style = "red bold" if (fail_count or unresolved_count) else "green"
+    console.print(
+        f"[{summary_style}]checked={checked}  fail={fail_count}  "
+        f"unresolved={unresolved_count} (undeclared state / pin role / "
+        f"unsourced rating)[/{summary_style}]"
     )
 
 
