@@ -71,6 +71,7 @@ from .jlcpcb_api import (
     JLCAPIError,
     JLCAuthError,
     JLCCredentials,
+    JLCIncompleteResponseError,
     JLCIPNotWhitelistedError,
     JLCOpenAPIClient,
     JLCPermissionError,
@@ -113,6 +114,7 @@ __all__ = [
     "JLCIPNotWhitelistedError",
     "JLCPermissionError",
     "JLCQuotaError",
+    "JLCIncompleteResponseError",
     # Composition
     "ComposedPart",
     "ComposedPartStore",
