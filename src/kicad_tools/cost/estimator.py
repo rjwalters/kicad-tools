@@ -33,6 +33,7 @@ class ComponentCost:
     lead_time_days: int | None  # Lead time if known
     is_basic: bool  # JLCPCB basic part (no setup fee)
     pricing_source: str = "estimated"  # "lcsc" or "estimated"
+    lookup_unavailable: bool = False  # Do not interpret failed lookup as observed zero stock
 
     @property
     def total_for_quantity(self) -> float:
@@ -187,6 +188,7 @@ class CostEstimate:
                         "in_stock": c.in_stock,
                         "is_basic": c.is_basic,
                         "pricing_source": c.pricing_source,
+                        "lookup_unavailable": c.lookup_unavailable,
                     }
                     for c in self.components
                 ],
@@ -649,6 +651,7 @@ class ManufacturingCostEstimator:
 
         # Bulk-fetch real prices for groups that have LCSC numbers
         lcsc_map: dict = {}
+        unavailable_parts: set[str] = set()
         if self.use_lcsc_pricing:
             lcsc_numbers = [
                 g.lcsc for g in bom.grouped() if g.lcsc and not (g.items and g.items[0].dnp)
@@ -659,8 +662,13 @@ class ManufacturingCostEstimator:
 
                     client = LCSCClient()
                     lcsc_map = client.lookup_many(list(set(lcsc_numbers)))
-                except Exception:
-                    pass  # Fall through to category-based estimates
+                except Exception as exc:
+                    from kicad_tools.parts import LCSCUnavailableError
+
+                    if isinstance(exc, LCSCUnavailableError):
+                        lcsc_map = exc.partial_results
+                        unavailable_parts = exc.unavailable_parts
+                    # Unresolved entries retain explicitly estimated pricing.
 
         for group in bom.grouped():
             # Skip DNP components
@@ -683,7 +691,7 @@ class ManufacturingCostEstimator:
                 is_basic = part.is_basic
             else:
                 unit_cost = self._get_component_price(group, pricing)
-                in_stock = True  # Unknown, assume available
+                in_stock = lcsc_key not in unavailable_parts  # Failed lookup is not availability
                 is_basic = self._is_basic_part(group.lcsc) if group.lcsc else False
                 pricing_source = "estimated"
 
@@ -701,6 +709,7 @@ class ManufacturingCostEstimator:
                     lead_time_days=None,
                     is_basic=is_basic,
                     pricing_source=pricing_source,
+                    lookup_unavailable=lcsc_key in unavailable_parts,
                 )
             )
 
