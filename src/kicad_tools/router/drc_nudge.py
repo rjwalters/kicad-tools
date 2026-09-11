@@ -29,6 +29,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -1410,6 +1411,34 @@ def _scan_and_repair_via_in_pad(
     return nudged
 
 
+def _via_pad_process_findings(via: Via, router: Autorouter) -> set[tuple[str, int, float]]:
+    """Process constraints not included in the copper-only route validator.
+
+    Keep object identity and measured gap so an unrelated inherited finding
+    can remain, but a new or changed hole/unsupported in-pad finding cannot
+    be accepted by the foreign-pad repair transaction.
+    """
+    findings: set[tuple[str, int, float]] = set()
+    drill_clearance = max(router.rules.min_drill_clearance, router.rules.min_hole_to_hole)
+    for route in [*router.routes, *getattr(router, "existing_routes", [])]:
+        for other in route.vias:
+            if other is via:
+                continue
+            gap = math.hypot(via.x - other.x, via.y - other.y) - (via.drill + other.drill) / 2
+            if gap < drill_clearance - 1e-6:
+                findings.add(("hole", id(other), gap))
+    supports_in_pad = _router_via_in_pad_supported(router)
+    for pad in (getattr(router, "pads", None) or {}).values():
+        if pad.through_hole and pad.drill > 0:
+            gap = math.hypot(via.x - pad.x, via.y - pad.y) - (via.drill + pad.drill) / 2
+            if gap < drill_clearance - 1e-6:
+                findings.add(("hole", id(pad), gap))
+        elif not pad.through_hole and not supports_in_pad:
+            if _via_drill_inside_bbox(via, _router_pad_bbox(pad)):
+                findings.add(("via_in_pad", id(pad), 0.0))
+    return findings
+
+
 def _try_nudge_via_pad_violation(
     violation: ClearanceViolation,
     router: Autorouter,
@@ -1462,6 +1491,13 @@ def _try_nudge_via_pad_violation(
     (``via_via_not_found``) instead of correctly declining with
     ``via_via_anchored``.
 
+    The proposal is transactional: revalidate the via and every snapped
+    segment against all existing copper, plus process hole spacing,
+    unsupported via-in-pad placement and board edges. Restore geometry in
+    place if any new finding appears. Unrelated pre-existing findings are
+    retained without vetoing a legal repair; a blocked proposal records
+    ``via_pad_destination_blocked``.
+
     Uses the same generous ``_VIA_IN_PAD_MAX_DISPLACEMENT`` budget as
     the same-net via-in-pad sweep -- clearing a foreign SMD pad requires
     roughly ``pad_half_width + via_radius + clearance`` of travel, well
@@ -1498,15 +1534,58 @@ def _try_nudge_via_pad_violation(
     if offending_pad is None:
         return False
 
-    budget = max(max_displacement, _VIA_IN_PAD_MAX_DISPLACEMENT)
-    return _try_nudge_via_pad(
-        via,
-        _router_pad_bbox(offending_pad),
-        router,
-        budget,
-        required_clearance=violation.required,
-        result=result,
-    )
+    # The cardinal exit helper only knows the offending pad. Treat its
+    # proposal as a transaction: include every snapped same-net endpoint,
+    # and reject NEW findings rather than requiring an otherwise clean board.
+    before = Counter(dataclasses.astuple(v) for v in validate_routes(router))
+    process_before = _via_pad_process_findings(via, router)
+    old_x, old_y = via.x, via.y
+    chain = [
+        (seg, seg.x1, seg.y1, seg.x2, seg.y2)
+        for route in router.routes
+        if route.net == via.net
+        for seg in route.segments
+    ]
+    accepted = False
+    try:
+        budget = max(max_displacement, _VIA_IN_PAD_MAX_DISPLACEMENT)
+        if not _try_nudge_via_pad(
+            via,
+            _router_pad_bbox(offending_pad),
+            router,
+            budget,
+            required_clearance=violation.required,
+            result=result,
+        ):
+            return False
+        after = Counter(dataclasses.astuple(v) for v in validate_routes(router))
+        edge_clearance = getattr(router, "_edge_clearance", None)
+        edge_blocked = False
+        if edge_clearance is not None and edge_clearance > 0:
+            for (x1, y1), (x2, y2) in getattr(router, "_edge_segments", []) or []:
+                old_gap = _point_to_segment_distance(old_x, old_y, x1, y1, x2, y2)
+                swept_gap = _segment_to_segment_distance(old_x, old_y, via.x, via.y, x1, y1, x2, y2)
+                required = via.diameter / 2 + edge_clearance
+                if swept_gap < min(required, old_gap) - 1e-6:
+                    edge_blocked = True
+                    break
+        if (
+            after - before
+            or _via_pad_process_findings(via, router) - process_before
+            or edge_blocked
+        ):
+            if result is not None:
+                result._bump_skipped("via_pad_destination_blocked")
+            return False
+        accepted = True
+        return True
+    finally:
+        if not accepted:
+            # Restore in place: other violations in this pass and callers
+            # may retain references to these exact Via/Segment objects.
+            via.x, via.y = old_x, old_y
+            for seg, x1, y1, x2, y2 in chain:
+                seg.x1, seg.y1, seg.x2, seg.y2 = x1, y1, x2, y2
 
 
 def _try_nudge_seg_edge(
