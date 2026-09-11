@@ -268,28 +268,28 @@ auto-router.  After generating, you can:
 4. **Re-route** - `kct route boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb -o ./routed.kicad_pcb --timeout 240`
 5. **Export Files** - generate Gerbers, BOM, and CPL via `kct export`
 
-## Future API Features
+## Project API
 
-The kicad-tools API is evolving to support the complete workflow:
+The `Project` API supports routing and manufacturing exports for an existing
+project (see `src/kicad_tools/project.py`):
 
 ```python
-# Planned API (not yet implemented)
-project = Project.create("stm32_devboard")
+from kicad_tools import Project
 
-# Sync schematic to PCB
-project.sync_to_pcb()
+project = Project.load("output/stm32_devboard.kicad_pro")
 
-# Auto-route with manufacturer rules
-project.route(strategy="negotiated", manufacturer="jlcpcb")
+# Auto-route with the default routing rules.
+project.route()
 
-# Validate
-result = project.check_drc(manufacturer="jlcpcb", layers=2)
-
-# Export manufacturing files
-project.export_gerbers("output/manufacturing/")
-project.export_bom("output/manufacturing/bom.csv")
-project.export_positions("output/manufacturing/positions.csv")
+# Export Gerbers and the assembly package (including BOM and positions).
+project.export_gerbers("output/manufacturing/", manufacturer="jlcpcb")
+project.export_assembly("output/manufacturing/", manufacturer="jlcpcb")
 ```
+
+`project.check_drc(manufacturer="jlcpcb", layers=2, report_path=...)`
+checks an existing native KiCad DRC report; generate that report first.
+Schematic-to-PCB synchronization still uses the CLI workflow above;
+`project.sync_to_pcb()` is not implemented.
 
 ## Related Examples
 

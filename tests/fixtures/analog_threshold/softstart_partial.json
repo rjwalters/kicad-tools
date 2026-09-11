@@ -1,0 +1,150 @@
+{
+  "id": "bank_interlock_partial",
+  "kind": "difference_comparator",
+  "resistors": {
+    "input_positive": [
+      {
+        "reference": "R1",
+        "ohms": 499000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      },
+      {
+        "reference": "R2",
+        "ohms": 499000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      },
+      {
+        "reference": "R3",
+        "ohms": 499000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      },
+      {
+        "reference": "R4",
+        "ohms": 499000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      }
+    ],
+    "input_negative": [
+      {
+        "reference": "R5",
+        "ohms": 499000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      },
+      {
+        "reference": "R6",
+        "ohms": 499000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      },
+      {
+        "reference": "R7",
+        "ohms": 499000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      },
+      {
+        "reference": "R8",
+        "ohms": 499000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      }
+    ],
+    "feedback": [
+      {
+        "reference": "R9",
+        "ohms": 10000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      }
+    ],
+    "reference_arm": [
+      {
+        "reference": "R10",
+        "ohms": 10000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      }
+    ],
+    "midpoint_top": [
+      {
+        "reference": "R11",
+        "ohms": 10000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      }
+    ],
+    "midpoint_bottom": [
+      {
+        "reference": "R12",
+        "ohms": 10000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      }
+    ],
+    "comparator_top": [
+      {
+        "reference": "R13",
+        "ohms": 41200.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      }
+    ],
+    "comparator_bottom": [
+      {
+        "reference": "R14",
+        "ohms": 10000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      }
+    ],
+    "signal": [
+      {
+        "reference": "R15",
+        "ohms": 10000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      }
+    ],
+    "hysteresis": [
+      {
+        "reference": "R16",
+        "ohms": 665000.0,
+        "tolerance": 0.001,
+        "source": "Issue #5064 illustrative \u00b10.1% resistor assumption; not supplier qualification"
+      }
+    ]
+  },
+  "bounds": {
+    "supply": {
+      "min": 3.234,
+      "nominal": 3.3,
+      "max": 3.366,
+      "source": "Issue #5064 assumed supply sweep"
+    },
+    "common_mode": {
+      "min": -250,
+      "nominal": 0,
+      "max": 250,
+      "source": "Issue #5064 terminal-average common-mode sweep"
+    }
+  },
+  "requirements": {
+    "falling": {
+      "min": 60,
+      "source": "Issue #5064 owner minimum bank voltage"
+    }
+  },
+  "unmodeled_terms": [
+    "Semiconductor error limits and reachable corner constraints not established"
+  ],
+  "devices": {
+    "amplifier": "U1",
+    "buffer": "U2",
+    "comparator": "U3"
+  }
+}
