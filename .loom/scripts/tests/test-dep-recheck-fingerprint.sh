@@ -394,6 +394,18 @@ assert_eq "blocked" "$(field "$out_pr_prefix" VERDICT)" \
 assert_eq "7496:OPEN" "$(field "$out_pr_prefix" DEPS)" \
     "T15d: DEPS reports the PR-prefixed reference (#7496), not the parenthetical closes-target (#7495)"
 
+# T15e: an `### Dependencies` (H3) heading — as filed by Curator on #7498 —
+# must be recognized the same as `## Dependencies` (H2), instead of being
+# silently skipped and reporting a false VERDICT=clear (#7503).
+jq -n '{body: "### Dependencies\n\n- [ ] #7496: must merge before this issue is buildable.\n\n### Other Section\n\n- [ ] #999: not a dependency, different section entirely\n"}' \
+    >"$STUB_DIR/issue-7498.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-7496.json"
+out_h3="$("$TARGET_SCRIPT" named-dependency --number 7498 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_h3" VERDICT)" \
+    "T15e: an H3 '### Dependencies' heading is recognized just like H2, reporting VERDICT=blocked instead of a false clear (#7503)"
+assert_eq "7496:OPEN" "$(field "$out_h3" DEPS)" \
+    "T15e: DEPS includes the H3-section dependency and excludes #999 from an unrelated H3 section"
+
 # --- T16: dep-recheck - narrowed label fingerprint (#7362): a pure label flip
 # among loom:pr/loom:review-requested/loom:reviewing/loom:operator/loom:treating
 # — none of them a superseding-block label — with no merge-state change must
