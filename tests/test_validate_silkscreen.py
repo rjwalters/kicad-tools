@@ -650,6 +650,28 @@ class TestSilkOverlap:
         )
         assert len(check_silk_overlap(pcb, _rules())) == 1
 
+    @pytest.mark.parametrize("offset", [0, 1e-7, 1e-5, 2e-4])
+    @pytest.mark.parametrize("reverse_a", [False, True])
+    @pytest.mark.parametrize("reverse_b", [False, True])
+    @pytest.mark.parametrize("swap", [False, True])
+    @pytest.mark.parametrize("rotation", [0, 37])
+    def test_offset_parallel_short_strokes_still_overlap(
+        self, offset, reverse_a, reverse_b, swap, rotation
+    ):
+        """Endpoint rounding must not turn parallel overdraw into a corner."""
+        a = [(0, 0), (2, 0)]
+        b = [(0, offset), (0.05, offset)]
+        if reverse_a:
+            a.reverse()
+        if reverse_b:
+            b.reverse()
+        graphics = [_silk_line(start=a[0], end=a[1]), _silk_line(start=b[0], end=b[1])]
+        if swap:
+            graphics.reverse()
+        pcb = _empty_pcb()
+        pcb._footprints.append(_make_footprint(rotation=rotation, graphics=graphics))
+        assert len(check_silk_overlap(pcb, _rules())) == 1
+
     def test_straight_outline_continuation_is_not_a_collision(self):
         pcb = _empty_pcb()
         pcb._footprints.append(

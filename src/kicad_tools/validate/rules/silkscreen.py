@@ -919,13 +919,16 @@ def check_silk_overlap(
                     joint_point = _shared_endpoint(a[0], b[0])
                     if joint_point is not None:
                         end_a = a[0][1] if a[0][0] == joint_point else a[0][0]
-                        end_b = (
-                            b[0][1]
+                        origin_b, end_b = (
+                            b[0]
                             if math.dist(b[0][0], joint_point) <= _CLEARANCE_EPSILON_MM
-                            else b[0][0]
+                            else (b[0][1], b[0][0])
                         )
                         da = (end_a[0] - joint_point[0], end_a[1] - joint_point[1])
-                        db = (end_b[0] - joint_point[0], end_b[1] - joint_point[1])
+                        # Use each stroke's own endpoint as its vector origin.
+                        # Snapping B to A's tolerant joint would tilt parallel
+                        # strokes and misclassify short overdraw as a corner.
+                        db = (end_b[0] - origin_b[0], end_b[1] - origin_b[1])
                         # Same-direction collinear lines overlap, even if the
                         # shorter line fits entirely inside the joint buffer.
                         # Opposite directions form a valid straight continuation.
