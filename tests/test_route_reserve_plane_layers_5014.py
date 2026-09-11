@@ -20,6 +20,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from kicad_tools.cli import route_cmd as route_cmd_module
 
 # ---------------------------------------------------------------------------
@@ -264,3 +266,127 @@ class TestReservationAcrossEscalationRungs:
         for _name, stack in self._ladder():
             route_cmd_module._apply_plane_layer_reservation(rules, stack, args)
             assert rules.allowed_layers == ["F.Cu", "In1.Cu"]
+
+
+class TestEscalationPlaneAudit:
+    """Audit committed copper on the selected router in every terminal flow."""
+
+    @staticmethod
+    def _run(tmp_path, monkeypatch, mode, *, dry_run=False, earlier_best=False):
+        from kicad_tools.core.types import CopperLayer
+        from kicad_tools.router import load_pcb_for_routing as real_load
+        from kicad_tools.router.layers import LayerStack
+        from kicad_tools.router.primitives import Route, Segment
+
+        pcb = _write_pcb(tmp_path)
+        pcb.write_text(
+            pcb.read_text()
+            .replace(" (at 110 110)", ' (at 110 110) (property "Reference" "R1")')
+            .replace(" (at 120 115)", ' (at 120 115) (property "Reference" "R2")')
+        )
+        output = tmp_path / "escalated.kicad_pcb"
+        argv = [
+            str(pcb),
+            "-o",
+            str(output),
+            "--backend",
+            "python",
+            "--strategy",
+            "basic",
+            "--no-cache",
+            "--skip-drc",
+            "--quiet",
+            "--no-optimize",
+            "--max-layers",
+            "4",
+        ]
+        if mode != "rules":
+            argv += ["--starting-layers", "4"]
+        if mode == "rules":
+            argv += ["--no-auto-layers", "--adaptive-rules"]
+        elif mode == "combined":
+            argv += ["--adaptive-rules"]
+        if dry_run:
+            argv += ["--dry-run"]
+        # The fixed-stack relaxation path detects its stack from the PCB.
+        monkeypatch.setattr(
+            "kicad_tools.router.io.detect_layer_stack",
+            lambda _: LayerStack.four_layer_sig_gnd_pwr_sig(),
+        )
+        loaded = []
+        attempted_stacks = []
+
+        def load(*args, **kwargs):
+            attempted_stacks.append(kwargs["layer_stack"])
+            if earlier_best and loaded:
+                raise ValueError("Later configuration cannot load this fixture")
+            router, net_map = real_load(*args, **kwargs)
+            loaded.append(router)
+            if earlier_best:
+                real_stats = router.get_statistics
+
+                def partial_stats(*a, **kw):
+                    return {**real_stats(*a, **kw), "nets_routed": 0}
+
+                monkeypatch.setattr(router, "get_statistics", partial_stats)
+            return router, net_map
+
+        monkeypatch.setattr("kicad_tools.router.load_pcb_for_routing", load)
+        real_finalize = route_cmd_module._finalize_routes
+        selected = []
+
+        def finalize(router, *args, **kwargs):
+            result = real_finalize(router, *args, **kwargs)
+            selected.append(router)
+            # Model committed copper at the finalization boundary, without
+            # relying on search preferences to choose an inner layer.
+            router.routes.append(
+                Route(
+                    net=1,
+                    net_name="AUDIT_SIG",
+                    segments=[
+                        Segment(
+                            x1=110,
+                            y1=110,
+                            x2=111,
+                            y2=110,
+                            width=0.2,
+                            layer=CopperLayer.IN1_CU,
+                            net=1,
+                        ),
+                    ],
+                )
+            )
+            return result
+
+        monkeypatch.setattr(route_cmd_module, "_finalize_routes", finalize)
+        rc = route_cmd_module.main(argv)
+        assert selected == [loaded[0]]
+        if earlier_best:
+            assert len(attempted_stacks) > 1
+            if mode != "rules":
+                assert attempted_stacks[-1] != selected[0].layer_stack
+        return rc
+
+    @pytest.mark.parametrize("mode", ["layers", "rules", "combined"])
+    def test_reports_committed_plane_signal(self, tmp_path, monkeypatch, capsys, mode):
+        self._run(tmp_path, monkeypatch, mode)
+        assert (
+            "net 'AUDIT_SIG' has 1 segment routed on reference-plane layer 'In1.Cu'"
+            in capsys.readouterr().err
+        )
+
+    @pytest.mark.parametrize("mode", ["layers", "rules", "combined"])
+    def test_dry_run_does_not_report_committed_plane_signal(
+        self, tmp_path, monkeypatch, capsys, mode
+    ):
+        assert self._run(tmp_path, monkeypatch, mode, dry_run=True) == 0
+        assert "net 'AUDIT_SIG'" not in capsys.readouterr().err
+
+    @pytest.mark.parametrize("mode", ["layers", "rules", "combined"])
+    def test_audits_earlier_best_result(self, tmp_path, monkeypatch, capsys, mode):
+        self._run(tmp_path, monkeypatch, mode, earlier_best=True)
+        assert (
+            "net 'AUDIT_SIG' has 1 segment routed on reference-plane layer 'In1.Cu'"
+            in capsys.readouterr().err
+        )

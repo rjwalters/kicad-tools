@@ -7419,6 +7419,9 @@ def route_with_layer_escalation(
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
+    # Each escalation flow returns before the direct-route audit. Use the
+    # selected router's stack, which can differ from the last attempted rung.
+    _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
     # Final summary
     if not quiet:
@@ -8254,6 +8257,9 @@ def route_with_rule_relaxation(
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
+    # Each escalation flow returns before the direct-route audit. Use the
+    # selected router's stack, which can differ from the last attempted rung.
+    _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
     # Final summary
     if not quiet:
@@ -10592,6 +10598,9 @@ def route_with_combined_escalation(
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
+    # Each escalation flow returns before the direct-route audit. Use the
+    # selected router's stack, which can differ from the last attempted rung.
+    _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
     # Final summary
     if not quiet:
