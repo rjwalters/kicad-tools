@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import pytest
 
+from kicad_tools.schema.pcb import Footprint, Pad
 from kicad_tools.validate.rules.clearance import (
     CopperElement,
     _rect_segment_centerline_distance,
@@ -297,3 +298,269 @@ class TestArgumentOrderSymmetry:
 
         assert c1 == pytest.approx(c2, abs=1e-9)
         assert (x1, y1) == pytest.approx((x2, y2), abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Regression: rotated roundrect pads must use the true polygon, not the AABB
+# (issue #4985 -- the segment-vs-pad analogue of #3826's pad-vs-pad fix)
+# ---------------------------------------------------------------------------
+
+
+def _c19_pad_and_footprint() -> tuple[Pad, Footprint]:
+    """Reproduce the exact C19 fixture from issue #4985 (chorus-test-revA).
+
+    Footprint at (147.086449, 97.046534), rotation -90 deg.  Pad 2 is a
+    1.0 x 1.45 mm ``roundrect`` (``roundrect_rratio`` 0.25) with local
+    position (0.95, 0) and absolute pad angle 270 deg (KiCad stores
+    ``pad.rotation`` in the absolute board frame -- it already folds in
+    the footprint's rotation, issue #3902).
+    """
+    footprint = Footprint(
+        name="C19",
+        reference="C19",
+        value="",
+        position=(147.086449, 97.046534),
+        rotation=-90.0,
+        layer="F.Cu",
+    )
+    pad = Pad(
+        number="2",
+        type="smd",
+        shape="roundrect",
+        position=(0.95, 0.0),
+        size=(1.0, 1.45),
+        layers=["F.Cu"],
+        net_number=5,
+        net_name="GNDA",
+        rotation=270.0,
+        roundrect_rratio=0.25,
+    )
+    return pad, footprint
+
+
+class TestRoundrectPadSegmentClearance:
+    """The C19 roundrect fixture from issue #4985.
+
+    Prior to the fix, ``_segment_circle_clearance`` routed every
+    non-circular pad through ``_rect_segment_centerline_distance``'s
+    AABB rectangle -- including ``roundrect`` pads, whose true copper
+    outline cuts back the corners.  For this fixture the AABB
+    over-approximation reported ~0.0812 mm of clearance (a false
+    ``clearance_pad_segment`` violation against the board's 0.1016 mm
+    floor); the true rounded-corner polygon (matching
+    ``pcbnew.PAD.GetEffectivePolygon``) clears by ~0.1846 mm.
+    """
+
+    def test_c19_fixture_does_not_over_fire(self) -> None:
+        pad, footprint = _c19_pad_and_footprint()
+        pad_elem = CopperElement.from_pad(pad, footprint)
+
+        # Foreign F.Cu trace on Net-(D3-A), width 0.11 mm, from the issue.
+        seg = CopperElement(
+            element_type="segment",
+            layer="F.Cu",
+            net_number=7,
+            geometry=(147.9, 98.6, 154.4, 98.6, 0.11),
+            reference="Trace-test",
+            net_name="Net-(D3-A)",
+        )
+
+        clearance, loc_x, loc_y = _segment_circle_clearance(seg, pad_elem)
+
+        # True rounded geometry clears comfortably above the 0.1016 mm
+        # board floor -- close to the verified GetEffectivePolygon value
+        # of ~0.1846 mm, not the AABB's false ~0.0812 mm.
+        assert clearance == pytest.approx(0.1846, abs=5e-3)
+        assert clearance > 0.1016
+        # Location is still reported at the pad center.
+        assert (loc_x, loc_y) == pytest.approx((147.086449, 97.996534), abs=1e-6)
+
+    def test_aabb_path_would_have_reported_the_false_positive(self) -> None:
+        """Pin the pre-fix AABB value so a future refactor can't silently
+        regress back to it without this test noticing."""
+        pad, footprint = _c19_pad_and_footprint()
+        pad_elem = CopperElement.from_pad(pad, footprint)
+        cx, cy, w, h = pad_elem.geometry  # AABB dimensions (swapped for 270 deg)
+
+        center_dist = _rect_segment_centerline_distance(cx, cy, w, h, 147.9, 98.6, 154.4, 98.6)
+        aabb_clearance = center_dist - 0.11 / 2
+
+        assert aabb_clearance == pytest.approx(0.0812, abs=5e-3)
+        assert aabb_clearance < 0.1016  # the false violation this issue fixes
+
+    def test_c19_fixture_moved_inward_still_fires(self) -> None:
+        """A trace moved inward creates a genuine <0.1016 mm violation
+        against the TRUE rounded-corner geometry -- the fix must not mask
+        real violations."""
+        pad, footprint = _c19_pad_and_footprint()
+        pad_elem = CopperElement.from_pad(pad, footprint)
+
+        seg = CopperElement(
+            element_type="segment",
+            layer="F.Cu",
+            net_number=7,
+            geometry=(147.9, 98.45, 154.4, 98.45, 0.11),
+            reference="Trace-test",
+            net_name="Net-(D3-A)",
+        )
+
+        clearance, _, _ = _segment_circle_clearance(seg, pad_elem)
+
+        assert clearance < 0.1016
+        assert clearance == pytest.approx(0.0904, abs=5e-3)
+
+    def test_rect_pad_shape_keeps_aabb_path_unchanged(self) -> None:
+        """A plain ``rect`` pad (no rounding) must not be routed through
+        the polygon path -- same numeric result as the AABB formula."""
+        footprint = Footprint(
+            name="U1", reference="U1", value="", position=(0.0, 0.0), rotation=0.0, layer="F.Cu"
+        )
+        pad = Pad(
+            number="1",
+            type="smd",
+            shape="rect",
+            position=(0.0, 0.0),
+            size=(0.5, 1.2),
+            layers=["F.Cu"],
+            net_number=1,
+            net_name="SIG",
+        )
+        pad_elem = CopperElement.from_pad(pad, footprint)
+        assert pad_elem.polygon is not None  # true-geometry polygon still built
+
+        seg = CopperElement(
+            element_type="segment",
+            layer="F.Cu",
+            net_number=2,
+            geometry=(0.8, -5.0, 0.8, 5.0, 0.2),
+            reference="Trace",
+            net_name="SIG2",
+        )
+
+        clearance, _, _ = _segment_circle_clearance(seg, pad_elem)
+        expected = _rect_segment_centerline_distance(0.0, 0.0, 0.5, 1.2, 0.8, -5.0, 0.8, 5.0) - 0.1
+
+        assert clearance == pytest.approx(expected, abs=1e-9)
+
+    def test_zero_rratio_roundrect_matches_plain_rect(self) -> None:
+        """``roundrect_rratio=0`` degenerates ``_pad_polygon`` to an exact
+        rectangle, so the polygon path must agree with the AABB formula."""
+        footprint = Footprint(
+            name="U3", reference="U3", value="", position=(0.0, 0.0), rotation=0.0, layer="F.Cu"
+        )
+        pad = Pad(
+            number="3",
+            type="smd",
+            shape="roundrect",
+            position=(0.0, 0.0),
+            size=(1.0, 2.0),
+            layers=["F.Cu"],
+            net_number=1,
+            net_name="SIG",
+            roundrect_rratio=0.0,
+        )
+        pad_elem = CopperElement.from_pad(pad, footprint)
+
+        seg = CopperElement(
+            element_type="segment",
+            layer="F.Cu",
+            net_number=2,
+            geometry=(0.6, -5.0, 0.6, 5.0, 0.2),
+            reference="Trace",
+            net_name="SIG2",
+        )
+
+        clearance, _, _ = _segment_circle_clearance(seg, pad_elem)
+        expected = _rect_segment_centerline_distance(0.0, 0.0, 1.0, 2.0, 0.6, -5.0, 0.6, 5.0) - 0.1
+
+        assert clearance == pytest.approx(expected, abs=1e-6)
+
+    def test_oval_pad_corner_false_positive_fixed(self) -> None:
+        """Non-square ``oval``/``obround`` pads have the same AABB
+        over-approximation at the stadium's flat-cap corners; the fix
+        must apply to them too, not just ``roundrect``."""
+        footprint = Footprint(
+            name="U1", reference="U1", value="", position=(0.0, 0.0), rotation=0.0, layer="F.Cu"
+        )
+        pad = Pad(
+            number="1",
+            type="smd",
+            shape="oval",
+            position=(0.0, 0.0),
+            size=(2.0, 0.6),
+            layers=["F.Cu"],
+            net_number=1,
+            net_name="SIG",
+        )
+        pad_elem = CopperElement.from_pad(pad, footprint)
+
+        # Trace grazing the stadium's rounded end-cap corner, where the
+        # AABB rectangle extends past the pad's actual copper.
+        seg = CopperElement(
+            element_type="segment",
+            layer="F.Cu",
+            net_number=2,
+            geometry=(1.05, 0.28, 1.2, 0.28, 0.2),
+            reference="Trace",
+            net_name="SIG2",
+        )
+
+        clearance, _, _ = _segment_circle_clearance(seg, pad_elem)
+        aabb_clearance = (
+            _rect_segment_centerline_distance(0.0, 0.0, 2.0, 0.6, 1.05, 0.28, 1.2, 0.28) - 0.1
+        )
+
+        # AABB reports a phantom overlap (negative); the true stadium
+        # geometry clears.
+        assert aabb_clearance < 0.0
+        assert clearance > 0.0
+        assert clearance == pytest.approx(0.0484, abs=5e-3)
+
+    def test_arbitrary_rotation_uses_true_polygon_not_just_cardinal(self) -> None:
+        """The polygon path must engage for non-cardinal rotations too --
+        not only the 90/270 degree case exercised by the C19 fixture."""
+        footprint = Footprint(
+            name="U9",
+            reference="U9",
+            value="",
+            position=(10.0, 5.0),
+            rotation=30.0,
+            layer="F.Cu",
+        )
+        pad = Pad(
+            number="1",
+            type="smd",
+            shape="roundrect",
+            position=(0.0, 0.0),
+            size=(2.0, 1.0),
+            layers=["F.Cu"],
+            net_number=1,
+            net_name="SIG",
+            rotation=30.0,
+            roundrect_rratio=0.3,
+        )
+        pad_elem = CopperElement.from_pad(pad, footprint)
+        assert pad_elem.polygon is not None
+
+        seg = CopperElement(
+            element_type="segment",
+            layer="F.Cu",
+            net_number=2,
+            geometry=(11.5, 4.0, 11.5, 6.0, 0.2),
+            reference="Trace",
+            net_name="SIG2",
+        )
+
+        clearance, _, _ = _segment_circle_clearance(seg, pad_elem)
+
+        from shapely.geometry import LineString
+
+        expected = LineString([(11.5, 4.0), (11.5, 6.0)]).buffer(0.1).distance(pad_elem.polygon)
+        assert clearance == pytest.approx(expected, abs=1e-9)
+
+        # The AABB path would report a meaningfully different (tighter)
+        # clearance for this non-cardinal rotation -- confirms the polygon
+        # path is actually engaged, not silently falling back to the AABB.
+        cx, cy, w, h = pad_elem.geometry
+        aabb_clearance = _rect_segment_centerline_distance(cx, cy, w, h, 11.5, 4.0, 11.5, 6.0) - 0.1
+        assert abs(clearance - aabb_clearance) > 0.05

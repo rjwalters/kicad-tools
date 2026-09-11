@@ -85,6 +85,14 @@ class CopperElement:
     # rounded corners and produce phantom sub-10um shorts (issue #3826).
     # ``None`` for segments and vias (which use the analytic disc path).
     polygon: object | None = None
+    # For pads: the raw ``pad.shape`` string (``"rect"``, ``"roundrect"``,
+    # ``"oval"``/``"obround"``, ``"circle"``, ...).  Used to scope the
+    # segment-vs-pad polygon path (issue #4985) to shapes whose true
+    # outline actually diverges from the AABB rectangle -- ``roundrect``
+    # and non-square ``oval``/``obround`` -- so plain ``rect`` pads keep
+    # the existing analytic AABB behaviour unchanged.  ``""`` for
+    # segments and vias.
+    pad_shape: str = ""
 
     @classmethod
     def from_segment(cls, seg: Segment) -> CopperElement:
@@ -118,6 +126,7 @@ class CopperElement:
             reference=f"{footprint.reference}-{pad.number}",
             net_name=pad.net_name if pad.net_number != 0 else "",
             polygon=polygon,
+            pad_shape=pad.shape,
         )
 
     @classmethod
@@ -497,6 +506,15 @@ def _segment_segment_clearance(
     return clearance, loc_x, loc_y
 
 
+# Pad shapes whose true copper outline (``_pad_polygon``) diverges from
+# the axis-aligned bounding box (``_transform_pad_dimensions``) enough to
+# matter for clearance: ``roundrect`` corners are cut back by
+# ``roundrect_rratio``, and non-square ``oval``/``obround`` pads are a
+# stadium, not a rectangle.  ``rect`` (and any unrecognized shape) keeps
+# the existing analytic AABB path unchanged -- see issue #4985.
+_POLYGON_DIVERGENT_SHAPES = frozenset({"roundrect", "oval", "obround"})
+
+
 def _segment_circle_clearance(
     seg: CopperElement, circle: CopperElement
 ) -> tuple[float, float, float]:
@@ -516,6 +534,16 @@ def _segment_circle_clearance(
     (commit 6ec0344c fixed the analogous bug for pad-to-pad clearance
     but did not visit segment-to-pad).  Use axis-aligned rectangle
     geometry for rectangular pads, mirroring ``_rect_circle_clearance``.
+
+    For pads whose true copper outline diverges from that bounding
+    box -- ``roundrect`` and ``oval``/``obround`` shapes -- the AABB
+    rectangle over-approximates the corners the copper doesn't actually
+    occupy, which reports tighter-than-actual clearance for a rotated
+    roundrect SMD pad (issue #4985, the segment-vs-pad analogue of
+    #3826's pad-vs-pad/pad-vs-zone fix).  When the pad carries a
+    precomputed true-geometry polygon (``CopperElement.polygon``, built
+    by ``_pad_polygon``), route the clearance calculation through that
+    polygon instead of the AABB rectangle.
     """
     x1, y1, x2, y2, seg_width = seg.geometry
     cx, cy, w, h = circle.geometry
@@ -530,18 +558,75 @@ def _segment_circle_clearance(
         center_dist = _point_to_segment_distance(cx, cy, x1, y1, x2, y2)
         clearance = center_dist - seg_half - radius
     else:
-        # Rectangular pad: compute true segment-to-rectangle distance.
-        # ``_rect_segment_centerline_distance`` returns a signed
-        # centerline distance (negative when the segment overlaps the
-        # rectangle, mirroring ``_rect_circle_clearance``'s sign
-        # convention for the rect-vs-disc case).
-        center_dist = _rect_segment_centerline_distance(cx, cy, w, h, x1, y1, x2, y2)
-        clearance = center_dist - seg_half
+        poly_clearance = None
+        if circle.polygon is not None and circle.pad_shape in _POLYGON_DIVERGENT_SHAPES:
+            poly_clearance = _segment_polygon_clearance(seg, circle)
+        if poly_clearance is not None:
+            clearance = poly_clearance
+        else:
+            # Rectangular pad (or no true-geometry polygon available):
+            # compute true segment-to-rectangle distance.
+            # ``_rect_segment_centerline_distance`` returns a signed
+            # centerline distance (negative when the segment overlaps the
+            # rectangle, mirroring ``_rect_circle_clearance``'s sign
+            # convention for the rect-vs-disc case).
+            center_dist = _rect_segment_centerline_distance(cx, cy, w, h, x1, y1, x2, y2)
+            clearance = center_dist - seg_half
 
     # Location is at the pad/via center (sufficient for repair tooling
     # and human readability; the previous behaviour also reported the
     # pad center).
     return clearance, cx, cy
+
+
+def _segment_polygon_clearance(seg: CopperElement, circle: CopperElement) -> float | None:
+    """Signed segment-to-pad clearance using the pad's true copper polygon.
+
+    Mirrors ``_polygon_pair_clearance``'s overlap/distance approach --
+    intersection-area penetration depth when the segment's copper
+    (buffered to its trace width) overlaps the pad, otherwise exact
+    edge-to-edge distance -- but for a trace segment against a pad's
+    true outline (roundrect/oval honored, see ``_pad_polygon``) rather
+    than the pad's axis-aligned bounding box.  Used so
+    ``clearance_pad_segment`` doesn't over-report phantom violations
+    against the rounded-off corners of a roundrect pad (issue #4985).
+
+    Returns ``None`` when the pad has no polygon, so the caller falls
+    back to the analytic AABB-rectangle path.
+    """
+    pad_poly = circle.polygon
+    if pad_poly is None:
+        return None
+
+    require_shapely("pad-segment clearance geometry")
+    from shapely.geometry import LineString, Point
+
+    x1, y1, x2, y2, seg_width = seg.geometry
+    seg_half = seg_width / 2.0
+
+    if x1 == x2 and y1 == y2:
+        # Degenerate (zero-length) segment -- treat as a point.
+        line_geom = Point(x1, y1)
+    else:
+        line_geom = LineString([(x1, y1), (x2, y2)])
+
+    seg_geom = line_geom.buffer(seg_half) if seg_half > 0 else line_geom
+
+    inter = seg_geom.intersection(pad_poly)
+    if not inter.is_empty and inter.area > 0:
+        # Real area overlap: most-negative clearance.  Approximate the
+        # penetration depth by the largest dimension of the
+        # intersection's bounding box, matching
+        # ``_polygon_pair_clearance``'s convention -- monotonic in
+        # overlap and always < 0, which is all the DRC gate needs (a
+        # real short).
+        minx, miny, maxx, maxy = inter.bounds
+        return -float(max(maxx - minx, maxy - miny))
+
+    # Disjoint, or merely touching at a point/edge (zero-area
+    # intersection).  ``distance`` is 0 for a touch, which is the
+    # correct edge-to-edge clearance.
+    return float(seg_geom.distance(pad_poly))
 
 
 def _rect_segment_centerline_distance(
