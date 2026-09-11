@@ -1204,7 +1204,11 @@ class NetStatusAnalyzer:
         # are one electrical net.  Merging components that both touch the same
         # via recovers the cross-layer ``pad -> trace -> via -> trace -> pour``
         # path so a pad on one layer bonds to a pour on another.
-        extended_chains = self._merge_chains_via_vias(segments, segment_components, vias)
+        # In strict mode each via must physically reach both touching
+        # segments; a blind/buried via cannot bridge unrelated layers (#5198).
+        extended_chains = self._merge_chains_via_vias(
+            segments, segment_components, vias, require_layer_span=self.strict
+        )
 
         # Pre-compute, per extended chain, the pads it reaches and the copper
         # layers/geometry it presents to the pour tests.
@@ -1268,7 +1272,12 @@ class NetStatusAnalyzer:
                                 bonded.add(pad_id)
                     for chain, pads_in_chain in zip(chain_seg_indices, chain_pads, strict=True):
                         touches = any(
-                            self._segment_touches_via(segments[s], via, via_geom) for s in chain
+                            self._segment_touches_via(segments[s], via, via_geom)
+                            and (
+                                not self.strict
+                                or self._via_spans_layer(via.layers, segments[s].layer)
+                            )
+                            for s in chain
                         )
                         if touches:
                             bonded.update(pads_in_chain)
@@ -1317,7 +1326,8 @@ class NetStatusAnalyzer:
         layer the via electrically spans (``_via_spans_layer``), so a
         blind/buried via does not fuse an inner-layer segment it cannot reach
         (Issue #4429).  The default (``False``) preserves the layer-agnostic
-        behaviour the zone/pour path (#4229) relies on.
+        behaviour for explicit legacy-mode pour analysis; strict pour analysis
+        requires physical layer spans (#5198).
         """
         n = len(segment_components)
         parent = list(range(n))
