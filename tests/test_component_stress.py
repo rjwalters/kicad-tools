@@ -276,8 +276,16 @@ def test_uncited_rating_is_unresolved_never_a_silent_pass(manifest):
     assert row.rated_v == pytest.approx(500.0)
 
 
-def test_allow_uncited_ratings_opt_in(manifest):
-    rows = _rows(_analyze(manifest, require_rating_source=False))
+def test_allow_uncited_ratings_opt_in(manifest, tmp_path):
+    # Isolate the citation opt-in: an exact device identity is still required.
+    path = tmp_path / "identified-uncited.kicad_sch"
+    path.write_text(
+        SCH.read_text().replace(
+            '(property "Reference" "Q4A"',
+            '(property "MPN" "TEST-500V-FET") (property "Reference" "Q4A"',
+        )
+    )
+    rows = _rows(ComponentStressAnalyzer(manifest, require_rating_source=False).analyze(path))
     row = rows[("Q4A", "mains_negative", "vds")]
     # 500V rating vs 259.3V stress -> PASS once the citation requirement is relaxed.
     assert row.status == "PASS"
@@ -462,8 +470,8 @@ def test_pin_role_cache_invalidated_by_part_swap(changed_field):
     sym = symbols["Q1A"]
 
     cache = PinRoleCache()
-    stale_key = cache.identity(sym)
     cache.resolve(sym, lib)
+    stale_key = cache._identity_by_ref[sym.reference]
     assert cache.misses == 1
     assert stale_key in cache._entries
 
@@ -493,7 +501,7 @@ def test_explicit_pin_fields_win_over_library_names():
             self.name = name
 
     class _Lib:
-        pins = [_Pin("1", "G"), _Pin("2", "D"), _Pin("3", "S")]
+        pins = [_Pin("4", "D"), _Pin("5", "G"), _Pin("6", "S")]
 
     roles = resolve_pin_roles(_Sym(), _Lib())
     assert roles is not None

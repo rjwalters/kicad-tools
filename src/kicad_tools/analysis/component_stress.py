@@ -259,6 +259,19 @@ def _get_field(sym: SymbolInstance, *names: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Operating-state manifest
 # ---------------------------------------------------------------------------
+def _unique_manifest_mapping(pairs: list[tuple[Any, Any]]) -> dict:
+    """Reject serialized duplicate keys before a parser can discard evidence."""
+    result: dict[Any, Any] = {}
+    for key, value in pairs:
+        try:
+            if key in result:
+                raise ValueError(f"duplicate manifest key: {key!r}")
+            result[key] = value
+        except TypeError as exc:
+            raise ValueError("manifest mapping keys must be scalar values") from exc
+    return result
+
+
 @dataclass
 class OperatingState:
     """One declared operating state: a correlated snapshot of node potentials.
@@ -291,13 +304,11 @@ class OperatingState:
         """
         if not net_name:
             return None
-        if net_name in self.potentials:
-            return self.potentials[net_name]
         wanted = _normalize_net_name(net_name)
-        for key, value in self.potentials.items():
-            if _normalize_net_name(key) == wanted:
-                return value
-        return None
+        matches = [
+            value for key, value in self.potentials.items() if _normalize_net_name(key) == wanted
+        ]
+        return matches[0] if len(matches) == 1 else None
 
 
 @dataclass
@@ -353,6 +364,8 @@ class OperatingStateManifest:
         states: dict[str, OperatingState] = {}
         for raw_name, body in raw_states.items():
             name = normalize_state_name(str(raw_name))
+            if name in states:
+                raise ValueError(f"duplicate normalized state name: {raw_name!r}")
             if not name:
                 raise ValueError(
                     f"operating-state manifest has an unusable state name: {raw_name!r}"
@@ -361,7 +374,10 @@ class OperatingStateManifest:
                 raise ValueError(f"state {raw_name!r} must be a mapping of nets to potentials")
 
             if "nets" in body:
-                raw_nets = body.get("nets") or {}
+                extra = set(body) - {"nets", "description", "assumptions", "source"}
+                if extra:
+                    raise ValueError(f"state {raw_name!r}: mixed or unknown state fields {extra!r}")
+                raw_nets = body["nets"]
                 if not isinstance(raw_nets, dict):
                     raise ValueError(f"state {raw_name!r}: 'nets' must be a mapping")
                 description = body.get("description")
@@ -374,7 +390,12 @@ class OperatingStateManifest:
                 source = None
 
             potentials: dict[str, float] = {}
+            normalized_nets: set[str] = set()
             for net, value in raw_nets.items():
+                normalized_net = _normalize_net_name(net)
+                if not normalized_net or normalized_net in normalized_nets:
+                    raise ValueError(f"state {raw_name!r}: ambiguous or empty net name {net!r}")
+                normalized_nets.add(normalized_net)
                 volts = _parse_voltage(value)
                 if volts is None:
                     raise ValueError(
@@ -397,9 +418,11 @@ class OperatingStateManifest:
         else:
             if not isinstance(required, (list, tuple)):
                 raise ValueError("'required_states' must be a list of state names")
-            required_states = tuple(
-                normalize_state_name(str(item)) for item in required if str(item)
-            )
+            required_states = tuple(normalize_state_name(str(item)) for item in required)
+            if not required_states or any(not name for name in required_states):
+                raise ValueError("required_states must contain nonempty state names")
+            if len(set(required_states)) != len(required_states):
+                raise ValueError("duplicate normalized state in required_states")
 
         return cls(states=states, required_states=required_states, source_path=source_path)
 
@@ -419,14 +442,27 @@ class OperatingStateManifest:
         data: Any
         if manifest_path.suffix.lower() == ".json":
             try:
-                data = json.loads(text)
+                data = json.loads(text, object_pairs_hook=_unique_manifest_mapping)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Invalid JSON in {manifest_path}: {exc}") from exc
         else:
             import yaml  # type: ignore[import-untyped]
 
+            class UniqueKeyLoader(yaml.SafeLoader):
+                def construct_mapping(self, node, deep=False):
+                    self.flatten_mapping(node)
+                    return _unique_manifest_mapping(
+                        [
+                            (
+                                self.construct_object(key, deep=deep),
+                                self.construct_object(value, deep=deep),
+                            )
+                            for key, value in node.value
+                        ]
+                    )
+
             try:
-                data = yaml.safe_load(text)
+                data = yaml.load(text, Loader=UniqueKeyLoader)
             except yaml.YAMLError as exc:
                 raise ValueError(f"Invalid YAML in {manifest_path}: {exc}") from exc
 
@@ -450,7 +486,7 @@ class OperatingStateManifest:
         for name in sorted(self.states):
             if name not in ordered:
                 ordered.append(name)
-        return ordered
+        return ordered or list(REQUIRED_COVERAGE_STATES)
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +508,10 @@ class PinRoleMap:
         return self.roles.get(role)
 
     def complete(self) -> bool:
-        return all(role in self.roles for role in ("D", "G", "S"))
+        return (
+            all(self.roles.get(role) for role in ("D", "G", "S"))
+            and len(set(self.roles.values())) == 3
+        )
 
 
 class PinRoleCache:
@@ -497,12 +536,18 @@ class PinRoleCache:
         explicit_parts: list[str] = []
         for role in sorted(_ROLE_ALIASES):
             names = _pin_field_names(role)
-            explicit_parts.append(f"{role}={_get_field(sym, *names) or ''}")
+            explicit_parts.extend(f"{name}={_get_field(sym, name) or ''}" for name in names)
+        accepted = {name.lower() for role in _ROLE_ALIASES for name in _pin_field_names(role)}
+        explicit_parts.extend(
+            f"{name}={getattr(prop, 'value', '')}"
+            for name, prop in sorted(sym.properties.items())
+            if name.lower() in accepted
+        )
         explicit = "|".join(explicit_parts)
         return (
             str(getattr(sym, "reference", "") or ""),
             str(getattr(sym, "lib_id", "") or ""),
-            _get_field(sym, *_MPN_FIELDS) or "",
+            repr(sorted(_field_values(sym, tuple(name for name in _MPN_FIELDS if name != "LCSC")))),
             str(getattr(sym, "footprint", "") or ""),
             explicit,
         )
@@ -514,7 +559,15 @@ class PinRoleCache:
     ) -> PinRoleMap | None:
         """Return the component's pin-role map, using the cache when valid."""
         ref = str(getattr(sym, "reference", "") or "")
-        key = self.identity(sym)
+        # A library pinout can change without changing its lib_id, MPN or
+        # footprint. Include the actual resolver input, not just its name.
+        library_identity = tuple(
+            sorted(
+                f"{p.number}:{getattr(p, 'name', '')}"
+                for p in (getattr(lib_symbol, "pins", None) or [])
+            )
+        )
+        key = (*self.identity(sym), repr(library_identity), str(lib_symbol is not None))
 
         previous = self._identity_by_ref.get(ref)
         if previous is not None and previous != key:
@@ -551,14 +604,27 @@ def resolve_pin_roles(
     """
     try:
         explicit = _roles_from_fields(sym)
-        if explicit is not None:
-            return explicit
+        explicit_names = {name.lower() for role in _ROLE_ALIASES for name in _pin_field_names(role)}
+        has_explicit = bool(explicit_names & {name.lower() for name in sym.properties}) or any(
+            _get_field(sym, *_pin_field_names(role)) is not None for role in _ROLE_ALIASES
+        )
+        if has_explicit:
+            # Partial or invalid explicit declarations are authoritative errors,
+            # not permission to fall back to a different library mapping.
+            return explicit if _valid_pin_roles(explicit, lib_symbol) else None
 
         by_name = _roles_from_pin_names(lib_symbol)
         if by_name is not None:
-            return by_name
+            return by_name if _valid_pin_roles(by_name, lib_symbol) else None
 
-        return _roles_from_lib_id_suffix(sym, lib_symbol)
+        if lib_symbol is not None and any(
+            str(getattr(pin, "name", "")).strip().upper() in set().union(*_ROLE_ALIASES.values())
+            for pin in (getattr(lib_symbol, "pins", None) or [])
+        ):
+            return None
+
+        suffix = _roles_from_lib_id_suffix(sym, lib_symbol)
+        return suffix if _valid_pin_roles(suffix, lib_symbol) else None
     except Exception:
         return None
 
@@ -571,12 +637,43 @@ def _pin_field_names(role: str) -> tuple[str, ...]:
     return tuple(f"Pin_{alias.title()}" for alias in sorted(_ROLE_ALIASES[role], key=len))
 
 
+def _valid_pin_roles(roles: PinRoleMap | None, lib_symbol: LibrarySymbol | None) -> bool:
+    if roles is None or not roles.complete() or lib_symbol is None:
+        return False
+    numbers = [str(pin.number) for pin in (getattr(lib_symbol, "pins", None) or [])]
+    return all(numbers.count(number) == 1 for number in roles.roles.values())
+
+
+def _field_values(sym: SymbolInstance, names: tuple[str, ...]) -> set[str]:
+    """Read every populated alias, including differently cased duplicates."""
+    wanted = {name.lower() for name in names}
+    values = {
+        str(getattr(prop, "value", "")).strip()
+        for name, prop in sym.properties.items()
+        if name.lower() in wanted and str(getattr(prop, "value", "")).strip()
+    }
+    values.update(value.strip() for name in names if (value := _get_field(sym, name)) is not None)
+    return values
+
+
 def _roles_from_fields(sym: SymbolInstance) -> PinRoleMap | None:
     roles: dict[str, str] = {}
     for role in _ROLE_ALIASES:
-        value = _get_field(sym, *_pin_field_names(role))
-        if value:
-            roles[role] = str(value).strip()
+        values = {
+            value.strip()
+            for name in _pin_field_names(role)
+            if (value := _get_field(sym, name)) is not None
+        }
+        accepted = {name.lower() for name in _pin_field_names(role)}
+        values.update(
+            str(getattr(prop, "value", "")).strip()
+            for name, prop in sym.properties.items()
+            if name.lower() in accepted
+        )
+        if len(values) > 1 or "" in values:
+            return None
+        if values:
+            roles[role] = values.pop()
     if len(roles) == 3:
         return PinRoleMap(roles=roles, origin="explicit Pin_D/Pin_G/Pin_S symbol fields")
     return None
@@ -753,21 +850,83 @@ class ComponentStressAnalyzer:
             return load_error(exc)
 
         try:
+            from kicad_tools.operations.netlist import _get_sheet_entries
             from kicad_tools.schema.schematic import Schematic
 
-            sch = Schematic.load(sch_path)
-            symbols = [s for s in sch.symbols if s.reference and not s.reference.startswith("#")]
+            symbols: list[tuple[Any, Any, str]] = []
+            visited: set[Path] = set()
+            label_scopes: dict[str, dict[str, bool]] = {}
+
+            def collect(path: Path, sheet_path: str) -> None:
+                resolved = path.resolve()
+                if resolved in visited:
+                    raise ValueError(f"reused or cyclic sheet cannot be bound uniquely: {path}")
+                visited.add(resolved)
+                sch = Schematic.load(path)
+                global_names = {
+                    node.get_string(0) for node in sch.sexp.find_children("global_label")
+                }
+                for tag in ("label", "hierarchical_label", "global_label"):
+                    for node in sch.sexp.find_children(tag):
+                        name = node.get_string(0)
+                        if name:
+                            label_scopes.setdefault(name, {})[sheet_path] = name in global_names
+                symbols.extend(
+                    (s, sch, sheet_path)
+                    for s in sch.symbols
+                    if s.reference and not s.reference.startswith("#")
+                )
+                for entry in _get_sheet_entries(path):
+                    collect(path.parent / entry.filename, f"{sheet_path}{entry.filename}/")
+
+            collect(Path(sch_path), "/")
+            # The shared netlist currently merges raw label names across
+            # sheets. Only an explicit same-name global label proves that
+            # equivalence here; parent-port/local-label equivalence otherwise
+            # requires scoped topology that this netlist does not preserve.
+            for name, scopes in label_scopes.items():
+                if len(scopes) > 1 and not all(scopes.values()):
+                    raise ValueError(
+                        f"repeated sheet-local label {name!r} has no proven global binding: "
+                        f"{', '.join(sorted(scopes))}"
+                    )
+            references = [sym.reference for sym, _, _ in symbols]
+            if len(references) != len(set(references)):
+                raise ValueError(
+                    "duplicate component references cannot be bound uniquely across sheets"
+                )
+            expected = {(sym.reference, path) for sym, _, path in symbols}
+            actual = {
+                (component.reference, component.sheet_path)
+                for component in netlist.components
+                if component.reference and not component.reference.startswith("#")
+            }
+            if expected != actual:
+                raise ValueError("schematic hierarchy and netlist component identities disagree")
+            net_names: dict[str, str] = {}
+            for net in netlist.nets:
+                normalized = _normalize_net_name(net.name)
+                if normalized in net_names and net_names[normalized] != net.name:
+                    raise ValueError(
+                        f"distinct nets {net_names[normalized]!r} and {net.name!r} "
+                        "have ambiguous operating-state aliases"
+                    )
+                net_names[normalized] = net.name
         except Exception as exc:
             return load_error(exc)
 
         states = self.manifest.coverage_states()
         results: list[ComponentStressResult] = []
-        for sym in symbols:
+        for sym, sch, _ in symbols:
             try:
-                if not _is_mosfet(sym):
+                try:
+                    lib = sch.get_lib_symbol_resolved(sym.lib_id)
+                except Exception:
+                    lib = None
+                if not _is_mosfet(sym, lib):
                     continue
                 results.extend(self._check_symbol(sym, sch, netlist, states))
-            except Exception:
+            except Exception as exc:
                 ref = str(getattr(sym, "reference", "") or "?")
                 for state in states:
                     for check, high, low in _CHECK_TERMINALS:
@@ -779,7 +938,7 @@ class ComponentStressAnalyzer:
                                 status=STATUS_UNRESOLVED,
                                 high_terminal=high,
                                 low_terminal=low,
-                                reason="analysis error",
+                                reason=f"analysis error: {exc}",
                                 assumptions=list(_MODEL_ASSUMPTIONS),
                             )
                         )
@@ -796,7 +955,10 @@ class ComponentStressAnalyzer:
         for net in netlist.nets:
             for node in net.nodes:
                 if node.reference == ref and node.pin:
-                    mapping.setdefault(str(node.pin), net.name)
+                    pin = str(node.pin)
+                    if pin in mapping and mapping[pin] != net.name:
+                        raise ValueError(f"{ref} pin {pin} is bound to multiple nets")
+                    mapping[pin] = net.name
         return mapping
 
     # ------------------------------------------------------------------
@@ -810,7 +972,9 @@ class ComponentStressAnalyzer:
         states: list[str],
     ) -> list[ComponentStressResult]:
         ref = sym.reference
-        mpn = _get_field(sym, *_MPN_FIELDS)
+        # Supplier stock codes (LCSC) identify an ordering channel, not the
+        # manufacturer's exact device. They may coexist with a real MPN.
+        mpn = _get_field(sym, *(name for name in _MPN_FIELDS if name != "LCSC"))
         rating_source = _get_field(sym, *_SOURCE_FIELDS)
 
         try:
@@ -960,11 +1124,23 @@ class ComponentStressAnalyzer:
                 low_potential_v=low_v,
                 stress_v=stress,
             )
+        rating_values = _field_values(sym, rating_fields)
+        parsed_ratings = {_parse_voltage(value) for value in rating_values}
         rated = _parse_voltage(raw_rating)
-        if rated is None or rated <= 0:
+        if rated is None or rated <= 0 or None in parsed_ratings:
             return row(
                 STATUS_UNRESOLVED,
                 f"unparseable {rating_fields[0]} field ({raw_rating!r})",
+                high_net=high_net,
+                low_net=low_net,
+                high_potential_v=high_v,
+                low_potential_v=low_v,
+                stress_v=stress,
+            )
+        if len(parsed_ratings) != 1:
+            return row(
+                STATUS_UNRESOLVED,
+                f"conflicting {rating_fields[0]} rating aliases: {sorted(rating_values)!r}",
                 high_net=high_net,
                 low_net=low_net,
                 high_potential_v=high_v,
@@ -988,6 +1164,19 @@ class ComponentStressAnalyzer:
         if not rating_source:
             assumptions.append("rating has no source citation (--allow-uncited-ratings)")
 
+        mpn_values = _field_values(sym, tuple(name for name in _MPN_FIELDS if name != "LCSC"))
+        if not mpn or len(mpn_values) != 1:
+            return row(
+                STATUS_UNRESOLVED,
+                "missing or conflicting exact MPN symbol fields; the rated device identity is unresolved",
+                high_net=high_net,
+                low_net=low_net,
+                high_potential_v=high_v,
+                low_potential_v=low_v,
+                stress_v=stress,
+                rated_v=rated,
+            )
+
         margin = rated - abs(stress)
         status = STATUS_FAIL if abs(stress) > rated else STATUS_PASS
         return row(
@@ -1003,7 +1192,7 @@ class ComponentStressAnalyzer:
         )
 
 
-def _is_mosfet(sym: SymbolInstance) -> bool:
+def _is_mosfet(sym: SymbolInstance, lib_symbol: LibrarySymbol | None = None) -> bool:
     """Return True when *sym* should be evaluated as a MOSFET.
 
     Recognised by lib_id hint (``Device:Q_NMOS_GDS`` and friends) **or** by the
@@ -1013,8 +1202,25 @@ def _is_mosfet(sym: SymbolInstance) -> bool:
     """
     lib_id = str(getattr(sym, "lib_id", "") or "")
     part = lib_id.split(":")[-1].upper()
+    if "FET" in lib_id.split(":")[0].upper():
+        return True
     if any(hint in part for hint in _MOSFET_LIB_HINTS):
         return True
-    return any(
-        _get_field(sym, name) is not None for name in ("Vds_max", "Vgs_max", "Pin_D", "Pin_S")
-    )
+    if any(
+        _get_field(sym, name) is not None
+        for name in (*_CHECK_RATING_FIELDS[CHECK_VDS], *_CHECK_RATING_FIELDS[CHECK_VGS])
+    ) or any(_get_field(sym, *_pin_field_names(role)) is not None for role in _ROLE_ALIASES):
+        return True
+    pin_names = {
+        str(getattr(pin, "name", "")).strip().upper()
+        for pin in (getattr(lib_symbol, "pins", None) or [])
+    }
+    if all(pin_names & aliases for aliases in _ROLE_ALIASES.values()):
+        return True
+    # An otherwise unclassified Q may be a vendor MOSFET with missing fields.
+    # Recognizable bipolar devices are outside this census; unknown transistor
+    # symbols stay visible and cannot produce a clean empty result.
+    bipolar_roles = ({"B", "BASE"}, {"C", "COLLECTOR"}, {"E", "EMITTER"})
+    if all(pin_names & aliases for aliases in bipolar_roles):
+        return False
+    return str(getattr(sym, "reference", "")).upper().startswith("Q")

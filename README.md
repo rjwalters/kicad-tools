@@ -683,6 +683,14 @@ entries live in [CHANGELOG.md](CHANGELOG.md).
   circuit-state inference — an undeclared state, unresolved D/G/S pin role,
   unbound terminal or uncited rating is reported `UNRESOLVED` (a release
   blocker), never a silent pass, and a creepage waiver can never suppress it.
+  Exact MPN and distinct, valid terminal-pin assignments are required;
+  conflicting rating or identity fields remain unresolved. The
+  census includes identifiable MOSFETs in child sheets; reused sheets, duplicate
+  references, and repeated local labels without proven global connections remain
+  unresolved. State/net aliases and duplicate JSON/YAML
+  keys cannot overwrite operating data. A project-specific coverage checklist
+  must be nonempty, and structured states cannot mix `nets:` with shorthand
+  potentials. These checks do not infer circuit states or qualify hardware.
 - **`kct analyze electrical-rating`** (v0.19.0) — deterministic, advisory
   LED-overcurrent and capacitor voltage-derating checks sourced from schematic
   fields; parts missing ratings are skipped, never failed.
