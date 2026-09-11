@@ -10,6 +10,7 @@ from kicad_tools.export.bom_spec_overlay import (
     apply_spec_overlay,
     expand_ref_range,
     find_spec_file,
+    resolved_refs,
 )
 from kicad_tools.schema.bom import BOMItem
 from kicad_tools.spec.schema import BOMEntry
@@ -152,6 +153,68 @@ class TestApplySpecOverlay:
         # R1 untouched
         assert items[1].mpn == ""
         assert report.matched == 2
+
+
+# ---------------------------------------------------------------------------
+# resolved_refs -- issue #4995 regression coverage
+# ---------------------------------------------------------------------------
+
+
+class TestResolvedRefs:
+    """Regression coverage for #4995: MPN-only spec entries (no LCSC) must
+    be exempt from downstream generic (value, footprint) LCSC auto-matching
+    just as much as LCSC-bearing entries are.
+
+    Board06's fixture (``boards/06-diffpair-test/project.kct``) is the real
+    reproduction: J1 = ``Samtec TSW-102-07-G-S``, ``source: Samtec``, no
+    ``lcsc`` -- this shape is mirrored by ``test_mpn_only_no_lcsc_included``.
+    """
+
+    def test_mpn_and_lcsc_both_set_included(self):
+        """Baseline (already-correct) case: both mpn and lcsc set."""
+        items = [_make_item("U1", value="STM32")]
+        entries = [BOMEntry(ref="U1", part="STM32G031F6P6", lcsc="C529330")]
+
+        report = apply_spec_overlay(items, entries)
+
+        assert "U1" in resolved_refs(report)
+
+    def test_mpn_only_no_lcsc_included(self):
+        """J1-shaped: explicit MPN, no LCSC -- must still count as resolved.
+
+        Before the #4995 fix, ``spec_refs`` only included entries with a
+        truthy ``lcsc``, so this reference was silently dropped from the
+        "leave alone" set and remained eligible for generic auto-matching.
+        """
+        items = [_make_item("J1", value="Conn_02x01", footprint="TSW-102-07-G-S")]
+        entries = [BOMEntry(ref="J1", part="Samtec TSW-102-07-G-S", source="Samtec")]
+
+        report = apply_spec_overlay(items, entries)
+
+        assert report.entries[0].mpn == "Samtec TSW-102-07-G-S"
+        assert report.entries[0].lcsc == ""
+        assert report.entries[0].matched is True
+        assert "J1" in resolved_refs(report)
+
+    def test_unmatched_entry_excluded(self):
+        """An entry with no matching BOM item is never in resolved_refs."""
+        items = [_make_item("R1")]
+        entries = [BOMEntry(ref="U99", part="MISSING_PART")]
+
+        report = apply_spec_overlay(items, entries)
+
+        assert "U99" not in resolved_refs(report)
+
+    def test_neither_mpn_nor_lcsc_excluded(self):
+        """A matched entry with neither field set contributes nothing."""
+        from kicad_tools.export.bom_spec_overlay import SpecOverlayEntry
+
+        report = SpecOverlayReport(
+            entries=[
+                SpecOverlayEntry(reference="R1", mpn="", lcsc="", matched=True),
+            ]
+        )
+        assert resolved_refs(report) == set()
 
 
 # ---------------------------------------------------------------------------

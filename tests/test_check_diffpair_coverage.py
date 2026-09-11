@@ -461,12 +461,21 @@ class TestRulesCheckedByRule:
 
     def test_cli_json_output_contains_per_rule_counter(self, tmp_path):
         """``kct check --format json`` MUST emit ``summary.rules_checked_by_rule``
-        so the CI script can read it.  Uses an existing committed routed PCB.
+        so the CI script can read it. Exercise the real CLI on a tiny board.
         """
-        # Use board 03's routed PCB (smaller / faster than board 06).
-        pcb = REPO_ROOT / "boards" / "03-usb-joystick" / "output" / "usb_joystick_routed.kicad_pcb"
-        if not pcb.is_file():
-            pytest.skip(f"Board 03 routed PCB not found at {pcb}")
+        # This is a JSON-contract test, not a fabrication check of Board 03.
+        # A synthetic route keeps the full subprocess/check/serialization path
+        # without making its cost depend on a changing demonstration board.
+        pcb = tmp_path / "json-contract.kicad_pcb"
+        pcb.write_text(
+            """(kicad_pcb (version 20241229) (generator pcbnew)
+              (general (thickness 1.6))
+              (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+              (net 0 "") (net 1 "SIGNAL")
+              (gr_rect (start 0 0) (end 10 10) (layer "Edge.Cuts")
+                (stroke (width 0.05) (type default)) (fill none))
+              (segment (start 2 5) (end 8 5) (width 0.3) (layer "F.Cu") (net 1)))"""
+        )
 
         proc = subprocess.run(
             [
