@@ -102,7 +102,6 @@ from .board_readiness import read_readiness
 from .format_options import FORMAT_JSON, add_format_flag, emit_json
 
 if TYPE_CHECKING:
-    from kicad_tools.schema.pcb import PCB
     from kicad_tools.sexp import SExp
 
 logger = logging.getLogger(__name__)
@@ -317,7 +316,7 @@ def _count_bom_parts(bom_path: Path, slug: str) -> int | None:
     return len(data_rows)
 
 
-def _development_outline_bounds(pcb: PCB) -> tuple[float, float, float, float] | None:
+def _development_outline_bounds(pcb: SExp) -> tuple[float, float, float, float] | None:
     """Measure only fully validated straight Edge.Cuts contours.
 
     This is local metadata policy: no first-contour walk or bounds from
@@ -383,7 +382,7 @@ def _development_outline_bounds(pcb: PCB) -> tuple[float, float, float, float] |
             visit(child, False)
 
     try:
-        for node in pcb._sexp.iter_children():
+        for node in pcb.iter_children():
             visit(node, True)
         if not segments or any(a == b for a, b in segments):
             return None
@@ -409,8 +408,9 @@ def _development_metrics(board_dir: Path, readiness: dict) -> dict:
     import math
 
     from kicad_tools.exceptions import KiCadToolsError
-    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.schema.pcb import FOOTPRINT_TAGS
     from kicad_tools.schema.schematic import Schematic
+    from kicad_tools.sexp import parse_string
     from kicad_tools.spec.parser import load_spec
 
     result: dict = {"sources": {}, "diagnostics": []}
@@ -459,11 +459,29 @@ def _development_metrics(board_dir: Path, readiness: dict) -> dict:
         try:
             raw = path.read_bytes()
             if kind == "pcb":
-                pcb = PCB.load(path)
-                if pcb._sexp.tag != "kicad_pcb" or not pcb.copper_layers:
+                # Static metadata does not require a valid outline/origin.
+                # Parse the same captured bytes without PCB.load's geometry
+                # normalization, then validate dimensions independently below.
+                pcb = parse_string(raw.decode("utf-8"))
+                tables = pcb.find_children("layers")
+                if pcb.tag != "kicad_pcb" or len(tables) != 1:
                     raise ValueError("missing PCB root or copper layer definitions")
-                result["part_count"] = len(pcb.footprints)
-                result["layer_count"] = len(pcb.copper_layers)
+                layers = list(tables[0].iter_children())
+                if any(
+                    layer.tag is None
+                    or not layer.tag.isdecimal()
+                    or not layer.get_string(0)
+                    or not layer.get_string(1)
+                    for layer in layers
+                ) or len({layer.tag for layer in layers}) != len(layers):
+                    raise ValueError("malformed PCB layer definitions")
+                copper_count = sum(layer.get_string(1) in {"signal", "power"} for layer in layers)
+                if not copper_count:
+                    raise ValueError("missing copper layer definitions")
+                result["part_count"] = sum(
+                    node.tag in FOOTPRINT_TAGS for node in pcb.iter_children()
+                )
+                result["layer_count"] = copper_count
                 bounds = _development_outline_bounds(pcb)
                 if bounds is not None:
                     width, height = bounds[2] - bounds[0], bounds[3] - bounds[1]
