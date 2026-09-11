@@ -1043,6 +1043,20 @@ def _write_routed_pcb(
 
     # Atomic write: tmp file -> fsync -> rename.  Sibling-in-same-dir
     # ensures os.replace is a same-filesystem rename (atomic on POSIX).
+    #
+    # NOTE (issue #4898): this stays a direct inline os.fsync/os.replace
+    # implementation rather than delegating to the new shared
+    # ``kicad_tools.core.atomic_write.atomic_write_text`` helper (used by
+    # ``save_pcb``/``save_schematic``/``save_project``/``save_footprint``/
+    # ``save_design_rules``). ``tests/test_route_zones_preserved.py``
+    # structurally asserts (via AST) that ``_write_routed_pcb`` calls
+    # ``fsync``/``replace`` directly in its own body as part of its
+    # zone-preservation guard; delegating to a helper in another module would
+    # make those calls invisible to that shallow-walk audit. The
+    # implementation is already identical to ``atomic_write_text`` -- this is
+    # a "keep the existing, already-tested/guarded code as-is" decision, not
+    # a functional difference. ``_save_partial_results`` (below) mirrors this
+    # same inline pattern for the same reason.
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     tmp_path.write_text(output_content)
     # fsync the file so a crash between write and rename does not leave
@@ -1950,7 +1964,33 @@ def _save_partial_results() -> bool:
             # Insert routes before final closing parenthesis
             output_content = _insert_sexp_before_closing(original_content, route_sexp)
 
-            save_path.write_text(output_content)
+            # Issue #4898: this SIGINT-triggered save previously used a plain
+            # ``write_text`` -- no tmp file, no fsync, no ``os.replace`` --
+            # unlike the terminal ``_write_routed_pcb`` path (#2808), so a
+            # second SIGINT (or a crash) during this very write could leave a
+            # torn partial-results file. Apply the same tmp -> fsync -> rename
+            # pattern here inline (mirroring ``_write_routed_pcb`` rather than
+            # calling the shared ``atomic_write_text`` helper) so this write
+            # site stays visible to
+            # ``tests/test_route_zones_preserved.py``'s AST-based
+            # zone-preservation audit, which discovers PCB-write sites by the
+            # ``<path>.write_text(<content variable>)`` shape.
+            # mypy infers ``save_path`` as ``bool | Path`` because it is
+            # ultimately sourced from the untyped ``_interrupt_state`` dict
+            # literal (whose declared-from-initializer value type is
+            # ``bool | None``) -- a pre-existing typing gap already covered
+            # by several baselined ``"bool" has no attribute ...`` errors
+            # elsewhere in this exact function (e.g. ``.read_text``,
+            # ``.with_stem``, the old ``.write_text``). These three lines are
+            # new attribute-access spellings of that same known-safe
+            # false positive (the guard above already establishes
+            # ``output_path``/``pcb_path`` are real ``Path`` objects), so
+            # they are ignored inline rather than growing the baseline file.
+            tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")  # type: ignore[attr-defined]
+            tmp_path.write_text(output_content)
+            with open(tmp_path, "rb") as f:
+                os.fsync(f.fileno())
+            os.replace(tmp_path, save_path)  # type: ignore[arg-type]
 
             if not quiet:
                 stats = router.get_statistics()

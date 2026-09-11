@@ -4,6 +4,7 @@ File I/O utilities for KiCad S-expression files.
 
 from pathlib import Path
 
+from kicad_tools.core.atomic_write import atomic_write_text
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.sexp import SExp, parse_string, serialize_sexp
@@ -66,7 +67,7 @@ def save_schematic(sexp: SExp, path: str | Path) -> None:
 
     path = Path(path)
     text = serialize_sexp(sexp)
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text, encoding="utf-8")
 
 
 def load_symbol_lib(path: str | Path) -> SExp:
@@ -179,7 +180,7 @@ def save_pcb(sexp: SExp, path: str | Path) -> None:
 
     path = Path(path)
     text = serialize_sexp(sexp)
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text, encoding="utf-8")
 
 
 class WriteVerificationError(Exception):
@@ -300,7 +301,7 @@ def save_footprint(sexp: SExp, path: str | Path) -> None:
 
     path = Path(path)
     text = serialize_sexp(sexp)
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text, encoding="utf-8")
 
 
 def load_design_rules(path: str | Path) -> SExp:
@@ -384,4 +385,4 @@ def save_design_rules(sexp: SExp, path: str | Path) -> None:
     for child in sexp.values:
         lines.append(serialize_sexp(child))
     text = "\n".join(lines)
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text, encoding="utf-8")
