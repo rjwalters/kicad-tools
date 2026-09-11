@@ -1202,6 +1202,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Noncardinal pad clearance geometry** (#5227) — orient rect, roundrect,
+  and oval copper polygons using KiCad's negative-angle board transform.
+  This removes mirrored false overlaps and missed physical overlaps while
+  preserving absolute pad angles, footprint-local centers, and clearance floors.
 - **Declared current paths reported `unresolved` on real boards whenever a
   trace did not land on the exact pad center** (#4980) — endpoint resolution
   (`router/current_paths.py`) attached a `RefDes.pad` endpoint to the copper
