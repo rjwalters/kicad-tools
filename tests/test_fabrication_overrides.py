@@ -40,6 +40,7 @@ def _write_sidecar(directory: Path, **entry) -> Path:
         "manufacturer": JLC_TIER1_MFR,
         "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
         "reason": "Published pad-hole minimum; matches reviewed geometry",
+        "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006",
     }
     defaults.update(entry)
     sidecar = directory / "fabrication_overrides.json"
@@ -62,6 +63,7 @@ def _valid_override(**kwargs) -> FabricationOverride:
         "manufacturer_id": JLC_TIER1_MFR,
         "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
         "reason": "Published pad-hole minimum; matches reviewed geometry",
+        "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006",
     }
     defaults.update(kwargs)
     return FabricationOverride(**defaults)
@@ -135,6 +137,13 @@ def test_rejects_missing_reason():
         validate_fabrication_override(_valid_override(reason="   "), manufacturer_id=JLC_TIER1_MFR)
 
 
+def test_rejects_missing_tracking_issue():
+    with pytest.raises(UnsafeFabricationOverrideError, match="tracking_issue"):
+        validate_fabrication_override(
+            _valid_override(tracking_issue="  "), manufacturer_id=JLC_TIER1_MFR
+        )
+
+
 def test_rejects_manufacturer_mismatch():
     with pytest.raises(UnsafeFabricationOverrideError, match="scoped to manufacturer"):
         validate_fabrication_override(
@@ -179,6 +188,7 @@ def test_load_fabrication_overrides_round_trips(tmp_path: Path):
                         "manufacturer": JLC_TIER1_MFR,
                         "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
                         "reason": "Published pad-hole minimum",
+                        "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006",
                     }
                 }
             }
@@ -191,6 +201,7 @@ def test_load_fabrication_overrides_round_trips(tmp_path: Path):
     assert overrides[0].field == "min_hole_to_hole_mm"
     assert overrides[0].value == 0.45
     assert overrides[0].manufacturer_id == JLC_TIER1_MFR
+    assert overrides[0].tracking_issue == "https://github.com/rjwalters/kicad-tools/issues/5006"
 
     # And it survives the full validate + apply pipeline.
     rules = _rules()
@@ -219,6 +230,27 @@ def test_load_fabrication_overrides_rejects_entry_missing_keys(tmp_path: Path):
             {
                 "fabrication_overrides": {
                     "min_hole_to_hole_mm": {"value": 0.45},
+                }
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="must be an object with keys"):
+        load_fabrication_overrides(sidecar)
+
+
+def test_load_fabrication_overrides_rejects_entry_missing_tracking_issue(tmp_path: Path):
+    sidecar = tmp_path / "fabrication_overrides.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "fabrication_overrides": {
+                    "min_hole_to_hole_mm": {
+                        "value": 0.45,
+                        "manufacturer": JLC_TIER1_MFR,
+                        "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
+                        "reason": "Published pad-hole minimum",
+                        # tracking_issue intentionally omitted.
+                    },
                 }
             }
         )

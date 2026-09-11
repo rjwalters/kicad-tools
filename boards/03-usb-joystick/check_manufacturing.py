@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 from routing_plan import PLAN, fingerprint, physical_contract, usb_geometry
@@ -21,9 +20,20 @@ from kicad_tools.cli.check_cmd import (
     run_selected_checks,
     write_json_report,
 )
+from kicad_tools.manufacturers.fabrication_overrides import (
+    apply_fabrication_overrides,
+    load_fabrication_overrides,
+)
 from kicad_tools.router.rules import net_class_map_from_dict
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate import DRCChecker
+
+# Issue #5006: the board's validated, cited pad-hole-spacing floor lives in
+# this sidecar (single source of truth), consumed identically by the Python
+# checker below and by every native-constraint-emission call site
+# (``generate_design.py``'s ``apply_native_fab_floor``, ``kct check
+# --emit-drc-constraints``, etc.) via ``resolve_pcb_fabrication_overrides``.
+FABRICATION_OVERRIDES_SIDECAR = "fabrication_overrides.json"
 
 
 def make_checker(pcb_path: Path) -> DRCChecker:
@@ -58,7 +68,20 @@ def make_checker(pcb_path: Path) -> DRCChecker:
         copper_oz_outer=1.0,
         copper_oz_inner=0.0152 / 0.035,
     )
-    checker.design_rules = replace(checker.design_rules, min_hole_to_hole_mm=0.45)
+    # Issue #5006: apply this board's validated, cited pad-hole-spacing
+    # override through the shared fabrication-overrides contract instead of
+    # a bespoke ``dataclasses.replace`` patch -- so the Python checker and
+    # every native-constraint-emission call site resolve the identical
+    # floor from the identical, cited source. ``load_fabrication_overrides``
+    # / ``apply_fabrication_overrides`` fail loud (raise) on a missing or
+    # invalid sidecar, matching this script's "fail closed" contract --
+    # unlike ``resolve_pcb_fabrication_overrides``, which degrades
+    # gracefully for the CLI/export call sites where a missing override is
+    # an expected, unremarkable case.
+    overrides = load_fabrication_overrides(pcb_path.parent / FABRICATION_OVERRIDES_SIDECAR)
+    checker.design_rules = apply_fabrication_overrides(
+        checker.design_rules, overrides, manufacturer_id="jlcpcb-tier1"
+    )
     return checker
 
 
@@ -77,11 +100,19 @@ def check(pcb_path: Path, report: Path) -> dict:
     meta = run_meta_checks(pcb_path, status, schematic=str(schematic), strict=True)
     write_json_report(violations, results, pcb_path, "jlcpcb-tier1", 4, report, meta=meta)
     data = json.loads(report.read_text())
+    # Report provenance straight from the sidecar (single source of truth,
+    # Issue #5006) rather than re-stating it here, so the report can never
+    # drift from the override the checker actually applied above.
+    override = next(
+        o
+        for o in load_fabrication_overrides(pcb_path.parent / FABRICATION_OVERRIDES_SIDECAR)
+        if o.field == "min_hole_to_hole_mm"
+    )
     data["fabrication_overrides"] = {
-        "min_hole_to_hole_mm": 0.45,
-        "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
-        "reason": "Published pad-hole minimum; native project has the same explicit floor",
-        "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006",
+        "min_hole_to_hole_mm": override.value,
+        "source": override.source,
+        "reason": override.reason,
+        "tracking_issue": override.tracking_issue,
         "suppressed_findings": 0,
     }
     data["usb_geometry"] = geometry

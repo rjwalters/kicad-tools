@@ -2147,19 +2147,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kicad_tools.manufacturers.fabrication_overrides` module defines a
   validated, cited per-board override contract: a `fabrication_overrides.json`
   sidecar next to the routed board declares a field, an overriding value, the
-  manufacturer it applies to, a source citation, and a reason; an override is
-  only retained if it names a manufacturer-verified capability floor on
-  record (e.g. JLCPCB's published pad-hole-spacing minimum) and does not ask
-  for anything looser than that floor — an unrecognized field, missing
-  citation, manufacturer mismatch, unregistered field, or a value below the
-  verified floor is rejected and the emission falls back to the profile's
-  conservative default instead of silently applying an unsafe override. All
-  four native-constraint-emission call sites (`kct check
+  manufacturer it applies to, a mandatory `source` citation, a mandatory
+  `reason`, and a mandatory `tracking_issue` recording the review that
+  approved it — any of the three provenance fields missing fails closed; an
+  override is only retained if it names a manufacturer-verified capability
+  floor on record (e.g. JLCPCB's published pad-hole-spacing minimum) and does
+  not ask for anything looser than that floor — an unrecognized field,
+  missing provenance, manufacturer mismatch, unregistered field, or a value
+  below the verified floor is rejected and the emission falls back to the
+  profile's conservative default instead of silently applying an unsafe
+  override. All four native-constraint-emission call sites (`kct check
   --emit-drc-constraints`, the manufacturing export path, `kct route`'s
   sidecar emission, `kct mfr apply-rules`) resolve the same sidecar through
   one shared entry point, `resolve_pcb_fabrication_overrides`, so the Python
   `DRCChecker` and every native-emission surface agree on the identical
   resolved floor for the same board.
+  `boards/03-usb-joystick/check_manufacturing.py`'s previously bespoke
+  `dataclasses.replace(checker.design_rules, min_hole_to_hole_mm=0.45)` patch
+  is migrated onto this shared contract, backed by a new
+  `boards/03-usb-joystick/output/fabrication_overrides.json` sidecar.
 
 ## [0.20.0] - 2026-08-06
 

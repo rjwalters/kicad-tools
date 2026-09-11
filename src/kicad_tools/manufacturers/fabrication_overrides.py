@@ -21,7 +21,8 @@ instead:
 
 - :func:`load_fabrication_overrides` / :func:`discover_fabrication_overrides_sidecar`
   read a small JSON sidecar declaring per-field overrides, each carrying
-  the manufacturer it applies to, a source citation, and a reason.
+  the manufacturer it applies to, a source citation, a reason, and a
+  tracking-issue reference recording the review that approved it.
 - :func:`validate_fabrication_override` rejects an override that is not
   backed by an independently verified capability floor for that exact
   (manufacturer, field) pair -- so a board cannot invent an arbitrary
@@ -128,6 +129,10 @@ class FabricationOverride:
             capability this override asserts.
         reason: A short human-readable justification tying the override to
             the board's actual geometry.
+        tracking_issue: A reference (URL or issue number) to the issue that
+            reviewed and approved this override -- mandatory provenance so a
+            narrower-than-profile floor is never asserted without a human
+            decision trail to point back to.
     """
 
     field: str
@@ -135,6 +140,7 @@ class FabricationOverride:
     manufacturer_id: str
     source: str
     reason: str
+    tracking_issue: str
 
 
 def fabrication_overrides_sidecar_candidates(pcb_path: str | Path) -> list[Path]:
@@ -177,7 +183,8 @@ def load_fabrication_overrides(path: str | Path) -> list[FabricationOverride]:
               "value": 0.45,
               "manufacturer": "jlcpcb-tier1",
               "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
-              "reason": "Published pad-hole minimum; matches reviewed geometry"
+              "reason": "Published pad-hole minimum; matches reviewed geometry",
+              "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006"
             }
           }
         }
@@ -191,9 +198,10 @@ def load_fabrication_overrides(path: str | Path) -> list[FabricationOverride]:
     Raises:
         ValueError: The file is not valid JSON, is not a JSON object, or an
             entry is missing a required key (``value``, ``manufacturer``,
-            ``source``, ``reason``). This is a format error, distinct from
-            :class:`UnsafeFabricationOverrideError` (a well-formed but
-            unsafe request) -- callers should treat both as fatal.
+            ``source``, ``reason``, ``tracking_issue``). This is a format
+            error, distinct from :class:`UnsafeFabricationOverrideError` (a
+            well-formed but unsafe request) -- callers should treat both as
+            fatal.
     """
     path = Path(path)
     try:
@@ -206,7 +214,7 @@ def load_fabrication_overrides(path: str | Path) -> list[FabricationOverride]:
         raise ValueError(f"{path}: missing top-level 'fabrication_overrides' object")
 
     overrides: list[FabricationOverride] = []
-    required = ("value", "manufacturer", "source", "reason")
+    required = ("value", "manufacturer", "source", "reason", "tracking_issue")
     for field_name, entry in entries.items():
         if not isinstance(entry, dict) or not all(k in entry for k in required):
             raise ValueError(
@@ -223,6 +231,7 @@ def load_fabrication_overrides(path: str | Path) -> list[FabricationOverride]:
                 manufacturer_id=str(entry["manufacturer"]),
                 source=str(entry["source"]),
                 reason=str(entry["reason"]),
+                tracking_issue=str(entry["tracking_issue"]),
             )
         )
     return overrides
@@ -242,8 +251,10 @@ def validate_fabrication_override(
 
     Raises:
         UnsafeFabricationOverrideError: The override is unrecognized,
-            uncited, scoped to a different manufacturer, has no registered
-            verified floor, or requests a value looser than that floor.
+            missing required provenance (``source``, ``reason``, or
+            ``tracking_issue``), scoped to a different manufacturer, has no
+            registered verified floor, or requests a value looser than that
+            floor.
     """
     if override.field not in _OVERRIDABLE_FIELDS:
         raise UnsafeFabricationOverrideError(
@@ -260,6 +271,11 @@ def validate_fabrication_override(
         raise UnsafeFabricationOverrideError(f"{override.field}: override must cite a 'source'")
     if not override.reason.strip():
         raise UnsafeFabricationOverrideError(f"{override.field}: override must state a 'reason'")
+    if not override.tracking_issue.strip():
+        raise UnsafeFabricationOverrideError(
+            f"{override.field}: override must cite a 'tracking_issue' recording the "
+            "review that approved it"
+        )
     if override.manufacturer_id != manufacturer_id:
         raise UnsafeFabricationOverrideError(
             f"{override.field}: override is scoped to manufacturer "
