@@ -1233,6 +1233,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Noncardinal pad clearance geometry** (#5227) — orient rect, roundrect,
+  and oval copper polygons using KiCad's negative-angle board transform.
+  This removes mirrored false overlaps and missed physical overlaps while
+  preserving absolute pad angles, footprint-local centers, and clearance floors.
 - Grid routing acceptance now retains non-cardinal pad rotation in Python
   segment/via backstops and the native validator, including late pad additions
   (#5182). Native candidate vias now check foreign pad copper using the same
