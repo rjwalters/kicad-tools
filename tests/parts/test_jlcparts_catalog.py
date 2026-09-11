@@ -28,7 +28,7 @@ from kicad_tools.parts.jlcparts_catalog import (
     get_catalog_path,
     sync_catalog,
 )
-from kicad_tools.parts.lcsc import LCSCClient, LCSCForbiddenError
+from kicad_tools.parts.lcsc import LCSCClient, LCSCForbiddenError, LCSCUnavailableError
 
 # --------------------------------------------------------------------------
 # Load the fixture builder (not an importable package -- load by path)
@@ -482,18 +482,17 @@ def test_lookup_no_requests_no_catalog_raises(tmp_path: Path, monkeypatch):
         client.lookup("C25804")
 
 
-def test_lookup_returns_none_when_catalog_absent_and_api_fails(
-    tmp_path: Path, force_requests_present
-):
+def test_lookup_raises_when_catalog_absent_and_api_fails(tmp_path: Path, force_requests_present):
     """No catalog + API down = existing 'not found' behavior (None)."""
     cache = PartsCache(db_path=tmp_path / "cache.db")
     client = LCSCClient(cache=cache, catalog_path=tmp_path / "missing.sqlite3")
 
     with mock.patch.object(client, "_fetch_part", side_effect=LCSCForbiddenError("403")):
-        assert client.lookup("C25804") is None
+        with pytest.raises(LCSCUnavailableError):
+            client.lookup("C25804")
 
 
-def test_lookup_missing_part_falls_through_to_none(
+def test_offline_miss_does_not_prove_catalog_absence(
     catalog_db: Path, tmp_path: Path, force_requests_present
 ):
     """Catalog present but part absent -> None."""
@@ -501,7 +500,8 @@ def test_lookup_missing_part_falls_through_to_none(
     client = LCSCClient(cache=cache, catalog_path=catalog_db)
 
     with mock.patch.object(client, "_fetch_part", side_effect=LCSCForbiddenError("403")):
-        assert client.lookup("C999999") is None
+        with pytest.raises(LCSCUnavailableError):
+            client.lookup("C999999")
 
 
 def test_live_api_success_bypasses_catalog(
@@ -529,7 +529,8 @@ def test_catalog_disabled_never_constructed(
     client = LCSCClient(cache=cache, use_local_catalog=False, catalog_path=catalog_db)
 
     with mock.patch.object(client, "_fetch_part", side_effect=LCSCForbiddenError("403")):
-        assert client.lookup("C25804") is None
+        with pytest.raises(LCSCUnavailableError):
+            client.lookup("C25804")
     assert client._get_catalog() is None
 
 
@@ -539,7 +540,10 @@ def test_lookup_many_fallback(catalog_db: Path, tmp_path: Path, force_requests_p
     client = LCSCClient(cache=cache, catalog_path=catalog_db)
 
     with mock.patch.object(client, "_fetch_part", side_effect=LCSCForbiddenError("403")):
-        got = client.lookup_many(["C25804", "C1525", "C999999"])
+        with pytest.raises(LCSCUnavailableError) as failure:
+            client.lookup_many(["C25804", "C1525", "C999999"])
+        got = failure.value.partial_results
+        assert failure.value.unavailable_parts == {"C999999"}
 
     assert set(got.keys()) == {"C25804", "C1525"}
     assert got["C25804"].mfr_part == "RC0402FR-0710KL"
@@ -559,7 +563,10 @@ def test_lookup_many_live_partial_then_catalog(
         raise LCSCForbiddenError("403")
 
     with mock.patch.object(client, "_fetch_part", side_effect=fake_fetch):
-        got = client.lookup_many(["C1525", "C25804", "C999999"])
+        with pytest.raises(LCSCUnavailableError) as failure:
+            client.lookup_many(["C1525", "C25804", "C999999"])
+        got = failure.value.partial_results
+        assert failure.value.unavailable_parts == {"C999999"}
 
     # C1525 from live API, C25804 from catalog, C999999 missing.
     assert got["C1525"].mfr_part == "LIVE-CAP"
@@ -638,17 +645,16 @@ def test_search_403_with_catalog_disabled_still_raises(
     assert client._get_catalog() is None
 
 
-def test_search_request_exception_without_catalog_returns_empty(
+def test_search_request_exception_without_catalog_is_unavailable(
     tmp_path: Path, force_requests_present
 ):
-    """Generic RequestException + no catalog -> empty SearchResult (unchanged)."""
+    """Generic RequestException + no catalog is unavailable, not an empty success."""
     cache = PartsCache(db_path=tmp_path / "cache.db")
     client = LCSCClient(cache=cache, catalog_path=tmp_path / "missing.sqlite3")
 
     with mock.patch.object(client, "_make_request", side_effect=_request_exception("boom")):
-        result = client.search("10k 0402")
-    assert result.parts == []
-    assert result.query == "10k 0402"
+        with pytest.raises(LCSCUnavailableError):
+            client.search("10k 0402")
 
 
 def test_search_live_success_bypasses_catalog(

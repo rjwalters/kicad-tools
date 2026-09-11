@@ -435,9 +435,32 @@ float Grid3D::memory_mb() const {
 
 void Grid3D::add_pad(float x, float y, float width, float height,
                      int net, int layer_idx, uint32_t ref_hash,
-                     float clearance_override, bool is_plane_net) {
+                     float clearance_override, bool is_plane_net, float rotation) {
     pads_.push_back({x, y, width, height, net, layer_idx, ref_hash,
-                     clearance_override, is_plane_net});
+                     clearance_override, is_plane_net, rotation, clearance_override, false});
+}
+
+void Grid3D::set_pad_via_policy(size_t index, float clearance, bool carveout_eligible) {
+    auto& pad = pads_.at(index);
+    pad.via_clearance_override = clearance;
+    pad.via_carveout_eligible = carveout_eligible;
+}
+
+// Transform into local copper axes, not the enclosing board-space box.
+static float pad_rect_distance(const PadInfo& pad, float x1, float y1,
+                               float x2, float y2) {
+    if (pad.rotation == 0.0f) {
+        return rect_segment_centerline_distance(
+            pad.x, pad.y, pad.width, pad.height, x1, y1, x2, y2);
+    }
+    const float angle = pad.rotation * 3.14159265358979323846f / 180.0f;
+    const float c = std::cos(angle), s = std::sin(angle);
+    const float dx1 = x1 - pad.x, dy1 = y1 - pad.y;
+    const float dx2 = x2 - pad.x, dy2 = y2 - pad.y;
+    return rect_segment_centerline_distance(
+        0.0f, 0.0f, pad.width, pad.height,
+        c * dx1 - s * dy1, s * dx1 + c * dy1,
+        c * dx2 - s * dy2, s * dx2 + c * dy2);
 }
 
 void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
@@ -781,7 +804,7 @@ ValidationResult Grid3D::validate_route(
             // Mirrors PR #2787 (validate/rules/clearance.py) and the
             // Python validator at ``router/grid.py``.
             float clearance;
-            const bool is_circular_pad = std::abs(pad.width - pad.height) < 0.001f;
+            const bool is_circular_pad = pad.rotation == 0.0f && std::abs(pad.width - pad.height) < 0.001f;
             if (is_circular_pad) {
                 const float pad_radius = std::max(pad.width, pad.height) / 2.0f;
                 const float dist = point_to_segment_distance(
@@ -791,9 +814,8 @@ ValidationResult Grid3D::validate_route(
                 // Rect-aware: signed centerline-to-rect distance.  Negative
                 // means the segment centerline lies inside the pad rectangle
                 // (a real DRC defect).
-                const float center_dist = rect_segment_centerline_distance(
-                    pad.x, pad.y, pad.width, pad.height,
-                    seg.x1, seg.y1, seg.x2, seg.y2);
+                const float center_dist = pad_rect_distance(
+                    pad, seg.x1, seg.y1, seg.x2, seg.y2);
                 clearance = center_dist - seg_half_width;
             }
 
@@ -964,6 +986,33 @@ ValidationResult Grid3D::validate_route(
         // Via spans from layer_from to layer_to
         int layer_lo = std::min(via.layer_from, via.layer_to);
         int layer_hi = std::max(via.layer_from, via.layer_to);
+
+        // Candidate via vs foreign pads (#5182): match worst_via_pad_deficit.
+        // Its floor is the component TRACE clearance; other via quadrants below
+        // retain their existing via clearance and pairwise widening policies.
+        for (const auto& pad : pads_) {
+            if (pad.net == exclude_net) continue;
+            if (pad.layer_idx != -1 &&
+                (pad.layer_idx < layer_lo || pad.layer_idx > layer_hi)) continue;
+            float clearance;
+            if (pad.rotation == 0.0f && std::abs(pad.width - pad.height) < 0.001f) {
+                clearance = std::hypot(via.x - pad.x, via.y - pad.y)
+                    - std::max(pad.width, pad.height) / 2.0f - via_radius;
+            } else {
+                clearance = pad_rect_distance(pad, via.x, via.y, via.x, via.y) - via_radius;
+            }
+            // No net-0 metal-overlap exception for vias.
+            if (!pad.is_plane_net && pad.via_carveout_eligible &&
+                is_excluded_ref(pad.ref_hash) && clearance >= 0.0f) continue;
+            result.min_clearance = std::min(result.min_clearance, clearance);
+            if (clearance < pad.via_clearance_override - CLEARANCE_EPSILON_MM) {
+                result.valid = false;
+                result.violation_x = pad.x;
+                result.violation_y = pad.y;
+                result.violation_type = 8;  // via-pad (7 reserved for search pairwise)
+                return result;
+            }
+        }
 
         for (const auto& seg : stored_segments_) {
             if (seg.net == exclude_net) continue;

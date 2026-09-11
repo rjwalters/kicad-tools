@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Flat signal-clearance table builder for clock-to-signal spacing**
+  (#5021) — `build_signal_clearance_table()` in
+  `router/pairwise_clearance.py` generalises the HV pairwise-clearance
+  resolver (#4431) past voltage-derived requirements to a flat,
+  non-voltage signal-integrity spacing rule, e.g. ST AN4488 §8.4.2's SDRAM
+  clock-to-signal guideline (three trace widths, 0.54 mm edge-to-edge). It
+  populates the same `PairwiseClearanceTable` data carrier the HV epic
+  built, so every downstream consumer (`route_pairwise_violation`,
+  `find_pairwise_violations`, `PairwisePathChecker`, the C++ `Grid3D`
+  projection) gets identical route-time avoidance and post-route audit
+  coverage across tracks, pads and via spans — with no separate
+  implementation to keep in sync and no routing-order dependence (the
+  board07 "reciprocal clock guard" defect this issue tracks: a clock track
+  cleared a foreign net's tracks by the full requirement but passed a
+  foreign through-via at the ordinary fabrication clearance because the
+  via's copper was never widened). No automatic package-escape exemption
+  is applied; a genuine waiver must be an explicit, measured `AttachZone`.
 - **`kct route --current-paths` / `--no-current-paths`** (#4980) — the third
   and final consumer of the declared branch-specific current-path model
   (after `kct pcb reinforce`, #5125, and `kct check`, #5184). The route
@@ -25,6 +42,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exits 1 before any routing work); an auto-discovered one degrades to a
   warning; the authored input file is never overwritten (a collision diverts
   the derived sidecar to `current_paths.effective.json`, the #4428 rule).
+- **`kct route --reserve-plane-layers`: controlled-impedance signal-layer
+  reservation guardrail** (#5014) — `LayerDefinition.is_routable` treats
+  every copper layer as signal-eligible by design, including layers a
+  `--layers 4`-style stack designates as a GND/PWR reference plane, so
+  ordinary signal could silently consume the continuous plane a
+  controlled-impedance recipe depends on. `--reserve-plane-layers`
+  hard-restricts routing to the resolved stack's non-`PLANE` layers (via
+  `DesignRules.allowed_layers`, issue #715's pre-existing enforcement); a
+  new route-time advisory recommends the flag whenever a plane-bearing
+  stack is resolved without it, and a post-route audit reports any
+  committed signal segment that still landed on a declared plane layer. A
+  no-op on stacks with no `PLANE` layers (`--layers 2`, `4-all`, or an
+  all-signal `auto`-detected board). See
+  `kicad_tools.router.layer_advisories` for the full contract.
 - **Konnect item 8 audit: natural-language design-rule store** (#4902, Part
   of #4880) — `docs/konnect-item8-design-rules-audit.md` decides **decline**
   on adding a Konnect-style free-text design-rule store: the repo already
@@ -1206,6 +1237,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and oval copper polygons using KiCad's negative-angle board transform.
   This removes mirrored false overlaps and missed physical overlaps while
   preserving absolute pad angles, footprint-local centers, and clearance floors.
+- Grid routing acceptance now retains non-cardinal pad rotation in Python
+  segment/via backstops and the native validator, including late pad additions
+  (#5182). Native candidate vias now check foreign pad copper using the same
+  component clearance and exclusions as finalization. Requires native build v22.
+
+
 - **Declared current paths reported `unresolved` on real boards whenever a
   trace did not land on the exact pad center** (#4980) — endpoint resolution
   (`router/current_paths.py`) attached a `RefDes.pad` endpoint to the copper
