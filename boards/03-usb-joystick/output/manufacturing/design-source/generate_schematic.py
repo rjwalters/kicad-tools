@@ -4,15 +4,19 @@
 import argparse
 import json
 import math
+import runpy
 from pathlib import Path
-
-from joystick_hardware import COMPONENTS
 
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 
+# Resolve the sibling by file path, including when imported through importlib.
+COMPONENTS = runpy.run_path(str(Path(__file__).with_name("joystick_hardware.py")))["COMPONENTS"]
+
 
 def create_usb_joystick_schematic(output_path: Path, verbose=False):
-    procurement = json.loads(Path(__file__).with_name("procurement-review.json").read_text())["parts"]
+    procurement = json.loads(Path(__file__).with_name("procurement-review.json").read_text())[
+        "parts"
+    ]
     sch = Schematic(
         title="USB joystick controller — ATmega32U4",
         date="2026-09",

@@ -98,3 +98,41 @@ def test_process_rejects_invalid_geometry_or_rules(process, repaired, change):
         repaired.write_text(serialize_sexp(doc))
     with pytest.raises(ValueError):
         process.make_checker(repaired)
+
+
+@pytest.mark.parametrize("bonded", [False, True])
+def test_obsolete_back_escape_trim_requires_free_endpoint(process, repaired, bonded):
+    from kicad_tools.sexp import parse_string
+    from kicad_tools.validate.rules.dangling_copper import DanglingCopperRule
+
+    doc = parse_file(repaired)
+    # Linux router variant retains this B.Cu copy of the SMT pad escape.
+    tail_id = "00000000-0000-4000-8000-000000005044"
+    doc.add(
+        parse_string(
+            f"(segment (start 145.3375 89.75) (end 145.8375 89.75) "
+            f'(width 0.15) (layer "B.Cu") (net "NRST") (uuid "{tail_id}"))'
+        )
+    )
+    if bonded:
+        # A second branch terminates the endpoint: this is real route copper,
+        # even though its position matches the historical dangling remnant.
+        doc.add(
+            parse_string(
+                "(segment (start 145.3375 89.75) (end 149.8875 93.8) "
+                '(width 0.15) (layer "B.Cu") (net "NRST") '
+                '(uuid "00000000-0000-4000-8000-000000005045"))'
+            )
+        )
+    repaired.write_text(serialize_sexp(doc))
+    before = process.validate_process(repaired)
+    findings = DanglingCopperRule().check(before, process.process_rules()).violations
+    assert any(v.rule_id == "track_dangling" and "NRST" in v.nets for v in findings) == (not bonded)
+    assert process.trim_obsolete_nrst_tail(repaired) == (0 if bonded else 1)
+    after = process.validate_process(repaired)
+    assert any(s.uuid == tail_id for s in after.segments) == bonded
+    assert not any(
+        v.rule_id == "track_dangling" and "NRST" in v.nets
+        for v in DanglingCopperRule().check(after, process.process_rules()).violations
+    )
+    assert process.trim_obsolete_nrst_tail(repaired) == 0

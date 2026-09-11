@@ -548,6 +548,21 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
     sidecar_path = output_path.parent / "net_class_map.json"
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
     print(f"   Wrote net-class-map sidecar: {sidecar_path}")
+
+    # ------------------------------------------------------------------
+    # Fabrication-overrides sidecar (Issue #5006): stage the board's
+    # reviewed, cited floors next to the generated board so a copy produced
+    # outside ``boards/03-usb-joystick/output/`` is self-describing --
+    # ``kct check --emit-drc-constraints`` and every other
+    # ``resolve_pcb_fabrication_overrides`` call site discover it there and
+    # emit the same narrowed floor the native project carries.
+    # ------------------------------------------------------------------
+    from routing_plan import COMMITTED_FABRICATION_OVERRIDES
+
+    overrides_sidecar = output_path.parent / COMMITTED_FABRICATION_OVERRIDES.name
+    # read-then-write is a no-op (not a SameFileError) when regenerating in place
+    overrides_sidecar.write_text(COMMITTED_FABRICATION_OVERRIDES.read_text())
+    print(f"   Wrote fabrication-overrides sidecar: {overrides_sidecar}")
     if use_saved_plan:
         from routing_plan import PLAN, apply_plan
 
@@ -687,30 +702,80 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
     # routed/checked at -- the old route-at-tier-1 / export-at-jlcpcb
     # split (#3033/#3038 era) produced a report.md that falsely flagged
     # the tier-1-legal via-in-pad as 4x via_in_pad errors.
-    cmd = [
-        sys.executable,
-        "-m",
-        "kicad_tools.cli",
-        "export",
-        str(routed_path),
-        "--output",
-        str(mfg_dir),
-        "--mfr",
-        "jlcpcb-tier1",
-        "--no-auto-lcsc",
-        "--sch",
-        str(output_dir / "usb_joystick.kicad_sch"),
-    ]
-    print(f"\n   Command: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.stdout:
-        for line in result.stdout.strip().split("\n")[-15:]:
-            print(f"   {line}")
-    if result.returncode != 0:
-        if result.stderr:
-            print(f"\n   Error: {result.stderr}")
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+
+    # Preserve the reviewed 0.45 mm native hole floor throughout preflight,
+    # Gerber export, and the project ZIP; generic emission resets it to 0.50.
+    package = ManufacturingPackage(
+        pcb_path=routed_path,
+        schematic_path=output_dir / "usb_joystick.kicad_sch",
+        manufacturer="jlcpcb-tier1",
+        config=ManufacturingConfig(
+            output_dir=mfg_dir,
+            auto_lcsc=False,
+            emit_drc_constraints=False,
+        ),
+    )
+    result = package.export(mfg_dir)
+    for warning in result.warnings:
+        print(f"   Warning: {warning}")
+    if not result.success:
+        for error in result.errors:
+            print(f"   Export error: {error}")
         return False
+    # Keep the separate manual assembly leg explicit in the supplier files.
+    import csv
+    import hashlib
+    import zipfile
+
+    bom = mfg_dir / "bom_jlcpcb.csv"
+    with bom.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        columns = reader.fieldnames
+        rows = list(reader)
+    manual = [row for row in rows if row["Designator"] == "J1"]
+    if len(manual) != 1:
+        raise ValueError("Expected exactly one USB-C J1 manual assembly BOM row")
+    for target, entries in [
+        (bom, [row for row in rows if row not in manual]),
+        (mfg_dir / "manual-assembly-bom.csv", manual),
+    ]:
+        with target.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=columns)
+            writer.writeheader()
+            writer.writerows(entries)
+
+    (mfg_dir / "README.txt").write_text(
+        "USB joystick revision B — fabrication and assembly package\n"
+        "\n"
+        "Order the exact four-layer stackup and Epoxy-filled & Capped POFV/VIPPO process in manufacturing-requirements.json. Do not use ordinary open or merely tented vias.\n"
+        "\n"
+        "Use bom_jlcpcb.csv and cpl_jlcpcb.csv for SMT assembly. J1 USB4085-GF-A is a separate manual through-hole assembly operation listed in manual-assembly-bom.csv. Use exact reviewed supplier parts; no automatic substitutions.\n"
+        "\n"
+        "After inspection, program the supplied 8 MHz firmware and fuses through J3 as described in firmware/README.md. Power the programmer/board from one regulated 5 V source with USB disconnected. No bootloader is required.\n"
+        "\n"
+        "Gerbers are in gerbers/gerbers.zip; editable KiCad files are in kicad_project.zip. DESIGN_REVIEW.md documents electrical and layout review. Physical bring-up and USB qualification remain to be performed on assembled hardware.\n"
+    )
+
+    # The editable project must resolve its custom ISP footprint and rules
+    # after extraction, without relying on this checkout's library table.
+    with zipfile.ZipFile(mfg_dir / "kicad_project.zip", "a", zipfile.ZIP_DEFLATED) as archive:
+        additions = [routed_path.with_suffix(".kicad_dru"), output_dir / "fp-lib-table"]
+        additions.extend(sorted((output_dir / "footprints").rglob("*.kicad_mod")))
+        for path in additions:
+            archive.write(path, path.relative_to(output_dir).as_posix())
+
     manifest = mfg_dir / "manifest.json"
+    data = json.loads(manifest.read_text())
+    data["files"] = {
+        path.relative_to(mfg_dir).as_posix(): {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "size": path.stat().st_size,
+        }
+        for path in sorted(mfg_dir.rglob("*"))
+        if path.is_file() and path != manifest
+    }
+    manifest.write_text(json.dumps(data, indent=2) + "\n")
     if manifest.exists():
         print(f"\n   Manifest: {manifest}")
         return True

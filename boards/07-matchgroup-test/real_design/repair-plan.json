@@ -1,0 +1,29 @@
+{
+  "source_segments": [
+    "01dc4e37-d5ba-4538-92ea-bfee455c436f",
+    "4bcac5ec-a4bc-406a-8442-36d0b10ac9a8",
+    "4c2b6094-2425-41df-9182-35ced068923f",
+    "6f3d8158-05e5-4bad-8fd1-10a9ae0a5a5b",
+    "88a1c31c-e696-4749-83f3-8c28b0f90361",
+    "8ef64169-d437-4dd9-98f6-9165e25b6487",
+    "94669c0c-1ea5-4cc5-b858-fff5c59f1ef4",
+    "96d7ffca-0e01-47c4-9fbe-5c2aae5877f5",
+    "a0f8e094-bf83-4606-b02e-e66064421d66",
+    "a4aeb3de-e7bf-49c1-a272-76bd7b9c8c33",
+    "abfc2126-9822-4901-ba15-471f81319ae2",
+    "d5002a60-154e-4e24-b646-bae92dfb36b2",
+    "f62dac64-7774-4ab9-ac84-4b37f07cd91e",
+    "fd1d7313-75de-4db7-bb78-efbc5f43b6c1"
+  ],
+  "pieces": 4,
+  "axis_first": true,
+  "selected_nets": [
+    "DQ4",
+    "DQ5",
+    "DQ6",
+    "SDCKE1",
+    "SDCLK",
+    "SDNE1",
+    "UDQM"
+  ]
+}

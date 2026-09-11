@@ -55,6 +55,19 @@ def _is_footprint_tag(tag: str | None) -> bool:
     return tag in FOOTPRINT_TAGS
 
 
+def _find_all_footprints(doc: SExp) -> list[SExp]:
+    """Return every footprint node in *doc*, in document order.
+
+    Matches both the modern ``(footprint ...)`` spelling and the legacy
+    pre-KiCad-6 ``(module ...)`` spelling (issue #4891).  Search semantics
+    match :meth:`SExp.find_all` -- descendants of the root, not the root
+    itself -- so this is a drop-in replacement for ``doc.find_all("footprint")``.
+    """
+    return [
+        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
+    ]
+
+
 # Default regex for detecting power/ground net names.
 # Matches names like GND, +3V3, +5V, VCC, VDD, VBUS, or names starting with '+'.
 _DEFAULT_POWER_NET_PATTERN = re.compile(
@@ -2658,9 +2671,7 @@ class PCB:
                     if item.is_atom and item.value == "addsublayer":
                         layers.append(layer)
                         sublayer += 1
-                        layer = StackupLayer(
-                            name=f"{name} (sublayer {sublayer})", type=layer_type
-                        )
+                        layer = StackupLayer(name=f"{name} (sublayer {sublayer})", type=layer_type)
                     elif item.tag == "thickness":
                         layer.thickness = item.get_float(0) or 0.0
                     elif item.tag == "material":
@@ -5092,7 +5103,7 @@ class PCB:
         new_uuid = str(uuid.uuid4())
 
         # Update the UUID in the footprint
-        uuid_node = fp_sexp.find("uuid")
+        uuid_node = fp_sexp.find_child("uuid")
         if uuid_node:
             uuid_node.set_value(0, new_uuid)
         else:
@@ -5103,12 +5114,12 @@ class PCB:
         # fresh IDs even when the library omits them, so native DRC findings
         # can be correlated with the saved board instead of transient IDs.
         for pad_node in fp_sexp.find_all("pad"):
-            pad_uuid = pad_node.find("uuid")
+            pad_uuid = pad_node.find_child("uuid")
             if pad_uuid is not None:
                 pad_uuid.set_value(0, str(uuid.uuid4()))
             else:
                 pad_node.append(SExp.list("uuid", str(uuid.uuid4())))
-            legacy_stamp = pad_node.find("tstamp")
+            legacy_stamp = pad_node.find_child("tstamp")
             if legacy_stamp is not None:
                 pad_node.remove(legacy_stamp)
 
@@ -5252,8 +5263,8 @@ class PCB:
         # New footprints need the same pad write-through links as loaded
         # footprints (#5049). Use parser order, not pad numbers: shield and
         # NPTH pads may share a number or have no number at all.
-        for pad, node in zip(footprint.pads, fp_sexp.find_all("pad"), strict=True):
-            object.__setattr__(pad, "_sexp_node", node)
+        for pad_obj, pad_node in zip(footprint.pads, fp_sexp.find_all("pad"), strict=True):
+            object.__setattr__(pad_obj, "_sexp_node", pad_node)
 
         self._footprints.append(footprint)
 

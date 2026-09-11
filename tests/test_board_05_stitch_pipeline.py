@@ -44,7 +44,10 @@ from kicad_tools.core.sexp_file import load_pcb
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "05-bldc-motor-controller"
 DESIGN_PY = BOARD_DIR / "design.py"
-ROUTED_PCB = BOARD_DIR / "output" / "bldc_controller_routed.kicad_pcb"
+ROUTED_PCB = (
+    REPO_ROOT
+    / "tests/fixtures/historical_demo_boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb"
+)
 
 # The three pour nets the issue calls out as strander-prone.  +5V is a
 # pour net too but its pads happen to sit on the pour layer, so we do not
@@ -77,7 +80,7 @@ class TestBoard05StitchPipelineStatic:
         main_fn = next(
             node
             for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef) and node.name == "main"
+            if isinstance(node, ast.FunctionDef) and node.name == "legacy_main"
         )
 
         # Record the source line of the first call to each pipeline fn.

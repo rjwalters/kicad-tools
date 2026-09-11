@@ -12,6 +12,13 @@ import math
 from collections import defaultdict
 from pathlib import Path
 
+from kicad_tools.manufacturers.fabrication_overrides import (
+    FABRICATION_OVERRIDES_SIDECAR_BASENAME,
+    FabricationOverride,
+    discover_fabrication_overrides_sidecar,
+    load_fabrication_overrides,
+)
+from kicad_tools.router.quantize import OffAngleSegmentError, verify_segment_45
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
 from kicad_tools.validate.rules.clearance import CopperElement
@@ -19,19 +26,72 @@ from kicad_tools.validate.rules.diffpair_routing_continuity import DiffPairRouti
 
 PLAN = Path(__file__).with_name("routing-plan.json")
 
+# Issue #5006: the board's reviewed, cited fabrication floors live in this
+# committed sidecar -- the single source of truth shared by the Python
+# checker (``check_manufacturing.py``), the native project emission below,
+# and every ``resolve_pcb_fabrication_overrides`` call site in ``kct``.
+COMMITTED_FABRICATION_OVERRIDES = (
+    Path(__file__).resolve().parent / "output" / FABRICATION_OVERRIDES_SIDECAR_BASENAME
+)
+
+
+def fabrication_overrides_path(pcb_path=None) -> Path:
+    """Locate the reviewed fabrication-overrides sidecar for ``pcb_path``.
+
+    Probes the shared three-directory order (board dir, its ``output/``, the
+    parent's ``output/``) so a board copy that ships its own sidecar wins,
+    then falls back to this board's committed sidecar. Without the fallback a
+    board generated anywhere other than ``boards/03-usb-joystick/output/``
+    would have no sidecar at all and die with ``FileNotFoundError``.
+    """
+    if pcb_path is not None:
+        discovered = discover_fabrication_overrides_sidecar(pcb_path)
+        if discovered is not None:
+            return discovered
+    if not COMMITTED_FABRICATION_OVERRIDES.is_file():
+        raise FileNotFoundError(
+            f"Reviewed fabrication-overrides sidecar is missing: {COMMITTED_FABRICATION_OVERRIDES}"
+        )
+    return COMMITTED_FABRICATION_OVERRIDES
+
+
+def load_board_fabrication_overrides(pcb_path=None) -> list[FabricationOverride]:
+    """Load this board's reviewed overrides (fail loud on missing/invalid)."""
+    return load_fabrication_overrides(fabrication_overrides_path(pcb_path))
+
+
+def select_fabrication_override(overrides, field) -> FabricationOverride:
+    """Return the override for ``field`` or raise an actionable error."""
+    override = next((o for o in overrides if o.field == field), None)
+    if override is None:
+        declared = sorted(o.field for o in overrides)
+        raise ValueError(
+            f"Reviewed fabrication-overrides sidecar declares no {field!r} override "
+            f"(declared: {declared or 'none'})"
+        )
+    return override
+
+
+def reviewed_fab_floor(field="min_hole_to_hole_mm", pcb_path=None) -> float:
+    """Reviewed value for ``field`` straight from the sidecar."""
+    return select_fabrication_override(load_board_fabrication_overrides(pcb_path), field).value
+
 
 def apply_native_fab_floor(pcb_path):
-    """Match JLC's published 0.45 mm pad-hole limit after generic rule emission.
+    """Match JLC's published pad-hole limit after generic rule emission.
 
     The generic profile currently carries a conservative 0.50 mm hole floor.
-    This explicit board fabrication setting is hash-bound by readiness evidence.
-    It does not alter pad geometry or suppress any violation by UUID.
+    The narrower reviewed floor is read from the committed
+    fabrication-overrides sidecar (Issue #5006) rather than restated here, so
+    the native project setting can never drift from the cited value the
+    Python checker applies. It is hash-bound by readiness evidence, and does
+    not alter pad geometry or suppress any violation by UUID.
     """
     project = Path(pcb_path).with_suffix(".kicad_pro")
     data = json.loads(project.read_text())
     data.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rules", {})[
         "min_hole_to_hole"
-    ] = 0.45
+    ] = reviewed_fab_floor()
     project.write_text(json.dumps(data, indent=2) + "\n")
 
 
@@ -198,12 +258,31 @@ def usb_geometry(path):
     return {"lengths_mm": lengths, "common_coupled_mm": coupled, "branch_skew_mm": skew}
 
 
+def _require_45_degree_copper(path):
+    # Parse the nodes rather than relying on KiCad's pretty-print layout.
+    for segment in parse_file(path).find_children("segment"):
+        start, end = segment.find_child("start"), segment.find_child("end")
+        try:
+            verify_segment_45(
+                start.get_float(0),
+                start.get_float(1),
+                end.get_float(0),
+                end.get_float(1),
+                strict=True,
+            )
+        except OffAngleSegmentError as exc:
+            raise ValueError(
+                "Routing plan contains off-angle copper; repair and revalidate before replay"
+            ) from exc
+
+
 def save_plan(reviewed_board, plan_path=PLAN):
+    _require_45_degree_copper(reviewed_board)
     doc = parse_file(reviewed_board)
     data = {
         "schema_version": 1,
         "physical_sha256": fingerprint(reviewed_board),
-        "description": "Revision B fixed-placement copper, manually completed and USB pair repaired",
+        "description": "Revision B fixed-placement copper, manually completed, USB pair repaired, and 45-degree aligned",
         "required_factory_options": {
             "layers": 4,
             "stackup": "JLC7628",
@@ -247,6 +326,7 @@ def apply_plan(input_path, output_path, plan_path=PLAN):
     candidate = output_path.with_name(f".{output_path.stem}.candidate.kicad_pcb")
     try:
         candidate.write_text(serialize_sexp(doc))
+        _require_45_degree_copper(candidate)
         usb_geometry(candidate)
         candidate.replace(output_path)
     finally:

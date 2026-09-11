@@ -25,6 +25,7 @@ If no output directory is specified, files are written to ./output/
 
 import json
 import os
+import runpy
 import subprocess
 import sys
 import uuid
@@ -605,24 +606,49 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # Write schematic
     sch_path = output_dir / "stm32_devboard.kicad_sch"
     sch.write(sch_path)
-    # Keep the synthesized +3.3V power symbol portable for native ERC.
-    from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
-
-    doc = parse_file(sch_path)
-    custom = parse_string('(kicad_symbol_lib (version 20250114) (generator "kicad_tools"))')
-    for symbol in doc.find_child("lib_symbols").find_children("symbol"):
-        if symbol.get_string(0).startswith("kicad_tools_pwr:"):
-            copy = parse_string(serialize_sexp(symbol))
-            copy.set_atom(0, copy.get_string(0).split(":", 1)[1])
-            custom.add(copy)
-    (output_dir / "kicad_tools_pwr.kicad_sym").write_text(serialize_sexp(custom))
-    (output_dir / "sym-lib-table").write_text(
-        '(sym_lib_table (version 7) (lib (name "kicad_tools_pwr") (type "KiCad") '
-        '(uri "${KIPRJMOD}/kicad_tools_pwr.kicad_sym") (options "") (descr "Power symbols")))\n'
-    )
+    write_portable_symbols(sch_path)
     print(f"   Schematic: {sch_path}")
 
     return sch_path
+
+
+def write_portable_symbols(sch_path: Path) -> None:
+    """Bind generated power and reviewed capacitor symbols to local libraries.
+
+    KiCad 10.0.5 and 10.0.6 ship different Device:C_Small definitions. Preserve
+    the schematic's exact cached pins/graphics instead of depending on which
+    stock library a native ERC host has installed.
+    """
+    from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
+
+    doc = parse_file(sch_path)
+    libraries = {
+        name: parse_string('(kicad_symbol_lib (version 20250114) (generator "kicad_tools"))')
+        for name in ("kicad_tools_pwr", "board04_symbols")
+    }
+    for symbol in doc.find_child("lib_symbols").find_children("symbol"):
+        lib_id = symbol.get_string(0)
+        if lib_id == "Device:C_Small":
+            lib_id = "board04_symbols:C_Small"
+            symbol.set_atom(0, lib_id)
+        namespace, name = lib_id.split(":", 1)
+        if namespace in libraries:
+            copy = parse_string(serialize_sexp(symbol))
+            copy.set_atom(0, name)
+            libraries[namespace].add(copy)
+    for symbol in doc.find_children("symbol"):
+        lib_id = symbol.find_child("lib_id")
+        if lib_id and lib_id.get_string(0) == "Device:C_Small":
+            lib_id.set_atom(0, "board04_symbols:C_Small")
+    sch_path.write_text(serialize_sexp(doc))
+    for name, library in libraries.items():
+        (sch_path.parent / f"{name}.kicad_sym").write_text(serialize_sexp(library))
+    entries = " ".join(
+        f'(lib (name "{name}") (type "KiCad") '
+        f'(uri "${{KIPRJMOD}}/{name}.kicad_sym") (options "") (descr "Portable board symbols"))'
+        for name in libraries
+    )
+    (sch_path.parent / "sym-lib-table").write_text(f"(sym_lib_table (version 7) {entries})\n")
 
 
 def create_project(output_dir: Path, project_name: str) -> Path:
@@ -1779,47 +1805,35 @@ def fill_zones(routed_path: Path) -> bool:
 
 
 def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
-    """
-    Generate manufacturing artifacts (Gerbers, drill, BOM, CPL, project zip,
-    DRC/ERC reports) into `<output_dir>/manufacturing/` using `kct export`.
+    """Export the assembly bundle with the reviewed paid-drill native rules."""
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
 
-    Targets JLCPCB tier-1 capability. Preflight DRC violations are reported
-    but do not block export (the routed PCB is known to ship with fine-pitch
-    clearance issues at U2 that are tracked separately).
-
-    Returns True if `kct export` succeeded.
-    """
-    from manufacturing_process import validate_process
-
-    validate_process(routed_path)
+    process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
+    process["validate_process"](routed_path)
 
     print("\n" + "=" * 60)
-    print("Generating manufacturing artifacts (kct export)...")
+    print("Generating manufacturing artifacts (reviewed paid drilling)...")
     print("=" * 60)
 
     mfr_dir = output_dir / "manufacturing"
-    cmd = [
-        sys.executable,
-        "-m",
-        "kicad_tools.cli",
-        "export",
-        str(routed_path),
-        "--mfr",
-        "jlcpcb-tier1",
-        "--output",
-        str(mfr_dir),
-    ]
-    print(f"\n   Command: {' '.join(cmd)}")
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.stdout:
-        for line in result.stdout.strip().split("\n"):
-            print(f"   {line}")
-    if result.returncode != 0:
-        if result.stderr:
-            print(f"\n   Export stderr:\n{result.stderr}")
-        print(f"\n   FAILED: kct export exited {result.returncode}")
+    # The stock tier1 export would overwrite the paid process's .15/.30/.075
+    # via floors before preflight and packaging. Preserve the validated native
+    # constraints throughout export, including the project ZIP and final gate.
+    package = ManufacturingPackage(
+        pcb_path=routed_path,
+        schematic_path=output_dir / "stm32_devboard.kicad_sch",
+        manufacturer="jlcpcb-tier1",
+        config=ManufacturingConfig(output_dir=mfr_dir, emit_drc_constraints=False),
+    )
+    result = package.export(mfr_dir)
+    for warning in result.warnings:
+        print(f"   Warning: {warning}")
+    if not result.success:
+        for error in result.errors:
+            print(f"   Export error: {error}")
         return False
+
+    process["validate_process"](routed_path)
 
     print(f"\n   SUCCESS: manufacturing artifacts written to {mfr_dir}")
     return True
@@ -2096,10 +2110,10 @@ def main() -> int:
         # BEFORE fill_zones (so the re-pour backs the GND plane off any dogleg
         # bulge); copper-LVS stays 0/0.
         quantize_success = quantize_escapes(routed_path)
-        from manufacturing_process import apply_native_floors, repair
-
-        repair(routed_path)
-        apply_native_floors(routed_path)
+        # File-relative loading also works for importlib-based recipe callers.
+        process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
+        process["repair"](routed_path)
+        process["apply_native_floors"](routed_path)
 
         # Step 6.5: Re-pour zones (#3791) -- refresh the GND B.Cu fill so it
         # backs off the relocated OSC_OUT 45 jog (#3790) by the full 0.3mm

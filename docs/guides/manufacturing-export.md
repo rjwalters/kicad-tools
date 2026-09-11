@@ -13,6 +13,20 @@ To order assembled PCBs from JLCPCB, you need:
 
 kicad-tools can generate all of these in JLCPCB's required format.
 
+The manufacturing package's `kicad_project.zip` includes the selected PCB,
+adjacent schematic/project files, and the project-local `sym-lib-table` with
+its referenced KiCad symbol libraries. Relative paths and `${KIPRJMOD}/`
+paths retain their subdirectories after extraction. Repeated references
+to the same file produce one archive member.
+
+Project ZIP creation reports an export error for a malformed table, missing
+library, or nonportable table entry (absolute paths, parent traversal,
+host environment variables, non-KiCad libraries, or symlinks outside the
+project). Move those dependencies under the project and use project-relative
+URIs before exporting. Libraries supplied by KiCad's global installation
+are not copied; footprint libraries and 3D models are outside this symbol
+packaging support.
+
 ## Prerequisites
 
 ```bash
@@ -470,3 +484,13 @@ export_pnp(pcb, "cpl.csv", manufacturer="jlcpcb", config=config)
 
 - **[Query API](query-api.md)** - Advanced filtering for design analysis
 - **[Schematic Analysis](schematic-analysis.md)** - Deep dive into schematic parsing
+
+## Offline submission preparation
+
+For exact-byte, locally verified Gerber/BOM/CPL handoffs, see
+[Offline assembly submission preparation](submission-preparation.md). This Python
+API produces a deterministic plan and expected reference matching list without
+supplier access, uploads, approval, or orders. A narrow `refresh_inventory`
+increment can observe exact-ID stock through a caller-supplied official adapter,
+preserving unknown-vs-zero evidence; the full milestone B provenance/freshness
+contract remains blocked on #5033/#5034 (PRs #5115/#5090), so #5142 stays open.

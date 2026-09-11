@@ -390,6 +390,19 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     conservative (an audit "connected" verdict implies real overlap; a
     thermal-spoke connection always overlaps the inscribed circle).
 
+    Via layer span (issue #5176): a via's declared endpoint layers are
+    expanded across the board's *physical* copper stack between them (see
+    ``_via_layer_span`` below), mirroring
+    ``ConnectivityValidator._via_bridged_layers``, instead of assuming every
+    via bridges all 4 copper layers regardless of its declared span.  A via
+    that does not physically reach a given layer can no longer fuse copper
+    on that layer into a net's "connected" verdict -- the false
+    ``POUR CONNECTIVITY: PASS`` mode a non-through (blind/buried) via would
+    otherwise create.  Board 06's stitching only ever emits through vias
+    today, so this is a no-op on its current committed/regenerated
+    artifacts; it is exercised directly by a constructed fixture in
+    ``tests/test_board_06_pour_audit_fixtures.py``.
+
     Returns:
         ``{net_name: {"connected": bool, "pad_groups": [[(pad, is_th)]],
         "zero_fill_zones": int}}``.  Requires shapely; raises
@@ -405,6 +418,38 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
 
     text = pcb_path.read_text()
     all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
+    # Board 06's fixed 4-layer stackup in *physical* stack order (issue
+    # #5176): F.Cu, then inner layers ascending, then B.Cu.  Needed so a
+    # via's declared endpoints (e.g. ``(layers "F.Cu" "B.Cu")``) expand to
+    # every copper layer physically bridged between them, mirroring
+    # ``ConnectivityValidator._copper_layer_order`` /
+    # ``_via_bridged_layers``.
+    copper_layer_order = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+
+    def _via_layer_span(via_text: str) -> frozenset[str]:
+        """Expand a via's declared endpoint layers to its full bridged span.
+
+        ``(layers "F.Cu" "B.Cu")`` is a through-hole via that also joins
+        every inner copper layer between the endpoints; a via naming two
+        adjacent layers (e.g. a blind ``F.Cu``/``In1.Cu`` via) bridges only
+        those.  Falls back to bridging *no* layers (never to ``all_layers``)
+        when the span can't be resolved, so an unrecognised or degenerate
+        via never over-connects: a false disconnect fails the audit safe,
+        while ``all_layers`` would be the false-PASS this audit exists to
+        catch.
+        """
+        m = re.search(r'\(layers "([^"]+)" "([^"]+)"\)', via_text)
+        if not m:
+            return frozenset()
+        named = frozenset(m.groups())
+        copper_named = frozenset(layer for layer in named if layer.endswith(".Cu"))
+        indices = [
+            copper_layer_order.index(layer) for layer in copper_named if layer in copper_layer_order
+        ]
+        if len(indices) < 2:
+            return copper_named
+        lo, hi = min(indices), max(indices)
+        return frozenset(copper_layer_order[lo : hi + 1])
 
     # Zone fills per net (+ zero-fill bookkeeping for the explicit gate).
     fills: dict[str, list] = {n: [] for n in net_names}
@@ -456,7 +501,10 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         sz = re.search(r"\(size ([\d.]+)\)", via)
         radius = (float(sz.group(1)) if sz else 0.6) / 2.0
         vias[name].append(
-            (Point(float(at.group(1)), float(at.group(2))).buffer(radius), all_layers)
+            (
+                Point(float(at.group(1)), float(at.group(2))).buffer(radius),
+                _via_layer_span(via),
+            )
         )
 
     # Pads (absolute sheet coordinates via the analyzer's PCB model).
@@ -1222,9 +1270,32 @@ def _parse_pads(pcb_path: Path):
                     "is_th": is_th,
                     "drill": float(getattr(pad, "drill", 0.0) or 0.0),
                     "layers": layers,
+                    "pad": pad,
+                    "footprint": fp,
+                    "origin": (origin_x, origin_y),
                 }
             )
     return pads
+
+
+def _via_overlaps_smd_pad(via, pad):
+    """Use the DRC detector, including partial drill overlap and pad rotation."""
+    from types import SimpleNamespace
+
+    from kicad_tools.validate.rules.via_pad_geometry import (
+        is_smd_pad,
+        pad_absolute_bbox,
+        via_inside_pad,
+    )
+
+    physical_pad, footprint = pad["pad"], pad["footprint"]
+    if not is_smd_pad(physical_pad) or via["net"] != pad["net"]:
+        return False
+    ox, oy = pad["origin"]
+    physical_via = SimpleNamespace(position=(via["x"] - ox, via["y"] - oy), drill=via["drill"])
+    return via_inside_pad(
+        physical_via, pad_absolute_bbox(physical_pad, footprint), physical_pad, footprint
+    )
 
 
 def _legalize_signal_vias(pcb_path: Path) -> int:
@@ -1249,8 +1320,8 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
       every layer the via previously joined plus the pad's copper layer
       (compass directions keep connectors axis/45 by construction).
 
-    Returns the number of defects repaired.  Unrepairable defects are
-    printed and left in place (never silently dropped).
+    Returns the number of defects repaired. Unrepairable pad overlaps
+    raise an error; the final routed-board gate also checks all rules.
     """
     import math
 
@@ -1369,16 +1440,28 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
         cands.append([(p0, mid_b), (mid_b, p1)])
         return cands
 
+    import re
+
+    used_uuids = set(re.findall(r'\(uuid "([^"]+)"\)', pcb_path.read_text()))
+
     def _seg_line(net_name, p0, p1, layer, width, net_num):
+        # A standalone cleanup may start the deterministic counter at zero
+        # on an already repaired board. Never reuse an existing identity.
+        identity = _generate_uuid()
+        while identity in used_uuids:
+            identity = _generate_uuid()
+        used_uuids.add(identity)
         return (
             f"  (segment (start {p0[0]:.3f} {p0[1]:.3f}) (end {p1[0]:.3f} {p1[1]:.3f}) "
             f'(width {width}) (layer "{layer}") (net {net_num}) '
-            f'(uuid "{_generate_uuid()}"))'
+            f'(uuid "{identity}"))'
         )
 
-    # Iterate: re-parse after every applied repair so obstacle state is
-    # always current.
-    for _round in range(8):
+    # Re-parse after every repair. A via may need a drill-pair repair and
+    # then a pad-overlap repair; allow a final pass to confirm convergence.
+    # A fixed eight-pass cap silently left defects on larger routed boards.
+    original_via_count = len(_parse_copper(pcb_path.read_text())[2])
+    for _round in range(2 * original_via_count + 1):
         text = pcb_path.read_text()
         net_ids, segs, vias = _parse_copper(text)
         net_num_by_name = {v: k for k, v in net_ids.items()}
@@ -1645,14 +1728,7 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
             for p in pads:
                 if p["is_th"]:
                     continue
-                # Drill circle fully inside the pad bbox (rule geometry).
-                r = v["drill"] / 2
-                if (
-                    p["x"] - p["w"] / 2 <= v["x"] - r
-                    and v["x"] + r <= p["x"] + p["w"] / 2
-                    and p["y"] - p["h"] / 2 <= v["y"] - r
-                    and v["y"] + r <= p["y"] + p["h"] / 2
-                ):
+                if _via_overlaps_smd_pad(v, p):
                     in_pad = p
                     break
             if in_pad is None:
@@ -1721,6 +1797,18 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
             )
         if not repair_applied:
             break
+    else:
+        raise RuntimeError("Via legalization did not converge within its physical-via bound")
+    from types import SimpleNamespace
+
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    residual = ViaInPadRule().check(PCB.load(pcb_path), SimpleNamespace(via_in_pad_supported=False))
+    if residual.violations:
+        raise RuntimeError(
+            f"Via legalization left {len(residual.violations)} unrepaired via-in-pad overlaps"
+        )
     return fixed
 
 

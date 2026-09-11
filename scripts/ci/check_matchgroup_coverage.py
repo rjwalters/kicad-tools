@@ -201,7 +201,7 @@ MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 #   the ADDR_BUS term, so the reroute count is now 1 and matches the
 #   committed-artifact count.)
 MATCHGROUP_VIOLATION_BASELINE: dict[str, int] = {
-    "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb": 1,
+    "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb": 1,
 }
 
 
@@ -488,7 +488,9 @@ def measure_pour_connectivity(recipe_mod, pcb_path: Path, pour_nets: set[str]) -
     return failures
 
 
-def count_errors_via_kct_check(pcb_path: Path, sidecar: Path | None) -> int:
+def count_errors_via_kct_check(
+    pcb_path: Path, sidecar: Path | None, *, error_rules: dict[str, int] | None = None
+) -> int:
     """Count BLOCKING errors via ``kct check --mfr jlcpcb --errors-only``.
 
     Issue #4008: this counter now applies the same advisory-rule filter as
@@ -565,7 +567,25 @@ def count_errors_via_kct_check(pcb_path: Path, sidecar: Path | None) -> int:
         blocking, _advisory_by_rule = count_blocking_errors(data)
     except RuntimeError as e:
         raise RuntimeError(f"{e} (source: {pcb_path})") from e
+    if error_rules is not None:
+        for violation in data.get("violations", []):
+            if violation.get("severity") == "error":
+                rule = violation.get("rule_id", "unknown")
+                error_rules[rule] = error_rules.get(rule, 0) + 1
     return blocking
+
+
+def unexpected_baseline_errors(key: str, errors: dict[str, int]) -> dict[str, int]:
+    """Historical skew improvements cannot absorb new physical defects."""
+    if key not in MATCHGROUP_VIOLATION_BASELINE:
+        return {}
+    expected = {
+        "diffpair_length_skew",
+        "diffpair_routing_continuity",
+        "match_group_length_skew",
+        "connectivity",
+    }
+    return {rule: count for rule, count in errors.items() if count and rule not in expected}
 
 
 def compute_rule_coverage(
@@ -771,7 +791,8 @@ def check_board(
     #      actually incremented (a regression in derive_group_skew_data
     #      would zero the counter even with a correct error count).
     try:
-        error_count = count_errors_via_kct_check(routed_pcb, sidecar)
+        error_rules: dict[str, int] = {}
+        error_count = count_errors_via_kct_check(routed_pcb, sidecar, error_rules=error_rules)
     except RuntimeError as e:
         annotate_error(str(routed_pcb), f"kct check failed: {e}")
         return 1
@@ -789,6 +810,7 @@ def check_board(
     print(f"[matchgroup-coverage] Routed PCB: {routed_pcb}")
     print(f"[matchgroup-coverage] Sidecar: {sidecar}")
     print(f"[matchgroup-coverage] DRC error count: {error_count} (allowed: {allowed})")
+    print(f"[matchgroup-coverage] All error rules: {error_rules}")
     print(f"[matchgroup-coverage] rules_checked_by_rule: {rules_by_rule}")
     print(
         f"[matchgroup-coverage] match-group error violations: "
@@ -888,6 +910,11 @@ def check_board(
                 f"[matchgroup-coverage] OK: pour connectivity "
                 f"({len(pour_nets)} pour nets, copper-union audit)."
             )
+
+    unexpected = unexpected_baseline_errors(lookup_key, error_rules)
+    if unexpected:
+        annotate_error(str(routed_pcb), f"Errors outside historical group baseline: {unexpected}")
+        failed = True
 
     # AC #1 (allowlist semantic): error count must be <= allowed.
     if error_count > allowed:
