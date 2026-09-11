@@ -44,6 +44,11 @@ MOVES = [
     ("U2.39", "SWO", (32.75, 17.8375), (32.75, 19.0)),
     ("U2.7", "NRST", (27.3375, 22.25), (28.65, 22.25)),
 ]
+INSET_ROUTE_MOVES = [
+    # The inset pad seeds (#5004) route OSC_OUT beside C11.1: move its
+    # ordinary 0.30 mm drill another 0.10 mm east to clear the SMT land.
+    ("C11.1", "OSC_OUT", (24.7, 15.75), (24.8, 15.75)),
+]
 
 
 def physical_fingerprint(path):
@@ -92,14 +97,15 @@ def physical_fingerprint(path):
 
 
 def repair(pcb_path):
-    """Move exactly the reviewed eight escapes and add a tail on every used layer."""
+    """Move reviewed escapes/route vias and add a tail on every used layer."""
     pcb_path = Path(pcb_path)
     if physical_fingerprint(pcb_path) != PHYSICAL_SHA256:
         raise ValueError("Board04 physical design changed: review new via escapes")
     pcb, doc = PCB.load(pcb_path), parse_file(pcb_path)
     ox, oy = pcb.board_origin
     changed = 0
-    for ref, net, old, new in MOVES:
+    for move in MOVES + INSET_ROUTE_MOVES:
+        ref, net, old, new = move
         choices = [
             (i, v)
             for i, v in enumerate(pcb.vias)
@@ -110,6 +116,11 @@ def repair(pcb_path):
                 pcb.nets[v.net_number].name == net and math.dist(v.position, new) < 0.001
                 for v in pcb.vias
             ):
+                continue
+            # The pinned historical route has no C11 transition at this
+            # location. Its absence is allowed; validate_process below still
+            # checks every drill against every SMT land on either variant.
+            if move in INSET_ROUTE_MOVES:
                 continue
             raise ValueError(f"Missing reviewed escape {ref}: cannot apply fixed repair")
         if len(choices) != 1:

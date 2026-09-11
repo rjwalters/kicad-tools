@@ -31,16 +31,40 @@ def _relocate_escapes(pcb):
         (148.1, 95.5): (148.4, 95.5),  # NODE_D
         (157.1, 105.9): (156.7, 105.9),  # NODE_D
     }
-    # Linux seed-42 routing chooses adjacent escape grid cells at R5. Both
-    # observed variants need the same reviewed destinations. Net qualification
+    # Linux seed-42 routing chooses adjacent escape grid cells. The observed
+    # variants need reviewed destinations. Net qualification
     # prevents an unrelated endpoint at the same coordinate from moving.
     net_names = {net.get_int(0): net.get_string(1) for net in pcb.find_children("net")}
-    r5_moves = {
+    reviewed_moves = {
         ("VCC", (140.665, 117.3)): (139.2, 115.5),
         ("VCC", (140.665, 117.2)): (139.2, 115.5),
         ("RESET", (141.1, 118.1)): (140.9, 118.5),
         # CI reports board-relative (17.8, 40.8); origin is (123.5, 77.5).
         ("RESET", (141.3, 118.3)): (140.9, 118.5),
+        # Unexempted pad-center seeds (issue #5004) choose these seed-42
+        # variants. Keep the annulus off SMT pads and the J2/VCC drills
+        # separated; native DRC and copper-LVS qualify the resulting copper.
+        ("LINE_A", (133.1, 114.0)): (133.4, 112.8),
+        ("NODE_B", (148.1, 105.5)): (148.4, 105.5),
+        ("NODE_B", (158.9, 105.5)): (158.6, 105.5),
+        ("NODE_C", (138.1, 105.0)): (138.4, 105.0),
+        ("LINE_D", (165.7, 123.1)): (165.5, 123.3),
+        ("VCC", (139.7, 116.235)): (139.2, 115.5),
+        # Restoring the selected negotiated route's copper changes the
+        # observed escape cells again. These variants retain the same
+        # manufacturing limits, including annulus-to-pad and drill spacing.
+        ("LINE_D", (163.1, 114.0)): (163.1, 114.5),
+        ("NODE_B", (138.1, 84.8)): (138.1, 84.4),
+        ("NODE_B", (148.1, 106.2)): (148.1, 106.55),
+        ("NODE_B", (159.4, 106.2)): (159.4, 106.55),
+        ("NODE_C", (138.1, 106.2)): (138.4, 106.5),
+        ("NODE_C", (140.0, 95.7)): (140.4, 95.7),
+        ("NODE_D", (163.9, 112.8)): (163.9, 112.4),
+        ("GND", (155.1, 118.2)): (155.1, 118.6),
+        ("GND", (131.1, 118.9)): (131.1, 118.4),
+        ("VCC", (139.9, 116.8)): (139.9, 116.4),
+        ("LINE_D", (165.4, 122.2)): (165.3, 122.2),
+        ("VCC", (129.2, 123.8)): (129.6, 124.0),
     }
     # Only a present via activates a relocation. Quantization can create a
     # track-only waypoint at an old escape cell; moving it on a second pass
@@ -51,7 +75,7 @@ def _relocate_escapes(pcb):
         net_name = net_names.get(net.get_int(0), net.get_string(0)) if net else None
         point = via.find("at")
         old = tuple(round(point.get_float(i), 3) for i in range(2))
-        destination = r5_moves.get((net_name, old), moves.get(old))
+        destination = reviewed_moves.get((net_name, old), moves.get(old))
         if destination is not None:
             active_moves[net_name, old] = destination
     for item in pcb.find_all("segment") + pcb.find_all("via"):

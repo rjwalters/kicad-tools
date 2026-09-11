@@ -1304,7 +1304,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 # board origin + (26.8375, 21.750)) escapes to B.Cu through a via-in-pad at
 # the U2.6 pad centre, and its FIRST B.Cu hop runs straight north into the
 # U2.5 OSC_IN pad centre at origin + (26.8375, 21.250) — the two adjacent
-# 0.5 mm-pitch HSE crystal pins — before turning west.  That single hop
+# 0.5 mm-pitch HSE crystal pins — before turning east.  That single hop
 # shorts OSC_IN <-> OSC_OUT (witnesses C10.1 / C11.1).  This is the #2834
 # escape-stub short that #3785 fixed BY HAND on the committed PCB; here it
 # is fixed PROGRAMMATICALLY so a fresh ``generate_design.py`` regen
@@ -1313,7 +1313,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 #
 # The fix is a deterministic post-route s-expression surgery (a sibling of
 # ``tie_power_pads``): re-aim that one B.Cu hop's endpoint off the U2.5 pad
-# column to origin + (26.6875, 21.100) — south-west of the U2.5 pad halo,
+# column to origin + (27.450, 21.250) — east of the U2.5 pad column,
 # where the next hop already turns — and drop the now-degenerate follow-on
 # segment.  The
 # re-aimed escape clears the U2.5 pad while staying >= the jlcpcb-tier1 track
@@ -1330,7 +1330,9 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 # feedback: the old hardcoded (100, 100)-origin absolutes stranded the
 # exact-match assert after the boards were sheet-centered).  The offsets are
 # board-frame: U2 sits at origin + (31, 22); U2.6 = U2 + (-4.1625, -0.25),
-# U2.5 = U2 + (-4.1625, -0.75), and the re-aim point is U2 + (-4.3125, -0.9).
+# U2.5 = U2 + (-4.1625, -0.75), and the re-aim point is U2 + (-3.55, -0.75).
+# The trace-radius inset (#5004) moves the follow-on leg east to this point
+# from the old pad-edge diagonal at origin + (26.6875, 21.100).
 _OSC_ORIGIN_X, _OSC_ORIGIN_Y = centered_origin(60.0, 40.0)  # == BOARD_ORIGIN_*
 _OSC_VIA = (
     _OSC_ORIGIN_X + 26.8375,
@@ -1341,8 +1343,8 @@ _OSC_IN_PAD = (
     _OSC_ORIGIN_Y + 21.25,
 )  # U2.5 OSC_IN pad centre (the short target)
 _OSC_REAIM = (
-    _OSC_ORIGIN_X + 26.6875,
-    _OSC_ORIGIN_Y + 21.1,
+    _OSC_ORIGIN_X + 27.45,
+    _OSC_ORIGIN_Y + 21.25,
 )  # re-aimed first-hop endpoint, off the U2.5 column
 
 
@@ -1353,7 +1355,7 @@ def fix_osc_escape(routed_path: Path) -> bool:
     north from the U2.6 via-in-pad into the U2.5 OSC_IN pad centre, shorting
     the two HSE crystal pins.  This deterministic post-route surgery (mirroring
     the :func:`tie_power_pads` s-expression edit) re-aims that single B.Cu hop
-    south-west of the U2.5 pad halo so the escape no longer crosses the OSC_IN
+    east of the U2.5 pad column so the escape no longer crosses the OSC_IN
     pad, clearing the short.  Routed copper for every other net is untouched.
 
     The edit is exact-match on deterministic pad-centre coordinates, so it is

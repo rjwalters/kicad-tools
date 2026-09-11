@@ -1394,11 +1394,12 @@ def _scan_and_repair_via_in_pad(
                 ):
                     result._bump_skipped("via_pad_centred_escape")
                     break
-                if _try_nudge_via_pad(
+                if _try_nudge_via_pad_transaction(
                     via,
                     bbox,
                     router,
                     via_pad_budget,
+                    preserve_connectivity=True,
                     result=result,
                 ):
                     nudged += 1
@@ -1411,21 +1412,12 @@ def _scan_and_repair_via_in_pad(
     return nudged
 
 
-def _via_pad_contacts(via: Via, router: Autorouter) -> set[tuple[int, int]]:
-    """Record same-net copper contacts that a via/chain move must retain.
-
-    IDs remain stable throughout the in-place transaction. Test copper
-    intersection, not endpoint proximity, so preserved track interiors and
-    off-centre pad contacts are protected too. Preserved routes are observed
-    only; this helper never moves them.
-    """
+def _via_pad_copper(via: Via, router: Autorouter) -> list[tuple[int, set[Layer], Any, float]]:
+    """Represent this net's routed and preserved copper with physical layers."""
     from shapely.affinity import rotate  # type: ignore[import-untyped]
     from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
 
     copper: list[tuple[int, set[Layer], Any, float]] = []
-    moving = {id(via)} | {
-        id(seg) for route in router.routes if route.net == via.net for seg in route.segments
-    }
     all_layers = set(Layer)
     for route in [*router.routes, *getattr(router, "existing_routes", [])]:
         if route.net != via.net:
@@ -1450,6 +1442,21 @@ def _via_pad_contacts(via: Via, router: Autorouter) -> set[tuple[int, int]]:
         if angle:
             shape = rotate(shape, -angle, origin=(pad.x, pad.y))
         copper.append((id(pad), layers, shape, 0.0))
+    return copper
+
+
+def _via_pad_contacts(via: Via, router: Autorouter) -> set[tuple[int, int]]:
+    """Record same-net copper contacts that a via/chain move must retain.
+
+    IDs remain stable throughout the in-place transaction. Test copper
+    intersection, not endpoint proximity, so preserved track interiors and
+    off-centre pad contacts are protected too. Preserved routes are observed
+    only; this helper never moves them.
+    """
+    copper = _via_pad_copper(via, router)
+    moving = {id(via)} | {
+        id(seg) for route in router.routes if route.net == via.net for seg in route.segments
+    }
     contacts: set[tuple[int, int]] = set()
     for index, (first, layers, shape, radius) in enumerate(copper):
         for second, other_layers, other_shape, other_radius in copper[index + 1 :]:
@@ -1461,6 +1468,32 @@ def _via_pad_contacts(via: Via, router: Autorouter) -> set[tuple[int, int]]:
             ):
                 contacts.add((min(first, second), max(first, second)))
     return contacts
+
+
+def _via_pad_connectivity(via: Via, router: Autorouter) -> dict[int, int]:
+    """Map copper identities to physical same-net connected components.
+
+    A same-net exit intentionally removes direct via-to-pad contact. Its
+    replacement trace must preserve the original electrical component, on
+    actual common copper layers, including fixed tracks, pads and vias.
+    """
+    copper = _via_pad_copper(via, router)
+    parent = {identity: identity for identity, _, _, _ in copper}
+
+    def root(identity: int) -> int:
+        while parent[identity] != identity:
+            parent[identity] = parent[parent[identity]]
+            identity = parent[identity]
+        return identity
+
+    for index, (first, layers, shape, radius) in enumerate(copper):
+        for second, other_layers, other_shape, other_radius in copper[index + 1 :]:
+            if (
+                layers & other_layers
+                and shape.distance(other_shape) <= radius + other_radius + 1e-9
+            ):
+                parent[root(first)] = root(second)
+    return {identity: root(identity) for identity in parent}
 
 
 def _via_pad_process_findings(via: Via, router: Autorouter) -> set[tuple[str, int, float]]:
@@ -1589,12 +1622,40 @@ def _try_nudge_via_pad_violation(
     if offending_pad is None:
         return False
 
+    return _try_nudge_via_pad_transaction(
+        via,
+        _router_pad_bbox(offending_pad),
+        router,
+        max(max_displacement, _VIA_IN_PAD_MAX_DISPLACEMENT),
+        required_clearance=violation.required,
+        result=result,
+    )
+
+
+def _try_nudge_via_pad_transaction(
+    via: Via,
+    pad_bbox: tuple[float, float, float, float],
+    router: Autorouter,
+    max_displacement: float,
+    *,
+    required_clearance: float | None = None,
+    preserve_connectivity: bool = False,
+    result: DRCNudgeResult | None = None,
+) -> bool:
+    """Validate a via/chain proposal and restore it in place on rejection.
+
+    Foreign-pad repairs retain their exact direct-contact contract. Same-net
+    exits may replace a direct contact with a copper path, but cannot split
+    any previously connected component. Both entry points share the existing
+    destination, process and edge guards.
+    """
     # The cardinal exit helper only knows the offending pad. Treat its
     # proposal as a transaction: include every snapped same-net endpoint,
     # and reject NEW findings rather than requiring an otherwise clean board.
     before = Counter(dataclasses.astuple(v) for v in validate_routes(router))
     process_before = _via_pad_process_findings(via, router)
-    contacts_before = _via_pad_contacts(via, router)
+    contacts_before = _via_pad_contacts(via, router) if not preserve_connectivity else set()
+    connectivity_before = _via_pad_connectivity(via, router) if preserve_connectivity else {}
     old_x, old_y = via.x, via.y
     chain = [
         (seg, seg.x1, seg.y1, seg.x2, seg.y2)
@@ -1604,13 +1665,12 @@ def _try_nudge_via_pad_violation(
     ]
     accepted = False
     try:
-        budget = max(max_displacement, _VIA_IN_PAD_MAX_DISPLACEMENT)
         if not _try_nudge_via_pad(
             via,
-            _router_pad_bbox(offending_pad),
+            pad_bbox,
             router,
-            budget,
-            required_clearance=violation.required,
+            max_displacement,
+            required_clearance=required_clearance,
             result=result,
         ):
             return False
@@ -1633,7 +1693,17 @@ def _try_nudge_via_pad_violation(
             if result is not None:
                 result._bump_skipped("via_pad_destination_blocked")
             return False
-        if contacts_before - _via_pad_contacts(via, router):
+        if preserve_connectivity:
+            connectivity_after = _via_pad_connectivity(via, router)
+            destinations: dict[int, set[int | None]] = {}
+            for identity, component in connectivity_before.items():
+                destinations.setdefault(component, set()).add(connectivity_after.get(identity))
+            contact_blocked = any(
+                len(components) != 1 or None in components for components in destinations.values()
+            )
+        else:
+            contact_blocked = bool(contacts_before - _via_pad_contacts(via, router))
+        if contact_blocked:
             if result is not None:
                 result._bump_skipped("via_pad_contact_blocked")
             return False

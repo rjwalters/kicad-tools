@@ -61,7 +61,9 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # Bump this constant whenever routing logic is modified to ensure stale
 # cached results are not reused.  The value is included in every cache key
 # so incrementing it automatically invalidates all existing entries.
-CACHE_VERSION = "2.2.0"
+# #5004 changes default clearance acceptance and pad seeds: old default-mode
+# routes may contain copper that the new validator rejects.
+CACHE_VERSION = "2.3.0"
 
 
 def get_default_cache_path() -> Path:
@@ -163,6 +165,14 @@ class CacheKey:
             rules_data["min_trace_width_floor"] = float(min_trace_floor)
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
+        # Issue #5004: flips whether the same-component carve-out grants an
+        # automatic exemption from bare fine pitch alone (no configured
+        # relaxation).  Changes which routes clear validation, so a cache
+        # entry produced with one setting must not be served to a run with
+        # the other. Only key non-default (True); CACHE_VERSION invalidates
+        # routes produced before default-mode acceptance was tightened.
+        if getattr(rules, "legacy_fine_pitch_carveout", False):
+            rules_data["legacy_fine_pitch_carveout"] = True
         if routing_context is not None:
             rules_data["routing_context"] = routing_context
         rules_json = json.dumps(rules_data, sort_keys=True, default=str)
@@ -342,6 +352,10 @@ class SubProblemSignature:
             rules_data["min_trace_width_floor"] = float(min_trace_floor)
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
+        # Issue #5004: see ``CacheKey.compute`` above -- same reasoning
+        # applies to reusable sub-problem signatures.
+        if getattr(rules, "legacy_fine_pitch_carveout", False):
+            rules_data["legacy_fine_pitch_carveout"] = True
         rules_json = json.dumps(rules_data, sort_keys=True)
         rules_hash = hashlib.sha256(rules_json.encode()).hexdigest()
 
