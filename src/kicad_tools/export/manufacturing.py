@@ -775,7 +775,11 @@ class ManufacturingPackage:
         actual capabilities rather than KiCad's stricter built-in defaults.
         """
         try:
-            from ..manufacturers import get_profile, write_drc_constraints
+            from ..manufacturers import (
+                get_profile,
+                resolve_pcb_fabrication_overrides,
+                write_drc_constraints,
+            )
 
             profile = get_profile(self.manufacturer)
         except Exception as e:
@@ -791,6 +795,21 @@ class ManufacturingPackage:
 
         layers, copper_oz = self._detect_layer_config()
         rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
+
+        # Issue #5006: retain (or reject) a validated, cited per-board
+        # fabrication-floor override the same way `kct check
+        # --emit-drc-constraints` does, so the packaged sidecars agree with
+        # a reviewed project floor instead of silently reverting it to the
+        # profile's conservative default.
+        rules, fab_override_msg = resolve_pcb_fabrication_overrides(
+            self.pcb_path, rules, manufacturer_id=profile.id
+        )
+        if fab_override_msg is not None:
+            if fab_override_msg.startswith("ignoring"):
+                logger.warning(fab_override_msg)
+                result.warnings.append(fab_override_msg)
+            else:
+                logger.info(fab_override_msg)
 
         try:
             written = write_drc_constraints(

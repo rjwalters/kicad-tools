@@ -548,6 +548,21 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
     sidecar_path = output_path.parent / "net_class_map.json"
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
     print(f"   Wrote net-class-map sidecar: {sidecar_path}")
+
+    # ------------------------------------------------------------------
+    # Fabrication-overrides sidecar (Issue #5006): stage the board's
+    # reviewed, cited floors next to the generated board so a copy produced
+    # outside ``boards/03-usb-joystick/output/`` is self-describing --
+    # ``kct check --emit-drc-constraints`` and every other
+    # ``resolve_pcb_fabrication_overrides`` call site discover it there and
+    # emit the same narrowed floor the native project carries.
+    # ------------------------------------------------------------------
+    from routing_plan import COMMITTED_FABRICATION_OVERRIDES
+
+    overrides_sidecar = output_path.parent / COMMITTED_FABRICATION_OVERRIDES.name
+    # read-then-write is a no-op (not a SameFileError) when regenerating in place
+    overrides_sidecar.write_text(COMMITTED_FABRICATION_OVERRIDES.read_text())
+    print(f"   Wrote fabrication-overrides sidecar: {overrides_sidecar}")
     if use_saved_plan:
         from routing_plan import PLAN, apply_plan
 
