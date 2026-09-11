@@ -96,3 +96,84 @@ def test_legalizer_reports_overlap_without_a_legal_escape(tmp_path, recipe):
     with pytest.raises(RuntimeError, match="1 unrepaired via-in-pad"):
         recipe._legalize_signal_vias(path)
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "failure", ["split", "legalize", "refill", "pour", "clearance", "interrupt"]
+)
+def test_finalization_restores_copper_and_fills_on_every_failure(
+    tmp_path, recipe, monkeypatch, failure
+):
+    path = tmp_path / "candidate.kicad_pcb"
+    original = b"original copper and matching zone fills\n"
+    path.write_bytes(original)
+    calls = []
+
+    def signature(candidate):
+        calls.append("clearance")
+        if failure == "clearance" and candidate.read_bytes() != original:
+            return {("new foreign-copper violation",)}
+        return set()
+
+    def split(candidate, before):
+        candidate.write_bytes(b"split copper with stale fills\n")
+        if failure == "split":
+            raise RuntimeError("split failed after writing")
+        return 1
+
+    def legalize(candidate):
+        candidate.write_bytes(b"partially legalized copper with stale fills\n")
+        if failure == "legalize":
+            raise RuntimeError("1 unrepaired via-in-pad overlap")
+        if failure == "interrupt":
+            raise KeyboardInterrupt
+        return 1
+
+    def refill(*args, **kwargs):
+        calls.append("refill")
+        path.write_bytes(b"legalized copper and new fills\n")
+        return SimpleNamespace(returncode=1 if failure == "refill" else 0)
+
+    def audit(tag):
+        calls.append("pour")
+        return failure != "pour"
+
+    monkeypatch.setattr(recipe, "_clearance_signature", signature)
+    monkeypatch.setattr(recipe, "_split_offangle_chords", split)
+    monkeypatch.setattr(recipe, "_legalize_signal_vias", legalize)
+    monkeypatch.setattr(recipe.subprocess, "run", refill)
+    with pytest.raises(KeyboardInterrupt if failure == "interrupt" else RuntimeError):
+        recipe._finalize_signal_copper(path, ["fill", str(path)], audit)
+    assert path.read_bytes() == original
+    assert calls.count("refill") <= 1  # rollback must not invoke a failing filler again
+    if failure == "refill":
+        assert "pour" not in calls  # stale/failed fills cannot pass the physical gate
+
+
+def test_finalization_commits_only_after_successful_physical_gates(tmp_path, recipe, monkeypatch):
+    path = tmp_path / "candidate.kicad_pcb"
+    path.write_bytes(b"original")
+    calls = []
+    monkeypatch.setattr(recipe, "_clearance_signature", lambda p: {("existing",)})
+    monkeypatch.setattr(recipe, "_split_offangle_chords", lambda p, before: 0)
+
+    def legalize(candidate):
+        candidate.write_bytes(b"new copper")
+        return 1
+
+    def refill(*args, **kwargs):
+        assert path.read_bytes() == b"new copper"
+        path.write_bytes(b"new copper and matching fills")
+        calls.append("refill")
+        return SimpleNamespace(returncode=0)
+
+    def audit(tag):
+        assert path.read_bytes() == b"new copper and matching fills"
+        calls.append("audit")
+        return True
+
+    monkeypatch.setattr(recipe, "_legalize_signal_vias", legalize)
+    monkeypatch.setattr(recipe.subprocess, "run", refill)
+    recipe._finalize_signal_copper(path, ["fill", str(path)], audit)
+    assert path.read_bytes() == b"new copper and matching fills"
+    assert calls == ["refill", "audit"]

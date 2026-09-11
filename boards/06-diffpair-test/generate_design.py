@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
@@ -2310,6 +2311,45 @@ def _resolve_quantize_treatment(
     return axis_first, skip
 
 
+def _finalize_signal_copper(
+    pcb_path: Path, fill_argv: list[str], audit_pours: Callable[[str], bool]
+) -> None:
+    """Commit legalization only after refill and physical validation succeed.
+
+    Restore the entire board on every failure, including its original zone
+    fills. Legalization can write several repairs before reporting an
+    unrepairable via; allowing those partial writes through leaves stale fills
+    that spuriously short otherwise separate nets in downstream copper LVS.
+    """
+    original = pcb_path.read_bytes()
+    try:
+        before = _clearance_signature(pcb_path)
+        n_split = _split_offangle_chords(pcb_path, before)
+        n_vias = _legalize_signal_vias(pcb_path)
+        if not (n_split or n_vias):
+            print("   No repairable via/chord residuals detected")
+            return
+        print(f"   {n_vias} via defect(s) repaired, {n_split} chord(s) split")
+        print("13b. Re-filling zones after legalization...")
+        result = subprocess.run(fill_argv, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"Zone re-fill failed (rc={result.returncode})")
+        print("13c. Copper-union pour audit + clearance gate (post-legalize)...")
+        pours_ok = audit_pours("[legal]")
+        new_clearances = _clearance_signature(pcb_path) - before
+        if not pours_ok or new_clearances:
+            raise RuntimeError(
+                f"POST-LEGALIZE GATE: FAIL (pours={'OK' if pours_ok else 'BROKEN'}, "
+                f"{len(new_clearances)} new clearance violation(s))"
+            )
+        print("   POST-LEGALIZE GATE: PASS (0 new clearance violations)")
+    except BaseException:
+        # Restoring saved bytes also restores the matching fill state. A second
+        # refill is unnecessary and could itself fail after the rollback.
+        pcb_path.write_bytes(original)
+        raise
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB with per-protocol net-class engagement.
 
@@ -3411,39 +3451,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # Gate exactly like step 12d: the combined mutation must introduce
     # ZERO new clearance violations or the whole step is rolled back.
     print("\n13. Same-net via legalization + off-angle mid-split (gallery-ready)...")
-    try:
-        import shutil as _shutil
-        import tempfile as _tempfile
-
-        pre_legalize_clearances = _clearance_signature(output_path)
-        snapshot = _tempfile.mkstemp(suffix=".kicad_pcb")[1]
-        _shutil.copy(output_path, snapshot)
-        n_split = _split_offangle_chords(output_path, pre_legalize_clearances)
-        n_vias_fixed = _legalize_signal_vias(output_path)
-        if n_split or n_vias_fixed:
-            print(f"   {n_vias_fixed} via defect(s) repaired, {n_split} chord(s) split")
-            print("13b. Re-filling zones after legalization...")
-            fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
-            if fill_result.returncode != 0:
-                print(f"   Zone re-fill failed (rc={fill_result.returncode})")
-            print("13c. Copper-union pour audit + clearance gate (post-legalize)...")
-            pour_ok_13 = _run_pour_audit("[legal]")
-            new_clearances = _clearance_signature(output_path) - pre_legalize_clearances
-            if not pour_ok_13 or new_clearances:
-                print(
-                    f"   POST-LEGALIZE GATE: FAIL "
-                    f"(pours={'OK' if pour_ok_13 else 'BROKEN'}, "
-                    f"{len(new_clearances)} new clearance violation(s)) -- rolling back"
-                )
-                _shutil.copy(snapshot, output_path)
-                subprocess.run(fill_argv, capture_output=True, text=True)
-            else:
-                print("   POST-LEGALIZE GATE: PASS (0 new clearance violations)")
-        else:
-            print("   No repairable via/chord residuals detected")
-        Path(snapshot).unlink(missing_ok=True)
-    except Exception as exc:  # pragma: no cover - degrade gracefully
-        print(f"   WARNING: legalization step skipped: {exc}")
+    _finalize_signal_copper(output_path, fill_argv, _run_pour_audit)
 
     total_signal_nets = len([n for n in router.nets if n > 0])
     success = stats["nets_routed"] == total_signal_nets
