@@ -789,7 +789,12 @@ def _run_relocate_in_pad(args, pcb_path: Path, resolved_layers: int) -> int:
 
     nets = set(args.nets) if getattr(args, "nets", None) else None
 
-    result = relocate_in_pad_vias(pcb, rules, nets=nets, dry_run=args.dry_run)
+    # Resolve the source project's hole floor before a renamed output is saved.
+    try:
+        result = relocate_in_pad_vias(pcb, rules, nets=nets, dry_run=args.dry_run)
+    except (ValueError, OSError) as exc:
+        print(f"Error resolving relocation constraints: {exc}", file=sys.stderr)
+        return 1
 
     if not args.quiet:
         print_relocation_results(
