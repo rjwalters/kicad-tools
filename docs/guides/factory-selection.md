@@ -13,21 +13,26 @@ selection tokens explicitly, after examining the exported evidence.
 
 ```python
 from kicad_tools.export.factory_selection import (
-    ExpectedPart, SelectionMapping, compare_factory_selection,
+    ExpectedPart,
+    SelectionMapping,
+    compare_factory_selection,
 )
 
 # Illustrative schema/identities, not supplier-guaranteed headers or parts.
 expected = [ExpectedPart("Y1", catalog_id="C123", mpn="EXACT-TCXO-MPN")]
 mapping = SelectionMapping(
-    reference="Designators", selected="Selection",
-    selected_values=("Selected",), unselected_values=("Not selected",),
-    catalog_id="Catalog ID", mpn="Manufacturer Part", identity="both",
+    reference="Designators",
+    selected="Selection",
+    selected_values=("Selected",),
+    unselected_values=("Not selected",),
+    catalog_id="Catalog ID",
+    mpn="Manufacturer Part",
+    identity="both",
     group_separator=",",
 )
 report = compare_factory_selection(
     expected,
-    b'Designators,Selection,Catalog ID,Manufacturer Part\n'
-    b'Y1,Selected,C123,EXACT-TCXO-MPN\n',
+    b"Designators,Selection,Catalog ID,Manufacturer Part\nY1,Selected,C123,EXACT-TCXO-MPN\n",
     mapping,
     source_kind="factory_selected_csv",
 )
