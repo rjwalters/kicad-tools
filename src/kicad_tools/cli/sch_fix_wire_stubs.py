@@ -314,7 +314,7 @@ def run_fix_wire_stubs(args) -> int:
         return 1
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("schematic", help="Root .kicad_sch file (includes child sheets)")
     parser.add_argument("--dry-run", "-n", action="store_true", help="Preview without writing")
