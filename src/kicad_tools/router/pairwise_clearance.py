@@ -467,8 +467,8 @@ def build_signal_clearance_table(
     first -- there is no "reciprocal guard" to remember to apply by hand.
 
     Every pair ``(w, o)`` with ``w`` in ``widened_nets`` and ``o`` in
-    ``other_nets`` (excluding ``w == o`` and any ``o`` that is itself a
-    widened net) receives ``required_mm``.  Pads and via spans are covered
+    ``other_nets`` (excluding only ``w == o``) receives ``required_mm``.
+    Distinct widened nets are included when explicitly listed in ``other_nets``.  Pads and via spans are covered
     automatically -- they are not special-cased here at all, because the
     shared walk (:func:`_segments_pairwise_violation` / :func:`find_pairwise_violations`)
     already treats trace, via and pad copper uniformly once a table widens a
@@ -514,11 +514,13 @@ def build_signal_clearance_table(
             raise ValueError(f"{name} must be a finite nonnegative distance, not a boolean")
 
     widened = {_norm_net_key(n) for n in widened_nets}
-    others = {_norm_net_key(n) for n in other_nets} - widened
+    others = {_norm_net_key(n) for n in other_nets}
 
     required_by_pair: dict[tuple[str, str], float] = {}
     for w in widened:
         for o in others:
+            if w == o:
+                continue
             key = (w, o) if w <= o else (o, w)
             required_by_pair[key] = max(required_by_pair.get(key, 0.0), float(required_mm))
 

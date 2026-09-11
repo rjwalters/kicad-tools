@@ -94,6 +94,35 @@ def test_multiple_widened_nets_each_get_the_requirement() -> None:
     assert table.required_clearance("SDCLK", "SDNCS") == pytest.approx(DRU)
 
 
+def test_explicit_overlap_keeps_distinct_net_requirement() -> None:
+    table = build_signal_clearance_table(
+        iter(["/CLK1", "CLK2"]), iter(["CLK1", "/CLK2", "BA1"]), CLOCK_REQUIRED_MM, dru=DRU
+    )
+    assert table.required_clearance("CLK1", "CLK2") == pytest.approx(CLOCK_REQUIRED_MM)
+    assert table.required_clearance("CLK2", "CLK1") == pytest.approx(CLOCK_REQUIRED_MM)
+    assert all(a != b for a, b in table.required_by_pair)
+    clock = Route(net=1, net_name="CLK1", segments=[_seg(0, 0, 4, 0, 1, "CLK1")])
+    other = Route(net=2, net_name="CLK2", segments=[_seg(0, 0.4, 4, 0.4, 2, "CLK2")])
+    assert route_pairwise_violation(clock, 1, [other], table) is not None
+    assert route_pairwise_violation(other, 2, [clock], table) is not None
+    from types import SimpleNamespace
+
+    from kicad_tools.router.pairwise_clearance import PairwisePathChecker
+
+    grid = SimpleNamespace(routes=[other])
+    checker = PairwisePathChecker.from_router(
+        SimpleNamespace(
+            rules=SimpleNamespace(pairwise_clearance=table),
+            grid=grid,
+            net_names={1: "CLK1", 2: "CLK2"},
+        )
+    )
+    assert checker is not None
+    assert checker.path_violation(0, 0, 4, 0, Layer.B_CU, 0.18, 1) is not None
+    grid.routes = [clock]
+    assert checker.path_violation(0, 0.4, 4, 0.4, Layer.B_CU, 0.18, 2) is not None
+
+
 def test_normalises_leading_slash() -> None:
     table = build_signal_clearance_table(["/SDCLK"], ["BA1"], CLOCK_REQUIRED_MM, dru=DRU)
     assert table.required_clearance("SDCLK", "/BA1") == pytest.approx(CLOCK_REQUIRED_MM)
