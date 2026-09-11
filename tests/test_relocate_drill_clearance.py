@@ -305,3 +305,38 @@ def test_drill_dry_run_matches_all_actual_moves():
     actual = relocate_drill_clearance(copy.deepcopy(pcb), _tier1_rules())
     assert preview == actual
     assert pcb._sexp.to_string() == before
+
+
+def test_drill_candidate_avoids_unassigned_smd_pad(tmp_path) -> None:
+    """The shared obstacle collector rejects an escape landing on net-zero copper."""
+    from kicad_tools.cli.relocate_in_pad_vias import _collect_smd_pads_by_net
+
+    pcb = _stack_board()
+    path = tmp_path / "net-zero.kicad_pcb"
+    pcb.save(path)
+    content = path.read_text().rstrip()
+    path.write_text(
+        content[:-1]
+        + f"""
+        (footprint "test:unused" (layer "F.Cu")
+          (at {22 + pcb._board_origin[0]} {20.5 + pcb._board_origin[1]})
+          (pad "1" smd rect (at 0 0) (size 0.4 0.4) (layers "F.Cu")))
+        )"""
+    )
+    pcb = PCB.load(path)
+    via = list(pcb.vias)[1]
+    rules = _tier1_rules()
+    target = _find_target(
+        pcb,
+        via,
+        (22, 20.5),
+        _collect_smd_pads_by_net(pcb),
+        [],
+        rules.min_clearance_mm,
+        rules.min_hole_to_hole_mm,
+    )
+    assert target is not None
+    # Measure independently of the shared clearance helper.
+    dx = max(21.8 - target[0], 0, target[0] - 22.2)
+    dy = max(20.3 - target[1], 0, target[1] - 20.7)
+    assert math.hypot(dx, dy) - via.size / 2 >= rules.min_clearance_mm - 1e-6

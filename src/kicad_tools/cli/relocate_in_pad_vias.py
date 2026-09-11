@@ -394,13 +394,15 @@ def _first_offpad_signal_candidate(
 def _collect_smd_pads_by_net(
     pcb: PCB,
 ) -> dict[int, list[tuple[Footprint, Pad, tuple[float, float, float, float]]]]:
-    """Group SMD pads (net != 0) by net number with precomputed AABBs."""
+    """Group all SMD pads by net number with precomputed obstacle AABBs.
+
+    Net-zero pads still carry physical copper.  Retain them for clearance
+    checks; relocation callers exclude net-zero vias as electrical sources.
+    """
     pads_by_net: dict[int, list[tuple[Footprint, Pad, tuple[float, float, float, float]]]] = {}
     for fp in pcb.footprints:
         for pad in fp.pads:
             if not is_smd_pad(pad):
-                continue
-            if pad.net_number == 0:
                 continue
             bbox = pad_absolute_bbox(pad, fp)
             pads_by_net.setdefault(pad.net_number, []).append((fp, pad, bbox))
@@ -479,9 +481,9 @@ def _check_clearance(
                     f"({other.position[0]:.2f}, {other.position[1]:.2f})"
                 )
 
-    # SMD pads on other nets: copper clearance to pad AABB.
+    # Other-net and unassigned SMD pads: copper clearance to pad AABB.
     for net_number, entries in pads_by_net.items():
-        if net_number == via.net_number:
+        if net_number != 0 and net_number == via.net_number:
             continue
         for fp, pad, bbox in entries:
             cu_gap = _dist_point_to_aabb(new_x, new_y, bbox) - via_r
