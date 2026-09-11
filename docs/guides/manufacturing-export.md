@@ -484,3 +484,11 @@ export_pnp(pcb, "cpl.csv", manufacturer="jlcpcb", config=config)
 
 - **[Query API](query-api.md)** - Advanced filtering for design analysis
 - **[Schematic Analysis](schematic-analysis.md)** - Deep dive into schematic parsing
+
+## Offline submission preparation
+
+For exact-byte, locally verified Gerber/BOM/CPL handoffs, see
+[Offline assembly submission preparation](submission-preparation.md). This Python
+API produces a deterministic plan and expected reference matching list without
+supplier access, uploads, approval, or orders. Live inventory composition remains
+milestone B of #5142.
