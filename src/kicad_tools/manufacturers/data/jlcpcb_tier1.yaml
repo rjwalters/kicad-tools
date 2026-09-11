@@ -20,6 +20,17 @@
 # the base jlcpcb profile - DRC rules for tier1 must be at least as
 # strict as the base profile to avoid regressions for users who specify
 # the tier1 profile).
+#
+# Issue #5009: ``via_in_pad_supported: true`` is a bare capability flag
+# -- it says Capability Plus is orderable at this layer/copper config,
+# not that JLCPCB's via-in-pad-specific process (Plated-Over Filled Via,
+# POFV) is eligible here.  POFV itself publishes a 4+ layer minimum
+# (see kicad_tools.manufacturers.fabrication_process.JLCPCB_TIER1_POFV_4L
+# and https://jlcpcb.com/news/free-via-in-pad-6-20-layer-pcbs-pofv), so
+# only the 4+ layer configs below carry ``via_in_pad_process_id``. The
+# 2-layer configs deliberately omit it: the ``via_in_pad`` DRC rule
+# treats "supported but no process id" as a distinct, fail-closed
+# outcome rather than silently suppressing 2-layer via-in-pad findings.
 
 design_rules:
   2layer_1oz:
@@ -43,6 +54,8 @@ design_rules:
     outer_copper_oz: 1.0
     inner_copper_oz: 0.0            # No inner layers
     via_in_pad_supported: true      # Capability Plus tier offers via-in-pad
+    # No via_in_pad_process_id: JLCPCB's POFV process requires 4+ layers
+    # (issue #5009) -- 2-layer via-in-pad geometry has no eligible process.
 
   2layer_2oz:
     min_trace_width_mm: 0.1524      # 6 mil (per JLCPCB published specs for 2oz copper)
@@ -65,6 +78,8 @@ design_rules:
     outer_copper_oz: 2.0
     inner_copper_oz: 0.0
     via_in_pad_supported: true      # Capability Plus tier offers via-in-pad
+    # No via_in_pad_process_id: JLCPCB's POFV process requires 4+ layers
+    # (issue #5009) -- 2-layer via-in-pad geometry has no eligible process.
 
   4layer_1oz:
     min_trace_width_mm: 0.1016      # 4 mil
@@ -87,6 +102,7 @@ design_rules:
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5
     via_in_pad_supported: true      # Capability Plus tier offers via-in-pad
+    via_in_pad_process_id: jlcpcb-tier1-pofv-4l  # #5009: real 4L POFV process
 
   4layer_2oz:
     min_trace_width_mm: 0.1524      # 6 mil outer (per JLCPCB published specs for 2oz copper)
@@ -109,6 +125,7 @@ design_rules:
     outer_copper_oz: 2.0
     inner_copper_oz: 0.5
     via_in_pad_supported: true      # Capability Plus tier offers via-in-pad
+    via_in_pad_process_id: jlcpcb-tier1-pofv-4l  # #5009: real 4L POFV process
 
   6layer_1oz:
     min_trace_width_mm: 0.0889      # 3.5 mil
@@ -131,3 +148,4 @@ design_rules:
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5
     via_in_pad_supported: true      # Capability Plus tier offers via-in-pad
+    via_in_pad_process_id: jlcpcb-tier1-pofv-4l  # #5009: real 6L POFV process

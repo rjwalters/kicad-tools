@@ -169,6 +169,25 @@ class DesignRules:
     # lives entirely in the pure-Python ``DRCChecker.check_via_in_pad``.
     via_in_pad_supported: bool = False
 
+    # Issue #5009: ``via_in_pad_supported`` is a bare capability flag --
+    # it says the manufacturer offers via-in-pad *somewhere* in its
+    # catalog, with no attached drill range, layer-count floor, annular
+    # ring floor, or filled/capped requirement.  ``via_in_pad_process_id``
+    # is a key into
+    # ``kicad_tools.manufacturers.fabrication_process.FABRICATION_PROCESSES``
+    # naming the SPECIFIC, orderable process this layer/copper
+    # configuration is eligible for (e.g. ``"jlcpcb-tier1-pofv-4l"`` for
+    # JLCPCB Capability Plus's 4+ layer Plated-Over Filled Via process).
+    # ``None`` means no real published process is modeled for this
+    # configuration -- this is deliberately the case for JLCPCB Capability
+    # Plus's 2-layer configs even though ``via_in_pad_supported`` is
+    # ``True`` there (Capability Plus is a 2-layer-orderable tier, but its
+    # via-in-pad-specific POFV process itself requires 4+ layers).  The
+    # ``via_in_pad`` DRC rule treats "supported but no process id" as a
+    # DISTINCT failure from "not supported": a bare capability flag with
+    # no attached process must not suppress a via-in-pad finding.
+    via_in_pad_process_id: str | None = None
+
     # Plated component pads can require wider rings than vias. None keeps
     # existing profiles' shared annular-ring behavior.
     min_pth_annular_ring_mm: float | None = None
@@ -208,6 +227,7 @@ class DesignRules:
             "max_board_width_mm": self.max_board_width_mm,
             "max_board_height_mm": self.max_board_height_mm,
             "via_in_pad_supported": self.via_in_pad_supported,
+            "via_in_pad_process_id": self.via_in_pad_process_id,
         }
 
 

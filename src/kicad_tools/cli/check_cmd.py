@@ -44,6 +44,7 @@ from kicad_tools.manufacturers import (
     get_profile,
     resolve_pcb_fabrication_overrides,
 )
+from kicad_tools.manufacturers.fabrication_process import describe_selection
 from kicad_tools.router.current_paths import (
     CurrentPathSpec,
     current_paths_sidecar_candidates,
@@ -525,6 +526,51 @@ def _maybe_emit_via_in_pad_tier_advisory(
         f"--mfr). {tail}",
         file=sys.stderr,
     )
+
+
+def _maybe_emit_via_in_pad_process_advisory(violations: Sequence) -> None:
+    """Emit a non-blocking hint for the process-eligibility findings (#5009).
+
+    ``via_in_pad_process_missing`` / ``via_in_pad_process_ineligible`` are
+    a DIFFERENT failure mode than the tier-gate advisory above (which only
+    fires when the active profile's ``via_in_pad_supported`` is entirely
+    ``False``): here the manufacturer's general tier DOES claim via-in-pad
+    support, but either no eligible ``FabricationProcess`` is declared for
+    this layer/copper configuration, or the board's actual via geometry
+    does not meet the declared process's published requirements.  A tier
+    switch alone will not fix these -- the fix is declaring (or meeting)
+    a real process.
+
+    CRITICAL: this is advisory only.  It must NOT change the verdict or
+    exit code -- it only prints to stderr.
+    """
+    missing_count = sum(
+        1 for v in violations if getattr(v, "rule_id", None) == "via_in_pad_process_missing"
+    )
+    ineligible_count = sum(
+        1 for v in violations if getattr(v, "rule_id", None) == "via_in_pad_process_ineligible"
+    )
+    if missing_count:
+        print(
+            f"WARNING: {missing_count} via_in_pad_process_missing finding(s). "
+            "The active manufacturer tier supports via-in-pad in its general "
+            "catalog, but no eligible fabrication process is declared for this "
+            "board's layer/copper configuration (DesignRules.via_in_pad_process_id "
+            "is unset or unrecognized). See "
+            "kicad_tools.manufacturers.fabrication_process for the known process "
+            "catalog, or move the via off the pad.",
+            file=sys.stderr,
+        )
+    if ineligible_count:
+        print(
+            f"WARNING: {ineligible_count} via_in_pad_process_ineligible finding(s). "
+            "A fabrication process IS declared, but this via's drill/annular-ring "
+            "geometry, the board's layer count, or its distance to another "
+            "component's drilled hole does not meet that process's published "
+            "requirements. See the violation message for the specific reason(s), "
+            "or move the via off the pad.",
+            file=sys.stderr,
+        )
 
 
 def _emit_drift_banner(pcb_path: Path, schematic: str | None) -> None:
@@ -2233,6 +2279,11 @@ def main(argv: list[str] | None = None) -> int:
     # or exit code.
     _maybe_emit_via_in_pad_tier_advisory(effective_mfr, results.violations, source=mfr_source)
 
+    # Issue #5009: the missing/ineligible process advisory is orthogonal to
+    # the tier-gate advisory above (it fires even when the active tier DOES
+    # claim via-in-pad support) -- see the function docstring.
+    _maybe_emit_via_in_pad_process_advisory(results.violations)
+
     # Issue #4623 / #4651: advisory routing-quality metrics + opt-in
     # threshold gate.  Metrics are computed in meta mode -- skipped under
     # --drc-only to keep the legacy stdout and on-disk JSON contracts
@@ -2351,6 +2402,13 @@ def main(argv: list[str] | None = None) -> int:
             strict=args.strict,
         )
 
+    # Issue #5009: resolve the active manufacturer's declared via-in-pad
+    # fabrication process (if any) into a machine-readable dict, bound to
+    # the same evidence this JSON report already carries -- generalizes
+    # boards 03/04's ad hoc ``fabrication_overrides`` block.  ``None`` when
+    # no ``via_in_pad_process_id`` is declared (the common case).
+    fabrication_process_dict = describe_selection(checker.design_rules)
+
     # Output results
     if args.format == "json":
         output_json(
@@ -2361,6 +2419,7 @@ def main(argv: list[str] | None = None) -> int:
             layers,
             meta=meta,
             routing_quality=routing_quality_dict,
+            fabrication_process=fabrication_process_dict,
         )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
@@ -2388,6 +2447,7 @@ def main(argv: list[str] | None = None) -> int:
             output_path,
             meta=meta,
             routing_quality=routing_quality_dict,
+            fabrication_process=fabrication_process_dict,
         )
 
     # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
@@ -3050,6 +3110,7 @@ def output_json(
     layers: int,
     meta: MetaCheckResult | None = None,
     routing_quality: dict | None = None,
+    fabrication_process: dict | None = None,
 ) -> None:
     """Output violations as JSON.
 
@@ -3062,6 +3123,15 @@ def output_json(
     Issue #4623: ``routing_quality`` (a ``RoutingQualityMetrics.to_dict()``
     payload) follows the same convention -- emitted as a top-level key in
     meta mode, omitted under ``--drc-only``.
+
+    Issue #5009: ``fabrication_process`` (from
+    ``kicad_tools.manufacturers.fabrication_process.describe_selection``)
+    is the machine-readable process-requirements artifact this issue
+    asks for -- generalizing the ad hoc ``fabrication_overrides`` block
+    boards 03/04 previously hand-wrote into their own reports.  ``None``
+    (the common case: no via_in_pad_process_id declared) omits the key
+    entirely, same OMIT-when-absent convention as the other optional
+    fields.
     """
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = sum(1 for v in violations if v.is_warning)
@@ -3102,6 +3172,8 @@ def output_json(
         data["meta_checks"] = meta.to_dict()
     if routing_quality is not None:
         data["routing_quality"] = routing_quality
+    if fabrication_process is not None:
+        data["fabrication_process"] = fabrication_process
     print(json.dumps(data, indent=2))
 
 
@@ -3114,6 +3186,7 @@ def write_json_report(
     output_path: Path,
     meta: MetaCheckResult | None = None,
     routing_quality: dict | None = None,
+    fabrication_process: dict | None = None,
 ) -> None:
     """Write DRC results as a JSON report file.
 
@@ -3123,6 +3196,9 @@ def write_json_report(
 
     Issue #4623: ``routing_quality`` follows the same OMIT-when-absent
     convention (present in meta mode, omitted under ``--drc-only``).
+
+    Issue #5009: ``fabrication_process`` follows the same
+    OMIT-when-absent convention -- see :func:`output_json` for details.
     """
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = sum(1 for v in violations if v.is_warning)
@@ -3157,6 +3233,8 @@ def write_json_report(
         data["meta_checks"] = meta.to_dict()
     if routing_quality is not None:
         data["routing_quality"] = routing_quality
+    if fabrication_process is not None:
+        data["fabrication_process"] = fabrication_process
     output_path.write_text(json.dumps(data, indent=2) + "\n")
 
 

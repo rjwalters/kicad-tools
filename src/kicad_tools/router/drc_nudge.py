@@ -51,7 +51,12 @@ from .pairwise_clearance import (
     violation_pair_keys,
 )
 from .primitives import Pad, Route, Segment, Via
-from .via_clearance import segment_clears_foreign_via
+from .via_clearance import (
+    DEFAULT_MIN_HOLE_TO_HOLE,
+    drill_hole_to_hole_clear,
+    segment_clears_foreign_via,
+    via_clears_foreign_segment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1164,6 +1169,48 @@ def _via_drill_inside_bbox(
     )
 
 
+def _via_drill_overlaps_bbox(
+    via: Via,
+    pad_bbox: tuple[float, float, float, float],
+    tol: float = 0.005,
+) -> bool:
+    """Return True if ``via``'s drill circle overlaps ``pad_bbox`` copper.
+
+    This is the predicate the via-in-pad **DRC rule** actually uses
+    (:func:`kicad_tools.validate.rules.via_pad_geometry.via_inside_pad`):
+    full containment is NOT required, because a drill that merely clips
+    the edge of an SMT land still lets solder wick into the hole.
+
+    :func:`_via_drill_inside_bbox` (full containment) is the older,
+    stricter predicate this module shipped with; it is retained for the
+    callers/tests that assert the containment property directly, but the
+    nudge sweep must use *this* function or it silently declines to
+    repair exactly the edge-clipping cases DRC then rejects.  Board 02
+    is the concrete instance: its in-pad vias sit on or just outside the
+    land boundary (offsets +-0.4..0.6 mm against a 1.0 x 1.3 mm land),
+    so the containment test matched none of them while DRC flagged them
+    (issue #5009).
+
+    Because this detector is deliberately wide, the relocation it
+    triggers is only safe with the destination validation added by
+    #5009's third review pass (:func:`_via_destination_blocked`): keyed
+    on overlap alone and committing the minimum-displacement exit blindly,
+    the sweep traded board 02's via-in-pad findings for a foreign-net
+    short that demoted a net (11/12 reach, 2 ``kicad-cli pcb drc``
+    errors).
+
+    Tangency within ``tol`` is excluded, matching the DRC rule's
+    ``distance >= radius - DRC_TOLERANCE`` early-out.
+    """
+    min_x, min_y, max_x, max_y = pad_bbox
+    radius = via.drill / 2.0
+    if radius <= tol:
+        return False
+    dx = max(min_x - via.x, 0.0, via.x - max_x)
+    dy = max(min_y - via.y, 0.0, via.y - max_y)
+    return math.hypot(dx, dy) < radius - tol
+
+
 def _snap_chain_endpoints(
     segments: list[Segment],
     old_x: float,
@@ -1208,6 +1255,337 @@ def _router_via_in_pad_supported(router: Autorouter) -> bool:
     return bool(getattr(limits, "via_in_pad_supported", False))
 
 
+def _router_via_in_pad_process_eligible(router: Autorouter) -> bool:
+    """Return True when an in-pad via on THIS board has a real fab process.
+
+    Issue #5009: :func:`_router_via_in_pad_supported` reads the bare
+    ``MfrLimits.via_in_pad_supported`` capability flag, which only says
+    the manufacturer offers via-in-pad *somewhere* in its catalog.  The
+    ``via_in_pad`` DRC rule no longer accepts that flag on its own -- it
+    additionally requires the profile's
+    ``DesignRules.via_in_pad_process_id`` to name a real, orderable
+    :class:`~kicad_tools.manufacturers.fabrication_process.FabricationProcess`
+    whose layer floor this board actually meets.  The canonical example
+    is JLCPCB Capability Plus (``jlcpcb-tier1``): every layer config sets
+    ``via_in_pad_supported: true``, but its via-in-pad-specific POFV
+    process publishes a 4-layer minimum, so a 2-layer board routed at
+    that tier has NO eligible process.
+
+    The nudge sweep must use the same predicate as the DRC rule,
+    otherwise the router happily leaves in-pad vias the very next DRC
+    pass rejects -- which is exactly what regressed board 02
+    (``charlieplex_3x3``, a 2-layer ``jlcpcb-tier1`` board) when the
+    process model landed.  Gating the sweep on process eligibility makes
+    the router relocate those vias off their SMT lands instead, using the
+    existing connectivity-preserving chain-snap machinery (#3112/#4359).
+
+    Fails closed (returns False, i.e. "run the sweep") whenever the
+    manufacturer, profile, or process cannot be resolved -- relocating a
+    via off a pad is always manufacturable, while leaving it there may
+    not be.
+    """
+    if not _router_via_in_pad_supported(router):
+        return False
+
+    rules = getattr(router, "rules", None)
+    mfr_id = getattr(rules, "manufacturer", None) if rules is not None else None
+    if not mfr_id:
+        return False
+
+    layer_stack = getattr(router, "layer_stack", None)
+    raw_layers = getattr(layer_stack, "num_layers", None)
+    try:
+        num_layers = int(raw_layers) if raw_layers else None
+    except (TypeError, ValueError):
+        num_layers = None
+
+    try:
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.manufacturers.fabrication_process import get_fabrication_process
+
+        design_rules = get_profile(mfr_id).get_design_rules(layers=num_layers or 2)
+    except (ValueError, KeyError, ImportError, IndexError):
+        return False
+
+    process = get_fabrication_process(getattr(design_rules, "via_in_pad_process_id", None))
+    if process is None:
+        return False
+    if num_layers is not None and num_layers < process.min_layer_count:
+        return False
+    return True
+
+
+#: Numerical slack for the destination-validation comparisons below, in mm.
+#: An order of magnitude below the 0.005 mm DRC tolerance the rules
+#: themselves use, so a candidate this guard accepts is never one DRC
+#: rejects -- it only absorbs float noise on candidates constructed to sit
+#: *exactly* on a clearance boundary.
+_DEST_TOL = 5e-4
+
+
+def _point_bbox_distance(
+    x: float,
+    y: float,
+    bbox: tuple[float, float, float, float],
+) -> float:
+    """Return the Euclidean distance from ``(x, y)`` to an AABB (0 inside)."""
+    min_x, min_y, max_x, max_y = bbox
+    dx = max(min_x - x, 0.0, x - max_x)
+    dy = max(min_y - y, 0.0, y - max_y)
+    return math.hypot(dx, dy)
+
+
+@dataclass(frozen=True)
+class _ViaDestContext:
+    """Board registries used to validate a relocated via's destination.
+
+    Built once per :func:`_try_nudge_via_pad` call (see
+    :func:`_build_via_dest_context`) and reused across every candidate
+    exit, so the sweep stays O(pads + vias) per via rather than per
+    candidate.  Coordinates are absolute mm, matching the router
+    primitives.
+    """
+
+    #: AABBs of pads on a DIFFERENT net from the via being moved.
+    foreign_pad_bboxes: tuple[tuple[float, float, float, float], ...]
+    #: AABBs of pads on the SAME net, excluding the pad being evicted.
+    same_net_pad_bboxes: tuple[tuple[float, float, float, float], ...]
+    #: ``(x, y, diameter)`` of vias on a DIFFERENT net.
+    foreign_vias: tuple[tuple[float, float, float], ...]
+    #: Committed track segments on a DIFFERENT net (both freshly routed
+    #: and pre-existing copper).  A destination that clears every pad and
+    #: drill can still be dropped straight onto a foreign trace -- that
+    #: is a cross-net short, the worst outcome of all.
+    foreign_segments: tuple[Segment, ...]
+    #: ``(x, y, drill_diameter)`` of every OTHER drill on the board --
+    #: vias of any net plus through-hole pad drills.  Hole-to-hole is
+    #: net-agnostic in DRC, so same-net drills belong here too.
+    drills: tuple[tuple[float, float, float], ...]
+    #: Fab drill-pitch floor (mm) from ``rules.min_hole_to_hole``.
+    min_hole_to_hole: float
+
+
+def _build_via_dest_context(
+    via: Via,
+    router: Autorouter,
+    own_pad_bbox: tuple[float, float, float, float],
+) -> _ViaDestContext:
+    """Snapshot ``router``'s pads/vias/drills for destination validation.
+
+    ``via`` itself is excluded from the via and drill registries by
+    identity, and ``own_pad_bbox`` (the pad the via is being evicted
+    from, always on the via's own net) is excluded from the pad
+    registries -- the caller's exit offset already clears its copper.
+    """
+    rules = getattr(router, "rules", None)
+    try:
+        min_hole_to_hole = float(getattr(rules, "min_hole_to_hole", DEFAULT_MIN_HOLE_TO_HOLE))
+    except (TypeError, ValueError):
+        min_hole_to_hole = DEFAULT_MIN_HOLE_TO_HOLE
+
+    via_net = getattr(via, "net", 0)
+    foreign_pads: list[tuple[float, float, float, float]] = []
+    same_net_pads: list[tuple[float, float, float, float]] = []
+    foreign_vias: list[tuple[float, float, float]] = []
+    drills: list[tuple[float, float, float]] = []
+
+    for pad in (getattr(router, "pads", None) or {}).values():
+        pad_drill = float(getattr(pad, "drill", 0.0) or 0.0)
+        if getattr(pad, "through_hole", False) and pad_drill > 0.0:
+            drills.append((pad.x, pad.y, pad_drill))
+        bbox = _router_pad_bbox(pad)
+        if bbox == own_pad_bbox:
+            continue
+        if getattr(pad, "net", 0) == via_net:
+            same_net_pads.append(bbox)
+        else:
+            foreign_pads.append(bbox)
+
+    foreign_segments: list[Segment] = []
+    for source in ("routes", "existing_routes"):
+        for route in getattr(router, source, None) or []:
+            for other in route.vias:
+                if other is via:
+                    continue
+                if other.drill > 0.0:
+                    drills.append((other.x, other.y, other.drill))
+                if getattr(other, "net", 0) != via_net:
+                    foreign_vias.append((other.x, other.y, other.diameter))
+            for seg in route.segments:
+                # Segments carry their own net; prefer it over the route's
+                # so a mixed-net Route object cannot smuggle same-net
+                # copper into the foreign list (or vice versa).
+                if getattr(seg, "net", getattr(route, "net", 0)) != via_net:
+                    foreign_segments.append(seg)
+
+    return _ViaDestContext(
+        foreign_pad_bboxes=tuple(foreign_pads),
+        same_net_pad_bboxes=tuple(same_net_pads),
+        foreign_vias=tuple(foreign_vias),
+        foreign_segments=tuple(foreign_segments),
+        drills=tuple(drills),
+        min_hole_to_hole=min_hole_to_hole,
+    )
+
+
+def _via_destination_blocked(
+    via: Via,
+    new_x: float,
+    new_y: float,
+    context: _ViaDestContext,
+    *,
+    required_clearance: float,
+) -> str | None:
+    """Validate a candidate via-in-pad exit against the rest of the board.
+
+    Issue #5009 (third review pass): :func:`_try_nudge_via_pad` used to
+    pick the exit that minimised displacement from the *offending* pad's
+    own bbox and commit it unconditionally -- nothing ever asked whether
+    the destination collided with a DIFFERENT pad, via or drilled hole.
+    On board 02 that put the exit from R1 pad 1 (an 0805 land pair whose
+    lands sit ~1.7 mm apart) 0.035 mm from R1 pad 2 on a foreign net
+    (0.127 mm required) with 0.185 mm hole-to-hole against the via that
+    had just been relocated out of pad 2 (0.250 mm required) -- trading
+    a ``via_in_pad`` finding for two harder clearance errors that
+    ``kicad-cli pcb drc`` then rejected.
+
+    Checks, in the same formulation the router's own via-placement guard
+    (:func:`kicad_tools.router.via_clearance.point_clear_of_copper`) and
+    the DRC rules use:
+
+    * **Foreign-net pad copper** -- via copper radius + ``required_clearance``
+      must fit between the via centre and the pad's AABB.
+    * **Same-net pad** -- the drill must not overlap another land of the
+      same net either, or the move just relocates the ``via_in_pad``
+      defect onto a neighbouring pad.
+    * **Foreign-net via copper** -- both annular radii + ``required_clearance``.
+    * **Foreign-net track copper** -- the layer-aware
+      :func:`~kicad_tools.router.via_clearance.via_clears_foreign_segment`
+      predicate, so a destination cannot be dropped onto a trace of
+      another net (board 02's second failure mode: net 9 was demoted by
+      the post-optimize backstop because a relocated VCC via landed
+      0.073 mm from a LINE_A track, a cross-net short).
+    * **Drill-to-drill** -- every other drill on the board (vias of ANY
+      net plus through-hole pad drills) must clear the candidate by
+      ``rules.min_hole_to_hole`` edge-to-edge, evaluated with the shared
+      :func:`~kicad_tools.router.via_clearance.drill_hole_to_hole_clear`
+      helper so this pre-check and the ``hole_to_hole_clearance`` DRC
+      post-check cannot disagree.  Hole-to-hole is net-agnostic in DRC,
+      so same-net drills are checked too.
+
+    Args:
+        via: The via being relocated (consulted for drill/diameter only;
+            its current position is NOT read).
+        new_x: Candidate destination X (mm).
+        new_y: Candidate destination Y (mm).
+        context: Registries from :func:`_build_via_dest_context`, built
+            once per relocation and shared across candidates.
+        required_clearance: Copper-to-copper clearance floor (mm).
+
+    Returns:
+        ``None`` when the destination is legal, otherwise a short
+        skip-reason string suitable for
+        :meth:`DRCNudgeResult._bump_skipped`.
+    """
+    copper_r = via.diameter / 2.0
+    drill_r = via.drill / 2.0
+
+    for bbox in context.foreign_pad_bboxes:
+        if _point_bbox_distance(new_x, new_y, bbox) < copper_r + required_clearance - _DEST_TOL:
+            return "via_pad_dest_pad_clearance"
+
+    for bbox in context.same_net_pad_bboxes:
+        # Same-net land: no clearance is owed, but dropping the drill into
+        # it just relocates the very defect we are repairing.
+        if _point_bbox_distance(new_x, new_y, bbox) < drill_r - _DEST_TOL:
+            return "via_pad_dest_other_pad"
+
+    for other_x, other_y, other_diameter in context.foreign_vias:
+        gap = math.hypot(new_x - other_x, new_y - other_y)
+        if gap < copper_r + other_diameter / 2.0 + required_clearance - _DEST_TOL:
+            return "via_pad_dest_via_clearance"
+
+    if context.foreign_segments:
+        # Layer-aware via-vs-track check, delegated to the canonical
+        # predicate so this guard and the router's own re-validation hook
+        # (``find_nets_with_via_segment_violations``) agree exactly.
+        moved = dataclasses.replace(via, x=new_x, y=new_y)
+        for seg in context.foreign_segments:
+            if not via_clears_foreign_segment(moved, seg, required_clearance):
+                return "via_pad_dest_segment_clearance"
+
+    if via.drill > 0.0 and not drill_hole_to_hole_clear(
+        new_x,
+        new_y,
+        via.drill,
+        list(context.drills),
+        min_hole_to_hole=context.min_hole_to_hole,
+    ):
+        return "via_pad_dest_hole_to_hole"
+
+    return None
+
+
+def _via_pad_exit_candidates(
+    via: Via,
+    pad_bbox: tuple[float, float, float, float],
+    offset: float,
+) -> list[tuple[float, float]]:
+    """Enumerate legal-by-construction exits from ``pad_bbox`` for ``via``.
+
+    Every candidate sits exactly ``offset`` away from the pad's AABB, so
+    each one clears the offending pad's own copper.  The set is the four
+    cardinal exits through the via's own axes (the pre-#5009 behaviour,
+    kept first so the historical choice is still preferred when it is
+    legal), plus edge-slide variants at the pad's corners/centre lines and
+    the four 45-degree corner escapes.  Issue #5009: a cramped two-pad
+    footprint (0805 land pair) has no legal cardinal exit on the side
+    facing its neighbour, so the extra exits are what keep such a via
+    repairable instead of merely refused.
+    """
+    min_x, min_y, max_x, max_y = pad_bbox
+    cx, cy = via.x, via.y
+    pad_cx = (min_x + max_x) / 2.0
+    pad_cy = (min_y + max_y) / 2.0
+    diag = offset / math.sqrt(2.0)
+
+    raw: list[tuple[float, float]] = [
+        # Cardinal exits through the via's own axes (pre-#5009 set).
+        (min_x - offset, cy),  # left
+        (max_x + offset, cy),  # right
+        (cx, min_y - offset),  # top (smaller y in PCB conventions)
+        (cx, max_y + offset),  # bottom
+        # Same four sides, slid along the pad edge.
+        (min_x - offset, pad_cy),
+        (max_x + offset, pad_cy),
+        (pad_cx, min_y - offset),
+        (pad_cx, max_y + offset),
+        (min_x - offset, min_y),
+        (min_x - offset, max_y),
+        (max_x + offset, min_y),
+        (max_x + offset, max_y),
+        (min_x, min_y - offset),
+        (max_x, min_y - offset),
+        (min_x, max_y + offset),
+        (max_x, max_y + offset),
+        # 45-degree corner escapes (distance to the corner == offset).
+        (min_x - diag, min_y - diag),
+        (max_x + diag, min_y - diag),
+        (min_x - diag, max_y + diag),
+        (max_x + diag, max_y + diag),
+    ]
+
+    seen: set[tuple[float, float]] = set()
+    candidates: list[tuple[float, float]] = []
+    for point in raw:
+        key = (round(point[0], 6), round(point[1], 6))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(point)
+    return candidates
+
+
 def _try_nudge_via_pad(
     via: Via,
     pad_bbox: tuple[float, float, float, float],
@@ -1220,11 +1598,23 @@ def _try_nudge_via_pad(
     """Slide a same-net via off an SMD pad it has been placed inside.
 
     Issue #3112: companion handler to :func:`_try_nudge_seg_pad`, but
-    operates on a **via** rather than a segment.  Picks the cardinal
-    exit (left/right/top/bottom) that minimises displacement, snapping
-    every same-net segment endpoint that was within ``_ENDPOINT_TOL`` of
-    the via's old position so the routed chain stays electrically
-    connected.
+    operates on a **via** rather than a segment.  Picks the exit that
+    minimises displacement **among the destinations that are actually
+    legal** (:func:`_via_pad_exit_candidates` +
+    :func:`_via_destination_blocked`), snapping every same-net segment
+    endpoint that was within ``_ENDPOINT_TOL`` of the via's old position
+    so the routed chain stays electrically connected.
+
+    Issue #5009 (third review pass): the candidate used to be chosen
+    purely by displacement from the offending pad, with nothing
+    validating it against any OTHER pad, via or drilled hole -- on board
+    02 that placed the exit from an 0805 land 0.035 mm from its
+    foreign-net neighbour (0.127 mm required) and 0.185 mm hole-to-hole
+    from a sibling via (0.250 mm required).  Colliding destinations are
+    now filtered out before the ``min()``; when NO candidate survives the
+    move is refused (``via_pad_dest_*`` skip counter) and the original
+    ``via_in_pad`` finding is left for DRC to report, which is strictly
+    better than manufacturing a short.
 
     Refuses the move when the required displacement exceeds
     ``max_displacement`` (matches the segment handlers' over-budget
@@ -1251,31 +1641,62 @@ def _try_nudge_via_pad(
 
     Returns:
         True when the via was moved within budget and its connecting
-        segments were snapped; False otherwise (over budget, no rule
-        info, etc).
+        segments were snapped; False otherwise (over budget, every
+        destination blocked by neighbouring copper/drills, no rule info,
+        etc).
     """
     if required_clearance is None:
         rules = getattr(router, "rules", None)
-        required_clearance = getattr(rules, "trace_clearance", 0.2) if rules else 0.2
+        clearance = float(getattr(rules, "trace_clearance", 0.2) if rules else 0.2)
+    else:
+        clearance = float(required_clearance)
 
-    min_x, min_y, max_x, max_y = pad_bbox
     cx, cy = via.x, via.y
     r = via.diameter / 2.0
-    margin = max(0.005, required_clearance * 0.10)
-    # Each cardinal candidate places the via just outside the pad edge,
-    # with the via's copper diameter (annular ring radius) + the
-    # required trace clearance + the same 10% margin used elsewhere
-    # in this module.
-    offset = r + required_clearance + margin
+    margin = max(0.005, clearance * 0.10)
+    # Each candidate places the via just outside the pad edge, with the
+    # via's copper diameter (annular ring radius) + the required trace
+    # clearance + the same 10% margin used elsewhere in this module.
+    offset = r + clearance + margin
 
-    candidates: list[tuple[float, float]] = [
-        (min_x - offset, cy),  # left
-        (max_x + offset, cy),  # right
-        (cx, min_y - offset),  # top (smaller y in PCB conventions)
-        (cx, max_y + offset),  # bottom
-    ]
+    # Issue #5009: filter the candidate exits against the REST of the
+    # board before choosing the nearest one.  Blocked destinations are
+    # recorded by reason so a refusal is diagnosable rather than silent.
+    context = _build_via_dest_context(via, router, pad_bbox)
+    blocked_reasons: list[str] = []
+    legal: list[tuple[float, float]] = []
+    for candidate in _via_pad_exit_candidates(via, pad_bbox, offset):
+        reason = _via_destination_blocked(
+            via,
+            candidate[0],
+            candidate[1],
+            context,
+            required_clearance=clearance,
+        )
+        if reason is None:
+            legal.append(candidate)
+        else:
+            blocked_reasons.append(reason)
+
+    if not legal:
+        # Refuse the move rather than placing the via blindly: an in-pad
+        # via is a manufacturability finding, a foreign-net short or a
+        # sub-minimum drill pitch is a scrapped board.
+        if result is not None:
+            result._bump_skipped(blocked_reasons[0] if blocked_reasons else "via_pad_dest_blocked")
+        logger.debug(
+            "Declining via-in-pad nudge for net %s at (%.3f, %.3f): all %d "
+            "candidate exits collide with neighbouring copper/drills (%s)",
+            via.net,
+            cx,
+            cy,
+            len(blocked_reasons),
+            ", ".join(sorted(set(blocked_reasons))) or "none",
+        )
+        return False
+
     new_x, new_y = min(
-        candidates,
+        legal,
         key=lambda c: math.hypot(c[0] - cx, c[1] - cy),
     )
 
@@ -1321,10 +1742,15 @@ def _scan_and_repair_via_in_pad(
 
     Issue #3112: runs the explicit detection sweep that the
     :func:`validate_routes` stream cannot surface (it intentionally
-    skips same-net pads at ``router/io.py:1756``).  Gated on the
-    manufacturer's ``via_in_pad_supported`` capability flag -- when the
-    profile supports via-in-pad (e.g. ``jlcpcb-tier1``, ``pcbway``)
-    this is a no-op.
+    skips same-net pads at ``router/io.py:1756``).  Gated on
+    :func:`_router_via_in_pad_process_eligible` -- when the profile
+    supports via-in-pad AND declares a real fabrication process this
+    board's layer count is eligible for (e.g. ``pcbway`` at any layer
+    count, ``jlcpcb-tier1`` at 4+ layers) this is a no-op.  Issue #5009
+    tightened this from the bare ``via_in_pad_supported`` capability
+    flag: a 2-layer ``jlcpcb-tier1`` board has no eligible POFV process,
+    so the sweep now runs there and relocates the vias instead of
+    leaving findings for DRC.
 
     Note on the displacement budget: the via-in-pad sweep uses its own
     budget (``_VIA_IN_PAD_MAX_DISPLACEMENT``, default 2.0 mm) rather
@@ -1341,8 +1767,12 @@ def _scan_and_repair_via_in_pad(
         Number of vias successfully nudged.
     """
     via_pad_budget = max(max_displacement, _VIA_IN_PAD_MAX_DISPLACEMENT)
-    if _router_via_in_pad_supported(router):
-        # Manufacturer supports via-in-pad -- nothing to do.
+    if _router_via_in_pad_process_eligible(router):
+        # Manufacturer supports via-in-pad AND declares a real, orderable
+        # process this board's layer count is eligible for (#5009) --
+        # nothing to do.  A bare capability flag is NOT enough: the DRC
+        # rule fails closed without a declared process, so the sweep must
+        # too, or the router leaves vias the next DRC pass rejects.
         return 0
 
     pads = getattr(router, "pads", None) or {}
@@ -1362,50 +1792,77 @@ def _scan_and_repair_via_in_pad(
             continue
         pads_by_net.setdefault(net, []).append(pad)
 
-    nudged = 0
+    # Canonical processing order (#5009, third review pass).  Each
+    # relocation commits copper that the NEXT relocation must clear
+    # (:func:`_via_destination_blocked` reads live via positions), so the
+    # sweep's outcome depends on the order vias are visited.  ``routes``
+    # is in negotiated-routing order, which varies with ``--seed`` even
+    # when the converged geometry does not -- sweeping it directly makes
+    # the board's final geometry seed-dependent, which board 02's
+    # cross-seed determinism guard rightly rejects.  Sorting by
+    # (net, x, y) makes the sweep a pure function of the pre-nudge
+    # geometry.  Same set of (route, via) pairs, deterministic order.
+    ordered: list[tuple[Route, Via]] = []
     for route in routes:
+        if not pads_by_net.get(route.net):
+            continue
+        ordered.extend((route, via) for via in route.vias)
+    ordered.sort(key=lambda rv: (rv[1].net, round(rv[1].x, 6), round(rv[1].y, 6)))
+
+    nudged = 0
+    for route, via in ordered:
         candidates = pads_by_net.get(route.net)
         if not candidates:
             continue
-        for via in route.vias:
-            for pad in candidates:
-                bbox = _router_pad_bbox(pad)
-                if not _via_drill_inside_bbox(via, bbox):
-                    continue
-                # Skip vias that sit DEAD-CENTRE on a pad of the same
-                # net.  Such a via is a deliberate in-pad escape: the
-                # via centre is the connection to the pad pin, and
-                # moving the via off the pad centre would disconnect
-                # the chain at the pad anchor (the trace tail meets the
-                # via centre, not the pad edge).  This guard preserves
-                # the contract enforced by :func:`_via_is_pad_anchored`
-                # /  :func:`_nudge_via_with_chain` for the via-via
-                # nudge handler.  An OFF-centre via that merely sits
-                # *inside* the pad bbox is NOT pad-anchored (the trace
-                # already lives outside the pad centre) -- those are
-                # the cases the user wants us to repair, and this
-                # branch lets them through.
-                pad_center_x = (bbox[0] + bbox[2]) / 2.0
-                pad_center_y = (bbox[1] + bbox[3]) / 2.0
-                if (
-                    abs(via.x - pad_center_x) < _PAD_ANCHOR_TOL
-                    and abs(via.y - pad_center_y) < _PAD_ANCHOR_TOL
-                ):
-                    result._bump_skipped("via_pad_centred_escape")
-                    break
-                if _try_nudge_via_pad(
-                    via,
-                    bbox,
-                    router,
-                    via_pad_budget,
-                    result=result,
-                ):
-                    nudged += 1
-                # Whether we moved it or not, one pad per via is enough --
-                # if budget refused, surface as remaining via-in-pad
-                # violation in the DRC report rather than churning
-                # through every same-net pad.
+        for pad in candidates:
+            bbox = _router_pad_bbox(pad)
+            # #5009: overlap, not containment -- see
+            # :func:`_via_drill_overlaps_bbox`.  A drill that merely
+            # clips the land edge is still a via-in-pad defect and
+            # DRC reports it (as ``via_in_pad_process_missing`` on a tier
+            # with no orderable process), so the sweep must repair it too
+            # or ``kct route`` emits errors it could have fixed.  Every
+            # destination this predicate sends to
+            # :func:`_try_nudge_via_pad` is validated against the rest of
+            # the board before it is committed (#5009 review pass 3), so
+            # the wider detector cannot trade a via-in-pad finding for a
+            # foreign-net short.
+            if not _via_drill_overlaps_bbox(via, bbox):
+                continue
+            # Skip vias that sit DEAD-CENTRE on a pad of the same
+            # net.  Such a via is a deliberate in-pad escape: the
+            # via centre is the connection to the pad pin, and
+            # moving the via off the pad centre would disconnect
+            # the chain at the pad anchor (the trace tail meets the
+            # via centre, not the pad edge).  This guard preserves
+            # the contract enforced by :func:`_via_is_pad_anchored`
+            # /  :func:`_nudge_via_with_chain` for the via-via
+            # nudge handler.  An OFF-centre via that merely sits
+            # *inside* the pad bbox is NOT pad-anchored (the trace
+            # already lives outside the pad centre) -- those are
+            # the cases the user wants us to repair, and this
+            # branch lets them through.
+            pad_center_x = (bbox[0] + bbox[2]) / 2.0
+            pad_center_y = (bbox[1] + bbox[3]) / 2.0
+            if (
+                abs(via.x - pad_center_x) < _PAD_ANCHOR_TOL
+                and abs(via.y - pad_center_y) < _PAD_ANCHOR_TOL
+            ):
+                result._bump_skipped("via_pad_centred_escape")
                 break
+            if _try_nudge_via_pad(
+                via,
+                bbox,
+                router,
+                via_pad_budget,
+                result=result,
+            ):
+                nudged += 1
+            # Whether we moved it or not, one pad per via is enough --
+            # if budget refused, surface as remaining via-in-pad
+            # violation in the DRC report rather than churning
+            # through every same-net pad.
+            break
 
     return nudged
 

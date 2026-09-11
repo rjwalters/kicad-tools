@@ -98,6 +98,17 @@ class ManufacturingResult:
     preflight_results: list[PreflightResult] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Issue #5009: the selected manufacturer profile's declared
+    # via-in-pad ``FabricationProcess`` (see
+    # ``kicad_tools.manufacturers.fabrication_process.describe_selection``),
+    # resolved for this board's actual layer/copper configuration.  ``None``
+    # when the profile declares no eligible process for this configuration
+    # (the common case -- most manufacturer profiles never set
+    # ``via_in_pad_process_id``).  Bound into ``manifest.json`` and
+    # ``README.txt`` so the machine-readable requirements and their
+    # human-readable ordering instructions travel with the bundle rather
+    # than requiring per-board hand-typed prose.
+    fabrication_process: dict | None = None
 
     @property
     def success(self) -> bool:
@@ -366,6 +377,13 @@ def _build_manifest(
     if result.preflight_results:
         manifest["preflight"] = [pr.to_dict() for pr in result.preflight_results]
 
+    # Issue #5009: bind the selected via-in-pad fabrication process (if
+    # any) into the manifest as a machine-readable artifact, generalizing
+    # the ad hoc ``fabrication_overrides`` blocks boards 03/04 previously
+    # hand-wrote into their own reports.
+    if result.fabrication_process is not None:
+        manifest["fabrication_process"] = result.fabrication_process
+
     return manifest
 
 
@@ -457,6 +475,12 @@ class ManufacturingPackage:
         # strict-preflight failure aborts the rest of the pipeline.
         if self.config.emit_drc_constraints:
             self._write_drc_constraints(result)
+
+        # Step 0b (issue #5009): resolve the selected manufacturer profile's
+        # declared via-in-pad fabrication process (if any) for this board's
+        # actual layer/copper configuration, so the manifest and README
+        # steps below can bind it into the bundle.
+        self._resolve_fabrication_process(result)
 
         # Step 0: Pre-flight validation
         preflight_cfg = self.config.preflight
@@ -825,6 +849,37 @@ class ManufacturingPackage:
             return
 
         result.drc_constraint_paths = written
+
+    def _resolve_fabrication_process(self, result: ManufacturingResult) -> None:
+        """Resolve the profile's declared via-in-pad process for this board (#5009).
+
+        Mirrors :meth:`_write_drc_constraints`'s profile/layer-config
+        resolution, but reads ``DesignRules.via_in_pad_process_id`` and
+        looks it up in the shared
+        :data:`~kicad_tools.manufacturers.fabrication_process.FABRICATION_PROCESSES`
+        registry via ``describe_selection``.  Sets ``result.fabrication_process``
+        to the resolved machine-readable dict (with derived
+        ``ordering_instructions``), or leaves it ``None`` when the profile
+        declares no eligible process for this layer/copper configuration --
+        the common case, since most manufacturer profiles never set
+        ``via_in_pad_process_id``.  Failures are swallowed (debug-logged
+        only): this is an additive, best-effort enrichment step that must
+        never block or degrade the rest of export.
+        """
+        try:
+            from ..manufacturers import get_profile
+            from ..manufacturers.fabrication_process import describe_selection
+
+            profile = get_profile(self.manufacturer)
+            layers, copper_oz = self._detect_layer_config()
+            rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
+            result.fabrication_process = describe_selection(rules)
+        except Exception as e:
+            logger.debug(
+                "Could not resolve fabrication process for manufacturer '%s': %s",
+                self.manufacturer,
+                e,
+            )
 
     def _dry_run(self, out_dir: Path, result: ManufacturingResult) -> ManufacturingResult:
         """Populate result with what *would* be generated."""
@@ -1492,6 +1547,22 @@ class ManufacturingPackage:
         lines.append("  manifest.json")
         lines.append(f"    {desc[0]}: {desc[1]}")
         lines.append("")
+
+        # Issue #5009: surface machine-derived factory ordering instructions
+        # when this board's manufacturer profile declares a via-in-pad
+        # process eligible for its layer/copper configuration -- generalizes
+        # the hand-typed README prose boards/03-usb-joystick previously
+        # wrote for its four-layer POFV contract into text derived from the
+        # shared FabricationProcess registry.
+        if result.fabrication_process:
+            lines.append("Fabrication process requirements:")
+            lines.append("-" * 34)
+            instructions = result.fabrication_process.get("ordering_instructions")
+            if instructions:
+                lines.append(f"  {instructions}")
+            else:
+                lines.append(f"  Process: {result.fabrication_process.get('name', '(unnamed)')}")
+            lines.append("")
 
         readme_path = out_dir / "README.txt"
         readme_path.write_text("\n".join(lines), encoding="utf-8")

@@ -417,6 +417,11 @@ class DRCChecker:
         "solder_mask_clearance": CATEGORY_MANUFACTURING,
         "solder_mask_pad": CATEGORY_MANUFACTURING,
         "via_in_pad": CATEGORY_MANUFACTURING,
+        # Issue #5009: process-eligibility findings, distinct from the
+        # base ``via_in_pad`` capability-absent case above -- both are
+        # fab-blocking manufacturing defects.
+        "via_in_pad_process_missing": CATEGORY_MANUFACTURING,
+        "via_in_pad_process_ineligible": CATEGORY_MANUFACTURING,
         "min_pad_size": CATEGORY_MANUFACTURING,
         "pth_annular_ring": CATEGORY_MANUFACTURING,
         "pad_grid": CATEGORY_MANUFACTURING,
@@ -1226,19 +1231,24 @@ class DRCChecker:
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_via_in_pad(self) -> DRCResults:
-        """Check for vias placed inside SMD pads on unsupported profiles.
+        """Check for vias placed inside SMD pads without an eligible process.
 
-        Fires only when the active manufacturer profile has
-        ``via_in_pad_supported=False`` (the default for ``jlcpcb``,
-        ``oshpark``, ``seeed``, ``flashpcb``).  The router refuses to
-        place in-pad vias for those profiles, but a hand-edited or
-        third-party-routed board could still contain them -- this rule
-        verifies the resulting board independently.
+        Issue #5009: fires when the active manufacturer profile's
+        ``via_in_pad_supported=False`` (the original #2635 behavior,
+        default for ``jlcpcb``, ``oshpark``, ``seeed``, ``flashpcb``),
+        AND when ``via_in_pad_supported=True`` but no eligible
+        :class:`~kicad_tools.manufacturers.fabrication_process.FabricationProcess`
+        is declared (``via_in_pad_process_id`` unset/unknown) or the
+        board's actual via geometry does not meet the declared process's
+        published requirements.  A bare capability flag is not
+        sufficient on its own to suppress a via-in-pad finding.
 
         Returns:
-            DRCResults containing via_in_pad violations (one per
-            offending via/pad pair).  Empty on profiles that support
-            via-in-pad (e.g., jlcpcb-tier1, pcbway).
+            DRCResults containing ``via_in_pad`` /
+            ``via_in_pad_process_missing`` / ``via_in_pad_process_ineligible``
+            violations (one per offending via/pad pair).  Empty only
+            when every in-pad via satisfies a declared, eligible process
+            (e.g. JLCPCB Capability Plus's 4+ layer POFV process).
         """
         rule = ViaInPadRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
