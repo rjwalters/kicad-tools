@@ -730,10 +730,10 @@ class LCSCClient:
         the catalog instead of raising / returning empty. This keeps parametric
         matching (``kct parts suggest`` / ``kct export --auto-lcsc``, both of
         which route through :class:`~kicad_tools.cost.suggest.PartMatcher` ->
-        ``search``) working offline. When the offline fallback is disabled
-        (``use_local_catalog=False``) or no catalog is synced, the historical
-        live-API-only behavior is preserved byte-for-byte (403 propagates, other
-        request errors return an empty :class:`SearchResult`).
+        ``search``) working offline. Without usable offline coverage, transport
+        or malformed/business-response failures raise an unavailable error;
+        they do not produce a verified empty result. Successful results expose
+        live, offline, or incomplete coverage through :class:`SearchResult`.
 
         Args:
             query: Search query string
