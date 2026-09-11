@@ -2499,10 +2499,25 @@ def _write_drc_constraint_sidecars(
             failures are blocking and printed even in quiet mode.
     """
     try:
-        from kicad_tools.manufacturers import get_profile, write_drc_constraints
+        from kicad_tools.manufacturers import (
+            get_profile,
+            resolve_pcb_fabrication_overrides,
+            write_drc_constraints,
+        )
 
         profile = get_profile(manufacturer)
         rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
+        # Issue #5006: retain (or reject) a validated, cited per-board
+        # fabrication-floor override -- same contract `kct check
+        # --emit-drc-constraints` and the manufacturing export path use --
+        # so a route-triggered re-emit cannot silently revert a reviewed
+        # floor back to the profile's conservative default.
+        rules, fab_override_msg = resolve_pcb_fabrication_overrides(
+            output_path, rules, manufacturer_id=profile.id
+        )
+        if fab_override_msg is not None and not quiet:
+            prefix = "  Warning: " if fab_override_msg.startswith("ignoring") else "  "
+            print(prefix + fab_override_msg)
         written = write_drc_constraints(
             output_path,
             rules,

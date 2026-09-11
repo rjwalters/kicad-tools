@@ -39,7 +39,11 @@ from kicad_tools.analysis.routing_quality import (
     routing_quality_gate_dict,
 )
 from kicad_tools.cli.copper_weight import parse_copper_weight_arg
-from kicad_tools.manufacturers import get_manufacturer_ids, get_profile
+from kicad_tools.manufacturers import (
+    get_manufacturer_ids,
+    get_profile,
+    resolve_pcb_fabrication_overrides,
+)
 from kicad_tools.router.current_paths import (
     CurrentPathSpec,
     current_paths_sidecar_candidates,
@@ -2132,6 +2136,23 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
+
+    # Issue #5006: apply a validated, cited per-board fabrication-floor
+    # override on top of the manufacturer profile's resolved DesignRules --
+    # BEFORE any check runs and BEFORE --emit-drc-constraints below reads
+    # ``checker.design_rules`` -- so Python DRC and any emitted native
+    # sidecars agree on the SAME reviewed floor (e.g. a board whose actual,
+    # cited geometry meets JLC's published 0.45mm pad-hole floor rather than
+    # the profile's conservative 0.5mm default). Auto-discovered only (no
+    # CLI flag): a missing sidecar is a no-op; a malformed or unsafe one
+    # degrades gracefully to the profile default rather than raising, since
+    # that fallback is always safe.
+    checker.design_rules, _fab_override_msg = resolve_pcb_fabrication_overrides(
+        pcb_path, checker.design_rules, manufacturer_id=effective_mfr
+    )
+    if _fab_override_msg is not None:
+        _prefix = "WARNING: " if _fab_override_msg.startswith("ignoring") else "[INFO] "
+        print(_prefix + _fab_override_msg, file=sys.stderr)
 
     # Resolve pad_grid tolerance policy (issue #3061).
     # Precedence: explicit value > strict mode > auto-derive (CLI default).

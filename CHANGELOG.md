@@ -2134,6 +2134,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are deliberately unchanged (board-wide even under `--net`, documented in
   the `--net` help text); `--incomplete` keeps its board-wide header.
 
+### Fixed
+
+- **Validated per-board fabrication-floor overrides for native DRC-constraint
+  emission** (#5006) — `kct check --mfr jlcpcb-tier1 --emit-drc-constraints`
+  (and the manufacturing export path, `kct route`'s sidecar emission, and
+  `kct mfr apply-rules`) previously overwrote a reviewed project's narrower,
+  actually-fab-verified `min_hole_to_hole` floor with the manufacturer
+  profile's conservative default, causing native KiCad DRC to report
+  spurious `hole_to_hole` warnings on a board that a native DRC pass with
+  the reviewed floor showed was clean. A new
+  `kicad_tools.manufacturers.fabrication_overrides` module defines a
+  validated, cited per-board override contract: a `fabrication_overrides.json`
+  sidecar next to the routed board declares a field, an overriding value, the
+  manufacturer it applies to, a source citation, and a reason; an override is
+  only retained if it names a manufacturer-verified capability floor on
+  record (e.g. JLCPCB's published pad-hole-spacing minimum) and does not ask
+  for anything looser than that floor — an unrecognized field, missing
+  citation, manufacturer mismatch, unregistered field, or a value below the
+  verified floor is rejected and the emission falls back to the profile's
+  conservative default instead of silently applying an unsafe override. All
+  four native-constraint-emission call sites (`kct check
+  --emit-drc-constraints`, the manufacturing export path, `kct route`'s
+  sidecar emission, `kct mfr apply-rules`) resolve the same sidecar through
+  one shared entry point, `resolve_pcb_fabrication_overrides`, so the Python
+  `DRCChecker` and every native-emission surface agree on the identical
+  resolved floor for the same board.
+
 ## [0.20.0] - 2026-08-06
 
 ### Summary
