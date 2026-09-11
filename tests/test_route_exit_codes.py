@@ -20,7 +20,7 @@ from kicad_tools.cli.route_cmd import main as route_main
 
 def _make_minimal_pcb(tmp_path):
     """Create a minimal .kicad_pcb file for testing."""
-    pcb_content = '(kicad_pcb (version 20240101) (generator "test"))'
+    pcb_content = '(kicad_pcb (version 20240101) (generator "test") (gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts") (width 0.05)))'
     pcb_file = tmp_path / "test.kicad_pcb"
     pcb_file.write_text(pcb_content)
     return pcb_file

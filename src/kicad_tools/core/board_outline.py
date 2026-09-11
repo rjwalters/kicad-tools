@@ -11,6 +11,32 @@ Point = tuple[float, float]
 Bounds = tuple[float, float, float, float]
 
 
+def _rotate_point(
+    point: tuple[float, float], center: tuple[float, float], angle_deg: float
+) -> tuple[float, float]:
+    """Rotate ``point`` about ``center`` by ``angle_deg`` degrees (CCW-positive).
+
+    Used to normalize pre-KiCad-6 legacy ``gr_arc`` encodings (center + signed
+    sweep angle) into modern on-arc start/mid/end points.
+    """
+    theta = math.radians(angle_deg)
+    dx, dy = point[0] - center[0], point[1] - center[1]
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    return (
+        center[0] + dx * cos_t - dy * sin_t,
+        center[1] + dx * sin_t + dy * cos_t,
+    )
+
+
+def legacy_arc_points(point: Point, center: Point, angle_deg: float) -> tuple[Point, Point, Point]:
+    """Normalize legacy center/endpoint/signed-sweep arcs without changing coordinates."""
+    return (
+        point,
+        _rotate_point(point, center, angle_deg / 2.0),
+        _rotate_point(point, center, angle_deg),
+    )
+
+
 def _coordinate(child: SExp, context: str) -> Point:
     if len(child.children) != 2:
         raise ValueError(f"Malformed Edge.Cuts {context}: expected two coordinates")
@@ -136,9 +162,23 @@ def board_outline_bounds(root: SExp) -> Bounds | None:
         if node.tag in ("gr_rect", "gr_line"):
             points.extend((_point(node, "start"), _point(node, "end")))
         elif node.tag == "gr_arc":
-            points.extend(
-                _arc_points(_point(node, "start"), _point(node, "mid"), _point(node, "end"))
-            )
+            start, end = _point(node, "start"), _point(node, "end")
+            if node.find_child("mid") is not None:
+                mid = _point(node, "mid")
+            else:
+                angle = node.find_child("angle")
+                sweep = angle.get_float(0) if angle is not None else None
+                if (
+                    angle is None
+                    or len(angle.children) != 1
+                    or sweep is None
+                    or not math.isfinite(sweep)
+                ):
+                    raise ValueError(
+                        "Malformed Edge.Cuts gr_arc: missing mid or invalid legacy angle"
+                    )
+                start, mid, end = legacy_arc_points(end, start, sweep)
+            points.extend(_arc_points(start, mid, end))
         elif node.tag == "gr_circle":
             center, end = _point(node, "center"), _point(node, "end")
             radius = math.dist(center, end)

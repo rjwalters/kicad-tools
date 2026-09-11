@@ -123,6 +123,7 @@ def test_cubic_bounds_use_curve_extrema_not_control_polygon():
     [
         '(gr_circle (center 10 10) (end 15 10) (layer "Edge.Cuts"))',
         '(gr_arc (start 0 0) (mid 5 5) (end 10 0) (layer "Edge.Cuts"))',
+        '(gr_arc (start 0 0) (end 10 0) (angle -90) (layer "Edge.Cuts"))',
         '(gr_curve (pts (xy 0 0) (xy 0 10) (xy 10 10) (xy 10 0)) (layer "Edge.Cuts"))',
     ],
 )
@@ -131,3 +132,18 @@ def test_routing_rejects_unsupported_curved_edge_obstacles(tmp_path, outline):
     path.write_text(_board(outline))
     with pytest.raises(ValueError, match="Unsupported routing Edge.Cuts"):
         load_pcb_for_routing(path, validate_drc=False)
+
+
+@pytest.mark.parametrize("sweep, expected", [(270, (-10, -10, 10, 10)), (-90, (0, -10, 10, 0))])
+def test_legacy_arc_bounds_preserve_signed_sweep(sweep, expected):
+    root = parse_string(
+        f'(kicad_pcb (gr_arc (start 0 0) (end 10 0) (angle {sweep}) (layer "Edge.Cuts")))'
+    )
+    assert board_outline_bounds(root) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("angle", ["", "(angle nan)", "(angle 90 180)", "(angle 0)"])
+def test_invalid_legacy_arc_is_rejected(angle):
+    root = parse_string(f'(kicad_pcb (gr_arc (start 0 0) (end 10 0) {angle} (layer "Edge.Cuts")))')
+    with pytest.raises(ValueError, match="Malformed Edge.Cuts"):
+        board_outline_bounds(root)

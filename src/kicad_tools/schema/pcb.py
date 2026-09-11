@@ -6,7 +6,6 @@ Provides classes for parsing and manipulating KiCad PCB files (.kicad_pcb).
 from __future__ import annotations
 
 import logging
-import math
 import re
 import tempfile
 import uuid
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 from kicad_tools.sexp import SExp
 
-from ..core.board_outline import board_outline_bounds
+from ..core.board_outline import board_outline_bounds, legacy_arc_points
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
 from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
 from ..footprints.library_path import (
@@ -1621,23 +1620,6 @@ class GraphicLine:
         return line
 
 
-def _rotate_point(
-    point: tuple[float, float], center: tuple[float, float], angle_deg: float
-) -> tuple[float, float]:
-    """Rotate ``point`` about ``center`` by ``angle_deg`` degrees (CCW-positive).
-
-    Used to normalize pre-KiCad-6 legacy ``gr_arc`` encodings (center + signed
-    sweep angle) into modern on-arc start/mid/end points.
-    """
-    theta = math.radians(angle_deg)
-    dx, dy = point[0] - center[0], point[1] - center[1]
-    cos_t, sin_t = math.cos(theta), math.sin(theta)
-    return (
-        center[0] + dx * cos_t - dy * sin_t,
-        center[1] + dx * sin_t + dy * cos_t,
-    )
-
-
 @dataclass
 class GraphicArc:
     """PCB graphic arc element (gr_arc).
@@ -1690,9 +1672,7 @@ class GraphicArc:
             angle_deg = angle.get_float(0) or 0.0
             center = arc.start
             on_arc_point = arc.end
-            arc.end = _rotate_point(on_arc_point, center, angle_deg)
-            arc.mid = _rotate_point(on_arc_point, center, angle_deg / 2.0)
-            arc.start = on_arc_point
+            arc.start, arc.mid, arc.end = legacy_arc_points(on_arc_point, center, angle_deg)
 
         return arc
 

@@ -187,6 +187,10 @@ class TestUnquotedLegacyReference:
 )
 """
         pcb_file = tmp_path / "unquoted_ref.kicad_pcb"
+        pcb_content = (
+            pcb_content.rstrip()[:-1]
+            + '(gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts") (width 0.05)))'
+        )
         pcb_file.write_text(pcb_content)
 
         router, _net_map = load_pcb_for_routing(pcb_file)
