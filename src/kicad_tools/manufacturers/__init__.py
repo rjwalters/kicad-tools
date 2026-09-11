@@ -43,6 +43,12 @@ from .fabrication_overrides import (
     load_fabrication_overrides,
     resolve_pcb_fabrication_overrides,
 )
+from .fabrication_process import (
+    FABRICATION_PROCESSES,
+    FabricationProcess,
+    describe_selection,
+    get_fabrication_process,
+)
 from .flashpcb import FLASHPCB_PROFILE
 from .jlcpcb import JLCPCB_PROFILE
 from .jlcpcb_tier1 import JLCPCB_TIER1_PROFILE
@@ -63,6 +69,11 @@ __all__ = [
     "PartsLibrary",
     "ManufacturerProfile",
     "FileNamingConvention",
+    # Fabrication process model (Issue #5009)
+    "FabricationProcess",
+    "FABRICATION_PROCESSES",
+    "get_fabrication_process",
+    "describe_selection",
     # Functions
     "get_profile",
     "get_fab_family",

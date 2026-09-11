@@ -9,6 +9,12 @@
 # Mirrors the router's MFR_PCBWAY.via_in_pad_supported in
 # router/mfr_limits.py (drift-prevention test in
 # tests/test_manufacturer_registry_sync.py enforces parity).
+#
+# Issue #5009: unlike JLCPCB Capability Plus (whose via-in-pad-specific
+# POFV process requires 4+ layers), PCBWay publishes via-in-pad as
+# available at every layer count, so ``via_in_pad_process_id`` is
+# attached to every config here (see
+# kicad_tools.manufacturers.fabrication_process.PCBWAY_VIA_IN_PAD).
 
 design_rules:
   2layer_1oz:
@@ -31,6 +37,7 @@ design_rules:
     outer_copper_oz: 1.0
     inner_copper_oz: 0.0
     via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
+    via_in_pad_process_id: pcbway-via-in-pad  # #5009: real PCBWay via-in-pad process
 
   2layer_2oz:
     min_trace_width_mm: 0.2         # 8 mil for 2oz
@@ -52,6 +59,7 @@ design_rules:
     outer_copper_oz: 2.0
     inner_copper_oz: 0.0
     via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
+    via_in_pad_process_id: pcbway-via-in-pad  # #5009: real PCBWay via-in-pad process
 
   4layer_1oz:
     min_trace_width_mm: 0.1016      # 4 mil
@@ -73,6 +81,7 @@ design_rules:
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5
     via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
+    via_in_pad_process_id: pcbway-via-in-pad  # #5009: real PCBWay via-in-pad process
 
   6layer_1oz:
     min_trace_width_mm: 0.0889      # 3.5 mil
@@ -94,3 +103,4 @@ design_rules:
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5
     via_in_pad_supported: true     # PCBWay offers via-in-pad as a standard option
+    via_in_pad_process_id: pcbway-via-in-pad  # #5009: real PCBWay via-in-pad process

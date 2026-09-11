@@ -496,6 +496,120 @@ class TestBuildManifest:
         assert manifest["files"]["stray.zip"]["size"] == outside.stat().st_size
 
 
+class TestFabricationProcessBinding:
+    """Issue #5009: exported bundles bind the selected via-in-pad process.
+
+    ``_resolve_fabrication_process`` mirrors ``_write_drc_constraints``'s
+    profile/layer-config resolution, but looks up
+    ``DesignRules.via_in_pad_process_id`` in the shared
+    ``FABRICATION_PROCESSES`` registry.  The resulting dict (or ``None``)
+    should flow into both ``manifest.json`` (machine-readable) and
+    ``README.txt`` (human-readable ordering instructions).
+    """
+
+    def test_resolve_declared_process_for_eligible_layer_count(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        pkg = ManufacturingPackage(pcb_path=pcb_path, manufacturer="jlcpcb-tier1")
+        result = ManufacturingResult(output_dir=tmp_path)
+
+        pkg._detect_layer_config = lambda: (4, 1.0)
+        pkg._resolve_fabrication_process(result)
+
+        assert result.fabrication_process is not None
+        assert result.fabrication_process["process_id"] == "jlcpcb-tier1-pofv-4l"
+        assert "ordering_instructions" in result.fabrication_process
+
+    def test_resolve_none_for_two_layer_jlcpcb_tier1(self, tmp_path):
+        """jlcpcb-tier1's 2-layer configs carry no via-in-pad process (#5009)."""
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        pkg = ManufacturingPackage(pcb_path=pcb_path, manufacturer="jlcpcb-tier1")
+        result = ManufacturingResult(output_dir=tmp_path)
+
+        pkg._detect_layer_config = lambda: (2, 1.0)
+        pkg._resolve_fabrication_process(result)
+
+        assert result.fabrication_process is None
+
+    def test_resolve_none_for_manufacturer_without_via_in_pad(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        pkg = ManufacturingPackage(pcb_path=pcb_path, manufacturer="jlcpcb")
+        result = ManufacturingResult(output_dir=tmp_path)
+
+        pkg._resolve_fabrication_process(result)
+
+        assert result.fabrication_process is None
+
+    def test_resolve_swallows_unknown_manufacturer(self, tmp_path):
+        """An unresolvable profile must not raise -- resolution is best-effort."""
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        pkg = ManufacturingPackage(pcb_path=pcb_path, manufacturer="not-a-real-manufacturer")
+        result = ManufacturingResult(output_dir=tmp_path)
+
+        pkg._resolve_fabrication_process(result)
+
+        assert result.fabrication_process is None
+
+    def test_build_manifest_includes_fabrication_process_when_present(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        result = ManufacturingResult(
+            output_dir=tmp_path,
+            fabrication_process={"process_id": "jlcpcb-tier1-pofv-4l", "name": "POFV"},
+        )
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb-tier1")
+
+        assert manifest["fabrication_process"] == {
+            "process_id": "jlcpcb-tier1-pofv-4l",
+            "name": "POFV",
+        }
+
+    def test_build_manifest_omits_fabrication_process_when_absent(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        result = ManufacturingResult(output_dir=tmp_path)
+
+        manifest = _build_manifest(result, pcb_path, "jlcpcb")
+
+        assert "fabrication_process" not in manifest
+
+    def test_readme_surfaces_ordering_instructions_when_process_present(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        pkg = ManufacturingPackage(pcb_path=pcb_path, manufacturer="jlcpcb-tier1")
+        result = ManufacturingResult(
+            output_dir=tmp_path,
+            fabrication_process={
+                "process_id": "jlcpcb-tier1-pofv-4l",
+                "name": "JLCPCB Capability Plus -- POFV, 4+ layer",
+                "ordering_instructions": (
+                    "Order the JLCPCB Capability Plus -- POFV, 4+ layer process."
+                ),
+            },
+        )
+
+        pkg._generate_readme(tmp_path, result)
+
+        text = result.readme_path.read_text()
+        assert "Fabrication process requirements" in text
+        assert "Order the JLCPCB Capability Plus -- POFV, 4+ layer process." in text
+
+    def test_readme_omits_fabrication_section_when_absent(self, tmp_path):
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+        pkg = ManufacturingPackage(pcb_path=pcb_path, manufacturer="jlcpcb")
+        result = ManufacturingResult(output_dir=tmp_path)
+
+        pkg._generate_readme(tmp_path, result)
+
+        text = result.readme_path.read_text()
+        assert "Fabrication process requirements" not in text
+
+
 class TestManufacturingPackageDryRun:
     """Tests for ManufacturingPackage dry run mode."""
 

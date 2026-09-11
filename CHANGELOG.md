@@ -25,6 +25,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exits 1 before any routing work); an auto-discovered one degrades to a
   warning; the authored input file is never overwritten (a collision diverts
   the derived sidecar to `current_paths.effective.json`, the #4428 rule).
+- **Via-in-pad process-eligibility model** (#5009) — `via_in_pad_supported`
+  on `MfrLimits`/`DesignRules` was a bare capability boolean that silenced
+  the entire `via_in_pad` DRC rule without validating drill range, layer
+  count, annular ring, filled-and-capped construction, or minimum
+  component-hole distance against a manufacturer's real published process
+  (e.g. JLCPCB's Plated-Over Filled Via/POFV requires 4+ copper layers and
+  a 0.2-0.5 mm drill, even though Capability Plus's `via_in_pad_supported`
+  flag is `True` on its 2-layer configs too). Adds
+  `kicad_tools.manufacturers.fabrication_process.FabricationProcess`, a
+  specific orderable process (layer-count floor, drill range, annular-ring
+  floor, `requires_filled_and_capped`, minimum component-hole distance,
+  source citation) attached to a manufacturer profile config via a new
+  `DesignRules.via_in_pad_process_id` field (`jlcpcb-tier1`'s 4+ layer
+  configs and every `pcbway` config now carry one; `jlcpcb-tier1`'s
+  2-layer configs deliberately do not). `ViaInPadRule` now fails closed
+  in three distinct cases: no capability (`via_in_pad`, original #2635
+  behavior), capability present but no eligible process declared
+  (`via_in_pad_process_missing`), and a declared process whose
+  requirements the via's actual geometry does not meet
+  (`via_in_pad_process_ineligible`) — a bare capability flag with no
+  process selection no longer suppresses a finding. `kct check` and
+  `kct export`'s manufacturing bundle (`manifest.json` + `README.txt`)
+  now bind the resolved process's machine-readable requirements and
+  human-derived ordering instructions into their output when a board's
+  layer/copper configuration carries one.
 - **Konnect item 8 audit: natural-language design-rule store** (#4902, Part
   of #4880) — `docs/konnect-item8-design-rules-audit.md` decides **decline**
   on adding a Konnect-style free-text design-rule store: the repo already
