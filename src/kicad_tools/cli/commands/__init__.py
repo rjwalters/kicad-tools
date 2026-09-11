@@ -43,6 +43,7 @@ from .pcb import run_pcb_command
 from .pipeline import run_pipeline_command
 from .placement import run_placement_command
 from .project import run_clean_command, run_init_command
+from .readiness import run_readiness_command
 from .reasoning import run_reason_command
 from .routing import (
     run_optimize_command,
@@ -114,6 +115,8 @@ __all__ = [
     "run_fleet_command",
     # Board metrics
     "run_board_metrics_command",
+    # Readiness
+    "run_readiness_command",
     # Reasoning
     "run_reason_command",
     # Placement

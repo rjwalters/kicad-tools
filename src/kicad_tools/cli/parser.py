@@ -186,6 +186,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_fleet_parser(subparsers)
     _add_render_parser(subparsers)
     _add_board_metrics_parser(subparsers)
+    _add_readiness_parser(subparsers)
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
@@ -6936,6 +6937,126 @@ def _add_board_metrics_parser(subparsers) -> None:
         help="Print board.json to stdout without writing any file",
     )
     add_format_flag(bm_parser)
+
+
+def _add_readiness_parser(subparsers) -> None:
+    """Add the ``readiness`` parser (scriptable manufacturing sign-off, #4977).
+
+    Implements the ``/kct:manufacturing-readiness`` + ``/kct:tapeout`` skill
+    contracts as an orchestrated command and writes the hash-bound
+    ``output/readiness.json`` evidence the demo gallery validates.
+    """
+    rd_parser = subparsers.add_parser(
+        "readiness",
+        help="Run the manufacturing-readiness gates and write output/readiness.json",
+        description=(
+            "Refill and save the canonical PCB, run kct check at the resolved "
+            "fab tier, run the mandatory independent kicad-cli pcb drc "
+            "--refill-zones cross-gate, review LVS and per-rule warnings, export "
+            "and package the manufacturing bundle, then emit hash-bound "
+            "readiness-v1 evidence. Exits non-zero unless every applicable gate "
+            "passes; there is no flag that produces Ready on a partial run."
+        ),
+    )
+    rd_parser.add_argument(
+        "readiness_board",
+        metavar="board",
+        help="Board directory or routed .kicad_pcb to sign off",
+    )
+    rd_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="readiness_manufacturer",
+        metavar="TIER",
+        default=None,
+        help="Fabrication tier (default: discovered from the board's recipe/manifest)",
+    )
+    rd_mode = rd_parser.add_mutually_exclusive_group()
+    rd_mode.add_argument(
+        "--assembly",
+        dest="readiness_assembly",
+        action="store_true",
+        help="Full assembly package including BOM/CPL procurement identities (default)",
+    )
+    rd_mode.add_argument(
+        "--pcb-only",
+        dest="readiness_pcb_only",
+        action="store_true",
+        help="Bare-board package; makes no component procurement or assembly claim",
+    )
+    rd_parser.add_argument(
+        "--output",
+        "-o",
+        dest="readiness_output",
+        metavar="DIR",
+        default=None,
+        help="Manufacturing bundle directory (default: <pcb-dir>/manufacturing/)",
+    )
+    rd_parser.add_argument(
+        "--sch",
+        dest="readiness_schematic",
+        metavar="PATH",
+        default=None,
+        help="Path to the .kicad_sch (auto-detected by default)",
+    )
+    rd_parser.add_argument(
+        "--net-class-map",
+        dest="readiness_net_class_map",
+        metavar="PATH",
+        default=None,
+        help="Net-class map sidecar (auto-discovered by default)",
+    )
+    rd_parser.add_argument(
+        "--ack-warnings",
+        dest="readiness_ack_warnings",
+        metavar="RULES",
+        default="",
+        help=(
+            "Comma-separated rule_ids whose assembly-affecting warnings are "
+            "explicitly accepted; each becomes an accepted-risk line in README.txt"
+        ),
+    )
+    rd_parser.add_argument(
+        "--include-tht",
+        dest="readiness_include_tht",
+        action="store_true",
+        help="Accept through-hole parts in the CPL (excluded by default)",
+    )
+    rd_parser.add_argument(
+        "--no-archive",
+        dest="readiness_no_archive",
+        action="store_true",
+        help="Skip building output/manufacturing.zip",
+    )
+    rd_parser.add_argument(
+        "--hv-net-class",
+        dest="readiness_hv_net_class",
+        metavar="NAME",
+        default="HV",
+        help="Net-class name identifying high-voltage nets (default: HV)",
+    )
+    rd_parser.add_argument(
+        "--hv-requirement",
+        dest="readiness_hv_requirement",
+        metavar="TEXT",
+        default=None,
+        help=(
+            "Record the isolation requirement an HV board was gated against. "
+            "Required when HV nets are present; otherwise the HV gate is not run."
+        ),
+    )
+    rd_parser.add_argument(
+        "--fill-tolerance",
+        dest="readiness_fill_tolerance",
+        metavar="MM2",
+        type=float,
+        default=None,
+        help=(
+            "Per-layer filled-copper area tolerance in mm^2 for the "
+            "saved-vs-refilled equivalence check"
+        ),
+    )
+    add_format_flag(rd_parser)
 
 
 def _add_fleet_parser(subparsers) -> None:
