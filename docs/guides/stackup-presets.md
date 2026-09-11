@@ -16,6 +16,7 @@ tangent 0.02 is a calculation assumption, not a factory specification.
 
 ```python
 from kicad_tools.physics import Stackup
+
 stack = Stackup.jlcpcb_named("JLC04161H-3313")
 ```
 
