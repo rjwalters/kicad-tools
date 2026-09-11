@@ -61,9 +61,9 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # Bump this constant whenever routing logic is modified to ensure stale
 # cached results are not reused.  The value is included in every cache key
 # so incrementing it automatically invalidates all existing entries.
-# #5004 changes default clearance acceptance and pad seeds: old default-mode
-# routes may contain copper that the new validator rejects.
-CACHE_VERSION = "2.3.0"
+# #5004 changes default clearance acceptance, pad seeds, tree connectivity,
+# and via repair. Invalidate earlier candidates as well as released routes.
+CACHE_VERSION = "2.4.0"
 
 
 def get_default_cache_path() -> Path:

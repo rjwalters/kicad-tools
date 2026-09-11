@@ -181,6 +181,7 @@ def _sync_pad_via_policies(py_grid: RoutingGrid, cpp_grid: Any) -> None:
         rules.trace_clearance,
         rules.trace_width,
         rules.strict_pad_clearance,
+        rules.legacy_fine_pitch_carveout,
         rules.fine_pitch_clearance,
         rules.fine_pitch_threshold,
         tuple(sorted(rules.component_clearances.items())),
