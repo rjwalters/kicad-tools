@@ -139,6 +139,7 @@ def test_finalization_restores_copper_and_fills_on_every_failure(
         return failure != "pour"
 
     monkeypatch.setattr(recipe, "_clearance_signature", signature)
+    monkeypatch.setattr(recipe, "_repair_pour_connectivity", lambda p, nets: (0, 0))
     monkeypatch.setattr(recipe, "_split_offangle_chords", split)
     monkeypatch.setattr(recipe, "_legalize_signal_vias", legalize)
     monkeypatch.setattr(recipe.subprocess, "run", refill)
@@ -177,3 +178,57 @@ def test_finalization_commits_only_after_successful_physical_gates(tmp_path, rec
     recipe._finalize_signal_copper(path, ["fill", str(path)], audit)
     assert path.read_bytes() == b"new copper and matching fills"
     assert calls == ["refill", "audit"]
+
+
+def test_restarted_repair_allocator_preserves_existing_identities(recipe):
+    recipe._reset_repair_uuid_counter()
+    existing = [recipe._generate_uuid() for _ in range(4)]
+    recipe._reset_repair_uuid_counter()
+    recipe._reserve_repair_uuids("\n".join(f'(uuid "{identity}")' for identity in existing))
+    resumed = [recipe._generate_uuid() for _ in range(4)]
+    assert not set(existing) & set(resumed)
+    assert len(set(resumed)) == 4
+    recipe._reset_repair_uuid_counter()
+    recipe._reserve_repair_uuids("\n".join(f'(uuid "{identity}")' for identity in existing))
+    assert [recipe._generate_uuid() for _ in range(4)] == resumed
+
+
+@pytest.mark.parametrize("refill_fails", [False, True])
+def test_finalization_recovers_pour_cut_by_relocated_copper(
+    tmp_path, recipe, monkeypatch, refill_fails
+):
+    path = tmp_path / "candidate.kicad_pcb"
+    path.write_bytes(b"original")
+    monkeypatch.setattr(recipe, "_clearance_signature", lambda p: set())
+    monkeypatch.setattr(recipe, "_split_offangle_chords", lambda p, before: 0)
+    monkeypatch.setattr(recipe, "_legalize_signal_vias", lambda p: 1)
+    calls = []
+
+    def refill(*args, **kwargs):
+        calls.append("refill")
+        if path.read_bytes() == b"bridge":
+            path.write_bytes(b"bridge and fills")
+            return SimpleNamespace(returncode=1 if refill_fails else 0)
+        path.write_bytes(b"legalized copper with disconnected pour")
+        return SimpleNamespace(returncode=0)
+
+    def repair(candidate, nets):
+        assert candidate.read_bytes() == b"legalized copper with disconnected pour"
+        assert nets == recipe.POUR_NETS
+        candidate.write_bytes(b"bridge")
+        calls.append("repair")
+        return (0, 1)
+
+    def audit(tag):
+        return path.read_bytes() == b"bridge and fills"
+
+    monkeypatch.setattr(recipe.subprocess, "run", refill)
+    monkeypatch.setattr(recipe, "_repair_pour_connectivity", repair)
+    if refill_fails:
+        with pytest.raises(RuntimeError, match="pour re-fill failed"):
+            recipe._finalize_signal_copper(path, ["fill"], audit)
+        assert path.read_bytes() == b"original"
+    else:
+        recipe._finalize_signal_copper(path, ["fill"], audit)
+        assert path.read_bytes() == b"bridge and fills"
+    assert calls == ["refill", "repair", "refill"]

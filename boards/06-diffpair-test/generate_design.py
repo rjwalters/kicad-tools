@@ -350,12 +350,21 @@ def _find_sexp_blocks(text: str, token: str) -> list[str]:
 # Issue #4536: sequence counter for deterministic repair-copper UUIDs.
 # Reset at the top of ``route_pcb`` so every regen mints the same sequence.
 _REPAIR_UUID_COUNTER = 0
+_REPAIR_UUID_RESERVED: set[str] = set()
 
 
 def _reset_repair_uuid_counter() -> None:
     """Reset the deterministic repair-UUID sequence (start of a regen)."""
     global _REPAIR_UUID_COUNTER
     _REPAIR_UUID_COUNTER = 0
+    _REPAIR_UUID_RESERVED.clear()
+
+
+def _reserve_repair_uuids(text: str) -> None:
+    """Protect existing copper when a repair resumes in a fresh process."""
+    import re
+
+    _REPAIR_UUID_RESERVED.update(re.findall(r'\(uuid "([^"]+)"\)', text))
 
 
 def _generate_uuid() -> str:
@@ -372,10 +381,16 @@ def _generate_uuid() -> str:
     routing is) while staying unique within the artifact.
     """
     global _REPAIR_UUID_COUNTER
-    _REPAIR_UUID_COUNTER += 1
     import uuid as _uuid
 
-    return str(_uuid.uuid5(_uuid.NAMESPACE_OID, f"board06-pour-repair:{_REPAIR_UUID_COUNTER}"))
+    while True:
+        _REPAIR_UUID_COUNTER += 1
+        identity = str(
+            _uuid.uuid5(_uuid.NAMESPACE_OID, f"board06-pour-repair:{_REPAIR_UUID_COUNTER}")
+        )
+        if identity not in _REPAIR_UUID_RESERVED:
+            _REPAIR_UUID_RESERVED.add(identity)
+            return identity
 
 
 def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
@@ -644,6 +659,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
     text = pcb_path.read_text()
+    _reserve_repair_uuids(text)
     net_id_by_name = {name: int(num) for num, name in re.findall(r'\(net (\d+) "([^"]*)"\)', text)}
     id_to_name = {str(v): k for k, v in net_id_by_name.items()}
     all_layers = frozenset({"F.Cu", "B.Cu", "In1.Cu", "In2.Cu"})
@@ -1413,6 +1429,7 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
     HOLE_CLEAR = 0.25
     EPS = 1e-3
 
+    _reserve_repair_uuids(pcb_path.read_text())
     fixed = 0
     pads = _parse_pads(pcb_path)
 
@@ -1864,6 +1881,94 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                     break
                 if placed:
                     break
+            if not placed:
+                from dataclasses import replace
+
+                from pour_escape import EscapeRules, find_escape
+
+                project = pcb_path.with_suffix(".kicad_pro")
+                if not project.exists():
+                    project = pcb_path.parent / "diffpair_test.kicad_pro"
+                rules = EscapeRules.from_project(project)
+                drill = max(rules.drill, v["drill"])
+                rules = replace(
+                    rules,
+                    drill=drill,
+                    diameter=max(rules.diameter, v["size"], drill + 2 * rules.annulus),
+                )
+                # A common path must clear copper on every connected layer.
+                # Collapse those layers into the search plane, retaining all
+                # other copper as obstacles for the through via itself.
+                search_pads = [
+                    (
+                        _pad_box(p),
+                        p["net"],
+                        {"F.Cu"} if set(conn_layers) & p["layers"] else set(),
+                        p["drill"] / 2,
+                        (p["x"], p["y"]),
+                    )
+                    for p in pads
+                ]
+                search_segments = [
+                    (
+                        LineString([(s["x1"], s["y1"]), (s["x2"], s["y2"])]).buffer(s["w"] / 2),
+                        s["net"],
+                        "F.Cu" if s["layer"] in conn_layers else s["layer"],
+                    )
+                    for s in segs
+                ]
+                search_vias = [
+                    (Point(o["x"], o["y"]), o["net"], o["size"] / 2, o["drill"])
+                    for o in vias
+                    if o["uuid"] != v["uuid"]
+                ]
+                bounds = (
+                    max(min_x, v["x"] - 2),
+                    max(min_y, v["y"] - 2),
+                    min(max_x, v["x"] + 2),
+                    min(max_y, v["y"] + 2),
+                )
+                # The relocation's goal is any legal barrel site. Existing
+                # connections are retained by emitting the path on each layer.
+                escape = find_escape(
+                    (v["x"], v["y"]),
+                    net,
+                    "F.Cu",
+                    search_pads,
+                    search_segments,
+                    search_vias,
+                    [(box(*bounds), {"In1.Cu"}, "relocation")],
+                    bounds,
+                    rules,
+                )
+                if escape is not None:
+                    nx, ny = escape.points[-1]
+                    new_block = re.sub(
+                        r"\(at [\d.-]+ [\d.-]+\)",
+                        f"(at {nx:.3f} {ny:.3f})",
+                        v["block"],
+                        count=1,
+                    )
+                    new_block = re.sub(
+                        r"\(size [\d.]+\)", f"(size {rules.diameter})", new_block, count=1
+                    )
+                    new_block = re.sub(
+                        r"\(drill [\d.]+\)", f"(drill {rules.drill})", new_block, count=1
+                    )
+                    new_text = text.replace(v["block"], new_block)
+                    add = [
+                        _seg_line(net, a, b, lay, rules.width, net_num_by_name[net])
+                        for lay in conn_layers
+                        for a, b in zip(escape.points, escape.points[1:], strict=False)
+                    ]
+                    pcb_path.write_text(
+                        new_text.rstrip().rstrip(")") + "\n" + "\n".join(add) + "\n)\n"
+                    )
+                    print(
+                        f"   grid-relocated {net} via out of pad {in_pad['name']} to ({nx:.3f},{ny:.3f})"
+                    )
+                    fixed += 1
+                    placed = True
             if placed:
                 repair_applied = True
                 break
@@ -1916,6 +2021,7 @@ def _split_offangle_chords(pcb_path: Path, baseline: set[tuple[str, ...]]) -> in
         return 0
 
     text = pcb_path.read_text()
+    _reserve_repair_uuids(text)
     _net_ids, segs, vias = _parse_copper(text)
     fixed = 0
 
@@ -2411,6 +2517,20 @@ def _finalize_signal_copper(
             raise RuntimeError(f"Zone re-fill failed (rc={result.returncode})")
         print("13c. Copper-union pour audit + clearance gate (post-legalize)...")
         pours_ok = audit_pours("[legal]")
+        # Relocated signal copper can carve an existing pour connection away
+        # during refill. Reconnect it inside this transaction; every added
+        # repair must survive legalization, refill, and the final gates.
+        for repair_round in range(MAX_POUR_REPAIR_ROUNDS):
+            if pours_ok:
+                break
+            added_vias, added_bridges = _repair_pour_connectivity(pcb_path, POUR_NETS)
+            if not (added_vias or added_bridges):
+                break
+            _legalize_signal_vias(pcb_path)
+            result = subprocess.run(fill_argv, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"Post-legalize pour re-fill failed (rc={result.returncode})")
+            pours_ok = audit_pours(f"[legal-r{repair_round + 1}]")
         new_clearances = _clearance_signature(pcb_path) - before
         if not pours_ok or new_clearances:
             raise RuntimeError(
