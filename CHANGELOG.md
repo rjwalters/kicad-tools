@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Konnect item 8 audit: natural-language design-rule store** (#4902, Part
+  of #4880) — `docs/konnect-item8-design-rules-audit.md` decides **decline**
+  on adding a Konnect-style free-text design-rule store: the repo already
+  has five overlapping mechanisms in this space (`DesignIntent.constraints`,
+  the typed `kicad_tools.intent` package, manufacturer profiles,
+  recipe-embedded intent, and — not previously catalogued — `project.kct`'s
+  `decisions:` log written by `kct spec decide`), and
+  `.claude/commands/kct/board-recipe-scaffold.md` has already settled the
+  adjacent "how do we record project *why*" question on that same
+  `decisions:` surface with an explicit "do not invent a fifth artifact"
+  principle. Two follow-ups are recommended rather than bundled: registering
+  the fully-implemented-but-unwired `declare_interface`/`declare_power_rail`/
+  `list_intents`/`clear_intent` MCP tools, and surfacing
+  `intent.constraints`/`decisions` into MCP session context so an LLM agent
+  can see prior human-recorded guidance without a human re-pasting it.
 - **kicad-tools.org benchmarks section** (#4952, Epic #4932 Phase 3) — a new
   `/benchmarks` page on the demo-gallery site presenting Phase 2's committed
   results (PocketBeagle + BeagleConnect Freedom, #4942) side by side with
@@ -1171,6 +1186,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`kct route` accepted KiCad 10 name-only nets but wrote zero copper and
+  reported a vacuous "SUCCESS" (0/0 nets)** (#4983) — a PCB saved in KiCad
+  10's name-only net syntax (`(net "SIGNAL")` on pads, no numeric net table
+  entries at all) made the router's pad-extraction paths
+  (`load_pcb_for_routing`, `load_pads_for_analysis` in `router/io.py`)
+  resolve every name-only pad's net to `net_num=0` — the "no net" obstacle
+  sentinel — because their name-to-id map was built only from the
+  numeric-plus-name dialect's top-level `(net N "NAME")` table, which a
+  name-only board may not have at all. `--nets <NAME>` preflight is
+  schema-level and dialect-aware so it still accepted the request, but the
+  routing graph never received a bound pad pair for that net, and `kct
+  route` reported `Nets routed: 0/0` / "SUCCESS: All signal nets routed!"
+  and exited 0 while writing an unrouted output. A new shared
+  `_build_net_number_map()` normalizes both dialects (numeric-plus-name and
+  name-only, including synthesizing stable ids for name-only nets with no
+  header table) before the routing graph, net-class auto-classification, and
+  output connectivity verification are built, so a name-only board routes
+  identically to its numeric-dialect equivalent. A `--nets`-specific guard
+  (`_reject_lost_route_only_bindings`) now aborts with a non-zero exit
+  instead of reporting vacuous success if a requested net's pad bindings are
+  ever lost after preflight already confirmed the net exists with 2+ pads.
 - **`PCB.remove_segments()` silently left copper behind on boards with a
   non-zero `board_origin`** (#4933) — the coordinate-fallback match (for
   segments/vias with no UUID) rebuilt an in-memory removal key without

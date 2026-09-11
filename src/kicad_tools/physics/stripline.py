@@ -63,8 +63,8 @@ def _vacuum_impedance(w: float, h1: float, h2: float, t: float) -> float:
         ]
     starts, ends = [], []
     for first, last in edges:
-        first, last = np.asarray(first), np.asarray(last)
-        points = first + fractions[:, None] * (last - first)
+        first_point, last_point = np.asarray(first), np.asarray(last)
+        points = first_point + fractions[:, None] * (last_point - first_point)
         starts.extend(points[:-1])
         ends.extend(points[1:])
     a, b = np.asarray(starts), np.asarray(ends)

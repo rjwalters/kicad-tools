@@ -2,6 +2,8 @@
 
 import json
 import logging
+import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -16,6 +18,22 @@ from kicad_tools.export.manufacturing import (
     _sha256_file,
 )
 from kicad_tools.export.preflight import PreflightChecker, PreflightConfig, PreflightResult
+
+
+@pytest.fixture
+def local_symbol_project(tmp_path):
+    """A real schematic with a generated local symbol, independent of stock libraries."""
+    from kicad_tools.schematic.models.schematic import Schematic
+
+    project = tmp_path / "project"
+    project.mkdir()
+    pcb = project / "board.kicad_pcb"
+    pcb.write_text("(kicad_pcb)")
+    sch = Schematic(title="Portable symbols")
+    sch.add_pwr_symbol("VMOTOR", x=100, y=100)
+    sch.write(project / "board.kicad_sch")
+    (project / "board.kicad_pro").write_text("{}")
+    return pcb
 
 
 class TestSha256File:
@@ -101,6 +119,136 @@ class TestCreateProjectZip:
 
         zip_path = _create_project_zip(project_dir / "board.kicad_pcb", out_dir, "my_project.zip")
         assert zip_path.name == "my_project.zip"
+
+    @pytest.mark.parametrize("prefix", ["", "${KIPRJMOD}/"])
+    def test_local_symbols_preserve_paths_and_deduplicate(
+        self, local_symbol_project, tmp_path, prefix
+    ):
+        pcb = local_symbol_project
+        project = pcb.parent
+        nested = project / "symbols" / "nested"
+        nested.mkdir(parents=True)
+        source = project / "kicad_tools_pwr.kicad_sym"
+        shutil.copyfile(source, nested / "power.kicad_sym")
+        table = project / "sym-lib-table"
+        table.write_text(
+            "(sym_lib_table (version 7)"
+            '(lib (name "direct") (type "KiCad") (uri "${KIPRJMOD}/kicad_tools_pwr.kicad_sym"))'
+            f'(lib (name "kicad_tools_pwr") (type "KiCad") (uri "{prefix}symbols/nested/power.kicad_sym"))'
+            f'(lib (name "alias") (type "KiCad") (uri "{prefix}symbols/nested/power.kicad_sym")))'
+        )
+        (project / "other.kicad_pcb").write_text("(kicad_pcb)")
+        (project / "board_backup_old.kicad_sch").write_text("(kicad_sch)")
+        archive = _create_project_zip(pcb, tmp_path)
+        with zipfile.ZipFile(archive) as zf:
+            assert set(zf.namelist()) == {
+                "board.kicad_pcb",
+                "board.kicad_sch",
+                "board.kicad_pro",
+                "sym-lib-table",
+                "kicad_tools_pwr.kicad_sym",
+                "symbols/nested/power.kicad_sym",
+            }
+            assert len(zf.namelist()) == len(set(zf.namelist()))
+            extracted = tmp_path / "extracted"
+            zf.extractall(extracted)
+        assert (extracted / "symbols/nested/power.kicad_sym").read_bytes() == source.read_bytes()
+        assert (extracted / "sym-lib-table").read_bytes() == table.read_bytes()
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "${KIPRJMOD}/missing.kicad_sym",
+            "../outside.kicad_sym",
+            "/tmp/outside.kicad_sym",
+            "C:/outside.kicad_sym",
+            "${KICAD10_SYMBOL_DIR}/Device.kicad_sym",
+            "https://example.com/a.kicad_sym",
+        ],
+    )
+    def test_missing_or_nonportable_library_fails_before_zip(
+        self, local_symbol_project, tmp_path, uri
+    ):
+        pcb = local_symbol_project
+        (pcb.parent / "sym-lib-table").write_text(
+            f'(sym_lib_table (lib (name "test") (type "KiCad") (uri "{uri}")))'
+        )
+        with pytest.raises((ValueError, FileNotFoundError), match="symbol library 'test'"):
+            _create_project_zip(pcb, tmp_path)
+        assert not (tmp_path / "kicad_project.zip").exists()
+
+    @pytest.mark.parametrize(
+        "table", ["(sym_lib_table", "(wrong)", '(sym_lib_table (lib (name "bad")))']
+    )
+    def test_malformed_table(self, local_symbol_project, tmp_path, table):
+        pcb = local_symbol_project
+        (pcb.parent / "sym-lib-table").write_text(table)
+        with pytest.raises(ValueError, match="sym-lib-table|symbol library"):
+            _create_project_zip(pcb, tmp_path)
+
+    def test_external_symlink_is_not_packaged(self, local_symbol_project, tmp_path):
+        pcb = local_symbol_project
+        library = pcb.parent / "kicad_tools_pwr.kicad_sym"
+        outside = tmp_path / "outside.kicad_sym"
+        library.rename(outside)
+        library.symlink_to(outside)
+        with pytest.raises(ValueError, match="resolves outside project"):
+            _create_project_zip(pcb, tmp_path)
+
+    def test_native_erc_library_resolution_survives_extraction(
+        self, local_symbol_project, tmp_path
+    ):
+        from kicad_tools.cli.runner import find_kicad_cli
+
+        cli = find_kicad_cli()
+        if cli is None:
+            pytest.skip("kicad-cli not installed")
+        pcb = local_symbol_project
+        # Exercise a real nested dependency, not just ZIP member presence.
+        project = pcb.parent
+        (project / "symbols").mkdir()
+        (project / "kicad_tools_pwr.kicad_sym").rename(project / "symbols/power.kicad_sym")
+        table = project / "sym-lib-table"
+        table.write_text(
+            table.read_text().replace("/kicad_tools_pwr.kicad_sym", "/symbols/power.kicad_sym")
+        )
+
+        def library_findings(schematic, name):
+            report = tmp_path / f"{name}.json"
+            process = subprocess.run(
+                [
+                    str(cli),
+                    "sch",
+                    "erc",
+                    "--format",
+                    "json",
+                    "--severity-all",
+                    "--output",
+                    str(report),
+                    str(schematic),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert process.returncode == 0, process.stderr
+            data = json.loads(report.read_text())
+            return [
+                v
+                for sheet in data["sheets"]
+                for v in sheet["violations"]
+                if v["type"] == "lib_symbol_issues"
+            ]
+
+        assert library_findings(project / "board.kicad_sch", "original") == []
+        archive = _create_project_zip(pcb, tmp_path)
+        extracted = tmp_path / "extracted"
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(extracted)
+        assert library_findings(extracted / "board.kicad_sch", "extracted") == []
+        # Positive control: this native invocation detects the original omission.
+        (extracted / "sym-lib-table").unlink()
+        assert library_findings(extracted / "board.kicad_sch", "missing")
 
 
 class TestManufacturingConfig:
@@ -402,17 +550,10 @@ class TestManufacturingPackageExport:
     but exercise the project ZIP and manifest logic for real.
     """
 
-    def test_project_zip_and_manifest(self, tmp_path, monkeypatch):
+    def test_project_zip_and_manifest(self, tmp_path, monkeypatch, local_symbol_project):
         """Test that project ZIP and manifest are generated correctly."""
         # Create a minimal project directory
-        project_dir = tmp_path / "project"
-        project_dir.mkdir()
-        pcb = project_dir / "board.kicad_pcb"
-        pcb.write_text("(kicad_pcb)")
-        sch = project_dir / "board.kicad_sch"
-        sch.write_text("(kicad_sch)")
-        pro = project_dir / "board.kicad_pro"
-        pro.write_text("{}")
+        pcb = local_symbol_project
 
         out_dir = tmp_path / "output"
 
@@ -457,6 +598,8 @@ class TestManufacturingPackageExport:
             assert "board.kicad_pcb" in zf.namelist()
             assert "board.kicad_sch" in zf.namelist()
             assert "board.kicad_pro" in zf.namelist()
+            assert "sym-lib-table" in zf.namelist()
+            assert "kicad_tools_pwr.kicad_sym" in zf.namelist()
 
         # Manifest should exist
         assert result.manifest_path is not None
@@ -473,6 +616,19 @@ class TestManufacturingPackageExport:
         # to result.manifest_path AFTER writing. So let's just verify checksums.
         bom_sha = manifest["files"]["bom_jlcpcb.csv"]["sha256"]
         assert bom_sha == _sha256_file(result.assembly_result.bom_path)
+        zip_info = manifest["files"]["kicad_project.zip"]
+        assert zip_info["sha256"] == _sha256_file(result.project_zip_path)
+        assert zip_info["size"] == result.project_zip_path.stat().st_size
+
+    def test_symbol_dependency_error_marks_export_failed(self, local_symbol_project, tmp_path):
+        pcb = local_symbol_project
+        (pcb.parent / "kicad_tools_pwr.kicad_sym").unlink()
+        package = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb")
+        result = ManufacturingResult(output_dir=tmp_path)
+        package._generate_project_zip(tmp_path, result)
+        assert not result.success
+        assert result.project_zip_path is None
+        assert "Missing project symbol library" in result.errors[0]
 
     def test_no_report_flag(self, tmp_path, monkeypatch):
         """Test that --no-report skips report generation."""

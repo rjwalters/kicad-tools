@@ -46,8 +46,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BOARD_DIR = REPO_ROOT / "boards" / "05-bldc-motor-controller"
-DESIGN_PY = BOARD_DIR / "design.py"
+BOARD_DIR = REPO_ROOT / "tests" / "fixtures" / "historical_demo_boards" / "05-bldc-motor-controller"
+DESIGN_PY = REPO_ROOT / "boards" / "05-bldc-motor-controller" / "design.py"
 
 # Expected DRV8301 invariants -- the BOM is the ground truth (it
 # determines what TI part actually ships on the board).
@@ -259,3 +259,25 @@ def test_design_py_emits_u3_value_drv8301(tmp_path: Path) -> None:
             f'``generate_htssop56("U3", ..., value=...)`` was edited '
             f"to a different string -- reconcile with the schematic."
         )
+
+
+def test_revision_b_main_delegates_and_preserves_exit_status(monkeypatch, tmp_path):
+    """The manufacturing entry point must execute the real redesign recipe."""
+    module = _load_design_module()
+    events = []
+    monkeypatch.setattr(module, "require_spec", lambda path: events.append(("spec", path)))
+    monkeypatch.setattr(module.sys, "argv", ["design.py", str(tmp_path)])
+
+    def call(argv):
+        events.append(("build", argv))
+        return 7
+
+    monkeypatch.setattr(module.subprocess, "call", call)
+    assert module.main() == 7
+    assert events == [
+        ("spec", str(DESIGN_PY)),
+        (
+            "build",
+            [module.sys.executable, str(DESIGN_PY.parent / "redesign/build.py"), str(tmp_path)],
+        ),
+    ]

@@ -20,7 +20,7 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 38 (37 SMD, 1 THT, 0 other) |
 | Nets | 27 |
-| Traces | 2025 segments |
+| Traces | 2048 segments |
 | Vias | 151 |
 | Board Size | 80.0 x 60.0 mm |
 
@@ -157,26 +157,47 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 ## DRC Status
 
-The reviewed fabrication checker and independent native KiCad refill each pass
-with zero errors and warnings; native connectivity has zero open connections.
-The checker uses the explicitly verified 0.45 mm pad-hole spacing supported by
-the selected factory. The generic profile's 0.50 mm floor gives 14 advisories;
-none are suppressed in the reviewed checker. See check-report.json for override
-provenance, native-drc.json for independent evidence, and fill-consistency.json
-for exported-copper parity.
+| Metric | Count |
+|--------|-------|
+| Errors | 0 |
+| Warnings | 14 |
+| Blocking | 0 |
+
+**Status**: PASS
+### Violations by Type
+
+| Violation Type | Count |
+|----------------|-------|
+| hole_to_hole_clearance | 14 |
+
+
+\newpage
+
+## Reviewed Factory Verification
+
+The generic report above uses a conservative 0.50 mm pad-hole floor and reports
+14 hole-spacing warnings. The selected factory process explicitly permits
+0.45 mm; native project rules and the reviewed checker use that same floor.
+No findings are suppressed. Fresh check-report.json records 51 evaluated rules,
+zero errors/warnings, and label plus copper LVS with 129 bound pads and zero
+mismatches. Independent native DRC/refill and ERC report zero violations and
+zero opens. Per-net, per-layer filled copper matches the independent refill
+exactly (fill-consistency.json). All 23 repaired off-angle segments are now
+45-degree aligned; the USB branch skew is 0.165685 mm, within the reviewed bound.
 
 ## Manufacturing Readiness
 
-**Verdict**: READY for fabrication and assembly review with the specified process.
+**Verdict**: READY for the specified fabrication and assembly process.
 
-Order the exact four-layer construction and Epoxy-filled & Capped POFV/VIPPO
-option in manufacturing-requirements.json. J1 is a separate through-hole
-soldering operation after the 37 SMT placements. Firmware and fuse programming
-instructions are included. The final native/ERC/LVS gates pass, and exported
-copper matches an independent native refill on all four layers.
+Order the reviewed four-layer construction and Epoxy-filled & Capped POFV/VIPPO
+option in manufacturing-requirements.json. The exact supplier BOM covers 37 SMT
+placements; J1 is a separate through-hole assembly operation in manual-assembly-bom.csv.
+The editable project includes the custom ISP footprint library and native rules.
+Unchanged compiled firmware and its source are supplied with programming instructions.
+Physical bring-up, USB electrical qualification, and first-article inspection
+remain unperformed; this is not a USB certification claim.
 
-Physical joystick operation, USB electrical/suspend qualification, and first-article
-inspection remain unperformed. No claim of USB certification is made.
+\newpage
 
 ## Routing Status
 

@@ -13,6 +13,20 @@ To order assembled PCBs from JLCPCB, you need:
 
 kicad-tools can generate all of these in JLCPCB's required format.
 
+The manufacturing package's `kicad_project.zip` includes the selected PCB,
+adjacent schematic/project files, and the project-local `sym-lib-table` with
+its referenced KiCad symbol libraries. Relative paths and `${KIPRJMOD}/`
+paths retain their subdirectories after extraction. Repeated references
+to the same file produce one archive member.
+
+Project ZIP creation reports an export error for a malformed table, missing
+library, or nonportable table entry (absolute paths, parent traversal,
+host environment variables, non-KiCad libraries, or symlinks outside the
+project). Move those dependencies under the project and use project-relative
+URIs before exporting. Libraries supplied by KiCad's global installation
+are not copied; footprint libraries and 3D models are outside this symbol
+packaging support.
+
 ## Prerequisites
 
 ```bash

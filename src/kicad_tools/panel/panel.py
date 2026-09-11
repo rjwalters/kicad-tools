@@ -939,7 +939,8 @@ def _offset_positions(node: SExp, dx: float, dy: float) -> None:
 def _remap_reference(footprint_node: SExp, instance_index: int) -> None:
     """Prefix footprint reference designators with board index.
 
-    Changes e.g. "R1" to "B0_R1" for board instance 0.
+    Changes e.g. "R1" to "B0_R1" for board instance 0. Prefer the modern
+    Reference property; fall back to legacy fp_text reference fields.
     """
     for child in footprint_node.children:
         if child.name == "property" and len(child.children) >= 2:
@@ -952,4 +953,16 @@ def _remap_reference(footprint_node: SExp, instance_index: int) -> None:
                 and isinstance(value_child.value, str)
             ):
                 child.children[1] = SExp(value=f"B{instance_index}_{value_child.value}")
+                return
+
+    for child in footprint_node.children:
+        if child.name == "fp_text" and len(child.children) >= 2:
+            kind, value = child.children[:2]
+            if (
+                kind.is_atom
+                and kind.value == "reference"
+                and value.is_atom
+                and isinstance(value.value, str)
+            ):
+                child.children[1] = SExp(value=f"B{instance_index}_{value.value}")
                 return
