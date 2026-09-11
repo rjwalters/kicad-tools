@@ -306,6 +306,12 @@ def route_net(
                     "net_name": net_name,
                     "layer": pad_layer,
                     "through_hole": is_through_hole,
+                    # Issue #4910: ``schema.pcb.Pad.rotation`` is ABSOLUTE in
+                    # the board frame (it already folds in the footprint
+                    # rotation), and no width/height axis swap is applied
+                    # here, so the full angle IS the residual the router's
+                    # obstacle models need for a correct rotated-pad AABB.
+                    "rotation": pad.rotation,
                 }
                 component_pads[fp.reference].append(pad_info)
                 net_pads.append(pad_info)
@@ -1110,6 +1116,9 @@ def _build_pads_for_net(
                     pin=pad.number,
                     through_hole=is_through_hole,
                     drill=pad.drill,
+                    # Absolute board-frame pad angle; see the identical note
+                    # in ``_build_router_pads``-style dict above (#4910).
+                    rotation=pad.rotation,
                 )
             )
 

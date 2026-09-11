@@ -237,7 +237,9 @@ public:
     void add_pad(float x, float y, float width, float height,
                  int net, int layer_idx, uint32_t ref_hash,
                  float clearance_override,
-                 bool is_plane_net = false);
+                 bool is_plane_net = false, float rotation = 0.0f);
+
+    void set_pad_via_policy(size_t index, float clearance, bool carveout_eligible);
 
     // Register a completed route's segments for clearance validation.
     void add_stored_segment(float x1, float y1, float x2, float y2,

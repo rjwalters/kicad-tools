@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 21
+_REQUIRED_CPP_BUILD_VERSION = 22
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -935,6 +935,7 @@ class CppGrid:
         from .grid import _is_plane_net_pad
 
         component_pitches = grid.compute_component_pitches()
+        grid._component_pitch_cache = component_pitches
 
         # Issue #3371 / P_FP2: Fine-pitch escape regions installed on the
         # grid (empty list when the detector has not run, which is the
@@ -1001,8 +1002,12 @@ class CppGrid:
                 ref_hash,
                 clearance_override,
                 is_plane_net,
+                pad.rotation,
             )
 
+        from .grid import _sync_pad_via_policies
+
+        _sync_pad_via_policies(grid, cpp_grid)
         return cpp_grid
 
     def index_to_layer(self, index: int) -> int:
@@ -2578,17 +2583,26 @@ class CppPathfinder:
                 float(cpp_seg.x2),
                 float(cpp_seg.y2),
             )
-            # Issue #1018: compute the (possibly necked-down) width once per
-            # C++ segment, BEFORE the dogleg split -- matching the Python
-            # backend, where ``_emit_segment`` computes the width on the
-            # merged segment endpoints and applies it to both dogleg legs.
-            seg_width = _segment_width(
-                float(cpp_seg.x1),
-                float(cpp_seg.y1),
-                float(cpp_seg.x2),
-                float(cpp_seg.y2),
-            )
-            for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
+            from .neck_down import taper_points
+
+            centers = []
+            if start_needs_neckdown:
+                centers.append((start.x, start.y))
+            if end_needs_neckdown:
+                centers.append((end.x, end.y))
+            split_points = [points[0]]
+            for a, b in zip(points, points[1:], strict=False):
+                split_points.extend(
+                    taper_points(
+                        a,
+                        b,
+                        centers,
+                        self._rules.neck_down_distance,
+                        self._rules.grid_resolution,
+                    )[1:]
+                )
+            for (sx, sy), (ex, ey) in zip(split_points, split_points[1:], strict=False):
+                seg_width = _segment_width(sx, sy, ex, ey)
                 if sx == ex and sy == ey:
                     continue
                 seg = Segment(
@@ -2681,8 +2695,8 @@ class CppPathfinder:
     ) -> tuple[float, float] | None:
         """Validate post-route geometric clearance using C++ validation.
 
-        Issue #2439: Uses the C++ validate_route() call which runs all 4
-        validation checks (segment-pad, segment-segment, via-segment,
+        Issue #2439: Uses the C++ validate_route() call which runs
+        validation checks (segment-pad, segment-segment, via-pad, via-segment,
         via-via, same-net drill spacing) in a single C++ call, eliminating
         Python callback overhead.
 
@@ -2772,6 +2786,11 @@ class CppPathfinder:
         # trace-vs-trace copper, not pads and vias).  No-op without a voltage
         # map.
         self._sync_pairwise_domains_to_cpp()
+
+        if route.vias and py_grid is not None:
+            from .grid import _sync_pad_via_policies
+
+            _sync_pad_via_policies(py_grid, self._grid)
 
         vresult = self._grid._impl.validate_route(
             cpp_segs,

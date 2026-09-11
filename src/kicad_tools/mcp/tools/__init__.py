@@ -29,6 +29,7 @@ from kicad_tools.mcp.tools.design import (
     validate_design,
     validate_move,
 )
+from kicad_tools.mcp.tools.design_intent import get_design_intent
 from kicad_tools.mcp.tools.explain import (
     explain_drc_violations,
     explain_net,
@@ -87,6 +88,7 @@ __all__ = [
     "explain_rule",
     "export_gerbers",
     "get_decision_history",
+    "get_design_intent",
     "get_drc_violations",
     "get_requirements",
     "get_session_context",

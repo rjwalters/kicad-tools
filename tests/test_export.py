@@ -870,6 +870,80 @@ class TestAssemblyPackageJLCPCBTHTIntegration:
         assert "J1" not in cpl_content
 
 
+class TestAssemblyPackageExplicitSourcingIntegration:
+    """Integration regression for issue #4995.
+
+    Uses the real ``boards/06-diffpair-test`` fixture -- the exact
+    reproduction cited in the issue. Its ``project.kct`` spec explicitly
+    sources J1/J2/J3 as Samtec headers (``mpn`` set, no ``lcsc``). Before
+    the fix, ``enrich_bom_lcsc``'s generic (value, footprint) auto-matcher
+    silently assigned J1 an unrelated LCSC part (``C404027``); after the
+    fix, these three references must stay unresolved (blank ``LCSC Part
+    #``) even with default ``auto_lcsc=True``.
+    """
+
+    def test_board06_explicit_samtec_headers_stay_unresolved(self):
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+
+        repo_root = Path(__file__).resolve().parent.parent
+        board_dir = repo_root / "boards" / "06-diffpair-test"
+        pcb_path = board_dir / "output" / "diffpair_test_routed.kicad_pcb"
+        if not pcb_path.exists():
+            pytest.skip("board06 routed fixture not present in this checkout")
+
+        config = AssemblyConfig(
+            include_bom=True,
+            include_pnp=False,
+            include_gerbers=False,
+            auto_lcsc=True,  # exercise the default, not the --no-auto-lcsc workaround
+            merge_lcsc=False,  # isolate spec-overlay behavior from any committed CSV
+        )
+
+        pkg = AssemblyPackage(
+            pcb_path=pcb_path,
+            manufacturer="jlcpcb-tier1",
+            config=config,
+        )
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            result = pkg.export(output_dir=out_dir)
+
+            assert result.bom_path is not None
+            with open(result.bom_path, newline="") as f:
+                rows = list(csv.DictReader(f))
+
+        by_ref: dict[str, dict] = {}
+        for row in rows:
+            for ref in row["Designator"].split(","):
+                by_ref[ref.strip()] = row
+
+        # J1/J2/J3 are the explicit Samtec-sourced headers from the spec --
+        # they must never acquire a generic LCSC substitute.
+        for ref in ("J1", "J2", "J3"):
+            assert ref in by_ref, f"{ref} missing from generated BOM"
+            assert by_ref[ref]["LCSC Part #"] == "", (
+                f"{ref} acquired an unreviewed LCSC substitute "
+                f"({by_ref[ref]['LCSC Part #']!r}) despite explicit Samtec "
+                "sourcing with no LCSC in the project spec (issue #4995)"
+            )
+
+        # Sanity: the enrichment report distinguishes this from a genuine
+        # "no match found" and other refs are unaffected (still get an
+        # LCSC either from the spec overlay or generic auto-matching).
+        assert result.lcsc_enrichment is not None
+        assert result.lcsc_enrichment.spec_unresolved == 3
+        assert {
+            e for entry in result.lcsc_enrichment.spec_unresolved_entries for e in entry.references
+        } == {
+            "J1",
+            "J2",
+            "J3",
+        }
+
+
 class TestExtractTHTExclusions:
     """Tests for extract_tht_exclusions (issue #3539)."""
 

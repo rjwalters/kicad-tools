@@ -58,6 +58,7 @@ from .geometry import (
     segment_to_segment_distance as _geom_seg_to_seg_dist,
 )
 from .layers import Layer, LayerDefinition, LayerStack, LayerType
+from .pad_geometry import pad_local_point, pad_point_distance
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 
 # Floating-point tolerance for clearance comparisons in validate_routes
@@ -2232,9 +2233,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             # do NOT add fp_rot on top of it (same fix as load_pcb_for_routing).
             pad_rot_match = re.search(r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block)
             pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
-            total_rot = pad_rot % 360
-            if abs(total_rot - 90) < 1 or abs(total_rot - 270) < 1:
-                width, height = height, width
+            width, height, pad_rotation = _resolve_pad_dims_and_rotation(pad_rot, width, height)
 
             # Extract net. Handles both the numeric-plus-name dialect
             # (``(net N "NAME")``) and the KiCad 9/10 name-only dialect
@@ -2271,6 +2270,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                     layer=layer,
                     through_hole=is_thru,
                     footprint_name=footprint_name,
+                    rotation=pad_rotation,
                 )
             )
 
@@ -2414,16 +2414,14 @@ def validate_routes(
                 # 1.475 x 0.3 mm) along their short axis by ~0.6 mm and
                 # produced false-positive ``[pad]`` clearance violations
                 # for traces that legally clear the rectangular copper.
-                # Pad ``width``/``height`` are already rotated into PCB
-                # space at load time, so the bounding box is correct.
+                # Transform to the residual-angle local pad frame so the
+                # rectangle represents rotated copper, not its enlarged AABB.
                 effective_dist = (
                     _segment_to_aabb_distance(
-                        segment.x1,
-                        segment.y1,
-                        segment.x2,
-                        segment.y2,
-                        pad.x,
-                        pad.y,
+                        *pad_local_point(pad, segment.x1, segment.y1),
+                        *pad_local_point(pad, segment.x2, segment.y2),
+                        0.0,
+                        0.0,
                         pad.width / 2,
                         pad.height / 2,
                     )
@@ -2609,12 +2607,7 @@ def validate_routes(
                 # rectangle rather than a bounding circle so anisotropic
                 # SMD lands do not produce false-positive via-clearance
                 # violations along their short axis.
-                effective_dist = (
-                    _point_to_aabb_distance(
-                        via.x, via.y, pad.x, pad.y, pad.width / 2, pad.height / 2
-                    )
-                    - via_radius
-                )
+                effective_dist = pad_point_distance(pad, via.x, via.y) - via_radius
 
                 if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
                     # Issue #2757: cross-net pad on the same component is
@@ -3271,6 +3264,43 @@ def route_pcb(
     return sexp, stats
 
 
+def _resolve_pad_dims_and_rotation(
+    pad_rot: float, width: float, height: float
+) -> tuple[float, float, float]:
+    """Board-space ``(width, height, rotation)`` for a pad angle (issue #4910).
+
+    ``pad_rot`` is the pad's ABSOLUTE board-frame angle in degrees (already
+    includes the parent footprint rotation -- issue #3902). At a pad angle
+    within 1 degree of 90/270 the pad's local width/height axes are swapped
+    (this predates #4910 and is unchanged here, so every existing cardinal
+    -rotated pad's ``width``/``height`` stay byte-identical). The returned
+    ``rotation`` is the RESIDUAL angle that swap does not already absorb --
+    ``pad_rot - 90``/``pad_rot - 270`` immediately after a swap fires (a
+    small residual, since the swap only fires near those angles), or
+    ``total_rot`` unchanged when it does not (every non-cardinal angle, e.g.
+    30 or 45 degrees, where width/height are the untouched local dims).
+    An angle within 1 degree of 180 is likewise reduced to ``total_rot -
+    180`` WITHOUT a swap: an axis-aligned bounding box is invariant under a
+    half-turn, so this is exactly equivalent and keeps the extremely common
+    exactly-180-degree pad on :func:`pad_half_extents`' zero-rotation
+    fast path (no trig, hence not even a 1-ulp shift from pre-#4910 values).
+
+    Feeding ``(width, height, rotation)`` to
+    :func:`kicad_tools.router.primitives.pad_half_extents` reproduces the
+    exact true board-space AABB for ANY ``pad_rot`` -- see that function's
+    docstring and :class:`~kicad_tools.router.primitives.Pad`'s ``rotation``
+    field docstring for the algebraic identity this relies on.
+    """
+    total_rot = pad_rot % 360
+    if abs(total_rot - 90) < 1:
+        return height, width, total_rot - 90.0
+    if abs(total_rot - 270) < 1:
+        return height, width, total_rot - 270.0
+    if abs(total_rot - 180) < 1:
+        return width, height, total_rot - 180.0
+    return width, height, total_rot
+
+
 def _extract_pad_blocks(section: str) -> list[str]:
     """
     Extract complete (pad ...) S-expression blocks from a footprint section.
@@ -3464,6 +3494,7 @@ def _install_fine_pitch_regions_from_components(
                         pin=str(pad_info.get("number", "")),
                         through_hole=bool(pad_info.get("through_hole", False)),
                         drill=float(pad_info.get("drill", 0.0)),
+                        rotation=float(pad_info.get("rotation", 0.0)),
                     )
                 )
             except (TypeError, ValueError, KeyError):
@@ -3832,11 +3863,11 @@ def load_pcb_for_routing(
             # Rotate pad dimensions to PCB space. The pad's angle is stored
             # ABSOLUTE in the file (KiCad already folds the footprint rotation
             # into it -- issue #3902), so it IS the board-frame orientation;
-            # do NOT add fp_rot on top of it.
-            total_rot = pad_rot % 360
-            # At 90° or 270° the pad's width and height axes swap
-            if abs(total_rot - 90) < 1 or abs(total_rot - 270) < 1:
-                pad_w, pad_h = pad_h, pad_w
+            # do NOT add fp_rot on top of it. At 90/270 degrees the pad's
+            # width/height axes swap; ``pad_rotation`` is the RESIDUAL angle
+            # that swap does not already absorb (issue #4910) -- see
+            # ``_resolve_pad_dims_and_rotation`` for the full convention.
+            pad_w, pad_h, pad_rotation = _resolve_pad_dims_and_rotation(pad_rot, pad_w, pad_h)
 
             pads.append(
                 {
@@ -3850,6 +3881,7 @@ def load_pcb_for_routing(
                     "through_hole": pad_type == "thru_hole",
                     "drill": drill_size,
                     "layer": pad_layer,
+                    "rotation": pad_rotation,
                 }
             )
 

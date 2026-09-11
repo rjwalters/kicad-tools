@@ -299,8 +299,6 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
                 errors.append(f"{name}: {layer} width {width} gives {z:.2f} ohm outside 45–55")
         impedance[name] = measured
         trace_capacitance[name] = capacitance_pf
-        if capacitance_pf > 20.0:
-            errors.append(f"{name}: trace capacitance {capacitance_pf:.3f} pF exceeds 20 pF")
         load = external_load(name, capacitance_pf, report.via_count)
         external_loads[name] = load
         if load["estimated_external_load_pf"] > load["external_limit_pf"]:
@@ -410,7 +408,12 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
         "validation_scope": "Physical/electrical design preflight; manufacturing bundle is a separate gate",
         "manufacturing_complete": manifest_status == "PASSED",
         "manufacturing_manifest_status": manifest_status,
-        "capacitance_scope": "Traces only; package and full through-via barrel capacitance excluded",
+        "capacitance_scope": (
+            "trace_capacitance_pf models traces only; external_load_estimates includes "
+            "receiver and full-via engineering allowances (ISSI receiver maxima where "
+            "specified; DQ receiver reserve). Geometry-derived via capacitance and "
+            "confirmed MCU package/input corners remain excluded; see #5134."
+        ),
         "hardware_tested": False,
         "assembly_inventory_verified": False,
     }
