@@ -12,7 +12,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -21,6 +21,27 @@ from kicad_tools.schema.schematic import Schematic
 
 class Record(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, strict=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def supported_numeric_range(cls, value: Any) -> Any:
+        # Bound every numeric input, including curve coordinates, before any
+        # arithmetic. This is deliberately far wider than physical electronics
+        # budgets while keeping powers/products away from float under/overflow.
+        def check(item: Any) -> None:
+            if isinstance(item, (int, float)) and not isinstance(item, bool):
+                magnitude = abs(item)
+                if magnitude > 1e20 or (0 < magnitude < 1e-20) or not math.isfinite(item):
+                    raise ValueError("nonzero numeric inputs must have magnitude in [1e-20, 1e20]")
+            elif isinstance(item, dict):
+                for child in item.values():
+                    check(child)
+            elif isinstance(item, (list, tuple)):
+                for child in item:
+                    check(child)
+
+        check(value)
+        return value
 
 
 class Evidence(Record):
@@ -38,7 +59,7 @@ class Rating(Record):
     basis: Literal["ambient", "terminal", "flange"]
     power_w: float = Field(gt=0)
     # Piecewise-linear [temperature C, fraction of power_w]. No extrapolation.
-    derating: list[tuple[float, float]] = Field(min_length=2)
+    derating: list[Annotated[tuple[float, float], Field(strict=False)]] = Field(min_length=2)
     requires_mounting: bool
     provenance: Provenance
 

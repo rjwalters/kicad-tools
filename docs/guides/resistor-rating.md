@@ -16,6 +16,10 @@ Use `Budget.model_json_schema()` from `kicad_tools.analysis.resistor_rating`
 to obtain the complete input schema. Unknown fields, nonfinite numbers,
 invalid curves, duplicate references, and invalid sample periods are rejected.
 All field names include their units; resistance tolerance is a fraction.
+Nonzero numeric inputs must have magnitude between `1e-20` and `1e20`
+(inclusive); zero is allowed where the field permits it. Values outside this
+documented arithmetic range are rejected as incomplete instead of risking
+underflow/overflow false passes. This includes curve coordinates and fractions.
 
 ## Minimal continuous-load sidecar
 

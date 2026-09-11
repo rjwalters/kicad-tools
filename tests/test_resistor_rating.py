@@ -259,3 +259,22 @@ def test_numeric_overflow_and_string_review_attestation_are_not_passes(budget):
     data["resistors"][0]["states"]["active"]["reviewed_power_includes_tolerance"] = "false"
     with pytest.raises(ValueError):
         run()
+
+
+@pytest.mark.parametrize("case", ["derating_span_overflow", "voltage_square_underflow"])
+def test_extreme_finite_inputs_cannot_produce_false_pass(budget, case):
+    data, run, path, _ = budget
+    part = data["resistors"][0]
+    state = part["states"]["active"]
+    if case == "derating_span_overflow":
+        part["ratings"][0]["derating"] = [[-1e308, 1], [1e308, 0]]
+        state["temperature_c"] = 1e307
+        state["samples"] = [{"duration_s": 1, "power_w": 1.5}]
+        state["reviewed_power_includes_tolerance"] = True
+    else:
+        part["resistance_ohm"] = 1e-300
+        part["ratings"][0]["power_w"] = 1e-110
+        state["samples"][0]["voltage_v"] = 1e-200
+    with pytest.raises(ValueError, match="numeric inputs"):
+        run()
+    assert main([str(path)]) == 2
