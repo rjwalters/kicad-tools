@@ -273,3 +273,31 @@ def test_failed_declared_requirement_cli(bound_files, capsys):
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "failed"
     assert result["networks"][0]["source_binding"] == "verified"
+
+
+@pytest.mark.parametrize("conflict_first", [True, False])
+def test_cross_network_resistance_conflict_is_incomplete(bound_files, conflict_first):
+    path, sidecar, policy = bound_files
+    conflicting = copy.deepcopy(policy["networks"][0])
+    conflicting["id"] = "conflicting-network"
+    conflicting["resistors"]["top"][0]["ohms"] = 10
+    policy["networks"].insert(0 if conflict_first else 1, conflicting)
+    sidecar.write_text(json.dumps(policy))
+    report = analyze_thresholds(path, sidecar)
+    assert report["status"] == "incomplete"
+    assert not report["networks"]
+    assert any("conflicting-network: R1: modeled resistance" in issue for issue in report["issues"])
+
+
+def test_consistent_resistor_reuse_across_networks_is_bound(bound_files):
+    path, sidecar, policy = bound_files
+    repeated = copy.deepcopy(policy["networks"][0])
+    repeated["id"] = "second-network"
+    policy["networks"].append(repeated)
+    sidecar.write_text(json.dumps(policy))
+    report = analyze_thresholds(path, sidecar)
+    assert report["status"] == "sampled", report
+    assert not report["issues"]
+    assert len(report["networks"]) == 2
+    assert all(row["source_binding"] == "verified" for row in report["networks"])
+    assert report["networks"][0]["thresholds"] == report["networks"][1]["thresholds"]

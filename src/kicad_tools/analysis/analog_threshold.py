@@ -272,12 +272,14 @@ def analyze_thresholds(schematic: str | Path, policy_path: str | Path) -> dict[s
     if not networks:
         issues.append("No networks declared")
     needed: set[str] = set()
-    resistor_values: dict[str, float] = {}
+    resistor_values: dict[str, list[tuple[str, float]]] = {}
     for network in networks:
         for parts in network.get("resistors", {}).values():
             for part in parts:
                 needed.add(part["reference"])
-                resistor_values[part["reference"]] = part["ohms"]
+                resistor_values.setdefault(part["reference"], []).append(
+                    (network.get("id", "<unnamed>"), part["ohms"])
+                )
         devices = network.get("devices", {})
         required_devices = (
             {"comparator"}
@@ -307,8 +309,11 @@ def analyze_thresholds(schematic: str | Path, policy_path: str | Path) -> dict[s
         if ref in resistor_values:
             try:
                 actual = parse_unit_value(bound_symbol.value)
-                if actual.unit not in {"", "Ω"} or actual.value != resistor_values[ref]:
-                    issues.append(f"{ref}: modeled resistance differs from schematic")
+                for network_id, resistance in resistor_values[ref]:
+                    if actual.unit not in {"", "Ω"} or actual.value != resistance:
+                        issues.append(
+                            f"{network_id}: {ref}: modeled resistance differs from schematic"
+                        )
             except ValueError:
                 issues.append(f"{ref}: cannot resolve schematic resistance")
     if issues:
