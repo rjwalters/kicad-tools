@@ -7,11 +7,16 @@ means the supplied evidence matches the input bytes; it does **not** establish
 board readiness, human approval, factory matching, available inventory, reserved
 stock, or feeder/attrition requirements.
 
-Milestone B (exact-ID inventory observations) remains outstanding and depends on
-#5033/#5034, tracked by PRs #5115/#5090. `refresh_inventory(plan)` currently raises
-`NotImplementedError` before accessing anything. Preparation has no client,
-credential, or transport argument, and does not read supplier environment
-variables. No live availability evidence is produced.
+Milestone B (exact-ID inventory observations) has a **narrow, partial** increment:
+`refresh_inventory` observes exact-ID stock through a caller-supplied adapter and
+preserves unknown-vs-zero evidence, but it targets only the current, pre-merge
+`kicad_tools.parts.jlcpcb_api` contract. Full milestone B depends on #5033/#5034
+(tracked by PRs #5115/#5090) landing their result/provenance/freshness contracts;
+until then this module does not claim source/observation-age provenance beyond a
+caller-supplied timestamp, and #5142 stays open. Preparation itself
+(`prepare_submission`) has no client, credential, or transport argument and does
+not read supplier environment variables — it never produces live availability
+evidence.
 
 ## Python API
 
@@ -180,6 +185,70 @@ and removal, but not a successfully published partial handoff. The input roots a
 destination parent must remain controlled by the caller; this is not protection
 against an attacker renaming the filesystem namespace during publication.
 
-Refreshing future stock observations must use separate files outside the frozen
-bundle and bind plan/BOM/quantity/demand hashes. That behavior is not implemented
-by milestone A. #5142 remains open for milestone B.
+## Inventory refresh (narrow milestone B increment)
+
+```python
+from kicad_tools.export.submission_plan import refresh_inventory
+from kicad_tools.parts import JLCCredentials, JLCOpenAPIClient
+
+creds = JLCCredentials.from_env()  # or construct explicitly; never silent-fallback
+assert creds is not None
+with JLCOpenAPIClient(creds) as client:
+    snapshot = refresh_inventory(
+        plan,
+        source=client,
+        destination=Path("inventory/board-run-1-2026-01-01.json"),
+        observed_at="2026-01-01T00:00:00Z",  # caller-supplied clock, not module-generated
+    )
+print(snapshot.sha256)
+```
+
+`refresh_inventory` never constructs a client, reads credentials, or falls back to
+an anonymous/offline source — it requires an already-built `source` object (the
+official `JLCOpenAPIClient`, or any object exposing a structurally compatible
+`get_component_detail_raw(codes) -> list[dict]`, per the `InventorySource`
+protocol). All local plan-shape validation (schema version, demand entries, bound
+BOM hash, explicit `observed_at`, destination outside the published handoff)
+happens **before** `source` is touched, so a malformed plan or destination never
+reaches the network.
+
+The deduplicated, sorted approved-ID set from the plan's `demand` list is queried
+once. Each ID is classified independently:
+
+| status | meaning |
+|---|---|
+| `verified` | Adapter returned a genuine non-negative int `stockCount`; `raw_stock` holds it (0 is valid and distinct from unknown). |
+| `missing-field` | The matched component object had no `stockCount` key. |
+| `malformed` | `stockCount` was present but not a non-negative int (string, negative, bool, float, …). |
+| `not-returned` | No component with this exact code appeared in the adapter's response. |
+| `forbidden` | Auth, permission, or IP-whitelist failure for the whole batch. |
+| `quota-error` | Rate limit/quota failure for the whole batch. |
+| `transport-error` | Any other adapter/API failure for the whole batch. |
+| `dependency-error` | The adapter's transport dependency (e.g. `requests`) was unavailable. |
+| `incomplete-response` | The response envelope succeeded but its payload shape was unusable. |
+
+Only `verified` ever carries a non-`None` `raw_stock`; every other status leaves
+it `None` rather than defaulting to zero. A component the adapter returns for an
+ID that was never requested is read and discarded — it can never satisfy a
+different code's demand ("no automatic substitution").
+
+The resulting `InventorySnapshot` is written once to an explicit `destination`
+**outside the published handoff directory** (which stays read-only) as a new,
+non-overwritable file, then bound to `plan_sha256`, the bound BOM output hash,
+`board_quantity`, and the exact `demand` mapping copied from the plan. Refreshing
+never mutates `plan.plan_bytes` or any file inside the handoff directory; calling
+it again with the same plan and `observed_at` reproduces byte-identical output,
+while a different `observed_at`, plan, or adapter response changes it. The
+snapshot's own `states` block never claims human review, factory matching, upload,
+reservation, or feeder/attrition evidence — those remain out of scope here as in
+milestone A.
+
+**What remains blocked on #5033/#5034/#5115/#5090:** those PRs add a
+`lookup_result()`/provenance contract (source identity, original observation
+time, snapshot revision/time, a documented freshness policy) to the shared parts
+layer. Until they land, `refresh_inventory` cannot safely surface that richer
+provenance without inventing it, so `observed_at` is caller-supplied and
+per-adapter source identity is not recorded beyond the coarse status above. This
+module also does not add a parallel signer/HTTP client, and does not confirm the
+live signing variant documented in `jlcpcb_api.py` actually works against the
+real API — no current supplier availability is claimed by any test in this repo.
