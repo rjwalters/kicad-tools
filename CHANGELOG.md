@@ -40,6 +40,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artifacts — `install-metadata.json`'s `clients_installed` /
   `skills_selected` / `installed_files` fields accumulate (union) across
   repeated or switched-client runs instead of being replaced.
+- **`kct route --reserve-plane-layers`: controlled-impedance signal-layer
+  reservation guardrail** (#5014) — `LayerDefinition.is_routable` treats
+  every copper layer as signal-eligible by design, including layers a
+  `--layers 4`-style stack designates as a GND/PWR reference plane, so
+  ordinary signal could silently consume the continuous plane a
+  controlled-impedance recipe depends on. `--reserve-plane-layers`
+  hard-restricts routing to the resolved stack's non-`PLANE` layers (via
+  `DesignRules.allowed_layers`, issue #715's pre-existing enforcement); a
+  new route-time advisory recommends the flag whenever a plane-bearing
+  stack is resolved without it, and a post-route audit reports any
+  committed signal segment that still landed on a declared plane layer. A
+  no-op on stacks with no `PLANE` layers (`--layers 2`, `4-all`, or an
+  all-signal `auto`-detected board). See
+  `kicad_tools.router.layer_advisories` for the full contract.
 - **Konnect item 8 audit: natural-language design-rule store** (#4902, Part
   of #4880) — `docs/konnect-item8-design-rules-audit.md` decides **decline**
   on adding a Konnect-style free-text design-rule store: the repo already
@@ -1252,6 +1266,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`_reject_lost_route_only_bindings`) now aborts with a non-zero exit
   instead of reporting vacuous success if a requested net's pad bindings are
   ever lost after preflight already confirmed the net exists with 2+ pads.
+- **`PCBEditor.add_zone` silently bound an unknown net to net 0 instead of
+  rejecting it, and both `PCBEditor.add_zone` / `ZoneGenerator.add_zone`
+  accepted arbitrary/disabled layer strings** (#4907) — `PCBEditor.add_zone`
+  resolved `net_name` through `get_net_number`'s `dict.get(name, 0)`
+  fallback, so a typo'd or nonexistent net silently produced a zone bound to
+  net 0 (`net_name` still recorded the wrong string) rather than an error.
+  Both `PCBEditor.add_zone` and `ZoneGenerator.add_zone` (used by
+  `kct pcb add-zone` and `kct zones add`) also passed `layer` through
+  unchecked, so misspelled layers (`"DefinitelyNotALayer"`), real
+  non-copper layers (`"F.SilkS"`), and inner copper layers not declared on
+  the specific board (`"In1.Cu"` on a 2-layer board) were written straight
+  into the zone node. Both writers now validate the net against the board's
+  declared net table and the layer against a new shared
+  `core.layers.validate_copper_layer` helper (canonical spelling via the
+  existing `COPPER_LAYER_ORDER`, plus board-declared/enabled-copper-layer
+  membership) *before* any document mutation, so rejected calls leave the
+  PCB untouched; both CLI routes surface the resulting `ValueError` as a
+  nonzero exit with an actionable message in text and JSON modes. Valid
+  known nets and F.Cu/B.Cu/declared-inner-layer zones are unaffected.
 - **`--strict-layers` was silently inert on the lattice engine, which shipped
   copper onto explicitly forbidden layers** (#4979) — `avoid_layers` is
   promoted to a HARD no-go set by

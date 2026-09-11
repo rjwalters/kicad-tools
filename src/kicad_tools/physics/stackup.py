@@ -120,6 +120,7 @@ class Stackup:
     board_thickness_mm: float = 1.6
     copper_finish: str = ""
     has_explicit_data: bool = False
+    construction: dict | None = None
 
     @classmethod
     def from_pcb(cls, pcb: PCB) -> Stackup:
@@ -339,22 +340,56 @@ class Stackup:
 
     @classmethod
     def jlcpcb_4layer(cls) -> Stackup:
-        """JLCPCB JLC04161H-3313 4-layer stackup.
+        """Compatibility alias for the historical model, not an orderable stack.
 
-        Standard 1.6mm 4-layer:
-        - F.Cu: 35um (1oz)
-        - Prepreg: 0.2104mm (7075), er=4.05
-        - In1.Cu: 17.5um (0.5oz)
-        - Core: 1.065mm, er=4.6
-        - In2.Cu: 17.5um (0.5oz)
-        - Prepreg: 0.2104mm (7075), er=4.05
-        - B.Cu: 35um (1oz)
-
-        Total: ~1.6mm
-
-        Returns:
-            JLCPCB 4-layer Stackup
+        Numerical defaults are preserved. Select ``jlcpcb_named`` explicitly
+        for a verified factory construction; see docs/guides/stackup-presets.md.
         """
+        return cls.jlcpcb_4layer_legacy()
+
+    @classmethod
+    def jlcpcb_named(cls, identifier: str) -> Stackup:
+        """Factory 1.6mm, 1oz outer / 0.5oz inner constructions.
+
+        Source: https://jlcpcb.com/impedance, verified 2026-09-10.
+        Nominal board thickness is distinct from the summed layer thickness.
+        Loss tangent retains a model assumption, not a sourced factory limit.
+        """
+        values = {
+            "JLC04161H-3313": (0.0994, 4.1, 1.265, "FR4 3313"),
+            "JLC04161H-7628": (0.2104, 4.4, 1.065, "FR4 7628"),
+        }
+        if identifier not in values:
+            raise ValueError(f"Unsupported factory stackup: {identifier}")
+        height, epsilon, core, material = values[identifier]
+        stack = cls.jlcpcb_4layer_legacy()
+        for index in (1, 5):
+            stack.layers[index].thickness_mm = height
+            stack.layers[index].epsilon_r = epsilon
+            stack.layers[index].material = material
+        for index in (2, 4):
+            stack.layers[index].thickness_mm = 0.0152
+        stack.layers[3].thickness_mm = core
+        # The table defines construction, not a mandatory surface finish.
+        stack.copper_finish = ""
+        stack.construction = {
+            "id": identifier,
+            "factory_id": identifier,
+            "manufacturer": "jlcpcb",
+            "source_url": "https://jlcpcb.com/impedance",
+            "verified_on": "2026-09-10",
+            "nominal_board_thickness_mm": 1.6,
+            "outer_copper_oz": 1.0,
+            "inner_copper_oz": 0.5,
+            "assumptions": [
+                "Loss tangent 0.02 is a model assumption, not a sourced factory limit."
+            ],
+        }
+        return stack
+
+    @classmethod
+    def jlcpcb_4layer_legacy(cls) -> Stackup:
+        """Historical 0.2104mm / er=4.05 model; no factory ordering identity."""
         return cls(
             layers=[
                 StackupLayer(
@@ -412,6 +447,7 @@ class Stackup:
             ],
             board_thickness_mm=1.6,
             copper_finish="HASL",
+            construction={"id": "jlcpcb-4-legacy", "factory_id": None, "compatibility_only": True},
         )
 
     @classmethod
@@ -931,6 +967,7 @@ class Stackup:
             Dictionary with stackup information
         """
         return {
+            "construction": self.construction,
             "board_thickness_mm": self.board_thickness_mm,
             "num_copper_layers": self.num_copper_layers,
             "copper_finish": self.copper_finish,

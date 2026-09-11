@@ -219,3 +219,17 @@ class TestPathAmpacityRule:
         results = rule.check(pcb, _design_rules_2oz())
         assert results.errors == []
         assert results.warnings == []
+
+
+@pytest.mark.parametrize("bridge", [False, True])
+def test_layer_transition_is_audited_before_ampacity(bridge):
+    pcb = _t_network_pcb(trunk_width=6.3)
+    pcb.segments[1].layer = "B.Cu"
+    if bridge:
+        pcb.add_via(60, 50, net="NET1")
+    result = PathAmpacityRule(specs=[_trunk_spec(), _sense_spec()]).check(pcb, _design_rules_2oz())
+    if bridge:
+        assert result.errors == []
+    else:
+        assert result.errors
+        assert any("unresolved" in error.message.lower() for error in result.errors)

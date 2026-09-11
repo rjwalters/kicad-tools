@@ -64,10 +64,12 @@ from typing import TYPE_CHECKING
 from kicad_tools.cli.relocate_in_pad_vias import (
     _PLANE_DIRECTIONS,
     _check_clearance,
+    _check_stub_clearance,
     _collect_smd_pads_by_net,
     _collect_tht_pads,
     _endpoint_at,
     _pad_copper_layer,
+    _persist_via_with_stubs,
 )
 from kicad_tools.validate.rules.via_pad_geometry import via_inside_pad
 
@@ -202,6 +204,8 @@ def _find_target(
     tht_pads: list,
     min_clearance: float,
     min_hole_to_hole: float,
+    stub_layers: list[str] | None = None,
+    stub_width: float = 0.2,
 ) -> tuple[float, float] | None:
     """Find the first clearance-safe location that clears the hole-to-hole floor.
 
@@ -241,6 +245,10 @@ def _find_target(
         if (
             _check_clearance(
                 pcb, via, nx, ny, pads_by_net, tht_pads, min_clearance, min_hole_to_hole
+            )
+            is None
+            and _check_stub_clearance(
+                pcb, via, (nx, ny), stub_layers or [], stub_width, min_clearance
             )
             is None
         ):
@@ -287,13 +295,6 @@ def _try_relocate(
             key=lambda item: math.hypot(item[1][0] - vx, item[1][1] - vy),
         )
 
-    target = _find_target(
-        pcb, via, escape_far, pads_by_net, tht_pads, min_clearance, min_hole_to_hole
-    )
-    if target is None:
-        return None
-    new_x, new_y = target
-
     # Connectivity stub layers: the pad's copper layer plus every connected
     # segment's layer (deduplicated, order-preserving).
     stub_layers: list[str] = []
@@ -310,22 +311,28 @@ def _try_relocate(
     widths = [seg.width for seg, _ in connected if seg.width > 0]
     stub_width = min(widths) if widths else 0.2
 
+    target = _find_target(
+        pcb,
+        via,
+        escape_far,
+        pads_by_net,
+        tht_pads,
+        min_clearance,
+        min_hole_to_hole,
+        stub_layers,
+        stub_width,
+    )
+    if target is None:
+        return None
+    new_x, new_y = target
+
     if not dry_run:
-        # Append connectivity stubs BEFORE moving the via so the old location
-        # stays bonded to the new one on every connected layer.  Skip a layer
-        # whose old->new leg already exists (avoids duplicating an escape leg
-        # when the via slides onto its own escape node).
-        for layer in stub_layers:
-            if _segment_exists(pcb, via.net_number, layer, (vx, vy), (new_x, new_y)):
-                continue
-            pcb.add_trace(
-                (vx, vy),
-                (new_x, new_y),
-                width=stub_width,
-                layer=layer,
-                net=net_name or None,
-            )
-        if not pcb.relocate_via(via, (new_x, new_y)):
+        additions = [
+            layer
+            for layer in stub_layers
+            if not _segment_exists(pcb, via.net_number, layer, (vx, vy), target)
+        ]
+        if not _persist_via_with_stubs(pcb, via, target, additions, stub_width, net_name):
             return None
 
     return DrillClearanceRelocation(
@@ -367,6 +374,13 @@ def relocate_drill_clearance(
         clearance-safe: a via is moved only to a location that passes
         :func:`_check_clearance`, so the pass never introduces a new violation.
     """
+    if dry_run:
+        import copy
+
+        # Later candidates must see earlier planned vias AND their stubs.
+        # Simulating the normal mutation path also keeps reports equivalent.
+        return relocate_drill_clearance(copy.deepcopy(pcb), design_rules, nets=nets)
+
     result = DrillClearanceRelocationResult()
 
     min_clearance = design_rules.min_clearance_mm

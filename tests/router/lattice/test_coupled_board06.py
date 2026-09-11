@@ -1,6 +1,7 @@
 """Board-06 diff-pair coupled-routing witness on the lattice engine (#4270).
 
-Negotiates the real ``boards/06-diffpair-test`` signal net set through the
+Negotiates the historical ``boards/06-diffpair-test/regression-fixture``
+signal net set through the
 lattice engine with the production pair grouping
 (:meth:`Autorouter._lattice_coupled_connections` -- detection, engagement,
 endpoint pairing, impedance-solved pitch + fab floor) and asserts the
@@ -23,6 +24,7 @@ manually (see PR #4270 test plan).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import warnings
@@ -38,8 +40,17 @@ from kicad_tools.router.rules import DesignRules
 pytestmark = pytest.mark.slow
 
 _REPO = Path(__file__).resolve().parents[3]
-_BOARD = _REPO / "boards/06-diffpair-test/output/diffpair_test.kicad_pcb"
-_CLASS_MAP = _REPO / "boards/06-diffpair-test/output/net_class_map.json"
+# d95b6eff replaced output/ with a four-channel LVDS hardware design. This
+# nine-pair algorithm witness must retain its original USB/PCIe/MIPI geometry.
+# Existing archives match pre-redesign ff4287fe5aabb7cc922979fa631af25d69cf5ab8.
+# Current assembled hardware remains covered by test_board06_real_hardware.py.
+_ARCHIVE = _REPO / "boards/06-diffpair-test/regression-fixture"
+_BOARD = _ARCHIVE / "diffpair_test.kicad_pcb"
+_CLASS_MAP = _ARCHIVE / "net_class_map.json"
+_INPUT_HASHES = {
+    _BOARD: "d69b22100589c86892219723a26e4ba7a08954dc583043ff80e334e119f60143",
+    _CLASS_MAP: "91c01ccfd7aa467fcabe741fdf9e19ba2de709ebdc8e1b48b84cf97fbe0fdee6",
+}
 
 _SIGNAL_ONLY = {"GND", "+3V3", "+1V8", "+1V2", "VBUS_USB"}
 
@@ -52,6 +63,10 @@ _EXPECTED_COUPLED_FLOOR = 5
 def negotiated():
     from kicad_tools.router.io import load_pcb_for_routing
     from kicad_tools.router.rules import net_class_map_from_dict
+
+    # Fail before expensive negotiation if this immutable witness drifts.
+    for path, expected_hash in _INPUT_HASHES.items():
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash, path
 
     rules = DesignRules(trace_width=0.2, trace_clearance=0.15, manufacturer="jlcpcb")
     with warnings.catch_warnings():

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import kicad_tools
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
+from kicad_tools.exceptions import KiCadToolsError
 from kicad_tools.parts.lcsc import LCSCDependencyMissingError
 from kicad_tools.sexp import parse_file
 
@@ -40,6 +41,7 @@ class ManufacturingConfig(AssemblyConfig):
     project_zip_name: str = "kicad_project.zip"
 
     # Manifest settings
+    stackup_id: str | None = None
     include_manifest: bool = True
     manifest_name: str = "manifest.json"
 
@@ -89,6 +91,7 @@ class ManufacturingResult:
     report_path: Path | None = None
     report_md_path: Path | None = None
     project_zip_path: Path | None = None
+    stackup_path: Path | None = None
     manifest_path: Path | None = None
     readme_path: Path | None = None
     image_paths: list[Path] = field(default_factory=list)
@@ -124,6 +127,8 @@ class ManufacturingResult:
             files.append(self.project_zip_path)
         if self.readme_path:
             files.append(self.readme_path)
+        if self.stackup_path:
+            files.append(self.stackup_path)
         if self.manifest_path:
             files.append(self.manifest_path)
         return files
@@ -417,6 +422,19 @@ class ManufacturingPackage:
         out_dir = Path(output_dir) if output_dir else self.config.output_dir
         result = ManufacturingResult(output_dir=out_dir)
 
+        selected_stackup_source_hash: str | None = None
+        if self.config.stackup_id:
+            from .stackup import stackup_ordering_record
+
+            try:
+                if self.manufacturer not in {"jlcpcb", "jlcpcb-tier1"}:
+                    raise ValueError("JLCPCB construction requires a JLCPCB manufacturer")
+                initial_record = stackup_ordering_record(self.pcb_path, self.config.stackup_id)
+                selected_stackup_source_hash = initial_record["pcb_sha256"]
+            except (OSError, ValueError, KiCadToolsError) as exc:
+                result.errors.append(f"Stackup ordering validation failed: {exc}")
+                return result
+
         if dry_run:
             return self._dry_run(out_dir, result)
 
@@ -535,6 +553,20 @@ class ManufacturingPackage:
         # Step 3.5: README.txt (optional)
         if self.config.include_readme:
             self._generate_readme(out_dir, result)
+
+        # Record the actual source again after generation, before hashing the bundle.
+        if self.config.stackup_id:
+            from .stackup import stackup_ordering_record
+
+            try:
+                record = stackup_ordering_record(self.pcb_path, self.config.stackup_id)
+                if record["pcb_sha256"] != selected_stackup_source_hash:
+                    raise ValueError("PCB changed during manufacturing export")
+            except (OSError, ValueError, KiCadToolsError) as exc:
+                result.errors.append(f"Stackup ordering validation failed: {exc}")
+                return result
+            result.stackup_path = out_dir / "stackup-ordering.json"
+            result.stackup_path.write_text(json.dumps(record, indent=2) + "\n")
 
         # Step 4: Manifest (always last -- needs checksums of other files)
         if self.config.include_manifest:
