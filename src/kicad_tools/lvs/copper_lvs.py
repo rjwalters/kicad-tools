@@ -114,7 +114,7 @@ class CopperLVSResult:
     ``clean`` is ``True`` iff ``mismatches`` is empty.  ``shorts`` and
     ``opens`` partition the mismatches by kind for convenient reporting.
 
-    ``bound_pad_count`` records how many board pads carried a real
+    ``bound_pad_count`` records how many distinct logical board pins carried a real
     (non-``None``) schematic net — the amount of evidence the diff was
     computed from.  ``None`` means the count was not recorded (results
     hand-built by older callers/tests); results produced by
@@ -149,6 +149,8 @@ def compare_partitions(
     schematic_net_of_pad: dict[tuple[str, str], str | None],
     copper_partition: list[frozenset[str]],
     advisory_net_names: frozenset[str] = frozenset(),
+    *,
+    pad_bindings: dict[str, tuple[str, str]] | None = None,
 ) -> CopperLVSResult:
     """Diff a physical copper partition against a schematic netlist.
 
@@ -168,6 +170,12 @@ def compare_partitions(
             (issue #4615).
         copper_partition: list of ``frozenset`` pad-id groups (``"REF.PAD"``
             form) from :meth:`ConnectivityValidator.extract_pad_partition`.
+        pad_bindings: Optional explicit occurrence-id -> (reference, pin)
+            mapping from ``extract_pad_occurrences``. Each physical occurrence
+            binds independently, even when several share one schematic pin.
+            Without this mapping, legacy REF.PAD groups remain supported,
+            including repeated logical membership in separate islands.
+            ``bound_pad_count`` continues to count distinct logical pins.
         advisory_net_names: nets whose completeness diff should be
             suppressed for ``open`` reporting only (``short`` reporting is
             NOT suppressed — a pour net copper-fused to a foreign net is
@@ -204,21 +212,45 @@ def compare_partitions(
         single synthetic ``kind="vacuous"`` mismatch and
         ``bound_pad_count=0`` instead of a vacuous ``clean=True``.
     """
-    # Build {pad_id -> schematic_net} restricted to pads that (a) have a
-    # real schematic net and (b) actually appear on the board, so the diff
-    # only considers pads both sides agree exist.  Pads only on one side are
-    # the label-based comparator's concern.
-    on_board: set[str] = set()
-    for comp in copper_partition:
-        on_board |= comp
+    # Normalize legacy logical groups into distinct occurrences per island.
+    # A repeated REF.PAD across islands must not be overwritten or treated as
+    # a singleton schematic net. Explicit bindings avoid suffix parsing.
+    display: dict[str, str] = {}
+    logical_binding: dict[str, tuple[str, str] | None] = {}
+    if pad_bindings is None:
+        logical_lookup = {f"{ref}.{pad}": (ref, pad) for ref, pad in schematic_net_of_pad}
+        normalized = []
+        for index, comp in enumerate(copper_partition):
+            nodes = set()
+            for offset, logical in enumerate(sorted(comp)):
+                node = f"{index}:{offset}"
+                nodes.add(node)
+                display[node] = logical
+                logical_binding[node] = logical_lookup.get(logical)
+            normalized.append(frozenset(nodes))
+        copper_partition = normalized
+    else:
+        seen: set[str] = set()
+        for comp in copper_partition:
+            for node in comp:
+                if node not in pad_bindings or node in seen:
+                    raise ValueError("Physical pad must have one binding and one copper island")
+                seen.add(node)
+                logical_binding[node] = pad_bindings[node]
+                display[node] = ".".join(pad_bindings[node])
 
+    if pad_bindings is not None and seen != set(pad_bindings):
+        raise ValueError("Every bound physical occurrence must appear in the partition")
+
+    on_board = set().union(*copper_partition) if copper_partition else set()
     pad_net: dict[str, str] = {}
-    for (ref, pad), net in schematic_net_of_pad.items():
-        if net is None:
-            continue
-        pad_id = f"{ref}.{pad}"
-        if pad_id in on_board:
-            pad_net[pad_id] = net
+    bound_logical: set[tuple[str, str]] = set()
+    for node, binding in logical_binding.items():
+        net = schematic_net_of_pad.get(binding) if binding is not None else None
+        if net is not None:
+            pad_net[node] = net
+            assert binding is not None
+            bound_logical.add(binding)
 
     # --- Vacuity guard (#4005 review): zero bound pads means the diff
     #     below can detect neither shorts nor opens, so an empty mismatch
@@ -250,7 +282,7 @@ def compare_partitions(
     for comp in copper_partition:
         # Net name -> representative (smallest) pad id in this component.
         net_rep: dict[str, str] = {}
-        for pad_id in sorted(comp):
+        for pad_id in sorted(comp, key=lambda node: (display[node], node)):
             net = pad_net.get(pad_id)
             if net is None:
                 continue
@@ -267,8 +299,8 @@ def compare_partitions(
                         kind="short",
                         net_a=na,
                         net_b=nb,
-                        pad_a=net_rep[na],
-                        pad_b=net_rep[nb],
+                        pad_a=display[net_rep[na]],
+                        pad_b=display[net_rep[nb]],
                     )
                 )
 
@@ -280,8 +312,8 @@ def compare_partitions(
         net_to_pads.setdefault(net, []).append(pad_id)
 
     for net, pads in sorted(net_to_pads.items()):
-        # A single-pad net cannot be open — there is nothing to connect it
-        # to.  NOTE (#4615): this skip is also why the per-pad auto-naming
+        # A single physical occurrence cannot be open. Multiple lands bound
+        # to the same schematic pin must still reach one copper island.  NOTE (#4615): this skip is also why the per-pad auto-naming
         # bug MASKED opens.  Every unnamed net presented one pad per
         # identity, so no unnamed net could ever be reported open however
         # badly it was routed.  With canonical per-component identities they
@@ -303,23 +335,25 @@ def compare_partitions(
             continue
         # Report one open per pair of distinct islands, using the smallest
         # pad in each island as the witness.
-        island_reps = [sorted(members)[0] for members in comps.values()]
-        island_reps.sort()
+        island_reps = [
+            min(members, key=lambda node: (display[node], node)) for members in comps.values()
+        ]
+        island_reps.sort(key=lambda node: (display[node], node))
         for i in range(len(island_reps) - 1):
             mismatches.append(
                 CopperLVSMismatch(
                     kind="open",
                     net_a=net,
                     net_b=net,
-                    pad_a=island_reps[i],
-                    pad_b=island_reps[i + 1],
+                    pad_a=display[island_reps[i]],
+                    pad_b=display[island_reps[i + 1]],
                 )
             )
 
     return CopperLVSResult(
         clean=not mismatches,
         mismatches=tuple(mismatches),
-        bound_pad_count=len(pad_net),
+        bound_pad_count=len(bound_logical),
     )
 
 
@@ -356,14 +390,14 @@ def compare_copper_netlist(sch_path: str | Path, pcb_path: str | Path) -> Copper
 
     schematic_net_of_pad = _schematic_pin_to_net(sch_path)
     validator = ConnectivityValidator(pcb_path)
-    copper_partition = validator.extract_pad_partition()
+    copper_partition, pad_bindings = validator.extract_pad_occurrences()
 
     # No advisory net-wide open suppression here (Issue #4982; historically
     # derived from `build_zone_net_map()` per #3914). The #5133 extractor
     # traces actual contact with separate fill solids: neither zone ownership
     # nor a net label is a physical bridge. Suppressing every open on a
     # zone-owning net would hide real disconnected islands.
-    return compare_partitions(schematic_net_of_pad, copper_partition)
+    return compare_partitions(schematic_net_of_pad, copper_partition, pad_bindings=pad_bindings)
 
 
 def result_to_json(result: CopperLVSResult) -> dict:

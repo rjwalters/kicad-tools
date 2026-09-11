@@ -242,3 +242,38 @@ def test_pour_graph_preserves_existing_via_trace_contact_depth(tmp_path, with_fi
     fills = [[(5, 4), (6, 4), (6, 6), (5, 6)]] if with_fill else []
     text = board(pad("A", 2, 5, "F.Cu") + pad("B", via_x, 5, "B.Cu"), fills, "B.Cu", extra)
     assert bonded(partition(tmp_path, text)) is bond
+
+
+@pytest.mark.parametrize("gap", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_duplicate_physical_pad_edge_via_contact(tmp_path, gap, reverse):
+    from kicad_tools.lvs.copper_lvs import compare_partitions
+
+    x = 5.5 if gap else 5.2
+    lands = [
+        '(pad "1" smd rect (at 0 0) (size .3 .7) (layers "F.Cu") (net 1 "N"))',
+        '(pad "1" smd rect (at 10 0) (size .3 .7) (layers "F.Cu") (net 1 "N"))',
+    ]
+    if reverse:
+        lands.reverse()
+    duplicate = (
+        f'(footprint "test" (layer "F.Cu") (at {x} 5)'
+        '(property "Reference" "A" (at 0 0) (layer "F.SilkS"))' + "".join(lands) + ")"
+    )
+    path = tmp_path / "duplicate-via.kicad_pcb"
+    path.write_text(
+        board(
+            duplicate + pad("B", 9, 5, "In1.Cu"),
+            [[(4, 4), (10, 4), (10, 6), (4, 6)]],
+            "In1.Cu",
+            '(via (at 5 5.15) (size .45) (drill .25) (layers "F.Cu" "B.Cu") (net 1))',
+        )
+    )
+    groups, bindings = ConnectivityValidator(path).extract_pad_occurrences()
+    assert list(bindings.values()).count(("A", "1")) == 2
+    assert sum(map(len, groups)) == 3
+    assert len(groups) == (3 if gap else 2)
+    result = compare_partitions({("A", "1"): "N", ("B", "1"): "N"}, groups, pad_bindings=bindings)
+    assert result.bound_pad_count == 2
+    assert len(result.opens) == (2 if gap else 1)
+    assert not result.shorts

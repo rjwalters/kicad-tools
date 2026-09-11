@@ -176,3 +176,104 @@ def test_routing_port_substitution_cannot_pass_physical_geometry_gate(tmp_path):
     pad.position = (pad.position[0] + 1.25, pad.position[1])
     assert pad.net_name == original_net
     assert validate.physical_pad_geometry(candidate) != validate.physical_pad_geometry(source)
+
+
+def test_external_load_gate_and_report_scope(tmp_path, monkeypatch):
+    """Exercise check() decisions with synthetic measurements, not native evidence."""
+    import json
+    from types import SimpleNamespace as NS
+
+    import pytest
+
+    validate = load("validate")
+    source = tmp_path / "source"
+    source.mkdir()
+    for suffix in (".kicad_pcb", ".kicad_pro", ".kicad_sch"):
+        (source / f"sdram_demo{suffix}").write_text("synthetic test source")
+    (source / "circuit.json").write_text('{"pin_nets": {}}')
+    segment = NS(layer="In3.Cu", width=0.2, start=(0, 0), end=(105, 0), uuid="trace", net_name="A0")
+    board = NS(
+        footprints=[],
+        vias=[],
+        _sexp=NS(find_children=lambda _: []),
+        segments=[segment],
+        get_net_by_name=lambda _: NS(number=1),
+        segments_in_net=lambda _: [segment],
+        vias_in_net=lambda _: [],
+    )
+    monkeypatch.setattr(validate.PCB, "load", lambda _: board)
+    monkeypatch.setattr(
+        validate, "NetStatusAnalyzer", lambda *a, **k: NS(analyze=lambda: NS(nets=[]))
+    )
+    monkeypatch.setattr(
+        validate,
+        "TraceLengthAnalyzer",
+        lambda: NS(analyze_net=lambda *a: NS(segment_count=1, total_length_mm=105, via_count=2)),
+    )
+    stack = NS(layers=[NS(name="In3.Cu", is_signal_layer=True)], is_outer_layer=lambda _: False)
+    monkeypatch.setattr(validate.Stackup, "from_pcb", lambda _: stack)
+    monkeypatch.setattr(validate, "copper_elevations", lambda _: {})
+    monkeypatch.setattr(
+        validate,
+        "TransmissionLine",
+        lambda _: NS(stripline=lambda **k: NS(z0=50, phase_velocity=1e8)),
+    )
+    monkeypatch.setattr(validate, "timing_errors", lambda *a: [])
+    monkeypatch.setattr(validate, "write_lvs_report", lambda *a, **k: (True, True))
+
+    def emit_rules(path, *args, **kwargs):
+        path.with_suffix(".kicad_dru").write_text("synthetic test rules")
+
+    monkeypatch.setattr(validate, "write_drc_constraints", emit_rules)
+
+    def fake_run(args, **kwargs):
+        if args[0] == "kct":
+            output = Path(args[args.index("--output") + 1])
+            report = {
+                "summary": {"errors": 0, "warnings": 0},
+                "meta_checks": {
+                    **{key: {"status": "PASSED"} for key in ("drc", "erc", "lvs")},
+                    "manifest": {"status": "NOT RUN"},
+                },
+            }
+        elif args[0] == "kicad-cli":
+            output = Path(args[args.index("-o") + 1])
+            report = {"violations": [], "unconnected_items": [], "sheets": []}
+        else:
+            output = Path(args[-1])
+            report = {"findings": []}
+        output.write_text(json.dumps(report))
+        return NS(returncode=2 if args[0] == "kct" else 0)
+
+    monkeypatch.setattr(validate.subprocess, "run", fake_run)
+    for name, trace_pf, expected in (
+        ("A0", 21, True),
+        ("A0", 27, False),
+        ("SDCLK", 10, False),
+        ("DQ0", 21, False),
+    ):
+        (source / "sdram_constraints.json").write_text(json.dumps({"groups": {"bus": [name]}}))
+        segment.end = (trace_pf * 5, 0)  # C'=0.2 pF/mm from the stubbed line model.
+        segment.net_name = name
+        segment.layer = "In2.Cu" if name.startswith("DQ") else "In3.Cu"
+        stack.layers = [NS(name=segment.layer, is_signal_layer=True)]
+        evidence = tmp_path / f"{name}-{trace_pf}"
+        assert validate.check(source / "sdram_demo.kicad_pcb", source, evidence) is expected
+        report = json.loads((evidence / "validation.json").read_text())
+        assert report["trace_capacitance_pf"][name] == pytest.approx(trace_pf)
+        estimate = report["external_load_estimates"][name]
+        assert estimate["via_allowance_pf"] == 2
+        assert (estimate["estimated_external_load_pf"] <= estimate["external_limit_pf"]) is expected
+        if expected:
+            assert estimate["estimated_external_load_pf"] == pytest.approx(26.8)
+            assert report["errors"] == []
+        else:
+            assert len(report["errors"]) == 1
+            assert "external load" in report["errors"][0]
+        assert "trace capacitance" not in " ".join(report["errors"])
+        scope = report["capacitance_scope"]
+        assert "receiver" in scope and "full-via" in scope
+        assert "engineering allowances" in scope
+        assert "geometry-derived" in scope.lower() and "MCU" in scope and "#5134" in scope
+        assert report["hardware_tested"] is False
+        assert report["manufacturing_complete"] is False

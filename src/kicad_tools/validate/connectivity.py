@@ -21,10 +21,12 @@ Example:
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from kicad_tools.validate.spatial import candidate_pairs
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
@@ -289,6 +291,32 @@ class ConnectivityValidator:
         else:
             self.pcb_path = None
             self.pcb = pcb
+        self._refresh_pad_identities()
+
+    def _refresh_pad_identities(self) -> None:
+        """Index physical occurrences independently of optional KiCad UUIDs."""
+        pads = [
+            (fi, pi, fp.reference, str(pad.number))
+            for fi, fp in enumerate(self.pcb.footprints)
+            if fp.reference and not fp.reference.startswith("#")
+            for pi, pad in enumerate(fp.pads)
+            if pad.number is not None and pad.number != ""
+        ]
+        counts = Counter(f"{ref}.{number}" for _, _, ref, number in pads)
+        self._pad_ids = {}
+        self.pad_bindings: dict[str, tuple[str, str]] = {}
+        for fi, pi, ref, number in pads:
+            logical = f"{ref}.{number}"
+            node = logical if counts[logical] == 1 else f"__pad:{fi}:{pi}"
+            self._pad_ids[fi, pi] = node
+            self.pad_bindings[node] = (ref, number)
+
+    def _pad_id(self, footprint_index: int, pad_index: int) -> str:
+        return self._pad_ids[footprint_index, pad_index]
+
+    def _pad_display(self, node: str) -> str:
+        binding = self.pad_bindings.get(node)
+        return ".".join(binding) if binding is not None else node
 
     def validate(self, *, reconcile_native: bool = False) -> ConnectivityResult:
         """Run connectivity validation on all nets.
@@ -296,6 +324,7 @@ class ConnectivityValidator:
         Returns:
             ConnectivityResult containing all issues found
         """
+        self._refresh_pad_identities()
         result = ConnectivityResult()
 
         # Issue #4498: model every same-net copper item as a graph node on
@@ -686,6 +715,19 @@ class ConnectivityValidator:
         return relationships
 
     def extract_pad_partition(self) -> list[frozenset[str]]:
+        """Return logical REF.PAD groups, retaining distinct physical islands.
+
+        A duplicate pad number may appear in several groups. Consumers must
+        not merge those groups by logical identity. For occurrence counts and
+        explicit schematic bindings use :meth:`extract_pad_occurrences`.
+        Unique-number boards retain the historical representation.
+        """
+        groups, bindings = self.extract_pad_occurrences()
+        return [frozenset(".".join(bindings[node]) for node in group) for group in groups]
+
+    def extract_pad_occurrences(
+        self,
+    ) -> tuple[list[frozenset[str]], dict[str, tuple[str, str]]]:
         """Extract the *physical* pad partition from routed copper.
 
         This is the independent-LVS primitive (issue #3742): it floods the
@@ -729,25 +771,26 @@ class ConnectivityValidator:
         load-bearing soundness property.
 
         Returns:
-            A list of ``frozenset`` pad-id groups (``"REF.PAD"`` form, e.g.
-            ``"U1.3"``).  Every footprint pad with a numeric pad number and a
+            A pair of occurrence groups and an explicit occurrence-to-(ref, pin)
+            binding dictionary. Every footprint pad with a nonempty number and a
             non-comment reference appears in exactly one group.  A pad with
             no copper touching it forms a singleton group.  Groups are
             returned sorted by their smallest member for determinism.
         """
+        self._refresh_pad_identities()
         # 1. Collect every pad on the board (label-independent) with its
         #    board-frame position and layer set.
         pad_positions: dict[str, tuple[float, float]] = {}
         pad_layers: dict[str, list[str]] = {}
-        for fp in self.pcb.footprints:
+        for fi, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
             fp_x, fp_y = fp.position
             rotation = fp.rotation
-            for pad in fp.pads:
+            for pi, pad in enumerate(fp.pads):
                 if pad.number is None or pad.number == "":
                     continue
-                pad_id = f"{fp.reference}.{pad.number}"
+                pad_id = self._pad_id(fi, pi)
                 pad_positions[pad_id] = self._transform_pad_position(
                     pad.position, fp_x, fp_y, rotation
                 )
@@ -982,7 +1025,7 @@ class ConnectivityValidator:
                 partition.append(frozenset(real_pads))
 
         partition.sort(key=lambda comp: min(comp))
-        return partition
+        return partition, dict(self.pad_bindings)
 
     def _get_net_pads(self, net_number: int) -> list[str]:
         """Get all pads on a specific net.
@@ -994,12 +1037,12 @@ class ConnectivityValidator:
             List of pad identifiers in format "REF.PAD" (e.g., "U1.3")
         """
         pads = []
-        for fp in self.pcb.footprints:
+        for fi, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
-            for pad in fp.pads:
-                if pad.net_number == net_number:
-                    pads.append(f"{fp.reference}.{pad.number}")
+            for pi, pad in enumerate(fp.pads):
+                if pad.net_number == net_number and (fi, pi) in self._pad_ids:
+                    pads.append(self._pad_id(fi, pi))
         return sorted(pads)
 
     def _build_connectivity_graph(
@@ -1031,16 +1074,16 @@ class ConnectivityValidator:
         # Get all pad positions and layer info for this net
         pad_positions: dict[str, tuple[float, float]] = {}
         pad_layers: dict[str, list[str]] = {}
-        for fp in self.pcb.footprints:
+        for fi, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
             # Get footprint position and rotation for pad position calculation
             fp_x, fp_y = fp.position
             rotation = fp.rotation
 
-            for pad in fp.pads:
-                if pad.net_number == net_number:
-                    pad_id = f"{fp.reference}.{pad.number}"
+            for pi, pad in enumerate(fp.pads):
+                if pad.net_number == net_number and (fi, pi) in self._pad_ids:
+                    pad_id = self._pad_id(fi, pi)
                     # Transform pad position from footprint-local to board coordinates
                     pad_x, pad_y = self._transform_pad_position(pad.position, fp_x, fp_y, rotation)
                     pad_positions[pad_id] = (pad_x, pad_y)
@@ -1074,7 +1117,14 @@ class ConnectivityValidator:
                 if self._points_close(pad_pos, copper_pos):
                     # Find other pads at this copper point
                     for other_id, other_pos in pad_positions.items():
-                        if other_id != pad_id and self._points_close(pad_pos, other_pos):
+                        if (
+                            other_id != pad_id
+                            and self._points_close(pad_pos, other_pos)
+                            and (
+                                self._copper_layers_of(pad_layers[pad_id])
+                                & self._copper_layers_of(pad_layers[other_id])
+                            )
+                        ):
                             graph[pad_id].add(other_id)
                             graph[other_id].add(pad_id)
 
@@ -1427,12 +1477,22 @@ class ConnectivityValidator:
 
         # Build segment adjacency graph
         segment_graph: dict[int, set[int]] = defaultdict(set)
-        for i, seg_a in enumerate(segments):
-            for j in range(i + 1, len(segments)):
-                seg_b = segments[j]
-                if self._segments_chain_at_shared_point(seg_a, seg_b, bridges):
-                    segment_graph[i].add(j)
-                    segment_graph[j].add(i)
+        # Enclose each full copper capsule, not just its centerline. The exact
+        # predicate also joins width-only side/T contacts; the query margin
+        # separately preserves legacy endpoint tolerance and layer bridges.
+        bounds = [
+            (
+                min(seg.start[0], seg.end[0]) - max(seg.width or 0.0, 0.0) / 2,
+                min(seg.start[1], seg.end[1]) - max(seg.width or 0.0, 0.0) / 2,
+                max(seg.start[0], seg.end[0]) + max(seg.width or 0.0, 0.0) / 2,
+                max(seg.start[1], seg.end[1]) + max(seg.width or 0.0, 0.0) / 2,
+            )
+            for seg in segments
+        ]
+        for i, j in candidate_pairs(bounds, self.POSITION_TOLERANCE):
+            if self._segments_chain_at_shared_point(segments[i], segments[j], bridges):
+                segment_graph[i].add(j)
+                segment_graph[j].add(i)
 
         # Find connected components of segments
         visited: set[int] = set()
@@ -1807,7 +1867,7 @@ class ConnectivityValidator:
         return circle
 
     def _eroded_pad_polygons(self, shape_aware: bool = False) -> dict[str, Any]:
-        """Board-frame eroded copper polygon per pad (``"REF.PAD"`` keys).
+        """Board-frame eroded copper polygon per physical pad node.
 
         Build :meth:`_pad_copper_polygon` geometry with the existing
         ``POUR_PAD_ERODE`` inset, omitting pads without a reference or number.
@@ -1820,15 +1880,15 @@ class ConnectivityValidator:
         actual via annuli in :meth:`_connect_via_in_pad`.
         """
         pad_polygons: dict[str, Any] = {}
-        for fp in self.pcb.footprints:
+        for fi, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
-            for pad in fp.pads:
+            for pi, pad in enumerate(fp.pads):
                 if pad.number is None or pad.number == "":
                     continue
                 poly = self._pad_copper_polygon(fp, pad, shape_aware=shape_aware)
                 if poly is not None:
-                    pad_polygons[f"{fp.reference}.{pad.number}"] = poly
+                    pad_polygons[self._pad_id(fi, pi)] = poly
         return pad_polygons
 
     def _connect_segment_in_pad(
@@ -1924,13 +1984,13 @@ class ConnectivityValidator:
         # every shape-aware outline — so it can only over-admit (the exact
         # eroded test below decides), never miss.
         pad_bounds: dict[str, tuple[float, float, float]] = {}
-        for fp in self.pcb.footprints:
+        for fi, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
-            for pad in fp.pads:
+            for pi, pad in enumerate(fp.pads):
                 if pad.number is None or pad.number == "":
                     continue
-                pad_id = f"{fp.reference}.{pad.number}"
+                pad_id = self._pad_id(fi, pi)
                 if pad_id not in pad_polygons:
                     continue
                 cx, cy = self._transform_pad_position(
@@ -1988,13 +2048,15 @@ class ConnectivityValidator:
 
         pads = self._eroded_pad_polygons()
         raw_keys: set[str] = set()
-        for fp in self.pcb.footprints:
+        for fi, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
-            for pad in fp.pads:
+            for pi, pad in enumerate(fp.pads):
+                if pad.number is None or pad.number == "":
+                    continue
                 if pad.shape not in {"rect", "roundrect", "circle", "oval", "obround"}:
                     continue  # No new raw bounding-box fallback for custom copper.
-                key = f"{fp.reference}.{pad.number}"
+                key = self._pad_id(fi, pi)
                 if key not in pad_positions:
                     continue
                 geom = _pad_polygon(pad, fp)
@@ -2162,13 +2224,13 @@ class ConnectivityValidator:
         path above is preferred whenever shapely is installed.
         """
         pad_declared_net: dict[str, str] = {}
-        for fp in self.pcb.footprints:
+        for fi, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
-            for pad in fp.pads:
+            for pi, pad in enumerate(fp.pads):
                 if pad.number is None or pad.number == "":
                     continue
-                pad_declared_net[f"{fp.reference}.{pad.number}"] = pad.net_name
+                pad_declared_net[self._pad_id(fi, pi)] = pad.net_name
 
         for zone in self.pcb.zones:
             if not zone.filled_polygons:
@@ -2252,6 +2314,9 @@ class ConnectivityValidator:
         Returns:
             ConnectivityIssue describing the problem
         """
+        # Public diagnostics retain logical pin names; repeated names in
+        # separate islands describe physically distinct lands of one pin.
+        islands = [[self._pad_display(node) for node in island] for island in islands]
         # Sort islands by size (largest first)
         islands = sorted(islands, key=len, reverse=True)
 

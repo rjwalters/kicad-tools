@@ -109,12 +109,13 @@ jobs:
     steps:
       - name: Ensure container has prerequisites
         # ca-certificates/curl/git for checkout + uv bootstrap; cmake and
-        # build-essential for the C++ router backend build below.
+        # build-essential for the C++ router backend build below; nodejs for
+        # executing workflow JavaScript regression tests.
         run: |
           set -euo pipefail
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl git cmake build-essential
+            ca-certificates curl git cmake build-essential nodejs
           kicad-cli --version
 
       - uses: actions/checkout@v7

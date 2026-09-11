@@ -408,6 +408,9 @@ class StrategyApplicator:
             if hasattr(graphic, "end"):
                 ex, ey = graphic.end
                 graphic.end = (ex, -ey)
+            if getattr(graphic, "mid", None) is not None:
+                mx, my = graphic.mid
+                graphic.mid = (mx, -my)
             if getattr(graphic, "center", None) is not None:
                 cx, cy = graphic.center
                 graphic.center = (cx, -cy)
@@ -447,6 +450,14 @@ class StrategyApplicator:
                 y = geo.get_float(1)
                 if y is not None:
                     geo.set_value(1, -y)
+
+        # A reflection reverses legacy center/angle arc sweep orientation.
+        if node.tag == "fp_arc" and node.find_child("mid") is None:
+            angle_node = node.find_child("angle")
+            if angle_node is not None:
+                angle = angle_node.get_float(0)
+                if angle is not None:
+                    angle_node.set_value(0, -angle)
 
         pts = node.find_child("pts")
         if pts is not None:
