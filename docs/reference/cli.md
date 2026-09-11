@@ -53,6 +53,7 @@ kct [--help] [--version] <command> [options]
 | | `impedance` | Transmission line impedance calculations |
 | | `ipc` | Interact with a running KiCad instance via IPC API (KiCad 9.0+) |
 | | `fleet` | Fleet-wide PCB status and operations |
+| | `readiness` | Run the manufacturing-readiness gates and write hash-bound `output/readiness.json` |
 | | `stitch` | Add via stitching to power planes |
 | | `build` | Build from spec to manufacturable design |
 | | `create-pcb` | Create a PCB from a KiCad schematic |
@@ -433,6 +434,71 @@ kct fleet status --ship-only
 ```
 
 See also: [Manufacturing Export → ship-ready check](../guides/manufacturing-export.md#are-we-ship-ready-kct-fleet-status).
+
+---
+
+### `readiness`
+
+Run the full manufacturing-readiness / tapeout sign-off for one board and write
+the hash-bound `output/readiness.json` evidence the demo gallery validates.
+Implemented in
+[`src/kicad_tools/cli/readiness_cmd.py`](../../src/kicad_tools/cli/readiness_cmd.py).
+
+`kct fleet status` *reads* stored readiness reports; `kct readiness` is the
+command that *produces* one. It orchestrates the engines that already exist —
+`kct check`, `kicad-cli pcb drc --refill-zones`, `kct export` and
+`kicad-cli sch|pcb export pdf` — and is the scripted equivalent of the
+`/kct:manufacturing-readiness` and `/kct:tapeout` skills.
+
+```bash
+kct readiness <board-dir|board.kicad_pcb> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--mfr TIER`, `-m TIER` | Fabrication tier (default: discovered from the board's recipe/manifest; never guessed) |
+| `--assembly` | Full assembly package incl. BOM/CPL procurement identities (default) |
+| `--pcb-only` | Bare-board package; makes no component procurement or assembly claim |
+| `--output DIR`, `-o DIR` | Manufacturing bundle directory (default: `<pcb-dir>/manufacturing/`) |
+| `--sch PATH` | Path to the `.kicad_sch` (auto-detected by default) |
+| `--net-class-map PATH` | Net-class map sidecar (auto-discovered by default) |
+| `--ack-warnings RULES` | Comma-separated `rule_id`s whose assembly-affecting warnings are explicitly accepted |
+| `--include-tht` | Accept through-hole parts in the CPL (excluded by default) |
+| `--no-archive` | Skip building `output/manufacturing.zip` |
+| `--hv-net-class NAME` | Net-class name identifying high-voltage nets (default: `HV`) |
+| `--hv-requirement TEXT` | Isolation requirement an HV board was gated against (required when HV nets exist) |
+| `--fill-tolerance MM2` | Per-layer filled-copper tolerance for the saved-vs-refilled equivalence check |
+| `--format {text,json}` | Output format (default: `text`) |
+
+Gate order is load-bearing: the copper pours are refilled and **saved to the
+canonical PCB before both** the native cross-gate and the export, so the bytes
+the checkers judged are the bytes the Gerbers come from. Every gate is judged
+on the engine's actual findings, never on a subprocess exit code — `kicad-cli
+pcb drc` exits 0 with error-severity violations, and a "ran" flag is not a pass.
+
+`ready` is emitted only when every applicable gate passed; otherwise the report
+is `blocked` (a gate failed) or `unverified` (a gate could not run), always with
+named `blockers`. **The command exits non-zero for anything other than `ready`
+and has no flag that produces `ready` on a partial run** — a gate that cannot
+run is a blocker, not a waiver.
+
+**Examples:**
+```bash
+# Full assembly sign-off at the tier recorded in the board's own recipe
+kct readiness boards/00-demo
+
+# Bare-board order — no BOM/CPL, no procurement claim
+kct readiness boards/04-demo --pcb-only --mfr jlcpcb
+
+# CI use: machine output, non-zero exit unless the verdict is `ready`
+kct readiness boards/01-demo --format json > readiness.json
+
+# Accept reviewed silkscreen warnings as an explicit, recorded risk
+kct readiness boards/05-demo --ack-warnings silk_over_copper,silk_overlap
+```
+
+See also: [`docs/board-json-schema.md`](../board-json-schema.md) for the
+`readiness.json` schema and the engine-fingerprint fields this command records.
 
 ---
 
