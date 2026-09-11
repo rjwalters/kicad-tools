@@ -190,9 +190,9 @@ class DesignRules:
     # ``component_clearances`` override, a net-class ``escape_clearance``
     # override, an applied ``fine_pitch_clearance`` shrink (narrow-channel
     # guard permitting), or a corridor already relaxed by
-    # ``_relax_same_component_clearance`` (Issue #2452). Any of those honor
-    # the SMALLER configured clearance rather than skipping the check
-    # entirely.
+    # ``_relax_same_component_clearance`` (Issue #2452). Those configured
+    # relaxation paths retain their existing exemption behavior. Enforcing
+    # their numerical per-component floors is tracked separately in #5166.
     #
     # Set ``True`` to restore the pre-#5004 behaviour (any fine-pitch
     # component's foreign-net pads are unconditionally exempted) for boards
