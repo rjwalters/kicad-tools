@@ -15,9 +15,12 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
   length identical across seeds 42/43/44 -- this small 2-layer board
   has fully converged.  (327.93mm before the 2026-09-10 #5009
   re-baseline: ``jlcpcb-tier1`` 2-layer declares no orderable via-in-pad
-  process, so the #3112 via-in-pad sweep now relocates five escape vias
+  process, so the #3112 via-in-pad sweep now relocates the escape vias
   off the SMT lands they clipped -- same 22 routes / 24 vias / 8/8
-  reach, and the board is strictly DRC-clean afterwards.)
+  reach.  See "SCOPE OF THE CLEANLINESS CLAIM" in
+  ``test_routing_output_deterministic_across_seeds`` for exactly which
+  DRC engine and which manufacturer profile that measurement covers --
+  the first revision of this note overstated it and CI refuted it.)
   Segment count is 295 on macOS-arm64 as of that re-baseline
   (274 as of the 2026-08-11 #4732 measurement, down from 476;
   routes/vias/length/reach
@@ -637,16 +640,38 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # via-in-pad process -- JLCPCB's POFV process publishes a 4-layer
     # minimum -- so the router's #3112 same-net via-in-pad sweep, which
     # used to no-op on the bare capability flag, now runs on this board
-    # and slides five escape vias off the SMT lands they were clipping
-    # (R1-1, R1-2, D2-1, R4-2, D6-2; offsets +-0.4..0.6 mm against
-    # 1.0 x 1.3 mm lands).  Routes (22), vias (24) and reach (8/8) are
-    # UNCHANGED and the board is now STRICTLY DRC-clean at jlcpcb-tier1
-    # ("DRC PASSED", 0 errors, 0 grandfathered findings); total length
-    # moves +1.30 mm (327.93 -> 329.23) and the segment count moves
-    # 274 -> 295, still inside the documented platform band below.
-    # This is a manufacturability IMPROVEMENT, not a regression: those
-    # five drills previously broke into solder lands.
+    # and slides the escape vias off the SMT lands they were clipping
+    # (offsets +-0.4..0.6 mm against 1.0 x 1.3 mm lands).  Routes (22),
+    # vias (24) and reach (8/8) are UNCHANGED; total length moves
+    # +1.30 mm (327.93 -> 329.23) and the segment count moves 274 -> 295,
+    # still inside the documented platform band below.  This is a
+    # manufacturability IMPROVEMENT, not a regression: those drills
+    # previously broke into solder lands.
     # Prior pin (22, 274-segment-era, 24, 327.93).
+    #
+    # SCOPE OF THE CLEANLINESS CLAIM (corrected 2026-09-11, #5009 review
+    # pass 3 -- the first revision of this note claimed the board was
+    # "strictly DRC-clean" outright, and CI refuted it):
+    #   * VERIFIED, in CI on the PR head: this module's own gate --
+    #     ``kct route --manufacturer jlcpcb-tier1`` reports 0 DRC errors
+    #     (``test_drc_clean_at_jlcpcb_tier1`` passes, and not via the
+    #     #3556 grandfathering allowance) with the pins below matching
+    #     bit-for-bit across seeds 42/43/44.  That is the PURE-PYTHON
+    #     checker at the tier1 profile.
+    #   * NOT COVERED by that claim: the LIVE board
+    #     (``boards/02-charlieplex-led``), which its recipe routes at the
+    #     plain ``jlcpcb`` profile and gates with the CONTAINERIZED
+    #     ``kicad-cli pcb drc`` in the "Board 02 End-to-End" job.  The
+    #     first #5009 revision of the sweep left that path with 2 native
+    #     DRC errors (a relocated via 0.073 mm from a foreign-net track,
+    #     and the net demotion that followed) -- the destination
+    #     validation in ``drc_nudge._via_destination_blocked`` is what
+    #     fixes it.  Re-verified locally after that fix with kicad-cli
+    #     10.0.1: 12/12 nets, 0 native violations, 0 unconnected items,
+    #     ``kct check`` 0 errors / 0 warnings, label- and copper-LVS PASS.
+    #   The two engines and the two profiles are separate claims; CI's
+    #   containerized run is authoritative for both.  Do not restate
+    #   either as a blanket "the board is DRC-clean".
     EXPECTED_ROUTES = 22
     EXPECTED_VIAS = 24
     EXPECTED_LENGTH = 329.23

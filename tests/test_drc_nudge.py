@@ -9,12 +9,14 @@ from unittest.mock import patch
 from kicad_tools.router.drc_nudge import (
     COINCIDENT_THRESHOLD,
     DRCNudgeResult,
+    _build_via_dest_context,
     _compute_merge_threshold,
     _expand_via_layers,
     _merge_same_net_vias,
     _nudge_segment,
     _nudge_segment_with_chain,
     _perpendicular_unit,
+    _point_bbox_distance,
     _reconnect_segments,
     _router_pad_bbox,
     _router_via_in_pad_process_eligible,
@@ -24,8 +26,10 @@ from kicad_tools.router.drc_nudge import (
     _segment_endpoints_anchored_to_net_vias,
     _segment_length,
     _try_nudge_via_pad,
+    _via_destination_blocked,
     _via_drill_inside_bbox,
     _via_drill_overlaps_bbox,
+    _via_pad_exit_candidates,
     drc_verify_and_nudge,
 )
 from kicad_tools.router.layers import Layer
@@ -2063,6 +2067,273 @@ class TestNudgeViaPad:
 
 
 # ---------------------------------------------------------------------------
+# Issue #5009 (third review pass): destination validation for the via-in-pad
+# exit.  The handler used to pick the exit that minimised displacement from
+# the OFFENDING pad and commit it blindly -- nothing checked the destination
+# against any other pad, via or drilled hole.
+# ---------------------------------------------------------------------------
+
+
+class TestViaPadDestinationValidation:
+    """A relocated via must not land on other copper or another drill.
+
+    Board 02's 0805 resistors are the concrete case: the two lands of R1
+    sit ~1.7 mm apart on DIFFERENT nets, so the nearest cardinal exit
+    from land 1 put the via 0.035 mm from land 2 (0.127 mm required) and
+    0.185 mm hole-to-hole from the via that had just been evicted from
+    land 2 (0.250 mm required) -- ``kicad-cli pcb drc`` then failed the
+    board on two clearance errors in place of one via-in-pad finding.
+    """
+
+    # jlcpcb-tier1 2-layer floors, matching board 02's profile.
+    CLEARANCE = 0.127
+    HOLE_TO_HOLE = 0.25
+
+    def _r1_router(self):
+        """Build the board-02 R1 shape: two 1.0 x 1.3 lands 1.7 mm apart."""
+        pad1 = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1, ref="R1", pin="1")
+        pad2 = _make_smd_pad(x=11.7, y=10.0, width=1.0, height=1.3, net=2, ref="R1", pin="2")
+        # Via clipping pad 1's right land edge (the board-02 geometry).
+        via = Via(
+            x=10.5,
+            y=9.7,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+        )
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        rules = DesignRules(
+            manufacturer="jlcpcb-tier1",
+            trace_clearance=self.CLEARANCE,
+            min_hole_to_hole=self.HOLE_TO_HOLE,
+        )
+        router = _StubAutorouter(
+            routes=[route],
+            rules=rules,
+            pads={("R1", "1"): pad1, ("R1", "2"): pad2},
+            nets={1: [("R1", "1")], 2: [("R1", "2")]},
+        )
+        return router, pad1, pad2, via
+
+    def test_exit_redirected_away_from_adjacent_foreign_pad(self):
+        """The nearest exit collides with the neighbouring land -- take the
+        nearest *surviving* candidate instead (here a 45-degree escape)."""
+        router, pad1, pad2, via = self._r1_router()
+
+        moved = _try_nudge_via_pad(
+            via,
+            _router_pad_bbox(pad1),
+            router,
+            max_displacement=2.0,
+            required_clearance=self.CLEARANCE,
+            result=DRCNudgeResult(),
+        )
+        assert moved is True
+
+        # Off its own land ...
+        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad1))
+        # ... and legally clear of the foreign-net land next door: the
+        # pre-fix destination sat 0.035 mm away, far inside the floor.
+        gap = _point_bbox_distance(via.x, via.y, _router_pad_bbox(pad2))
+        assert gap >= via.diameter / 2.0 + self.CLEARANCE - 1e-6
+
+    def test_pre_fix_nearest_exit_is_rejected(self):
+        """The exit the old code would have taken is explicitly illegal.
+
+        Pins the actual defect rather than just the repaired outcome: the
+        minimum-displacement cardinal exit (straight toward pad 2) must be
+        reported as blocked by the destination validator.
+        """
+        router, pad1, pad2, via = self._r1_router()
+        bbox1 = _router_pad_bbox(pad1)
+        offset = via.diameter / 2.0 + self.CLEARANCE + max(0.005, self.CLEARANCE * 0.10)
+        context = _build_via_dest_context(via, router, bbox1)
+
+        # The pre-#5009 choice: nearest cardinal exit == straight right.
+        right_exit = (bbox1[2] + offset, via.y)
+        assert (
+            _via_destination_blocked(
+                via,
+                right_exit[0],
+                right_exit[1],
+                context,
+                required_clearance=self.CLEARANCE,
+            )
+            == "via_pad_dest_pad_clearance"
+        )
+
+        # At least one candidate in the enumerated set IS legal, so the
+        # handler redirects rather than refusing.
+        legal = [
+            c
+            for c in _via_pad_exit_candidates(via, bbox1, offset)
+            if _via_destination_blocked(via, c[0], c[1], context, required_clearance=self.CLEARANCE)
+            is None
+        ]
+        assert legal
+
+    def test_exit_respects_hole_to_hole_against_sibling_via(self):
+        """A drill parked on the nearest exit forces a hole-to-hole detour.
+
+        Mirrors board 02's second symptom: the via evicted from land 2 sat
+        where land 1's via wanted to go, leaving 0.185 mm hole-to-hole
+        against a 0.250 mm floor.
+        """
+        router, pad1, _pad2, via = self._r1_router()
+        bbox1 = _router_pad_bbox(pad1)
+        offset = via.diameter / 2.0 + self.CLEARANCE + max(0.005, self.CLEARANCE * 0.10)
+        # Same-net sibling via sitting exactly on the nearest cardinal exit.
+        sibling = Via(
+            x=bbox1[2] + offset,
+            y=via.y,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+        )
+        router.routes[0].vias.append(sibling)
+
+        moved = _try_nudge_via_pad(
+            via,
+            bbox1,
+            router,
+            max_displacement=2.0,
+            required_clearance=self.CLEARANCE,
+            result=DRCNudgeResult(),
+        )
+        assert moved is True
+        # Hole-to-hole is net-agnostic in DRC, so the same-net sibling counts.
+        edge_gap = math.hypot(via.x - sibling.x, via.y - sibling.y) - via.drill / 2.0 - 0.15
+        assert edge_gap >= self.HOLE_TO_HOLE - 1e-3
+
+    def test_refuses_when_every_exit_is_blocked(self):
+        """With no legal destination the via stays put and a structured
+        skip is recorded -- an in-pad via is a finding, a short is scrap."""
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.0, net=1, ref="U1", pin="1")
+        via = Via(
+            x=10.3,
+            y=10.2,
+            drill=0.35,
+            diameter=0.7,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+        )
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        # Four foreign-net bars forming a picture frame 0.28 mm outside the
+        # whole candidate ring (needs 0.35 + 0.2 = 0.55 mm).
+        pads = {("U1", "1"): pad}
+        frame = {
+            ("FRAME", "T"): (10.0, 8.4, 6.0, 0.6),
+            ("FRAME", "B"): (10.0, 11.6, 6.0, 0.6),
+            ("FRAME", "L"): (8.4, 10.0, 0.6, 6.0),
+            ("FRAME", "R"): (11.6, 10.0, 0.6, 6.0),
+        }
+        for key, (px, py, pw, ph) in frame.items():
+            pads[key] = _make_smd_pad(
+                x=px, y=py, width=pw, height=ph, net=9, ref=key[0], pin=key[1]
+            )
+        router = _StubAutorouter(
+            routes=[route],
+            rules=DesignRules(manufacturer="jlcpcb-tier1", trace_clearance=0.2),
+            pads=pads,
+            nets={1: [("U1", "1")]},
+        )
+
+        result = DRCNudgeResult()
+        moved = _try_nudge_via_pad(
+            via,
+            _router_pad_bbox(pad),
+            router,
+            max_displacement=2.0,
+            required_clearance=0.2,
+            result=result,
+        )
+        assert moved is False
+        # Untouched -- the original via-in-pad finding survives for DRC.
+        assert math.isclose(via.x, 10.3)
+        assert math.isclose(via.y, 10.2)
+        assert result.skipped.get("via_pad_dest_pad_clearance", 0) == 1
+
+    def test_does_not_relocate_into_another_same_net_land(self):
+        """A same-net neighbour owes no clearance, but the drill must not
+        land in it either -- that just moves the via-in-pad defect."""
+        pad1 = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1, ref="R1", pin="1")
+        # Same-net land immediately to the right (e.g. a split plane pad).
+        pad2 = _make_smd_pad(x=11.2, y=10.0, width=1.0, height=1.3, net=1, ref="R2", pin="1")
+        via = Via(
+            x=10.5,
+            y=9.7,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+        )
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        router = _StubAutorouter(
+            routes=[route],
+            rules=DesignRules(manufacturer="jlcpcb-tier1", trace_clearance=0.127),
+            pads={("R1", "1"): pad1, ("R2", "1"): pad2},
+            nets={1: [("R1", "1"), ("R2", "1")]},
+        )
+
+        moved = _try_nudge_via_pad(
+            via,
+            _router_pad_bbox(pad1),
+            router,
+            max_displacement=2.0,
+            required_clearance=0.127,
+            result=DRCNudgeResult(),
+        )
+        assert moved is True
+        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad1))
+        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad2))
+
+    def test_sweep_end_to_end_leaves_no_new_violation(self):
+        """The full sweep on the R1 shape: both lands' vias get evicted and
+        neither destination introduces a clearance or hole-to-hole error.
+
+        Both vias sit off-centre but fully inside their own land, which is
+        what the sweep's containment detector matches.
+        """
+        pad1 = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1, ref="R1", pin="1")
+        pad2 = _make_smd_pad(x=11.7, y=10.0, width=1.0, height=1.3, net=2, ref="R1", pin="2")
+        via1 = Via(x=10.3, y=9.7, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        via2 = Via(x=11.4, y=9.7, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=2)
+        routes = [
+            Route(net=1, net_name="Net1", segments=[], vias=[via1]),
+            Route(net=2, net_name="Net2", segments=[], vias=[via2]),
+        ]
+        router = _StubAutorouter(
+            routes=routes,
+            rules=DesignRules(
+                manufacturer="jlcpcb-tier1",
+                trace_clearance=self.CLEARANCE,
+                min_hole_to_hole=self.HOLE_TO_HOLE,
+            ),
+            pads={("R1", "1"): pad1, ("R1", "2"): pad2},
+            nets={1: [("R1", "1")], 2: [("R1", "2")]},
+        )
+        router.layer_stack = _StubLayerStack(num_layers=2)  # type: ignore[attr-defined]
+
+        result = DRCNudgeResult()
+        nudged = _scan_and_repair_via_in_pad(router, max_displacement=2.0, result=result)
+        assert nudged == 2
+
+        bbox1 = _router_pad_bbox(pad1)
+        bbox2 = _router_pad_bbox(pad2)
+        copper_r = 0.3
+        # No via left in a land, each via clear of the FOREIGN land, and the
+        # two drills apart by the fab hole-to-hole floor.
+        assert not _via_drill_overlaps_bbox(via1, bbox1)
+        assert not _via_drill_overlaps_bbox(via2, bbox2)
+        assert _point_bbox_distance(via1.x, via1.y, bbox2) >= copper_r + self.CLEARANCE - 1e-6
+        assert _point_bbox_distance(via2.x, via2.y, bbox1) >= copper_r + self.CLEARANCE - 1e-6
+        centre_gap = math.hypot(via1.x - via2.x, via1.y - via2.y)
+        assert centre_gap - 0.15 - 0.15 >= self.HOLE_TO_HOLE - 1e-3
+
+
+# ---------------------------------------------------------------------------
 # Issue #5009: process-eligibility gate for the via-in-pad sweep
 # ---------------------------------------------------------------------------
 
@@ -2110,11 +2381,14 @@ class TestViaInPadProcessEligibilityGate:
         assert _router_via_in_pad_process_eligible(router) is False
 
     def test_sweep_runs_on_two_layer_tier1(self):
-        """The board-02 shape: tier1, 2 layers, via clipping a land edge."""
+        """The board-02 shape: tier1, 2 layers, via clipping a land edge.
+
+        Pad bbox (9.5, 9.35)-(10.5, 10.65).  The via centre sits exactly
+        on the right edge, so its 0.3mm drill straddles the land -- the
+        exact geometry board 02's router output produced, and the case the
+        old containment-only detector silently skipped.
+        """
         pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1)
-        # Pad bbox (9.5, 9.35)-(10.5, 10.65).  The via centre sits exactly
-        # on the right edge, so its 0.3mm drill straddles the land -- the
-        # exact geometry board 02's router output produced.
         via = Via(
             x=10.5,
             y=9.7,
@@ -2139,6 +2413,60 @@ class TestViaInPadProcessEligibilityGate:
         )
         assert nudged == 1
         assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
+
+    def test_edge_clipping_via_is_detected_but_refused_when_boxed_in(self):
+        """Detection is overlap-based; the MOVE still has to be legal.
+
+        The same edge-clipping via the sweep now detects is left exactly
+        where it is when every candidate exit collides with foreign
+        copper -- the original ``via_in_pad`` finding goes to DRC rather
+        than becoming a short (#5009 review pass 3).
+        """
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1)
+        # Centre exactly on the right land edge: drill straddles it.
+        via = Via(
+            x=10.5,
+            y=9.7,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+        )
+        bbox = _router_pad_bbox(pad)
+        assert _via_drill_overlaps_bbox(via, bbox) is True
+        assert _via_drill_inside_bbox(via, bbox) is False
+
+        # Foreign-net frame boxing in the whole candidate ring.
+        pads = {("U1", "1"): pad}
+        for key, (px, py, pw, ph) in {
+            ("FRAME", "T"): (10.0, 8.4, 8.0, 0.6),
+            ("FRAME", "B"): (10.0, 11.6, 8.0, 0.6),
+            ("FRAME", "L"): (8.4, 10.0, 0.6, 8.0),
+            ("FRAME", "R"): (11.6, 10.0, 0.6, 8.0),
+        }.items():
+            pads[key] = _make_smd_pad(
+                x=px, y=py, width=pw, height=ph, net=9, ref=key[0], pin=key[1]
+            )
+
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        router = _StubAutorouter(
+            routes=[route],
+            rules=DesignRules(manufacturer="jlcpcb-tier1", trace_clearance=0.2),
+            pads=pads,
+            nets={1: [("U1", "1")]},
+        )
+        router.layer_stack = _StubLayerStack(num_layers=2)  # type: ignore[attr-defined]
+
+        result = DRCNudgeResult()
+        nudged = _scan_and_repair_via_in_pad(
+            router,
+            max_displacement=2.0,
+            result=result,
+        )
+        assert nudged == 0
+        assert math.isclose(via.x, 10.5)
+        assert math.isclose(via.y, 9.7)
+        assert result.skipped.get("via_pad_dest_pad_clearance", 0) == 1
 
     def test_sweep_no_ops_on_four_layer_tier1(self):
         """Same geometry at 4 layers: POFV is orderable, leave it alone."""

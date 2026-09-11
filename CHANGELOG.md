@@ -1251,11 +1251,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `via_in_pad` DRC rule applies) rather than the bare capability flag,
   and its detector was corrected from full drill *containment* to the
   drill/land *overlap* test the DRC rule uses — a drill that merely clips a
-  land edge is still a via-in-pad defect, and every one of board 02's five
-  offending vias was of exactly that shape, so the old predicate matched
-  none of them. Board 02 (`charlieplex_3x3`) now routes strictly DRC-clean
-  at `jlcpcb-tier1` (0 errors, unchanged 22 routes / 24 vias / 8-of-8 reach;
-  total length re-baselined 327.93 → 329.23 mm for the relocated vias).
+  land edge is still a via-in-pad defect, and board 02's offending vias
+  were of exactly that shape, so the old predicate matched none of them.
+  The relocation itself is validated against the rest of the board before
+  it is committed: a candidate exit that would put the via inside another
+  land, within copper clearance of a foreign-net pad/via/track, or closer
+  than the fab hole-to-hole floor to any other drill is rejected, and the
+  nearest *surviving* candidate (cardinal, edge-slide or 45° corner escape)
+  is taken instead — with the move refused outright, and the original
+  `via_in_pad` finding left for DRC, when no legal destination exists.
+  Without that gate the exit was chosen purely to minimise displacement
+  from the offending pad and committed unchecked, which on board 02 put a
+  relocated via 0.073 mm from a foreign-net track (0.127 mm required) and
+  cost the board a net (11-of-12 reach, 2 `kicad-cli pcb drc` errors); an
+  0805 land pair likewise put the exit 0.035 mm from its neighbouring land
+  with 0.185 mm hole-to-hole against a 0.250 mm floor. The sweep also
+  visits vias in a canonical `(net, x, y)` order rather than
+  negotiated-routing order, so the relocations (each of which becomes an
+  obstacle for the next) are a pure function of the pre-nudge geometry
+  rather than of `--seed`. Board 02 (`charlieplex_3x3`) routes 0-error at
+  `jlcpcb-tier1` with unchanged 22 routes / 24 vias / 8-of-8 reach (total
+  length re-baselined 327.93 → 329.23 mm for the relocated vias), and its
+  full recipe regeneration at the plain `jlcpcb` profile is clean under
+  the native `kicad-cli pcb drc` gate: 12/12 nets, 0 violations, 0
+  unconnected items, label- and copper-LVS PASS.
 - **`kct route` accepted KiCad 10 name-only nets but wrote zero copper and
   reported a vacuous "SUCCESS" (0/0 nets)** (#4983) — a PCB saved in KiCad
   10's name-only net syntax (`(net "SIGNAL")` on pads, no numeric net table
