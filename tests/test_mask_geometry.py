@@ -316,3 +316,54 @@ def test_native_footprint_local_translation(board, tmp_path):
     center = (int(flash[1]) / 1e6, -int(flash[2]) / 1e6)
     geometry = inspect_mask_geometry(path).openings[0].geometry
     assert (geometry.centroid.x, geometry.centroid.y) == pytest.approx(center, abs=0.000001)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "(solder_mask_margin banana)",
+        "(roundrect_rratio banana)",
+        "(roundrect_rratio 0.8)",
+        "(at banana 0)",
+        "(at 0 0 banana)",
+        "(at 0 0 inf)",
+        "(size 1 banana)",
+        "(solder_mask_margin 0 0)",
+    ],
+)
+def test_malformed_present_pad_fields_never_become_native_defaults(board, field):
+    at = "" if field.startswith("(at ") else "(at 0 0)"
+    size = "" if field.startswith("(size ") else "(size 1 2)"
+    path = board(f'(pad "1" smd roundrect {at} {size} (layers "F.Cu" "F.Mask") {field})')
+    result = inspect_mask_geometry(path)
+    assert not result.complete
+    assert not result.openings
+    assert result.unsupported[0]["feature"] == "source-geometry"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"setup": "(tenting (front banana) (back yes))"},
+        {"setup": "(tenting (front yes) (front no))"},
+        {"setup": "(pad_to_mask_clearance banana)"},
+        {"footprint": "(solder_mask_margin banana)"},
+        {"rotation": "banana"},
+        {"extra": '(via (at banana 0) (size 1) (layers "F.Cu" "B.Cu"))'},
+        {"extra": '(via (at 0 0) (size 1) (layers "F.Cu" "B.Cu") (tenting (front banana)))'},
+    ],
+)
+def test_malformed_inherited_and_via_fields_are_incomplete(board, change):
+    result = inspect_mask_geometry(board(**change))
+    assert not result.complete
+    assert not result.openings
+
+
+def test_valid_leading_dot_and_zero_source_fields_keep_native_semantics(board):
+    path = board(
+        '(pad "1" smd roundrect (at .0 0 0) (size .5 1) (layers "F.Cu" "F.Mask") (roundrect_rratio .25) (solder_mask_margin 0))'
+    )
+    result = inspect_mask_geometry(path)
+    assert result.complete
+    assert result.openings[0].margin_mm == 0
+    assert result.openings[0].margin_source == "pad"

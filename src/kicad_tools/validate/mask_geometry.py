@@ -141,6 +141,67 @@ def _validate_structure(text: str) -> None:
         raise ValueError("Incomplete or multiple PCB roots")
 
 
+def _raw_geometry_errors(tree: Any) -> list[str]:
+    """Validate present source fields before schema recovery loses their validity."""
+    errors: list[str] = []
+
+    def numeric(node: Any, tag: str, lengths: set[int], *, positive: bool = False) -> None:
+        fields = [child for child in node.children if child.name == tag]
+        if not fields:
+            return  # Absence keeps the native/schema default; malformed presence does not.
+        if len(fields) != 1:
+            errors.append(f"Repeated {node.name} {tag}")
+            return
+        field = fields[0]
+        values = [field.get_float(i) for i in range(len(field.children))]
+        if len(values) not in lengths or any(
+            not atom.is_atom
+            or value is None
+            or not math.isfinite(value)
+            or (positive and value <= 0)
+            for atom, value in zip(field.children, values, strict=True)
+        ):
+            errors.append(f"Invalid {node.name} {tag}")
+        elif tag == "roundrect_rratio" and not 0 <= values[0] <= 0.5:
+            errors.append("Invalid pad roundrect_rratio")
+
+    def scan(node: Any) -> None:
+        if node.name in {"footprint", "module", "pad", "via"}:
+            numeric(node, "at", {2} if node.name == "via" else {2, 3})
+            numeric(node, "solder_mask_margin", {1})
+        if node.name == "pad":
+            numeric(node, "size", {2}, positive=True)
+            numeric(node, "roundrect_rratio", {1})
+        if node.name == "via":
+            numeric(node, "size", {1}, positive=True)
+        if node.name == "setup":
+            numeric(node, "pad_to_mask_clearance", {1})
+            numeric(node, "solder_mask_min_width", {1})
+        if node.name in {"setup", "via"}:
+            tenting = [child for child in node.children if child.name == "tenting"]
+            if len(tenting) > 1:
+                errors.append(f"Repeated {node.name} tenting")
+            for settings in tenting:
+                seen: set[str] = set()
+                allowed = {"yes", "no", "none"} if node.name == "via" else {"yes", "no"}
+                for side in settings.children:
+                    if (
+                        side.name not in {"front", "back"}
+                        or side.name in seen
+                        or len(side.children) != 1
+                        or not side.children[0].is_atom
+                        or side.get_string(0) not in allowed
+                    ):
+                        errors.append(f"Invalid {node.name} tenting")
+                    seen.add(side.name)
+        for child in node.children:
+            if not child.is_atom:
+                scan(child)
+
+    scan(tree)
+    return errors
+
+
 def inspect_mask_geometry(pcb_path: str | Path) -> MaskGeometrySnapshot:
     """Inspect immutable source files; partial results always carry coverage gaps.
 
@@ -171,6 +232,13 @@ def inspect_mask_geometry(pcb_path: str | Path) -> MaskGeometrySnapshot:
     tree = parse_string(text)
     if tree.name != "kicad_pcb":
         raise ValueError("Expected kicad_pcb root")
+    raw_errors = _raw_geometry_errors(tree)
+    if raw_errors:
+        snapshot.unsupported = [
+            {"source_uuid": "", "feature": "source-geometry", "reason": reason}
+            for reason in sorted(set(raw_errors))
+        ]
+        return snapshot
     pcb = PCB(tree, path)
 
     def unsupported(uuid: str, feature: str, reason: str) -> None:

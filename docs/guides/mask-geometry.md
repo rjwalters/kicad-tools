@@ -61,3 +61,5 @@ The [KiCad PCB editor documentation](https://docs.kicad.org/9.0/en/pcbnew/pcbnew
 describes mask expansion and footprint/pad overrides; the fixture tests establish
 the concrete native version used here. No generic JLCDFM value is asserted to be
 a JLCPCB ordering limit, and no supplier qualification has been performed.
+
+Present malformed numeric or tenting fields return incomplete coverage with no openings before tolerant schema recovery can substitute defaults. This includes footprint/pad/via positions and rotations, dimensions, mask expansion, roundrect ratios and inherited board tenting. Absent native defaults and explicit zero overrides remain distinct from malformed values.
