@@ -705,15 +705,19 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         )
         seg_index.append((line.buffer(width / 2.0), id_to_name.get(nid, ""), lay))
 
-    # Vias: (center_point, net, radius)
+    # Vias: (center_point, net, radius, actual drill diameter)
     via_index: list[tuple] = []
     for via in _find_sexp_blocks(text, "\n\t(via") + _find_sexp_blocks(text, "\n  (via"):
         at = re.search(r"\(at ([\d.-]+) ([\d.-]+)\)", via)
         sz = re.search(r"\(size ([\d.]+)\)", via)
         nid = re.search(r"\(net (\d+)\)", via).group(1)
         radius = (float(sz.group(1)) if sz else 0.6) / 2.0
+        drill_match = re.search(r"\(drill ([\d.]+)\)", via)
+        if drill_match is None:
+            raise ValueError("Pour repair requires an explicit round via drill")
+        drill = float(drill_match.group(1))
         via_index.append(
-            (Point(float(at.group(1)), float(at.group(2))), id_to_name.get(nid, ""), radius)
+            (Point(float(at.group(1)), float(at.group(2))), id_to_name.get(nid, ""), radius, drill)
         )
 
     # Zone fills: net -> [(poly, layer)]
@@ -779,10 +783,10 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         for geom, snet, _lay in seg_index:
             if snet != net and vgeom.distance(geom) < CLEAR:
                 return False
-        for pt, vnet, radius in via_index:
+        for pt, vnet, radius, drill in via_index:
             # Issue #3855: drill hole-to-hole vs existing repair vias
-            # (all 0.25 mm drill), edge-to-edge against the 0.5 mm floor.
-            if not _drills_clear(vx, vy, pt.x, pt.y, REPAIR_VIA_DRILL):
+            # using actual drill sizes, edge-to-edge against the 0.5 mm floor.
+            if not _drills_clear(vx, vy, pt.x, pt.y, drill):
                 return False
             if vnet != net and vgeom.distance(pt.buffer(radius)) < CLEAR:
                 return False
@@ -806,7 +810,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         for geom, snet, lay in seg_index:
             if snet != net and lay == layer and path.distance(geom) < CLEAR:
                 return False
-        for pt, vnet, radius in via_index:
+        for pt, vnet, radius, drill in via_index:
             if vnet != net and path.distance(pt.buffer(radius)) < CLEAR:
                 return False
         return True
@@ -825,14 +829,16 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     bridges_placed = 0
     failed: list[str] = []
 
-    def _emit_via(net: str, vx: float, vy: float) -> None:
+    def _emit_via(
+        net: str, vx: float, vy: float, diameter: float = 0.45, drill: float = 0.25
+    ) -> None:
         nonlocal vias_placed
         nid = net_id_by_name[net]
         via_lines.append(
-            f"  (via (at {vx:.3f} {vy:.3f}) (size 0.45) (drill 0.25) "
+            f"  (via (at {vx:.3f} {vy:.3f}) (size {diameter}) (drill {drill}) "
             f'(layers "F.Cu" "B.Cu") (net {nid}) (uuid "{_generate_uuid()}"))'
         )
-        via_index.append((Point(vx, vy), net, VIA_R))
+        via_index.append((Point(vx, vy), net, diameter / 2, drill))
         vias_placed += 1
 
     def _emit_seg(
@@ -859,7 +865,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         for geom, snet, lay in seg_index:
             if snet == net:
                 own.append((geom, frozenset({lay}), "seg"))
-        for pt, vnet, radius in via_index:
+        for pt, vnet, radius, drill in via_index:
             if vnet == net:
                 own.append((pt.buffer(radius), all_layers, "via"))
         for entry in pad_index:
@@ -1146,6 +1152,50 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                             break
                     if done:
                         break
+
+            # The fixed rays cannot follow a narrow corridor to a distant
+            # legal via. Only after the established repairs fail, search a
+            # bounded physical path without changing any authored geometry.
+            if not merged and comp_pads and not comp_has_via:
+                from pour_escape import EscapeRules, find_escape
+
+                project = pcb_path.with_suffix(".kicad_pro")
+                if not project.exists():
+                    project = pcb_path.parent / "diffpair_test.kicad_pro"
+                escape_rules = EscapeRules.from_project(project)
+                for pad_name in comp_pads:
+                    escape = find_escape(
+                        pad_center[pad_name],
+                        net,
+                        "F.Cu",
+                        pad_index,
+                        seg_index,
+                        via_index,
+                        [own[i] for i in primary],
+                        (min_x, min_y, max_x, max_y),
+                        escape_rules,
+                    )
+                    if escape is None:
+                        continue
+                    if escape.via:
+                        vx, vy = escape.points[-1]
+                        _emit_via(net, vx, vy, escape_rules.diameter, escape_rules.drill)
+                        _append_own(
+                            (Point(vx, vy).buffer(escape_rules.diameter / 2), all_layers, "via")
+                        )
+                    for p0, p1 in zip(escape.points, escape.points[1:], strict=False):
+                        _emit_seg(net, p0, p1, "F.Cu", escape_rules.width)
+                        _append_own(
+                            (
+                                LineString([p0, p1]).buffer(escape_rules.width / 2),
+                                frozenset({"F.Cu"}),
+                                "seg",
+                            )
+                        )
+                    bridges_placed += 1
+                    merged = True
+                    print(f"   Grid escape: {net} {pad_name}, {len(escape.points) - 1} segment(s)")
+                    break
 
             if not merged:
                 names = [own[i][2] for i in target if own[i][2].startswith("pad:")]
