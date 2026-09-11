@@ -178,13 +178,10 @@ def compare_partitions(
             by a stitching via/segment landed in its own singleton copper
             island and a strict opens diff reported one advisory "open" per
             stranded pad (88-105 of them on board 05), drowning any real
-            signal opens in noise.  Issue #3947 changed
-            :meth:`ConnectivityValidator.extract_pad_partition` to union a
-            zone's *entire* fill (every ``filled_polygon`` fragment) into
-            one graph component before the pad partition is built, so a pad
-            genuinely bonded to the pour no longer lands in a singleton —
-            the stitching-residual noise this parameter existed to hide is
-            gone at the geometry layer.  :func:`compare_copper_netlist` (the
+            signal opens in noise. Issue #3947 later collapsed a whole
+            zone's fill, but zone ownership does not prove physical contact.
+            Issue #5133 instead traces individual fill solids and actual
+            pad/via/segment bridges, preserving disconnected islands.  :func:`compare_copper_netlist` (the
             only production caller) stopped deriving this set from
             :func:`kicad_tools.analysis.net_status.build_zone_net_map` in
             #4982: net-wide suppression by zone *ownership* was blanket-
@@ -362,16 +359,10 @@ def compare_copper_netlist(sch_path: str | Path, pcb_path: str | Path) -> Copper
     copper_partition = validator.extract_pad_partition()
 
     # No advisory net-wide open suppression here (Issue #4982; historically
-    # derived from `build_zone_net_map()` per #3914).  #3947 already unions
-    # a zone's entire fill (every `filled_polygon` fragment) into one graph
-    # component before `extract_pad_partition()` returns, so a pad
-    # genuinely bonded to the pour lands in that component, not a
-    # singleton — the stitching-residual noise the old net-wide waiver
-    # existed to hide is gone at the geometry layer.  Suppressing opens for
-    # every pad on a zone-owning net (regardless of whether that specific
-    # pad's island is actually fill-bonded) was hiding real disconnected
-    # islands, not just residuals; see `compare_partitions`'
-    # `advisory_net_names` docstring for the full history.
+    # derived from `build_zone_net_map()` per #3914). The #5133 extractor
+    # traces actual contact with separate fill solids: neither zone ownership
+    # nor a net label is a physical bridge. Suppressing every open on a
+    # zone-owning net would hide real disconnected islands.
     return compare_partitions(schematic_net_of_pad, copper_partition)
 
 
