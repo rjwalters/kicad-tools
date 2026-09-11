@@ -1783,6 +1783,13 @@ def _add_sch_parser(subparsers) -> None:
     )
     add_format_flag(sch_disconnect)
 
+    sch_fix_wire_stubs = sch_subparsers.add_parser(
+        "fix-wire-stubs", help="Safely extend exact-grid wire stubs to pins"
+    )
+    sch_fix_wire_stubs.add_argument("schematic", help="Root .kicad_sch file")
+    sch_fix_wire_stubs.add_argument("--dry-run", "-n", action="store_true")
+    add_format_flag(sch_fix_wire_stubs)
+
     # sch reconnect-pin
     sch_reconnect_pin = sch_subparsers.add_parser(
         "reconnect-pin", help="Reconnect a pin from one net to another"
@@ -3829,7 +3836,7 @@ def _add_route_parser(subparsers) -> None:
         "--timeout",
         type=float,
         default=None,
-        help="Timeout in seconds for routing (default: no timeout). Returns best partial result if reached.",
+        help="Total routing invocation budget in seconds (default: unbounded). Includes cleanup/native work; allows up to 5 extra seconds for raw partial serialization, then terminates the process group and exits 124.",
     )
     route_parser.add_argument(
         "--per-net-timeout",
