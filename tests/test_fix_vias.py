@@ -2691,3 +2691,58 @@ class TestRelocatePhase3:
         rc = main([str(p), "--mfr", "jlcpcb", "--relocate-in-pad", "--dry-run", "-q"])
         assert rc in (0, 2)
         assert p.read_text() == original
+
+
+class TestUnassignedSmdObstacles:
+    """Net-zero pads are physical obstacles, not an electrical net (#5010)."""
+
+    @pytest.mark.parametrize("neighbor_x", [101.4, 101.65, 103.0])
+    def test_signal_candidate_respects_unassigned_copper(self, tmp_path: Path, neighbor_x: float):
+        content = _PCB_BOXED_IN.replace('(net 2 "SIG2"))', '(net 0 ""))').replace(
+            "(at 100.9 100)", f"(at {neighbor_x} 100)"
+        )
+        path = _write(tmp_path, content)
+        rules = get_mfr_design_rules("jlcpcb", 2, 1.0)
+        reports = []
+        for dry_run in (True, False):
+            pcb = PCB.load(path)
+            original = pcb._sexp.to_string()
+            report = relocate_in_pad_vias(pcb, rules, dry_run=dry_run)
+            reports.append(report)
+            if neighbor_x < 102:
+                assert not report.changed
+                assert len(report.skipped) == 1
+                assert "clearance" in report.skipped[0].reason
+                assert "pad" in report.skipped[0].reason
+                assert pcb._sexp.to_string() == original
+            else:
+                assert len(report.moved) == 1
+                assert not report.skipped
+                moved = report.moved[0]
+                # Independent rectangle geometry: the neighboring pad is 1 mm wide.
+                gap = neighbor_x - 0.5 - moved.new_x - 0.3
+                assert gap >= rules.min_clearance_mm
+                assert (pcb._sexp.to_string() == original) == dry_run
+        assert reports[0] == reports[1]
+
+    @pytest.mark.parametrize("net", [0, 1])
+    def test_only_assigned_same_net_copper_is_exempt(self, tmp_path: Path, net: int):
+        pcb = PCB.load(_write(tmp_path, _PCB_SIGNAL_IN_PAD.replace("(net 1", f"(net {net}")))
+        pads = _collect_smd_pads_by_net(pcb)
+        assert len(pads[net]) == 1
+        reason = _check_clearance(pcb, pcb.vias[0], 100, 100, pads, [], 0.127, 0.25)
+        assert (reason is None) == (net != 0)
+
+    @pytest.mark.parametrize("via_net", [0, 1])
+    def test_unassigned_pad_is_not_a_relocation_source(self, tmp_path: Path, via_net: int):
+        content = _PCB_SIGNAL_IN_PAD.replace('(net 1 "SIG1"))', '(net 0 ""))')
+        content = content.replace(
+            '(net 1) (uuid "via-inpad")', f'(net {via_net}) (uuid "via-inpad")'
+        )
+        pcb = PCB.load(_write(tmp_path, content))
+        original = pcb._sexp.to_string()
+        report = relocate_in_pad_vias(pcb, get_mfr_design_rules("jlcpcb", 2, 1.0))
+        assert not report.changed
+        assert not report.skipped
+        assert not report.unresolvable
+        assert pcb._sexp.to_string() == original
