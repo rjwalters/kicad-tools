@@ -38,6 +38,16 @@ if TYPE_CHECKING:
 # probe is delegated to the shared guard in :mod:`kicad_tools._shapely`.
 from kicad_tools._shapely import has_shapely as _has_shapely
 
+# Shared, checker-agnostic trace-copper geometry (issue #4176).  These are
+# pure analytic helpers with no shapely dependency, so same-layer track
+# contact is decided identically on core-only installs.
+from kicad_tools.geometry.copper import (
+    point_segment_distance as _point_segment_distance_impl,
+)
+from kicad_tools.geometry.copper import (
+    segments_copper_touch,
+)
+
 if _has_shapely():  # pragma: no cover - import guard exercised by environment
     from shapely.geometry import LineString as _ShapelyLineString  # type: ignore[import-untyped]
     from shapely.geometry import Point as _ShapelyPoint
@@ -850,37 +860,41 @@ class ConnectivityValidator:
                     ):
                         _connect(node_id, pad_id)
 
-        # 2a3. Geometric endpoint-in-pad-copper bonding (issue #4678).  Step
-        #      2a only bonds a segment endpoint to a pad whose *center* is
-        #      within ``POSITION_TOLERANCE`` (0.01 mm) of the endpoint.  A
-        #      trace that legally terminates inside a pad's copper but away
-        #      from the pad center — routers do this routinely on wide pads —
-        #      was invisible to that test, stranding the pad in its own
-        #      component and surfacing as a false LVS ``open`` that no flag
-        #      could override (the tapeout Gate 1 wedge).  Bond an endpoint
-        #      to any pad whose *eroded* copper box contains it (or whose
-        #      eroded box the endpoint's swept trace cap, radius ``width/2``,
-        #      penetrates) on a shared copper layer.  The
-        #      ``POUR_PAD_ERODE`` inset plus the ``> 1 µm`` cap-penetration
-        #      guard mirror steps 2c2 / 2a2: copper across a real clearance
-        #      moat (≥ 0.1 mm on any DRC-clean board) can never fuse, so this
-        #      only adds true galvanic contact — an endpoint physically inside
-        #      pad copper IS connected, exactly as kicad-cli and the strict
-        #      net-status model report it.  Bonds are injected via
-        #      ``segment_extra_nodes`` so the chain builder (2b) carries them
-        #      across the whole segment chain.  Requires shapely; core-only
+        # 2a3. Geometric segment-in-pad-copper bonding (issues #4678, #5060).
+        #      Step 2a only bonds a segment ENDPOINT to a pad whose *center*
+        #      is within ``POSITION_TOLERANCE`` (0.01 mm) of it.  A trace that
+        #      legally terminates inside a pad's copper but away from the pad
+        #      center — routers do this routinely on wide pads — was invisible
+        #      to that test (#4678, the tapeout Gate 1 wedge), and so was a pad
+        #      straddled by the *interior* of a continuous trace running past
+        #      it (#5060, board 09's inline SOIC pins on +3V3 / PMOS_SOURCE).
+        #      Bond a pad to any segment whose swept copper reaches into its
+        #      eroded copper outline on a shared copper layer, measured over
+        #      the segment's whole length so the result is invariant under
+        #      splitting the trace at the pad.  The ``POUR_PAD_ERODE`` inset
+        #      plus the ``> 1 µm`` penetration guard (mirroring steps 2c2 /
+        #      2a2) mean copper across a real clearance moat (≥ 0.1 mm on any
+        #      DRC-clean board) can never fuse: only true galvanic contact is
+        #      added, exactly as kicad-cli and the strict net-status model
+        #      report it.  Bonds are injected via ``segment_extra_nodes`` so
+        #      the chain builder (2b) carries them across the whole chain.
+        #      Requires shapely for the eroded pad outlines; core-only
         #      installs keep the legacy center-proximity behavior.
         if _has_shapely():
-            self._connect_endpoint_in_pad(segments, pad_layers, segment_extra_nodes)
+            self._connect_segment_in_pad(segments, pad_layers, segment_extra_nodes)
 
-        # 2b. Segment chains: pads connected through a chain of segments that
-        #     share endpoints are galvanically connected even with no pad at
-        #     the intermediate junctions.  Reuse the existing chain builder,
-        #     which is itself label-agnostic (it only looks at endpoints).
+        # 2b. Segment chains: pads connected through a chain of segments whose
+        #     copper physically touches are galvanically connected even with
+        #     no pad at the intermediate junctions.  Reuse the existing chain
+        #     builder, which is itself label-agnostic (it only looks at
+        #     geometry, never at net numbers).  Contact is decided over each
+        #     segment's full swept copper (issue #5060), so a mid-track
+        #     T-branch chains whether or not the trunk carries an explicit
+        #     vertex there.
         #     It is layer-aware (issue #3783): cross-layer hops require a via /
         #     multi-layer pad bridge, so pad_layers is passed through.
-        #     ``segment_extra_nodes`` carries the 2a2 via-barrel bonds into
-        #     each segment's chain component.
+        #     ``segment_extra_nodes`` carries the 2a2 via-barrel and 2a3
+        #     segment-in-pad bonds into each segment's chain component.
         graph = self._build_segment_chains(
             segments,
             pad_positions,
@@ -1362,14 +1376,51 @@ class ConnectivityValidator:
         seg_b: Any,
         bridges: list[tuple[tuple[float, float], frozenset[str]]],
     ) -> bool:
-        """Decide whether two segments chain where they share an endpoint.
+        """Decide whether two tracks are galvanically joined.
 
-        Same-layer segments chain whenever they share an XY endpoint (the
-        historic behaviour).  Different-layer segments chain only at a shared
-        XY endpoint that a via / multi-layer pad bridges across their two
-        layers — a bare cross-layer crossover does NOT chain (issue #3783).
+        Same-layer segments chain wherever their **swept copper** actually
+        touches (issue #5060), not merely where their endpoints coincide.
+        Different-layer segments chain only at a shared XY endpoint that a
+        via / multi-layer pad bridges across their two layers — a bare
+        cross-layer crossover does NOT chain (issue #3783).
+
+        Why full-copper contact and not endpoints (issue #5060).  Physical
+        connectivity must be invariant under splitting a straight track into
+        collinear subsegments whose copper union is unchanged: an editor,
+        router, or human may or may not have emitted an explicit vertex where
+        a branch meets a trunk.  Endpoint-only adjacency is *not* invariant —
+        a T-junction whose branch lands on a trunk's interior, or a wide
+        trace overlapped side-on, chained only once someone happened to split
+        the trunk at that point.  On board 09 that produced five false
+        ``open`` findings on ``+3V3`` / ``PMOS_SOURCE`` while native KiCad DRC
+        reported zero violations, and splitting the very same copper (0.0 mm²
+        union change, Shapely-verified) made them disappear.
+
+        :func:`~kicad_tools.geometry.copper.segments_copper_touch` decides the
+        same-layer case: two capsules of radius ``width / 2`` intersect iff
+        their centerlines lie within the sum of their radii.  It is
+        *label-free* (net numbers are never consulted, so a mislabeled or
+        foreign-net segment physically touching still fuses and surfaces as a
+        short) and *conservative*: a strictly positive copper gap — the
+        ≥ 0.1 mm clearance moat any DRC-clean board maintains between foreign
+        nets — exceeds the reach and never chains.  Splitting either segment
+        cannot manufacture contact, because every subsegment centerline is a
+        subset of the original.
+
+        The legacy ``POSITION_TOLERANCE`` endpoint coincidence is retained as
+        an additional same-layer trigger so degenerate width-less fixtures
+        keep chaining exactly as before.
         """
         same_layer = seg_a.layer == seg_b.layer
+        if same_layer and segments_copper_touch(
+            seg_a.start,
+            seg_a.end,
+            seg_a.width or 0.0,
+            seg_b.start,
+            seg_b.end,
+            seg_b.width or 0.0,
+        ):
+            return True
         for pa in (seg_a.start, seg_a.end):
             for pb in (seg_b.start, seg_b.end):
                 if not self._points_close(pa, pb):
@@ -1391,16 +1442,20 @@ class ConnectivityValidator:
     ) -> dict[str, set[str]]:
         """Build connectivity through chains of connected segments.
 
-        Segments that share endpoints form chains. Pads at any point
-        in a chain are connected to all other pads in the chain.
+        Segments whose same-layer copper physically touches form chains —
+        see :meth:`_segments_chain_at_shared_point`.  Pads at a chain
+        endpoint, or bonded anywhere along it via ``segment_extra_nodes``,
+        are connected to every other pad in the chain.
 
         The chain builder is **layer-aware** (issue #3783): two segments on
         *different* copper layers are only chained where they share an XY
         endpoint if a via (``via.layers`` spanning both layers) or a
         multi-layer pad actually bridges the layers at that point.  Two
         traces that merely cross at the same XY on opposite layers with no
-        via — a legal, DRC-clean layer crossover — are NOT fused.  Same-layer
-        chaining is unchanged.
+        via — a legal, DRC-clean layer crossover — are NOT fused.  The #5060
+        full-copper contact test applies to the SAME-layer case only, so
+        cross-layer copper that merely overlaps in XY still requires a real
+        via / PTH bridge at a shared endpoint.
 
         Pad membership in a chain is ALSO layer-gated when ``pad_layers``
         is supplied (softstart false-short fix): a chain endpoint only
@@ -1568,17 +1623,12 @@ class ConnectivityValidator:
         seg_start: tuple[float, float],
         seg_end: tuple[float, float],
     ) -> float:
-        """Shortest distance from ``point`` to the segment ``seg_start-seg_end``."""
-        px, py = point
-        ax, ay = seg_start
-        bx, by = seg_end
-        dx, dy = bx - ax, by - ay
-        length_sq = dx * dx + dy * dy
-        if length_sq <= 0.0:
-            return math.hypot(px - ax, py - ay)
-        t = ((px - ax) * dx + (py - ay) * dy) / length_sq
-        t = max(0.0, min(1.0, t))
-        return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+        """Shortest distance from ``point`` to the segment ``seg_start-seg_end``.
+
+        Thin delegate to the shared
+        :func:`kicad_tools.geometry.copper.point_segment_distance` primitive.
+        """
+        return _point_segment_distance_impl(point, seg_start, seg_end)
 
     def _points_close(
         self,
@@ -1688,7 +1738,7 @@ class ConnectivityValidator:
         the 0.1016 mm minimum clearance once ``d ≳ 1.2 mm`` (0.211 mm of
         over-reach on a 1.7 mm header pad).  Any *distance-to-copper* test
         against that phantom corner can bond across a legal clearance moat.
-        See :meth:`_connect_endpoint_in_pad` for the failure this guards.
+        See :meth:`_connect_segment_in_pad` for the failure this guards.
 
         The shape-aware outline is inscribed in the same rotated size box, so
         it is always a **subset** of the box geometry: enabling it can only
@@ -1838,35 +1888,51 @@ class ConnectivityValidator:
                     pad_polygons[f"{fp.reference}.{pad.number}"] = poly
         return pad_polygons
 
-    def _connect_endpoint_in_pad(
+    def _connect_segment_in_pad(
         self,
         segments: list,
         pad_layers: dict[str, list[str]],
         segment_extra_nodes: dict[int, set[str]],
     ) -> None:
-        """Bond segment endpoints landing inside pad copper (issue #4678).
+        """Bond track copper overlapping pad copper (issues #4678, #5060).
 
-        A track endpoint that lies inside a pad's copper is galvanic contact
+        A track *endpoint* that lies inside a pad's copper is galvanic contact
         with that pad — KiCad's own connectivity, ``kct net-status`` (strict)
         and ``kct route --complete`` all treat it as connected.  The legacy
         center-proximity test (step 2a, ``POSITION_TOLERANCE`` = 0.01 mm from
         the pad *center*) missed it, so the LVS copper leg reported a false
         ``open`` that blocked tapeout Gate 1 with no override.
 
+        Issue #5060 extends the same test from the two endpoints to the
+        **whole swept segment**.  A pad sitting inline on a continuous trace
+        (a SOIC pin whose copper is straddled by an uninterrupted wide track
+        running past it) touches only that track's *interior*, so the
+        endpoint form left it stranded in its own component — a false
+        ``open`` on board 09's ``+3V3`` / ``PMOS_SOURCE`` that vanished as
+        soon as the very same copper was split at the pad, with a
+        Shapely-verified 0.0 mm² change to the buffered trace union.
+        Measuring the distance from the pad polygon to the entire centerline
+        makes the bond invariant under such splits in both directions: the
+        minimum is attained at some centerline point, which lies on exactly
+        one subsegment, and no subsegment reaches anywhere the whole
+        centerline did not — so inserting a collinear vertex can neither
+        create nor destroy a pad bond.
+
         Bond condition (conservative by construction):
 
         * shared copper layer — the pad's copper must exist on the segment's
           layer (``*.Cu`` through-hole pads match any copper layer), and
-        * the endpoint lies inside the pad's **eroded, shape-aware** copper
-          outline (:meth:`_pad_copper_polygon` with ``shape_aware=True``:
-          circle → disk, oval → stadium, rect/roundrect → size box, each
-          inset by ``POUR_PAD_ERODE`` = 0.1 mm), or the endpoint's swept
-          trace end-cap (KiCad tracks have rounded ends of radius
-          ``width / 2``) penetrates that eroded outline by **more than 1 µm**
-          (the step-2a2 strictly-positive contact-depth guard).
+        * the segment centerline enters the pad's **eroded, shape-aware**
+          copper outline (:meth:`_pad_copper_polygon` with
+          ``shape_aware=True``: circle → disk, oval → stadium,
+          rect/roundrect → size box, each inset by ``POUR_PAD_ERODE`` =
+          0.1 mm), or the swept trace copper (KiCad tracks are the
+          centerline buffered by ``width / 2``, with rounded ends)
+          penetrates that eroded outline by **more than 1 µm** (the
+          step-2a2 strictly-positive contact-depth guard).
 
         Soundness (and why the geometry must be shape-aware).  This step
-        measures a *distance* from an arbitrary trace vertex to the pad
+        measures a *distance* from arbitrary trace copper to the pad
         polygon, so the polygon has to be contained in the pad's real copper
         in **every** direction, not just on axis.  The plain size box is not:
         for a circle pad of diameter ``d`` its eroded corner sticks out to
@@ -1882,10 +1948,13 @@ class ConnectivityValidator:
         true copper with ≥ 0.1 mm of margin **in every direction** (rect and
         roundrect are exact-or-inside by construction; circle/oval are the
         true outline inset by 0.1 mm).  DRC clearance keeps a *foreign*
-        trace's copper ≥ 0.1016 mm from that copper, and its endpoint
-        centerline sits a further ``width / 2`` (end-cap radius) beyond the
-        copper edge, so the measured distance stays above ``width / 2`` and
-        the bond does not fire.  The claim is therefore scoped, not absolute:
+        trace's copper ≥ 0.1016 mm from that copper, and its centerline sits
+        a further ``width / 2`` beyond its own copper edge, so the measured
+        distance stays above ``width / 2`` and the bond does not fire.  That
+        argument is about a *clearance to copper* and so is unaffected by the
+        #5060 widening from the two endpoints to the whole centerline: DRC
+        holds along the entire trace, not only at its vertices.  The claim is
+        therefore scoped, not absolute:
         it holds for the pad-shape families modelled here, and a ``custom``
         (polygon-primitive) pad still falls back to the size box — such a pad
         can in principle over-reach on a concave outline, which is a known,
@@ -1906,8 +1975,8 @@ class ConnectivityValidator:
         if not pad_polygons:
             return
 
-        # Cheap bounding prefilter: skip the shapely test unless the endpoint
-        # is within the pad box's half-diagonal plus the trace end-cap radius
+        # Cheap bounding prefilter: skip the shapely test unless the centerline
+        # is within the pad box's half-diagonal plus the trace copper radius
         # of the pad center.  Uses the *uneroded box* bound — a superset of
         # every shape-aware outline — so it can only over-admit (the exact
         # eroded test below decides), never miss.
@@ -1929,24 +1998,24 @@ class ConnectivityValidator:
 
         for seg_index, seg in enumerate(segments):
             cap_radius = max((seg.width or 0.0) / 2.0, 0.0)
-            for endpoint in (seg.start, seg.end):
-                ex, ey = endpoint
-                point = _ShapelyPoint(endpoint)
-                for pad_id, (cx, cy, bound) in pad_bounds.items():
-                    reach = bound + cap_radius
-                    dx, dy = ex - cx, ey - cy
-                    if dx * dx + dy * dy > reach * reach:
-                        continue
-                    # Layer gate: the pad's copper must exist on the
-                    # segment's layer for the trace metal to touch it.
-                    if not self._pad_copper_on_layer(pad_layers.get(pad_id, []), seg.layer):
-                        continue
-                    dist = pad_polygons[pad_id].distance(point)
-                    # Inside the eroded outline (dist == 0), or the trace
-                    # end-cap penetrates it by > 1 µm (strictly positive
-                    # contact depth).
-                    if dist == 0.0 or dist < cap_radius - 1e-3:
-                        segment_extra_nodes.setdefault(seg_index, set()).add(pad_id)
+            centerline = (
+                _ShapelyPoint(seg.start)
+                if seg.start == seg.end
+                else _ShapelyLineString([seg.start, seg.end])
+            )
+            for pad_id, (cx, cy, bound) in pad_bounds.items():
+                # The whole segment must pass the broad-phase test, not only
+                # its endpoints: an inline pad can be arbitrarily far from
+                # either vertex of otherwise identical unsplit copper.
+                if self._point_segment_distance((cx, cy), seg.start, seg.end) > bound + cap_radius:
+                    continue
+                if not self._pad_copper_on_layer(pad_layers.get(pad_id, []), seg.layer):
+                    continue
+                dist = pad_polygons[pad_id].distance(centerline)
+                # Retain the existing eroded, shape-aware pad and positive
+                # contact-depth guards while considering the full trace.
+                if dist == 0.0 or dist < cap_radius - 1e-3:
+                    segment_extra_nodes.setdefault(seg_index, set()).add(pad_id)
 
     def _connect_via_in_pad(
         self,
@@ -2081,7 +2150,7 @@ class ConnectivityValidator:
             for pad in fp.pads:
                 if pad.number is None or pad.number == "":
                     continue
-                poly = self._pad_copper_polygon(fp, pad)
+                poly = self._pad_copper_polygon(fp, pad, shape_aware=True)
                 if poly is not None:
                     pad_polygons[f"{fp.reference}.{pad.number}"] = poly
         via_radius = self._synthetic_via_radii(synthetic_nodes)

@@ -726,11 +726,37 @@ command as the write.
 This workaround applies to the three `worktree-write-confinement-unresolved-var`
 deny sites in `guard-destructive-generic.sh`'s Bash-tool write-confinement
 check (the ones fed by `extract_write_targets()`, which runs the resolver
-above before reaching these deny paths). It does **not** apply to the
-`rm-scope-unresolved-var` deny (`guards.rmScope=repo`) — `extract_rm_targets()`
-never calls `record_assign()`/`resolve_var()`, so a same-command literal
-declaration does not resolve an `rm` target; that check still requires an
-explicit literal path.
+above before reaching these deny paths).
+
+The `rm-scope-unresolved-var` deny (`guards.rmScope=repo`) reaches the same
+outcome by a **separate, narrower** route: `extract_rm_targets()` still never
+calls `record_assign()`/`resolve_var()`, so the shared resolver above does not
+run on `rm` targets. Instead, two dedicated same-command fast paths sit
+immediately in front of the deny:
+
+| Fast path | Recognized shape | Verdict |
+|---|---|---|
+| `rm_scope_mktemp_same_command_safe()` (#6520) | a **bare** `$NAME`/`${NAME}` target whose single same-command assignment is exactly `NAME=$(mktemp -d)` / `NAME=$(mktemp)` (optionally double-quoted) | Proven `/tmp`-or-`$TMPDIR`-rooted; **skips the scope check entirely**. |
+| `rm_scope_literal_same_command_resolve()` (#6676, widened by #6805) | `$NAME<suffix>` / `${NAME}<suffix>` in any quoting, whose single same-command assignment is a pure literal absolute path (no `$`, no backtick), with a `<suffix>` that is empty or a pure literal starting at a `/` boundary | Resolves to `<literal><suffix>` and re-runs the **normal** rm-scope checks against it — so it can allow *or* deny. |
+
+Both inherit the write-confinement resolver's fail-closed rules: two
+assignments to the same name (even identical ones) poison the resolution, a
+RHS that itself carries an unresolved `$`/command substitution is not trusted,
+and an unassigned name stays unresolved. Heredoc bodies are masked before the
+scan, so an inert decoy assignment inside one cannot launder a real
+unresolved target (#6549).
+
+Because the literal fast path re-runs the ordinary checks on the *resolved*
+path, it is a false-positive refinement rather than a relaxation:
+`WT=/etc/foo; rm -rf "$WT/.snapshots"` still denies as out-of-scope,
+`WT=/; rm -rf "$WT/usr"` still denies as a top-level system directory, and a
+`..` in the suffix is collapsed by `normalize_abs_path()` before the scope
+test. What it stops denying is the routine builder/doctor cleanup shape —
+`WT="<repo>/.loom/worktrees/issue-N"; rm -rf "$WT/.snapshots"` — that was
+previously denied at the catastrophic tier purely because the target was
+spelled through a variable.
+
+Anything outside those two shapes still requires an explicit literal path.
 
 ### Background Subagent Stop Guard (`guards.backgroundSubagents` / `LOOM_GUARD_BACKGROUND_SUBAGENTS`)
 
@@ -1015,6 +1041,44 @@ other than a pop, so a deny would strand work rather than protect it. Invoking
 the wrapper itself is not a raw stash command and is therefore ungated, exactly
 like `worktree.sh stash-pop`.
 
+#### Main-checkout clean baseline: `stash-push main` / `stash-pop main` (#6076)
+
+The ask above is correct, but until #6076 it was *unactionable in a headless
+run*: the message offered only "disable the guard", because the sanctioned
+clean-and-restore pair was issue-keyed and there was no main-checkout
+equivalent to redirect to. Roles that legitimately work in the primary clone
+(Judge, Champion, Auditor, Guide, Hermit) therefore kept reaching for raw
+`git stash` + `git stash pop` there, and every pop stalled on an ask with
+nobody present to answer it — 21 recurrences in the 2026-08-09..12 audit
+window, on the same command shapes.
+
+`worktree.sh stash-push main` / `stash-pop main` close that gap. They behave
+exactly like the per-issue verbs but operate on the primary clone and anchor
+to `refs/loom/stash-baseline/main`, so they never touch `refs/stash`:
+
+```bash
+./.loom/scripts/worktree.sh stash-push main    # capture WIP, reset main to HEAD
+shellcheck install.sh                          # clean-tree baseline
+./.loom/scripts/worktree.sh stash-pop main     # restore exactly what was captured
+```
+
+This is **not** a guard exemption. The tier is unchanged — a raw
+`git stash pop`/`drop`/`clear` in the main checkout still asks — and the pair
+is simply invisible to the check because it never invokes those subcommands.
+It is also strictly safer than the raw stash it replaces: `refs/stash` lets two
+callers interleave silently, whereas a second `stash-push main` while a capture
+is outstanding fails loudly and names the ref. The create-side deny (#5754) was
+deliberately **not** extended to the primary clone, which also hosts legitimate
+raw-stash producers the hook cannot distinguish (`check-main-clean.sh
+--quarantine`'s rescue push, an operator's own interactive shelf).
+
+Reconciling a quarantined entry is a separate case with its own rule — **replay,
+don't pop**: apply the diff inside the owning issue worktree
+(`git stash show -p <ref> | git -C .loom/worktrees/issue-<N> apply -`), then
+retire the entry with `loom-daemon stashes retire --issue <N> --execute`.
+Popping it back into the primary clone puts the contamination straight back
+where the sweep backstop will quarantine it again.
+
 The main-checkout test compares `git rev-parse --show-toplevel` against
 `git rev-parse --git-common-dir/..`, both resolved from the command's cwd: they
 are equal only when cwd **is** the main checkout, and diverge when cwd is a
@@ -1170,6 +1234,17 @@ cd .loom/worktrees/issue-42 && git stash   # DENY -> use snapshot/stash-push 42
 cargo clippy --message-format=short > /tmp/baseline.txt   # clean-tree baseline
 ./.loom/scripts/worktree.sh stash-pop 42
 cargo clippy --message-format=short > /tmp/with-wip.txt   # then diff the two
+
+# Same comparison, but in the PRIMARY CLONE (#6076) — the replacement for a
+# raw `git stash` + `git stash pop` pair there, likewise never gated:
+./.loom/scripts/worktree.sh stash-push main
+shellcheck install.sh
+./.loom/scripts/worktree.sh stash-pop main
+
+# Reconciling a quarantined entry — replay into the OWNING worktree, never pop
+# it back into main (which the sweep backstop would just re-quarantine):
+git stash show -p stash@{0} | git -C .loom/worktrees/issue-42 apply -
+loom-daemon stashes retire --issue 42 --execute
 
 # Ad-hoc "shelve my WIP" — the replacement for a bare `git stash`:
 ./.loom/scripts/worktree.sh snapshot 42

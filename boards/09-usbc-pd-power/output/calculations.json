@@ -1,0 +1,86 @@
+{
+  "component_value_binding": {
+    "R5": "680k",
+    "R6": "100k",
+    "R7": "100k 0.1%",
+    "R8": "13.3k 0.1%",
+    "RSH1": "10m 1% 1W",
+    "L1": "10uH",
+    "C5": "10u 50V",
+    "C8": "22u 25V",
+    "C9": "22u 25V"
+  },
+  "scope": "Analytical screening; thermal, transient, EMI and USB interoperability tests pending.",
+  "sources": {
+    "buck": "https://www.ti.com/lit/ds/symlink/tps54302.pdf",
+    "inductor": "https://www.bourns.com/docs/product-datasheets/srp7050ta.pdf",
+    "shunt": "https://www.vishay.com/docs/30108/wsk2512.pdf",
+    "monitor": "https://www.ti.com/lit/ds/symlink/ina226.pdf"
+  },
+  "output": {
+    "target_current_A": 3.0,
+    "nominal_pre_shunt_V": 5.077203007518797,
+    "dc_component_tolerance_min_at_3A_V": 4.910392938640306,
+    "dc_component_tolerance_max_no_load_V": 5.214182129497917,
+    "excluded_from_bounds": [
+      "load/line regulation",
+      "ripple",
+      "transients",
+      "PCB path drop",
+      "resistor TCR"
+    ]
+  },
+  "inductor": {
+    "L_nominal_uH": 10,
+    "L_min_uH": 8,
+    "fsw_min_Hz": 290000,
+    "vin_max_V": 21,
+    "ripple_pp_A": 1.6894525747101976,
+    "peak_A": 3.844726287355099,
+    "rms_A": 3.039383846579694,
+    "minimum_buck_HS_limit_A": 4,
+    "inductor_Isat_A": 7.5,
+    "inductor_Irms_rating_A": 4,
+    "DCR_max_25C_ohm": 0.069,
+    "winding_loss_25C_W": 0.6374119375126208,
+    "note": "Isat and Irms use manufacturer 25C test definitions; not a guaranteed hot-board limit."
+  },
+  "shunt": {
+    "ohm": 0.01,
+    "max_drop_3A_V": 0.0303,
+    "max_dissipation_3A_W": 0.0909,
+    "rating_at_70C_W": 1
+  },
+  "enable": {
+    "upper_ohm": 680000,
+    "lower_ohm": 100000,
+    "typical_start_V": 9.117999999999999,
+    "typical_stop_V": 7.518,
+    "note": "Typical internal EN currents; measure thresholds. 5V input is below the intended operating window."
+  },
+  "pd_budget": {
+    "assumed_min_efficiency": 0.85,
+    "logic_reserve_W": 0.1,
+    "15V_1p5A_available_at_minus5pct_W": 21.375,
+    "20V_1A_available_at_minus5pct_W": 19.0,
+    "required_input_W": 18.502995751169124,
+    "note": "Confirm actual sink PDO/RDO and charger capability. Efficiency is a design budget, not measured."
+  },
+  "monitor": {
+    "current_lsb_A": 0.0002,
+    "calibration": 2560,
+    "power_lsb_W": 0.005,
+    "shunt_lsb_V": 2.5e-06,
+    "bus_lsb_V": 0.00125
+  },
+  "bench_limits": {
+    "initial_load_A": 0.1,
+    "ambient_C": [
+      20,
+      30
+    ],
+    "target_load_A": 3,
+    "status": "not bench validated"
+  },
+  "screen_passed": true
+}

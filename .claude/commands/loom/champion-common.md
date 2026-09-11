@@ -224,6 +224,90 @@ extract_blocker_refs() {
 }
 ```
 
+### Step 1.5 — discover an epic's children (marker-independent, #6516)
+
+The original form of Step 2 below asked one question — "which
+`loom:epic-phase` issues carry `<!-- loom:epic:N:phase:M -->` in their body?"
+— which sees **only** the children `champion-epic.md`'s Step 3 created itself.
+An epic decomposed any other way (the GitHub sub-issues UI, a hand-written
+task list, issues filed directly against the epic) has zero marker children
+and reads as `blocked-not-started` no matter how finished it is. That is the
+same class of blindness #5211 fixed one layer up, and it is what let a fully
+executed epic sit open for days (#6516).
+
+`discover_epic_children` unions the containment sources and keeps them graded,
+because the two callers need different confidence:
+
+| Tier | Sources | Who may act on it |
+|---|---|---|
+| **Strong** (containment) | (a) `loom:epic-phase` children carrying the phase marker, (b) native GitHub sub-issues, (c) `- [ ] #N` task-list entries in the epic body | Step 2's classification, and `champion-epic.md` → "Step 0" **including its autonomous close** |
+| **Weak** (prose reference) | (d) issues whose body merely names `Epic #N` | Never on its own — it may only downgrade `champion-epic.md`'s Step 0 to an operator ask, and it never affects Step 2 |
+
+```bash
+# Sets EPIC_CHILD_STRONG_{OPEN,CLOSED}, EPIC_CHILD_WEAK_{OPEN,CLOSED},
+# EPIC_CHILD_SOURCES (comma list of the sources that actually contributed).
+# $1 = "owner/repo", $2 = epic number.
+discover_epic_children() {
+  local repo="$1" num="$2" marker="loom:epic:$2:phase:" srcs=""
+
+  # (a) phase-marker children — the historical source (champion-epic.md Step 3).
+  local a
+  # `gh --jq` takes only an expression (no `--arg`), so the marker — digits and
+  # literals only — is interpolated into the program directly.
+  a=$(${GH_READ:-gh} issue list --repo "$repo" --label="loom:epic-phase" --state=all --limit=500 \
+    --json number,state,body \
+    --jq "[.[] | select(.body | contains(\"$marker\")) | {number, state}]" 2>/dev/null || echo '[]')
+
+  # (b) native sub-issues. 404s (→ `[]`) on forges/repos without the API, which
+  # is a legitimate "no evidence", never "no children".
+  local b
+  b=$(gh api "repos/$repo/issues/$num/sub_issues" --paginate \
+    --jq '[.[] | {number, state: (.state | ascii_upcase)}]' 2>/dev/null | jq -s 'add // []')
+
+  # (c) same-repo task-list entries in the epic body ("- [ ] #123" / "- [x] #123").
+  # Resolve each ref's state; cap the fan-out so a pathological body cannot burn
+  # the API budget (a >40-item hand-written epic is already an operator problem).
+  local body refs c='[]'
+  body=$(${GH_READ:-gh} issue view "$num" --repo "$repo" --json body --jq '.body // ""' 2>/dev/null)
+  refs=$(printf '%s\n' "$body" \
+    | grep -Eo '^[[:space:]]*[-*][[:space:]]*\[[ xX]\][[:space:]]*#[0-9]+' \
+    | grep -Eo '[0-9]+' | sort -un | head -40)
+  for r in $refs; do
+    [ "$r" = "$num" ] && continue
+    local st
+    st=$(${GH_READ:-gh} issue view "$r" --repo "$repo" --json state --jq '.state' 2>/dev/null) || continue
+    c=$(printf '%s' "$c" | jq --argjson n "$r" --arg s "$st" '. + [{number:$n, state:$s}]')
+  done
+
+  # (d) weak: prose references to this epic, no containment claimed.
+  local d
+  d=$(${GH_READ:-gh} issue list --repo "$repo" --state=all --limit=200 \
+    --search "\"Epic #$num\" in:body" --json number,state --jq '.' 2>/dev/null || echo '[]')
+
+  local strong weak
+  strong=$(jq -s --argjson e "$num" 'add | map(select(.number != $e)) | unique_by(.number)' \
+    <(printf '%s' "$a") <(printf '%s' "$b") <(printf '%s' "$c"))
+  weak=$(jq -s --argjson e "$num" '(.[0] | map(.number)) as $s
+    | .[1] | map(select(.number != $e and (.number | IN($s[]) | not))) | unique_by(.number)' \
+    <(printf '%s' "$strong") <(printf '%s' "$d"))
+
+  EPIC_CHILD_STRONG_OPEN=$(printf '%s' "$strong" | jq '[.[] | select(.state=="OPEN")] | length')
+  EPIC_CHILD_STRONG_CLOSED=$(printf '%s' "$strong" | jq '[.[] | select(.state=="CLOSED")] | length')
+  EPIC_CHILD_WEAK_OPEN=$(printf '%s' "$weak" | jq '[.[] | select(.state=="OPEN")] | length')
+  EPIC_CHILD_WEAK_CLOSED=$(printf '%s' "$weak" | jq '[.[] | select(.state=="CLOSED")] | length')
+  [ "$(printf '%s' "$a" | jq 'length')" -gt 0 ] && srcs="$srcs,phase-marker"
+  [ "$(printf '%s' "$b" | jq 'length')" -gt 0 ] && srcs="$srcs,sub-issues"
+  [ "$(printf '%s' "$c" | jq 'length')" -gt 0 ] && srcs="$srcs,task-list"
+  [ "$(printf '%s' "$weak" | jq 'length')" -gt 0 ] && srcs="$srcs,prose-reference"
+  EPIC_CHILD_SOURCES="${srcs#,}"
+}
+```
+
+**A source finding nothing is never evidence of completion.** Every counter
+starts at 0, so "no children anywhere" is `STRONG_CLOSED == 0` and both
+callers must treat it as *undecomposed*, not *done* — the same reason
+`CLOSED_COUNT == 0` gates `blocked-not-started` below.
+
 ### Step 2 — classify the referenced blocker
 
 ```bash
@@ -245,21 +329,21 @@ else
   # Walk EVERY phase's children, not just one — generalizes champion-epic.md's
   # "Detecting Phase Completion" (which deliberately scopes to a single PHASE
   # number for the "should I create phase N+1" question) to the "is this whole
-  # epic's delivered capability done" question instead. One list call per
-  # epic, filtered locally, rather than one `gh issue list --search=...` call
-  # per phase. Cached (${GH_READ:-gh}) — a classification read, same rationale
-  # as the BLOCKER_JSON read above; falls back to plain `gh` when unset.
-  CHILDREN=$(${GH_READ:-gh} issue list --repo "$BLOCKER_REPO" --label="loom:epic-phase" --state=all --limit=500 \
-    --json number,state,body \
-    --jq --arg marker "loom:epic:$BLOCKER_NUM:phase:" \
-      '[.[] | select(.body | contains($marker))]')
-  OPEN_COUNT=$(printf '%s\n' "$CHILDREN" | jq '[.[] | select(.state=="OPEN")] | length')
-  CLOSED_COUNT=$(printf '%s\n' "$CHILDREN" | jq '[.[] | select(.state=="CLOSED")] | length')
+  # epic's delivered capability done" question instead. Step 1.5's discovery is
+  # also marker-independent, so an epic decomposed via sub-issues or a body task
+  # list is classified on the same footing as one Champion decomposed itself
+  # (#6516). Cached reads throughout (${GH_READ:-gh}) — a classification read,
+  # same rationale as the BLOCKER_JSON read above.
+  discover_epic_children "$BLOCKER_REPO" "$BLOCKER_NUM"
+  # STRONG (containment) counts only: a prose "Epic #N" mention must never be
+  # able to make a blocker look delivered.
+  OPEN_COUNT="$EPIC_CHILD_STRONG_OPEN"
+  CLOSED_COUNT="$EPIC_CHILD_STRONG_CLOSED"
 
   if [ "$OPEN_COUNT" -gt 0 ]; then
     EPIC_BLOCK_STATE="blocked-in-progress"        # genuinely still working — keep blocking, no change here
   elif [ "$CLOSED_COUNT" -eq 0 ]; then
-    EPIC_BLOCK_STATE="blocked-not-started"        # no phase children created yet — keep blocking, no change here
+    EPIC_BLOCK_STATE="blocked-not-started"        # no children found by ANY containment source — keep blocking, no change here
   else
     EPIC_BLOCK_STATE="epic-complete-unpromoted"   # OPEN_COUNT==0 AND CLOSED_COUNT>0: the trap state (#5211)
   fi
@@ -268,7 +352,10 @@ fi
 
 `CLOSED_COUNT == 0` (not just `OPEN_COUNT == 0`) gates `blocked-not-started` —
 an epic that has never been decomposed has `OPEN_COUNT == 0` vacuously and
-must **not** be misread as complete.
+must **not** be misread as complete. Widening discovery in Step 1.5 does not
+weaken that: a source that returns nothing contributes nothing, so an
+undecomposed epic still lands on `blocked-not-started` through every source
+at once.
 
 **Only `epic-complete-unpromoted` changes any caller's behavior.**
 `blocked-not-started` and `blocked-in-progress` are the common, correct case

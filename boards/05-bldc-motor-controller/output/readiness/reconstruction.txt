@@ -1,0 +1,3 @@
+Fresh hardware.py circuit and routing.json copper rebuilt into /tmp/loom-5044-board05-45-rebuild.
+All component/pad/placement/net geometry fingerprint preserved. Native refill:0 violations/0 opens. Native ERC:0. Manufacturer checks:0 errors/0 warnings. Label/copper LVS:0 mismatches,149 bound pads.
+All8114 track segments are aligned to0/45/90/135 degrees. No DRC waivers, width/layer changes, via moves or synthetic pads.

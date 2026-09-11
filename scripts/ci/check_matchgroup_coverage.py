@@ -93,8 +93,7 @@ the name set and their in-directory precedence to
 after #4601/PR #4629 taught ``kct check`` about the stem-keyed
 ``<pcb_stem>.net_class_map.json`` name, so this gate could have passed a
 different sidecar to ``kct check`` than a developer's local ``kct check``
-would have auto-discovered.  The directory this gate searches
-(``board_dir/output``) is unchanged.
+would have auto-discovered.  The directory follows the selected recipe artifact, including isolated legacy fixtures.
 """
 
 from __future__ import annotations
@@ -107,6 +106,9 @@ import sys
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from board_recipe_artifacts import recipe_baseline_key, recipe_output_dir  # noqa: E402
 
 # Issue #4634: the sidecar filename rules are shared with ``kct check``, the
 # routed-DRC gate and the ``kct export`` report surface via the stdlib-only
@@ -199,7 +201,7 @@ MATCHGROUP_RULE_IDS: tuple[str, ...] = ("match_group_length_skew",)
 #   the ADDR_BUS term, so the reroute count is now 1 and matches the
 #   committed-artifact count.)
 MATCHGROUP_VIOLATION_BASELINE: dict[str, int] = {
-    "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb": 1,
+    "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb": 1,
 }
 
 
@@ -306,6 +308,7 @@ def re_route_board(board_dir: Path, seed: int) -> bool:
     cmd = [
         sys.executable,
         str(script),
+        str(recipe_output_dir(board_dir, prepare=True)),
         "--step",
         "route",
         "--seed",
@@ -325,11 +328,11 @@ def re_route_board(board_dir: Path, seed: int) -> bool:
 def find_routed_pcb(board_dir: Path) -> Path | None:
     """Locate the board's freshly-routed PCB.
 
-    Walks ``board_dir/output`` looking for the canonical
+    Walks the isolated recipe output (or legacy fixture) looking for the canonical
     ``*_routed.kicad_pcb`` artifact emitted by ``generate_design.py``.
     Returns ``None`` if not found (caller emits the error).
     """
-    out = board_dir / "output"
+    out = recipe_output_dir(board_dir)
     if not out.is_dir():
         return None
     candidates = list(out.glob("*_routed.kicad_pcb"))
@@ -357,8 +360,8 @@ def find_net_class_map_sidecar(board_dir: Path, routed_pcb: Path) -> Path | None
     (stem-keyed ``<pcb_stem>.net_class_map.json`` first, then the bare
     ``net_class_map.json``) via :mod:`kicad_tools.sidecars`, so this gate
     can never resolve a different file than the ``kct check`` invocation
-    it goes on to gate.  The **directory** scope is unchanged:
-    ``board_dir/output`` only.
+    it goes on to gate.  The directory follows the selected routed PCB, so a synthetic fixture
+    cannot accidentally consume the assembled board's sidecar.
 
     Args:
         board_dir: The board directory (``boards/NN-name``).
@@ -366,7 +369,7 @@ def find_net_class_map_sidecar(board_dir: Path, routed_pcb: Path) -> Path | None
             the exact stem for the stem-keyed candidate.  The caller
             already holds it from :func:`find_routed_pcb`.
     """
-    return first_existing_net_class_map_sidecar([board_dir / "output"], routed_pcb.stem)
+    return first_existing_net_class_map_sidecar([routed_pcb.parent], routed_pcb.stem)
 
 
 def _import_module_from_path(module_name: str, path: Path):
@@ -485,7 +488,9 @@ def measure_pour_connectivity(recipe_mod, pcb_path: Path, pour_nets: set[str]) -
     return failures
 
 
-def count_errors_via_kct_check(pcb_path: Path, sidecar: Path | None) -> int:
+def count_errors_via_kct_check(
+    pcb_path: Path, sidecar: Path | None, *, error_rules: dict[str, int] | None = None
+) -> int:
     """Count BLOCKING errors via ``kct check --mfr jlcpcb --errors-only``.
 
     Issue #4008: this counter now applies the same advisory-rule filter as
@@ -562,7 +567,25 @@ def count_errors_via_kct_check(pcb_path: Path, sidecar: Path | None) -> int:
         blocking, _advisory_by_rule = count_blocking_errors(data)
     except RuntimeError as e:
         raise RuntimeError(f"{e} (source: {pcb_path})") from e
+    if error_rules is not None:
+        for violation in data.get("violations", []):
+            if violation.get("severity") == "error":
+                rule = violation.get("rule_id", "unknown")
+                error_rules[rule] = error_rules.get(rule, 0) + 1
     return blocking
+
+
+def unexpected_baseline_errors(key: str, errors: dict[str, int]) -> dict[str, int]:
+    """Historical skew improvements cannot absorb new physical defects."""
+    if key not in MATCHGROUP_VIOLATION_BASELINE:
+        return {}
+    expected = {
+        "diffpair_length_skew",
+        "diffpair_routing_continuity",
+        "match_group_length_skew",
+        "connectivity",
+    }
+    return {rule: count for rule, count in errors.items() if count and rule not in expected}
 
 
 def compute_rule_coverage(
@@ -755,11 +778,7 @@ def check_board(
 
     # Compute the allowlist key in the same way check_routed_drc.py does:
     # repo-relative path string.
-    try:
-        rel = routed_pcb.resolve().relative_to(Path.cwd())
-        lookup_key = str(rel)
-    except ValueError:
-        lookup_key = str(routed_pcb)
+    lookup_key = recipe_baseline_key(routed_pcb)
     allowed = allowlist.get(lookup_key, 0)
 
     # Two-pass strategy (see docstrings on count_errors_via_kct_check
@@ -772,7 +791,8 @@ def check_board(
     #      actually incremented (a regression in derive_group_skew_data
     #      would zero the counter even with a correct error count).
     try:
-        error_count = count_errors_via_kct_check(routed_pcb, sidecar)
+        error_rules: dict[str, int] = {}
+        error_count = count_errors_via_kct_check(routed_pcb, sidecar, error_rules=error_rules)
     except RuntimeError as e:
         annotate_error(str(routed_pcb), f"kct check failed: {e}")
         return 1
@@ -790,6 +810,7 @@ def check_board(
     print(f"[matchgroup-coverage] Routed PCB: {routed_pcb}")
     print(f"[matchgroup-coverage] Sidecar: {sidecar}")
     print(f"[matchgroup-coverage] DRC error count: {error_count} (allowed: {allowed})")
+    print(f"[matchgroup-coverage] All error rules: {error_rules}")
     print(f"[matchgroup-coverage] rules_checked_by_rule: {rules_by_rule}")
     print(
         f"[matchgroup-coverage] match-group error violations: "
@@ -889,6 +910,11 @@ def check_board(
                 f"[matchgroup-coverage] OK: pour connectivity "
                 f"({len(pour_nets)} pour nets, copper-union audit)."
             )
+
+    unexpected = unexpected_baseline_errors(lookup_key, error_rules)
+    if unexpected:
+        annotate_error(str(routed_pcb), f"Errors outside historical group baseline: {unexpected}")
+        failed = True
 
     # AC #1 (allowlist semantic): error count must be <= allowed.
     if error_count > allowed:

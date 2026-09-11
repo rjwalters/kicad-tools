@@ -1,0 +1,31 @@
+{
+  "build": {
+    "core": "arduino",
+    "extra_flags": "-DARDUINO_AVR_LEONARDO",
+    "f_cpu": "8000000L",
+    "hwids": [
+      [
+        "0x16c0",
+        "0x27dc"
+      ]
+    ],
+    "mcu": "atmega32u4",
+    "usb_product": "KCT USB Joystick 03",
+    "variant": "leonardo"
+  },
+  "debug": {
+    "simavr_target": "atmega32u4"
+  },
+  "frameworks": [
+    "arduino"
+  ],
+  "name": "KCT ATmega32U4 joystick (ISP, no bootloader)",
+  "upload": {
+    "maximum_ram_size": 2560,
+    "maximum_size": 32768,
+    "protocol": "usbasp",
+    "require_upload_port": false
+  },
+  "url": "https://github.com/rjwalters/kicad-tools/tree/main/boards/03-usb-joystick",
+  "vendor": "kicad-tools.org"
+}

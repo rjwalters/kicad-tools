@@ -36,10 +36,13 @@ from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp
 
 
-def find_footprint_sexp(sexp: SExp, reference: str) -> SExp:
+def find_footprint_sexp(sexp: SExp, reference: str) -> SExp | None:
     """Find footprint S-expression by reference."""
     for child in sexp.iter_children():
         if _is_footprint_tag(child.tag):
+            for prop in child.find_children("property"):
+                if prop.get_string(0) == "Reference" and prop.get_string(1) == reference:
+                    return child
             # Look for fp_text with reference
             for fp_text in child.find_children("fp_text"):
                 if fp_text.get_string(0) == "reference":
@@ -135,25 +138,25 @@ def cmd_flip(sexp: SExp, args) -> bool:
     print(f"  To:   {new_layer}")
 
     if not args.dry_run:
-        layer.set_value(0, new_layer)
+        from kicad_tools.recovery.applicator import StrategyApplicator
+        from kicad_tools.recovery.types import Action, Difficulty, ResolutionStrategy, StrategyType
+        from kicad_tools.schema.pcb import PCB
 
-        # Also need to flip layer references in pads
-        for pad in fp.find_children("pad"):
-            layers = pad.find_child("layers")
-            if layers:
-                for i, val in enumerate(layers.values):
-                    if val == "F.Cu":
-                        layers.values[i] = "B.Cu"
-                    elif val == "B.Cu":
-                        layers.values[i] = "F.Cu"
-                    elif val == "F.Paste":
-                        layers.values[i] = "B.Paste"
-                    elif val == "B.Paste":
-                        layers.values[i] = "F.Paste"
-                    elif val == "F.Mask":
-                        layers.values[i] = "B.Mask"
-                    elif val == "B.Mask":
-                        layers.values[i] = "F.Mask"
+        # Reuse the complete KiCad-verified transform (#4560), including
+        # geometric mirroring, absolute pad angles, mask/paste and cosmetics.
+        # PCB retains this same tree, so all mutations reach the CLI save.
+        result = StrategyApplicator().apply_strategy(
+            PCB(sexp),
+            ResolutionStrategy(
+                type=StrategyType.MIRROR_COMPONENT,
+                difficulty=Difficulty.EASY,
+                confidence=1.0,
+                actions=[Action(type="mirror", target=args.reference)],
+            ),
+        )
+        if not result.success:
+            print(f"Error: {result.message}", file=sys.stderr)
+            return False
 
     return True
 

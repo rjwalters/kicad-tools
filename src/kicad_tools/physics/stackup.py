@@ -60,6 +60,7 @@ class StackupLayer:
         epsilon_r: Relative permittivity (for dielectrics)
         loss_tangent: Loss tangent tan(delta) (for dielectrics)
         copper_weight_oz: Copper weight in oz/ft^2 (for copper layers)
+        copper_role: Native copper role (signal/power), empty for legacy presets
     """
 
     name: str
@@ -69,6 +70,8 @@ class StackupLayer:
     epsilon_r: float = 0.0
     loss_tangent: float = 0.0
     copper_weight_oz: float | None = None
+    # Native layer declaration: signal, power, or unspecified for presets.
+    copper_role: str = ""
 
     @property
     def is_copper(self) -> bool:
@@ -82,11 +85,11 @@ class StackupLayer:
 
     @property
     def is_signal_layer(self) -> bool:
-        """Check if this is a signal copper layer (F.Cu, B.Cu, In*.Cu)."""
+        """Check for copper that is not explicitly declared a power plane."""
         if not self.is_copper:
             return False
         name = self.name.lower()
-        return name.endswith(".cu")
+        return name.endswith(".cu") and self.copper_role != "power"
 
 
 @dataclass
@@ -139,6 +142,7 @@ class Stackup:
 
         # Parse explicit stackup from KiCad file
         layers = []
+        copper_roles = {layer.name: layer.type for layer in pcb.layers.values()}
         for layer_data in setup.stackup:
             layer_type = cls._parse_layer_type(layer_data.type)
 
@@ -148,6 +152,8 @@ class Stackup:
                 thickness_mm=layer_data.thickness,
                 material=layer_data.material,
                 epsilon_r=layer_data.epsilon_r,
+                loss_tangent=layer_data.loss_tangent,
+                copper_role=copper_roles.get(layer_data.name, ""),
             )
 
             # Infer copper weight from thickness
@@ -789,26 +795,25 @@ class Stackup:
             Height in mm to reference plane
         """
         if self.is_outer_layer(layer_name):
-            # Microstrip: height to plane below
-            dielectric = self.get_dielectric_above(layer_name)
+            # The bottom trace references copper toward the board interior,
+            # not its exterior mask/paste layers.
+            dielectric = self._microstrip_dielectric(layer_name)
             if dielectric:
                 return dielectric.thickness_mm
         else:
-            # Stripline: distance to nearest plane
-            above = self.get_dielectric_above(layer_name)
-            below = self.get_dielectric_below(layer_name)
-
-            heights = []
-            if above:
-                heights.append(above.thickness_mm)
-            if below:
-                heights.append(below.thickness_mm)
-
-            if heights:
-                return min(heights)
+            # Include composite dielectric strata and skip explicitly declared
+            # signal layers, just as the stripline calculation does.
+            return min(self.get_stripline_geometry(layer_name))
 
         # Default fallback
         return 0.2
+
+    def _microstrip_dielectric(self, layer_name: str) -> StackupLayer | None:
+        """Return the substrate facing inward from an outer copper layer."""
+        copper = self.copper_layers
+        if copper and layer_name == copper[-1].name:
+            return self.get_dielectric_below(layer_name)
+        return self.get_dielectric_above(layer_name)
 
     def get_dielectric_constant(self, layer_name: str) -> float:
         """Get effective dielectric constant for a copper layer.
@@ -823,8 +828,7 @@ class Stackup:
             Dielectric constant (epsilon_r)
         """
         if self.is_outer_layer(layer_name):
-            # Microstrip: use dielectric above
-            dielectric = self.get_dielectric_above(layer_name)
+            dielectric = self._microstrip_dielectric(layer_name)
             if dielectric and dielectric.epsilon_r > 0:
                 return dielectric.epsilon_r
         else:
@@ -853,7 +857,11 @@ class Stackup:
         Returns:
             Loss tangent (tan delta)
         """
-        dielectric = self.get_dielectric_above(layer_name)
+        dielectric = (
+            self._microstrip_dielectric(layer_name)
+            if self.is_outer_layer(layer_name)
+            else self.get_dielectric_above(layer_name)
+        )
         if dielectric and dielectric.loss_tangent > 0:
             return dielectric.loss_tangent
         return FR4_STANDARD.loss_tangent
@@ -877,7 +885,9 @@ class Stackup:
 
         For inner layers, returns the distance to both the upper and lower
         reference planes. For outer layers, returns (h, h) where h is the
-        single dielectric height.
+        single dielectric height. Explicit native power roles take precedence
+        over legacy adjacent-copper inference. These roles express design
+        intent; callers must separately verify actual plane coverage.
 
         Args:
             layer_name: Inner copper layer name (e.g., "In1.Cu")
@@ -891,14 +901,28 @@ class Stackup:
             h = self.get_dielectric_height(layer_name)
             return (h, h)
 
-        # Inner layer - get both distances
-        above = self.get_dielectric_above(layer_name)
-        below = self.get_dielectric_below(layer_name)
+        # KiCad often defaults every copper declaration to "signal". Retain
+        # adjacent-copper inference for those legacy files/presets. Once a
+        # board explicitly declares power planes, signal copper is no longer
+        # an implicit reference: scan through it to the declared plane.
+        explicit_planes = any(layer.copper_role == "power" for layer in self.copper_layers)
+        index = self.get_layer_index(layer_name)
+        if index < 0:
+            return (0.2, 0.2)
 
-        h1 = above.thickness_mm if above else 0.2
-        h2 = below.thickness_mm if below else 0.2
+        def distance(step: int) -> float:
+            height = 0.0
+            for i in range(index + step, len(self.layers) if step > 0 else -1, step):
+                layer = self.layers[i]
+                if layer.is_copper and (not explicit_planes or layer.copper_role == "power"):
+                    return height
+                # Crossing a signal layer does not remove its physical height.
+                height += layer.thickness_mm
+            if explicit_planes:
+                raise ValueError(f"No declared reference plane on both sides of {layer_name}")
+            return 0.2
 
-        return (h1, h2)
+        return (distance(-1), distance(1))
 
     def summary(self) -> dict:
         """Get a summary of the stackup.

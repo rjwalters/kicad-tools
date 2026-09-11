@@ -590,7 +590,9 @@ class SchematicValidationMixin:
         # Group power symbols by their net name (e.g., "+3.3V", "GND")
         power_nets: dict[str, list[tuple[float, float]]] = {}
         for pwr in self.power_symbols:
-            net_name = pwr.lib_id.split(":")[1] if ":" in pwr.lib_id else pwr.lib_id
+            net_name = pwr.net_name
+            if net_name is None:
+                continue
             pwr_pos = (round(pwr.x, 2), round(pwr.y, 2))
             if net_name not in power_nets:
                 power_nets[net_name] = []
@@ -619,6 +621,12 @@ class SchematicValidationMixin:
                     power_inputs_by_root[root].append(
                         (sym.reference, pin.name or pin.number, pos_rounded)
                     )
+
+        # Flags drive their connected rail without publishing a global net name.
+        for pwr in self.power_symbols:  # type: ignore[attr-defined]
+            if pwr.is_power_flag:
+                pos = (round(pwr.x, 2), round(pwr.y, 2))
+                power_outputs.setdefault(find(pos), []).append((pwr.reference, "1", pos))
 
         # Check each power net
         for net_name, positions in power_nets.items():
@@ -739,7 +747,9 @@ class SchematicValidationMixin:
             "hier_label_count": len(self.hier_labels),
             "power_symbol_count": len(self.power_symbols),
             "references": sorted([s.reference for s in self.symbols]),
-            "power_nets": sorted({p.lib_id.split(":")[1] for p in self.power_symbols}),
+            "power_nets": sorted(
+                {p.net_name for p in self.power_symbols if p.net_name is not None}
+            ),
             "net_labels": sorted({lbl.text for lbl in self.labels}),
         }
 
@@ -838,7 +848,9 @@ class SchematicValidationMixin:
         for hl in self.hier_labels:  # type: ignore[attr-defined]
             named_points.append((hl.x, hl.y, hl.text))
         for pwr in self.power_symbols:  # type: ignore[attr-defined]
-            net_name = pwr.lib_id.split(":")[1] if ":" in pwr.lib_id else pwr.lib_id
+            net_name = pwr.net_name
+            if net_name is None:
+                continue
             named_points.append((pwr.x, pwr.y, net_name))
 
         per_wire: list[set[str]] = []

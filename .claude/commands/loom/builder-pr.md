@@ -852,11 +852,14 @@ post-incident read can tell them apart) **before doing anything
 externally-visible**: no push, no PR. It never contests or cleans up a peer's
 claim — the `loom:building` label is left exactly as-is; that is out of
 scope for this check (see the script's own header doc,
-`defaults/scripts/sweep-lease-fence.sh`). A manual `/loom:sweep`, GH Actions
-cron, or `--no-daemon` run has no lease comment to fence against at all — the
-check fails open (exit `0`) for those, same as every other lease-record
-reader in this repo treats "no lease" as "no evidence", never as "not
-fresh".
+`defaults/scripts/sweep-lease-fence.sh`). Since #6320 an in-session run
+(manual `/loom:sweep`, GH Actions cron, `--no-daemon`) publishes its own
+lease at pre-flight (`sweep-lease-publish.sh`, sweep.md Step 1b), so this
+check is now meaningful on both dispatch paths rather than only the
+daemon-dispatched one. When there genuinely is no lease comment — a run
+predating those writers, or one whose lease write failed — the check fails
+open (exit `0`), same as every other lease-record reader in this repo treats
+"no lease" as "no evidence", never as "not fresh".
 
 **Issue #6783: an EXPIRED lease owned by a DIFFERENT host now PASSes, not
 aborts.** Exit `3` (EXPIRED) fires only when the freshest lease is stale AND

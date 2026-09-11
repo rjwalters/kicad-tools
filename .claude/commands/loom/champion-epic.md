@@ -118,8 +118,16 @@ comments, so:
   to gate it.
 - A phase **held** by Step 2.5 posts a hold comment, not a verdict — no marker is
   written, and the blocker is re-checked on every later pass.
+- **Step 0's Completion-First Check (#6516).** Whether an epic is *finished* is a
+  property of its children and its deliverables, not of its own text — children
+  close underneath a byte-identical body all the time. An epic that was rejected
+  for structure and then quietly completed is the single most important case this
+  whole file has to get right, and it carries a matching marker by construction,
+  so a marker match must run Step 0 **before** it skips or escalates. Same
+  reasoning as the #5211 caveat above, applied to child state instead of blocker
+  state.
 
-### The check (run BEFORE Step 1, once per epic)
+### The check (run FIRST, once per epic — before Step 0)
 
 Compute a marker keyed to a **hash of the epic's own text** (title + body), so a
 genuine revision always gets a fresh evaluation while an unchanged epic is never
@@ -184,6 +192,10 @@ elif printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$VERDICT_MARKER" \
   SKIP_STREAK=${SKIP_STREAK:-0}
   UNREVISED_EVALS=$(( PRIOR_REJECTIONS + SKIP_STREAK ))
 
+  # NOTE: both branches below are reached only if Step 0's Completion-First Check
+  # did not act. Run Step 0 first — an epic can finish under an unchanged body,
+  # and this marker matches by construction on exactly the rejected-then-completed
+  # epics that must not be skipped into silence (#6516).
   if [ "$UNREVISED_EVALS" -ge "${LOOM_MAX_UNREVISED_EVALUATIONS:-2}" ]; then
     # Silence is not free forever: the skip budget is spent, so this pass does NOT
     # skip. Jump straight to Step 4's escalation branch — no re-evaluation, since
@@ -212,9 +224,9 @@ fi
 
 | Guard outcome | Next action |
 |---|---|
-| No marker match — a new epic, or one revised since its last rejection | Step 1 (Read) → Step 2 (Evaluate) → Step 2.5 → Step 3 or 4: a **full** re-evaluation, exactly as before this section existed |
-| Marker match, `UNREVISED_EVALS < ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}` | Tally the skip in place (`PATCH` the existing verdict comment) and continue to the next epic. No new comment, no label change, no evaluation |
-| Marker match, budget exhausted (`ESCALATE_UNREVISED=yes`) | Go **straight to Step 4's escalation branch**, skipping Steps 1–3 — the text is byte-identical, so re-evaluating cannot change the verdict |
+| No marker match — a new epic, or one revised since its last rejection | Step 0 (Completion-First Check) → Step 1 (Read) → Step 2 (Evaluate) → Step 2.5 → Step 3 or 4. Step 0 may end the pass on its own (close / operator ask); only an epic that is **not** a completion candidate reaches the structural criteria — that part is then a **full** re-evaluation, exactly as before this section existed |
+| Marker match, `UNREVISED_EVALS < ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}` | **Run Step 0 first.** If it acts (close / operator ask), the pass ends there. Otherwise tally the skip in place (`PATCH` the existing verdict comment) and continue to the next epic: no new comment, no label change, no structural evaluation |
+| Marker match, budget exhausted (`ESCALATE_UNREVISED=yes`) | **Run Step 0 first**, then — if it did not act — go **straight to Step 4's escalation branch**, skipping Steps 1–3: the text is byte-identical, so re-evaluating the criteria cannot change the verdict |
 | `ALREADY_ROUTED=yes` | Continue to the next epic — no tally, no re-escalation, no comment; a human already owns it |
 
 A silent skip is neither an approval nor a rejection, so it never counts against
@@ -273,9 +285,162 @@ path reads — one threshold, both surfaces.
 
 ## Epic Approval Workflow
 
-**Run the "Idempotency Guard for Unrevised Epics" above FIRST, before Step 1.**
-It has three outcomes (skip silently / escalate / evaluate), and only the third
-enters Step 1.
+**Run the "Idempotency Guard for Unrevised Epics" above FIRST.** It has four
+outcomes. `ALREADY_ROUTED=yes` ends the pass immediately (a human owns the epic).
+The other three — skip silently / escalate / evaluate — **all enter Step 0
+first**, because completion is a fact about the epic's children, not about its
+text, and the two marker-matching outcomes are precisely the ones a
+rejected-then-completed epic lands on. Only after Step 0 declines to act do they
+resume their own behavior (skip, Step 4's escalation, or Step 1).
+
+### Step 0: Completion-First Check — ask "is this already done?" before "is this well-shaped?" (#6516)
+
+The 6 criteria above describe an epic **awaiting decomposition**: they ask
+whether the phases, sizing, and success criteria are shaped well enough to
+*start* creating issues from. Run against an epic whose work is already
+decomposed, executed, and merged, they are not merely useless — they are a
+**permanent deadlock**, because nobody retrofits a Phase 1/2/3 skeleton onto
+finished work, so the finding can never clear and the epic stays open forever,
+blocking every dependent that cites it.
+
+That is not hypothetical. In the incident behind #6516 an external epic had all
+four of its children closed and its named deliverable merged to `main`, while
+Champion kept re-filing a "missing phase structure" objection against it and two
+buildable downstream issues sat `loom:blocked` behind it for days in a fleet that
+was starved for work.
+
+So: **completion is checked first, and a completion candidate never reaches Step
+2's structural criteria on that pass.**
+
+#### 0a. Discover the children (marker-independent — this is the load-bearing part)
+
+```bash
+# Read champion-common.md → "Step 1.5 — discover an epic's children" if not
+# already loaded this pass, then:
+# owner/repo this Champion is running in, derived with zero API calls — the same
+# derivation champion-pr-merge.md Step 5 uses.
+THIS_REPO=$(git remote get-url origin 2>/dev/null \
+  | sed -E 's#^(git@[^:]+:|https?://[^/]+/)##; s#\.git$##')
+discover_epic_children "$THIS_REPO" "$EPIC_NUMBER"
+EPIC_BODY=$(printf '%s\n' "$EPIC_JSON" | jq -r '.body // ""')   # fetched by the guard above
+```
+
+**Do NOT substitute "Detecting Phase Completion" below for this.** That query
+matches `<!-- loom:epic:N:phase:M -->`, so it sees only children *this file's*
+Step 3 created — precisely the population an epic decomposed some other way, or
+one that arrived already fully executed, is missing from. Depending on the
+marker here would reproduce the #6516 blind spot exactly.
+
+| Discovery result | Outcome |
+|---|---|
+| `STRONG_CLOSED == 0` and `WEAK_CLOSED == 0` — no children found by any source | **Not a completion candidate.** An epic that was never decomposed is exactly what the structural criteria are for → continue to Step 1 |
+| `STRONG_OPEN > 0` — containment children still open | Not complete → continue to Step 1 (and "Phase Progression" handles the next phase) |
+| `STRONG_OPEN == 0` and `STRONG_CLOSED > 0` | **Completion candidate** → 0b |
+| No strong children at all, but `WEAK_OPEN == 0` and `WEAK_CLOSED > 0` | **Low-confidence candidate**: prose references only, containment never established → 0c's operator ask, **never** an autonomous close |
+
+#### 0b. Verify the deliverables the epic itself names
+
+An epic that says it delivers `path/to/thing` is not complete until that thing
+is on the default branch, however many children closed.
+
+```bash
+git fetch origin --quiet   # the check reads the remote's tip, not a stale local ref
+# Path-shaped backticked tokens in the epic body. The required directory
+# component is deliberate: it keeps `loom:epic-phase`, `cargo check`, and a
+# prose "see README.md" out of the deliverable set, at the cost of missing a
+# top-level file — precision matters more here, because a false "missing" only
+# downgrades to an ask while a false "present" would close live work.
+DELIVERABLES=$(printf '%s\n' "$EPIC_BODY" \
+  | grep -Eo '`[A-Za-z0-9._/-]+/[A-Za-z0-9._-]+\.[A-Za-z0-9]+`' | tr -d '`' | sort -u)
+MISSING=""
+for P in $DELIVERABLES; do
+  git cat-file -e "origin/${DEFAULT_BRANCH:-main}:$P" 2>/dev/null || MISSING="$MISSING $P"
+done
+```
+
+An epic naming no path-shaped deliverable satisfies this vacuously — that is the
+same evidence standard "Epic Completion" below has always closed on. A **non-empty**
+`$MISSING` downgrades the candidate to 0c's operator ask, and the ask must state
+the missing path and must **not** assert that the epic is complete. The grep is a
+floor, not a ceiling: if you can *see* the epic promising an artifact this pattern
+did not capture, verify it too, and ask rather than close when you cannot.
+
+#### 0c. Close, or ask the operator to
+
+Close autonomously only when **all four** hold:
+
+1. `STRONG_OPEN == 0` and `STRONG_CLOSED > 0` (0a's completion candidate — containment, not prose).
+2. `$MISSING` is empty (0b).
+3. The epic carries none of `loom:blocked`, `loom:operator-only`, `loom:operator`.
+4. No comment on the epic raises outstanding **content** work dated after the last child closed. Champion's own structural verdicts (`<!-- champion:epic-verdict:body-* -->` / "Epic Needs Revision") explicitly do **not** count — those are the format gate this step supersedes, and treating them as objections would restore the deadlock through the back door.
+
+```bash
+CLOSE_DIRECTLY=yes   # only when all four hold; any doubt at all makes it "no"
+
+if [ "$CLOSE_DIRECTLY" = "yes" ]; then
+  # Same close as "Epic Completion" below, reached without a phase marker.
+  gh issue close "$EPIC_NUMBER" --comment "<!-- champion:epic-completion-close -->
+**Champion: Epic Complete — Closing**
+
+All $EPIC_CHILD_STRONG_CLOSED linked children are closed (discovered via: $EPIC_CHILD_SOURCES) and every deliverable this epic names is present on \`${DEFAULT_BRANCH:-main}\`. Closing as delivered rather than re-evaluating pre-decomposition structure against finished work (#6516).
+
+---
+*Automated by Champion role*"
+else
+  # Not confident enough to close unilaterally — one mechanical ask, then hands off.
+  # loom:operator-mechanical, not -decision: "is this epic done?" is a fact the
+  # operator can confirm by looking, not a preference call.
+  ASK_MARKER="<!-- champion:epic-completion-ask -->"
+  printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$ASK_MARKER" \
+    '.comments[] | select(.body | contains($m))' >/dev/null || {
+    gh issue comment "$EPIC_NUMBER" --body "$ASK_MARKER
+**Champion: This Epic Looks Complete — Close?**
+
+Every child found for this epic is closed (via: $EPIC_CHILD_SOURCES), so its structural Phase 1/2/3 criteria are no longer meaningful to re-run. $UNCERTAINTY
+
+Close it, or say what is outstanding.
+
+---
+*Automated by Champion role*" \
+      && gh issue edit "$EPIC_NUMBER" --add-label "loom:operator-only,loom:operator-mechanical"
+  }
+fi
+```
+
+`$UNCERTAINTY` is the one specific reason this is an ask rather than a close —
+the missing deliverable path from 0b, "containment was never established
+(prose references only)", or the outstanding-content-work comment from
+criterion 4. A bare "not confident" does not satisfy it.
+
+Either branch **ends the pass for this epic**: do not fall through to Step 1.
+Neither counts against "Epic Rate Limiting" below (a close is not an approval),
+and the guard's `ALREADY_ROUTED=yes` short-circuit drops an asked epic from every
+later pass — so the comment budget for a complete-but-open epic is exactly **one**.
+
+#### 0d. Behavioral checks (what a change to this section must still produce)
+
+Verify against a real epic, not by reading — these are the outcomes #6516 is
+defined by:
+
+| Epic shape | Required outcome on the **same** pass |
+|---|---|
+| All children closed, deliverable on `main`, no content objection — **and no phase markers anywhere** (the #6516 shape) | Autonomous close. **No** Phase 1/2/3 checklist re-run, no "Epic Needs Revision" comment |
+| Same, but already carrying two "Epic Needs Revision" rejections | Same close — the body-hash marker match must not skip past Step 0 |
+| All children closed, but the body names `x/y.spice` that is **not** on `main` | `loom:operator-mechanical` ask naming `x/y.spice`. **No** close, and no claim that the epic is complete |
+| Only prose "Epic #N" references, all closed | `loom:operator-mechanical` ask. **No** close |
+| No children found by any source (undecomposed epic) | Falls through to Step 1 → Step 2's 6 criteria, byte-for-byte the behavior that existed before this section |
+| One child still open | Falls through to Step 1; "Phase Progression" unaffected |
+
+**Invariants a future edit must preserve:**
+
+- **Completion is evaluated before structure, never after.** Reordering these so
+  Step 2 can reject first reinstates the exact deadlock (#6516).
+- **Discovery stays marker-independent.** Narrowing 0a back to the phase-marker
+  query re-blinds the check to every epic Champion did not decompose itself.
+- **Nothing closes on prose alone.** Weak (`Epic #N` mention) evidence may only
+  reach the operator ask; autonomous closure requires containment.
+- **Absence of children is undecomposed, not done.** All-zero counts must route
+  to Step 1, never to 0c.
 
 ### Step 1: Read the Epic
 
@@ -649,7 +814,10 @@ phase at a time. `champion-common.md` → "Epic-Aware Blocker Check" Step 2
 generalizes the same query across **every** phase of a *different* epic that
 this one names as a blocker, to answer "is that epic's delivered capability
 done" rather than "should I create the next phase of this one" — read that
-section, not this one, when evaluating a blocker reference (#5211).
+section, not this one, when evaluating a blocker reference (#5211). And read
+**Step 0** when the question is "is *this* epic finished overall": this query
+answers it only for epics Champion itself decomposed, which is why Step 0 uses
+`discover_epic_children` instead (#6516).
 
 **Idempotency guard on the "not yet complete" branch
 (`champion:epic-phase-progress:*`, #7188)**: when Phase N is not yet
@@ -809,7 +977,12 @@ Otherwise, when Phase N completes, create Phase N+1 issues following the same pa
 
 ### Epic Completion
 
-When all phases are complete:
+When all phases are complete. This is the *phase-marker* route into closure —
+Champion decomposed the epic itself, walked it phase by phase, and knows the last
+phase just closed. **Step 0's Completion-First Check is the other route**, for an
+epic whose children Champion did not create and therefore cannot recognize here
+(#6516); the two close on the same evidence standard (all children closed, named
+deliverables present), differing only in how the children are found.
 
 ```bash
 # Close the epic
@@ -841,7 +1014,7 @@ Total PRs merged: N
 
 **Approve at most 1 epic per iteration.**
 
-Epics generate multiple issues, so limit epic approvals to prevent overwhelming the backlog. Phase progression (creating next phase issues) does not count against this limit.
+Epics generate multiple issues, so limit epic approvals to prevent overwhelming the backlog. Phase progression (creating next phase issues) does not count against this limit, and neither does Step 0's close/operator ask — closing finished work creates no backlog, and rate-limiting it would be a way of keeping deadlocked epics open.
 
 ---
 

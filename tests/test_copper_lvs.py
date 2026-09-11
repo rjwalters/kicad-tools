@@ -743,6 +743,43 @@ _POUR_SCHEMATIC: dict[tuple[str, str], str | None] = {
 }
 
 
+@requires_shapely
+@pytest.mark.parametrize("moat_radius,bonded", [(1.05, False), (0.6, True)])
+def test_round_pad_pour_bond_uses_copper_not_bounding_box(tmp_path, moat_radius, bonded):
+    """A 1.7mm round header must clear a 2.1mm antipad (#4992).
+
+    Its enclosing square reaches the plane despite the real 0.2mm clearance.
+    The smaller moat is a real copper overlap and must continue to bond.
+    """
+    import math
+
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    hole = [
+        (
+            5 + moat_radius * math.cos(-math.pi / 2 - i * math.tau / 128),
+            10 + moat_radius * math.sin(-math.pi / 2 - i * math.tau / 128),
+        )
+        for i in range(129)
+    ]
+    ring = [(0, 0), (5, 0), *hole, (5, 0), (20, 0), (20, 20), (0, 20), (0, 0)]
+    text = (
+        _pcb_pour_adversarial()
+        .replace(_POUR_FILL_RING, " ".join(f"(xy {x} {y})" for x, y in ring))
+        .replace(
+            "smd roundrect (at 0 0) (size 1.5 1.5)",
+            "thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0)",
+            1,
+        )
+    )
+    path = tmp_path / "round-header.kicad_pcb"
+    path.write_text(text)
+    partition = ConnectivityValidator(path).extract_pad_partition()
+    ground = next(group for group in partition if "R3.1" in group)
+    assert ("R1.1" in ground) is bonded
+    assert "R2.1" in ground  # Existing genuine foreign-net bond remains visible.
+
+
 def _declared_net_pour_partition(pcb_path: Path) -> list[frozenset[str]]:
     """Extract the partition under the LEGACY declared-net pour model.
 
@@ -954,7 +991,7 @@ def test_pour_extraction_unions_pads_across_disjoint_fill_islands_of_one_zone(
 
 @requires_shapely
 def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
-    """End-to-end: pour-heavy extraction reports board 07's 5 honest opens.
+    """End-to-end: pour-heavy extraction reports board 07's four remaining opens.
 
     Board 07 (match-group test) carries the GND / +1V2 / +1V8 plane pours
     (one zone per net since #3818 de-duplicated the router/recipe overlap),
@@ -965,14 +1002,14 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
 
     The fixture schematic is fully wired since #4012 (244/244 pads bound),
     so the comparator carries real evidence — and board 07 routes PARTIAL
-    by design (5 seed-invariant unroutable nets, #3438), so the honest
-    verdict is ``clean=False`` with exactly those 5 opens and no shorts.
+    after the MIPI repair (DDR/HDMI residuals, #3438), so the honest
+    verdict is ``clean=False`` with exactly four opens and no shorts.
     (History: pre-#4012 the schematic bound 0 pins; this test pinned the
     #4006 vacuous verdict, and before that a zero-evidence ``clean=True``
     that masked these same 5 real opens.)
     """
     repo_root = Path(__file__).resolve().parent.parent
-    board_out = repo_root / "boards" / "07-matchgroup-test" / "output"
+    board_out = repo_root / "boards" / "07-matchgroup-test" / "regression-fixture"
     sch = board_out / "matchgroup_test.kicad_sch"
     pcb = board_out / "matchgroup_test_routed.kicad_pcb"
     if not (sch.exists() and pcb.exists()):
@@ -989,10 +1026,9 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
     assert sorted({m.net_a for m in result.opens}) == [
         "DQ3",
         "DQ4",
-        "MIPI_DAT0_N",
         "TMDS_D0_N",
         "TMDS_D1_N",
-    ], "expected exactly the 5 seed-invariant unroutable nets (#3438)"
+    ], "expected four remaining DDR/HDMI opens after the MIPI repair"
 
 
 def test_compare_copper_netlist_on_board06_wired_fixture_is_clean() -> None:
@@ -1006,7 +1042,7 @@ def test_compare_copper_netlist_on_board06_wired_fixture_is_clean() -> None:
     routed to copper completion).
     """
     repo_root = Path(__file__).resolve().parent.parent
-    board_out = repo_root / "boards" / "06-diffpair-test" / "output"
+    board_out = repo_root / "boards" / "06-diffpair-test" / "regression-fixture"
     sch = board_out / "diffpair_test.kicad_sch"
     pcb = board_out / "diffpair_test_routed.kicad_pcb"
     if not (sch.exists() and pcb.exists()):
@@ -2307,3 +2343,160 @@ def test_endpoint_inside_oval_pad_copper_still_bonds(tmp_path: Path) -> None:
     )
     partition = ConnectivityValidator(pcb_path).extract_pad_partition()
     assert frozenset({"J1.1", "R9.1"}) in partition, f"partition={partition}"
+
+
+# ---------------------------------------------------------------------------
+# Mid-track physical contact decides the verdict, not labels (issue #5060)
+# ---------------------------------------------------------------------------
+#
+# Board 09 reported five false ``open`` findings on ``+3V3`` / ``PMOS_SOURCE``
+# where a branch met the *interior* of a trunk trace and where SOIC pads were
+# straddled by a continuous wide trace.  Splitting the very same copper at
+# those points changed the buffered union by 0.0 mm² yet made copper LVS
+# pass.  These fixtures pin both directions of the fix at the public
+# copper-LVS layer: real mid-track contact must be seen (no false open) and
+# must still surface as a SHORT when the schematic disagrees, while a
+# positive copper gap must stay unfused.
+
+
+def _pcb_midtrack(
+    *,
+    branch_gap: float | None,
+    inline_pad_offset: float | None = None,
+    trunk_net: int = 1,
+    branch_net: int = 1,
+) -> str:
+    """A continuous trunk trace with **no vertex** at the contact point.
+
+    The trunk runs (100, 100) -> (110, 100) at 0.6 mm as ONE segment, so
+    every contact below lands on its interior.
+
+    Args:
+        branch_gap: If not ``None``, add a 0.4 mm branch from
+            ``(105, 100 + branch_gap)`` up to the ``U3`` pad at (105, 105).
+            ``0.0`` is a centerline T-junction; ``0.6`` clears the trunk
+            copper edge (0.3) plus the branch cap radius (0.2) with 0.1 mm
+            to spare, so it is a DRC-legal near miss.
+        inline_pad_offset: If not ``None``, place the ``U3`` pad *inline* at
+            ``(105, 100 + inline_pad_offset)`` instead of at the end of a
+            branch — a pin sitting on the trunk with no branch copper at all.
+        trunk_net / branch_net: The *declared* segment net labels.  They are
+            deliberately settable so the regression can prove the extraction
+            never consults them.
+    """
+    if inline_pad_offset is None:
+        u3 = (105.0, 105.0)
+        branch = (
+            f"  (segment (start 105 {100 + (branch_gap or 0.0)}) (end 105 105)"
+            f' (width 0.4) (layer "F.Cu") (net {branch_net})'
+            '    (uuid "00000000-0000-0000-0000-0000000000c2"))'
+            if branch_gap is not None
+            else ""
+        )
+    else:
+        u3 = (105.0, 100.0 + inline_pad_offset)
+        branch = ""
+    return f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "")
+  (net 1 "SIG")
+  (net 2 "OTHER")
+  (footprint "Test:Pad" (layer "F.Cu") (at 100 100)
+    (property "Reference" "U1" (at 0 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG")))
+  (footprint "Test:Pad" (layer "F.Cu") (at 110 100)
+    (property "Reference" "U2" (at 0 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG")))
+  (footprint "Test:Pad" (layer "F.Cu") (at {u3[0]} {u3[1]})
+    (property "Reference" "U3" (at 0 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG")))
+  (segment (start 100 100) (end 110 100) (width 0.6) (layer "F.Cu") (net {trunk_net})
+    (uuid "00000000-0000-0000-0000-0000000000c1"))
+{branch}
+)
+"""
+
+
+#: All three pads on the SAME schematic net — a missed mid-track contact
+#: shows up as an ``open``.
+_MIDTRACK_SAME_NET: dict[tuple[str, str], str | None] = {
+    ("U1", "1"): "SIG",
+    ("U2", "1"): "SIG",
+    ("U3", "1"): "SIG",
+}
+#: ``U3`` on a *different* schematic net — real contact is a ``short``.
+_MIDTRACK_FOREIGN_NET: dict[tuple[str, str], str | None] = {
+    ("U1", "1"): "SIG",
+    ("U2", "1"): "SIG",
+    ("U3", "1"): "OTHER",
+}
+
+
+def test_midtrack_tee_is_not_a_false_open(tmp_path: Path) -> None:
+    """A branch landing on a trunk's interior is connected, not open."""
+    pcb_path = _write(tmp_path, "b.kicad_pcb", _pcb_midtrack(branch_gap=0.0))
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    assert partition == [frozenset({"U1.1", "U2.1", "U3.1"})], f"partition={partition}"
+    result = compare_partitions(_MIDTRACK_SAME_NET, partition)
+    assert result.clean, f"expected clean, got {result.mismatches}"
+
+
+def test_midtrack_tee_across_nets_is_reported_as_a_short(tmp_path: Path) -> None:
+    """Mid-track contact must still expose a short — labels are irrelevant.
+
+    Every piece of copper here is *labelled* ``SIG`` (net 1), including the
+    branch that physically belongs to ``OTHER``.  The extraction is
+    label-free, so the fused copper is reported as a SIG<->OTHER short
+    rather than silently trusted.
+    """
+    pcb_path = _write(
+        tmp_path, "b.kicad_pcb", _pcb_midtrack(branch_gap=0.0, branch_net=1, trunk_net=1)
+    )
+    result = compare_partitions(
+        _MIDTRACK_FOREIGN_NET, ConnectivityValidator(pcb_path).extract_pad_partition()
+    )
+    assert {frozenset({m.net_a, m.net_b}) for m in result.shorts} == {frozenset({"SIG", "OTHER"})}
+    assert not result.opens
+
+
+def test_midtrack_positive_gap_stays_open(tmp_path: Path) -> None:
+    """A DRC-legal 0.1 mm copper gap at the same XY must NOT fuse."""
+    pcb_path = _write(tmp_path, "b.kicad_pcb", _pcb_midtrack(branch_gap=0.6))
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    assert set(partition) == {frozenset({"U1.1", "U2.1"}), frozenset({"U3.1"})}, (
+        f"partition={partition}"
+    )
+    # Same-net schematic: the real gap is an open, and nothing is a short.
+    result = compare_partitions(_MIDTRACK_SAME_NET, partition)
+    assert [m.net_a for m in result.opens] == ["SIG"]
+    assert not result.shorts
+    # Foreign-net schematic: a near miss must not be invented as a short.
+    assert not compare_partitions(_MIDTRACK_FOREIGN_NET, partition).shorts
+
+
+@requires_shapely
+def test_inline_pad_on_continuous_trace_is_bound(tmp_path: Path) -> None:
+    """A pad straddled by an unbroken trace is bound to it (board-09 case)."""
+    pcb_path = _write(
+        tmp_path, "b.kicad_pcb", _pcb_midtrack(branch_gap=None, inline_pad_offset=0.0)
+    )
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    assert partition == [frozenset({"U1.1", "U2.1", "U3.1"})], f"partition={partition}"
+    assert compare_partitions(_MIDTRACK_SAME_NET, partition).clean
+    # And the same contact is a short when the schematic says otherwise.
+    assert compare_partitions(_MIDTRACK_FOREIGN_NET, partition).shorts
+
+
+@requires_shapely
+def test_inline_pad_clear_of_the_trace_stays_open(tmp_path: Path) -> None:
+    """An inline pad held clear of the trace copper is still an open."""
+    pcb_path = _write(
+        tmp_path, "b.kicad_pcb", _pcb_midtrack(branch_gap=None, inline_pad_offset=1.2)
+    )
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    assert set(partition) == {frozenset({"U1.1", "U2.1"}), frozenset({"U3.1"})}, (
+        f"partition={partition}"
+    )

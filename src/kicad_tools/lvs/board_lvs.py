@@ -302,6 +302,10 @@ def _pcb_pin_to_net(pcb_path: Path) -> dict[tuple[str, str], str | None]:
             net_name: str | None
             if net is None:
                 net_name = None
+            elif len(net.children) == 1 and isinstance(net.get_value(0), str):
+                # KiCad 10: (net "NAME"). Check the atom type rather than
+                # coercing it: (net 5) is not a name, but (net "5") is.
+                net_name = net.get_string(0)
             else:
                 # ``(net K "NAME")`` — index 0 is the net number, index 1
                 # the human-readable name.

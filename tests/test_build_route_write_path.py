@@ -323,7 +323,7 @@ class TestBoardProjectKctLoads:
 
     def test_board_06_project_kct_loads_clean(self) -> None:
         """No validation errors on the curated board 06 project spec."""
-        path = BOARDS_DIR / "06-diffpair-test" / "project.kct"
+        path = BOARDS_DIR / "06-diffpair-test" / "regression-fixture" / "project.kct"
         if not path.exists():
             pytest.skip(f"Board 06 spec not present at {path}")
 

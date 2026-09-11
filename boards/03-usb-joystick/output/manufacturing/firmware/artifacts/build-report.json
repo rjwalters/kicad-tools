@@ -1,0 +1,20 @@
+{
+  "mcu": "ATmega32U4-AU",
+  "clock_hz": 8000000,
+  "fuses": {
+    "low": "0xFF",
+    "high": "0xD9",
+    "extended": "0xCA"
+  },
+  "usb_vid": "0x16C0",
+  "usb_pid": "0x27DC",
+  "test_identity": false,
+  "manufacturing_identity_review": "shared joystick identity with domain-prefixed serial",
+  "flash_image_bytes": 7104,
+  "device_descriptor_hex": "1201000200000040c016dc27000101020301",
+  "sha256": {
+    "firmware.hex": "7637638b3d85d90a861eaa629a6ae5b23098e8e5c3b62c6ca0494232a6f517ac",
+    "firmware.elf": "2a9de8ac92d1564020ee68e5f3bdd4efe2bf35e1f04a834b43a1dd04956ca4a6",
+    "firmware.bin": "477e4b8c07890e584a39c5207f8eb0d3ef1e9e1e9b94e55c8de3f995f61c0c3d"
+  }
+}

@@ -162,27 +162,14 @@ class TestViaInPadRule:
         results = ViaInPadRule().check(pcb, _StubDesignRules(via_in_pad_supported=False))
         assert len([v for v in results.violations if v.rule_id == "via_in_pad"]) == 0
 
-    def test_via_partially_overlapping_pad_not_flagged(self):
-        """Drill circle that pokes out of the pad edge is NOT in-pad.
-
-        The router considers a via "in-pad" only when the drill is fully
-        covered by the pad copper -- partial overlaps would be flagged
-        by the clearance rule (if any) but not here.  The DRC tolerance
-        gives a small grace zone for fabrication rounding.
-        """
-        # Pad is 1.0 wide x 0.5 tall.  Place the via at the edge so its
-        # drill circle extends well past the pad.
-        pad = _StubPad(net_number=1, net_name="DATA", position=(0.0, 0.0), size=(1.0, 0.5))
+    def test_via_partially_overlapping_pad_is_flagged(self):
+        """A same-net drill crossing the pad edge still requires filled/capped vias."""
+        pad = _StubPad(size=(1.0, 0.5))
         fp = _StubFootprint(pads=[pad])
-        # Pad spans x in [-0.5, 0.5] (relative to fp 10,10 -> [9.5, 10.5]).
-        # Via at (10.5, 10.0) with drill 0.4 -> circle in x [10.3, 10.7],
-        # which extends past the pad's max x of 10.5 by 0.2 mm (well
-        # above the DRC tolerance of 0.005 mm).
-        via = _StubVia(position=(10.5, 10.0), drill=0.4, net_number=1)
+        via = _StubVia(position=(10.5, 10.0), drill=0.4)
         pcb = _StubPCB(footprints=[fp], vias=[via])
-
-        results = ViaInPadRule().check(pcb, _StubDesignRules(via_in_pad_supported=False))
-        assert len([v for v in results.violations if v.rule_id == "via_in_pad"]) == 0
+        results = ViaInPadRule().check(pcb, _StubDesignRules())
+        assert len(results.violations) == 1
 
     def test_multiple_vias_in_same_pad_each_flagged(self):
         """Two distinct in-pad vias on the same pad produce two violations."""
@@ -299,3 +286,38 @@ class TestViaInPadIntegration:
             assert rules.via_in_pad_supported is True, (
                 f"pcbway ({layers}L) should have via_in_pad_supported=True"
             )
+
+
+def test_partial_drill_detection_honors_round_pad_outline():
+    """A drill can cross a round land, while one near its empty AABB corner is safe."""
+    from kicad_tools.schema.pcb import Footprint, Pad
+
+    pad = Pad("1", "smd", "circle", (0, 0), (1, 1), ["F.Cu"], net_number=1)
+    fp = Footprint("test", "F.Cu", (10, 10), 0, "U1", "test", pads=[pad])
+    pcb = _StubPCB(
+        footprints=[fp],
+        vias=[
+            _StubVia(position=(10.55, 10), drill=0.2, uuid="overlap"),
+            _StubVia(position=(10.5, 10.5), drill=0.2, uuid="corner"),
+            _StubVia(position=(10.6, 10), drill=0.2, uuid="tangent"),
+        ],
+    )
+    result = ViaInPadRule().check(pcb, _StubDesignRules())
+    assert [v.items[0] for v in result.violations] == ["Via-overlap"]
+
+
+def test_drill_overlap_uses_absolute_pad_angle():
+    """A 90-degree pad in an unrotated footprint must use its own copper angle."""
+    from kicad_tools.schema.pcb import Footprint, Pad
+
+    pad = Pad("1", "smd", "rect", (0, 0), (1, 0.25), ["F.Cu"], net_number=1, rotation=90)
+    fp = Footprint("test", "F.Cu", (10, 10), 0, "U1", "test", pads=[pad])
+    pcb = _StubPCB(
+        footprints=[fp],
+        vias=[
+            _StubVia(position=(10, 10.55), drill=0.2, uuid="overlap"),
+            _StubVia(position=(10.55, 10), drill=0.2, uuid="outside"),
+        ],
+    )
+    result = ViaInPadRule().check(pcb, _StubDesignRules())
+    assert [v.items[0] for v in result.violations] == ["Via-overlap"]

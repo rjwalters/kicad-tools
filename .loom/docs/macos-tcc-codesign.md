@@ -20,6 +20,32 @@ Unset (or an identity `security find-identity -v -p codesigning` doesn't
 list) falls back to the ad-hoc path unchanged — this is entirely opt-in and
 every non-Darwin / no-`codesign` host is unaffected.
 
+**Why this stays unwired by default (#6366).** Nothing here can be set once
+in a committed `.loom/config.json` and cover the whole fleet: a self-signed
+identity lives in one Mac's login keychain, so `codesign.identity` is
+inherently a **per-host** value (see "Provisioning additional Macs" below).
+Committing a single identity name for every host would either silently
+no-op on hosts without a matching keychain identity (falling back to
+ad-hoc, unchanged) or require every fleet Mac to mint/import the identically
+named certificate as a precondition — neither is a safe unconditional
+default, so `provision-daemon.sh` ships ad-hoc-only until an operator opts a
+given host in. **Having a "Loom Local Signing" identity present in the
+keychain (from a prior one-time setup) does not by itself wire it up** —
+`codesign.identity` (or `LOOM_CODESIGN_IDENTITY`) must still be set on that
+host, in `.loom-local/local.json` for a host-local override or exported in
+the shell profile that starts the daemon. Verify wiring took effect with:
+
+```bash
+codesign -dv ~/.local/bin/loom-daemon 2>&1 | grep -E 'Authority|adhoc'
+# wired:   Authority=<your identity>   (no 'adhoc' anywhere in the output)
+# unwired: Signature=adhoc, TeamIdentifier=not set
+```
+
+If it still reports `adhoc` after a roll, the identity is present in the
+keychain but not referenced by config/env on this host — set
+`codesign.identity` in `.loom-local/local.json` (see "Using it" below) and
+re-run the update script before re-checking.
+
 ## One-time setup: a self-signed "Code Signing" certificate
 
 You only need a certificate that satisfies the macOS `codeSign` policy — a

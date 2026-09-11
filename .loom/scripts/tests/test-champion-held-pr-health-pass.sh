@@ -528,6 +528,20 @@ digest_aggregate_line() {
     echo "Merge-risk holds: $held open PR(s) — $conflicting conflicting ($rotting rotting >=${ROT_THRESHOLD_DAYS}d, $clean clean), $at_doctor out at Doctor, oldest ${oldest}d"
 }
 
+# =====================================================================
+# Digest-issue lookup (#7338), mirrored from champion-pr-merge.md's Step 0
+# `DIGEST_ISSUE=...` jq pipeline: given the `gh issue list --json
+# number,body` payload for every open issue whose title matches, prefer a
+# marker-tagged match (lowest number among ties, though there should only
+# ever be one); when NO match carries the marker, fall back to the oldest
+# (lowest-numbered) open title match instead of returning empty and letting
+# Step 4b create a duplicate digest issue.
+# =====================================================================
+digest_issue_lookup() {
+    local json="$1" marker="$2"
+    printf '%s\n' "$json" | jq "([.[] | select(.body | startswith(\"$marker\"))] as \$tagged | if (\$tagged | length) > 0 then (\$tagged | min_by(.number)) else min_by(.number) end) | .number // empty"
+}
+
 echo "=== test-champion-held-pr-health-pass.sh ==="
 echo
 
@@ -989,6 +1003,58 @@ assert_eq "Merge-risk holds: 2 open PR(s) — 2 conflicting (0 rotting >=3d, 2 c
 echo
 
 # ---------------------------------------------------------------------
+echo "Test 12B: digest-issue lookup falls back to a pre-marker digest issue instead of orphaning it (#7338)"
+
+MARKER='<!-- champion:merge-risk-hold-digest -->'
+
+# (a) A single, marker-less digest issue (created before the marker
+# convention shipped) — no marker-tagged issue exists at all. Pre-#7338 this
+# returned empty, and Step 4b would create a duplicate; the fallback must
+# adopt it instead.
+PRE_MARKER_ONLY='[
+  {"number": 6851, "body": "Champion Merge-Risk Hold Digest\n\n| PR | Reason | Status |"}
+]'
+assert_eq "6851" "$(digest_issue_lookup "$PRE_MARKER_ONLY" "$MARKER")" \
+    "(a) a marker-less digest issue is adopted when no marker-tagged issue exists (#7338)"
+
+# (a2) Two marker-less title matches, neither carrying the marker — the
+# OLDEST (lowest-numbered) one is selected, not whichever the forge happens
+# to list first.
+PRE_MARKER_TWO='[
+  {"number": 7100, "body": "a newer marker-less duplicate, filed by mistake"},
+  {"number": 6851, "body": "the original pre-marker digest issue"}
+]'
+assert_eq "6851" "$(digest_issue_lookup "$PRE_MARKER_TWO" "$MARKER")" \
+    "(a2) with multiple marker-less title matches, the oldest (lowest-numbered) one is selected"
+
+# (b) A marker-tagged issue exists ALONGSIDE an older marker-less title
+# match — the marker-tagged issue must always win, regardless of issue-number
+# ordering (the marker-less one is a stale/pre-convention leftover, not the
+# live digest).
+TAGGED_AND_OLDER_UNTAGGED="[
+  {\"number\": 6851, \"body\": \"an older marker-less title match, not the live digest\"},
+  {\"number\": 7050, \"body\": \"${MARKER}\\nthe current, marker-tagged digest issue\"}
+]"
+assert_eq "7050" "$(digest_issue_lookup "$TAGGED_AND_OLDER_UNTAGGED" "$MARKER")" \
+    "(b) a marker-tagged issue wins over an OLDER marker-less title match, regardless of numbering (#7338)"
+
+# (b2) Same as (b) but with the numbering reversed, to confirm the win is not
+# an accident of "highest number wins" — it must be the marker, not the
+# ordering, that decides.
+TAGGED_LOWER_NUMBER="[
+  {\"number\": 7050, \"body\": \"${MARKER}\\nthe current, marker-tagged digest issue\"},
+  {\"number\": 9999, \"body\": \"a newer marker-less title match\"}
+]"
+assert_eq "7050" "$(digest_issue_lookup "$TAGGED_LOWER_NUMBER" "$MARKER")" \
+    "(b2) the marker-tagged issue still wins even when it has the LOWER number — the marker decides, not the ordering"
+
+# (c) No title match at all — the lookup returns empty, exactly as before
+# (Step 4b's create-a-new-issue path still applies when nothing exists).
+assert_eq "" "$(digest_issue_lookup '[]' "$MARKER")" \
+    "(c) no title match at all still returns empty, unaffected by the fallback (#7338)"
+echo
+
+# ---------------------------------------------------------------------
 echo "Test 13: the shipped markdown matches this mirror (drift guard)"
 
 assert_doc_contains "$CHAMPION_MD" \
@@ -1168,6 +1234,20 @@ assert_doc_contains "$CHAMPION_MD" \
 assert_doc_contains "$CHAMPION_MD" \
     'OLD_DIGEST_BODY=$("$GH_READ" issue view "$DIGEST_ISSUE" --json body --jq '"'"'.body'"'"')' \
     "Step 0 reads the pinned digest issue's own body so Step 1 can carry the conflict-since clock forward across passes (#7020)"
+
+# --- #7338: digest-issue lookup falls back to the oldest marker-less title
+# match instead of orphaning a pre-marker digest issue ---
+assert_doc_contains "$CHAMPION_MD" \
+    'as \$tagged | if (\$tagged | length) > 0 then (\$tagged | min_by(.number)) else min_by(.number) end' \
+    "Step 0's DIGEST_ISSUE lookup prefers a marker-tagged match, falling back to the oldest marker-less title match otherwise (#7338)"
+
+assert_doc_lacks "$CHAMPION_MD" \
+    '] | first | .number // empty")' \
+    "the old no-fallback lookup (empty when nothing carries the marker) is gone (#7338)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "oldest (lowest-numbered) open title match instead of returning empty" \
+    "the doc explains the fallback rationale: adopt a pre-marker digest issue rather than duplicate it (#7338)"
 
 assert_doc_contains "$CHAMPION_MD" \
     'CONFLICT_SINCE_PREFIX="<!-- champion:conflict-since:PR="' \

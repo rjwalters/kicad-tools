@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "mode": "assembly",
+  "status": "blocked",
+  "checked_at": "2026-09-10T21:09:08.468831+00:00",
+  "inputs": {
+    "output/usbc_pd_power.kicad_sch": "8495152128796e849615d65dbea1db8d97334252ae7a4da5190c71057b6d73ae",
+    "output/usbc_pd_power.kicad_pcb": "39bf81159243f6827792cc0ce1fa23d907a419595d200edf478f25819905bdc7",
+    "output/circuit.json": "8c5346506cd6bd6796e29cc368fae648df63b1ccaf7c651f61d4422ca8e8c8ef",
+    "output/net_class_map.json": "aecfc117903d74e544f93fa8f2ab29117130bc8a202b6f71830cfa2166535a61",
+    "output/usbc_pd_power.kicad_pro": "46e70ad622f62a250039b8ed3a792497b33bf6c7a0d18eb689a5f513a4ae2c22",
+    "output/board09.kicad_sym": "36f1e94f721256abb4ab91d033f3d099e7aee1a49c81a25856ddfb67d36b9e52",
+    "output/board09.pretty/SRP7050TA.kicad_mod": "0e5569968f48e2d3f7f09ec4814306e0d63792d71fd3ccf00564d053394dd947",
+    "generate_design.py": "7ba97d5cd4fbea5cb98eff60daf5fdbb3c96f3d9e428afc353fb8d3f0e51788a",
+    "check_design.py": "ce6610cb0af6d85bf230e54bc3e03539d9093c22445d5d1ff2169faf468eb2c9",
+    "procurement.json": "dcbd7f3e94a74336da5ad1bd97e9384be9658b6b7af9239826351b526a89298a",
+    "project.kct": "1bcbeb72f575efca40117e2510948b33d065284f769256112826c97006a3dadd",
+    "engineering/calculate.py": "31b8b2e51a6a84eacb539282be90e3e3154e61ddb90a2c8840ebdc86f85dcc7a",
+    "output/development-check.json": "7ac0f33cd872f5fc5baf6a1fe60da4e546198b02f5f7f024530b46d89bbe4c59",
+    "output/native-erc.json": "a4afb3b00e36820e4a1b4a06ca8872c9cb453c75ce1003f098a3e4e33efd1cbb",
+    "output/placement-drc.json": "0846ceb10e58cc111a9b5b34a76760cc67243e52fbdfd9fe23125147d3dd4205",
+    "output/label-lvs.json": "6f69e242fd4c0e6c87a4bf0900ecf432a578e1932c15420fa35b60ec0ce1d744",
+    "output/copper-lvs.json": "9e1980046e2f00f36f16ec60c7b9b4f8b0ed5086bcd280d487d9a1f8b5172232",
+    "output/manufacturer-check.json": "4a0da704f03400fb30758da653e21aaeb84df41b678273ae4120ee337d68d6eb",
+    "output/net-status.json": "7b5faa05aa024de4bf4afb2ec26fa6bfd47294c7480805b7e3e2492a1f0937cf",
+    "output/calculations.json": "82e319f0c0af2f9cde2ed97416f9d3ab84aa7aed5dcc9454d5c1af5f7d4ae310"
+  },
+  "blockers": [
+    "Resolve manufacturer ampacity findings through branch-current and thermal review",
+    "Reconcile strict GND connectivity disagreement with native KiCad (#5061)",
+    "Power-path, Kelvin, switch-loop, thermal and capacitor bias review",
+    "Complete procurement and assembly-library package verification",
+    "PD configuration readback and attach/inrush/unsupported-source tests",
+    "Manufacturing export and independent refill identity"
+  ],
+  "checks": [
+    {
+      "name": "native_erc_clean",
+      "status": "passed"
+    },
+    {
+      "name": "native_drc_geometry_clean",
+      "status": "passed"
+    },
+    {
+      "name": "critical_routes_connected",
+      "status": "passed"
+    },
+    {
+      "name": "inner_ground_planes_valid",
+      "status": "passed"
+    },
+    {
+      "name": "all_nets_connected",
+      "status": "passed"
+    },
+    {
+      "name": "label_lvs_clean",
+      "status": "passed"
+    },
+    {
+      "name": "copper_lvs_clean",
+      "status": "passed"
+    },
+    {
+      "name": "analytical_screen_passed",
+      "status": "passed"
+    },
+    {
+      "name": "manufacturer_rules_passed",
+      "status": "failed"
+    },
+    {
+      "name": "manufacturing_release",
+      "status": "not_run"
+    }
+  ]
+}

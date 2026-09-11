@@ -1,20 +1,10 @@
-/**
- * Unit tests for the display-status helper (issues #3717, #3749).
- *
- * The displayed gallery badge must read "Ready" ONLY when a board has zero
- * DRC violations AND an explicit `lvs_clean === true`. A board with
- * `drc_violations > 0` must never show "Ready". A board with an LVS mismatch
- * (`lvs_clean === false`) must never show "Ready". A board that has not run
- * LVS at all (`lvs_clean === undefined`) must never show "Ready" — the chip
- * reads "LVS not run" instead.
- */
+/** Manufacturing badges require current readiness as well as known DRC/LVS. */
 import { describe, expect, it } from "vitest";
 import { displayStatus, displayStatusLabel } from "./boardStatus.ts";
 import type { Board } from "./types.ts";
 
 function makeBoard(overrides: Partial<Board> = {}): Board {
-  // Default fixture is "Ready" — explicitly LVS-clean. Tests for the
-  // unverified path opt OUT via `lvs_clean: undefined`.
+  // Default fixture is assembly-ready with explicit current evidence.
   return {
     $schema: "https://kicad-tools.org/schemas/board/v1.json",
     schema_version: 1,
@@ -23,6 +13,8 @@ function makeBoard(overrides: Partial<Board> = {}): Board {
     status: "ok",
     category: "demo",
     lvs_clean: true,
+    drc_violations: 0,
+    readiness: { status: "ready", mode: "assembly", blockers: [] },
     ...overrides,
   };
 }
@@ -31,19 +23,19 @@ describe("displayStatus", () => {
   it("returns 'ready' for status ok with zero DRC violations and lvs_clean true", () => {
     const b = makeBoard({ status: "ok", drc_violations: 0, lvs_clean: true });
     expect(displayStatus(b)).toBe("ready");
-    expect(displayStatusLabel(b)).toBe("Ready");
+    expect(displayStatusLabel(b)).toBe("Assembly ready");
   });
 
-  it("returns 'ready' for status ok when drc_violations is absent", () => {
-    const b = makeBoard({ status: "ok" });
-    expect(displayStatus(b)).toBe("ready");
-    expect(displayStatusLabel(b)).toBe("Ready");
+  it("requires an explicit zero DRC count", () => {
+    const b = makeBoard({ status: "ok", drc_violations: undefined });
+    expect(displayStatus(b)).toBe("unverified");
+    expect(displayStatusLabel(b)).toBe("Readiness unverified");
   });
 
   it("never returns 'ready' when drc_violations > 0, even for status ok", () => {
     const b = makeBoard({ status: "ok", drc_violations: 3 });
     expect(displayStatus(b)).toBe("drc");
-    expect(displayStatusLabel(b)).not.toBe("Ready");
+    expect(displayStatusLabel(b)).not.toBe("Assembly ready");
     expect(displayStatusLabel(b)).toBe("3 DRC violations");
   });
 
@@ -95,8 +87,8 @@ describe("displayStatus", () => {
     // LVS verification → chip MUST NOT read "Ready".
     const b = makeBoard({ status: "ok", drc_violations: 0, lvs_clean: undefined });
     expect(displayStatus(b)).toBe("unverified");
-    expect(displayStatusLabel(b)).toBe("LVS not run");
-    expect(displayStatusLabel(b)).not.toBe("Ready");
+    expect(displayStatusLabel(b)).toBe("Readiness unverified");
+    expect(displayStatusLabel(b)).not.toBe("Assembly ready");
   });
 
   it("DRC takes priority over LVS when both fail (DRC is the fabrication blocker)", () => {

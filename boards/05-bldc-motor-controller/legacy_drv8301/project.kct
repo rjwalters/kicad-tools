@@ -1,0 +1,270 @@
+kct_version: "1.0"
+
+project:
+  name: "BLDC Motor Controller"
+  revision: "A"
+  author: "kicad-tools"
+  description: |
+    Three-phase brushless DC motor controller demonstrating thermal management,
+    high-current routing, and power electronics design patterns.
+  artifacts:
+    schematic: "output/bldc_controller.kicad_sch"
+    pcb: "output/bldc_controller.kicad_pcb"
+    routed: "output/bldc_controller_routed.kicad_pcb"
+
+intent:
+  summary: |
+    Advanced test board for validating kicad-tools thermal analysis,
+    zone generation, and high-current trace routing capabilities.
+
+  use_cases:
+    - "Validate ThermalAnalyzer with power MOSFET dissipation"
+    - "Test ZoneGenerator for power plane creation"
+    - "Exercise net class differentiation (power vs signal)"
+    - "Demonstrate multi-voltage domain power supply design"
+
+  interfaces:
+    - name: power_input
+      type: "DC barrel/screw terminal"
+      voltage: "12-24V"
+      current_max: "15A"
+
+    - name: motor_output
+      type: "3-phase BLDC"
+      description: "Phases U, V, W at 10A continuous"
+      pins: ["U", "V", "W"]
+
+    - name: hall_sensors
+      type: "digital"
+      description: "Hall sensor inputs at 3.3V logic"
+      pins: ["HALL_A", "HALL_B", "HALL_C"]
+      voltage: "3.3V"
+
+    - name: debug
+      type: "SWD"
+      pins: ["SWDIO", "SWCLK", "NRST"]
+
+requirements:
+  electrical:
+    input_voltage:
+      min: 12
+      max: 24
+      unit: "V"
+
+    motor_current:
+      continuous: 10
+      peak: 15
+      unit: "A"
+
+    power_domains:
+      - name: "VMOTOR"
+        voltage: "12-24V"
+        description: "Motor power bus"
+      - name: "VDD_5V"
+        voltage: "5V"
+        description: "Gate driver supply"
+      - name: "VDD_3V3"
+        voltage: "3.3V"
+        description: "MCU and logic"
+
+  thermal:
+    max_ambient: 40
+    max_junction: 125
+    unit: "C"
+    notes: |
+      MOSFETs require thermal vias and copper pour for heat dissipation.
+      Expect 1-2W per MOSFET at full load.
+
+  mechanical:
+    board_size:
+      width: 60
+      height: 80
+      unit: "mm"
+    mounting: "4x M3 corner holes"
+
+  manufacturing:
+    layers:
+      preferred: 4
+      # Issue #3402: bumped from 2 to 4 — the empirical routing audit
+      # showed 2L tops out at 46% reach while 4L reaches 60%+.  See the
+      # ``escalation.starting_layers`` note below for the manufacturable-
+      # bar rationale (100% LVS + 0 DRC).
+    min_trace: "0.2mm"
+    min_space: "0.2mm"
+    min_drill: "0.3mm"
+    copper_weight: "2oz"
+    unit: "mm"
+    notes: "2oz copper recommended for motor phase traces"
+    # Issue #3425: the 4-layer stack is paired with the jlcpcb-tier1
+    # (Capability-Plus) fabricator profile — the DRV8301's HTSSOP-56
+    # 0.5mm-pitch escape requires in-pad rescue vias that only tier1
+    # manufactures legally (epoxy fill + plating-over,
+    # via_in_pad_supported: true).  design.py route_pcb() pins
+    # ``--manufacturer jlcpcb-tier1 --backend cpp --auto-layers
+    # --starting-layers 4 --max-layers 4``; the CI
+    # DRC gate measures the routed artifact against the same profile
+    # via the manufacturers: override in
+    # .github/routed-drc-tolerance.yml.  Do not change the layer count
+    # or the fab tier independently — they are a coupled recipe.
+    target_fab: "jlcpcb-tier1"
+    # Issue #3402: DRV8301 gate driver + STM32G431 MCU + 3-phase power
+    # routing combine high pin density with high-current motor phase
+    # traces.  Empirical routing audit (#3402) shows 2L tops out at 46%
+    # reach while 4L reaches 60% — a clear "more layers materially
+    # helps" signal.  Set starting_layers=4 to skip the 2L probe.
+    # Residual reach gap at 4L tracked separately as a follow-on issue
+    # (gh:#3412).
+    escalation:
+      starting_layers: 4
+
+suggestions:
+  components:
+    gate_driver:
+      preferred: ["DRV8301"]
+      rationale: "Integrated 3-phase gate driver with current sense amps, QFN-56"
+
+    mosfets:
+      preferred: ["IRLZ44N"]
+      rationale: "Logic-level N-channel, 55V 47A, Rds(on) 22mOhm, TO-220"
+
+    current_sense:
+      preferred: ["Shunt resistor 0.005Ohm 2512"]
+      rationale: "Low-value shunt for current sensing, 1W power rating"
+
+    buck_regulator:
+      preferred: ["LM2596"]
+      rationale: "Simple switcher, 24V to 5V at 3A"
+
+    ldo:
+      preferred: ["AMS1117-3.3"]
+      rationale: "5V to 3.3V for MCU"
+
+    mcu:
+      preferred: ["STM32G431"]
+      rationale: "Motor control timers, 170MHz, integrated op-amps, LQFP-48"
+
+  layout:
+    - "Place MOSFETs in H-bridge configuration near motor connector"
+    - "Use thermal vias under MOSFET tab (min 6 per device)"
+    - "Ground plane on bottom layer for heat spreading"
+    - "Keep gate drive traces short (<10mm)"
+    - "Use Kelvin connection to shunt resistors"
+    - "Route sense traces away from switching nodes"
+    - "Place sense amplifier close to shunts"
+    - "Separate motor power from logic power at input"
+    - "Use star-ground topology"
+    - "Bulk capacitors near power input and MOSFETs"
+    - "Keep PWM traces away from sense traces"
+    - "Use ground guard traces around sensitive signals"
+
+bom_entries:
+  - ref: J1
+    part: WJ15EDGRC-3.81-2P
+    lcsc: C8465
+  - ref: F1
+    part: 0685P9150-01
+    lcsc: C89657
+  - ref: D1
+    part: SMDJ24A
+    lcsc: C35208
+  - ref: C1
+    part: 470uF/35V
+    lcsc: C134742
+  - ref: C2
+    part: CL21B104KBCNNNC
+    lcsc: C1525
+  - ref: U1
+    part: LM2596S-5.0
+    lcsc: C29781
+  - ref: U2
+    part: AMS1117-3.3
+    lcsc: C6186
+  - ref: C5
+    part: CL21A106KAYNNNE
+    lcsc: C15850
+  - ref: C6
+    part: CL21B104KBCNNNC
+    lcsc: C1525
+  - ref: C7-C8
+    part: CL21B104KBCNNNC
+    lcsc: C1525
+  - ref: C9
+    part: CL21A475KAQNNNE
+    lcsc: C1779
+  - ref: Y1
+    part: X49SM8MSD2SC
+    lcsc: C12674
+  - ref: C10-C11
+    part: CL21C200JBANNNC
+    lcsc: C1554
+  - ref: U3
+    part: DRV8301DCAR
+    lcsc: C129292
+  - ref: Q1-Q6
+    part: IRLZ44NPBF
+    lcsc: C2537
+  - ref: R10-R12
+    part: CS2512-0R005-J-T
+    source: LCSC
+    lcsc: C76662
+  - ref: J2
+    part: WJ15EDGRC-3.81-3P
+    lcsc: C8390
+  - ref: J3
+    part: B-5100S05P-A110
+    lcsc: C50950
+  - ref: J4
+    part: B-6100S06P-A110
+    lcsc: C40877
+  - ref: D3
+    part: 17-21SUGC/S530-A2/TR8
+    lcsc: C72043
+  - ref: D4
+    part: 17-21SURC/S530-A2/TR8
+    lcsc: C72038
+
+decisions:
+  - topic: "Discrete MOSFETs vs Integrated Driver"
+    choice: "Discrete TO-220 MOSFETs (IRLZ44N)"
+    rationale: |
+      Discrete MOSFETs provide better thermal visibility for testing
+      ThermalAnalyzer. TO-220 package has well-characterized thermal
+      properties and requires explicit thermal management.
+    alternatives:
+      - "Integrated half-bridge ICs (e.g., IR2184 + dual MOSFET)"
+      - "Smart power modules"
+
+  - topic: "PCB Layer Count"
+    choice: "2-layer PCB"
+    rationale: |
+      Tests routing capability on constrained layer count.
+      Requires careful copper pour management for power delivery.
+      More challenging thermal design validates thermal analysis.
+    alternatives:
+      - "4-layer with dedicated power planes"
+
+  - topic: "Power Component Package"
+    choice: "Through-hole for power components"
+    rationale: |
+      TO-220 MOSFETs and through-hole screw terminals are
+      common in motor control. Tests mixed SMD/THT routing.
+
+progress:
+  phase: "design"
+  checklist:
+    - task: "Create schematic"
+      status: "pending"
+    - task: "Run ERC"
+      status: "pending"
+    - task: "Create PCB"
+      status: "pending"
+    - task: "Place components"
+      status: "pending"
+    - task: "Add zones"
+      status: "pending"
+    - task: "Route traces"
+      status: "pending"
+    - task: "Run thermal analysis"
+      status: "pending"
+    - task: "Run DRC"
+      status: "pending"

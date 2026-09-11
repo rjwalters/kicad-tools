@@ -26,6 +26,7 @@
 # date flags), so they were confirmed hermetic and ubuntu-portable the same
 # way as the tests/hooks/ suites above before being wired in here.
 
+test-agent-destroy.sh
 test-app-permission-fallback.sh
 test-archive-transcripts.sh
 test-blame-issue.sh
@@ -34,6 +35,7 @@ test-bounded-run.sh
 test-build-gate-timeout.sh
 test-build-rs-watchset.sh
 test-build-slot.sh
+test-cargo-target-dir-reclaim.sh
 test-cargo-test-daemon-guard.sh
 test-champion-ci-checks-no-checks-signal.sh
 test-champion-critical-file-check.sh
@@ -70,6 +72,7 @@ test-cpu-budget.sh
 test-create-pr-superseded-issue.sh
 test-create-pr-version-check.sh
 test-default-branch.sh
+test-dep-recheck-fingerprint.sh
 test-dependency-parse.sh
 test-detect-dependency-cycle.sh
 test-detect-startable-subset.sh
@@ -98,12 +101,14 @@ test-guide-operator-attention-fold.sh
 test-guide-operator-only-exclude.sh
 test-guide-plan-body-stable-sort.sh
 test-guide-pool-pressure-defer.sh
+test-guide-superseding-block-merge-state.sh
 test-guide-work-log-debounce.sh
 test-guide-work-log-issue-out-of-order.sh
 test-guide-work-log-issue-pagination.sh
 test-guide-work-log-out-of-order-merge.sh
 test-guide-work-log-pr-pagination.sh
 test-guide-work-log-self-loop.sh
+test-guide-work-plan-approved-review-label-fidelity.sh
 test-guide-work-plan-debounce.sh
 test-guide-work-plan-operator-only-exclude.sh
 test-guide-work-plan-ready-open-pr-exclude.sh
@@ -135,7 +140,9 @@ test-merge-admission-telemetry.sh
 test-merge-pr-app-permission-fallback.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
 test-merge-pr-auto-reconcile.sh
+test-merge-pr-check-runs-404-fallback.sh
 test-merge-pr-closed-issue-cleanup.sh
+test-merge-pr-defaults-version-bump-collision.sh
 test-merge-pr-dirty-worktree-guard.sh
 test-merge-pr-head-mismatch.sh
 test-merge-pr-help.sh
@@ -147,11 +154,13 @@ test-merge-pr-primary-worktree-guard.sh
 test-merge-pr-rate-limit-fallback.sh
 test-merge-pr-stale-mergeable.sh
 test-merge-pr-unstable-fallback.sh
+test-merge-pr-wait-for-checks-empty-settle.sh
 test-merge-pr-worktree-awk.sh
 test-merge-pr-worktree-path.sh
 test-merge-pr-worktree-remove-diagnosis.sh
 test-nextest-daemon-guard.sh
 test-operator-only-subkind.sh
+test-post-verdict.sh
 test-pr-worktree-isolation.sh
 test-probe-tokens-fallback.sh
 test-provision-codex-hooks.sh
@@ -162,6 +171,7 @@ test-rebase-stacked-children.sh
 test-record-noop-release.sh
 test-recover-orphaned-shepherds-diagnostics.sh
 test-reconcile-stack.sh
+test-repo-mismatch-fallback.sh
 test-require-complexity-marker.sh
 test-resolve-tier-model.sh
 test-resync-installed.sh
@@ -178,6 +188,7 @@ test-sweep-checkpoint.sh
 test-sweep-experiment.sh
 test-sweep-lease-fence.sh
 test-sweep-lease-fence-race.sh
+test-sweep-lease-publish.sh
 test-sweep-lease-renew.sh
 test-sweep-pr-mode.sh
 test-sweep-run-registry.sh
@@ -186,6 +197,7 @@ test-sync-labels-repo-flag.sh
 test-urgent-flip-guard.sh
 test-verdict-staleness-guard.sh
 test-verify-install-scope.sh
+test-version-check-gate-callsites.sh
 test-version-check-gate.sh
 test-warn-operator-gated.sh
 test-warn-out-of-set-deps.sh
@@ -240,6 +252,7 @@ tests/install/test-provision-daemon.sh
 tests/install/test-uninstall-clean-preserves-unmanaged-hooks.sh
 tests/install/test-uninstall-labels-block.sh
 tests/install/test-uninstall-preserve-siblings.sh
+tests/install/test-uninstall-settings-permissions.sh
 tests/install/test-uninstall-shim-cleanup.sh
 
 # tests/hermit/ — the Hermit role's stateless-ceremony heuristic regression

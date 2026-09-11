@@ -1,0 +1,49 @@
+"""Length additions accepted only after continuous foreign/self copper checks."""
+from pathlib import Path
+exec(Path('/tmp/board07-sdram/planar-ports.py').read_text().split("for name in a.nets.split(','):")[0])
+import importlib.util
+from kicad_tools.physics import Stackup
+from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
+from kicad_tools.router.primitives import Segment
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.optimizer.serpentine import SerpentineConfig,SerpentineGenerator
+spec=importlib.util.spec_from_file_location('validate07','boards/07-matchgroup-test/real_design/validate.py');val=importlib.util.module_from_spec(spec);spec.loader.exec_module(val)
+constraints=json.load(open('/tmp/board07-sdram/circuit-43/sdram_constraints.json'));targets={'SDRAM_BYTE0':64.0,'SDRAM_BYTE1':74.0,'SDRAM_ADDRESS':79.0,'SDRAM_COMMAND':72.0};target={n:targets[g] for g,ns in constraints['groups'].items() for n in ns};z=val.copper_elevations(Stackup.from_pcb(b))
+source=PCB.load('/tmp/board07-sdram/group-source/sdram_demo.kicad_pcb');protected={s.uuid for s in source.segments};lengthan=TraceLengthAnalyzer()
+def netlength(name):
+ num=b.get_net_by_name(name).number;segments=list(b.segments_in_net(num));return lengthan.analyze_net(b,name).total_length_mm+sum(val.via_travel_mm(v,segments,z) for v in b.vias_in_net(num))
+for name in sorted(a.nets.split(','),key=lambda n:target[n]-netlength(n),reverse=True):
+ if name=='SDCLK':continue
+ start=time.monotonic();before=netlength(name);remaining=target[name]-before;added=0
+ for iteration in range(8):
+  if remaining<.15:break
+  num=b.get_net_by_name(name).number;segments=list(b.segments_in_net(num));candidates=sorted([s for s in segments if s.uuid not in protected and math.dist(s.start,s.end)>2.5],key=lambda s:math.dist(s.start,s.end),reverse=True);best=None
+  obs={layer:obstacles(name,layer) for layer in {s.layer for s in candidates}}
+  for old in candidates:
+   dx,dy=old.end[0]-old.start[0],old.end[1]-old.start[1]
+   if min(abs(dx),abs(dy),abs(abs(dx)-abs(dy)))>1e-5:continue
+   length=math.hypot(dx,dy);normal=(-dy/length,dx/length)
+   own=unary_union([LineString([s.start,s.end]).buffer(.33) for s in segments if s.uuid!=old.uuid and s.layer==old.layer])
+   own=unary_union([own]+[Point(v.position).buffer(.49) for v in b.vias_in_net(num)])
+   own=own.difference(unary_union([Point(old.start).buffer(.45),Point(old.end).buffer(.45)]))
+   for fraction in [1,.75,.5,.25,.125]:
+    deficit=remaining*fraction
+    for count in range(1,min(20,int((length*.9-.72)/1.44))+1):
+     amp=deficit/(2*count)
+     if amp<.72:continue
+     for direction in [1,-1]:
+      config=SerpentineConfig(amplitude=amp,min_spacing=.72,gap_factor=1,max_iterations=count,side='outer',outer_normal_hint=(normal[0]*direction,normal[1]*direction));gen=SerpentineGenerator(config);segment=Segment(*old.start,*old.end,width=.18,layer=next(layer for layer in Layer if layer.kicad_name==old.layer),net=num,net_name=name);r=gen.generate_trombone(segment,deficit)
+      if not r.success or r.length_added>remaining+.02:continue
+      points=[(r.new_segments[0].x1,r.new_segments[0].y1)]+[(s.x2,s.y2) for s in r.new_segments];line=LineString(points)
+      if not line.is_simple or line.intersects(obs[old.layer]) or line.intersects(own):continue
+      if any(not(.4<=x<=99.6 and .4<=y<=79.6) for x,y in points):continue
+      if best is None or r.length_added>best[0]:best=(r.length_added,old,r.new_segments)
+    if best and best[0]>=remaining-.02:break
+   if best and best[0]>=remaining-.02:break
+  if best is None:break
+  amount,old,new=best
+  node=next(n for n in b._sexp.find_all('segment') if n.find('uuid').get_string(0)==old.uuid);b._sexp.remove(node)
+  for s in new:b.add_trace((s.x1,s.y1),(s.x2,s.y2),width=.18,layer=s.layer.kicad_name,net=name)
+  b.save(a.out/'physical.kicad_pcb');b=PCB.load(a.out/'physical.kicad_pcb');added+=amount;remaining=target[name]-netlength(name)
+ result={'net':name,'before':before,'after':netlength(name),'target':target[name],'added':added,'seconds':round(time.monotonic()-start,3)};results.append(result);print(json.dumps(result),flush=True)
+ b.save(a.out/'physical.kicad_pcb');shutil.copy2(a.source.with_suffix('.kicad_pro'),a.out/'physical.kicad_pro');(a.out/'results.json').write_text(json.dumps(results,indent=2))

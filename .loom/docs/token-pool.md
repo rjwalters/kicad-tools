@@ -43,7 +43,10 @@ machine profile root. Loom rejects traversal, separators, symlink escapes,
 non-directory targets, and a profile root located inside the repository.
 Codex owns `<profile>/auth.json` and may refresh it in place; Loom's registry
 does not open, parse, copy, serialize, or log that file. Operators should keep
-profile directories `0700` and `auth.json` `0600`.
+profile directories `0700` and `auth.json` `0600`. If `.loom/accounts.json` is
+committed and a host has not yet locally provisioned a directory for one of
+its listed entries, inventory simply skips that one name (with a warning) —
+the rest of the pool on that host is unaffected.
 
 Selected accounts expose the non-secret observability identity
 `LOOM_ACCOUNT_PROVIDER` and `LOOM_ACCOUNT_NAME`, plus `LOOM_ACCOUNT_UPSTREAM_ID`
@@ -1001,3 +1004,104 @@ Codex exposes no trustworthy quota-headroom percentage here. Status/capacity
 therefore reports raw, enabled, healthy, cooldown, and reauth-required counts;
 transcript token totals remain observability and are never presented as
 remaining quota. Claude's existing global daemon concurrency cap is unchanged.
+
+## Session-managed Codex accounts: auth-state probe + re-auth runbook (#6927)
+
+A Codex account can be **adopted** by a session container
+(`loom-daemon accounts session start <name>`, issue #6925): from then on the
+container is the single serializing owner of that account's `CODEX_HOME`, and
+no host-side `codex` process may touch the profile directly (ADR-0017
+Decision 1). Adoption is permanent and recorded by a `.session-managed.json`
+marker inside the profile directory.
+
+### How a session-managed account's auth state is learned
+
+The host-direct `codex login status` probe is forbidden on an adopted
+profile, so the daemon asks the container that owns it instead:
+
+```
+docker exec <container> codex login status
+```
+
+This stays *inside* the ownership boundary rather than being an exception to
+it: the host never opens the profile, `codex login status` is read-only (it
+never starts a device-code flow or rewrites the refresh chain, so it cannot
+race a refresh the container is performing), and the probe is non-interactive
+with a bounded timeout, so it can never block on an absent operator.
+
+The result is reported by the ordinary account surfaces — a session-managed
+account reads exactly like a host-direct one, only the transport differs:
+
+```bash
+loom-daemon accounts status codex <name>          # login=LoggedIn | NotLoggedIn | ...
+loom-daemon accounts status codex <name> --json   # "login_state": "logged_in", "session_managed": true
+```
+
+`login_state: session_unavailable` means the probe could not run at all —
+the account's session container is not running (or `docker` is unavailable),
+so **nothing is known** about its auth state. Start the container and re-run.
+
+### How the probe reaches selection
+
+Account selection (`select_account` → `select_healthy_at`) probes every
+enabled, adopted Codex account before choosing one, and feeds each
+**conclusive** result into the same `.loom/account-health.json` state the
+reactive terminal signals use:
+
+| Probe result | Effect on `.loom/account-health.json` |
+|---|---|
+| not logged in | `reason = reauth_required` — excluded from selection *before* a dispatch is attempted |
+| logged in, account held `reauth_required` | hold released (a live probe is the independent verification a release requires) |
+| logged in, otherwise | probe stamp only — never clears an exhaustion cooldown or a transient backoff |
+| container stopped / `docker` or `codex` missing / timeout / unparseable | **nothing recorded** — "could not tell" is never evidence of expiry |
+
+Knobs (all optional):
+
+- `LOOM_CODEX_SESSION_PROBE=0` — disable the probe entirely.
+- `LOOM_CODEX_SESSION_PROBE_TTL_SECS` (default `300`, `0` = every selection) —
+  minimum age of the last conclusive result before an account is re-probed.
+
+The probe costs zero `docker` invocations for a pool with no adopted account,
+and never fails a selection: it is an optimization over discovering a dead
+refresh chain by dispatching into it.
+
+### Re-auth runbook: attach → `codex login` → detach
+
+Run this when an account reports `login=NotLoggedIn`, or when selection
+reports it as `reauth_required`. It is the *only* supported way to
+re-authenticate an adopted profile — a host-direct
+`loom-daemon accounts reauth` refuses one by design.
+
+```bash
+# 0. Confirm the diagnosis, and that the container is up.
+loom-daemon accounts status codex <name>          # expect login=NotLoggedIn
+loom-daemon accounts session status <name>        # expect running
+
+# 1. Start the container if it is stopped (idempotent if already running).
+loom-daemon accounts session start <name>
+
+# 2. Attach to the container's tmux session (interactive, operator-only).
+loom-daemon accounts session attach <name>
+
+# 3. INSIDE the attached session, re-authenticate:
+codex login
+#    ...complete the browser/device flow...
+codex login status                                # expect "Logged in"
+
+# 4. Detach WITHOUT killing the session: press Ctrl-b then d
+#    (tmux's default prefix — the session image's entrypoint does not
+#    rebind it; see docker/session/entrypoint.sh).
+
+# 5. Confirm from the host that the probe now agrees.
+loom-daemon accounts status codex <name>          # expect login=LoggedIn
+```
+
+Step 5 is what releases the `reauth_required` hold: the next selection's
+probe sees a logged-in account and clears it. To force that immediately
+rather than wait out `LOOM_CODEX_SESSION_PROBE_TTL_SECS`, run the next
+selection with `LOOM_CODEX_SESSION_PROBE_TTL_SECS=0`.
+
+**Do not** `exit` the shell inside the tmux pane instead of detaching — that
+ends the pane the entrypoint created. The container survives (it blocks on
+its own `sleep infinity`), but a later `attach` has no session to attach to
+until the container is restarted.

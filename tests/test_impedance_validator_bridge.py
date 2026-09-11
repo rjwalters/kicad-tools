@@ -536,3 +536,42 @@ class TestBoard06DormancyOptOut:
             f"{first_dielectric.epsilon_r:.2f}; expected 4.05 (JLCPCB).  "
             f"Validator/router lockstep drift will resurface."
         )
+
+
+def test_cli_impedance_synthesis_preserves_explicit_thin_dielectric(tmp_path):
+    """SWCLK synthesis must not widen a fine-pitch bus using a generic stack."""
+    from kicad_tools.physics import TransmissionLine
+    from kicad_tools.router.io import load_pcb_for_routing
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.create(width=20, height=20, layers=4)
+    for layer in pcb._sexp.get("setup").get("stackup").find_children("layer"):
+        if layer.get_atoms()[0] in {"dielectric 1", "dielectric 3"}:
+            layer.get("thickness").set_value(0, 0.0994)
+            layer.get("epsilon_r").set_value(0, 4.1)
+    path = tmp_path / "thin-stack.kicad_pcb"
+    pcb.save(path)
+    router, _ = load_pcb_for_routing(
+        path,
+        rules=DesignRules(grid_resolution=0.25, trace_width=0.16, min_trace_width_floor=0.15),
+        layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+        validate_drc=False,
+    )
+    router.nets = {1: [("U1", "1")], 2: [("U1", "2")]}
+    router.net_names = {1: "SWCLK", 2: "DQ1"}
+    router.net_class_map = {
+        "SWCLK": NET_CLASS_DEBUG,
+        "DQ1": NetClassRouting(
+            name="SDRAM", trace_width=0.16, clearance=0.15, target_single_impedance=50
+        ),
+    }
+    router._prepare_routing()
+
+    assert router._stackup.has_explicit_data
+    assert router._stackup.get_dielectric_height("F.Cu") == pytest.approx(0.0994)
+    for name in ("SWCLK", "DQ1"):
+        width = router.net_class_map[name].trace_width
+        # 0.5mm-pitch, 0.3mm-wide pads cannot escape with the old 0.375mm width.
+        assert width <= 0.20
+        actual = TransmissionLine(router._stackup).microstrip(width_mm=width, layer="F.Cu").z0
+        assert 45 <= actual <= 55

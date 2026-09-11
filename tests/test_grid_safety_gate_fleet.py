@@ -60,7 +60,13 @@ FLEET: list[tuple[str, str, bool]] = [
 
 
 def _input_pcb(board_dir: str, stem: str) -> Path:
-    return REPO_ROOT / "boards" / board_dir / "output" / f"{stem}.kicad_pcb"
+    # These exact gate expectations describe the pre-redesign pad geometry.
+    root = (
+        REPO_ROOT / "tests/fixtures/historical_demo_boards"
+        if board_dir in {"05-bldc-motor-controller", "07-matchgroup-test"}
+        else REPO_ROOT / "boards"
+    )
+    return root / board_dir / "output" / f"{stem}.kicad_pcb"
 
 
 @pytest.mark.parametrize("budget", [500_000, 2_000_000])

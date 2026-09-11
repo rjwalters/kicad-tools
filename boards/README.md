@@ -1,6 +1,6 @@
 # kicad-tools Demo Boards
 
-Complete PCB designs demonstrating kicad-tools capabilities. Each board includes a `.kct` project specification file describing the design intent, requirements, and progress.
+PCB designs and developing examples demonstrating kicad-tools capabilities. Each board includes a `.kct` project specification file describing the design intent, requirements, and progress.
 
 ## Quick Start
 
@@ -30,19 +30,22 @@ kct build boards/01-voltage-divider --mfr jlcpcb
 
 | # | Board | Status | Components | Nets | Notes |
 |---|-------|--------|------------|------|-------|
-| 00 | [Simple LED](00-simple-led/) | ✅ Working | 3 | 3 | "Hello World" board; end-to-end pipeline gated in CI (`check_board_00_e2e.py`) |
-| 01 | [Voltage Divider](01-voltage-divider/) | ✅ Working | 4 | 3 | Simplest possible design, workflow validation |
-| 02 | [Charlieplex LED](02-charlieplex-led/) | ✅ Working | 14 | 8 | Routes 8/8 signal nets; both DRC engines clean (verified 2026-07-05) |
-| 03 | [USB Joystick](03-usb-joystick/) | ✅ Working | ~20 | 13 | Routes 13/13 on 2-layer in ~24s, 0 native DRC; recipe requests `--differential-pairs` (runtime coupling gated on [#3952]) |
-| 04 | [STM32 Dev Board](04-stm32-devboard/) | ✅ Working | ~30 | 12 | Fully routed via `generate_design.py`; kicad-cli DRC clean (verified 2026-07-05) |
-| 05 | [BLDC Motor Controller](05-bldc-motor-controller/) | 🚧 In progress | 55 | 52 | Three-phase HV/high-current bench (STM32G431 + DRV8301); phase nets routed, 3 ISENSE nets open pending level-2 escalation ([#3766]); CI-gated (`check_board_05_blocking.py`) |
-| 06 | [Diff-Pair Test](06-diffpair-test/) | ⚠️ Scaffold | 7 | 26 | Epic [#2556] Phase 4L regression bench --- USB 2.0/3.0, PCIe, MIPI on 4-layer; exercises Phase 1-3 features (intra_pair_clearance, coupled_routing, coupled_continuity_threshold, target_diff_impedance, skew_tolerance_mm) |
-| 07 | [Match-Group Test](07-matchgroup-test/) | ⚠️ Scaffold | 8 | 33 | Epic [#2661] Phase 3L regression bench --- DDR data byte, MIPI CSI, HDMI TMDS, address bus on 4-layer; exercises Phase 1A-2G match-group features (length_match_group, length_match_reference, length_match_tolerance_mm) |
+| 00 | [Simple LED](00-simple-led/) | Assembly ready | 3 | 3 | Manual D1/J1 after SMT. |
+| 01 | [Voltage Divider](01-voltage-divider/) | Assembly ready | 4 | 3 | Manual J1/J2 after SMT. |
+| 02 | [Charlieplex LED](02-charlieplex-led/) | Assembly ready | 19 | 12 | Real ATtiny85, compiled firmware; manual MCU and headers. |
+| 03 | [USB Joystick](03-usb-joystick/) | Assembly ready | 38 | 27 | Real ATmega32U4 HID circuit; four-layer filled/capped via process. |
+| 04 | [STM32 Dev Board](04-stm32-devboard/) | Assembly ready | 17 | 12 | Correct MCP1825S regulator; paid 0.15 mm mechanical drills. |
+| 05 | [BLDC Motor Controller](05-bldc-motor-controller/) | Assembly ready | 42 | 37 | DRV8313 + ATmega328P; firmware and conservative bring-up limits supplied. |
+| 06 | [Four-channel LVDS demo](06-diffpair-test/) | Assembly ready | 36 | 18 | Real SN65LVDS1/2, four-layer stack with outer-layer signals; three manual headers. |
+| 07 | [8 MiB SDRAM exerciser](07-matchgroup-test/) | Assembly ready | 43 | 55 | STM32F429 + IS42S16400J, six layers, 48 MHz SDRAM; legacy Epic [#2661] fixture archived. |
+| 08 | [Precision acquisition](08-precision-acquisition/) | Planned | — | — | Four simultaneous differential ADC channels with USB streaming. |
+| 09 | [USB-C PD power supply](09-usbc-pd-power/) | Development | 47 | 32 | Real PD sink, 5 V / 3 A target buck and Kelvin telemetry; routing/procurement pending. |
 
-**Status Legend:**
-- ✅ Working - Generates manufacturable output
-- ⚠️ Needs optimization - Works but may have routing challenges or require post-processing
-- 🚧 Work in progress - Incomplete implementation
+Assembly readiness applies only to the exact checked source and manufacturing
+package bound by each `output/readiness.json`. Hardware testing remains pending.
+Follow each board's fabrication process and manual-assembly instructions;
+regenerating a board requires fresh validation and export. See the
+[readiness audit](../docs/demo-readiness-2026-09-09.md) for evidence and tool issues.
 
 ## Prerequisites for Manual Build
 
@@ -95,7 +98,7 @@ derived from the architectural review in [#3072], is:
 |---|---|---|
 | No differential pairs and no length-matching | `subprocess.run(["kct", "route", ...])` *or* in-process `router.route_all()` | 00, 01, 02, 04 |
 | Differential pairs (USB2/USB3/PCIe/MIPI/HDMI/etc.) | `subprocess.run(["kct", "route", ..., "--differential-pairs"])` *or* in-process `router.route_all_with_diffpairs(diffpair_config=...)` | 03, 05, 06 |
-| Match-groups (DDR, address buses) | Same as above; see `boards/07-matchgroup-test/` for the in-development pattern | 07 (work in progress) |
+| Match-groups (SDR SDRAM) | See `boards/07-matchgroup-test/real_design/` for the reviewed six-layer source and independent timing/load checks | 07 |
 
 ### Why this matters
 
@@ -406,7 +409,11 @@ Not a working device --- synthetic sinks drive routing exercise only.
 
 [#2556]: https://github.com/rjwalters/kicad-tools/issues/2556
 
-### 07 - Match-Group Test (Routing Testbench)
+### 07 - SDRAM exerciser and archived match-group fixture
+
+The current assembly is the real six-layer SDRAM exerciser described in
+[board07's README](07-matchgroup-test/README.md). The following description
+applies only to the archived `regression-fixture/` used by legacy CI:
 
 Multi-protocol N-trace match-group regression testbench:
 - DDR data byte (10 nets: DQ0-7 + DM0 + DQS_P/N pair) -- N-trace + diff-pair group composition

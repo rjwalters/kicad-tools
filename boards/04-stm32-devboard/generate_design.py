@@ -25,6 +25,7 @@ If no output directory is specified, files are written to ./output/
 
 import json
 import os
+import runpy
 import subprocess
 import sys
 import uuid
@@ -144,7 +145,7 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # boards/05-bldc-motor-controller/design.py); see issue #3149.
     #
     # +5V: the +5V rail has no genuine ``power_output`` source -- the only
-    # consumer is the AMS1117 VI pin, which is a ``power_input``.  Without
+    # consumer is the MCP1825S VI pin, which is a ``power_input``.  Without
     # the bridging wire the +5V symbol floats (``pin_not_connected``); even
     # once wired, the rail has no driver so U1.VI fires
     # ``power_pin_not_driven``.  Add a PWR_FLAG on the +5V column to mark the
@@ -155,33 +156,17 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     sch.add_wire((X_LEFT + 7, RAIL_5V - 10), (X_LEFT + 7, RAIL_5V), warn_on_collision=False)
     sch.add_junction(X_LEFT + 7, RAIL_5V)
 
-    # +3.3V: synthesized ``+3.3V`` power symbol whose published global net
-    # matches the rail's "+3.3V" label (set above) and the PCB NETS table.
-    #
-    # Because the schematic now mirrors the PCB's SOT-223 pad order
-    # (pad1=+5V, pad2=GND, pad3=+3.3V; issue #3765), the AMS1117 symbol's
-    # VO pin (``power_output``, pad 2) lands on GND and its VI pin
-    # (``power_input``, pad 3) lands on +3.3V.  So +3.3V has NO
-    # ``power_output`` driver and would fire ``power_pin_not_driven``
-    # against VI -- add a PWR_FLAG here to mark the rail as externally
-    # driven (the LDO output, in the real board).
+    # The real MCP1825S drives +3.3V; input power and ground are external.
     sch.add_pwr_symbol("+3.3V", x=80, y=RAIL_3V3 - 10, rotation=0)
     sch.add_wire((80, RAIL_3V3 - 10), (80, RAIL_3V3), warn_on_collision=False)
-    sch.add_pwr_flag(87, RAIL_3V3 - 10)
-    sch.add_wire((87, RAIL_3V3 - 10), (87, RAIL_3V3), warn_on_collision=False)
-    sch.add_junction(87, RAIL_3V3)
     sch.add_junction(80, RAIL_3V3)
-
-    # GND: with the swapped LDO pad order, the AMS1117 VO pin
-    # (``power_output``, pad 2) now lands on GND and IS the net's driver,
-    # so NO PWR_FLAG here (a flag would trigger an Output<->Power-output
-    # ``pin_to_pin`` conflict against VO -- the same reason +3.3V used to
-    # omit one).  The GND symbol still establishes the global GND net for
-    # the MCU VSS / decoupling-cap power_input pins.
     sch.add_power("power:GND", x=X_LEFT, y=RAIL_GND + 10, rotation=0)
     sch.add_wire((X_LEFT, RAIL_GND + 10), (X_LEFT, RAIL_GND), warn_on_collision=False)
     sch.add_junction(X_LEFT, RAIL_GND)
-    print("   Added power symbols (wired to rails; PWR_FLAG on +5V/+3.3V)")
+    sch.add_pwr_flag(X_LEFT + 7, RAIL_GND + 10)
+    sch.add_wire((X_LEFT + 7, RAIL_GND + 10), (X_LEFT + 7, RAIL_GND), warn_on_collision=False)
+    sch.add_junction(X_LEFT + 7, RAIL_GND)
+    print("   Added power symbols; PWR_FLAG only on external +5V and GND")
 
     # =========================================================================
     # Section 2: LDO Voltage Regulator (Manual Component Placement)
@@ -193,11 +178,12 @@ def create_stm32_schematic(output_dir: Path) -> Path:
 
     # Add LDO symbol (using a generic 3-terminal regulator)
     ldo = sch.add_symbol(
-        "Regulator_Linear:AMS1117-3.3",
+        "Regulator_Linear:MCP1825S",
         x=100,
         y=100,
         ref="U1",
-        value="AMS1117-3.3",
+        value="MCP1825S-3302E/DB",
+        properties={"Manufacturer": "Microchip", "MPN": "MCP1825S-3302E/DB", "LCSC": "C148031"},
         footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2",
     )
     print(f"   LDO: {ldo.reference}")
@@ -232,33 +218,17 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     )
     print(f"   Output caps: {c_out1.reference} = 10uF, {c_out2.reference} = 100nF")
 
-    # Wire LDO to power nets by PAD NUMBER to match the PCB's canonical
-    # SOT-223 footprint net assignment (the routed-layout source of truth):
-    #   pad 1 -> +5V, pad 2 -> GND, pad 3 -> +3.3V
-    # so compare_netlists(sch, routed_pcb) agrees pad-for-pad on U1.  The
-    # KiCad AMS1117-3.3 symbol numbers its pins GND=1 / VO=2 / VI=3, which
-    # is the opposite pad ordering; wiring by pin NAME would reintroduce the
-    # U1.1/U1.2/U1.3 drift (issue #3765).  The hand-built PCB footprint
-    # carries this 1:+5V/2:GND/3:+3.3V order, so we mirror it here.
-    #
-    # The three pads emerge at different orientations (pad 1 below the body,
-    # pads 2/3 left/right), so instead of running long wires across the body
-    # to the horizontal rails we drop a short stub from each pad and place a
-    # global net label on the stub.  The label unifies with the matching
-    # rail's global net (+5V / GND / +3.3V) -- a robust, geometry-free way
-    # to bind each pad to the correct net.
+    # Microchip MCP1825S SOT-223: 1=VIN, 2/tab=GND, 3=VOUT.
+    # These are the manufacturer's fixed pin numbers, not a schematic remap.
     def _label_ldo_pad(pad_number: str, net_name: str, dx: float, dy: float) -> None:
         pos = ldo.pin_position(pad_number)
         end = (pos[0] + dx, pos[1] + dy)
         sch.add_wire(pos, end, warn_on_collision=False)
         sch.add_label(net_name, end[0], end[1], rotation=0)
 
-    # pad 1 (GND-named pin, below body) -> +5V ; stub downward.
-    _label_ldo_pad("1", "+5V", 0.0, 8.0)
-    # pad 2 (VO-named pin, right side) -> GND ; stub rightward.
-    _label_ldo_pad("2", "GND", 8.0, 0.0)
-    # pad 3 (VI-named pin, left side) -> +3.3V ; stub leftward.
-    _label_ldo_pad("3", "+3.3V", -8.0, 0.0)
+    _label_ldo_pad("1", "+5V", -8.0, 0.0)
+    _label_ldo_pad("2", "GND", 0.0, 8.0)
+    _label_ldo_pad("3", "+3.3V", 8.0, 0.0)
 
     # Wire decoupling capacitors
     sch.wire_decoupling_cap(c_in, RAIL_5V, RAIL_GND)
@@ -315,14 +285,14 @@ def create_stm32_schematic(output_dir: Path) -> Path:
 
     # MCU decoupling caps (one per VDD/VBAT/VDDA pin, plus a bulk cap).
     # Place between MCU and 3.3V rail, on the left side of the symbol.
-    # Produces C12-C15 (100nF) at x=160,170,180,190 and C16 (4.7uF) at x=200.
+    # Keep the whole bypass bank left of the MCU body, including bulk C16.
     mcu_decoupling = create_mcu_decoupling_array(
         sch,
         x=160,
         y=85,
         supply_pins=4,
         ref_start=12,
-        spacing=10,
+        spacing=7.5,
         cap_symbol="Device:C_Small",
         cap_footprint="Capacitor_SMD:C_0805_2012Metric",
     )
@@ -636,9 +606,49 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # Write schematic
     sch_path = output_dir / "stm32_devboard.kicad_sch"
     sch.write(sch_path)
+    write_portable_symbols(sch_path)
     print(f"   Schematic: {sch_path}")
 
     return sch_path
+
+
+def write_portable_symbols(sch_path: Path) -> None:
+    """Bind generated power and reviewed capacitor symbols to local libraries.
+
+    KiCad 10.0.5 and 10.0.6 ship different Device:C_Small definitions. Preserve
+    the schematic's exact cached pins/graphics instead of depending on which
+    stock library a native ERC host has installed.
+    """
+    from kicad_tools.sexp import parse_file, parse_string, serialize_sexp
+
+    doc = parse_file(sch_path)
+    libraries = {
+        name: parse_string('(kicad_symbol_lib (version 20250114) (generator "kicad_tools"))')
+        for name in ("kicad_tools_pwr", "board04_symbols")
+    }
+    for symbol in doc.find_child("lib_symbols").find_children("symbol"):
+        lib_id = symbol.get_string(0)
+        if lib_id == "Device:C_Small":
+            lib_id = "board04_symbols:C_Small"
+            symbol.set_atom(0, lib_id)
+        namespace, name = lib_id.split(":", 1)
+        if namespace in libraries:
+            copy = parse_string(serialize_sexp(symbol))
+            copy.set_atom(0, name)
+            libraries[namespace].add(copy)
+    for symbol in doc.find_children("symbol"):
+        lib_id = symbol.find_child("lib_id")
+        if lib_id and lib_id.get_string(0) == "Device:C_Small":
+            lib_id.set_atom(0, "board04_symbols:C_Small")
+    sch_path.write_text(serialize_sexp(doc))
+    for name, library in libraries.items():
+        (sch_path.parent / f"{name}.kicad_sym").write_text(serialize_sexp(library))
+    entries = " ".join(
+        f'(lib (name "{name}") (type "KiCad") '
+        f'(uri "${{KIPRJMOD}}/{name}.kicad_sym") (options "") (descr "Portable board symbols"))'
+        for name in libraries
+    )
+    (sch_path.parent / "sym-lib-table").write_text(f"(sym_lib_table (version 7) {entries})\n")
 
 
 def create_project(output_dir: Path, project_name: str) -> Path:
@@ -1037,7 +1047,7 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     print("\n1. Adding footprints...")
 
     # U1: LDO voltage regulator
-    parts.append(generate_sot223("U1", U1_POS, "AMS1117-3.3"))
+    parts.append(generate_sot223("U1", U1_POS, "MCP1825S-3302E/DB"))
     print(f"   U1 (LDO) at {U1_POS}")
 
     # C1: Input capacitor (5V to GND)
@@ -1795,43 +1805,35 @@ def fill_zones(routed_path: Path) -> bool:
 
 
 def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
-    """
-    Generate manufacturing artifacts (Gerbers, drill, BOM, CPL, project zip,
-    DRC/ERC reports) into `<output_dir>/manufacturing/` using `kct export`.
+    """Export the assembly bundle with the reviewed paid-drill native rules."""
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
 
-    Targets JLCPCB tier-1 capability. Preflight DRC violations are reported
-    but do not block export (the routed PCB is known to ship with fine-pitch
-    clearance issues at U2 that are tracked separately).
+    process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
+    process["validate_process"](routed_path)
 
-    Returns True if `kct export` succeeded.
-    """
     print("\n" + "=" * 60)
-    print("Generating manufacturing artifacts (kct export)...")
+    print("Generating manufacturing artifacts (reviewed paid drilling)...")
     print("=" * 60)
 
     mfr_dir = output_dir / "manufacturing"
-    cmd = [
-        sys.executable,
-        "-m",
-        "kicad_tools.cli",
-        "export",
-        str(routed_path),
-        "--mfr",
-        "jlcpcb-tier1",
-        "--output",
-        str(mfr_dir),
-    ]
-    print(f"\n   Command: {' '.join(cmd)}")
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.stdout:
-        for line in result.stdout.strip().split("\n"):
-            print(f"   {line}")
-    if result.returncode != 0:
-        if result.stderr:
-            print(f"\n   Export stderr:\n{result.stderr}")
-        print(f"\n   FAILED: kct export exited {result.returncode}")
+    # The stock tier1 export would overwrite the paid process's .15/.30/.075
+    # via floors before preflight and packaging. Preserve the validated native
+    # constraints throughout export, including the project ZIP and final gate.
+    package = ManufacturingPackage(
+        pcb_path=routed_path,
+        schematic_path=output_dir / "stm32_devboard.kicad_sch",
+        manufacturer="jlcpcb-tier1",
+        config=ManufacturingConfig(output_dir=mfr_dir, emit_drc_constraints=False),
+    )
+    result = package.export(mfr_dir)
+    for warning in result.warnings:
+        print(f"   Warning: {warning}")
+    if not result.success:
+        for error in result.errors:
+            print(f"   Export error: {error}")
         return False
+
+    process["validate_process"](routed_path)
 
     print(f"\n   SUCCESS: manufacturing artifacts written to {mfr_dir}")
     return True
@@ -1897,6 +1899,12 @@ def run_drc(pcb_path: Path) -> bool:
     drill count is within the allowance -- so a 3rd drill or any new rule
     flips the recipe to a non-zero exit.
     """
+    if (pcb_path.parent / "manufacturing-requirements.json").is_file():
+        from check_manufacturing import check
+
+        data = check(pcb_path, pcb_path.parent / "drc_report.json")
+        return data["summary"]["errors"] == 0 and data["summary"]["warnings"] == 0
+
     print("\n" + "=" * 60)
     print("Running DRC (via kct check --drc-only)...")
     print("=" * 60)
@@ -2102,6 +2110,10 @@ def main() -> int:
         # BEFORE fill_zones (so the re-pour backs the GND plane off any dogleg
         # bulge); copper-LVS stays 0/0.
         quantize_success = quantize_escapes(routed_path)
+        # File-relative loading also works for importlib-based recipe callers.
+        process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
+        process["repair"](routed_path)
+        process["apply_native_floors"](routed_path)
 
         # Step 6.5: Re-pour zones (#3791) -- refresh the GND B.Cu fill so it
         # backs off the relocated OSC_OUT 45 jog (#3790) by the full 0.3mm
@@ -2185,7 +2197,7 @@ def main() -> int:
             route_ok=route_success,
             route_allowance=0,
             lvs_ok=copper_clean,
-            rule_allowances={"hole_clearance": 2},
+            rule_allowances={},
         )
 
         # Summary
@@ -2211,7 +2223,7 @@ def main() -> int:
         print(f"  Zone fill: {'SUCCESS' if fill_success else 'FAIL'}")
         print(f"  Manufacturing bundle: {'WRITTEN' if mfr_success else 'FAILED'}")
         print("\nBoard description:")
-        print("  - U1: AMS1117-3.3 LDO (5V to 3.3V)")
+        print("  - U1: MCP1825S-3302E/DB LDO (5V to 3.3V)")
         print("  - U2: STM32F103C8T6 MCU (LQFP-48, 0.5mm pitch)")
         print("  - C1-C3: LDO decoupling capacitors")
         print("  - Y1: 8MHz crystal oscillator (HSE on PD0/PD1)")

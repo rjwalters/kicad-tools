@@ -1,0 +1,12 @@
+{
+  "before_sha256": "6ef2df7930ae4d54079454fab0c875877ffdd22b333aaac4bf53b46b6349277b",
+  "after_sha256": "6ef2df7930ae4d54079454fab0c875877ffdd22b333aaac4bf53b46b6349277b",
+  "byte_identical": true,
+  "native_violations": 0,
+  "native_unconnected_items": 0,
+  "native_rule_sha256": {
+    ".kicad_pro": "0302972d3b5268436bf2f69d5a031d7844275a25a159e369299c09992d61d047",
+    ".kicad_dru": "3ded5c188d306230f5f88455a49a38c20d6da72323c9bb5e47e668c323070adb"
+  },
+  "post_check_rule_sources_identical_to_refill_proof": true
+}

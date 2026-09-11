@@ -53,7 +53,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "07-matchgroup-test"
-OUTPUT_DIR = BOARD_DIR / "output"
+OUTPUT_DIR = BOARD_DIR / "regression-fixture"
 
 
 def _load_module(name: str, path: Path):
@@ -342,6 +342,38 @@ class TestDeterministicGeneration:
             "generate_pcb() is not deterministic modulo UUIDs --- "
             "two invocations produced different non-UUID content"
         )
+
+    def test_sidecar_geometry_meets_impedance_at_authored_gap(
+        self, generate_design_mod, tmp_path
+    ) -> None:
+        """The routing/check sidecar must describe compact, physical pairs."""
+        from kicad_tools.physics import CoupledLines
+        from kicad_tools.physics.stackup import Stackup
+
+        classes = generate_design_mod.build_net_class_map(preserve_authored_gap=True)
+        sidecar = generate_design_mod.write_sidecar(classes, tmp_path)
+        serialized = json.loads(sidecar.read_text())
+        physics = CoupledLines(Stackup.jlcpcb_4layer())
+        for name in ("MIPI_CLK_P", "MIPI_DAT0_N", "TMDS_D0_P", "TMDS_D2_N"):
+            cls = classes[name]
+            assert cls.intra_pair_clearance == pytest.approx(0.10)
+            assert cls.clearance == pytest.approx(0.10)
+            assert cls.trace_width >= 0.15
+            actual = physics.edge_coupled_microstrip(
+                cls.trace_width, cls.intra_pair_clearance, "F.Cu"
+            ).zdiff
+            assert actual == pytest.approx(
+                cls.target_diff_impedance, rel=cls.impedance_tolerance_percent / 100
+            )
+            assert serialized[name]["intra_pair_clearance"] == cls.intra_pair_clearance
+            assert serialized[name]["trace_width"] == cls.trace_width
+            assert serialized[name]["coupled_routing"] is True
+            assert serialized[name]["coupled_continuity_threshold"] == 0.85
+
+        # Sizing must not invent a target or alter unrelated routing geometry.
+        assert classes["DQS_P"] == generate_design_mod.ddr_dqs_pair_net_class()
+        assert classes["DQ0"] == generate_design_mod.ddr_data_byte_0_net_class()
+        assert classes["A0"] == generate_design_mod.addr_bus_net_class()
 
 
 # =============================================================================
@@ -668,18 +700,36 @@ class TestNetCountBudget:
 # =============================================================================
 
 
+def test_generated_j1_faces_mipi_receiver(generate_pcb_mod, tmp_path):
+    """The repaired source rotates both pad row positions and copper angles."""
+    from kicad_tools.schema.pcb import PCB
+
+    path = tmp_path / "generated.kicad_pcb"
+    path.write_text(generate_pcb_mod.generate_pcb(mipi_source_rotation=-90))
+    board = PCB.load(path)
+    connector = board.get_footprint("J1")
+    assert connector.rotation == -90
+    assert all(pad.rotation == -90 for pad in connector.pads)
+    for index, net in enumerate(
+        ["MIPI_CLK_P", "MIPI_CLK_N", "MIPI_DAT0_P", "MIPI_DAT0_N", "MIPI_DAT1_P", "MIPI_DAT1_N"]
+    ):
+        number = str(index + 1)
+        assert board.get_pad_position("J1", number) == pytest.approx((15, 52.5 + index))
+        assert next(p for p in connector.pads if p.number == number).net_name == net
+
+
 class TestDefaultNetStatusGenuineOpens:
     """The DEFAULT ``NetStatusAnalyzer`` path still reports board 07's real opens.
 
     Issue #4557 flipped the analyzer default to strict (real copper
     geometry).  The flip removes board 06's 16 FALSE opens but must not mask
-    board 07's 5 GENUINE opens (#3438) -- measured identical under both
-    connectivity models.  No ``strict`` argument may appear in these tests:
+    board 07's GENUINE opens (#3438). The 2026-09-09 targeted MIPI repair
+    closes MIPI_DAT0_N; the other four remain. No ``strict`` argument may appear in these tests:
     they pin the default code path consumers actually hit.
     """
 
-    # The 5 known-unroutable nets on the committed artifact (#3438).
-    EXPECTED_OPEN_NETS = {"DQ3", "DQ4", "MIPI_DAT0_N", "TMDS_D0_N", "TMDS_D1_N"}
+    # The four remaining opens on the repaired committed artifact.
+    EXPECTED_OPEN_NETS = {"DQ3", "DQ4", "TMDS_D0_N", "TMDS_D1_N"}
 
     @pytest.fixture(scope="class")
     def default_result(self):
@@ -697,10 +747,119 @@ class TestDefaultNetStatusGenuineOpens:
             n.net_name for n in default_result.unrouted
         }
         assert open_nets == self.EXPECTED_OPEN_NETS, (
-            f"Default (strict) connectivity must keep reporting board 07's 5 "
+            f"Default (strict) connectivity must keep reporting board 07's 4 "
             f"genuine opens (#3438) -- the #4557 default flip must not mask "
             f"real opens.  Expected {sorted(self.EXPECTED_OPEN_NETS)}, got "
             f"{sorted(open_nets)}.  Fewer nets here WITHOUT a router "
             f"improvement on the committed artifact means the connectivity "
             f"model started over-connecting; more means a regression."
         )
+
+
+@pytest.mark.parametrize("hole_clearance", [0.25, 0.3])
+def test_relocates_signal_and_stitch_pad_edge_drills(generate_design_mod, tmp_path, hole_clearance):
+    """Retain the archived witness; repair the seven observed CI overlaps in a copy."""
+    import shutil
+
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    source = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+    original = source.read_bytes()
+    candidate = tmp_path / source.name
+    shutil.copy2(source, candidate)
+    pcb = PCB.load(candidate)
+    # CI stitching selected these alternate +1V8 sites. Together with the
+    # archived signal escapes, they reproduce all seven reported pad cuts.
+    for uid, xy in [
+        ("0de3e62a-2521-486b-a847-963011236afa", (85.19, 56.27)),
+        ("91bd6227-0458-43fc-9f1b-5cec0fbfdb8c", (83.73, 56.47)),
+    ]:
+        via = next(v for v in pcb.vias if v.uuid == uid)
+        assert pcb.relocate_via(via, xy)
+    pcb.save(candidate)
+    candidate.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {"board": {"design_settings": {"rules": {"min_hole_clearance": hole_clearance}}}}
+        )
+    )
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    assert len(ViaInPadRule().check(pcb, rules).violations) == 7
+    if hole_clearance == 0.3:
+        # This tighter project cannot clear its crowded signal escapes.
+        # Reject atomically instead of silently falling back to 0.25 mm.
+        before = candidate.read_bytes()
+        with pytest.raises(RuntimeError, match="Unresolved pad/drill overlaps"):
+            generate_design_mod._relocate_pad_drills(candidate)
+        assert candidate.read_bytes() == before
+        assert source.read_bytes() == original
+        return
+    assert generate_design_mod._relocate_pad_drills(candidate) == 7
+    after = PCB.load(candidate)
+    assert not ViaInPadRule().check(after, rules).violations
+    assert len(after.vias) == len(pcb.vias)
+    assert [(v.uuid, v.net_number, v.size, v.drill) for v in after.vias] == [
+        (v.uuid, v.net_number, v.size, v.drill) for v in pcb.vias
+    ]
+    from shapely.geometry import LineString, Point
+
+    for before, moved in zip(pcb.vias, after.vias, strict=True):
+        if before.position == moved.position:
+            continue
+        for segment in after.segments:
+            if segment.net_number == moved.net_number:
+                continue
+            hole_gap = (
+                Point(moved.position).distance(LineString([segment.start, segment.end]))
+                - moved.drill / 2
+                - segment.width / 2
+            )
+            assert hole_gap >= hole_clearance - 1e-6
+    assert generate_design_mod._relocate_pad_drills(candidate) == 0
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("obstruct_extension", [False, True])
+def test_power_stub_uses_safe_alternate_escape(generate_design_mod, tmp_path, obstruct_extension):
+    """The fresh seed42 U4.E4 stub cannot slide toward its neighboring drill."""
+    import math
+
+    from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    pcb = PCB.load(OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb")
+    via = next(v for v in pcb.vias if v.uuid == "0de3e62a-2521-486b-a847-963011236afa")
+    original = (85.19, 56.27)
+    assert pcb.relocate_via(via, original)
+    pcb.add_trace((83.82, 56.27), original, width=0.2, layer="F.Cu", net="+1V8")
+    blocker = pcb.add_via(84.52, 55.85, size=0.6, drill=0.2, net="+1V8")
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    result = relocate_in_pad_vias(pcb, rules)
+    assert len(result.skipped) == 1
+    assert "hole-to-hole" in result.skipped[0].reason
+    old_segments = [(s.uuid, s.start, s.end) for s in pcb.segments]
+    if obstruct_extension:
+        pcb.add_trace((85.4, 56.0), (85.4, 56.5), width=0.2, layer="F.Cu", net="GND")
+    fixed = generate_design_mod._extend_blocked_power_stubs(pcb, rules, result)
+    if obstruct_extension:
+        assert fixed == 0
+        assert via.position == original
+        assert result.skipped
+        return
+    assert fixed == 1
+    assert not result.skipped
+    assert via.position[0] > original[0]
+    assert via.position[1] == pytest.approx(original[1])
+    assert math.dist(via.position, blocker.position) - (via.drill + blocker.drill) / 2 >= (
+        rules.min_hole_to_hole_mm
+    )
+    assert [(s.uuid, s.start, s.end) for s in pcb.segments[: len(old_segments)]] == old_segments
+    stub = pcb.segments[-1]
+    assert stub.start == original and stub.end == via.position
+    assert stub.width == 0.2 and stub.layer == "F.Cu" and stub.net_number == via.net_number
+    assert not ViaInPadRule().check(pcb, rules).violations
+    uuids = [v.uuid for v in pcb.vias] + [s.uuid for s in pcb.segments]
+    assert len(set(uuids)) == len(uuids)

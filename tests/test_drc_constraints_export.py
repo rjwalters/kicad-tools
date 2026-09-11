@@ -203,6 +203,79 @@ def test_merge_preserves_existing_keys_and_relaxes_default_clearance():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("flag", ["1", "true"])
+def test_reviewed_project_preserves_stricter_rules_on_repeated_export(tmp_path: Path, flag):
+    """Factory capabilities must not loosen reviewed fills (#5023)."""
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=6)
+    board = tmp_path / "reviewed.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    project = board.with_suffix(".kicad_pro")
+    project.write_text(
+        json.dumps(
+            {
+                "text_variables": {"KCT_PRESERVE_BOARD_RULES": flag},
+                "board": {
+                    "design_settings": {
+                        "rules": {"min_clearance": 0.15, "min_track_width": 0.15},
+                        "defaults": {"clearance_min": 0.15, "via_min_diameter": 0.5},
+                        "rule_severities": {"isolated_copper": "error"},
+                    }
+                },
+                "net_settings": {
+                    "classes": [
+                        {
+                            "name": "Default",
+                            "clearance": 0.15,
+                            "track_width": 0.16,
+                            "via_diameter": 0.5,
+                            "via_drill": 0.2,
+                        },
+                        {"name": "HV", "clearance": 0.8},
+                    ]
+                },
+            }
+        )
+    )
+    write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=6)
+    first = project.read_bytes()
+    write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=6)
+    assert project.read_bytes() == first
+    data = json.loads(first)
+    settings = data["board"]["design_settings"]
+    assert settings["rules"]["min_clearance"] == 0.15
+    assert settings["rules"]["min_track_width"] == 0.15
+    assert settings["defaults"]["clearance_min"] == 0.15
+    assert settings["defaults"]["via_min_diameter"] == 0.5
+    assert settings["rule_severities"]["isolated_copper"] == "error"
+    assert data["net_settings"]["classes"] == [
+        {
+            "name": "Default",
+            "clearance": 0.15,
+            "track_width": 0.16,
+            "via_diameter": 0.5,
+            "via_drill": 0.2,
+        },
+        {"name": "HV", "clearance": 0.8},
+    ]
+    dru = board.with_suffix(".kicad_dru").read_text()
+    assert "(constraint clearance (min 0.15mm))" in dru
+    assert "(constraint clearance (min 0.0889mm))" not in dru
+    assert "(constraint clearance (min 0.8mm))" in dru
+    assert dru.index('"Reviewed clearance - Default"') < dru.index('"Reviewed clearance - HV"')
+
+
+def test_reviewed_project_still_enforces_stricter_factory_minimum():
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=6)
+    data = {
+        "text_variables": {"KCT_PRESERVE_BOARD_RULES": "1"},
+        "board": {"design_settings": {"rules": {"min_clearance": 0.01}}},
+        "net_settings": {"classes": [{"name": "Default", "clearance": 0.01}]},
+    }
+    merge_project_rules(data, rules)
+    assert data["board"]["design_settings"]["rules"]["min_clearance"] == rules.min_clearance_mm
+    assert data["net_settings"]["classes"][0]["clearance"] == rules.min_clearance_mm
+
+
 def test_write_drc_constraints_emits_siblings(tmp_path: Path):
     board = tmp_path / "demo.kicad_pcb"
     board.write_text("(kicad_pcb)")  # content irrelevant for this helper
@@ -599,12 +672,12 @@ def test_export_emits_sibling_kicad_pro(tmp_path: Path):
     assert pro in result.drc_constraint_paths
 
     data = json.loads(pro.read_text())
-    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=2, copper_oz=1.0)
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4, copper_oz=1.0)
     pro_rules = data["board"]["design_settings"]["rules"]
-    # Board 03 is 2-layer -> 2-layer profile minimums.
+    # The real ATmega32U4 board 03 uses four copper layers.
     assert pro_rules["min_track_width"] == rules.min_trace_width_mm
     assert pro_rules["min_clearance"] == rules.min_clearance_mm
-    # #3736: built-in via diameter floor stays at the standard 2-layer
+    # #3736: built-in via diameter floor stays at the standard four-layer
     # minimum; micro vias are exempted via min_microvia_diameter.
     assert pro_rules["min_via_diameter"] == rules.min_via_diameter_mm
     assert pro_rules["min_microvia_diameter"] == _MICRO_VIA_FLOOR_DIAMETER_MM
@@ -700,16 +773,27 @@ def test_subspec_standard_via_fires_under_kicad_cli(tmp_path: Path):
     )
 
 
-@pytest.mark.skipif(not BOARD_04.exists(), reason="board 04 routed PCB not available")
 @pytest.mark.skipif(_kicad_cli() is None, reason="kicad-cli not installed")
-def test_board_04_micro_vias_stay_clean_under_kicad_cli(tmp_path: Path):
-    """Board 04's legitimate micro vias must stay exempt: 0 kicad-cli errors
-    on the full emitted ruleset (the micro-via exemption survives #3736)."""
+def test_micro_vias_stay_exempt_under_kicad_cli(tmp_path: Path):
+    """A real adjacent-layer microvia preserves the #3736 exemption.
+
+    Board04 now uses ordinary paid small drills; pin this regression to an
+    explicit microvia instead of assuming the current demo fabrication process.
+    """
     cli = _kicad_cli()
     assert cli is not None
 
     pcb = tmp_path / "board.kicad_pcb"
-    pcb.write_text(BOARD_04.read_text())
+    pcb.write_text("""(kicad_pcb (version 20240108) (generator pcbnew)
+      (general (thickness 1.6)) (paper "A4")
+      (layers (0 "F.Cu" signal) (1 "In1.Cu" signal)
+        (2 "In2.Cu" signal) (31 "B.Cu" signal)
+        (38 "B.Mask" user) (39 "F.Mask" user) (44 "Edge.Cuts" user))
+      (setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "A")
+      (gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default))
+        (fill none) (layer "Edge.Cuts"))
+      (via micro (at 10 10) (size 0.2) (drill 0.1)
+        (layers "F.Cu" "In1.Cu") (net 1)))""")
 
     profile = get_profile("jlcpcb-tier1")
     rules = profile.get_design_rules(layers=4, copper_oz=1.0)

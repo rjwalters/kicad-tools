@@ -169,6 +169,10 @@ class DesignRules:
     # lives entirely in the pure-Python ``DRCChecker.check_via_in_pad``.
     via_in_pad_supported: bool = False
 
+    # Plated component pads can require wider rings than vias. None keeps
+    # existing profiles' shared annular-ring behavior.
+    min_pth_annular_ring_mm: float | None = None
+
     @property
     def min_trace_width_mil(self) -> float:
         """Trace width in mils (thousandths of an inch)."""
@@ -187,6 +191,7 @@ class DesignRules:
             "min_via_drill_mm": self.min_via_drill_mm,
             "min_via_diameter_mm": self.min_via_diameter_mm,
             "min_annular_ring_mm": self.min_annular_ring_mm,
+            "min_pth_annular_ring_mm": self.min_pth_annular_ring_mm,
             "min_hole_diameter_mm": self.min_hole_diameter_mm,
             "max_hole_diameter_mm": self.max_hole_diameter_mm,
             "min_copper_to_edge_mm": self.min_copper_to_edge_mm,

@@ -81,17 +81,38 @@ debugging only — no reader may treat it as authoritative; the forge's own
 line rather than appending another copy, so a long-running sweep's lease
 comment never grows unbounded and no duplicate comments ever accumulate.
 
-### Why this needs no explicit `--sweep-id` in normal use
+### The PATCH must use `gh api -F`, never `-f` (#6320)
 
-`sweep.md`'s "Step 1a — daemon self-claim check" is the only place `start`
-is invoked, and it fires only for the ONE issue `SweepRegistry::dispatch`
-told this session it owns (`--claim-owned N` / `LOOM_SWEEP_CLAIM_OWNED=N`).
-By construction, the newest lease comment on that issue at that point in
-pre-flight IS this session's own — the daemon wrote it immediately before
-spawning this exact child process, so "most recent lease comment" and "my
-own lease comment" coincide. `--host`/`--sweep-id` remain available as an
-exact-match filter for precision (tests, or a future scenario where that
-assumption no longer holds), but ordinary sweep usage does not need them.
+Real `gh api` applies the `@<path>` / `@-` read-from-file/stdin magic **only**
+to `-F/--field`. `-f/--raw-field` sends the value as a literal string, so
+`-f body=@-` PATCHes the comment body to the two characters `@-` — erasing
+the first-line marker on the very first renewal and making a live claim look
+lease-less to every reader (the daemon's reclamation gate #6286, the
+dispatch-time ordering check #6287, the sweep-side fence #6309, and this
+script's own next pass, which can no longer find the comment it just
+destroyed). This shipped in the original #6180 implementation and was
+observed live on real issues before #6360 fixed it. The regression is pinned
+by `defaults/scripts/tests/test-sweep-lease-renew.sh`, whose `gh` stub now
+reproduces gh's own per-flag semantics instead of reading stdin regardless
+of the flag.
+
+### When `--host` / `--sweep-id` are needed
+
+`sweep.md`'s "Step 1a — daemon self-claim check" invokes `start` without
+them, and that is safe there: Step 1a fires only for the ONE issue
+`SweepRegistry::dispatch` told this session it owns (`--claim-owned N` /
+`LOOM_SWEEP_CLAIM_OWNED=N`), and by construction the newest lease comment on
+that issue at that point in pre-flight IS this session's own — the daemon
+wrote it immediately before spawning this exact child process, so "most
+recent lease comment" and "my own lease comment" coincide.
+
+**The in-session path (Step 1b, #6320) must pass both.** There, the sweep
+published its own record at pre-flight and a *peer* daemon may publish a
+newer one for the same issue moments later. Under "newest wins" the sweep
+would then faithfully renew the peer's lease while its own aged out — the
+exact inversion of what renewal is for. `sweep-lease-publish.sh publish`
+prints the resolved `<host> <sweep-id>` on stdout precisely so the caller can
+thread them into `start`.
 
 ## Where it is wired in
 
@@ -103,19 +124,29 @@ owns the daemon's claim on issue `N`, before falling through to step 2,
 ```
 Fire-and-forget, best-effort, non-blocking — mirrors #6179's own
 write-on-dispatch contract: a failure here changes nothing about whether the
-sweep runs. For any sweep with no daemon-dispatched claim on this run
-(manual invocation, GH Actions cron, `--no-daemon`, Mode C), Step 1a's
-self-claim signal is never true, so this line never executes and there is no
-lease to renew anyway.
+sweep runs.
+
+For any sweep with no daemon-dispatched claim on this run (manual
+invocation, GH Actions cron, `--no-daemon`), Step 1a's self-claim signal is
+never true, so that line never executes — those candidates instead publish
+their own record and start renewal at **Step 1b** (#6320,
+`sweep-lease-publish.sh`), pinned to that record's `--host`/`--sweep-id`:
+
+```bash
+LEASE_IDENT="$(./.loom/scripts/sweep-lease-publish.sh publish "$N" --sweep-id "$RUN_ID")"
+# shellcheck disable=SC2086
+set -- $LEASE_IDENT
+./.loom/scripts/sweep-lease-renew.sh start "$N" --host "$1" --sweep-id "$2" > /dev/null 2>&1 || true
+```
 
 ## What this does not do (Phase 1 scope)
 
-Nothing in the reclamation/dispatch decision path reads the lease or its
-renewals yet — that is Phase 2. This document, like #6179's own, is
-write-only: it exists so Phase 2 (reclamation) and Phase 3 (fencing) can
-consume the renewal cadence/format without re-deriving it. It also does not
-fix the acquisition race #4028 documented; Phase 3 bounds that cost, this
-phase does not touch it.
+This document was written for Phase 1, when nothing read the lease. Phases 2
+and 3 have since landed, so renewals are now load-bearing: the daemon's
+reclamation gate (#6286) and dispatch-time ordering check (#6287) and the
+sweep-side pre-push fence (#6309) all consume the freshness this loop
+maintains. What is still out of scope here is the acquisition race #4028
+documented — Phase 3 bounds its cost, renewal does not touch it.
 
 See also: [`lease-record.md`](lease-record.md) — #6179's own doc, the
 authoritative definition of the marker format and the dispatch-time write

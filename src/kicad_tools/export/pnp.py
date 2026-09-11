@@ -359,6 +359,25 @@ def get_pnp_formatter(
     return formatter_class(config, rotation_corrections)
 
 
+def is_through_hole_footprint(footprint: Footprint) -> bool:
+    """Identify components needing through-hole soldering for assembly export.
+
+    Generated/legacy footprints may omit their assembly attribute. Numbered
+    plated through-hole pads still require soldering, even on a footprint
+    marked SMD. Thermal vias sharing a numbered SMD land, unnumbered
+    mechanical holes, and NPTH alignment pegs do not require lead insertion.
+    An explicit through-hole attribute remains authoritative without pads.
+    """
+    pads = getattr(footprint, "pads", ())
+    smd_numbers = {pad.number for pad in pads if pad.type == "smd" and pad.number}
+    return getattr(footprint, "attr", "") == "through_hole" or any(
+        pad.type in ("thru_hole", "through_hole")
+        and bool(pad.number)
+        and pad.number not in smd_numbers
+        for pad in pads
+    )
+
+
 def extract_placements(
     footprints: list[Footprint],
     config: PnPExportConfig | None = None,
@@ -385,7 +404,7 @@ def extract_placements(
             continue
 
         # Skip through-hole footprints when exclude_tht is enabled
-        if config.exclude_tht and getattr(fp, "attr", "") == "through_hole":
+        if config.exclude_tht and is_through_hole_footprint(fp):
             continue
 
         x, y = fp.position
@@ -448,7 +467,7 @@ def extract_tht_exclusions(
             continue
         if not config.include_dnp and getattr(fp, "dnp", False):
             continue
-        if getattr(fp, "attr", "") != "through_hole":
+        if not is_through_hole_footprint(fp):
             continue
 
         x, y = fp.position

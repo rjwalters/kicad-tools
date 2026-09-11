@@ -174,6 +174,45 @@ class TestRunMoveFootprint:
         assert fp is not None
         assert fp.rotation == pytest.approx(180.0, abs=0.01)
 
+    @pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+    def test_rotation_preserves_pad_orientation_relative_to_footprint(self, tmp_path, batch):
+        """Rotating a placed part must rotate its rectangular copper pads too."""
+        from kicad_tools.cli.pcb_move_footprint import run_move_footprint
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = tmp_path / "test.kicad_pcb"
+        # J3 starts at 45 degrees; its middle pad has an intentional extra
+        # 30-degree angle. KiCad stores these pad angles in board coordinates.
+        pcb.write_text(
+            MINIMAL_PCB.replace("(at 120 100 90)", "(at 120 100 45)")
+            .replace("(at -2.5 0)", "(at -2.5 0 45)")
+            .replace("(at 0 0)", "(at 0 0 75)")
+            .replace("(at 2.5 0)", "(at 2.5 0 45)")
+            .replace("(size 1.7 1.7)", "(size 1.7 0.8)")
+        )
+        kwargs = (
+            {"batch_map": {"J3": {"x": 100.0, "y": 100.0, "rotation": -90.0}}}
+            if batch
+            else {"reference": "J3", "to": (100.0, 100.0), "rotation": -90.0}
+        )
+
+        # Repeating the same absolute orientation must not rotate pads again.
+        for _ in range(2):
+            assert run_move_footprint(pcb, **kwargs) == 0
+            board = PCB.load(pcb)
+            fp = board.get_footprint("J3")
+            assert fp is not None
+            assert fp.rotation == pytest.approx(-90.0)
+            assert [pad.rotation for pad in fp.pads] == pytest.approx([-90.0, -60.0, -90.0])
+            assert [pad.position for pad in fp.pads] == [(-2.5, 0.0), (0.0, 0.0), (2.5, 0.0)]
+            assert board.get_pad_position("J3", "1") == pytest.approx((100.0, 97.5))
+            assert all(pad.size == (1.7, 0.8) for pad in fp.pads)
+
+            # The other connector is unaffected by J3's rotation.
+            j2 = board.get_footprint("J2")
+            assert j2 is not None
+            assert [pad.rotation for pad in j2.pads] == [0.0, 0.0]
+
     def test_dry_run_does_not_modify(self, tmp_path):
         """dry_run=True leaves file unchanged."""
         from kicad_tools.cli.pcb_move_footprint import run_move_footprint

@@ -353,9 +353,10 @@ class TestDRUFiles:
             assert version is not None, f"{dru_file} missing version"
             assert version.values[0] == 1, f"{dru_file} has wrong version"
 
-            # Check for 11 rules (standard set with condition expressions)
+            # JLC has a separate plated-component-pad ring floor.
             rules = sexp.find_children("rule")
-            assert len(rules) == 11, f"{dru_file} should have 11 rules, has {len(rules)}"
+            expected = 10 if dru_file.startswith("jlcpcb-") else 9
+            assert len(rules) == expected
 
 
 class TestMfrCLICommands:
@@ -839,8 +840,8 @@ class TestDruGenerator:
         assert content.startswith("(version 1)")
         assert "(rule" in content
 
-    def test_generate_dru_has_11_rules(self):
-        """Test that generate_dru produces all 11 rules."""
+    def test_generate_dru_has_all_jlc_rules(self):
+        """JLC includes the base rules plus its separate PTH ring floor."""
         from kicad_tools.manufacturers.dru_generator import generate_dru
 
         profile = get_profile("jlcpcb")
@@ -848,7 +849,7 @@ class TestDruGenerator:
         content = generate_dru(rules, manufacturer_name="JLCPCB")
 
         rule_count = content.count("(rule ")
-        assert rule_count == 11, f"Expected 11 rules, got {rule_count}"
+        assert rule_count == 10, f"Expected 10 rules, got {rule_count}"
 
     def test_generate_dru_has_condition_expressions(self):
         """Test that generated DRU includes condition expressions."""
@@ -865,18 +866,17 @@ class TestDruGenerator:
         # Silkscreen rules should be scoped to silk layer
         assert "A.Layer == 'F.Silkscreen'" in content
 
-    def test_generate_dru_covers_solder_mask_rules(self):
-        """Test that solder mask dam and clearance rules are present."""
+    def test_generate_dru_omits_unsupported_mask_rules(self):
+        """Numeric mask floors have no native custom-rule equivalent."""
         from kicad_tools.manufacturers.dru_generator import generate_dru
 
         profile = get_profile("jlcpcb")
         rules = profile.get_design_rules(layers=2, copper_oz=1.0)
         content = generate_dru(rules, manufacturer_name="JLCPCB")
 
-        assert "solder_mask_margin" in content
-        assert "physical_hole_clearance" in content
-        assert f"{rules.min_solder_mask_clearance_mm}mm" in content
-        assert f"{rules.min_solder_mask_dam_mm}mm" in content
+        assert "solder_mask_margin" not in content
+        assert 'rule "Solder Mask Dam' not in content
+        assert "B.Layer == 'Edge.Cuts'" in content
 
     def test_generate_dru_covers_silkscreen_height(self):
         """Test that silkscreen height rule is present."""
@@ -941,7 +941,8 @@ class TestDruGenerator:
             rules = profile.get_design_rules(layers=2, copper_oz=1.0)
             content = generate_dru(rules, manufacturer_name=profile.name)
             assert "(version 1)" in content, f"Failed for {mfr_id}"
-            assert content.count("(rule ") == 11, f"Wrong rule count for {mfr_id}"
+            expected = 9 + (rules.min_pth_annular_ring_mm is not None)
+            assert content.count("(rule ") == expected, f"Wrong rule count for {mfr_id}"
 
     def test_static_dru_files_match_dynamic_generation(self):
         """Test that static .kicad_dru files match dynamic generation output."""

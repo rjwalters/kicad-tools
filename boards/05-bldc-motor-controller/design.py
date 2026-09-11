@@ -1,27 +1,12 @@
 #!/usr/bin/env python3
-"""
-BLDC Motor Controller - Full Design Pipeline
+"""Build the real revision-B sensored BLDC board and verified assembly bundle.
 
-This script demonstrates the complete PCB design workflow for a power
-electronics board:
-1. Create project file
-2. Create schematic with power rails and components
-3. Run ERC validation
-4. Generate PCB with component placement
-5. Route PCB traces
-6. Run DRC validation
+Usage: python design.py [output_dir]
 
-The design includes:
-- Multi-voltage power supply (12-24V -> 5V -> 3.3V)
-- Gate driver for 3-phase motor control
-- Power MOSFET half-bridges
-- Current sensing with shunt resistors
-- MCU for motor control
-
-Usage:
-    python design.py [output_dir]
-
-If no output directory is specified, files are written to ./output/
+The CLI delegates to redesign/build.py. Historical DRV8301 helpers below remain
+only for tool regression tests; legacy_main defaults to regression-output and
+must not be used for manufacturing. The original source/copper is archived in
+legacy_drv8301; its electrical defects are documented in issue #4993.
 """
 
 import subprocess
@@ -3701,8 +3686,8 @@ def run_drc(pcb_path: Path) -> bool:
         return False
 
 
-def main() -> int:
-    """Main entry point."""
+def legacy_main() -> int:
+    """Historical DRV8301 regression pipeline; not suitable for manufacture."""
     # Precondition (#4539): refuse to mutate a board that carries no captured
     # intent.  Anchored on ``__file__`` -- NOT ``Path.cwd()`` and NOT the
     # output dir -- because CI invokes this recipe from the repo root with an
@@ -3715,7 +3700,7 @@ def main() -> int:
     if len(sys.argv) > 1:
         output_dir = Path(sys.argv[1])
     else:
-        output_dir = Path(__file__).parent / "output"
+        output_dir = Path(__file__).parent / "regression-output"
 
     try:
         # Step 1: Create project file
@@ -3906,6 +3891,13 @@ def main() -> int:
 
         traceback.print_exc()
         return 1
+
+
+def main() -> int:
+    """Build the real revision-B circuit; legacy helpers remain for regressions."""
+    require_spec(__file__)
+    recipe = Path(__file__).parent / "redesign" / "build.py"
+    return subprocess.call([sys.executable, str(recipe), *sys.argv[1:]])
 
 
 if __name__ == "__main__":

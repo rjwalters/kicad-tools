@@ -171,6 +171,9 @@ class DesignRules:
     # When set, components with pin pitch below fine_pitch_threshold automatically
     # use this clearance instead of trace_clearance
     fine_pitch_clearance: float | None = None
+    # Enforce the authored floor against every foreign pad, including
+    # same-component fine-pitch and NC pads (Issue #5004).
+    strict_pad_clearance: bool = False
     # mm -- components with pitch < this use fine_pitch_clearance
     #
     # Issue #3371 (P_FP1): Raised from 0.8mm -> 1.5mm so 1.27mm-pitch SOIC
@@ -561,6 +564,15 @@ class DesignRules:
             >>> rules.get_clearance_for_component("R1")  # Default
             0.15
         """
+        if self.strict_pad_clearance:
+            return max(
+                self.trace_clearance,
+                self.component_clearances.get(ref, self.trace_clearance),
+                (net_class.clearance or self.trace_clearance)
+                if net_class
+                else self.trace_clearance,
+            )
+
         # Check explicit per-component override first.  Explicit overrides
         # bypass the narrow-channel guard: the caller is asserting the
         # geometry is feasible for this specific component.

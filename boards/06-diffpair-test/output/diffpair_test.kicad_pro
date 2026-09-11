@@ -17,9 +17,11 @@
       "diff_pair_dimensions": [],
       "drc_exclusions": [],
       "rules": {
-        "min_copper_edge_clearance": 0.0,
+        "min_copper_edge_clearance": 0.3,
         "solder_mask_clearance": 0.0,
-        "solder_mask_min_width": 0.0
+        "solder_mask_min_width": 0.0,
+        "min_clearance": 0.15,
+        "min_track_width": 0.15
       },
       "track_widths": [],
       "via_dimensions": []
@@ -43,7 +45,7 @@
     "classes": [
       {
         "bus_width": 12,
-        "clearance": 0.2,
+        "clearance": 0.15,
         "diff_pair_gap": 0.25,
         "diff_pair_via_gap": 0.25,
         "diff_pair_width": 0.2,

@@ -300,6 +300,111 @@ git worktree remove .loom/worktrees/issue-42 --force
 git worktree prune
 ```
 
+### Redirected cargo target dirs are reclaimed with their worktree (#7239)
+
+**Symptom**: an external volume fills with directories like
+`/Volumes/build/cargo-target/issue-<N>` whose worktrees were removed weeks ago.
+One multi-agent host accumulated tens of them and hundreds of GB before the
+volume started pressuring other workloads.
+
+**Cause**: Cargo's output is only `<worktree>/target` by default.
+`CARGO_TARGET_DIR`, or `build.target-dir` in any `config.toml` on Cargo's
+lookup path (commonly `~/.cargo/config.toml` on a host tuned by
+`/repo:host-optimize`), redirects it **outside** the worktree — where no
+removal path ever looked. Removing the worktree therefore left the build
+output behind forever.
+
+**Now**: every worktree-removal path resolves the *actual* target dir before
+removing the worktree (`cargo metadata`, so the value it reads honors the whole
+config hierarchy) and reclaims it afterwards — but only when the redirect is
+attributable to that one worktree, which means a `.cargo/config.toml` inside it
+(see the never-delete list and the limitation below):
+
+- `worktree.sh remove <N>` — bash side, via
+  `defaults/scripts/lib/cargo-target-dir.sh`.
+- `merge-pr.sh`'s post-merge worktree cleanup — same bash library. This is the
+  removal path most worktrees actually take, so it is where the leak was
+  largest.
+- `loom-daemon clean` and the daemon's periodic worktree reaper — Rust side,
+  via `loom-daemon/src/worktree_ops/cargo_target.rs` (both `issue-<N>` and
+  `pr-<N>` worktrees).
+
+Preview what a removal would reclaim, with sizes, without touching anything:
+
+```bash
+./.loom/scripts/worktree.sh remove 42 --dry-run    # or --dry-run --json
+loom-daemon clean --dry-run                        # every candidate worktree
+```
+
+**What it will never delete**, each reported with the reason instead:
+
+- A dir that is only ever named by a **machine-global redirect source**. Two
+  of those exist, and neither can be evidence that a directory belongs to the
+  one worktree being removed, because both resolve identically for *every* path
+  on the host:
+  - the **remover's own ambient `CARGO_TARGET_DIR`**, read from the environment
+    of whatever process is doing the removal; and
+  - `build.target-dir` in **`$CARGO_HOME/config.toml`, or in any ancestor
+    `.cargo/config.toml` above the worktree** — including the machine-wide one
+    `/repo:host-optimize` writes.
+
+  Only a redirect derived from the worktree **itself** — `build.target-dir` in a
+  `.cargo/config.toml` *inside* the worktree — authorizes a delete. On a host
+  whose single shared build cache comes from either global source, worktree
+  removal simply reports and leaves it alone.
+- A dir another **live** worktree also resolves to — the `host-optimize`
+  convention is a *single shared* `target-dir` for the whole machine, and
+  deleting that on one worktree's removal would destroy a sibling's cache
+  mid-build. Containment counts in both directions, and if the sharing question
+  cannot be answered it refuses rather than assuming nobody else uses it. That
+  covers both ways it can go unanswered: `git worktree list` failing, and a
+  live worktree whose configured redirect `cargo metadata` could not read (a
+  mid-edit `Cargo.toml`, a conflicted merge). A sibling that silently degraded
+  to `<sibling>/target` would otherwise look exactly like one that builds
+  somewhere else.
+- A dir a **running process** is using (same evidence-based gate as
+  "Never launch a service from a build-output path" above). The reclaim is
+  deferred, not lost — stop the process and remove again.
+- The repository itself or any ancestor of it, the primary checkout's own
+  `target/` (that belongs to the pressure-gated deep-clean pass), `$HOME`, or
+  any suspiciously shallow path.
+
+An un-redirected `target/` inside the worktree is reported as nothing at all:
+it disappears with the worktree for free, as it always did.
+
+**Limitation — the redirect must be attributable to the worktree, and
+resolvable at removal time.** The reclaim asks Cargo where this worktree's
+output *would* go right now (`CARGO_TARGET_DIR` → `cargo metadata` →
+`<worktree>/target`); it does not guess at a naming template and never deletes
+a path by pattern match. Two shapes are therefore reported rather than
+reclaimed:
+
+- A *per-worktree* `CARGO_TARGET_DIR` exported only inside the agent/build
+  environment (say `…/cargo-target-<issue>`), with the worktree then removed
+  from a shell where that variable is unset. Resolution lands somewhere else
+  and the real directory is left alone — correctly, since nothing at removal
+  time can prove it belonged to that worktree. Re-exporting the variable for
+  the removal does **not** help: an env var read from the remover's own
+  environment is machine-global and is refused outright (see the never-delete
+  list above). Put the redirect where it belongs to the tree instead —
+  `build.target-dir` in a `.cargo/config.toml` **inside the worktree**.
+- A redirect that lives only in `~/.cargo/config.toml` (what
+  `/repo:host-optimize` writes) or in an ancestor `.cargo/config.toml`. Every
+  worktree on the host resolves to that one directory, so no single worktree's
+  removal may delete it; the reclaim treats such a tree as unredirected and
+  does nothing. To get per-worktree reclaim, give each worktree its own
+  `.cargo/config.toml` with a `target-dir` of its own (for example
+  `…/cargo-target/issue-<N>`) — that is the shape this feature reclaims.
+- A worktree whose Cargo manifest is not at its **root** (a nested
+  `backend/Cargo.toml` layout). The pre-check treats a root without a
+  `Cargo.toml` as "cargo never built here", so nothing is resolved or
+  reclaimed. That is a missed reclaim, not data loss — the safe failure
+  direction — but such a directory must be removed by hand.
+
+Directories orphaned *before* this landed have no worktree left to resolve
+from, so they must be removed by hand — check them against `git worktree list`
+first, and stop anything still building into them.
+
 ### A worktree vanished mid-session — who removed it? (#5950)
 
 **Symptom**: a Builder's worktree and/or its `feature/issue-N` branch disappears
@@ -798,6 +903,78 @@ git -C <target> stash list | grep loom-install   # changes the installer stashed
 ```bash
 # Check daemon logs
 tail -f ~/.loom/daemon.log
+```
+
+### `loom-daemon-start.sh` refuses: "agent-session context detected" (#6568)
+
+```
+WARNING: agent-session context detected -- this shell exports: LOOM_ROLE LOOM_SWEEP_CLAIM_OWNED LOOM_TERMINAL_ID
+ERROR: refusing to start -- this would overwrite the REAL daemon configuration with
+an agent session's environment (see the WARNING above).
+```
+
+**This is working as designed, not a bug.** Your shell is a Loom agent session
+(a dispatched sweep, a role runner, or a Claude Code terminal that inherited one),
+and the start would have written the **default** supervisor identity —
+`com.rjwalters.loom-daemon` on macOS, `loom-daemon.service` on systemd — from a
+per-invocation environment. That is the 2026-08-17 incident: a sweep exercising
+the start path overwrote the production LaunchAgent on **both** operator Macs
+with its own session env (`/tmp` `WorkingDirectory`, mktemp'd watchdog/socket/pid
+paths, `LOOM_ROLE=sweep-lifecycle`, a stray `LOOM_ROLE_RUNNER_INTERVAL_SECS=900`)
+and ran that way for two days undetected. Pick the option that matches intent:
+
+```bash
+# Exercising / testing the start path -> scope the supervisor identity.
+# (This is what every test in this repo does; it is also the exemption that
+#  keeps existing test-authoring patterns working from a session context.)
+LOOM_LAUNCHD_LABEL=com.example.loom-daemon-test ./.loom/scripts/cli/loom-daemon-start.sh   # macOS
+LOOM_SYSTEMD_UNIT=loom-daemon-test.service     ./.loom/scripts/cli/loom-daemon-start.sh    # systemd Linux
+
+# Genuinely (re)starting the production daemon from inside an agent session,
+# e.g. recovering a fleet host from a Claude Code terminal. Loud, not silent:
+# the warning still prints.
+LOOM_ALLOW_SESSION_DAEMON_START=1 ./.loom/scripts/cli/loom-daemon-start.sh
+
+# Or drop the session context entirely.
+env -u LOOM_ROLE -u LOOM_TERMINAL_ID -u LOOM_SWEEP_CLAIM_OWNED \
+    ./.loom/scripts/cli/loom-daemon-start.sh
+```
+
+`--print-plist` / `--print-unit` are **never** refused — they warn and still
+print, so you can always inspect what a real start would render.
+
+Independently of this refusal, the session-scoped keys themselves
+(`LOOM_SWEEP_*`, `LOOM_TERMINAL_ID`, `LOOM_ROLE`, `LOOM_RUNTIME`) are **always**
+stripped from every rendered plist/unit, and are never carried forward out of an
+already-installed one — if you see
+
+```
+NOTICE: purging 4 AGENT-SESSION env key(s) carried by the installed …
+```
+
+then that host's daemon config was written from an agent session at some point in
+the past; the re-render is cleaning it up. Full writeup:
+[`daemon-reference.md` → Agent-session isolation on the start path](daemon-reference.md).
+
+### Daemon warns it is running from a scratch directory (#6568)
+
+```
+WARNING: this daemon would run out of a SCRATCH / temporary directory (#6568):
+  - WorkingDirectory=/tmp/pr6416-checkout
+  - LOOM_WORKSPACE=/tmp/pr6416-checkout
+```
+
+Advisory, never blocking. Inside a test fixture this is expected (the daemon
+suites deliberately run scratch-rooted daemons). **On a real host it means the
+daemon is misconfigured** — its working directory, logs, and any watchdog /
+socket / pid path underneath it disappear on reboot or tmp cleanup, while the
+daemon keeps reporting healthy. Repair by re-starting from the machine checkout:
+
+```bash
+./.loom/scripts/cli/loom-daemon-stop.sh
+loom start                       # machine-mode dispatcher: WorkingDirectory := ~/.local/share/loom
+launchctl print gui/$(id -u)/com.rjwalters.loom-daemon | grep -A3 'environment'   # macOS: confirm
+systemctl --user cat loom-daemon.service | grep -E 'WorkingDirectory|LOOM_WORKSPACE'  # systemd: confirm
 ```
 
 ### Claude Code not found

@@ -737,6 +737,9 @@ def resolve_clearance_with_escape_region(
         etc.) should land here so the threading footprint stays a
         single function.
     """
+    if rules.strict_pad_clearance:
+        return rules.get_clearance_for_component(pad.ref, pin_pitch, net_class)
+
     # Layer 1: per-component explicit override.  Wins unconditionally so
     # designers can opt-out of the escape rule for a specific component
     # by pinning ``component_clearances[ref]`` to the relaxed value.

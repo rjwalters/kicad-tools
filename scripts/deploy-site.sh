@@ -93,33 +93,40 @@ sha256_of() {
 }
 
 # assert_cloudflare_account WRANGLER_CMD...
-#   Runs `wrangler whoami`, extracts the 32-hex account ID, and aborts (exit 1)
-#   unless it equals EXPECTED_CLOUDFLARE_ACCOUNT_ID.  Also runs `wrangler pages
-#   project list` and WARNs (non-fatal) if the kicad-tools project is absent.
+#   Checks the explicit account ID (or falls back to `wrangler whoami`)
+#   against the identity pin. With an explicit target, Pages listing must
+#   authenticate successfully and expose the existing kicad-tools project.
 assert_cloudflare_account() {
   local whoami_out account_id
 
-  info "Verifying Cloudflare deploy target (wrangler whoami)..."
-  if ! whoami_out="$("$@" whoami 2>&1)"; then
-    err "Could not run 'wrangler whoami' (not logged in?). Output:"
-    printf '%s\n' "${whoami_out}" >&2
-    err "Refusing to deploy. Run 'wrangler logout && wrangler login' to the"
-    err "correct personal Cloudflare account, then re-run this script."
-    exit 1
-  fi
+  # A scoped Pages token need not have User Details or Account Read access.
+  # Its explicit target is authenticated below through Pages project listing.
+  account_id="${CLOUDFLARE_ACCOUNT_ID:-}"
+  if [ -n "${account_id}" ]; then
+    info "Verifying explicitly configured Cloudflare deploy account..."
+  else
+    info "Verifying Cloudflare deploy target (wrangler whoami)..."
+    if ! whoami_out="$("$@" whoami 2>&1)"; then
+      err "Could not run 'wrangler whoami' (not logged in?). Output:"
+      printf '%s\n' "${whoami_out}" >&2
+      err "Refusing to deploy. Run 'wrangler logout && wrangler login' to the"
+      err "correct personal Cloudflare account, then re-run this script."
+      exit 1
+    fi
 
-  # `wrangler whoami` prints the account ID as a 32-hex token in a table; it is
-  # the only 32-hex value in the output (OAuth tokens are not printed).  Grab
-  # the first such token.
-  account_id="$(printf '%s\n' "${whoami_out}" | grep -oiE '[0-9a-f]{32}' | head -n1 || true)"
+    # `wrangler whoami` prints the account ID as a 32-hex token in a table; it is
+    # the only 32-hex value in the output (OAuth tokens are not printed).  Grab
+    # the first such token.
+    account_id="$(printf '%s\n' "${whoami_out}" | grep -oiE '[0-9a-f]{32}' | head -n1 || true)"
 
-  if [ -z "${account_id}" ]; then
-    err "Could not parse a Cloudflare account ID from 'wrangler whoami'."
-    err "Are you logged in? Output was:"
-    printf '%s\n' "${whoami_out}" >&2
-    err "Refusing to deploy. Run 'wrangler logout && wrangler login' to the"
-    err "correct personal Cloudflare account, then re-run this script."
-    exit 1
+    if [ -z "${account_id}" ]; then
+      err "Could not parse a Cloudflare account ID from 'wrangler whoami'."
+      err "Are you logged in? Output was:"
+      printf '%s\n' "${whoami_out}" >&2
+      err "Refusing to deploy. Run 'wrangler logout && wrangler login' to the"
+      err "correct personal Cloudflare account, then re-run this script."
+      exit 1
+    fi
   fi
 
   local account_sha
@@ -150,18 +157,26 @@ assert_cloudflare_account() {
     exit 1
   fi
 
-  info "Cloudflare account verified (${account_id})."
+  info "Cloudflare account matches the configured identity pin."
 
   # Non-fatal: confirm the kicad-tools Pages project is reachable.  The very
   # first deploy may predate project creation, so only WARN if it's missing.
   local projects
   if projects="$("$@" pages project list 2>&1)"; then
     if ! printf '%s\n' "${projects}" | grep -q 'kicad-tools'; then
+      if [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+        err "Configured account does not expose the existing kicad-tools Pages project. Refusing to deploy."
+        exit 1
+      fi
       warn "'kicad-tools' Pages project not found in 'wrangler pages project list'."
       warn "If this is the first deploy, wrangler will create it; otherwise"
       warn "double-check you're on the right account."
     fi
   else
+    if [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+      err "Could not authenticate Pages access to the configured account. Refusing to deploy."
+      exit 1
+    fi
     warn "Could not list Pages projects ('wrangler pages project list' failed);"
     warn "continuing — wrangler will report any project issues at deploy time."
   fi
@@ -296,6 +311,16 @@ if command -v wrangler >/dev/null 2>&1; then
   WRANGLER=(wrangler)
 else
   WRANGLER=(npx wrangler)
+fi
+
+# Prefer the operator's scoped, chezmoi-managed Pages credentials when no
+# token was explicitly supplied. Keep tokens out of logs and the repository.
+if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -f "${HOME}/.cloudflare/rjwalters/pages-rjwalters.env" ]; then
+  info "Loading scoped Cloudflare Pages credentials."
+  set -a
+  # shellcheck disable=SC1091
+  source "${HOME}/.cloudflare/rjwalters/pages-rjwalters.env"
+  set +a
 fi
 
 # Guard against deploying to the wrong Cloudflare account (aborts on mismatch

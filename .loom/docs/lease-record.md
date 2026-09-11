@@ -7,11 +7,13 @@ alive and working, or crashed/hung hours ago. The lease record is the
 missing liveness signal, layered on top of the existing label claim without
 changing what the label itself means.
 
-This document defines the record's on-forge shape. It is **write-only**:
-this phase (#6179) writes the record at dispatch time and nothing else. No
-reclamation or dispatch-decision logic reads it back yet — that is Phase 2
-of the epic, a future issue. Phase 3 (fencing) is the phase after that. Both
-are expected to consume this exact format without re-deriving it.
+This document defines the record's on-forge shape. Phase 1 (#6179) wrote the
+record at dispatch time and nothing read it; the later phases documented
+below now do read it — reclamation (#6286) and dispatch-time ordering
+(#6287) in Phase 2, the sweep-side pre-push fence (#6309) in Phase 3 — all
+against this same format. Since #6320 there are **two writers**, the daemon's
+dispatch and the in-session `/loom:sweep` path (see "Who writes one" below);
+readers must not distinguish them.
 
 The sibling issue #6180 (`defaults/docs/lease-renewal.md`) implements the
 other half: a sweep-owned background loop that keeps a lease fresh for the
@@ -132,6 +134,55 @@ rewritten, so both shapes can be found in the wild — a reader must treat
 The embedded `at=...` timestamp in that prose is for human debugging only —
 it is what the dispatcher *believed* the time was when it wrote the comment,
 not an authoritative value any reader may rely on.
+
+## Who writes one (both dispatch paths — #6320)
+
+Two writers publish this record. They are byte-compatible by design: a reader
+cannot tell them apart, and must not try to.
+
+| Writer | When | Code |
+|---|---|---|
+| **Daemon dispatch** (#6179) | Immediately after a confirmed `flip_label_to_building` | `SweepRegistry::write_lease_comment` (`loom-daemon/src/sweep_registry/guards.rs`) |
+| **In-session sweep** (#6320) | Per-issue pre-flight Step 1b, for every candidate the daemon did *not* claim (operator `/loom:sweep`, `--no-daemon`, GH Actions cron) | `defaults/scripts/sweep-lease-publish.sh publish` |
+
+**Why the second writer exists.** `/loom:sweep`'s in-session path dispatches
+its Builder through the Task tool, one level deep, deliberately (the skill's
+own "CRITICAL: One level deep" rule). Those Builders are subagents of the
+orchestrator session, not daemon-spawned children — so there is no
+`SweepRegistry` entry and, until #6320, no lease record either. A lease
+design only daemon-spawned sweeps participate in leaves in-session sweeps
+**permanently reclaimable no matter how good the lease semantics are**: a
+live in-session claim is indistinguishable from an abandoned one, so any
+host reading leases to answer "is anyone still working this?" sees a bare
+`loom:building` label with no lease. In the incident behind #6320 a
+fleet-dispatch bot stripped a 9-minute-old in-session claim (the staleness
+threshold is measured in *hours*), re-claimed it, and dispatched a second
+Builder into the same `.loom/worktrees/issue-<N>` the first was still
+working in; that Builder's `git reset --hard HEAD` discarded the first's
+uncommitted edits.
+
+**Two deliberate differences on the in-session side**, neither of which
+changes the record's format or its reader contract:
+
+1. **Published at pre-flight, before the label flip.** The daemon flips the
+   label itself, so it can write "after the claim". In-session the Builder
+   subagent flips it later, so the orchestrator publishes at the moment it
+   decides this sweep will work the issue. This is also what makes the
+   record's forge comment `id` sort *earlier* than a racing daemon
+   dispatch's, which is precisely what the ordering check in "Phase 2,
+   dispatch-time half" below reads to make that dispatcher yield.
+2. **It refuses to publish over a live peer.** If the freshest lease is
+   fresh and held by a *different* host, `sweep-lease-publish.sh` exits `4`
+   without writing — publishing would hide a live worker from every
+   freshest-wins reader — and the sweep skips that issue. A *stale* lease
+   (this host's or a peer's) never blocks publication: that is exactly the
+   abandoned-claim case a new lease should supersede.
+
+Renewal is shared: both writers' records are kept fresh by
+`sweep-lease-renew.sh` (`lease-renewal.md`). The in-session caller passes
+`--host`/`--sweep-id` so renewal targets its own record exactly rather than
+"newest wins" — otherwise a peer's later lease comment would be the one it
+kept alive while its own expired.
 
 ## When it is written
 
@@ -339,3 +390,31 @@ recurred; both are applied together because the fence-side fix is the
 correctness backstop (defends even if a future code path re-introduces a
 misdirected or intentionally-left-running renewal loop) and the renew-side
 fix addresses the actual mechanism observed in the incident.
+
+
+## Reclaim instrumentation: absent vs. stale (#6320)
+
+Reclaim log lines used to record only the host-scoped `ReclaimReason` (dead
+pid / dead run-registry pid / no-record-stale age), which left the most
+important question about a cross-host reclaim unanswerable after the fact:
+was the claim reclaimed because its lease had *expired*, or because it never
+published one *at all*? Issue #6320 could only infer the latter from a
+timeline plus an absent comment — "stated as a hypothesis rather than a
+finding".
+
+`claim_reconciliation::classify_lease_evidence` (a pure, unit-tested
+classifier) now folds the lease probe's result into a `LeaseEvidence` value —
+`absent` / `fresh { age_minutes }` / `stale { age_minutes }` — that is
+rendered into both the refusal and the reclaim WARN lines:
+
+```
+claim_reconciliation: reclaimed loom:building -> loom:issue for #1234 in /path
+  (NoRecordStale { age_hours: 26.4 }, lease_evidence=absent (no loom:lease comment
+  found — not evidence of abandonment; this decision rests on host-scoped evidence
+  alone), last_known_pid=None, run_id=None)
+```
+
+Grepping `lease_evidence=` in `daemon.log` therefore answers, per reclaim,
+which evidence class drove it. `absent` deliberately renders with its own
+caveat: per this document's reader contract, a missing lease is *no evidence
+either way*, never proof of abandonment.

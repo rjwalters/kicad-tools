@@ -1,0 +1,577 @@
+Clearance: 0.15mm (rules: explicit --clearance flag)
+Edge clearance: 0.3mm (from jlcpcb manufacturer limits)
+Routing: +3V3, VBUS_FUSED, VBUS_RAW, VBUS_SENSE, VIN, VOUT_PRE (power nets without zones)
+============================================================
+KiCad PCB Autorouter
+============================================================
+Input:    boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb
+Output:   /tmp/board09-reference/route-first.kicad_pcb
+Strategy: negotiated
+Layers:   4-Layer SIG-GND-PWR-SIG (4 layers)
+Skip:     GND
+Edge:     0.3mm clearance
+
+--- Loading PCB ---
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/io.py:3851: UserWarning: Grid resolution 0.1mm may cause clearance violations with 0.15mm clearance. Recommend grid_resolution <= 0.075mm for reliable DRC compliance.
+  validate_grid_resolution(
+WARNING: net-class-map: 31/32 entries matched a board net after normalization.
+    'GND' -> no similar board net found
+  Edge clearance: 0.3mm, 52608 cells blocked
+  Net-class map: merged 31/32 sidecar entries
+  Fine-pitch escape regions detected: 6 (J1, U1, Q1, Q2, U2, U3); escape clearance 0.140mm
+  Board size: 100.0mm x 65.0mm
+  Backend:    cpp v1.0.0 (native, 10-100x faster)
+  Grid:       1001x651x4 = 2,606,604 cells
+  Total nets: 32
+  Nets to route: 31 (multi-pad signal nets)
+
+  148 pads off-grid; A* lands on pad metal directly, with the sub-grid escape pre-pass (uncovered pads) + PIN_ACCESS retry as recovery (waypoint injection unavailable on this backend)
+
+--- Fine-Pitch Component Analysis ---
+
+⚠️  Warning: Fine-pitch components detected
+    Grid resolution: 0.1mm
+
+  🔴 J1 (SSOP-18): 0.50mm pitch, 18 pads
+      - 17 pads off-grid by 0.05mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: CC1, CC2, GND, VBUS_RAW
+
+  🔴 U1 (SSOP-26): 0.50mm pitch, 26 pads
+      - 25 pads off-grid by 0.05mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: CC1, CC2, DISCHARGE, GND, PD_ALERT, ... (14 total)
+
+  ⚠️  C1 (SOT-2): 1.55mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: GND, VBUS_RAW
+
+  ⚠️  C10 (SOT-2): 1.55mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: FB, VOUT_PRE
+
+  ⚠️  C11 (SOT-2): 1.55mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: SENSE_N, SENSE_P
+
+  ⚠️  C12 (SOT-2): 1.55mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: +3V3, GND
+
+  ⚠️  C13 (SOT-2): 1.55mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: GND, VBUS_RAW
+
+  ⚠️  C14 (SOT-2): 1.55mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: +3V3, GND
+
+  ⚠️  C15 (SOT-2): 1.55mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: +5V_OUT, GND
+
+  ⚠️  C2 (SOT-2): 1.55mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: GND, VREG_1V2
+
+  ⚠️  C3 (SOT-2): 1.55mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: GND, VREG_2V7
+
+  ⚠️  C4 (SOT-2): 1.55mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: PMOS_GATE, PMOS_SOURCE
+
+  ⚠️  C5 (SOT-2): 2.95mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: GND, VIN
+
+  ⚠️  C6 (SOT-2): 1.55mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: GND, VIN
+
+  ⚠️  C7 (SOT-2): 1.55mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: BOOT_CAP, SW
+
+  ⚠️  C8 (SOT-2): 2.95mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: GND, VOUT_PRE
+
+  ⚠️  C9 (SOT-2): 2.95mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: GND, VOUT_PRE
+
+  ⚠️  D1 (SOT-2): 3.30mm pitch, 2 pads
+      - 2 pads off-grid by 0.05mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: PMOS_GATE, PMOS_SOURCE
+
+  ⚠️  D2 (SOT-2): 1.57mm pitch, 2 pads
+      - 2 pads off-grid by 0.01mm at current 0.1mm grid
+      - Recommendation: Use 0.025mm grid for better alignment
+      - Affected nets: GND, LED_A
+
+  ⚠️  J2 (THT-2): 5.08mm pitch, 2 pads
+      - 1 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.01mm grid for better alignment
+      - Affected nets: GND
+
+  ⚠️  J3 (DIP-6): 2.54mm pitch, 6 pads
+      - 4 pads off-grid by 0.02-0.04mm at current 0.1mm grid
+      - Recommendation: Use 0.01mm grid for better alignment
+      - Affected nets: +3V3, PD_ALERT, SCL, SDA
+
+  ⚠️  L1 (SOT-2): 5.90mm pitch, 2 pads
+      - 2 pads off-grid by 0.05mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: SW, VOUT_PRE
+
+  ⚠️  Q1 (SOIC-8): 1.27mm pitch, 8 pads
+      - 8 pads off-grid by 0.02-0.04mm at current 0.1mm grid
+      - Recommendation: Use 0.01mm grid for better alignment
+      - Affected nets: PMOS_GATE, PMOS_SOURCE, VBUS_FUSED
+
+  ⚠️  Q2 (SOIC-8): 1.27mm pitch, 8 pads
+      - 8 pads off-grid by 0.02-0.04mm at current 0.1mm grid
+      - Recommendation: Use 0.01mm grid for better alignment
+      - Affected nets: PMOS_GATE, PMOS_SOURCE, VIN
+
+  ⚠️  R1 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: PMOS_GATE, PMOS_SOURCE
+
+  ⚠️  R10 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: KELVIN_P, SENSE_P
+
+  ⚠️  R11 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: KELVIN_N, SENSE_N
+
+  ⚠️  R12 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: +3V3, SCL
+
+  ⚠️  R13 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: +3V3, SDA
+
+  ⚠️  R14 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: +3V3, PD_ALERT
+
+  ⚠️  R15 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: +3V3, MON_ALERT
+
+  ⚠️  R16 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: +5V_OUT, LED_A
+
+  ⚠️  R17 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: +3V3, PD_OK2
+
+  ⚠️  R18 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: +3V3, PD_OK3
+
+  ⚠️  R2 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: PMOS_GATE, SINK_GATE
+
+  ⚠️  R3 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: VBUS_RAW, VBUS_SENSE
+
+  ⚠️  R4 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: DISCHARGE, VIN
+
+  ⚠️  R5 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: BUCK_EN, VIN
+
+  ⚠️  R6 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: BUCK_EN, GND
+
+  ⚠️  R7 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: FB, VOUT_PRE
+
+  ⚠️  R8 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: FB, GND
+
+  ⚠️  R9 (SOT-2): 1.65mm pitch, 2 pads
+      - 2 pads off-grid by 0.02mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: BOOT, BOOT_CAP
+
+  ⚠️  RSH1 (SOT-4): 1.96mm pitch, 4 pads
+      - 4 pads off-grid by 0.03-0.04mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm or 0.025mm grid
+      - Affected nets: +5V_OUT, KELVIN_N, KELVIN_P, VOUT_PRE
+
+  ⚠️  U2 (MSOP-6): 0.95mm pitch, 6 pads
+      - 6 pads off-grid by 0.04-0.05mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: BOOT, BUCK_EN, FB, GND, SW, ... (6 total)
+
+  ⚠️  U4 (SOT-3): 1.90mm pitch, 3 pads
+      - 3 pads off-grid by 0.04-0.05mm at current 0.1mm grid
+      - Recommendation: Use 0.05mm grid for better alignment
+      - Affected nets: +3V3, GND, VBUS_RAW
+
+  Recommendations:
+    • Use finer grid: --grid 0.025 or --grid 0.05
+    • Consider enabling sub-grid routing for pad connections
+    • Review affected nets for manual routing
+
+  WARNING: 90% of pads (148/165) are off-grid at 0.1mm resolution.
+  Routing quality will be degraded. Consider --grid 0.05 for better pad alignment.
+
+--- Routing (negotiated) ---
+  Timeout: 90.0s
+  Per-net timeout: 8.0s
+Escape routing for J1 (USB_C_CONNECTOR, 18 pins, 0.50mm pitch): 0 pins escaped -- all escapes failed clearance validation. Consider setting fine_pitch_clearance in DesignRules or adding a component_clearances override for J1.
+Escape routing for U3: 3 of 4 pins deferred to main router (clearance violation)
+Escape routing for U3: 5 of 6 pins deferred to main router (clearance violation)
+impedance-driven sizing: PCB stackup deviates from predefined 'jlcpcb_4layer' (deviation: dielectric thickness Δ=0.000mm, εr Δ=0.55); impedance-driven sizing may not achieve the target
+  Escape routing: auto-enabled (dense packages: ['J1', 'U1', 'Q1', 'Q2', 'U3'])
+
+=== Routing with Escape Pattern Generation ===
+
+--- Phase 1: Escape Routing (5 dense packages) ---
+  J1: USB_C_CONNECTOR, 18 pins
+  U1: UNKNOWN, 26 pins
+  Q1: SOP, 8 pins
+  Q2: SOP, 8 pins
+  U3: TSSOP, 10 pins
+  Escape routes: J1 (USB_C_CONNECTOR) - 0 pins escaped
+  Escape routes: U1 (UNKNOWN) - 14 pins escaped
+  Escape routes: Q1 (SOP) - 0 pins escaped
+  Escape routes: Q2 (SOP) - 0 pins escaped
+  Escape routes: U3 (TSSOP) - 2 pins escaped
+  Escape endpoint overrides: 16 pads remapped to escape endpoints
+  Generated 16 escape route segments
+  Pad-channel budgets: 16 escape channel(s) tagged (Issue #3143)
+
+--- Phase 2: Main Routing ---
+  Relief-rescue sub-search cap: 8.0s wall clock -- deterministic rescue is off for this route (the default; opt in with deterministic_rescue=True; issue #4730)
+  Relief-rescue transaction bound: exempt -- the two-phase stall-relief hook (#3471) carries no stage deadline into its rescues, so the proportional bound has no remaining-budget denominator on this path (issue #4781)
+
+=== Two-Phase Routing (Global + Detailed) ===
+
+--- Phase 1: Global Routing (tile-based) ---
+  Tile grid: 28x18 (504 regions, 1924 edges, pitch=0.350mm, layers=4)
+  Global routing: 31/31 nets have corridors (5 iterations, overflow=0, 0.0s)
+
+--- Phase 2: Detailed Routing ---
+  [  0.0%] Routing VBUS_RAW... (0.0s)
+Net VBUS_RAW: C++ pathfinder gave up (resume after rejected goal cell failed: all via candidates blocked by stored-via geometry (blocking net SENSE_P)); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  Intra-IC defer: J1 pins A9->B4 (direct path violates 0.200mm pad clearance, no legal perimeter wrap)
+  Intra-IC defer: J1 pins A4->B9 (direct path violates 0.200mm pad clearance, no legal perimeter wrap)
+  [  3.2%] Routing CC1... (8.3s)
+Net CC1: C++ pathfinder gave up (post-route clearance validation failed; exhausted 5 resume attempts); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  Intra-IC route: U1 pins 1->2 (0.50mm)
+  [  6.5%] Routing CC2... (12.6s)
+Net CC2: C++ pathfinder gave up (post-route clearance validation failed; exhausted 5 resume attempts); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  Intra-IC route: U1 pins 4->5 (0.50mm)
+  [  9.7%] Routing VIN... (21.0s)
+Net VIN: C++ pathfinder gave up (resume after rejected goal cell failed: all via candidates blocked by stored-via geometry (blocking net SENSE_P)); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  Intra-IC route: Q2 pins 5->6 (1.27mm)
+  Intra-IC route: Q2 pins 6->7 (1.27mm)
+  Intra-IC route: Q2 pins 7->8 (1.27mm)
+  [ 12.9%] Routing SCL... (29.2s)
+  [ 16.1%] Routing SDA... (29.6s)
+Net SDA: C++ pathfinder gave up (post-route clearance validation failed; exhausted 5 resume attempts); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  [ 19.4%] Routing +3V3... (38.2s)
+  [ 22.6%] Routing +5V_OUT... (38.5s)
+Net +5V_OUT: C++ pathfinder gave up (resume after rejected goal cell failed: all via candidates blocked by stored-via geometry (blocking net SENSE_P)); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  [ 25.8%] Routing PD_ALERT... (46.7s)
+  [ 29.0%] Routing VREG_1V2... (48.1s)
+  [ 32.3%] Routing VBUS_SENSE... (48.1s)
+Net VBUS_SENSE: C++ pathfinder gave up (post-route clearance validation failed; exhausted 5 resume attempts); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  [ 35.5%] Routing VREG_2V7... (48.5s)
+  [ 38.7%] Routing DISCHARGE... (48.6s)
+Net DISCHARGE: C++ pathfinder gave up (no path (C++ A* open set exhausted)); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  [ 41.9%] Routing SINK_GATE... (48.7s)
+Net SINK_GATE: C++ pathfinder gave up (post-route clearance validation failed; exhausted 5 resume attempts); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  [ 45.2%] Routing PD_OK2... (56.9s)
+Net PD_OK2: C++ pathfinder gave up (no path (C++ A* open set exhausted)); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  [ 48.4%] Routing PD_OK3... (57.2s)
+Net PD_OK3: C++ pathfinder gave up (post-route clearance validation failed; exhausted 5 resume attempts); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  [ 51.6%] Routing FB... (59.2s)
+  [ 54.8%] Routing BUCK_EN... (59.2s)
+  [ 58.1%] Routing SW... (59.3s)
+Net SW: C++ pathfinder gave up (post-route clearance validation failed; exhausted 5 resume attempts); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  [ 61.3%] Routing BOOT... (67.5s)
+  [ 64.5%] Routing VOUT_PRE... (67.5s)
+Net VOUT_PRE: C++ pathfinder gave up (resume after rejected goal cell failed: all via candidates blocked by stored-via geometry (blocking net SENSE_P)); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  [ 67.7%] Routing LED_A... (75.7s)
+  [ 71.0%] Routing BOOT_CAP... (75.9s)
+  [ 74.2%] Routing KELVIN_P... (75.9s)
+  [ 77.4%] Routing KELVIN_N... (75.9s)
+Net KELVIN_N: C++ pathfinder gave up (post-route clearance validation failed; exhausted 5 resume attempts); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  [ 80.6%] Routing PMOS_SOURCE... (77.9s)
+  Intra-IC route: Q1 pins 1->2 (1.27mm)
+  Intra-IC route: Q1 pins 2->3 (1.27mm)
+  Intra-IC route: Q2 pins 3->2 (1.27mm)
+  Intra-IC route: Q2 pins 2->1 (1.27mm)
+  [ 83.9%] Routing VBUS_FUSED... (78.3s)
+  Intra-IC route: Q1 pins 8->7 (1.27mm)
+  Intra-IC route: Q1 pins 7->6 (1.27mm)
+  Intra-IC route: Q1 pins 6->5 (1.27mm)
+  [ 87.1%] Routing SENSE_N... (78.4s)
+Net SENSE_N: C++ pathfinder gave up (post-route clearance validation failed; exhausted 5 resume attempts); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  [ 90.3%] Routing SENSE_P... (80.8s)
+Net SENSE_P: C++ pathfinder gave up (post-route clearance validation failed; exhausted 5 resume attempts); falling back to the pure-Python A* (typically 10-100x slower -- this net may take minutes). See router.backend_info['fallback_stats'] for details.
+  [ 93.5%] Routing MON_ALERT... (81.0s)
+  [ 96.8%] Routing PMOS_GATE... (81.4s)
+  Initial pass: 24/31 nets, overflow: 67
+  Initial pass stall (overflow=67): 13 net(s) unrouted -- engaging BLOCKED_BY_COMPONENT rip-up (82.3s)
+  BLOCKED_BY_COMPONENT rip-up (negotiated) for VBUS_RAW: displacing 10 sibling(s) on C1, C13, F1, J1, R3, U1, U4: VREG_2V7, +3V3, CC1, CC2, PD_ALERT, PD_OK3, SCL, VBUS_FUSED, VBUS_SENSE, VREG_1V2
+    rip-up [1/11] for VBUS_RAW: routing failed net VBUS_RAW (elapsed 0.0s)
+  BLOCKED_BY_COMPONENT rip-up (negotiated) for VBUS_RAW: reroute did not converge (elapsed 10.2s)
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 23 on F.Cu]: (174.6000, 103.5000) -> (176.4100, 104.0450) is 16.7573 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 11 on F.Cu]: (172.1000, 89.4000) -> (172.4000, 90.0750) is 21.0375 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 22 on B.Cu]: (174.4600, 98.4000) -> (173.4000, 96.7000) is 13.0552 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 22 on F.Cu]: (175.3250, 98.5000) -> (174.4600, 98.4000) is 6.5945 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 14 on B.Cu]: (141.3000, 126.5000) -> (136.1900, 120.7000) is 3.6188 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 14 on F.Cu]: (136.1900, 120.7000) -> (135.3250, 120.5250) is 11.4373 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 32 on F.Cu]: (108.0000, 94.5600) -> (107.7250, 95.4750) is 16.7280 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 32 on B.Cu]: (115.0000, 95.2000) -> (108.0000, 94.5600) is 5.2239 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 1 on F.Cu]: (118.6400, 115.7000) -> (117.8000, 115.5000) is 13.3925 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 1 on F.Cu]: (176.7250, 106.5000) -> (177.0000, 107.4400) is 16.3070 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 1 on B.Cu]: (177.0000, 107.4400) -> (183.2000, 113.0000) is 3.1151 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+
+=== Two-Phase Routing Complete ===
+  Total nets: 31
+  Global routing: 31 corridors assigned
+  Detailed routing: 19 nets routed
+    (9 additional net(s) have partial routes)
+  Total time: 93.1s
+Failed nets:
+  - Net 27 "VBUS_RAW": blocked_path (blocked_path)
+  - Net 7 "CC2": blocked_path (blocked_path)
+  - Net 29 "VIN": blocked_path (blocked_path)
+  - Net 21 "SDA": blocked_path (blocked_path)
+  - Net 2 "+5V_OUT": blocked_path (blocked_path)
+  - Net 8 "DISCHARGE": blocked_path (blocked_path)
+  - Net 24 "SINK_GATE": blocked_path (blocked_path)
+  - Net 16 "PD_OK2": blocked_path (blocked_path)
+  - Net 25 "SW": blocked_path (blocked_path)
+  - Net 30 "VOUT_PRE": blocked_path (blocked_path)
+  ... and 1 more failed net
+
+=== Routing with Escape Complete ===
+  Dense packages escaped: 5
+  Total nets routed: 19
+  Total segments: 7941
+  Total vias: 46
+Failed nets:
+  - Net 27 "VBUS_RAW": blocked_path (blocked_path)
+  - Net 7 "CC2": blocked_path (blocked_path)
+  - Net 29 "VIN": blocked_path (blocked_path)
+  - Net 21 "SDA": blocked_path (blocked_path)
+  - Net 2 "+5V_OUT": blocked_path (blocked_path)
+  - Net 8 "DISCHARGE": blocked_path (blocked_path)
+  - Net 24 "SINK_GATE": blocked_path (blocked_path)
+  - Net 16 "PD_OK2": blocked_path (blocked_path)
+  - Net 25 "SW": blocked_path (blocked_path)
+  - Net 30 "VOUT_PRE": blocked_path (blocked_path)
+  ... and 1 more failed net
+
+--- Optimizing traces ---
+  DRC nudge: 0/7 violations resolved in 1 pass(es)
+  Vias nudged: 9
+  Remaining violations: 7
+  Consolidation: 757 -> 437 segments (320 removed, 42.3%), 50 collinear run(s) merged across 18 route(s)
+  ⚠ Post-optimize backstop demoted 1 net(s) whose copper became a cross-net short after optimize/nudge: [18]
+  Segments: 7941 -> 298 (-96.2%)
+  Vias:     46 -> 34 (-26.1%)
+
+--- Results --- (newly-routed nets only; preserved copper counted above)
+  Routes created:  71
+  Segments:        298
+  Vias:            34
+  Total length:    822.53mm
+  Nets routed:     18/31
+  Partial routes:  9/31 -- have segments, not all pads connected
+  Unrouted:        4/31 -- no segments at all
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 23 on F.Cu]: (174.6000, 103.5000) -> (176.4100, 104.0450) is 16.7573 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 11 on F.Cu]: (172.1000, 89.4000) -> (172.4000, 90.0750) is 21.0375 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 22 on B.Cu]: (174.4600, 98.4000) -> (173.4000, 96.7000) is 13.0552 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 22 on F.Cu]: (175.3250, 98.5000) -> (174.4600, 98.4000) is 6.5945 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 14 on B.Cu]: (141.3000, 126.5000) -> (136.1900, 120.7000) is 3.6188 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 14 on F.Cu]: (136.1900, 120.7000) -> (135.3250, 120.5250) is 11.4373 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 32 on F.Cu]: (108.0000, 94.5600) -> (107.7250, 95.4750) is 16.7280 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 32 on B.Cu]: (115.0000, 95.2000) -> (108.0000, 94.5600) is 5.2239 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 1 on F.Cu]: (118.6400, 115.7000) -> (117.8000, 115.5000) is 13.3925 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 1 on F.Cu]: (176.7250, 106.5000) -> (177.0000, 107.4400) is 16.3070 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+/Users/rwalters/GitHub/kicad-tools/src/kicad_tools/router/primitives.py:331: OffAngleSegmentWarning: off-angle segment [net 1 on B.Cu]: (177.0000, 107.4400) -> (183.2000, 113.0000) is 3.1151 deg off the 0/45/90/135 set (tol 0.01 deg).  Serializing as-is for the legacy quantize_pcb_file fallback to repair; migrate this emitter to a by-construction dogleg (issue #3907).  Set KICAD_TOOLS_SEGMENT_45_STRICT=1 to make this a hard error.
+  verify_segment_45(
+
+--- Pre-save Clearance Validation ---
+  Found 5 clearance violation(s):
+  pad: 5
+  [pad] KELVIN_N vs +5V_OUT at (171.49, 91.14) on F.Cu: -0.130mm (required 0.200mm)
+  [pad] +3V3 vs GND at (119.28, 115.50) on F.Cu: 0.060mm (required 0.200mm)
+  [pad] KELVIN_N vs +5V_OUT at (171.49, 91.14): -0.255mm (required 0.200mm)
+  [pad] SENSE_N vs KELVIN_N at (173.68, 98.50): 0.085mm (required 0.200mm)
+  [pad] +3V3 vs GND at (119.28, 115.50): -0.115mm (required 0.200mm)
+Info: 1 component-inherent pad spacing(s) excluded
+
+--- Saving routed PCB ---
+  Saved to: /tmp/board09-reference/route-first.kicad_pcb
+
+--- Output Connectivity Verification ---
+  WARNING: 13 net(s) have disconnected pads in written output
+  +5V_OUT: 0/5 pads connected -- disconnected: RSH1:4, U3:8, J2:1, R16:1, C15:1
+  CC2: 2/3 pads connected -- disconnected: J1:B5
+  DISCHARGE: 1/2 pads connected -- disconnected: R4:2
+  PD_OK2: 1/2 pads connected -- disconnected: R17:2
+  PMOS_GATE: 0/6 pads connected -- disconnected: Q1:4, Q2:4, D1:2, R1:2, R2:1 (+1 more)
+  SDA: 1/4 pads connected -- disconnected: U3:4, J3:3, R13:2
+  SENSE_N: 2/3 pads connected -- disconnected: U3:9
+  SENSE_P: 2/3 pads connected -- disconnected: U3:10
+  SINK_GATE: 1/2 pads connected -- disconnected: R2:2
+  SW: 0/3 pads connected -- disconnected: U2:2, L1:1, C7:2
+  VBUS_RAW: 0/10 pads connected -- disconnected: J1:A4, J1:A9, J1:B4, J1:B9, U1:24 (+5 more)
+  VIN: 5/9 pads connected -- disconnected: U2:3, R5:1, C5:1, C6:1
+  VOUT_PRE: 2/6 pads connected -- disconnected: L1:2, RSH1:1, R7:1, C10:1
+  Net-class-map sidecar: /tmp/board09-reference/net_class_map.json
+  Fab-profile sidecar: /tmp/board09-reference/fab_profile.json
+  DRC-constraint sidecars: /tmp/board09-reference/route-first.kicad_pro, /tmp/board09-reference/route-first.kicad_dru
+
+--- DRC Validation ---
+  Errors:   39
+  Warnings: 159
+    - clearance_pad_segment: SHORT: 'SENSE_P' and 'SENSE_N' copper overlaps by 0.030mm (segment to pad) at (174.60, 104.00)
+    - clearance_pad_segment: SHORT: 'KELVIN_N' and '+5V_OUT' copper overlaps by 0.130mm (segment to pad) at (171.49, 91.14)
+    - clearance_pad_segment: Segment to pad clearance 0.060mm < minimum 0.102mm at (119.28, 115.50)
+    - clearance_pad_via: SHORT: '+5V_OUT' and 'KELVIN_N' copper overlaps by 0.512mm (pad to via) at (172.36, 90.25)
+    - clearance_pad_via: Pad to via clearance 0.085mm < minimum 0.102mm at (174.12, 98.40)
+    ... and 34 more errors
+
+  Run 'kct check /tmp/board09-reference/route-first.kicad_pcb --mfr jlcpcb' for full details
+  Run 'kct fix-drc /tmp/board09-reference/route-first.kicad_pcb' to auto-repair clearance violations
+
+============================================================
+PARTIAL: Routed 18/31 signal nets (1 power skipped)
+  Additionally, 39 DRC violation(s) detected.
+
+============================================================
+Routing Incomplete (58% connected)
+  Nets routed: 18/31 (58%)
+  Partial routes: 9/31 (29%) -- have segments, not all pads connected
+  Unrouted: 4/31 (13%) -- no segments at all
+
+  Partially connected nets (9):
+    CC2: 2/3 pads connected
+    DISCHARGE: 1/2 pads connected
+    PD_OK2: 1/2 pads connected
+    SDA: 1/4 pads connected
+    SENSE_N: 2/3 pads connected
+    SENSE_P: 2/3 pads connected
+    SINK_GATE: 1/2 pads connected
+    VIN: 5/9 pads connected
+    VOUT_PRE: 2/6 pads connected
+============================================================
+
+Unrouted nets:
+  +5V_OUT: Path blocked by component or trace
+            Suggestion: Move J2 north to create routing channel
+  PMOS_GATE: No path found
+  SW: Path blocked by component or trace
+            Suggestion: Move C5, L1, U2 west to create routing channel
+  VBUS_RAW: Path blocked by component or trace
+            Suggestion: Move F1, J1 north to create routing channel
+
+============================================================
+Failure Summary by Cause
+============================================================
+  BLOCKED_PATH: 3 nets (75%)
+
+============================================================
+Routing Suggestions
+============================================================
+
+Based on failure analysis:
+
+1. COMPONENT BLOCKING (3 nets affected)
+   Direct paths are blocked by component keepouts.
+   Try: Reposition components or use vias to route around
+
+
+Tip: Try randomized net ordering for better results:
+  kct route boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb --strategy monte-carlo --mc-trials 20
+
+Tip: Export failed net names for manual routing in KiCad:
+  kct route boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb --export-failed-nets failed_nets.txt
+
+============================================================
+
+  Raw partial snapshot saved to: /tmp/board09-reference/route-first_partial.kicad_pcb (pre-optimize, pre-DRC; NOT canonical)
+  Canonical output remains: /tmp/board09-reference/route-first.kicad_pcb
+    Nets routed: 18
+    Segments: 298
+    Vias: 34
+  Canonical output: /tmp/board09-reference/route-first.kicad_pcb (full route + optimize + DRC)
+  Open in KiCad to complete remaining nets manually

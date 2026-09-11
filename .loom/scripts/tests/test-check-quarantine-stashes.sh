@@ -238,6 +238,34 @@ else
     fail "non-git dir expected exit 0, got $rc"
 fi
 
+# -------- Test 10: the advisory never RECOMMENDS an ask-tier stash mutation --------
+#
+# Regression guard for #6076. This advisory runs at sweep pre-flight, so any
+# command it prints is a command headless agents will run. It used to print
+# `git stash apply <ref>   # or: git stash pop <ref>`; a bare `git stash pop`
+# in the primary clone is an unanswerable `stash-scope:main-checkout` ask, and
+# that hint accounted for a recurring stall in guard-decisions.log. The
+# reconciliation hint must therefore name only guard-transparent commands.
+echo "Test 10: reconciliation hint recommends no ask-tier stash mutation (#6076)"
+make_fixture
+push_stash "loom-quarantine: run=sweep-test-3 issue=6076" "contamination-$RANDOM"
+stderr_out="$(cd "$WORKDIR/repo" && "$SCRIPT" 2>&1 >/dev/null)"
+if ! printf '%s' "$stderr_out" | grep -qE 'git stash (pop|drop|clear)'; then
+    pass "advisory suggests no git stash pop/drop/clear"
+else
+    fail "advisory still recommends an ask-tier stash mutation. Got: $stderr_out"
+fi
+if printf '%s' "$stderr_out" | grep -q "worktrees/issue-"; then
+    pass "advisory points the replay at the owning issue worktree"
+else
+    fail "advisory does not name the owning issue worktree as the replay target. Got: $stderr_out"
+fi
+if printf '%s' "$stderr_out" | grep -q "loom-daemon stashes retire"; then
+    pass "advisory names the retirement path (loom-daemon stashes retire)"
+else
+    fail "advisory missing the retirement path. Got: $stderr_out"
+fi
+
 # -------- Summary --------
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"

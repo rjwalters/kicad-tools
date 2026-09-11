@@ -82,17 +82,8 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
     ("docs/reference/cli.md", "_main_impl", "src/kicad_tools/cli/route_cmd.py"),
     ("docs/reference/cli.md", "exit codes:", "src/kicad_tools/cli/route_cmd.py"),
     ("docs/reference/cli.md", "Exit Codes:", "src/kicad_tools/cli/fleet_cmd.py"),
-    # boards/03-usb-joystick/README.md — the three route entry points
-    (
-        "boards/03-usb-joystick/README.md",
-        "_run_step_route",
-        "src/kicad_tools/cli/build_cmd.py",
-    ),
-    (
-        "boards/03-usb-joystick/README.md",
-        "route_pcb",
-        "boards/03-usb-joystick/generate_design.py",
-    ),
+    # Board 03's revision-B README documents reviewed copper replay, not
+    # the old generic-router entry points. It remains in GUARDED_DOC_GLOBS.
     # docs/placement-pad-anchoring-audit.md — the centre-vs-pad inventory
     # (#4831).  These are the anchors the audit's load-bearing claims rest
     # on: the objective it says is centre-anchored by default, the pad-map
@@ -208,6 +199,83 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
         "_route_pair_impl",
         "src/kicad_tools/router/lattice/pathfinder.py",
     ),
+    # docs/konnect-item8-design-rules-audit.md — the five overlapping
+    # design-rule mechanisms the decline verdict rests on (#4902).
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "DesignIntent",
+        "src/kicad_tools/spec/schema.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "derive_constraints",
+        "src/kicad_tools/intent/constraints.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "validate_intent",
+        "src/kicad_tools/intent/constraints.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "declare_interface",
+        "src/kicad_tools/mcp/tools/session.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "declare_power_rail",
+        "src/kicad_tools/mcp/tools/session.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "list_intents",
+        "src/kicad_tools/mcp/tools/session.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "clear_intent",
+        "src/kicad_tools/mcp/tools/session.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "start_session",
+        "src/kicad_tools/mcp/tools/registry.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "load_design_rules_from_yaml",
+        "src/kicad_tools/manufacturers/base.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "_resolve_effective_check_mfr",
+        "src/kicad_tools/cli/check_cmd.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "_write_fab_profile_sidecar",
+        "src/kicad_tools/cli/route_cmd.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "resolve_target_fab_for_pcb",
+        "src/kicad_tools/sync/discover.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "_run_spec_decide",
+        "src/kicad_tools/cli/commands/spec.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "_run_spec_status",
+        "src/kicad_tools/cli/commands/spec.py",
+    ),
+    (
+        "docs/konnect-item8-design-rules-audit.md",
+        "append_decision",
+        "src/kicad_tools/spec/parser.py",
+    ),
 )
 
 
@@ -281,7 +349,7 @@ def test_cited_symbols_exist() -> None:
 
     * rename ``_sync_attr_node`` in ``src/kicad_tools/schema/pcb.py`` —
       the source-side assertion goes red;
-    * drop ``_run_step_route`` from ``boards/03-usb-joystick/README.md``
+    * drop ``_sync_attr_node`` from ``docs/reference/api.md``
       — the doc-side assertion goes red.
     """
     for doc_rel, anchor, source_rel in CITED_SYMBOLS:

@@ -1,0 +1,38 @@
+{
+  "stm32f429xx.h": {
+    "url": "https://raw.githubusercontent.com/STMicroelectronics/cmsis-device-f4/a833f4af71410f25b01468f976560d7ff63a2fc9/Include/stm32f429xx.h",
+    "sha256": "d0cdc158b50180069860ece77ee91e4ef59c1694361ee1beb4f7bca6fba7e2d5"
+  },
+  "system_stm32f4xx.h": {
+    "url": "https://raw.githubusercontent.com/STMicroelectronics/cmsis-device-f4/a833f4af71410f25b01468f976560d7ff63a2fc9/Include/system_stm32f4xx.h",
+    "sha256": "02c067d5a135f540c03215dc834b1e60a97bbd4e55bfd3994b0c82a15ea3012a"
+  },
+  "core_cm4.h": {
+    "url": "https://raw.githubusercontent.com/ARM-software/CMSIS_5/55b19837f5703e418ca37894d5745b1dc05e4c91/CMSIS/Core/Include/core_cm4.h",
+    "sha256": "6b355b3974b13104dac0c987aff54795a2c64e6e268c9a0e058fb3443b3406a3"
+  },
+  "cmsis_version.h": {
+    "url": "https://raw.githubusercontent.com/ARM-software/CMSIS_5/55b19837f5703e418ca37894d5745b1dc05e4c91/CMSIS/Core/Include/cmsis_version.h",
+    "sha256": "184c19fd3ee73632edf35a0b4d49cd48be75fbf49e6ccb19d9db05fa83bea4b3"
+  },
+  "cmsis_compiler.h": {
+    "url": "https://raw.githubusercontent.com/ARM-software/CMSIS_5/55b19837f5703e418ca37894d5745b1dc05e4c91/CMSIS/Core/Include/cmsis_compiler.h",
+    "sha256": "747c5edd04a88d4e228c7856750ec475908545c77464a162a305b38d9e362d82"
+  },
+  "cmsis_gcc.h": {
+    "url": "https://raw.githubusercontent.com/ARM-software/CMSIS_5/55b19837f5703e418ca37894d5745b1dc05e4c91/CMSIS/Core/Include/cmsis_gcc.h",
+    "sha256": "2f92cd832b6f58e4d4803b28d7340443f5e46b0f357a307cda76a42a0e530108"
+  },
+  "mpu_armv7.h": {
+    "url": "https://raw.githubusercontent.com/ARM-software/CMSIS_5/55b19837f5703e418ca37894d5745b1dc05e4c91/CMSIS/Core/Include/mpu_armv7.h",
+    "sha256": "29206b52ee02290ed6f5a5415ebd4187de802cf176d9b3cb844390d8e5571372"
+  },
+  "ST-LICENSE.md": {
+    "url": "https://raw.githubusercontent.com/STMicroelectronics/cmsis-device-f4/a833f4af71410f25b01468f976560d7ff63a2fc9/LICENSE.md",
+    "sha256": "dadb755f51d36614173b28c5790cb4a991e8f4cc822e5b634fd66a4f4145824d"
+  },
+  "ARM-LICENSE.txt": {
+    "url": "https://raw.githubusercontent.com/ARM-software/CMSIS_5/55b19837f5703e418ca37894d5745b1dc05e4c91/LICENSE.txt",
+    "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+  }
+}

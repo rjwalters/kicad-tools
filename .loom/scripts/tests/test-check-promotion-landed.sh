@@ -225,6 +225,16 @@ plain_comment() {
     printf '{"createdAt":"%s","body":"%s"}' "$1" "$2"
 }
 
+# self_generated_comment <created_at> <marker> -- one of THIS SCRIPT's own
+# follow-up comments (the completed/mismatch templates near the bottom of
+# check-promotion-landed.sh). Both templates quote the literal phrase
+# "Champion Review: APPROVED" in their own narrative text, which is exactly
+# what let a prior run's own comment get mistaken for a fresh Champion
+# verdict on issue #7287 (#7299).
+self_generated_comment() {
+    printf '{"createdAt":"%s","body":"<!-- champion:promotion-landed-%s -->\\n**Champion: reconciliation note**\\n\\nThis issue carried a `Champion Review: APPROVED` verdict comment, but loom:issue was handled by a prior pass."}' "$1" "$2"
+}
+
 issue_json() {
     # issue_json <state> <labels-json-array> <comments-json-array>
     printf '{"state":"%s","labels":%s,"comments":%s}' "$1" "$2" "$3"
@@ -488,6 +498,82 @@ touch "$STUB_DIR/timeline-fail-405"
 run_sut --issue 405
 assert_eq "1" "$RC" "(r) gh api timeline failure -> exit 1"
 assert_contains "$ERR" "timeline" "(r) stderr names the failing gh api call"
+
+# --- #7299: issue #7287 incident regression. A single `gh issue edit
+# --add-label loom:issue --add-label "$TIER"` call landed cleanly (each label
+# gets its own distinct timeline event, contrary to the issue's first
+# suspected-cause hypothesis -- see (t) below), but a SECOND run of this
+# script mis-selected its OWN prior completed-reconciliation comment (which
+# quotes "Champion Review: APPROVED" in its own narrative text) as the
+# "newest APPROVED comment", pushing APPROVED_AT past the very labeled event
+# it needed to see, and incorrectly escalated an issue that had already
+# progressed to loom:building.
+
+# (s) Isolates the comment-selection bug (Fix A) on its own: the CURRENT
+#     label set does NOT include loom:building/loom:blocked (so the Step 1b
+#     fallback added by this fix cannot mask a broken comment filter), a
+#     genuine Champion APPROVED comment lands first, the `labeled loom:issue`
+#     timeline event lands after it, and THEN this script's own self-
+#     generated follow-up comment (quoting "Champion Review: APPROVED" in its
+#     own prose) lands last. A naive `contains()` match would pick the
+#     self-generated comment as "the newest APPROVED comment", whose
+#     timestamp is AFTER the labeled event -- producing a false MISMATCH.
+#     With the exclusion filter, the genuine comment is used instead and the
+#     labeled event correctly postdates it -> OK.
+reset_state
+issue_json "OPEN" "$(labels_json "loom:auditor")" \
+  "[$(approved_comment "2026-09-06T15:08:19Z" "**Goal Alignment**: Tier 2 (goal-supporting)"), $(self_generated_comment "2026-09-06T15:16:27Z" "completed")]" \
+  > "$STUB_DIR/issue-7287.json"
+stage_timeline 7287 "[$(labeled_event "2026-09-06T15:16:26Z")]"
+run_sut --issue 7287
+assert_eq "0" "$RC" "(s) #7287 regression: self-generated comment must not shadow the genuine APPROVED comment -> exit 0"
+assert_eq "OK" "$(get_field "$OUT" DECISION)" "(s) DECISION=OK (genuine APPROVED comment used, not this script's own follow-up)"
+assert_eq "" "$EDITS" "(s) no label edit issued"
+assert_eq "" "$COMMENTS_POSTED" "(s) no escalation comment posted"
+
+# (t) Isolates the later-lifecycle-label fallback (Fix B / Step 1b) on its
+#     own: loom:issue is currently absent, loom:building IS present (the
+#     issue already progressed past the promotion, exactly as #7287's
+#     Builder claim did at 15:56:06), and the timeline lookup finds NO
+#     `labeled loom:issue` event at all (default empty timeline -- e.g. the
+#     timeline read itself is incomplete/unreliable, acceptance criterion 3).
+#     Must resolve OK from the current-label check alone, independent of the
+#     timeline, and without even needing a timeline fixture staged.
+reset_state
+issue_json "OPEN" "$(labels_json "loom:building")" \
+  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 2 (goal-supporting)")]" \
+  > "$STUB_DIR/issue-406.json"
+run_sut --issue 406
+assert_eq "0" "$RC" "(t) loom:building present with no timeline evidence at all -> exit 0 via later-lifecycle fallback"
+assert_eq "OK" "$(get_field "$OUT" DECISION)" "(t) DECISION=OK (later-lifecycle label alone is sufficient proof)"
+assert_eq "" "$EDITS" "(t) no label edit issued"
+assert_eq "" "$COMMENTS_POSTED" "(t) no comment posted"
+
+# (u) Same fallback, but via loom:blocked instead of loom:building (the other
+#     legitimate further-progression the script's own doc comment names).
+reset_state
+issue_json "OPEN" "$(labels_json "loom:blocked")" \
+  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 3 (maintenance)")]" \
+  > "$STUB_DIR/issue-407.json"
+run_sut --issue 407
+assert_eq "0" "$RC" "(u) loom:blocked present with no timeline evidence -> exit 0 via later-lifecycle fallback"
+assert_eq "OK" "$(get_field "$OUT" DECISION)" "(u) DECISION=OK"
+
+# (v) A single multi-label `gh issue edit --add-label loom:issue --add-label
+#     "$TIER"` call DOES produce a distinct, matchable `labeled`/`loom:issue`
+#     timeline event of its own (confirmed against a real multi-label edit on
+#     this repo, #7299) -- so the Step 2 timeline match must not require the
+#     event to be the ONLY `labeled` event at that timestamp. Two `labeled`
+#     events share the same created_at (loom:issue and the tier label from
+#     one multi-label call); the loom:issue-specific one must still be found.
+reset_state
+issue_json "OPEN" "$(labels_json "loom:building")" \
+  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 2 (goal-supporting)")]" \
+  > "$STUB_DIR/issue-408.json"
+stage_timeline 408 "[$(labeled_event "2026-08-18T00:05:00Z"), {\"event\":\"labeled\",\"created_at\":\"2026-08-18T00:05:00Z\",\"label\":{\"name\":\"tier:goal-supporting\"}}]"
+run_sut --issue 408
+assert_eq "0" "$RC" "(v) multi-label edit's loom:issue timeline event is found alongside a same-timestamp tier event -> exit 0"
+assert_eq "OK" "$(get_field "$OUT" DECISION)" "(v) DECISION=OK"
 
 echo
 echo "--- Doc pins: champion-issue-promo.md ships the reordered write-then-verify Step 3b and the Pass 0c reconciliation loop (#6862) ---"

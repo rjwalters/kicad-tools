@@ -1,0 +1,78 @@
+[
+  {
+    "width_mm": 0.15,
+    "grid_mm": 0.01,
+    "half_domain_mm": 2.5,
+    "nodes": 63378,
+    "vacuum_capacitance_pF_m": 30.685944430707526,
+    "capacitance_pF_m": 137.32194886436264,
+    "effective_er": 4.475076502026906,
+    "impedance_ohm": 51.38537979732275,
+    "seconds": 0.22474384307861328
+  },
+  {
+    "width_mm": 0.16,
+    "grid_mm": 0.01,
+    "half_domain_mm": 2.5,
+    "nodes": 63126,
+    "vacuum_capacitance_pF_m": 31.607118693868106,
+    "capacitance_pF_m": 141.53984145913094,
+    "effective_er": 4.478100102385801,
+    "impedance_ohm": 49.87093274659754,
+    "seconds": 0.21160602569580078
+  },
+  {
+    "width_mm": 0.18,
+    "grid_mm": 0.01,
+    "half_domain_mm": 2.5,
+    "nodes": 63126,
+    "vacuum_capacitance_pF_m": 33.33996265210969,
+    "capacitance_pF_m": 149.46740570926383,
+    "effective_er": 4.483130568228329,
+    "impedance_ohm": 47.252358937856556,
+    "seconds": 0.2157900333404541
+  },
+  {
+    "width_mm": 0.19,
+    "grid_mm": 0.01,
+    "half_domain_mm": 2.5,
+    "nodes": 63378,
+    "vacuum_capacitance_pF_m": 34.154440474493704,
+    "capacitance_pF_m": 153.18944185288976,
+    "effective_er": 4.485198402453425,
+    "impedance_ohm": 46.11490227710781,
+    "seconds": 0.21501994132995605
+  },
+  {
+    "width_mm": 0.16,
+    "grid_mm": 0.005,
+    "half_domain_mm": 2.5,
+    "nodes": 250250,
+    "vacuum_capacitance_pF_m": 31.41816605364216,
+    "capacitance_pF_m": 140.65619538851888,
+    "effective_er": 4.476906613465851,
+    "impedance_ohm": 50.17754957705344,
+    "seconds": 1.2028448581695557
+  },
+  {
+    "width_mm": 0.16,
+    "grid_mm": 0.0025,
+    "half_domain_mm": 2.5,
+    "nodes": 988494,
+    "vacuum_capacitance_pF_m": 31.34265298486019,
+    "capacitance_pF_m": 140.30038017715808,
+    "effective_er": 4.476340284433772,
+    "impedance_ohm": 50.30162277063327,
+    "seconds": 8.420179843902588
+  },
+  {
+    "width_mm": 0.16,
+    "grid_mm": 0.005,
+    "half_domain_mm": 5,
+    "nodes": 500250,
+    "vacuum_capacitance_pF_m": 31.418143483696618,
+    "capacitance_pF_m": 140.65608679949943,
+    "effective_er": 4.47690637330268,
+    "impedance_ohm": 50.17758696913519
+  }
+]

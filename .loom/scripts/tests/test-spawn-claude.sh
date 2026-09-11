@@ -1870,6 +1870,130 @@ rm -f "$TEST_WS/.loom/config.json"
 rm -rf "$SLEEP_DIR"
 
 # ============================================================
+# Section 7e: containerized dispatch mode (issue #7429, epic #6896 Phase 3)
+#
+# `runtimes.containment.enabled` (env override `LOOM_SWEEP_CONTAINERIZED`)
+# re-execs spawn-claude.sh itself inside `docker run <image>
+# <workspace>/.loom/scripts/spawn-claude.sh <args>`. The docker stub below
+# mimics real `docker run`'s behavior for `-e VAR` (no `=value`): it just
+# `exec`s the trailing command in THIS shell's own environment, which is
+# enough to prove BOTH the constructed command shape (path-parity mount,
+# image, recursion target) and that the recursed invocation still reaches a
+# real `claude` stub with token selection and args intact — mirroring the
+# host's own `.loom/scripts -> ../defaults/scripts` symlink convention so
+# `$CONTAIN_WS/.loom/scripts/spawn-claude.sh` resolves to the SAME script
+# under test.
+# ============================================================
+
+echo ""
+echo "Testing spawn-claude.sh containerized dispatch mode (#7429)..."
+
+CONTAIN_WS="$(mktemp -d)"
+mkdir -p "$CONTAIN_WS/.loom/tokens"
+chmod 700 "$CONTAIN_WS/.loom/tokens"
+echo -n "fake-token-contain" > "$CONTAIN_WS/.loom/tokens/contain.token"
+chmod 600 "$CONTAIN_WS/.loom/tokens/contain.token"
+ln -s "$SCRIPTS_DIR" "$CONTAIN_WS/.loom/scripts"
+
+CONTAIN_STUB_DIR="$(mktemp -d)"
+trap 'rm -rf "$TEST_WS" "$STUB_DIR" "$CONTAIN_WS" "$CONTAIN_STUB_DIR"' EXIT
+cat > "$CONTAIN_STUB_DIR/claude" <<'STUB'
+#!/usr/bin/env bash
+echo "stub-claude ran, args=$*"
+STUB
+chmod +x "$CONTAIN_STUB_DIR/claude"
+
+DOCKER_LOG="$CONTAIN_STUB_DIR/docker.log"
+cat > "$CONTAIN_STUB_DIR/docker" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "$DOCKER_LOG"
+args=("\$@")
+i=0
+[[ "\${args[i]:-}" == "run" ]] && i=\$((i + 1))
+[[ "\${args[i]:-}" == "--rm" ]] && i=\$((i + 1))
+while true; do
+    case "\${args[i]:-}" in
+        -v | --label) i=\$((i + 2)) ;;
+        -w) i=\$((i + 2)) ;;
+        -e)
+            # Real \`docker run -e KEY=VALUE\` seeds the container's initial
+            # env with that literal value; \`-e KEY\` (bare, no \`=\`) instead
+            # forwards whatever value the docker CLIENT's own env already
+            # has. This stub does not really isolate a container -- it just
+            # execs the trailing command in THIS shell -- so it must actually
+            # \`export\` a KEY=VALUE pair to reproduce that seeding; a bare
+            # KEY needs no action since it is already inherited. Without
+            # this, \`-e LOOM_SPAWN_CONTAINERIZED=1\` (the recursion guard)
+            # would never actually take effect and the recursed
+            # spawn-claude.sh would re-enter containment mode forever.
+            _val="\${args[i+1]:-}"
+            case "\$_val" in
+                *=*) export "\$_val" ;;
+            esac
+            i=\$((i + 2))
+            ;;
+        *) break ;;
+    esac
+done
+i=\$((i + 1)) # skip the image name
+exec "\${args[@]:i}"
+STUB
+chmod +x "$CONTAIN_STUB_DIR/docker"
+
+# Test: default (no config, no env override) -> containment stays disabled,
+# docker is never invoked (byte-for-byte pre-#7429 default behavior).
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    env -u LOOM_SWEEP_CONTAINERIZED LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "stub-claude ran" "$output" \
+    "containment disabled by default: the spawn still runs directly (#7429)"
+assert_eq "" "$(cat "$DOCKER_LOG" 2>/dev/null)" \
+    "containment disabled by default: docker is never invoked (#7429)"
+
+# Test: runtimes.containment.enabled=true wraps the spawn in `docker run`,
+# under the path-parity mount contract, defaulting to the loom-worker image,
+# and re-execs spawn-claude.sh itself as the containerized command — the
+# recursed invocation (simulated by the stub's exec-through) still reaches
+# the claude stub with its args intact.
+echo '{"runtimes": {"containment": {"enabled": true}}}' > "$CONTAIN_WS/.loom/config.json"
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "containerized dispatch ENABLED" "$output" \
+    "runtimes.containment.enabled=true: spawn-claude logs the containment decision (#7429)"
+docker_log="$(cat "$DOCKER_LOG" 2>/dev/null)"
+assert_contains "-v $CONTAIN_WS:$CONTAIN_WS" "$docker_log" \
+    "containerized dispatch: workspace mounted at path parity (MOUNT-CONTRACT.md §1, #7429)"
+assert_contains "ghcr.io/rjwalters/loom-worker:latest" "$docker_log" \
+    "containerized dispatch: defaults to the ghcr.io/rjwalters/loom-worker image (#7429)"
+assert_contains "$CONTAIN_WS/.loom/scripts/spawn-claude.sh" "$docker_log" \
+    "containerized dispatch: re-execs spawn-claude.sh itself as the containerized command (#7429)"
+assert_contains "stub-claude ran, args=-p ping" "$output" \
+    "containerized dispatch: the recursed invocation still reaches the claude stub with args intact (#7429)"
+
+# Test: LOOM_SWEEP_CONTAINERIZED=0 env override wins over config true.
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    LOOM_SWEEP_CONTAINERIZED=0 LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_eq "" "$(cat "$DOCKER_LOG" 2>/dev/null)" \
+    "LOOM_SWEEP_CONTAINERIZED=0 env override wins over runtimes.containment.enabled=true config (#7429)"
+
+# Test: LOOM_SWEEP_CONTAINER_IMAGE overrides the image.
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    LOOM_SWEEP_CONTAINER_IMAGE="ghcr.io/example/custom-worker:1.2.3" LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+docker_log="$(cat "$DOCKER_LOG" 2>/dev/null)"
+assert_contains "ghcr.io/example/custom-worker:1.2.3" "$docker_log" \
+    "LOOM_SWEEP_CONTAINER_IMAGE overrides the containerized image (#7429)"
+
+rm -f "$CONTAIN_WS/.loom/config.json"
+rm -rf "$CONTAIN_WS" "$CONTAIN_STUB_DIR"
+
+# ============================================================
 # Section 8: claude-wrapper.sh `Execution error` retry + permanent-death
 #            diagnostics (issue #4255)
 #

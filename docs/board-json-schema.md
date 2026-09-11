@@ -6,7 +6,8 @@ kicad-tools.org demo gallery (Phase 2, Astro site).
 
 It is emitted to `boards/<id>/output/board.json`. Every metric is sourced from
 artifacts that **already exist** under the board's `output/manufacturing/`
-directory — `kct board-metrics` never recomputes anything from KiCad.
+directory or `output/` — `kct board-metrics` never recomputes anything from KiCad.
+It validates saved readiness evidence using file content hashes.
 
 ## Source artifacts
 
@@ -26,6 +27,7 @@ directory — `kct board-metrics` never recomputes anything from KiCad.
 | `manifest_generated_at` | `manifest.json` → `generated_at`      | ISO-8601 string |
 | `lvs_clean`             | `output/lvs.json` → `clean`           | omitted when `lvs.json` is absent (#3748, #3749) |
 | `lvs_mismatches`        | `output/lvs.json` → `len(mismatches)` | omitted when `lvs.json` is absent (#3748, #3749) |
+| `readiness` | `output/readiness.json` | current evidence, or `unverified` with reasons |
 
 ## Example
 
@@ -53,7 +55,7 @@ directory — `kct board-metrics` never recomputes anything from KiCad.
   "manifest_generated_at": "2026-06-12T05:03:41.535120+00:00",
   "lvs_clean": true,
   "lvs_mismatches": 0,
-  "status": "ok"
+  "status": "partial"
 }
 ```
 
@@ -90,14 +92,89 @@ resolves to `boards/<id>/output/renders/pcb-front.svg`.
 
 | Value          | Meaning |
 |----------------|---------|
-| `ok`           | `output/manufacturing/` exists, `report.md` parsed successfully, `drc_violations == 0`, and (when `lvs.json` is present) `lvs_clean == true` |
-| `partial`      | `output/manufacturing/` exists but `report.md` is absent/unparseable (only identity and recoverable fields are present), OR `drc_violations > 0`, OR an explicit `lvs_clean == false` |
+| `ok`           | `output/manufacturing/` exists, `report.md` parsed successfully, `drc_violations == 0`, and (when `lvs.json` is present) `lvs_clean == true`, and current `readiness.status == "ready"` |
+| `partial`      | `output/manufacturing/` exists but `report.md` is absent/unparseable (only identity and recoverable fields are present), OR `drc_violations > 0`, OR an explicit `lvs_clean == false`, OR readiness is missing, stale or blocked |
 | `no_artifacts` | the board has no `output/manufacturing/` directory at all |
 
-Note: a *missing* `lvs.json` does **not** downgrade `status` at the producer
-layer — boards without an LVS step yet keep their existing status. The site
-gallery enforces a stricter gate ("Ready" requires `lvs_clean === true`) by
-rendering a neutral "LVS not run" chip when the field is absent (#3749).
+The gallery additionally requires explicit zero DRC and clean LVS fields. A missing
+or stale readiness report displays “Readiness unverified”; a current failing
+report displays “Needs work”. A passing report displays “PCB fabrication ready”
+for `pcb_only` or “Assembly ready” for `assembly`.
+
+## Current manufacturing readiness
+
+`readiness` is an additive optional object in schema v1. The producer attaches
+it from `output/readiness.json`. The site independently loads and validates the
+sidecar at build time, so an old `board.json` cannot preserve stale success.
+The report writer must run the checks against the actual released design and
+write the sidecar **after** finalizing all hashed artifacts:
+
+```json
+{
+  "schema_version": 1,
+  "checked_at": "2026-09-09T22:00:00Z",
+  "mode": "pcb_only",
+  "status": "blocked",
+  "blockers": ["Native DRC reports 13 unconnected items"],
+  "inputs": {
+    "output/example_routed.kicad_pcb": "<64 lowercase SHA256 hex characters>",
+    "output/example.kicad_sch": "<SHA256>",
+    "output/manufacturing/manifest.json": "<SHA256>"
+  },
+  "checks": [
+    {"name": "kct_check", "status": "passed", "detail": "DRC, ERC and LVS passed"},
+    {"name": "native_drc", "status": "failed", "detail": "13 unconnected items"},
+    {"name": "artifacts", "status": "passed", "detail": "Bundle matches checked sources"},
+    {"name": "bom", "status": "passed", "detail": "PCB-only fabrication; assembly not included"}
+  ]
+}
+```
+
+`checked_at` is ISO-8601. Status is `ready`, `blocked`, or `unverified`;
+check status is `passed`, `failed`, or `not_run`. All four named checks above
+must be present and passed for Ready, with no blockers. For `assembly`, the
+BOM check must verify actual procurement identifiers and consistent BOM/CPL
+references. `pcb_only` makes no component procurement or assembly claim.
+
+`inputs` paths are relative to the **board directory**, unlike render/download
+paths. Every listed file must exist and match its SHA256. Absolute paths,
+parent traversal and symlinks outside the board directory are rejected. Ready
+requires PCB, schematic and manufacturing-manifest hashes. All existing
+`output/*.kicad_pro`, `output/*.kicad_dru`, `output/*net_class_map.json` and
+`output/fab_profile.json` files must also be included. The writer should include
+all check evidence and delivered BOM/CPL/Gerber/project archives. Artifact
+verification must check manifest hashes **and** source correspondence (for
+example, compare the project's archived PCB against the checked PCB); mtime
+or internal bundle consistency alone does not establish freshness.
+
+An optional `evidence` object maps check names to board-relative report paths;
+these evidence files should also appear in `inputs`. The gallery presents
+check details and the verification timestamp. Missing, malformed, incomplete
+or changed evidence produces an `unverified` object with `blockers` explaining
+why; this object omits unverifiable timestamps and check results.
+
+An optional `metrics` object can supply current `drc_violations` (nonnegative
+integer), `nets_routed_pct` (0–100), `lvs_clean` (boolean), and
+`lvs_mismatches` (nonnegative integer). Fresh `ready` or `blocked` reports
+override the historical export metrics in both producer and site. Missing,
+stale or unverified evidence cannot override them. The DRC aggregate should
+use the maximum of the two engines' blocking counts to avoid naively adding
+duplicate detections; per-engine counts remain in check details. Values without
+current evidence are labeled as export-report metrics in the gallery.
+
+The existing `manufacturing_package` field retains its historical path to the
+**KiCad project ZIP** for compatibility. The gallery labels that download
+“KiCad project (ZIP)” and separately serves the fabrication archive at
+`manufacturing/gerbers/gerbers.zip` as “Gerber fabrication files (ZIP)”.
+
+When present, `output/manufacturing.zip` is staged at
+`/boards/<slug>/manufacturing.zip` and linked as “Full manufacturing package
+(ZIP)”. This archive contains the complete manufacturing directory and lives
+outside it to avoid a manifest checksum cycle. Include its hash in readiness
+inputs after building it. Presence is detected at build time without a new
+`board.json` field. Schematic/assembly PDFs, manufacturing instructions,
+procurement review, the manifest, and electrical/native DRC JSON reports are
+also offered individually when present in `output/manufacturing/`.
 
 ## Optional fields are omitted, never `null`
 

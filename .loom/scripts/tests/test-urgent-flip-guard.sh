@@ -115,17 +115,29 @@ make_events() { # <output-path>
     printf '\n]\n' >> "$out"
 }
 
+# A default "definitely under cap" live-count fixture, so every existing
+# guard_check()/guard_rc() call below stays hermetic (#7272's live-cap checks
+# added a `gh issue list` fallback that would otherwise fire a real network
+# call on every add-direction check that doesn't set
+# LOOM_URGENT_GUARD_LIVE_COUNT_FILE itself). Tests that care about the live
+# count pass their own value as a trailing env assignment, which overrides
+# this default (later `env` assignments win).
+DEFAULT_EMPTY_LIVE_COUNT="$SANDBOX/default-empty-live-count.json"
+printf '[]\n' > "$DEFAULT_EMPTY_LIVE_COUNT"
+
 # Run the guard against a fixture at a fixed "now"; echo the verdict line.
 guard_check() { # <events-file> <now-epoch> <issue> <add|remove> [extra env assignments...]
     local events="$1" now="$2" issue="$3" dir="$4"; shift 4
-    env LOOM_URGENT_GUARD_EVENTS_FILE="$events" LOOM_URGENT_GUARD_NOW="$now" "$@" \
+    env LOOM_URGENT_GUARD_EVENTS_FILE="$events" LOOM_URGENT_GUARD_NOW="$now" \
+        LOOM_URGENT_GUARD_LIVE_COUNT_FILE="$DEFAULT_EMPTY_LIVE_COUNT" "$@" \
         "$GUARD_SH" check "$issue" "$dir" 2>/dev/null
 }
 
 guard_rc() { # same args as guard_check; echo the exit code
     local events="$1" now="$2" issue="$3" dir="$4"; shift 4
     local rc=0
-    env LOOM_URGENT_GUARD_EVENTS_FILE="$events" LOOM_URGENT_GUARD_NOW="$now" "$@" \
+    env LOOM_URGENT_GUARD_EVENTS_FILE="$events" LOOM_URGENT_GUARD_NOW="$now" \
+        LOOM_URGENT_GUARD_LIVE_COUNT_FILE="$DEFAULT_EMPTY_LIVE_COUNT" "$@" \
         "$GUARD_SH" check "$issue" "$dir" >/dev/null 2>&1 || rc=$?
     echo "$rc"
 }
@@ -419,7 +431,8 @@ printf '[]\n' > "$NO_EVENTS"
 # drive the PR-linkage seams directly here instead of reusing them.
 pr_guard_check() { # <prs-file-or-empty> <details-file-or-empty> <issue> <dir>
     local prs="$1" details="$2" issue="$3" dir="$4"
-    local -a envs=(LOOM_URGENT_GUARD_EVENTS_FILE="$NO_EVENTS" LOOM_URGENT_GUARD_NOW="$NOW")
+    local -a envs=(LOOM_URGENT_GUARD_EVENTS_FILE="$NO_EVENTS" LOOM_URGENT_GUARD_NOW="$NOW"
+        LOOM_URGENT_GUARD_LIVE_COUNT_FILE="$DEFAULT_EMPTY_LIVE_COUNT")
     [[ -n "$prs" ]] && envs+=(LOOM_URGENT_GUARD_ISSUE_PRS_FILE="$prs")
     [[ -n "$details" ]] && envs+=(LOOM_URGENT_GUARD_PR_DETAILS_FILE="$details")
     env "${envs[@]}" "$GUARD_SH" check "$issue" "$dir" 2>/dev/null
@@ -507,6 +520,115 @@ if [[ "$rc" == "0" ]]; then
     pass "an unreadable per-PR details lookup fails OPEN (never blocks a promotion)"
 else
     fail "the per-PR details lookup must fail open, got rc=$rc"
+fi
+
+# --- Test 13: live-cap-at-add-time — Rule 3 (#7272) --------------------------
+# Independent of any issue's own event history: if the LIVE fleet-wide
+# loom:urgent count is already >= 3 at write time, an add is suppressed
+# regardless of cooldown/flap state. This narrows the race where two
+# concurrent ticks each observe an empty/under-cap set and both add.
+echo ""
+echo "Test 13: a live fleet-wide loom:urgent count >= 3 suppresses further adds (#7272)"
+
+live_guard_check() { # <events> <now> <issue> <dir> <live-count-file>
+    local events="$1" now="$2" issue="$3" dir="$4" live="$5"
+    env LOOM_URGENT_GUARD_EVENTS_FILE="$events" LOOM_URGENT_GUARD_NOW="$now" \
+        LOOM_URGENT_GUARD_LIVE_COUNT_FILE="$live" \
+        "$GUARD_SH" check "$issue" "$dir" 2>/dev/null
+}
+live_guard_rc() { # same args as live_guard_check; echo the exit code
+    local out rc=0
+    out="$(live_guard_check "$@")" || rc=$?
+    echo "$rc"
+}
+
+AT_CAP="$SANDBOX/live-at-cap.json"
+printf '[101, 102, 103]\n' > "$AT_CAP"
+UNDER_CAP="$SANDBOX/live-under-cap.json"
+printf '[101, 102]\n' > "$UNDER_CAP"
+OVER_CAP="$SANDBOX/live-over-cap.json"
+printf '[101, 102, 103, 104]\n' > "$OVER_CAP"
+
+out="$(live_guard_check "$EMPTY" "$NOW" 5565 add "$AT_CAP")"
+rc="$(live_guard_rc "$EMPTY" "$NOW" 5565 add "$AT_CAP")"
+if [[ "$rc" == "1" ]] && [[ "$out" == *"reason=live-cap-at-write-time"* ]] && [[ "$out" == *"live_count=3"* ]]; then
+    pass "live count == 3 (at cap) -> add is suppressed, naming the count"
+else
+    fail "expected suppression at live count 3 (rc=$rc out='$out')"
+fi
+
+rc="$(live_guard_rc "$EMPTY" "$NOW" 5565 add "$OVER_CAP")"
+if [[ "$rc" == "1" ]]; then
+    pass "live count == 4 (over cap) -> add is also suppressed"
+else
+    fail "expected suppression at live count 4, got rc=$rc"
+fi
+
+rc="$(live_guard_rc "$EMPTY" "$NOW" 5565 add "$UNDER_CAP")"
+if [[ "$rc" == "0" ]]; then
+    pass "live count == 2 (under cap) -> add is allowed"
+else
+    fail "expected an under-cap add to be allowed, got rc=$rc"
+fi
+
+rc="$(live_guard_rc "$EMPTY" "$NOW" 5565 remove "$AT_CAP")"
+if [[ "$rc" == "0" ]]; then
+    pass "the live-cap-at-add-time check is add-only -- remove is unaffected even at cap"
+else
+    fail "remove must never be blocked by the live-cap check, got rc=$rc"
+fi
+
+# Fail-open: an unreadable live count must never manufacture a new suppression.
+rc="$(live_guard_rc "$EMPTY" "$NOW" 5565 add "$SANDBOX/does-not-exist-live-count.json")"
+if [[ "$rc" == "0" ]]; then
+    pass "an unreadable live count fails OPEN (falls through to the history-based rules)"
+else
+    fail "the live-count lookup must fail open, got rc=$rc"
+fi
+
+# --- Test 14: over-cap correction exempts remove from the cooldown (#7272) --
+# Mirrors Rule 2's own `remove` exemption (flap-freeze): a `remove` must never
+# be trapped behind the cooldown when the live loom:urgent count already
+# exceeds the "max 3" cap -- otherwise a concurrent-tick race's over-cap set
+# stays stuck for up to LOOM_URGENT_FLIP_COOLDOWN_SECS with no recovery path.
+echo ""
+echo "Test 14: an over-cap live count exempts remove from reversal-within-cooldown (#7272)"
+
+# FRESH_ADD (Test 3) is labeled 31 minutes ago -- inside the cooldown, so a
+# bare remove is normally suppressed.
+out="$(live_guard_check "$FRESH_ADD" "$NOW" 5565 remove "$OVER_CAP")"
+rc="$(live_guard_rc "$FRESH_ADD" "$NOW" 5565 remove "$OVER_CAP")"
+if [[ "$rc" == "0" ]] && [[ "$out" == *"reason=over-cap-correction"* ]] && [[ "$out" == *"live_count=4"* ]]; then
+    pass "live count > 3 -> remove is allowed despite the fresh cooldown, naming the count"
+else
+    fail "expected the over-cap exemption to allow the remove (rc=$rc out='$out')"
+fi
+
+rc="$(live_guard_rc "$FRESH_ADD" "$NOW" 5565 remove "$AT_CAP")"
+if [[ "$rc" == "1" ]]; then
+    pass "live count == 3 (exactly at cap, not over) -> the exemption does NOT apply, cooldown still holds"
+else
+    fail "expected the ordinary cooldown suppression at exactly 3, got rc=$rc"
+fi
+
+# The exemption only ever widens what a `remove` may do -- it must never
+# itself grant an exemption it cannot verify (fails closed to the
+# pre-existing reversal-within-cooldown suppression, not a new bypass).
+rc="$(live_guard_rc "$FRESH_ADD" "$NOW" 5565 remove "$SANDBOX/does-not-exist-live-count.json")"
+if [[ "$rc" == "1" ]]; then
+    pass "an unreadable live count grants no exemption -- ordinary cooldown suppression still applies"
+else
+    fail "expected the ordinary cooldown suppression when the live count can't be read, got rc=$rc"
+fi
+
+# The existing single-swap hysteresis for the normal, at-or-under-cap case
+# (#5643) is unchanged: with an under-cap live count, a fresh remove is still
+# suppressed exactly as before this issue's fix.
+rc="$(live_guard_rc "$FRESH_ADD" "$NOW" 5565 remove "$UNDER_CAP")"
+if [[ "$rc" == "1" ]]; then
+    pass "under-cap live count -> the normal (#5643) cooldown suppression is unchanged"
+else
+    fail "expected the normal at-or-under-cap cooldown suppression to be unaffected, got rc=$rc"
 fi
 
 summarize_and_exit

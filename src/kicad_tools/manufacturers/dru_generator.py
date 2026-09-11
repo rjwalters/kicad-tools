@@ -64,7 +64,7 @@ DRU_VERSION_HEADER = "(version 1)"
 
 #: Rule-name families emitted by :func:`generate_dru`, sans label suffix.
 _LEGACY_RULE_NAME_RE = re.compile(
-    r"^(?:Trace Width|Clearance|Via Drill|Via Diameter|Annular Ring|"
+    r"^(?:Trace Width|Clearance|Via Drill|Via Diameter|Annular Ring|PTH Annular Ring|"
     r"Copper to Edge|Hole to Edge|Silkscreen Width|Silkscreen Height|"
     r"Solder Mask Clearance|Solder Mask Dam|"
     r"Ampacity Min Width \(.+, (?:external|internal)\))"
@@ -279,6 +279,12 @@ def generate_dru(
         f"  (condition \"A.Via_Type != 'Micro'\")\n"
         f"  (constraint annular_width (min {rules.min_annular_ring_mm}mm)))"
     )
+    if rules.min_pth_annular_ring_mm is not None:
+        lines.append(
+            f'(rule "PTH Annular Ring{label_suffix}"\n'
+            f"  (condition \"A.Type == 'pad'\")\n"
+            f"  (constraint annular_width (min {rules.min_pth_annular_ring_mm}mm)))"
+        )
 
     # --- Copper to Edge ---
     lines.append(
@@ -289,8 +295,8 @@ def generate_dru(
     # --- Hole to Edge ---
     lines.append(
         f'(rule "Hole to Edge{label_suffix}"\n'
-        f"  (condition \"A.Type == 'via' || A.Type == 'pad'\")\n"
-        f"  (constraint hole_clearance (min {rules.min_hole_to_edge_mm}mm)))"
+        f"  (condition \"(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'\")\n"
+        f"  (constraint physical_hole_clearance (min {rules.min_hole_to_edge_mm}mm)))"
     )
 
     # --- Silkscreen Width ---
@@ -307,17 +313,12 @@ def generate_dru(
         f"  (constraint text_height (min {rules.min_silkscreen_height_mm}mm)))"
     )
 
-    # --- Solder Mask Clearance ---
-    lines.append(
-        f'(rule "Solder Mask Clearance{label_suffix}"\n'
-        f"  (constraint solder_mask_margin (min {rules.min_solder_mask_clearance_mm}mm)))"
-    )
+    # KiCad does not support a solder_mask_margin custom constraint. Emitting
+    # it makes KiCad 10 silently discard all custom rules (#4999). The Python
+    # solder-mask checker continues to enforce explicit pad mask margins.
 
-    # --- Solder Mask Dam (bridge) ---
-    lines.append(
-        f'(rule "Solder Mask Dam{label_suffix}"\n'
-        f"  (constraint physical_hole_clearance (min {rules.min_solder_mask_dam_mm}mm)))"
-    )
+    # A numeric solder-mask web floor also has no custom-rule equivalent.
+    # physical_hole_clearance measures holes to objects, not mask openings.
 
     # --- Ampacity-derived net-scoped minimum trace widths (#4216) ---
     #

@@ -4313,6 +4313,74 @@ in neither, either, or both cooldowns simultaneously, and clearing/setting
 one never touches the other. No config knob: this is a per-issue, not
 per-workspace, declaration, and lives entirely in the issue body.
 
+**Host-affinity constraint (#7456).** Every mechanism above bounds *when* the
+work finder re-tries an issue; none of them steer *which host* gets it — every
+dispatcher in a multi-host fleet competes for the same claim on equal terms.
+That gap is fine for ordinary work, but not for an issue whose toolchain lives
+on one machine only: `example-org/pcb-tool#9` needed `some-fdtd-solver` (an FDTD
+EM solver, provisioned on `loom-worker-2` only) and landed on a host without it 7
+times in one day (20+ overall) — each time the Builder correctly bailed with
+"wrong host, no changes made" and released the claim (recording a no-op
+cooldown, see "No-op re-dispatch cooldown (#6670)" above), but only *after*
+the work finder had already flipped `loom:issue` → `loom:building`, spawned a
+sweep, and burned a token draw from a pool that was the binding fleet
+constraint that day.
+
+An issue declares a host-affinity constraint via **either** (both are ORed
+together, any-of semantics):
+
+- A repeatable label, `loom:host:<host-id>` — visible/filterable in the forge
+  UI without opening the body; or
+- A repeatable body marker, `<!-- loom:requires-host=<host-id> -->` — anchored
+  the same `<!-- ... -->` way the capability marker
+  (`<!-- loom:capability=<name> -->`, `loom-daemon/src/capability.rs`) is,
+  but with an **open** value grammar (a host id is whatever
+  `sweep_registry::host_identity()` resolves to on some machine — an explicit
+  `$LOOM_HOST_ID`, or a `$HOSTNAME`/`hostname`-binary fallback that can be
+  mixed-case and dotted, e.g. `Roberts-MacBook-Pro.local` — not a closed list
+  this repo can enumerate).
+
+```
+<!-- loom:requires-host=loom-worker-2 -->
+```
+
+Declaring nothing at all — every issue that predates this feature — leaves the
+constraint empty, which matches every host: **zero behavior change**. A
+non-empty constraint is fail-closed: it matches **only** a host whose own
+identity is literally one of the declared values (exact, case-sensitive
+string match — no normalization rescues a near-miss).
+
+Two independent enforcement points, mirroring the AC1–AC3 split the issue
+asked for:
+
+1. **`work_finder`'s autonomous tick** (`loom_daemon::host_affinity`,
+   `WorkItem::host_constraint`) checks every ready-issue candidate against
+   `WorkDispatcher::current_host_id()` (which defaults to
+   `sweep_registry::host_identity()`) *before* any other skip/park logic —
+   before the in-flight/capacity gates, and without ever calling `dispatch()`.
+   A non-matching host logs one INFO line —
+   `work_finder: skipping issue #N — requires host X, this is Y` — increments
+   its own `host-constraint-skip` counter on the per-tick summary line, and
+   leaves behind **no** claim flip, no comment, and no cooldown/backoff
+   record: the candidate simply was not actionable on this host at all, so it
+   is never even attempted. A matching host dispatches exactly as it would an
+   unconstrained issue.
+2. **`loom-daemon dispatch <issue>`** (the explicit-operator path) fetches the
+   issue's current labels/body via one `gh issue view` call and refuses with a
+   clear message — naming both the required host(s) and the actual one — when
+   they do not match, unless `--ignore-host-constraint` is passed. This check
+   runs entirely client-side, before the IPC round-trip: the CLI process and
+   the daemon it talks to over a Unix socket always share one host identity,
+   so there is no wire-protocol field for this. A `gh` fetch failure (offline,
+   missing binary, transient forge hiccup) fails **open** — the actual command
+   being gated is the dispatch itself, and a `gh` outage must not silently
+   turn into "every explicit dispatch refused."
+
+The Builder-side "landed on the wrong host, no changes made" bail-out this
+feature exists to make rare is unchanged and stays the backstop for a
+mislabelled issue — this is a `work_finder`/`dispatch`-level *filter*, not a
+replacement for the sweep's own toolchain check.
+
 ### Host-distress circuit breaker (#4235)
 
 The insta-crash quarantine above protects the shared **queue** from one broken
@@ -5178,6 +5246,93 @@ superset recovery path that reports zero errors when the loop already cleaned
 up. The first tick after daemon startup is deliberately skipped so in-flight
 sweeps can re-establish their `.loom-in-use` markers first. See
 `loom-daemon/src/worktree_reaper.rs`.
+
+#### Docker image retention (#7332)
+
+**The leak this doesn't share with `target/`.** The session-container CI/smoke
+flows (`.github/workflows/ci.yml`'s `worker-image-smoke` / `session-image-smoke`
+jobs, plus fleet-side `audit-smoke`/`audit-test` automation outside this repo)
+build and tag `loom-worker`/`loom-worker-session` images under a **fixed** tag
+on every run. Docker re-points that tag at the new image each time and leaves
+the *previous* image dangling (untagged, unreferenced by any name) — nothing
+in-tree ever removed it. A host running these flows daily measured **26.9GB
+across 25 images with only 2 active** before this pass existed, none of it
+visible to workspace-level disk accounting (it lives in root-owned
+`/var/lib/docker`, invisible to `du` under the unprivileged fleet user — only
+`docker system df` reveals it).
+
+**What it does.** At the end of each reaper tick, right after the deep-clean
+pass above, the daemon lists every local Docker image (grouping every alias tag
+— e.g. a local `loom-worker:ci-smoke` and its `ghcr.io/...` mirror of the same
+digest — into one unit) and:
+
+1. Removes every **dangling** image (no tag points at it) outright — always
+   safe, since nothing can be "using" an unreferenced image by name.
+2. For each **tracked** repository (default: `loom-worker`,
+   `loom-worker-session`, and their `ghcr.io/rjwalters/...` aliases), keeps
+   only the `keepLastN` (default 2) most-recently-built tagged images and
+   removes the rest **by image ID**, so every alias tag riding on that ID goes
+   with it in one `docker rmi` call.
+
+Unlike the deep-clean pass, this one is **not** disk-pressure-gated — image
+accumulation is independent of `target/` regrowth, and dangling-image removal
+is inherently safe to run on every tick (the same guarantee `docker image
+prune` gives). A `minIntervalSecs` cooldown (default 30 min, **host-wide**, not
+per-repo) still exists, purely to avoid re-shelling to `docker` once per
+registered repo on the same tick.
+
+**Long-lived base images are exempt.** A configurable `allowlist` of
+repository-name substrings (e.g. `"eda"` for a shared multi-GB EDA toolchain
+image) is checked before either removal rule — an allowlisted image is skipped
+outright, whether or not it is dangling or in a tracked repository.
+
+**Safety.** Mirrors the deep-clean pass's build-slot gate: removal holds the
+machine-wide build slot for its duration, so an in-progress `docker build` (or
+target/-artifact deep clean) is never targeted mid-build; if the slot cannot be
+taken, the pass defers to the next tick. `docker rmi` itself additionally
+refuses to remove an image backing a running container — a soft per-image
+failure, not fatal to the rest of the pass.
+
+**Not the `ci.yml` GitHub Actions jobs.** `worker-image-smoke` and
+`session-image-smoke` both run on GitHub-hosted (`ubuntu-latest`) ephemeral
+runners — the runner, and therefore any image it built, is destroyed when the
+job ends, so there is nothing to retain there. The accumulation this pass
+addresses comes from **persistent fleet hosts** running the session-container
+flows outside GitHub-hosted CI (see `docker/worker/README.md` and
+`docker/session/`).
+
+```json
+{
+  "autonomous": {
+    "dockerImageRetention": {
+      "enabled": true,
+      "keepLastN": 2,
+      "minIntervalSecs": 1800,
+      "trackedRepos": ["loom-worker", "loom-worker-session"],
+      "allowlist": ["eda"]
+    }
+  }
+}
+```
+
+| Env var | Config key | Precedence | Default |
+|---------|-----------|------------|---------|
+| `LOOM_DOCKER_IMAGE_RETENTION` | `autonomous.dockerImageRetention.enabled` | env > config > default | `true` (on) |
+| `LOOM_DOCKER_IMAGE_RETENTION_KEEP_N` | `autonomous.dockerImageRetention.keepLastN` | env > config > default | `2` |
+| `LOOM_DOCKER_IMAGE_RETENTION_MIN_INTERVAL_SECS` | `autonomous.dockerImageRetention.minIntervalSecs` | env > config > default | `1800` (30 min) |
+| — | `autonomous.dockerImageRetention.trackedRepos` | config > default | `loom-worker`, `loom-worker-session`, and their `ghcr.io/rjwalters/...` aliases |
+| — | `autonomous.dockerImageRetention.allowlist` | config > default | `[]` (empty — a shared long-lived image must be opted in explicitly) |
+
+**Expected steady-state footprint.** On a container-enabled host running these
+flows regularly, steady state is: the `keepLastN` newest images per tracked
+repository (default 2 × however many tracked repos are actually built on that
+host), zero dangling images, plus whatever explicitly allowlisted long-lived
+base images the host hosts. A `docker system df` climbing past that bound on a
+host with this pass enabled (and `docker` reachable) is a signal worth
+investigating, not an expected baseline. `docker` being unreachable (not
+installed, permission error) is treated as "unknown", never "zero images" —
+the pass skips rather than guesses. See
+`loom-daemon/src/docker_image_clean.rs`.
 
 #### `pr-<N>` worktrees are reaped too (#5939)
 
@@ -6818,6 +6973,92 @@ without an Aqua session, not regressions introduced here.
   bootstrap is (so the #3972 failure mode does not reproduce there — the systemd
   path is about reboot survival + supervised restart, not that incident).
 
+### Agent-session isolation on the start path (#6568)
+
+**Incident (2026-08-17, found 2026-08-19).** A daemon-dispatched sweep working
+issue #6388 out of a `/tmp/pr6416-checkout` checkout invoked
+`loom-daemon-start.sh` to exercise the start path. On **both** operator Macs it
+overwrote `~/Library/LaunchAgents/com.rjwalters.loom-daemon.plist` — the REAL
+production LaunchAgent — with a plist rendered from the sweep's own environment.
+Nothing complained; both production daemons ran under a test's configuration for
+two days. What production inherited:
+
+- `WorkingDirectory` / `StandardOutPath` / `StandardErrorPath` / `LOOM_WORKSPACE`
+  pointed at `/tmp/pr6416-checkout`;
+- session-scoped keys baked into `EnvironmentVariables`:
+  `LOOM_SWEEP_CLAIM_OWNED=6388`, `LOOM_TERMINAL_ID=daemon-sweep-issue-6388-…`,
+  `LOOM_ROLE=sweep-lifecycle`, `LOOM_RUNTIME=claude`;
+- watchdog/socket/pid paths under a `mktemp` dir — **wiped on reboot**, so the
+  watchdog's recovery state and the pid file silently vanished at the next
+  restart (one Mac showed 5 daemon restarts the following day);
+- `LOOM_ROLE_RUNNER_INTERVAL_SECS=900` on one Mac — an env-tier override that
+  beats every config tier, halving the fleet's configured 1800s role cadence
+  through a token-pool trough.
+
+**Root cause — two independent properties, either of which alone is enough.**
+
+1. `resolve_launchd_label()` returns the fixed production label
+   `com.rjwalters.loom-daemon` whenever `LOOM_LAUNCHD_LABEL` is unset, so an
+   invocation that *forgets* the override does not get a neutral sandbox — it
+   **replaces the production job**. (The systemd tier has the same shape with
+   `LOOM_SYSTEMD_UNIT` / `loom-daemon.service`.)
+2. `render_launchd_plist` / `render_systemd_unit` harvest **every** exported
+   `LOOM_*` var into the durable env block. That is correct for an operator
+   shell and catastrophic for an agent session, whose environment is
+   per-invocation by construction.
+
+**Fix — two defenses, because either property alone reproduces part of it.**
+
+- **Env strip (always on, no opt-out).** `is_session_scoped_env_key()` drops
+  `LOOM_SWEEP_*`, `LOOM_TERMINAL_ID`, `LOOM_ROLE` and `LOOM_RUNTIME` from every
+  rendered plist/unit — including for an operator invocation that merely happens
+  to have them exported (a `loom start` typed inside a Claude Code session
+  inherits all four). The same filter is applied to the **#5344 carry-forward
+  merge**, so an already-poisoned installed plist cannot re-inject them on the
+  next re-render; the purge is reported, not silent.
+- **Session-context refusal.** `guard_session_context_start()` REFUSES a real
+  start (exit 1) when the invoking shell exports any of
+  `LOOM_SWEEP_*` / `LOOM_TERMINAL_ID` / `LOOM_ROLE` **and** the invocation would
+  write the **default** supervisor identity. Two explicit exemptions:
+  scope the identity (`LOOM_LAUNCHD_LABEL=…` / `LOOM_SYSTEMD_UNIT=…` — what
+  every test in this repo already does), or acknowledge a deliberate production
+  start with `LOOM_ALLOW_SESSION_DAEMON_START=1` (which still prints the
+  warning — it is loud, not silent).
+
+`LOOM_RUNTIME` is stripped but is deliberately **not** a detection signal: it is
+a plausible personal default for an operator to export, and a refusal keyed on it
+would block legitimate `loom start` runs.
+
+**Automated restart paths are unaffected.** The host watchdog and the daemon's
+own self-update relaunch both re-enter `loom-daemon-start.sh` from a
+supervisor-provided environment (the plist/unit env), which carries no session
+keys — and the watchdog plist additionally bakes in an explicit
+`LOOM_LAUNCHD_LABEL`, so it is exempt twice over. The path that *is* newly gated
+is an **agent** running `loom start` / `loom update` by hand on a fleet host:
+that is the same act as the incident, and it now has to say so explicitly with
+`LOOM_ALLOW_SESSION_DAEMON_START=1`.
+
+**`--print-plist` / `--print-unit` are never refused.** They warn instead —
+stdout is still the rendered plist/unit and the exit code is still 0 — exactly
+like `warn_autonomy_downgrade`'s read-only preview split. Refusing a preview
+would make it impossible to inspect what a real start would do. The nohup
+fallback tier is also untouched: it renders no plist/unit, so it has no durable
+config to poison.
+
+**Scratch-workdir drift warning.** A start whose resolved `WorkingDirectory` or
+`LOOM_WORKSPACE` lands under `$TMPDIR`, `/tmp`, `/var/folders`, a `*-checkout`
+path, or a `.loom/worktrees/` root now warns loudly at start/render time. It is
+**advisory only** — it never blocks, because the repo's own hermetic test suites
+deliberately run scratch-rooted daemons — but it means an operator sees the
+condition in the start output instead of discovering it two days later.
+
+Regression coverage: the render/preview side in
+`defaults/scripts/tests/test-loom-daemon-launchd-plist.sh` (cases 21–25), the
+real-install side in `defaults/scripts/tests/test-loom-daemon-start.sh` (the
+"SI." section), including the control cases that prove the strip is targeted and
+the refusal is keyed on session context rather than on the default identity
+alone.
+
 ### systemd user unit (Linux, #4268)
 
 On a systemd Linux host, `loom-daemon-start.sh` installs a `systemd --user`
@@ -7012,6 +7253,36 @@ Assistant or openssl + `security import`, including the OpenSSL 3 PKCS12
 `-legacy` quirk and the `-T /usr/bin/codesign` trust-anchor requirement for
 unattended signing) and why grants should target the daemon identity, not
 Terminal: [`macos-tcc-codesign.md`](macos-tcc-codesign.md).
+
+**AppleEvents / Automation attribution (#6366).** A TCC prompt reading
+*"loom-daemon" wants access to control "System Events"* (or any other app)
+follows the **exact same responsible-process mechanism** as the
+folder-access prompts described above — it does **not** mean the daemon
+itself sent an AppleEvent. `git grep -n osascript` against the daemon core
+(`loom-daemon/src`), `defaults/`, and the installed `.loom/` surfaces
+returns zero hits: nothing in the daemon or its shipped scripts drives GUI
+automation. What actually happens is that every sweep/role child is a
+launchd descendant of the daemon, and macOS attributes a **child's**
+AppleEvent request to the **daemon**, the responsible process at the top of
+that process tree — so an agent that improvises `osascript -e 'tell
+application "System Events" to …'` (or any `osascript`/`tell application`
+invocation, e.g. opening a Terminal window or faking a keystroke) surfaces
+the prompt in the operator's face labeled `loom-daemon`, even though the
+daemon core never touched Automation itself.
+
+Sweeps are headless by design ("No TTY available, running claude directly")
+and have no legitimate need for GUI automation, so **the correct fix is to
+deny it at the spawn layer, not to grant the prompt.** `defaults/.claude/settings.json`
+(the repo-default permission set every installed `.claude/settings.json`
+inherits, consumed by every `spawn-claude.sh`-launched session) ships a
+`permissions.deny` block covering `osascript`, `tell application`, and
+`"System Events"` invocations — a sweep child that attempts one now gets a
+clean tool-denial in its own log instead of a host-level TCC dialog.
+**If you see this prompt: click Deny, then find the sweep** (same "what to
+click" discipline as the folder-access prompts above) — a genuine need for
+`osascript` from a headless agent almost always indicates an improvised
+workaround rather than an intended capability, and the deny above should
+already have caught it before the prompt fires.
 
 ### Supervised restart primitive (#4054)
 
@@ -7794,7 +8065,12 @@ Each tick (surfaced in `loom-daemon status` — human and `--json` — as
    daemon. It **never** runs `git pull`.
 3. **Settle window** — waits `settleSecs` after first observing a stale commit,
    resetting on every further commit, so a burst of daemon merges collapses into
-   a single roll.
+   a single roll. **Bounded (Issue #6261)**: `SETTLE_CEILING_MULTIPLIER` (6) `×
+   settleSecs`, measured from the FIRST stale observation in the streak — not
+   reset by later commits — is a hard ceiling on how long repeated resets can
+   defer the first attempt, so a source checkout that advances faster than
+   `settleSecs` apart (a busy merge day) still converges within a bounded worst
+   case instead of never settling.
 4. **Build-stampede gate (bounded, #4929)** — defers the rebuild while
    `ipc::count_in_flight_sweeps` reports any non-terminal sweep across every
    managed root (a `cargo build --release` competes with in-flight sweep builds
@@ -7806,8 +8082,44 @@ Each tick (surfaced in `loom-daemon status` — human and `--json` — as
    build yields CPU to the running sweeps; the roll then proceeds through the
    same drain path below (and if that drain is refused or times out, the fresh
    binary is still provisioned for the next supervised restart). The clock
-   re-arms on any zero-in-flight check, a new source commit, or a completed
-   rebuild, so short busy bursts never reach the deadline.
+   re-arms on any zero-in-flight check or a completed rebuild — **not** on a new
+   source commit landing mid-defer (fixed by Issue #6261; pre-fix, a host busy
+   continuously across many merges never accumulated toward `deferDeadlineSecs`
+   at all, because every new commit silently restarted the clock from zero).
+
+**2026-08-14 incident (Issue #6261) — diagnosis and fix.** An urgent one-line
+daemon fix (#6250) merged and then sat undelivered for a full day across 20+
+further merges, with `auto_update` enabled the whole time. Two compounding
+gaps, both closed by #6261:
+- **The gate-reset bugs above** — the settle window's quiet-period timer and
+  gate 4's continuous-busy timer BOTH reset on every new commit landing, not
+  just (respectively) on catching up / going idle. A source checkout advancing
+  faster than `settleSecs` apart could defer "settled" indefinitely, and a host
+  busy continuously while commits kept landing never accumulated toward
+  `deferDeadlineSecs`. Both now have a reset-proof anchor (`first_stale_since`
+  for the settle ceiling; `deferred_since` no longer resets on a commit change)
+  so they still converge within a bounded worst case.
+- **No proactive signal.** Every tick's decision was published only to
+  `daemon status`'s latest-tick `note` field (overwritten every tick) and
+  otherwise unlogged for a `Skip` — so a day-long stall left zero trace in the
+  daemon's own log unless someone happened to run `daemon status` at exactly
+  the right moment. Every tick's decision (skip reason or rebuild) is now
+  logged (`log::info!`/`log::warn!`/`log::error!`, `auto_update: …`), and a
+  **staleness surface** (below) proactively warns once the magnitude crosses a
+  threshold, independent of what that tick's gates decide.
+
+**Staleness surface (`self_update::SelfUpdateStatus`, Issue #6261).** Beyond
+the boolean `update_available` hint, `loom-daemon status` (both the
+`Self-update:` text line and the `self_update` JSON block — this is the
+CLIENT-side, `self_update::check()` read, so it is populated **regardless** of
+whether the `auto_update` loop itself is enabled) now reports HOW stale:
+`commits_behind` (`git rev-list --count built..source`) and `hours_behind`
+(whole hours since the OLDEST unbuilt commit landed). Once either crosses a
+warn threshold — env-overridable via `LOOM_SELF_UPDATE_STALE_WARN_COMMITS` /
+`LOOM_SELF_UPDATE_STALE_WARN_HOURS`, default 10 commits / 12 hours — a
+`WARNING:` line prints in text mode and `self_update.staleness_warning` is
+non-null in `--json`; the `auto_update` loop (when enabled) also logs the
+same warning every tick it is active, independent of `decide()`'s gates.
 5. **Roll via drain, not a bare restart** — on a clean rebuild it triggers
    `ipc::handle_drain_request` (#4090), so in-flight sweeps finish first and
    survive in the registry rather than being orphaned as bare processes. The

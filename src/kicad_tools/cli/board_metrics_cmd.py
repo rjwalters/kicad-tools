@@ -13,6 +13,7 @@ artifacts that already exist under a board's ``output/manufacturing/`` directory
 * ``bom_jlcpcb.csv`` -> fallback part count (row count minus header).
 * ``kicad_project.zip`` -> downloadable manufacturing package path.
 * ``../renders/*.png`` -> render image paths (written by ``kct render``, #3675).
+* ``../readiness.json`` -> current hash-bound manufacturing readiness.
 * ``../lvs.json``    -> Layout-vs-Schematic verification (#3748, #3749);
                         sourced from ``output/lvs.json`` (NOT under
                         ``manufacturing/``).
@@ -89,6 +90,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .board_readiness import read_readiness
 from .format_options import FORMAT_JSON, add_format_flag, emit_json
 
 logger = logging.getLogger(__name__)
@@ -126,13 +128,14 @@ _COST_BATCH_TOTAL_RE = re.compile(r"Batch Total \(estimated\)\D*~([\d.]+)\s*USD"
 _TITLE_RE = re.compile(r'^title:\s*"?([^"\n]+)"?\s*$', re.MULTILINE)
 
 
-def _parse_report_md(text: str, slug: str) -> dict:
+def _parse_report_md(text: str, slug: str, current_metrics: dict | None = None) -> dict:
     """Parse the machine-generated ``report.md`` into a partial metrics dict.
 
     Each field is parsed independently; a miss logs a warning (naming the slug
     and field) and is omitted rather than raising.
     """
     out: dict = {}
+    current_metrics = current_metrics or {}
 
     m = _LAYERS_RE.search(text)
     if m:
@@ -156,13 +159,17 @@ def _parse_report_md(text: str, slug: str) -> dict:
         logger.warning("board %s: could not parse part_count from report.md", slug)
 
     m = _NETS_ROUTED_RE.search(text)
-    if m:
+    if "nets_routed_pct" in current_metrics:
+        out["nets_routed_pct"] = current_metrics["nets_routed_pct"]
+    elif m:
         out["nets_routed_pct"] = float(m.group(1))
     else:
         logger.warning("board %s: could not parse nets_routed_pct from report.md", slug)
 
     m = _DRC_ERRORS_RE.search(text)
-    if m:
+    if "drc_violations" in current_metrics:
+        out["drc_violations"] = current_metrics["drc_violations"]
+    elif m:
         out["drc_violations"] = int(m.group(1))
     else:
         logger.warning("board %s: could not parse drc_violations from report.md", slug)
@@ -322,6 +329,7 @@ def extract_board_metrics(board_dir: Path) -> dict:
 
     output_dir = board_dir / "output"
     mfg_dir = output_dir / "manufacturing"
+    metrics["readiness"] = read_readiness(board_dir)
 
     if not mfg_dir.is_dir():
         # No manufacturing artifacts at all — identity-only board.json.
@@ -330,15 +338,19 @@ def extract_board_metrics(board_dir: Path) -> dict:
         _attach_render_paths(metrics, output_dir)
         return metrics
 
-    report_parsed = False
+    current = (
+        metrics["readiness"].get("metrics", {})
+        if metrics["readiness"]["status"] in {"ready", "blocked"}
+        else {}
+    )
 
-    # report.md is the primary metrics source.
+    # Markdown supplies descriptive/export metadata; current structured evidence
+    # supplies checked metrics independently of report formatting.
     report_path = mfg_dir / "report.md"
     if report_path.is_file():
         try:
             text = report_path.read_text()
-            metrics.update(_parse_report_md(text, slug))
-            report_parsed = True
+            metrics.update(_parse_report_md(text, slug, current))
         except OSError as exc:
             logger.warning("board %s: could not read report.md (%s)", slug, exc)
     else:
@@ -369,22 +381,21 @@ def extract_board_metrics(board_dir: Path) -> dict:
 
     _attach_render_paths(metrics, output_dir)
 
-    # `status == "ok"` asserts the board is manufacturable, so it MUST require
-    # zero DRC violations. A board that routed (report parsed) but still has
-    # DRC errors is downgraded to "partial" — the gallery treats "ok" as the
-    # "Ready" badge, which must never appear over a violating board (#3717).
-    #
-    # An *explicit* LVS mismatch (`lvs_clean == False`) is also a downgrade:
-    # the schematic and PCB disagree, so the board will not function as
-    # designed even if it DRC-cleans (#3749). A *missing* lvs.json does NOT
-    # downgrade — boards without an LVS step yet keep their existing status,
-    # and the site layer enforces the stricter "Ready requires lvs_clean ===
-    # true" gate via the "LVS not run" (`unverified`) display variant.
-    lvs_dirty = metrics.get("lvs_clean") is False
-    if not report_parsed or metrics.get("drc_violations", 0) > 0 or lvs_dirty:
-        metrics["status"] = "partial"
-    else:
-        metrics["status"] = "ok"
+    # Fresh readiness may carry newer measurements than the saved export report.
+    if metrics["readiness"]["status"] in {"ready", "blocked"}:
+        for name in ("drc_violations", "nets_routed_pct", "lvs_clean", "lvs_mismatches"):
+            if name in current:
+                metrics[name] = current[name]
+
+    # A complete current verdict does not depend on a Markdown heading/table
+    # or a cached board.json status. Missing or conflicting evidence stays partial.
+    metrics["status"] = (
+        "ok"
+        if metrics["readiness"]["status"] == "ready"
+        and metrics.get("drc_violations") == 0
+        and metrics.get("lvs_clean") is True
+        else "partial"
+    )
     return metrics
 
 

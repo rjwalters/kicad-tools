@@ -519,7 +519,7 @@ class TestRunStitch:
 
         assert len(result.vias_added) > 0
         for via in result.vias_added:
-            assert via.layers == ("F.Cu", "In1.Cu")
+            assert via.layers == ("F.Cu", "B.Cu")
 
 
 class TestPadToViaTraces:
@@ -1305,10 +1305,10 @@ class TestZoneAutoDetection:
         assert result.detected_layers["GND"] == "In1.Cu"
         assert len(result.fallback_nets) == 0
 
-        # Vias should target In1.Cu
+        # Through barrels cross the detected inner plane and reach both surfaces
         assert len(result.vias_added) > 0
         for via in result.vias_added:
-            assert via.layers[1] == "In1.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
     def test_auto_detect_multiple_nets(self, stitch_zone_pcb: Path):
         """Should auto-detect target layers for multiple nets with zones."""
@@ -1329,9 +1329,9 @@ class TestZoneAutoDetection:
         v33_vias = [v for v in result.vias_added if v.pad.net_name == "+3.3V"]
 
         for via in gnd_vias:
-            assert via.layers[1] == "In1.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
         for via in v33_vias:
-            assert via.layers[1] == "In2.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
     def test_no_zone_infers_inner_layer_for_power_net(self, stitch_zone_pcb: Path):
         """Should infer inner layer from stackup when no zone found for net on 4-layer board."""
@@ -1348,10 +1348,10 @@ class TestZoneAutoDetection:
         assert "VCC" in result.stackup_inferred_nets
         assert len(result.fallback_nets) == 0
 
-        # VCC vias should target In2.Cu
+        # VCC through vias must cross the In2.Cu contact target
         vcc_vias = [v for v in result.vias_added if v.pad.net_name == "VCC"]
         for via in vcc_vias:
-            assert via.layers[1] == "In2.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
     def test_mixed_zone_and_no_zone_nets(self, stitch_zone_pcb: Path):
         """Should handle mix of nets with zones and nets inferred from stackup."""
@@ -1375,9 +1375,9 @@ class TestZoneAutoDetection:
         vcc_vias = [v for v in result.vias_added if v.pad.net_name == "VCC"]
 
         for via in gnd_vias:
-            assert via.layers[1] == "In1.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
         for via in vcc_vias:
-            assert via.layers[1] == "In2.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
     def test_explicit_target_overrides_zone(self, stitch_zone_pcb: Path):
         """Explicit target layer should override zone auto-detection."""
@@ -1392,9 +1392,9 @@ class TestZoneAutoDetection:
         assert len(result.detected_layers) == 0
         assert len(result.fallback_nets) == 0
 
-        # All vias should use the explicit layer
+        # The explicit plane remains the contact target, but barrels are through
         for via in result.vias_added:
-            assert via.layers[1] == "In2.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
     def test_no_zone_infers_inner_layer_on_4layer_board(self, stitch_test_pcb: Path):
         """4-layer PCB without zones should infer inner layer from stackup."""
@@ -1411,9 +1411,9 @@ class TestZoneAutoDetection:
         assert "GND" in result.stackup_inferred_nets
         assert len(result.fallback_nets) == 0
 
-        # Vias should target In1.Cu
+        # Through barrels cross the detected inner plane and reach both surfaces
         for via in result.vias_added:
-            assert via.layers[1] == "In1.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
 
 class TestCLIOutputWithZones:
@@ -1634,9 +1634,9 @@ class TestStackupAwareFallback:
         v33_vias = [v for v in result.vias_added if v.pad.net_name == "+3.3V"]
 
         for via in gnd_vias:
-            assert via.layers[1] == "In1.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
         for via in v33_vias:
-            assert via.layers[1] == "In2.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
     def test_inner_zone_not_overridden(self, stitch_zone_pcb: Path):
         """Zones on inner layers should be used directly, not overridden by stackup."""
@@ -8260,3 +8260,30 @@ class TestBlanketFillContainmentGate:
         )
         # Outline spans x 100-130; grid should reach beyond x=115 (no fill gate).
         assert any(v.via_x > 115 for v in result.vias_added)
+
+
+@pytest.mark.parametrize("surface,target", [("F.Cu", "In1.Cu"), ("B.Cu", "In2.Cu")])
+def test_standard_via_serialization_crosses_full_stack(surface, target):
+    """An inner-plane target must not silently request a blind drill span."""
+    from kicad_tools.cli.stitch_cmd import add_via_to_pcb
+    from kicad_tools.sexp import SExp
+
+    pad = PadInfo("C1", "1", 1, "GND", 10, 10, surface, 0.9, 0.95)
+    placement = ViaPlacement(pad, 11, 10, 0.45, 0.2, (surface, target))
+    pcb = SExp("kicad_pcb")
+    add_via_to_pcb(pcb, placement)
+    assert placement.layers == ("F.Cu", "B.Cu")
+    assert pcb.get("via").get("layers").get_atoms() == ["F.Cu", "B.Cu"]
+
+
+def test_explicit_micro_via_preserves_adjacent_span():
+    """Through-via normalization must not turn an HDI micro-via into a PTH."""
+    from kicad_tools.cli.stitch_cmd import add_via_to_pcb
+    from kicad_tools.sexp import SExp
+
+    pad = PadInfo("U1", "1", 1, "GND", 10, 10, "F.Cu", 0.2, 0.2)
+    placement = ViaPlacement(pad, 10, 10, 0.2, 0.1, ("F.Cu", "In1.Cu"), "micro")
+    pcb = SExp("kicad_pcb")
+    add_via_to_pcb(pcb, placement)
+    assert pcb.get("via").get("layers").get_atoms() == ["F.Cu", "In1.Cu"]
+    assert "micro" in pcb.get("via").get_atoms()

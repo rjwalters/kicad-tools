@@ -7,6 +7,8 @@
  *
  * Design notes (see `docs/board-json-schema.md` and issue #3679):
  *   - Runs at build time only (Node `fs`). Not bundled into client output.
+ *   - Revalidates readiness.json content hashes, overriding saved readiness
+ *     and current metrics even when board.json predates the latest checks.
  *   - Resilient to missing files: NO `board.json` files exist on a fresh
  *     checkout — they are generated at runtime via `kct board-metrics --all`.
  *     A board directory with no `board.json` yields a stub record with
@@ -25,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import { SCHEMA_VERSION } from "./types.ts";
 import type { Board, BoardCategory, BoardStatus } from "./types.ts";
 import { EXCLUDED_SLUGS } from "./galleryConfig.mjs";
+import { loadReadiness } from "./readiness.ts";
 
 /** True if a discovered board path lives under `boards/external/`. */
 function categoryForPath(boardPath: string): BoardCategory {
@@ -188,6 +191,20 @@ export function loadBoard(boardPath: string): Board {
   if (!board) return makeStub(slug, category);
   // `category` is loader-assigned (not part of board.json); always set it.
   board.category = category;
+  // Always revalidate the current report: board.json itself may be months old.
+  board.readiness = loadReadiness(boardPath);
+  if (["ready", "blocked"].includes(board.readiness.status)) {
+    const current = board.readiness.metrics;
+    if (current?.drc_violations !== undefined) board.drc_violations = current.drc_violations;
+    if (current?.nets_routed_pct !== undefined) board.nets_routed_pct = current.nets_routed_pct;
+    if (current?.lvs_clean !== undefined) board.lvs_clean = current.lvs_clean;
+    if (current?.lvs_mismatches !== undefined) board.lvs_mismatches = current.lvs_mismatches;
+  }
+  // The saved status describes an earlier export; a current complete verdict
+  // must also refresh it, or old "partial" records incorrectly hide Ready.
+  if (board.readiness.status === "ready" && board.drc_violations === 0 && board.lvs_clean === true) {
+    board.status = "ok";
+  }
   return board;
 }
 

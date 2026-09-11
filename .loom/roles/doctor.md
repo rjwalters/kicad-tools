@@ -564,7 +564,13 @@ if [ "$PRIORITY_1" -eq 0 ] && [ "$PRIORITY_2" -eq 0 ]; then
       # VERSION/the files that WERE part of the conflict resolution --
       # invisible until CI's "Installer Integration Tests" fails. Run the
       # same gate create-pr.sh uses (#6730) here too, since this path pushes
-      # directly and never goes through create-pr.sh.
+      # directly and never goes through create-pr.sh. If the gate's Fix: line
+      # tells you to run `./scripts/version.sh bump patch`, that command only
+      # rewrites the files on disk -- it does NOT commit them (#7417; the
+      # commit only happens inside `--tag`) -- so `git add` the printed files
+      # and `git commit` before re-running the gate and pushing. The gate
+      # itself now also fails outright if a version-bearing file is bumped
+      # but left uncommitted.
       if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
         echo "Aborting: version-bearing files are out of sync after rebase (see BLOCKER:/Fix: above)." >&2
         exit 1
@@ -918,6 +924,32 @@ git fetch origin && git log --oneline "$CLAIM_HEAD_SHA..origin/$(git branch --sh
 | Your work and theirs overlap partially | Keep only the parts still needed, rebase, re-run local checks, then push with `--force-with-lease`. |
 | You cannot tell | Prefer standing down and commenting — a duplicate fix costs more than a deferred one. |
 
+**If you rebase in either of the two "then push" rows above, gate the push the
+same way the merge-conflict recipes do** (#7168, extended #7341). Rebasing onto
+a moved head silently absorbs whatever version-bearing values that head already
+carried, and `.loom/install-metadata.json` never raises a git conflict (your
+branch's own commits never touched it) — so it can drift stale relative to
+`VERSION` and the files that *were* rewritten, invisible until CI's "Installer
+Integration Tests" fails:
+
+```bash
+# Run in the worktree, after `git rebase`, BEFORE `git push --force-with-lease`.
+if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+  echo "Aborting: version-bearing files are out of sync after rebase (see BLOCKER:/Fix: above)." >&2
+  exit 1
+fi
+git push --force-with-lease
+```
+
+**Never hand-patch VERSION/CLAUDE.md/`Cargo.toml`/… to "re-add a bump the rebase
+dropped"** — run the `./scripts/version.sh` command the gate prints. A hand-rolled
+bump reproduces `bef3e07a` (#7341): all 8 core files patched, `.loom/install-metadata.json`
+missed, CI red. **That command (`bump patch`/`bump minor`/`bump major`) only
+rewrites the files on disk — it does NOT commit them** (#7417; only `--tag`
+commits) — `git add` the files it changed and `git commit` before re-running
+the gate and pushing. The gate itself also fails outright if it finds a
+version-bearing file bumped but left uncommitted.
+
 **Standing down** (a concurrent fix already landed):
 
 ```bash
@@ -1095,13 +1127,38 @@ This is the Doctor-side counterpart of the orchestrator guardrail in `sweep.md` 
 1. **You have made the fix and pushed it: hand back to Judge instead of waiting.** This is the correct default. Verifying the final CI verdict is **Judge's** gate — complete the `loom:changes-requested` → `loom:review-requested` transition, state in your PR comment that CI was still running at hand-off, and finish your turn. A later Judge pass re-evaluates once CI settles.
 2. **Single-PR / manual invocation where a settled result is expected before your turn ends: block-poll in the foreground.** Loop **inside this same turn** — `gh pr checks`, `sleep`, repeat — until the checks resolve or you hit an explicit, bounded cap. This is an ordinary shell loop that runs to completion and returns control to you before you write your final message; nothing about it depends on a future turn.
 
+**Empty `gh pr checks` output is NOT proof CI has settled.** `gh pr checks` is
+GraphQL-backed and can return completely empty output (zero rows) during a
+transient forge failure (e.g. an intermittent TLS handshake error) — a state
+indistinguishable from "nothing pending" if your loop condition only greps the
+output for the word "pending" (#6169: a Judge poller on kicad-tools PR #4792
+declared CI "settled" 6 minutes into a ~40-minute run this way). Guard against
+it by asserting a minimum row count before trusting an absence of "pending":
+
 ```bash
 # Foreground block-poll after `git push` — bounded, in-turn, no watcher.
 # MAX_WAIT caps the total wait; never loop unboundedly (see "Time budget" above).
+# ci_still_pending: true (pending) if any row shows pending/queued/in_progress.
+# A ZERO-ROW read is retried once before being trusted — on a real forge blip
+# the retry almost always returns real rows; only a read that is STILL empty
+# after the retry is treated as "genuinely no checks reported" (not pending).
+ci_still_pending() {
+  local pr="$1" out rows
+  out="$(gh pr checks "$pr" 2>/dev/null)"
+  rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+  if [[ "$rows" -eq 0 ]]; then
+    sleep 3
+    out="$(gh pr checks "$pr" 2>/dev/null)"
+    rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+    [[ "$rows" -eq 0 ]] && return 1   # confirmed empty on retry -- not pending
+  fi
+  printf '%s\n' "$out" | grep -qE "(pending|queued|in_progress)"
+}
+
 MAX_WAIT=1200   # 20 min cap — tune to the repo's typical CI duration
 INTERVAL=60
 ELAPSED=0
-while gh pr checks <PR_NUMBER> | grep -qE "(pending|queued|in_progress)"; do
+while ci_still_pending <PR_NUMBER>; do
   if [ "$ELAPSED" -ge "$MAX_WAIT" ]; then
     echo "CI still pending after ${MAX_WAIT}s — handing back to Judge unsettled."
     break
@@ -1406,7 +1463,12 @@ git rebase --continue
 # files that WERE part of the conflict resolution -- invisible until CI's
 # "Installer Integration Tests" fails. Run the same gate create-pr.sh uses
 # (#6730) here too, since this path pushes directly and never goes through
-# create-pr.sh.
+# create-pr.sh. If the gate's Fix: line tells you to run
+# `./scripts/version.sh bump patch`, that command only rewrites the files on
+# disk -- it does NOT commit them (#7417; only `--tag` commits) -- so
+# `git add` the printed files and `git commit` before re-running the gate
+# and pushing. The gate itself also fails outright if it finds a
+# version-bearing file bumped but left uncommitted.
 if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
   echo "Aborting: version-bearing files are out of sync after rebase (see BLOCKER:/Fix: above)." >&2
   exit 1

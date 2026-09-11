@@ -517,6 +517,191 @@ if [[ -f "$_sleep_inhibit_config_lib" ]]; then
     fi
 fi
 
+# --- Containerized dispatch mode (issue #7429, epic #6896 Phase 3) ---
+#
+# Config-selectable, initially OFF: `.loom/config.json` ->
+# `runtimes.containment.enabled` (env override `LOOM_SWEEP_CONTAINERIZED`,
+# standard env > config > default-off precedence). When enabled, this script
+# re-execs ITSELF inside a `docker run` of the configured image (default
+# ghcr.io/rjwalters/loom-worker:latest — override with
+# `LOOM_SWEEP_CONTAINER_IMAGE` or `runtimes.containment.image`), under the
+# path-parity mount contract (`docker/worker/MOUNT-CONTRACT.md`): the
+# resolved `$WORKSPACE` (repo root — covers the main checkout AND every
+# `.loom/worktrees/*` beneath it) is bind-mounted read-write at the
+# IDENTICAL absolute host path, never remapped, so a sweep running in a git
+# worktree builds and commits with no repo copy — git's absolute-path
+# worktree pointers (`.git` gitdir files, `commondir`, object-store refs)
+# resolve identically inside and outside the container (MOUNT-CONTRACT.md
+# §1's "load-bearing" rule).
+#
+# `LOOM_SPAWN_CONTAINERIZED=1` is the recursion guard: once re-exec'd inside
+# the container, this same block sees it already set and falls straight
+# through to the rest of this script unchanged. Every later section — CPU
+# quota (degrades to advisory-only, same as any host with no reachable
+# `systemd --user` manager), sleep-inhibit, and token selection — runs
+# AGAIN, this time *inside* the container, against the mount contract's
+# parity-mounted paths (the token pool read-only, the build cache
+# read-write) instead of being duplicated here. This is deliberate: it is
+# the existing token-rotation logic in THIS script that the mount contract's
+# secrets section (§2) says a worker container must use, not a
+# reimplementation of it. Niceness is the one exception: `LOOM_SWEEP_NICED`
+# (already exported on the host side, before this block runs) is forwarded
+# through the generic `LOOM_*` env passthrough below, so the recursed
+# invocation's own niceness re-exec sees its sentinel already set and
+# correctly skips re-niceing a process that is, from the HOST kernel's
+# perspective, still the same niced process tree.
+#
+# Restart-safety (issue #5119, ADR-0017 Decision 4, "The #5119 drain
+# interaction, specified"): a per-sweep container is its own cgroup, owned
+# by the container runtime (dockerd), not by loom-daemon's systemd unit or
+# by this script's own process tree. A hard-killed daemon (a plain
+# stop/restart on systemd, or any other non-drained teardown of the chain
+# that dispatched this script) SIGKILLs the local `docker run` CLIENT below
+# exactly like every other exec in this script — but killing that client
+# does NOT stop the container it started: `docker run` needs no host-side
+# supervising process to keep a container alive after dockerd has it. The
+# in-flight sweep survives as an orphan relative to the daemon's in-memory
+# registry — the SAME "sweeps survive by design" property launchd already
+# gives bare-metal sweeps today (see daemon-reference.md), now extended to
+# systemd too, via the container boundary instead of process reparenting.
+# `loom-daemon restart --drain` remains the recommended path on both
+# supervisors — it waits for in-flight sweeps (containerized or not) to
+# finish before the daemon exits, so the orphan case above is a hard-stop
+# fallback, not the common path. Reconciling a still-running orphaned
+# container after a daemon restart (`SweepRegistry::reconstruct`'s
+# container-recognition extension) and teaching `cancel_sweep` to `docker
+# stop`/`docker rm` a containerized sweep it explicitly cancels are real,
+# named Phase 3 obligations ADR-0017 defers past this issue's own scope note
+# ("only add the dispatch mode itself") — tracked as a follow-up rather than
+# silently assumed done.
+#
+# Build-cache placement (MOUNT-CONTRACT.md §4, issue #6013/#6014): a
+# container that mounts no build-cache path gets a fresh, empty `target/`
+# trapped in its own ephemeral writable layer on every `docker run` — worse
+# than a redirected-but-persistent host cache, because then EVERY sweep pays
+# a full rebuild. `CARGO_TARGET_DIR` is therefore resolved the SAME way the
+# rest of the repo already does (`lib/cargo-target-dir.sh`: env ->
+# `cargo metadata` -> `<workspace>/target`), then — only when it resolves
+# OUTSIDE the already-mounted workspace — mounted at its own identical
+# absolute path (parity applies to caches too) and exported into the
+# container, so a containerized sweep shares the exact per-repo-per-host
+# cache `post-worktree.sh`'s binary-reuse fast path already assumes, never a
+# path that lives only inside the container's own filesystem.
+#
+# Per-sweep resource LIMITS (CPU/mem ceilings on the container itself) are
+# explicitly OUT of scope here — a separate, later Phase 3 issue per #7429's
+# own scope note ("Per-sweep resource limits ... are separate, LATER issues
+# in this phase"). This mode ships with no `--cpus`/`--memory` docker flags.
+# The host CPU-quota mechanism above (issue #5111, `CPU_QUOTA_WRAP`) is
+# deliberately NOT applied to the `docker run` client below even when
+# computed: wrapping the trivial client process in a systemd scope would not
+# constrain the container's own (separate) cgroup, so it would be
+# decorative, not real containment.
+CONTAINMENT_ENABLED="0"
+_containment_config_lib="${_script_dir}/lib/config-resolver.sh"
+if [[ -z "${LOOM_SPAWN_CONTAINERIZED:-}" ]]; then
+    _containment_enabled="${LOOM_SWEEP_CONTAINERIZED:-}"
+    if [[ -z "$_containment_enabled" && -f "$_containment_config_lib" ]]; then
+        # shellcheck source=./lib/config-resolver.sh
+        source "$_containment_config_lib"
+        _containment_enabled="$(loom_config_get "$WORKSPACE" "runtimes.containment.enabled" "")"
+    fi
+    case "$_containment_enabled" in
+        1 | true | yes) CONTAINMENT_ENABLED="1" ;;
+        *) CONTAINMENT_ENABLED="0" ;;
+    esac
+fi
+
+if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
+    if ! command -v docker >/dev/null 2>&1; then
+        log_error "spawn-claude: containerized dispatch is enabled (runtimes.containment.enabled / LOOM_SWEEP_CONTAINERIZED) but 'docker' is not on PATH."
+        log_error "Install docker, or disable containment (LOOM_SWEEP_CONTAINERIZED=0, or runtimes.containment.enabled=false in .loom/config.json)."
+        exit 78 # EX_CONFIG
+    fi
+
+    _containment_image="${LOOM_SWEEP_CONTAINER_IMAGE:-}"
+    if [[ -z "$_containment_image" && -f "$_containment_config_lib" ]]; then
+        # shellcheck source=./lib/config-resolver.sh
+        source "$_containment_config_lib"
+        _containment_image="$(loom_config_get "$WORKSPACE" "runtimes.containment.image" "")"
+    fi
+    : "${_containment_image:=ghcr.io/rjwalters/loom-worker:latest}"
+
+    _containment_cwd="$(pwd -P)"
+    _containment_mounts=(-v "${WORKSPACE}:${WORKSPACE}")
+
+    # --- Secrets mounts (MOUNT-CONTRACT.md §2) ---
+    # The per-repo token pool ($WORKSPACE/.loom/tokens) is already covered by
+    # the workspace mount above. The shared machine-level pool (the
+    # spawn-claude.sh fallback documented at the top of this file) lives
+    # outside $WORKSPACE and needs its own read-only parity mount.
+    _containment_shared_tokens="${LOOM_SHARED_TOKENS_DIR:-${HOME:-}/.loom/tokens}"
+    if [[ -n "$_containment_shared_tokens" && -d "$_containment_shared_tokens" \
+        && "$_containment_shared_tokens" != "${WORKSPACE}"/* ]]; then
+        _containment_mounts+=(-v "${_containment_shared_tokens}:${_containment_shared_tokens}:ro")
+    fi
+    # gh/git forge auth (docker/worker/README.md "Bootstrap seams"): prefer
+    # the env-var form already in this process's environment (passed through
+    # by the LOOM_*/CLAUDE_*/GH_*/GITHUB_* sweep below); best-effort read-only
+    # bind of ~/.config/gh only when neither token env var is present.
+    if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" && -n "${HOME:-}" && -d "${HOME}/.config/gh" ]]; then
+        _containment_mounts+=(-v "${HOME}/.config/gh:${HOME}/.config/gh:ro")
+    fi
+    # Git commit identity (check-git-identity.sh's global user.name/user.email).
+    if [[ -n "${HOME:-}" && -f "${HOME}/.gitconfig" ]]; then
+        _containment_mounts+=(-v "${HOME}/.gitconfig:${HOME}/.gitconfig:ro")
+    fi
+
+    # --- Build-cache placement (MOUNT-CONTRACT.md §4, issue #6013/#6014) ---
+    _containment_env=()
+    _containment_cargo_lib="${_script_dir}/lib/cargo-target-dir.sh"
+    if [[ -f "${WORKSPACE}/Cargo.toml" && -f "$_containment_cargo_lib" ]]; then
+        # shellcheck source=./lib/cargo-target-dir.sh
+        source "$_containment_cargo_lib"
+        _containment_target_dir="$(loom_resolve_cargo_target_dir "$WORKSPACE")"
+        if [[ -n "$_containment_target_dir" ]]; then
+            if [[ "$_containment_target_dir" != "${WORKSPACE}"/* ]]; then
+                mkdir -p "$_containment_target_dir" 2>/dev/null || true
+                _containment_mounts+=(-v "${_containment_target_dir}:${_containment_target_dir}")
+            fi
+            _containment_env+=(-e "CARGO_TARGET_DIR=${_containment_target_dir}")
+        fi
+    fi
+
+    # --- Env passthrough ---
+    # Every LOOM_*/CLAUDE_*/SAFEHOUSE*/CODEX_*/GH_TOKEN/GITHUB_TOKEN var
+    # already present in THIS process's environment (exported by the daemon
+    # before it spawned this script — LOOM_SWEEP_CLAIM_OWNED, LOOM_ROLE,
+    # LOOM_RUNTIME, LOOM_MODEL/LOOM_EFFORT when set, etc. — or already
+    # resolved above, e.g. CLAUDE_CODE_OAUTH_TOKEN when
+    # LOOM_SPAWN_NO_EXPORT bypassed selection) is forwarded by NAME (`-e
+    # VAR`, no `=value`) so docker reads the CURRENT value straight from this
+    # shell — generic and exhaustive rather than a hardcoded list that drifts
+    # from what the daemon actually sets.
+    while IFS='=' read -r _containment_var _; do
+        case "$_containment_var" in
+            LOOM_* | CLAUDE_* | SAFEHOUSE* | CODEX_* | GH_TOKEN | GITHUB_TOKEN)
+                _containment_env+=(-e "$_containment_var")
+                ;;
+        esac
+    done < <(env)
+    _containment_env+=(-e "LOOM_SPAWN_CONTAINERIZED=1" -e "LOOM_WORKSPACE=${WORKSPACE}" -e "HOME=${HOME:-/home/loom}")
+
+    _containment_labels=(--label "loom.sweep=1" --label "loom.dispatch=container")
+    [[ -n "${LOOM_SWEEP_CLAIM_OWNED:-}" ]] && _containment_labels+=(--label "loom.sweep.issue=${LOOM_SWEEP_CLAIM_OWNED}")
+
+    log_info "spawn-claude: containerized dispatch ENABLED (issue #7429) — image=${_containment_image}, workspace=${WORKSPACE} (parity-mounted), cwd=${_containment_cwd}"
+    echo "# LOOM_CONTAINMENT_ENABLED image=${_containment_image}" >&2
+
+    exec ${SLEEP_INHIBIT_WRAP[@]+"${SLEEP_INHIBIT_WRAP[@]}"} docker run --rm \
+        "${_containment_mounts[@]}" \
+        -w "$_containment_cwd" \
+        "${_containment_env[@]}" \
+        "${_containment_labels[@]}" \
+        "$_containment_image" \
+        "${WORKSPACE}/.loom/scripts/spawn-claude.sh" "$@"
+fi
+
 # --- Locate the loom-daemon binary (token selection, issue #4228) ---
 # Resolution precedence (see lib/locate-daemon-bin.sh): $LOOM_DAEMON_BIN ->
 # `loom-daemon` on PATH -> build-output-relative candidates under $WORKSPACE.

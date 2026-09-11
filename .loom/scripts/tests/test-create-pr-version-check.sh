@@ -258,7 +258,20 @@ EOF
   if [[ "$meta_version" != "__omit__" ]]; then
     printf '{"loom_version": "%s"}\n' "$meta_version" > "$dir/.loom/install-metadata.json"
   fi
-  (cd "$dir" && git init -q)
+  (
+    cd "$dir"
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    # version-check-gate.sh (#7417) now also fails on a version-bearing file
+    # that's modified/untracked relative to git HEAD (a bump that was never
+    # committed) -- committing the fixture's baseline here keeps these tests
+    # focused on version.sh check's own file-vs-file comparison, not on that
+    # separate uncommitted-bump check (covered by test-version-check-gate.sh's
+    # T10/T11 instead).
+    git add -A
+    git commit -q -m "base at $version"
+  )
 }
 
 # T5: package.json says 1.2.3 (the "expected" version); every VERSION_FILES

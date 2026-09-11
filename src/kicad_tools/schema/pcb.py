@@ -1403,7 +1403,7 @@ class Zone:
 
     A zone carrying a ``(keepout ...)`` child is a KiCad **rule area** rather
     than a pour: :attr:`keepout` holds its per-object-type flags (issue
-    #4605) and :meth:`is_rule_area` is True.  Rule areas are commonly
+    #4605) and is non-None. Rule areas are commonly
     multi-layer (``(layers "F.Cu" "B.Cu")``), captured in :attr:`layers`.
     """
 
@@ -1734,6 +1734,7 @@ class StackupLayer:
     thickness: float = 0.0
     material: str = ""
     epsilon_r: float = 0.0
+    loss_tangent: float = 0.0
 
 
 @dataclass
@@ -2634,7 +2635,12 @@ class PCB:
         self._net_classes[net_class.name] = net_class
 
     def _parse_stackup(self, sexp: SExp) -> list[StackupLayer]:
-        """Parse stackup definition."""
+        """Parse physical stackup strata, expanding native ``addsublayer`` entries.
+
+        KiCad represents a composite dielectric with repeated material fields
+        separated by bare addsublayer tokens. Keep each stratum's properties
+        rather than dropping all but the first or averaging unlike materials.
+        """
         layers = []
 
         for child in sexp.iter_children():
@@ -2646,13 +2652,21 @@ class PCB:
 
                 if type_node := child.find("type"):
                     layer.type = type_node.get_string(0) or ""
-                if thick := child.find("thickness"):
-                    layer.thickness = thick.get_float(0) or 0.0
-                if mat := child.find("material"):
-                    layer.material = mat.get_string(0) or ""
-                if eps := child.find("epsilon_r"):
-                    layer.epsilon_r = eps.get_float(0) or 0.0
-
+                name, layer_type = layer.name, layer.type
+                sublayer = 1
+                for item in child.children:
+                    if item.is_atom and item.value == "addsublayer":
+                        layers.append(layer)
+                        sublayer += 1
+                        layer = StackupLayer(name=f"{name} (sublayer {sublayer})", type=layer_type)
+                    elif item.tag == "thickness":
+                        layer.thickness = item.get_float(0) or 0.0
+                    elif item.tag == "material":
+                        layer.material = item.get_string(0) or ""
+                    elif item.tag == "epsilon_r":
+                        layer.epsilon_r = item.get_float(0) or 0.0
+                    elif item.tag == "loss_tangent":
+                        layer.loss_tangent = item.get_float(0) or 0.0
                 layers.append(layer)
             elif child.tag == "copper_finish":
                 pass  # Store globally if needed
@@ -5076,12 +5090,25 @@ class PCB:
         new_uuid = str(uuid.uuid4())
 
         # Update the UUID in the footprint
-        uuid_node = fp_sexp.find("uuid")
+        uuid_node = fp_sexp.find_child("uuid")
         if uuid_node:
             uuid_node.set_value(0, new_uuid)
         else:
             # Add UUID if not present
             fp_sexp.append(SExp.list("uuid", new_uuid))
+
+        # Library pad identities are not placed-instance identities. Persist
+        # fresh IDs even when the library omits them, so native DRC findings
+        # can be correlated with the saved board instead of transient IDs.
+        for pad_node in fp_sexp.find_all("pad"):
+            pad_uuid = pad_node.find_child("uuid")
+            if pad_uuid is not None:
+                pad_uuid.set_value(0, str(uuid.uuid4()))
+            else:
+                pad_node.append(SExp.list("uuid", str(uuid.uuid4())))
+            legacy_stamp = pad_node.find_child("tstamp")
+            if legacy_stamp is not None:
+                pad_node.remove(legacy_stamp)
 
         # Update layer first (at node must come after layer)
         layer_node = fp_sexp.find("layer")
@@ -5220,6 +5247,11 @@ class PCB:
         # rotation, or layer are automatically persisted.
         object.__setattr__(footprint, "_board_origin", self._board_origin)
         object.__setattr__(footprint, "_sexp_node", fp_sexp)
+        # New footprints need the same pad write-through links as loaded
+        # footprints (#5049). Use parser order, not pad numbers: shield and
+        # NPTH pads may share a number or have no number at all.
+        for pad_obj, pad_node in zip(footprint.pads, fp_sexp.find_all("pad"), strict=True):
+            object.__setattr__(pad_obj, "_sexp_node", pad_node)
 
         self._footprints.append(footprint)
 

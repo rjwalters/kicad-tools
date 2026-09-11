@@ -374,6 +374,207 @@ else
     fail "stash-pop left pending state behind at .stash-baseline/issue-314"
 fi
 
+# ===========================================================================
+# The `main` target (#6076)
+# ===========================================================================
+#
+# Roles that legitimately run in the primary clone (Judge, Champion, Auditor,
+# Guide, Hermit) had no sanctioned clean-and-restore pair — the verbs were
+# issue-keyed only — so they reached for raw `git stash` + `git stash pop`
+# there, and the pop half is an unanswerable `stash-scope:main-checkout` ask
+# in a headless run. `stash-push main` / `stash-pop main` close that gap with
+# the same never-touch-refs/stash guarantees as the issue-keyed path.
+
+# --- Test 13: stash-push/pop main round-trips the PRIMARY clone -------------
+echo ""
+echo "Test 13: stash-push main captures the primary clone and never touches refs/stash"
+cd "$REPO"
+git stash clear >/dev/null 2>&1 || true
+echo "main-checkout wip" >> "$REPO/tracked.txt"
+stash_before="$(git stash list)"
+if ./.loom/scripts/worktree.sh stash-push main >/tmp/sbp-main1.$$ 2>&1; then
+    pass "stash-push main exited 0 for a dirty primary clone"
+else
+    fail "stash-push main exited non-zero (see /tmp/sbp-main1.$$)"
+fi
+if [[ "$stash_before" == "$(git stash list)" ]]; then
+    pass "git stash list is unchanged by stash-push main"
+else
+    fail "stash-push main touched the shared refs/stash stack"
+fi
+if [[ "$(cat "$REPO/tracked.txt")" == "tracked file" ]]; then
+    pass "primary clone reset to the clean HEAD baseline"
+else
+    fail "primary clone was NOT reset to a clean baseline"
+fi
+if git rev-parse --verify --quiet refs/loom/stash-baseline/main >/dev/null 2>&1; then
+    pass "main baseline ref was created (refs/loom/stash-baseline/main)"
+else
+    fail "no main baseline ref was created"
+fi
+if ./.loom/scripts/worktree.sh stash-pop main >/tmp/sbp-main2.$$ 2>&1; then
+    pass "stash-pop main exited 0"
+else
+    fail "stash-pop main exited non-zero (see /tmp/sbp-main2.$$)"
+fi
+if grep -q "main-checkout wip" "$REPO/tracked.txt"; then
+    pass "stash-pop main restored the captured tracked-file diff"
+else
+    fail "stash-pop main did NOT restore the captured diff"
+fi
+if ! git rev-parse --verify --quiet refs/loom/stash-baseline/main >/dev/null 2>&1; then
+    pass "main baseline ref was cleared by stash-pop main"
+else
+    fail "main baseline ref was left dangling after stash-pop main"
+fi
+git checkout -q -- tracked.txt 2>/dev/null || true
+
+# --- Test 14: a pending `main` capture refuses a second push ----------------
+echo ""
+echo "Test 14: stash-push main refuses a second push while one is pending"
+cd "$REPO"
+echo "first main change" >> "$REPO/tracked.txt"
+./.loom/scripts/worktree.sh stash-push main >/tmp/sbp-main3a.$$ 2>&1
+echo "second main change" >> "$REPO/tracked.txt"
+if ./.loom/scripts/worktree.sh stash-push main >/tmp/sbp-main3b.$$ 2>&1; then
+    fail "a second stash-push main succeeded — the first capture could be clobbered"
+else
+    pass "a second stash-push main is refused while a capture is pending"
+fi
+if grep -q "stash-pop main" /tmp/sbp-main3b.$$; then
+    pass "the refusal names the restore command ('stash-pop main')"
+else
+    fail "the refusal did not name 'stash-pop main'. Got: $(cat /tmp/sbp-main3b.$$)"
+fi
+if grep -q "second main change" "$REPO/tracked.txt"; then
+    pass "the refused push left the uncaptured change in place, not silently discarded"
+else
+    fail "the refused push discarded the uncaptured working-tree change"
+fi
+# Drop the uncaptured edit first: restoring ON TOP of it would conflict, and a
+# conflicted restore deliberately PRESERVES the pending state (nothing lost).
+git checkout -q -- tracked.txt 2>/dev/null || true
+./.loom/scripts/worktree.sh stash-pop main >/tmp/sbp-main3c.$$ 2>&1 || true
+git checkout -q -- tracked.txt 2>/dev/null || true
+git update-ref -d refs/loom/stash-baseline/main 2>/dev/null || true
+rm -rf "$REPO/.loom/worktrees/.stash-baseline/main" 2>/dev/null || true
+
+# --- Test 15: `main` and an issue target are independent --------------------
+echo ""
+echo "Test 15: a pending main capture does not block (or leak into) an issue capture"
+make_worktree 320
+cd "$REPO"
+echo "main wip" >> "$REPO/tracked.txt"
+echo "issue wip" >> "$REPO/.loom/worktrees/issue-320/tracked.txt"
+./.loom/scripts/worktree.sh stash-push main >/tmp/sbp-main4a.$$ 2>&1
+if ./.loom/scripts/worktree.sh stash-push 320 >/tmp/sbp-main4b.$$ 2>&1; then
+    pass "an issue stash-push succeeds while a main capture is pending"
+else
+    fail "an issue stash-push was blocked by a pending main capture (see /tmp/sbp-main4b.$$)"
+fi
+./.loom/scripts/worktree.sh stash-pop 320 >/tmp/sbp-main4c.$$ 2>&1 || true
+./.loom/scripts/worktree.sh stash-pop main >/tmp/sbp-main4d.$$ 2>&1 || true
+if grep -q "main wip" "$REPO/tracked.txt" && grep -q "issue wip" "$REPO/.loom/worktrees/issue-320/tracked.txt"; then
+    pass "each target restored its OWN capture (no cross-target leakage)"
+else
+    fail "captures leaked between the main and issue targets"
+fi
+git checkout -q -- tracked.txt 2>/dev/null || true
+git -C ".loom/worktrees/issue-320" checkout -q -- tracked.txt 2>/dev/null || true
+
+# --- Test 16: main target works when invoked FROM a worktree ----------------
+#
+# The roles this exists for run in the primary clone, but a sweep can invoke
+# the verb from anywhere; the target must be resolved from the git common dir,
+# never from cwd.
+echo ""
+echo "Test 16: stash-push/pop main resolve the primary clone even when run from a worktree"
+make_worktree 321
+echo "resolved-from-worktree" >> "$REPO/tracked.txt"
+if (cd "$REPO/.loom/worktrees/issue-321" && "$REPO/.loom/scripts/worktree.sh" stash-push main >/tmp/sbp-main5a.$$ 2>&1); then
+    pass "stash-push main exited 0 when invoked from a worktree cwd"
+else
+    fail "stash-push main failed when invoked from a worktree cwd (see /tmp/sbp-main5a.$$)"
+fi
+if [[ "$(cat "$REPO/tracked.txt")" == "tracked file" ]]; then
+    pass "the PRIMARY clone (not the worktree) was reset"
+else
+    fail "stash-push main did not reset the primary clone"
+fi
+(cd "$REPO/.loom/worktrees/issue-321" && "$REPO/.loom/scripts/worktree.sh" stash-pop main >/tmp/sbp-main5b.$$ 2>&1) || true
+cd "$REPO"
+git checkout -q -- tracked.txt 2>/dev/null || true
+
+# --- Test 17: clean primary clone is a no-op chain; bad targets rejected ----
+echo ""
+echo "Test 17: the full main chain is a no-op on a clean primary clone, and bad targets are rejected"
+cd "$REPO"
+if ./.loom/scripts/worktree.sh stash-push main >/tmp/sbp-main6.$$ 2>&1 \
+    && cat "$REPO/tracked.txt" >/dev/null \
+    && ./.loom/scripts/worktree.sh stash-pop main >>/tmp/sbp-main6.$$ 2>&1; then
+    pass "push/check/pop chain exits 0 for a clean primary clone"
+else
+    fail "the main push/check/pop chain broke on a clean primary clone (see /tmp/sbp-main6.$$)"
+fi
+if [[ ! -e "$REPO/.loom/worktrees/.stash-baseline/main" ]]; then
+    pass "no pending state left behind after a clean main round trip"
+else
+    fail "stash-pop main left pending state behind at .stash-baseline/main"
+fi
+if ./.loom/scripts/worktree.sh stash-push not-a-target >/tmp/sbp-main7.$$ 2>&1; then
+    fail "stash-push accepted a non-numeric, non-'main' target"
+else
+    pass "stash-push rejects a target that is neither an issue number nor 'main'"
+fi
+if ./.loom/scripts/worktree.sh stash-pop MAIN >/tmp/sbp-main8.$$ 2>&1; then
+    fail "stash-pop accepted 'MAIN' — the target must be exact, not case-folded"
+else
+    pass "stash-pop rejects 'MAIN' (exact 'main' only)"
+fi
+
+# --- Test 18: --json for the main target ------------------------------------
+echo ""
+echo "Test 18: --json reports target=main with a null issueNumber"
+cd "$REPO"
+echo "json main wip" >> "$REPO/tracked.txt"
+json_out="$(./.loom/scripts/worktree.sh stash-push main --json 2>/dev/null)"
+if [[ "$(printf '%s\n' "$json_out" | grep -c .)" -eq 1 ]]; then
+    pass "stash-push main --json emits exactly one line on stdout"
+else
+    fail "stash-push main --json stdout was not a single line: $json_out"
+fi
+if printf '%s' "$json_out" | grep -q '"target": "main"' && printf '%s' "$json_out" | grep -q '"issueNumber": null'; then
+    pass "stash-push main --json reports target=main and issueNumber=null"
+else
+    fail "stash-push main --json payload wrong: $json_out"
+fi
+if printf '%s' "$json_out" | grep -q 'refs/loom/stash-baseline/main'; then
+    pass "stash-push main --json names the main baseline ref"
+else
+    fail "stash-push main --json did not name the main baseline ref: $json_out"
+fi
+json_out="$(./.loom/scripts/worktree.sh stash-pop main --json 2>/dev/null)"
+if printf '%s' "$json_out" | grep -q '"target": "main"' && printf '%s' "$json_out" | grep -q '"restoredTracked": true'; then
+    pass "stash-pop main --json reports the restore"
+else
+    fail "stash-pop main --json payload wrong: $json_out"
+fi
+git checkout -q -- tracked.txt 2>/dev/null || true
+
+# --- Test 19: the issue-target JSON keeps its historical fields -------------
+echo ""
+echo "Test 19: issue-target --json still reports a numeric issueNumber"
+make_worktree 322
+cd "$REPO"
+echo "json issue wip" >> "$REPO/.loom/worktrees/issue-322/tracked.txt"
+json_out="$(./.loom/scripts/worktree.sh stash-push 322 --json 2>/dev/null)"
+if printf '%s' "$json_out" | grep -q '"issueNumber": 322'; then
+    pass "issue-target --json still emits an unquoted numeric issueNumber"
+else
+    fail "issue-target --json regressed: $json_out"
+fi
+./.loom/scripts/worktree.sh stash-pop 322 >/dev/null 2>&1 || true
+
 # --- Summary ----------------------------------------------------------------
 echo ""
 echo "Tests run: $TESTS_RUN, Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"

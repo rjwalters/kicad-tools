@@ -1,0 +1,68 @@
+"""Two-layer exact-obstacle bus crossover completion, full through vias only."""
+from pathlib import Path
+import subprocess
+exec(Path('/tmp/board07-sdram/planar-ports.py').read_text().split("for name in a.nets.split(','):")[0])
+def hybrid(net,start,end):
+ layers=(['In2.Cu','F.Cu'] if net.startswith('DQ') or net in ['LDQM','UDQM'] else ['In3.Cu','B.Cu']);obs=[obstacles(net,layer) for layer in layers];step=a.grid;xs=np.arange(.4,99.6,step);ys=np.arange(.4,79.6,step);width=len(xs);height=len(ys)
+ blocked=np.stack([contains_xy(o.buffer(step/math.sqrt(2)),xs[None,:],ys[:,None]) for o in obs])
+ # obstacles() already includes .245 mm clearance+trace radius. A .5 mm via
+ # requires another .16 mm radius. Include foreign copper on EVERY layer.
+ viaobs=unary_union([obstacles(net,layer).buffer(.16) for layer in ['F.Cu','In1.Cu','In2.Cu','In3.Cu','In4.Cu','B.Cu']])
+ pads=unary_union([_pad_polygon(d,f) for f in b.footprints for d in f.pads if d.type=='smd']).buffer(.30)
+ holes=unary_union([Point(v.position).buffer(.75) for v in b.vias])
+ viablocked=contains_xy(unary_union([viaobs,pads,holes]).buffer(.0001),xs[None,:],ys[:,None])
+ def xy(q):return(float(xs[q[0]]),float(ys[q[1]]))
+ def clear(points,k):return not LineString(points).intersects(obs[k])
+ def seeds(pt):
+  cx,cy=round((pt[0]-.4)/step),round((pt[1]-.4)/step);answer=[]
+  for k in range(2):
+   for dx in range(-4,5):
+    for dy in range(-4,5):
+     q=(cx+dx,cy+dy,k)
+     if 0<=q[0]<width and 0<=q[1]<height and not blocked[k,q[1],q[0]] and clear([pt,xy(q)],k):answer.append(q)
+  return answer
+ goals=set(seeds(end));heap=[];dist={};prev={};visited=set();deadline=time.monotonic()+45
+ for q in seeds(start):dist[q]=math.dist(start,xy(q));heapq.heappush(heap,(dist[q]+math.dist(xy(q),end),q))
+ found=None
+ while heap and len(visited)<1000000:
+  _,q=heapq.heappop(heap)
+  if q in visited:continue
+  visited.add(q)
+  if len(visited)%10000==0 and time.monotonic()>deadline:break
+  if q in goals:found=q;break
+  for dx,dy,dk in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(1,1,0),(-1,1,0),(1,-1,0),(-1,-1,0),(0,0,1)]:
+   v=(q[0]+dx,q[1]+dy,1-q[2] if dk else q[2])
+   if dk and viablocked[q[1],q[0]]:continue
+   if not(0<=v[0]<width and 0<=v[1]<height) or blocked[v[2],v[1],v[0]] or v in visited:continue
+   cost=dist[q]+(3.0 if dk else step*math.hypot(dx,dy))
+   if cost<dist.get(v,float('inf')):dist[v]=cost;prev[v]=q;heapq.heappush(heap,(cost+math.dist(xy(v),end),v))
+ if found is None:return None,None,len(visited)
+ states=[found];q=found
+ while q in prev:q=prev[q];states.append(q)
+ states.reverse();sections=[];vias=[];current=[start];k=states[0][2]
+ for q in states:
+  if q[2]!=k:
+   sections.append((k,current));vias.append(xy(q));current=[xy(q)];k=q[2]
+  else:current.append(xy(q))
+ current.append(end);sections.append((k,current));traces=[]
+ for k,points in sections:
+  compact=[points[0]]
+  for i in range(1,len(points)-1):
+   u,v,w=compact[-1],points[i],points[i+1]
+   if abs((v[0]-u[0])*(w[1]-v[1])-(v[1]-u[1])*(w[0]-v[0]))>1e-8:compact.append(v)
+  compact.append(points[-1]);assert clear(compact,k)
+  for u,v in zip(compact,compact[1:]):
+   if math.dist(u,v)>1e-7:traces.append((u,v,layers[k]))
+ assert all(not Point(q).intersects(viaobs) and not Point(q).intersects(pads) and not Point(q).intersects(holes) for q in vias)
+ assert all(math.dist(u,v)>=.75 for i,u in enumerate(vias) for v in vias[i+1:])
+ return traces,vias,len(visited)
+for name in a.nets.split(','):
+ endpoints=[tuple(v['port']) for v in ports if v['net']==name];start=time.monotonic();traces,vias,expanded=hybrid(name,*endpoints);result={'net':name,'routed':traces is not None,'vias':len(vias or []),'expanded':expanded,'seconds':round(time.monotonic()-start,3)};results.append(result);print(json.dumps(result),flush=True)
+ if traces:
+  for u,v,layer in traces:b.add_trace(u,v,width=.18,layer=layer,net=name)
+  for v in vias:b.add_via(*v,size=.5,drill=.2,net=name)
+  b.save(a.out/'physical.kicad_pcb');shutil.copy2(a.source.with_suffix('.kicad_pro'),a.out/'physical.kicad_pro')
+  tuneout=a.out/'tuning'/name;tuneout.mkdir(parents=True,exist_ok=True)
+  subprocess.run(['uv','run','python','-u','/tmp/board07-sdram/tune-local.py',str(a.out/'physical.kicad_pcb'),str(a.ports),str(tuneout),'--nets',name],check=True)
+  b=PCB.load(tuneout/'physical.kicad_pcb');b.save(a.out/'physical.kicad_pcb')
+ (a.out/'results.json').write_text(json.dumps(results,indent=2))

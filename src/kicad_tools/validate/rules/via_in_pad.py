@@ -1,6 +1,6 @@
 """Via-in-pad DRC rule.
 
-Detects vias whose drill circle is fully covered by an SMD pad on the same
+Detects vias whose drill circle overlaps an SMD pad on the same
 net, which is only legal when the chosen manufacturer profile supports
 via-in-pad processing (epoxy-filled and plated-over vias).
 
@@ -15,15 +15,11 @@ introduce in-pad vias that DRC would otherwise silently accept.
 
 Geometry of "via inside pad":
 
-* SMD pads are modelled as axis-aligned rectangles (post footprint
-  rotation transformation) -- mirrors the representation used by the
-  clearance rule.  For rotated footprints we use the axis-aligned
-  bounding box; pads with non-cardinal rotations are conservatively
-  reported when the BB contains the via even if the actual pad polygon
-  does not.
-* A via is "in the pad" when its drill circle is fully contained inside
-  the pad rectangle, i.e., every point on the drill circle lies on or
-  inside the pad edge.
+* SMD pads use the shared clearance geometry, honoring rounded pad outlines
+  and absolute copper angles. Legacy callers without pad geometry use a
+  rectangular bounding box.
+* Any drill overlap with SMT copper requires the process, including partial
+  overlap where the drill is not fully contained by the land.
 
 Out of scope (explicitly): blind/buried vias, microvias, and
 controlled-impedance differential pairs.  These require additional
@@ -42,7 +38,7 @@ from typing import TYPE_CHECKING
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
 
-# The pad-bbox / containment geometry now lives in a shared module so the
+# The pad-bbox / overlap geometry now lives in a shared module so the
 # ``fix-vias --relocate-in-pad`` command reuses exactly the same detector as
 # this DRC rule (single source of truth -- issue #4359).  The private aliases
 # are retained for backward compatibility with existing references to
@@ -70,8 +66,8 @@ class ViaInPadRule(DRCRule):
     default for ``jlcpcb``, ``oshpark``, ``seeed``, ``flashpcb``).
 
     For every via on the board, the rule scans SMD pads on the same net
-    and flags the via as an error if any pad's bounding box fully
-    contains the drill circle.
+    and flags the via as an error if the drill circle overlaps a pad's
+    copper outline beyond the geometry tolerance.
 
     The same-net constraint prevents false positives where a via is
     placed near (but not connected to) a pad on a different net -- those
@@ -133,7 +129,7 @@ class ViaInPadRule(DRCRule):
             if not candidates:
                 continue
             for fp, pad, bbox in candidates:
-                if not _via_inside_pad(via, bbox):
+                if not _via_inside_pad(via, bbox, pad, fp):
                     continue
                 results.add(self._make_violation(via, fp, pad))
 

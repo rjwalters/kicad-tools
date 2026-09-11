@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
     from pathlib import Path
 
     from kicad_tools.explain.decisions import DecisionStore
@@ -1461,6 +1461,7 @@ class Autorouter:
 
         # Physics integration
         self._stackup = stackup
+        self._impedance_source_pcb_path: str | None = None
         self._physics_enabled = physics_enabled
         self._transmission_line: TransmissionLine | None = None
         self._init_physics()
@@ -4751,6 +4752,57 @@ class Autorouter:
                     partial.add(net_id)
         return partial
 
+    def _count_completed_nets(
+        self,
+        net_routes: dict[int, list[Route]],
+        pads_by_net: dict[int, list[Pad]],
+        net_order: Iterable[int],
+        partial_nets: set[int] | None = None,
+    ) -> int:
+        """Count selected nets that are actually finished.
+
+        Issue #4967: the negotiated loop's progress line used to print
+        ``len(net_routes)``, which counts dictionary *keys*.  That dict can
+        hold empty lists (a net that was ripped up and then failed to
+        re-route -- Issue #3448) and partially connected nets (some pads
+        joined, some stranded -- Issue #2475), so the count could reach
+        ``total_nets`` in the very same iteration in which the recovery
+        logic below it reported nets still unrouted.
+
+        This helper applies the same definition of "done" the recovery path
+        (``still_failed``) already uses -- a net counts only when it has a
+        nonempty route list and is not in the partially-routed set -- and
+        restricts the tally to the currently selected nets (``net_order``),
+        which is what ``total_nets`` is derived from.
+
+        Args:
+            net_routes: Mapping of net ID to list of routes for that net.
+            pads_by_net: Mapping of net ID to list of pads for that net.
+            net_order: The selected nets (the denominator's net set).
+            partial_nets: Pre-computed partially-routed set, when the caller
+                has already paid for :meth:`_get_partially_routed_nets`.
+                Computed on demand when ``None``.
+
+        Returns:
+            Number of distinct nets in ``net_order`` with a nonempty,
+            fully connected route set.  Never counts a net that
+            ``still_failed`` would flag, so the displayed count can never
+            reach ``total_nets`` while any selected net remains
+            failed/partial.
+        """
+        if partial_nets is None:
+            partial_nets = self._get_partially_routed_nets(net_routes, pads_by_net)
+
+        completed = 0
+        seen: set[int] = set()
+        for net_id in net_order:
+            if net_id in seen:
+                continue
+            seen.add(net_id)
+            if net_routes.get(net_id) and net_id not in partial_nets:
+                completed += 1
+        return completed
+
     def _ensure_congestion_estimator(self) -> CongestionEstimator:
         """Build the pre-route congestion estimator if not already computed.
 
@@ -4905,7 +4957,11 @@ class Autorouter:
         width.  The derived stackup is stored on ``self._stackup`` so
         subsequent calls (in the same router instance) reuse it.
 
-        Stackup selection mirrors :meth:`Stackup._create_default_stackup`
+        Prefer the source PCB's explicit stackup, when available.  Falling
+        back to a preset despite authored dielectric dimensions can widen
+        fine-pitch escape traces enough to make otherwise routable pads
+        inaccessible.  When the source has no explicit stackup, selection
+        mirrors :meth:`Stackup._create_default_stackup`
         so the router's auto-derived stackup matches what the validator
         uses by default (``ImpedanceRule.from_pcb`` -> ``_create_default_stackup``).
         Otherwise the router and validator would compute slightly
@@ -4946,6 +5002,15 @@ class Autorouter:
 
         try:
             from kicad_tools.physics import Stackup
+
+            if self._impedance_source_pcb_path is not None:
+                from kicad_tools.schema.pcb import PCB
+
+                source_stackup = Stackup.from_pcb(PCB.load(self._impedance_source_pcb_path))
+                if source_stackup.has_explicit_data:
+                    self._stackup = source_stackup
+                    logger.info("Using source PCB stackup for impedance-driven sizing")
+                    return
 
             # Mirror Stackup._create_default_stackup's layer-count
             # branching so the router and validator agree on stackup
@@ -11588,17 +11653,27 @@ class Autorouter:
                         flush_print(
                             f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow} ({elapsed_str()})"
                         )
-                        flush_print(f"  Progress: {len(net_routes)}/{total_nets} nets routed total")
+                        # Issue #2475: Partially routed nets (those in net_routes
+                        # but missing pad-to-pad connectivity) cannot make further
+                        # progress without rip-up.  Computed here (rather than just
+                        # below) so the progress line and the recovery logic share
+                        # one definition of "done" -- Issue #4967.
+                        partial_failed = self._get_partially_routed_nets(net_routes, pads_by_net)
+                        # Issue #4967: count nonempty, fully connected routes among
+                        # the selected nets instead of ``len(net_routes)``, which
+                        # counted empty-list entries (ripped up then failed to
+                        # re-route) and partials as completed -- printing N/N in the
+                        # same iteration the stall detector reported nets unrouted.
+                        completed_nets = self._count_completed_nets(
+                            net_routes, pads_by_net, net_order, partial_nets=partial_failed
+                        )
+                        flush_print(f"  Progress: {completed_nets}/{total_nets} nets routed total")
 
                         # Issue #2265: When overflow is 0 but nets remain unrouted,
                         # the standard rip-up path only re-attempts failed nets without
                         # clearing the routed nets that block them. Fall back to
                         # targeted rip-up to identify and displace blockers.
                         # Issue #2333: Skip fallbacks in hotset-only mode.
-                        # Issue #2475: Also include partially routed nets (those
-                        # in net_routes but missing pad-to-pad connectivity), since
-                        # they too cannot make further progress without rip-up.
-                        partial_failed = self._get_partially_routed_nets(net_routes, pads_by_net)
                         # Issue #3448: ``not net_routes.get(n)`` so empty-list
                         # entries (ripped up above, then failed re-route) also
                         # qualify for the targeted fallback.

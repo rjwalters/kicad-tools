@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "status": "incomplete",
+  "reviewed": "2026-09-10",
+  "note": "Candidate MPN/package bindings, not an orderable assembly BOM. Stock and assembly-library availability must be refreshed before release; unlisted passives remain unresolved.",
+  "parts": {
+    "R3": {
+      "mpn": "CRCW12061K00FKEAHP",
+      "lcsc": "C844867",
+      "source": "https://www.vishay.com/docs/20043/crcwhpe3.pdf",
+      "status": "candidate; procurement release pending"
+    },
+    "R4": {
+      "mpn": "CRCW12061K00FKEAHP",
+      "lcsc": "C844867",
+      "source": "https://www.vishay.com/docs/20043/crcwhpe3.pdf",
+      "status": "candidate; procurement release pending"
+    },
+    "R7": {
+      "mpn": "RT0603BRD07100KL",
+      "lcsc": "C122538",
+      "source": "https://www.lcsc.com/product-detail/C122538.html",
+      "status": "candidate; procurement release pending"
+    },
+    "R8": {
+      "mpn": "RT0603BRD0713K3L",
+      "lcsc": "C861117",
+      "source": "https://www.lcsc.com/product-detail/C861117.html",
+      "status": "candidate; procurement release pending"
+    },
+    "100n 50V": {
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "source": "https://www.lcsc.com/product-detail/C14663.html",
+      "status": "candidate; procurement release pending"
+    },
+    "10u 50V": {
+      "mpn": "CL31B106KBHNNNE",
+      "lcsc": "C89632",
+      "source": "https://www.lcsc.com/product-detail/C89632.html",
+      "status": "candidate; procurement release pending"
+    },
+    "22u 25V": {
+      "mpn": "CL31A226KAHNNNE",
+      "lcsc": "C12891",
+      "source": "https://www.lcsc.com/product-detail/C12891.html",
+      "status": "candidate; procurement release pending"
+    }
+  }
+}

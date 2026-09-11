@@ -2379,9 +2379,12 @@ def _emit_drc_sidecars(
                 net_classes=net_classes,
             )
         else:
-            from kicad_tools.manufacturers.dru_generator import generate_dru, merge_dru_floors
+            from kicad_tools.manufacturers.dru_generator import merge_dru_floors
+            from kicad_tools.manufacturers.project_generator import generate_project_dru
 
             dru_path = pcb_path.with_suffix(".kicad_dru")
+            pro_path = pcb_path.with_suffix(".kicad_pro")
+            project_data = json.loads(pro_path.read_text()) if pro_path.exists() else {}
             # Issue #4600: merge into a marker-guarded managed block instead of
             # a blanket overwrite, so hand-written rules and the creepage
             # managed block (#4508) in a pre-existing file survive the emit.
@@ -2389,9 +2392,10 @@ def _emit_drc_sidecars(
             dru_path.write_text(
                 merge_dru_floors(
                     existing_dru,
-                    generate_dru(
+                    generate_project_dru(
                         checker.design_rules,
-                        manufacturer_name=manufacturer_id,
+                        project_data,
+                        manufacturer_id=manufacturer_id,
                         net_classes=net_classes,
                     ),
                     path=dru_path,
@@ -2399,7 +2403,7 @@ def _emit_drc_sidecars(
                 encoding="utf-8",
             )
             written = [dru_path]
-    except OSError as e:
+    except (OSError, json.JSONDecodeError) as e:
         print(
             f"WARNING: could not emit DRC-constraint sidecar(s) next to "
             f"{pcb_path}: {e}. The check verdict is unaffected.",

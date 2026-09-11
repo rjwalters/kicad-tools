@@ -1,31 +1,8 @@
 #!/usr/bin/env python3
-"""
-Demonstrate autorouting on the charlieplexed LED grid PCB.
+"""Route the real ATtiny85 board using the revision-B deterministic recipe.
 
-This script invokes ``kct route`` with the proven flag recipe used by
-``generate_design.py:route_pcb()``.  Using the orchestrator path
-(rather than a bare in-process ``router.route_all()`` call) is what
-unlocks ≥ 8/10 nets DRC-clean on this geometry, because ``kct route``:
-
-  1. uses the negotiated congestion router with adaptive rip-up,
-  2. emits auto-pour zones for GND/VCC after routing (so power pads
-     reach ``status=complete`` via plane connectivity),
-  3. runs auto-layer-escalation when 1-layer routing is blocked, and
-  4. runs ``drc_verify_and_nudge`` post-route (Issue #3112) to slide
-     same-net via-in-pad escape vias off offending pads.
-
-Issue #3207: this script previously called the bare ``router.route_all()``
-in-process path, which regressed to 4/8 nets routed with 6 DRC errors
-on board 02 even though ``kct route`` direct on the same PCB reaches
-8/10 + DRC-clean.  Replacing the in-process path with a subprocess
-call to ``kct route`` (matching ``generate_design.py:route_pcb()``)
-guarantees the two recipes can't drift again.
-
-Usage:
-    python route_demo.py [input_pcb] [output_pcb]
-
-Example:
-    python route_demo.py output/charlieplex_3x3.kicad_pcb output/charlieplex_3x3_routed.kicad_pcb
+Routes both supply rails explicitly, applies reviewed escape-via corrections,
+and requires native DRC before manufacturing export.
 """
 
 import contextlib
@@ -186,10 +163,8 @@ def main():
     print(f"\nInput:  {input_path}")
     print(f"Output: {output_path}")
 
-    # GND is a pour net (auto-poured into a copper zone by ``kct route``).
-    # Excluded from the per-net pathfinder to avoid wasted iterations.
     # This matches ``generate_design.py:route_pcb()`` exactly.
-    skip_nets = ["GND"]
+    skip_nets = []  # Revision B routes both power rails explicitly.
 
     # Same recipe as ``boards/02-charlieplex-led/generate_design.py:route_pcb()``.
     # Keeping these two recipes byte-identical is the whole point of Issue #3207:
@@ -200,8 +175,7 @@ def main():
     cmd = [
         sys.executable,
         "-m",
-        "kicad_tools.cli",
-        "route",
+        "kicad_tools.cli.route_cmd",
         str(input_path),
         "--output",
         str(output_path),
@@ -226,8 +200,10 @@ def main():
         "240",
         "--seed",
         "42",
-        "--skip-nets",
-        ",".join(skip_nets),
+        "--no-auto-pour",
+        "--no-auto-layers",
+        "--grid",
+        "0.1",
         # Issue #3112: pass the manufacturer through so the post-route
         # ``drc_verify_and_nudge`` sweep can consult ``via_in_pad_supported``
         # and slide any same-net via-in-pad escape vias off the offending pad.
@@ -265,6 +241,12 @@ def main():
             f"\nERROR: `kct route` did not produce {output_path} (exit code {result.returncode})",
             file=sys.stderr,
         )
+        return 1
+
+    from finalize_routing import finalize_routing
+
+    if not finalize_routing(output_path):
+        print("Native DRC failed after revision-B layout corrections; export stopped.")
         return 1
 
     # Parse the routed-net summary so the demo can print a final tally.
