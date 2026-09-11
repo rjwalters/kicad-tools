@@ -54,7 +54,12 @@ plated multilayer pad copper establish layer changes. Via/track centerline
 contacts and same-layer endpoint/interior contacts split graph edges, while
 public evidence retains each original routed segment once (including its
 whole length and width). Pad-internal convex copper is normalized before
-whole-component cycle detection; physical via arrays remain ambiguous.
+whole-component cycle detection. A benign parallel via array -- a hub
+fanning into two or more via legs whose far ends tie back together, current
+splitting and immediately recombining for capacity, not an alternate route
+-- is recognized and contracted before that check (Issue #5197); a loop
+built entirely from track copper, or one where the hub's own legs leave a
+residual route uncontracted, remains ambiguous.
 
 Unsupported custom/trapezoid pads, repeated physical pad numbers, and copper
 on absent stackup layers make the declaration unresolved. Supported pad
@@ -675,23 +680,176 @@ def _bfs_path(graph: _CopperGraph, start: _Node, goal: _Node) -> list[Segment] |
     return list({id(seg): seg for seg in reversed(evidence)}.values())
 
 
+def _walk_chain(
+    graph: _CopperGraph, degree: dict[_Node, int], first_edge: _GraphEdge, cur: _Node
+) -> tuple[_Node, bool, list[_Node]]:
+    """Follow a chain of degree-2 nodes starting at ``cur``.
+
+    A node that is neither a branch point nor a leaf (``degree == 2``) is
+    just a waypoint on its two neighbours' shared conductor -- a via's
+    interior layer, or a track's interior contact. Walking through every
+    such waypoint until a real branch/leaf node is reached collapses the
+    physical detail (how many internal layers a via crosses, how many
+    contacts split a track) down to a single logical leg between two real
+    decision points, which is what :func:`_via_array_roots` reasons about.
+
+    Returns:
+        ``(far, via_seen, path)`` -- the real node the chain ends at,
+        whether any edge along the way was a via crossing
+        (``edge.segment is None``), and the ordered interior nodes walked
+        (ending with ``far`` itself, excluding the starting node).
+    """
+    via_seen = first_edge.segment is None
+    prev_edge = first_edge
+    path = [cur]
+    while degree.get(cur, 0) == 2:
+        choice: tuple[_Node, _GraphEdge] | None = None
+        for nxt, edge in graph.adjacency.get(cur, []):
+            if edge is prev_edge:
+                continue
+            choice = (nxt, edge)
+            break
+        if choice is None:
+            # A 2-cycle back to the same neighbour via two parallel edges;
+            # nothing further to walk.
+            break
+        nxt, edge = choice
+        via_seen = via_seen or edge.segment is None
+        prev_edge = edge
+        cur = nxt
+        path.append(cur)
+    return cur, via_seen, path
+
+
+def _via_array_roots(graph: _CopperGraph) -> dict[_Node, _Node]:
+    """Union-find roots after contracting benign parallel via-array legs.
+
+    Issue #5197: a real branch/leaf node (``degree != 2``) reached by TWO OR
+    MORE legs that each cross a via (:func:`_walk_chain`'s ``via_seen``,
+    which sees straight through any intervening waypoint -- an internal
+    via layer, a same-layer track split) is a hub of a parallel via array
+    IF those legs' far ends are also mutually reachable through each other
+    using track-only legs. That combination is exactly "several via barrels
+    tying the same electrical points together, current splitting and
+    immediately recombining for capacity" -- board09's ``+5V_OUT`` shunt
+    pad fanning into three vias reunited by a wide ``B.Cu`` trace is the
+    concrete case -- rather than an alternate operating mode.
+
+    Requiring the hub's *own* legs to be exclusively the fused via array
+    (nothing else survives outside it) is what keeps a superficially similar
+    but genuinely ambiguous structure un-fused: if a hub's via legs only
+    account for PART of a loop and an independent track route reaches the
+    same far cluster some other way, that residual route is left as a real,
+    uncontracted cycle. A loop built entirely from track legs (no via
+    involved at all) never matches this pattern in the first place, which
+    is what keeps ``test_loop_reachable_from_endpoints_is_ambiguous`` and
+    ``test_parallel_return_path_is_not_silently_inherited`` ambiguous.
+
+    Returns:
+        A mapping from every node in ``graph`` to its contracted root. A
+        node whose leg was not fused into an array maps to itself.
+    """
+    degree = {node: len(edges) for node, edges in graph.adjacency.items()}
+
+    # Several of a hub's via legs can legitimately land on the SAME far node
+    # (board09: two of RSH1.4's three via legs both terminate, one directly
+    # and one via a tie, at the same B.Cu branch point) -- so every leg's
+    # path is kept, not just one per distinct far node, or a duplicate leg's
+    # interior nodes would silently escape fusion.
+    via_far: dict[_Node, set[_Node]] = {}
+    via_leg_paths: dict[_Node, list[list[_Node]]] = {}
+    track_leg_path: dict[frozenset[_Node], list[_Node]] = {}
+    for node, edges in graph.adjacency.items():
+        if degree.get(node, 0) == 2:
+            continue  # only real branch/leaf nodes are candidate hubs/far ends
+        for nxt, edge in edges:
+            leg_far, via_seen, path = _walk_chain(graph, degree, edge, nxt)
+            if leg_far == node:
+                continue  # a chain that loops back to its own hub is not a leg
+            if via_seen:
+                via_far.setdefault(node, set()).add(leg_far)
+                via_leg_paths.setdefault(node, []).append(path)
+            else:
+                track_leg_path[frozenset((node, leg_far))] = path
+
+    parent: dict[_Node, _Node] = {}
+
+    def find(node: _Node) -> _Node:
+        parent.setdefault(node, node)
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union_chain(nodes: list[_Node]) -> None:
+        for a, b in zip(nodes, nodes[1:], strict=False):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+    for hub, far in via_far.items():
+        if len(far) < 2:
+            continue
+
+        def track_neighbors(node: _Node, *, far_set: set[_Node] = far) -> list[_Node]:
+            return [g for g in far_set if g != node and frozenset((node, g)) in track_leg_path]
+
+        far_list = list(far)
+        reached = {far_list[0]}
+        stack = [far_list[0]]
+        while stack:
+            cur = stack.pop()
+            for nxt in track_neighbors(cur):
+                if nxt not in reached:
+                    reached.add(nxt)
+                    stack.append(nxt)
+        if reached != far:
+            continue
+
+        for path in via_leg_paths[hub]:
+            union_chain([hub, *path])
+        seen_ties: set[frozenset[_Node]] = set()
+        for f in far:
+            for g in track_neighbors(f):
+                tie = frozenset((f, g))
+                if tie in seen_ties:
+                    continue
+                seen_ties.add(tie)
+                union_chain([f, *track_leg_path[tie]])
+
+    return {node: find(node) for node in graph.adjacency}
+
+
 def _component_has_cycle(graph: _CopperGraph, start: _Node) -> bool:
-    """Keep the conservative whole-component ambiguity policy.
+    """Whole-component ambiguity, after contracting benign via-array legs.
 
     Distinct split edges count separately, even when they refer to the same
-    original routed segment. Real via edges count too; there is no via-array
-    or current-sharing exception.
+    original routed segment, and a pre-existing self-loop (two ends of one
+    segment already sharing a node, e.g. after pad-union collapsing) always
+    counts. Real via edges count too, EXCEPT inside the narrow
+    parallel-via-array pattern :func:`_via_array_roots` recognizes and
+    contracts first -- everything else keeps the original conservative
+    whole-component policy with no other current-sharing exception.
     """
-    visited = {start}
-    stack = [start]
+    roots = _via_array_roots(graph)
+
+    def root(node: _Node) -> _Node:
+        return roots.get(node, node)
+
+    visited_nodes = {start}
+    visited_roots = {root(start)}
     seen_edges: set[_GraphEdge] = set()
+    stack = [start]
     while stack:
-        for nxt, edge in graph.adjacency.get(stack.pop(), []):
-            seen_edges.add(edge)
-            if nxt not in visited:
-                visited.add(nxt)
+        cur = stack.pop()
+        for nxt, edge in graph.adjacency.get(cur, []):
+            if cur == nxt or root(cur) != root(nxt):
+                seen_edges.add(edge)
+            if nxt not in visited_nodes:
+                visited_nodes.add(nxt)
+                visited_roots.add(root(nxt))
                 stack.append(nxt)
-    return len(seen_edges) > len(visited) - 1
+    return len(seen_edges) > len(visited_roots) - 1
 
 
 def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
