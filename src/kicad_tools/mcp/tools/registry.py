@@ -734,6 +734,146 @@ register_tool(
 )
 
 
+def _handler_declare_interface(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle declare_interface tool call."""
+    from kicad_tools.mcp.tools.session import declare_interface
+
+    result = declare_interface(
+        session_id=params["session_id"],
+        interface_type=params["interface_type"],
+        nets=params["nets"],
+        params=params.get("params"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="declare_interface",
+    description=(
+        "Declare a typed interface intent for nets in an active placement session. "
+        "Derives interface constraints used by subsequent session operations."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {"type": "string", "description": "Session ID from start_session"},
+            "interface_type": {
+                "type": "string",
+                "description": "Interface type, e.g. usb2_high_speed or spi_standard",
+            },
+            "nets": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Net names forming the interface",
+            },
+            "params": {
+                "type": ["object", "null"],
+                "description": "Optional interface-specific parameters",
+            },
+        },
+        required=["session_id", "interface_type", "nets"],
+    ),
+    handler=_handler_declare_interface,
+    category="session",
+)
+
+
+def _handler_declare_power_rail(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle declare_power_rail tool call."""
+    from kicad_tools.mcp.tools.session import declare_power_rail
+
+    result = declare_power_rail(
+        session_id=params["session_id"],
+        net=params["net"],
+        voltage=params["voltage"],
+        max_current=params.get("max_current", 0.5),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="declare_power_rail",
+    description=(
+        "Declare a power rail in an active placement session with voltage and "
+        "maximum current requirements, deriving width and decoupling constraints."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {"type": "string", "description": "Session ID from start_session"},
+            "net": {"type": "string", "description": "Power net name"},
+            "voltage": {"type": "number", "description": "Rail voltage in volts"},
+            "max_current": {
+                "type": "number",
+                "default": 0.5,
+                "description": "Maximum expected current in amperes (default 0.5)",
+            },
+        },
+        required=["session_id", "net", "voltage"],
+    ),
+    handler=_handler_declare_power_rail,
+    category="session",
+)
+
+
+def _handler_list_intents(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle list_intents tool call."""
+    from kicad_tools.mcp.tools.session import list_intents
+
+    result = list_intents(session_id=params["session_id"])
+    return result.to_dict()
+
+
+register_tool(
+    name="list_intents",
+    description="List declared interface and power intents and their constraints in a session.",
+    parameters=_make_params(
+        properties={
+            "session_id": {"type": "string", "description": "Session ID from start_session"},
+        },
+        required=["session_id"],
+    ),
+    handler=_handler_list_intents,
+    category="session",
+)
+
+
+def _handler_clear_intent(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle clear_intent tool call."""
+    from kicad_tools.mcp.tools.session import clear_intent
+
+    result = clear_intent(
+        session_id=params["session_id"],
+        interface_type=params.get("interface_type"),
+        nets=params.get("nets"),
+    )
+    return result.to_dict()
+
+
+register_tool(
+    name="clear_intent",
+    description=(
+        "Remove session intents matching optional interface-type and net filters. "
+        "Omitting both filters removes all intents."
+    ),
+    parameters=_make_params(
+        properties={
+            "session_id": {"type": "string", "description": "Session ID from start_session"},
+            "interface_type": {
+                "type": ["string", "null"],
+                "description": "Optional interface type to remove",
+            },
+            "nets": {
+                "type": ["array", "null"],
+                "items": {"type": "string"},
+                "description": "Optional net names selecting intents to remove",
+            },
+        },
+        required=["session_id"],
+    ),
+    handler=_handler_clear_intent,
+    category="session",
+)
+
+
 # -----------------------------------------------------------------------------
 # Context Tools
 # -----------------------------------------------------------------------------
