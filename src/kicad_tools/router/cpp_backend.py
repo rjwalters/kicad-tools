@@ -2606,15 +2606,44 @@ class CppPathfinder:
         via_diameter = float(net_class.via_size if net_class else self._rules.via_diameter)
         via_drill = float(self._rules.via_drill)
 
+        # Issue #5013: ``cpp_via.layer_from``/``layer_to`` are the LOGICAL
+        # search transition (e.g. F.Cu -> In2.Cu), not the via's physical
+        # drilled span.  The C++ pathfinder has no blind/buried process
+        # selection (Issue #4007: ``blind_buried_supported`` is False for
+        # every current board -- ``hdi_4layer`` via rules are defined but
+        # never instantiated), so every via this loop constructs is
+        # manufactured as an ordinary through-hole whose barrel contacts
+        # every copper layer from the top of the stack to the bottom,
+        # regardless of which two layers the search happened to bridge.
+        # Emitting the logical pair verbatim under-reported the drilled
+        # span (e.g. ``F.Cu``/``In2.Cu`` on a 4-layer board): DRC and
+        # connectivity code treat ``via.layers`` as the physical barrel
+        # extent (see ``validate/connectivity.py::_via_bridged_layers``,
+        # ``validate/rules/clearance.py``), so a truncated span silently
+        # skipped barrel-vs-foreign-copper clearance checks on the layers
+        # the via actually passes through.  Router counterpart of stitch
+        # issue #5001 (``ViaPlacement`` normalization in
+        # ``cli/stitch_cmd.py``).
+        #
+        # The search/obstacle-avoidance side already treats every via as
+        # full-stack -- ``Grid3D::mark_via`` / ``Pathfinder::is_via_blocked_diag``
+        # (cpp/src/grid.cpp, cpp/src/pathfinder.cpp) iterate ALL grid
+        # layers unconditionally -- so no route is newly accepted against
+        # copper this fix "discovers"; only the *reported* span was wrong.
+        # Normalize HERE, at ``Route`` construction (upstream of
+        # acceptance and export), so every downstream consumer of
+        # ``route.vias`` sees the correct physical span, not just the
+        # final saved ``.kicad_pcb``.
+        physical_top_layer = Layer(self._grid.index_to_layer(0))
+        physical_bottom_layer = Layer(self._grid.index_to_layer(self._grid.num_layers - 1))
+
         for cpp_via in result.vias:
-            layer_from_value = self._grid.index_to_layer(cpp_via.layer_from)
-            layer_to_value = self._grid.index_to_layer(cpp_via.layer_to)
             via = Via(
                 x=cpp_via.x,
                 y=cpp_via.y,
                 drill=via_drill,
                 diameter=via_diameter,
-                layers=(Layer(layer_from_value), Layer(layer_to_value)),
+                layers=(physical_top_layer, physical_bottom_layer),
                 net=cpp_via.net,
                 net_name=start.net_name,
             )

@@ -1216,6 +1216,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frame), and all in-pad nodes are shorted through the pad. This is a *false*
   fail-closed being removed, not a relaxation — copper outside the pad extent
   still never attaches, so genuinely moved/removed pads still fail closed.
+- **Router emitted partial-stack via spans for ordinary multilayer
+  transitions, without an HDI process ever being selected** (#5013,
+  router counterpart of stitch issue #5001) — `CppPathfinder._convert_result_to_route`
+  and `Router._convert_path_to_route` (the C++ and Python A* pathfinders)
+  built a via's reported `layers` span directly from the LOGICAL
+  current/next search layer (e.g. `F.Cu`/`In2.Cu` on a 4-layer board)
+  instead of the via's physical drilled extent. No blind/buried via
+  process is ever selected by either pathfinder today (Issue #4007:
+  `blind_buried_supported` is False for every board — `hdi_4layer` via
+  rules are defined but never instantiated), so every via either
+  constructs is manufactured as an ordinary through-hole whose barrel
+  spans the full copper stack; under-reporting the span let DRC and
+  connectivity code (which trust `via.layers` as the physical barrel
+  extent — `validate/connectivity.py`, `validate/rules/clearance.py`,
+  `core/layers.py::via_spans_layer`) silently skip barrel-vs-foreign-
+  copper clearance checks on layers the via actually passes through but
+  did not name as an endpoint. The grid-side obstacle search already
+  treated every via as full-stack (`Grid3D::mark_via` /
+  `Pathfinder::is_via_blocked_diag` in C++; `RoutingGrid._mark_via` in
+  Python both block/check ALL layers unconditionally), so no route is
+  newly accepted against copper this fix "discovers" — only the
+  *reported* span was wrong. Both pathfinders, plus the shared
+  `Route.validate_layer_transitions` missing-via safety net, now
+  normalize an ordinary (non-micro) via's span to the full physical
+  stack at `Route` construction — upstream of acceptance and export —
+  so every downstream consumer of `route.vias` sees the correct span,
+  not just the final saved `.kicad_pcb`. Explicit micro-vias are
+  untouched. Regression coverage spans both backends, an inner-to-inner
+  (`In1.Cu` -> `In2.Cu`) transition, the `validate_layer_transitions`
+  fallback, and `via_spans_layer`'s foreign-copper-on-an-intermediate-
+  layer visibility.
 - **`kct route` accepted KiCad 10 name-only nets but wrote zero copper and
   reported a vacuous "SUCCESS" (0/0 nets)** (#4983) — a PCB saved in KiCad
   10's name-only net syntax (`(net "SIGNAL")` on pads, no numeric net table
