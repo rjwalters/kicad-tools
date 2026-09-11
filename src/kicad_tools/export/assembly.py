@@ -430,7 +430,8 @@ class AssemblyPackage:
         # spec overlay (which has higher priority) but before API
         # auto-matching (which has lower priority).  Items that already
         # received an LCSC from the schematic or spec overlay are not
-        # overwritten.
+        # overwritten. Explicit MPN-only selections also take priority over
+        # old generic CSV assignments, even with auto-matching disabled.
         csv_merge_refs: set[str] = set()
         if self.config.merge_lcsc:
             filename = self.config.bom_filename.format(manufacturer=self.fab_family)
@@ -449,7 +450,13 @@ class AssemblyPackage:
                     except Exception as e:
                         logger.debug("Parts cache unavailable for CSV-merge validation: %s", e)
                     merged_count, csv_merge_refs = apply_existing_lcsc_assignments(
-                        items, existing, parts_cache=parts_cache
+                        [
+                            item
+                            for item in items
+                            if not (item.reference in spec_refs and item.mpn and not item.lcsc)
+                        ],
+                        existing,
+                        parts_cache=parts_cache,
                     )
                     if merged_count:
                         logger.info(
