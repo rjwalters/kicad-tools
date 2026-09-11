@@ -435,9 +435,9 @@ float Grid3D::memory_mb() const {
 
 void Grid3D::add_pad(float x, float y, float width, float height,
                      int net, int layer_idx, uint32_t ref_hash,
-                     float clearance_override, bool is_plane_net) {
+                     float clearance_override, bool is_plane_net, float rotation) {
     pads_.push_back({x, y, width, height, net, layer_idx, ref_hash,
-                     clearance_override, is_plane_net});
+                     clearance_override, is_plane_net, rotation});
 }
 
 void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
@@ -781,7 +781,7 @@ ValidationResult Grid3D::validate_route(
             // Mirrors PR #2787 (validate/rules/clearance.py) and the
             // Python validator at ``router/grid.py``.
             float clearance;
-            const bool is_circular_pad = std::abs(pad.width - pad.height) < 0.001f;
+            const bool is_circular_pad = pad.rotation == 0.0f && std::abs(pad.width - pad.height) < 0.001f;
             if (is_circular_pad) {
                 const float pad_radius = std::max(pad.width, pad.height) / 2.0f;
                 const float dist = point_to_segment_distance(
@@ -791,9 +791,23 @@ ValidationResult Grid3D::validate_route(
                 // Rect-aware: signed centerline-to-rect distance.  Negative
                 // means the segment centerline lies inside the pad rectangle
                 // (a real DRC defect).
-                const float center_dist = rect_segment_centerline_distance(
-                    pad.x, pad.y, pad.width, pad.height,
-                    seg.x1, seg.y1, seg.x2, seg.y2);
+                float center_dist;
+                if (pad.rotation == 0.0f) {
+                    center_dist = rect_segment_centerline_distance(
+                        pad.x, pad.y, pad.width, pad.height,
+                        seg.x1, seg.y1, seg.x2, seg.y2);
+                } else {
+                    // KiCad copper rotates by -angle in board coordinates;
+                    // inverse-transform endpoints with +angle into local axes.
+                    const float angle = pad.rotation * 3.14159265358979323846f / 180.0f;
+                    const float c = std::cos(angle), s = std::sin(angle);
+                    const float dx1 = seg.x1 - pad.x, dy1 = seg.y1 - pad.y;
+                    const float dx2 = seg.x2 - pad.x, dy2 = seg.y2 - pad.y;
+                    center_dist = rect_segment_centerline_distance(
+                        0.0f, 0.0f, pad.width, pad.height,
+                        c * dx1 - s * dy1, s * dx1 + c * dy1,
+                        c * dx2 - s * dy2, s * dx2 + c * dy2);
+                }
                 clearance = center_dist - seg_half_width;
             }
 

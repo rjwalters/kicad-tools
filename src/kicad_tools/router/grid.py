@@ -135,6 +135,34 @@ _PLANE_NET_EXACT: frozenset[str] = frozenset(
 )
 
 
+def _pad_rect_segment_centerline_distance(
+    pad: Pad, x1: float, y1: float, x2: float, y2: float
+) -> float:
+    """Distance in pad-local axes, preserving the cardinal legacy fast path.
+
+    KiCad board coordinates rotate copper by minus the declared angle, so
+    the inverse transform below uses plus rotation. Dimensions stay local.
+    This rectangular model does not infer arbitrary native pad shapes.
+    """
+    if pad.rotation == 0.0:
+        return _rect_segment_centerline_distance(
+            pad.x, pad.y, pad.width, pad.height, x1, y1, x2, y2
+        )
+    angle = math.radians(pad.rotation)
+    c, s = math.cos(angle), math.sin(angle)
+    dx1, dy1, dx2, dy2 = x1 - pad.x, y1 - pad.y, x2 - pad.x, y2 - pad.y
+    return _rect_segment_centerline_distance(
+        0.0,
+        0.0,
+        pad.width,
+        pad.height,
+        c * dx1 - s * dy1,
+        s * dx1 + c * dy1,
+        c * dx2 - s * dy2,
+        s * dx2 + c * dy2,
+    )
+
+
 def _sync_pad_to_cpp_grid(
     py_grid: RoutingGrid,
     cpp_grid: Any,
@@ -3085,17 +3113,14 @@ class RoutingGrid:
                 )
             )
 
-            is_circular_pad = abs(pad.width - pad.height) < 0.001
+            is_circular_pad = pad.rotation == 0.0 and abs(pad.width - pad.height) < 0.001
             if is_circular_pad:
                 pad_radius = max(pad.width, pad.height) / 2
                 dist = self._point_to_segment_distance(pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2)
                 clearance = dist - seg_half_width - pad_radius
             else:
-                center_dist = _rect_segment_centerline_distance(
-                    pad.x,
-                    pad.y,
-                    pad.width,
-                    pad.height,
+                center_dist = _pad_rect_segment_centerline_distance(
+                    pad,
                     seg.x1,
                     seg.y1,
                     seg.x2,
@@ -3188,7 +3213,7 @@ class RoutingGrid:
                 )
             )
 
-            is_circular_pad = abs(pad.width - pad.height) < 0.001
+            is_circular_pad = pad.rotation == 0.0 and abs(pad.width - pad.height) < 0.001
             if is_circular_pad:
                 pad_radius = max(pad.width, pad.height) / 2
                 dist = math.hypot(via.x - pad.x, via.y - pad.y)
@@ -3196,11 +3221,8 @@ class RoutingGrid:
             else:
                 # Degenerate (point) segment: distance from the pad rect
                 # boundary to the via center.
-                center_dist = _rect_segment_centerline_distance(
-                    pad.x,
-                    pad.y,
-                    pad.width,
-                    pad.height,
+                center_dist = _pad_rect_segment_centerline_distance(
+                    pad,
                     via.x,
                     via.y,
                     via.x,
@@ -3487,7 +3509,7 @@ class RoutingGrid:
             # the disc model -- it is exact for circular obstacles and
             # cheaper to evaluate. This mirrors PR #2787's fix at
             # ``validate/rules/clearance.py::_segment_circle_clearance``.
-            is_circular_pad = abs(pad.width - pad.height) < 0.001
+            is_circular_pad = pad.rotation == 0.0 and abs(pad.width - pad.height) < 0.001
             if is_circular_pad:
                 pad_radius = max(pad.width, pad.height) / 2
                 dist = self._point_to_segment_distance(pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2)
@@ -3497,11 +3519,8 @@ class RoutingGrid:
                 # means the segment centerline lies inside the pad rectangle
                 # (a real DRC defect; the magnitude is the deepest signed
                 # depth).
-                center_dist = _rect_segment_centerline_distance(
-                    pad.x,
-                    pad.y,
-                    pad.width,
-                    pad.height,
+                center_dist = _pad_rect_segment_centerline_distance(
+                    pad,
                     seg.x1,
                     seg.y1,
                     seg.x2,

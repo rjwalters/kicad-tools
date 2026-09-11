@@ -587,6 +587,7 @@ struct PadInfo {
     // by classifying ``pad.net_name`` (the C++ side has no string
     // table, so the boolean is computed in Python and passed in).
     bool is_plane_net = false;
+    float rotation = 0.0f;  // Residual KiCad board-space degrees (#5182)
 };
 
 // Stored segment for validation (Issue #2439)

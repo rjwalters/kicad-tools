@@ -1000,6 +1000,7 @@ class CppGrid:
                 ref_hash,
                 clearance_override,
                 is_plane_net,
+                pad.rotation,
             )
 
         return cpp_grid
