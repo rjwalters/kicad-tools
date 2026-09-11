@@ -40,7 +40,7 @@ Three things this module deliberately does NOT do, by design:
   hiding them.
 
 Endpoint attachment is by pad **extent**, not by an exact pad-center hit
-(:func:`_pad_covers` / :func:`_bind_pad`): a router may terminate a trace
+(:func:`_pad_covers`): a router may terminate a trace
 anywhere inside a pad's copper, and a wide power pad is routinely entered
 by several stubs at once, all shorted by the pad itself. Binding on an
 exact center match instead reported such boards ``unresolved`` -- a *false*
@@ -48,6 +48,20 @@ fail-closed, which is not conservative at all: it teaches users to delete
 declarations, and a deleted declaration is exactly the silent pass this
 module exists to prevent. Copper outside the pad extent still never
 attaches, so the fail-closed direction is preserved where it is real.
+
+The declared-path graph is layer-aware. Only real same-net via spans or
+plated multilayer pad copper establish layer changes. Via/track centerline
+contacts and same-layer endpoint/interior contacts split graph edges, while
+public evidence retains each original routed segment once (including its
+whole length and width). Pad-internal convex copper is normalized before
+whole-component cycle detection; physical via arrays remain ambiguous.
+
+Unsupported custom/trapezoid pads, repeated physical pad numbers, and copper
+on absent stackup layers make the declaration unresolved. Supported pad
+extents are circles, rectangles, capsules (oval), and rounded rectangles.
+Width-only copper overlaps, arcs, zones, and pad-interior contacts without a
+track/via node are outside this bounded centerline model; a resolved result is not a native connectivity or ampacity
+claim. These contacts require a separate physical geometry model.
 
 Consumers:
 
@@ -149,6 +163,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from kicad_tools.core.geometry import point_to_segment_distance, segments_intersect
+from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -472,100 +489,209 @@ def _net_segments(pcb: PCB, net_name: str) -> list[Segment]:
     ]
 
 
-def _build_graph(
-    segments: list[Segment],
-) -> dict[tuple[float, float], list[tuple[tuple[float, float], Segment]]]:
-    adjacency: dict[tuple[float, float], list[tuple[tuple[float, float], Segment]]] = {}
+# Copper node identity includes the layer. Pad normalization below may replace
+# a node with another copper node, but never merges layers by XY alone.
+_Node = tuple[float, float, str]
+
+
+@dataclass(eq=False)
+class _GraphEdge:
+    """One graph edge; several split edges may retain the same routed segment."""
+
+    segment: Segment | None = None  # None is real via barrel copper
+
+
+@dataclass
+class _CopperGraph:
+    adjacency: dict[_Node, list[tuple[_Node, _GraphEdge]]] = field(default_factory=dict)
+    pads: dict[tuple[str, str], _Node] = field(default_factory=dict)
+    internal: dict[_Node, list[Segment]] = field(default_factory=dict)
+
+
+def _copper_node(point: tuple[float, float], layer: str) -> _Node:
+    return (*_node_key(point), layer)
+
+
+def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGraph:
+    """Build exact centerline contacts and normalize convex pad-internal copper.
+
+    Supported contacts are same-layer track endpoints (including a T landing
+    in a segment interior), via centers on a track, and nodes inside supported
+    pad copper. Width-only overlaps, zone/arc connectivity and arbitrary pad
+    primitives are not modeled; no proximity tolerance invents a connection.
+    This is not a general PCB connectivity solver.
+    """
+    layers = {layer.name for layer in pcb.copper_layers}
+    net = pcb.get_net_by_name(net_name)
+    vias = [
+        via
+        for via in pcb.vias
+        if (via.net_name == net_name or (net is not None and via.net_number == net.number))
+        and len(via.layers) == 2
+        and len(set(via.layers)) == 2
+        and all(layer in layers for layer in via.layers)
+    ]
+    contacts: dict[str, set[tuple[float, float]]] = {layer: set() for layer in layers}
     for seg in segments:
-        a, b = _node_key(seg.start), _node_key(seg.end)
-        adjacency.setdefault(a, []).append((b, seg))
-        adjacency.setdefault(b, []).append((a, seg))
-    return adjacency
+        contacts.setdefault(seg.layer, set()).update((_node_key(seg.start), _node_key(seg.end)))
+    # Proper same-layer centerline crossings are also contacts. Ignoring
+    # them can hide a real parallel route even when neither trace ends there.
+    for i, first in enumerate(segments):
+        for second in segments[i + 1 :]:
+            if first.layer != second.layer or not segments_intersect(
+                *first.start, *first.end, *second.start, *second.end
+            ):
+                continue
+            dx, dy = first.end[0] - first.start[0], first.end[1] - first.start[1]
+            ex, ey = second.end[0] - second.start[0], second.end[1] - second.start[1]
+            ox, oy = second.start[0] - first.start[0], second.start[1] - first.start[1]
+            t = (ox * ey - oy * ex) / (dx * ey - dy * ex)
+            point = _node_key((first.start[0] + t * dx, first.start[1] + t * dy))
+            contacts[first.layer].add(point)
+    for via in vias:
+        for layer in layers:
+            if via_spans_layer(via.layers, layer):
+                contacts[layer].add(_node_key(via.position))
+
+    edges: list[tuple[_Node, _Node, _GraphEdge]] = []
+    for seg in segments:
+        points = [
+            point
+            for point in contacts[seg.layer]
+            if point_to_segment_distance(*point, *seg.start, *seg.end) <= _PAD_EPS
+        ]
+        points.sort(key=lambda point: math.dist(point, seg.start))
+        for point_a, point_b in zip(points, points[1:], strict=False):
+            edges.append(
+                (
+                    _copper_node(point_a, seg.layer),
+                    _copper_node(point_b, seg.layer),
+                    _GraphEdge(seg),
+                )
+            )
+    for via in vias:
+        nodes = [
+            _copper_node(via.position, layer)
+            for layer in COPPER_LAYER_ORDER
+            if layer in layers and via_spans_layer(via.layers, layer)
+        ]
+        for a, b in zip(nodes, nodes[1:], strict=False):
+            edges.append((a, b, _GraphEdge()))
+
+    # Contract only contacts inside one physical convex pad. Adding a pad hub
+    # plus the original internal track edges instead manufactures false cycles.
+    # External branches remain separate edges, so real parallel returns survive.
+    parents = {node: node for a, b, _ in edges for node in (a, b)}
+
+    def root(node: _Node) -> _Node:
+        while parents[node] != node:
+            parents[node] = parents[parents[node]]
+            node = parents[node]
+        return node
+
+    pad_contacts: dict[tuple[str, str], list[_Node]] = {}
+    internal_edges: set[_GraphEdge] = set()
+    wholly_internal_ids: set[int] = set()
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_name != net_name or pad.type == "np_thru_hole":
+                continue
+            nodes = [
+                node
+                for node in parents
+                if (node[2] in pad.layers or "*.Cu" in pad.layers)
+                and _pad_covers(pcb, fp.reference, pad.number, node[:2])
+            ]
+            # Only a plated through-hole pad establishes interlayer copper.
+            groups = (
+                [nodes]
+                if pad.type == "thru_hole"
+                else [[node for node in nodes if node[2] == layer] for layer in layers]
+            )
+            for group in groups:
+                if group:
+                    members = set(group)
+                    internal_edges.update(
+                        edge for a, b, edge in edges if a in members and b in members
+                    )
+                    wholly_internal_ids.update(
+                        id(seg)
+                        for seg in segments
+                        if _copper_node(seg.start, seg.layer) in members
+                        and _copper_node(seg.end, seg.layer) in members
+                    )
+                    hub = root(group[0])
+                    for node in group[1:]:
+                        parents[root(node)] = hub
+            pad_contacts[(fp.reference, pad.number)] = nodes
+
+    graph = _CopperGraph()
+    for key, nodes in pad_contacts.items():
+        hubs = {root(node) for node in nodes}
+        if len(hubs) == 1:
+            graph.pads[key] = hubs.pop()
+    for a, b, edge in edges:
+        ra, rb = root(a), root(b)
+        graph.adjacency.setdefault(ra, [])
+        graph.adjacency.setdefault(rb, [])
+        if edge in internal_edges and a != b:
+            # A split piece inside a pad cannot cover its original segment's
+            # external tail. That original needs a traversed external edge;
+            # otherwise a dangling sense spur becomes trunk/reinforcement.
+            if edge.segment is not None and id(edge.segment) in wholly_internal_ids:
+                graph.internal.setdefault(ra, []).append(edge.segment)
+            continue
+        graph.adjacency[ra].append((rb, edge))
+        graph.adjacency[rb].append((ra, edge))
+    return graph
 
 
-def _bfs_path(
-    adjacency: dict[tuple[float, float], list[tuple[tuple[float, float], Segment]]],
-    start: tuple[float, float],
-    goal: tuple[float, float],
-) -> list[Segment] | None:
-    """Shortest (fewest-hop) segment chain from ``start`` to ``goal``, or None."""
-    if start == goal:
-        return []
+def _bfs_path(graph: _CopperGraph, start: _Node, goal: _Node) -> list[Segment] | None:
+    """Find a route, reporting each original routed segment exactly once."""
     visited = {start}
-    queue: deque[tuple[float, float]] = deque([start])
-    parent: dict[tuple[float, float], tuple[tuple[float, float], Segment]] = {}
+    queue = deque([start])
+    parent: dict[_Node, tuple[_Node, _GraphEdge]] = {}
     while queue:
         cur = queue.popleft()
         if cur == goal:
             break
-        for nxt, seg in adjacency.get(cur, []):
-            if nxt in visited:
-                continue
-            visited.add(nxt)
-            parent[nxt] = (cur, seg)
-            queue.append(nxt)
+        for nxt, edge in graph.adjacency.get(cur, []):
+            if nxt not in visited:
+                visited.add(nxt)
+                parent[nxt] = (cur, edge)
+                queue.append(nxt)
     if goal not in visited:
         return None
-    path_segments: list[Segment] = []
+    evidence = list(graph.internal.get(goal, []))
     node = goal
     while node != start:
-        prev, seg = parent[node]
-        # Pad shorts are pseudo-edges standing for a pad's own copper, not
-        # routed segments: they must not appear in the covered-segment set
-        # (nothing can check their width, and they are not "uncovered copper"
-        # a designer could route differently).
-        if not isinstance(seg, _PadShort):
-            path_segments.append(seg)
+        prev, edge = parent[node]
+        if edge.segment is not None:
+            evidence.append(edge.segment)
+        evidence.extend(graph.internal.get(prev, []))
         node = prev
-    path_segments.reverse()
-    return path_segments
+    # A via may split an original segment into several traversed graph edges.
+    # Audit/ampacity/reinforcement still operate on whole original segments.
+    return list({id(seg): seg for seg in reversed(evidence)}.values())
 
 
-def _component_has_cycle(
-    adjacency: dict[tuple[float, float], list[tuple[tuple[float, float], Segment]]],
-    start: tuple[float, float],
-) -> bool:
-    """True if the connected component containing ``start`` has a cycle.
+def _component_has_cycle(graph: _CopperGraph, start: _Node) -> bool:
+    """Keep the conservative whole-component ambiguity policy.
 
-    A cycle anywhere in the component reachable from a declared endpoint
-    means the net's copper offers more than one electrical route between
-    some pair of points in that component -- i.e. current entering at
-    ``start`` could split across parallel branches. This is a deliberately
-    coarse, whole-component check (not limited to routes between the
-    declared source and sink): the issue requires that a parallel return
-    or alternate-mode path never be silently collapsed into a single
-    confident result, and erring toward "ambiguous" is the fail-closed
-    direction.
+    Distinct split edges count separately, even when they refer to the same
+    original routed segment. Real via edges count too; there is no via-array
+    or current-sharing exception.
     """
     visited = {start}
     stack = [start]
-    seen_segment_ids: set[int] = set()
-    edge_count = 0
+    seen_edges: set[_GraphEdge] = set()
     while stack:
-        cur = stack.pop()
-        for nxt, seg in adjacency.get(cur, []):
-            seg_id = id(seg)
-            if seg_id not in seen_segment_ids:
-                seen_segment_ids.add(seg_id)
-                edge_count += 1
+        for nxt, edge in graph.adjacency.get(stack.pop(), []):
+            seen_edges.add(edge)
             if nxt not in visited:
                 visited.add(nxt)
                 stack.append(nxt)
-    return edge_count > len(visited) - 1
-
-
-class _PadShort:
-    """A zero-length pseudo-edge standing for a pad's own copper.
-
-    Every trace endpoint landing inside one pad is the *same* electrical
-    node -- the pad shorts them. Modelling that as an explicit edge (rather
-    than by rewriting node keys) keeps :func:`_component_has_cycle`'s
-    edge-vs-node counting honest: each instance is distinct, so ``id()``
-    dedup counts pad shorts exactly once each, and a pad that fans out to
-    branches which never rejoin still counts as a tree.
-    """
-
-    __slots__ = ()
+    return len(seen_edges) > len(visited) - 1
 
 
 def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
@@ -606,39 +732,27 @@ def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float])
     local_x = dx * cos_a - dy * sin_a
     local_y = dx * sin_a + dy * cos_a
 
-    if pad.shape in ("circle", "oval"):
-        return (local_x / half_w) ** 2 + (local_y / half_h) ** 2 <= 1.0 + _PAD_EPS
-    # rect / roundrect / trapezoid / custom: the bounding rectangle. Ignoring a
-    # roundrect's clipped corners over-approximates by at most a corner radius,
-    # which is far below any clearance a trace could legally end in.
-    return abs(local_x) <= half_w + _PAD_EPS and abs(local_y) <= half_h + _PAD_EPS
-
-
-def _bind_pad(
-    adjacency: dict[tuple[float, float], list[tuple[tuple[float, float], Segment]]],
-    pcb: PCB,
-    ref: str,
-    pad_number: str,
-    position: tuple[float, float],
-) -> tuple[float, float] | None:
-    """Attach a pad to the copper graph, returning its node (or None).
-
-    All graph nodes lying on the pad are shorted together through a hub node
-    at the pad's center, because the pad's own copper connects them. Returns
-    ``None`` -- the fail-closed outcome -- only when no copper touches the pad
-    at all.
-    """
-    hub = _node_key(position)
-    on_pad = [n for n in adjacency if _pad_covers(pcb, ref, pad_number, n)]
-    if not on_pad:
-        return None
-    for node in on_pad:
-        if node == hub:
-            continue
-        short = _PadShort()
-        adjacency.setdefault(hub, []).append((node, short))  # type: ignore[arg-type]
-        adjacency.setdefault(node, []).append((hub, short))  # type: ignore[arg-type]
-    return hub
+    if pad.shape == "circle":
+        radius = min(half_w, half_h)
+        return math.hypot(local_x, local_y) <= radius + _PAD_EPS
+    if pad.shape == "oval":
+        # KiCad ovals are capsules, not ellipses.
+        radius = min(half_w, half_h)
+        dx = max(abs(local_x) - (half_w - radius), 0.0)
+        dy = max(abs(local_y) - (half_h - radius), 0.0)
+        return math.hypot(dx, dy) <= radius + _PAD_EPS
+    if pad.shape == "rect":
+        return abs(local_x) <= half_w + _PAD_EPS and abs(local_y) <= half_h + _PAD_EPS
+    if pad.shape == "roundrect":
+        ratio = pad.roundrect_rratio
+        if not 0 <= ratio <= 0.5:
+            return False
+        radius = 2 * min(half_w, half_h) * ratio
+        dx = max(abs(local_x) - (half_w - radius), 0.0)
+        dy = max(abs(local_y) - (half_h - radius), 0.0)
+        return math.hypot(dx, dy) <= radius + _PAD_EPS
+    # Custom/trapezoid copper cannot be inferred from its bounding rectangle.
+    return False
 
 
 def _resolve_endpoint(
@@ -647,7 +761,13 @@ def _resolve_endpoint(
     fp = pcb.get_footprint(endpoint.ref)
     if fp is None:
         return None, f"component {endpoint.ref!r} not found on board"
-    pad = next((p for p in fp.pads if p.number == endpoint.pad), None)
+    matches = [p for p in fp.pads if p.number == endpoint.pad]
+    if len(matches) > 1:
+        return (
+            None,
+            f"pad {endpoint.label()} has multiple physical occurrences; contact is unsupported",
+        )
+    pad = matches[0] if matches else None
     if pad is None:
         return None, f"pad {endpoint.label()} not found on component {endpoint.ref!r}"
     if pad.net_name != expected_net:
@@ -721,9 +841,33 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
             sink=sink,
         )
 
-    adjacency = _build_graph(net_segments)
+    # Unknown shapes or repeated physical pad numbers might hide alternate
+    # routes. Refuse the net rather than silently ignoring their copper.
+    unsupported = None
+    for fp in pcb.footprints:
+        seen_numbers: set[str] = set()
+        for pad in fp.pads:
+            if pad.net_name != spec.net_name or pad.type == "np_thru_hole":
+                continue
+            if pad.number in seen_numbers or pad.shape not in {
+                "rect",
+                "roundrect",
+                "circle",
+                "oval",
+            }:
+                unsupported = f"unsupported physical pad contact at {fp.reference}.{pad.number}"
+            seen_numbers.add(pad.number)
+    layers = {layer.name for layer in pcb.copper_layers}
+    if any(seg.layer not in layers for seg in net_segments):
+        unsupported = "routed copper uses a layer absent from the board stackup"
+    if unsupported:
+        return PathResolution(
+            spec=spec, status=STATUS_UNRESOLVED, reason=unsupported, source=source, sink=sink
+        )
 
-    if _node_key(source.position) == _node_key(sink.position):
+    adjacency = _build_graph(net_segments, pcb, spec.net_name)
+
+    if spec.source == spec.sink:
         # Degenerate self-path: a declaration whose source and sink are the
         # same pad covers no copper, so it resolves trivially without needing
         # anything attached to the graph at all (preserved from before the
@@ -739,8 +883,8 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
     # path as "unresolved" -- a FALSE fail-closed, which teaches users to
     # delete declarations and is every bit as unsafe as the silent pass this
     # rule exists to prevent.
-    start = _bind_pad(adjacency, pcb, source.ref, source.pad, source.position)
-    goal = _bind_pad(adjacency, pcb, sink.ref, sink.pad, sink.position)
+    start = adjacency.pads.get((source.ref, source.pad))
+    goal = adjacency.pads.get((sink.ref, sink.pad))
 
     if start is None:
         return PathResolution(
