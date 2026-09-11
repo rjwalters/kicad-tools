@@ -1042,6 +1042,43 @@ register_tool(
 )
 
 
+def _handler_get_design_intent(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_design_intent tool call."""
+    from kicad_tools.mcp.tools.design_intent import get_design_intent
+
+    return get_design_intent(spec_path=params["spec_path"])
+
+
+register_tool(
+    name="get_design_intent",
+    description=(
+        "Read the standing design guidance and decision history persisted in a "
+        "project's .kct specification file. Returns the project's intent summary, "
+        "'constraints' (standing project guidance the author wrote down, e.g. fab "
+        "or form-factor limits -- distinct from session-scoped electrical "
+        "constraints), and 'decisions' (the project's own append-only historical "
+        "log of material design choices with rationale -- distinct from session "
+        "decision history). Read-only: the caller must supply the exact spec_path; "
+        "no active project is inferred from server or session state, and the file "
+        "is never modified. Absent or null constraints/decisions normalize to "
+        "empty arrays; a missing file, unreadable/directory path, malformed YAML, "
+        "or schema-invalid content (e.g. an intent block missing its required "
+        "summary) raises a tool error rather than returning an empty result."
+    ),
+    parameters=_make_params(
+        properties={
+            "spec_path": {
+                "type": "string",
+                "description": "Path to the .kct project specification file to read",
+            },
+        },
+        required=["spec_path"],
+    ),
+    handler=_handler_get_design_intent,
+    category="context",
+)
+
+
 # -----------------------------------------------------------------------------
 # Analysis Tools
 # -----------------------------------------------------------------------------
