@@ -545,6 +545,16 @@ def _check_stub_clearance(
     layers = set(stub_layers)
     copper_layers = [layer.name for layer in pcb.copper_layers]
 
+    # The stub must physically originate at the via's pre-relocation position
+    # to bond to whatever copper is already routed there. Any foreign item
+    # already within that position's pre-existing keep-out radius (the via's
+    # own disc plus the clearance floor) was already too close *before* this
+    # relocation -- the condition the move exists to escape, not a new
+    # violation the stub introduces. Clip that disc out of the checked
+    # geometry so only the escape route beyond it is held to full clearance.
+    exclusion = Point(via.position).buffer(via.size / 2.0 + min_clearance)
+    check_path = path.difference(exclusion)
+
     def overlaps(item_layers: list[str]) -> bool:
         return (
             bool(layers.intersection(item_layers))
@@ -556,7 +566,9 @@ def _check_stub_clearance(
         return net == 0 or net != via.net_number
 
     def too_close(shape, other_radius: float = 0.0) -> bool:
-        return bool(path.distance(shape) - radius - other_radius < min_clearance - 1e-6)
+        if check_path.is_empty:
+            return False
+        return bool(check_path.distance(shape) - radius - other_radius < min_clearance - 1e-6)
 
     for seg in pcb.segments:
         if seg.layer in layers and foreign(seg.net_number):

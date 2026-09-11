@@ -2839,6 +2839,24 @@ def test_stub_via_obstacle_spans_inner_layers():
     assert _check_stub_clearance(pcb, via, (12, 10), ["In1.Cu"], 0.2, 0.127)
 
 
+def test_stub_ignores_via_own_preexisting_violation():
+    """PR #5078 Judge review: a via's own pre-relocation position can already
+    be too close to foreign copper -- exactly the violation a different-net-
+    short repair exists to fix. Every candidate must not be permanently boxed
+    in because the stub's start point re-triggers that pre-existing clearance
+    failure; only obstacles beyond the via's own footprint should block."""
+    from kicad_tools.cli.relocate_in_pad_vias import _check_stub_clearance
+
+    pcb = PCB.create(width=40, height=40, layers=2)
+    via = pcb.add_via(20, 20, net="NRST")
+    pcb.add_via(20.3, 20, net="OSC_IN")  # 0.3mm away: already violates at via's own position
+    assert _check_stub_clearance(pcb, via, (5, 20), ["B.Cu"], 0.2, 0.127) is None
+
+    # A genuinely new obstacle further along the escape route is still caught.
+    pcb.add_via(5.05, 20, net="OTHER")
+    assert _check_stub_clearance(pcb, via, (5, 20), ["B.Cu"], 0.2, 0.127) is not None
+
+
 def test_dry_run_accounts_for_previously_planned_moves(tmp_path):
     import copy
 
