@@ -139,6 +139,27 @@ def test_copper_lvs_detects_a_real_short_in_hierarchical_design() -> None:
     assert {short.net_a, short.net_b} == {"VCC", "GND"}
 
 
+def test_copper_extraction_detects_bridge_short_in_hierarchical_design(tmp_path: Path) -> None:
+    """A physical bridge joins the routed VCC/GND islands after extraction."""
+    board_text = _BOARD_PCB.read_text().rstrip()
+    assert board_text.endswith(")")
+    bridge = (
+        '  (segment (start 101 100) (end 101 99) (width 0.25) (layer "F.Cu") (net 2)\n'
+        '    (uuid "hlvs-seg-short-bridge"))\n'
+    )
+    shorted_board = tmp_path / "shorted.kicad_pcb"
+    shorted_board.write_text(board_text[:-1] + bridge + ")\n")
+
+    result = compare_copper_netlist(_ROOT_SCH, shorted_board)
+
+    assert result.vacuous is False
+    assert result.bound_pad_count == 4
+    assert result.clean is False
+    assert result.opens == ()
+    assert len(result.mismatches) == len(result.shorts) == 1
+    assert {result.shorts[0].net_a, result.shorts[0].net_b} == {"VCC", "GND"}
+
+
 def test_floating_sub_sheet_pin_resolves_to_none_not_dropped() -> None:
     """A floating pin in a sub-sheet maps to ``None``, not silently dropped.
 
