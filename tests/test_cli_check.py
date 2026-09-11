@@ -1608,6 +1608,34 @@ class TestManifestContentFreshness:
         )
         return pcb, manifest, archive
 
+    @pytest.mark.parametrize("compression, offset, value", [(8, 0, 0x07), (14, 4, 0xFF)])
+    def test_hash_bound_corrupt_compression_is_unverified(
+        self, tmp_path, compression, offset, value
+    ):
+        import hashlib
+        import struct
+        import zipfile
+
+        from kicad_tools.cli.check_cmd import _manifest_subcheck
+
+        pcb, manifest, archive = self.bundle(tmp_path)
+        with zipfile.ZipFile(archive, "w", compression=compression) as z:
+            z.writestr(pcb.name, pcb.read_bytes())
+        content = bytearray(archive.read_bytes())
+        name_length, extra_length = struct.unpack_from("<HH", content, 26)
+        # Invalid deflate block type or unsupported LZMA properties.
+        content[30 + name_length + extra_length + offset] = value
+        archive.write_bytes(content)
+        data = json.loads(manifest.read_text())
+        data["files"][archive.name] = {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+        }
+        manifest.write_text(json.dumps(data))
+        result = _manifest_subcheck(pcb)
+        assert result.status == "FAILED"
+        assert "unverified" in result.detail
+
     def test_matching_content_ignores_mtime(self, tmp_path):
         from kicad_tools.cli.check_cmd import _manifest_subcheck
 

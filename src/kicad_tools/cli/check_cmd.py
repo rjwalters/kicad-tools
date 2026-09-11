@@ -879,8 +879,10 @@ def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
     schematic and results) remains the independent readiness.json contract.
     """
     import hashlib
+    import lzma
     import re
     import zipfile
+    import zlib
 
     from kicad_tools.export import verify_manifest
 
@@ -932,7 +934,16 @@ def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
             archived_digest = hashlib.sha256(archive.read(pcb_path.name)).hexdigest()
         if archived_digest != hashlib.sha256(pcb_path.read_bytes()).hexdigest():
             raise ValueError("routed PCB content differs from the manifest-bound project archive")
-    except (OSError, ValueError, TypeError, AttributeError, zipfile.BadZipFile, RuntimeError) as e:
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        zipfile.BadZipFile,
+        RuntimeError,
+        zlib.error,
+        lzma.LZMAError,
+    ) as e:
         return SubCheckResult(status="FAILED", detail=f"STALE/unverified: {e}")
 
     return SubCheckResult(
