@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..layers import LayerStack
-from ..primitives import Pad, Route, Segment, Via
+from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
 from ..rules import DesignRules
 from .coupled import CoupledConnection
@@ -405,8 +405,9 @@ class LatticePathfinder:
                 if not math.isfinite(nn)
                 else min(self.fine, max(nn / 2.0, self.fine / 2.0))
             )
-            hx = pad.width / 2.0 + self.margin
-            hy = pad.height / 2.0 + self.margin
+            half_w, half_h = pad_half_extents(pad)
+            hx = half_w + self.margin
+            hy = half_h + self.margin
             regions.append(RefineRegion((pad.x - hx, pad.y - hy, pad.x + hx, pad.y + hy), fine_i))
         return regions
 
@@ -928,21 +929,25 @@ class LatticePathfinder:
                 min_cc = self.rules.via_drill / 2.0 + pad.drill / 2.0 + self.rules.min_hole_to_hole
                 if dist(point, (pad.x, pad.y)) < min_cc - 1e-9:
                     return False
-            elif (
-                abs(point[0] - pad.x) <= pad.width / 2.0 + via_radius
-                and abs(point[1] - pad.y) <= pad.height / 2.0 + via_radius
-            ):
-                # Via barrel intersects an SMD pad rect (#4284).  Same-net is
-                # via-in-pad: legal only on fab tiers that fill/cap the via
-                # (jlcpcb-tier1, pcbway); the default tier rejects so the
-                # layer change moves off the pad onto the escape stub.
-                # Other-net falls through to the unconditional grown-rect
-                # veto below.
-                allow_via_in_pad = (
-                    self._via_in_pad_allowed if via_in_pad_override is None else via_in_pad_override
-                )
-                if pad.net == net and not allow_via_in_pad:
-                    return False
+            else:
+                half_w, half_h = pad_half_extents(pad)
+                if (
+                    abs(point[0] - pad.x) <= half_w + via_radius
+                    and abs(point[1] - pad.y) <= half_h + via_radius
+                ):
+                    # Via barrel intersects an SMD pad rect (#4284).  Same-net
+                    # is via-in-pad: legal only on fab tiers that fill/cap the
+                    # via (jlcpcb-tier1, pcbway); the default tier rejects so
+                    # the layer change moves off the pad onto the escape stub.
+                    # Other-net falls through to the unconditional grown-rect
+                    # veto below.
+                    allow_via_in_pad = (
+                        self._via_in_pad_allowed
+                        if via_in_pad_override is None
+                        else via_in_pad_override
+                    )
+                    if pad.net == net and not allow_via_in_pad:
+                        return False
             if pad.net == net:
                 continue
             rect = obstacles.pad_rects[idx]
@@ -1814,11 +1819,12 @@ class LatticePathfinder:
                         continue
                     if layer not in self.obstacles.pad_layer_indices[idx]:
                         continue
+                    half_w, half_h = pad_half_extents(pad)
                     rect = (
-                        pad.x - pad.width / 2.0,
-                        pad.y - pad.height / 2.0,
-                        pad.x + pad.width / 2.0,
-                        pad.y + pad.height / 2.0,
+                        pad.x - half_w,
+                        pad.y - half_h,
+                        pad.x + half_w,
+                        pad.y + half_h,
                     )
                     for a, b in zip(full, full[1:], strict=False):
                         if dist(a, b) <= 1e-9:
