@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Flat signal-clearance table builder for clock-to-signal spacing**
+  (#5021) — `build_signal_clearance_table()` in
+  `router/pairwise_clearance.py` generalises the HV pairwise-clearance
+  resolver (#4431) past voltage-derived requirements to a flat,
+  non-voltage signal-integrity spacing rule, e.g. ST AN4488 §8.4.2's SDRAM
+  clock-to-signal guideline (three trace widths, 0.54 mm edge-to-edge). It
+  populates the same `PairwiseClearanceTable` data carrier the HV epic
+  built, so every downstream consumer (`route_pairwise_violation`,
+  `find_pairwise_violations`, `PairwisePathChecker`, the C++ `Grid3D`
+  projection) gets identical route-time avoidance and post-route audit
+  coverage across tracks, pads and via spans — with no separate
+  implementation to keep in sync and no routing-order dependence (the
+  board07 "reciprocal clock guard" defect this issue tracks: a clock track
+  cleared a foreign net's tracks by the full requirement but passed a
+  foreign through-via at the ordinary fabrication clearance because the
+  via's copper was never widened). No automatic package-escape exemption
+  is applied; a genuine waiver must be an explicit, measured `AttachZone`.
 - **Konnect item 8 audit: natural-language design-rule store** (#4902, Part
   of #4880) — `docs/konnect-item8-design-rules-audit.md` decides **decline**
   on adding a Konnect-style free-text design-rule store: the repo already
