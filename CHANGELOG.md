@@ -1237,6 +1237,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`_reject_lost_route_only_bindings`) now aborts with a non-zero exit
   instead of reporting vacuous success if a requested net's pad bindings are
   ever lost after preflight already confirmed the net exists with 2+ pads.
+- **`PCBEditor.add_zone` silently bound an unknown net to net 0 instead of
+  rejecting it, and both `PCBEditor.add_zone` / `ZoneGenerator.add_zone`
+  accepted arbitrary/disabled layer strings** (#4907) — `PCBEditor.add_zone`
+  resolved `net_name` through `get_net_number`'s `dict.get(name, 0)`
+  fallback, so a typo'd or nonexistent net silently produced a zone bound to
+  net 0 (`net_name` still recorded the wrong string) rather than an error.
+  Both `PCBEditor.add_zone` and `ZoneGenerator.add_zone` (used by
+  `kct pcb add-zone` and `kct zones add`) also passed `layer` through
+  unchecked, so misspelled layers (`"DefinitelyNotALayer"`), real
+  non-copper layers (`"F.SilkS"`), and inner copper layers not declared on
+  the specific board (`"In1.Cu"` on a 2-layer board) were written straight
+  into the zone node. Both writers now validate the net against the board's
+  declared net table and the layer against a new shared
+  `core.layers.validate_copper_layer` helper (canonical spelling via the
+  existing `COPPER_LAYER_ORDER`, plus board-declared/enabled-copper-layer
+  membership) *before* any document mutation, so rejected calls leave the
+  PCB untouched; both CLI routes surface the resulting `ValueError` as a
+  nonzero exit with an actionable message in text and JSON modes. Valid
+  known nets and F.Cu/B.Cu/declared-inner-layer zones are unaffected.
 - **`--strict-layers` was silently inert on the lattice engine, which shipped
   copper onto explicitly forbidden layers** (#4979) — `avoid_layers` is
   promoted to a HARD no-go set by
