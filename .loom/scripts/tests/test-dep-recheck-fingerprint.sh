@@ -96,6 +96,9 @@ assert_eq "2" "$rc" "T0c: --stdin and --number together is a usage error"
 rc=0
 echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict bogus >/dev/null 2>&1 || rc=$?
 assert_eq "2" "$rc" "T0d: an invalid --verdict value is a usage error"
+rc=0
+"$TARGET_SCRIPT" extract-refs >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "T0e: extract-refs also requires --number or --stdin"
 
 # --- T1: identical input twice -> identical hash (the core determinism bug) --
 FIXTURE_BLOCKED='{"prs":[{"number":4743,"state":"OPEN","labels":["loom:changes-requested"],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
@@ -425,6 +428,113 @@ assert_ne "$(field "$out_pr" CONCLUSION_HASH)" "$(field "$out_pr_conflicting" CO
     "T18a: mergeable MERGEABLE/CLEAN -> CONFLICTING (labels unchanged) changes CONCLUSION_HASH"
 assert_eq "blocked" "$(field "$out_pr_conflicting" VERDICT)" \
     "T18b: CONFLICTING merge state alone (no superseding label) is still VERDICT=blocked"
+
+# --- T19-T26: extract-refs (#4963) - the "Extracting the stated reference"
+# extraction behind curator.md's "Checking Operator-Only Premises" section.
+# The regression under test is the #4507 self-perpetuation loop: the old
+# inline `[.body] + [.comments[].body]` shell scanned comment history
+# unconditionally, so the bot's own "premise possibly stale" comment (which
+# quotes the matched phrase back into the thread) became new input the next
+# pass's extraction re-matched — indefinitely, even after the body itself was
+# fixed. extract-refs closes this by scanning the body always, but a comment
+# only when it is neither authored by the automation identity nor carrying
+# this file's own curator marker.
+# ------------------------------------------------------------------------
+
+# T19: THE #4963 REGRESSION - reproduction of the exact #4507 shape: body has
+# zero matches (already fixed to "Sequenced after #4510 (both now closed)"),
+# comment history has N automation-authored heartbeat comments (carrying the
+# `curator:operator-premise-recheck:` marker) quoting the already-diagnosed
+# false-positive phrase "Depends on #4510" back into the thread. Must extract
+# ZERO references -- not re-match the bot's own historical report comments.
+FIXTURE_4507="$(jq -n '{
+    body: "Sequenced after #4510 (both now closed)",
+    comments: [
+        {author: {login: "loom-fleet-dispatch"}, body: "**Operator-parked, premise possibly stale**: the reference this issue is parked on, #4510 (\"Depends on #4510\"), is now **closed**. <!-- curator:operator-premise-recheck:aaaa1111 -->"},
+        {author: {login: "loom-fleet-dispatch"}, body: "**Operator-parked, premise possibly stale**: the reference this issue is parked on, #4510 (\"Depends on #4510\"), is now **closed**. <!-- curator:operator-premise-recheck:aaaa1111 -->"},
+        {author: {login: "loom-fleet-dispatch"}, body: "**Operator-parked, premise possibly stale**: the reference this issue is parked on, #4510 (\"Depends on #4510\"), is now **closed**. <!-- curator:operator-premise-recheck:aaaa1111 -->"}
+    ]
+}')"
+out="$(echo "$FIXTURE_4507" | "$TARGET_SCRIPT" extract-refs --stdin)"
+assert_eq "" "$(field "$out" REFS)" \
+    "T19: #4507 shape (body already fixed, N automation heartbeat comments quoting the stale phrase) extracts zero references (#4963)"
+
+# T20: a genuine NEW human-authored "Blocked by #N" comment (different login,
+# no marker) IS still detected -- the fix must not blind the check to
+# comment-sourced references entirely.
+FIXTURE_HUMAN="$(jq -n '{
+    body: "no blockers in the body",
+    comments: [
+        {author: {login: "some-human-operator"}, body: "Actually, Blocked by #321 now."}
+    ]
+}')"
+out="$(echo "$FIXTURE_HUMAN" | "$TARGET_SCRIPT" extract-refs --stdin)"
+assert_eq "321" "$(field "$out" REFS)" "T20: a genuine new human-authored 'Blocked by #N' comment is still detected"
+
+# T21: login-based exclusion alone (no marker present) still excludes an
+# automation-authored comment.
+FIXTURE_NO_MARKER="$(jq -n '{
+    body: "no blockers in the body",
+    comments: [
+        {author: {login: "loom-fleet-dispatch"}, body: "Depends on #55, restating without the marker this time."}
+    ]
+}')"
+out="$(echo "$FIXTURE_NO_MARKER" | "$TARGET_SCRIPT" extract-refs --stdin)"
+assert_eq "" "$(field "$out" REFS)" "T21: an automation-authored comment is excluded even without the marker (login match alone suffices)"
+
+# T22: marker-based exclusion alone (different login) still excludes a
+# comment carrying the curator marker (belt-and-suspenders, per #4963 AC).
+FIXTURE_MARKER_DIFF_LOGIN="$(jq -n '{
+    body: "no blockers in the body",
+    comments: [
+        {author: {login: "some-other-login"}, body: "Depends on #66 <!-- curator:dep-recheck:deadbeef -->"}
+    ]
+}')"
+out="$(echo "$FIXTURE_MARKER_DIFF_LOGIN" | "$TARGET_SCRIPT" extract-refs --stdin)"
+assert_eq "" "$(field "$out" REFS)" "T22: a comment carrying the curator marker is excluded even under a different login (belt-and-suspenders)"
+
+# T23: a body-only reference is found with no comments at all.
+FIXTURE_BODY_ONLY='{"body": "This issue is Blocked by #42.", "comments": []}'
+out="$(echo "$FIXTURE_BODY_ONLY" | "$TARGET_SCRIPT" extract-refs --stdin)"
+assert_eq "42" "$(field "$out" REFS)" "T23: a body-only reference is found with no comments at all"
+
+# T24: --bot-login overrides the default automation identity.
+FIXTURE_CUSTOM_BOT='{"body": "no blockers", "comments": [{"author": {"login": "my-custom-bot"}, "body": "Depends on #88"}]}'
+out_default="$(echo "$FIXTURE_CUSTOM_BOT" | "$TARGET_SCRIPT" extract-refs --stdin)"
+assert_eq "88" "$(field "$out_default" REFS)" "T24a: a non-default automation login is NOT excluded without --bot-login"
+out_custom="$(echo "$FIXTURE_CUSTOM_BOT" | "$TARGET_SCRIPT" extract-refs --stdin --bot-login my-custom-bot)"
+assert_eq "" "$(field "$out_custom" REFS)" "T24b: --bot-login excludes the named identity's comments"
+
+# T25: login match is case-insensitive and tolerant of an 'app/' prefix or a
+# '[bot]' suffix, since different `gh` views/API paths normalize a GitHub
+# App's login differently.
+FIXTURE_LOGIN_VARIANTS="$(jq -n '{
+    body: "no blockers",
+    comments: [
+        {author: {login: "app/loom-fleet-dispatch"}, body: "Depends on #91"},
+        {author: {login: "Loom-Fleet-Dispatch[bot]"}, body: "Depends on #92"}
+    ]
+}')"
+out="$(echo "$FIXTURE_LOGIN_VARIANTS" | "$TARGET_SCRIPT" extract-refs --stdin)"
+assert_eq "" "$(field "$out" REFS)" "T25: login match tolerates an 'app/' prefix and a '[bot]' suffix, case-insensitively"
+
+# T26: live --number mode (stubbed gh) reproduces the #4507 shape end to end
+# via `gh issue view --json body,comments`.
+jq -n '{
+    body: "Sequenced after #4510 (both now closed)",
+    comments: [
+        {author: {login: "loom-fleet-dispatch"}, body: "premise possibly stale: Depends on #4510 <!-- curator:operator-premise-recheck:aaaa1111 -->"}
+    ]
+}' >"$STUB_DIR/issue-4507.json"
+out="$("$TARGET_SCRIPT" extract-refs --number 4507 --repo owner/repo)"
+assert_eq "" "$(field "$out" REFS)" "T26a: live --number mode reproduces the #4507 shape end to end (zero refs via gh issue view body,comments)"
+
+jq -n '{
+    body: "Blocked by #200",
+    comments: []
+}' >"$STUB_DIR/issue-4508.json"
+out="$("$TARGET_SCRIPT" extract-refs --number 4508 --repo owner/repo)"
+assert_eq "200" "$(field "$out" REFS)" "T26b: live --number mode still finds a genuine body reference"
 
 # --- Summary ---
 echo ""
