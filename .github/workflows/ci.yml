@@ -9,6 +9,18 @@ on:
 permissions:
   contents: read
 
+# One live run per ref (2AMLogic/2am#29, 2026-09-11). PR branches: a new push
+# cancels the run it supersedes -- a third of the ~370 daily runs were
+# superseded and still ran all 18 jobs to completion. main: a running
+# verification is never cancelled, but GitHub keeps only the newest PENDING
+# run per group, so the ~80 merges a day collapse to "one running, one
+# waiting" instead of the 13-deep queue of stale main runs that, together with
+# the superseded PR runs, held every job 70-100 min in queue against this
+# account's 20-job GitHub-hosted concurrency cap.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   lint:
     name: Lint & Format
@@ -83,7 +95,18 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    # main pushes run this on the fleet's dedicated CI runner (2AMLogic/2am#29;
+    # 2 slots for this repo); PR runs stay on GitHub-hosted. Push-only on
+    # purpose: PR volume alone (~200 runs/day) exceeds the whole box, while
+    # main is serialised by the concurrency group above, so at most one run's
+    # heavy jobs are ever on the box and they never queue behind each other.
+    # What it buys: the two ~30-min jobs of every main run leave the account's
+    # 20-job GitHub-hosted pool to PR runs.
+    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
+    env:
+      # -n auto reads the container's 8-core cpuset on the runner; keep the
+      # worker count at GitHub-hosted parity (4 vCPU) so memory stays bounded.
+      PYTEST_XDIST_AUTO_NUM_WORKERS: "4"
     timeout-minutes: 45
     # Issue #3436: run inside the official KiCad 10 container (same image
     # as the kicad-cli-smoke job; see its comment for why apt+PPA installs
@@ -101,7 +124,11 @@ jobs:
       image: kicad/kicad:10.0
       # Run as root so installs write system locations and actions/checkout
       # can write $GITHUB_WORKSPACE (mirrors the smoke job).
-      options: --user 0:0
+      # On the runner this is a sibling container of the runner's own, created by
+      # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
+      # to the two kicad slots' cores (24-31) and 6 GB itself. GitHub-hosted
+      # runs get the plain --user 0:0 (4 vCPU / 16 GB VM, nothing to contain).
+      options: ${{ github.event_name == 'push' && '--user 0:0 --cpuset-cpus 24-31 --memory 6g' || '--user 0:0' }}
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the smoke job).
@@ -109,12 +136,13 @@ jobs:
     steps:
       - name: Ensure container has prerequisites
         # ca-certificates/curl/git for checkout + uv bootstrap; cmake and
-        # build-essential for the C++ router backend build below.
+        # build-essential for the C++ router backend build below; nodejs for
+        # executing workflow JavaScript regression tests.
         run: |
           set -euo pipefail
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl git cmake build-essential
+            ca-certificates curl git cmake build-essential nodejs
           kicad-cli --version
 
       - uses: actions/checkout@v7
@@ -1449,14 +1477,25 @@ jobs:
     # Advisory until a repo admin adds it to branch protection (same as the
     # board 00/01 e2e jobs).
     name: Board 06 End-to-End (LVS)
-    runs-on: ubuntu-latest
+    # main pushes run this on the fleet's dedicated CI runner (2AMLogic/2am#29;
+    # 2 slots for this repo); PR runs stay on GitHub-hosted. Push-only on
+    # purpose: PR volume alone (~200 runs/day) exceeds the whole box, while
+    # main is serialised by the concurrency group above, so at most one run's
+    # heavy jobs are ever on the box and they never queue behind each other.
+    # What it buys: the two ~30-min jobs of every main run leave the account's
+    # 20-job GitHub-hosted pool to PR runs.
+    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     # The measured recipe takes 28m; allow the independent synthetic/LVS,
     # plane-net and artifact gates to finish within the whole-job deadline.
     # Internal routing budgets and all validation gates remain unchanged.
     timeout-minutes: 35
     container:
       image: kicad/kicad:10.0
-      options: --user 0:0
+      # On the runner this is a sibling container of the runner's own, created by
+      # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
+      # to the two kicad slots' cores (24-31) and 6 GB itself. GitHub-hosted
+      # runs get the plain --user 0:0 (4 vCPU / 16 GB VM, nothing to contain).
+      options: ${{ github.event_name == 'push' && '--user 0:0 --cpuset-cpus 24-31 --memory 6g' || '--user 0:0' }}
     defaults:
       run:
         shell: bash
