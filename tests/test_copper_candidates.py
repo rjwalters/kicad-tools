@@ -166,3 +166,21 @@ def test_width_only_contact_exhaustive_parity(monkeypatch, layer, widths, extra_
     monkeypatch.setattr(connectivity, "candidate_pairs", exhaustive)
     assert indexed == run()
     assert ("b" in indexed["a"]) == (layer == "F.Cu" and extra_gap <= 0)
+
+
+def test_negative_width_shared_endpoint_exhaustive_parity(monkeypatch):
+    # The exact contact predicate treats negative widths as bare centerlines.
+    segments = [
+        SimpleNamespace(start=(0, 0), end=(10, 0), layer="F.Cu", width=-2),
+        SimpleNamespace(start=(0, 0), end=(-2, 0), layer="F.Cu", width=0.2),
+    ]
+    validator = connectivity.ConnectivityValidator(SimpleNamespace(vias=[]))
+
+    def run():
+        return validator._build_segment_chains(
+            segments, {}, defaultdict(set), segment_extra_nodes={0: {"a"}, 1: {"b"}}
+        )
+
+    indexed = run()
+    monkeypatch.setattr(connectivity, "candidate_pairs", exhaustive)
+    assert indexed == run() == {"a": {"b"}, "b": {"a"}}

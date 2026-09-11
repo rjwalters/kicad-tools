@@ -1484,10 +1484,10 @@ class ConnectivityValidator:
         # separately preserves legacy endpoint tolerance and layer bridges.
         bounds = [
             (
-                min(seg.start[0], seg.end[0]) - (seg.width or 0.0) / 2,
-                min(seg.start[1], seg.end[1]) - (seg.width or 0.0) / 2,
-                max(seg.start[0], seg.end[0]) + (seg.width or 0.0) / 2,
-                max(seg.start[1], seg.end[1]) + (seg.width or 0.0) / 2,
+                min(seg.start[0], seg.end[0]) - max(seg.width or 0.0, 0.0) / 2,
+                min(seg.start[1], seg.end[1]) - max(seg.width or 0.0, 0.0) / 2,
+                max(seg.start[0], seg.end[0]) + max(seg.width or 0.0, 0.0) / 2,
+                max(seg.start[1], seg.end[1]) + max(seg.width or 0.0, 0.0) / 2,
             )
             for seg in segments
         ]
