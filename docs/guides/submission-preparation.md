@@ -252,3 +252,100 @@ per-adapter source identity is not recorded beyond the coarse status above. This
 module also does not add a parallel signer/HTTP client, and does not confirm the
 live signing variant documented in `jlcpcb_api.py` actually works against the
 real API — no current supplier availability is claimed by any test in this repo.
+
+## Human review record and local review page (#5143)
+
+`kicad_tools.export.submission_review` implements the second slice of #5056: a
+hash-bound human review record and a portable, local review page over an
+already-prepared `SubmissionPlan`. It performs no order/purchase operation of
+any kind, no rendering of fabrication bytes, and never launches a browser.
+
+```python
+from kicad_tools.export.submission_review import (
+    ReviewAsset,
+    render_review_page,
+    submit_review,
+    verify_review,
+)
+
+REQUIRED_CHECKLIST = (
+    "gerber-visually-inspected",
+    "bom-cross-checked",
+    "quantities-confirmed",
+)
+
+record = submit_review(
+    plan,
+    reviewer="alice@example.com",
+    reviewed_at="2026-01-01T00:00:00Z",  # caller-supplied clock, not module-generated
+    policy_version="policy-v1",
+    checklist=dict.fromkeys(REQUIRED_CHECKLIST, True),
+    required_items=REQUIRED_CHECKLIST,
+    destination=Path("reviews/board-run-1.json"),
+)
+verify_review(record, plan)  # raises ReviewError on any hash mismatch
+
+page = render_review_page(
+    plan,
+    record=record,
+    destination=Path("reviews/board-run-1-page"),
+    assets={
+        "top-copper.png": ReviewAsset("top-copper.png", layer_sha256, layer_size, "manufacturing"),
+    },
+    assets_root=Path("exports/layer-views"),
+)
+```
+
+`submit_review` is the **only** function that writes a review record, and it
+only runs after every item in the caller-supplied `required_items` (the
+review policy's own checklist, never hardcoded here) is present in
+`checklist` mapped to exactly `True`. A missing item, an unrecognized extra
+item, or a `False`/falsy item all leave the checklist incomplete, and no
+record is published — a missing checklist is invalid, never an implicit
+pass. The record binds the reviewer identity, timestamp and policy version to
+the exact SHA-256 hashes of the plan document itself
+(`SubmissionPlan.sha256`), the overall bundle output set, each of the
+Gerber/BOM/CPL outputs individually, every declared bundle file, and the
+declared source evidence.
+
+`verify_review` recomputes every one of those hashes from the current plan
+and raises `ReviewError` on the first mismatch — a bundle re-prepared into a
+new plan (different hashes) invalidates a review bound to the old one. Pass
+`source_root` to additionally reread the current bytes of the declared PCB/
+schematic source files on disk and catch a **source edited after the
+review was recorded**, even though the plan and bundle themselves were never
+regenerated (the plan only pins the source hash observed at `prepare_submission`
+time, not a live watch on the source path).
+
+`render_review_page` publishes a portable directory: `index.md` (states,
+checklist, reviewer/timestamp/policy version, and links), a human-readable
+`inventory-report.txt` (the plan's own per-catalog-ID assembly demand, not a
+live stock observation), byte-exact copies of the plan's declared upload/
+download file set under `uploads/`, and any caller-supplied `ReviewAsset`s
+under `layer-views/` (`kind="manufacturing"`) or `test-evidence/`
+(`kind="synthetic-test-evidence"`). If `record` is omitted the page is
+rendered with an explicit `human_approval: not-established` state and a
+"NOT REVIEWED" banner — human approval is never inferred from a prepared
+plan alone. If `record` is supplied it is independently reverified first; a
+stale or malformed record raises rather than silently rendering an
+"approved" page.
+
+Every `ReviewAsset` is reread from `assets_root` and reverified against its
+declared `sha256`/`size` before being copied — a caller cannot claim a layer
+view is bound to bytes it does not actually match. `kind` must be exactly
+`"manufacturing"` or `"synthetic-test-evidence"`; anything captured by a
+headless/automated browser (for example, a Playwright/Selenium screenshot
+used only to test that this page itself renders) must use
+`"synthetic-test-evidence"` and is always kept in its own, clearly labeled,
+"NOT MANUFACTURING EVIDENCE" section — it never counts as proof that any
+factory portal received, matched, or accepted an upload.
+
+States reuse `submission_plan.py`'s own vocabulary
+(`preparation`/`inventory`/`human_approval`/`factory_matching`/`upload`/
+`order`). This module only ever establishes `human_approval` (to
+`"reviewed"`, once and only once a checklist submission validates);
+`upload`, `factory_matching` and `order` remain untouched placeholders —
+no stage is ever inferred from an earlier or later stage's success, and this
+slice adds no upload, factory-matching, or order/purchase operation. Full
+factory-matching/upload/order tracking is left to later slices (#5145,
+#5146).
