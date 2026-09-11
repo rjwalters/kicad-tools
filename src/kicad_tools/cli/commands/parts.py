@@ -175,6 +175,7 @@ def _print_json_result(result, *, active_references: int, missing_lcsc_reference
             "existing_lcsc": suggestion.existing_lcsc,
             "search_query": suggestion.search_query,
             "error": suggestion.error,
+            "warnings": suggestion.warnings,
             "suggestions": [],
         }
 
@@ -207,6 +208,8 @@ def _print_table_result(result) -> None:
     print("-" * 82)
 
     for suggestion in result.suggestions:
+        for warning in suggestion.warnings:
+            print(f"Warning: {suggestion.reference}: {warning}", file=sys.stderr)
         if suggestion.has_suggestion:
             best = suggestion.best_suggestion
             print(
