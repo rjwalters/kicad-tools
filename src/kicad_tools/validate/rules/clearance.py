@@ -222,9 +222,11 @@ def _pad_polygon(pad: Pad, footprint: Footprint):
       over-approximation.
 
     The polygon is built around the origin from the pad's *local* size,
-    rotated by the pad's ABSOLUTE angle (``pad.rotation`` -- which already
-    includes ``footprint.rotation`` per KiCad's file convention, issue #3902)
-    and translated to the pad's absolute board position.  Modeling the
+    rotated by the negative of the pad's ABSOLUTE angle (``pad.rotation`` --
+    which already includes ``footprint.rotation`` per KiCad's file convention,
+    issue #3902). KiCad's board-coordinate forward transform negates the
+    stored angle, whereas Shapely uses the usual positive-angle matrix.
+    The result is translated to the pad's absolute board position. Modeling the
     rounded geometry instead of an AABB removes the sub-10-micron phantom
     corner overlaps that KiCad's true geometry never sees (issue #3826).
 
@@ -273,7 +275,9 @@ def _pad_polygon(pad: Pad, footprint: Footprint):
     else:  # "rect" and any unknown shape -> exact rectangle (no over-approx)
         poly = shapely.box(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0)
 
-    poly = rotate(poly, total_rot, origin=(0, 0), use_radians=False)
+    # Match KiCad's forward transform, without adding footprint rotation a
+    # second time. AABB/cardinal tests cannot detect the sign error (#5227).
+    poly = rotate(poly, -total_rot, origin=(0, 0), use_radians=False)
     return translate(poly, cx, cy)
 
 
