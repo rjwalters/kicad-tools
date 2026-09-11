@@ -446,3 +446,74 @@ def test_claimed_destination_is_not_touched(inputs):
         sp.prepare_submission(**inputs)
     assert lock.read_bytes() == b"peer owns publication"
     assert not inputs["destination"].exists()
+
+
+def _context_signature(context):
+    return (
+        context.prec,
+        context.rounding,
+        context.Emin,
+        context.Emax,
+        context.capitals,
+        context.clamp,
+        dict(context.traps),
+        dict(context.flags),
+    )
+
+
+@pytest.mark.parametrize("rounding", ["ROUND_DOWN", "ROUND_UP", "ROUND_HALF_EVEN"])
+def test_public_plan_ignores_decimal_context(inputs, tmp_path, rounding):
+    from decimal import localcontext
+
+    # More significant digits than even the default 28-digit context, plus
+    # an exponent outside the deliberately hostile caller context.
+    exact_x = "10.5000000000000000000000000000000000000000000001"
+    rewrite_csv(inputs, "cpl", lambda rows: rows[1].__setitem__(3, exact_x + "mm"))
+    rewrite_csv(inputs, "cpl", lambda rows: rows[1].__setitem__(4, "1e-1000mm"))
+    normal = sp.prepare_submission(**inputs)
+    matches = json.loads((normal.directory / "expected-matches.json").read_bytes())
+    assert matches[0]["x_mm"] == exact_x
+    assert matches[0]["y_mm"] == "1E-1000"
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = rounding
+        context.Emin, context.Emax = -1, 1
+        context.capitals, context.clamp = 0, 1
+        for signal in context.traps:
+            context.traps[signal] = True
+        before = _context_signature(context)
+        other = sp.prepare_submission(**(inputs | {"destination": tmp_path / "hostile"}))
+        assert _context_signature(context) == before
+    assert other.plan_bytes == normal.plan_bytes
+    assert other.sha256 == normal.sha256
+    assert (other.directory / "expected-matches.json").read_bytes() == (
+        normal.directory / "expected-matches.json"
+    ).read_bytes()
+
+
+@pytest.mark.parametrize("value", ["1000001", "-1000001", "1000000.000000000000000000000000000001"])
+def test_numeric_limit_is_exact_under_rounding(inputs, value):
+    from decimal import localcontext
+
+    rewrite_csv(inputs, "cpl", lambda rows: rows[1].__setitem__(3, value))
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = "ROUND_DOWN"
+        before = _context_signature(context)
+        with pytest.raises(sp.SubmissionError, match="out-of-range"):
+            sp.prepare_submission(**inputs)
+        assert _context_signature(context) == before
+    assert not inputs["destination"].exists()
+
+
+def test_invalid_decimal_does_not_change_caller_flags(inputs):
+    from decimal import localcontext
+
+    rewrite_csv(inputs, "cpl", lambda rows: rows[1].__setitem__(3, "not-a-number"))
+    with localcontext() as context:
+        for signal in context.traps:
+            context.traps[signal] = False
+        before = _context_signature(context)
+        with pytest.raises(sp.SubmissionError):
+            sp.prepare_submission(**inputs)
+        assert _context_signature(context) == before

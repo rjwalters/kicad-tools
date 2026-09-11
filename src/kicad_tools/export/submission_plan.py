@@ -19,7 +19,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -265,12 +265,36 @@ def _number(value: str, *, mm: bool = False) -> str:
     if mm and value.endswith("mm"):
         value = value[:-2]
     try:
-        number = Decimal(value)
+        # String construction is exact; its explicit context contains any
+        # conversion-error flags instead of mutating the caller context.
+        number = Decimal(value, context=Context())
     except InvalidOperation as exc:
         raise SubmissionError("Invalid CPL numeric field") from exc
-    if not number.is_finite() or abs(number) > 1_000_000:
+    if not number.is_finite() or number.copy_abs() > 1_000_000:
         raise SubmissionError("Nonfinite or out-of-range CPL numeric field")
-    return str(number.normalize()) if number else "0"
+    if not number:
+        return "0"
+    # normalize(), abs(), and Decimal.__str__ depend on ambient precision,
+    # rounding or capitalization. Canonicalize the exact tuple using only
+    # integer/string operations, without allocating huge exponent padding.
+    sign, digits, exponent = number.as_tuple()
+    assert isinstance(exponent, int)  # Nonfinite values were rejected above.
+    coefficient = "".join(str(digit) for digit in digits)
+    trimmed = coefficient.rstrip("0")
+    exponent += len(coefficient) - len(trimmed)
+    adjusted = exponent + len(trimmed) - 1
+    if exponent <= 0 and adjusted >= -6:
+        point = len(trimmed) + exponent
+        if point <= 0:
+            result = "0." + "0" * (-point) + trimmed
+        elif point < len(trimmed):
+            result = trimmed[:point] + "." + trimmed[point:]
+        else:
+            result = trimmed
+    else:
+        result = trimmed[0] + ("." + trimmed[1:] if len(trimmed) > 1 else "")
+        result += "E" + ("+" if adjusted >= 0 else "") + str(adjusted)
+    return ("-" if sign else "") + result
 
 
 def _population(
