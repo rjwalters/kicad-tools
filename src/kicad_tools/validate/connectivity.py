@@ -1479,12 +1479,15 @@ class ConnectivityValidator:
 
         # Build segment adjacency graph
         segment_graph: dict[int, set[int]] = defaultdict(set)
+        # Enclose each full copper capsule, not just its centerline. The exact
+        # predicate also joins width-only side/T contacts; the query margin
+        # separately preserves legacy endpoint tolerance and layer bridges.
         bounds = [
             (
-                min(seg.start[0], seg.end[0]),
-                min(seg.start[1], seg.end[1]),
-                max(seg.start[0], seg.end[0]),
-                max(seg.start[1], seg.end[1]),
+                min(seg.start[0], seg.end[0]) - (seg.width or 0.0) / 2,
+                min(seg.start[1], seg.end[1]) - (seg.width or 0.0) / 2,
+                max(seg.start[0], seg.end[0]) + (seg.width or 0.0) / 2,
+                max(seg.start[1], seg.end[1]) + (seg.width or 0.0) / 2,
             )
             for seg in segments
         ]

@@ -51,7 +51,7 @@ def test_clearance_exhaustive_parity(monkeypatch, threshold):
 @pytest.mark.parametrize("bridge", [False, True])
 def test_chain_exhaustive_parity(monkeypatch, bridge):
     segments = [
-        SimpleNamespace(start=a, end=b, layer=layer)
+        SimpleNamespace(start=a, end=b, layer=layer, width=0.2)
         for a, b, layer in [
             ((0, 0), (1, 0), "F.Cu"),
             ((1.009, 0), (2, 0), "F.Cu"),
@@ -83,7 +83,8 @@ def test_chain_exhaustive_parity(monkeypatch, bridge):
 @pytest.mark.parametrize("count", [100, 400])
 def test_production_exact_predicate_counts(monkeypatch, count):
     segments = [
-        SimpleNamespace(start=(i * 10, 0), end=(i * 10 + 1, 0), layer="F.Cu") for i in range(count)
+        SimpleNamespace(start=(i * 10, 0), end=(i * 10 + 1, 0), layer="F.Cu", width=0.2)
+        for i in range(count)
     ]
     validator = connectivity.ConnectivityValidator(SimpleNamespace(vias=[]))
     chain_calls = 0
@@ -141,3 +142,27 @@ def test_no_shapely_fallback(monkeypatch):
 
     monkeypatch.setattr(spatial, "has_shapely", lambda: False)
     assert list(candidate_pairs([(0, 0, 1, 1), (100, 100, 101, 101)], 0)) == [(0, 1)]
+
+
+@pytest.mark.parametrize("layer", ["F.Cu", "B.Cu"])
+@pytest.mark.parametrize("widths", [(0.2, 0.2), (0.05, 0.8)])
+@pytest.mark.parametrize("extra_gap", [-0.01, 0.0, 0.001])
+def test_width_only_contact_exhaustive_parity(monkeypatch, layer, widths, extra_gap):
+    # Endpoint coincidence cannot account for these side contacts. The
+    # copper edge controls connectivity even when the centerline boxes miss.
+    separation = sum(widths) / 2 + extra_gap
+    segments = [
+        SimpleNamespace(start=(0, 0), end=(10, 0), layer="F.Cu", width=widths[0]),
+        SimpleNamespace(start=(2, separation), end=(8, separation), layer=layer, width=widths[1]),
+    ]
+    validator = connectivity.ConnectivityValidator(SimpleNamespace(vias=[]))
+
+    def run():
+        return validator._build_segment_chains(
+            segments, {}, defaultdict(set), segment_extra_nodes={0: {"a"}, 1: {"b"}}
+        )
+
+    indexed = run()
+    monkeypatch.setattr(connectivity, "candidate_pairs", exhaustive)
+    assert indexed == run()
+    assert ("b" in indexed["a"]) == (layer == "F.Cu" and extra_gap <= 0)
