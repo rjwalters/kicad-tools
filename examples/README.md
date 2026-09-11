@@ -302,5 +302,5 @@ done
 ## Further Reading
 
 - [API Documentation](../docs/)
-- [CLI Reference](../README.md#command-line-usage)
+- [CLI Reference](../README.md#cli-commands)
 - [CHANGELOG](../CHANGELOG.md)

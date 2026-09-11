@@ -13,7 +13,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, reannotate, sync-netlist, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, reannotate, sync-netlist, add-3d-models, remove-footprint, move-footprint, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, export-dsn, import-ses, current-paths-audit"
         )
         return 1
 
@@ -43,6 +43,10 @@ def run_pcb_command(args) -> int:
     # Handle reinforce command (Unit A of #4218; issue #4220)
     if args.pcb_command == "reinforce":
         return _run_reinforce_command(args, pcb_path)
+
+    # Handle current-paths-audit command (issue #4980)
+    if args.pcb_command == "current-paths-audit":
+        return _run_current_paths_audit_command(args, pcb_path)
 
     # Handle dedupe command (remove exact-duplicate copper; issue #4175)
     if args.pcb_command == "dedupe":
@@ -493,6 +497,20 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     output_format = getattr(args, "format", "text")
     output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
 
+    # Issue #4980: optional declared branch-specific current-path intent.
+    # When supplied, reinforcement gates to an allow-list -- see
+    # ``reinforce_net``'s ``current_paths`` docstring.
+    current_paths = None
+    current_paths_arg = getattr(args, "current_paths", None)
+    if current_paths_arg:
+        from kicad_tools.router.current_paths import load_current_path_specs
+
+        try:
+            current_paths = load_current_path_specs(current_paths_arg)
+        except (OSError, ValueError) as e:
+            print(f"Error loading --current-paths {current_paths_arg!r}: {e}", file=sys.stderr)
+            return 1
+
     try:
         pcb = PCB.load(pcb_path)
     except Exception as e:
@@ -509,6 +527,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             dry_run=dry_run,
             all_runs=all_runs,
             min_run_length_mm=min_run_length,
+            current_paths=current_paths,
         )
     except ReinforceError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -548,9 +567,12 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "anchors_needed": rs.anchors_needed,
                 "anchors_placed": rs.anchors_placed,
                 "anchors_refused": rs.anchors_refused,
+                "path_excluded_reason": rs.path_excluded_reason,
             }
             for rs in outcome.runs
         ],
+        # Issue #4980: current-path gating.
+        "current_paths": current_paths_arg,
     }
 
     if output_format == "json":
@@ -603,6 +625,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 + (f", {rs.anchors_refused} refused" if rs.anchors_refused else "")
                 + f" [{state}]"
             )
+            if rs.path_excluded_reason:
+                print(f"      excluded: {rs.path_excluded_reason}")
         print()
         print(f"  Anchors placed:  {outcome.placed_count}")
         print(f"  Anchors refused: {outcome.refused_count}")
@@ -625,6 +649,107 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         except Exception as e:
             print(f"Error saving PCB: {e}", file=sys.stderr)
             return 1
+
+    return 0
+
+
+def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb current-paths-audit' command (issue #4980).
+
+    Independent post-write audit of declared branch-specific current-path
+    intent: resolves every declared path against the routed board (fails
+    closed on a broken/ambiguous endpoint mapping) and reports any routed
+    copper on a declared net that no resolved path covers. Read-only --
+    never mutates or saves the board.
+    """
+    from kicad_tools.router.current_paths import audit_current_paths, load_current_path_specs
+    from kicad_tools.schema.pcb import PCB
+
+    current_paths_arg = getattr(args, "current_paths", None)
+    if not current_paths_arg:
+        print("Error: --current-paths is required", file=sys.stderr)
+        return 1
+
+    try:
+        specs = load_current_path_specs(current_paths_arg)
+    except (OSError, ValueError) as e:
+        print(f"Error loading --current-paths {current_paths_arg!r}: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    audit = audit_current_paths(pcb, specs)
+    output_format = getattr(args, "format", "text")
+
+    result: dict[str, Any] = {
+        "input": str(pcb_path),
+        "current_paths": current_paths_arg,
+        "paths_declared": len(specs),
+        "paths_resolved": sum(1 for r in audit.resolutions if r.ok),
+        "all_resolved": audit.all_resolved,
+        "fully_covered": audit.fully_covered,
+        "resolutions": [
+            {
+                "name": r.spec.name,
+                "net": r.spec.net_name,
+                "source": r.spec.source.label(),
+                "sink": r.spec.sink.label(),
+                "continuous_a": r.spec.continuous_a,
+                "reinforcement_eligible": r.spec.reinforcement_eligible,
+                "status": r.status,
+                "reason": r.reason,
+                "segment_count": len(r.segments),
+                "length_mm": round(r.length_mm, 4),
+            }
+            for r in audit.resolutions
+        ],
+        "uncovered": {
+            net_name: [
+                {
+                    "layer": s.layer,
+                    "start": list(s.start),
+                    "end": list(s.end),
+                    "width": s.width,
+                }
+                for s in segments
+            ]
+            for net_name, segments in audit.uncovered.items()
+        },
+    }
+
+    if output_format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print("Current-Path Audit")
+        print(f"  Input:          {pcb_path}")
+        print(f"  Paths declared: {len(specs)}")
+        print(f"  Paths resolved: {result['paths_resolved']}/{len(specs)}")
+        print()
+        for r in audit.resolutions:
+            print(
+                f"  {r.spec.name}: {r.spec.source.label()} -> {r.spec.sink.label()} "
+                f"on {r.spec.net_name!r} [{r.status}]"
+            )
+            if r.reason:
+                print(f"      {r.reason}")
+            if r.ok:
+                print(
+                    f"      {len(r.segments)} segment(s), {r.length_mm:.2f} mm, "
+                    f"{r.spec.continuous_a:.2f}A declared, "
+                    f"reinforcement_eligible={r.spec.reinforcement_eligible}"
+                )
+        if audit.uncovered:
+            print()
+            print("  Uncovered copper (declared net, no resolved path covers it):")
+            for net_name, segments in audit.uncovered.items():
+                print(f"    {net_name}: {len(segments)} segment(s)")
+        else:
+            print()
+            print("  No uncovered copper on any net with a declared path.")
 
     return 0
 
