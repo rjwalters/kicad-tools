@@ -586,7 +586,7 @@ def test_equal_aabb_rounded_pad_clearance(shape, size, rotation, radius, gap):
     distance = radius + gap + trace_radius
     x = size[0] / 2 - radius + distance / math.sqrt(2)
     y = size[1] / 2 - radius + distance / math.sqrt(2)
-    angle = math.radians(rotation)
+    angle = math.radians(-rotation)
     x, y = x * math.cos(angle) - y * math.sin(angle), x * math.sin(angle) + y * math.cos(angle)
     fp = Footprint(name="U1", reference="U1", value="", position=(0, 0), rotation=0, layer="F.Cu")
     pad = Pad(
@@ -632,10 +632,54 @@ def test_45_degree_roundrect_short_segment_clears():
         element_type="segment",
         layer="F.Cu",
         net_number=2,
-        geometry=(0, 1.2, 0.05, 1.2, 0.1),
+        geometry=(0, -1.2, 0.05, -1.2, 0.1),
         reference="trace",
         net_name="other",
     )
     clearance, _, _ = _segment_circle_clearance(seg, CopperElement.from_pad(pad, fp))
     assert clearance == pytest.approx(0.2791, abs=0.001)
     assert clearance > 0.1016
+
+
+@pytest.mark.parametrize("shape", ["roundrect", "oval"])
+@pytest.mark.parametrize("angle", [-45, -30, 30, 45])
+def test_segment_on_physical_pad_and_mirrored_gap(shape, angle):
+    """Keep the native-confirmed clockwise physical witness in this integration."""
+    import math
+
+    from kicad_tools.schema.pcb import Segment
+    from kicad_tools.sexp import parse_string
+    from kicad_tools.validate.rules.clearance import _calculate_clearance
+
+    pad = Pad.from_sexp(
+        parse_string(
+            f'(pad "1" smd {shape} (at 0 0 {angle}) (size 4 1) (layers "F.Cu") (roundrect_rratio 0.25) (net 1 "A"))'
+        )
+    )
+    fp = Footprint(
+        name="Test",
+        layer="F.Cu",
+        position=(10, 20),
+        rotation=0,
+        reference="U1",
+        value="Test",
+        pads=[pad],
+    )
+    elem = CopperElement.from_pad(pad, fp)
+    x = 10 + 1.5 * math.cos(math.radians(angle))
+    for y, overlap in [
+        (20 - 1.5 * math.sin(math.radians(angle)), True),
+        (20 + 1.5 * math.sin(math.radians(angle)), False),
+    ]:
+        seg = CopperElement.from_segment(
+            Segment(
+                start=(x - 0.05, y),
+                end=(x + 0.05, y),
+                width=0.2,
+                layer="F.Cu",
+                net_number=2,
+                net_name="B",
+            )
+        )
+        distance = _calculate_clearance(elem, seg)[0]
+        assert distance < 0 if overlap else distance > 0.15
