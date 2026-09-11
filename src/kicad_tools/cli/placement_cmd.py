@@ -1101,6 +1101,12 @@ def _estimate_routability(pcb_path: Path, quiet: bool = False) -> tuple[float, i
                             "layer": Layer.F_CU,
                             "through_hole": is_pth,
                             "drill": pad.drill if is_pth else 0.0,
+                            # Issue #4910: absolute board-frame pad angle
+                            # (already includes the footprint rotation); no
+                            # width/height swap is applied here, so the full
+                            # angle is the residual the router's obstacle
+                            # models need for a correct rotated-pad AABB.
+                            "rotation": pad.rotation,
                         }
                     )
 
