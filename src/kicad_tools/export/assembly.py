@@ -20,7 +20,12 @@ from .bom_formats import (
     export_bom,
     read_existing_lcsc_assignments,
 )
-from .bom_spec_overlay import SpecOverlayReport, apply_spec_overlay, find_spec_file
+from .bom_spec_overlay import (
+    SpecOverlayReport,
+    apply_spec_overlay,
+    find_spec_file,
+    resolved_refs,
+)
 from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter
 from .pnp import (
     PlacementData,
@@ -409,10 +414,15 @@ class AssemblyPackage:
                             result.spec_overlay = overlay_report
                         for line in overlay_report.summary_lines():
                             logger.info(line)
-                        # Collect refs that got an LCSC from spec
-                        spec_refs = {
-                            e.reference for e in overlay_report.entries if e.matched and e.lcsc
-                        }
+                        # Collect refs the spec overlay explicitly resolved --
+                        # either an LCSC number directly, or an MPN with no
+                        # LCSC (an explicit non-LCSC supplier selection, e.g.
+                        # a Samtec/Digikey-sourced part). Both must be exempt
+                        # from downstream generic auto-matching: a matched
+                        # MPN-only entry still represents explicit sourcing
+                        # intent that must never be silently overwritten by a
+                        # generic (value, footprint) LCSC guess (issue #4995).
+                        spec_refs = resolved_refs(overlay_report)
             except Exception as e:
                 logger.warning(f"Spec overlay failed (continuing without): {e}")
 

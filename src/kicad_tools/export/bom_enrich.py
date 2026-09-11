@@ -41,7 +41,7 @@ class EnrichmentEntry:
     footprint: str
     references: list[str]
     lcsc_part: str  # The assigned LCSC part number (empty if unmatched)
-    source: str  # "schematic" | "auto" | "cache" | "unmatched"
+    source: str  # "schematic" | "spec" | "auto" | "cache" | "unmatched" | "spec_unresolved"
     confidence: float = 0.0
     part_type: str = ""  # "Basic" | "Pref" | "Ext" | ""
     error: str = ""
@@ -88,6 +88,23 @@ class EnrichmentReport:
         """Get the entries that could not be matched."""
         return [e for e in self.entries if e.source == "unmatched"]
 
+    @property
+    def spec_unresolved(self) -> int:
+        """Groups with an explicit spec/CSV-assigned MPN but no LCSC.
+
+        Distinct from :attr:`unmatched`: these were never sent to the
+        generic (value, footprint) auto-matcher at all -- the explicit
+        supplier/MPN sourcing intent from the project spec (or a preserved
+        CSV assignment) was honored by leaving the LCSC field unresolved
+        instead of guessing (issue #4995).
+        """
+        return len([e for e in self.entries if e.source == "spec_unresolved"])
+
+    @property
+    def spec_unresolved_entries(self) -> list[EnrichmentEntry]:
+        """Get entries with an explicit MPN/supplier but no LCSC assigned."""
+        return [e for e in self.entries if e.source == "spec_unresolved"]
+
     def summary_lines(self) -> list[str]:
         """Return human-readable summary lines."""
         parts = [f"{self.auto_matched} auto-matched"]
@@ -95,6 +112,8 @@ class EnrichmentReport:
             parts.append(f"{self.cache_matched} from cache")
         if self.spec_populated:
             parts.append(f"{self.spec_populated} from spec")
+        if self.spec_unresolved:
+            parts.append(f"{self.spec_unresolved} explicitly sourced (no LCSC)")
         parts.append(f"{self.already_populated} from schematic")
         parts.append(f"{self.unmatched} unmatched")
         lines = [f"LCSC enrichment: {', '.join(parts)}"]
@@ -104,6 +123,11 @@ class EnrichmentReport:
                 refs = ", ".join(entry.references)
                 reason = f" ({entry.error})" if entry.error else ""
                 lines.append(f"  {entry.value} [{entry.footprint}] ({refs}){reason}")
+        if self.spec_unresolved_entries:
+            lines.append("Explicitly-sourced parts left unresolved (no LCSC):")
+            for entry in self.spec_unresolved_entries:
+                refs = ", ".join(entry.references)
+                lines.append(f"  {entry.value} [{entry.footprint}] ({refs})")
         return lines
 
 
@@ -152,9 +176,18 @@ def enrich_bom_lcsc(
         items: List of BOM items to enrich (modified in place).
         prefer_basic: Prefer JLCPCB Basic parts (no extra assembly fee).
         min_stock: Minimum stock level to consider a part viable.
-        spec_refs: Set of reference designators whose LCSC was populated
-            by the project spec overlay.  These are reported with
-            ``source="spec"`` instead of ``"schematic"``.
+        spec_refs: Set of reference designators the project spec overlay
+            (or a preserved CSV assignment) explicitly resolved -- either
+            by populating ``lcsc`` directly (reported with
+            ``source="spec"`` instead of ``"schematic"``), or by setting an
+            explicit ``mpn`` with no ``lcsc`` (an explicit non-LCSC
+            supplier selection). For the latter case, membership in
+            ``spec_refs`` also **skips** the generic (value, footprint)
+            auto-match entirely -- the group is reported with
+            ``source="spec_unresolved"`` instead of being sent to
+            :class:`~kicad_tools.cost.suggest.PartSuggester` (issue #4995:
+            a generic auto-match must never silently override an
+            explicitly-declared, non-LCSC manufacturer part).
 
     Returns:
         EnrichmentReport summarising what was matched.
@@ -286,6 +319,44 @@ def enrich_bom_lcsc(
                         references=refs,
                         lcsc_part=existing_lcsc,
                         source=source,
+                    )
+                )
+                continue
+
+            # An explicit MPN/supplier was assigned by the project spec (or
+            # a preserved CSV assignment) with no LCSC. This is a deliberate
+            # non-LCSC sourcing decision (e.g. a Samtec/Digikey-only
+            # connector) -- never send it to the generic (value, footprint)
+            # auto-matcher, which has no way to verify it is matching the
+            # *same* manufacturer part and would otherwise silently
+            # substitute a generic LCSC guess for a reviewed, explicitly
+            # sourced component (issue #4995). Leave the LCSC field
+            # unresolved instead.
+            _spec_refs = spec_refs or set()
+            spec_mpn_refs = [
+                r for r, it in zip(refs, group_items, strict=True) if r in _spec_refs and it.mpn
+            ]
+            if spec_mpn_refs:
+                logger.info(
+                    "Leaving %s [%s] LCSC unresolved -- explicit MPN set via "
+                    "spec/CSV for %s with no LCSC; skipping generic "
+                    "auto-match to preserve declared sourcing intent",
+                    value,
+                    footprint,
+                    ", ".join(spec_mpn_refs),
+                )
+                report.entries.append(
+                    EnrichmentEntry(
+                        value=value,
+                        footprint=footprint,
+                        references=refs,
+                        lcsc_part="",
+                        source="spec_unresolved",
+                        error=(
+                            "explicit MPN set via project spec/CSV with no "
+                            "LCSC -- left unresolved to preserve declared "
+                            "supplier"
+                        ),
                     )
                 )
                 continue
