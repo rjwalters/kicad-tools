@@ -16,7 +16,7 @@ permissions:
 # run per group, so the ~80 merges a day collapse to "one running, one
 # waiting" instead of the 13-deep queue of stale main runs that, together with
 # the superseded PR runs, held every job 70-100 min in queue against this
-# account's 20-job GitHub-hosted concurrency cap.
+# account's 40-job GitHub-hosted concurrency cap.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -121,14 +121,13 @@ jobs:
     name: Test
     needs: changes
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
-    # main pushes run this on the fleet's dedicated CI runner (2AMLogic/2am#29;
-    # 2 slots for this repo); PR runs stay on GitHub-hosted. Push-only on
-    # purpose: PR volume alone (~200 runs/day) exceeds the whole box, while
-    # main is serialised by the concurrency group above, so at most one run's
-    # heavy jobs are ever on the box and they never queue behind each other.
-    # What it buys: the two ~30-min jobs of every main run leave the account's
-    # 20-job GitHub-hosted pool to PR runs.
-    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
+    # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
+    # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
+    # fork PRs route back to GitHub-hosted instead of being skipped, so no
+    # outside fork ever executes on our host and required checks never go
+    # missing. Measured here vs ubuntu-latest: Test 17 vs 40 min, Board 06
+    # 19 vs 27, Diff-Pair ~15 vs 25.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     env:
       # -n auto reads the container's 8-core cpuset on the runner; keep the
       # worker count at GitHub-hosted parity (4 vCPU) so memory stays bounded.
@@ -148,17 +147,15 @@ jobs:
     # step had continue-on-error.
     container:
       image: kicad/kicad:10.0
-      # Run as root so installs write system locations and actions/checkout
-      # can write $GITHUB_WORKSPACE (mirrors the smoke job).
       # On the runner this is a sibling container of the runner's own, created by
       # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
-      # to the two kicad slots' cores (24-31) and cap its memory. 12 GB, not
-      # the 6 GB first tried: at 6 GB four xdist workers each spawning
-      # kicad-cli DRC pushed the cgroup over its cap and the kernel SIGKILLed
-      # kicad-cli / crashed workers (31 failures, 2026-09-11 run 34645135306);
-      # a GitHub-hosted VM has 16 GB. GitHub-hosted runs get the plain
-      # --user 0:0 (nothing to contain).
-      options: ${{ github.event_name == 'push' && '--user 0:0 --cpuset-cpus 24-31 --memory 12g' || '--user 0:0' }}
+      # to the kicad slots' cores (24-63) and cap its memory at 12g (6 GB
+      # SIGKILLed kicad-cli under four xdist workers, 2026-09-11; a
+      # GitHub-hosted VM has 16 GB).
+      # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
+      # either way, so installs write system locations and actions/checkout can
+      # write $GITHUB_WORKSPACE (mirrors the smoke job).
+      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --cpuset-cpus 24-63 --memory 12g' || '--user 0:0' }}
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the smoke job).
@@ -545,7 +542,13 @@ jobs:
     name: Diff-Pair Routing Regression
     needs: changes
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
-    runs-on: ubuntu-latest
+    # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
+    # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
+    # fork PRs route back to GitHub-hosted instead of being skipped, so no
+    # outside fork ever executes on our host and required checks never go
+    # missing. Measured here vs ubuntu-latest: Test 17 vs 40 min, Board 06
+    # 19 vs 27, Diff-Pair ~15 vs 25.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     # Issue #3509: run inside the official KiCad 10 container (same image
     # as the test + kicad-cli-smoke jobs).  The board 06 recipe's pour
     # pipeline (zone fill -> stitch -> pour-connectivity repair -> re-fill
@@ -563,9 +566,14 @@ jobs:
     # fails the job instead of rotting in the log.
     container:
       image: kicad/kicad:10.0
-      # Run as root so installs write system locations and actions/checkout
-      # can write $GITHUB_WORKSPACE (mirrors the test + smoke jobs).
-      options: --user 0:0
+      # On the runner this is a sibling container of the runner's own, created by
+      # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
+      # to the kicad slots' cores (24-63) and cap its memory at 8g (same shape as
+      # Board 06: one board, one router run, kicad-cli DRC).
+      # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
+      # either way, so installs write system locations and actions/checkout can
+      # write $GITHUB_WORKSPACE (mirrors the smoke job).
+      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --cpuset-cpus 24-63 --memory 8g' || '--user 0:0' }}
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the test job).
@@ -1526,14 +1534,13 @@ jobs:
     name: Board 06 End-to-End (LVS)
     needs: changes
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
-    # main pushes run this on the fleet's dedicated CI runner (2AMLogic/2am#29;
-    # 2 slots for this repo); PR runs stay on GitHub-hosted. Push-only on
-    # purpose: PR volume alone (~200 runs/day) exceeds the whole box, while
-    # main is serialised by the concurrency group above, so at most one run's
-    # heavy jobs are ever on the box and they never queue behind each other.
-    # What it buys: the two ~30-min jobs of every main run leave the account's
-    # 20-job GitHub-hosted pool to PR runs.
-    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
+    # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
+    # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
+    # fork PRs route back to GitHub-hosted instead of being skipped, so no
+    # outside fork ever executes on our host and required checks never go
+    # missing. Measured here vs ubuntu-latest: Test 17 vs 40 min, Board 06
+    # 19 vs 27, Diff-Pair ~15 vs 25.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     # The measured recipe takes 28m; allow the independent synthetic/LVS,
     # plane-net and artifact gates to finish within the whole-job deadline.
     # Internal routing budgets and all validation gates remain unchanged.
@@ -1542,10 +1549,12 @@ jobs:
       image: kicad/kicad:10.0
       # On the runner this is a sibling container of the runner's own, created by
       # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
-      # to the two kicad slots' cores (24-31) and 8 GB (it passed at 6 GB on
-      # 2026-09-11; headroom, since the cap SIGKILLs rather than swaps).
-      # GitHub-hosted runs get the plain --user 0:0 (nothing to contain).
-      options: ${{ github.event_name == 'push' && '--user 0:0 --cpuset-cpus 24-31 --memory 8g' || '--user 0:0' }}
+      # to the kicad slots' cores (24-63) and cap its memory at 8g (passed at 6 GB;
+      # headroom, since the cap SIGKILLs rather than swaps).
+      # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
+      # either way, so installs write system locations and actions/checkout can
+      # write $GITHUB_WORKSPACE (mirrors the smoke job).
+      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --cpuset-cpus 24-63 --memory 8g' || '--user 0:0' }}
     defaults:
       run:
         shell: bash
