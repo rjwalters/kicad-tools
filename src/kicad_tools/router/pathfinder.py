@@ -36,6 +36,7 @@ from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer
+from .pad_geometry import pad_point_distance
 from .primitives import Pad, Route, Segment, Via
 from .quantize import dogleg_points, is_45_aligned
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
@@ -2743,9 +2744,7 @@ class Router:
             for pad in self.grid._pads:
                 if pad.through_hole:
                     continue
-                dx = max(abs(wx - pad.x) - pad.width / 2.0, 0.0)
-                dy = max(abs(wy - pad.y) - pad.height / 2.0, 0.0)
-                if dx * dx + dy * dy < drill_radius * drill_radius:
+                if pad_point_distance(pad, wx, wy) < drill_radius:
                     return False
 
         # Check all layers using priority ordering.
