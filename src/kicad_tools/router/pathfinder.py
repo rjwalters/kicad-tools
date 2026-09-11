@@ -17,6 +17,7 @@ The Router accepts a pluggable Heuristic for experimentation with
 different routing strategies. See heuristics.py for available options.
 """
 
+import contextlib
 import heapq
 import itertools
 import math
@@ -230,9 +231,14 @@ class Router:
         self.rules = rules
         from .mfr_limits import get_mfr_limits
 
-        self._allow_smd_vias = not rules.manufacturer or bool(
-            get_mfr_limits(rules.manufacturer).via_in_pad_supported
-        )
+        self._allow_smd_vias = True
+        if rules.manufacturer:
+            # Unknown manufacturer -> unspecified capability is retained
+            # (permissive), matching the fallback used elsewhere for
+            # unrecognized manufacturer ids (see
+            # Router._build_manufacturer_design_rules).
+            with contextlib.suppress(ValueError):
+                self._allow_smd_vias = bool(get_mfr_limits(rules.manufacturer).via_in_pad_supported)
         # Issue #3524: copy the default map instead of aliasing the
         # module-level singleton -- in-place writes must stay local.
         self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)

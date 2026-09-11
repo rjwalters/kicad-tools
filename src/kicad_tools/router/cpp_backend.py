@@ -19,6 +19,7 @@ Or check its status with:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
@@ -1173,9 +1174,14 @@ class CppPathfinder:
         cpp_rules.trace_clearance = rules.trace_clearance
         from .mfr_limits import get_mfr_limits
 
-        cpp_rules.allow_smd_vias = not rules.manufacturer or bool(
-            get_mfr_limits(rules.manufacturer).via_in_pad_supported
-        )
+        cpp_rules.allow_smd_vias = True
+        if rules.manufacturer:
+            # Unknown manufacturer -> unspecified capability is retained
+            # (permissive), matching pathfinder.Router's fallback.
+            with contextlib.suppress(ValueError):
+                cpp_rules.allow_smd_vias = bool(
+                    get_mfr_limits(rules.manufacturer).via_in_pad_supported
+                )
         cpp_rules.via_drill = rules.via_drill
         cpp_rules.via_diameter = rules.via_diameter
         cpp_rules.via_clearance = rules.via_clearance
