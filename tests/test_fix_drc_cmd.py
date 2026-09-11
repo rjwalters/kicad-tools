@@ -1365,10 +1365,14 @@ class TestPurePythonDRCFallback:
         from kicad_tools.validate.checker import DRCChecker
 
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text(PCB_WITH_CLEARANCE)
+        pcb_file.write_text(
+            PCB_WITH_CLEARANCE.rstrip()[:-1]
+            + "\n(segment (start 120 120) (end 125 120) (width 0.25) "
+            '(layer "F.Cu") (net 1) (uuid "isolated-track"))\n)\n'
+        )
 
-        # Guard against a vacuous assertion: both traces float in free
-        # space, so the underlying checker really does flag them.
+        # The clearance pair has overlapping end caps; a separate isolated
+        # trace ensures the underlying checker also emits a topology finding.
         checked = DRCChecker(PCB.load(pcb_file), layers=2).check_all()
         assert any(v.rule_id == "track_dangling" for v in checked.violations)
 

@@ -160,8 +160,16 @@ jobs:
         # now gates: if it is red, fix the tests -- do NOT re-add
         # continue-on-error. Known-broken tests must be xfail'd with a
         # tracking issue instead.
-        # The file above already ran in this job; all other tests use xdist.
-        run: uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow" --ignore=tests/test_board_05_drc_allowlist.py
+        # Match the temporary Board 07 job suspension (#5097, #5160).
+        # Its tests remain runnable locally; the same variable restores them.
+        env:
+          BOARD_07_CI_ENABLED: ${{ vars.BOARD_07_CI_ENABLED }}
+        run: |
+          test_args=(--ignore=tests/test_board_05_drc_allowlist.py)
+          if [[ "$BOARD_07_CI_ENABLED" != "true" ]]; then
+            test_args+=(--ignore=tests/test_board_07_matchgroup_test.py)
+          fi
+          uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow" "${test_args[@]}"
 
   cpp-build-check:
     # Issue #2501: catch source/.so drift by rebuilding the C++ extension
