@@ -693,7 +693,24 @@ def test_client_codex_installs_agents_skills_and_agents_md(
     # distinctive sentence from ee-review.md's body must survive verbatim.
     ee_review_body = (skills_dir / "kct-ee-review" / "SKILL.md").read_text()
     source_body = (SKILLS_SRC / "ee-review.md").read_text().split("---", 2)[2]
-    assert source_body.strip() in ee_review_body
+    for line in source_body.splitlines():
+        if not any(token in line for token in ("/kct:", ".claude/commands/kct/", "CLAUDE.md")):
+            assert line in ee_review_body
+
+    # Operational references resolve inside a Codex-only installation.
+    help_text = (skills_dir / "kct-help" / "SKILL.md").read_text()
+    assert "ls .agents/skills/kct-*/SKILL.md" in help_text
+    assert ".agents/skills/kct-<command>/SKILL.md" in help_text
+    assert (skills_dir / "kct-help" / "README.md").exists()
+    assert "optional metadata" in help_text
+    assert "`$` followed by its `name`" in help_text
+    tapeout_text = (skills_dir / "kct-tapeout" / "SKILL.md").read_text()
+    assert ".agents/skills/kct-manufacturing-readiness/SKILL.md" in tapeout_text
+    assert "$kct-manufacturing-readiness" in tapeout_text
+    for skill_md in skills_dir.glob("kct-*/SKILL.md"):
+        body = skill_md.read_text().split("---", 2)[2].split("-->\n", 1)[1]
+        assert ".claude/commands/kct/" not in body
+        assert "/kct:" not in body
 
     # A guarded AGENTS.md block was created, pointing at the SKILL.md layout.
     agents_md = (target_repo / "AGENTS.md").read_text()
