@@ -216,3 +216,31 @@ def test_malformed_via_position_is_incomplete():
     pcb = board('(via (at banana 0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))')
     result = check_physical_copper_gap(pcb, 0.25)
     assert any(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+
+
+@pytest.mark.parametrize("angle", [-60, -30, 0, 30, 60, 90, 120, 150])
+@pytest.mark.parametrize("gap", [-0.1, 0.2, 0.3])
+def test_rotated_parallel_rect_pads_measure_physical_air(angle, gap):
+    """KiCad positive angles rotate the long pad axis toward negative Y."""
+    import math
+
+    radians = math.radians(angle)
+    pads = []
+    for index in (0, 1):
+        # Translate along the physical minor-axis normal. The 0.4 mm
+        # combined half-heights leave exactly `gap` of air between pads.
+        x = 10 + index * (0.4 + gap) * math.sin(radians)
+        y = 10 + index * (0.4 + gap) * math.cos(radians)
+        pads.append(f"""(footprint "X" (layer "F.Cu") (at {x} {y})
+          (property "Reference" "U{index}")
+          (pad "1" smd rect (at 0 0 {angle}) (size 4 .4) (layers "F.Cu")
+            (net 1 "GND") (uuid "pad{index}")))""")
+    result = check_physical_copper_gap(board(*pads), 0.25)
+    assert not any(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+    findings = [v for v in result.violations if v.rule_id == "physical_copper_gap"]
+    if gap == 0.2:
+        assert len(findings) == 1
+        assert findings[0].actual_value == pytest.approx(gap, abs=0.001)
+        assert findings[0].items == ("pad0", "pad1")
+    else:
+        assert not findings  # Overlapping copper and a wide air gap are valid.
