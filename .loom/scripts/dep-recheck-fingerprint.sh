@@ -450,13 +450,16 @@ _run_operator_premise() {
 
 # --- named-dependency ---------------------------------------------------------
 
-# Extract only the `## Dependencies` section (up to the next level-2 heading
-# or end of body) so an unrelated `#N` mentioned anywhere else in the issue
-# body is never picked up as a named dependency.
+# Extract only the `## Dependencies` (or `### Dependencies`) section (up to
+# the next same-or-higher-level heading or end of body) so an unrelated `#N`
+# mentioned anywhere else in the issue body is never picked up as a named
+# dependency. Tolerant of H2 or H3 since Curators file both shapes in
+# practice (#7503) — false "clear" (silently skipping a real dependency) is
+# the worse failure direction than being slightly too permissive here.
 _extract_dependencies_section() {
     awk '
-        /^## Dependencies[[:space:]]*$/ { found = 1; next }
-        found && /^## / { found = 0 }
+        /^#{2,3}[[:space:]]+Dependencies[[:space:]]*$/ { found = 1; next }
+        found && /^#{1,3}[[:space:]]/ { found = 0 }
         found { print }
     ' <<<"$1"
 }

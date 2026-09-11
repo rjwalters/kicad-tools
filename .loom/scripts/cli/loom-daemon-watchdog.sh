@@ -1623,8 +1623,26 @@ escalate_peer_coordination_degraded() {
 
     local hostname_str body
     hostname_str="$(hostname 2>/dev/null || echo unknown-host)"
-    body="$(cat <<EOF
-\`loom-daemon health\`'s \`peer_coordination\` section has gone DEGRADED on host
+    # #7508: built via `read -d ''` rather than `body="$(cat <<EOF ... EOF)"`.
+    # Wrapping a heredoc in `$(...)` command substitution trips a real bash 3.2
+    # parser bug (macOS's stock /bin/bash, which Apple has frozen pre-GPLv3
+    # for over a decade) -- its lexer's textual scan for the closing `)`
+    # mis-tracks quoting THROUGH the heredoc body, so a bare apostrophe
+    # anywhere in it (e.g. a possessive "host's"), or a `#` sharing a physical
+    # line with an escaped backtick pair, is misread as opening a region it
+    # can never close. That surfaces as `bad substitution: no closing )` or
+    # `unexpected EOF`, and silently drops the escalation issue body (see
+    # #7508 for the 1099x-since-2026-08-16 incident this caused). Rewording to
+    # dodge one trigger is not enough -- both trigger shapes are common in
+    # ordinary prose -- so this reads the heredoc directly with no `$(...)`
+    # wrapper, sidestepping the buggy scan entirely. Verified against a
+    # locally built bash 3.2.0(2) release: this construction round-trips the
+    # exact body below byte-for-byte identically on bash 3.2.0 and a modern
+    # bash. escalate_daemon_outage()'s heredoc above was checked against the
+    # same bash 3.2.0 build and is NOT affected (no bare apostrophe or
+    # backtick+`#` pairing in its body) -- left as-is.
+    IFS= read -r -d '' body <<EOF || true
+The \`peer_coordination\` section of \`loom-daemon health\` has gone DEGRADED on host
 \`$hostname_str\`. This host's one-way peer-claim RECEIVE path (Safehouse, #6157)
 can no longer be trusted to prove another host has already claimed an issue.
 This is diagnostic only since Epic #6165 Phase 4 (#6317): it no longer freezes
@@ -1648,7 +1666,6 @@ the loom-daemon-watchdog.sh peer-coordination escalation (#6222, Layer 3 of
 automatically (and this issue commented on + closed) once a later watchdog
 tick observes \`peer_coordination\` back to healthy.
 EOF
-)"
     local issue_url create_rc
     issue_url="$("$issue_script" \
         --title "peer-claim coordination is DEGRADED on $hostname_str (#6157 Layer 3)" \
