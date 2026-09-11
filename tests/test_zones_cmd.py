@@ -74,6 +74,84 @@ class TestAddOverlapWarnings:
         assert "overlap warning" not in captured.err
 
 
+class TestAddValidation:
+    """`kct zones add` rejects unknown nets and invalid/unavailable copper
+    layers with a nonzero exit and no artifact mutation (#4907).
+    """
+
+    def test_unknown_net_rejected(self, tmp_pcb, capsys):
+        original_bytes = tmp_pcb.read_bytes()
+        ret = main(
+            ["add", str(tmp_pcb), "--net", "DOES_NOT_EXIST", "--layer", "B.Cu"],
+        )
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "DOES_NOT_EXIST" in captured.err
+        assert tmp_pcb.read_bytes() == original_bytes
+
+    def test_unknown_net_rejected_json(self, tmp_pcb, capsys):
+        import json
+
+        original_bytes = tmp_pcb.read_bytes()
+        ret = main(
+            [
+                "add",
+                str(tmp_pcb),
+                "--net",
+                "DOES_NOT_EXIST",
+                "--layer",
+                "B.Cu",
+                "--format",
+                "json",
+            ],
+        )
+        assert ret == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert "DOES_NOT_EXIST" in payload["error"]
+        assert tmp_pcb.read_bytes() == original_bytes
+
+    def test_known_net_still_works(self, tmp_pcb):
+        ret = main(
+            ["add", str(tmp_pcb), "--net", "GND", "--layer", "B.Cu", "-o", str(tmp_pcb)],
+        )
+        assert ret == 0
+
+    def test_invalid_layer_spelling_rejected(self, tmp_pcb, capsys):
+        original_bytes = tmp_pcb.read_bytes()
+        ret = main(
+            ["add", str(tmp_pcb), "--net", "GND", "--layer", "NotALayer"],
+        )
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "NotALayer" in captured.err
+        assert tmp_pcb.read_bytes() == original_bytes
+
+    def test_non_copper_layer_rejected(self, tmp_pcb, capsys):
+        original_bytes = tmp_pcb.read_bytes()
+        ret = main(
+            ["add", str(tmp_pcb), "--net", "GND", "--layer", "F.SilkS"],
+        )
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "copper" in captured.err
+        assert tmp_pcb.read_bytes() == original_bytes
+
+    def test_valid_inner_layer_on_multilayer_board(self, tmp_pcb):
+        """multilayer_zones.kicad_pcb declares In1.Cu/In2.Cu -- must succeed."""
+        ret = main(
+            ["add", str(tmp_pcb), "--net", "GND", "--layer", "In1.Cu", "-o", str(tmp_pcb)],
+        )
+        assert ret == 0
+
+    def test_dry_run_rejects_without_writing(self, tmp_pcb):
+        original_bytes = tmp_pcb.read_bytes()
+        ret = main(
+            ["add", str(tmp_pcb), "--net", "GND", "--layer", "NotALayer", "--dry-run"],
+        )
+        assert ret == 1
+        assert tmp_pcb.read_bytes() == original_bytes
+
+
 class TestBatchOverlapWarnings:
     """Verify overlap warnings are surfaced in zones batch."""
 
