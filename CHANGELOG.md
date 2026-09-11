@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`kct route --current-paths` / `--no-current-paths`** (#4980) — the third
+  and final consumer of the declared branch-specific current-path model
+  (after `kct pcb reinforce`, #5125, and `kct check`, #5184). The route
+  command now loads the same `current_paths.json` sidecar (explicit path, or
+  auto-discovered next to the input board with the `--net-class-map` probe
+  order), runs the `path_ampacity` rule in the post-route DRC so each
+  declared branch is judged against its **own** current rather than one
+  whole-net `target_ampacity`, and re-emits the declarations as
+  `current_paths.json` next to the routed board. That re-emission is what
+  makes route-time intent and the later independent final-copper audit read
+  identical declarations — a bare `kct check` on the routed board
+  auto-discovers it instead of silently passing with `path_ampacity`
+  inactive. An explicit sidecar is strict (missing file / malformed JSON
+  exits 1 before any routing work); an auto-discovered one degrades to a
+  warning; the authored input file is never overwritten (a collision diverts
+  the derived sidecar to `current_paths.effective.json`, the #4428 rule).
 - **Konnect item 8 audit: natural-language design-rule store** (#4902, Part
   of #4880) — `docs/konnect-item8-design-rules-audit.md` decides **decline**
   on adding a Konnect-style free-text design-rule store: the repo already
@@ -1186,6 +1202,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Declared current paths reported `unresolved` on real boards whenever a
+  trace did not land on the exact pad center** (#4980) — endpoint resolution
+  (`router/current_paths.py`) attached a `RefDes.pad` endpoint to the copper
+  graph only by an exact pad-center node match. A router may legitimately
+  terminate a trace anywhere inside a pad's copper, and a wide power pad is
+  routinely entered by several stubs at once (all shorted by the pad itself),
+  so ordinary boards failed to resolve: on board09 the `+5V_OUT` force path
+  enters the 2.29 × 2.03 mm shunt pad `RSH1.4` through three stubs 0.015,
+  0.785 and 0.815 mm off center, and every declaration on the net reported
+  "source pad has no routed copper touching it". Endpoints now bind by the
+  pad's real extent (exact rectangle/ellipse test in the pad's own rotated
+  frame), and all in-pad nodes are shorted through the pad. This is a *false*
+  fail-closed being removed, not a relaxation — copper outside the pad extent
+  still never attaches, so genuinely moved/removed pads still fail closed.
 - **`kct route` accepted KiCad 10 name-only nets but wrote zero copper and
   reported a vacuous "SUCCESS" (0/0 nets)** (#4983) — a PCB saved in KiCad
   10's name-only net syntax (`(net "SIGNAL")` on pads, no numeric net table

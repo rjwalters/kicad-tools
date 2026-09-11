@@ -805,6 +805,71 @@ Common flags (the full surface lives in `kct route --help`):
 | `--auto-fix` / `--auto-fix-passes N` | Run `kct fix-drc` after routing on DRC failure |
 | `--skip-drc` | Skip post-route DRC validation |
 
+#### Declared branch current paths (`--current-paths`)
+
+A net's copper is not always electrically homogeneous. `/AC_NEUTRAL` can
+carry a 15 A force trunk *and* a zero-cross / INA181 sense tap; a
+four-terminal shunt's force and sense pads sit on the **same** net. A single
+net-class `target_ampacity` / `trace_width` cannot represent both: sized for
+the trunk it obstructs the sense-pad escape, sized for the tap it declares
+the power path safe when it is not.
+
+`--current-paths` accepts a JSON sidecar declaring each physical branch by
+stable `RefDes.pad` endpoints, with its own continuous current and
+reinforcement eligibility (issue #4980):
+
+```json
+{
+  "paths": [
+    {"name": "AC_NEUTRAL_TRUNK", "net": "/AC_NEUTRAL",
+     "source": {"ref": "J1", "pad": "2"}, "sink": {"ref": "J2", "pad": "2"},
+     "continuous_a": 15.0, "reinforcement_eligible": true},
+    {"name": "AC_NEUTRAL_ZC_SENSE", "net": "/AC_NEUTRAL",
+     "source": {"ref": "J1", "pad": "2"}, "sink": {"ref": "U3", "pad": "3"},
+     "continuous_a": 0.01, "reinforcement_eligible": false}
+  ]
+}
+```
+
+| Option | Description |
+|--------|-------------|
+| `--current-paths PATH` | Declared branch current-path sidecar. Auto-discovered next to the board as `<board-stem>.current_paths.json` or `current_paths.json` (board dir, then `output/`, then `../output/`) when omitted. |
+| `--no-current-paths` | Suppress auto-discovery; `path_ampacity` stays inactive. Cannot be combined with `--current-paths`. |
+
+The same flags exist on `kct check` and `kct pcb reinforce`, so one sidecar
+drives all three consumers:
+
+- **`kct route`** runs the `path_ampacity` rule in the post-route DRC against
+  each declared branch's *own* current, then re-emits the declarations as
+  `current_paths.json` next to the routed board — so a later bare `kct check`
+  auto-discovers identical intent instead of silently passing.
+- **`kct check`** is the independent final-copper audit: it re-derives each
+  branch from the finished copper, so it is authoritative regardless of which
+  edges the router chose.
+- **`kct pcb reinforce --current-paths`** treats the declarations as an
+  *allow-list*: only copper covered by a resolved, reinforcement-eligible path
+  may be anchored, so a Kelvin sense tap is never bridged to its force path.
+
+Resolution **fails closed**. A declared pad that was moved, removed, or no
+longer resolves onto its declared net is reported as `unresolved`, and a net
+whose copper contains a loop reachable from the endpoints is reported as
+`ambiguous` — never as a silent fallback to whole-net ampacity. Copper on a
+declared net that no path covers is reported as uncovered rather than waived.
+Endpoints bind by the pad's real copper extent, not by an exact pad-center
+hit, so a trace terminating anywhere inside the pad attaches (and several
+stubs landing on one pad are shorted by it, as they are in reality).
+
+> **Known limitation (#5197):** the `ambiguous` test is whole-net, so a
+> benign parallel via array feeding a trunk from one pad makes *every*
+> declaration on that net ambiguous — including unrelated low-current taps.
+> Until that is scoped down, prefer declaring endpoints that do not sit on a
+> multi-via fan-out, or review the findings rather than waiving the rule.
+Route-time width selection itself stays governed by the net-class
+`trace_width` (the same declarative/checked-post-route split
+`NetClassRouting.target_ampacity` already uses); see the
+`kicad_tools.router.current_paths` module docstring for that decision's
+rationale. `kct pcb current-paths-audit` runs the audit standalone.
+
 #### Targeted completion mode (`--complete`)
 
 `--complete` is a completion pass rather than a full route (epic #4465): it

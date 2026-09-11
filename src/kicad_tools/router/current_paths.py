@@ -39,6 +39,16 @@ Three things this module deliberately does NOT do, by design:
   path as *uncovered*, so an audit can show unmodeled branches rather than
   hiding them.
 
+Endpoint attachment is by pad **extent**, not by an exact pad-center hit
+(:func:`_pad_covers` / :func:`_bind_pad`): a router may terminate a trace
+anywhere inside a pad's copper, and a wide power pad is routinely entered
+by several stubs at once, all shorted by the pad itself. Binding on an
+exact center match instead reported such boards ``unresolved`` -- a *false*
+fail-closed, which is not conservative at all: it teaches users to delete
+declarations, and a deleted declaration is exactly the silent pass this
+module exists to prevent. Copper outside the pad extent still never
+attaches, so the fail-closed direction is preserved where it is real.
+
 Consumers:
 
 * :class:`kicad_tools.validate.rules.path_ampacity.PathAmpacityRule` --
@@ -51,6 +61,17 @@ Consumers:
   buttress-wire anchoring, so a declared sense/measurement branch is never
   silently reinforced (or bridged to the force path) even when
   ``all_runs=True`` would otherwise anchor it.
+* :func:`kicad_tools.cli.route_cmd.run_post_route_drc` -- ``kct route
+  --current-paths`` loads the same sidecar, runs the per-branch check in the
+  post-route DRC, and **re-emits** the declarations as a
+  ``current_paths.json`` sidecar next to the routed board
+  (:func:`kicad_tools.cli.route_cmd._write_current_paths_sidecar`).  That
+  re-emission is what makes route-time intent and the later independent
+  final-copper audit read *identical* declarations: a subsequent bare
+  ``kct check`` auto-discovers the routed board's sidecar rather than
+  silently running with ``path_ampacity`` inactive, so any disagreement
+  between the two is a real copper difference and never a difference in
+  what was declared.
 
 Deliberately NOT a consumer (yet): ``router/pathfinder.py``'s route-time
 trace-width selection. Issue #5124 Acceptance Criterion 1 offers an
@@ -155,6 +176,12 @@ __all__ = [
 # ``pcb/reinforce.py::_chain_polylines`` already uses to re-match router
 # segments back to schema segments.
 _COORD_DECIMALS = 6
+
+# Slack on pad-extent containment (:func:`_pad_covers`), in mm. Absorbs
+# floating-point error in the pad-center/rotation transform only -- it is far
+# below any manufacturable feature, so it never turns "near the pad" into "on
+# the pad".
+_PAD_EPS = 1e-6
 
 
 @dataclass(frozen=True)
@@ -483,7 +510,12 @@ def _bfs_path(
     node = goal
     while node != start:
         prev, seg = parent[node]
-        path_segments.append(seg)
+        # Pad shorts are pseudo-edges standing for a pad's own copper, not
+        # routed segments: they must not appear in the covered-segment set
+        # (nothing can check their width, and they are not "uncovered copper"
+        # a designer could route differently).
+        if not isinstance(seg, _PadShort):
+            path_segments.append(seg)
         node = prev
     path_segments.reverse()
     return path_segments
@@ -520,6 +552,93 @@ def _component_has_cycle(
                 visited.add(nxt)
                 stack.append(nxt)
     return edge_count > len(visited) - 1
+
+
+class _PadShort:
+    """A zero-length pseudo-edge standing for a pad's own copper.
+
+    Every trace endpoint landing inside one pad is the *same* electrical
+    node -- the pad shorts them. Modelling that as an explicit edge (rather
+    than by rewriting node keys) keeps :func:`_component_has_cycle`'s
+    edge-vs-node counting honest: each instance is distinct, so ``id()``
+    dedup counts pad shorts exactly once each, and a pad that fans out to
+    branches which never rejoin still counts as a tree.
+    """
+
+    __slots__ = ()
+
+
+def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
+    """True if ``point`` lies on the named pad's copper.
+
+    Exact extent test in the pad's own rotated frame rather than a fixed
+    tolerance: pads are not points, and a router may legitimately terminate a
+    trace anywhere inside one. On board09 the ``+5V_OUT`` force path enters
+    the 2.29 x 2.03 mm shunt pad ``RSH1.4`` through THREE stubs at 0.015 mm,
+    0.785 mm and 0.815 mm from its center -- all plainly on the pad, none at
+    its center.
+
+    ``pad.rotation`` is absolute (it already includes the footprint's
+    rotation -- see :class:`~kicad_tools.schema.pcb.Pad`), so the point is
+    un-rotated by that angle alone.
+    """
+    fp = pcb.get_footprint(ref)
+    if fp is None:
+        return False
+    pad = next((p for p in fp.pads if p.number == pad_number), None)
+    if pad is None:
+        return False
+    center = pcb.get_pad_position(ref, pad_number)
+    if center is None:
+        return False
+    try:
+        half_w = float(pad.size[0]) / 2.0
+        half_h = float(pad.size[1]) / 2.0
+    except (TypeError, ValueError, IndexError):
+        return False
+    if half_w <= 0.0 or half_h <= 0.0:
+        return False
+
+    dx = point[0] - center[0]
+    dy = point[1] - center[1]
+    angle = math.radians(-float(getattr(pad, "rotation", 0.0) or 0.0))
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    local_x = dx * cos_a - dy * sin_a
+    local_y = dx * sin_a + dy * cos_a
+
+    if pad.shape in ("circle", "oval"):
+        return (local_x / half_w) ** 2 + (local_y / half_h) ** 2 <= 1.0 + _PAD_EPS
+    # rect / roundrect / trapezoid / custom: the bounding rectangle. Ignoring a
+    # roundrect's clipped corners over-approximates by at most a corner radius,
+    # which is far below any clearance a trace could legally end in.
+    return abs(local_x) <= half_w + _PAD_EPS and abs(local_y) <= half_h + _PAD_EPS
+
+
+def _bind_pad(
+    adjacency: dict[tuple[float, float], list[tuple[tuple[float, float], Segment]]],
+    pcb: PCB,
+    ref: str,
+    pad_number: str,
+    position: tuple[float, float],
+) -> tuple[float, float] | None:
+    """Attach a pad to the copper graph, returning its node (or None).
+
+    All graph nodes lying on the pad are shorted together through a hub node
+    at the pad's center, because the pad's own copper connects them. Returns
+    ``None`` -- the fail-closed outcome -- only when no copper touches the pad
+    at all.
+    """
+    hub = _node_key(position)
+    on_pad = [n for n in adjacency if _pad_covers(pcb, ref, pad_number, n)]
+    if not on_pad:
+        return None
+    for node in on_pad:
+        if node == hub:
+            continue
+        short = _PadShort()
+        adjacency.setdefault(hub, []).append((node, short))  # type: ignore[arg-type]
+        adjacency.setdefault(node, []).append((hub, short))  # type: ignore[arg-type]
+    return hub
 
 
 def _resolve_endpoint(
@@ -603,10 +722,27 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
         )
 
     adjacency = _build_graph(net_segments)
-    start = _node_key(source.position)
-    goal = _node_key(sink.position)
 
-    if start != goal and start not in adjacency:
+    if _node_key(source.position) == _node_key(sink.position):
+        # Degenerate self-path: a declaration whose source and sink are the
+        # same pad covers no copper, so it resolves trivially without needing
+        # anything attached to the graph at all (preserved from before the
+        # pad-extent attachment below existed).
+        return PathResolution(
+            spec=spec, status=STATUS_RESOLVED, source=source, sink=sink, segments=(), length_mm=0.0
+        )
+
+    # Attach each endpoint by its pad's own extent, not by an exact center
+    # hit: a trace terminating anywhere inside the pad is electrically on it,
+    # and several traces landing on one pad are shorted by it. Without this,
+    # an ordinary sub-millimetre router offset reports a perfectly good force
+    # path as "unresolved" -- a FALSE fail-closed, which teaches users to
+    # delete declarations and is every bit as unsafe as the silent pass this
+    # rule exists to prevent.
+    start = _bind_pad(adjacency, pcb, source.ref, source.pad, source.position)
+    goal = _bind_pad(adjacency, pcb, sink.ref, sink.pad, sink.position)
+
+    if start is None:
         return PathResolution(
             spec=spec,
             status=STATUS_UNRESOLVED,
@@ -614,7 +750,7 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
             source=source,
             sink=sink,
         )
-    if start != goal and goal not in adjacency:
+    if goal is None:
         return PathResolution(
             spec=spec,
             status=STATUS_UNRESOLVED,
