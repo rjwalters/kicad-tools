@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
     from kicad_tools.router import Autorouter, LayerStack
+    from kicad_tools.router.layer_intent import LayerIntentViolation
     from kicad_tools.router.net_names import NetClassMapResolution
     from kicad_tools.router.pairwise_clearance import AttachZone, PairwiseViolation
     from kicad_tools.router.primitives import Route
@@ -4594,14 +4595,32 @@ def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Rou
     session's numbering would otherwise be audited under the wrong net's
     voltage -- the silent-blindness failure mode this issue is about.
     """
+    routed = list(getattr(router, "routes", None) or [])
+    return routed + _preserved_trace_copper(router, routed=routed, id_to_name=id_to_name)
+
+
+def _preserved_trace_copper(
+    router: "Autorouter", *, routed: "list[Route]", id_to_name=None
+) -> "list[Route]":
+    """The PRESERVED half of :func:`_audited_trace_copper` (#4699, reused by #4979).
+
+    Split out so a gate that must distinguish copper this run *created* from
+    copper it *inherited* -- the hard layer-intent audit (issue #4979) -- can
+    resolve the preserved set through exactly the same preference order and
+    net-id re-keying the pairwise gate uses, instead of re-deriving it.
+
+    ``routed`` is the freshly-routed list; it is read only by the fallback
+    branch (stand-in routers that never went through ``_finalize_routes``) to
+    apply the same "a re-routed net replaces its own stale copper" dedupe.
+    """
     from kicad_tools.router.primitives import Route
 
-    routes: list[Route] = list(getattr(router, "routes", None) or [])
+    routes: list[Route] = []
 
     preserved = getattr(router, "_emitted_preserved_routes", None)
     if preserved is None:
         source = list(getattr(router, "existing_routes", None) or [])
-        routed_net_ids = {r.net for r in routes} - set(getattr(router, "_stub_terminals", {}) or {})
+        routed_net_ids = {r.net for r in routed} - set(getattr(router, "_stub_terminals", {}) or {})
         preserved = [r for r in source if r.net not in routed_net_ids]
 
     if preserved:
@@ -4822,6 +4841,177 @@ def _print_pairwise_failure_banner(
         print("  re-route with --route-engine grid or lattice (route-time creepage")
         print("  rejection), widen the HV corridor in placement, or add rated attach")
         print("  zones (#4506).")
+
+
+# --- Hard layer-intent gate (issue #4979) ------------------------------------
+
+
+def _audit_layer_intent(
+    router: "Autorouter", args, *, id_to_name=None
+) -> "list[LayerIntentViolation]":
+    """Board-level post-route HARD layer-intent audit -- issue #4979.
+
+    ``avoid_layers`` is hardened into a no-go set by
+    :meth:`NetClassRouting.hard_avoided_layer_indices` (``--strict-layers``,
+    or unconditionally for an ampacity-bearing class).  Both grid backends
+    honoured that during search; the LATTICE engine -- the ``--complete``
+    default -- did not until #4979, and shipped 2.6 mm ``/PGND`` copper onto
+    an explicitly forbidden ``In2.Cu`` plane with no hard failure anywhere in
+    the run.  The search fix removes those layers from the lattice's reachable
+    state space; THIS gate is the independent check that the copper the board
+    actually carries agrees, on every engine and every flow.
+
+    Scanned copper is :func:`_audited_trace_copper`'s two halves kept apart:
+    ``router.routes`` (created by this run -> a NEW violation, which indicts
+    the router) and the preserved routes ``_finalize_routes`` re-emitted
+    (``--preserve-existing`` / ``--complete`` -> an INHERITED violation, which
+    indicts the input board).  Only new violations move the exit code; both
+    are reported.
+
+    A strict no-op (empty list, no scan) when no net class carries a hard
+    layer constraint, so every pre-#4979 run is byte-identical.
+
+    ``args`` is accepted (and currently unread) for call-shape symmetry with
+    :func:`_audit_pairwise_clearance`: the hard/soft decision lives entirely
+    on the router's own ``rules.strict_layers`` + net classes, which is what
+    the SEARCH consulted, so re-reading the flag off ``args`` here could only
+    ever introduce a disagreement between the gate and the engine.
+    """
+    rules = getattr(router, "rules", None)
+    net_class_map = getattr(router, "net_class_map", None)
+    if rules is None or not net_class_map:
+        return []
+
+    from kicad_tools.router.layer_intent import find_layer_intent_violations
+
+    routed = list(getattr(router, "routes", None) or [])
+    preserved = _preserved_trace_copper(router, routed=routed, id_to_name=id_to_name)
+    return find_layer_intent_violations(
+        routed,
+        preserved,
+        net_class_map=net_class_map,
+        strict_layers=bool(getattr(rules, "strict_layers", False)),
+        layer_stack=getattr(router, "layer_stack", None),
+        id_to_name=id_to_name,
+    )
+
+
+def _audit_layer_intent_for_escalation(final_result, args) -> "list[LayerIntentViolation]":
+    """Run the #4979 layer-intent gate for the escalation wrapper flows.
+
+    ``--auto-layers`` defaults to **True**, so ``route_with_layer_escalation``
+    (and its rule-relaxation / combined siblings) is the DEFAULT ``kct route``
+    path and owns its own summary banner + exit-code block -- gating only
+    ``main()``'s inline block would leave the gate dead where it matters most.
+    Same rationale (and the same call shape) as
+    :func:`_audit_pairwise_for_escalation`; safe after
+    ``_release_routing_engine_state``, which preserves ``router.routes`` and
+    ``router.net_class_map``.
+    """
+    return _audit_layer_intent(
+        final_result.router,
+        args,
+        id_to_name={v: k for k, v in (getattr(final_result, "net_map", None) or {}).items()},
+    )
+
+
+def _new_layer_intent_violations(
+    violations: "Sequence[LayerIntentViolation]",
+) -> "list[LayerIntentViolation]":
+    """The subset this run CREATED (``inherited=False``) -- the gating subset."""
+    return [v for v in violations if not v.inherited]
+
+
+def _format_layer_intent_violations(
+    violations: "Sequence[LayerIntentViolation]", limit: int = 10
+) -> str:
+    """Render layer-intent findings one per line, with an ``... and K more`` tail."""
+    lines = [f"  {v.describe()}" for v in violations[:limit]]
+    remaining = len(violations) - limit
+    if remaining > 0:
+        lines.append(f"  ... and {remaining} more")
+    return "\n".join(lines)
+
+
+def _layer_intent_counts(violations: "Sequence[LayerIntentViolation]") -> tuple[int, int]:
+    """``(new, inherited)`` violation counts."""
+    new = sum(1 for v in violations if not v.inherited)
+    return new, len(violations) - new
+
+
+def _print_layer_intent_failure_banner(
+    violations: "Sequence[LayerIntentViolation]", args, output_path
+) -> None:
+    """Print the #4979 ``ROUTING FAILED`` banner for forbidden-layer copper."""
+    new_count, inherited_count = _layer_intent_counts(violations)
+    print("ROUTING FAILED: hard layer-intent violations")
+    print("=" * 60)
+    print()
+    print(
+        f"Forbidden-layer copper ({new_count} newly created"
+        + (f", {inherited_count} inherited" if inherited_count else "")
+        + "):"
+    )
+    print(_format_layer_intent_violations(violations))
+    print()
+    print("These nets declare the layer off-limits via net-class avoid_layers,")
+    print("hardened by --strict-layers (or by a declared target_ampacity). The")
+    print("router must DECLINE a connection it cannot route legally rather than")
+    print("commit copper on the forbidden layer as partial progress (issue #4979).")
+    print()
+    print("An 'inherited' finding was re-emitted from the input board under")
+    print("--preserve-existing/--complete, not created by this run; re-route")
+    print("those nets (or fix the input) -- the written board violates the")
+    print("declared layer intent either way.")
+    print(f"  Board: {output_path}")
+
+
+def _print_layer_intent_addendum(violations: "Sequence[LayerIntentViolation]") -> None:
+    """Fold #4979 findings into an already-failing summary (one coherent report).
+
+    The inherited-only case gets its own wording rather than an awkward
+    "0 newly created": it is a statement about the INPUT board, and reading
+    it as an accusation against this run would send a user hunting for a
+    router bug that is not there.
+    """
+    new_count, inherited_count = _layer_intent_counts(violations)
+    if new_count == 0:
+        print(
+            f"  Additionally, {inherited_count} forbidden-layer "
+            "segment(s)/via(s) were inherited from the input board "
+            "(not created by this run):"
+        )
+    else:
+        print(
+            f"  Additionally, {new_count} newly created forbidden-layer "
+            f"segment(s)/via(s) detected"
+            + (
+                f" ({inherited_count} more inherited from the input board)"
+                if inherited_count
+                else ""
+            )
+            + ":"
+        )
+    print(_format_layer_intent_violations(violations, limit=5))
+
+
+def _layer_intent_escalation_exit(rc: int, violations: "Sequence[LayerIntentViolation]") -> int:
+    """Map an escalation wrapper's exit code through the #4979 gate.
+
+    Mirrors :func:`_pairwise_escalation_exit`: ``0`` (met the completion
+    threshold) becomes ``3`` -- the established "routing succeeded but the
+    copper is dirty" contract -- and ``2`` (below threshold) becomes ``4``.
+    Any other code already carries a more specific diagnosis and passes
+    through untouched.  Only NEWLY created violations gate: a board that
+    merely inherited forbidden copper is reported, not re-blamed on this run.
+    """
+    if not _new_layer_intent_violations(violations):
+        return rc
+    if rc == 0:
+        return 3
+    if rc == 2:
+        return 4
+    return rc
 
 
 def _warn_unresolved_net_class_map(resolution, board_net_names, nearest_fn) -> None:
@@ -6908,11 +7098,21 @@ def route_with_layer_escalation(
     # Issue #4588: board-level HV pairwise clearance gate.  A no-op without
     # --voltage-map; otherwise it audits the copper this engine committed.
     _pairwise = _audit_pairwise_for_escalation(final_result, args)
+    # Issue #4979: board-level HARD layer-intent gate (same reason this
+    # terminal path needs its own copy of the #4588 gate above).
+    _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
 
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
-        if final_result.success and _pairwise:
+        if _new_layer_intent_violations(_layer_intent):
+            # Issue #4979: forbidden-layer copper this run created outranks
+            # every other banner -- SUCCESS must be unreachable while the
+            # written board violates a hard layer constraint.
+            _print_layer_intent_failure_banner(_layer_intent, args, output_path)
+            if _pairwise:
+                _print_pairwise_addendum(_pairwise)
+        elif final_result.success and _pairwise:
             # Issue #4588: this run would have printed a SUCCESS banner while
             # its own copper violates the --voltage-map creepage requirement.
             _print_pairwise_failure_banner(_pairwise, args, output_path)
@@ -6941,6 +7141,10 @@ def route_with_layer_escalation(
             )
             if _pairwise:
                 _print_pairwise_addendum(_pairwise)
+            if _layer_intent:
+                # Issue #4979: inherited-only findings (any newly created
+                # ones already replaced the banner above).
+                _print_layer_intent_addendum(_layer_intent)
 
     # Issue #2881: Stash the final router on args so an outer
     # ``route_with_mfr_tier_escalation`` wrapper can inspect
@@ -6966,10 +7170,10 @@ def route_with_layer_escalation(
         # detected") already covers this case semantically.
         if fix_result == 3:
             return 3
-        return _pairwise_escalation_exit(0, _pairwise)
+        return _layer_intent_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _layer_intent)
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
-        return _pairwise_escalation_exit(2, _pairwise)
+        return _layer_intent_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _layer_intent)
     # Nothing was routed — treat as fatal failure
     return 1
 
@@ -7717,11 +7921,21 @@ def route_with_rule_relaxation(
     # Issue #4588: board-level HV pairwise clearance gate (see the
     # layer-escalation wrapper above for why each terminal path needs it).
     _pairwise = _audit_pairwise_for_escalation(final_result, args)
+    # Issue #4979: board-level HARD layer-intent gate (same reason this
+    # terminal path needs its own copy of the #4588 gate above).
+    _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
 
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
-        if final_result.success and _pairwise:
+        if _new_layer_intent_violations(_layer_intent):
+            # Issue #4979: forbidden-layer copper this run created outranks
+            # every other banner -- SUCCESS must be unreachable while the
+            # written board violates a hard layer constraint.
+            _print_layer_intent_failure_banner(_layer_intent, args, output_path)
+            if _pairwise:
+                _print_pairwise_addendum(_pairwise)
+        elif final_result.success and _pairwise:
             _print_pairwise_failure_banner(_pairwise, args, output_path)
         elif final_result.success:
             print("SUCCESS: Routing complete with adaptive rules")
@@ -7750,6 +7964,10 @@ def route_with_rule_relaxation(
             )
             if _pairwise:
                 _print_pairwise_addendum(_pairwise)
+            if _layer_intent:
+                # Issue #4979: inherited-only findings (any newly created
+                # ones already replaced the banner above).
+                _print_layer_intent_addendum(_layer_intent)
 
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline.
@@ -7759,10 +7977,10 @@ def route_with_rule_relaxation(
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
             return 3
-        return _pairwise_escalation_exit(0, _pairwise)
+        return _layer_intent_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _layer_intent)
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
-        return _pairwise_escalation_exit(2, _pairwise)
+        return _layer_intent_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _layer_intent)
     # Nothing was routed — treat as fatal failure
     return 1
 
@@ -10028,11 +10246,21 @@ def route_with_combined_escalation(
     # Issue #4588: board-level HV pairwise clearance gate (see the
     # layer-escalation wrapper above for why each terminal path needs it).
     _pairwise = _audit_pairwise_for_escalation(final_result, args)
+    # Issue #4979: board-level HARD layer-intent gate (same reason this
+    # terminal path needs its own copy of the #4588 gate above).
+    _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
 
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
-        if final_result.success and _pairwise:
+        if _new_layer_intent_violations(_layer_intent):
+            # Issue #4979: forbidden-layer copper this run created outranks
+            # every other banner -- SUCCESS must be unreachable while the
+            # written board violates a hard layer constraint.
+            _print_layer_intent_failure_banner(_layer_intent, args, output_path)
+            if _pairwise:
+                _print_pairwise_addendum(_pairwise)
+        elif final_result.success and _pairwise:
             _print_pairwise_failure_banner(_pairwise, args, output_path)
         elif final_result.success:
             print(
@@ -10063,6 +10291,10 @@ def route_with_combined_escalation(
             )
             if _pairwise:
                 _print_pairwise_addendum(_pairwise)
+            if _layer_intent:
+                # Issue #4979: inherited-only findings (any newly created
+                # ones already replaced the banner above).
+                _print_layer_intent_addendum(_layer_intent)
 
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline.
@@ -10072,10 +10304,10 @@ def route_with_combined_escalation(
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
             return 3
-        return _pairwise_escalation_exit(0, _pairwise)
+        return _layer_intent_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _layer_intent)
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
-        return _pairwise_escalation_exit(2, _pairwise)
+        return _layer_intent_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _layer_intent)
     # Nothing was routed — treat as fatal failure
     return 1
 
@@ -11169,6 +11401,20 @@ def _net_name_for_lattice_key(router: "Autorouter", key: object) -> str:
     return str(key)
 
 
+def _is_layer_constrained_reason(reason: str) -> bool:
+    """True when a lattice decline reason names the HARD layer intent (#4979).
+
+    The lattice pathfinder reports three such reasons --
+    ``layer-constrained-start`` / ``layer-constrained-end`` (every escape
+    from that pad landed on a hard-avoided layer) and
+    ``no-path-layer-constrained`` (the hard block pruned candidate states
+    from a search that then found no route).  All three share the
+    ``layer-constrained`` substring by construction, so this test stays
+    correct if a future reason joins the family.
+    """
+    return "layer-constrained" in (reason or "")
+
+
 def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | None:
     """Structured, machine-readable unroutable-link report for ``--complete``.
 
@@ -11257,6 +11503,16 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
             "reason": reason,
             "link": {"start": ep[0], "end": ep[1]} if ep else None,
             "deadline_hit": bool(reason == "deadline-exceeded" or stats.deadline_hit),
+            # Issue #4979: machine-readable "this residual is layer-
+            # constrained" flag.  A link the hard layer intent declined
+            # (``layer-constrained-start``/``-end``, or a search the hard
+            # block narrowed before it ran out of options,
+            # ``no-path-layer-constrained``) is a DELIBERATE refusal to ship
+            # copper on a forbidden layer, not congestion -- a consumer must
+            # be able to tell the two apart without string-matching the
+            # reason, because the remedy is different (relax/repoint the
+            # net-class ``avoid_layers``, or give the net a legal corridor).
+            "layer_constrained": _is_layer_constrained_reason(reason),
             "elapsed_s": round(stats.elapsed_s, 3),
             "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
             "blocking_copper": list(diag.blocking_nets) if diag else [],
@@ -11299,6 +11555,14 @@ def _print_complete_link_report(report: dict) -> None:
         link = entry["link"]
         ep = f"{link['start']} <-> {link['end']}" if link else "(pads unknown)"
         print(f"  [{entry['net']}] {ep} -- {entry['reason']}")
+        if entry.get("layer_constrained"):
+            # Issue #4979: name the constraint that produced the residual, so
+            # the reader is not left to guess whether this was congestion.
+            print(
+                "      layer intent: declined rather than route on a layer "
+                "this net's class forbids (avoid_layers, hardened by "
+                "--strict-layers or target_ampacity)"
+            )
         if entry["blocking_copper"]:
             nearest = entry["nearest_blocker_mm"]
             nearest_note = f" (nearest {nearest:.3f}mm)" if nearest is not None else ""
@@ -16156,6 +16420,20 @@ def _main_impl(argv: list[str] | None = None) -> int:
         )
     pairwise_violation_count = len(pairwise_violations)
 
+    # Issue #4979: board-level HARD layer-intent gate.  A strict no-op unless
+    # some net class hardens ``avoid_layers`` (``--strict-layers``, or a
+    # declared ``target_ampacity``); otherwise it audits the copper the output
+    # carries -- freshly routed AND preserved -- so forbidden-layer copper
+    # can never be shipped behind a SUCCESS banner again.  Runs on every
+    # engine (the lattice search gained the hard block in this same issue; the
+    # gate is the independent check that the shipped copper agrees).
+    layer_intent_violations: list = []
+    if not args.dry_run:
+        layer_intent_violations = _audit_layer_intent(
+            router, args, id_to_name={v: k for k, v in net_map.items()}
+        )
+    layer_intent_new_count = len(_new_layer_intent_violations(layer_intent_violations))
+
     # Summary
     all_nets_routed = stats["nets_routed"] == nets_to_route
     drc_passed = drc_errors <= 0  # -1 means DRC failed to run, treat as passed
@@ -16170,9 +16448,31 @@ def _main_impl(argv: list[str] | None = None) -> int:
         summary_parts.append(f"{power_nets_skipped} power skipped")
     summary_suffix = f" ({', '.join(summary_parts)})" if summary_parts else ""
 
+    if not quiet and layer_intent_violations and layer_intent_new_count == 0:
+        # Issue #4979: this run created no forbidden-layer copper, but the
+        # written board still carries some it inherited from its input.
+        # Advisory (exit code unchanged) -- a SUCCESS banner must never be
+        # read as "the board honours its declared layer intent".
+        print()
+        print(
+            f"NOTE: {len(layer_intent_violations)} inherited forbidden-layer "
+            "segment(s)/via(s) carried over from the input board "
+            "(not created by this run):"
+        )
+        print(_format_layer_intent_violations(layer_intent_violations, limit=5))
+
     if not quiet:
         print("\n" + "=" * 60)
-        if pairwise_violation_count > 0 and drc_passed and (all_nets_routed or meets_threshold):
+        if layer_intent_new_count > 0:
+            # Issue #4979: copper on a layer the net declared hard-off-limits
+            # is a correctness failure of the router itself, so its banner
+            # outranks every other outcome -- a SUCCESS (or even a PARTIAL)
+            # banner must be unreachable while this run's own copper violates
+            # the declared layer intent.
+            _print_layer_intent_failure_banner(layer_intent_violations, args, output_path)
+            if pairwise_violation_count > 0:
+                _print_pairwise_addendum(pairwise_violations)
+        elif pairwise_violation_count > 0 and drc_passed and (all_nets_routed or meets_threshold):
             # Issue #4588: this run would otherwise have printed a SUCCESS
             # banner.  Board-level HV creepage violations make that a false
             # pass, so the pairwise failure banner replaces it outright --
@@ -16237,6 +16537,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
             if pairwise_violation_count > 0:
                 # Issue #4588: see the DRC branch above.
                 _print_pairwise_addendum(pairwise_violations)
+            if layer_intent_violations:
+                # Issue #4979: inherited-only findings (this run created none,
+                # or the banner above already reported the new ones).
+                _print_layer_intent_addendum(layer_intent_violations)
 
             # Issue #2388: When the negotiated loop bailed out due to a
             # power-net stall, surface actionable suggestions naming the
@@ -16330,8 +16634,14 @@ def _main_impl(argv: list[str] | None = None) -> int:
     #     as a non-fatal warning (and label it a DRC failure).  Neither
     #     forwards --voltage-map today, so the HV meaning cannot reach them;
     #     #4607 threads the flag through and makes it fatal there.
+    #     Issue #4979: also returned when the post-route hard layer-intent
+    #     gate finds copper this run created on a layer the net's class
+    #     declared off-limits (``avoid_layers`` hardened by --strict-layers
+    #     or a declared target_ampacity).  Checked before the --complete
+    #     exit-8 branch: forbidden copper outranks an unclosed link.
     # 4 = Seg-seg or HV pairwise clearance violations remain AND routing is
-    #     below threshold (Issue #1666, extended by #4588)
+    #     below threshold (Issue #1666, extended by #4588); also the
+    #     below-threshold form of the #4979 layer-intent failure above.
     # 5 = Interrupted by SIGINT with partial results saved (handled in _handle_interrupt)
     # 6 = Connectivity regression detected (--strict mode only): either
     #     the optimize / DRC nudge phases reduced the number of fully-
@@ -16390,6 +16700,18 @@ def _main_impl(argv: list[str] | None = None) -> int:
     if stats["nets_routed"] == 0 and nets_to_route > 0:
         # Nothing was routed — treat as fatal failure
         return 1
+
+    # Issue #4979: newly created forbidden-layer copper is a hard layer-intent
+    # failure and shares the established "routing succeeded but the copper is
+    # dirty" contract (3 above threshold / 4 below) with the seg-seg and #4588
+    # pairwise gates.  Checked BEFORE the --complete exit-8 branch on purpose:
+    # exit 8 reports a link that could not be closed (an expected outcome on a
+    # hard board), while this reports copper the tool should never have
+    # committed at all -- the more serious, and more actionable, verdict.  The
+    # banner above names both.  Inherited-only findings do NOT gate (the run
+    # created none); they are reported as a NOTE and leave the exit code alone.
+    if layer_intent_new_count > 0:
+        return 3 if meets_threshold else 4
 
     # Issue #4477: --complete exits nonzero whenever a link it was asked to
     # close remains unroutable, independent of --min-completion (a whole-
