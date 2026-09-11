@@ -375,7 +375,11 @@ Additive development fields:
 `part_count` counts PCB footprints (including non-BOM footprints), not unique
 BOM rows or schematic symbols. `layer_count` counts actual PCB copper layers.
 `board_size_mm` describes the Edge.Cuts bounding envelope for supported closed
-linear outlines; missing/open or curved outlines currently omit dimensions with
+linear outlines (`gr_line`, `gr_rect`, and straight `gr_poly`). Every contributing
+contour must close, including cutouts and separate islands, regardless of file
+order. Endpoints must match exactly; this metadata check does not snap gaps
+closed. Missing/open, degenerate, crossing, malformed or curved/unsupported
+geometry omits dimensions with
 a diagnostic rather than supply an inaccurate or zero size. The project supplies
 name/description. Schematic-only boards identify their source but do not invent
 PCB counts or dimensions.

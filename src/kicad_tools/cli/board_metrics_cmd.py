@@ -96,9 +96,14 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .board_readiness import read_readiness
 from .format_options import FORMAT_JSON, add_format_flag, emit_json
+
+if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import SExp
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +317,92 @@ def _count_bom_parts(bom_path: Path, slug: str) -> int | None:
     return len(data_rows)
 
 
+def _development_outline_bounds(pcb: PCB) -> tuple[float, float, float, float] | None:
+    """Measure only fully validated straight Edge.Cuts contours.
+
+    This is local metadata policy: no first-contour walk or bounds from
+    unchecked leftovers. Curves and footprint-local geometry need other
+    transforms/extrema and remain explicitly unsupported here.
+    """
+    import math
+    from collections import Counter
+
+    from shapely.errors import GEOSException  # type: ignore[import-untyped]
+    from shapely.geometry import MultiLineString  # type: ignore[import-untyped]
+    from shapely.ops import polygonize_full  # type: ignore[import-untyped]
+
+    segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+
+    def point(node: SExp, tag: str) -> tuple[float, float]:
+        matches = [child for child in node.iter_children() if child.tag == tag]
+        if len(matches) != 1:
+            raise ValueError("missing or duplicate outline coordinate")
+        return xy(matches[0])
+
+    def xy(node: SExp) -> tuple[float, float]:
+        values = node.get_atoms()
+        if (
+            len(values) != 2
+            or list(node.iter_children())
+            or any(type(v) not in (int, float) for v in values)
+            or any(not math.isfinite(float(v)) for v in values)
+        ):
+            raise ValueError("malformed outline coordinate")
+        return float(values[0]), float(values[1])
+
+    def visit(node: SExp, top_level: bool) -> None:
+        layers = [child for child in node.iter_children() if child.tag == "layer"]
+        if any(layer.get_string(0) == "Edge.Cuts" for layer in layers):
+            if (
+                not top_level
+                or len(layers) != 1
+                or layers[0].get_atoms() != ["Edge.Cuts"]
+                or node.tag not in {"gr_line", "gr_rect", "gr_poly"}
+            ):
+                raise ValueError("unsupported outline geometry")
+            if node.tag == "gr_line":
+                points = [point(node, "start"), point(node, "end")]
+            elif node.tag == "gr_rect":
+                a, b = point(node, "start"), point(node, "end")
+                points = [a, (b[0], a[1]), b, (a[0], b[1]), a]
+            else:
+                containers = [child for child in node.iter_children() if child.tag == "pts"]
+                if len(containers) != 1:
+                    raise ValueError("missing or duplicate outline polygon")
+                children = list(containers[0].iter_children())
+                if containers[0].get_atoms() or any(child.tag != "xy" for child in children):
+                    raise ValueError("unsupported polygon edge")
+                points = [xy(child) for child in children]
+                if len(points) > 1 and points[-1] == points[0]:
+                    points.pop()
+                if len(points) < 3:
+                    raise ValueError("degenerate outline polygon")
+                points.append(points[0])
+            segments.extend(zip(points, points[1:], strict=False))
+        for child in node.iter_children():
+            visit(child, False)
+
+    try:
+        for node in pcb._sexp.iter_children():
+            visit(node, True)
+        if not segments or any(a == b for a, b in segments):
+            return None
+        # Exact endpoints: do not silently close a physical gap by snapping.
+        degrees = Counter(point for segment in segments for point in segment)
+        if any(degree != 2 for degree in degrees.values()):
+            return None
+        lines = MultiLineString(segments)
+        if not lines.is_simple:  # Reject crossings and overlapping edges.
+            return None
+        polygons, cuts, dangles, invalid = polygonize_full(lines)
+        if polygons.is_empty or not all(g.is_empty for g in (cuts, dangles, invalid)):
+            return None
+        left, bottom, right, top = lines.bounds
+        return float(left), float(bottom), float(right), float(top)
+    except (ValueError, TypeError, OverflowError, GEOSException):
+        return None
+
+
 def _development_metrics(board_dir: Path, readiness: dict) -> dict:
     """Recover static development metadata without upgrading release evidence."""
     import hashlib
@@ -373,24 +464,14 @@ def _development_metrics(board_dir: Path, readiness: dict) -> dict:
                     raise ValueError("missing PCB root or copper layer definitions")
                 result["part_count"] = len(pcb.footprints)
                 result["layer_count"] = len(pcb.copper_layers)
-                # The existing raw bounds helper does not calculate curved extrema.
-                # Omit unsupported curved outlines instead of reporting a false size.
-                curved = any(
-                    node.tag in {"gr_arc", "gr_circle", "gr_curve"}
-                    and (layer := node.find_child("layer")) is not None
-                    and layer.get_string(0) == "Edge.Cuts"
-                    for node in pcb._sexp.iter_children()
-                )
-                outline = pcb.get_board_outline()
-                closed = len(outline) >= 4 and math.dist(outline[0], outline[-1]) < 1e-6
-                bounds = pcb._edge_cuts_bbox_sexp() if closed and not curved else None
+                bounds = _development_outline_bounds(pcb)
                 if bounds is not None:
                     width, height = bounds[2] - bounds[0], bounds[3] - bounds[1]
                     if all(math.isfinite(v) and v > 0 for v in (width, height)):
                         result["board_size_mm"] = {"width": width, "height": height}
                 if "board_size_mm" not in result:
                     diagnostics.append(
-                        "PCB outline is missing, open, or curved/unsupported; dimensions unknown"
+                        "PCB outline is missing, open, malformed, or curved/unsupported; dimensions unknown"
                     )
             else:
                 schematic = Schematic.load(path)

@@ -704,3 +704,83 @@ def test_development_explicit_source_cannot_escape_board(development_board):
     result = extract_board_metrics(development_board)
     assert "part_count" not in result
     assert any("outside-board" in d for d in result["diagnostics"])
+
+
+def _replace_development_outline(board, graphics):
+    from kicad_tools.schema.pcb import PCB
+
+    path = board / "output/actual.kicad_pcb"
+    pcb = PCB.load(path)
+    for child in list(pcb._sexp.iter_children()):
+        if child.tag.startswith("gr_"):
+            pcb._sexp.children.remove(child)
+    pcb.save(path)
+    text = path.read_text().rstrip()
+    path.write_text(text[:-1] + "\n" + "\n".join(graphics) + ")")
+
+
+def _outline_lines(points):
+    return [
+        f'(gr_line (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (layer "Edge.Cuts"))'
+        for a, b in zip(points, points[1:], strict=False)
+    ]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_development_stray_open_edge_omits_dimensions(development_board, reverse):
+    graphics = _outline_lines([(0, 0), (30, 0), (30, 20), (0, 20), (0, 0)])
+    graphics += _outline_lines([(100, 100), (101, 100)])
+    _replace_development_outline(development_board, graphics[::-1] if reverse else graphics)
+    result = extract_board_metrics(development_board)
+    assert "board_size_mm" not in result
+    assert any("outline" in d and "unknown" in d for d in result["diagnostics"])
+
+
+@pytest.mark.parametrize(
+    "graphic",
+    [
+        '(gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts"))',
+        '(gr_poly (pts (xy 0 0) (xy 30 0) (xy 30 20) (xy 0 20)) (layer "Edge.Cuts"))',
+    ],
+)
+@pytest.mark.parametrize("cutout_first", [False, True])
+def test_development_closed_graphics_with_cutout(development_board, graphic, cutout_first):
+    cutout = _outline_lines([(5, 5), (10, 5), (10, 10), (5, 10), (5, 5)])
+    graphics = cutout + [graphic] if cutout_first else [graphic] + cutout[::-1]
+    _replace_development_outline(development_board, graphics)
+    assert extract_board_metrics(development_board)["board_size_mm"] == {"width": 30, "height": 20}
+
+
+@pytest.mark.parametrize(
+    "points",
+    [
+        [(0, 0), (30, 20), (0, 20), (30, 0), (0, 0)],  # crossing
+        [(0, 0), (30, 0), (0, 0)],  # overlapping/degenerate
+        [(0, 0), (30, 0), (30, 20), (0, 20), (0, 0.00000001)],  # real gap
+    ],
+)
+def test_development_malformed_line_contours_omit_dimensions(development_board, points):
+    _replace_development_outline(development_board, _outline_lines(points))
+    assert "board_size_mm" not in extract_board_metrics(development_board)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        '(gr_line (start 30 20) (end 31 21) (layer "Edge.Cuts"))',
+        '(gr_line (start 0) (end 30 0) (layer "Edge.Cuts"))',
+        '(gr_rect (start 0 0) (end 0 20) (layer "Edge.Cuts"))',
+        '(gr_poly (pts (xy 0 0) (xy 20 0)) (layer "Edge.Cuts"))',
+        '(gr_poly (pts (xy 0 0) (xy bad 5) (xy 2 2)) (layer "Edge.Cuts"))',
+        '(gr_line (start nan 0) (end 30 0) (layer "Edge.Cuts"))',
+        '(gr_line (start 0 0) (start 20 20) (end 30 0) (layer "Edge.Cuts"))',
+        '(gr_text "unsupported" (at 10 10) (layer "Edge.Cuts"))',
+    ],
+)
+def test_development_any_malformed_contributing_geometry_is_unknown(development_board, extra):
+    valid = '(gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts"))'
+    _replace_development_outline(development_board, [valid, extra])
+    result = extract_board_metrics(development_board)
+    assert "board_size_mm" not in result
+    assert result["layer_count"] == 4
+    assert any("outline" in d and "unknown" in d for d in result["diagnostics"])
