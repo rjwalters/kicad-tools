@@ -144,7 +144,7 @@ def test_copper_extraction_detects_bridge_short_in_hierarchical_design(tmp_path:
     board_text = _BOARD_PCB.read_text().rstrip()
     assert board_text.endswith(")")
     bridge = (
-        '  (segment (start 101 100) (end 101 99) (width 0.25) (layer "F.Cu") (net 2)\n'
+        '  (segment (start 101 100) (end 101 98) (width 0.25) (layer "F.Cu") (net 2)\n'
         '    (uuid "hlvs-seg-short-bridge"))\n'
     )
     shorted_board = tmp_path / "shorted.kicad_pcb"
@@ -174,3 +174,21 @@ def test_floating_sub_sheet_pin_resolves_to_none_not_dropped() -> None:
         ("R3", "1"): None,  # floating: present, explicitly None
         ("R3", "2"): "GND",
     }
+
+
+def test_copper_lvs_detects_physical_bridge_in_hierarchical_fixture(tmp_path: Path) -> None:
+    """Separated routes become shorted when real copper joins them (#5192)."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(_BOARD_PCB)
+    # The original fixture overlapped VCC/GND routes on F.Cu. Keep the
+    # clean fixture separated, and exercise that physical fault explicitly.
+    pcb.add_trace((105, 98), (105, 102), width=0.25, layer="F.Cu", net="VCC")
+    bridged = tmp_path / "bridged.kicad_pcb"
+    pcb.save(bridged)
+
+    result = compare_copper_netlist(_ROOT_SCH, bridged)
+    assert result.bound_pad_count == 4
+    assert not result.vacuous
+    assert not result.clean
+    assert any({short.net_a, short.net_b} == {"VCC", "GND"} for short in result.shorts)
