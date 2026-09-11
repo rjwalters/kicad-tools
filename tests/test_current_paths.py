@@ -91,6 +91,12 @@ def _t_network_pcb(*, trunk_width: float = 3.0, sense_width: float = 0.2):
     return pcb
 
 
+def _seg_len(seg) -> float:
+    import math
+
+    return math.dist(seg.start, seg.end)
+
+
 def _trunk_spec(name: str = "TRUNK", current_a: float = 15.0) -> CurrentPathSpec:
     return CurrentPathSpec(
         name=name,
@@ -316,6 +322,102 @@ class TestResolveCurrentPath:
         assert r.ok
         assert r.segments == ()
         assert r.length_mm == 0.0
+
+
+class TestPadExtentEndpointBinding:
+    """Endpoints attach by pad *extent*, not by an exact center hit (#4980).
+
+    A router may terminate a trace anywhere inside a pad's copper, and a
+    wide power pad is routinely entered by several stubs at once. Resolving
+    only on an exact center match reported such boards as ``unresolved`` --
+    a FALSE fail-closed, which teaches users to delete declarations and is
+    every bit as unsafe as the silent pass this model exists to prevent.
+    Regression fixture is board09's 2.29 x 2.03 mm shunt pad ``RSH1.4``,
+    entered by three stubs 0.015 / 0.785 / 0.815 mm off center.
+    """
+
+    @staticmethod
+    def _wide_pad_pcb(*, offsets: tuple[float, ...], pad_size=(2.29, 2.03)):
+        """J1 -> J2, where the J1 end fans into ``offsets`` stubs on its pad."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=200, height=120, center=False)
+        _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+        j1 = pcb.get_footprint("J1")
+        assert j1 is not None
+        j1.pads[0].shape = "roundrect"
+        j1.pads[0].size = pad_size
+
+        # Each stub starts ON the pad (dx from its center) and drops to the
+        # y=60 rail, which then runs to J2. The pad's own copper is what
+        # joins the stubs -- there is no trace between them.
+        for dx in offsets:
+            pcb.add_trace((20 + dx, 50), (20 + dx, 60), width=0.6, layer="F.Cu", net="NET1")
+        for i in range(len(offsets) - 1):
+            pcb.add_trace(
+                (20 + offsets[i], 60),
+                (20 + offsets[i + 1], 60),
+                width=2.0,
+                layer="F.Cu",
+                net="NET1",
+            )
+        pcb.add_trace((20 + offsets[-1], 60), ("J2", "1"), width=2.0, layer="F.Cu", net="NET1")
+        return pcb
+
+    def test_offcenter_stub_on_pad_resolves(self) -> None:
+        """A single stub 0.015 mm off center is on the pad, not unresolved."""
+        pcb = self._wide_pad_pcb(offsets=(0.015,))
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert r.status == "resolved", r.reason
+
+    def test_stub_outside_pad_still_fails_closed(self) -> None:
+        """The fix must not degrade into "near enough" -- 5 mm away is not on it."""
+        pcb = self._wide_pad_pcb(offsets=(5.0,))
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert r.status == "unresolved"
+        assert "no routed copper touching it" in r.reason
+
+    def test_pad_edge_is_inside_and_just_beyond_is_not(self) -> None:
+        """Containment is the pad's real extent: half-width 1.145 mm here."""
+        assert resolve_current_path(self._wide_pad_pcb(offsets=(1.14,)), _trunk_spec()).ok
+        assert not resolve_current_path(self._wide_pad_pcb(offsets=(1.16,)), _trunk_spec()).ok
+
+    def test_multiple_stubs_on_one_pad_are_shorted_by_it(self) -> None:
+        """board09's case: three stubs into one shunt pad, none at its center.
+
+        Only the pad connects them, so without pad-extent binding the trunk
+        is split across three graph components and never resolves.
+        """
+        pcb = self._wide_pad_pcb(offsets=(-0.785, 0.015, 0.815))
+        r = resolve_current_path(pcb, _trunk_spec())
+        # The three stubs plus the y=60 rail form a genuine parallel loop
+        # through the pad, which the model reports rather than collapsing.
+        assert r.status == "ambiguous", r.reason
+        assert "loop" in r.reason
+
+    def test_pad_short_never_appears_as_a_covered_segment(self) -> None:
+        """Pad shorts are pseudo-edges: nothing can check their width."""
+        pcb = self._wide_pad_pcb(offsets=(0.015,))
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert r.ok
+        assert all(hasattr(s, "width") for s in r.segments)
+        assert r.length_mm == pytest.approx(sum(_seg_len(s) for s in r.segments))
+
+    def test_rotated_pad_extent_follows_the_pad(self) -> None:
+        """A 90-degree pad rotation swaps which offsets land on the copper."""
+        # 0.9 mm off center along x: inside a 2.29-wide pad, outside the
+        # 2.03-tall one once that extent is rotated onto the x axis.
+        upright = self._wide_pad_pcb(offsets=(1.1,))
+        assert resolve_current_path(upright, _trunk_spec()).ok
+
+        rotated = self._wide_pad_pcb(offsets=(1.1,))
+        fp = rotated.get_footprint("J1")
+        assert fp is not None
+        fp.pads[0].size = (2.29, 1.0)
+        fp.pads[0].rotation = 90.0
+        r = resolve_current_path(rotated, _trunk_spec())
+        assert r.status == "unresolved", "the 1.0 mm-wide axis now faces x"
 
 
 # --------------------------------------------------------------------------
