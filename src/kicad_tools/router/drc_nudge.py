@@ -1127,17 +1127,10 @@ def _try_nudge_via_via(
 
 
 def _router_pad_bbox(pad: Pad) -> tuple[float, float, float, float]:
-    """Return the axis-aligned bounding box for a router primitive ``Pad``.
+    """Rotation-aware enclosing AABB, not proof of physical pad containment."""
+    from .primitives import pad_half_extents
 
-    The router pad already carries absolute coordinates and (for cardinal
-    footprint rotations) swapped ``width/height``, so the AABB is just
-    ``(x ± w/2, y ± h/2)``.  Non-cardinal rotations are conservatively
-    approximated by the same convention used elsewhere in this module --
-    matches :func:`kicad_tools.validate.rules.via_in_pad._pad_absolute_bbox`
-    for the cardinal cases which are the only ones the router emits.
-    """
-    half_w = pad.width / 2.0
-    half_h = pad.height / 2.0
+    half_w, half_h = pad_half_extents(pad)
     return (pad.x - half_w, pad.y - half_h, pad.x + half_w, pad.y + half_h)
 
 

@@ -75,135 +75,48 @@ class ThermalRelief:
     layer_index: int = 0
 
     def generate_antipad_cells(self, grid: "RoutingGrid") -> set[tuple[int, int]]:
-        """Generate grid cells forming the antipad (clearance ring).
+        """Enumerate cells outside the rotated rectangle within ``gap``.
 
-        The antipad is the area around the pad that must remain copper-free
-        except for the spoke connections.
-
-        Args:
-            grid: Routing grid for coordinate conversion
-
-        Returns:
-            Set of (gx, gy) grid cells in the antipad region
+        The enclosing AABB bounds enumeration only. Local-frame rectangle
+        distance defines the ring, including clearance around its corners.
         """
+        from .pad_geometry import pad_contains_point, pad_point_distance
+        from .primitives import pad_half_extents
+
         cells: set[tuple[int, int]] = set()
-
-        # Pad dimensions with gap
-        pad_half_w = self.pad.width / 2
-        pad_half_h = self.pad.height / 2
-        outer_radius = max(pad_half_w, pad_half_h) + self.gap
-
-        # Convert to grid cells
-        outer_cells = int(outer_radius / grid.resolution) + 1
-
-        # Get pad center in grid coordinates
-        pad_gx, pad_gy = grid.world_to_grid(self.pad.x, self.pad.y)
-
-        # Generate antipad ring (cells outside pad but within gap)
-        for dy in range(-outer_cells, outer_cells + 1):
-            for dx in range(-outer_cells, outer_cells + 1):
-                gx, gy = pad_gx + dx, pad_gy + dy
-
-                # Skip cells outside grid
-                if not (0 <= gx < grid.cols and 0 <= gy < grid.rows):
-                    continue
-
-                # Get world position of cell
-                wx, wy = grid.grid_to_world(gx, gy)
-
-                # Distance from pad center
-                rel_x = wx - self.pad.x
-                rel_y = wy - self.pad.y
-
-                # Check if in antipad region (outside pad, inside outer boundary)
-                # Use rectangular check for pad shape
-                in_pad = abs(rel_x) <= pad_half_w and abs(rel_y) <= pad_half_h
-
-                # Use circular check for outer boundary
-                dist = math.sqrt(rel_x * rel_x + rel_y * rel_y)
-                in_outer = dist <= outer_radius
-
-                if not in_pad and in_outer:
+        half_w, half_h = pad_half_extents(self.pad)
+        nx = math.ceil((half_w + self.gap) / grid.resolution) + 1
+        ny = math.ceil((half_h + self.gap) / grid.resolution) + 1
+        cx, cy = grid.world_to_grid(self.pad.x, self.pad.y)
+        for gy in range(max(0, cy - ny), min(grid.rows, cy + ny + 1)):
+            for gx in range(max(0, cx - nx), min(grid.cols, cx + nx + 1)):
+                x, y = grid.grid_to_world(gx, gy)
+                if not pad_contains_point(self.pad, x, y) and (
+                    pad_point_distance(self.pad, x, y) <= self.gap + 1e-12
+                ):
                     cells.add((gx, gy))
-
         return cells
 
     def generate_spoke_cells(self, grid: "RoutingGrid") -> set[tuple[int, int]]:
-        """Generate grid cells forming the connecting spokes.
+        """Copper bridges through the entire gap, at board-space spoke angles.
 
-        Spokes are narrow bridges of copper connecting the pad to
-        the surrounding zone copper through the antipad.
-
-        Args:
-            grid: Routing grid for coordinate conversion
-
-        Returns:
-            Set of (gx, gy) grid cells forming the spokes
+        Spokes are finite-width rays from the pad center clipped to the gap
+        ring. Reusing ring membership prevents seams or different outer bounds.
         """
         cells: set[tuple[int, int]] = set()
-
-        # Pad dimensions
-        pad_half_w = self.pad.width / 2
-        pad_half_h = self.pad.height / 2
-        outer_radius = max(pad_half_w, pad_half_h) + self.gap
-
-        # Spoke parameters
-        spoke_half_width = self.spoke_width / 2
-        angle_step = 360.0 / self.spoke_count
-
-        # Get pad center in grid coordinates
-        pad_gx, pad_gy = grid.world_to_grid(self.pad.x, self.pad.y)
-
-        # Grid range to check
-        outer_cells = int(outer_radius / grid.resolution) + 2
-
-        for dy in range(-outer_cells, outer_cells + 1):
-            for dx in range(-outer_cells, outer_cells + 1):
-                gx, gy = pad_gx + dx, pad_gy + dy
-
-                # Skip cells outside grid
-                if not (0 <= gx < grid.cols and 0 <= gy < grid.rows):
-                    continue
-
-                # Get world position of cell
-                wx, wy = grid.grid_to_world(gx, gy)
-
-                # Position relative to pad center
-                rel_x = wx - self.pad.x
-                rel_y = wy - self.pad.y
-
-                # Check if cell is in the antipad region
-                in_pad = abs(rel_x) <= pad_half_w and abs(rel_y) <= pad_half_h
-                dist = math.sqrt(rel_x * rel_x + rel_y * rel_y)
-                in_outer = dist <= outer_radius
-
-                if in_pad or not in_outer:
-                    continue  # Only care about antipad region
-
-                # Check if cell falls within any spoke
-                cell_angle = math.degrees(math.atan2(rel_y, rel_x))
-                if cell_angle < 0:
-                    cell_angle += 360
-
-                for i in range(self.spoke_count):
-                    spoke_angle = self.spoke_angle + i * angle_step
-                    spoke_angle = spoke_angle % 360
-
-                    # Angular distance to spoke center
-                    angle_diff = abs(cell_angle - spoke_angle)
-                    if angle_diff > 180:
-                        angle_diff = 360 - angle_diff
-
-                    # Convert angular width to linear at this distance
-                    if dist > 0:
-                        # Spoke width check: perpendicular distance from spoke line
-                        spoke_rad = math.radians(spoke_angle)
-                        # Project onto perpendicular to spoke direction
-                        perp_dist = abs(rel_x * math.sin(spoke_rad) - rel_y * math.cos(spoke_rad))
-                        if perp_dist <= spoke_half_width:
-                            cells.add((gx, gy))
-                            break
-
+        directions = [
+            (math.cos(angle), math.sin(angle))
+            for i in range(self.spoke_count)
+            for angle in [math.radians(self.spoke_angle + i * 360.0 / self.spoke_count)]
+        ]
+        for gx, gy in self.generate_antipad_cells(grid):
+            x, y = grid.grid_to_world(gx, gy)
+            x, y = x - self.pad.x, y - self.pad.y
+            if any(
+                x * dx + y * dy >= 0 and abs(x * dy - y * dx) <= self.spoke_width / 2
+                for dx, dy in directions
+            ):
+                cells.add((gx, gy))
         return cells
 
 
