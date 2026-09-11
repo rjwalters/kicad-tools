@@ -213,8 +213,11 @@ def cmd_nets(pcb: PCB, args):
                     island_map[net.number] = []
             else:
                 graph = analyzer._build_connectivity_graph(net.number, pad_infos)
-                islands = analyzer._find_islands(graph, [p.full_name for p in pad_infos])
-                island_map[net.number] = islands
+                islands = analyzer._find_islands(graph, [p.connectivity_id for p in pad_infos])
+                display_names = {p.connectivity_id: p.full_name for p in pad_infos}
+                island_map[net.number] = [
+                    [display_names[node] for node in island] for island in islands
+                ]
 
     if args.format == "json":
         net_stats = []

@@ -866,3 +866,164 @@ def test_route_emits_sibling_kicad_pro(monkeypatch, tmp_path: Path):
     defaults = data["board"]["design_settings"]["defaults"]
     assert defaults["clearance_min"] == rules.min_clearance_mm
     assert defaults["track_min_width"] == rules.min_trace_width_mm
+
+
+@pytest.fixture
+def authored_route_source(tmp_path):
+    source = tmp_path / "source.kicad_pcb"
+    source.write_text("(kicad_pcb)")
+    source.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "text_variables": {"KCT_PRESERVE_BOARD_RULES": "1"},
+                "board": {
+                    "design_settings": {
+                        "rules": {
+                            "min_clearance": 0.15,
+                            "min_track_width": 0.15,
+                            "min_via_hole": 0.1,
+                        }
+                    }
+                },
+                "net_settings": {
+                    "classes": [
+                        {"name": "Default", "clearance": 0.15},
+                        {"name": "HV", "clearance": 0.8},
+                    ],
+                    "netclass_assignments": {"VCC": "HV"},
+                },
+            }
+        )
+    )
+    source.with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "Custom width" (constraint track_width (min 0.2mm)))\n'
+    )
+    return source
+
+
+@pytest.mark.parametrize("subdir", ["", "fresh"])
+def test_renamed_route_preserves_source_rules(authored_route_source, subdir):
+    source = authored_route_source
+    before = {
+        suffix: source.with_suffix(suffix).read_bytes() for suffix in (".kicad_pro", ".kicad_dru")
+    }
+    output = source.parent / subdir / "renamed.kicad_pcb"
+    output.parent.mkdir(exist_ok=True)
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    write_drc_constraints(output, rules, manufacturer_id="jlcpcb", source_pcb_path=source)
+    data = json.loads(output.with_suffix(".kicad_pro").read_text())
+    assert data["text_variables"]["KCT_PRESERVE_BOARD_RULES"] == "1"
+    assert data["board"]["design_settings"]["rules"]["min_clearance"] == 0.15
+    assert data["board"]["design_settings"]["rules"]["min_via_hole"] == rules.min_via_drill_mm
+    assert data["net_settings"]["netclass_assignments"] == {"VCC": "HV"}
+    dru = output.with_suffix(".kicad_dru").read_text()
+    assert '"Custom width"' in dru and "(min 0.15mm)" in dru and "(min 0.8mm)" in dru
+    first = {suffix: output.with_suffix(suffix).read_bytes() for suffix in before}
+    write_drc_constraints(output, rules, manufacturer_id="jlcpcb", source_pcb_path=source)
+    assert first == {suffix: output.with_suffix(suffix).read_bytes() for suffix in before}
+    assert before == {suffix: source.with_suffix(suffix).read_bytes() for suffix in before}
+
+
+@pytest.mark.parametrize("suffix", [".kicad_pro", ".kicad_dru"])
+def test_renamed_route_conflicts_leave_both_sidecars_untouched(authored_route_source, suffix):
+    source = authored_route_source
+    output = source.with_name("renamed.kicad_pcb")
+    target = output.with_suffix(suffix)
+    target.write_text("{}" if suffix == ".kicad_pro" else "(version 1)\n# other rules\n")
+    before = target.read_bytes()
+    with pytest.raises(ValueError, match="conflict"):
+        write_drc_constraints(
+            output, get_profile("jlcpcb").get_design_rules(layers=4), source_pcb_path=source
+        )
+    assert target.read_bytes() == before
+    other = ".kicad_dru" if suffix == ".kicad_pro" else ".kicad_pro"
+    assert not output.with_suffix(other).exists()
+
+
+def test_post_route_conflict_blocks_even_quiet(authored_route_source, capsys, monkeypatch):
+    from kicad_tools.cli import route_cmd
+
+    output = authored_route_source.with_name("renamed.kicad_pcb")
+    output.with_suffix(".kicad_pro").write_text("{}")
+
+    def route_then_auto_fix(argv):
+        route_cmd.run_post_route_drc(
+            output, "jlcpcb", 4, quiet=True, source_pcb_path=authored_route_source
+        )
+        pytest.fail("constraint conflicts must abort before auto-fix can erase the failure")
+
+    monkeypatch.setattr(route_cmd, "_main_impl", route_then_auto_fix)
+    assert route_cmd.main([]) == 1
+    assert "conflict" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(_kicad_cli() is None, reason="kicad-cli not installed")
+def test_renamed_native_drc_uses_authored_clearance(authored_route_source, tmp_path):
+    import shutil
+    import subprocess
+
+    source = authored_route_source
+    source.write_text("""(kicad_pcb (version 20240108) (generator pcbnew)
+      (general (thickness 1.6)) (paper "A4")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+      (setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "A") (net 2 "B")
+      (gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default))
+        (fill none) (layer "Edge.Cuts"))
+      (segment (start 5 5) (end 10 5) (width 0.2) (layer "F.Cu") (net 1))
+      (segment (start 5 5.34) (end 10 5.34) (width 0.2) (layer "F.Cu") (net 2)))""")
+    output = tmp_path / "renamed.kicad_pcb"
+    shutil.copyfile(source, output)
+    rules = get_profile("jlcpcb").get_design_rules(layers=2)
+
+    def clearance_findings(board):
+        report = board.with_suffix(".json")
+        proc = subprocess.run(
+            [str(_kicad_cli()), "pcb", "drc", "--format", "json", "-o", str(report), str(board)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+        data = json.loads(report.read_text())
+        return [v for v in data["violations"] if v["type"] == "clearance"]
+
+    # At the ordinary factory minimum the exact same 0.14mm gap passes.
+    control = tmp_path / "factory.kicad_pcb"
+    shutil.copyfile(source, control)
+    write_drc_constraints(control, rules, manufacturer_id="jlcpcb")
+    assert clearance_findings(control) == []
+    write_drc_constraints(output, rules, manufacturer_id="jlcpcb", source_pcb_path=source)
+    findings = clearance_findings(output)
+    assert findings
+    assert any("0.1500" in v["description"] for v in findings), findings
+
+
+def test_renamed_source_alias_is_not_modified(authored_route_source):
+    source = authored_route_source
+    target = source.with_name("alias.kicad_pcb")
+    project = source.with_suffix(".kicad_pro")
+    before = project.read_bytes()
+    target.with_suffix(".kicad_pro").symlink_to(project)
+    with pytest.raises(ValueError, match="aliases source"):
+        write_drc_constraints(
+            target, get_profile("jlcpcb").get_design_rules(layers=4), source_pcb_path=source
+        )
+    assert project.read_bytes() == before
+
+
+def test_renamed_identical_authored_destination_is_accepted(authored_route_source):
+    import shutil
+
+    source = authored_route_source
+    target = source.with_name("copy.kicad_pcb")
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        shutil.copyfile(source.with_suffix(suffix), target.with_suffix(suffix))
+    write_drc_constraints(
+        target, get_profile("jlcpcb").get_design_rules(layers=4), source_pcb_path=source
+    )
+    assert (
+        json.loads(target.with_suffix(".kicad_pro").read_text())["text_variables"][
+            "KCT_PRESERVE_BOARD_RULES"
+        ]
+        == "1"
+    )

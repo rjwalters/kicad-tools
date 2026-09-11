@@ -8,6 +8,10 @@ intersection, matching ``kicad-cli pcb drc`` semantics) by default; pass
 ``strict=False`` to opt into the legacy 0.01mm endpoint-proximity model
 (see ``NetStatusAnalyzer.POSITION_TOLERANCE`` for the trade-offs).
 
+Strict graphs retain each physical pad occurrence, including duplicate pad
+numbers. Reports keep logical ``REF.PAD`` names and board positions. Duplicate
+numbers never imply an internal component jumper in this copper model.
+
 Example:
     >>> from kicad_tools.schema.pcb import PCB
     >>> from kicad_tools.analysis.net_status import NetStatusAnalyzer
@@ -43,6 +47,13 @@ class PadInfo:
     position: tuple[float, float]  # Board coordinates (x, y)
     is_connected: bool  # Whether pad is connected to main routing
     layers: list[str] = field(default_factory=list)  # Layers pad exists on
+
+    # Internal graph identity; display names deliberately remain REF.PAD.
+    node_id: str = field(default="", repr=False)
+
+    @property
+    def connectivity_id(self) -> str:
+        return self.node_id or self.full_name
 
     @property
     def full_name(self) -> str:
@@ -522,7 +533,7 @@ class NetStatusAnalyzer:
         # Strict-mode geometry caches (Issue #4176), keyed by object id.
         self._segment_poly_cache: dict[int, Any] = {}
         self._via_geom_cache: dict[int, Any] = {}
-        # Per-analyzer pad copper polygon cache (keyed ``REF.PAD``); ``None``
+        # Per-analyzer pad copper polygon cache (keyed by physical occurrence); ``None``
         # until first built lazily in :meth:`_pad_polys`.
         self._pad_poly_cache: dict[str, Any] | None = None
         if strict:
@@ -686,7 +697,7 @@ class NetStatusAnalyzer:
         graph = self._build_connectivity_graph(net_number, pad_infos)
 
         # Find connected components (islands)
-        islands = self._find_islands(graph, [p.full_name for p in pad_infos])
+        islands = self._find_islands(graph, [p.connectivity_id for p in pad_infos])
         # Issue #4934: the island COUNT (not just which pads sit in the
         # largest one) is what a ratsnest-style "remaining connections"
         # metric needs, so record it before the largest-island collapse.
@@ -701,7 +712,7 @@ class NetStatusAnalyzer:
 
         # Classify pads
         for pad_info in pad_infos:
-            pad_info.is_connected = pad_info.full_name in connected_names
+            pad_info.is_connected = pad_info.connectivity_id in connected_names
             if pad_info.is_connected:
                 status.connected_pads.append(pad_info)
             else:
@@ -711,6 +722,17 @@ class NetStatusAnalyzer:
         status.unconnected_pads.sort(key=lambda p: (p.reference, p.pad_number))
 
         return status
+
+    def _pad_node_id(self, fp_index: int, pad_index: int, fp: Any, pad: Any) -> str:
+        """Keep physical occurrences separate even with missing/duplicate UUIDs.
+
+        Indices are stable for this analyzer's immutable board snapshot. Legacy
+        mode retains its historical logical-name grouping; names in reports do
+        not change in either mode.
+        """
+        if self.strict:
+            return f"__pad:{fp_index}:{pad_index}"
+        return f"{fp.reference}.{pad.number}"
 
     def _get_net_pads_with_positions(self, net_number: int) -> list[PadInfo]:
         """Get all pads on a net with their board positions.
@@ -722,14 +744,14 @@ class NetStatusAnalyzer:
             List of PadInfo objects
         """
         pads = []
-        for fp in self.pcb.footprints:
+        for fp_index, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
 
             fp_x, fp_y = fp.position
             rotation = fp.rotation
 
-            for pad in fp.pads:
+            for pad_index, pad in enumerate(fp.pads):
                 if pad.net_number == net_number:
                     # Transform pad position to board coordinates
                     board_pos = self._transform_pad_position(pad.position, fp_x, fp_y, rotation)
@@ -740,6 +762,7 @@ class NetStatusAnalyzer:
                             position=board_pos,
                             is_connected=False,
                             layers=pad.layers,
+                            node_id=self._pad_node_id(fp_index, pad_index, fp, pad),
                         )
                     )
         return pads
@@ -789,8 +812,8 @@ class NetStatusAnalyzer:
             Adjacency list mapping pad names to connected pad names
         """
         graph: dict[str, set[str]] = defaultdict(set)
-        pad_positions = {p.full_name: p.position for p in pad_infos}
-        pad_layers = {p.full_name: p.layers for p in pad_infos}
+        pad_positions = {p.connectivity_id: p.position for p in pad_infos}
+        pad_layers = {p.connectivity_id: p.layers for p in pad_infos}
 
         # Get segments and vias for this net
         segments = list(self.pcb.segments_in_net(net_number))
@@ -1137,15 +1160,15 @@ class NetStatusAnalyzer:
         # reference validator's geometry so the model matches
         # ``extract_pad_partition`` exactly.
         pad_polys: dict[str, Any] = {}
-        for fp in self.pcb.footprints:
+        for fp_index, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
-            for pad in fp.pads:
+            for pad_index, pad in enumerate(fp.pads):
                 if pad.net_number != net_number:
                     continue
                 if pad.number is None or pad.number == "":
                     continue
-                pad_id = f"{fp.reference}.{pad.number}"
+                pad_id = self._pad_node_id(fp_index, pad_index, fp, pad)
                 if pad_id not in pad_positions:
                     continue
                 poly = cv._pad_copper_polygon(fp, pad)
@@ -1589,7 +1612,7 @@ class NetStatusAnalyzer:
         return geom
 
     def _pad_polys(self) -> dict[str, Any]:
-        """Board-frame copper polygon per pad, keyed by ``REF.PAD`` (strict).
+        """Board-frame copper polygon per physical pad occurrence (strict).
 
         Built once per analyzer over every footprint pad, reusing
         :meth:`ConnectivityValidator._pad_copper_polygon` for shape/rotation
@@ -1600,13 +1623,15 @@ class NetStatusAnalyzer:
             return self._pad_poly_cache
         cache: dict[str, Any] = {}
         cv = self._connectivity_geometry()
-        for fp in self.pcb.footprints:
+        for fp_index, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
-            for pad in fp.pads:
+            for pad_index, pad in enumerate(fp.pads):
                 if pad.number is None or pad.number == "":
                     continue
-                cache[f"{fp.reference}.{pad.number}"] = cv._pad_copper_polygon(fp, pad)
+                cache[self._pad_node_id(fp_index, pad_index, fp, pad)] = cv._pad_copper_polygon(
+                    fp, pad
+                )
         self._pad_poly_cache = cache
         return cache
 
