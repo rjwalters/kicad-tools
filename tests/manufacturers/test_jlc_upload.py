@@ -265,58 +265,34 @@ def test_module_never_hand_rolls_a_multipart_boundary(handoff):
     assert set(call["fields"]) == {"meta"}
 
 
-def test_requests_transport_delegates_multipart_encoding_to_the_library():
-    requests = pytest.importorskip("requests")
-
-    class FakeSession:
-        def __init__(self):
-            self.calls = []
-
-        def close(self):
-            self.closed = True
-
-        def post(self, url, **kwargs):
-            self.calls.append({"url": url, **kwargs})
-
-            class Resp:
-                status_code = 200
-                headers = {"J-Trace-ID": "trace-1"}
-                content = json.dumps(ok_body()).encode()
-
-            return Resp()
-
-    session = FakeSession()
-    transport = ju.RequestsUploadTransport(session=session)
-    assert transport.identity.live is True
-
-    transport.post_multipart(
+def test_offline_request_preparation_uses_library_multipart_encoding():
+    pytest.importorskip("requests")
+    prepared = ju.prepare_multipart_request(
         "https://example.invalid/x",
         headers={"Content-MD5": "abc"},
         fields={"meta": "{}"},
         files={"file": ("gerbers.zip", b"bytes\x00\xff", "application/octet-stream")},
     )
-    call = session.calls[0]
-    # requests' own encoder is handed the discrete parts (so it generates the
-    # boundary); the transport never builds a body string itself.
-    assert call["data"] == {"meta": "{}"}
-    assert call["files"] == {"file": ("gerbers.zip", b"bytes\x00\xff", "application/octet-stream")}
-    assert not [name for name in call["headers"] if name.lower() == "content-type"]
-
-    # Prove the library-generated encoding carries the exact bytes.
-    prepared = requests.Request(
-        "POST", "https://example.invalid/x", data=call["data"], files=call["files"]
-    ).prepare()
-    assert b"boundary=" in prepared.headers["Content-Type"].encode()
+    assert "boundary=" in prepared.headers["Content-Type"]
     assert b"bytes\x00\xff" in prepared.body
+    assert b'name="meta"' in prepared.body
+    assert b'name="file"; filename="gerbers.zip"' in prepared.body
+    assert prepared.headers["Content-MD5"] == "abc"
 
-    # Closing must never leave the transport able to resurrect a LIVE session
-    # behind an injected one.
-    with transport as entered:
-        assert entered is transport
-    assert session.closed is True
-    with pytest.raises(ju.TransportError) as closed:
-        transport.post_json("https://example.invalid/x", headers={}, body=b"{}")
-    assert closed.value.request_sent is False
+
+def test_direct_requests_transport_blocks_injected_session():
+    class Session:
+        def post(self, *args, **kwargs):
+            pytest.fail("unverified live transport sent request")
+
+        def close(self):
+            self.closed = True
+
+    session = Session()
+    with ju.RequestsUploadTransport(session=session) as transport:
+        with pytest.raises(ju.UploadGateError, match="protocol"):
+            transport.post_multipart("https://example.invalid/x", headers={}, fields={}, files={})
+    assert session.closed
 
 
 # ---------------------------------------------------------------------------
@@ -420,9 +396,9 @@ def test_http_200_with_business_error_is_a_failure(handoff):
 
 def test_http_200_success_flag_without_code_200_is_a_failure(handoff):
     transport = FakeTransport(responses=[response(200, {"success": True, "data": "k"})])
-    with pytest.raises(ju.UploadRejectedError):
+    with pytest.raises(ju.UploadUncertainError):
         upload(handoff, transport)
-    assert [e["kind"] for e in handoff["ledger"].events()] == ["intent", "failure"]
+    assert [e["kind"] for e in handoff["ledger"].events()] == ["intent", "uncertain"]
 
 
 def test_http_403_preserves_only_safe_reason_and_trace_id(handoff):
@@ -475,7 +451,7 @@ def test_unsafe_trace_id_header_is_discarded(handoff):
 
 def test_non_json_error_body_is_a_failure_without_echoing_the_body(handoff):
     transport = FakeTransport(responses=[response(502, content=b"<html>raw-payload-marker</html>")])
-    with pytest.raises(ju.UploadRejectedError):
+    with pytest.raises(ju.UploadUncertainError):
         upload(handoff, transport)
     assert "raw-payload-marker" not in handoff["ledger"].path.read_text()
 
@@ -491,9 +467,9 @@ def test_non_json_error_body_is_a_failure_without_echoing_the_body(handoff):
 )
 def test_unusable_file_key_fails_closed(handoff, body):
     transport = FakeTransport(responses=[response(200, body)])
-    with pytest.raises(ju.UploadRejectedError):
+    with pytest.raises(ju.UploadUncertainError):
         upload(handoff, transport)
-    assert [e["kind"] for e in handoff["ledger"].events()] == ["intent", "failure"]
+    assert [e["kind"] for e in handoff["ledger"].events()] == ["intent", "uncertain"]
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +482,7 @@ def test_app_identity_mismatch_fails_closed(handoff):
     transport = FakeTransport(responses=[response(200, body)])
     with pytest.raises(ju.UploadIdentityError):
         upload(handoff, transport)
-    assert [e["kind"] for e in handoff["ledger"].events()] == ["intent", "failure"]
+    assert [e["kind"] for e in handoff["ledger"].events()] == ["intent", "uncertain"]
 
 
 def test_file_md5_mismatch_fails_closed(handoff):
@@ -962,12 +938,12 @@ def test_mock_transport_success_is_never_labeled_a_factory_receipt(handoff):
     assert '"uploaded"' not in text
 
 
-def test_live_transport_success_is_labeled_a_factory_receipt(handoff):
+def test_declared_live_upload_is_gated_before_any_ledger_write(handoff):
     transport = FakeTransport(responses=[response(200, ok_body())], live=True, name="live-fake")
-    receipt = upload(handoff, transport)
-    assert receipt.is_factory_receipt is True
-    assert receipt.evidence == "live-factory-response"
-    assert receipt.states["upload"] == "uploaded"
+    with pytest.raises(ju.UploadGateError, match="protocol"):
+        upload(handoff, transport)
+    assert not transport.multipart_calls
+    assert not handoff["ledger"].events()
 
 
 # ---------------------------------------------------------------------------
@@ -1203,3 +1179,150 @@ def test_module_source_contains_no_order_pay_or_quote_endpoint():
         "submitorder",
     ):
         assert forbidden not in lowered, f"out-of-scope endpoint surface: {forbidden}"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("success", "false"),
+        ("success", 1),
+        ("code", 200.0),
+        ("code", "200"),
+        ("appId", 999),
+        ("appId", ""),
+        ("md5", None),
+        ("sha256", []),
+    ],
+)
+def test_ambiguous_envelope_blocks_second_send(handoff, field, value):
+    transport = FakeTransport(responses=[response(200, dict(ok_body(), **{field: value}))])
+    with pytest.raises(ju.UploadUncertainError):
+        upload(handoff, transport)
+    with pytest.raises(ju.UploadBlockedError):
+        upload(handoff, transport)
+    assert len(transport.multipart_calls) == 1
+    assert [a.state for a in handoff["ledger"].attempts().values()] == [ju.STATE_UNCERTAIN]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("success", "false"),
+        ("success", 1),
+        ("code", 200.0),
+        ("code", "200"),
+        ("appId", 999),
+        ("appId", ""),
+        ("md5", None),
+        ("sha256", []),
+    ],
+)
+def test_malformed_preview_never_creates_result(handoff, field, value):
+    transport = FakeTransport(
+        responses=[response(200, ok_body()), response(200, dict(ok_body(), **{field: value}))]
+    )
+    receipt = upload(handoff, transport)
+    before = handoff["ledger"].path.read_bytes()
+    with pytest.raises(ju.UploadError):
+        ju.fetch_preview(
+            receipt,
+            ledger=handoff["ledger"],
+            transport=transport,
+            credentials=fake_credentials(),
+            requested_at="2026-09-11T00:00:00Z",
+        )
+    assert handoff["ledger"].path.read_bytes() == before
+
+
+def test_direct_requests_transport_is_gated_before_session_creation(monkeypatch):
+    requests = pytest.importorskip("requests")
+    monkeypatch.setattr(requests, "Session", lambda: pytest.fail("created live session"))
+    transport = ju.RequestsUploadTransport()
+    with pytest.raises(ju.UploadGateError, match="protocol"):
+        transport.post_json("https://example.invalid/x", headers={}, body=b"{}")
+
+
+@pytest.mark.parametrize("key", ju._APP_ECHO_KEYS + ju._MD5_ECHO_KEYS + ju._SHA_ECHO_KEYS)
+@pytest.mark.parametrize("value", [None, "", "  ", 123, [], {}])
+def test_every_present_malformed_identity_blocks_retry(handoff, key, value):
+    transport = FakeTransport(responses=[response(200, dict(ok_body(), **{key: value}))])
+    with pytest.raises(ju.UploadIdentityError):
+        upload(handoff, transport)
+    with pytest.raises(ju.UploadBlockedError):
+        upload(handoff, transport)
+    assert len(transport.multipart_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"code":200,',
+        b"{}",
+        b"null",
+        b'{"code":200,"success":true}',
+        b'{"code":200,"success":true,"data":123}',
+        b'{"code":200,"success":true,"data":""}',
+        b'{"code":200,"success":false}',
+        b'{"code":500,"success":true}',
+        b'{"code":200,"code":200,"success":true,"data":"key"}',
+    ],
+)
+def test_unusable_post_send_outcomes_cannot_trigger_second_upload(handoff, body):
+    transport = FakeTransport(responses=[response(200, content=body)])
+    with pytest.raises(ju.UploadUncertainError):
+        upload(handoff, transport)
+    with pytest.raises(ju.UploadBlockedError):
+        upload(handoff, transport)
+    assert len(transport.multipart_calls) == 1
+
+
+def test_declared_live_preview_is_gated_before_request_or_result(handoff):
+    receipt = upload(handoff, FakeTransport(responses=[response(200, ok_body())]))
+    transport = FakeTransport(live=True)
+    before = handoff["ledger"].path.read_bytes()
+    with pytest.raises(ju.UploadGateError, match="protocol"):
+        ju.fetch_preview(
+            receipt,
+            ledger=handoff["ledger"],
+            transport=transport,
+            credentials=fake_credentials(),
+            requested_at="2026-09-11T00:00:00Z",
+        )
+    assert not transport.json_calls
+    assert handoff["ledger"].path.read_bytes() == before
+
+
+@pytest.mark.parametrize("data", [None, "", "  "])
+def test_preview_without_payload_has_no_result(handoff, data):
+    transport = FakeTransport(
+        responses=[response(200, ok_body()), response(200, dict(ok_body(), data=data))]
+    )
+    receipt = upload(handoff, transport)
+    before = handoff["ledger"].path.read_bytes()
+    with pytest.raises(ju.UploadRejectedError):
+        ju.fetch_preview(
+            receipt,
+            ledger=handoff["ledger"],
+            transport=transport,
+            credentials=fake_credentials(),
+            requested_at="2026-09-11T00:00:00Z",
+        )
+    assert handoff["ledger"].path.read_bytes() == before
+
+
+def test_relabeling_requests_transport_does_not_bypass_gate(handoff):
+    transport = ju.RequestsUploadTransport()
+    transport.identity = ju.TransportIdentity("not-a-verification", False)
+    with pytest.raises(ju.UploadGateError, match="protocol"):
+        upload(handoff, transport)
+    assert not handoff["ledger"].events()
+
+
+@pytest.mark.parametrize("status", [200, 400, 500])
+def test_contradictory_success_status_is_uncertain(handoff, status):
+    transport = FakeTransport(responses=[response(status, {"code": 403, "success": True})])
+    with pytest.raises(ju.UploadUncertainError):
+        upload(handoff, transport)
+    with pytest.raises(ju.UploadBlockedError):
+        upload(handoff, transport)
+    assert len(transport.multipart_calls) == 1

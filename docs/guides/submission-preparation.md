@@ -352,50 +352,27 @@ factory-matching/upload/order tracking is left to later slices (#5145,
 
 ## Gerber upload transport and durable upload state (#5145)
 
-`kicad_tools.manufacturers.jlc_upload` implements the third slice of #5056:
-the network transport that hands an already-prepared, already-reviewed Gerber
-bundle to JLCPCB's official API, plus the durable record of what was attempted
-and what came back. There is **no order, payment, quote, fabrication-parameter,
-BOM/CPL, or PCBA-submission operation anywhere in it** — where JLCPCB has no
-first-party-verified assembly API, the workflow falls back to the explicit
-manual website hand-off spelled out in `jlc_upload.PCBA_WEBSITE_HANDOFF`
-rather than pretending to automate it.
+`kicad_tools.manufacturers.jlc_upload` provides an offline protocol model and
+durable upload ledger for an already-prepared, already-reviewed Gerber bundle.
+**Live upload and preview are disabled** until the complete first-party wire
+contract is verified. This is partial progress on #5145, not completion of its
+live integration. It provides no order, payment, quote, fabrication-parameter,
+BOM/CPL or PCBA-submission operation; assembly remains an explicit manual
+website handoff through `jlc_upload.PCBA_WEBSITE_HANDOFF`.
 
-```python
-from kicad_tools.manufacturers.jlc_upload import (
-    RequestsUploadTransport,
-    UploadBlockedError,
-    UploadLedger,
-    UploadUncertainError,
-    fetch_preview,
-    pending_reconciliations,
-    reconcile_upload,
-    upload_gerber,
-)
-from kicad_tools.parts import JLCCredentials
+Call `upload_gerber` and `fetch_preview` only with an injected offline transport
+whose `TransportIdentity.live` is exactly `False`. The ledger and reconciliation
+APIs remain usable with mock protocol responses. A transport declaring live
+operation is rejected with `UploadGateError`, even if a matching receipt exists.
+Direct `RequestsUploadTransport` calls are also blocked, including with an
+injected session. No session is created and no live request is sent. There is
+no verification boolean or environment override to bypass the missing contract.
 
-ledger = UploadLedger.open(Path("uploads/board-run-1.jsonl"))  # outside the handoff
-credentials = JLCCredentials.from_env()  # explicit; this module never reads env itself
-assert credentials is not None
-
-with RequestsUploadTransport() as transport:  # or any injected transport
-    try:
-        receipt = upload_gerber(
-            plan,
-            record,  # the #5143 review record
-            ledger=ledger,
-            transport=transport,
-            credentials=credentials,
-            requested_at="2026-01-02T00:00:00Z",  # caller clock, never invented here
-            source_root=Path("release/source"),  # optional: re-check source bytes
-        )
-    except UploadBlockedError:
-        ...  # an earlier uncertain attempt must be reconciled first
-    except UploadUncertainError:
-        ...  # this attempt's outcome is unknown; it is now recorded as such
-
-print(receipt.file_key, receipt.is_factory_receipt, receipt.states["upload"])
-```
+`prepare_multipart_request(url, headers=..., fields=..., files=...)` uses
+requests' multipart encoder to inspect the provisional wire format without
+creating a session or sending anything. Its output is not proof that JLCPCB
+accepts the request. Offline tests use dummy credentials and injected responses;
+no real factory receipt is created by this workflow.
 
 ### The pre-network gate
 
@@ -417,26 +394,32 @@ A failure at any of those steps raises `UploadGateError` and **nothing is
 sent**. The upload filename is the plan's own bound `artifacts["gerber"]
 ["output_name"]`; nothing is guessed or globbed.
 
-### Wire format (carried from #5056's observations, not first-party verified)
+### Protocol evidence and remaining gate
 
-`POST /overseas/openapi/pcb/uploadGerber`, multipart fields `meta` (the exact
-string `{}` for this request class) and `file`. The **metadata JSON string** is
-signed — not the encoded multipart body — using the same
-`METHOD\nPATH\nTIMESTAMP\nNONCE\nBODY\n` construction and `Authorization`
-assembly as `kicad_tools.parts.jlcpcb_api`. `Content-MD5` carries the
-lowercase hex MD5 of the raw file bytes (a transport checksum the endpoint
-requires; integrity itself is established by the SHA-256 binding). No
-`Content-Type` is set for the upload request, so the transport's HTTP library
-generates the multipart content type and its own boundary — nothing here
-hand-rolls one.
+First-party documentation retrieved on 2026-09-11 confirms:
 
-These details come from the parent issue's **user-reported SDK observations**
-and have not been exercised against a live endpoint here; the public API docs
-fetched 2026-09-11 "only returned shell". Whether the same `open.jlcpcb.com`
-application credentials are valid for both the component-search surface and
-this PCB surface has not been traced — so this module never reads credentials
-from the environment and never builds a client: the caller passes an explicit
-`JLCCredentials` and an explicit transport, or nothing happens.
+- [Basic rules](https://api.jlcpcb.com/docs/start): multipart uploads.
+- [Request signatures](https://api.jlcpcb.com/docs/api-request-signature): sign
+  metadata JSON for uploads, with five newline-terminated fields and Base64
+  HMAC-SHA256.
+- [API keys](https://api.jlcpcb.com/docs/configure-api-key) and
+  [applications](https://api.jlcpcb.com/docs/create-an-application): keys belong
+  to applications.
+- [API list](https://api.jlcpcb.com/docs/api-list): Gerber upload returns a file
+  ID and preview takes that ID and a language.
+
+The public pages were read through their documentation CMS reader; these were
+published-document retrievals, not operational factory requests. They resolved
+the earlier shell-only access limitation but did not establish exact endpoint
+paths, multipart part names, metadata fields or hexadecimal MD5 encoding.
+
+The offline fixture still models `POST /overseas/openapi/pcb/uploadGerber`,
+`meta` containing `{}`, a `file` part, lowercase-hex `Content-MD5`, and preview
+at `/overseas/openapi/pcb/audit/get`. Those details remain the parent issue's
+**user-reported SDK observations**, not verified endpoint requirements. The
+HTTP library generates the multipart boundary. Live enablement requires the
+missing authoritative contract and a separately reviewed implementation;
+a caller assertion cannot supply that evidence.
 
 ### Durable state machine, not a retry flag
 
@@ -459,7 +442,7 @@ intent --success-------------------> succeeded
 | `not-attempted` | No intent exists for this exact binding. |
 | `succeeded` | A file key is bound to these exact bytes, app id and endpoint. |
 | `failed` | A definite failure (business error, or a request the transport proved was never sent). A fresh attempt is allowed. |
-| `uncertain` | The request may or may not have been received: a timeout, a dropped connection, an unclassified transport fault, or an intent whose outcome was never written at all. |
+| `uncertain` | The request may or may not have been received: a timeout, a dropped connection, an unclassified transport fault, malformed/contradictory response, unusable success receipt, unresolved identity, or an intent whose outcome was never written at all. |
 
 An attempt whose intent was persisted but whose outcome never was folds to
 `uncertain` **by construction** — there is no boolean "retry me" flag
@@ -502,6 +485,9 @@ one of:
 | `mock-protocol-only` | `False` | `mock-protocol-only` |
 | `human-reconciliation` | `False` | `reconciled` |
 
+Live evidence values above remain readable for existing ledgers; current calls
+cannot create live evidence while the protocol gate is closed.
+
 The injected transport must declare a `TransportIdentity(name, live)`. A
 success produced by a transport that did not declare `live=True` is recorded
 and labeled `mock-protocol-only` — **a mocked protocol success is never
@@ -510,8 +496,14 @@ recorded as a human attestation, never as a protocol receipt.
 
 ### Failure handling
 
-An HTTP 200 carrying a business-level error (`code != 200` or a falsy
-`success`) is a failure, not a success. Failures retain only a fixed
+Success requires a JSON integer `code` of 200 and the exact boolean
+`success: true`, plus a usable receipt and matching identities. An explicit
+rejection requires an integer non-200 code with `success: false`. Strings,
+numeric booleans, missing fields, contradictory outcomes and truncated replies
+cannot establish a receipt. After an upload send, such outcomes and missing
+file keys are recorded as `uncertain`, blocking another send until explicit
+reconciliation. Valid business rejections remain `failed` and permit retry.
+Failures retain only a fixed
 classification word (`auth-failed`, `ip-not-whitelisted`, `permission-denied`,
 `quota-exceeded`, `incomplete-response`, `identity-mismatch`,
 `transport-unsent`, `transport-uncertain`, `request-failed`), a whitelisted
@@ -521,8 +513,11 @@ touched — or that contains markup/raw-payload characters — is withheld
 entirely rather than surfaced or persisted. The raw response body is never
 logged, raised, or written to the ledger.
 
-A response that echoes a *different* app id, file MD5, or file SHA-256 fails
-closed as `UploadIdentityError` and is recorded as a failure, even on HTTP 200.
+A present app ID, file MD5 or SHA-256 must be a nonblank string matching the
+request binding; missing optional echo fields remain allowed. Malformed or
+mismatched echoes raise `UploadIdentityError`, a subclass of
+`UploadUncertainError`, and upload attempts are recorded as `uncertain`.
+Preview errors never create a preview result or change the upload receipt.
 
 ### Preview retrieval is a separate call
 

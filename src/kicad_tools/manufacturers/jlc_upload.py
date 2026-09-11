@@ -1,10 +1,10 @@
 """Resumable exact-byte Gerber upload intents and hash-bound receipts (#5145).
 
-Third slice of #5056 (#5142 -> #5143 -> #5145 -> #5146): the network transport
-for handing an **already prepared and already human-reviewed** Gerber bundle to
-JLCPCB's official API, plus the durable record of what was attempted and what
-came back. Clean-room Python; no copied SDK code and no runtime Java/Windows
-dependency.
+Offline implementation toward #5056's third slice (#5142 -> #5143 -> #5145
+-> #5146): durable offline protocol records for an **already prepared and
+already human-reviewed** Gerber bundle. Live calls
+remain disabled pending the complete first-party endpoint contract.
+Clean-room Python; no copied SDK code or runtime Java/Windows dependency.
 
 What this module never does
 ---------------------------
@@ -27,33 +27,34 @@ What this module never does
   declared ``live=True``, and a human reconciliation is recorded as a human
   attestation (``human-reconciliation``), never as a protocol receipt.
 
-Protocol provenance -- NOT first-party verified
------------------------------------------------
-The upload wire format implemented here is carried from #5056's
-**user-reported SDK observations**, which that issue explicitly flags as not
-independently verified against a live endpoint (the public docs fetched
-2026-09-11 "only returned shell"):
+Protocol provenance -- partially verified, live calls disabled
+--------------------------------------------------------------
+Public first-party documentation retrieved 2026-09-11 confirms multipart
+uploads, signing the metadata JSON, five newline-terminated signature fields,
+Base64 HMAC-SHA256, and application-scoped API keys. The API list describes
+Gerber upload returning a file ID and preview accepting that ID and language:
 
-* ``POST /overseas/openapi/pcb/uploadGerber``, multipart fields ``meta``
-  (the empty JSON object ``{}`` for this request class) and ``file``.
-* The **metadata JSON string** is signed -- not the encoded multipart body.
-* ``Content-MD5`` is the lowercase hex MD5 of the raw file bytes.
-* The HTTP library generates the multipart boundary; nothing here hand-rolls
-  one (this module never emits a ``Content-Type`` for the upload request).
-* Response ``data`` is a string file key, consumed later by the separate
-  ``/overseas/openapi/pcb/audit/get`` preview call.
+* https://api.jlcpcb.com/docs/start
+* https://api.jlcpcb.com/docs/api-request-signature
+* https://api.jlcpcb.com/docs/configure-api-key
+* https://api.jlcpcb.com/docs/create-an-application
+* https://api.jlcpcb.com/docs/api-list
 
-The signing *scheme* is deliberately shared with
-:mod:`kicad_tools.parts.jlcpcb_api` (same ``METHOD\\nPATH\\nTIMESTAMP\\nNONCE\\n
-BODY\\n`` string-to-sign, same ``Authorization`` header assembly), but the
-**signed body differs**: here it is the metadata JSON, not a request body that
-is actually transmitted as-is. Whether the same ``open.jlcpcb.com`` application
-credentials are valid for both the component-search surface and this PCB
-surface has **not** been traced -- so this module never reads credentials from
-the environment and never constructs a client: the caller passes an explicit
-:class:`~kicad_tools.parts.jlcpcb_api.JLCCredentials` and an explicit
-transport, or nothing happens at all. Do not upgrade any of the above to
-"confirmed" without a first-party citation or a real live call.
+The exact upload/preview paths, multipart part names, metadata schema and
+hexadecimal MD5 encoding remain unconfirmed. Constants below preserve #5056's
+user-reported SDK observations for OFFLINE fixtures only. Declared-live
+upload/preview calls and direct RequestsUploadTransport sends raise
+UploadGateError before session creation or request/ledger writes. There is no
+caller flag that substitutes for first-party verification. Protocol
+confirmation and live enablement remain outstanding under #5145.
+
+The provisional upload uses POST /overseas/openapi/pcb/uploadGerber, fields
+meta (the JSON string {}) and file, and lowercase-hex Content-MD5 of raw bytes.
+The provisional preview path is /overseas/openapi/pcb/audit/get. These details
+must not be described as confirmed. prepare_multipart_request exercises the
+library's encoder without opening a session or sending a request. Injected
+non-live transports retain the durable mock protocol workflow. No credentials
+are read from the environment by this module.
 
 The durable upload state machine
 --------------------------------
@@ -94,7 +95,7 @@ import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NoReturn, Protocol
 
 from ..export.submission_plan import (
     SubmissionPlan,
@@ -151,6 +152,7 @@ __all__ = [
     "fetch_preview",
     "find_receipt",
     "pending_reconciliations",
+    "prepare_multipart_request",
     "reconcile_upload",
     "upload_gerber",
     "upload_state",
@@ -288,8 +290,13 @@ class UploadRejectedError(UploadError):
         self.trace_id = trace_id
 
 
-class UploadIdentityError(UploadRejectedError):
-    """A response echoed an app or file identity that is not ours: fail closed."""
+class UploadIdentityError(UploadUncertainError):
+    """Response identity is unresolved; an upload needs reconciliation."""
+
+    def __init__(self, message: str, *, classification: str, reason: str) -> None:
+        super().__init__(message)
+        self.classification = classification
+        self.reason = reason
 
 
 class LedgerError(UploadError):
@@ -364,13 +371,47 @@ class UploadTransport(Protocol):
     ) -> TransportResponse: ...
 
 
-class RequestsUploadTransport:
-    """A live :mod:`requests`-backed transport.
+def _require_offline_transport(transport: UploadTransport) -> TransportIdentity:
+    identity = getattr(transport, "identity", None)
+    if not isinstance(identity, TransportIdentity) or type(identity.live) is not bool:
+        raise UploadGateError("Transport must declare an explicit boolean TransportIdentity")
+    if identity.live or isinstance(transport, RequestsUploadTransport):
+        _unverified_protocol()
+    return identity
 
-    ``requests`` is an optional dependency and is imported lazily, so this
-    module (and its tests) load without it. The multipart body is built by
-    ``requests`` itself from the discrete ``data``/``files`` mappings; nothing
-    here constructs a boundary or a body blob.
+
+def _unverified_protocol() -> NoReturn:
+    # No caller flag can stand in for the missing first-party wire contract.
+    raise UploadGateError(
+        "Live upload/preview protocol is not fully first-party verified; "
+        "only offline injected transports are supported"
+    )
+
+
+def prepare_multipart_request(
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    fields: Mapping[str, str],
+    files: Mapping[str, tuple[str, bytes, str]],
+) -> Any:
+    """Prepare the provisional wire format offline; never create/send a session.
+
+    requests supplies its multipart encoder and boundary. This is protocol
+    fixture support, not evidence that the endpoint accepts the request.
+    """
+    import requests
+
+    return requests.Request(
+        "POST", url, headers=dict(headers), data=dict(fields), files=dict(files)
+    ).prepare()
+
+
+class RequestsUploadTransport:
+    """Reserved live transport, disabled until its protocol is verified.
+
+    No session is created and no request is sent, including with an injected
+    session. Use prepare_multipart_request for offline wire-format inspection.
     """
 
     identity = TransportIdentity("requests-live", True)
@@ -380,47 +421,8 @@ class RequestsUploadTransport:
         self._closed = False
         self.timeout = timeout
 
-    def _get_session(self) -> Any:
-        if self._closed:
-            # Never silently resurrect a live session after close() -- that
-            # would turn a caller-injected session into a real network call.
-            raise TransportError("transport is closed", request_sent=False)
-        if self._session is None:
-            import requests
-
-            self._session = requests.Session()
-        return self._session
-
-    @staticmethod
-    def _request_exception() -> type[BaseException]:
-        try:
-            import requests
-
-            return requests.RequestException
-        except ImportError:
-            return Exception
-
-    @staticmethod
-    def _classify(exc: BaseException) -> bool | None:
-        """Fail-closed: only a proven never-sent request reports ``False``."""
-        try:
-            import requests
-        except ImportError:
-            return None
-        if isinstance(exc, requests.exceptions.ConnectTimeout):
-            return False
-        if isinstance(exc, requests.exceptions.InvalidURL | requests.exceptions.MissingSchema):
-            return False
-        return None
-
     def _post(self, url: str, **kwargs: Any) -> TransportResponse:
-        try:
-            response = self._get_session().post(url, timeout=self.timeout, **kwargs)
-        except self._request_exception() as exc:
-            raise TransportError(str(exc), request_sent=self._classify(exc)) from None
-        return TransportResponse(
-            int(response.status_code), dict(response.headers), bytes(response.content)
-        )
+        _unverified_protocol()
 
     def post_multipart(
         self,
@@ -997,6 +999,24 @@ def _envelope(response: TransportResponse) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _typed_envelope(envelope: dict[str, Any] | None) -> bool:
+    return (
+        envelope is not None
+        and type(envelope.get("code")) is int
+        and type(envelope.get("success")) is bool
+    )
+
+
+def _successful_response(response: TransportResponse, envelope: dict[str, Any] | None) -> bool:
+    return (
+        _typed_envelope(envelope)
+        and 200 <= response.status_code < 300
+        and envelope is not None
+        and envelope["code"] == 200
+        and envelope["success"] is True
+    )
+
+
 def _whitelisted_reason(sanitized: str) -> str:
     """Keep the server's own reason only when it passes an explicit whitelist.
 
@@ -1029,6 +1049,8 @@ def _business_failure(
     message = envelope.get("message") if envelope is not None else None
     sanitized = _safe_error_reason(message, redactions)
     code = envelope.get("code") if envelope is not None else None
+    if type(code) is not int:
+        code = None
     error = _classify_business_error(code, sanitized, http_status=status)
     return _classification(error), _whitelisted_reason(sanitized), error.code, _trace_id(response)
 
@@ -1037,30 +1059,25 @@ def _check_response_identity(
     envelope: Mapping[str, Any], *, app_identity: str, file_md5: str, file_sha256: str
 ) -> None:
     """Fail closed when a response echoes someone else's app or file identity."""
-    for key in _APP_ECHO_KEYS:
-        value = envelope.get(key)
-        if isinstance(value, str) and value.strip() and value.strip() != app_identity:
-            raise UploadIdentityError(
-                "JLCPCB upload response echoed a different app identity; failing closed.",
-                classification="identity-mismatch",
-                reason="response app identity does not match the credential app id",
-            )
-    for key in _MD5_ECHO_KEYS:
-        value = envelope.get(key)
-        if isinstance(value, str) and value.strip() and value.strip().lower() != file_md5:
-            raise UploadIdentityError(
-                "JLCPCB upload response echoed a different file MD5; failing closed.",
-                classification="identity-mismatch",
-                reason="response file md5 does not match the uploaded bytes",
-            )
-    for key in _SHA_ECHO_KEYS:
-        value = envelope.get(key)
-        if isinstance(value, str) and value.strip() and value.strip().lower() != file_sha256:
-            raise UploadIdentityError(
-                "JLCPCB upload response echoed a different file SHA256; failing closed.",
-                classification="identity-mismatch",
-                reason="response file sha256 does not match the uploaded bytes",
-            )
+    for keys, expected, digest in (
+        (_APP_ECHO_KEYS, app_identity, False),
+        (_MD5_ECHO_KEYS, file_md5, True),
+        (_SHA_ECHO_KEYS, file_sha256, True),
+    ):
+        for key in keys:
+            if key not in envelope:
+                continue
+            value = envelope[key]
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or (value.lower() if digest else value) != expected
+            ):
+                raise UploadIdentityError(
+                    "JLCPCB response identity is malformed or mismatched; failing closed.",
+                    classification="identity-mismatch",
+                    reason="response identity does not match the request binding",
+                )
 
 
 # --------------------------------------------------------------------------
@@ -1160,15 +1177,14 @@ def upload_gerber(
         UploadGateError: a precondition failed; nothing was sent.
         UploadBlockedError: an unresolved uncertain attempt blocks retry.
         UploadUncertainError: the outcome is unknown and now needs reconciling.
-        UploadRejectedError / UploadIdentityError: a definite failure.
+        UploadRejectedError: a definite failure.
+        UploadIdentityError: unresolved response identity, recorded as uncertain.
     """
     if not isinstance(requested_at, str) or not requested_at.strip():
         raise UploadGateError("Explicit request timestamp required")
     if not isinstance(base_url, str) or not base_url.strip():
         raise UploadGateError("Explicit base URL required")
-    identity = getattr(transport, "identity", None)
-    if not isinstance(identity, TransportIdentity):
-        raise UploadGateError("Transport must declare an explicit TransportIdentity")
+    identity = _require_offline_transport(transport)
     if ledger.path.is_relative_to(plan.directory):
         raise UploadGateError("Upload ledger must live outside the published handoff")
 
@@ -1196,7 +1212,7 @@ def upload_gerber(
     file_sha256 = _digest(content)
     if file_sha256 != bound["sha256"] or len(content) != bound["size"]:
         raise UploadGateError("Published Gerber bytes differ from the plan's bound hash")
-    # MD5 here is a transport checksum the endpoint requires, never a security
+    # MD5 here is a provisional protocol checksum, never a security
     # property -- integrity is established by the SHA-256 binding above.
     file_md5 = hashlib.md5(content, usedforsecurity=False).hexdigest()
 
@@ -1297,12 +1313,31 @@ def upload_gerber(
         envelope = _envelope(response)
         status = response.status_code
         trace_id = _trace_id(response)
-        ok = (
-            envelope is not None
-            and 200 <= status < 300
-            and envelope.get("code") == 200
-            and bool(envelope.get("success"))
+        try:
+            if envelope is not None:
+                _check_response_identity(
+                    envelope, app_identity=app_identity, file_md5=file_md5, file_sha256=file_sha256
+                )
+        except UploadIdentityError as exc:
+            _record_uncertain(ledger, attempt_id, exc.classification, exc.reason)
+            raise
+        ok = _successful_response(response, envelope)
+        explicit_rejection = (
+            _typed_envelope(envelope)
+            and envelope is not None
+            and envelope["success"] is False
+            and envelope["code"] != 200
         )
+        if (
+            not ok
+            and not explicit_rejection
+            and not (400 <= status < 500 and status != 408 and envelope is None)
+        ):
+            reason = "response did not establish a successful receipt or explicit rejection"
+            _record_uncertain(ledger, attempt_id, "incomplete-response", reason)
+            raise UploadUncertainError(
+                "Upload outcome is unknown; automatic retry requires reconciliation"
+            )
         if not ok:
             classification, reason, code, trace_id = _business_failure(
                 response, envelope, redactions
@@ -1318,33 +1353,13 @@ def upload_gerber(
                 trace_id=trace_id,
             )
 
-        assert envelope is not None  # ``ok`` above already required it
-        try:
-            _check_response_identity(
-                envelope,
-                app_identity=app_identity,
-                file_md5=file_md5,
-                file_sha256=file_sha256,
-            )
-        except UploadIdentityError as exc:
-            _record_failure(
-                ledger, attempt_id, exc.classification, exc.reason, status, None, trace_id
-            )
-            raise
-
+        assert envelope is not None
         key = envelope.get("data")
         if not isinstance(key, str) or not _FILE_KEY.fullmatch(key):
             reason = "response carried no usable file key"
-            _record_failure(
-                ledger, attempt_id, "incomplete-response", reason, status, None, trace_id
-            )
-            raise UploadRejectedError(
-                f"JLCPCB upload returned no usable file key (HTTP {status},"
-                f" {TRACE_HEADER}={trace_id}).",
-                classification="incomplete-response",
-                reason=reason,
-                http_status=status,
-                trace_id=trace_id,
+            _record_uncertain(ledger, attempt_id, "incomplete-response", reason)
+            raise UploadUncertainError(
+                "Upload response carried no usable file key; automatic retry requires reconciliation"
             )
 
         ledger._append(
@@ -1430,9 +1445,7 @@ def fetch_preview(
     """
     if not isinstance(requested_at, str) or not requested_at.strip():
         raise UploadGateError("Explicit request timestamp required")
-    identity = getattr(transport, "identity", None)
-    if not isinstance(identity, TransportIdentity):
-        raise UploadGateError("Transport must declare an explicit TransportIdentity")
+    identity = _require_offline_transport(transport)
     if language is not None and (type(language) is not int or language < 0):
         raise UploadGateError("language must be a non-negative integer when supplied")
     if credentials.app_id != receipt.app_identity:
@@ -1486,12 +1499,7 @@ def fetch_preview(
 
     envelope = _envelope(response)
     status = response.status_code
-    ok = (
-        envelope is not None
-        and 200 <= status < 300
-        and envelope.get("code") == 200
-        and bool(envelope.get("success"))
-    )
+    ok = _successful_response(response, envelope)
     if not ok:
         classification, reason, code, trace_id = _business_failure(response, envelope, redactions)
         raise UploadRejectedError(
@@ -1512,6 +1520,13 @@ def fetch_preview(
         file_sha256=receipt.file_sha256,
     )
     data = envelope.get("data")
+    if data is None or (isinstance(data, str) and not data.strip()):
+        raise UploadRejectedError(
+            "JLCPCB preview response carried no result",
+            classification="incomplete-response",
+            reason="preview result is missing",
+            http_status=status,
+        )
     try:
         payload_bytes = _json(data)
     except (TypeError, ValueError) as exc:
