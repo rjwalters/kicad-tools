@@ -75,8 +75,8 @@ def _t_network_pcb(*, trunk_width: float = 3.0, sense_width: float = 0.2):
 
     The junction sits at an explicit vertex (the trunk is routed as two
     segments meeting there), matching how a real T-tap is routed -- a
-    single continuous trunk segment with a spur touching its *interior*
-    would not form a graph node for the tap.
+    single continuous trunk segment also connects an exact same-layer
+    spur endpoint touching its interior.
     """
     from kicad_tools.schema.pcb import PCB
 
@@ -532,3 +532,234 @@ class TestReinforcementEligibleSegmentIds:
     def test_empty_specs_yields_empty_set(self) -> None:
         pcb = _t_network_pcb()
         assert reinforcement_eligible_segment_ids(pcb, []) == set()
+
+
+class TestPhysicalLayerGraph:
+    @pytest.mark.parametrize("bridge", ["missing", "wrong-net", "blind", "malformed", "valid"])
+    def test_cross_layer_t_requires_real_bridge(self, bridge):
+        pcb = _t_network_pcb()
+        pcb.segments[1].layer = "B.Cu"
+        if bridge != "missing":
+            via = pcb.add_via(60, 50, net="OTHER" if bridge == "wrong-net" else "NET1")
+            if bridge == "blind":
+                via.layers = ["F.Cu", "In1.Cu"]
+            if bridge == "malformed":
+                via.layers = ["F.Cu", "garbage", "B.Cu"]
+        resolution = resolve_current_path(pcb, _trunk_spec())
+        assert resolution.status == ("resolved" if bridge == "valid" else "unresolved")
+        if bridge == "valid":
+            assert {id(s) for s in resolution.segments} == {id(s) for s in pcb.segments[:2]}
+            assert resolution.length_mm == pytest.approx(100)
+        else:
+            assert not reinforcement_eligible_segment_ids(pcb, [_trunk_spec()])
+
+    @staticmethod
+    def _interior_pcb(*, split=False, reverse=False, receiving_layer="B.Cu"):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(layers=4)
+        _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+        pcb.add_trace((20, 50), (60, 50), width=3, layer="F.Cu", net="NET1")
+        pieces = [((40, 50), (60, 50)), ((60, 50), (120, 50))] if split else [((40, 50), (120, 50))]
+        for start, end in pieces:
+            pcb.add_trace(start, end, width=3, layer=receiving_layer, net="NET1")
+        pcb.add_via(60, 50, net="NET1")
+        if reverse:
+            pcb._segments.reverse()
+            for seg in pcb.segments:
+                seg.start, seg.end = seg.end, seg.start
+        return pcb
+
+    @pytest.mark.parametrize("split", [False, True])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_interior_via_original_evidence(self, split, reverse):
+        pcb = self._interior_pcb(split=split, reverse=reverse)
+        original_ids = {id(seg) for seg in pcb.segments}
+        result = resolve_current_path(pcb, _trunk_spec())
+        assert result.ok
+        expected = [
+            s
+            for s in pcb.segments
+            if not (split and max(s.start[0], s.end[0]) == 60 and s.layer == "B.Cu")
+        ]
+        assert {id(s) for s in result.segments} == {id(s) for s in expected}
+        assert result.length_mm == pytest.approx(sum(_seg_len(s) for s in expected))
+        assert reinforcement_eligible_segment_ids(pcb, [_trunk_spec()]) == {id(s) for s in expected}
+        audit = audit_current_paths(pcb, [_trunk_spec()])
+        assert {id(s) for s in audit.uncovered.get("NET1", [])} == original_ids - {
+            id(s) for s in expected
+        }
+
+    @pytest.mark.parametrize(
+        "receiving_layer,span,expected",
+        [
+            ("In1.Cu", ["F.Cu", "B.Cu"], "resolved"),
+            ("In1.Cu", ["F.Cu", "In1.Cu"], "resolved"),
+            ("B.Cu", ["F.Cu", "In1.Cu"], "unresolved"),
+            ("In1.Cu", ["In2.Cu", "B.Cu"], "unresolved"),
+        ],
+    )
+    def test_interior_via_span(self, receiving_layer, span, expected):
+        pcb = self._interior_pcb(receiving_layer=receiving_layer)
+        pcb.vias[0].layers = span
+        assert resolve_current_path(pcb, _trunk_spec()).status == expected
+
+    def test_split_edges_count_as_distinct_cycle_edges(self):
+        pcb = self._interior_pcb()
+        # Three via contacts split the SAME B.Cu segment. Counting original
+        # segment IDs undercounts graph edges and misses this physical cycle.
+        pcb.add_trace((60, 50), (100, 50), width=3, layer="F.Cu", net="NET1")
+        pcb.add_via(80, 50, net="NET1")
+        pcb.add_via(100, 50, net="NET1")
+        assert resolve_current_path(pcb, _trunk_spec()).status == "ambiguous"
+        pcb._segments.reverse()
+        assert resolve_current_path(pcb, _trunk_spec()).status == "ambiguous"
+
+    def test_unused_vias_split_evidence_without_duplicate_accounting(self):
+        pcb = _t_network_pcb()
+        for x in (30, 40, 50):
+            pcb.add_via(x, 50, net="NET1")
+        result = resolve_current_path(pcb, _trunk_spec())
+        assert result.ok
+        assert len(result.segments) == 2
+        assert result.length_mm == pytest.approx(100)
+        assert audit_current_paths(pcb, [_trunk_spec(), _sense_spec()]).fully_covered
+
+    def test_interior_via_nearby_is_not_contact(self):
+        pcb = self._interior_pcb()
+        pcb.vias[0].position = (60, 50.01)
+        assert not resolve_current_path(pcb, _trunk_spec()).ok
+
+    @pytest.mark.parametrize(
+        "pad_type,layers,expected",
+        [
+            ("thru_hole", ["*.Cu"], "resolved"),
+            ("smd", ["F.Cu"], "unresolved"),
+            ("np_thru_hole", ["*.Cu"], "unresolved"),
+        ],
+    )
+    def test_actual_intermediate_pad_copper_bridges_layers(self, pad_type, layers, expected):
+        pcb = _t_network_pcb()
+        pcb.segments[1].layer = "B.Cu"
+        _add_pad_footprint(pcb, ref="TP1", x=60, y=50, net="NET1")
+        pad = pcb.get_footprint("TP1").pads[0]
+        pad.type, pad.layers = pad_type, layers
+        assert resolve_current_path(pcb, _trunk_spec()).status == expected
+
+    def test_distinct_pads_at_same_xy_do_not_make_self_path(self):
+        pcb = _t_network_pcb()
+        _add_pad_footprint(pcb, ref="BACK", x=20, y=50, net="NET1")
+        for ref, layer in (("J1", "F.Cu"), ("BACK", "B.Cu")):
+            pad = pcb.get_footprint(ref).pads[0]
+            pad.type, pad.layers = "smd", [layer]
+        pcb.add_trace((20, 50), (20, 40), width=1, layer="B.Cu", net="NET1")
+        spec = CurrentPathSpec(
+            name="opposite",
+            net_name="NET1",
+            source=PathEndpoint("J1", "1"),
+            sink=PathEndpoint("BACK", "1"),
+            continuous_a=1,
+        )
+        assert resolve_current_path(pcb, spec).status == "unresolved"
+
+    def test_pad_internal_star_does_not_manufacture_cycle(self):
+        pcb = _t_network_pcb()
+        # Both endpoints are within J1's copper. The pad already shorts
+        # these points, so this internal stub is not a physical return path.
+        pcb.add_trace((20, 50), (20.2, 50), width=1, layer="F.Cu", net="NET1")
+        pcb.add_trace((20.2, 50), (20.2, 40), width=1, layer="F.Cu", net="NET1")
+        result = resolve_current_path(pcb, _trunk_spec())
+        assert result.ok
+        assert len({id(s) for s in result.segments}) == len(result.segments)
+        # Rejoining outside the pad is a real parallel route and stays ambiguous.
+        pcb.add_trace((20.2, 40), (60, 50), width=1, layer="F.Cu", net="NET1")
+        assert resolve_current_path(pcb, _trunk_spec()).status == "ambiguous"
+
+    @pytest.mark.parametrize("shape", ["custom", "trapezoid"])
+    def test_unsupported_pad_shapes_fail_closed(self, shape):
+        pcb = _t_network_pcb()
+        pcb.get_footprint("J1").pads[0].shape = shape
+        assert resolve_current_path(pcb, _trunk_spec()).status == "unresolved"
+
+    def test_roundrect_clipped_corner_not_copper(self):
+        pcb = _t_network_pcb()
+        pad = pcb.get_footprint("J1").pads[0]
+        pad.shape, pad.size, pad.roundrect_rratio = "roundrect", (2, 2), 0.5
+        pcb.segments[0].start = (20.95, 50.95)
+        assert not resolve_current_path(pcb, _trunk_spec()).ok
+
+    def test_duplicate_physical_pad_number_is_not_guessed(self):
+        from copy import deepcopy
+
+        pcb = _t_network_pcb()
+        fp = pcb.get_footprint("J1")
+        fp.pads.append(deepcopy(fp.pads[0]))
+        assert resolve_current_path(pcb, _trunk_spec()).status == "unresolved"
+
+    def test_board09_via_array_stays_ambiguous_and_read_only(self):
+        from pathlib import Path
+
+        from kicad_tools.schema.pcb import PCB
+
+        board = (
+            Path(__file__).resolve().parents[1]
+            / "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb"
+        )
+        before = board.read_bytes()
+        pcb = PCB.load(board)
+        spec = CurrentPathSpec(
+            name="output",
+            net_name="+5V_OUT",
+            source=PathEndpoint("RSH1", "4"),
+            sink=PathEndpoint("J2", "1"),
+            continuous_a=3,
+        )
+        assert resolve_current_path(pcb, spec).status == "ambiguous"
+        assert board.read_bytes() == before
+
+    def test_transitive_pad_union_does_not_erase_external_return(self):
+        pcb = _t_network_pcb()
+        pcb.get_footprint("J1").pads[0].size = (1.6, 1.6)
+        for ref, x, y in (("TP1", 21, 51), ("TP2", 22, 50)):
+            _add_pad_footprint(pcb, ref=ref, x=x, y=y, net="NET1")
+            pcb.get_footprint(ref).pads[0].size = (1.6, 1.6)
+        for start, end in [
+            ((20, 50), (20.5, 50.5)),
+            ((20.5, 50.5), (21.5, 50.5)),
+            ((21.5, 50.5), (22, 50)),
+        ]:
+            pcb.add_trace(start, end, width=0.1, layer="F.Cu", net="NET1")
+        # The existing trunk crosses outside the joined pad copper at (21,50).
+        # Its endpoints collapse transitively but it must remain a self-loop.
+        assert resolve_current_path(pcb, _trunk_spec()).status == "ambiguous"
+
+    def test_disabled_copper_layer_is_not_bridged_by_wildcard_pad(self):
+        pcb = _t_network_pcb()
+        pcb.segments[0].layer = "In1.Cu"  # absent on this two-layer board
+        pcb.segments[1].layer = "In1.Cu"
+        assert resolve_current_path(pcb, _trunk_spec()).status == "unresolved"
+
+    @pytest.mark.parametrize("layer,expected", [("F.Cu", "ambiguous"), ("B.Cu", "resolved")])
+    def test_interior_crossing_cannot_hide_parallel_route(self, layer, expected):
+        pcb = _t_network_pcb()
+        # This return crosses the trunk interior at (40,50). The source
+        # through-hole pad connects either layer, but only F.Cu rejoins it.
+        pcb.add_trace((20, 50), (40, 40), width=1, layer=layer, net="NET1")
+        pcb.add_trace((40, 40), (40, 60), width=1, layer=layer, net="NET1")
+        assert resolve_current_path(pcb, _trunk_spec()).status == expected
+
+    @pytest.mark.parametrize("split_inside_pad", [False, True])
+    def test_pad_internal_piece_does_not_cover_external_spur(self, split_inside_pad):
+        pcb = _t_network_pcb()
+        pcb.add_trace((20, 50), (20, 40), width=0.1, layer="F.Cu", net="NET1")
+        spur = pcb.segments[-1]
+        if split_inside_pad:
+            pcb.add_via(20, 49.8, net="NET1")
+        result = resolve_current_path(pcb, _trunk_spec())
+        assert result.ok
+        assert result.length_mm == pytest.approx(100)
+        assert {id(s) for s in result.segments} == {id(s) for s in pcb.segments[:2]}
+        audit = audit_current_paths(pcb, [_trunk_spec(), _sense_spec()])
+        assert [id(s) for s in audit.uncovered["NET1"]] == [id(spur)]
+        assert id(spur) not in reinforcement_eligible_segment_ids(pcb, [_trunk_spec()])

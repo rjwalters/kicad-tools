@@ -13,6 +13,7 @@ This module provides:
 
 import contextlib
 import dataclasses
+import math
 import random
 import uuid
 from collections.abc import Iterator
@@ -470,6 +471,66 @@ class Pad:
     drill: float = 0.0  # Drill diameter for PTH pads (0 = use pad size)
     steiner_point: bool = False  # True for virtual Steiner tree branch points
     footprint_name: str = ""  # Library footprint name, e.g. "Package_QFP:TQFP-32_7x7mm_P0.8mm"
+    rotation: float = 0.0
+    """Residual board-space rotation in degrees (issue #4910).
+
+    ``width``/``height`` are already axis-swapped by the ``io.py`` parsers
+    for a pad rotated within 1 degree of 90/270 (so a "vertical" SMD pad's
+    long axis lines up with the Y grid axis as before this field existed).
+    ``rotation`` carries only what that swap does NOT already absorb -- the
+    angle a true board-space AABB still needs to account for. Concretely it
+    is ``total_rot - 90`` / ``total_rot - 270`` immediately after a swap
+    (a small residual, since the swap only fires near those angles),
+    ``total_rot - 180`` near a half-turn (no swap needed -- an AABB is
+    invariant under a half-turn) or ``total_rot`` unchanged otherwise
+    (covers every non-cardinal angle, e.g. 30 or 45 degrees, where the raw
+    width/height are exactly the pre-rotation local dimensions).  A
+    construction site that never applies the cardinal swap (e.g. the MCP /
+    placement pad-dict builders, which read ``pad.size`` straight off the
+    schema) simply passes the pad's full ABSOLUTE board angle -- that is
+    the ``no swap fired`` case and is equally correct.  The default ``0.0``
+    means "no
+    rotation info available" and is always safe: every AABB consumer must
+    fall back to the plain ``(width/2, height/2)`` box in that case, which
+    is the pre-#4910 behavior byte-for-byte.  See
+    :func:`pad_half_extents` for the one true consumer of this
+    convention -- callers computing a keep-out/AABB box from a ``Pad``
+    should use that helper rather than reading ``width``/``height``
+    directly, so a non-cardinal rotation is never silently dropped again.
+    """
+
+
+def pad_half_extents(pad: "Pad") -> tuple[float, float]:
+    """Board-space ``(half_width, half_height)`` AABB extent of ``pad``.
+
+    Issue #4910: ``pad.width``/``pad.height`` alone under-estimate the true
+    board-space bounding box for a pad rotated at a non-cardinal angle --
+    ``pad.rotation`` (see its docstring for the exact residual-angle
+    convention) supplies the correction via the same trigonometric AABB
+    formula :func:`kicad_tools.router.pairwise_clearance.build_attach_zones`
+    already uses for the post-route audit side::
+
+        half_w = |cos(rotation)| * width / 2 + |sin(rotation)| * height / 2
+        half_h = |sin(rotation)| * width / 2 + |cos(rotation)| * height / 2
+
+    (Projecting all four rectangle corners onto the board axes.  The angle's
+    SIGN is immaterial here -- ``|cos(-t)| == |cos(t)|`` -- which is why this
+    matches the audit side even though that one negates the angle for KiCad's
+    clockwise convention.)
+
+    ``rotation == 0.0`` (the default -- unknown/axis-aligned) short-circuits
+    to the plain ``(width / 2, height / 2)`` box with no trig call, so every
+    pre-#4910 caller that never threaded rotation through construction sees
+    byte-identical results.  Prefer this helper over reading ``pad.width`` /
+    ``pad.height`` directly wherever a keep-out / clearance AABB is built.
+    """
+    if pad.rotation == 0.0:
+        return pad.width / 2.0, pad.height / 2.0
+    theta = math.radians(pad.rotation)
+    cos_t, sin_t = abs(math.cos(theta)), abs(math.sin(theta))
+    half_w = cos_t * pad.width / 2.0 + sin_t * pad.height / 2.0
+    half_h = sin_t * pad.width / 2.0 + cos_t * pad.height / 2.0
+    return half_w, half_h
 
 
 @dataclass

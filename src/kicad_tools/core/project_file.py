@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from kicad_tools.core.atomic_write import atomic_write_text
+
 
 def load_project(path: str | Path) -> dict[str, Any]:
     """
@@ -47,7 +49,7 @@ def save_project(data: dict[str, Any], path: str | Path) -> None:
     """
     path = Path(path)
     text = json.dumps(data, indent=2)
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text, encoding="utf-8")
 
 
 def get_design_settings(data: dict[str, Any]) -> dict[str, Any]:

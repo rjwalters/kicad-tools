@@ -265,6 +265,11 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
             pin=pin,
             through_hole=pad_data.get("through_hole", False),
             drill=pad_data.get("drill", 0.0),
+            # Issue #4910: ``pads_data`` is produced by ``Autorouter``'s
+            # worker-config serializer, which carries the pad's residual
+            # board rotation; dropping it here would silently rebuild every
+            # rotated pad as axis-aligned in the worker process.
+            rotation=pad_data.get("rotation", 0.0),
         )
         router.pads[(ref, pin)] = pad
         router.grid.add_pad(pad)

@@ -535,3 +535,50 @@ def test_off_center_pad_trace_via_pour_bond(endpoint_y, track_layer, expected):
 '''
     board = board.rstrip()[:-1] + extra + ")"
     assert _status(board, "GND", strict=True) == expected
+
+
+@pytest.mark.parametrize(
+    "via_layers,pour_layer,trace_end,fill_start,expected",
+    [
+        ('"In1.Cu" "B.Cu"', "B.Cu", 2, 3, "incomplete"),
+        ('"F.Cu" "B.Cu"', "B.Cu", 2, 3, "complete"),
+        ('"F.Cu" "In2.Cu"', "In2.Cu", 2, 3, "complete"),
+        ('"F.Cu" "In1.Cu"', "In2.Cu", 2, 3, "incomplete"),
+        ('"F.Cu" "B.Cu"', "B.Cu", 1.5, 3, "incomplete"),
+        # The via itself touches the fill: its separate chain-bond path must
+        # not bypass the same physical span requirement.
+        ('"In1.Cu" "B.Cu"', "B.Cu", 2, 1.8, "incomplete"),
+        ('"F.Cu" "B.Cu"', "B.Cu", 2, 1.8, "complete"),
+        ('"F.Cu" "B.Cu"', "B.Cu", 1.5, 1.8, "incomplete"),
+    ],
+)
+def test_pour_chain_requires_actual_via_layer_span(
+    via_layers, pour_layer, trace_end, fill_start, expected
+):
+    """A front pad reaches a pour only through continuous, layer-valid copper."""
+    board = f'''(kicad_pcb (version 20240108) (generator test)
+      (general (thickness 1.6))
+      (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal)
+        (31 "B.Cu" signal)) (net 0 "") (net 1 "PWR")
+      (footprint "R" (layer "F.Cu") (at 0 0) (property "Reference" "R1")
+        (pad "1" smd rect (at 0 0) (size .6 .6) (layers "F.Cu") (net 1 "PWR")))
+      (footprint "R" (layer "{pour_layer}") (at 8 0) (property "Reference" "R2")
+        (pad "1" smd rect (at 0 0) (size .6 .6) (layers "{pour_layer}") (net 1 "PWR")))
+      (footprint "R" (layer "{pour_layer}") (at 9 0) (property "Reference" "R3")
+        (pad "1" smd rect (at 0 0) (size .6 .6) (layers "{pour_layer}") (net 1 "PWR")))
+      (segment (start 0 0) (end {trace_end} 0) (width .2) (layer "F.Cu") (net 1))
+      (segment (start 2 0) (end 4 0) (width .2) (layer "{pour_layer}") (net 1))
+      (via (at 2 0) (size .6) (drill .3) (layers {via_layers}) (net 1))
+      (zone (net 1) (net_name "PWR") (layer "{pour_layer}") (hatch edge .5)
+        (connect_pads (clearance .2)) (min_thickness .1) (fill yes)
+        (polygon (pts (xy {fill_start} -1) (xy 10 -1) (xy 10 1) (xy {fill_start} 1)))
+        (filled_polygon (layer "{pour_layer}")
+          (pts (xy {fill_start} -1) (xy 10 -1) (xy 10 1) (xy {fill_start} 1)))))'''
+    result = _analyze(board, strict=True)
+    net = result.get_net("PWR")
+    assert net.status == expected
+    # Two poured pads make that island the unambiguous main component.
+    assert net.total_pads == 3
+    assert result.total_unconnected_pads == (1 if expected == "incomplete" else 0)
+    if expected == "incomplete":
+        assert [(p.reference, p.pad_number) for p in net.unconnected_pads] == [("R1", "1")]
