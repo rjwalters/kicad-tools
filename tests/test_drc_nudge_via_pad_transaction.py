@@ -273,3 +273,25 @@ def test_residual_rotation_does_not_create_false_rectangular_contact():
     result = drc_verify_and_nudge(router, max_passes=1)
     assert (via.x, via.y) == (3.98, 5.0)
     assert result.remaining_violations == 0
+
+
+def test_rotated_pad_contact_disappears_after_via_leaves_actual_copper():
+    from types import SimpleNamespace
+
+    from kicad_tools.router.drc_nudge import _via_pad_contacts
+    from kicad_tools.router.primitives import Pad
+
+    pad = Pad(x=0, y=0, width=4, height=1, net=1, net_name="SIG", rotation=45)
+    via = Via(x=0, y=0, diameter=0.2, drill=0.1, layers=(Layer.F_CU, Layer.B_CU), net=1)
+    router = SimpleNamespace(
+        routes=[Route(net=1, net_name="SIG", vias=[via])],
+        existing_routes=[],
+        pads={"pad": pad},
+    )
+    contact = (min(id(pad), id(via)), max(id(pad), id(via)))
+    assert contact in _via_pad_contacts(via, router)
+    # The 45-degree pad's narrow-axis edge is only 0.5 mm from its
+    # centre. This displacement leaves a 0.389949 mm copper gap, even
+    # though it remains inside a rotated copy of the expanded AABB.
+    via.x = via.y = 0.7
+    assert contact not in _via_pad_contacts(via, router)

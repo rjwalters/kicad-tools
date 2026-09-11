@@ -15,7 +15,8 @@ if TYPE_CHECKING:
     from .primitives import Pad, Route
     from .rules import NetClassRouting
 
-from .primitives import Route, Segment
+from .pad_geometry import pad_segment_distance
+from .primitives import Route, Segment, pad_half_extents
 
 
 def _get_trace_width_for_net(
@@ -195,16 +196,7 @@ def _path_violates(
         for pad in foreign_pads:
             if not _pad_blocks_layer(pad, layer):
                 continue
-            dist = _segment_rect_distance(
-                px1,
-                py1,
-                px2,
-                py2,
-                pad.x - pad.width / 2.0,
-                pad.y - pad.height / 2.0,
-                pad.x + pad.width / 2.0,
-                pad.y + pad.height / 2.0,
-            )
+            dist = pad_segment_distance(pad, px1, py1, px2, py2)
             if dist < need_pad:
                 return True
         if obstacle_segments:
@@ -245,10 +237,10 @@ def _perimeter_wrap_candidates(
         Candidate polylines sorted by length (shortest first)
     """
     margin = clearance + width / 2.0 + 0.05
-    minx = min(p.x - p.width / 2.0 for p in component_pads) - margin
-    maxx = max(p.x + p.width / 2.0 for p in component_pads) + margin
-    miny = min(p.y - p.height / 2.0 for p in component_pads) - margin
-    maxy = max(p.y + p.height / 2.0 for p in component_pads) + margin
+    minx = min(p.x - pad_half_extents(p)[0] for p in component_pads) - margin
+    maxx = max(p.x + pad_half_extents(p)[0] for p in component_pads) + margin
+    miny = min(p.y - pad_half_extents(p)[1] for p in component_pads) - margin
+    maxy = max(p.y + pad_half_extents(p)[1] for p in component_pads) + margin
     w = maxx - minx
     h = maxy - miny
     perimeter = 2.0 * (w + h)
@@ -432,18 +424,18 @@ def create_intra_ic_routes(
                 # ALL foreign pads near the wrap region plus previously
                 # routed copper, not just the same package.
                 margin = clearance + trace_width / 2.0 + 0.1
-                wminx = min(p.x - p.width / 2.0 for p in component_pads) - margin
-                wmaxx = max(p.x + p.width / 2.0 for p in component_pads) + margin
-                wminy = min(p.y - p.height / 2.0 for p in component_pads) - margin
-                wmaxy = max(p.y + p.height / 2.0 for p in component_pads) + margin
+                wminx = min(p.x - pad_half_extents(p)[0] for p in component_pads) - margin
+                wmaxx = max(p.x + pad_half_extents(p)[0] for p in component_pads) + margin
+                wminy = min(p.y - pad_half_extents(p)[1] for p in component_pads) - margin
+                wmaxy = max(p.y + pad_half_extents(p)[1] for p in component_pads) + margin
                 nearby_foreign = [
                     p
                     for p in pad_lookup.values()
                     if p.net != net
-                    and p.x + p.width / 2.0 >= wminx - margin
-                    and p.x - p.width / 2.0 <= wmaxx + margin
-                    and p.y + p.height / 2.0 >= wminy - margin
-                    and p.y - p.height / 2.0 <= wmaxy + margin
+                    and p.x + pad_half_extents(p)[0] >= wminx - margin
+                    and p.x - pad_half_extents(p)[0] <= wmaxx + margin
+                    and p.y + pad_half_extents(p)[1] >= wminy - margin
+                    and p.y - pad_half_extents(p)[1] <= wmaxy + margin
                 ]
                 # Issue #3413: cap the acceptable wrap detour.  The wrap
                 # primitive was built for small packages (SOT-23 scale)

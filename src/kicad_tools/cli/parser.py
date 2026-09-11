@@ -1783,6 +1783,13 @@ def _add_sch_parser(subparsers) -> None:
     )
     add_format_flag(sch_disconnect)
 
+    sch_fix_wire_stubs = sch_subparsers.add_parser(
+        "fix-wire-stubs", help="Safely extend exact-grid wire stubs to pins"
+    )
+    sch_fix_wire_stubs.add_argument("schematic", help="Root .kicad_sch file")
+    sch_fix_wire_stubs.add_argument("--dry-run", "-n", action="store_true")
+    add_format_flag(sch_fix_wire_stubs)
+
     # sch reconnect-pin
     sch_reconnect_pin = sch_subparsers.add_parser(
         "reconnect-pin", help="Reconnect a pin from one net to another"
