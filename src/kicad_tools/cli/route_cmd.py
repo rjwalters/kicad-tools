@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
     from kicad_tools.router import Autorouter, LayerStack
+    from kicad_tools.router.current_paths import CurrentPathSpec
     from kicad_tools.router.layer_intent import LayerIntentViolation
     from kicad_tools.router.net_names import NetClassMapResolution
     from kicad_tools.router.pairwise_clearance import AttachZone, PairwiseViolation
@@ -2402,6 +2403,185 @@ def _write_net_class_map_sidecar(
             print(f"  Net-class-map sidecar: {sidecar_path}")
 
 
+def _write_current_paths_sidecar(
+    output_path: Path,
+    current_path_specs: "Sequence[CurrentPathSpec] | None",
+    quiet: bool = False,
+    input_path: Path | None = None,
+) -> None:
+    """Persist the declared current-path intent next to the routed PCB (#4980).
+
+    The third and final consumer surface of the branch-specific
+    current-path model (PR #5125 landed the model + ``kct pcb reinforce``;
+    PR #5184 landed ``kct check``).  ``kct route --current-paths <file>``
+    now re-emits the *exact* declarations the route step validated against
+    as ``<output_dir>/current_paths.json``, so a later bare ``kct check``
+    on the routed board auto-discovers the same intent
+    (:func:`~kicad_tools.router.current_paths.discover_current_paths_sidecar`)
+    instead of silently running with ``path_ampacity`` INACTIVE.
+
+    That re-emission is what makes the issue's "route-time intent and the
+    independent final-copper audit agree on the branch/path assignments"
+    criterion true at the CLI level: both surfaces read byte-identical
+    declarations, so any disagreement is a real copper difference rather
+    than a difference in what was declared.
+
+    Follows the ``net_class_map.json`` sidecar contract exactly
+    (:func:`_write_net_class_map_sidecar`): a blocked / read-only output
+    directory degrades to a non-fatal warning rather than failing the
+    route, and when the derived path would overwrite the user's authored
+    ``--current-paths`` INPUT file (board written into the same directory
+    the sidecar was read from -- Issue #4428's collision), the write is
+    diverted to a sibling ``current_paths.effective.json`` so the authored
+    input is left untouched.
+
+    Args:
+        output_path: Path to the routed PCB file.  The sidecar is written
+            to the same directory.
+        current_path_specs: The declared specs the route step loaded.
+            Empty/``None`` writes nothing -- an empty sidecar would read as
+            "declared, and nothing to check", which is exactly the silent
+            pass the issue forbids.
+        quiet: If True, suppress the confirmation line.
+        input_path: The resolved ``--current-paths`` INPUT path (or
+            ``None``).  Used only to detect -- and avoid -- a self-overwrite.
+    """
+    import json
+
+    from kicad_tools.router.current_paths import (
+        CURRENT_PATHS_SIDECAR_BASENAME,
+        dump_current_path_specs,
+    )
+
+    if not current_path_specs:
+        return
+
+    sidecar_path = output_path.parent / CURRENT_PATHS_SIDECAR_BASENAME
+
+    diverted = False
+    if input_path is not None and _sidecar_collides_with_input(input_path, sidecar_path):
+        sidecar_path = output_path.parent / "current_paths.effective.json"
+        diverted = True
+
+    try:
+        payload = dump_current_path_specs(list(current_path_specs))
+        sidecar_path.write_text(json.dumps(payload, indent=2))
+    except (OSError, TypeError, ValueError) as e:
+        if not quiet:
+            print(f"  Warning: could not write current-paths sidecar: {e}")
+        return
+    if not quiet:
+        if diverted:
+            print(f"  Current-paths sidecar: {sidecar_path} (input --current-paths left unchanged)")
+        else:
+            print(f"  Current-paths sidecar: {sidecar_path}")
+
+
+def _preload_current_paths(args, pcb_path: Path) -> int:
+    """Validate + load the ``--current-paths`` sidecar before any routing (#4980).
+
+    Stashes the result on ``args._loaded_current_paths`` (always set, even
+    when empty) so each of the four post-route DRC call sites reads one
+    already-validated value instead of re-parsing.  Mirrors the
+    ``--net-class-map`` preload's placement (before dispatching to any
+    ``route_with_*`` sub-flow, so the error paths short-circuit regardless
+    of which routing path the args select) and ``kct check
+    --current-paths``' load contract (PR #5184) exactly:
+
+    * ``--current-paths FILE`` is **strict** -- a missing file or malformed
+      JSON returns exit 1 before any routing work happens.
+    * An **auto-discovered** sidecar degrades to a stderr warning when it
+      is malformed: a board that merely sits next to someone else's broken
+      file must still route.
+    * ``--no-current-paths`` suppresses discovery entirely, and pairing it
+      with an explicit ``--current-paths`` is a usage error.
+
+    Note the asymmetry with ``kct check``: this probes next to the **input**
+    board (routing has not written the output yet), and the route step then
+    re-emits the loaded specs next to the **output** board via
+    :func:`_write_current_paths_sidecar` so the later check auto-discovers
+    identical intent.
+
+    Args:
+        args: The parsed route namespace (mutated: ``_loaded_current_paths``).
+        pcb_path: The resolved INPUT board path, used for sidecar probing.
+
+    Returns:
+        ``0`` on success, ``1`` on a usage/validation error (already
+        reported on stderr).
+    """
+    from kicad_tools.router.current_paths import (
+        discover_current_paths_sidecar,
+        load_current_path_specs,
+    )
+
+    args._loaded_current_paths = []
+    # The file the specs actually came from (explicit OR auto-discovered).
+    # Threaded to the sidecar writer so the derived ``current_paths.json``
+    # never rewrites the source file in place -- an auto-discovered sidecar
+    # in the board directory is just as much the user's authored file as an
+    # explicitly-named one.
+    args._current_paths_input_path = None
+
+    explicit = getattr(args, "current_paths", None)
+    suppressed = bool(getattr(args, "no_current_paths", False))
+
+    if suppressed and explicit is not None:
+        print(
+            "Error: --no-current-paths cannot be combined with "
+            f"--current-paths {explicit!r}: one disables sidecar "
+            "auto-discovery, the other names a sidecar to load. Pass exactly "
+            "one of them.",
+            file=sys.stderr,
+        )
+        return 1
+    if suppressed:
+        return 0
+
+    cp_path = Path(explicit).resolve() if explicit is not None else None
+    if cp_path is None:
+        cp_path = discover_current_paths_sidecar(pcb_path)
+        if cp_path is None:
+            # Nothing declared and nothing found: path_ampacity stays
+            # inactive, exactly as before this flag existed.  Say so once, at
+            # non-quiet verbosity, so an inactive check is never mistaken for
+            # a passing one -- but as ONE line, not ``kct check``'s full
+            # probed-candidate dump: routing is not the audit surface, and
+            # this fires on every route of every board that does not use the
+            # feature.  ``kct check --current-paths`` names the probed paths
+            # for the user who wants to know where to put the file.
+            if not getattr(args, "quiet", False):
+                print(
+                    "  Note: no current-paths sidecar found; declared branch "
+                    "current checks (path_ampacity) are INACTIVE. Pass "
+                    "--current-paths FILE to enable them, or --no-current-paths "
+                    "to silence this."
+                )
+            return 0
+
+    if explicit is not None and not cp_path.exists():
+        print(f"Error: current-paths file not found: {cp_path}", file=sys.stderr)
+        return 1
+
+    try:
+        args._loaded_current_paths = load_current_path_specs(cp_path)
+    except (OSError, ValueError) as e:
+        if explicit is not None:
+            print(f"Error: parsing current-paths JSON: {e}", file=sys.stderr)
+            return 1
+        print(
+            f"WARNING: ignoring malformed current-paths sidecar {cp_path}: {e}",
+            file=sys.stderr,
+        )
+        args._loaded_current_paths = []
+        return 0
+
+    args._current_paths_input_path = cp_path
+    if explicit is None:
+        print(f"[INFO] auto-loaded current-paths sidecar: {cp_path}", file=sys.stderr)
+    return 0
+
+
 def _write_fab_profile_sidecar(
     output_path: Path,
     manufacturer: str,
@@ -2552,6 +2732,8 @@ def run_post_route_drc(
     net_class_map_input_path: Path | None = None,
     loaded_net_class_map: dict | None = None,
     source_pcb_path: Path | None = None,
+    current_path_specs: "Sequence[CurrentPathSpec] | None" = None,
+    current_paths_input_path: Path | None = None,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -2590,6 +2772,20 @@ def run_post_route_drc(
             (``args._loaded_net_class_map``), merged over the classifier
             output for round-trip fidelity in the derived sidecar (Issue
             #4428).
+        current_path_specs: Declared branch-specific current-path intent
+            (Issue #4980, ``args._loaded_current_paths`` from
+            ``--current-paths``).  When supplied, the ``path_ampacity``
+            rule checks each declared branch against its OWN declared
+            current -- independent of ``net_class_map``'s whole-net
+            ``target_ampacity`` -- and the specs are re-emitted as a
+            ``current_paths.json`` sidecar next to the routed board so a
+            later ``kct check`` audits against identical declarations.
+            ``None``/empty leaves ``path_ampacity`` inactive exactly as
+            before.
+        current_paths_input_path: The resolved ``--current-paths`` INPUT
+            path.  Threaded to the sidecar writer so the derived sidecar
+            never overwrites the user's authored file (Issue #4428's
+            collision rule, applied to this sidecar too).
 
     Returns:
         Tuple of (error_count, warning_count)
@@ -2609,6 +2805,17 @@ def run_post_route_drc(
         quiet=quiet,
         input_path=net_class_map_input_path,
         loaded_net_class_map=loaded_net_class_map,
+    )
+
+    # Issue #4980: persist the declared branch current-path intent next to the
+    # routed PCB so a later bare ``kct check`` audits the finished copper
+    # against the SAME declarations this route step validated, rather than
+    # silently running with ``path_ampacity`` INACTIVE.
+    _write_current_paths_sidecar(
+        output_path,
+        current_path_specs,
+        quiet=quiet,
+        input_path=current_paths_input_path,
     )
 
     # Issue #3920: persist the resolved fab profile as a ``fab_profile.json``
@@ -2645,6 +2852,10 @@ def run_post_route_drc(
             layers=layers,
             copper_oz=copper_oz,
             net_class_map=net_class_map,
+            # Issue #4980: declared branch-specific current-path intent.
+            # Empty/None leaves ``check_path_ampacity`` a no-op, so the
+            # flag-off route stays byte-identical to the pre-#4980 verdict.
+            current_path_specs=current_path_specs,
         )
         results = checker.check_all()
 
@@ -7084,6 +7295,12 @@ def route_with_layer_escalation(
                 Path(args.net_class_map).resolve() if getattr(args, "net_class_map", None) else None
             ),
             loaded_net_class_map=getattr(args, "_loaded_net_class_map", None),
+            # Issue #4980: thread the loaded --current-paths declarations so
+            # path_ampacity checks each declared branch against its OWN
+            # current, and the specs are re-emitted next to the routed board
+            # for kct check auto-discovery.
+            current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_paths_input_path=getattr(args, "_current_paths_input_path", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -7907,6 +8124,12 @@ def route_with_rule_relaxation(
                 Path(args.net_class_map).resolve() if getattr(args, "net_class_map", None) else None
             ),
             loaded_net_class_map=getattr(args, "_loaded_net_class_map", None),
+            # Issue #4980: thread the loaded --current-paths declarations so
+            # path_ampacity checks each declared branch against its OWN
+            # current, and the specs are re-emitted next to the routed board
+            # for kct check auto-discovery.
+            current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_paths_input_path=getattr(args, "_current_paths_input_path", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -10232,6 +10455,12 @@ def route_with_combined_escalation(
                 Path(args.net_class_map).resolve() if getattr(args, "net_class_map", None) else None
             ),
             loaded_net_class_map=getattr(args, "_loaded_net_class_map", None),
+            # Issue #4980: thread the loaded --current-paths declarations so
+            # path_ampacity checks each declared branch against its OWN
+            # current, and the specs are re-emitted next to the routed board
+            # for kct check auto-discovery.
+            current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_paths_input_path=getattr(args, "_current_paths_input_path", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -12591,6 +12820,42 @@ def _main_impl(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON sidecar declaring branch-specific current-path "
+            "intent (Issue #4980): stable RefDes.pad source/sink endpoints, "
+            "a continuous current, and reinforcement eligibility, per "
+            "physical branch. Lets a net that carries BOTH a high-current "
+            "trunk and low-current sense taps (a Kelvin shunt, an INA181 "
+            "input) be checked per branch instead of at one whole-net "
+            "target_ampacity. The post-route DRC runs the path_ampacity "
+            "rule against each declared branch's OWN current, and the "
+            "declarations are re-emitted as current_paths.json next to the "
+            "routed board so a later kct check audits the finished copper "
+            "against identical intent. This INPUT file is never "
+            "overwritten: a collision diverts the derived sidecar to "
+            "current_paths.effective.json (Issue #4428). Auto-discovered "
+            "next to the input board when omitted -- as "
+            "<board-stem>.current_paths.json or current_paths.json, in the "
+            "board dir then output/ then ../output/ (mirrors "
+            "--net-class-map). Use --no-current-paths to suppress that."
+        ),
+    )
+    parser.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help=(
+            "Suppress current-paths sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (path_ampacity stays inactive in the "
+            "post-route DRC and no current_paths.json sidecar is emitted). "
+            "Cannot be combined with --current-paths."
+        ),
+    )
+    parser.add_argument(
         "--voltage-map",
         dest="voltage_map",
         default=None,
@@ -13970,6 +14235,19 @@ def _main_impl(argv: list[str] | None = None) -> int:
             print(f"Error: invalid spatial_keepouts block: {_sk_err}", file=sys.stderr)
             return 1
         args._spatial_keepouts = _ncm_data.get("spatial_keepouts")
+
+    # Issue #4980: validate and load the optional --current-paths sidecar in
+    # the same pre-dispatch window as --net-class-map above, so every routing
+    # sub-flow sees one already-validated result on
+    # ``args._loaded_current_paths``.  Contract mirrors ``kct check
+    # --current-paths`` exactly (PR #5184): an EXPLICIT flag is strict (a
+    # missing file or malformed JSON is exit 1 before any routing work), an
+    # AUTO-DISCOVERED sidecar degrades to a warning (a board that happens to
+    # sit next to someone else's malformed file must still route), and
+    # --no-current-paths suppresses discovery entirely.
+    rc = _preload_current_paths(args, pcb_path)
+    if rc != 0:
+        return rc
 
     # Issue #4605: rule areas are honored by the lattice engine only -- warn
     # once (never gate) when another engine is about to ignore them.
@@ -16388,6 +16666,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 Path(args.net_class_map).resolve() if getattr(args, "net_class_map", None) else None
             ),
             loaded_net_class_map=getattr(args, "_loaded_net_class_map", None),
+            # Issue #4980: thread the loaded --current-paths declarations so
+            # path_ampacity checks each declared branch against its OWN
+            # current, and the specs are re-emitted next to the routed board
+            # for kct check auto-discovery.
+            current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_paths_input_path=getattr(args, "_current_paths_input_path", None),
         )
 
         # Auto-fix DRC violations if requested
