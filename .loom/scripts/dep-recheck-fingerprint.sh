@@ -97,8 +97,14 @@
 #                       item naming a *different*, non-closing issue/PR as a
 #                       prerequisite (e.g. #6335 blocked on #6333, which does
 #                       not carry `Closes #6335`). Parses `- [ ] #N: ...` /
-#                       `- [x] #N: ...` items out of the issue body's own
-#                       `## Dependencies` section (a checked box is treated as
+#                       `- [x] #N: ...` items — the canonical/preferred
+#                       format — out of the issue body's own `## Dependencies`
+#                       section, tolerating an optional case-insensitive
+#                       `PR `/`Issue ` token before the `#N` as best-effort
+#                       (e.g. `- [ ] PR #N: ...`, `- [ ] Issue #N: ...`,
+#                       #7501 — curator prose naturally varies, and silently
+#                       dropping such an item would produce a false
+#                       VERDICT=clear) (a checked box is treated as
 #                       already resolved, no live lookup needed) and, for
 #                       every unchecked item, looks up the referenced issue's
 #                       or PR's own `state` (never its labels — this is
@@ -462,8 +468,13 @@ _extract_dependencies_section() {
 #   - [ ] #123: Prerequisite feature
 #   - [x] #456: Required infrastructure
 _extract_named_deps() {
+    # Matches the canonical bare form (`- [ ] #123: ...`) plus an optional
+    # case-insensitive `PR `/`Issue ` token before the `#N` (#7501) — curator
+    # prose naturally varies ("PR #N", "Issue #N"), and silently dropping such
+    # an item would produce a false VERDICT=clear (the worse failure
+    # direction: it can incorrectly unblock a Builder).
     local line num checked
-    grep -oE '^[[:space:]]*-[[:space:]]*\[[ xX]\][[:space:]]*#[0-9]+' <<<"$1" | while IFS= read -r line; do
+    grep -oiE '^[[:space:]]*-[[:space:]]*\[[ xX]\][[:space:]]*((pr|issue)[[:space:]]+)?#[0-9]+' <<<"$1" | while IFS= read -r line; do
         checked="false"
         [[ "$line" =~ \[[xX]\] ]] && checked="true"
         num="$(grep -oE '#[0-9]+' <<<"$line" | tr -d '#')"

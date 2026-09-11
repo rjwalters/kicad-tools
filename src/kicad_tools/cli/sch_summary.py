@@ -60,7 +60,7 @@ def gather_summary(schematic_path: str, verbose: bool = False) -> dict:
     path = Path(schematic_path)
 
     # Basic info
-    summary = {
+    summary: dict[str, object] = {
         "file": path.name,
         "path": str(path),
     }
@@ -95,16 +95,18 @@ def gather_summary(schematic_path: str, verbose: bool = False) -> dict:
                 prefix = "".join(c for c in item.reference if c.isalpha())
                 ref_counts[prefix] += 1
 
-        summary["components"] = {
+        components: dict[str, object] = {
             "total": bom.total_components,
             "unique_parts": bom.unique_parts,
             "dnp": bom.dnp_count,
             "by_type": dict(ref_counts.most_common()),
         }
 
+        summary["components"] = components
+
         if verbose:
             groups = bom_filtered.grouped()
-            summary["components"]["top_parts"] = [
+            components["top_parts"] = [
                 {"value": g.value, "qty": g.quantity, "refs": g.references}
                 for g in sorted(groups, key=lambda x: -x.quantity)[:10]
             ]
@@ -137,7 +139,7 @@ def gather_summary(schematic_path: str, verbose: bool = False) -> dict:
             except Exception:
                 continue
 
-        summary["connectivity"] = {
+        connectivity: dict[str, object] = {
             "wires": total_wires,
             "junctions": total_junctions,
             "labels": total_labels,
@@ -145,8 +147,10 @@ def gather_summary(schematic_path: str, verbose: bool = False) -> dict:
             "hierarchical_labels": total_hierarchical_labels,
         }
 
+        summary["connectivity"] = connectivity
+
         if verbose:
-            summary["connectivity"]["unique_signals"] = sorted(label_names)[:20]
+            connectivity["unique_signals"] = sorted(label_names)[:20]
 
     except Exception:
         summary["connectivity"] = {}

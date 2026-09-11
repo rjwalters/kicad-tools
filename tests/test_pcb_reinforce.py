@@ -28,6 +28,7 @@ from kicad_tools.physics.wire_gauge import (
     supported_gauges,
     wire_ampacity,
 )
+from kicad_tools.router.current_paths import CurrentPathSpec, PathEndpoint
 from kicad_tools.schema.pcb import PCB, Segment
 
 # --------------------------------------------------------------------------
@@ -637,6 +638,165 @@ class TestReinforceCLI:
         assert data["runs_fully_reinforced"] >= 2
 
 
+def _write_single_pad_footprint_lib(tmp_path: Path) -> Path:
+    """A minimal 1-pad .kicad_mod library file (issue #4980 CLI fixtures).
+
+    Manually-appended in-memory footprints (``pcb._footprints.append``)
+    never get an S-expression node, so they do NOT survive ``pcb.save()`` --
+    a real library-backed footprint is required for CLI tests that load the
+    saved file back (the CLI handler itself calls ``PCB.load``).
+    """
+    mod_path = tmp_path / "TestPad.kicad_mod"
+    mod_path.write_text(
+        '(footprint "TestPad" (layer "F.Cu")\n'
+        '  (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.5) (layers "*.Cu")))\n'
+    )
+    return mod_path
+
+
+class TestCurrentPathsCLI:
+    """CLI coverage for ``--current-paths`` (reinforce) and
+    ``current-paths-audit`` (issue #4980)."""
+
+    def _build_kelvin_board(self, tmp_path: Path) -> Path:
+        mod_path = _write_single_pad_footprint_lib(tmp_path)
+        pcb = PCB.create(width=200, height=120, center=False)
+        pcb.add_footprint_from_file(mod_path, "RSH1", 20, 50)
+        pcb.add_footprint_from_file(mod_path, "J2", 120, 50)
+        pcb.add_footprint_from_file(mod_path, "U3", 60, 80)
+        # add_trace() creates copper but never assigns a pad to a net --
+        # that has to be done explicitly for the pad's own net_name/
+        # net_number to persist through save/load (issue #4980 endpoint
+        # resolution reads the PAD's net, not just the routed copper's).
+        for ref in ("RSH1", "J2", "U3"):
+            pcb.assign_net_to_footprint_pad(ref, "1", "PGND")
+        pcb.add_trace(("RSH1", "1"), (60, 50), width=3.0, layer="F.Cu", net="PGND")
+        pcb.add_trace((60, 50), ("J2", "1"), width=3.0, layer="F.Cu", net="PGND")
+        pcb.add_trace((60, 50), ("U3", "1"), width=0.2, layer="F.Cu", net="PGND")
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb.save(pcb_path)
+        return pcb_path
+
+    def _write_current_paths(self, tmp_path: Path) -> Path:
+        sidecar = tmp_path / "current_paths.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "paths": [
+                        {
+                            "name": "FORCE",
+                            "net": "PGND",
+                            "source": {"ref": "RSH1", "pad": "1"},
+                            "sink": {"ref": "J2", "pad": "1"},
+                            "continuous_a": 15.0,
+                            "reinforcement_eligible": True,
+                        },
+                        {
+                            "name": "KELVIN_SENSE",
+                            "net": "PGND",
+                            "source": {"ref": "RSH1", "pad": "1"},
+                            "sink": {"ref": "U3", "pad": "1"},
+                            "continuous_a": 0.001,
+                            "reinforcement_eligible": False,
+                        },
+                    ]
+                }
+            )
+        )
+        return sidecar
+
+    def test_reinforce_gates_via_cli(self, tmp_path):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = self._build_kelvin_board(tmp_path)
+        sidecar = self._write_current_paths(tmp_path)
+
+        rc = run_pcb_command(
+            _reinforce_args(
+                pcb_path,
+                net="PGND",
+                spacing=10.0,
+                all_runs=True,
+                current_paths=str(sidecar),
+                format="json",
+            )
+        )
+        assert rc == 0
+
+        after = PCB.load(pcb_path)
+        # No via anchored near U3's sense pad.
+        u3_pos = after.get_pad_position("U3", "1")
+        assert u3_pos is not None
+        assert all(math.dist(v.position, u3_pos) > 1.0 for v in after.vias)
+        # At least one anchor landed on the force path.
+        assert len(after.vias) > 0
+
+    def test_reinforce_cli_bad_current_paths_file_errors(self, tmp_path):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = self._build_kelvin_board(tmp_path)
+        rc = run_pcb_command(
+            _reinforce_args(pcb_path, net="PGND", current_paths=str(tmp_path / "missing.json"))
+        )
+        assert rc == 1
+
+    def test_current_paths_audit_cli_json(self, tmp_path, capsys):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = self._build_kelvin_board(tmp_path)
+        sidecar = self._write_current_paths(tmp_path)
+
+        args = argparse.Namespace(
+            pcb_command="current-paths-audit",
+            pcb=str(pcb_path),
+            current_paths=str(sidecar),
+            format="json",
+        )
+        rc = run_pcb_command(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        data = json.loads(out)
+        assert data["paths_declared"] == 2
+        assert data["paths_resolved"] == 2
+        assert data["all_resolved"] is True
+        assert data["fully_covered"] is True
+        # Board never mutated by the audit.
+        assert len(PCB.load(pcb_path).vias) == 0
+
+    def test_current_paths_audit_cli_text_reports_unresolved(self, tmp_path, capsys):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = self._build_kelvin_board(tmp_path)
+        sidecar = tmp_path / "current_paths.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "paths": [
+                        {
+                            "name": "BROKEN",
+                            "net": "PGND",
+                            "source": {"ref": "RSH1", "pad": "1"},
+                            "sink": {"ref": "J404", "pad": "1"},
+                            "continuous_a": 15.0,
+                        }
+                    ]
+                }
+            )
+        )
+
+        args = argparse.Namespace(
+            pcb_command="current-paths-audit",
+            pcb=str(pcb_path),
+            current_paths=str(sidecar),
+            format="text",
+        )
+        rc = run_pcb_command(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "unresolved" in out
+        assert "BROKEN" in out
+
+
 class TestAllRunsAnchoring:
     def test_default_mode_anchors_only_longest_run(self):
         pcb = _branched_run_pcb()
@@ -742,3 +902,196 @@ class TestCollinearMergeReporting:
         result = reinforce_net(pcb, "FUSED_LINE", spacing_mm=15.0, all_runs=True)
         # Still three distinct runs after merge -- the junction is never bridged.
         assert len(result.runs) == 3
+
+
+# --------------------------------------------------------------------------
+# Declared current-path gating (Issue #4980)
+# --------------------------------------------------------------------------
+
+
+def _add_pad_footprint(pcb: PCB, *, ref: str, x: float, y: float, net: str) -> None:
+    """Same helper as ``_add_th_pad_footprint`` but a plain SMD-shaped pad."""
+    from kicad_tools.schema.pcb import Footprint, Pad
+
+    net_obj = pcb.add_net(net)
+    pad = Pad(
+        number="1",
+        type="thru_hole",
+        shape="circle",
+        position=(0.0, 0.0),
+        size=(1.0, 1.0),
+        layers=["*.Cu"],
+        net_number=net_obj.number,
+        net_name=net,
+        drill=0.5,
+    )
+    fp = Footprint(
+        name="TH:Pad",
+        layer="F.Cu",
+        position=(x, y),
+        rotation=0.0,
+        reference=ref,
+        value="TP",
+        pads=[pad],
+    )
+    pcb._footprints.append(fp)
+
+
+def _kelvin_shunt_pcb() -> PCB:
+    """A four-terminal-shunt-style fixture on one net.
+
+    RSH1 (force-) --force path--> J2 (force+)
+         |
+      Kelvin sense spur
+         |
+         v
+        U3 (INA181-style sense pad)
+    """
+    pcb = PCB.create(width=200, height=120, center=False)
+    _add_pad_footprint(pcb, ref="RSH1", x=20, y=50, net="PGND")
+    _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="PGND")
+    _add_pad_footprint(pcb, ref="U3", x=60, y=80, net="PGND")
+    pcb.add_trace(("RSH1", "1"), (60, 50), width=3.0, layer="F.Cu", net="PGND")
+    pcb.add_trace((60, 50), ("J2", "1"), width=3.0, layer="F.Cu", net="PGND")
+    pcb.add_trace((60, 50), ("U3", "1"), width=0.2, layer="F.Cu", net="PGND")
+    return pcb
+
+
+def _force_spec(current_a: float = 15.0) -> CurrentPathSpec:
+    return CurrentPathSpec(
+        name="FORCE",
+        net_name="PGND",
+        source=PathEndpoint("RSH1", "1"),
+        sink=PathEndpoint("J2", "1"),
+        continuous_a=current_a,
+        reinforcement_eligible=True,
+    )
+
+
+def _kelvin_sense_spec(current_a: float = 0.001) -> CurrentPathSpec:
+    return CurrentPathSpec(
+        name="KELVIN_SENSE",
+        net_name="PGND",
+        source=PathEndpoint("RSH1", "1"),
+        sink=PathEndpoint("U3", "1"),
+        continuous_a=current_a,
+        reinforcement_eligible=False,
+    )
+
+
+class TestCurrentPathGating:
+    def test_ungated_when_no_current_paths_supplied(self):
+        """Legacy behavior is unchanged when ``current_paths`` is omitted."""
+        pcb = _kelvin_shunt_pcb()
+        result = reinforce_net(pcb, "PGND", spacing_mm=10.0, all_runs=True)
+        assert all(rs.path_excluded_reason is None for rs in result.runs)
+        assert result.placed_count > 0
+
+    def test_kelvin_sense_never_reinforced(self):
+        """Force path anchored; the Kelvin sense spur is excluded even with
+        --all-runs (it must never be bridged by a shared reinforcement
+        anchor)."""
+        pcb = _kelvin_shunt_pcb()
+        result = reinforce_net(
+            pcb,
+            "PGND",
+            spacing_mm=10.0,
+            all_runs=True,
+            current_paths=[_force_spec(), _kelvin_sense_spec()],
+        )
+        # Force path (both trunk legs) anchored.
+        force_runs = [rs for rs in result.runs if rs.length_mm in (40.0, 60.0)]
+        assert all(rs.path_excluded_reason is None for rs in force_runs)
+        assert all(rs.anchors_placed > 0 for rs in force_runs)
+
+        # The sense-only leg (RSH1 junction -> U3, 30mm) is excluded.
+        sense_run = next(rs for rs in result.runs if rs.length_mm == pytest.approx(30.0))
+        assert sense_run.path_excluded_reason is not None
+        assert sense_run.anchors_placed == 0
+
+    def test_default_longest_run_picks_force_not_sense(self):
+        """Even in default mode (no --all-runs), the gate must not let a
+        longer sense spur get picked over the force path.
+
+        Uses an explicit degree-3 junction (like ``_kelvin_shunt_pcb``) so
+        the chainer splits the force legs and the sense spur into separate
+        runs, with the sense spur made deliberately the LONGEST run --
+        proving the gate, not run length, decides eligibility.
+        """
+        pcb = PCB.create(width=300, height=300, center=False)
+        _add_pad_footprint(pcb, ref="RSH1", x=20, y=50, net="PGND")
+        _add_pad_footprint(pcb, ref="J2", x=55, y=50, net="PGND")
+        _add_pad_footprint(pcb, ref="U3", x=50, y=250, net="PGND")
+        pcb.add_trace(("RSH1", "1"), (50, 50), width=3.0, layer="F.Cu", net="PGND")
+        pcb.add_trace((50, 50), ("J2", "1"), width=3.0, layer="F.Cu", net="PGND")
+        pcb.add_trace((50, 50), ("U3", "1"), width=0.2, layer="F.Cu", net="PGND")
+
+        force_spec = CurrentPathSpec(
+            name="FORCE",
+            net_name="PGND",
+            source=PathEndpoint("RSH1", "1"),
+            sink=PathEndpoint("J2", "1"),
+            continuous_a=15.0,
+            reinforcement_eligible=True,
+        )
+        sense_spec = CurrentPathSpec(
+            name="KELVIN_SENSE",
+            net_name="PGND",
+            source=PathEndpoint("RSH1", "1"),
+            sink=PathEndpoint("U3", "1"),
+            continuous_a=0.001,
+            reinforcement_eligible=False,
+        )
+
+        # Sanity: WITHOUT gating, the longest run (the 200mm sense spur)
+        # would be the default anchor target.
+        ungated = reinforce_net(pcb, "PGND", spacing_mm=10.0)
+        assert ungated.run_length_mm == pytest.approx(200.0, abs=1e-6)
+
+        gated = reinforce_net(
+            pcb,
+            "PGND",
+            spacing_mm=10.0,
+            current_paths=[force_spec, sense_spec],
+        )
+        assert gated.placed_count > 0
+        # The anchored primary run is the (short) force leg RSH1->junction,
+        # not the (long) sense spur.
+        assert gated.run_length_mm == pytest.approx(30.0, abs=1e-6)
+
+    def test_broken_force_endpoint_reinforces_nothing(self):
+        """A trunk endpoint that no longer resolves fails closed: nothing
+        is reinforced rather than silently continuing against a
+        declaration nobody can verify."""
+        pcb = _kelvin_shunt_pcb()
+        broken_force = CurrentPathSpec(
+            name="FORCE",
+            net_name="PGND",
+            source=PathEndpoint("RSH1", "1"),
+            sink=PathEndpoint("J404", "1"),  # moved/removed component
+            continuous_a=15.0,
+            reinforcement_eligible=True,
+        )
+        result = reinforce_net(
+            pcb, "PGND", spacing_mm=10.0, all_runs=True, current_paths=[broken_force]
+        )
+        assert result.placed_count == 0
+        assert all(rs.path_excluded_reason is not None for rs in result.runs)
+
+    def test_current_paths_for_other_net_do_not_gate(self):
+        """Specs targeting a different net are ignored -- gating is
+        per-net, opt-in only where declared."""
+        pcb = _kelvin_shunt_pcb()
+        other_net_spec = CurrentPathSpec(
+            name="UNRELATED",
+            net_name="SOME_OTHER_NET",
+            source=PathEndpoint("RSH1", "1"),
+            sink=PathEndpoint("J2", "1"),
+            continuous_a=1.0,
+            reinforcement_eligible=True,
+        )
+        result = reinforce_net(
+            pcb, "PGND", spacing_mm=10.0, all_runs=True, current_paths=[other_net_spec]
+        )
+        assert all(rs.path_excluded_reason is None for rs in result.runs)
+        assert result.placed_count > 0

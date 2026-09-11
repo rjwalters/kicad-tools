@@ -55,34 +55,29 @@ needed.
 
 Live-smoke result (2026-07, issue #4118)
 ----------------------------------------
-A one-off local smoke against ``open.jlcpcb.com`` with the owner's real key
-**confirmed the Base64 digest encoding is correct**:
+A one-off local smoke against ``open.jlcpcb.com`` observed a permission denial
+with Base64 signatures and a signature rejection with hex signatures. This
+supports the current Base64 default, but a permission denial alone does not
+establish that the signature verified. HTTP 403 can reflect IP restrictions,
+product permissions, or another access policy; classification uses the explicit
+server reason when available.
 
-* Base64 digest (either scheme keyword) -> HTTP 403,
-  ``"API insufficient permissions, access denied"`` -- i.e. the signature
-  *verified*, but the app was not permitted (a portal/permission/IP matter).
-* Hex digest -> HTTP 401, ``"The request signature verify failed"`` -- the
-  signature was rejected.
-
-So :data:`SIGNATURE_ENCODING` = ``"base64"`` is validated, and the scheme
-keyword does not affect signature verification. The remaining 403 is an
-owner-side developer-portal configuration matter (enable the Parts API product
-for the app / whitelist the calling IP), not a client bug -- which is why the
-feature ships inert-without-keys and defers that step to the owner.
 """
 
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from .lcsc import _categorize_part, _guess_package_type
 from .models import Part, PartPrice
@@ -137,9 +132,10 @@ class JLCAPIError(Exception):
     when they are available so callers can log something actionable.
     """
 
-    def __init__(self, message: str, *, code: int | None = None):
+    def __init__(self, message: str, *, code: int | None = None, http_status: int | None = None):
         super().__init__(message)
         self.code = code
+        self.http_status = http_status
 
 
 class JLCAuthError(JLCAPIError):
@@ -155,12 +151,13 @@ class JLCAuthError(JLCAPIError):
 class JLCIPNotWhitelistedError(JLCAPIError):
     """The caller's public IP is not on the app's IP whitelist.
 
-    The JLCPCB developer portal has an IP Whitelisting feature; requests from
-    an un-whitelisted IP are rejected. The exact business ``code``/``message``
-    for this case is **unconfirmed** without a live smoke test -- detection is
-    a best-effort message/code heuristic (see :func:`_classify_business_error`)
-    and should be refined once the owner runs the live smoke.
+    Selected only for an explicit IP/whitelist reason in the server response.
+    A generic HTTP 403 or product permission denial is insufficient evidence.
     """
+
+
+class JLCPermissionError(JLCAPIError):
+    """Access or product permission denied, without diagnosing an IP restriction."""
 
 
 class JLCQuotaError(JLCAPIError):
@@ -168,6 +165,15 @@ class JLCQuotaError(JLCAPIError):
 
     Actionable: back off and retry later, or request a higher quota from the
     developer portal.
+    """
+
+
+class JLCIncompleteResponseError(JLCAPIError):
+    """The HTTP/business envelope succeeded but the payload shape is unusable.
+
+    Distinct from a transport failure or a per-code miss: the server accepted
+    the request, but ``data`` was not the documented list, so no per-code
+    stock evidence -- verified, missing, or malformed -- can be attributed.
     """
 
 
@@ -369,41 +375,51 @@ class JLCOpenAPIClient:
                 timeout=self.timeout,
             )
         except request_exc as e:
-            raise JLCAPIError(f"JLCPCB open-platform request failed: {e}") from e
+            reason = _safe_error_reason(
+                str(e),
+                (
+                    self.credentials.app_id,
+                    self.credentials.access_key,
+                    self.credentials.secret_key,
+                    headers["Authorization"],
+                    signature,
+                ),
+            )
+            raise JLCAPIError(f"JLCPCB open-platform request failed: {reason}") from None
 
-        # Transport-level auth rejections may surface as HTTP status rather than
-        # a business envelope; map the common ones before parsing JSON.
         status = response.status_code
-        if status in (401, 403):
-            raise JLCAuthError(
-                f"JLCPCB open-platform rejected the request (HTTP {status}); "
-                "verify credentials and that this IP is whitelisted.",
-                code=status,
-            )
-        if status == 429:
-            raise JLCQuotaError(
-                "JLCPCB open-platform rate limit exceeded (HTTP 429).",
-                code=status,
-            )
-
-        try:
-            envelope = response.json()
-        except ValueError as e:
-            raise JLCAPIError(
-                f"JLCPCB open-platform returned non-JSON response (HTTP {status})."
-            ) from e
+        envelope = None
+        # Error pages may be HTML or oversized. Bound JSON parsing for failed
+        # HTTP responses; component-detail success payloads may legitimately be large.
+        if status < 400 or len(response.content) <= 65536:
+            with contextlib.suppress(ValueError):
+                envelope = response.json()
 
         if not isinstance(envelope, dict):
-            raise JLCAPIError("JLCPCB open-platform returned an unexpected response shape.")
+            if status >= 400:
+                raise _classify_business_error(None, None, http_status=status)
+            raise JLCAPIError(
+                f"JLCPCB open-platform returned a non-JSON or unexpected response (HTTP {status}).",
+                http_status=status,
+            )
 
         code = envelope.get("code")
-        success = envelope.get("success")
-        if code == 200 and success:
-            data = envelope.get("data")
-            return {"data": data}
+        if 200 <= status < 300 and code == 200 and envelope.get("success"):
+            return {"data": envelope.get("data")}
 
-        # Business-level failure: classify into an actionable exception.
-        raise _classify_business_error(code, envelope.get("message"))
+        # Never include echoed request credentials, signatures, or headers in
+        # the exception. Only a bounded, sanitized message field is retained.
+        reason = _safe_error_reason(
+            envelope.get("message"),
+            (
+                self.credentials.app_id,
+                self.credentials.access_key,
+                self.credentials.secret_key,
+                headers["Authorization"],
+                signature,
+            ),
+        )
+        raise _classify_business_error(code, reason, http_status=status)
 
     def get_component_detail_by_codes(self, codes: list[str]) -> dict[str, Part]:
         """Look up component detail for one or more LCSC codes.
@@ -441,6 +457,44 @@ class JLCOpenAPIClient:
                 parts[part.lcsc_part.upper()] = part
         return parts
 
+    def get_component_detail_raw(self, codes: list[str]) -> list[dict[str, Any]]:
+        """Return raw per-code response objects, with no ``Part`` projection.
+
+        Unlike :meth:`get_component_detail_by_codes`, this performs **no**
+        field coercion: ``stockCount`` is returned exactly as the server sent
+        it (absent, ``null``, a string, negative, or a genuine non-negative
+        int), so a caller that must distinguish verified-zero stock from
+        unknown/missing/malformed evidence has the raw material to do so
+        instead of silently observing ``Part.stock == 0`` for both.
+
+        Args:
+            codes: LCSC part numbers. Blank entries are dropped; an empty
+                result after cleaning returns ``[]`` without a request.
+
+        Returns:
+            The raw ``data`` list entries that are JSON objects (non-object
+            entries are dropped, not coerced). Codes with no match are simply
+            absent -- this method does not report per-code misses itself.
+
+        Raises:
+            JLCIncompleteResponseError: the response envelope succeeded but
+                ``data`` was not a list.
+            JLCAPIError (and subclasses): transport, auth, permission, IP
+                whitelist, or quota failures, exactly as for
+                :meth:`get_component_detail_by_codes`.
+        """
+        cleaned = [c.strip().upper() for c in codes if c and c.strip()]
+        if not cleaned:
+            return []
+
+        result = self._post_signed(COMPONENT_DETAIL_PATH, {"componentCodes": cleaned})
+        data = result.get("data")
+        if not isinstance(data, list):
+            raise JLCIncompleteResponseError(
+                "JLCPCB open-platform returned a non-list component-detail payload."
+            )
+        return [component for component in data if isinstance(component, dict)]
+
     def close(self) -> None:
         """Close the underlying HTTP session, if any."""
         if self._session is not None:
@@ -455,96 +509,65 @@ class JLCOpenAPIClient:
         return False
 
 
-def _classify_business_error(code: object, message: object) -> JLCAPIError:
-    """Map a non-success business envelope to a specific exception.
+def _safe_error_reason(message: object, secrets_to_redact: tuple[str, ...] = ()) -> str:
+    """Retain a short plain-text reason, never a serialized response envelope."""
+    if not isinstance(message, str) or not message:
+        return "unknown error"
+    if len(message) > 65536:
+        return "server error reason too large"
+    for secret in sorted(secrets_to_redact, key=len, reverse=True):
+        if secret:
+            message = message.replace(secret, "[redacted]")
+    return " ".join("".join(c if c.isprintable() else " " for c in message).split())[:512]
 
-    The precise business codes/messages for auth vs. IP-whitelist vs. quota are
-    **not first-party-documented**; this uses a best-effort message/code
-    heuristic (see per-branch comments) that the owner's live smoke should
-    refine. Anything unrecognized becomes a generic :class:`JLCAPIError` rather
-    than being conflated with a "part not found" miss.
-    """
-    msg = str(message) if message not in (None, "") else "unknown error"
-    code_int: int | None
+
+def _classify_business_error(
+    code: object, message: object, *, http_status: int | None = None
+) -> JLCAPIError:
+    """Use explicit reasons first, then status fallbacks without inferring IP or signature validity."""
+    msg = _safe_error_reason(message)
     try:
         code_int = int(str(code)) if code is not None else None
     except (TypeError, ValueError):
         code_int = None
-
     lowered = msg.lower()
-
-    # Signature rejection -- the *signature itself* did not verify. Confirmed
-    # message from the live API (2026-07, issue #4118 smoke): code 401,
-    # "The request signature verify failed". This is the actionable "your
-    # signing is wrong" case -- check the secret key and the signing variant.
-    if (
-        "signature" in lowered
-        or "sign verify" in lowered
-        or (code_int == 401 and ("verify" in lowered or "auth" in lowered))
+    details = f"(HTTP {http_status}, code={code_int}): {msg}"
+    error_type: type[JLCAPIError]
+    if "signature" in lowered or "sign verify" in lowered:
+        error_type = JLCAuthError
+        reason = "authentication failed (signature verification); check the signing configuration"
+    elif any(term in lowered for term in ("quota", "rate limit", "too many", "frequenc")):
+        error_type = JLCQuotaError
+        reason = "quota/rate limit exceeded"
+    elif "whitelist" in lowered or (
+        re.search(r"\bip\b", lowered)
+        and any(term in lowered for term in ("not allowed", "denied", "reject", "forbidden"))
     ):
-        return JLCAuthError(
-            f"JLCPCB open-platform signature verification failed (code={code_int}): {msg}. "
-            "Verify your JLCPCB_SECRET_KEY and the signing variant "
-            "(AUTH_SCHEME / SIGNATURE_ENCODING) in parts/jlcpcb_api.py.",
-            code=code_int,
-        )
-
-    # Quota / rate limit -- heuristic (UNCONFIRMED; refine via live smoke).
-    if (
-        code_int == 429
-        or "quota" in lowered
-        or "rate limit" in lowered
-        or "too many" in lowered
-        or "frequenc" in lowered
+        error_type = JLCIPNotWhitelistedError
+        reason = "IP access restriction; check the app's IP whitelist"
+    elif any(term in lowered for term in ("permission", "access denied", "forbidden")):
+        error_type = JLCPermissionError
+        reason = "access denied; check app/product permissions"
+    elif any(
+        term in lowered
+        for term in ("auth", "credential", "access key", "accesskey", "secret", "token")
     ):
-        return JLCQuotaError(
-            f"JLCPCB open-platform quota/rate limit exceeded (code={code_int}): {msg}.",
-            code=code_int,
-        )
-
-    # Permission / IP-whitelist rejection -- the signature verified but the app
-    # is not permitted. Confirmed message from the live API (2026-07 smoke):
-    # code 403, "API insufficient permissions, access denied". This is a portal
-    # configuration matter (enable the Parts API product for the app and/or add
-    # this machine's public IP to the app's IP whitelist), NOT a signing bug.
-    if (
-        code_int == 403
-        or "whitelist" in lowered
-        or "ip " in lowered
-        or "not allowed" in lowered
-        or "permission" in lowered
-        or "access denied" in lowered
-        or "denied" in lowered
-        or "forbidden" in lowered
-    ):
-        return JLCIPNotWhitelistedError(
-            f"JLCPCB open-platform denied access (code={code_int}): {msg}. "
-            "The signature verified, but the app lacks permission: enable the "
-            "Parts/component API product for this app and/or add your public IP "
-            "to the app's IP whitelist in the developer portal.",
-            code=code_int,
-        )
-
-    # Other auth-ish failures (missing token, bad access key, etc.).
-    if (
-        code_int in (401, 403)
-        or "auth" in lowered
-        or "credential" in lowered
-        or "access key" in lowered
-        or "accesskey" in lowered
-        or "secret" in lowered
-        or "token" in lowered
-    ):
-        return JLCAuthError(
-            f"JLCPCB open-platform authentication failed (code={code_int}): {msg}. "
-            "Verify your access/secret keys and the signing variant "
-            "(AUTH_SCHEME / SIGNATURE_ENCODING).",
-            code=code_int,
-        )
-
-    return JLCAPIError(
-        f"JLCPCB open-platform returned a business error (code={code_int}): {msg}.",
-        code=code_int,
+        error_type = JLCAuthError
+        reason = "authentication failed"
+    elif code_int == 429 or http_status == 429:
+        error_type = JLCQuotaError
+        reason = "quota/rate limit exceeded"
+    elif code_int == 401 or http_status == 401:
+        error_type = JLCAuthError
+        reason = "authentication failed"
+    elif code_int == 403 or http_status == 403:
+        error_type = JLCPermissionError
+        reason = "access denied"
+    else:
+        error_type = JLCAPIError
+        reason = "request failed"
+    return error_type(
+        f"JLCPCB open-platform {reason} {details}.", code=code_int, http_status=http_status
     )
 
 
