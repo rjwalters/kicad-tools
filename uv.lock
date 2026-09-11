@@ -2915,11 +2915,11 @@ wheels = [
 
 [[package]]
 name = "nanobind"
-version = "2.10.2"
+version = "3.0.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/d1/7b/818fe4f6d1fdd516a14386ba86f2cbbac1b7304930da0f029724e9001658/nanobind-2.10.2.tar.gz", hash = "sha256:08509910ce6d1fadeed69cb0880d4d4fcb77739c6af9bd8fb4419391a3ca4c6b", size = 993651, upload-time = "2025-12-10T10:55:32.335Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/07/11/69cf231c4f3ac4fa724a0b1933c3650fb65aff6b9d7a4c2573b9e4e40077/nanobind-3.0.1.tar.gz", hash = "sha256:f7f0a889c8fb80deaacb95e918d88e05148850a32d2b8eda28446291b2bf7c35", size = 1142340, upload-time = "2026-08-27T22:45:21.806Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/14/06/cb08965f985a5e1b9cb55ed96337c1f6daaa6b9cbdaeabe6bb3f7a1a11df/nanobind-2.10.2-py3-none-any.whl", hash = "sha256:6976c1b04b90481d2612b346485a3063818c6faa5077fe9d8bbc9b5fbe29c380", size = 246514, upload-time = "2025-12-10T10:55:30.741Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/cf/261b8281d410d99b22ce47559ce56f98c7548dccf8c25ed70a51fbf42d1f/nanobind-3.0.1-py3-none-any.whl", hash = "sha256:4b49491fe8bf483a5e0342125b8fe56237e490ba642c7e296170b8cd256a7764", size = 316363, upload-time = "2026-08-27T22:45:20.155Z" },
 ]
 
 [[package]]
