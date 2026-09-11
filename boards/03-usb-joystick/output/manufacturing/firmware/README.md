@@ -58,14 +58,13 @@ installed core before every build (`platformio.ini`'s
   from `src/main.cpp` — services safely from main-loop context, where
   interrupts are enabled again.
 
-`apply_usbcore_patch.py` refuses to patch blindly: it checks the installed
-`USBCore.cpp` against the exact sha256 this patch was written against before
-applying, and aborts the build with an explicit error if a platform/package
-bump has changed that file (rather than silently mis-applying a line-anchored
-patch, or silently doing nothing). `build.py` separately asserts that the
-patched symbol (`_usbClockResumePending`) is present in the compiled ELF, so
-a version bump that causes the patch to no-op is caught as a hard build
-failure rather than a silent regression to the unpatched, TODO'd core.
+`apply_usbcore_patch.py` accepts only the exact SHA256 of the pinned baseline
+or the complete reviewed patched core. A marker comment alone is insufficient:
+partial, stale, or modified patched content aborts the build. The hook applies
+changes to a temporary copy and verifies the full result before updating the
+installed core. `build.py` separately checks that `_usbClockResumePending` is
+present in the compiled ELF; that symbol is a build sanity check, not a
+substitute for source integrity or physical USB qualification.
 
 This is a code-level fix for a documented upstream defect, reviewed against
 the ATmega32U4 datasheet's USB clock/PLL description — it is **not** a

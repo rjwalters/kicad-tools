@@ -97,8 +97,8 @@
       "size": 6
     },
     "firmware/README.md": {
-      "sha256": "28fd7061bc93ae90cbc8de0e9b48b58a286b730cc869309e61e6e0950f0daa95",
-      "size": 7449
+      "sha256": "dc1deefc57c081bf1828109570ceaef7e295512e73be014d1ef140b391aad421",
+      "size": 7375
     },
     "firmware/artifacts/build-report.json": {
       "sha256": "386ca82b8ba402b3b2dab63dcc2f44eba95bfacfdffb4f0477a56ce041650dac",
@@ -161,8 +161,8 @@
       "size": 7670
     },
     "firmware/patches/apply_usbcore_patch.py": {
-      "sha256": "d2716ac6560e447350aa831742adf712365c66cdf21241ee3daf04652a0e5975",
-      "size": 4624
+      "sha256": "2cdbbe38d30c490a0cbbb5cdc53207a0ca1e960624589a4f0afd545368892a7b",
+      "size": 5114
     },
     "firmware/patches/usbcore-suspend-resume.patch": {
       "sha256": "ecc17553df25caa39a005fa6d7ccaa26557653b73d5aa2e59a48907ef4c5b2a3",
