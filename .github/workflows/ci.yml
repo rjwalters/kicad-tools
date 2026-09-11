@@ -22,6 +22,32 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  changes:
+    name: Select CI jobs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      test: ${{ steps.plan.outputs['test'] }}
+      cpp-build-check: ${{ steps.plan.outputs['cpp-build-check'] }}
+      kicad-cli-smoke: ${{ steps.plan.outputs['kicad-cli-smoke'] }}
+      board-00-end-to-end: ${{ steps.plan.outputs['board-00-end-to-end'] }}
+      board-01-end-to-end: ${{ steps.plan.outputs['board-01-end-to-end'] }}
+      board-02-end-to-end: ${{ steps.plan.outputs['board-02-end-to-end'] }}
+      board-03-end-to-end: ${{ steps.plan.outputs['board-03-end-to-end'] }}
+      board-04-end-to-end: ${{ steps.plan.outputs['board-04-end-to-end'] }}
+      board-05-routing-regression: ${{ steps.plan.outputs['board-05-routing-regression'] }}
+      board-06-end-to-end: ${{ steps.plan.outputs['board-06-end-to-end'] }}
+      diffpair-routing-regression: ${{ steps.plan.outputs['diffpair-routing-regression'] }}
+      board-07-end-to-end: ${{ steps.plan.outputs['board-07-end-to-end'] }}
+      matchgroup-routing-regression: ${{ steps.plan.outputs['matchgroup-routing-regression'] }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Select affected consumers from the complete event diff
+        id: plan
+        run: python3 scripts/ci/select_jobs.py
+
   lint:
     name: Lint & Format
     runs-on: ubuntu-latest
@@ -94,6 +120,8 @@ jobs:
         run: uv run python scripts/ci/check_mypy_baseline.py
 
   test:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['test'] == 'true' }}
     name: Test
     # main pushes run this on the fleet's dedicated CI runner (2AMLogic/2am#29;
     # 2 slots for this repo); PR runs stay on GitHub-hosted. Push-only on
@@ -200,6 +228,8 @@ jobs:
           uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow" "${test_args[@]}"
 
   cpp-build-check:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['cpp-build-check'] == 'true' }}
     # Issue #2501: catch source/.so drift by rebuilding the C++ extension
     # from a clean checkout and asserting the version-guard reports the
     # backend as available. If anyone changes cpp/ source without bumping
@@ -286,6 +316,8 @@ jobs:
           uv run pytest tests/test_router_cpp_backend.py::TestCppBuildVersionGuard -v --no-cov
 
   kicad-cli-smoke:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['kicad-cli-smoke'] == 'true' }}
     name: kicad-cli Round-trip Smoke
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -462,6 +494,8 @@ jobs:
           uv run python scripts/ci/check_routed_drc.py "${args[@]}"
 
   diffpair-routing-regression:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['diffpair-routing-regression'] == 'true' }}
     # Issue #2660 / Epic #2556 Phase 4N: re-route board 06 (the diff-pair
     # testbench) from scratch on every PR and verify that
     #   (a) the resulting DRC error count is within the allowlist baseline
@@ -709,9 +743,10 @@ jobs:
             --seed 42
 
   matchgroup-routing-regression:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['matchgroup-routing-regression'] == 'true' && vars.BOARD_07_CI_ENABLED == 'true' }}
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
-    if: ${{ vars.BOARD_07_CI_ENABLED == 'true' }}
     # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
     # N-trace match-group testbench, #2724 Phase 3L) from scratch on
     # every PR and verify that
@@ -933,6 +968,8 @@ jobs:
             --seed 42
 
   board-00-end-to-end:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['board-00-end-to-end'] == 'true' }}
     # Issue #3751: regenerate board 00 ("simple-led", the canonical
     # "Hello World" fixture) from its recipe (boards/00-simple-led/
     # generate_design.py) on every PR and assert that the resulting
@@ -1110,6 +1147,8 @@ jobs:
             /tmp/board00-staging/00-simple-led
 
   board-01-end-to-end:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['board-01-end-to-end'] == 'true' }}
     # Issue #3762: same end-to-end gate as ``board-00-end-to-end``, applied
     # to board 01 ("voltage-divider").  Board 01 is verified clean on both
     # the copper-extracted and label-based LVS comparators, so its recipe
@@ -1202,6 +1241,8 @@ jobs:
             /tmp/board01-staging/01-voltage-divider
 
   board-02-end-to-end:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['board-02-end-to-end'] == 'true' }}
     # Issue #3783: same full end-to-end gate as ``board-00-end-to-end`` /
     # ``board-01-end-to-end``, applied to board 02 ("charlieplex-led").
     # This job was deferred in #3779 because a fresh regen produced a
@@ -1302,6 +1343,8 @@ jobs:
             /tmp/board02-staging/02-charlieplex-led
 
   board-03-end-to-end:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['board-03-end-to-end'] == 'true' }}
     # Issue #3795 (#3780 Part 2): LVS-ONLY end-to-end gate for board 03
     # ("usb-joystick"), graduated out of ``ADVISORY_LVS_BOARDS``.  Board 03's
     # recipe now runs ``write_lvs_report(..., require_clean=True,
@@ -1446,6 +1489,8 @@ jobs:
             /tmp/board03-staging/03-usb-joystick
 
   board-06-end-to-end:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['board-06-end-to-end'] == 'true' }}
     # Issue #3779 (LVS re-enabled by #4012): end-to-end LVS gate for board
     # 06 ("diffpair-test").  The fixture schematic is now FULLY WIRED
     # (#4012: generate_schematic.py synthesizes PCB-native-pad symbols and
@@ -1598,9 +1643,10 @@ jobs:
             /tmp/board06-staging/06-diffpair-test
 
   board-07-end-to-end:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['board-07-end-to-end'] == 'true' && vars.BOARD_07_CI_ENABLED == 'true' }}
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
-    if: ${{ vars.BOARD_07_CI_ENABLED == 'true' }}
     # Issue #3779 (LVS honestly dirty per #4012): end-to-end gate for
     # board 07 ("matchgroup-test").  The fixture schematic is now FULLY
     # WIRED (#4012: 244/244 pads bound), so the copper comparator carries
@@ -1770,6 +1816,8 @@ jobs:
             /tmp/board07-staging/07-matchgroup-test
 
   board-05-routing-regression:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['board-05-routing-regression'] == 'true' }}
     # Issue #3822: blocking-net baseline gate for board 05 ("bldc-motor-
     # controller").  Board 05 is the only demo board whose routing changes
     # CANNOT be validated on the local macOS host: an unmodified host regen of
@@ -1923,6 +1971,8 @@ jobs:
             /tmp/board05-ci/bldc_controller_routed.kicad_pcb
 
   board-04-end-to-end:
+    needs: [changes, lint, typecheck]
+    if: ${{ needs.changes.outputs['board-04-end-to-end'] == 'true' }}
     # Issue #3839: end-to-end gate for board 04 ("stm32-devboard").  Two
     # board-04 gaps shipped regressions undetected: (1) the recipe's main()
     # success gate omitted the already-computed drc_success / copper-LVS
