@@ -1410,6 +1410,87 @@ def _scan_and_repair_via_in_pad(
     return nudged
 
 
+def _try_nudge_via_pad_violation(
+    violation: ClearanceViolation,
+    router: Autorouter,
+    max_displacement: float,
+    result: DRCNudgeResult | None = None,
+) -> bool:
+    """Repair a via-vs-FOREIGN-pad clearance violation (Issue #4991).
+
+    :class:`ClearanceViolation`'s ``"pad"`` obstacle_type has a
+    documented dual shape (see its docstring): a genuine segment graze
+    (``segment_index >= 0``) or a via graze (``segment_index == -1``,
+    ``x1 == x2 == via.x`` / ``y1 == y2 == via.y``) -- the same
+    segment-vs-obstacle / obstacle-vs-obstacle split already handled for
+    the ``"via"`` obstacle_type just above in the dispatch loop. Before
+    this fix, EVERY ``"pad"`` violation was routed to
+    :func:`_try_nudge_seg_pad` regardless of shape. For the via shape,
+    that helper's :func:`_find_segment` lookup searches for a real route
+    segment matching the zero-length ``(via.x, via.y)-(via.x, via.y)``
+    coordinates -- which never exists -- so it silently returned
+    ``False`` every time. The result: an ordinary two-pad passive (0805
+    cap/resistor) whose escape via lands across an adjacent foreign pad
+    was reported by ``validate_routes`` and even counted in the nudge
+    pass's statistics, but the via itself was never actually moved,
+    leaving the invalid geometry in the saved PCB for native KiCad DRC
+    to catch after the fact.
+
+    This handler locates the offending via (:func:`_find_via_at`) and
+    the offending pad (matched by net + position from
+    ``violation.location``), then reuses :func:`_try_nudge_via_pad`'s
+    cardinal-exit slide -- the same geometry the same-net via-in-pad
+    sweep uses -- passing ``violation.required`` as the explicit
+    clearance so the exit offset matches the exact (possibly per-net-
+    class) clearance that was violated, rather than defaulting to the
+    global trace clearance. :func:`_try_nudge_via_pad` also snaps every
+    same-net segment endpoint anchored to the via's old position, so a
+    stub segment that grazed the same foreign pad (e.g. the escape
+    segment feeding the via) moves along with it and is repaired in the
+    same step.
+
+    Uses the same generous ``_VIA_IN_PAD_MAX_DISPLACEMENT`` budget as
+    the same-net via-in-pad sweep -- clearing a foreign SMD pad requires
+    roughly ``pad_half_width + via_radius + clearance`` of travel, well
+    above the ``0.2`` mm default used for ordinary segment nudges.
+
+    Returns:
+        True when the via was moved (and its chain snapped) within
+        budget; False when no matching via/pad was found or the move
+        exceeded budget (recorded as a structured skip by
+        :func:`_try_nudge_via_pad`).
+    """
+    via_hit = _find_via_at(router, violation.net, violation.x1, violation.y1)
+    if via_hit is None:
+        return False
+    _route, via = via_hit
+
+    if violation.location is None:
+        return False
+    pad_x, pad_y = violation.location
+
+    pads = getattr(router, "pads", None) or {}
+    offending_pad: Pad | None = None
+    for candidate in pads.values():
+        if candidate.net != violation.obstacle_net:
+            continue
+        if abs(candidate.x - pad_x) < 0.005 and abs(candidate.y - pad_y) < 0.005:
+            offending_pad = candidate
+            break
+    if offending_pad is None:
+        return False
+
+    budget = max(max_displacement, _VIA_IN_PAD_MAX_DISPLACEMENT)
+    return _try_nudge_via_pad(
+        via,
+        _router_pad_bbox(offending_pad),
+        router,
+        budget,
+        required_clearance=violation.required,
+        result=result,
+    )
+
+
 def _try_nudge_seg_edge(
     violation: ClearanceViolation,
     router: Autorouter,
@@ -1910,12 +1991,26 @@ def _drc_verify_and_nudge_impl(
                         result=result,
                     )
             elif v.obstacle_type == "pad":
-                success = _try_nudge_seg_pad(
-                    v,
-                    router,
-                    max_displacement,
-                    result=result,
-                )
+                # Issue #4991: ``"pad"`` shares the same dual-shape
+                # contract as ``"via"`` above -- ``segment_index == -1``
+                # marks a via-vs-pad violation (a zero-length
+                # "segment" at the via's centre) that ``_find_segment``
+                # can never match, so it must be dispatched to the
+                # via-aware handler instead of the segment handler.
+                if v.segment_index == -1:
+                    success = _try_nudge_via_pad_violation(
+                        v,
+                        router,
+                        max_displacement,
+                        result=result,
+                    )
+                else:
+                    success = _try_nudge_seg_pad(
+                        v,
+                        router,
+                        max_displacement,
+                        result=result,
+                    )
             elif v.obstacle_type == "edge":
                 # Issue #2743: trace-vs-board-edge violations now flow
                 # through the same dispatch path.
