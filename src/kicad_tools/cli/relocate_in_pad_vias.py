@@ -27,10 +27,9 @@ These have no slide direction, so instead the pass walks the
 offsets from the pad edge) and picks the first off-pad location that (a) clears
 the pad by ``min_clearance_mm``, (b) clears all other-net copper + the
 hole-to-hole floor, and (c) lands **inside a same-net zone boundary polygon**
-on a layer the via spans.  Because plane connectivity is realized by pour
-overlap -- not a discrete track -- a plane-stitch move needs **no stub**: after
-the operator re-floods the pour (``kicad-cli pcb drc --refill-zones``) the
-zone reconnects to the via's annular ring at its new location.  When no
+on a layer the via spans. Clearance-checked stubs preserve the pad and original
+plane attachment unless actual filled copper proves continuity on that layer.
+Refill the zones after saving to validate the final pour connection. When no
 plane-legal, clearance-safe candidate exists (no same-net zone, or every
 candidate is boxed in) the via is reported *unresolvable* and left in place --
 never mis-placed into a short.
@@ -64,6 +63,8 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
+
 from kicad_tools.cli.stitch_cmd import point_in_polygon
 from kicad_tools.validate.rules.via_pad_geometry import (
     is_smd_pad,
@@ -86,9 +87,8 @@ class ViaRelocation:
 
     ``kind`` is ``"signal"`` for a Phase-1 slide-along-track move (which appends
     connectivity stubs -- see :attr:`stub_layers`) or ``"plane-stitch"`` for a
-    Phase-2 pour-overlap move (which appends **no** stub; the net reconnects on
-    the next zone refill).  Plane-stitch moves therefore always have an empty
-    :attr:`stub_layers`.
+    Phase-2 pour move. Both kinds report any added copper in :attr:`stub_layers`;
+    a plane stub is omitted only with actual filled-copper continuity evidence.
     """
 
     old_x: float
@@ -252,9 +252,8 @@ def _via_spans_zone_layer(via: Via, zone: Zone) -> bool:
 def _same_net_zone_boundaries(pcb: PCB, via: Via, net_name: str) -> list[list[tuple[float, float]]]:
     """Return boundary polygons of same-net zones on a layer the via spans.
 
-    Uses each zone's ``polygon`` (the pour *boundary*, not the stale
-    ``filled_polygons``): connectivity is realized only after a zone refill, so
-    the boundary is the correct membership target for a relocated stitch via.
+    Boundaries restrict the candidate search; they do not prove connectivity.
+    Actual filled copper or explicit stubs preserve the original attachment.
     Net matching is by number when both are non-zero, falling back to name
     (KiCad 10 may emit ``(net "GND")`` with no numeric id).
     """
@@ -272,6 +271,48 @@ def _same_net_zone_boundaries(pcb: PCB, via: Via, net_name: str) -> list[list[tu
     return polygons
 
 
+def _plane_stub_layers(
+    pcb: PCB, via: Via, pad: Pad, target: tuple[float, float], net_name: str
+) -> list[str]:
+    """Preserve surface and original plane connections with conservative stubs.
+
+    Only one actual solid fill component covering both complete via lands is
+    sufficient evidence to omit a stub. Boundary membership, holes, and separate
+    islands cannot establish continuity. Missing fills retain explicit copper.
+    Stubs use the via diameter to preserve its entire original copper land,
+    including edge-only pad contacts and multiple pads touching the annulus.
+    """
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    old_land = Point(via.position).buffer(via.size / 2)
+    new_land = Point(target).buffer(via.size / 2)
+    layers = [_pad_copper_layer(pad)]
+    connected_layers: set[str] = set()
+    for zone in pcb.zones:
+        if zone.keepout is not None or not _via_spans_zone_layer(via, zone):
+            continue
+        if not (
+            (via.net_number and zone.net_number == via.net_number)
+            or (net_name and zone.net_name == net_name)
+        ):
+            continue
+        # Preserve potential original attachments when no fill is available.
+        if not zone.filled_polygons and point_in_polygon(*via.position, zone.polygon):
+            layers.append(zone.layer)
+        for index, points in enumerate(zone.filled_polygons):
+            layer = zone.filled_polygon_layer(index)
+            solid = ConnectivityValidator._fill_solid_region(points)
+            if solid is None:
+                continue
+            components = list(solid.geoms) if hasattr(solid, "geoms") else [solid]
+            for component in components:
+                if component.intersects(old_land):
+                    layers.append(layer)
+                if component.covers(old_land) and component.covers(new_land):
+                    connected_layers.add(layer)
+    return list(dict.fromkeys(layer for layer in layers if layer and layer not in connected_layers))
+
+
 def _first_offpad_plane_candidate(
     pcb: PCB,
     via: Via,
@@ -281,6 +322,8 @@ def _first_offpad_plane_candidate(
     min_clearance: float,
     min_hole_to_hole: float,
     zone_polygons: list[list[tuple[float, float]]],
+    pad: Pad,
+    net_name: str,
 ) -> tuple[float, float] | None:
     """Find the first plane-legal, clearance-safe off-pad location for a via.
 
@@ -288,7 +331,8 @@ def _first_offpad_plane_candidate(
     accepted only when it (a) clears the pad bbox edge by ``min_clearance`` (via
     copper radius), (b) lands inside a same-net zone boundary polygon, and (c)
     introduces no other-net clearance or hole-to-hole violation
-    (:func:`_check_clearance`).  Returns ``None`` when every candidate fails --
+    (:func:`_check_clearance`), including every required connection stub.
+    Returns ``None`` when every candidate fails --
     the caller then reports the via as ``unresolvable`` and leaves it in place.
     """
     pad_cx = (bbox[0] + bbox[2]) / 2.0
@@ -320,6 +364,9 @@ def _first_offpad_plane_candidate(
                 is not None
             ):
                 continue
+            stub_layers = _plane_stub_layers(pcb, via, pad, (nx, ny), net_name)
+            if _check_stub_clearance(pcb, via, (nx, ny), stub_layers, via.size, min_clearance):
+                continue
             return (nx, ny)
 
     return None
@@ -333,6 +380,8 @@ def _first_offpad_signal_candidate(
     tht_pads: list[ThtPad],
     min_clearance: float,
     min_hole_to_hole: float,
+    stub_layers: list[str] | None = None,
+    stub_width: float = 0.2,
 ) -> tuple[float, float] | None:
     """Find the first clearance-safe off-pad location for a **signal** via.
 
@@ -368,6 +417,13 @@ def _first_offpad_signal_candidate(
             if (
                 _check_clearance(
                     pcb, via, nx, ny, pads_by_net, tht_pads, min_clearance, min_hole_to_hole
+                )
+                is not None
+            ):
+                continue
+            if (
+                _check_stub_clearance(
+                    pcb, via, (nx, ny), stub_layers or [], stub_width, min_clearance
                 )
                 is not None
             ):
@@ -508,6 +564,168 @@ def _check_clearance(
     return None
 
 
+def _check_stub_clearance(
+    pcb: PCB,
+    via: Via,
+    target: tuple[float, float],
+    stub_layers: list[str],
+    stub_width: float,
+    min_clearance: float,
+) -> str | None:
+    """Validate the entire swept copper of a proposed set of straight stubs.
+
+    Centerline distances include both conductors' radii, avoiding polygonal
+    approximations of round caps. Pad AABBs conservatively include rotations.
+    Net zero is physical copper, never a same-net exemption. Existing zone
+    fills are checked on their actual layers; native DRC with refill remains
+    required because an outline cannot predict future poured copper.
+
+    Copper drawings / arcs and custom-pad primitives are not modeled by this
+    relocator. Refuse moves on their layers rather than silently ignoring them.
+    """
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    path = LineString([via.position, target])
+    radius = stub_width / 2.0
+    layers = set(stub_layers)
+    copper_layers = [layer.name for layer in pcb.copper_layers]
+
+    # Subtract the old via's clearance envelope AFTER buffering the complete
+    # stub. Clipping its centerline first hides new copper beside the old via.
+    # Polygon buffers are inscribed approximations. Inflate candidate/obstacle
+    # buffers to circumscribe their true circles, but leave the excluded old
+    # envelope inscribed: approximation can only reject, never hide new copper.
+    quadrants = 64
+    circumscribe = 1.0 / math.cos(math.pi / (4 * quadrants))
+    new_keepout = None
+
+    def overlaps(item_layers: list[str]) -> bool:
+        return (
+            bool(layers.intersection(item_layers))
+            or ("*.Cu" in item_layers and bool(layers))
+            or ("F&B.Cu" in item_layers and bool(layers & {"F.Cu", "B.Cu"}))
+        )
+
+    def foreign(net: int) -> bool:
+        return net == 0 or net != via.net_number
+
+    def too_close(shape, other_radius: float = 0.0) -> bool:
+        nonlocal new_keepout
+        # Exact analytic distance quickly accepts geometry outside the entire
+        # candidate envelope, without polygon discretization error.
+        if path.distance(shape) - radius - other_radius >= min_clearance - 1e-6:
+            return False
+        if new_keepout is None:
+            candidate = path.buffer((radius + min_clearance) * circumscribe, quad_segs=quadrants)
+            old_keepout = Point(via.position).buffer(
+                via.size / 2.0 + min_clearance, quad_segs=quadrants
+            )
+            new_keepout = candidate.difference(old_keepout)
+        copper = (
+            shape.buffer(other_radius * circumscribe, quad_segs=quadrants)
+            if other_radius > 0
+            else shape
+        )
+        return bool(new_keepout.intersects(copper))
+
+    for seg in pcb.segments:
+        if seg.layer in layers and foreign(seg.net_number):
+            if too_close(LineString([seg.start, seg.end]), seg.width / 2.0):
+                return f"stub clearance to track on {seg.layer}, net {seg.net_number}"
+
+    for other in pcb.vias:
+        if other is via or not foreign(other.net_number):
+            continue
+        # KiCad records the endpoints of a blind/buried span, not every layer.
+        span = list(other.layers)
+        if len(span) >= 2 and all(layer in copper_layers for layer in span):
+            indices = [copper_layers.index(layer) for layer in span]
+            span = copper_layers[min(indices) : max(indices) + 1]
+        if overlaps(span) and too_close(Point(other.position), other.size / 2.0):
+            return f"stub clearance to via on net {other.net_number}"
+
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if not foreign(pad.net_number) or not overlaps(pad.layers):
+                continue
+            if pad.shape == "custom":
+                return f"stub clearance unproven for custom pad {fp.reference}-{pad.number}"
+            if too_close(box(*pad_absolute_bbox(pad, fp))):
+                return f"stub clearance to pad {fp.reference}-{pad.number}"
+
+    for zone in pcb.zones:
+        if not foreign(zone.net_number):
+            continue
+        for index, points in enumerate(zone.filled_polygons):
+            if zone.filled_polygon_layer(index) not in layers:
+                continue
+            solid = ConnectivityValidator._fill_solid_region(points)
+            if solid is not None and too_close(solid):
+                return f"stub clearance to filled zone on {zone.filled_polygon_layer(index)}"
+
+    # Inspect source nodes too: routed arcs and copper text are not represented
+    # by pcb.segments. Unknown copper cannot be treated as empty space.
+    for node in pcb._sexp.children:
+        if node.is_atom:
+            continue
+        nodes = node.children if node.name in ("footprint", "module") else [node]
+        for item in nodes:
+            if item.is_atom or not (
+                item.name in ("arc", "property", "dimension")
+                or (item.name or "").startswith(("gr_", "fp_"))
+            ):
+                continue
+            layer_node = item.find("layer")
+            layer = layer_node.get_string(0) if layer_node is not None else ""
+            if layer in layers:
+                return f"stub clearance unproven for {item.name} on {layer}"
+
+    return None
+
+
+def _persist_via_with_stubs(
+    pcb: PCB,
+    via: Via,
+    target: tuple[float, float],
+    stub_layers: list[str],
+    stub_width: float,
+    net_name: str,
+) -> bool:
+    """Commit a validated move and its copper, rolling back failed writes.
+
+    Preserve object identities used by the caller's remaining worklist and
+    footprint bindings. A false relocate_via result still changes Via.position,
+    so restore that explicitly. No stubs are emitted until persistence works.
+    """
+    import copy
+
+    old_position = via.position
+    old_children = list(pcb._sexp.children)
+    old_segments = list(pcb._segments)
+    via_positions = [
+        (at, copy.deepcopy(at.children))
+        for node in old_children
+        if not node.is_atom and node.name == "via"
+        if (at := node.find("at")) is not None
+    ]
+    committed = False
+    try:
+        if not pcb.relocate_via(via, target):
+            return False
+        for layer in stub_layers:
+            pcb.add_trace(old_position, target, width=stub_width, layer=layer, net=net_name or None)
+        committed = True
+        return True
+    finally:
+        if not committed:
+            pcb._sexp.children[:] = old_children
+            pcb._segments[:] = old_segments
+            for at, children in via_positions:
+                at.children[:] = children
+            via.position = old_position
+            pcb._invalidate_dedup_keys()
+
+
 def relocate_in_pad_vias(
     pcb: PCB,
     design_rules: DesignRules,
@@ -533,6 +751,13 @@ def relocate_in_pad_vias(
         as *skipped* and left untouched (an already-routed board is never made
         worse).
     """
+    if dry_run:
+        import copy
+
+        # Later candidates must see earlier planned vias AND their stubs.
+        # Simulating the normal mutation path also keeps reports equivalent.
+        return relocate_in_pad_vias(copy.deepcopy(pcb), design_rules, nets=nets)
+
     result = RelocationResult()
 
     # Capability gate: a no-op on profiles that support via-in-pad.
@@ -581,10 +806,9 @@ def relocate_in_pad_vias(
                 connected.append((seg, far))
 
         if not connected:
-            # No routed track -> plane-stitch via (Phase 2).  Its only electrical
-            # path is pour overlap, so relocation stays inside a same-net zone
-            # boundary and adds NO stub -- connectivity re-realizes on the next
-            # zone refill.  Fall back to unresolvable only when placement fails.
+            # Preserve both the surface land and original plane attachment.
+            # A zone outline selects candidates; only filled copper proves a
+            # connection that can safely omit its layer's stub.
             zone_polygons = _same_net_zone_boundaries(pcb, via, net_name)
             if not zone_polygons:
                 result.unresolvable.append(
@@ -612,6 +836,8 @@ def relocate_in_pad_vias(
                 min_clearance,
                 min_hole_to_hole,
                 zone_polygons,
+                pad,
+                net_name,
             )
             if target is None:
                 result.unresolvable.append(
@@ -632,8 +858,11 @@ def relocate_in_pad_vias(
                 continue
 
             new_x, new_y = target
+            plane_stub_layers = _plane_stub_layers(pcb, via, pad, target, net_name)
             if not dry_run:
-                moved_ok = pcb.relocate_via(via, (new_x, new_y))
+                moved_ok = _persist_via_with_stubs(
+                    pcb, via, target, plane_stub_layers, via.size, net_name
+                )
                 if not moved_ok:
                     result.unresolvable.append(
                         ViaRelocationSkip(
@@ -659,7 +888,7 @@ def relocate_in_pad_vias(
                     net_name=net_name,
                     pad_ref=pad_ref,
                     uuid=via.uuid,
-                    stub_layers=[],
+                    stub_layers=plane_stub_layers,
                     kind="plane-stitch",
                 )
             )
@@ -676,6 +905,18 @@ def relocate_in_pad_vias(
         )
         _, far = escape
 
+        # Layers needing a connectivity stub: the pad's copper layer (pad->via
+        # path) plus every connected segment's layer (route->via path).
+        stub_layers: list[str] = []
+        seen_layers: set[str] = set()
+        for layer in [_pad_copper_layer(pad), *(seg.layer for seg, _ in connected)]:
+            if layer and layer not in seen_layers:
+                seen_layers.add(layer)
+                stub_layers.append(layer)
+
+        # Stub width: the escape track's width (fall back to a sane default).
+        stub_width = escape[0].width if escape[0].width > 0 else 0.2
+
         if _dist_point_to_aabb(far[0], far[1], bbox) <= 1e-6:
             # Gap A (Phase 3): no connected branch leaves the pad boundary, so
             # there is no single reliable slide direction (multi-branch fan-out
@@ -685,7 +926,15 @@ def relocate_in_pad_vias(
             # does.  The via is reported unresolvable only when no clearing
             # off-pad location exists (boxed in) -- never mis-placed.
             target = _first_offpad_signal_candidate(
-                pcb, via, bbox, pads_by_net, tht_pads, min_clearance, min_hole_to_hole
+                pcb,
+                via,
+                bbox,
+                pads_by_net,
+                tht_pads,
+                min_clearance,
+                min_hole_to_hole,
+                stub_layers,
+                stub_width,
             )
             if target is None:
                 result.unresolvable.append(
@@ -754,31 +1003,28 @@ def relocate_in_pad_vias(
                 )
                 continue
 
-        # Layers needing a connectivity stub: the pad's copper layer (pad->via
-        # path) plus every connected segment's layer (route->via path).
-        stub_layers: list[str] = []
-        seen_layers: set[str] = set()
-        for layer in [_pad_copper_layer(pad), *(seg.layer for seg, _ in connected)]:
-            if layer and layer not in seen_layers:
-                seen_layers.add(layer)
-                stub_layers.append(layer)
-
-        # Stub width: the escape track's width (fall back to a sane default).
-        stub_width = escape[0].width if escape[0].width > 0 else 0.2
+        reason = _check_stub_clearance(
+            pcb, via, (new_x, new_y), stub_layers, stub_width, min_clearance
+        )
+        if reason is not None:
+            result.unresolvable.append(
+                ViaRelocationSkip(
+                    x=vx,
+                    y=vy,
+                    net=via.net_number,
+                    net_name=net_name,
+                    pad_ref=pad_ref,
+                    reason=reason,
+                    uuid=via.uuid,
+                    category="unresolvable",
+                )
+            )
+            continue
 
         if not dry_run:
-            # Add stubs from the old (in-pad) location to the new via location
-            # on each connected layer BEFORE moving the via, so connectivity is
-            # continuous at every step.  No existing copper is mutated.
-            for layer in stub_layers:
-                pcb.add_trace(
-                    (vx, vy),
-                    (new_x, new_y),
-                    width=stub_width,
-                    layer=layer,
-                    net=net_name or None,
-                )
-            moved_ok = pcb.relocate_via(via, (new_x, new_y))
+            moved_ok = _persist_via_with_stubs(
+                pcb, via, (new_x, new_y), stub_layers, stub_width, net_name
+            )
             if not moved_ok:
                 # Could not find the backing S-expression node -- record as
                 # unresolvable rather than claiming a move that will not persist.
@@ -901,7 +1147,7 @@ def print_relocation_results(
         if m.stub_layers:
             tie = f"stubs on {', '.join(m.stub_layers)}"
         else:
-            tie = "plane-stitch (no stub; pour overlap re-realized on zone refill)"
+            tie = "plane-stitch (no stub; connected filled copper)"
         print(
             f"  Via {m.uuid[:8] or '?'} (net '{m.net_name}') on pad {m.pad_ref}: "
             f"({m.old_x:.3f}, {m.old_y:.3f}) -> ({m.new_x:.3f}, {m.new_y:.3f}); "
@@ -912,9 +1158,8 @@ def print_relocation_results(
 
     if any(m.kind == "plane-stitch" for m in result.moved):
         print(
-            "\nNote: plane-stitch vias were moved without a stub -- run "
-            "`kicad-cli pcb drc --refill-zones` to re-establish the pour "
-            "connection at each via's new location."
+            "\nNote: run `kicad-cli pcb drc --refill-zones` to validate "
+            "plane-stitch pour connections after saving."
         )
 
     if result.skipped:

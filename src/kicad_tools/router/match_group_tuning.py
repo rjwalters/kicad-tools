@@ -2133,20 +2133,32 @@ def _splice_mirrored_n_route(
     n_route: Route,
     n_insertion_seg_index: int,
     mirrored_segments: list[Segment],
-) -> Route:
+    *,
+    endpoint_tolerance_mm: float = 1e-6,
+) -> Route | None:
     """Build a new N-side Route by splicing in mirrored serpentine segments.
 
     The strategy mirrors what :meth:`SerpentineGenerator.add_serpentine`
     does on the P side: replace ``n_route.segments[n_insertion_seg_index]``
-    with the mirrored segments (which start at the original segment's
-    one endpoint and end at the other) plus the surrounding segments
-    untouched.
+    (the "host" segment) with the mirrored segments (which are expected
+    to start at one endpoint of the host and end at the other) plus the
+    surrounding segments untouched.
 
-    Note: this is a simplified splice that assumes ``mirrored_segments``
-    forms a continuous path from one endpoint of the original segment
-    to the other.  When the mirror swaps the direction (because the
-    reflection axis crosses through the segment) the splice prepends
-    the reversed first/last endpoints onto the surrounding segments.
+    Issue #4984: the caller (:func:`_find_corresponding_n_segment`)
+    selects the host by same-layer midpoint proximity, which does not
+    guarantee the host's own span matches the span the reflected P-side
+    geometry actually occupies.  Blindly replacing the host with
+    ``mirrored_segments`` in that case produces a malformed route: the
+    surrounding ``before``/``after`` segments no longer connect to the
+    spliced-in geometry, so the result has a discontinuity (silently
+    duplicated/overlapping copper) and an added length that differs
+    between the two halves of the pair.  This function now REQUIRES
+    ``mirrored_segments`` to start and end exactly at the host's own two
+    endpoints (in either order -- the mirror can flip direction) within
+    ``endpoint_tolerance_mm``, and returns ``None`` instead of
+    constructing a candidate when that does not hold.  Callers MUST
+    treat ``None`` the same as any other failed tuning attempt (reject
+    the candidate, do not commit it).
 
     Args:
         n_route: The original N-side route to splice into.
@@ -2154,17 +2166,71 @@ def _splice_mirrored_n_route(
             that the serpentine replaces.
         mirrored_segments: The mirrored serpentine segments (P-side
             geometry reflected about the centerline).
+        endpoint_tolerance_mm: Maximum allowed distance between a
+            ``mirrored_segments`` boundary point and the corresponding
+            host endpoint for the two to be considered the same point.
+            Kept tight by default (sub-micron) since both endpoints are
+            already grid-snapped upstream by
+            :func:`_mirror_segments_about_centerline`; this only absorbs
+            floating-point rounding, not genuine geometric mismatch.
 
     Returns:
         A new :class:`Route` with the same ``net``/``net_name`` as
-        ``n_route`` and the mirrored segments spliced in.  The original
-        ``n_route`` object and its ``.segments`` list are NOT mutated.
+        ``n_route`` and the mirrored segments spliced in, or ``None``
+        when the reflected geometry's endpoints do not correspond to
+        the host segment's own endpoints. The original ``n_route``
+        object and its ``.segments`` list are NOT mutated in either
+        case.
     """
     from .primitives import Route as _Route
+    from .primitives import Segment as _Segment
 
+    if not mirrored_segments:
+        return None
+    if n_insertion_seg_index < 0 or n_insertion_seg_index >= len(n_route.segments):
+        return None
+
+    host = n_route.segments[n_insertion_seg_index]
     before = list(n_route.segments[:n_insertion_seg_index])
     after = list(n_route.segments[n_insertion_seg_index + 1 :])
-    new_segments = before + list(mirrored_segments) + after
+
+    def _same_point(ax: float, ay: float, bx: float, by: float) -> bool:
+        return abs(ax - bx) <= endpoint_tolerance_mm and abs(ay - by) <= endpoint_tolerance_mm
+
+    m_first = mirrored_segments[0]
+    m_last = mirrored_segments[-1]
+
+    if _same_point(m_first.x1, m_first.y1, host.x1, host.y1) and _same_point(
+        m_last.x2, m_last.y2, host.x2, host.y2
+    ):
+        ordered_mirrored = list(mirrored_segments)
+    elif _same_point(m_first.x1, m_first.y1, host.x2, host.y2) and _same_point(
+        m_last.x2, m_last.y2, host.x1, host.y1
+    ):
+        # The reflected chain runs the opposite direction from the host
+        # (the reflection axis crosses through the host segment) --
+        # reverse both the segment order and each segment's own
+        # endpoints so the spliced chain still runs before -> after.
+        ordered_mirrored = [
+            _Segment(
+                x1=seg.x2,
+                y1=seg.y2,
+                x2=seg.x1,
+                y2=seg.y1,
+                width=seg.width,
+                layer=seg.layer,
+                net=seg.net,
+                net_name=seg.net_name,
+            )
+            for seg in reversed(mirrored_segments)
+        ]
+    else:
+        # Neither orientation lines up with the host's own endpoints --
+        # the host does not correspond to the reflected P-side span.
+        # Reject rather than splice a malformed/discontinuous route.
+        return None
+
+    new_segments = before + ordered_mirrored + after
     return _Route(
         net=n_route.net,
         net_name=n_route.net_name,
@@ -2176,32 +2242,60 @@ def _splice_mirrored_n_route(
 def _find_corresponding_n_segment(
     n_route: Route,
     p_seg: Segment,
+    *,
+    max_span_mismatch_mm: float = 0.05,
 ) -> tuple[int, Segment] | None:
     """Find the N-side segment "corresponding" to ``p_seg``.
 
     The correspondence heuristic: the N-side segment whose midpoint is
-    closest to ``p_seg``'s midpoint AND which shares the same layer.
-    This works for the canonical pair geometry (P and N traces running
-    parallel to each other on the same layer) which is what Phase 2F is
-    targeted at (MIPI lanes, HDMI TMDS lanes).
+    closest to ``p_seg``'s midpoint, which shares the same layer, AND
+    whose own span (length) is within ``max_span_mismatch_mm`` of
+    ``p_seg``'s span. This works for the canonical pair geometry (P and
+    N traces running parallel to each other on the same layer) which is
+    what Phase 2F is targeted at (MIPI lanes, HDMI TMDS lanes).
+
+    Issue #4984: the span check is required, not cosmetic. The mirrored
+    replacement geometry that will later be spliced into the returned
+    segment's slot spans exactly ``p_seg``'s own length (reflection
+    preserves length). If the selected N host segment has a
+    substantially different span, the reflected chain's endpoints will
+    not land on the host's own endpoints, and
+    :func:`_splice_mirrored_n_route` would either have to reject the
+    candidate anyway or (before this fix) silently splice a
+    discontinuous, length-mismatched route. Filtering here means a
+    genuinely non-corresponding host is never returned as if it were a
+    match, and a same-layer segment elsewhere in the route whose span
+    DOES match is preferred over a closer-but-wrong-span neighbor.
 
     Args:
         n_route: The N-side route.
         p_seg: The P-side segment selected for trombone insertion.
+        max_span_mismatch_mm: Maximum allowed absolute difference
+            between ``p_seg``'s length and a candidate segment's length
+            for the candidate to be considered corresponding.
 
     Returns:
         ``(index, segment)`` -- the index into ``n_route.segments`` and
-        the segment itself, or ``None`` if no same-layer N segment
-        exists.
+        the segment itself, or ``None`` if no same-layer, span-matching
+        N segment exists.
     """
+    import math
+
     p_mx = (p_seg.x1 + p_seg.x2) / 2.0
     p_my = (p_seg.y1 + p_seg.y2) / 2.0
+    p_length = math.hypot(p_seg.x2 - p_seg.x1, p_seg.y2 - p_seg.y1)
 
     best_idx: int | None = None
     best_seg: Segment | None = None
     best_d2 = float("inf")
     for i, nseg in enumerate(n_route.segments):
         if nseg.layer != p_seg.layer:
+            continue
+        n_length = math.hypot(nseg.x2 - nseg.x1, nseg.y2 - nseg.y1)
+        if abs(n_length - p_length) > max_span_mismatch_mm:
+            # Same-layer but a materially different span: not a
+            # corresponding host (issue #4984) -- skip regardless of
+            # how close its midpoint is.
             continue
         n_mx = (nseg.x1 + nseg.x2) / 2.0
         n_my = (nseg.y1 + nseg.y2) / 2.0
@@ -2799,6 +2893,24 @@ def _tune_match_group_of_pairs(
                 n_insertion_seg_index=n_insertion_seg_idx,
                 mirrored_segments=new_n_segments,
             )
+            if candidate_n_route is None:
+                # Issue #4984: the reflected P-side geometry's endpoints
+                # do not correspond to the selected N-side host
+                # segment's own endpoints -- splicing anyway would
+                # produce a discontinuous route with asymmetric added
+                # length. Reject the candidate and roll back, same as
+                # any other failed insertion attempt this cascade loop.
+                for r in (per_pair_result_p, per_pair_result_n):
+                    r.reason = "no_suitable_segment"
+                    r.message = (
+                        "Reflected P-side geometry does not correspond to "
+                        "the selected N-side host segment's endpoints for "
+                        f"pair ({p_id}, {n_id}); rejecting candidate rather "
+                        "than splicing a malformed route."
+                    )
+                current_p = original_p_route
+                current_n = original_n_route
+                break
 
             # --- Step 6: paired DRC self-check.
             pair_drc_detail = _post_insertion_clearance_detail_pair_group(
