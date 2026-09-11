@@ -791,7 +791,13 @@ def _run_relocate_in_pad(args, pcb_path: Path, resolved_layers: int) -> int:
 
     # Resolve the source project's hole floor before a renamed output is saved.
     try:
-        result = relocate_in_pad_vias(pcb, rules, nets=nets, dry_run=args.dry_run)
+        result = relocate_in_pad_vias(
+            pcb,
+            rules,
+            nets=nets,
+            dry_run=args.dry_run,
+            search_alternatives=getattr(args, "search_alternatives", False),
+        )
     except (ValueError, OSError) as exc:
         print(f"Error resolving relocation constraints: {exc}", file=sys.stderr)
         return 1
@@ -913,6 +919,11 @@ Examples:
             "are reported (skipped/unresolvable), never left silently in-pad. "
             "This is a distinct pass from via resizing."
         ),
+    )
+    parser.add_argument(
+        "--search-alternatives",
+        action="store_true",
+        help="With --relocate-in-pad, try up to 24 safe cardinal/45-degree alternatives when the preferred escape is blocked (default: disabled).",
     )
     parser.add_argument(
         "--net",

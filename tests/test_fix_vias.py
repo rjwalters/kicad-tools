@@ -3271,6 +3271,300 @@ def test_invalid_hole_floor_cli_preserves_source(tmp_path, capsys):
     assert board.read_bytes() == original
 
 
+def test_blocked_slide_alternative_preserves_copper(tmp_path):
+    source = Path(__file__).parent / "fixtures/via_relocation/blocked_slide.kicad_pcb"
+    board = _write(tmp_path, source.read_text())
+    pcb = PCB.load(board)
+    original = [(s.start, s.end, s.width, s.layer, s.net_number, s.uuid) for s in pcb.segments]
+    rules = get_mfr_design_rules("jlcpcb", 4, 1.0)
+    assert not relocate_in_pad_vias(pcb, rules).moved
+    result = relocate_in_pad_vias(pcb, rules, search_alternatives=True)
+    assert len(result.moved) == 1
+    assert result.moved[0].new_x == pytest.approx(10)
+    assert result.moved[0].new_y == pytest.approx(10.8266)
+    pcb.save(board)
+    reloaded = PCB.load(board)
+    assert [
+        (s.start, s.end, s.width, s.layer, s.net_number, s.uuid) for s in reloaded.segments[:1]
+    ] == original
+    assert reloaded.vias[0].uuid == "11111111-1111-4111-8111-111111111111"
+    assert {s.layer for s in reloaded.segments[1:]} == {"F.Cu", "B.Cu"}
+    assert all(s.width == 0.45 and s.net_number == 1 for s in reloaded.segments[1:])
+
+
+def _blocked_slide_board(tmp_path, extra=""):
+    source = Path(__file__).parent / "fixtures/via_relocation/blocked_slide.kicad_pcb"
+    return _write(tmp_path, source.read_text().rstrip().removesuffix(")") + extra + ")")
+
+
+@pytest.mark.parametrize("net", [0, 2])
+def test_alternative_rejects_entire_foreign_stub(tmp_path, net):
+    # The nearest +Y landing is clear, but its stub crosses foreign copper.
+    obstacle = f"""(segment (start 9.6 10.42) (end 10.4 10.42)
+        (width .1) (layer "B.Cu") (net {net}))"""
+    pcb = PCB.load(_blocked_slide_board(tmp_path, obstacle))
+    result = relocate_in_pad_vias(
+        pcb, get_mfr_design_rules("jlcpcb", 4, 1.0), search_alternatives=True
+    )
+    assert len(result.moved) == 1
+    # Next cardinal direction (-X) is safe; the old via/track are retained.
+    assert result.moved[0].new_x < 10
+    assert result.moved[0].new_y == pytest.approx(10)
+    assert pcb.segments[1].net_number == net
+
+
+@pytest.mark.parametrize(
+    "obstacles",
+    [
+        # All directions blocked by same-net drill ring.
+        "".join(
+            f'(via (at {x} {y}) (size .45) (drill .2) (layers "F.Cu" "B.Cu") (net 1))'
+            for x, y in [
+                (10.7, 10),
+                (10, 10.7),
+                (9.3, 10),
+                (10, 9.3),
+                (10.7, 10.7),
+                (9.3, 10.7),
+                (9.3, 9.3),
+                (10.7, 9.3),
+                (11.2, 10),
+                (10, 11.2),
+                (8.8, 10),
+                (10, 8.8),
+            ]
+        ),
+        # Four foreign tracks fence the entire swept copper, even far landings.
+        "".join(
+            f'(segment (start {x1} {y1}) (end {x2} {y2}) (width .2) (layer "B.Cu") (net 0))'
+            for x1, y1, x2, y2 in [
+                (9.6, 9.6, 10.4, 9.6),
+                (10.4, 9.6, 10.4, 10.4),
+                (10.4, 10.4, 9.6, 10.4),
+                (9.6, 10.4, 9.6, 9.6),
+            ]
+        ),
+    ],
+)
+def test_alternative_boxed_in_is_atomic(tmp_path, obstacles):
+    pcb = PCB.load(_blocked_slide_board(tmp_path, obstacles))
+    original = pcb._sexp.to_string()
+    result = relocate_in_pad_vias(
+        pcb, get_mfr_design_rules("jlcpcb", 4, 1.0), search_alternatives=True
+    )
+    assert not result.moved
+    assert len(result.skipped) == 1
+    assert "no safe bounded alternative" in result.skipped[0].reason
+    assert pcb._sexp.to_string() == original
+
+
+@pytest.mark.parametrize(
+    "outline",
+    [
+        '(gr_rect (start 0 0) (end 20 10.5) (layer "Edge.Cuts"))',
+        '(gr_rect (start 0 0) (end 20 20) (layer "Edge.Cuts"))'
+        '(gr_rect (start 9.8 10.35) (end 10.2 10.55) (layer "Edge.Cuts"))',
+        "(gr_poly (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 10.3 20)"
+        ' (xy 10.3 10.5) (xy 9.7 10.5) (xy 9.7 20) (xy 0 20)) (layer "Edge.Cuts"))',
+    ],
+)
+def test_alternative_checks_actual_outline_and_stub_cutout(tmp_path, outline):
+    from kicad_tools.cli.relocate_in_pad_vias import _alternative_board_region
+
+    pcb = PCB.load(_blocked_slide_board(tmp_path))
+    node = next(n for n in pcb._sexp.children if n.name == "gr_rect")
+    pcb._sexp.remove(node)
+    from kicad_tools.sexp import parse_string
+
+    # Read directly from S-expression to avoid stale cached geometry.
+    pcb._sexp.children.extend(
+        n for n in parse_string("(root " + outline + ")").children if not n.is_atom
+    )
+    result = relocate_in_pad_vias(
+        pcb, get_mfr_design_rules("jlcpcb", 4, 1.0), search_alternatives=True
+    )
+    assert len(result.moved) == 1
+    assert result.moved[0].new_y == pytest.approx(10)
+    assert result.moved[0].new_x < 10
+    from shapely.geometry import Point
+
+    assert _alternative_board_region(pcb).contains(Point(pcb.vias[0].position))
+
+
+@pytest.mark.parametrize(
+    "outline",
+    [
+        '(gr_circle (center 8 8) (end 8.1 8) (layer "Edge.Cuts"))',
+        '(gr_line (start 8 8) (end 9 8) (layer "Edge.Cuts"))',
+        '(gr_poly (layer "Edge.Cuts"))',
+    ],
+)
+def test_alternative_unproven_outline_refuses_atomically(tmp_path, outline):
+    pcb = PCB.load(_blocked_slide_board(tmp_path, outline))
+    original = pcb._sexp.to_string()
+    result = relocate_in_pad_vias(
+        pcb, get_mfr_design_rules("jlcpcb", 4, 1.0), search_alternatives=True
+    )
+    assert not result.moved
+    assert pcb._sexp.to_string() == original
+
+
+def test_alternative_dry_run_filters_capability_and_cli(tmp_path):
+    import copy
+    from dataclasses import replace
+
+    board = _blocked_slide_board(tmp_path)
+    pcb = PCB.load(board)
+    original = pcb._sexp.to_string()
+    rules = get_mfr_design_rules("jlcpcb", 4, 1.0)
+    dry = relocate_in_pad_vias(pcb, rules, search_alternatives=True, dry_run=True)
+    live = relocate_in_pad_vias(copy.deepcopy(pcb), rules, search_alternatives=True)
+    assert dry == live
+    assert pcb._sexp.to_string() == original
+    assert not relocate_in_pad_vias(pcb, rules, search_alternatives=True, nets={"OTHER"}).changed
+    assert relocate_in_pad_vias(
+        pcb, replace(rules, via_in_pad_supported=True), search_alternatives=True
+    ).supported_noop
+    assert pcb._sexp.to_string() == original
+    before = board.read_bytes()
+    assert (
+        main(
+            [
+                str(board),
+                "--relocate-in-pad",
+                "--search-alternatives",
+                "--dry-run",
+                "--layers",
+                "4",
+                "--quiet",
+            ]
+        )
+        == 0
+    )
+    assert board.read_bytes() == before
+    assert (
+        main([str(board), "--relocate-in-pad", "--search-alternatives", "--layers", "4", "--quiet"])
+        == 0
+    )
+    assert PCB.load(board).vias[0].position == pytest.approx(
+        (dry.moved[0].new_x, dry.moved[0].new_y)
+    )
+
+
+def test_alternative_project_floor_gates_every_stub(tmp_path):
+    import json
+
+    extra = '(via (at 10.45 10.8) (size .45) (drill .2) (layers "F.Cu" "B.Cu") (net 0))'
+    board = _blocked_slide_board(tmp_path, extra)
+    rules = get_mfr_design_rules("jlcpcb", 4, 1.0)
+    assert relocate_in_pad_vias(PCB.load(board), rules, search_alternatives=True).moved
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"min_hole_clearance": 0.7}}}})
+    )
+    pcb = PCB.load(board)
+    original = pcb._sexp.to_string()
+    result = relocate_in_pad_vias(pcb, rules, search_alternatives=True, min_hole_clearance_mm=0.25)
+    assert not result.moved
+    assert pcb._sexp.to_string() == original
+
+
+def test_alternative_preserves_offset_pad_and_all_layers(tmp_path):
+    from shapely.geometry import LineString, box
+
+    board = _blocked_slide_board(tmp_path)
+    text = board.read_text().replace(
+        '(31 "B.Cu" signal)', '(1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)'
+    )
+    text = text.replace(
+        "(via (at 10 10) (size .45) (drill .2)", "(via (at 10.65 10) (size .6) (drill .4)"
+    )
+    text = text.replace("(start 10 10)", "(start 10.65 10)")
+    text = text.replace("(at 10.7016 10.3)", "(at 11.1 10.3)")
+    board.write_text(text)
+    pcb = PCB.load(board)
+    result = relocate_in_pad_vias(
+        pcb, get_mfr_design_rules("jlcpcb", 4, 1.0), search_alternatives=True
+    )
+    assert len(result.moved) == 1
+    stubs = pcb.segments[1:]
+    assert {s.layer for s in stubs} == {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}
+    surface_stub = next(s for s in stubs if s.layer == "F.Cu")
+    # The old drill overlaps the pad, but a .2-wide perpendicular stub misses
+    # it because the via center sits .15 beyond the pad. Full land survives.
+    assert surface_stub.start == (10.65, 10)
+    assert surface_stub.width >= 0.6
+    assert (
+        LineString([surface_stub.start, surface_stub.end])
+        .buffer(surface_stub.width / 2)
+        .intersects(box(9.5, 9.5, 10.5, 10.5))
+    )
+
+
+def test_alternative_native_roundtrip(tmp_path):
+    import json
+    import shutil
+    import subprocess
+
+    native = shutil.which("kicad-cli")
+    if native is None:
+        pytest.skip("native KiCad CLI unavailable")
+    board = _blocked_slide_board(tmp_path)
+
+    def drc(name):
+        output = tmp_path / f"{name}.json"
+        subprocess.run(
+            [
+                native,
+                "pcb",
+                "drc",
+                "--refill-zones",
+                "--save-board",
+                "--format",
+                "json",
+                "-o",
+                str(output),
+                str(board),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return json.loads(output.read_text())
+
+    before = drc("before")
+    pcb = PCB.load(board)
+    result = relocate_in_pad_vias(
+        pcb, get_mfr_design_rules("jlcpcb", 4, 1.0), search_alternatives=True
+    )
+    assert len(result.moved) == 1
+    pcb.save(board)
+    after = drc("after")
+    assert not [
+        v
+        for v in after["violations"]
+        if v["type"]
+        in {
+            "clearance",
+            "hole_clearance",
+            "holes_co_located",
+            "shorting_items",
+            "copper_edge_clearance",
+        }
+    ]
+    assert len(after["unconnected_items"]) <= len(before["unconnected_items"])
+
+
+def test_alternative_does_not_transfer_overlap_to_same_net_pad(tmp_path):
+    extra = """(footprint "Test:Pad" (layer "B.Cu") (at 10 10.83)
+      (pad "1" smd rect (at 0 0) (size .2 .2) (layers "B.Cu") (net 1 "SIG")))"""
+    pcb = PCB.load(_blocked_slide_board(tmp_path, extra))
+    result = relocate_in_pad_vias(
+        pcb, get_mfr_design_rules("jlcpcb", 4, 1.0), search_alternatives=True
+    )
+    assert len(result.moved) == 1
+    assert result.moved[0].new_x < 10
+    assert result.moved[0].new_y == pytest.approx(10)
+
+
 @pytest.mark.parametrize("drill", ["oval .2 1.6", ".2 (offset 0 -.7)"])
 @pytest.mark.parametrize("gate", ["via", "stub"])
 def test_hole_floor_rejects_unmodeled_pad_drills(tmp_path, drill, gate):
