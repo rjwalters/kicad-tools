@@ -490,5 +490,7 @@ export_pnp(pcb, "cpl.csv", manufacturer="jlcpcb", config=config)
 For exact-byte, locally verified Gerber/BOM/CPL handoffs, see
 [Offline assembly submission preparation](submission-preparation.md). This Python
 API produces a deterministic plan and expected reference matching list without
-supplier access, uploads, approval, or orders. Live inventory composition remains
-milestone B of #5142.
+supplier access, uploads, approval, or orders. A narrow `refresh_inventory`
+increment can observe exact-ID stock through a caller-supplied official adapter,
+preserving unknown-vs-zero evidence; the full milestone B provenance/freshness
+contract remains blocked on #5033/#5034 (PRs #5115/#5090), so #5142 stays open.

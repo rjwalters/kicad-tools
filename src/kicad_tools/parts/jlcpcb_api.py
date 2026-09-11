@@ -77,7 +77,7 @@ import re
 import secrets
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from .lcsc import _categorize_part, _guess_package_type
 from .models import Part, PartPrice
@@ -165,6 +165,15 @@ class JLCQuotaError(JLCAPIError):
 
     Actionable: back off and retry later, or request a higher quota from the
     developer portal.
+    """
+
+
+class JLCIncompleteResponseError(JLCAPIError):
+    """The HTTP/business envelope succeeded but the payload shape is unusable.
+
+    Distinct from a transport failure or a per-code miss: the server accepted
+    the request, but ``data`` was not the documented list, so no per-code
+    stock evidence -- verified, missing, or malformed -- can be attributed.
     """
 
 
@@ -447,6 +456,44 @@ class JLCOpenAPIClient:
             if part.lcsc_part:
                 parts[part.lcsc_part.upper()] = part
         return parts
+
+    def get_component_detail_raw(self, codes: list[str]) -> list[dict[str, Any]]:
+        """Return raw per-code response objects, with no ``Part`` projection.
+
+        Unlike :meth:`get_component_detail_by_codes`, this performs **no**
+        field coercion: ``stockCount`` is returned exactly as the server sent
+        it (absent, ``null``, a string, negative, or a genuine non-negative
+        int), so a caller that must distinguish verified-zero stock from
+        unknown/missing/malformed evidence has the raw material to do so
+        instead of silently observing ``Part.stock == 0`` for both.
+
+        Args:
+            codes: LCSC part numbers. Blank entries are dropped; an empty
+                result after cleaning returns ``[]`` without a request.
+
+        Returns:
+            The raw ``data`` list entries that are JSON objects (non-object
+            entries are dropped, not coerced). Codes with no match are simply
+            absent -- this method does not report per-code misses itself.
+
+        Raises:
+            JLCIncompleteResponseError: the response envelope succeeded but
+                ``data`` was not a list.
+            JLCAPIError (and subclasses): transport, auth, permission, IP
+                whitelist, or quota failures, exactly as for
+                :meth:`get_component_detail_by_codes`.
+        """
+        cleaned = [c.strip().upper() for c in codes if c and c.strip()]
+        if not cleaned:
+            return []
+
+        result = self._post_signed(COMPONENT_DETAIL_PATH, {"componentCodes": cleaned})
+        data = result.get("data")
+        if not isinstance(data, list):
+            raise JLCIncompleteResponseError(
+                "JLCPCB open-platform returned a non-list component-detail payload."
+            )
+        return [component for component in data if isinstance(component, dict)]
 
     def close(self) -> None:
         """Close the underlying HTTP session, if any."""
