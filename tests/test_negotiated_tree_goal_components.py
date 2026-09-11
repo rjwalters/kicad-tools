@@ -159,7 +159,7 @@ def test_disjoint_forest_does_not_offer_unrelated_tree_as_goal():
     assert all(gy >= 65 for _, gy, _ in calls[2][2])
 
 
-def test_failed_swapped_edge_preserves_callback_and_component_state():
+def test_failed_edge_preserves_callback_and_component_state():
     pads, _, calls, failures = _run(
         [(0, 1), (0, 2), (2, 3)],
         points=[(2, 2), (7, 2), (2, 7), (7, 7)],
@@ -188,3 +188,11 @@ def test_tree_via_goals_respect_physical_layer_span(span):
     )
     first, last = sorted(grid.layer_to_index(layer.value) for layer in span)
     assert {layer for _, _, layer in cells} == set(range(first, last + 1))
+
+
+def test_existing_source_retains_directed_edge():
+    pads, routes, calls, _ = _run([(0, 1), (0, 2)])
+    assert calls[1][0] is pads[0]
+    assert calls[1][1] is pads[2]
+    assert calls[1][2] is None
+    assert _touches(pads[2], routes)

@@ -1242,11 +1242,10 @@ class NegotiatedRouter:
 
                 source_root, target_root = tree_root(i), tree_root(j)
                 search_start, search_end = source_pad, target_pad
-                # Grow from the unconnected endpoint toward existing copper.
-                # Keep original edge identities for failure callbacks below.
-                if source_root in tree_cells and target_root not in tree_cells:
-                    search_start, search_end = target_pad, source_pad
-                    source_root, target_root = target_root, source_root
+                # Preserve the RSMT edge's search direction. When only the
+                # source is connected, route to the exact new target rather
+                # than reversing native A* or returning to the source tree.
+                # An established target component still offers safe shortcuts.
                 goal_cells = tree_cells.get(target_root) if source_root != target_root else None
                 route = self.router.route(
                     search_start,
