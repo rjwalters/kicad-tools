@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 21
+_REQUIRED_CPP_BUILD_VERSION = 22
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -934,6 +934,7 @@ class CppGrid:
         from .grid import _is_plane_net_pad
 
         component_pitches = grid.compute_component_pitches()
+        grid._component_pitch_cache = component_pitches
 
         # Issue #3371 / P_FP2: Fine-pitch escape regions installed on the
         # grid (empty list when the detector has not run, which is the
@@ -1000,8 +1001,12 @@ class CppGrid:
                 ref_hash,
                 clearance_override,
                 is_plane_net,
+                pad.rotation,
             )
 
+        from .grid import _sync_pad_via_policies
+
+        _sync_pad_via_policies(grid, cpp_grid)
         return cpp_grid
 
     def index_to_layer(self, index: int) -> int:
@@ -2670,8 +2675,8 @@ class CppPathfinder:
     ) -> tuple[float, float] | None:
         """Validate post-route geometric clearance using C++ validation.
 
-        Issue #2439: Uses the C++ validate_route() call which runs all 4
-        validation checks (segment-pad, segment-segment, via-segment,
+        Issue #2439: Uses the C++ validate_route() call which runs
+        validation checks (segment-pad, segment-segment, via-pad, via-segment,
         via-via, same-net drill spacing) in a single C++ call, eliminating
         Python callback overhead.
 
@@ -2761,6 +2766,11 @@ class CppPathfinder:
         # trace-vs-trace copper, not pads and vias).  No-op without a voltage
         # map.
         self._sync_pairwise_domains_to_cpp()
+
+        if route.vias and py_grid is not None:
+            from .grid import _sync_pad_via_policies
+
+            _sync_pad_via_policies(py_grid, self._grid)
 
         vresult = self._grid._impl.validate_route(
             cpp_segs,
