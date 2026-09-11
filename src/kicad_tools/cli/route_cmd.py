@@ -73,6 +73,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
     from kicad_tools.router import Autorouter, LayerStack
+    from kicad_tools.router.current_paths import CurrentPathSpec
+    from kicad_tools.router.layer_intent import LayerIntentViolation
     from kicad_tools.router.net_names import NetClassMapResolution
     from kicad_tools.router.pairwise_clearance import AttachZone, PairwiseViolation
     from kicad_tools.router.primitives import Route
@@ -553,6 +555,54 @@ def _routable_multi_pad_nets(router: "Autorouter") -> list[int]:
     return sorted(result)
 
 
+def _reject_lost_route_only_bindings(args, nets_to_route: int) -> int | None:
+    """Issue #4983 defense-in-depth: fail loudly, never vacuously succeed.
+
+    ``--nets <NAME>[,...]`` preflight (:func:`_resolve_route_only_nets`)
+    already confirmed -- via the schema-level pad parser, which correctly
+    handles both KiCad net-reference dialects -- that every requested net
+    name exists on the board with 2+ pads before routing starts. If the
+    routing denominator built from ``router.nets`` (after
+    ``load_pcb_for_routing``) is STILL zero at this point, the loader lost
+    every requested net's pad-to-net binding while parsing the PCB file
+    (the exact #4983 failure mode -- a numeric-plus-name-only regex
+    mismatch silently collapsed bound pads to ``net_num=0``, an
+    unroutable obstacle id -- or any future regression with the same
+    shape). That is a bug, not a legitimate "nothing to route" outcome,
+    so this aborts with a clear error and non-zero exit instead of
+    letting the caller fall through to a "SUCCESS: All signal nets
+    routed! (0/0)" banner.
+
+    This is NOT triggered when every requested net was already reported
+    by preflight (:func:`_resolve_route_only_nets`) as having fewer than
+    2 pads -- that is the legitimate, warned "nothing to route" outcome
+    (e.g. a scripted single-pad ``--nets`` debug request), not a lost
+    binding.
+
+    Returns a non-zero exit code to return immediately, or ``None`` when
+    the denominator is trustworthy (including when ``--nets`` was not
+    used at all).
+    """
+    requested = getattr(args, "_route_only_nets", None)
+    if not requested or nets_to_route != 0:
+        return None
+    under_two = getattr(args, "_route_only_nets_under_two", None) or set()
+    if set(requested) <= under_two:
+        # Preflight already warned every requested net has <2 pads -- a
+        # zero routable count is expected here, not a loader bug.
+        return None
+    print(
+        "Error: --nets requested "
+        f"{', '.join(requested)}, but 0 routable net(s) remained after "
+        "loading the board. The requested net(s)' pad bindings were lost "
+        "while parsing the PCB file -- --nets preflight already confirmed "
+        "the net(s) exist with 2+ pads, so this is a loader bug, not an "
+        "empty board. Aborting instead of reporting a vacuous success.",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def _emit_single_pad_net_warning(
     router: "Autorouter",
     single_pad_nets: list[int],
@@ -993,6 +1043,20 @@ def _write_routed_pcb(
 
     # Atomic write: tmp file -> fsync -> rename.  Sibling-in-same-dir
     # ensures os.replace is a same-filesystem rename (atomic on POSIX).
+    #
+    # NOTE (issue #4898): this stays a direct inline os.fsync/os.replace
+    # implementation rather than delegating to the new shared
+    # ``kicad_tools.core.atomic_write.atomic_write_text`` helper (used by
+    # ``save_pcb``/``save_schematic``/``save_project``/``save_footprint``/
+    # ``save_design_rules``). ``tests/test_route_zones_preserved.py``
+    # structurally asserts (via AST) that ``_write_routed_pcb`` calls
+    # ``fsync``/``replace`` directly in its own body as part of its
+    # zone-preservation guard; delegating to a helper in another module would
+    # make those calls invisible to that shallow-walk audit. The
+    # implementation is already identical to ``atomic_write_text`` -- this is
+    # a "keep the existing, already-tested/guarded code as-is" decision, not
+    # a functional difference. ``_save_partial_results`` (below) mirrors this
+    # same inline pattern for the same reason.
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     tmp_path.write_text(output_content)
     # fsync the file so a crash between write and rename does not leave
@@ -1900,7 +1964,33 @@ def _save_partial_results() -> bool:
             # Insert routes before final closing parenthesis
             output_content = _insert_sexp_before_closing(original_content, route_sexp)
 
-            save_path.write_text(output_content)
+            # Issue #4898: this SIGINT-triggered save previously used a plain
+            # ``write_text`` -- no tmp file, no fsync, no ``os.replace`` --
+            # unlike the terminal ``_write_routed_pcb`` path (#2808), so a
+            # second SIGINT (or a crash) during this very write could leave a
+            # torn partial-results file. Apply the same tmp -> fsync -> rename
+            # pattern here inline (mirroring ``_write_routed_pcb`` rather than
+            # calling the shared ``atomic_write_text`` helper) so this write
+            # site stays visible to
+            # ``tests/test_route_zones_preserved.py``'s AST-based
+            # zone-preservation audit, which discovers PCB-write sites by the
+            # ``<path>.write_text(<content variable>)`` shape.
+            # mypy infers ``save_path`` as ``bool | Path`` because it is
+            # ultimately sourced from the untyped ``_interrupt_state`` dict
+            # literal (whose declared-from-initializer value type is
+            # ``bool | None``) -- a pre-existing typing gap already covered
+            # by several baselined ``"bool" has no attribute ...`` errors
+            # elsewhere in this exact function (e.g. ``.read_text``,
+            # ``.with_stem``, the old ``.write_text``). These three lines are
+            # new attribute-access spellings of that same known-safe
+            # false positive (the guard above already establishes
+            # ``output_path``/``pcb_path`` are real ``Path`` objects), so
+            # they are ignored inline rather than growing the baseline file.
+            tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")  # type: ignore[attr-defined]
+            tmp_path.write_text(output_content)
+            with open(tmp_path, "rb") as f:
+                os.fsync(f.fileno())
+            os.replace(tmp_path, save_path)  # type: ignore[arg-type]
 
             if not quiet:
                 stats = router.get_statistics()
@@ -2353,6 +2443,185 @@ def _write_net_class_map_sidecar(
             print(f"  Net-class-map sidecar: {sidecar_path}")
 
 
+def _write_current_paths_sidecar(
+    output_path: Path,
+    current_path_specs: "Sequence[CurrentPathSpec] | None",
+    quiet: bool = False,
+    input_path: Path | None = None,
+) -> None:
+    """Persist the declared current-path intent next to the routed PCB (#4980).
+
+    The third and final consumer surface of the branch-specific
+    current-path model (PR #5125 landed the model + ``kct pcb reinforce``;
+    PR #5184 landed ``kct check``).  ``kct route --current-paths <file>``
+    now re-emits the *exact* declarations the route step validated against
+    as ``<output_dir>/current_paths.json``, so a later bare ``kct check``
+    on the routed board auto-discovers the same intent
+    (:func:`~kicad_tools.router.current_paths.discover_current_paths_sidecar`)
+    instead of silently running with ``path_ampacity`` INACTIVE.
+
+    That re-emission is what makes the issue's "route-time intent and the
+    independent final-copper audit agree on the branch/path assignments"
+    criterion true at the CLI level: both surfaces read byte-identical
+    declarations, so any disagreement is a real copper difference rather
+    than a difference in what was declared.
+
+    Follows the ``net_class_map.json`` sidecar contract exactly
+    (:func:`_write_net_class_map_sidecar`): a blocked / read-only output
+    directory degrades to a non-fatal warning rather than failing the
+    route, and when the derived path would overwrite the user's authored
+    ``--current-paths`` INPUT file (board written into the same directory
+    the sidecar was read from -- Issue #4428's collision), the write is
+    diverted to a sibling ``current_paths.effective.json`` so the authored
+    input is left untouched.
+
+    Args:
+        output_path: Path to the routed PCB file.  The sidecar is written
+            to the same directory.
+        current_path_specs: The declared specs the route step loaded.
+            Empty/``None`` writes nothing -- an empty sidecar would read as
+            "declared, and nothing to check", which is exactly the silent
+            pass the issue forbids.
+        quiet: If True, suppress the confirmation line.
+        input_path: The resolved ``--current-paths`` INPUT path (or
+            ``None``).  Used only to detect -- and avoid -- a self-overwrite.
+    """
+    import json
+
+    from kicad_tools.router.current_paths import (
+        CURRENT_PATHS_SIDECAR_BASENAME,
+        dump_current_path_specs,
+    )
+
+    if not current_path_specs:
+        return
+
+    sidecar_path = output_path.parent / CURRENT_PATHS_SIDECAR_BASENAME
+
+    diverted = False
+    if input_path is not None and _sidecar_collides_with_input(input_path, sidecar_path):
+        sidecar_path = output_path.parent / "current_paths.effective.json"
+        diverted = True
+
+    try:
+        payload = dump_current_path_specs(list(current_path_specs))
+        sidecar_path.write_text(json.dumps(payload, indent=2))
+    except (OSError, TypeError, ValueError) as e:
+        if not quiet:
+            print(f"  Warning: could not write current-paths sidecar: {e}")
+        return
+    if not quiet:
+        if diverted:
+            print(f"  Current-paths sidecar: {sidecar_path} (input --current-paths left unchanged)")
+        else:
+            print(f"  Current-paths sidecar: {sidecar_path}")
+
+
+def _preload_current_paths(args, pcb_path: Path) -> int:
+    """Validate + load the ``--current-paths`` sidecar before any routing (#4980).
+
+    Stashes the result on ``args._loaded_current_paths`` (always set, even
+    when empty) so each of the four post-route DRC call sites reads one
+    already-validated value instead of re-parsing.  Mirrors the
+    ``--net-class-map`` preload's placement (before dispatching to any
+    ``route_with_*`` sub-flow, so the error paths short-circuit regardless
+    of which routing path the args select) and ``kct check
+    --current-paths``' load contract (PR #5184) exactly:
+
+    * ``--current-paths FILE`` is **strict** -- a missing file or malformed
+      JSON returns exit 1 before any routing work happens.
+    * An **auto-discovered** sidecar degrades to a stderr warning when it
+      is malformed: a board that merely sits next to someone else's broken
+      file must still route.
+    * ``--no-current-paths`` suppresses discovery entirely, and pairing it
+      with an explicit ``--current-paths`` is a usage error.
+
+    Note the asymmetry with ``kct check``: this probes next to the **input**
+    board (routing has not written the output yet), and the route step then
+    re-emits the loaded specs next to the **output** board via
+    :func:`_write_current_paths_sidecar` so the later check auto-discovers
+    identical intent.
+
+    Args:
+        args: The parsed route namespace (mutated: ``_loaded_current_paths``).
+        pcb_path: The resolved INPUT board path, used for sidecar probing.
+
+    Returns:
+        ``0`` on success, ``1`` on a usage/validation error (already
+        reported on stderr).
+    """
+    from kicad_tools.router.current_paths import (
+        discover_current_paths_sidecar,
+        load_current_path_specs,
+    )
+
+    args._loaded_current_paths = []
+    # The file the specs actually came from (explicit OR auto-discovered).
+    # Threaded to the sidecar writer so the derived ``current_paths.json``
+    # never rewrites the source file in place -- an auto-discovered sidecar
+    # in the board directory is just as much the user's authored file as an
+    # explicitly-named one.
+    args._current_paths_input_path = None
+
+    explicit = getattr(args, "current_paths", None)
+    suppressed = bool(getattr(args, "no_current_paths", False))
+
+    if suppressed and explicit is not None:
+        print(
+            "Error: --no-current-paths cannot be combined with "
+            f"--current-paths {explicit!r}: one disables sidecar "
+            "auto-discovery, the other names a sidecar to load. Pass exactly "
+            "one of them.",
+            file=sys.stderr,
+        )
+        return 1
+    if suppressed:
+        return 0
+
+    cp_path = Path(explicit).resolve() if explicit is not None else None
+    if cp_path is None:
+        cp_path = discover_current_paths_sidecar(pcb_path)
+        if cp_path is None:
+            # Nothing declared and nothing found: path_ampacity stays
+            # inactive, exactly as before this flag existed.  Say so once, at
+            # non-quiet verbosity, so an inactive check is never mistaken for
+            # a passing one -- but as ONE line, not ``kct check``'s full
+            # probed-candidate dump: routing is not the audit surface, and
+            # this fires on every route of every board that does not use the
+            # feature.  ``kct check --current-paths`` names the probed paths
+            # for the user who wants to know where to put the file.
+            if not getattr(args, "quiet", False):
+                print(
+                    "  Note: no current-paths sidecar found; declared branch "
+                    "current checks (path_ampacity) are INACTIVE. Pass "
+                    "--current-paths FILE to enable them, or --no-current-paths "
+                    "to silence this."
+                )
+            return 0
+
+    if explicit is not None and not cp_path.exists():
+        print(f"Error: current-paths file not found: {cp_path}", file=sys.stderr)
+        return 1
+
+    try:
+        args._loaded_current_paths = load_current_path_specs(cp_path)
+    except (OSError, ValueError) as e:
+        if explicit is not None:
+            print(f"Error: parsing current-paths JSON: {e}", file=sys.stderr)
+            return 1
+        print(
+            f"WARNING: ignoring malformed current-paths sidecar {cp_path}: {e}",
+            file=sys.stderr,
+        )
+        args._loaded_current_paths = []
+        return 0
+
+    args._current_paths_input_path = cp_path
+    if explicit is None:
+        print(f"[INFO] auto-loaded current-paths sidecar: {cp_path}", file=sys.stderr)
+    return 0
+
+
 def _write_fab_profile_sidecar(
     output_path: Path,
     manufacturer: str,
@@ -2398,12 +2667,17 @@ def _write_fab_profile_sidecar(
         print(f"  Fab-profile sidecar: {sidecar_path}")
 
 
+class DRCConstraintPropagationError(ValueError):
+    """Authored source constraints could not safely reach the routed output."""
+
+
 def _write_drc_constraint_sidecars(
     output_path: Path,
     manufacturer: str,
     layers: int,
     copper_oz: float = 1.0,
     quiet: bool = False,
+    source_pcb_path: Path | None = None,
 ) -> None:
     """Emit ``.kicad_pro`` + ``.kicad_dru`` next to the routed PCB.
 
@@ -2442,20 +2716,42 @@ def _write_drc_constraint_sidecars(
         copper_oz: Copper weight in oz (defaults to 1.0, the system default
             and the correct value for all 8 demo boards).
         quiet: If True, suppress the confirmation line.
+        source_pcb_path: Original PCB for renamed outputs. Source propagation
+            failures are blocking and printed even in quiet mode.
     """
     try:
-        from kicad_tools.manufacturers import get_profile, write_drc_constraints
+        from kicad_tools.manufacturers import (
+            get_profile,
+            resolve_pcb_fabrication_overrides,
+            write_drc_constraints,
+        )
 
         profile = get_profile(manufacturer)
         rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
+        # Issue #5006: retain (or reject) a validated, cited per-board
+        # fabrication-floor override -- same contract `kct check
+        # --emit-drc-constraints` and the manufacturing export path use --
+        # so a route-triggered re-emit cannot silently revert a reviewed
+        # floor back to the profile's conservative default.
+        rules, fab_override_msg = resolve_pcb_fabrication_overrides(
+            output_path, rules, manufacturer_id=profile.id
+        )
+        if fab_override_msg is not None and not quiet:
+            prefix = "  Warning: " if fab_override_msg.startswith("ignoring") else "  "
+            print(prefix + fab_override_msg)
         written = write_drc_constraints(
             output_path,
             rules,
             manufacturer_id=profile.id,
             layers=layers,
             copper_oz=copper_oz,
+            source_pcb_path=source_pcb_path,
         )
     except (ValueError, OSError, KeyError) as e:
+        if source_pcb_path is not None:
+            raise DRCConstraintPropagationError(
+                f"cannot preserve source DRC constraints: {e}"
+            ) from e
         # Non-fatal: an unknown manufacturer (ValueError) or a read-only /
         # blocked output directory (OSError) must not fail the route.
         if not quiet:
@@ -2475,11 +2771,17 @@ def run_post_route_drc(
     strict_drc: bool = False,
     net_class_map_input_path: Path | None = None,
     loaded_net_class_map: dict | None = None,
+    source_pcb_path: Path | None = None,
+    current_path_specs: "Sequence[CurrentPathSpec] | None" = None,
+    current_paths_input_path: Path | None = None,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
     Args:
         output_path: Path to the routed PCB file
+        source_pcb_path: Original PCB before staging/renaming; carry authored
+            project and DRU into the destination before native DRC. Conflicting
+            destination constraints raise DRCConstraintPropagationError before DRC.
         manufacturer: Manufacturer profile for DRC rules (e.g., "jlcpcb")
         layers: Number of PCB layers
         quiet: If True, suppress output
@@ -2510,6 +2812,20 @@ def run_post_route_drc(
             (``args._loaded_net_class_map``), merged over the classifier
             output for round-trip fidelity in the derived sidecar (Issue
             #4428).
+        current_path_specs: Declared branch-specific current-path intent
+            (Issue #4980, ``args._loaded_current_paths`` from
+            ``--current-paths``).  When supplied, the ``path_ampacity``
+            rule checks each declared branch against its OWN declared
+            current -- independent of ``net_class_map``'s whole-net
+            ``target_ampacity`` -- and the specs are re-emitted as a
+            ``current_paths.json`` sidecar next to the routed board so a
+            later ``kct check`` audits against identical declarations.
+            ``None``/empty leaves ``path_ampacity`` inactive exactly as
+            before.
+        current_paths_input_path: The resolved ``--current-paths`` INPUT
+            path.  Threaded to the sidecar writer so the derived sidecar
+            never overwrites the user's authored file (Issue #4428's
+            collision rule, applied to this sidecar too).
 
     Returns:
         Tuple of (error_count, warning_count)
@@ -2531,6 +2847,17 @@ def run_post_route_drc(
         loaded_net_class_map=loaded_net_class_map,
     )
 
+    # Issue #4980: persist the declared branch current-path intent next to the
+    # routed PCB so a later bare ``kct check`` audits the finished copper
+    # against the SAME declarations this route step validated, rather than
+    # silently running with ``path_ampacity`` INACTIVE.
+    _write_current_paths_sidecar(
+        output_path,
+        current_path_specs,
+        quiet=quiet,
+        input_path=current_paths_input_path,
+    )
+
     # Issue #3920: persist the resolved fab profile as a ``fab_profile.json``
     # sidecar next to the routed PCB so bare ``kct check`` auto-discovers the
     # intended manufacturer tier instead of defaulting to base ``jlcpcb`` and
@@ -2546,7 +2873,12 @@ def run_post_route_drc(
     # route flow -- makes the verdict deterministic and independent of any
     # sidecars a prior run may have left behind.
     _write_drc_constraint_sidecars(
-        output_path, manufacturer, layers, copper_oz=copper_oz, quiet=quiet
+        output_path,
+        manufacturer,
+        layers,
+        copper_oz=copper_oz,
+        quiet=quiet,
+        source_pcb_path=source_pcb_path,
     )
 
     try:
@@ -2560,6 +2892,10 @@ def run_post_route_drc(
             layers=layers,
             copper_oz=copper_oz,
             net_class_map=net_class_map,
+            # Issue #4980: declared branch-specific current-path intent.
+            # Empty/None leaves ``check_path_ampacity`` a no-op, so the
+            # flag-off route stays byte-identical to the pre-#4980 verdict.
+            current_path_specs=current_path_specs,
         )
         results = checker.check_all()
 
@@ -4510,14 +4846,32 @@ def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Rou
     session's numbering would otherwise be audited under the wrong net's
     voltage -- the silent-blindness failure mode this issue is about.
     """
+    routed = list(getattr(router, "routes", None) or [])
+    return routed + _preserved_trace_copper(router, routed=routed, id_to_name=id_to_name)
+
+
+def _preserved_trace_copper(
+    router: "Autorouter", *, routed: "list[Route]", id_to_name=None
+) -> "list[Route]":
+    """The PRESERVED half of :func:`_audited_trace_copper` (#4699, reused by #4979).
+
+    Split out so a gate that must distinguish copper this run *created* from
+    copper it *inherited* -- the hard layer-intent audit (issue #4979) -- can
+    resolve the preserved set through exactly the same preference order and
+    net-id re-keying the pairwise gate uses, instead of re-deriving it.
+
+    ``routed`` is the freshly-routed list; it is read only by the fallback
+    branch (stand-in routers that never went through ``_finalize_routes``) to
+    apply the same "a re-routed net replaces its own stale copper" dedupe.
+    """
     from kicad_tools.router.primitives import Route
 
-    routes: list[Route] = list(getattr(router, "routes", None) or [])
+    routes: list[Route] = []
 
     preserved = getattr(router, "_emitted_preserved_routes", None)
     if preserved is None:
         source = list(getattr(router, "existing_routes", None) or [])
-        routed_net_ids = {r.net for r in routes} - set(getattr(router, "_stub_terminals", {}) or {})
+        routed_net_ids = {r.net for r in routed} - set(getattr(router, "_stub_terminals", {}) or {})
         preserved = [r for r in source if r.net not in routed_net_ids]
 
     if preserved:
@@ -4738,6 +5092,177 @@ def _print_pairwise_failure_banner(
         print("  re-route with --route-engine grid or lattice (route-time creepage")
         print("  rejection), widen the HV corridor in placement, or add rated attach")
         print("  zones (#4506).")
+
+
+# --- Hard layer-intent gate (issue #4979) ------------------------------------
+
+
+def _audit_layer_intent(
+    router: "Autorouter", args, *, id_to_name=None
+) -> "list[LayerIntentViolation]":
+    """Board-level post-route HARD layer-intent audit -- issue #4979.
+
+    ``avoid_layers`` is hardened into a no-go set by
+    :meth:`NetClassRouting.hard_avoided_layer_indices` (``--strict-layers``,
+    or unconditionally for an ampacity-bearing class).  Both grid backends
+    honoured that during search; the LATTICE engine -- the ``--complete``
+    default -- did not until #4979, and shipped 2.6 mm ``/PGND`` copper onto
+    an explicitly forbidden ``In2.Cu`` plane with no hard failure anywhere in
+    the run.  The search fix removes those layers from the lattice's reachable
+    state space; THIS gate is the independent check that the copper the board
+    actually carries agrees, on every engine and every flow.
+
+    Scanned copper is :func:`_audited_trace_copper`'s two halves kept apart:
+    ``router.routes`` (created by this run -> a NEW violation, which indicts
+    the router) and the preserved routes ``_finalize_routes`` re-emitted
+    (``--preserve-existing`` / ``--complete`` -> an INHERITED violation, which
+    indicts the input board).  Only new violations move the exit code; both
+    are reported.
+
+    A strict no-op (empty list, no scan) when no net class carries a hard
+    layer constraint, so every pre-#4979 run is byte-identical.
+
+    ``args`` is accepted (and currently unread) for call-shape symmetry with
+    :func:`_audit_pairwise_clearance`: the hard/soft decision lives entirely
+    on the router's own ``rules.strict_layers`` + net classes, which is what
+    the SEARCH consulted, so re-reading the flag off ``args`` here could only
+    ever introduce a disagreement between the gate and the engine.
+    """
+    rules = getattr(router, "rules", None)
+    net_class_map = getattr(router, "net_class_map", None)
+    if rules is None or not net_class_map:
+        return []
+
+    from kicad_tools.router.layer_intent import find_layer_intent_violations
+
+    routed = list(getattr(router, "routes", None) or [])
+    preserved = _preserved_trace_copper(router, routed=routed, id_to_name=id_to_name)
+    return find_layer_intent_violations(
+        routed,
+        preserved,
+        net_class_map=net_class_map,
+        strict_layers=bool(getattr(rules, "strict_layers", False)),
+        layer_stack=getattr(router, "layer_stack", None),
+        id_to_name=id_to_name,
+    )
+
+
+def _audit_layer_intent_for_escalation(final_result, args) -> "list[LayerIntentViolation]":
+    """Run the #4979 layer-intent gate for the escalation wrapper flows.
+
+    ``--auto-layers`` defaults to **True**, so ``route_with_layer_escalation``
+    (and its rule-relaxation / combined siblings) is the DEFAULT ``kct route``
+    path and owns its own summary banner + exit-code block -- gating only
+    ``main()``'s inline block would leave the gate dead where it matters most.
+    Same rationale (and the same call shape) as
+    :func:`_audit_pairwise_for_escalation`; safe after
+    ``_release_routing_engine_state``, which preserves ``router.routes`` and
+    ``router.net_class_map``.
+    """
+    return _audit_layer_intent(
+        final_result.router,
+        args,
+        id_to_name={v: k for k, v in (getattr(final_result, "net_map", None) or {}).items()},
+    )
+
+
+def _new_layer_intent_violations(
+    violations: "Sequence[LayerIntentViolation]",
+) -> "list[LayerIntentViolation]":
+    """The subset this run CREATED (``inherited=False``) -- the gating subset."""
+    return [v for v in violations if not v.inherited]
+
+
+def _format_layer_intent_violations(
+    violations: "Sequence[LayerIntentViolation]", limit: int = 10
+) -> str:
+    """Render layer-intent findings one per line, with an ``... and K more`` tail."""
+    lines = [f"  {v.describe()}" for v in violations[:limit]]
+    remaining = len(violations) - limit
+    if remaining > 0:
+        lines.append(f"  ... and {remaining} more")
+    return "\n".join(lines)
+
+
+def _layer_intent_counts(violations: "Sequence[LayerIntentViolation]") -> tuple[int, int]:
+    """``(new, inherited)`` violation counts."""
+    new = sum(1 for v in violations if not v.inherited)
+    return new, len(violations) - new
+
+
+def _print_layer_intent_failure_banner(
+    violations: "Sequence[LayerIntentViolation]", args, output_path
+) -> None:
+    """Print the #4979 ``ROUTING FAILED`` banner for forbidden-layer copper."""
+    new_count, inherited_count = _layer_intent_counts(violations)
+    print("ROUTING FAILED: hard layer-intent violations")
+    print("=" * 60)
+    print()
+    print(
+        f"Forbidden-layer copper ({new_count} newly created"
+        + (f", {inherited_count} inherited" if inherited_count else "")
+        + "):"
+    )
+    print(_format_layer_intent_violations(violations))
+    print()
+    print("These nets declare the layer off-limits via net-class avoid_layers,")
+    print("hardened by --strict-layers (or by a declared target_ampacity). The")
+    print("router must DECLINE a connection it cannot route legally rather than")
+    print("commit copper on the forbidden layer as partial progress (issue #4979).")
+    print()
+    print("An 'inherited' finding was re-emitted from the input board under")
+    print("--preserve-existing/--complete, not created by this run; re-route")
+    print("those nets (or fix the input) -- the written board violates the")
+    print("declared layer intent either way.")
+    print(f"  Board: {output_path}")
+
+
+def _print_layer_intent_addendum(violations: "Sequence[LayerIntentViolation]") -> None:
+    """Fold #4979 findings into an already-failing summary (one coherent report).
+
+    The inherited-only case gets its own wording rather than an awkward
+    "0 newly created": it is a statement about the INPUT board, and reading
+    it as an accusation against this run would send a user hunting for a
+    router bug that is not there.
+    """
+    new_count, inherited_count = _layer_intent_counts(violations)
+    if new_count == 0:
+        print(
+            f"  Additionally, {inherited_count} forbidden-layer "
+            "segment(s)/via(s) were inherited from the input board "
+            "(not created by this run):"
+        )
+    else:
+        print(
+            f"  Additionally, {new_count} newly created forbidden-layer "
+            f"segment(s)/via(s) detected"
+            + (
+                f" ({inherited_count} more inherited from the input board)"
+                if inherited_count
+                else ""
+            )
+            + ":"
+        )
+    print(_format_layer_intent_violations(violations, limit=5))
+
+
+def _layer_intent_escalation_exit(rc: int, violations: "Sequence[LayerIntentViolation]") -> int:
+    """Map an escalation wrapper's exit code through the #4979 gate.
+
+    Mirrors :func:`_pairwise_escalation_exit`: ``0`` (met the completion
+    threshold) becomes ``3`` -- the established "routing succeeded but the
+    copper is dirty" contract -- and ``2`` (below threshold) becomes ``4``.
+    Any other code already carries a more specific diagnosis and passes
+    through untouched.  Only NEWLY created violations gate: a board that
+    merely inherited forbidden copper is reported, not re-blamed on this run.
+    """
+    if not _new_layer_intent_violations(violations):
+        return rc
+    if rc == 0:
+        return 3
+    if rc == 2:
+        return 4
+    return rc
 
 
 def _warn_unresolved_net_class_map(resolution, board_net_names, nearest_fn) -> None:
@@ -6158,6 +6683,9 @@ def route_with_layer_escalation(
             net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) == 1
         ]
         nets_to_route = len(multi_pad_nets)
+        _lost_binding_rc = _reject_lost_route_only_bindings(args, nets_to_route)
+        if _lost_binding_rc is not None:
+            return _lost_binding_rc
 
         if not quiet:
             flush_print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
@@ -6785,6 +7313,7 @@ def route_with_layer_escalation(
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
@@ -6806,6 +7335,12 @@ def route_with_layer_escalation(
                 Path(args.net_class_map).resolve() if getattr(args, "net_class_map", None) else None
             ),
             loaded_net_class_map=getattr(args, "_loaded_net_class_map", None),
+            # Issue #4980: thread the loaded --current-paths declarations so
+            # path_ampacity checks each declared branch against its OWN
+            # current, and the specs are re-emitted next to the routed board
+            # for kct check auto-discovery.
+            current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_paths_input_path=getattr(args, "_current_paths_input_path", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -6820,11 +7355,21 @@ def route_with_layer_escalation(
     # Issue #4588: board-level HV pairwise clearance gate.  A no-op without
     # --voltage-map; otherwise it audits the copper this engine committed.
     _pairwise = _audit_pairwise_for_escalation(final_result, args)
+    # Issue #4979: board-level HARD layer-intent gate (same reason this
+    # terminal path needs its own copy of the #4588 gate above).
+    _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
 
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
-        if final_result.success and _pairwise:
+        if _new_layer_intent_violations(_layer_intent):
+            # Issue #4979: forbidden-layer copper this run created outranks
+            # every other banner -- SUCCESS must be unreachable while the
+            # written board violates a hard layer constraint.
+            _print_layer_intent_failure_banner(_layer_intent, args, output_path)
+            if _pairwise:
+                _print_pairwise_addendum(_pairwise)
+        elif final_result.success and _pairwise:
             # Issue #4588: this run would have printed a SUCCESS banner while
             # its own copper violates the --voltage-map creepage requirement.
             _print_pairwise_failure_banner(_pairwise, args, output_path)
@@ -6853,6 +7398,10 @@ def route_with_layer_escalation(
             )
             if _pairwise:
                 _print_pairwise_addendum(_pairwise)
+            if _layer_intent:
+                # Issue #4979: inherited-only findings (any newly created
+                # ones already replaced the banner above).
+                _print_layer_intent_addendum(_layer_intent)
 
     # Issue #2881: Stash the final router on args so an outer
     # ``route_with_mfr_tier_escalation`` wrapper can inspect
@@ -6878,10 +7427,10 @@ def route_with_layer_escalation(
         # detected") already covers this case semantically.
         if fix_result == 3:
             return 3
-        return _pairwise_escalation_exit(0, _pairwise)
+        return _layer_intent_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _layer_intent)
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
-        return _pairwise_escalation_exit(2, _pairwise)
+        return _layer_intent_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _layer_intent)
     # Nothing was routed — treat as fatal failure
     return 1
 
@@ -7176,6 +7725,9 @@ def route_with_rule_relaxation(
             net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) == 1
         ]
         nets_to_route = len(multi_pad_nets)
+        _lost_binding_rc = _reject_lost_route_only_bindings(args, nets_to_route)
+        if _lost_binding_rc is not None:
+            return _lost_binding_rc
 
         if not quiet:
             flush_print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
@@ -7590,6 +8142,7 @@ def route_with_rule_relaxation(
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
@@ -7611,6 +8164,12 @@ def route_with_rule_relaxation(
                 Path(args.net_class_map).resolve() if getattr(args, "net_class_map", None) else None
             ),
             loaded_net_class_map=getattr(args, "_loaded_net_class_map", None),
+            # Issue #4980: thread the loaded --current-paths declarations so
+            # path_ampacity checks each declared branch against its OWN
+            # current, and the specs are re-emitted next to the routed board
+            # for kct check auto-discovery.
+            current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_paths_input_path=getattr(args, "_current_paths_input_path", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -7625,11 +8184,21 @@ def route_with_rule_relaxation(
     # Issue #4588: board-level HV pairwise clearance gate (see the
     # layer-escalation wrapper above for why each terminal path needs it).
     _pairwise = _audit_pairwise_for_escalation(final_result, args)
+    # Issue #4979: board-level HARD layer-intent gate (same reason this
+    # terminal path needs its own copy of the #4588 gate above).
+    _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
 
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
-        if final_result.success and _pairwise:
+        if _new_layer_intent_violations(_layer_intent):
+            # Issue #4979: forbidden-layer copper this run created outranks
+            # every other banner -- SUCCESS must be unreachable while the
+            # written board violates a hard layer constraint.
+            _print_layer_intent_failure_banner(_layer_intent, args, output_path)
+            if _pairwise:
+                _print_pairwise_addendum(_pairwise)
+        elif final_result.success and _pairwise:
             _print_pairwise_failure_banner(_pairwise, args, output_path)
         elif final_result.success:
             print("SUCCESS: Routing complete with adaptive rules")
@@ -7658,6 +8227,10 @@ def route_with_rule_relaxation(
             )
             if _pairwise:
                 _print_pairwise_addendum(_pairwise)
+            if _layer_intent:
+                # Issue #4979: inherited-only findings (any newly created
+                # ones already replaced the banner above).
+                _print_layer_intent_addendum(_layer_intent)
 
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline.
@@ -7667,10 +8240,10 @@ def route_with_rule_relaxation(
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
             return 3
-        return _pairwise_escalation_exit(0, _pairwise)
+        return _layer_intent_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _layer_intent)
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
-        return _pairwise_escalation_exit(2, _pairwise)
+        return _layer_intent_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _layer_intent)
     # Nothing was routed — treat as fatal failure
     return 1
 
@@ -9436,6 +10009,9 @@ def route_with_combined_escalation(
             # multi-pad nets from the denominator (see _routable_multi_pad_nets).
             multi_pad_nets = _routable_multi_pad_nets(router)
             nets_to_route = len(multi_pad_nets)
+            _lost_binding_rc = _reject_lost_route_only_bindings(args, nets_to_route)
+            if _lost_binding_rc is not None:
+                return _lost_binding_rc
 
             # Route
             escape_flag = _resolve_escape_routing_flag(args)
@@ -9897,6 +10473,7 @@ def route_with_combined_escalation(
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
@@ -9918,6 +10495,12 @@ def route_with_combined_escalation(
                 Path(args.net_class_map).resolve() if getattr(args, "net_class_map", None) else None
             ),
             loaded_net_class_map=getattr(args, "_loaded_net_class_map", None),
+            # Issue #4980: thread the loaded --current-paths declarations so
+            # path_ampacity checks each declared branch against its OWN
+            # current, and the specs are re-emitted next to the routed board
+            # for kct check auto-discovery.
+            current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_paths_input_path=getattr(args, "_current_paths_input_path", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -9932,11 +10515,21 @@ def route_with_combined_escalation(
     # Issue #4588: board-level HV pairwise clearance gate (see the
     # layer-escalation wrapper above for why each terminal path needs it).
     _pairwise = _audit_pairwise_for_escalation(final_result, args)
+    # Issue #4979: board-level HARD layer-intent gate (same reason this
+    # terminal path needs its own copy of the #4588 gate above).
+    _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
 
     # Final summary
     if not quiet:
         print("\n" + "=" * 60)
-        if final_result.success and _pairwise:
+        if _new_layer_intent_violations(_layer_intent):
+            # Issue #4979: forbidden-layer copper this run created outranks
+            # every other banner -- SUCCESS must be unreachable while the
+            # written board violates a hard layer constraint.
+            _print_layer_intent_failure_banner(_layer_intent, args, output_path)
+            if _pairwise:
+                _print_pairwise_addendum(_pairwise)
+        elif final_result.success and _pairwise:
             _print_pairwise_failure_banner(_pairwise, args, output_path)
         elif final_result.success:
             print(
@@ -9967,6 +10560,10 @@ def route_with_combined_escalation(
             )
             if _pairwise:
                 _print_pairwise_addendum(_pairwise)
+            if _layer_intent:
+                # Issue #4979: inherited-only findings (any newly created
+                # ones already replaced the banner above).
+                _print_layer_intent_addendum(_layer_intent)
 
     if final_result.success:
         # Issue #3238: propagate auto-fix-skipped-by-deadline.
@@ -9976,10 +10573,10 @@ def route_with_combined_escalation(
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
             return 3
-        return _pairwise_escalation_exit(0, _pairwise)
+        return _layer_intent_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _layer_intent)
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
-        return _pairwise_escalation_exit(2, _pairwise)
+        return _layer_intent_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _layer_intent)
     # Nothing was routed — treat as fatal failure
     return 1
 
@@ -11073,6 +11670,20 @@ def _net_name_for_lattice_key(router: "Autorouter", key: object) -> str:
     return str(key)
 
 
+def _is_layer_constrained_reason(reason: str) -> bool:
+    """True when a lattice decline reason names the HARD layer intent (#4979).
+
+    The lattice pathfinder reports three such reasons --
+    ``layer-constrained-start`` / ``layer-constrained-end`` (every escape
+    from that pad landed on a hard-avoided layer) and
+    ``no-path-layer-constrained`` (the hard block pruned candidate states
+    from a search that then found no route).  All three share the
+    ``layer-constrained`` substring by construction, so this test stays
+    correct if a future reason joins the family.
+    """
+    return "layer-constrained" in (reason or "")
+
+
 def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | None:
     """Structured, machine-readable unroutable-link report for ``--complete``.
 
@@ -11161,6 +11772,16 @@ def _build_complete_link_report(router: "Autorouter", pcb_path: Path) -> dict | 
             "reason": reason,
             "link": {"start": ep[0], "end": ep[1]} if ep else None,
             "deadline_hit": bool(reason == "deadline-exceeded" or stats.deadline_hit),
+            # Issue #4979: machine-readable "this residual is layer-
+            # constrained" flag.  A link the hard layer intent declined
+            # (``layer-constrained-start``/``-end``, or a search the hard
+            # block narrowed before it ran out of options,
+            # ``no-path-layer-constrained``) is a DELIBERATE refusal to ship
+            # copper on a forbidden layer, not congestion -- a consumer must
+            # be able to tell the two apart without string-matching the
+            # reason, because the remedy is different (relax/repoint the
+            # net-class ``avoid_layers``, or give the net a legal corridor).
+            "layer_constrained": _is_layer_constrained_reason(reason),
             "elapsed_s": round(stats.elapsed_s, 3),
             "budget_s": round(stats.budget_s, 3) if stats.budget_s is not None else None,
             "blocking_copper": list(diag.blocking_nets) if diag else [],
@@ -11203,6 +11824,14 @@ def _print_complete_link_report(report: dict) -> None:
         link = entry["link"]
         ep = f"{link['start']} <-> {link['end']}" if link else "(pads unknown)"
         print(f"  [{entry['net']}] {ep} -- {entry['reason']}")
+        if entry.get("layer_constrained"):
+            # Issue #4979: name the constraint that produced the residual, so
+            # the reader is not left to guess whether this was congestion.
+            print(
+                "      layer intent: declined rather than route on a layer "
+                "this net's class forbids (avoid_layers, hardened by "
+                "--strict-layers or target_ampacity)"
+            )
         if entry["blocking_copper"]:
             nearest = entry["nearest_blocker_mm"]
             nearest_note = f" (nearest {nearest:.3f}mm)" if nearest is not None else ""
@@ -11322,6 +11951,11 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
     # Marker: route-only mode.  The (large) inverted skip set must NOT be
     # forwarded as force_pour_nets (that would try to pour ~every net).
     args._route_only_nets = requested_unique
+    # Remember which requested nets preflight already warned have <2 pads,
+    # so _reject_lost_route_only_bindings can tell "every requested net was
+    # already known to be unroutable" apart from "the loader lost a binding
+    # preflight confirmed was routable" (issue #4983 follow-up).
+    args._route_only_nets_under_two = set(under_two)
 
     # Issue #4355: --nets promises (per --help) that every OTHER board net is a
     # "fixed obstacle" -- its copper must be RETAINED in the output AND honored
@@ -11594,7 +12228,13 @@ def main(argv: list[str] | None = None) -> int:
     invocation; only the outermost exit (return *or* raise) restores it.
     """
     with _process_state_guard():
-        return _main_impl(argv)
+        try:
+            return _main_impl(argv)
+        except DRCConstraintPropagationError as exc:
+            # A rule conflict is not a copper violation that --auto-fix may
+            # clear. Abort every route flow before its ordinary DRC handling.
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
 
 
 def _main_impl(argv: list[str] | None = None) -> int:
@@ -12217,6 +12857,42 @@ def _main_impl(argv: list[str] | None = None) -> int:
             "collide with this input file (board written into the same "
             "directory) the derived map is diverted to "
             "net_class_map.effective.json instead (Issue #4428)."
+        ),
+    )
+    parser.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON sidecar declaring branch-specific current-path "
+            "intent (Issue #4980): stable RefDes.pad source/sink endpoints, "
+            "a continuous current, and reinforcement eligibility, per "
+            "physical branch. Lets a net that carries BOTH a high-current "
+            "trunk and low-current sense taps (a Kelvin shunt, an INA181 "
+            "input) be checked per branch instead of at one whole-net "
+            "target_ampacity. The post-route DRC runs the path_ampacity "
+            "rule against each declared branch's OWN current, and the "
+            "declarations are re-emitted as current_paths.json next to the "
+            "routed board so a later kct check audits the finished copper "
+            "against identical intent. This INPUT file is never "
+            "overwritten: a collision diverts the derived sidecar to "
+            "current_paths.effective.json (Issue #4428). Auto-discovered "
+            "next to the input board when omitted -- as "
+            "<board-stem>.current_paths.json or current_paths.json, in the "
+            "board dir then output/ then ../output/ (mirrors "
+            "--net-class-map). Use --no-current-paths to suppress that."
+        ),
+    )
+    parser.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help=(
+            "Suppress current-paths sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (path_ampacity stays inactive in the "
+            "post-route DRC and no current_paths.json sidecar is emitted). "
+            "Cannot be combined with --current-paths."
         ),
     )
     parser.add_argument(
@@ -13600,6 +14276,19 @@ def _main_impl(argv: list[str] | None = None) -> int:
             return 1
         args._spatial_keepouts = _ncm_data.get("spatial_keepouts")
 
+    # Issue #4980: validate and load the optional --current-paths sidecar in
+    # the same pre-dispatch window as --net-class-map above, so every routing
+    # sub-flow sees one already-validated result on
+    # ``args._loaded_current_paths``.  Contract mirrors ``kct check
+    # --current-paths`` exactly (PR #5184): an EXPLICIT flag is strict (a
+    # missing file or malformed JSON is exit 1 before any routing work), an
+    # AUTO-DISCOVERED sidecar degrades to a warning (a board that happens to
+    # sit next to someone else's malformed file must still route), and
+    # --no-current-paths suppresses discovery entirely.
+    rc = _preload_current_paths(args, pcb_path)
+    if rc != 0:
+        return rc
+
     # Issue #4605: rule areas are honored by the lattice engine only -- warn
     # once (never gate) when another engine is about to ignore them.
     _warn_rule_areas_other_engine(pcb_path, _resolve_route_engine(args))
@@ -14438,6 +15127,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) == 1
     ]
     nets_to_route = len(multi_pad_nets)  # Only routable multi-pad nets need routing
+    _lost_binding_rc = _reject_lost_route_only_bindings(args, nets_to_route)
+    if _lost_binding_rc is not None:
+        return _lost_binding_rc
     power_nets_skipped = len(skip_nets)
 
     if not quiet:
@@ -15996,6 +16688,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         drc_ran = True
         drc_errors, drc_warnings = run_post_route_drc(
             output_path=output_path,
+            source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=layer_stack.num_layers,
             quiet=quiet,
@@ -16013,6 +16706,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 Path(args.net_class_map).resolve() if getattr(args, "net_class_map", None) else None
             ),
             loaded_net_class_map=getattr(args, "_loaded_net_class_map", None),
+            # Issue #4980: thread the loaded --current-paths declarations so
+            # path_ampacity checks each declared branch against its OWN
+            # current, and the specs are re-emitted next to the routed board
+            # for kct check auto-discovery.
+            current_path_specs=getattr(args, "_loaded_current_paths", None),
+            current_paths_input_path=getattr(args, "_current_paths_input_path", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -16045,6 +16744,20 @@ def _main_impl(argv: list[str] | None = None) -> int:
         )
     pairwise_violation_count = len(pairwise_violations)
 
+    # Issue #4979: board-level HARD layer-intent gate.  A strict no-op unless
+    # some net class hardens ``avoid_layers`` (``--strict-layers``, or a
+    # declared ``target_ampacity``); otherwise it audits the copper the output
+    # carries -- freshly routed AND preserved -- so forbidden-layer copper
+    # can never be shipped behind a SUCCESS banner again.  Runs on every
+    # engine (the lattice search gained the hard block in this same issue; the
+    # gate is the independent check that the shipped copper agrees).
+    layer_intent_violations: list = []
+    if not args.dry_run:
+        layer_intent_violations = _audit_layer_intent(
+            router, args, id_to_name={v: k for k, v in net_map.items()}
+        )
+    layer_intent_new_count = len(_new_layer_intent_violations(layer_intent_violations))
+
     # Summary
     all_nets_routed = stats["nets_routed"] == nets_to_route
     drc_passed = drc_errors <= 0  # -1 means DRC failed to run, treat as passed
@@ -16059,9 +16772,31 @@ def _main_impl(argv: list[str] | None = None) -> int:
         summary_parts.append(f"{power_nets_skipped} power skipped")
     summary_suffix = f" ({', '.join(summary_parts)})" if summary_parts else ""
 
+    if not quiet and layer_intent_violations and layer_intent_new_count == 0:
+        # Issue #4979: this run created no forbidden-layer copper, but the
+        # written board still carries some it inherited from its input.
+        # Advisory (exit code unchanged) -- a SUCCESS banner must never be
+        # read as "the board honours its declared layer intent".
+        print()
+        print(
+            f"NOTE: {len(layer_intent_violations)} inherited forbidden-layer "
+            "segment(s)/via(s) carried over from the input board "
+            "(not created by this run):"
+        )
+        print(_format_layer_intent_violations(layer_intent_violations, limit=5))
+
     if not quiet:
         print("\n" + "=" * 60)
-        if pairwise_violation_count > 0 and drc_passed and (all_nets_routed or meets_threshold):
+        if layer_intent_new_count > 0:
+            # Issue #4979: copper on a layer the net declared hard-off-limits
+            # is a correctness failure of the router itself, so its banner
+            # outranks every other outcome -- a SUCCESS (or even a PARTIAL)
+            # banner must be unreachable while this run's own copper violates
+            # the declared layer intent.
+            _print_layer_intent_failure_banner(layer_intent_violations, args, output_path)
+            if pairwise_violation_count > 0:
+                _print_pairwise_addendum(pairwise_violations)
+        elif pairwise_violation_count > 0 and drc_passed and (all_nets_routed or meets_threshold):
             # Issue #4588: this run would otherwise have printed a SUCCESS
             # banner.  Board-level HV creepage violations make that a false
             # pass, so the pairwise failure banner replaces it outright --
@@ -16126,6 +16861,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
             if pairwise_violation_count > 0:
                 # Issue #4588: see the DRC branch above.
                 _print_pairwise_addendum(pairwise_violations)
+            if layer_intent_violations:
+                # Issue #4979: inherited-only findings (this run created none,
+                # or the banner above already reported the new ones).
+                _print_layer_intent_addendum(layer_intent_violations)
 
             # Issue #2388: When the negotiated loop bailed out due to a
             # power-net stall, surface actionable suggestions naming the
@@ -16219,8 +16958,14 @@ def _main_impl(argv: list[str] | None = None) -> int:
     #     as a non-fatal warning (and label it a DRC failure).  Neither
     #     forwards --voltage-map today, so the HV meaning cannot reach them;
     #     #4607 threads the flag through and makes it fatal there.
+    #     Issue #4979: also returned when the post-route hard layer-intent
+    #     gate finds copper this run created on a layer the net's class
+    #     declared off-limits (``avoid_layers`` hardened by --strict-layers
+    #     or a declared target_ampacity).  Checked before the --complete
+    #     exit-8 branch: forbidden copper outranks an unclosed link.
     # 4 = Seg-seg or HV pairwise clearance violations remain AND routing is
-    #     below threshold (Issue #1666, extended by #4588)
+    #     below threshold (Issue #1666, extended by #4588); also the
+    #     below-threshold form of the #4979 layer-intent failure above.
     # 5 = Interrupted by SIGINT with partial results saved (handled in _handle_interrupt)
     # 6 = Connectivity regression detected (--strict mode only): either
     #     the optimize / DRC nudge phases reduced the number of fully-
@@ -16279,6 +17024,18 @@ def _main_impl(argv: list[str] | None = None) -> int:
     if stats["nets_routed"] == 0 and nets_to_route > 0:
         # Nothing was routed — treat as fatal failure
         return 1
+
+    # Issue #4979: newly created forbidden-layer copper is a hard layer-intent
+    # failure and shares the established "routing succeeded but the copper is
+    # dirty" contract (3 above threshold / 4 below) with the seg-seg and #4588
+    # pairwise gates.  Checked BEFORE the --complete exit-8 branch on purpose:
+    # exit 8 reports a link that could not be closed (an expected outcome on a
+    # hard board), while this reports copper the tool should never have
+    # committed at all -- the more serious, and more actionable, verdict.  The
+    # banner above names both.  Inherited-only findings do NOT gate (the run
+    # created none); they are reported as a NOTE and leave the exit code alone.
+    if layer_intent_new_count > 0:
+        return 3 if meets_threshold else 4
 
     # Issue #4477: --complete exits nonzero whenever a link it was asked to
     # close remains unroutable, independent of --min-completion (a whole-

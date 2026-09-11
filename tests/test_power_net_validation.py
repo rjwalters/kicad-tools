@@ -375,11 +375,7 @@ class TestValidatePowerNetsPWRFLAG:
     """Tests involving PWR_FLAG (if supported)."""
 
     def test_pwr_flag_acts_as_power_output(self):
-        """PWR_FLAG power symbol should act as power output.
-
-        Note: This test documents expected behavior but actual implementation
-        may need PWR_FLAG special handling.
-        """
+        """PWR_FLAG power symbol acts as power output on its connected net."""
         sch = Schematic("Test")
 
         # Add GND power symbol
@@ -387,14 +383,11 @@ class TestValidatePowerNetsPWRFLAG:
 
         # Add PWR_FLAG connected to it
         add_power_symbol(sch, "power:PWR_FLAG", 100, 80)
-        sch.add_wire((100, 80), (100, 100))
+        sch.add_wire((100, 80), (100, 100), snap=False)
 
         issues = sch.validate_power_nets()
 
-        # Current implementation may not recognize PWR_FLAG as a power output
-        # This test documents the expected behavior for future enhancement
-        # For now, we just verify the method runs without error
-        assert isinstance(issues, list)
+        assert issues == []
 
 
 class TestPowerNetValidationIntegration:

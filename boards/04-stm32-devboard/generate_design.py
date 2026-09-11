@@ -1833,25 +1833,6 @@ def generate_manufacturing(routed_path: Path, output_dir: Path) -> bool:
             print(f"   Export error: {error}")
         return False
 
-    # The schematic's local symbol bindings must travel with the native project.
-    import hashlib
-    import json
-    import zipfile
-
-    project_zip = mfr_dir / "kicad_project.zip"
-    with zipfile.ZipFile(project_zip, "a", zipfile.ZIP_DEFLATED) as archive:
-        for source in [*output_dir.glob("*.kicad_sym"), output_dir / "sym-lib-table"]:
-            if source.is_file():
-                archive.write(source, source.name)
-    manifest_path = mfr_dir / "manifest.json"
-    if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text())
-        manifest["files"][project_zip.name] = {
-            "sha256": hashlib.sha256(project_zip.read_bytes()).hexdigest(),
-            "size": project_zip.stat().st_size,
-        }
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-
     process["validate_process"](routed_path)
 
     print(f"\n   SUCCESS: manufacturing artifacts written to {mfr_dir}")

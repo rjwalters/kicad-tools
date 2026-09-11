@@ -257,3 +257,86 @@ def test_dense_field_never_introduces_a_new_violation() -> None:
             rules.min_hole_to_hole_mm,
         )
         assert reason is None, f"moved via {m.uuid[:8]} is not clearance-safe: {reason}"
+
+
+def test_drill_relocation_rejects_crossing_stub():
+    """A clear escape landing does not license a crossing on another layer."""
+    from shapely.geometry import LineString
+
+    from kicad_tools.drc.relocate_drill_clearance import _try_relocate
+
+    pcb = PCB.create(width=30, height=30)
+    via = pcb.add_via(10, 10, size=0.3, drill=0.15, net="SIG")
+    pcb.add_trace((10, 10), (12, 10), width=0.127, layer="F.Cu", net="SIG")
+    pcb.add_trace((10, 10), (10.1, 10), width=0.127, layer="B.Cu", net="SIG")
+    pcb.add_trace((11, 8), (11, 12), width=0.127, layer="B.Cu", net="OTHER")
+    result = _try_relocate(pcb, via, {}, [], 0.127, 0.5, False)
+    assert result is not None  # shorter ladder move is safe
+    obstacle = LineString([(11, 8), (11, 12)])
+    for seg in pcb.segments:
+        if seg.net_name == "SIG" and seg.layer == "B.Cu":
+            assert LineString([seg.start, seg.end]).distance(obstacle) - 0.127 >= 0.127 - 1e-6
+
+
+def test_drill_persist_failure_leaves_board_unchanged(monkeypatch):
+    from kicad_tools.drc.relocate_drill_clearance import _try_relocate
+
+    pcb = _stack_board()
+    via = pcb.vias[1]
+    before = pcb._sexp.to_string()
+    old_position = via.position
+
+    def fail(via, target):
+        via.position = target
+        return False
+
+    monkeypatch.setattr(pcb, "relocate_via", fail)
+    assert _try_relocate(pcb, via, {}, [], 0.127, 0.5, False) is None
+    assert pcb._sexp.to_string() == before
+    assert via.position == old_position
+
+
+def test_drill_dry_run_matches_all_actual_moves():
+    import copy
+
+    pcb = _stack_board()
+    before = pcb._sexp.to_string()
+    preview = relocate_drill_clearance(pcb, _tier1_rules(), dry_run=True)
+    actual = relocate_drill_clearance(copy.deepcopy(pcb), _tier1_rules())
+    assert preview == actual
+    assert pcb._sexp.to_string() == before
+
+
+def test_drill_candidate_avoids_unassigned_smd_pad(tmp_path) -> None:
+    """The shared obstacle collector rejects an escape landing on net-zero copper."""
+    from kicad_tools.cli.relocate_in_pad_vias import _collect_smd_pads_by_net
+
+    pcb = _stack_board()
+    path = tmp_path / "net-zero.kicad_pcb"
+    pcb.save(path)
+    content = path.read_text().rstrip()
+    path.write_text(
+        content[:-1]
+        + f"""
+        (footprint "test:unused" (layer "F.Cu")
+          (at {22 + pcb._board_origin[0]} {20.5 + pcb._board_origin[1]})
+          (pad "1" smd rect (at 0 0) (size 0.4 0.4) (layers "F.Cu")))
+        )"""
+    )
+    pcb = PCB.load(path)
+    via = list(pcb.vias)[1]
+    rules = _tier1_rules()
+    target = _find_target(
+        pcb,
+        via,
+        (22, 20.5),
+        _collect_smd_pads_by_net(pcb),
+        [],
+        rules.min_clearance_mm,
+        rules.min_hole_to_hole_mm,
+    )
+    assert target is not None
+    # Measure independently of the shared clearance helper.
+    dx = max(21.8 - target[0], 0, target[0] - 22.2)
+    dy = max(20.3 - target[1], 0, target[1] - 20.7)
+    assert math.hypot(dx, dy) - via.size / 2 >= rules.min_clearance_mm - 1e-6

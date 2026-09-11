@@ -97,8 +97,14 @@
 #                       item naming a *different*, non-closing issue/PR as a
 #                       prerequisite (e.g. #6335 blocked on #6333, which does
 #                       not carry `Closes #6335`). Parses `- [ ] #N: ...` /
-#                       `- [x] #N: ...` items out of the issue body's own
-#                       `## Dependencies` section (a checked box is treated as
+#                       `- [x] #N: ...` items — the canonical/preferred
+#                       format — out of the issue body's own `## Dependencies`
+#                       section, tolerating an optional case-insensitive
+#                       `PR `/`Issue ` token before the `#N` as best-effort
+#                       (e.g. `- [ ] PR #N: ...`, `- [ ] Issue #N: ...`,
+#                       #7501 — curator prose naturally varies, and silently
+#                       dropping such an item would produce a false
+#                       VERDICT=clear) (a checked box is treated as
 #                       already resolved, no live lookup needed) and, for
 #                       every unchecked item, looks up the referenced issue's
 #                       or PR's own `state` (never its labels — this is
@@ -444,13 +450,16 @@ _run_operator_premise() {
 
 # --- named-dependency ---------------------------------------------------------
 
-# Extract only the `## Dependencies` section (up to the next level-2 heading
-# or end of body) so an unrelated `#N` mentioned anywhere else in the issue
-# body is never picked up as a named dependency.
+# Extract only the `## Dependencies` (or `### Dependencies`) section (up to
+# the next same-or-higher-level heading or end of body) so an unrelated `#N`
+# mentioned anywhere else in the issue body is never picked up as a named
+# dependency. Tolerant of H2 or H3 since Curators file both shapes in
+# practice (#7503) — false "clear" (silently skipping a real dependency) is
+# the worse failure direction than being slightly too permissive here.
 _extract_dependencies_section() {
     awk '
-        /^## Dependencies[[:space:]]*$/ { found = 1; next }
-        found && /^## / { found = 0 }
+        /^#{2,3}[[:space:]]+Dependencies[[:space:]]*$/ { found = 1; next }
+        found && /^#{1,3}[[:space:]]/ { found = 0 }
         found { print }
     ' <<<"$1"
 }
@@ -462,8 +471,13 @@ _extract_dependencies_section() {
 #   - [ ] #123: Prerequisite feature
 #   - [x] #456: Required infrastructure
 _extract_named_deps() {
+    # Matches the canonical bare form (`- [ ] #123: ...`) plus an optional
+    # case-insensitive `PR `/`Issue ` token before the `#N` (#7501) — curator
+    # prose naturally varies ("PR #N", "Issue #N"), and silently dropping such
+    # an item would produce a false VERDICT=clear (the worse failure
+    # direction: it can incorrectly unblock a Builder).
     local line num checked
-    grep -oE '^[[:space:]]*-[[:space:]]*\[[ xX]\][[:space:]]*#[0-9]+' <<<"$1" | while IFS= read -r line; do
+    grep -oiE '^[[:space:]]*-[[:space:]]*\[[ xX]\][[:space:]]*((pr|issue)[[:space:]]+)?#[0-9]+' <<<"$1" | while IFS= read -r line; do
         checked="false"
         [[ "$line" =~ \[[xX]\] ]] && checked="true"
         num="$(grep -oE '#[0-9]+' <<<"$line" | tr -d '#')"

@@ -55,6 +55,19 @@ def _is_footprint_tag(tag: str | None) -> bool:
     return tag in FOOTPRINT_TAGS
 
 
+def _find_all_footprints(doc: SExp) -> list[SExp]:
+    """Return every footprint node in *doc*, in document order.
+
+    Matches both the modern ``(footprint ...)`` spelling and the legacy
+    pre-KiCad-6 ``(module ...)`` spelling (issue #4891).  Search semantics
+    match :meth:`SExp.find_all` -- descendants of the root, not the root
+    itself -- so this is a drop-in replacement for ``doc.find_all("footprint")``.
+    """
+    return [
+        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
+    ]
+
+
 # Default regex for detecting power/ground net names.
 # Matches names like GND, +3V3, +5V, VCC, VDD, VBUS, or names starting with '+'.
 _DEFAULT_POWER_NET_PATTERN = re.compile(
@@ -610,6 +623,7 @@ class FootprintGraphic:
     radius: float | None = None
     points: list[tuple[float, float]] = field(default_factory=list)
     uuid: str = ""
+    mid: tuple[float, float] | None = None  # Appended for positional compatibility
 
     @classmethod
     def from_sexp(cls, sexp: SExp, graphic_type: str) -> FootprintGraphic:
@@ -634,6 +648,9 @@ class FootprintGraphic:
             graphic.start = (start.get_float(0) or 0.0, start.get_float(1) or 0.0)
         if end := sexp.find("end"):
             graphic.end = (end.get_float(0) or 0.0, end.get_float(1) or 0.0)
+
+        if graphic_type == "arc":
+            graphic.start, graphic.mid, graphic.end = _arc_points_from_sexp(sexp)
 
         # Center/radius (for circle)
         if center := sexp.find("center"):
@@ -1620,6 +1637,31 @@ class GraphicLine:
         return line
 
 
+def _arc_points_from_sexp(
+    sexp: SExp,
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+    """Normalize modern three-point and legacy center/signed-angle arcs.
+
+    Preserve GraphicArc's tolerant defaults and explicit-mid precedence. Points
+    stay in the input coordinate frame (footprint graphics use local space).
+    Legacy normalization is delegated to ``legacy_arc_points`` so schema
+    parsing and routing share the exact same arc math.
+    """
+    start = mid = end = (0.0, 0.0)
+    if node := sexp.find("start"):
+        start = (node.get_float(0) or 0.0, node.get_float(1) or 0.0)
+    mid_node = sexp.find("mid")
+    if mid_node is not None:
+        mid = (mid_node.get_float(0) or 0.0, mid_node.get_float(1) or 0.0)
+    if node := sexp.find("end"):
+        end = (node.get_float(0) or 0.0, node.get_float(1) or 0.0)
+    if mid_node is None and (angle := sexp.find("angle")) is not None:
+        angle_deg = angle.get_float(0) or 0.0
+        center, on_arc_point = start, end
+        start, mid, end = legacy_arc_points(on_arc_point, center, angle_deg)
+    return start, mid, end
+
+
 @dataclass
 class GraphicArc:
     """PCB graphic arc element (gr_arc).
@@ -1644,12 +1686,7 @@ class GraphicArc:
             layer="",
         )
 
-        if start := sexp.find("start"):
-            arc.start = (start.get_float(0) or 0.0, start.get_float(1) or 0.0)
-        if mid := sexp.find("mid"):
-            arc.mid = (mid.get_float(0) or 0.0, mid.get_float(1) or 0.0)
-        if end := sexp.find("end"):
-            arc.end = (end.get_float(0) or 0.0, end.get_float(1) or 0.0)
+        arc.start, arc.mid, arc.end = _arc_points_from_sexp(sexp)
         if layer := sexp.find("layer"):
             arc.layer = layer.get_string(0) or ""
         if width := sexp.find("width"):
@@ -1660,19 +1697,6 @@ class GraphicArc:
                 arc.width = stroke_width.get_float(0) or 0.1
         if uuid := sexp.find("uuid"):
             arc.uuid = uuid.get_string(0) or ""
-
-        # Pre-KiCad-6 legacy gr_arc encoding: (start <center>) (end <point>)
-        # (angle <deg>), with no `mid` token at all. The legacy `start` is
-        # the arc CENTER (not an on-arc point) and `end` is one genuine
-        # on-arc endpoint. Normalize into modern on-arc start/mid/end
-        # semantics here so downstream consumers (outline chaining, arc
-        # approximation) can keep treating all three as genuine on-arc
-        # points regardless of source KiCad version.
-        if mid is None and (angle := sexp.find("angle")) is not None:
-            angle_deg = angle.get_float(0) or 0.0
-            center = arc.start
-            on_arc_point = arc.end
-            arc.start, arc.mid, arc.end = legacy_arc_points(on_arc_point, center, angle_deg)
 
         return arc
 

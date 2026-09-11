@@ -535,13 +535,29 @@ def cmd_apply_rules(args):
         # kicad-cli enforce the intended tier, including the Default netclass
         # clearance (issue #4097).  Non-fatal: the zone-clearance write above
         # already succeeded, so a sidecar failure only warns.
-        from kicad_tools.manufacturers import write_drc_constraints
+        from kicad_tools.manufacturers import (
+            resolve_pcb_fabrication_overrides,
+            write_drc_constraints,
+        )
+
+        # Issue #5006: retain (or reject) a validated, cited per-board
+        # fabrication-floor override the same way `kct check
+        # --emit-drc-constraints`, the manufacturing export path, and `kct
+        # route`'s sidecar emission do, so `kct mfr apply-rules` cannot
+        # silently revert a reviewed floor back to the profile's
+        # conservative default either.
+        pcb_rules, fab_override_msg = resolve_pcb_fabrication_overrides(
+            output_path, rules, manufacturer_id=profile.id
+        )
+        if fab_override_msg is not None and not json_mode:
+            prefix = "Warning: " if fab_override_msg.startswith("ignoring") else ""
+            print(prefix + fab_override_msg)
 
         sidecars: list[str] = []
         try:
             written = write_drc_constraints(
                 output_path,
-                rules,
+                pcb_rules,
                 manufacturer_id=profile.id,
                 layers=args.layers,
                 copper_oz=args.copper,

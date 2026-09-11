@@ -211,6 +211,28 @@ def test_reviewed_hole_floor_does_not_mutate_shared_profile(generated, manufactu
     assert baseline == 0.5
 
 
+def test_reviewed_hole_floor_resolves_for_a_board_without_a_local_sidecar(
+    generated, manufacturing_checker, tmp_path
+):
+    """Issue #5006: a generated board copy must still find the reviewed floor.
+
+    ``route_pcb`` stages the fabrication-overrides sidecar next to every
+    generated board, and ``make_checker`` falls back to the board's committed
+    sidecar when a copy carries none -- a hand-rolled ``pcb_path.parent``
+    lookup instead raised ``FileNotFoundError`` for any board generated
+    outside ``boards/03-usb-joystick/output/``.
+    """
+    import shutil
+
+    work = tmp_path / "no-local-sidecar"
+    shutil.copytree(generated, work)
+    sidecar = work / "fabrication_overrides.json"
+    assert sidecar.is_file(), "route_pcb must stage the sidecar with the generated board"
+    sidecar.unlink()
+    checker = manufacturing_checker.make_checker(work / "usb_joystick_routed.kicad_pcb")
+    assert checker.design_rules.min_hole_to_hole_mm == 0.45
+
+
 @pytest.mark.parametrize("change", ["native_floor", "stackup"])
 def test_manufacturing_check_rejects_mismatched_fabrication(
     generated, manufacturing_checker, tmp_path, change

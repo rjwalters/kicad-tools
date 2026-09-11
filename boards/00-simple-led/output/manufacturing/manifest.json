@@ -69,8 +69,8 @@
       "size": 1209
     },
     "procurement-review.md": {
-      "sha256": "aeef990eddac1de142102d44708a885e03dcea81dfa60534ecf9609804a993f9",
-      "size": 6142
+      "sha256": "5a92a3d3954169dfb8a85c450f48603b1b43fcfbf713a89661fd314b8166d847",
+      "size": 10400
     },
     "report.md": {
       "sha256": "6317d1b14e07521e5e4ac378dc9c393cdd6d29451754358ed11a160d5f377138",
@@ -167,5 +167,10 @@
   "mode": "assembly",
   "warning_counts": {},
   "native_warning_counts": {},
-  "acknowledged_warning_rules": []
+  "acknowledged_warning_rules": [],
+  "documentation_refresh": {
+    "updated_at": "2026-09-10T21:50:06.229926+00:00",
+    "issue": 5048,
+    "scope": "Procurement documentation and package integrity only; original fabrication checks unchanged."
+  }
 }
