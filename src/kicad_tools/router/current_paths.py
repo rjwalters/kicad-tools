@@ -43,12 +43,51 @@ Consumers:
 
 * :class:`kicad_tools.validate.rules.path_ampacity.PathAmpacityRule` --
   per-path IPC-2221 width check + unresolved/ambiguous/uncovered
-  reporting (the "independent final-copper audit").
+  reporting (the "independent final-copper audit"), wired into
+  :meth:`kicad_tools.validate.checker.DRCChecker.check_path_ampacity` and
+  reachable from ``kct check --current-paths`` (Issue #5124).
 * :func:`kicad_tools.pcb.reinforce.reinforce_net` -- an optional
   ``current_paths`` argument gates which chained runs are eligible for
   buttress-wire anchoring, so a declared sense/measurement branch is never
   silently reinforced (or bridged to the force path) even when
   ``all_runs=True`` would otherwise anchor it.
+
+Deliberately NOT a consumer (yet): ``router/pathfinder.py``'s route-time
+trace-width selection. Issue #5124 Acceptance Criterion 1 offers an
+explicit escape valve -- "OR a documented decision that width selection
+stays declarative-only ... rather than route-time-enforced, with
+rationale" -- and this module takes that path, for two reasons:
+
+1. **Precedent already exists.** :attr:`~kicad_tools.router.rules
+   .NetClassRouting.target_ampacity` is the closest existing analogue (a
+   declared current a net class must support) and it does NOT feed the
+   pathfinder's A* trace-width choice either -- it only hard-avoids
+   inner-plane layers and drives ``.kicad_dru`` generation. Route-time
+   width stays governed by the coarser ``NetClassRouting.trace_width``
+   scalar; ``target_ampacity`` is checked post-route
+   (:meth:`~kicad_tools.validate.checker.DRCChecker.check_ampacity`).
+   ``CurrentPathSpec`` follows the same declarative/checked-post-route
+   split its whole-net sibling already established.
+2. **The router's net decomposition would make edge-matching an
+   unreliable, misleading mechanism.** ``Router.route()`` and its
+   siblings route one pad-to-pad edge at a time
+   (``start: Pad, end: Pad``); a multi-terminal net (any T-network with
+   a trunk plus one or more sense taps) is decomposed into a spanning
+   tree of such edges by the router's own topology choice, which is not
+   guaranteed to reproduce a declared spec's exact ``source``/``sink``
+   pad pair as a single routed edge. Route-time width selection keyed on
+   an exact edge match would silently no-op on precisely the multi-tap
+   topologies this issue exists to model (Kelvin shunts, sense taps),
+   while *looking* like route-time enforcement -- worse than being
+   honestly declarative.
+
+The post-route :class:`PathAmpacityRule` audit remains authoritative: it
+re-derives each declared path's actual copper from the finished board via
+:func:`resolve_current_path` (graph BFS over real routed segments), so it
+catches a narrow trunk regardless of which edges the router chose. A
+future increment could add route-time width *hints* for the common case
+where a spec's endpoints DO match a single routed edge, without changing
+this module's contract -- tracked under Issue #5124.
 
 Sidecar format (mirrors the ``net_class_map.json`` convention already
 established for :class:`~kicad_tools.router.rules.NetClassRouting`)::
@@ -96,12 +135,15 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB, Segment
 
 __all__ = [
+    "CURRENT_PATHS_SIDECAR_BASENAME",
     "CurrentPathAudit",
     "CurrentPathSpec",
     "PathEndpoint",
     "PathResolution",
     "ResolvedEndpoint",
     "audit_current_paths",
+    "current_paths_sidecar_candidates",
+    "discover_current_paths_sidecar",
     "dump_current_path_specs",
     "load_current_path_specs",
     "parse_current_path_specs",
@@ -255,6 +297,75 @@ def load_current_path_specs(path: str | Path) -> list[CurrentPathSpec]:
 def dump_current_path_specs(specs: Sequence[CurrentPathSpec]) -> dict[str, object]:
     """Serialize specs back to the sidecar's ``{"paths": [...]}`` form."""
     return {"paths": [spec.to_dict() for spec in specs]}
+
+
+# The bare, board-agnostic sidecar name. Mirrors
+# ``kicad_tools.sidecars.NET_CLASS_MAP_SIDECAR_BASENAME`` -- declared,
+# committed board metadata (not a waiver list, which is why this follows
+# the un-prefixed ``net_class_map.json`` naming convention rather than the
+# leading-dot ``.kct_waivers.json`` / ``.courtyard_waivers.json`` style used
+# for opt-in suppression sidecars).
+CURRENT_PATHS_SIDECAR_BASENAME = "current_paths.json"
+
+
+def _current_paths_sidecar_names(pcb_stem: str) -> list[str]:
+    """Sidecar filenames to probe in one directory, in probe order.
+
+    Mirrors ``kicad_tools.sidecars.net_class_map_sidecar_names``: the
+    stem-keyed name (``<pcb_stem>.current_paths.json``) wins over the bare
+    ``current_paths.json`` within a directory, since it is evidence about
+    *this* board rather than a generic file.
+    """
+    if not pcb_stem:
+        return [CURRENT_PATHS_SIDECAR_BASENAME]
+    return [f"{pcb_stem}.{CURRENT_PATHS_SIDECAR_BASENAME}", CURRENT_PATHS_SIDECAR_BASENAME]
+
+
+def current_paths_sidecar_candidates(pcb_path: str | Path) -> list[Path]:
+    """Enumerate candidate ``current_paths.json`` sidecar paths for a board.
+
+    Mirrors :func:`kicad_tools.sidecars.net_class_map_sidecar_candidates`
+    exactly: the board directory, a sibling ``output/``, and
+    ``../output/``, crossed with the stem-keyed-then-bare name order from
+    :func:`_current_paths_sidecar_names`, de-duplicated and nearer
+    directories winning over farther ones.
+
+    Args:
+        pcb_path: Path to the ``*.kicad_pcb`` being checked/routed.
+
+    Returns:
+        Candidate paths in probe order (existence not checked).
+    """
+    pcb_path = Path(pcb_path)
+    pcb_dir = pcb_path.parent
+    directories = [pcb_dir, pcb_dir / "output", pcb_dir.parent / "output"]
+    names = _current_paths_sidecar_names(pcb_path.stem)
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for directory in directories:
+        for name in names:
+            candidate = directory / name
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            candidates.append(candidate)
+    return candidates
+
+
+def discover_current_paths_sidecar(pcb_path: str | Path) -> Path | None:
+    """Return the first existing ``current_paths.json`` sidecar for a board.
+
+    Args:
+        pcb_path: Path to the ``*.kicad_pcb`` being checked/routed.
+
+    Returns:
+        The first candidate (from :func:`current_paths_sidecar_candidates`)
+        that exists as a file, or ``None`` when none is found.
+    """
+    for candidate in current_paths_sidecar_candidates(pcb_path):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 @dataclass(frozen=True)

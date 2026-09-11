@@ -861,6 +861,33 @@ def _add_check_parser(subparsers) -> None:
         ),
     )
     check_parser.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        help=(
+            "Path to a JSON sidecar declaring branch-specific current-path "
+            "intent (stable RefDes.pad source/sink endpoints with their own "
+            "declared current, Issue #4980).  When supplied, enables the "
+            "path_ampacity DRC rule to check each declared branch "
+            "independently of --net-class-map's whole-net target_ampacity.  "
+            "Auto-discovered next to the board when this flag is omitted -- "
+            "as <board-stem>.current_paths.json or current_paths.json, in "
+            "the board dir then output/ then ../output/ (mirrors "
+            "--net-class-map, Issue #5124).  Use --no-current-paths to "
+            "suppress that auto-discovery."
+        ),
+    )
+    check_parser.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help=(
+            "Suppress current-paths sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (path_ampacity stays inactive).  Cannot "
+            "be combined with --current-paths."
+        ),
+    )
+    check_parser.add_argument(
         "--courtyard-waivers",
         dest="courtyard_waivers",
         default=None,
