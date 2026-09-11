@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kicad_tools.validate.spatial import candidate_pairs
+
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
 
@@ -1525,12 +1527,22 @@ class ConnectivityValidator:
 
         # Build segment adjacency graph
         segment_graph: dict[int, set[int]] = defaultdict(set)
-        for i, seg_a in enumerate(segments):
-            for j in range(i + 1, len(segments)):
-                seg_b = segments[j]
-                if self._segments_chain_at_shared_point(seg_a, seg_b, bridges):
-                    segment_graph[i].add(j)
-                    segment_graph[j].add(i)
+        # Enclose each full copper capsule, not just its centerline. The exact
+        # predicate also joins width-only side/T contacts; the query margin
+        # separately preserves legacy endpoint tolerance and layer bridges.
+        bounds = [
+            (
+                min(seg.start[0], seg.end[0]) - max(seg.width or 0.0, 0.0) / 2,
+                min(seg.start[1], seg.end[1]) - max(seg.width or 0.0, 0.0) / 2,
+                max(seg.start[0], seg.end[0]) + max(seg.width or 0.0, 0.0) / 2,
+                max(seg.start[1], seg.end[1]) + max(seg.width or 0.0, 0.0) / 2,
+            )
+            for seg in segments
+        ]
+        for i, j in candidate_pairs(bounds, self.POSITION_TOLERANCE):
+            if self._segments_chain_at_shared_point(segments[i], segments[j], bridges):
+                segment_graph[i].add(j)
+                segment_graph[j].add(i)
 
         # Find connected components of segments
         visited: set[int] = set()
