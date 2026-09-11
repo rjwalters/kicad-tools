@@ -15,7 +15,7 @@ was built for unrelated issues (#2613's chorus-test single-pad-net sweep,
 The sixth, `fix_connectivity`'s near-miss auto-snap, is a genuine and narrow
 gap: we already **detect** the exact defect class (`find_wire_stubs`) but
 have no automated **repair** for it, unlike our existing `fix-erc` pattern
-which already proves out the `--dry-run`-gated auto-fix shape for two other
+which already establishes a `--dry-run`-gated auto-fix pattern for other
 ERC violation classes.
 
 | # | Primitive | Verdict | Where we already do this |
@@ -143,11 +143,12 @@ closed by our own code (#2613). No gap.
 (PCB) forms of "orphan item." One narrower notion — a fully-disconnected
 *component* (every pad on that footprint isolated, as opposed to one
 orphan pin or one orphan copper island) — is not modeled as its own named
-check, but it is fully implied by the existing pin-level and net-level
-checks: a component with zero connected pins shows up as N single-pin-net
-findings from item 2's PCB-side rule, one per pad. Not worth a dedicated
-"orphan component" primitive on top of that — it would just recompute
-the same evidence with a different grouping.
+check. Existing schematic pin checks provide related evidence, but the PCB
+single-pad-net rule skips pads with no net assignment and intentionally
+allows some power/ground nets. It therefore does not guarantee one finding
+per pad of every disconnected component. A dedicated component-level summary
+is declined for this audit's scope; that is a prioritization decision, not
+proof that every orphan-component case is already detected.
 
 ## 4. `trace_from_point` — Already have
 
@@ -269,10 +270,11 @@ suppression). It is also narrowly scoped: the target defect (a wire
 endpoint an exact integer number of grid steps short of a real pin, on
 one axis) is precisely the shape `find_wire_stubs` already isolates, so
 the fix is "extend this wire's dangling endpoint to this already-computed
-pin position" — no new geometry search, no new net-identity reasoning,
-and (critically, given `sch_wire_stub.py`'s own conservatism: it only
-fires on integer-grid-step gaps, never a fuzzy/proximity match) no risk
-of silently bridging two pins that were never meant to connect. The
+pin position". The detector's integer-grid-step restriction narrows candidates,
+but geometric alignment alone does not prove intended electrical connectivity.
+The repair still needs net-identity and ambiguity checks, previewable changes,
+and negative tests against unintended bridges before it can safely mutate a
+schematic. The
 existing `fix-erc --dry-run` command (`cli/fix_erc_cmd.py:81`, `:223`)
 already establishes the exact UX shape this should follow: preview by
 default logic inverted to `--dry-run` opt-in, one `FixAction` per
