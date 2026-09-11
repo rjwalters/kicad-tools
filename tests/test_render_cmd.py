@@ -580,3 +580,119 @@ class TestEdgeCases:
         board = _make_board(tmp_path, "01-vd", "vd.kicad_pcb")
         rc = render_main([str(board), "--no-3d"])
         assert rc == 0
+
+
+class TestMissingModelDiagnostics:
+    @pytest.mark.parametrize("directory_mode", [False, True])
+    def test_missing_bodies_are_partial_even_when_native_render_succeeds(
+        self, tmp_path, fake_kicad, capsys, directory_mode
+    ):
+        board = _make_board(tmp_path, "05-board", "board.kicad_pcb")
+        pcb = board / "output/board.kicad_pcb"
+        source = """(kicad_pcb
+          (footprint "TSSOP" (property "Reference" "U2")
+            (model "missing-tssop.step"))
+          (module "HVSSOP" (fp_text reference "U3")
+            (model "missing-hvssop.step")))"""
+        pcb.write_text(source)
+        rc = render_main([str(board if directory_mode else pcb), "--format", "json"])
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)["boards"][0]
+        assert rc == 1
+        assert result["status"] == "partial"
+        assert len(result["outputs"]) == 4
+        check = result["model_check"]
+        assert check["status"] == "failed"
+        assert check["checked_models"] == 2
+        assert [m["reference"] for m in check["unresolved_models"]] == ["U2", "U3"]
+        assert all(m["reason"] == "model file not found" for m in check["unresolved_models"])
+        assert "missing-tssop.step" in result["errors"][0]
+        assert pcb.read_text() == source
+        assert captured.err == ""
+
+    def test_text_names_component_and_model(self, tmp_path, fake_kicad, capsys):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text(
+            '(kicad_pcb (footprint "x" (property "Reference" "U2") (model "absent.step")))'
+        )
+        assert render_main([str(pcb)]) == 1
+        assert "3D model U2: model file not found: absent.step" in capsys.readouterr().err
+
+    def test_no_3d_does_not_inspect_models(self, tmp_path, fake_kicad, monkeypatch, capsys):
+        def unexpected(*args):
+            raise AssertionError("2D must not inspect models")
+
+        monkeypatch.setattr(render_cmd, "inspect_pcb_models", unexpected)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text('(kicad_pcb (footprint "x" (model "absent.step")))')
+        assert render_main([str(pcb), "--no-3d", "--format", "json"]) == 0
+        result = json.loads(capsys.readouterr().out)["boards"][0]
+        assert result["status"] == "ok"
+        assert result["model_check"]["status"] == "not_run"
+        assert len(result["outputs"]) == 2
+        assert fake_kicad["render"] == []
+
+    def test_paths_use_render_environment_and_project_directory(self, tmp_path, monkeypatch):
+        from kicad_tools.cli import runner
+
+        model_dir = tmp_path / "library"
+        model_dir.mkdir()
+        (model_dir / "part.step").touch()
+        (tmp_path / "local.step").touch()
+        monkeypatch.setenv("KICAD9_3DMODEL_DIR", str(model_dir))
+        monkeypatch.setenv("CUSTOM_MODELS", "${KICAD9_3DMODEL_DIR}")
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("""(kicad_pcb (footprint "x" (property "Reference" "U1")
+          (model "${KICAD9_3DMODEL_DIR}/part.step")
+          (model "$(CUSTOM_MODELS)/part.step")
+          (model "${KIPRJMOD}/local.step")
+          (model "local.step" (hide no))
+          (model "missing.step" (hide yes))))""")
+        assert runner.inspect_pcb_models(pcb) == {
+            "status": "passed",
+            "checked_models": 4,
+            "unresolved_models": [],
+        }
+
+    def test_unknown_variable_and_directory_are_not_models(self, tmp_path, monkeypatch):
+        from kicad_tools.cli import runner
+
+        monkeypatch.delenv("NONEXISTENT_MODEL_ROOT", raising=False)
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("""(kicad_pcb (footprint "x" (property "Reference" "U1")
+          (model "${NONEXISTENT_MODEL_ROOT}/part.step") (model ".")))""")
+        missing = runner.inspect_pcb_models(pcb)["unresolved_models"]
+        assert missing[0]["reason"] == "unresolved path variable"
+        assert missing[0]["resolved_path"] is None
+        assert missing[1]["reason"] == "model file not found"
+
+    def test_inspection_failure_cannot_report_complete(self, tmp_path, fake_kicad, capsys):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(not_a_board)")
+        assert render_main([str(pcb), "--format", "json"]) == 1
+        result = json.loads(capsys.readouterr().out)["boards"][0]
+        assert result["status"] == "partial"
+        assert result["model_check"]["status"] == "failed"
+        assert "inspection failed" in result["errors"][0]
+
+    def test_native_configured_paths_and_environment_precedence(self, tmp_path, monkeypatch):
+        from kicad_tools.cli import runner
+
+        config = tmp_path / "config/10.0"
+        config.mkdir(parents=True)
+        models = tmp_path / "models"
+        models.mkdir()
+        (models / "part.step").touch()
+        (config / "kicad_common.json").write_text(
+            json.dumps({"environment": {"vars": {"PRIVATE_MODELS": str(models)}}})
+        )
+        monkeypatch.setenv("KICAD_CONFIG_HOME", str(config.parent))
+        monkeypatch.delenv("PRIVATE_MODELS", raising=False)
+        monkeypatch.setattr(runner, "get_kicad_version", lambda *a: "10.0.6")
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text('(kicad_pcb (footprint "x" (model "${PRIVATE_MODELS}/part.step")))')
+        assert runner.inspect_pcb_models(pcb)["status"] == "passed"
+        monkeypatch.setenv("PRIVATE_MODELS", str(tmp_path / "absent"))
+        missing = runner.inspect_pcb_models(pcb)["unresolved_models"]
+        assert missing[0]["reason"] == "model file not found"
+        assert missing[0]["resolved_path"] == str(tmp_path / "absent/part.step")
