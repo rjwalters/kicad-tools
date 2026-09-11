@@ -38,6 +38,7 @@ HV/creepage model (Unit F).
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from kicad_tools.core.types import CopperLayer
@@ -47,6 +48,7 @@ from kicad_tools.physics.wire_gauge import (
     anchor_drill_for_awg,
     anchor_pad_for_drill,
 )
+from kicad_tools.router.current_paths import CurrentPathSpec, reinforcement_eligible_segment_ids
 from kicad_tools.router.optimizer.algorithms import merge_collinear
 from kicad_tools.router.optimizer.chain import sort_into_chains
 from kicad_tools.router.optimizer.config import OptimizationConfig
@@ -132,6 +134,15 @@ class RunSummary:
     anchors_placed: int
     #: Anchor positions on this run that were hard-refused (no clear nudge).
     anchors_refused: int
+    #: Set (Issue #4980) to a human-readable reason when a ``current_paths``
+    #: declaration excluded this run from anchoring -- it was not fully
+    #: covered by a resolved, reinforcement-eligible ``CurrentPathSpec``
+    #: (e.g. a Kelvin sense tap, an unresolved trunk declaration, or copper
+    #: no declared path covers at all). ``None`` when the run was not
+    #: excluded -- either no ``current_paths`` were supplied to
+    #: :func:`reinforce_net` at all (legacy, ungated behavior), or the run
+    #: passed the gate.
+    path_excluded_reason: str | None = None
 
     @property
     def fully_reinforced(self) -> bool:
@@ -550,6 +561,7 @@ def reinforce_net(
     dry_run: bool = False,
     all_runs: bool = False,
     min_run_length_mm: float | None = None,
+    current_paths: Sequence[CurrentPathSpec] | None = None,
 ) -> ReinforceResult:
     """Emit a spaced same-net PTH anchor row along a routed net's trace.
 
@@ -585,6 +597,19 @@ def reinforce_net(
             anchored; shorter runs are still reported (never silently
             dropped). Composes with ``all_runs`` -- filter first, then anchor
             all that survive.
+        current_paths: Optional declared branch-specific current-path
+            intent (Issue #4980; see
+            :mod:`kicad_tools.router.current_paths`). Specs not on
+            ``net_name`` are ignored. When at least one spec targets
+            ``net_name``, reinforcement gates to an **allow-list**: only
+            runs fully covered by a resolved, reinforcement-eligible
+            ``CurrentPathSpec`` may be anchored -- a declared sense/
+            measurement/Kelvin branch (``reinforcement_eligible=False``),
+            copper an ineligible-or-unresolved declaration cannot verify,
+            and copper no declared path covers at all are all excluded and
+            reported via :attr:`RunSummary.path_excluded_reason`, never
+            silently anchored. ``None`` (the default) preserves the
+            pre-#4980 ungated behavior.
 
     Returns:
         A :class:`ReinforceResult` summarising placed/refused anchors, the
@@ -656,12 +681,36 @@ def reinforce_net(
     # unchanged -- merge only removes collinear interior vertices).
     geoms = [_run_geometry(run) for run in runs]
 
+    # Issue #4980: declared current-path gating. When at least one spec
+    # targets this net, reinforcement flips to an ALLOW-list -- a run may
+    # only be anchored when every one of its segments is covered by a
+    # resolved, reinforcement-eligible CurrentPathSpec. This is what keeps a
+    # Kelvin sense tap (or any branch declared reinforcement_eligible=False)
+    # from ever being anchored/bridged, and what makes a broken/moved
+    # endpoint mapping fail closed (a spec that no longer resolves simply
+    # never contributes segments to the allow-list, rather than falling
+    # back to "anchor it anyway").
+    path_excluded_reasons: dict[int, str] = {}
+    net_path_specs = [spec for spec in (current_paths or ()) if spec.net_name == net_name]
+    if net_path_specs:
+        eligible_segment_ids = reinforcement_eligible_segment_ids(pcb, net_path_specs)
+        for i, run in enumerate(runs):
+            run_segment_ids = {id(s) for s in run}
+            if not run_segment_ids.issubset(eligible_segment_ids):
+                path_excluded_reasons[i] = (
+                    "excluded by declared current-path intent (Issue #4980): not fully "
+                    "covered by a resolved, reinforcement-eligible CurrentPathSpec for "
+                    f"net {net_name!r}"
+                )
+
     # Selection: filter by min length (report -- do not drop -- shorter runs),
+    # then by the current-path gate (report -- do not drop -- excluded runs),
     # then anchor either all survivors (all_runs) or just the longest.
     if min_run_length_mm is not None:
         eligible = [i for i, g in enumerate(geoms) if g.length_mm >= min_run_length_mm]
     else:
         eligible = list(range(len(geoms)))
+    eligible = [i for i in eligible if i not in path_excluded_reasons]
     anchored_idx: set[int] = set(eligible if all_runs else eligible[:1])
 
     # Backward-compat whole-net fields describe the primary (longest anchored)
@@ -741,6 +790,7 @@ def reinforce_net(
                 anchors_needed=len(targets),
                 anchors_placed=run_placed,
                 anchors_refused=run_refused,
+                path_excluded_reason=path_excluded_reasons.get(i),
             )
         )
 

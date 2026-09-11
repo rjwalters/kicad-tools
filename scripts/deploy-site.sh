@@ -159,11 +159,11 @@ assert_cloudflare_account() {
 
   info "Cloudflare account matches the configured identity pin."
 
-  # Non-fatal: confirm the kicad-tools Pages project is reachable.  The very
-  # first deploy may predate project creation, so only WARN if it's missing.
+  # Scoped credentials must reach the exact existing project. OAuth retains
+  # the first-deploy warning when the project has not been created yet.
   local projects
   if projects="$("$@" pages project list 2>&1)"; then
-    if ! printf '%s\n' "${projects}" | grep -q 'kicad-tools'; then
+    if ! printf '%s\n' "${projects}" | grep -Eq '(^|[[:space:]│|])kicad-tools([[:space:]│|]|$)'; then
       if [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
         err "Configured account does not expose the existing kicad-tools Pages project. Refusing to deploy."
         exit 1
