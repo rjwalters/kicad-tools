@@ -152,8 +152,19 @@ class TestValidateLayerTransitionsFullStack:
         """
         route = Route(net=1, net_name="SIG")
         route.segments = [
-            Segment(x1=0.0, y1=0.0, x2=5.0, y2=0.0, width=0.2, layer=Layer.IN1_CU, net=1, net_name="SIG"),
-            Segment(x1=5.0, y1=0.0, x2=10.0, y2=0.0, width=0.2, layer=Layer.IN2_CU, net=1, net_name="SIG"),
+            Segment(
+                x1=0.0, y1=0.0, x2=5.0, y2=0.0, width=0.2, layer=Layer.IN1_CU, net=1, net_name="SIG"
+            ),
+            Segment(
+                x1=5.0,
+                y1=0.0,
+                x2=10.0,
+                y2=0.0,
+                width=0.2,
+                layer=Layer.IN2_CU,
+                net=1,
+                net_name="SIG",
+            ),
         ]
         inserted = route.validate_layer_transitions()
         assert inserted == 1
@@ -178,12 +189,26 @@ class TestConvertPathToRouteFullStack:
         )
         router = Router(grid, rules)
         start_pad = Pad(
-            x=0.0, y=0.0, width=1.0, height=1.0, net=1, net_name="SIG",
-            layer=Layer.IN1_CU, ref="J1", pin="1",
+            x=0.0,
+            y=0.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="SIG",
+            layer=Layer.IN1_CU,
+            ref="J1",
+            pin="1",
         )
         end_pad = Pad(
-            x=5.0, y=0.0, width=1.0, height=1.0, net=1, net_name="SIG",
-            layer=Layer.IN2_CU, ref="J2", pin="1",
+            x=5.0,
+            y=0.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="SIG",
+            layer=Layer.IN2_CU,
+            ref="J2",
+            pin="1",
         )
         route = Route(net=1, net_name="SIG")
         # Synthetic A* path: two cells on In1.Cu (grid index 1), a via to
