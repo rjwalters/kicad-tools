@@ -4,8 +4,9 @@ This module aggregates already-computed manufacturing artifacts into a single,
 stable ``board.json`` data contract consumed by the kicad-tools.org demo gallery
 (Epic #3674, Phase 1, issue #3676).
 
-It does **not** recompute anything from KiCad. All metrics are parsed from
-artifacts that already exist under a board's ``output/manufacturing/`` directory:
+It does **not** invoke KiCad or run any manufacturing export. For a board with
+an ``output/manufacturing/`` directory, all metrics are parsed from artifacts
+that already exist there:
 
 * ``report.md``      -> routing %, DRC errors, layer count, board size, part
                         count, description, cost estimate.
@@ -17,6 +18,12 @@ artifacts that already exist under a board's ``output/manufacturing/`` directory
 * ``../lvs.json``    -> Layout-vs-Schematic verification (#3748, #3749);
                         sourced from ``output/lvs.json`` (NOT under
                         ``manufacturing/``).
+
+For a board with no ``output/manufacturing/`` directory (issue #5055), static
+identity/geometry metadata is instead read directly from a selected
+``.kicad_pcb``/``.kicad_sch`` source (footprint/layer counts, Edge.Cuts bounds)
+without altering readiness evidence or synthesizing manufacturing output — see
+"Development boards without manufacturing export" in ``docs/board-json-schema.md``.
 
 Output is written to ``boards/<id>/output/board.json``.
 
