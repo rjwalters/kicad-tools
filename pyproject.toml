@@ -214,7 +214,7 @@ dev = [
     "pytest-cov>=4.0",
     "pytest-benchmark>=4.0",
     "pytest-timeout>=2.3",
-    "ruff==0.16.5",
+    "ruff==0.16.6",
     "mypy>=1.0",
     "rtree>=1.0",
     "numpy>=1.24",

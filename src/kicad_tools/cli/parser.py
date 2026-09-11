@@ -1782,6 +1782,13 @@ def _add_sch_parser(subparsers) -> None:
     )
     add_format_flag(sch_disconnect)
 
+    sch_fix_wire_stubs = sch_subparsers.add_parser(
+        "fix-wire-stubs", help="Safely extend exact-grid wire stubs to pins"
+    )
+    sch_fix_wire_stubs.add_argument("schematic", help="Root .kicad_sch file")
+    sch_fix_wire_stubs.add_argument("--dry-run", "-n", action="store_true")
+    add_format_flag(sch_fix_wire_stubs)
+
     # sch reconnect-pin
     sch_reconnect_pin = sch_subparsers.add_parser(
         "reconnect-pin", help="Reconnect a pin from one net to another"
@@ -4271,6 +4278,25 @@ def _add_route_parser(subparsers) -> None:
             "also declare 'target_ampacity' are hard-blocked regardless of this "
             "flag. Use this for manufacturability-critical boards where an "
             "avoided layer must never carry a given net."
+        ),
+    )
+    # Issue #5014: opt-in HARD signal-layer eligibility for controlled-impedance
+    # plane assignments.  Mirror of the inner route_cmd.py flag; both sites
+    # must stay in sync per ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--reserve-plane-layers",
+        action="store_true",
+        default=False,
+        help=(
+            "Hard-restrict signal routing to the resolved layer stack's "
+            "non-PLANE layers (e.g. with --layers 4, only F.Cu/B.Cu stay "
+            "routable -- In1.Cu/In2.Cu are reserved for the GND/PWR "
+            "reference planes). By default LayerDefinition.is_routable "
+            "treats every copper layer -- including declared reference "
+            "planes -- as signal-eligible, so a controlled-impedance recipe "
+            "can silently lose its continuous reference construction to "
+            "ordinary signal. A no-op on a stack with no PLANE layers "
+            "(--layers 2, 4-all, or an all-signal auto-detected board)."
         ),
     )
     route_parser.add_argument(
