@@ -255,14 +255,35 @@ def _lookup(args) -> int:
         return 1
 
     client = LCSCClient()
-    part = client.lookup(args.part, bypass_cache=args.no_cache)
+    from ..parts.lcsc import LCSCDependencyMissingError
 
+    try:
+        lookup = client.lookup_result(args.part, bypass_cache=args.no_cache)
+    except LCSCDependencyMissingError as exc:
+        if args.format == "json":
+            print(json.dumps({"status": "unavailable", "error": str(exc)}))
+        else:
+            print(f"Parts lookup unavailable: {exc}", file=sys.stderr)
+        return 1
+    part = lookup.part
+    coverage = {"status": lookup.status, "source": lookup.source, "diagnostics": lookup.diagnostics}
     if part is None:
-        print(f"Part not found: {args.part}", file=sys.stderr)
+        if args.format == "json":
+            print(json.dumps({"lookup": coverage, "part": None}))
+        else:
+            label = (
+                "Verified live no-match"
+                if lookup.status == "not_found"
+                else "Lookup unavailable; catalog absence not verified"
+            )
+            print(f"{label}: {args.part}", file=sys.stderr)
+            for diagnostic in lookup.diagnostics:
+                print(diagnostic, file=sys.stderr)
         return 1
 
     if args.format == "json":
         data = {
+            "lookup": coverage,
             "lcsc_part": part.lcsc_part,
             "mfr_part": part.mfr_part,
             "manufacturer": part.manufacturer,
@@ -279,6 +300,9 @@ def _lookup(args) -> int:
         }
         print(json.dumps(data, indent=2))
     else:
+        print(f"Lookup source: {lookup.source}")
+        for diagnostic in lookup.diagnostics:
+            print(diagnostic, file=sys.stderr)
         print(f"LCSC Part:    {part.lcsc_part}")
         print(f"MFR Part:     {part.mfr_part}")
         print(f"Manufacturer: {part.manufacturer}")
@@ -313,6 +337,8 @@ def _search(args) -> int:
         print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
         return 1
 
+    from ..parts.lcsc import LCSCUnavailableError
+
     client = LCSCClient()
     try:
         results = client.search(
@@ -321,19 +347,35 @@ def _search(args) -> int:
             in_stock=args.in_stock,
             basic_only=args.basic,
         )
-    except LCSCDependencyMissingError as e:
+    except (LCSCDependencyMissingError, LCSCUnavailableError) as e:
         # Backend genuinely unavailable (no ``requests`` extra AND no synced
         # offline catalog).  Surface this distinctly from a legitimate empty
         # result so the user isn't misled by a bare "No parts found" (#4296).
-        print(f"Error: parts search backend unavailable: {e}", file=sys.stderr)
+        if args.format == "json":
+            print(json.dumps({"status": "unavailable", "error": str(e)}))
+        else:
+            print(f"Error: parts search backend unavailable: {e}", file=sys.stderr)
         return 1
 
-    if not results.parts:
-        print(f"No parts found for: {args.query}", file=sys.stderr)
+    if not results.parts and args.format != "json":
+        label = (
+            "No parts found"
+            if results.coverage == "live"
+            else "No candidates in incomplete source coverage; catalog absence not verified"
+        )
+        print(f"{label} for: {args.query}", file=sys.stderr)
+        for diagnostic in results.diagnostics:
+            print(diagnostic, file=sys.stderr)
         return 1
+    if args.format != "json":
+        for diagnostic in results.diagnostics:
+            print(diagnostic, file=sys.stderr)
 
     if args.format == "json":
         data = {
+            "source": results.source,
+            "coverage": results.coverage,
+            "diagnostics": results.diagnostics,
             "query": results.query,
             "total": results.total_count,
             "parts": [
@@ -377,7 +419,7 @@ def _search(args) -> int:
                 f"{part.lcsc_part}: {part.mfr_part} - {part.package} - {part.stock:,} in stock - {price_str}{basic_str}"
             )
 
-    return 0
+    return 0 if results.parts else 1
 
 
 def _cache(args) -> int:
@@ -1018,6 +1060,13 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
                     print(f"      • {alt.lcsc_part}: {alt.stock:,} in stock{price_info}{basic}")
             else:
                 print("    No alternatives found")
+        print()
+
+    unavailable = [i for i in items if i.status == AvailabilityStatus.UNAVAILABLE]
+    if unavailable:
+        print(f"? LOOKUP UNAVAILABLE ({len(unavailable)} parts):")
+        for item in unavailable:
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part}): {item.error}")
         print()
 
     # Missing parts (no LCSC number or not found)

@@ -61,7 +61,7 @@ def test_chain_exhaustive_parity(monkeypatch, bridge):
             ((5, 0), (5, 0), "F.Cu"),  # zero length
         ]
     ]
-    pcb = SimpleNamespace(vias=[])
+    pcb = SimpleNamespace(vias=[], footprints=[])
     validator = connectivity.ConnectivityValidator(pcb)
     bridges = [((2, 0), frozenset({"F.Cu", "B.Cu"}))] if bridge else []
     monkeypatch.setattr(validator, "_collect_layer_bridges", lambda *args: bridges)
@@ -86,7 +86,7 @@ def test_production_exact_predicate_counts(monkeypatch, count):
         SimpleNamespace(start=(i * 10, 0), end=(i * 10 + 1, 0), layer="F.Cu", width=0.2)
         for i in range(count)
     ]
-    validator = connectivity.ConnectivityValidator(SimpleNamespace(vias=[]))
+    validator = connectivity.ConnectivityValidator(SimpleNamespace(vias=[], footprints=[]))
     chain_calls = 0
 
     def chain_predicate(*args):
@@ -155,7 +155,7 @@ def test_width_only_contact_exhaustive_parity(monkeypatch, layer, widths, extra_
         SimpleNamespace(start=(0, 0), end=(10, 0), layer="F.Cu", width=widths[0]),
         SimpleNamespace(start=(2, separation), end=(8, separation), layer=layer, width=widths[1]),
     ]
-    validator = connectivity.ConnectivityValidator(SimpleNamespace(vias=[]))
+    validator = connectivity.ConnectivityValidator(SimpleNamespace(vias=[], footprints=[]))
 
     def run():
         return validator._build_segment_chains(
@@ -174,7 +174,7 @@ def test_negative_width_shared_endpoint_exhaustive_parity(monkeypatch):
         SimpleNamespace(start=(0, 0), end=(10, 0), layer="F.Cu", width=-2),
         SimpleNamespace(start=(0, 0), end=(-2, 0), layer="F.Cu", width=0.2),
     ]
-    validator = connectivity.ConnectivityValidator(SimpleNamespace(vias=[]))
+    validator = connectivity.ConnectivityValidator(SimpleNamespace(vias=[], footprints=[]))
 
     def run():
         return validator._build_segment_chains(
