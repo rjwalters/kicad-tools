@@ -1989,22 +1989,11 @@ def _save_partial_results() -> bool:
             # ``tests/test_route_zones_preserved.py``'s AST-based
             # zone-preservation audit, which discovers PCB-write sites by the
             # ``<path>.write_text(<content variable>)`` shape.
-            # mypy infers ``save_path`` as ``bool | Path`` because it is
-            # ultimately sourced from the untyped ``_interrupt_state`` dict
-            # literal (whose declared-from-initializer value type is
-            # ``bool | None``) -- a pre-existing typing gap already covered
-            # by several baselined ``"bool" has no attribute ...`` errors
-            # elsewhere in this exact function (e.g. ``.read_text``,
-            # ``.with_stem``, the old ``.write_text``). These three lines are
-            # new attribute-access spellings of that same known-safe
-            # false positive (the guard above already establishes
-            # ``output_path``/``pcb_path`` are real ``Path`` objects), so
-            # they are ignored inline rather than growing the baseline file.
-            tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")  # type: ignore[attr-defined]
+            tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
             tmp_path.write_text(output_content)
             with open(tmp_path, "rb") as f:
                 os.fsync(f.fileno())
-            os.replace(tmp_path, save_path)  # type: ignore[arg-type]
+            os.replace(tmp_path, save_path)
 
             if not quiet:
                 stats = router.get_statistics()
