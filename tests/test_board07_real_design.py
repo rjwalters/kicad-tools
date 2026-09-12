@@ -119,7 +119,7 @@ def test_dq_load_evaluates_both_receiver_directions_explicitly():
     assert data["estimated_external_load_pf"] == mcu_receives["estimated_external_load_pf"]
     # A single-direction net (clock, address/control) has exactly one entry.
     clock = validate.external_load("SDCLK", 10.0, 2)
-    assert list(clock["directions"]) == ["SDRAM drives, MCU receives (clock)"]
+    assert list(clock["directions"]) == ["MCU drives, SDRAM receives (clock)"]
     address = validate.external_load("A0", 10.0, 2)
     assert list(address["directions"]) == ["MCU drives, SDRAM receives"]
 
@@ -172,48 +172,114 @@ def test_stackup_average_epsilon_r_weights_by_dielectric_thickness():
 
     validate = load("validate")
     stack = NS(
+        has_explicit_data=True,
         layers=[
-            NS(is_dielectric=True, thickness_mm=1.0, epsilon_r=4.0),
-            NS(is_dielectric=True, thickness_mm=3.0, epsilon_r=5.0),
-            NS(is_dielectric=False, thickness_mm=0.035, epsilon_r=0.0),
-        ]
+            NS(is_copper=True, is_dielectric=False, thickness_mm=0.035, epsilon_r=0),
+            NS(is_copper=False, is_dielectric=True, thickness_mm=1.0, epsilon_r=4.0),
+            NS(is_copper=False, is_dielectric=True, thickness_mm=3.0, epsilon_r=5.0),
+            NS(is_copper=True, is_dielectric=False, thickness_mm=0.035, epsilon_r=0),
+        ],
     )
     # (1.0*4.0 + 3.0*5.0) / 4.0 = 4.75
     assert validate.stackup_average_epsilon_r(stack) == pytest.approx(4.75)
-    assert validate.stackup_average_epsilon_r(NS(layers=[])) is None
+    assert validate.stackup_average_epsilon_r(NS(has_explicit_data=True, layers=[])) is None
 
 
-def test_board_antipad_clearance_reads_the_boards_own_min_clearance_rule(tmp_path):
+def _filled_antipad_board(radius=0.4, *, topology="circle"):
+    """Real PCB parser with native-style bridged filled-polygon holes."""
+    import math
+
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
+
+    header = "(kicad_pcb (version 20241229) (generator test) "
+    header += '(layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) '
+    header += '(8 "In3.Cu" signal) (10 "In4.Cu" signal) (31 "B.Cu" signal)) '
+    header += '(net 1 "SIG") (net 2 "GND") (net 3 "+3V3") '
+    header += '(via (at 0 0) (size .5) (drill .2) (layers "F.Cu" "B.Cu") (net 1)) '
+    for layer in ("In1.Cu", "In4.Cu"):
+        ring = [
+            (radius * math.cos(-i * math.tau / 128), radius * math.sin(-i * math.tau / 128))
+            for i in range(129)
+        ]
+        if topology == "slot":
+            ring = [(x * 2, y) for x, y in ring]
+        outer = [(2, 0), (2, 2), (-2, 2), (-2, -2), (2, -2), (2, 0)]
+        points = outer + [ring[0]] + ring[1:] + [ring[0], outer[0]]
+        if topology == "edge":
+            points = [(radius, -2), (2, -2), (2, 2), (radius, 2)]
+        pts = " ".join(f"(xy {x} {y})" for x, y in points)
+        fill = f'(filled_polygon (layer "{layer}") (pts {pts}))'
+        if topology == "unfilled":
+            fill = ""
+        net_id, net_name = (2, "GND") if layer == "In1.Cu" else (3, "+3V3")
+        header += f'(zone (net {net_id}) (net_name "{net_name}") (layer "{layer}") {fill}) '
+    return PCB(parse_string(header + ")"))
+
+
+def test_measured_antipads_follow_filled_copper_not_project_rule(tmp_path):
     import json
-
-    validate = load("validate")
-    board_path = tmp_path / "checked.kicad_pcb"
-    board_path.write_text("(kicad_pcb)")
-    board_path.with_suffix(".kicad_pro").write_text(
-        json.dumps({"board": {"design_settings": {"rules": {"min_clearance": 0.15}}}})
-    )
-    assert validate.board_antipad_clearance_mm(board_path) == 0.15
-    # Missing/malformed project data is "geometry unavailable", not an error.
-    board_path.with_suffix(".kicad_pro").write_text("not json")
-    assert validate.board_antipad_clearance_mm(board_path) is None
-    board_path.with_suffix(".kicad_pro").unlink()
-    assert validate.board_antipad_clearance_mm(board_path) is None
-
-
-def test_net_via_capacitance_sums_measured_barrels_and_falls_back_when_unavailable():
-    from types import SimpleNamespace as NS
 
     import pytest
 
     validate = load("validate")
-    vias = [NS(size=0.5), NS(size=0.5)]
-    total = validate.net_via_capacitance_pf(vias, 0.15, 1.6, 4.6)
-    assert total == pytest.approx(2 * 0.681, abs=0.002)
-    # Any missing input (clearance, epsilon_r, or an empty via list) disables
-    # the geometry path for the whole net rather than partially measuring it.
-    assert validate.net_via_capacitance_pf(vias, None, 1.6, 4.6) is None
-    assert validate.net_via_capacitance_pf(vias, 0.15, 1.6, None) is None
-    assert validate.net_via_capacitance_pf([], 0.15, 1.6, 4.6) is None
+    project = tmp_path / "board.kicad_pro"
+    project.write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"min_clearance": 0.15}}}})
+    )
+    original = project.read_bytes()
+    values = []
+    for radius in (0.4, 0.377, 0.5):
+        board = _filled_antipad_board(radius)
+        planes = validate.board_reference_copper(board)
+        values.append(validate.net_via_capacitance_pf(board.vias, planes, 1.6, 4.6))
+        assert validate.measured_antipad_diameter_mm(board.vias[0], planes) == pytest.approx(
+            2 * radius, abs=0.001
+        )
+    assert values[0] == pytest.approx(0.681, abs=0.002)
+    assert values[1] > values[0] > values[2]
+    assert project.read_bytes() == original
+
+
+def test_net_via_capacitance_rejects_unknown_topology_for_whole_net():
+    validate = load("validate")
+    for topology in ("slot", "edge", "unfilled"):
+        board = _filled_antipad_board(topology=topology)
+        assert (
+            validate.net_via_capacitance_pf(
+                board.vias, validate.board_reference_copper(board), 1.6, 4.6
+            )
+            is None
+        )
+    board = _filled_antipad_board()
+    planes = validate.board_reference_copper(board)
+    assert validate.net_via_capacitance_pf(board.vias, planes, 1.6, None) is None
+    assert validate.net_via_capacitance_pf([], planes, 1.6, 4.6) is None
+    board.vias[0].via_type = "blind"
+    assert validate.net_via_capacitance_pf(board.vias, planes, 1.6, 4.6) is None
+
+
+def test_stackup_parser_defaults_and_partial_material_do_not_become_measurements():
+    from kicad_tools.physics import Stackup
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
+
+    validate = load("validate")
+    header = '(kicad_pcb (layers (0 "F.Cu" signal) (31 "B.Cu" signal)) '
+    default = Stackup.from_pcb(PCB(parse_string(header + ")")))
+    assert not default.has_explicit_data
+    assert validate.stackup_average_epsilon_r(default) is None
+    for er in ("", "(epsilon_r nan)", "(epsilon_r 0)"):
+        setup = '(setup (stackup (layer "F.Cu" (type "copper") (thickness .035)) '
+        setup += '(layer "dielectric 1" (type "core") (thickness .7) (epsilon_r 4.6)) '
+        setup += f'(layer "dielectric 2" (type "prepreg") (thickness .83) {er}) '
+        setup += '(layer "B.Cu" (type "copper") (thickness .035))))'
+        stack = Stackup.from_pcb(PCB(parse_string(header + setup + ")")))
+        assert stack.has_explicit_data
+        assert validate.stackup_average_epsilon_r(stack) is None
+    # The reproduced near-limit clock load must retain its failing fallback.
+    load_result = validate.external_load("SDCLK", 10.8, 1)
+    assert load_result["estimated_external_load_pf"] > load_result["external_limit_pf"]
 
 
 def test_external_load_uses_measured_via_capacitance_when_provided():
@@ -327,6 +393,7 @@ def test_external_load_gate_and_report_scope(tmp_path, monkeypatch):
     segment = NS(layer="In3.Cu", width=0.2, start=(0, 0), end=(105, 0), uuid="trace", net_name="A0")
     board = NS(
         footprints=[],
+        zones=[],
         vias=[],
         _sexp=NS(find_children=lambda _: []),
         segments=[segment],
@@ -343,7 +410,11 @@ def test_external_load_gate_and_report_scope(tmp_path, monkeypatch):
         "TraceLengthAnalyzer",
         lambda: NS(analyze_net=lambda *a: NS(segment_count=1, total_length_mm=105, via_count=2)),
     )
-    stack = NS(layers=[NS(name="In3.Cu", is_signal_layer=True)], is_outer_layer=lambda _: False)
+    stack = NS(
+        has_explicit_data=False,
+        layers=[NS(name="In3.Cu", is_signal_layer=True)],
+        is_outer_layer=lambda _: False,
+    )
     monkeypatch.setattr(validate.Stackup, "from_pcb", lambda _: stack)
     monkeypatch.setattr(validate, "copper_elevations", lambda _: {})
     monkeypatch.setattr(
@@ -415,3 +486,45 @@ def test_external_load_gate_and_report_scope(tmp_path, monkeypatch):
         assert "geometry-derived" in scope.lower() and "MCU" in scope and "#5134" in scope
         assert report["hardware_tested"] is False
         assert report["manufacturing_complete"] is False
+
+
+def test_committed_stackup_surface_defaults_do_not_mask_barrel_material():
+    from kicad_tools.physics import Stackup
+    from kicad_tools.schema.pcb import PCB
+
+    validate = load("validate")
+    board = PCB.load(ROOT / "reviewed-routing/sdram_demo.kicad_pcb")
+    stack = Stackup.from_pcb(board)
+    assert 4.16 < validate.stackup_average_epsilon_r(stack) < 4.6
+    planes = validate.board_reference_copper(board)
+    # Existing frozen fill, no native refill or route invoked by this test.
+    assert any(validate.measured_antipad_diameter_mm(via, planes) is not None for via in board.vias)
+    for layer in stack.layers:
+        if layer.name == "dielectric 1":
+            layer.thickness_mm = float("nan")
+    assert validate.stackup_average_epsilon_r(stack) is None
+
+
+def test_antipad_copper_island_and_one_unknown_via_disable_whole_net():
+    import copy
+
+    from shapely.geometry import Point
+    from shapely.ops import unary_union
+
+    validate = load("validate")
+    board = _filled_antipad_board()
+    planes = validate.board_reference_copper(board)
+    other = copy.copy(board.vias[0])
+    other.position = (5, 5)
+    assert validate.net_via_capacitance_pf([board.vias[0], other], planes, 1.6, 4.6) is None
+    planes["In1.Cu"] = unary_union([planes["In1.Cu"], Point(0.32, 0).buffer(0.02)])
+    assert validate.net_via_capacitance_pf(board.vias, planes, 1.6, 4.6) is None
+
+
+def test_via_formula_rejects_nonfinite_inputs():
+    validate = load("validate")
+    for index in range(4):
+        for value in (float("nan"), float("inf")):
+            inputs = [0.5, 0.8, 1.6, 4.6]
+            inputs[index] = value
+            assert validate.via_barrel_capacitance_pf(*inputs) is None

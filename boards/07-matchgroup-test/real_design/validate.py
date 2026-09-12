@@ -76,74 +76,126 @@ def via_barrel_capacitance_pf(
     any non-positive input) so callers fall back to the flat per-via allowance
     instead of dividing by zero or a negative gap.
     """
+    values = (pad_diameter_mm, antipad_diameter_mm, board_thickness_mm, epsilon_r)
+    if not all(math.isfinite(value) and value > 0 for value in values):
+        return None
     gap_mm = antipad_diameter_mm - pad_diameter_mm
-    if pad_diameter_mm <= 0 or board_thickness_mm <= 0 or epsilon_r <= 0 or gap_mm <= 0:
+    if gap_mm <= 0:
         return None
     thickness_in = board_thickness_mm / 25.4
     return 1.41 * epsilon_r * thickness_in * pad_diameter_mm / gap_mm
 
 
 def stackup_average_epsilon_r(stack: Stackup) -> float | None:
-    """Thickness-weighted average epsilon_r across the stackup's dielectrics.
-
-    A standard through-hole via barrel spans every dielectric between the
-    outer copper layers, not one core, so no single layer's epsilon_r
-    represents the whole barrel. ``None`` when no dielectric layer publishes
-    a permittivity (geometry unavailable).
-    """
-    dielectrics = [
-        layer
-        for layer in stack.layers
-        if getattr(layer, "is_dielectric", False) and layer.epsilon_r > 0
-    ]
-    total_thickness = sum(layer.thickness_mm for layer in dielectrics)
-    if total_thickness <= 0:
+    """Use only complete explicit dielectric data, never synthesized defaults."""
+    if not stack.has_explicit_data:
         return None
+    copper_indices = [i for i, layer in enumerate(stack.layers) if layer.is_copper]
+    if len(copper_indices) < 2:
+        return None
+    barrel_layers = stack.layers[copper_indices[0] : copper_indices[-1] + 1]
+    # Surface paste/mask are outside the barrel and may carry zero defaults.
+    # Every adjacent pair of copper layers must have explicit dielectric data.
+    if any(
+        not any(layer.is_dielectric for layer in stack.layers[a + 1 : b])
+        for a, b in zip(copper_indices, copper_indices[1:], strict=False)
+    ):
+        return None
+    dielectrics = [layer for layer in barrel_layers if layer.is_dielectric]
+    if not dielectrics or not all(
+        math.isfinite(layer.thickness_mm) and layer.thickness_mm > 0 for layer in barrel_layers
+    ):
+        return None
+    if not all(math.isfinite(layer.epsilon_r) and layer.epsilon_r > 0 for layer in dielectrics):
+        return None
+    total_thickness = sum(layer.thickness_mm for layer in dielectrics)
     return sum(layer.thickness_mm * layer.epsilon_r for layer in dielectrics) / total_thickness
 
 
-def board_antipad_clearance_mm(board_path: Path) -> float | None:
-    """Copper-to-via clearance the native zone refill just applied around every via.
+def board_reference_copper(board: PCB) -> dict:
+    """Actual filled GND/+3V3 copper on Board07's designated reference layers.
 
-    Read from the project rules ``write_drc_constraints`` persisted before the
-    native ``--refill-zones`` pass earlier in :func:`check`, so this is the
-    clearance that governed the antipad gap in the copper already measured
-    elsewhere in this run -- not a separately assumed constant. ``None`` when
-    the project file is missing or malformed (geometry unavailable).
+    Native filled polygons can encode holes with doubled bridges; buffer(0)
+    resolves those bridges into polygon interiors. Missing fills stay missing.
+    Project clearance rules and unfilled zone outlines are never measurements.
     """
-    try:
-        project = json.loads(board_path.with_suffix(".kicad_pro").read_text())
-        clearance = project["board"]["design_settings"]["rules"]["min_clearance"]
-    except (OSError, ValueError, KeyError, TypeError):
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    planes = {}
+    for layer, net_name in (("In1.Cu", "GND"), ("In4.Cu", "+3V3")):
+        polygons = []
+        for zone in board.zones:
+            if zone.net_name != net_name:
+                continue
+            for index, points in enumerate(zone.filled_polygons):
+                if zone.filled_polygon_layer(index) != layer:
+                    continue
+                if len(points) < 3 or not all(math.isfinite(v) for point in points for v in point):
+                    return {}
+                polygons.append(Polygon(points).buffer(0))
+        if polygons:
+            planes[layer] = unary_union(polygons)
+    return planes
+
+
+def measured_antipad_diameter_mm(via, planes: dict) -> float | None:
+    """Recognize a circular, enclosed antipad in both Board07 reference planes.
+
+    The 5 um circularity tolerance permits native polygon tessellation, not
+    slots, plane edges, overlapping cutouts or thermal spokes. Use the smaller
+    inscribed diameter across the two planes in the approximate full-barrel
+    model. Unsupported topology returns None rather than a fictitious hole.
+    """
+    from shapely.geometry import Point, Polygon
+
+    if set(via.layers) != {"F.Cu", "B.Cu"} or via.via_type is not None:
         return None
-    if not isinstance(clearance, (int, float)) or clearance <= 0:
-        return None
-    return float(clearance)
+    point = Point(via.position)
+    diameters = []
+    for layer in ("In1.Cu", "In4.Cu"):
+        copper = planes.get(layer)
+        if copper is None or copper.is_empty or copper.covers(point):
+            return None
+        polygons = [copper] if copper.geom_type == "Polygon" else list(copper.geoms)
+        holes = [
+            Polygon(ring)
+            for polygon in polygons
+            if polygon.geom_type == "Polygon"
+            for ring in polygon.interiors
+            if Polygon(ring).contains(point)
+        ]
+        if len(holes) != 1:
+            return None
+        hole = holes[0]
+        inner_radius = hole.boundary.distance(point)
+        outer_radius = max(math.dist(via.position, xy) for xy in hole.exterior.coords)
+        if inner_radius <= via.size / 2 or outer_radius - inner_radius > 0.005:
+            return None
+        # Islands/spokes inside the hole also disqualify the annular model.
+        if copper.distance(point) < inner_radius - 1e-6:
+            return None
+        diameters.append(2 * inner_radius)
+    return min(diameters)
 
 
 def net_via_capacitance_pf(
     vias: list,
-    antipad_clearance_mm: float | None,
+    reference_copper: dict,
     board_thickness_mm: float,
     epsilon_r: float | None,
 ) -> float | None:
-    """Sum measured per-via capacitance for every physical via on a net.
-
-    Each physical via (including dangling barrel stubs) is counted once,
-    matching the flat-allowance counting this supplements. ``None`` propagates
-    from any single via whose pad size is degenerate, or when the board-level
-    clearance/permittivity inputs are unavailable -- so the caller falls back
-    to the flat allowance for the whole net rather than mixing measured and
-    assumed contributions.
-    """
-    if antipad_clearance_mm is None or epsilon_r is None or not vias:
+    """Sum physical vias only when every barrel has measured usable geometry."""
+    if epsilon_r is None or not vias:
         return None
     total_pf = 0.0
     for via in vias:
-        pad_mm = getattr(via, "size", 0.0)
+        antipad = measured_antipad_diameter_mm(via, reference_copper)
+        if antipad is None:
+            return None
         capacitance = via_barrel_capacitance_pf(
-            pad_diameter_mm=pad_mm,
-            antipad_diameter_mm=pad_mm + 2 * antipad_clearance_mm,
+            pad_diameter_mm=via.size,
+            antipad_diameter_mm=antipad,
             board_thickness_mm=board_thickness_mm,
             epsilon_r=epsilon_r,
         )
@@ -179,7 +231,7 @@ def external_load(
     construction -- see ``engineering/load-review.md``).
     """
     if name == "SDCLK":
-        directions = {"SDRAM drives, MCU receives (clock)": (3.5, "ISSI maximum")}
+        directions = {"MCU drives, SDRAM receives (clock)": (3.5, "ISSI maximum")}
     elif name.startswith("DQ"):
         directions = {
             "SDRAM drives, MCU receives": (10.0, "engineering reserve"),
@@ -387,12 +439,9 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
     line = TransmissionLine(stack)
     elevations = copper_elevations(stack)
     signal_layers = {layer.name for layer in stack.layers if layer.is_signal_layer}
-    # Geometry-derived via capacitance inputs (#5134): the clearance the
-    # native refill just applied around every via, and the stackup's own
-    # thickness-weighted dielectric constant. Computed once per board; a
-    # missing/malformed input disables geometry for every net this run and
-    # each net falls back to the flat 1 pF/via allowance individually.
-    antipad_clearance_mm = board_antipad_clearance_mm(board_path)
+    # Extract actual reference-plane fill and explicit dielectric inputs once.
+    # Missing data or unsupported topology preserves the whole-net fallback.
+    reference_copper = board_reference_copper(board)
     dielectric_epsilon_r = stackup_average_epsilon_r(stack)
     for via in board.vias:
         if set(via.layers) != {"F.Cu", "B.Cu"} or via.via_type is not None:
@@ -452,7 +501,7 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
         physical_vias = list(board.vias_in_net(net.number))
         via_pf_measured = (
             net_via_capacitance_pf(
-                physical_vias, antipad_clearance_mm, stack.board_thickness_mm, dielectric_epsilon_r
+                physical_vias, reference_copper, stack.board_thickness_mm, dielectric_epsilon_r
             )
             if len(physical_vias) == report.via_count
             else None
@@ -573,7 +622,7 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
             "receiver and full-via allowances, and DQ is evaluated in both directions "
             "(ISSI receiver maxima where specified; DQ MCU-receiver engineering reserve). "
             "The via allowance is now TI SLYT335 geometry-derived from the board's own "
-            "measured pad size, native-refill antipad clearance and stackup dielectric "
+            "measured pad size, enclosed circular filled-plane openings and explicit stackup dielectric "
             "when that geometry is available, else the conservative flat 1 pF/via "
             "allowance. MCU package/input capacitance corners remain an unconfirmed "
             "engineering reserve -- ST's IBIS archive was still unreachable during this "
