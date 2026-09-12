@@ -1,7 +1,8 @@
 """Geometry of router pads' rotated rectangular envelopes.
 
-Router Pad does not retain shape/corner radius. These predicates describe its
-rectangle, not roundrect/oval/custom copper. Bounds alone are for broad phase.
+Router Pad retains shape but not corner radius. These conservative predicates
+describe its rectangle, not exact circle/roundrect/oval copper. The grid acceptance
+paths separately distinguish circles. Bounds alone are for broad phase.
 """
 
 from __future__ import annotations

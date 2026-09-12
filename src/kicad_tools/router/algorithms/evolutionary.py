@@ -270,6 +270,7 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
             # board rotation; dropping it here would silently rebuild every
             # rotated pad as axis-aligned in the worker process.
             rotation=pad_data.get("rotation", 0.0),
+            shape=pad_data.get("shape", "rect"),
         )
         router.pads[(ref, pin)] = pad
         router.grid.add_pad(pad)

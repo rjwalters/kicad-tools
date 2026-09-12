@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix Codex-only installer workflows to resolve generated sibling skills and namespace help, with runtime-appropriate invocation and optional metadata handling.
 - Use shared project drill-clearance checks for Board07 relocation and fallback stubs; reject archived moves into foreign zone fill without saving partial repairs.
 
+### Fixed
+
+- Preserve authored pad shapes through router loading, workers, and native
+  conversion (#5229). Square pads no longer lose copper corners to a circular
+  approximation. Rotated search bounds enclose copper; unsupported custom or
+  layer-specific pad geometry stops routing explicitly.
+
 ### Added
 
 - **Flat signal-clearance table builder for clock-to-signal spacing**

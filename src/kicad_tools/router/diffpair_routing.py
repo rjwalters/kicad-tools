@@ -4447,6 +4447,7 @@ class DiffPairRouter:
             # copy its rotation too or the shape is silently un-rotated
             # (issue #4910).
             rotation=template.rotation,
+            shape=template.shape,
         )
 
     def _segment_cells_clear(
