@@ -882,7 +882,6 @@ class RoutingCache:
                 is_escape=route_dict.get("is_escape", False),
                 segments=segments,
                 vias=vias,
-                is_escape=route_dict.get("is_escape", False),
             )
             routes.append(route)
 
