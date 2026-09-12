@@ -40,6 +40,10 @@ import {
   fmtKctCheck,
   fmtCliDrc,
   fmtDiffPairs,
+  fmtOutcome,
+  fmtArtifactSource,
+  isLegacyOutcome,
+  isFallbackArtifact,
 } from "../data/benchmarkFormat.ts";
 import SiteHeader from "../components/Header.astro";
 import SiteFooter from "../components/Footer.astro";
@@ -154,6 +158,8 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
                 <th scope="col">kct check</th>
                 <th scope="col">kicad-cli DRC</th>
                 <th scope="col">Diff pairs</th>
+                <th scope="col">Outcome</th>
+                <th scope="col">Artifact</th>
                 <th scope="col">DeepPCB reference</th>
               </tr>
             </thead>
@@ -166,6 +172,8 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
                   if (ref?.completionPct !== undefined)
                     refCells.push(`${ref.completionPct}% complete`);
                   if (ref?.vias !== undefined) refCells.push(`${ref.vias} vias`);
+                  const legacy = isLegacyOutcome(report);
+                  const fallback = isFallbackArtifact(report);
                   return (
                     <tr>
                       <th scope="row">{ref?.name ?? report.board_id}</th>
@@ -184,6 +192,8 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
                       </td>
                       <td>{fmtCliDrc(report)}</td>
                       <td>{fmtDiffPairs(report)}</td>
+                      <td class:list={[{ warn: legacy || fallback }]}>{fmtOutcome(report)}</td>
+                      <td class:list={[{ warn: fallback }]}>{fmtArtifactSource(report)}</td>
                       <td class="ref-cell">{refCells.length > 0 ? refCells.join(" · ") : "—"}</td>
                     </tr>
                   );
@@ -199,7 +209,7 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
                   return (
                     <tr class="pending-row">
                       <th scope="row">{board.name}</th>
-                      <td colspan="9" class="pending-cell">
+                      <td colspan="11" class="pending-cell">
                         not yet reproduced in this repository's benchmark harness — see{" "}
                         <a href={EPIC_URL} target="_blank" rel="noopener noreferrer">
                           Epic #4932
@@ -218,7 +228,12 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
           A <span class="warn">highlighted</span> completion or{" "}
           <code>kct check</code> cell means the board did not route 100% or
           did not pass our own connectivity/clearance checks — see
-          "Failure-mode annotations" below for why.
+          "Failure-mode annotations" below for why. A highlighted{" "}
+          <strong>Outcome</strong> means the report either predates
+          outcome/artifact-provenance tracking ("unknown (legacy)") or the
+          measured board is a fallback (pre-route) input, not router output —
+          in neither case does the row's completion% reflect a completed
+          route.
         </p>
       </section>
 

@@ -51,6 +51,7 @@ started around it, so no timing number is even produced to discard.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
@@ -378,8 +379,20 @@ def _run_one_board(
     except normalize.NormalizeError as exc:
         raise BenchExternalError(str(exc)) from exc
 
-    routed_path = output_dir / "routed" / f"{spec.slug}.kicad_pcb"
+    # Named per protocol AND slug (issue #5280): a tuned and a zero-touch run
+    # against the same board slug must never share -- and thus never
+    # overwrite or fall back to reading -- each other's routed output.
+    routed_path = output_dir / "routed" / f"{spec.slug}.{protocol}.kicad_pcb"
     routed_path.parent.mkdir(parents=True, exist_ok=True)
+    # Per-attempt output ownership (issue #5280): this attempt is the only
+    # writer of `routed_path` for the rest of this call. If a prior run
+    # (crashed, reused output dir, ...) left a file here, its mere existence
+    # must never be mistaken for THIS attempt's output -- so it is removed
+    # before the router is even invoked, and existence is checked only
+    # after the call below returns.
+    if routed_path.exists():
+        routed_path.unlink()
+
     route_argv = [str(normalized_path), "-o", str(routed_path), "--seed", str(seed)]
     if net_class_map_path is not None:
         # Issue #4943 ("tuned" protocol): apply the declared per-board
@@ -394,24 +407,36 @@ def _run_one_board(
 
     wall_clock_s: float | None = None
     route_rc: int | None
+    route_exc: Exception | None = None
+    # Measure the whole attempt, including failures, only with a native backend.
+    start = time.perf_counter() if backend.timing_valid else None
     try:
-        if backend.timing_valid:
-            # Gate BEFORE measuring (Epic #4932 risk register): the
-            # stopwatch is only ever started when the C++ backend is live,
-            # so a Python-fallback number is never even produced.
-            start = time.perf_counter()
-            route_rc = route(route_argv)
-            wall_clock_s = time.perf_counter() - start
-        else:
-            route_rc = route(route_argv)
+        route_rc = route(route_argv)
     except Exception as exc:  # defensive: a router crash must not abort the whole run
         route_rc = None
-        wall_clock_s = None
+        route_exc = exc
         router_note = f"router raised {type(exc).__name__}: {exc}"
     else:
         router_note = f"router exit code: {route_rc}"
+    finally:
+        if start is not None:
+            wall_clock_s = time.perf_counter() - start
 
-    measured_path = routed_path if routed_path.exists() else normalized_path
+    from kicad_tools.cli.route_deadline import TIMEOUT_EXIT
+    from kicad_tools.router.crosstail_advisory import GATE_EXIT_CODE
+
+    # These are explicit router contracts. Generic nonzero exit/output absence
+    # says nothing about whether search started, so never infer a preflight stop.
+    route_timed_out = route_rc == TIMEOUT_EXIT or isinstance(
+        route_exc, (TimeoutError, subprocess.TimeoutExpired)
+    )
+    route_stopped_before_routing = route_rc == GATE_EXIT_CODE
+
+    # Evidence of THIS attempt's output -- correct regardless of whether the
+    # path was previously bare or previously occupied, because it was
+    # unconditionally cleared above before `route()` ran.
+    output_exists = routed_path.exists()
+    measured_path = routed_path if output_exists else normalized_path
 
     notes = [
         f"seed={seed}",
@@ -422,10 +447,13 @@ def _run_one_board(
             f"{baseline.unrouted_pads} unrouted pads"
         ),
     ]
-    if not routed_path.exists():
+    if not output_exists:
         notes.append(
-            "router produced no output file -- reporting the unrouted, "
-            "ripped-up board (0% complete) rather than a stale artifact"
+            "router produced no output file for this attempt -- measuring "
+            "the pre-route (ripped-up) input as fallback; the completion% "
+            "below reflects pre-existing/trivial connectivity, NOT new "
+            "routing progress (see route_outcome / pre_route_completion "
+            "in the JSON report)"
         )
     if spec.deep_pcb_reference:
         notes.append(f"DeepPCB published reference: {spec.deep_pcb_reference}")
@@ -451,4 +479,10 @@ def _run_one_board(
         kicad_cli_timeout=kicad_cli_timeout,
         notes=notes,
         backend=backend,
+        route_exit_code=route_rc,
+        route_output_exists=output_exists,
+        route_exception=route_exc,
+        route_timed_out=route_timed_out,
+        route_stopped_before_routing=route_stopped_before_routing,
+        pre_route_path=normalized_path,
     )

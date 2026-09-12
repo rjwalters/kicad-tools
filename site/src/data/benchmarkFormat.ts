@@ -27,9 +27,41 @@ export function fmtWirelength(report: BenchmarkReport): string {
 
 export function fmtTiming(report: BenchmarkReport): string {
   if (report.timing.valid && report.timing.wall_clock_s !== null) {
+    const phase = report.timing.measured_phase;
+    if (phase && phase !== "completed" && phase !== "unknown") {
+      // A real, backend-eligible elapsed time on a non-completed attempt
+      // is time-to-refusal/partial-progress, NOT a completed-routing
+      // performance number -- never render it as a bare seconds figure
+      // (issue #5280).
+      return `${report.timing.wall_clock_s.toFixed(1)} s (${phase.replace(/_/g, " ")})`;
+    }
     return `${report.timing.wall_clock_s.toFixed(1)} s`;
   }
   return "refused";
+}
+
+/** `"unknown (legacy)"` when `route_outcome` is absent -- never success. */
+export function fmtOutcome(report: BenchmarkReport): string {
+  const outcome = report.route_outcome;
+  if (outcome == null) return "unknown (legacy)";
+  return outcome.outcome.replace(/_/g, " ");
+}
+
+/** Whether the measured board is router output, a fallback input, or unknown. */
+export function fmtArtifactSource(report: BenchmarkReport): string {
+  const outcome = report.route_outcome;
+  if (outcome == null) return "unknown";
+  return outcome.artifact_source.replace(/_/g, " ");
+}
+
+/** True when this report predates route-outcome/artifact-provenance tracking (#5280). */
+export function isLegacyOutcome(report: BenchmarkReport): boolean {
+  return report.route_outcome == null;
+}
+
+/** True when the measured board is the pre-route input, not router output. */
+export function isFallbackArtifact(report: BenchmarkReport): boolean {
+  return report.route_outcome?.artifact_source === "fallback_input";
 }
 
 export function fmtKctCheck(report: BenchmarkReport): string {

@@ -27,10 +27,44 @@ export interface BenchmarkCopper {
   wirelength_mm: number;
 }
 
+/**
+ * What happened on a routing attempt, and where the measured board came
+ * from (issue #5280, Epic #5278 Phase 1).
+ *
+ * `undefined`/`null` on `BenchmarkReport.route_outcome` means no
+ * route-attempt evidence was recorded -- including every report generated
+ * before this field existed (schema v1, pre-#5280). Consumers MUST treat
+ * that absence as unknown, never as an implicit success.
+ */
+export type BenchmarkRouteOutcomeKind =
+  | "completed"
+  | "partial"
+  | "stopped_before_routing"
+  | "failed"
+  | "timeout"
+  | "unknown"
+  | string;
+
+export type BenchmarkArtifactSource = "router_output" | "fallback_input" | "unknown" | string;
+
+export interface BenchmarkRouteOutcome {
+  outcome: BenchmarkRouteOutcomeKind;
+  artifact_source: BenchmarkArtifactSource;
+  exit_code: number | null;
+  reason: string | null;
+}
+
 export interface BenchmarkTiming {
   wall_clock_s: number | null;
   valid: boolean;
   refusal_reason: string | null;
+  /**
+   * Mirrors `route_outcome.outcome` (or absent/`"unknown"` on a legacy
+   * report). A `valid` timing whose phase is not `"completed"` is real
+   * elapsed time, but is time-to-refusal/partial-progress, NOT a
+   * completed-routing performance number.
+   */
+  measured_phase?: BenchmarkRouteOutcomeKind;
 }
 
 export interface BenchmarkKctCheck {
@@ -59,6 +93,11 @@ export interface BenchmarkDiffPairs {
  * always present in a valid report (the schema never omits them — absent
  * *data* within a block is represented by `null`/`0`, not by dropping the
  * block), so they are typed as required here too.
+ *
+ * `route_outcome` / `pre_route_completion` / `newly_routed_connections` are
+ * OPTIONAL (issue #5280, purely additive to schema v1): a report generated
+ * before this issue landed simply omits them. Treat `undefined` the same as
+ * `null` — unknown, never an implicit success.
  */
 export interface BenchmarkReport {
   $schema: string;
@@ -69,7 +108,10 @@ export interface BenchmarkReport {
   board_source: string | null;
   protocol: BenchmarkProtocol;
   tool_commit: string;
+  route_outcome?: BenchmarkRouteOutcome | null;
   completion: BenchmarkCompletion;
+  pre_route_completion?: BenchmarkCompletion | null;
+  newly_routed_connections?: number | null;
   copper: BenchmarkCopper;
   timing: BenchmarkTiming;
   kct_check: BenchmarkKctCheck;
