@@ -87,9 +87,15 @@ unproved endpoint via fanouts remain explicitly ambiguous.
 Unsupported custom/trapezoid pads, repeated physical pad numbers, and copper
 on absent stackup layers make the declaration unresolved. Supported pad
 extents are circles, rectangles, capsules (oval), and rounded rectangles.
-Width-only copper overlaps, arcs, zones, and pad-interior contacts without a
-track/via node are outside this bounded centerline model; a resolved result is not a native connectivity or ampacity
-claim. These contacts require a separate physical geometry model.
+Width-only copper overlaps and pad-interior contacts without a track/via
+node are outside this bounded centerline model; a resolved result is not a
+native connectivity or ampacity claim. These contacts require a separate
+physical geometry model. Routed arcs and non-keepout same-net zones/pours
+are not folded into the graph either, but they are not silently ignored:
+:func:`unmodeled_copper` inventories them, and :func:`resolve_current_path`
+reports ``"ambiguous"`` -- naming the copper -- for any declared branch
+whose net carries one, because either can form a parallel return path this
+bounded model cannot see and rule out.
 
 Consumers:
 
@@ -218,7 +224,8 @@ from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from kicad_tools.schema.pcb import PCB, Footprint, Pad, Segment, Via, Zone
+    from kicad_tools.schema.pcb import PCB, Footprint, Net, Pad, Segment, Via, Zone
+    from kicad_tools.sexp.parser import SExp
 
 __all__ = [
     "CURRENT_PATHS_SIDECAR_BASENAME",
@@ -231,6 +238,7 @@ __all__ = [
     "PathResolution",
     "ResolvedEndpoint",
     "ThermalDesignCurrent",
+    "UnmodeledCopper",
     "audit_current_paths",
     "current_paths_sidecar_candidates",
     "discover_current_paths_sidecar",
@@ -239,6 +247,7 @@ __all__ = [
     "parse_current_path_specs",
     "reinforcement_eligible_segment_ids",
     "resolve_current_path",
+    "unmodeled_copper",
 ]
 
 # Coordinate rounding for graph-node identity. Matches the tolerance
@@ -652,6 +661,101 @@ class ResolvedEndpoint:
     net_name: str
 
 
+@dataclass(frozen=True)
+class UnmodeledCopper:
+    """One piece of same-net copper :func:`resolve_current_path` cannot model.
+
+    :func:`_build_graph` builds its centerline graph from routed
+    :class:`~kicad_tools.schema.pcb.Segment` tracks and via barrels only.
+    A routed **arc** or a non-keepout same-net **zone/pour** is real
+    current-carrying copper the graph never sees, and either can form a
+    parallel return path around a declared linear branch -- see
+    :func:`unmodeled_copper`.
+
+    Attributes:
+        kind: ``"arc"`` or ``"zone"``.
+        layer: The copper layer this object occupies. Best-effort for a
+            multi-layer zone (the first entry of its ``layers`` list).
+        location: A representative ``(x, y)`` point in mm -- an arc's start
+            point, or a zone's first boundary-polygon vertex -- for
+            locating the object in audit/DRC output. Not a bounding shape.
+    """
+
+    kind: str
+    layer: str
+    location: tuple[float, float]
+
+
+def _sexp_matches_net(node: SExp, net: Net | None, net_name: str) -> bool:
+    """True if raw ``node``'s direct ``(net ...)`` child names ``net_name``.
+
+    Mirrors :func:`_matches_net` for raw :class:`~kicad_tools.sexp.parser
+    .SExp` nodes (e.g. routed arcs) that are never parsed into a dataclass
+    carrying ``net_name``/``net_number`` attributes.
+    """
+    net_child = node.find_child("net")
+    if net_child is None:
+        return False
+    return net_child.get_string(0) == net_name or (
+        net is not None and net_child.get_int(0) == net.number
+    )
+
+
+def _matches_net(obj: Pad | Via | Zone, net: Net | None, net_name: str) -> bool:
+    """True if a parsed ``Pad``/``Via``/``Zone`` object sits on ``net_name``."""
+    return obj.net_name == net_name or (net is not None and obj.net_number == net.number)
+
+
+def unmodeled_copper(pcb: PCB, net_name: str) -> list[UnmodeledCopper]:
+    """Inventory same-net copper :func:`resolve_current_path`'s graph cannot see.
+
+    Two kinds of real, current-carrying same-net copper are invisible to
+    the bounded centerline model :func:`_build_graph` builds:
+
+    * a routed track **arc** -- ``(arc ...)`` is never exposed as a
+      :class:`~kicad_tools.schema.pcb.Segment`; and
+    * a filled copper **pour** -- a non-keepout
+      :class:`~kicad_tools.schema.pcb.Zone` on the declared net. A keepout
+      rule area carries no copper and is excluded.
+
+    Either can form a parallel return path around a declared linear
+    branch, so a "resolved" single-path verdict is not evidence that the
+    declared branch is the only route between its endpoints when this
+    returns non-empty.
+
+    Args:
+        pcb: A loaded :class:`~kicad_tools.schema.pcb.PCB`.
+        net_name: The net to inventory.
+
+    Returns:
+        One :class:`UnmodeledCopper` per matching arc/zone (arcs first,
+        then zones, each in board order). Empty when the net carries none.
+    """
+    net = pcb.get_net_by_name(net_name)
+    found: list[UnmodeledCopper] = []
+
+    for arc in pcb._sexp.find_all("arc"):
+        if not _sexp_matches_net(arc, net, net_name):
+            continue
+        layer_node = arc.find_child("layer")
+        layer = (layer_node.get_string(0) if layer_node is not None else None) or ""
+        start_node = arc.find_child("start")
+        if start_node is not None:
+            location = (start_node.get_float(0) or 0.0, start_node.get_float(1) or 0.0)
+        else:
+            location = (0.0, 0.0)
+        found.append(UnmodeledCopper(kind="arc", layer=layer, location=location))
+
+    for zone in pcb.zones:
+        if zone.keepout is not None or not _matches_net(zone, net, net_name):
+            continue
+        layer = zone.layers[0] if zone.layers else zone.layer
+        location = zone.polygon[0] if zone.polygon else (0.0, 0.0)
+        found.append(UnmodeledCopper(kind="zone", layer=layer, location=location))
+
+    return found
+
+
 # Resolution status values. Each is reported explicitly -- there is no
 # implicit "resolved" default and no consumer is allowed to treat an
 # absent/None status as "assume resolved" (fail-closed, per the issue's
@@ -935,15 +1039,11 @@ def _array_contacts_modeled(
     net = pcb.get_net_by_name(net_name)
 
     def same_net(obj: Pad | Via | Zone) -> bool:
-        return obj.net_name == net_name or (net is not None and obj.net_number == net.number)
+        return _matches_net(obj, net, net_name)
 
     # Routed arcs are not exposed as Segment objects. Never silently omit them.
     for arc in pcb._sexp.find_all("arc"):
-        arc_net = arc.find_child("net")
-        if arc_net is not None and (
-            arc_net.get_string(0) == net_name
-            or (net is not None and arc_net.get_int(0) == net.number)
-        ):
+        if _sexp_matches_net(arc, net, net_name):
             return False
     for footprint in pcb.footprints:
         for candidate in footprint.pads:
@@ -952,15 +1052,7 @@ def _array_contacts_modeled(
                     return False
 
     for raw_via in pcb._sexp.find_all("via"):
-        via_net = raw_via.find_child("net")
-        if (
-            via_net is not None
-            and (
-                via_net.get_string(0) == net_name
-                or (net is not None and via_net.get_int(0) == net.number)
-            )
-            and raw_via.find_child("padstack") is not None
-        ):
+        if _sexp_matches_net(raw_via, net, net_name) and raw_via.find_child("padstack") is not None:
             return False
 
     # Default circular buffers use 16 chords per quadrant. Circumscribe
@@ -1547,6 +1639,30 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
         }.values()
     )
 
+    # An otherwise-clean resolution can still be undermined by copper this
+    # bounded centerline model never puts in the graph at all: a routed arc
+    # or a non-keepout same-net pour can form a parallel return path around
+    # the declared branch. This deliberately runs last -- every other
+    # unresolved/ambiguous reason above (broken endpoints, no routed copper,
+    # unsupported shapes, unproved via fanout, a modeled cycle) still takes
+    # precedence, and the degenerate self-path short-circuit above never
+    # reaches here at all.
+    unmodeled = unmodeled_copper(pcb, spec.net_name)
+    if unmodeled:
+        kinds = "/".join(sorted({item.kind for item in unmodeled}))
+        return PathResolution(
+            spec=spec,
+            status=STATUS_AMBIGUOUS,
+            reason=(
+                f"net {spec.net_name!r} carries {len(unmodeled)} unmodeled same-net "
+                f"{kinds} object(s) (a routed arc or a copper pour) this bounded "
+                "centerline model cannot verify does not form a parallel return path "
+                "around the declared branch"
+            ),
+            source=source,
+            sink=sink,
+        )
+
     return PathResolution(
         spec=spec,
         status=STATUS_RESOLVED,
@@ -1570,10 +1686,20 @@ class CurrentPathAudit:
             paths fully account for its routed copper. A net with zero
             declared paths is not reported here at all (it is entirely out
             of this audit's declared scope, not "clean").
+        unmodeled: ``{net_name: [UnmodeledCopper, ...]}`` -- for every net
+            that has at least one declared path, the same-net routed arcs
+            and non-keepout zones/pours :func:`resolve_current_path` cannot
+            fold into its graph (see :func:`unmodeled_copper`). Any entry
+            here means every declared path on that net was checked for
+            ``"ambiguous"``, since such copper can form a parallel return
+            around a declared branch. Reported unconditionally -- even for
+            a net whose declared paths all resolved cleanly before this
+            copper is accounted for -- rather than only implied by status.
     """
 
     resolutions: list[PathResolution] = field(default_factory=list)
     uncovered: dict[str, list[Segment]] = field(default_factory=dict)
+    unmodeled: dict[str, list[UnmodeledCopper]] = field(default_factory=dict)
 
     @property
     def all_resolved(self) -> bool:
@@ -1621,6 +1747,7 @@ def audit_current_paths(pcb: PCB, specs: Sequence[CurrentPathSpec]) -> CurrentPa
         bucket.update(id(seg) for seg in resolution.segments)
 
     uncovered: dict[str, list[Segment]] = {}
+    unmodeled: dict[str, list[UnmodeledCopper]] = {}
     nets_with_specs = {spec.net_name for spec in specs}
     for net_name in nets_with_specs:
         net_segments = _net_segments(pcb, net_name)
@@ -1629,7 +1756,11 @@ def audit_current_paths(pcb: PCB, specs: Sequence[CurrentPathSpec]) -> CurrentPa
         if missing:
             uncovered[net_name] = missing
 
-    return CurrentPathAudit(resolutions=resolutions, uncovered=uncovered)
+        found = unmodeled_copper(pcb, net_name)
+        if found:
+            unmodeled[net_name] = found
+
+    return CurrentPathAudit(resolutions=resolutions, uncovered=uncovered, unmodeled=unmodeled)
 
 
 def reinforcement_eligible_segment_ids(pcb: PCB, specs: Sequence[CurrentPathSpec]) -> set[int]:

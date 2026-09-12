@@ -187,6 +187,73 @@ class TestPathAmpacityRule:
             "not covered" in results.warnings[0].message.lower()
         )
 
+    def test_unmodeled_arc_is_warning_plus_ambiguous_error(self) -> None:
+        """A same-net routed arc (#5273) makes the declared trunk ambiguous
+        (error) AND is separately surfaced by name (warning) -- the warning
+        names the specific object responsible, on top of the status error."""
+        from kicad_tools.sexp import parse_string
+
+        pcb = _t_network_pcb(trunk_width=6.3, sense_width=0.2)
+        net = pcb.get_net_by_name("NET1")
+        assert net is not None
+        pcb._sexp.append(
+            parse_string(
+                f"(arc (start 20 50) (mid 70 20) (end 120 50) (width 0.2) "
+                f'(layer "F.Cu") (net {net.number}))'
+            )
+        )
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0), _sense_spec(0.01)])
+        results = rule.check(pcb, _design_rules_2oz())
+
+        ambiguous_errors = [v for v in results.errors if "ambiguous" in v.message]
+        assert len(ambiguous_errors) == 2  # both TRUNK and SENSE resolve ambiguous
+
+        unmodeled_warnings = [v for v in results.warnings if "arc" in v.message]
+        assert len(unmodeled_warnings) == 1
+        assert unmodeled_warnings[0].severity == "warning"
+
+    def test_unmodeled_pour_is_warning(self) -> None:
+        """A same-net non-keepout zone (#5273) is surfaced the same way."""
+        from kicad_tools.schema.pcb import Zone
+
+        pcb = _t_network_pcb(trunk_width=6.3, sense_width=0.2)
+        net = pcb.get_net_by_name("NET1")
+        assert net is not None
+        pcb._zones.append(
+            Zone(
+                net.number,
+                "NET1",
+                "F.Cu",
+                polygon=[(0, 0), (200, 0), (200, 120), (0, 120)],
+            )
+        )
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(pcb, _design_rules_2oz())
+
+        unmodeled_warnings = [v for v in results.warnings if "zone" in v.message]
+        assert len(unmodeled_warnings) == 1
+
+    def test_keepout_zone_is_not_flagged_as_unmodeled(self) -> None:
+        """A keepout rule area carries no copper -- excluded entirely."""
+        from kicad_tools.schema.pcb import Zone, ZoneKeepout
+
+        pcb = _t_network_pcb(trunk_width=6.3, sense_width=0.2)
+        net = pcb.get_net_by_name("NET1")
+        assert net is not None
+        pcb._zones.append(
+            Zone(
+                net.number,
+                "NET1",
+                "F.Cu",
+                polygon=[(0, 0), (200, 0), (200, 120), (0, 120)],
+                keepout=ZoneKeepout(),
+            )
+        )
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0), _sense_spec(0.01)])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert results.errors == []
+        assert results.warnings == []
+
     def test_kelvin_force_and_sense_declared_currents_independent(self) -> None:
         """A four-terminal-shunt-style fixture: a force path across the
         shunt and a Kelvin sense path sharing the electrical net, but

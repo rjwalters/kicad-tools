@@ -730,6 +730,17 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
             ]
             for net_name, segments in audit.uncovered.items()
         },
+        # Same-net routed arcs / non-keepout zones-pours the declared-path
+        # graph never models (#5273). Any entry here means every declared
+        # path on that net resolves "ambiguous" -- a parallel return path
+        # this bounded model cannot rule out.
+        "unmodeled": {
+            net_name: [
+                {"kind": item.kind, "layer": item.layer, "location": list(item.location)}
+                for item in items
+            ]
+            for net_name, items in audit.unmodeled.items()
+        },
     }
 
     if output_format == "json":
@@ -766,6 +777,17 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
         else:
             print()
             print("  No uncovered copper on any net with a declared path.")
+        if audit.unmodeled:
+            print()
+            print("  Unmodeled copper (same-net arc/pour not in the declared-path graph):")
+            for net_name, items in audit.unmodeled.items():
+                print(f"    {net_name}: {len(items)} object(s)")
+                for item in items:
+                    x, y = item.location
+                    print(f"      {item.kind} on {item.layer} near ({x:.3f}, {y:.3f})")
+        else:
+            print()
+            print("  No unmodeled arcs/pours on any net with a declared path.")
 
     return 0
 
