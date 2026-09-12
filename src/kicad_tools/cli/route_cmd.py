@@ -71,7 +71,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from kicad_tools.core.kicad_lock import check_kicad_lock
 
-from .route_deadline import record_stage
+from .route_deadline import record_stage, restore_stage
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -418,26 +418,58 @@ def _total_deadline_expired(args) -> bool:
     return rem is not None and rem <= 0.0
 
 
+def _search_stage_cap(args) -> float | None:
+    """Return the per-search-stage wall-clock cap (issue #5266).
+
+    ``--timeout`` is the **hard total** deadline for the whole invocation:
+    :mod:`kicad_tools.cli.route_deadline` supervises the worker process
+    against it and terminates the process group when it fires.  Historically
+    the same number *also* doubled as the per-stage cap handed to inner
+    router routines, which made the two contracts impossible to express
+    separately: a recipe that wants "600 s for the initial search, then two
+    600 s placement probes, then postprocessing" could only ask for it by
+    raising ``--timeout``, at which point the initial search happily consumed
+    the whole enlarged budget and nothing was left for the later stages.
+
+    ``--search-timeout`` breaks that tie.  When set (positive) it caps each
+    *individual* search stage -- the initial negotiated pass, each escalation
+    attempt, each placement-feedback iteration -- while ``--timeout`` keeps
+    hard-capping the invocation as a whole.  When unset this returns
+    ``args.timeout`` unchanged, so every pre-#5266 invocation keeps its exact
+    previous behaviour.
+
+    Note this is only ever an *upper bound*: :func:`_budgeted_timeout` and
+    :func:`_per_attempt_budgeted_timeout` still take the minimum with the
+    remaining total budget, so a ``--search-timeout`` larger than what
+    ``--timeout`` still has left can never escape the hard deadline.
+    """
+    search = getattr(args, "search_timeout", None)
+    if search is not None and search > 0:
+        return float(search)
+    return getattr(args, "timeout", None)
+
+
 def _budgeted_timeout(args) -> float | None:
     """Return the per-call timeout to pass into inner router routines.
 
-    When a deadline is configured this is the smaller of the original
-    ``--timeout`` (preserving per-stage semantics for the *first* stage)
-    and the remaining wall-clock budget (so the *final* stage shortens
-    naturally as time runs out).  When no deadline is configured this
-    returns ``args.timeout`` unchanged so existing behaviour is preserved
-    for users who never passed ``--timeout``.
+    When a deadline is configured this is the smaller of the per-stage cap
+    (:func:`_search_stage_cap` -- ``--search-timeout`` when set, otherwise
+    ``--timeout``, preserving per-stage semantics for the *first* stage) and
+    the remaining wall-clock budget (so the *final* stage shortens naturally
+    as time runs out).  When no deadline is configured this returns the cap
+    unchanged so existing behaviour is preserved for users who never passed
+    ``--timeout``.
     """
-    timeout = getattr(args, "timeout", None)
+    cap = _search_stage_cap(args)
     remaining = _remaining_budget(args)
     if remaining is None:
-        return timeout
-    if timeout is None:
+        return cap
+    if cap is None:
         # ``_wall_clock_deadline`` is derived from ``args.timeout`` so this
         # branch is unreachable in practice; guard against future refactors
         # that decouple the two.
         return remaining
-    return min(float(timeout), remaining)
+    return min(float(cap), remaining)
 
 
 # =============================================================================
@@ -460,7 +492,8 @@ def _budgeted_timeout(args) -> float | None:
 #
 # The fix is a *per-attempt* helper that divides the remaining wall-clock
 # budget evenly across the remaining attempts, returning the minimum of:
-#   1. ``args.timeout``          - never exceed user's original cap
+#   1. ``_search_stage_cap``     - never exceed the per-stage cap
+#                                  (``--search-timeout``, else ``--timeout``)
 #   2. ``remaining_budget``      - never overrun the total deadline
 #   3. ``per_attempt_budget``    - fair slice across remaining attempts
 #
@@ -505,22 +538,24 @@ def _per_attempt_budgeted_timeout(args, attempt_index: int, max_attempts: int) -
           divided by the *new* ``remaining_attempts`` count, so an early
           completion on attempt N enlarges the slice available to N+1.
     """
-    timeout = getattr(args, "timeout", None)
+    # Issue #5266: ``--search-timeout`` (when set) is the per-stage cap; it
+    # falls back to ``args.timeout`` so pre-#5266 runs are bit-identical.
+    cap = _search_stage_cap(args)
     remaining = _remaining_budget(args)
     if remaining is None:
         # No deadline configured -> legacy unbounded behaviour.
-        return timeout
+        return cap
 
     # Attempts still outstanding *including* the current one.
     remaining_attempts = max(1, max_attempts - attempt_index)
     per_attempt_slice = remaining / remaining_attempts
 
-    if timeout is None:
+    if cap is None:
         # Defensive: ``_wall_clock_deadline`` is derived from ``args.timeout``,
         # so this branch is unreachable in practice.
         return per_attempt_slice
 
-    return min(float(timeout), remaining, per_attempt_slice)
+    return min(float(cap), remaining, per_attempt_slice)
 
 
 def _routable_multi_pad_nets(router: "Autorouter") -> list[int]:
@@ -1459,12 +1494,23 @@ def _make_checkpoint_callback(
         # _write_routed_pcb does not erase it from the staged input.
         if preserved_sexp:
             route_sexp = f"{route_sexp}\n\t{preserved_sexp}" if route_sexp else preserved_sexp
-        _write_routed_pcb(
-            pcb_path,
-            output_path,
-            route_sexp,
-            is_checkpoint=True,
-        )
+        # Issue #5266: ``_write_routed_pcb`` stamps ``serialization`` on the
+        # deadline-supervisor control file.  A *checkpoint* write is a
+        # transient excursion out of whatever stage the router is actually in,
+        # so restore that stage on the way out -- otherwise the first
+        # checkpoint leaves ``serialization`` published for the rest of the
+        # run and a later timeout is misattributed to serialization instead of
+        # the search that was really running.  A timeout landing *inside* this
+        # write is still reported as ``serialization`` (the signal handler
+        # stamps ``interrupted_stage`` before this restore runs, and the
+        # supervisor prefers that field).
+        with restore_stage():
+            _write_routed_pcb(
+                pcb_path,
+                output_path,
+                route_sexp,
+                is_checkpoint=True,
+            )
 
         last_time[0] = now
         if not quiet:
@@ -3398,6 +3444,64 @@ def _run_placement_feedback(
     return diff_data
 
 
+def _delta_probe_timeout(args, *, quiet: bool = True) -> float | None:
+    """Resolve the per-probe wall clock for the placement-delta feedback loop.
+
+    Issue #5266.  ``--placement-delta-feedback-timeout`` is the loop's own
+    per-iteration allocation and is deliberately **independent of the
+    per-search-stage cap** (:func:`_search_stage_cap`): an initial pass that
+    spent its whole stage allocation must not starve the probes, because a
+    probe re-route granted less budget than the baseline under-routes for
+    budget reasons and gets reverted regardless of whether the placement change
+    helped.
+
+    What it is *not* is an escape hatch from ``--timeout``.  That deadline is
+    enforced out-of-process by :func:`route_deadline._supervise`, which
+    terminates the whole process group when it fires -- a probe allowed to
+    "survive" it just buys an unverified partial artifact and a killed run.  So
+    the allocation is clamped to whatever the total budget still has left.
+
+    Sizing the contract is the caller's job: ``--timeout`` must cover the
+    initial search stage + ``--placement-delta-feedback-budget`` x this
+    allocation + postprocessing.  When it does not, this emits an advisory note
+    naming the shortfall (see ``boards/07-matchgroup-test/generate_design.py``
+    for a recipe that derives a total which fits).
+
+    Args:
+        args: Parsed CLI namespace.
+        quiet: Suppress the advisory clamp/shortfall notes.
+
+    Returns:
+        ``None`` for unbounded, otherwise the effective per-probe timeout.
+    """
+    loop_timeout_raw = getattr(args, "placement_delta_feedback_timeout", None)
+    if loop_timeout_raw is None:
+        # No explicit allocation: share what the total deadline has left,
+        # bounded by the per-search-stage cap (pre-#5266 behaviour).
+        return _budgeted_timeout(args)
+
+    loop_timeout = float(loop_timeout_raw)
+    remaining_total = _remaining_budget(args)
+    if remaining_total is None:
+        return loop_timeout
+
+    budget = int(getattr(args, "placement_delta_feedback_budget", 3) or 3)
+    timeout = min(loop_timeout, remaining_total)
+    if not quiet:
+        if timeout < loop_timeout:
+            print(
+                f"  Probe allocation clamped to the total --timeout: "
+                f"{timeout:.0f}s (requested {loop_timeout:g}s)"
+            )
+        elif budget * loop_timeout > remaining_total:
+            print(
+                f"  Note: {budget} x {loop_timeout:g}s of probe budget exceeds the "
+                f"{remaining_total:.0f}s left of the total --timeout; later probes "
+                "will be truncated or skipped"
+            )
+    return timeout
+
+
 def _placement_delta_path(args, pcb_path: Path) -> Path:
     """Resolve the path of the ``<output>_placement_delta.json`` artifact."""
     if getattr(args, "output", None):
@@ -3449,21 +3553,42 @@ def _run_placement_delta_feedback(
     from kicad_tools.schema.pcb import PCB
 
     # An explicit per-iteration budget (``--placement-delta-feedback-timeout``)
-    # is the loop's OWN allocation: it survives an exhausted routing deadline
-    # and gives each delta's re-route the SAME wall clock the initial pass got.
-    # That equality is load-bearing for the keep/revert decision -- a re-route
-    # granted less budget than the baseline would under-route for reasons that
-    # have nothing to do with the placement change and revert every delta.
+    # is the loop's OWN allocation: it is independent of the per-search-stage
+    # cap (``--search-timeout``), so an initial pass that spent its whole stage
+    # allocation does NOT starve the probes.  Granting each delta's re-route
+    # the SAME wall clock the initial pass got is load-bearing for the
+    # keep/revert decision -- a re-route granted less budget than the baseline
+    # would under-route for reasons that have nothing to do with the placement
+    # change and revert every delta.
+    #
+    # Issue #5266: the allocation is NOT an escape hatch from ``--timeout``.
+    # That value is a hard TOTAL deadline enforced out-of-process by
+    # ``route_deadline._supervise``, which terminates the process group when it
+    # fires -- so a probe budget that "survived" it only bought an unverified
+    # partial artifact and a killed run.  The allocation is therefore clamped
+    # to whatever the total budget still has left, and the loop is skipped when
+    # nothing is left.  Sizing the contract is the caller's job: ``--timeout``
+    # must cover the initial search stage + budget x this allocation +
+    # postprocessing (see boards/07-matchgroup-test/generate_design.py).
     loop_timeout_raw = getattr(args, "placement_delta_feedback_timeout", None)
     loop_timeout = float(loop_timeout_raw) if loop_timeout_raw is not None else None
 
-    if loop_timeout is None and _deadline_expired(args):
+    if _deadline_expired(args):
         if not quiet:
             print("\n--- Classifier-Driven Placement-Delta Feedback ---")
-            print(
-                "  Skipping: routing wall-clock deadline reached (--timeout, issue #2802); "
-                "pass --placement-delta-feedback-timeout to give the loop its own budget"
-            )
+            if loop_timeout is None:
+                print(
+                    "  Skipping: routing wall-clock deadline reached (--timeout, issue #2802); "
+                    "pass --placement-delta-feedback-timeout to give the loop its own budget"
+                )
+            else:
+                print(
+                    "  Skipping: the hard total --timeout deadline is exhausted, so the "
+                    f"{loop_timeout:g}s per-iteration allocation has nowhere to run "
+                    "(issue #5266).  Raise --timeout to cover the initial search stage "
+                    "(--search-timeout) + --placement-delta-feedback-budget x "
+                    "--placement-delta-feedback-timeout + postprocessing."
+                )
         return None
 
     if not quiet:
@@ -3485,7 +3610,10 @@ def _run_placement_delta_feedback(
     budget = int(getattr(args, "placement_delta_feedback_budget", 3) or 3)
     max_movement = float(getattr(args, "placement_feedback_max_movement", 5.0) or 5.0)
     use_negotiated = getattr(args, "strategy", "negotiated") == "negotiated"
-    timeout = loop_timeout if loop_timeout is not None else _budgeted_timeout(args)
+    timeout = _delta_probe_timeout(args, quiet=quiet)
+    # Issue #5266: attribute a timeout inside a probe to this loop rather than
+    # to the initial search stage (or a stale checkpoint ``serialization``).
+    record_stage("placement-delta-feedback")
     # Issue #4776: ``or None`` normalizes the ``--deterministic-budget``
     # ``0.0`` sentinel away, matching every other call site (see
     # ``_run_placement_feedback``).
@@ -12771,15 +12899,35 @@ def _route_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help=(
-            "Total wall-clock timeout in seconds for the whole routing "
-            "invocation (default: no timeout).  This is a TOTAL budget: "
-            "auto-layer escalation, placement-routing feedback, auto-fix "
-            "passes, and inner negotiated/two-phase/escape calls all share "
-            "the same deadline.  The command returns the best partial "
+            "HARD TOTAL wall-clock timeout in seconds for the whole routing "
+            "invocation (default: no timeout).  Nothing escapes it: auto-layer "
+            "escalation, placement-routing feedback, placement-delta probes, "
+            "auto-fix passes, and inner negotiated/two-phase/escape calls all "
+            "share this one deadline.  The command returns the best partial "
             "result available when the deadline fires. Cleanup and native calls are "
             "supervised too; up to 5 additional seconds are allowed for raw partial "
             "serialization, then the process group is terminated. Timeout exits 124; "
-            "a snapshot may be unavailable if serialization cannot finish."
+            "a snapshot may be unavailable if serialization cannot finish. "
+            "Use --search-timeout to bound an INDIVIDUAL search stage inside "
+            "this total, so a long initial pass cannot swallow the whole "
+            "budget (issue #5266)."
+        ),
+    )
+    parser.add_argument(
+        "--search-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Per-search-stage wall-clock allocation in seconds: the initial "
+            "routing pass, each layer/rule escalation attempt, and each "
+            "placement-feedback iteration are individually capped at this "
+            "value.  Default: the value of --timeout, i.e. the first stage may "
+            "consume the whole total budget (pre-#5266 behaviour).  This is an "
+            "upper bound INSIDE --timeout, never an escape from it: every "
+            "stage is still clamped to whatever the total deadline has left. "
+            "Set it below --timeout to reserve room for later stages and "
+            "postprocessing. Issue #5266."
         ),
     )
     parser.add_argument(
@@ -13654,12 +13802,15 @@ def _route_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help=(
             "Per-iteration wall-clock budget for the placement-delta feedback "
-            "loop's re-routes, in seconds. This is the loop's OWN allocation: "
-            "it survives an already-exhausted --timeout and gives each delta's "
-            "re-route the same budget the initial pass got (an unequal budget "
-            "would revert every delta for reasons unrelated to the placement "
-            "change). Default: share whatever remains of --timeout, and skip "
-            "the loop entirely when nothing remains. Issue #4468."
+            "loop's re-routes, in seconds. This is the loop's OWN allocation, "
+            "independent of the per-stage --search-timeout, so an initial pass "
+            "that spent its whole stage allocation does not starve the probes "
+            "(an unequal budget would revert every delta for reasons unrelated "
+            "to the placement change). It does NOT escape the hard total "
+            "--timeout: it is clamped to whatever that deadline has left, and "
+            "the loop is skipped once nothing remains -- size --timeout to "
+            "cover --search-timeout + budget x this value + postprocessing. "
+            "Default: share whatever remains of --timeout. Issues #4468, #5266."
         ),
     )
     parser.add_argument(
@@ -15821,6 +15972,14 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 flush_print(f"  Profiling enabled: {profile_output}")
 
         import time
+
+        # Issue #5266: publish the stage the search itself runs under, so the
+        # timeout report names ``routing`` rather than whatever the last
+        # incidental ``record_stage`` call happened to leave behind (before
+        # this, a fixed-layer negotiated run reported the setup-time
+        # ``routing-conflict-fallback-conversion`` label, or -- once the first
+        # best-so-far checkpoint fired -- a stale ``serialization``).
+        record_stage("routing")
 
         routing_start_time = time.time()
 

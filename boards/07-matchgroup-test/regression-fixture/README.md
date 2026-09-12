@@ -201,7 +201,17 @@ pads).
 The route step runs `kct route --placement-delta-feedback
 --placement-delta-feedback-budget 2 --placement-delta-feedback-timeout
 600` (wired from the `PLACEMENT_DELTA_FEEDBACK*` constants at the top of
-`generate_design.py`).  Each iteration classifies the **routed** board,
+`generate_design.py`).  Since #5266 the surrounding budget contract is
+stated as two separate numbers: `--search-timeout 600` bounds each
+individual search stage (the initial negotiated pass), while `--timeout`
+carries the **hard total** invocation deadline, derived as
+`600 + 2x600 + 600 = 2400 s` (one search stage, one probe allocation per
+budget unit, and a postprocessing reserve).  The probe allocation does
+**not** escape the total deadline -- it is clamped to whatever the total
+has left -- so the total must be large enough to contain both probes or
+the out-of-process supervisor kills the run mid-probe and leaves only
+unverified partial artifacts.  Each iteration classifies the **routed**
+board,
 translates every `PLACEMENT_BOUND` / `CONGESTION_SATURATED` diagnosis into
 one concrete placement delta, applies the top unprobed one, re-routes, and
 keeps it only when the re-route **strictly increases the routed-net count

@@ -801,7 +801,8 @@ Common flags (the full surface lives in `kct route --help`):
 | `--manufacturer NAME` (`--mfr`) | Manufacturer profile for DRC and adaptive rules |
 | `--layers {auto,2,4,4-sig,4-all,6}` | Layer stack configuration (default: `auto`) |
 | `--min-completion FLOAT` | Minimum completion ratio for success (default: 0.95) |
-| `--timeout SEC` / `--per-net-timeout SEC` | Global / per-net wall-clock caps |
+| `--timeout SEC` / `--per-net-timeout SEC` | Hard total invocation / per-net wall-clock caps |
+| `--search-timeout SEC` | Per-search-stage allocation inside `--timeout` (default: `--timeout`) |
 | `--seed N` | Seed Python `random` for reproducible routing (#2589) |
 | `--auto-fix` / `--auto-fix-passes N` | Run `kct fix-drc` after routing on DRC failure |
 | `--skip-drc` | Skip post-route DRC validation |
@@ -882,6 +883,31 @@ validation and output work. Its monotonic deadline is also passed to the existin
 routing budget helpers. Zero or a negative value retains unbounded behavior.
 Both `kct route` and `python -m kicad_tools.cli.route_cmd` use this supervision.
 
+#### Staging search budgets inside the total deadline (`--search-timeout`, #5266)
+
+Because `--timeout` is a **hard total**, it cannot also serve as the per-stage
+budget: a recipe that wants "600 s for the initial search, then two 600 s
+placement-delta probes, then postprocessing" used to have no way to say so —
+raising `--timeout` just let the initial pass swallow the enlarged budget, and
+leaving it at 600 s meant the supervisor terminated the run during the first
+probe.
+
+`--search-timeout SECONDS` is the separate, explicitly-configurable allocation
+for an **individual** search stage: the initial routing pass, each layer/rule
+escalation attempt, and each placement-feedback iteration are capped at this
+value. `--timeout` keeps hard-capping the invocation as a whole, and every
+stage is still clamped to whatever the total deadline has left — a
+`--search-timeout` (or a `--placement-delta-feedback-timeout` probe allocation)
+larger than the remaining total can never escape it. Size the total as
+`search stage + probes x probe allocation + postprocessing reserve`; see
+`boards/07-matchgroup-test/generate_design.py` (`_route_total_timeout_s`) for a
+worked example.
+
+When the deadline does fire, `<output>.timeout.json` names the stage that was
+running. Best-so-far checkpoint writes restore the stage they interrupted, so a
+mid-search timeout is reported as `routing` (or `placement-delta-feedback`)
+rather than a stale `serialization` left behind by the last checkpoint.
+
 On timeout, routing stops and up to **five additional seconds** are allowed to
 serialize a raw `<output>_partial.kicad_pcb`. The process group is then terminated
 and the worker reaped, even if native code ignores the graceful request. Exit
@@ -945,7 +971,7 @@ footprints are auto-anchored, and the applied deltas are written to
 |--------|-------------|
 | `--placement-delta-feedback` / `--no-placement-delta-feedback` | Enable / explicitly disable the loop (default: disabled) |
 | `--placement-delta-feedback-budget N` | Maximum apply/keep-or-revert iterations (default: 3) |
-| `--placement-delta-feedback-timeout SECONDS` | Per-iteration wall-clock budget for the loop's re-routes; a positive total `--timeout` remains the outer ceiling. Default: share whatever remains of `--timeout`. |
+| `--placement-delta-feedback-timeout SECONDS` | Per-iteration wall-clock budget for the loop's re-routes. Independent of the per-stage `--search-timeout` (an exhausted initial search stage no longer starves the probes), but clamped to — never an escape from — the hard total `--timeout`. Default: share whatever remains of `--timeout`. |
 
 #### Feasibility / coupling flags (v0.15.0, all default off)
 
