@@ -4,6 +4,7 @@ import copy
 
 import pytest
 
+from kicad_tools.router.cache import CacheKey, RoutingCache
 from kicad_tools.router.connectivity_invariant import (
     enforce_connectivity_invariant,
     snapshot_connectivity,
@@ -193,3 +194,27 @@ def test_trailing_scalars_share_physical_pair_reference_and_via_context():
     assert physical_length(ar, 5) == pytest.approx(11.6, abs=0.02)
     assert results[6][1].length_before_mm == pytest.approx(11.6)
     assert sum(LengthTracker.calculate_route_length(r) for r in ar.routes if r.net == 6) == 10
+
+
+def test_sqlite_cache_hit_preserves_pre_tuning_fragments_and_physical_result(tmp_path):
+    cold, group = setup_pair(via_counts=(1, 0, 1, 1))
+    key = CacheKey.compute("synthetic split pair input", cold.rules, cold.rules.grid_resolution)
+    cache = RoutingCache(cache_dir=tmp_path)
+    # The CLI writes this cache boundary before optimization and group tuning.
+    cache.put(key, cold.routes, cold.get_statistics(), route_usage=cold.grid.export_route_usage())
+    cold.apply_match_group_tuning([group], verbose=False)
+
+    reopened = RoutingCache(cache_dir=tmp_path)
+    hit = reopened.get(key)
+    assert hit is not None
+    restored = reopened.deserialize_routes(hit.routes_data)
+    assert len(restored) == 8
+    assert sum(r.is_escape for r in restored) == 4
+    assert sum(len(r.vias) for r in restored) == 3
+    warm, group = setup_pair(via_counts=(1, 0, 1, 1))
+    warm.restore_route_snapshot(restored)
+    warm.apply_match_group_tuning([group], verbose=False)
+    assert warm.routes == cold.routes
+    assert (physical_length(warm, 1) + physical_length(warm, 2)) / 2 == pytest.approx(
+        11.6, abs=0.02
+    )
