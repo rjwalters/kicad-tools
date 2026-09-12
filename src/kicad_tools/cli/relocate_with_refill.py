@@ -213,7 +213,10 @@ def relocate_in_pad_vias_with_refill(
     and candidate, without consulting net labels. Native report identities and
     their multiplicities must not regress, including unconnected items.
     """
-    pcb_path = Path(pcb_path).resolve()
+    # Project context belongs to the supplied path, including a symlink's
+    # adjacent sidecars. Publish through the link without replacing the link.
+    pcb_path = Path(pcb_path).absolute()
+    publish_path = pcb_path.resolve()
     paths = [pcb_path, pcb_path.with_suffix(".kicad_pro"), pcb_path.with_suffix(".kicad_dru")]
     snapshots = {path: path.read_bytes() if path.exists() else None for path in paths}
     if snapshots[pcb_path] is None:
@@ -272,7 +275,7 @@ def relocate_in_pad_vias_with_refill(
     # leave the original board untouched.
     # Prepare publication before the final source check. The replacement is
     # in the same directory/filesystem and preserves the source file mode.
-    fd, pending_name = tempfile.mkstemp(prefix=f".{pcb_path.name}.", dir=pcb_path.parent)
+    fd, pending_name = tempfile.mkstemp(prefix=f".{pcb_path.name}.", dir=publish_path.parent)
     pending = Path(pending_name)
     try:
         with os.fdopen(fd, "wb") as output:
@@ -284,7 +287,9 @@ def relocate_in_pad_vias_with_refill(
             current = path.read_bytes() if path.exists() else None
             if current != data:
                 raise RuntimeError(f"Source changed during relocation: {path.name}")
-        os.replace(pending, pcb_path)
+        if pcb_path.resolve() != publish_path:
+            raise RuntimeError("Source link changed during relocation")
+        os.replace(pending, publish_path)
     finally:
         pending.unlink(missing_ok=True)
     return evidence
