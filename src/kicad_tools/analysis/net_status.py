@@ -6,7 +6,9 @@ are complete, incomplete, or unrouted, with details on what's missing.
 Connectivity is decided by real geometric copper contact (shapely polygon
 intersection, matching ``kicad-cli pcb drc`` semantics) by default; pass
 ``strict=False`` to opt into the legacy 0.01mm endpoint-proximity model
-(see ``NetStatusAnalyzer.POSITION_TOLERANCE`` for the trade-offs).
+(see ``NetStatusAnalyzer.POSITION_TOLERANCE`` for the trade-offs). Boards with
+copper arcs always use geometric contact: endpoint proximity cannot describe
+interior arc contact and must not substitute a chord for the curved copper.
 
 Strict graphs retain each physical pad occurrence, including duplicate pad
 numbers. Reports keep logical ``REF.PAD`` names and board positions. Duplicate
@@ -516,7 +518,8 @@ class NetStatusAnalyzer:
                 reports open (#4176), and it reports false opens when a trace
                 endpoint lands inside pad copper but away from the pad center
                 (#4557).  Legitimate uses are perf-sensitive inner loops that
-                only consume before/after deltas.
+                only consume before/after deltas. Boards containing copper arcs
+                always use geometry, including when ``strict=False`` is requested.
         """
         from kicad_tools.schema.pcb import PCB as PCBClass
 
@@ -529,14 +532,16 @@ class NetStatusAnalyzer:
             self.pcb = pcb
             pcb_path = getattr(pcb, "path", None)
             self.source_file = str(pcb_path) if pcb_path else ""
-        self.strict = strict
+        # Endpoint heuristics cannot represent curved copper or interior contact.
+        # Arc-bearing boards therefore require real copper geometry in both modes.
+        self.strict = strict or bool(self.pcb.arcs)
         # Strict-mode geometry caches (Issue #4176), keyed by object id.
         self._segment_poly_cache: dict[int, Any] = {}
         self._via_geom_cache: dict[int, Any] = {}
         # Per-analyzer pad copper polygon cache (keyed by physical occurrence); ``None``
         # until first built lazily in :meth:`_pad_polys`.
         self._pad_poly_cache: dict[str, Any] | None = None
-        if strict:
+        if self.strict:
             from kicad_tools._shapely import require_shapely
 
             require_shapely("net-status --strict real-geometry connectivity")
@@ -675,7 +680,7 @@ class NetStatusAnalyzer:
             )
 
         # Check for routing
-        segments = list(self.pcb.segments_in_net(net_number))
+        segments = [*self.pcb.segments_in_net(net_number), *self.pcb.arcs_in_net(net_number)]
         status.has_routing = len(segments) > 0
 
         # Check for vias
@@ -816,7 +821,7 @@ class NetStatusAnalyzer:
         pad_layers = {p.connectivity_id: p.layers for p in pad_infos}
 
         # Get segments and vias for this net
-        segments = list(self.pcb.segments_in_net(net_number))
+        segments = [*self.pcb.segments_in_net(net_number), *self.pcb.arcs_in_net(net_number)]
         vias = list(self.pcb.vias_in_net(net_number))
 
         # Get zones for this net with their layers, filled polygons, and boundaries
@@ -1375,7 +1380,11 @@ class NetStatusAnalyzer:
         via as joined to the segment when the via copper disc intersects the
         segment copper, which matches KiCad's connectivity.
         """
-        if self._points_close(seg.start, via.position) or self._points_close(seg.end, via.position):
+        from kicad_tools.schema.pcb import Arc
+
+        if not isinstance(seg, Arc) and (
+            self._points_close(seg.start, via.position) or self._points_close(seg.end, via.position)
+        ):
             return True
         if via_geom is None:
             return False
@@ -1600,8 +1609,21 @@ class NetStatusAnalyzer:
         poly = cache.get(key)
         if poly is None and key not in cache:
             from kicad_tools.geometry.copper import segment_copper_polygon
+            from kicad_tools.schema.pcb import Arc
 
-            poly = segment_copper_polygon(seg.start, seg.end, seg.width)
+            if isinstance(seg, Arc):
+                from shapely.geometry import LineString
+
+                # Bound both centerline sagitta and round-buffer approximation.
+                # Their combined absolute boundary error is <= 2 * error mm.
+                # Width scaling keeps even very thin copper well resolved.
+                error = min(0.00001, seg.width / 1000)
+                radius = seg.width / 2
+                step = 4 * math.asin(math.sqrt(min(error / (2 * radius), 0.5)))
+                quad_segs = max(16, math.ceil(math.pi / (2 * step)))
+                poly = LineString(seg.centerline_points(error)).buffer(radius, quad_segs=quad_segs)
+            else:
+                poly = segment_copper_polygon(seg.start, seg.end, seg.width)
             cache[key] = poly
         return poly
 

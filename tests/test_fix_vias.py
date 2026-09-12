@@ -3734,12 +3734,14 @@ def test_raw_footprint_graphic_uses_rotation_and_board_origin(tmp_path, gate, la
 @pytest.mark.parametrize("gate", ["hole", "stub"])
 def test_raw_unmodelable_copper_remains_fail_closed(tmp_path, gate):
     from kicad_tools.cli.relocate_in_pad_vias import _check_hole_to_copper, _check_stub_clearance
+    from kicad_tools.sexp import parse_string
 
-    pcb = PCB.load(
-        _hole_floor_board(
-            tmp_path,
-            obstacle=('(arc (start 900 900) (end 901 900) (width .2) (layer "F.Cu") (net 2))'),
-        )
+    # PCB.load now rejects malformed copper arcs. Retain the repair guard's
+    # independent fail-closed coverage for unmodelable raw copper introduced
+    # through the mutable S-expression API after a valid board was loaded.
+    pcb = PCB.load(_hole_floor_board(tmp_path, obstacle=" "))
+    pcb._sexp.append(
+        parse_string('(arc (start 900 900) (end 901 900) (width .2) (layer "F.Cu") (net 2))')
     )
     via = pcb.vias[0]
     if gate == "hole":

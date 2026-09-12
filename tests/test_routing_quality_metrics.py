@@ -41,6 +41,7 @@ from kicad_tools.schema.pcb import Segment
 class _StubPCB:
     def __init__(self, segments: list[Segment]):
         self.segments = segments
+        self.arcs = []
 
 
 def _seg(

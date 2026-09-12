@@ -79,7 +79,9 @@ class TraceLengthReport:
         net_name: Name of the net.
         net_class: Net class if defined (e.g., "USB", "Clock").
         total_length_mm: Total trace length in millimeters.
-        segment_count: Number of trace segments.
+        segment_count: Number of straight trace segments.
+        arc_count: Number of curved copper tracks.
+        arc_lengths: Analytic swept lengths of curved tracks.
         segment_lengths: Per-segment length breakdown.
         via_count: Number of vias in the net.
         layer_changes: Description of layer transitions (e.g., ["F.Cu → B.Cu"]).
@@ -115,12 +117,17 @@ class TraceLengthReport:
     pair_length_mm: float | None = None
     skew_mm: float | None = None
 
+    # Curved tracks are separate from the straight-segment population.
+    arc_count: int = 0
+    arc_lengths: list[float] = field(default_factory=list)
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         result: dict[str, Any] = {
             "net_name": self.net_name,
             "total_length_mm": round(self.total_length_mm, 3),
             "segment_count": self.segment_count,
+            "arc_count": self.arc_count,
             "via_count": self.via_count,
             "layers_used": sorted(self.layers_used),
         }
@@ -243,6 +250,13 @@ class TraceLengthAnalyzer:
             if not ordered_layers or ordered_layers[-1] != segment.layer:
                 ordered_layers.append(segment.layer)
 
+        arc_lengths: list[float] = []
+        for arc in board.arcs_in_net(net_number):
+            arc_lengths.append(arc.length)
+            layers_used.add(arc.layer)
+            if not ordered_layers or ordered_layers[-1] != arc.layer:
+                ordered_layers.append(arc.layer)
+
         # Count vias and identify layer changes
         via_count = sum(1 for _ in board.vias_in_net(net_number))
 
@@ -251,13 +265,15 @@ class TraceLengthAnalyzer:
         for i in range(len(ordered_layers) - 1):
             layer_changes.append(f"{ordered_layers[i]} → {ordered_layers[i + 1]}")
 
-        total_length = sum(segment_lengths)
+        total_length = sum(segment_lengths) + sum(arc_lengths)
 
         return TraceLengthReport(
             net_name=net_name,
             total_length_mm=total_length,
             segment_count=len(segment_lengths),
             segment_lengths=segment_lengths,
+            arc_count=len(arc_lengths),
+            arc_lengths=arc_lengths,
             via_count=via_count,
             layer_changes=layer_changes,
             layers_used=layers_used,

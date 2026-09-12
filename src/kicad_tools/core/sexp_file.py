@@ -150,7 +150,9 @@ def load_pcb(path: str | Path) -> SExp:
             ],
         )
 
-    text = path.read_text(encoding="utf-8")
+    # Preserve line endings inside untouched copper arc nodes as well as
+    # their token spelling; universal-newline reads would lose CRLF bytes.
+    text = path.read_bytes().decode("utf-8")
     sexp = parse_string(text)
 
     if sexp.tag != "kicad_pcb":
@@ -181,9 +183,9 @@ def save_pcb(sexp: SExp, path: str | Path) -> None:
         )
 
     path = Path(path)
-    text = serialize_sexp(sexp)
+    text = serialize_sexp(sexp, preserve_source=True)
     check_kicad_lock(path)
-    atomic_write_text(path, text, encoding="utf-8")
+    atomic_write_text(path, text, encoding="utf-8", newline="")
 
 
 class WriteVerificationError(Exception):
