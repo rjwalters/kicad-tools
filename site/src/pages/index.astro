@@ -7,6 +7,7 @@
 // degrade gracefully when board.json / renders are absent.
 import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
+import { projectVersion } from "../data/siteMetadata.ts";
 import { loadBoards } from "../data/loadBoards.ts";
 import BoardCard from "../components/BoardCard.astro";
 import SiteHeader from "../components/Header.astro";
@@ -37,21 +38,27 @@ const hasPcbFor = (slug: string): boolean =>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>kicad-tools demo gallery</title>
+    <title>kicad-tools — tools for KiCad projects and AI agents</title>
     <meta
       name="description"
-      content="A gallery of PCB designs produced end-to-end by kicad-tools' automated agent pipeline, with design-verification and HV-isolation capabilities (v0.19.0)."
+      content={`Inspect, generate, route and check KiCad projects with Python, the command line and AI agents. Explore examples and their recorded validation. kicad-tools v${projectVersion}.`}
     />
   </head>
   <body>
     <SiteHeader />
-    <main>
+    <main id="main-content" tabindex="-1">
       <header class="page-header">
-        <h1>kicad-tools demo gallery</h1>
+        <p class="eyebrow">Python · Command line · AI agents</p>
+        <h1>Build and understand<br />your KiCad projects.</h1>
         <p class="tagline">
-          PCB designs produced end-to-end by the kicad-tools automated
-          pipeline — with design-verification and HV-isolation capabilities.
+          kicad-tools gives developers and AI agents tools to inspect schematics,
+          generate PCB designs, route connections and check the results.
+          Explore the examples below to see the work and the evidence behind it.
         </p>
+        <div class="hero-links">
+          <a class="primary-link" href="https://github.com/rjwalters/kicad-tools#quick-start">Get started</a>
+          {demoBoards.length > 0 && <a href="#demo-boards">Explore demo boards ↓</a>}
+        </div>
         <p class="count">
           {boards.length} board{boards.length === 1 ? "" : "s"}
           {withData > 0 && ` · ${withData} with generated artifacts`}
@@ -65,52 +72,49 @@ const hasPcbFor = (slug: string): boolean =>
         </p>
       )}
 
-      <section class="capabilities">
+      <section class="capabilities" aria-labelledby="capabilities-heading">
         <div class="capabilities-head">
-          <h2>Capabilities</h2>
-          <span class="version-badge">v0.19.0</span>
+          <h2 id="capabilities-heading">From design data to checked copper</h2>
+          <span class="version-badge">v{projectVersion}</span>
         </div>
         <p class="section-copy">
-          Beyond placement and routing, the 0.19.0 pipeline adds a
-          high-voltage isolation design loop and electrical-rating checks that
-          run against real KiCad designs.
+          Use the CLI for a single check, the Python API for a repeatable workflow,
+          or the MCP server to give an agent access to your design tools.
         </p>
         <ul class="capability-list" role="list">
           <li>
-            <strong>HV-isolation design loop</strong> —
-            <code>kct creepage --voltage-map</code>,
-            <code>kct zones hv-keepout</code>, HV-aware
-            <code>optimize-placement</code>, and the
-            <code>/kct:hv-isolation-loop</code> skill.
+            <h3>Inspect and automate</h3>
+            <p>Read KiCad design data and build repeatable workflows with Python
+              or an AI agent.</p>
+            <a href="https://github.com/rjwalters/kicad-tools#python-api">Python examples</a>
+            <a href="https://github.com/rjwalters/kicad-tools#mcp-server-for-ai-agents">MCP setup</a>
           </li>
           <li>
-            <strong>Electrical-rating analysis</strong> —
-            <code>kct analyze electrical-rating</code> flags LED overcurrent
-            and capacitor voltage-derating violations.
+            <h3>Place and route</h3>
+            <p>Generate layouts and route connections with configurable design
+              rules. Automated routing is experimental; inspect connectivity and
+              clearance results for each design.</p>
+            <a href="https://github.com/rjwalters/kicad-tools#pcb-autorouter">Routing example</a>
+            <a href="/benchmarks">Recorded external-board attempts</a>
           </li>
           <li>
-            <strong>Design-rule constraint export</strong> —
-            <code>kct check --emit-dru</code> /
-            <code>--emit-drc-constraints</code> emit KiCad design-rule and DRC
-            constraint files.
-          </li>
-          <li>
-            <strong>Smarter via repair</strong> —
-            <code>kct fix-vias</code> relocates off-pad vias and repairs
-            through-hole hole-to-hole clearance.
-          </li>
-          <li>
-            <strong>KiCad-10 format-stamp centralization</strong> — a
-            single-source format stamp guarded by DRC and round-trip tests.
+            <h3>Check the design</h3>
+            <p>Run geometric checks, electrical-rating analysis and high-voltage
+              creepage audits. These checks support design review; they do not
+              certify hardware or establish manufacturing readiness.</p>
+            <code>kct check board.kicad_pcb --mfr jlcpcb</code>
+            <a href="https://github.com/rjwalters/kicad-tools#pure-python-drc">Design-check examples</a>
+            <a href="https://github.com/rjwalters/kicad-tools#cli-commands">Analysis and repair commands</a>
           </li>
         </ul>
       </section>
 
       {demoBoards.length > 0 && (
-        <section class="board-section">
+        <section class="board-section" id="demo-boards">
           <h2>Demo boards</h2>
           <p class="section-copy">
-            Reference designs that exercise the kicad-tools pipeline end-to-end.
+            Reference designs that exercise the workflow. Each board reports its own
+            available artifacts and validation; inclusion here is not a readiness claim.
           </p>
           <ul class="grid" role="list">
             {demoBoards.map((board) => (
@@ -126,8 +130,8 @@ const hasPcbFor = (slug: string): boolean =>
         <section class="board-section">
           <h2>Project gallery</h2>
           <p class="section-copy">
-            Real-world boards built with kicad-tools. More designs — including
-            contributed work from others — will land here over time.
+            Additional projects used with kicad-tools. Open a board to inspect its
+            available design files, measurements and recorded checks.
           </p>
           <ul class="grid" role="list">
             {projectBoards.map((board) => (
@@ -143,42 +147,7 @@ const hasPcbFor = (slug: string): boolean =>
   </body>
 </html>
 
-<style is:global>
-  :root {
-    color-scheme: dark;
-    --bg: #0a0e12;
-    --text: #e6edf3;
-    --muted: #9aa7b2;
-    --accent: #3fae7a;
-    --border: #25303a;
-    --card-bg: #11171d;
-    --badge-bg: #1b2530;
-  }
 
-  * {
-    box-sizing: border-box;
-  }
-
-  html,
-  body {
-    margin: 0;
-    padding: 0;
-  }
-
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family:
-      system-ui,
-      -apple-system,
-      "Segoe UI",
-      Roboto,
-      Helvetica,
-      Arial,
-      sans-serif;
-    line-height: 1.5;
-  }
-</style>
 
 <style>
   main {
@@ -193,13 +162,17 @@ const hasPcbFor = (slug: string): boolean =>
 
   h1 {
     margin: 0 0 0.4rem;
-    font-size: clamp(1.6rem, 4vw, 2.4rem);
+    font-size: clamp(2rem, 5vw, 3.8rem);
+    line-height: 1.12;
+    letter-spacing: -0.035em;
+    margin-bottom: 1.25rem;
   }
 
   .tagline {
     margin: 0;
     color: var(--muted);
-    font-size: 1rem;
+    font-size: 1.1rem;
+    max-width: 65ch;
   }
 
   .count {
@@ -219,6 +192,7 @@ const hasPcbFor = (slug: string): boolean =>
   .capabilities-head {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.6rem;
     margin: 0 0 0.3rem;
   }
@@ -245,12 +219,15 @@ const hasPcbFor = (slug: string): boolean =>
     padding: 0;
     display: grid;
     gap: 0.75rem;
-    max-width: 80ch;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .capability-list li {
     color: var(--muted);
     font-size: 0.92rem;
+    padding: 1.1rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
   }
 
   .capability-list strong {
@@ -310,6 +287,14 @@ const hasPcbFor = (slug: string): boolean =>
     font-size: 0.85em;
   }
 
+  .eyebrow { color: var(--accent); font-size: 0.85rem; margin: 0 0 1rem; }
+  .hero-links { display: flex; flex-wrap: wrap; align-items: center; gap: 1.25rem; margin: 1.5rem 0; }
+  .hero-links a, .capability-list a { color: var(--accent); text-underline-offset: 0.2em; }
+  .hero-links .primary-link { background: var(--accent); color: var(--bg); padding: 0.7rem 1rem; border-radius: 5px; font-weight: 600; text-decoration: none; }
+  .capability-list h3 { color: var(--text); font-size: 1.05rem; margin: 0; }
+  .capability-list p { margin: 0.75rem 0; }
+  .capability-list a { display: block; margin-top: 0.7rem; }
+  @media (max-width: 800px) { .capability-list { grid-template-columns: 1fr; } }
   @media (max-width: 480px) {
     .grid {
       grid-template-columns: 1fr;

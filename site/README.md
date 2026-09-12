@@ -129,6 +129,8 @@ With data present, the placeholder index lists every board's real `status`
 
 ## Deploying
 
+Deploy after site-content or release changes; there is no scheduled deployment. The footer records the site build time and source commit, separately from board and benchmark evidence dates. Project version is read from `pyproject.toml` at build time.
+
 The gallery is published **manually** to Cloudflare Pages with a locally
 authenticated `wrangler` — there is no CI auto-deploy. (The former
 `gallery-deploy.yml` GitHub Actions workflow was removed in favour of this
