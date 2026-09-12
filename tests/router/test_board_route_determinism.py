@@ -55,6 +55,7 @@ class _BoardRoute(NamedTuple):
     directory: str
     stem: str
     flags: list[str]
+    module: str = "kicad_tools.cli"
 
 
 # Per-board production route flags -- MUST mirror the ``kct route`` argv in
@@ -73,11 +74,14 @@ _BOARD_CONFIG: dict[str, _BoardRoute] = {
             "240",
             "--seed",
             "42",
-            "--skip-nets",
-            "GND",
+            "--no-auto-pour",
+            "--no-auto-layers",
+            "--grid",
+            "0.1",
             "--manufacturer",
             "jlcpcb",
         ],
+        module="kicad_tools.cli.route_cmd",
     ),
     "04": _BoardRoute(
         directory="boards/04-stm32-devboard",
@@ -143,8 +147,8 @@ def _route_once(board: str, out_pcb: Path, log: Path) -> None:
     cmd = [
         sys.executable,
         "-m",
-        "kicad_tools.cli",
-        "route",
+        config.module,
+        *(["route"] if config.module == "kicad_tools.cli" else []),
         str(input_pcb),
         "--output",
         str(out_pcb),
@@ -257,3 +261,34 @@ def test_board04_route_is_reproducible(tmp_path: Path) -> None:
     makes its seed-42 route reproducible.
     """
     _assert_route_reproducible("04", tmp_path)
+
+
+@pytest.mark.parametrize(
+    "recipe,function", [("generate_design.py", "route_pcb"), ("route_demo.py", "main")]
+)
+def test_board02_determinism_uses_actual_recipe_command(recipe, function):
+    """Exercise the same route mode, power-net participation and grid as production."""
+    import ast
+
+    source = REPO_ROOT / _BOARD_CONFIG["02"].directory / recipe
+    tree = ast.parse(source.read_text())
+    entry = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == function
+    )
+    command = next(
+        node.value
+        for node in ast.walk(entry)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "cmd" for target in node.targets)
+        and isinstance(node.value, ast.List)
+    )
+    flags_start = next(
+        index
+        for index, value in enumerate(command.elts)
+        if isinstance(value, ast.Constant) and value.value == "--strategy"
+    )
+    actual_flags = [ast.literal_eval(value) for value in command.elts[flags_start:]]
+    assert _BOARD_CONFIG["02"].flags == actual_flags
+    assert getattr(_BOARD_CONFIG["02"], "module", "kicad_tools.cli") == ast.literal_eval(
+        command.elts[2]
+    )
