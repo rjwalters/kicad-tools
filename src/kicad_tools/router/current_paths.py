@@ -18,6 +18,27 @@ net: a :class:`CurrentPathSpec` names two stable ``RefDes.pad`` endpoints,
 a continuous (and optionally pulsed) current, and whether the branch is
 eligible for buttress-wire reinforcement.
 
+A pulsed branch is not just "a bigger number". A declared ``pulsed_a``
+(optionally with a ``duty_cycle`` and a ``pulse_duration_s``) drives two
+*different* checks, because a repetitive pulse can fail copper two ways:
+
+* **Thermally**, over many periods -- governed by the waveform's RMS
+  current, not its peak (I**2 heating), via
+  :meth:`CurrentPathSpec.thermal_design_current` ->
+  :func:`~kicad_tools.physics.ampacity.width_for_current`. A 30 A strobe
+  at 10% duty heats copper like ~9.5 A, so sizing it at 30 A wastes a
+  board and sizing it at its 1 A average burns one.
+* **Adiabatically**, within a single pulse -- governed by the peak and the
+  pulse duration, via
+  :func:`~kicad_tools.physics.ampacity.adiabatic_fusing_current`. An
+  inrush event far shorter than any thermal time constant can still melt
+  a trace the RMS check calls comfortable.
+
+Both assumptions are *declared*, never inferred, and both are reported
+when they cannot be applied: a pulse with no duty cycle is sized at its
+peak (conservative) **and says so**, and a pulse with no duration leaves
+the fusing mode explicitly unchecked rather than silently passing.
+
 Three things this module deliberately does NOT do, by design:
 
 * **Infer branch currents from net topology.** A path is only ever what a
@@ -154,9 +175,29 @@ established for :class:`~kicad_tools.router.rules.NetClassRouting`)::
           "continuous_a": 0.01,
           "reinforcement_eligible": false,
           "notes": "INA181 sense input -- must not be reinforced"
+        },
+        {
+          "name": "VOUT_INRUSH",
+          "net": "/VOUT_PRE",
+          "source": {"ref": "L1", "pad": "2"},
+          "sink": {"ref": "RSH1", "pad": "1"},
+          "continuous_a": 3.0,
+          "pulsed_a": 18.0,
+          "duty_cycle": 0.08,
+          "pulse_duration_s": 0.002,
+          "reinforcement_eligible": true,
+          "notes": "3A steady output, 18A capacitor inrush at hot-plug"
         }
       ]
     }
+
+``pulsed_a`` / ``duty_cycle`` / ``pulse_duration_s`` are all optional and
+default to ``null``; omitting them leaves the branch a purely continuous
+declaration whose checks are byte-identical to before they existed.
+Declaring ``duty_cycle`` or ``pulse_duration_s`` *without* ``pulsed_a``,
+or a ``pulsed_a`` below ``continuous_a``, is rejected at load time -- a
+half-declared waveform reads like modeled intent while leaving the
+consumer to guess.
 
 A bare JSON list of path objects (no ``"paths"`` wrapper) is also
 accepted.
@@ -181,11 +222,15 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CURRENT_PATHS_SIDECAR_BASENAME",
+    "THERMAL_BASIS_CONTINUOUS",
+    "THERMAL_BASIS_PEAK_AS_CONTINUOUS",
+    "THERMAL_BASIS_RMS",
     "CurrentPathAudit",
     "CurrentPathSpec",
     "PathEndpoint",
     "PathResolution",
     "ResolvedEndpoint",
+    "ThermalDesignCurrent",
     "audit_current_paths",
     "current_paths_sidecar_candidates",
     "discover_current_paths_sidecar",
@@ -206,6 +251,52 @@ _COORD_DECIMALS = 6
 # below any manufacturable feature, so it never turns "near the pad" into "on
 # the pad".
 _PAD_EPS = 1e-6
+
+
+# Which waveform assumption produced a path's thermal design current
+# (:meth:`CurrentPathSpec.thermal_design_current`). Reported verbatim in
+# audit output and DRC messages so the assumption is never invisible.
+THERMAL_BASIS_CONTINUOUS = "continuous"
+THERMAL_BASIS_RMS = "rms"
+THERMAL_BASIS_PEAK_AS_CONTINUOUS = "peak-as-continuous"
+
+
+def _optional_number(data: dict[str, object], key: str, spec_name: str) -> float | None:
+    """Read an optional numeric field, rejecting a non-numeric value.
+
+    ``None``/absent means "not declared"; anything present but non-numeric
+    is a declaration error rather than something to coerce or ignore.
+    """
+    value = data.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"current-path spec {spec_name!r} has non-numeric {key!r}")
+    return float(value)
+
+
+@dataclass(frozen=True)
+class ThermalDesignCurrent:
+    """The current a declared path's IPC-2221 width check is run at.
+
+    Attributes:
+        current_a: The current to size copper for, in amps.
+        basis: One of :data:`THERMAL_BASIS_CONTINUOUS`,
+            :data:`THERMAL_BASIS_RMS`, or
+            :data:`THERMAL_BASIS_PEAK_AS_CONTINUOUS` -- which waveform
+            treatment produced ``current_a``.
+        description: Human-readable rendering of ``current_a`` *and* how it
+            was derived, for DRC messages and audit output.
+        assumption: Non-empty only when the derivation rested on an
+            assumption the declaration did not supply (today: a pulsed
+            branch with no declared duty cycle). Consumers must surface
+            this rather than let a conservative default pass unremarked.
+    """
+
+    current_a: float
+    basis: str
+    description: str
+    assumption: str = ""
 
 
 @dataclass(frozen=True)
@@ -254,12 +345,29 @@ class CurrentPathSpec:
         continuous_a: Steady-state current this branch is declared to
             carry, in amps.
         pulsed_a: Optional peak/pulsed current, in amps, for branches with
-            a distinct transient rating (e.g. inrush or switching ripple).
-            Not yet consumed by :class:`~kicad_tools.validate.rules
-            .path_ampacity.PathAmpacityRule` (continuous-only check for
-            this increment) -- carried through so a later increment can
-            add a transient/duty-cycle-aware check without a schema
-            change.
+            a distinct transient rating (e.g. inrush, switching ripple, a
+            strobed LED). Must be >= :attr:`continuous_a` -- a declared
+            "peak" below the steady current is a declaration mistake, not
+            a relaxation, and is rejected at construction.
+            :meth:`thermal_design_current` turns this (plus
+            :attr:`duty_cycle`) into the current the IPC-2221 width check
+            actually uses.
+        duty_cycle: Optional fraction of each period spent at
+            :attr:`pulsed_a`, in ``(0, 1]``. Only meaningful alongside
+            ``pulsed_a`` (declaring it without one is rejected). When
+            present, the thermal check uses the waveform's RMS current
+            (``sqrt(D*peak**2 + (1-D)*continuous**2)``) rather than the
+            peak -- the physically correct equivalent for I**2 heating.
+            When absent, the peak is conservatively treated as continuous
+            and that assumption is reported, never silently applied.
+        pulse_duration_s: Optional duration of a single pulse, in seconds.
+            Only meaningful alongside ``pulsed_a``. When present, the
+            branch's copper is additionally checked against the Onderdonk
+            adiabatic fusing current for a pulse that long -- the
+            destruction backstop the RMS thermal check cannot see. When
+            absent, that check cannot be performed and its absence is
+            reported as an unmodeled failure mode rather than passing
+            silently.
         reinforcement_eligible: Whether :func:`kicad_tools.pcb.reinforce
             .reinforce_net` may anchor buttress-wire anchors along copper
             covered by this path. ``False`` for sense/measurement/Kelvin
@@ -274,8 +382,118 @@ class CurrentPathSpec:
     sink: PathEndpoint
     continuous_a: float
     pulsed_a: float | None = None
+    duty_cycle: float | None = None
+    pulse_duration_s: float | None = None
     reinforcement_eligible: bool = False
     notes: str = ""
+
+    def __post_init__(self) -> None:
+        """Reject incoherent declarations at construction (fail closed).
+
+        A half-declared waveform is worse than no waveform at all: it looks
+        like modeled intent while leaving the consumer to guess. Every
+        combination below is a *declaration* error the author can fix, not
+        a board condition, so it is raised rather than reported as a DRC
+        finding.
+        """
+        if self.continuous_a <= 0:
+            raise ValueError(
+                f"current-path spec {self.name!r}: 'continuous_a' must be positive, "
+                f"got {self.continuous_a}"
+            )
+        if self.pulsed_a is not None:
+            if self.pulsed_a <= 0:
+                raise ValueError(
+                    f"current-path spec {self.name!r}: 'pulsed_a' must be positive, "
+                    f"got {self.pulsed_a}"
+                )
+            if self.pulsed_a < self.continuous_a:
+                raise ValueError(
+                    f"current-path spec {self.name!r}: 'pulsed_a' ({self.pulsed_a}) is "
+                    f"below 'continuous_a' ({self.continuous_a}); a peak below the "
+                    f"steady current is a declaration mistake, not a relaxation"
+                )
+        if self.duty_cycle is not None:
+            if self.pulsed_a is None:
+                raise ValueError(
+                    f"current-path spec {self.name!r}: 'duty_cycle' declared without "
+                    f"'pulsed_a' -- a duty cycle describes a pulse that was never declared"
+                )
+            if not 0.0 < self.duty_cycle <= 1.0:
+                raise ValueError(
+                    f"current-path spec {self.name!r}: 'duty_cycle' must be in (0, 1], "
+                    f"got {self.duty_cycle}"
+                )
+        if self.pulse_duration_s is not None:
+            if self.pulsed_a is None:
+                raise ValueError(
+                    f"current-path spec {self.name!r}: 'pulse_duration_s' declared "
+                    f"without 'pulsed_a' -- a pulse duration describes a pulse that "
+                    f"was never declared"
+                )
+            if self.pulse_duration_s <= 0:
+                raise ValueError(
+                    f"current-path spec {self.name!r}: 'pulse_duration_s' must be "
+                    f"positive, got {self.pulse_duration_s}"
+                )
+
+    def thermal_design_current(self) -> ThermalDesignCurrent:
+        """The current the IPC-2221 continuous width check must be run at.
+
+        Three cases, and which one applied is always reported (never a
+        silent substitution):
+
+        * **No pulse declared** -> ``continuous_a`` itself.
+        * **Pulse + duty cycle** -> the waveform's RMS current
+          (:func:`~kicad_tools.physics.ampacity.rms_current_for_duty_cycle`
+          with ``continuous_a`` as the between-pulse baseline). Correct for
+          I**2 heating, and never below ``continuous_a`` because
+          ``pulsed_a >= continuous_a`` is enforced at construction.
+        * **Pulse, no duty cycle** -> the peak, treated as continuous. The
+          duty cycle is the only thing that could justify sizing below the
+          peak, so without it the conservative reading is the only honest
+          one -- and :attr:`ThermalDesignCurrent.assumption` says so, so a
+          reader can see that the branch is sized pessimistically rather
+          than wondering why a 30 A strobe demands 30 A of copper.
+
+        Returns:
+            A :class:`ThermalDesignCurrent`.
+        """
+        if self.pulsed_a is None:
+            return ThermalDesignCurrent(
+                current_a=self.continuous_a,
+                basis=THERMAL_BASIS_CONTINUOUS,
+                description=f"{self.continuous_a:.4g}A continuous",
+                assumption="",
+            )
+
+        from kicad_tools.physics.ampacity import rms_current_for_duty_cycle
+
+        if self.duty_cycle is not None:
+            rms_a = rms_current_for_duty_cycle(
+                self.pulsed_a, self.duty_cycle, baseline_a=self.continuous_a
+            )
+            return ThermalDesignCurrent(
+                current_a=max(rms_a, self.continuous_a),
+                basis=THERMAL_BASIS_RMS,
+                description=(
+                    f"{rms_a:.4g}A RMS ({self.pulsed_a:.4g}A peak at "
+                    f"{self.duty_cycle * 100:.4g}% duty over {self.continuous_a:.4g}A "
+                    f"continuous)"
+                ),
+                assumption="",
+            )
+
+        return ThermalDesignCurrent(
+            current_a=max(self.pulsed_a, self.continuous_a),
+            basis=THERMAL_BASIS_PEAK_AS_CONTINUOUS,
+            description=f"{self.pulsed_a:.4g}A peak treated as continuous",
+            assumption=(
+                "no 'duty_cycle' declared, so the pulsed current cannot be reduced to "
+                "an RMS equivalent; the peak is sized as if it were continuous "
+                "(conservative)"
+            ),
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -285,6 +503,8 @@ class CurrentPathSpec:
             "sink": self.sink.to_dict(),
             "continuous_a": self.continuous_a,
             "pulsed_a": self.pulsed_a,
+            "duty_cycle": self.duty_cycle,
+            "pulse_duration_s": self.pulse_duration_s,
             "reinforcement_eligible": self.reinforcement_eligible,
             "notes": self.notes,
         }
@@ -304,16 +524,18 @@ class CurrentPathSpec:
         continuous_a = data.get("continuous_a")
         if not isinstance(continuous_a, (int, float)):
             raise ValueError(f"current-path spec {name!r} missing numeric 'continuous_a'")
-        pulsed_a = data.get("pulsed_a")
-        if pulsed_a is not None and not isinstance(pulsed_a, (int, float)):
-            raise ValueError(f"current-path spec {name!r} has non-numeric 'pulsed_a'")
+        pulsed_a = _optional_number(data, "pulsed_a", name)
+        duty_cycle = _optional_number(data, "duty_cycle", name)
+        pulse_duration_s = _optional_number(data, "pulse_duration_s", name)
         return cls(
             name=name,
             net_name=net_name,
             source=PathEndpoint.from_dict(source_data),
             sink=PathEndpoint.from_dict(sink_data),
             continuous_a=float(continuous_a),
-            pulsed_a=float(pulsed_a) if pulsed_a is not None else None,
+            pulsed_a=pulsed_a,
+            duty_cycle=duty_cycle,
+            pulse_duration_s=pulse_duration_s,
             reinforcement_eligible=bool(data.get("reinforcement_eligible", False)),
             notes=str(data.get("notes", "")),
         )

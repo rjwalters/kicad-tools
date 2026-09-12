@@ -699,6 +699,17 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 "source": r.spec.source.label(),
                 "sink": r.spec.sink.label(),
                 "continuous_a": r.spec.continuous_a,
+                "pulsed_a": r.spec.pulsed_a,
+                "duty_cycle": r.spec.duty_cycle,
+                "pulse_duration_s": r.spec.pulse_duration_s,
+                # The current the IPC-2221 width check actually runs at, and
+                # which waveform assumption produced it (#4980). Reported
+                # even when it equals ``continuous_a`` so a reader never has
+                # to re-derive it.
+                "thermal_design_a": round(r.spec.thermal_design_current().current_a, 6),
+                "thermal_basis": r.spec.thermal_design_current().basis,
+                "thermal_assumption": r.spec.thermal_design_current().assumption,
+                "fusing_checked": r.spec.pulsed_a is None or r.spec.pulse_duration_s is not None,
                 "reinforcement_eligible": r.spec.reinforcement_eligible,
                 "status": r.status,
                 "reason": r.reason,
@@ -737,11 +748,16 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
             if r.reason:
                 print(f"      {r.reason}")
             if r.ok:
+                thermal = r.spec.thermal_design_current()
                 print(
                     f"      {len(r.segments)} segment(s), {r.length_mm:.2f} mm, "
-                    f"{r.spec.continuous_a:.2f}A declared, "
+                    f"sized for {thermal.description}, "
                     f"reinforcement_eligible={r.spec.reinforcement_eligible}"
                 )
+                if thermal.assumption:
+                    print(f"      assumption: {thermal.assumption}")
+                if r.spec.pulsed_a is not None and r.spec.pulse_duration_s is None:
+                    print("      fusing survivability NOT checked (no 'pulse_duration_s' declared)")
         if audit.uncovered:
             print()
             print("  Uncovered copper (declared net, no resolved path covers it):")

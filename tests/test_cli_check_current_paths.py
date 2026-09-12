@@ -334,3 +334,123 @@ def test_cli_cross_layer_path_requires_via(tmp_path, bridge):
         assert status == 2
         assert any("unresolved" in v["message"].lower() for v in violations)
     assert board.read_bytes() == before
+
+
+# --------------------------------------------------------------------------
+# Pulsed / duty-cycled declarations through the CLI (Issue #4980)
+# --------------------------------------------------------------------------
+
+
+def _pulsed_trunk_spec(**overrides) -> CurrentPathSpec:
+    """A 1A steady trunk with a 15A pulse -- 2% duty, 1ms, by default."""
+    kwargs = {
+        "name": "TRUNK",
+        "net_name": "NET1",
+        "source": PathEndpoint("J1", "1"),
+        "sink": PathEndpoint("J2", "1"),
+        "continuous_a": 1.0,
+        "pulsed_a": 15.0,
+        "duty_cycle": 0.02,
+        "pulse_duration_s": 0.001,
+        "reinforcement_eligible": True,
+    }
+    kwargs.update(overrides)
+    return CurrentPathSpec(**kwargs)
+
+
+class TestPulsedDeclarationsThroughCheck:
+    """The sidecar's waveform fields reach the rule and change the verdict.
+
+    The 2.0mm trunk board is the fixture for all three: it is comfortably
+    wide for the ~2.34A RMS of a 15A/2%-duty pulse (~0.97mm required at
+    1oz external) and far too narrow for 15A of continuous current
+    (~12.59mm required).
+    """
+
+    def test_duty_cycled_pulse_passes_on_the_narrow_trunk(
+        self, narrow_trunk_pcb: Path, tmp_path: Path
+    ):
+        sidecar = _write_sidecar(tmp_path / "cp.json", [_pulsed_trunk_spec(), _sense_spec(0.01)])
+        report = tmp_path / "report.json"
+
+        result = _run_check(narrow_trunk_pcb, report, extra=["--current-paths", str(sidecar)])
+
+        assert result == 0
+        assert [v for v in _path_ampacity_violations(report) if v["severity"] == "error"] == []
+
+    def test_same_peak_without_duty_cycle_fails_the_same_board(
+        self, narrow_trunk_pcb: Path, tmp_path: Path
+    ):
+        """Withholding the duty cycle is not a free pass: the peak is sized
+        as continuous, and the under-width error names that assumption."""
+        sidecar = _write_sidecar(
+            tmp_path / "cp.json", [_pulsed_trunk_spec(duty_cycle=None), _sense_spec(0.01)]
+        )
+        report = tmp_path / "report.json"
+
+        result = _run_check(narrow_trunk_pcb, report, extra=["--current-paths", str(sidecar)])
+
+        assert result == 2
+        errors = [v for v in _path_ampacity_violations(report) if v["severity"] == "error"]
+        assert errors
+        assert any("peak treated as continuous" in v["message"] for v in errors)
+
+    def test_fusing_error_surfaces_through_the_cli(self, narrow_trunk_pcb: Path, tmp_path: Path):
+        """A 25A pulse held for a full second melts 2.0mm of 1oz copper
+        (~20.2A Onderdonk limit) even though its ~3.67A RMS is fine."""
+        sidecar = _write_sidecar(
+            tmp_path / "cp.json",
+            [_pulsed_trunk_spec(pulsed_a=25.0, pulse_duration_s=1.0), _sense_spec(0.01)],
+        )
+        report = tmp_path / "report.json"
+
+        result = _run_check(narrow_trunk_pcb, report, extra=["--current-paths", str(sidecar)])
+
+        assert result == 2
+        errors = [v for v in _path_ampacity_violations(report) if v["severity"] == "error"]
+        assert any("would fuse" in v["message"] for v in errors)
+        assert not any("too narrow" in v["message"] for v in errors)
+
+    def test_unchecked_fusing_mode_is_reported_as_a_warning(
+        self, narrow_trunk_pcb: Path, tmp_path: Path
+    ):
+        sidecar = _write_sidecar(
+            tmp_path / "cp.json", [_pulsed_trunk_spec(pulse_duration_s=None), _sense_spec(0.01)]
+        )
+        report = tmp_path / "report.json"
+
+        result = _run_check(narrow_trunk_pcb, report, extra=["--current-paths", str(sidecar)])
+
+        assert result == 0  # a warning does not fail the gate
+        warnings = [v for v in _path_ampacity_violations(report) if v["severity"] == "warning"]
+        assert any("fusing survivability was NOT checked" in v["message"] for v in warnings)
+
+    def test_half_declared_waveform_in_an_explicit_sidecar_exits_1(
+        self, narrow_trunk_pcb: Path, tmp_path: Path, capsys
+    ):
+        """A duty cycle with no pulse is a declaration error, caught at load
+        time -- the board is never checked against an intent nobody can
+        interpret."""
+        sidecar = tmp_path / "cp.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "paths": [
+                        {
+                            "name": "TRUNK",
+                            "net": "NET1",
+                            "source": {"ref": "J1", "pad": "1"},
+                            "sink": {"ref": "J2", "pad": "1"},
+                            "continuous_a": 1.0,
+                            "duty_cycle": 0.02,
+                        }
+                    ]
+                }
+            )
+        )
+        report = tmp_path / "report.json"
+
+        result = _run_check(narrow_trunk_pcb, report, extra=["--current-paths", str(sidecar)])
+
+        assert result == 1
+        assert "duty_cycle" in capsys.readouterr().err
