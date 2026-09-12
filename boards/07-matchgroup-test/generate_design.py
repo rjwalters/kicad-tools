@@ -594,7 +594,7 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     return results
 
 
-def _relocate_pad_drills(pcb_path: Path) -> int:
+def _relocate_pad_drills(pcb_path: Path, *, native_refill: bool = False) -> int:
     """Clear partial pad/drill overlaps before repairing plane connectivity."""
     from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias
     from kicad_tools.manufacturers import get_profile
@@ -603,91 +603,27 @@ def _relocate_pad_drills(pcb_path: Path) -> int:
 
     pcb = PCB.load(pcb_path)
     rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    if native_refill:
+        from kicad_tools.cli.relocate_with_refill import relocate_in_pad_vias_with_refill
+
+        return len(relocate_in_pad_vias_with_refill(pcb_path, rules).relocation.moved)
     # The shared relocation API enforces the source project drill floor
     # independently of manufacturer copper clearance.
     result = relocate_in_pad_vias(pcb, rules)
-    extended = _extend_blocked_power_stubs(pcb, rules, result)
+    _extend_blocked_power_stubs(pcb, rules, result)
     remaining = ViaInPadRule().check(pcb, rules).violations
     if result.skipped or result.unresolvable or remaining:
         raise RuntimeError(f"Unresolved pad/drill overlaps: {result}; findings: {remaining}")
-    if result.changed or extended:
+    if result.changed:
         pcb.save(pcb_path)
-    return len(result.moved) + extended
+    return len(result.moved)
 
 
 def _extend_blocked_power_stubs(pcb, rules, result) -> int:
-    """Try a straight continuation when sliding back along a stitch stub is blocked.
+    """Compatibility entry point for the shared direct-relocation guard."""
+    from kicad_tools.cli.relocate_in_pad_vias import extend_blocked_stubs
 
-    The U4 power-pad escape can point toward a crowded drill cluster. A short
-    extension in the opposite direction preserves its existing copper. Use
-    the production candidate's drill/copper checks and additionally check the
-    entire new stub against foreign copper before accepting the extension.
-    """
-
-    from kicad_tools.cli import relocate_in_pad_vias as relocation
-
-    fixed = 0
-    pads = relocation._collect_smd_pads_by_net(pcb)
-    tht = relocation._collect_tht_pads(pcb)
-    for skipped in list(result.skipped):
-        if skipped.net_name not in POUR_NETS:
-            continue
-        via = next(v for v in pcb.vias if v.uuid == skipped.uuid)
-        attached = [
-            s
-            for s in pcb.segments_in_net(via.net_number)
-            if relocation._endpoint_at(s, *via.position) is not None
-        ]
-        if len(attached) != 1 or attached[0].layer != "F.Cu":
-            continue
-        segment = attached[0]
-        far = relocation._endpoint_at(segment, *via.position)
-        containing = next(
-            (
-                (f, p, b)
-                for f, p, b in pads[via.net_number]
-                if relocation.via_inside_pad(via, b, p, f)
-            ),
-            None,
-        )
-        if containing is None:
-            continue
-        target = relocation._first_offpad_signal_candidate(
-            pcb,
-            via,
-            containing[2],
-            pads,
-            tht,
-            rules.min_clearance_mm,
-            rules.min_hole_to_hole_mm,
-        )
-        if target is None:
-            continue
-        vx, vy = via.position
-        dx, dy = vx - far[0], vy - far[1]
-        tx, ty = target[0] - vx, target[1] - vy
-        # Restrict this fallback to an exact axis-aligned continuation.
-        if (
-            not ((abs(dx) < 1e-6 and abs(tx) < 1e-6) or (abs(dy) < 1e-6 and abs(ty) < 1e-6))
-            or dx * tx + dy * ty <= 0
-        ):
-            continue
-        if not all(
-            via.size / 2 <= x <= limit - via.size / 2
-            for x, limit in zip(target, pcb.board_size, strict=True)
-        ):
-            continue
-        if relocation._check_stub_clearance(
-            pcb, via, target, [segment.layer], segment.width, rules.min_clearance_mm
-        ):
-            continue
-        old = via.position
-        if not pcb.relocate_via(via, target):
-            continue
-        pcb.add_trace(old, target, width=segment.width, layer=segment.layer, net=skipped.net_name)
-        result.skipped.remove(skipped)
-        fixed += 1
-    return fixed
+    return extend_blocked_stubs(pcb, rules, result, nets=set(POUR_NETS))
 
 
 def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int, int]:
@@ -2032,9 +1968,9 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     # Both routed signal escapes and stitched power vias can partially cut an
     # SMT land. The shared drill-overlap detector includes these edge cuts.
-    # Relocate now so the following pour repair/re-fill rechecks moved plane
-    # vias; the existing final quantizer also handles the new signal stubs.
-    moved = _relocate_pad_drills(output_path)
+    # Stage and natively refill the complete relocation before publication.
+    # The later pour-connectivity repairs still run their own final checks.
+    moved = _relocate_pad_drills(output_path, native_refill=True)
     print(f"\n6b. Relocated {moved} via drill(s) clear of SMT lands.")
 
     # Issue #3617: repair the stitcher's residual then iterate repair <->

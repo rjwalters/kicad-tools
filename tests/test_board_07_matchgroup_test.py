@@ -924,3 +924,70 @@ def test_power_stub_uses_safe_alternate_escape(generate_design_mod, tmp_path, ob
     assert not [v for v in ViaInPadRule().check(pcb, rules).violations if "+1V8" in v.nets]
     uuids = [v.uuid for v in pcb.vias] + [s.uuid for s in pcb.segments]
     assert len(set(uuids)) == len(uuids)
+
+
+@pytest.mark.parametrize("hole_clearance,power_stub", [(0.25, False), (0.3, False), (0.25, True)])
+def test_native_staged_pad_drill_repair_preserves_connectivity(
+    tmp_path, hole_clearance, power_stub
+):
+    """Qualify all seven repairs against native fills, without weakening direct guards."""
+    from kicad_tools.cli.relocate_with_refill import (
+        _violation_identities,
+        relocate_in_pad_vias_with_refill,
+    )
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    executable = find_kicad_cli()
+    if executable is None:
+        pytest.skip("native KiCad is required for staged refill qualification")
+    source = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+    source_bytes = source.read_bytes()
+    candidate = tmp_path / source.name
+    candidate.write_bytes(source_bytes)
+    pcb = PCB.load(candidate)
+    for uid, xy in [
+        ("0de3e62a-2521-486b-a847-963011236afa", (85.19, 56.27)),
+        ("91bd6227-0458-43fc-9f1b-5cec0fbfdb8c", (83.73, 56.47)),
+    ]:
+        assert pcb.relocate_via(next(v for v in pcb.vias if v.uuid == uid), xy)
+    if power_stub:
+        pcb.add_trace((83.82, 56.27), (85.19, 56.27), width=0.2, layer="F.Cu", net="+1V8")
+        pcb.add_via(84.52, 55.85, size=0.6, drill=0.2, net="+1V8")
+    pcb.save(candidate)
+    project = candidate.with_suffix(".kicad_pro")
+    project.write_text(
+        json.dumps(
+            {
+                "board": {"design_settings": {"rules": {"min_hole_clearance": hole_clearance}}},
+            }
+        )
+    )
+    project_bytes = project.read_bytes()
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    assert len(ViaInPadRule().check(pcb, rules).violations) == 7
+    result = relocate_in_pad_vias_with_refill(candidate, rules, kicad_cli=executable)
+    assert len(result.relocation.moved) == 7
+    if power_stub:
+        moved = next(
+            move
+            for move in result.relocation.moved
+            if move.uuid == "0de3e62a-2521-486b-a847-963011236afa"
+        )
+        assert moved.new_x > moved.old_x
+        assert moved.new_y == pytest.approx(moved.old_y)
+        assert set(moved.stub_layers) == {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}
+    assert not ViaInPadRule().check(PCB.load(candidate), rules).violations
+    assert not (
+        _violation_identities(result.candidate_report)
+        - _violation_identities(result.baseline_report)
+    )
+    assert source.read_bytes() == source_bytes
+    assert project.read_bytes() == project_bytes
+    published = candidate.read_bytes()
+    assert not relocate_in_pad_vias_with_refill(
+        candidate, rules, kicad_cli=executable
+    ).relocation.changed
+    assert candidate.read_bytes() == published

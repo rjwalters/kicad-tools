@@ -1527,6 +1527,92 @@ def relocate_in_pad_vias(
 # ---------------------------------------------------------------------------
 
 
+def extend_blocked_stubs(
+    pcb: PCB, rules: DesignRules, result: RelocationResult, *, nets: set[str]
+) -> int:
+    """Try a straight continuation when sliding back along a stitch stub is blocked.
+
+    A surface-pad escape can point toward a crowded drill cluster. A short
+    extension in the opposite direction preserves its existing copper. Use
+    the production candidate's drill/copper checks and additionally check the
+    entire new stub against foreign copper before accepting the extension.
+    """
+
+    fixed = 0
+    region = _alternative_board_region(pcb)
+    pads = _collect_smd_pads_by_net(pcb)
+    tht = _collect_tht_pads(pcb)
+    for skipped in list(result.skipped):
+        if skipped.net_name not in nets:
+            continue
+        via = next(v for v in pcb.vias if v.uuid == skipped.uuid)
+        attached = [
+            s
+            for s in pcb.segments_in_net(via.net_number)
+            if _endpoint_at(s, *via.position) is not None
+        ]
+        if len(attached) != 1 or attached[0].layer != "F.Cu":
+            continue
+        segment = attached[0]
+        far = _endpoint_at(segment, *via.position)
+        if far is None:
+            continue
+        containing = next(
+            ((f, p, b) for f, p, b in pads[via.net_number] if via_inside_pad(via, b, p, f)),
+            None,
+        )
+        if containing is None:
+            continue
+        target = _first_offpad_signal_candidate(
+            pcb,
+            via,
+            containing[2],
+            pads,
+            tht,
+            rules.min_clearance_mm,
+            rules.min_hole_to_hole_mm,
+        )
+        if target is None:
+            continue
+        vx, vy = via.position
+        dx, dy = vx - far[0], vy - far[1]
+        tx, ty = target[0] - vx, target[1] - vy
+        # Restrict this fallback to an exact axis-aligned continuation.
+        if (
+            not ((abs(dx) < 1e-6 and abs(tx) < 1e-6) or (abs(dy) < 1e-6 and abs(ty) < 1e-6))
+            or dx * tx + dy * ty <= 0
+        ):
+            continue
+        if not _alternative_contained(region, via, target, segment.width):
+            continue
+        if _check_stub_clearance(
+            pcb, via, target, [segment.layer], segment.width, rules.min_clearance_mm
+        ):
+            continue
+        old_x, old_y = via.position
+        if not _persist_via_with_stubs(
+            pcb, via, target, [segment.layer], segment.width, skipped.net_name
+        ):
+            continue
+        result.skipped.remove(skipped)
+        result.moved.append(
+            ViaRelocation(
+                old_x=old_x,
+                old_y=old_y,
+                new_x=target[0],
+                new_y=target[1],
+                net=via.net_number,
+                net_name=skipped.net_name,
+                pad_ref=skipped.pad_ref,
+                uuid=via.uuid,
+                stub_layers=[segment.layer],
+                kind="signal",
+            )
+        )
+        fixed += 1
+    return fixed
+
+
 def print_relocation_results(
     result: RelocationResult,
     output_format: str = "text",
