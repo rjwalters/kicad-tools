@@ -394,3 +394,39 @@ def test_get_default_checks_registers_all_four_new_checks() -> None:
         "LedSeriesResistorCheck",
         "BomFieldHealthCheck",
     } <= names
+
+
+@pytest.mark.parametrize("return_net", ['(net 3 "SIG")', '(net 1 "VCC")'])
+def test_decoupling_requires_distinct_ground_return(tmp_path: Path, return_net: str) -> None:
+    ic, cap = _IC_WITH_CAP.split('  (footprint "Capacitor_SMD:C_0402"')
+    cap = cap.replace('(net 2 "GND")', return_net)
+    pcb = _load_pcb(tmp_path, ic + '  (footprint "Capacitor_SMD:C_0402"' + cap)
+    assert len(MissingDecouplingCapCheck().check(pcb)) == 1
+
+
+@pytest.mark.parametrize("topology", ["unrelated_ground", "parallel", "same_net", "branched"])
+def test_led_requires_series_topology(tmp_path: Path, topology: str) -> None:
+    led, resistor = _LED_WITH_RESISTOR.split('  (footprint "Resistor_SMD:R_0402"')
+    if topology == "unrelated_ground":
+        resistor = resistor.replace('(net 1 "LED_A")', '(net 2 "GND")')
+    elif topology == "parallel":
+        resistor = resistor.replace('(net 3 "+3V3")', '(net 2 "GND")')
+    elif topology == "same_net":
+        resistor = resistor.replace('(net 3 "+3V3")', '(net 1 "LED_A")')
+    body = led + '  (footprint "Resistor_SMD:R_0402"' + resistor
+    if topology == "branched":
+        body += """
+  (footprint "Connector:PinHeader"
+    (layer "F.Cu") (at 20 20)
+    (property "Reference" "J1") (property "Value" "GPIO")
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "LED_A"))
+  )
+"""
+    pcb = _load_pcb(tmp_path, body)
+    assert len(LedSeriesResistorCheck().check(pcb)) == 1
+
+
+def test_led_low_side_series_resistor(tmp_path: Path) -> None:
+    # Swap the external rails while preserving the exclusive LED/R junction.
+    body = _LED_WITH_RESISTOR.replace('"GND"', '"VCC"').replace('"+3V3"', '"GND"')
+    assert LedSeriesResistorCheck().check(_load_pcb(tmp_path, body)) == []

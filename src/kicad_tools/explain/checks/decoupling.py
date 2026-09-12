@@ -15,6 +15,7 @@ from ..mistakes import (
     Mistake,
     MistakeCategory,
     is_bypass_cap,
+    is_ground_net,
     is_power_net,
 )
 
@@ -80,8 +81,8 @@ class MissingDecouplingCapCheck:
                         location=ic.position,
                         explanation=(
                             f"{ic.reference} has a power pin on net {net_name!r}, "
-                            "but no bypass/decoupling capacitor is connected "
-                            "anywhere on that net. Without local decoupling, "
+                            "but no bypass/decoupling capacitor connects that net "
+                            "to a recognized ground return. Without local decoupling, "
                             "supply transients from switching current can couple "
                             "into the IC and cause glitches, resets, or radiated "
                             "noise."
@@ -112,12 +113,15 @@ class MissingDecouplingCapCheck:
         return ics
 
     def _bypass_cap_nets(self, pcb: PCB) -> set[str]:
-        """Return the set of net names touched by any bypass-style capacitor."""
+        """Return supply nets with a two-terminal bypass cap to ground."""
         nets: set[str] = set()
         for fp in pcb.footprints:
             if not is_bypass_cap(fp.reference, fp.value):
                 continue
-            for pad in fp.pads:
-                if pad.net_name:
-                    nets.add(pad.net_name)
+            if len(fp.pads) != 2:
+                continue
+            pad_nets = {pad.net_name for pad in fp.pads if pad.net_name}
+            if len(pad_nets) != 2 or not any(is_ground_net(net) for net in pad_nets):
+                continue
+            nets.update(net for net in pad_nets if is_power_net(net))
         return nets

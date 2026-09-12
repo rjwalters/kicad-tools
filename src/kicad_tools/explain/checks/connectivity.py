@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from ..mistakes import Mistake, MistakeCategory, is_power_net
+from ..mistakes import Mistake, MistakeCategory, is_ground_net, is_power_net
 
 if TYPE_CHECKING:
     from ...schema.pcb import PCB, Footprint
@@ -130,11 +130,11 @@ class LedSeriesResistorCheck:
     Driving an LED directly from a rail (or a GPIO) without a series
     resistor relies on the LED's own (typically very low) forward
     resistance to limit current -- this usually over-drives the LED and
-    shortens its life or destroys it outright. This heuristic only checks
-    for *any* resistor sharing a net with the LED; it cannot distinguish a
-    resistor from a constant-current driver IC, so a false positive is
-    possible when current limiting is done in silicon rather than with a
-    discrete resistor.
+    shortens its life or destroys it outright. This conservative heuristic
+    requires a private, non-rail junction
+    between a two-terminal LED and resistor. Branched junctions and
+    constant-current drivers remain warnings because this PCB-only check
+    cannot establish their current-limiting behavior.
     """
 
     category = MistakeCategory.CONNECTIVITY
@@ -166,7 +166,7 @@ class LedSeriesResistorCheck:
                     components=[fp.reference],
                     location=fp.position,
                     explanation=(
-                        f"{fp.reference} has no resistor sharing a net with it. "
+                        f"{fp.reference} has no confirmed series resistor in its net topology. "
                         "Driving an LED without a series current-limiting "
                         "resistor risks over-current damage or a shortened "
                         "lifespan, since the LED's own forward resistance is "
@@ -185,10 +185,22 @@ class LedSeriesResistorCheck:
         return mistakes
 
     def _has_series_resistor(self, pcb: PCB, led: Footprint, led_nets: set[str]) -> bool:
+        if len(led.pads) != 2 or len(led_nets) != 2:
+            return False
         for fp in pcb.footprints:
-            if fp is led or not fp.reference.upper().startswith("R"):
+            if fp is led or not fp.reference.upper().startswith("R") or len(fp.pads) != 2:
                 continue
             pad_nets = {pad.net_name for pad in fp.pads if pad.net_name}
-            if pad_nets & led_nets:
+            shared = pad_nets & led_nets
+            if len(pad_nets) != 2 or len(shared) != 1:
+                continue
+            junction = next(iter(shared))
+            if is_power_net(junction) or is_ground_net(junction):
+                continue
+            # Extra terminals could drive or bypass this junction.
+            terminals = sum(
+                pad.net_name == junction for component in pcb.footprints for pad in component.pads
+            )
+            if terminals == 2:
                 return True
         return False
