@@ -237,7 +237,8 @@ public:
     void add_pad(float x, float y, float width, float height,
                  int net, int layer_idx, uint32_t ref_hash,
                  float clearance_override,
-                 bool is_plane_net = false, float rotation = 0.0f);
+                 bool is_plane_net = false, float rotation = 0.0f,
+                 bool is_circular = false);
 
     void set_pad_via_policy(size_t index, float clearance, bool carveout_eligible);
 

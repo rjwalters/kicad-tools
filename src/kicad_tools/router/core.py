@@ -736,6 +736,7 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
             "through_hole": pad_data.get("through_hole", False),
             "drill": pad_data.get("drill", 0.0),
             "rotation": pad_data.get("rotation", 0.0),
+            "shape": pad_data.get("shape", "rect"),
         }
         # Add directly to avoid component grouping overhead
         from kicad_tools.router.primitives import Pad
@@ -754,6 +755,7 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
             through_hole=pad_info["through_hole"],
             drill=pad_info["drill"],
             rotation=pad_info["rotation"],
+            shape=pad_info["shape"],
         )
         key = (ref, pin)
         router.pads[key] = pad
@@ -2042,6 +2044,7 @@ class Autorouter:
                 through_hole=pad_info.get("through_hole", False),
                 drill=pad_info.get("drill", 0.0),
                 rotation=pad_info.get("rotation", 0.0),
+                shape=pad_info.get("shape", "rect"),
             )
             key = (ref, pin)
             # Issue #4271: ``self.pads`` is keyed (ref, pin), so a footprint
@@ -15015,6 +15018,7 @@ class Autorouter:
                     "through_hole": pad.through_hole,
                     "drill": pad.drill,
                     "rotation": pad.rotation,
+                    "shape": pad.shape,
                 }
             )
 
@@ -17493,6 +17497,7 @@ class Autorouter:
                         through_hole=pad.through_hole,
                         drill=pad.drill,
                         rotation=pad.rotation,
+                        shape=pad.shape,
                     )
                     self._escape_pad_overrides[pad_key] = virtual_pad
 
@@ -17579,6 +17584,7 @@ class Autorouter:
                         through_hole=pad.through_hole,
                         drill=pad.drill,
                         rotation=pad.rotation,
+                        shape=pad.shape,
                     )
                     self._escape_pad_overrides[pad_key] = virtual_pad
 
