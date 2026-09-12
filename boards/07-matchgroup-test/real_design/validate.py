@@ -14,6 +14,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from shapely.geometry import Point, Polygon  # type: ignore[import-untyped]
+from shapely.ops import unary_union  # type: ignore[import-untyped]
+
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
 from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
 from kicad_tools.lvs.recipe import write_lvs_report
@@ -119,9 +122,6 @@ def board_reference_copper(board: PCB) -> dict:
     resolves those bridges into polygon interiors. Missing fills stay missing.
     Project clearance rules and unfilled zone outlines are never measurements.
     """
-    from shapely.geometry import Polygon
-    from shapely.ops import unary_union
-
     planes = {}
     for layer, net_name in (("In1.Cu", "GND"), ("In4.Cu", "+3V3")):
         polygons = []
@@ -147,8 +147,6 @@ def measured_antipad_diameter_mm(via, planes: dict) -> float | None:
     inscribed diameter across the two planes in the approximate full-barrel
     model. Unsupported topology returns None rather than a fictitious hole.
     """
-    from shapely.geometry import Point, Polygon
-
     if set(via.layers) != {"F.Cu", "B.Cu"} or via.via_type is not None:
         return None
     point = Point(via.position)
@@ -168,7 +166,7 @@ def measured_antipad_diameter_mm(via, planes: dict) -> float | None:
         if len(holes) != 1:
             return None
         hole = holes[0]
-        inner_radius = hole.boundary.distance(point)
+        inner_radius = float(hole.boundary.distance(point))
         outer_radius = max(math.dist(via.position, xy) for xy in hole.exterior.coords)
         if inner_radius <= via.size / 2 or outer_radius - inner_radius > 0.005:
             return None
