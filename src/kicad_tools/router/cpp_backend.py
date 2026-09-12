@@ -883,36 +883,71 @@ class CppGrid:
         # ``grid.py::_sync_pad_to_cpp_grid`` for pads added AFTER this
         # bulk-copy completes (the typical ``Autorouter.add_component``
         # flow).
-        py_pad_blocked = grid._pad_blocked
-        for layer in range(grid.num_layers):
-            for y in range(grid.rows):
-                for x in range(grid.cols):
-                    # Issue #5240: ``grid.grid[layer][y][x]`` walks three
-                    # chained ``__getitem__`` calls (``_GridView`` ->
-                    # ``_LayerView`` -> ``_RowView``), allocating two
-                    # throwaway intermediate view objects per cell just to
-                    # reach the same ``_CellView`` that ``cell_at`` returns
-                    # in one call (see ``RoutingGrid.cell_at`` docstring,
-                    # added by #5307).  This loop is the C++ grid bulk-copy
-                    # -- it runs once per ``from_routing_grid`` call over
-                    # every cell in the board (cols*rows*layers), so it is
-                    # the single largest per-cell iteration in the router.
-                    # Profiling a full board-06 re-route (Issue #5240)
-                    # showed this exact call site as the top cumulative-time
-                    # contributor to ``from_routing_grid``.  ``cell_at`` is
-                    # a documented drop-in: identical ``_CellView`` type,
-                    # identical properties, callers see no behavioral
-                    # change.
-                    py_cell = grid.cell_at(layer, y, x)
-                    if py_cell.blocked:
-                        cpp_grid._impl.mark_blocked(
-                            x,
-                            y,
-                            layer,
-                            py_cell.net,
-                            py_cell.is_obstacle,
-                            bool(py_pad_blocked[layer, y, x]),
-                        )
+        # Issue #5240: visit only the BLOCKED cells, not every cell.
+        #
+        # The previous form walked ``layers * rows * cols`` in a triple Python
+        # loop, building a throwaway ``_CellView`` per cell (via ``cell_at``,
+        # itself the #5307 improvement over the three chained ``__getitem__``
+        # views) purely to read ``.blocked`` and discard the ~84% of cells that
+        # are free.  On board 06 that is 2001 x 1601 x 4 = 12.8M iterations,
+        # and an instrumented board-06 re-route measured a single
+        # ``from_routing_grid`` call at 19-23 s -- while the C++ coupled A*
+        # search it feeds completed its whole 1000-iteration budget in 0.03 s.
+        # Because ``CoupledPathfinder`` is constructed once per differential
+        # pair, that marshalling cost was paid nine times over in board 06's
+        # diff-pair pre-phase alone.
+        #
+        # ``_CellView.blocked`` / ``.net`` / ``.is_obstacle`` are thin readers
+        # over ``grid._blocked`` / ``grid._net`` / ``grid._is_obstacle``
+        # (grid.py ``_CellView``), so ``np.nonzero`` on the blocked plane
+        # selects exactly the cells the old loop's ``if py_cell.blocked``
+        # admitted.  ``np.nonzero`` returns indices in C order -- layer, then
+        # y, then x, ascending -- which is the identical visit order, so
+        # ``mark_blocked`` is called with the same arguments in the same
+        # sequence and the resulting C++ grid is unchanged.  ``to_numpy``
+        # keeps the GPU/MLX array backends (``RoutingGrid._backend``) working
+        # by materialising a host copy first.
+        #
+        # The rows are consumed in chunks so the temporary index / gathered
+        # value arrays stay bounded on very large boards instead of
+        # materialising one list per array over every blocked cell at once.
+        import numpy as np
+
+        from ..acceleration.backend import to_numpy
+
+        blocked_np = to_numpy(grid._blocked)
+        if blocked_np.size:
+            net_np = to_numpy(grid._net)
+            obstacle_np = to_numpy(grid._is_obstacle)
+            pad_blocked_np = to_numpy(grid._pad_blocked)
+            # Named ``blocked_layer_idx`` (not ``layer_idx``): the pad loop
+            # a little further down in this same function assigns a plain
+            # ``int`` to a variable of that name, and mypy infers a single
+            # type per function-scope variable across its first assignment
+            # -- reusing ``layer_idx`` here for this ndarray made that
+            # unrelated downstream ``int`` assignment a NEW mypy error
+            # (variable has type "ndarray", not "int").
+            blocked_layer_idx, y_idx, x_idx = np.nonzero(blocked_np)
+            mark_blocked = cpp_grid._impl.mark_blocked
+            chunk = 1 << 20
+            for lo in range(0, x_idx.shape[0], chunk):
+                hi = lo + chunk
+                ls = blocked_layer_idx[lo:hi]
+                ys = y_idx[lo:hi]
+                xs = x_idx[lo:hi]
+                # ``.tolist()`` converts each block to plain Python
+                # int/bool objects in one C-level pass, so the inner loop
+                # never pays per-element NumPy scalar boxing.
+                for x, y, layer, net, is_obstacle, pad_blocked in zip(
+                    xs.tolist(),
+                    ys.tolist(),
+                    ls.tolist(),
+                    net_np[ls, ys, xs].tolist(),
+                    obstacle_np[ls, ys, xs].tolist(),
+                    pad_blocked_np[ls, ys, xs].tolist(),
+                    strict=True,
+                ):
+                    mark_blocked(x, y, layer, net, is_obstacle, pad_blocked)
 
         # Issue #4071: marshal corridor reservations into the C++ grid.
         # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner
