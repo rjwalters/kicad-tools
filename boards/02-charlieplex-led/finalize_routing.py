@@ -36,6 +36,10 @@ def _relocate_escapes(pcb):
     # prevents an unrelated endpoint at the same coordinate from moving.
     net_names = {net.get_int(0): net.get_string(1) for net in pcb.find_children("net")}
     net_qualified_moves = {
+        # Authoritative-grid seed-42 capacitor escapes (#5270). Native DRC,
+        # process eligibility and copper LVS validate these off-pad positions.
+        ("GND", (155.1, 117.9)): (154.6, 118.4),  # C1-2; clear LINE_C and RESET
+        ("VCC", (129.9, 119.5)): (128.6, 119.5),  # C2-1; outside the SMT drill area
         # Exact seed-42 variants exposed by the repaired edge parser (#5257).
         ("GND", (155.1, 117.5)): (156.8, 117.5),
         ("VCC", (139.7, 117.3)): (139.2, 115.5),
