@@ -54,7 +54,14 @@ plated multilayer pad copper establish layer changes. Via/track centerline
 contacts and same-layer endpoint/interior contacts split graph edges, while
 public evidence retains each original routed segment once (including its
 whole length and width). Pad-internal convex copper is normalized before
-whole-component cycle detection; physical via arrays remain ambiguous.
+whole-component cycle detection. A bounded endpoint-pad fanout can be contracted
+only after proving parallel straight stubs, actual same-net outer-layer via
+barrels, and one straight receiving trunk. Stub length and via span must not
+exceed the endpoint pad diagonal. Every original member remains in the resolved
+segment evidence and is checked at the declaration's full current; no I/N or
+summed-width assumption is made. The proof permits one or more receiving exits proved to terminate at real
+pads through acyclic copper. Other cycles and
+unproved endpoint via fanouts remain explicitly ambiguous.
 
 Unsupported custom/trapezoid pads, repeated physical pad numbers, and copper
 on absent stackup layers make the declaration unresolved. Supported pad
@@ -170,7 +177,7 @@ from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from kicad_tools.schema.pcb import PCB, Segment
+    from kicad_tools.schema.pcb import PCB, Footprint, Pad, Segment, Via, Zone
 
 __all__ = [
     "CURRENT_PATHS_SIDECAR_BASENAME",
@@ -675,23 +682,335 @@ def _bfs_path(graph: _CopperGraph, start: _Node, goal: _Node) -> list[Segment] |
     return list({id(seg): seg for seg in reversed(evidence)}.values())
 
 
-def _component_has_cycle(graph: _CopperGraph, start: _Node) -> bool:
-    """Keep the conservative whole-component ambiguity policy.
+@dataclass
+class _ViaArray:
+    nodes: set[_Node]
+    edges: set[_GraphEdge]
+    members: list[Segment]
 
-    Distinct split edges count separately, even when they refer to the same
-    original routed segment. Real via edges count too; there is no via-array
-    or current-sharing exception.
+
+def _array_contacts_modeled(
+    pcb: PCB,
+    net_name: str,
+    fp: Footprint,
+    pad: Pad,
+    members: list[Segment],
+    far_nodes: list[_Node],
+    exits: list[tuple[_Node, _Node, _GraphEdge]],
+) -> bool:
+    """Reject unmodeled copper touching the local array, using copper extents.
+
+    Only the receiving segment's interval between barrels defines local scope;
+    evidence still retains that segment whole. A modeled outgoing track may
+    overlap a convex local copper piece containing its modeled graph port.
+    Unsupported same-net pad stacks and routed arcs conservatively disable this
+    recognition subset because their copper is not inventoried by this graph.
     """
-    visited = {start}
-    stack = [start]
+    from shapely.geometry import LineString, Point, Polygon  # type: ignore[import-untyped]
+
+    from kicad_tools.validate.rules.clearance import _pad_on_layer, _pad_polygon
+
+    net = pcb.get_net_by_name(net_name)
+
+    def same_net(obj: Pad | Via | Zone) -> bool:
+        return obj.net_name == net_name or (net is not None and obj.net_number == net.number)
+
+    # Routed arcs are not exposed as Segment objects. Never silently omit them.
+    for arc in pcb._sexp.find_all("arc"):
+        arc_net = arc.find_child("net")
+        if arc_net is not None and (
+            arc_net.get_string(0) == net_name
+            or (net is not None and arc_net.get_int(0) == net.number)
+        ):
+            return False
+    for footprint in pcb.footprints:
+        for candidate in footprint.pads:
+            if same_net(candidate) and candidate._sexp_node is not None:
+                if candidate._sexp_node.find_child("padstack") is not None:
+                    return False
+
+    for raw_via in pcb._sexp.find_all("via"):
+        via_net = raw_via.find_child("net")
+        if (
+            via_net is not None
+            and (
+                via_net.get_string(0) == net_name
+                or (net is not None and via_net.get_int(0) == net.number)
+            )
+            and raw_via.find_child("padstack") is not None
+        ):
+            return False
+
+    # Default circular buffers use 16 chords per quadrant. Circumscribe
+    # strokes, and expand existing pad polygons by their maximum chord error.
+    # These envelopes only reject contacts; they never prove connectivity.
+    scale = 1 / math.cos(math.pi / 64)
+
+    def outer_buffer(geometry, radius):
+        return geometry.buffer(radius * scale, quad_segs=16)
+
+    def pad_envelope(candidate, footprint):
+        polygon = _pad_polygon(candidate, footprint)
+        if polygon is None or candidate.shape == "rect":
+            return polygon
+        error = max(candidate.size) * (1 - 1 / scale)
+        return outer_buffer(polygon, error)
+
+    trunk = members[-1]
+    ordered = sorted(far_nodes, key=lambda n: math.dist(n[:2], trunk.start))
+    # Each piece retains its width for a bounded, modeled port join allowance.
+    pieces = []
+    for member in members:
+        ends = (ordered[0][:2], ordered[-1][:2]) if member is trunk else (member.start, member.end)
+        pieces.append(
+            (member.layer, outer_buffer(LineString(ends), member.width / 2), member.width / 2)
+        )
+    source = pad_envelope(pad, fp)
+    if source is None:
+        return False
+    pieces.append((members[0].layer, source, 0.0))
+    positions = {node[:2] for node in far_nodes}
+    member_vias = [v for v in pcb.vias if _node_key(v.position) in positions]
+    for via in member_vias:
+        for copper_layer in pcb.copper_layers:
+            if via_spans_layer(via.layers, copper_layer.name):
+                pieces.append(
+                    (
+                        copper_layer.name,
+                        outer_buffer(Point(via.position), via.size / 2),
+                        via.size / 2,
+                    )
+                )
+    member_ids = {id(s) for s in members}
+    for segment in _net_segments(pcb, net_name):
+        if id(segment) in member_ids:
+            continue
+        copper = outer_buffer(LineString((segment.start, segment.end)), segment.width / 2)
+        for layer, region, radius in pieces:
+            if layer != segment.layer:
+                continue
+            overlap = copper.intersection(region)
+            for node, _, edge in exits:
+                if edge.segment is segment and node[2] == layer:
+                    # Both pieces are convex straight strokes/discs. Their
+                    # intersection is connected to this proved port, including
+                    # oblique joins whose overlap exceeds the sum of radii.
+                    if region.covers(Point(node[:2])):
+                        overlap = Polygon()
+                    else:
+                        overlap = overlap.difference(
+                            Point(node[:2]).buffer(
+                                (radius + segment.width / 2) * scale * scale + _PAD_EPS
+                            )
+                        )
+            if not overlap.is_empty:
+                return False
+    for footprint in pcb.footprints:
+        for candidate in footprint.pads:
+            if candidate is pad or not same_net(candidate) or candidate.type == "np_thru_hole":
+                continue
+            copper = pad_envelope(candidate, footprint)
+            if copper is None:
+                return False
+            if any(
+                _pad_on_layer(candidate, layer) and copper.intersects(region)
+                for layer, region, _ in pieces
+            ):
+                return False
+    for via in pcb.vias:
+        if via in member_vias or not same_net(via):
+            continue
+        copper = outer_buffer(Point(via.position), via.size / 2)
+        if any(
+            via_spans_layer(via.layers, layer) and copper.intersects(region)
+            for layer, region, _ in pieces
+        ):
+            return False
+    for zone in pcb.zones:
+        if not same_net(zone) or zone.keepout is not None:
+            continue
+        # Boundary is a conservative envelope, independent of stale fill data.
+        if len(zone.polygon) < 3:
+            return False
+        envelope = Polygon(zone.polygon).envelope
+        layers = zone.layers or [zone.layer]
+        if any(
+            (layer in layers or "*.Cu" in layers) and envelope.intersects(region)
+            for layer, region, _ in pieces
+        ):
+            return False
+    return True
+
+
+def _proved_load_exits(
+    graph: _CopperGraph,
+    array_nodes: set[_Node],
+    exits: list[tuple[_Node, _Node, _GraphEdge]],
+) -> bool:
+    """Every outgoing tree must end at pads, with no loops or return to the array."""
+    if not exits:
+        return False
+    terminals = set(graph.pads.values()) - array_nodes
+    visited: set[_Node] = set()
+    for _, first, incoming in exits:
+        pending = [(first, incoming)]
+        while pending:
+            node, previous = pending.pop()
+            if node in array_nodes or node in visited:
+                return False
+            visited.add(node)
+            onward = [(n, e) for n, e in graph.adjacency[node] if e is not previous]
+            if not onward and node not in terminals:
+                return False
+            pending.extend(onward)
+    return True
+
+
+def _endpoint_via_array(
+    graph: _CopperGraph, pcb: PCB, endpoint: PathEndpoint, net_name: str
+) -> _ViaArray | None:
+    """Prove straight parallel pad stubs, real barrels and one receiving trunk.
+
+    Stub length and via span are bounded by the endpoint pad diagonal. This is
+    an explicit supported-subset limit, never a current-sharing assumption.
+    """
+    hub = graph.pads.get((endpoint.ref, endpoint.pad))
+    fp = pcb.get_footprint(endpoint.ref)
+    if hub is None or fp is None:
+        return None
+    pad = next((p for p in fp.pads if p.number == endpoint.pad), None)
+    if pad is None or pad.type != "smd" or hub[2] not in {"F.Cu", "B.Cu"}:
+        return None
+    if any(node == hub and key != (endpoint.ref, endpoint.pad) for key, node in graph.pads.items()):
+        return None
+    far_layer = "B.Cu" if hub[2] == "F.Cu" else "F.Cu"
+    arms = graph.adjacency.get(hub, [])
+    if len(arms) < 2:
+        return None
+    bound = math.hypot(*pad.size)
+    nodes = {hub}
+    edges: set[_GraphEdge] = set()
+    members: list[Segment] = list(graph.internal.get(hub, []))
+    far_nodes = []
+    direction = None
+    for top, edge in arms:
+        seg = edge.segment
+        if seg is None or seg.layer != hub[2] or top in nodes or len(graph.adjacency[top]) != 2:
+            return None
+        anchors = [
+            p for p in (seg.start, seg.end) if _pad_covers(pcb, endpoint.ref, endpoint.pad, p)
+        ]
+        if len(anchors) != 1:
+            return None
+        anchor = anchors[0]
+        tip = seg.end if anchor == seg.start else seg.start
+        if _node_key(tip) != top[:2] or _seg_length(seg) > bound + _PAD_EPS:
+            return None
+        delta = (tip[0] - anchor[0], tip[1] - anchor[1])
+        if direction is None:
+            direction = delta
+        elif (
+            abs(direction[0] * delta[1] - direction[1] * delta[0]) > _PAD_EPS
+            or direction[0] * delta[0] + direction[1] * delta[1] <= 0
+        ):
+            return None
+        matching = [v for v in pcb.vias if _node_key(v.position) == top[:2]]
+        if len(matching) != 1:
+            return None
+        via = matching[0]
+        net = pcb.get_net_by_name(net_name)
+        if set(via.layers) != {"F.Cu", "B.Cu"} or not (
+            via.net_name == net_name or (net is not None and via.net_number == net.number)
+        ):
+            return None
+        members.append(seg)
+        edges.add(edge)
+        previous, current = edge, top
+        while True:
+            if current in nodes:
+                return None
+            nodes.add(current)
+            onward = [(n, e) for n, e in graph.adjacency[current] if e is not previous]
+            if current[2] == far_layer:
+                far_nodes.append(current)
+                break
+            if len(onward) != 1 or onward[0][1].segment is not None:
+                return None
+            nxt, barrel = onward[0]
+            if nxt[:2] != top[:2]:
+                return None
+            edges.add(barrel)
+            previous, current = barrel, nxt
+    if max(math.dist(a[:2], b[:2]) for a in far_nodes for b in far_nodes) > bound + _PAD_EPS:
+        return None
+    candidates = [
+        e.segment
+        for _, e in graph.adjacency[far_nodes[0]]
+        if e.segment is not None
+        and e.segment.layer == far_layer
+        and all(
+            point_to_segment_distance(*n[:2], *e.segment.start, *e.segment.end) <= _PAD_EPS
+            for n in far_nodes
+        )
+    ]
+    candidates = list({id(seg): seg for seg in candidates}.values())
+    if len(candidates) != 1:
+        return None
+    trunk = candidates[0]
+    ordered = sorted(far_nodes, key=lambda n: math.dist(n[:2], trunk.start))
+    first, last = ordered[0], ordered[-1]
+    for node in graph.adjacency:
+        if (
+            node[2] == far_layer
+            and point_to_segment_distance(*node[:2], *first[:2], *last[:2]) <= _PAD_EPS
+        ):
+            nodes.add(node)
+    if any(node in nodes and node != hub for node in graph.pads.values()):
+        return None
+    trunk_edges = set()
+    for node in nodes:
+        for other, edge in graph.adjacency[node]:
+            if other in nodes and edge not in edges:
+                if edge.segment is not trunk:
+                    return None
+                trunk_edges.add(edge)
+    reached, pending = {first}, [first]
+    while pending:
+        for other, edge in graph.adjacency[pending.pop()]:
+            if edge in trunk_edges and other not in reached:
+                reached.add(other)
+                pending.append(other)
+    if not set(far_nodes) <= reached:
+        return None
+    edges.update(trunk_edges)
+    exits = [(n, other, e) for n in nodes for other, e in graph.adjacency[n] if other not in nodes]
+    if not _proved_load_exits(graph, nodes, exits):
+        return None
+    members.append(trunk)
+    if not _array_contacts_modeled(pcb, net_name, fp, pad, members, far_nodes, exits):
+        return None
+    return _ViaArray(nodes, edges, list({id(seg): seg for seg in members}.values()))
+
+
+def _component_has_cycle(
+    graph: _CopperGraph, start: _Node, arrays: Sequence[_ViaArray] = ()
+) -> bool:
+    """Contract only physically proved arrays; keep every other cycle visible."""
+    roots = {node: next(iter(array.nodes)) for array in arrays for node in array.nodes}
+    visited_nodes, visited_roots = {start}, {roots.get(start, start)}
     seen_edges: set[_GraphEdge] = set()
+    contracted = {edge for array in arrays for edge in array.edges}
+    stack = [start]
     while stack:
-        for nxt, edge in graph.adjacency.get(stack.pop(), []):
-            seen_edges.add(edge)
-            if nxt not in visited:
-                visited.add(nxt)
+        cur = stack.pop()
+        for nxt, edge in graph.adjacency.get(cur, []):
+            if edge not in contracted:
+                seen_edges.add(edge)
+            if nxt not in visited_nodes:
+                visited_nodes.add(nxt)
+                visited_roots.add(roots.get(nxt, nxt))
                 stack.append(nxt)
-    return len(seen_edges) > len(visited) - 1
+    return len(seen_edges) > len(visited_roots) - 1
 
 
 def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
@@ -913,7 +1232,40 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
             sink=sink,
         )
 
-    if _component_has_cycle(adjacency, start):
+    arrays: list[_ViaArray] = []
+    for endpoint in (spec.source, spec.sink):
+        array = _endpoint_via_array(adjacency, pcb, endpoint, spec.net_name)
+        if array is not None and not any(array.nodes & previous.nodes for previous in arrays):
+            arrays.append(array)
+        elif array is None:
+            hub = adjacency.pads.get((endpoint.ref, endpoint.pad))
+            endpoint_fp = pcb.get_footprint(endpoint.ref)
+            endpoint_pad = (
+                next((p for p in endpoint_fp.pads if p.number == endpoint.pad), None)
+                if endpoint_fp
+                else None
+            )
+            arms = adjacency.adjacency.get(hub, []) if hub is not None else []
+            # A broken fanout may become acyclic when receiving copper is
+            # removed. It must not fall back to checking one surviving arm.
+            if (
+                endpoint_pad is not None
+                and endpoint_pad.type == "smd"
+                and len(arms) >= 2
+                and any(
+                    edge.segment is not None
+                    and any(_node_key(v.position) == node[:2] for v in pcb.vias)
+                    for node, edge in arms
+                )
+            ):
+                return PathResolution(
+                    spec=spec,
+                    status=STATUS_AMBIGUOUS,
+                    source=source,
+                    sink=sink,
+                    reason="endpoint via fanout is outside the proved local pad-to-trunk motif",
+                )
+    if _component_has_cycle(adjacency, start, arrays):
         return PathResolution(
             spec=spec,
             status=STATUS_AMBIGUOUS,
@@ -925,6 +1277,14 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
             source=source,
             sink=sink,
         )
+
+    # Every member remains physical evidence checked at the full current.
+    path_segments = list(
+        {
+            id(seg): seg
+            for seg in [*path_segments, *(seg for array in arrays for seg in array.members)]
+        }.values()
+    )
 
     return PathResolution(
         spec=spec,

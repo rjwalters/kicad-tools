@@ -5,8 +5,22 @@
 # skills (Anvil's model, NOT Loom's full-package vendoring). This installer:
 #   1. Adds kicad-tools as a uv dependency in the target's pyproject.toml
 #      (git source by default, local path source with --path <dir>).
-#   2. Vendors .claude/commands/kct/*.md skills into the target (NEVER touches
-#      .claude/commands/loom/ — coexists additively with Loom).
+#   2. Vendors workflow content for the selected --client (default: claude;
+#      claude|codex|both — #4905):
+#        - claude: .claude/commands/kct/*.md skills (NEVER touches
+#          .claude/commands/loom/ — coexists additively with Loom), plus a
+#          guarded <!-- BEGIN KICAD-TOOLS --> block in the target's CLAUDE.md.
+#        - codex: one .agents/skills/kct-<name>/SKILL.md per skill, generated
+#          from the SAME source .claude/commands/kct/<name>.md files (one
+#          maintained source — the SKILL.md frontmatter carries only `name`/
+#          `description`, never Claude's `invocation`/`suggestedModel`), plus
+#          a guarded <!-- BEGIN KICAD-TOOLS --> block in the target's
+#          AGENTS.md (NEVER touches an existing Loom AGENTS.md block — those
+#          use different markers).
+#      Selecting one client never overwrites, removes, or duplicates the
+#      other client's files, markers, or a repeat/switched install's prior
+#      valid artifacts (install-metadata.json accumulates client/file/skill
+#      history across runs rather than being overwritten).
 #   3. Vendors the portable CI gate scripts (scripts/ci/check_copper_lvs.py,
 #      check_routed_drc.py, net_class_map_resolver.py) into the target's
 #      .kct/ci/ (Epic #4054 Child 2, #4056). These are stdlib+yaml only, take
@@ -14,8 +28,12 @@
 #      the consumer's own CI. Copied verbatim as a sibling triple so
 #      check_routed_drc.py's local `from net_class_map_resolver import ...`
 #      (a sys.path insert relative to the script's own dir) still resolves.
-#   4. Appends a guarded, idempotent <!-- BEGIN KICAD-TOOLS --> block to the
-#      target's CLAUDE.md carrying the three hard-won Epic #4054 conventions.
+#      Shared across both clients, installed regardless of --client.
+#   4. Vendors the load-bearing conventions (native backend build, cross-gate
+#      DRC, artifact-first, per-rule warning baselines) verbatim into
+#      .kct/CONVENTIONS.md — shared across both clients, installed regardless
+#      of --client. Both the CLAUDE.md and AGENTS.md blocks point at this one
+#      file rather than inlining a second copy of the substance.
 #   5. Writes .kct/install-metadata.json for a future uninstaller/upgrader.
 #   6. --dry-run prints every planned write and writes nothing.
 #
@@ -23,6 +41,9 @@
 #   ./scripts/install-kct.sh [OPTIONS] <target-repo>
 #
 # Options:
+#   --client <c>       Which agent runtime(s) to install workflow content for:
+#                      `claude` (default, backward-compatible), `codex`, or
+#                      `both`. Unknown values are rejected before any write.
 #   --path <dir>       Install kicad-tools as a LOCAL PATH dependency pointing
 #                      at <dir> (a kicad-tools checkout), for sibling-repo
 #                      development (e.g. --path ../kicad-tools). Network-free.
@@ -31,8 +52,10 @@
 #                      the source checkout's kct version tag (v<version>).
 #   --rev <rev>        Git-source pin: use this rev/sha (git mode only).
 #   --skills=<a,b,c>   Vendor only the listed skills (default: all *.md under
-#                      the source .claude/commands/kct/). README is always
-#                      vendored (it documents the namespace).
+#                      the source .claude/commands/kct/), for whichever
+#                      client(s) --client selects. README is always vendored
+#                      for claude (it documents the namespace); help is always
+#                      vendored for both clients (introspective meta-skill).
 #   --dry-run          Print planned actions, write nothing.
 #   -y, --yes          Non-interactive (skip confirmation; auto-enabled when
 #                      stdin is not a TTY, e.g. CI/agent shells).
@@ -43,6 +66,8 @@
 #   ./scripts/install-kct.sh --path ../kicad-tools /path/to/board-repo
 #   ./scripts/install-kct.sh --dry-run /path/to/board-repo
 #   ./scripts/install-kct.sh --skills=ee-review /path/to/board-repo
+#   ./scripts/install-kct.sh --client codex /path/to/board-repo
+#   ./scripts/install-kct.sh --client both /path/to/board-repo
 #
 # Prerequisites in the target repo:
 #   - A pyproject.toml at the target root. This MVP does NOT `uv init` a
@@ -51,7 +76,12 @@
 #     uv-managed consumer repo).
 #
 # Re-running the installer is the upgrade/idempotency path: a second run with
-# the same args adds no duplicate CLAUDE.md block and no duplicate dependency.
+# the same args adds no duplicate CLAUDE.md/AGENTS.md block and no duplicate
+# dependency. Re-running with a DIFFERENT --client adds that client's
+# artifacts additively — it does not remove or duplicate a previously
+# installed client's files, and install-metadata.json's clients_installed /
+# skills_selected / installed_files fields accumulate (union) across runs
+# rather than being replaced.
 
 set -euo pipefail
 
@@ -75,7 +105,7 @@ note()  { echo "${CYAN}  note: $*${NC}"; }
 
 usage() {
   # The Usage / Options / Examples block lives in the header comment.
-  sed -n '4,45p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '40,80p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
@@ -92,9 +122,12 @@ PATH_DIR=""
 GIT_TAG=""
 GIT_REV=""
 TARGET=""
+CLIENT="claude"   # backward-compatible default (#4905)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --client=*) CLIENT="${1#--client=}"; [[ -z "$CLIENT" ]] && error "--client requires a value (claude|codex|both)"; shift ;;
+    --client)   shift; CLIENT="${1:-}"; [[ -z "$CLIENT" ]] && error "--client requires a value (claude|codex|both)"; shift ;;
     --skills=*) SKILLS_FILTER="${1#--skills=}"; [[ -z "$SKILLS_FILTER" ]] && error "--skills requires a comma-separated list"; shift ;;
     --skills)   shift; SKILLS_FILTER="${1:-}"; [[ -z "$SKILLS_FILTER" ]] && error "--skills requires a comma-separated list"; shift ;;
     --path)     shift; PATH_DIR="${1:-}"; [[ -z "$PATH_DIR" ]] && error "--path requires a directory argument"; PATH_MODE=true; shift ;;
@@ -121,12 +154,24 @@ if [[ "$PATH_MODE" == true ]] && { [[ -n "$GIT_TAG" ]] || [[ -n "$GIT_REV" ]]; }
   error "--path is a local-path source; --tag/--rev only apply to git mode"
 fi
 
+# Reject an unknown --client selection before any write (Curator acceptance
+# criterion: validate before Stage 1, not partway through a partial install).
+case "$CLIENT" in
+  claude|codex|both) ;;
+  *) error "unknown --client value: '$CLIENT' (expected: claude, codex, or both)" ;;
+esac
+
 # Auto-detect non-interactive mode when stdin is not a TTY (agent/CI shells).
 if [[ "$NON_INTERACTIVE" != true ]] && [[ ! -t 0 ]]; then
   NON_INTERACTIVE=true
 fi
 
 [[ -z "$TARGET" ]] && error "target repository path required (run with --help to see usage)"
+
+CLIENT_WANTS_CLAUDE=false
+CLIENT_WANTS_CODEX=false
+[[ "$CLIENT" == "claude" || "$CLIENT" == "both" ]] && CLIENT_WANTS_CLAUDE=true
+[[ "$CLIENT" == "codex"  || "$CLIENT" == "both" ]] && CLIENT_WANTS_CODEX=true
 
 # ----- Stage 1: resolve KCT_ROOT (this installer's source checkout) ---------
 info "Stage 1: resolve kicad-tools source root"
@@ -251,6 +296,7 @@ ok "selected: ${SELECTED_SKILLS[*]}"
 if [[ "$NON_INTERACTIVE" != true ]] && [[ "$DRY_RUN" != true ]]; then
   echo ""
   echo "About to install kicad-tools v$KCT_VERSION into: $TARGET"
+  echo "Client: $CLIENT"
   echo "Source: $SOURCE_MODE ($SOURCE_REF)"
   echo "Skills: ${SELECTED_SKILLS[*]}"
   echo ""
@@ -358,11 +404,10 @@ else
   do_action "uv add kicad-tools ($SOURCE_MODE: $SOURCE_REF)" run_uv_add
 fi
 
-# ----- Stage 6: vendor .claude/commands/kct/ skills -------------------------
+# ----- Stage 6: vendor .claude/commands/kct/ skills (client: claude) --------
 # Copy README.md and help.md (both always) plus each selected skill's <name>.md.
-# NEVER touch .claude/commands/loom/ (coexist additively with Loom).
-info "Stage 6: vendor .claude/commands/kct/ skills"
-DST_SKILLS_DIR="$TARGET/.claude/commands/kct"
+# NEVER touch .claude/commands/loom/ (coexist additively with Loom). Only for
+# --client claude|both (#4905) — CI gates/conventions below stay unconditional.
 VENDORED_FILES=()  # target-relative paths, for the metadata manifest.
 
 vendor_file() {
@@ -372,24 +417,32 @@ vendor_file() {
   chmod 0644 "$dst"
 }
 
-# README.md and help.md are always vendored, regardless of --skills= filtering.
-# README.md documents the namespace convention; help.md is the introspective
-# meta-skill (/kct:help) that describes whatever skills are present, so it must
-# exist for every install exactly like README.md (not opt-in via --skills=).
-do_action "vendor .claude/commands/kct/README.md" \
-  vendor_file "$SKILLS_SRC/README.md" "$DST_SKILLS_DIR/README.md"
-VENDORED_FILES+=(".claude/commands/kct/README.md")
+if [[ "$CLIENT_WANTS_CLAUDE" == true ]]; then
+  info "Stage 6: vendor .claude/commands/kct/ skills"
+  DST_SKILLS_DIR="$TARGET/.claude/commands/kct"
 
-do_action "vendor .claude/commands/kct/help.md" \
-  vendor_file "$SKILLS_SRC/help.md" "$DST_SKILLS_DIR/help.md"
-VENDORED_FILES+=(".claude/commands/kct/help.md")
+  # README.md and help.md are always vendored, regardless of --skills=
+  # filtering. README.md documents the namespace convention; help.md is the
+  # introspective meta-skill (/kct:help) that describes whatever skills are
+  # present, so it must exist for every install exactly like README.md (not
+  # opt-in via --skills=).
+  do_action "vendor .claude/commands/kct/README.md" \
+    vendor_file "$SKILLS_SRC/README.md" "$DST_SKILLS_DIR/README.md"
+  VENDORED_FILES+=(".claude/commands/kct/README.md")
 
-for s in "${SELECTED_SKILLS[@]}"; do
-  do_action "vendor .claude/commands/kct/$s.md" \
-    vendor_file "$SKILLS_SRC/$s.md" "$DST_SKILLS_DIR/$s.md"
-  VENDORED_FILES+=(".claude/commands/kct/$s.md")
-done
-ok "vendored ${#VENDORED_FILES[@]} skill file(s)"
+  do_action "vendor .claude/commands/kct/help.md" \
+    vendor_file "$SKILLS_SRC/help.md" "$DST_SKILLS_DIR/help.md"
+  VENDORED_FILES+=(".claude/commands/kct/help.md")
+
+  for s in "${SELECTED_SKILLS[@]}"; do
+    do_action "vendor .claude/commands/kct/$s.md" \
+      vendor_file "$SKILLS_SRC/$s.md" "$DST_SKILLS_DIR/$s.md"
+    VENDORED_FILES+=(".claude/commands/kct/$s.md")
+  done
+  ok "vendored ${#VENDORED_FILES[@]} skill file(s) for client=claude"
+else
+  note "Stage 6: .claude/commands/kct/ skills skipped (--client=$CLIENT excludes claude)"
+fi
 
 # ----- Stage 6b: vendor portable CI gate scripts (#4056) --------------------
 # Copy the three consumer-generic gates verbatim into .kct/ci/ as a sibling
@@ -538,35 +591,108 @@ do_action "write .kct/CONVENTIONS.md" write_conventions
 VENDORED_FILES+=(".kct/CONVENTIONS.md")
 ok "vendored load-bearing conventions into .kct/CONVENTIONS.md"
 
-# ----- Stage 7: guarded CLAUDE.md block -------------------------------------
-info "Stage 7: CLAUDE.md guarded block"
-CLAUDE_MD="$TARGET/CLAUDE.md"
+# ----- Stage 6d: vendor .agents/skills/kct-<name>/SKILL.md (client: codex) --
+# Codex (and other AGENTS.md-aware runtimes) discover skills via the
+# `.agents/skills/<name>/SKILL.md` convention this repo's own Repo Skills
+# install already demonstrates (.agents/skills/repo/SKILL.md). Only for
+# --client codex|both (#4905). "One maintained source": each SKILL.md is
+# GENERATED from the same .claude/commands/kct/<name>.md file Stage 6 vendors
+# — never hand-duplicated — but the frontmatter carries only `name` and
+# `description`. Claude-specific dispatch metadata (`invocation`,
+# `suggestedModel`) is deliberately dropped: Codex has no slash-command
+# dispatch or per-skill model-suggestion concept, and copying it blindly would
+# imply a contract this installer cannot honor on that runtime. The skill
+# directory is prefixed `kct-` (not the bare skill name) so it is
+# unambiguously kicad-tools-native and cannot collide with an unrelated
+# same-named skill package (e.g. a "help" from another tool).
+if [[ "$CLIENT_WANTS_CODEX" == true ]]; then
+  info "Stage 6d: vendor .agents/skills/kct-<name>/SKILL.md"
+  DST_AGENTS_SKILLS_DIR="$TARGET/.agents/skills"
 
-# The block is a lightweight pointer (matching the Loom/Repo-Skills pattern):
-# it references the vendored files rather than inlining their substance. The
-# load-bearing conventions live verbatim in .kct/CONVENTIONS.md — a file the
-# installer owns outright and rewrites on every run (see Stage 6c) — so they
-# survive CLAUDE.md drift by construction, without needing to be inlined into a
-# file the consumer may hand-edit.
-NEW_BLOCK="$KCT_MARK_BEGIN
-## kicad-tools ($KCT_VERSION)
+  # Adapt only runtime references; the workflow instructions remain shared.
+  # Resolve concrete sibling paths before the namespace directory itself.
+  adapt_codex_content() {
+    # The dollar sign is a literal Codex skill invocation, not a shell variable.
+    # shellcheck disable=SC2016
+    sed -E \
+      -e 's@\.claude/commands/kct/README\.md@.agents/skills/kct-help/README.md@g' \
+      -e 's@\.claude/commands/kct/([^/[:space:]`]+)\.md@.agents/skills/kct-\1/SKILL.md@g' \
+      -e 's@\.claude/commands/kct/@.agents/skills/@g' \
+      -e 's@/kct:@$kct-@g' \
+      -e 's@CLAUDE\.md@AGENTS.md@g'
+  }
 
-This repo uses [kicad-tools](https://github.com/rjwalters/kicad-tools) (\`kct\`)
-for PCB design/routing/DRC. Skills: \`/kct:<name>\` (see
-\`.claude/commands/kct/README.md\`). **Load-bearing conventions (native backend
-build, cross-gate DRC, artifact-first): \`.kct/CONVENTIONS.md\` — read before
-routing or sign-off.** Managed by \`install-kct.sh\` — edit outside the markers
-only; re-running the installer replaces it in place.
-$KCT_MARK_END"
+  # Render a Codex SKILL.md from a Claude-style source skill markdown file.
+  # Extracts `name:`/`description:` from the source frontmatter (the only two
+  # fields Codex's SKILL.md convention needs) and carries the body — the
+  # actual instructions — through with runtime references adapted, so behavior stays derived from
+  # the one maintained source rather than a hand-written parallel copy.
+  render_skill_md() {
+    local src="$1"
+    local name desc body
+    name="$(awk '/^---$/{c++; next} c==1 && /^name:/{sub(/^name:[[:space:]]*/,""); print; exit}' "$src")"
+    desc="$(awk '/^---$/{c++; next} c==1 && /^description:/{sub(/^description:[[:space:]]*/,""); print; exit}' "$src")"
+    [[ -n "$name" ]] || error "skill $src missing frontmatter 'name:'"
+    [[ -n "$desc" ]] || error "skill $src missing frontmatter 'description:'"
+    # Only the FIRST two '---' lines close the frontmatter fence; a body that
+    # itself uses '---' as a markdown horizontal rule (ee-review.md's does)
+    # must NOT be swallowed as a third/fourth fence — gate the fence-matching
+    # rule on c<2 so once the frontmatter closes, every later '---' line falls
+    # through to the plain print rule instead of being consumed silently.
+    body="$(awk 'BEGIN{c=0} c<2 && /^---$/{c++; next} c>=2{print}' "$src" | adapt_codex_content)"
+    # Block scalar preserves punctuation such as ': ' in the source description.
+    printf -- '---\nname: kct-%s\ndescription: >-\n  %s\n---\n<!-- Generated by install-kct.sh from .claude/commands/kct/%s.md (kicad-tools). Edit the upstream original, not this file — re-running the installer overwrites it. -->\n%s\n' \
+      "$name" "$desc" "$name" "$body"
+  }
 
-# Validate the kicad-tools marker structure of a CLAUDE.md. Echoes a
-# human-readable reason and returns non-zero when the markers are malformed
+  vendor_codex_skill() {
+    local src="$1" name="$2"
+    local dst_dir="$DST_AGENTS_SKILLS_DIR/kct-$name"
+    mkdir -p "$dst_dir"
+    render_skill_md "$src" > "$dst_dir/SKILL.md"
+    chmod 0644 "$dst_dir/SKILL.md"
+  }
+
+  # Keep the namespace reference beside the always-installed help skill.
+  vendor_codex_readme() {
+    mkdir -p "$DST_AGENTS_SKILLS_DIR/kct-help"
+    adapt_codex_content < "$SKILLS_SRC/README.md" > "$DST_AGENTS_SKILLS_DIR/kct-help/README.md"
+    chmod 0644 "$DST_AGENTS_SKILLS_DIR/kct-help/README.md"
+  }
+  do_action "vendor .agents/skills/kct-help/README.md" vendor_codex_readme
+  VENDORED_FILES+=(".agents/skills/kct-help/README.md")
+
+  # help is always vendored (the introspective meta-skill), mirroring
+  # Stage 6's always-vendored help.md — not opt-in via --skills=.
+  do_action "vendor .agents/skills/kct-help/SKILL.md" \
+    vendor_codex_skill "$SKILLS_SRC/help.md" "help"
+  VENDORED_FILES+=(".agents/skills/kct-help/SKILL.md")
+
+  CODEX_SKILL_COUNT=1
+  for s in "${SELECTED_SKILLS[@]}"; do
+    do_action "vendor .agents/skills/kct-$s/SKILL.md" \
+      vendor_codex_skill "$SKILLS_SRC/$s.md" "$s"
+    VENDORED_FILES+=(".agents/skills/kct-$s/SKILL.md")
+    CODEX_SKILL_COUNT=$((CODEX_SKILL_COUNT + 1))
+  done
+  ok "vendored $CODEX_SKILL_COUNT SKILL.md file(s) for client=codex"
+else
+  note "Stage 6d: .agents/skills/kct-*/SKILL.md skipped (--client=$CLIENT excludes codex)"
+fi
+
+# ----- Marker-block helpers (shared by Stage 7 CLAUDE.md and Stage 7b -------
+# AGENTS.md — same guarded <!-- BEGIN/END KICAD-TOOLS --> markers, generalized
+# to operate on an arbitrary target file so both client blocks share one
+# implementation instead of two near-duplicates (#4905).
+
+# Validate the kicad-tools marker structure of a target markdown file. Echoes
+# a human-readable reason and returns non-zero when the markers are malformed
 # (unterminated BEGIN, or an END that appears before its BEGIN). Shared by the
 # real merge and the --dry-run preview so both agree on what will happen.
 #
 # A malformed file MUST NOT be edited: an unterminated BEGIN would cause every
 # line after it to be silently dropped, then clobber the original on `mv`.
-claude_md_marker_error() {
+kct_marker_error() {
   local file="$1"
   local line depth=0
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -574,29 +700,34 @@ claude_md_marker_error() {
       depth=$((depth + 1))
     elif [[ "$line" == *"$KCT_MARK_END"* ]]; then
       if [[ "$depth" -eq 0 ]]; then
-        echo "CLAUDE.md has an $KCT_MARK_END before any $KCT_MARK_BEGIN; refusing to edit — fix the markers and re-run"
+        echo "$file has an $KCT_MARK_END before any $KCT_MARK_BEGIN; refusing to edit — fix the markers and re-run"
         return 1
       fi
       depth=$((depth - 1))
     fi
   done < "$file"
   if [[ "$depth" -ne 0 ]]; then
-    echo "CLAUDE.md has an unterminated $KCT_MARK_BEGIN block (no $KCT_MARK_END marker); refusing to edit — fix the markers and re-run"
+    echo "$file has an unterminated $KCT_MARK_BEGIN block (no $KCT_MARK_END marker); refusing to edit — fix the markers and re-run"
     return 1
   fi
   return 0
 }
 
-merge_claude_md() {
-  if [[ ! -f "$CLAUDE_MD" ]]; then
-    printf '%s\n' "$NEW_BLOCK" > "$CLAUDE_MD"
+# Insert/replace $new_block in $file's guarded kicad-tools marker block.
+# NEVER touches markers this installer doesn't own (e.g. an existing Loom
+# `<!-- BEGIN LOOM ORCHESTRATION (AGENTS) -->` block uses different marker
+# text entirely, so it is preserved untouched either way).
+merge_kct_block() {
+  local file="$1" new_block="$2"
+  if [[ ! -f "$file" ]]; then
+    printf '%s\n' "$new_block" > "$file"
     return
   fi
 
-  if grep -qF "$KCT_MARK_BEGIN" "$CLAUDE_MD"; then
+  if grep -qF "$KCT_MARK_BEGIN" "$file"; then
     # Abort on a malformed target rather than risk silent data loss.
     local marker_err
-    if ! marker_err="$(claude_md_marker_error "$CLAUDE_MD")"; then
+    if ! marker_err="$(kct_marker_error "$file")"; then
       error "$marker_err"
     fi
 
@@ -608,7 +739,7 @@ merge_claude_md() {
     while IFS= read -r line || [[ -n "$line" ]]; do
       if [[ "$in_block" -eq 0 ]]; then
         if [[ "$line" == *"$KCT_MARK_BEGIN"* ]]; then
-          printf '%s\n' "$NEW_BLOCK" >> "$tmp"
+          printf '%s\n' "$new_block" >> "$tmp"
           in_block=1
           replaced=1
         else
@@ -619,49 +750,150 @@ merge_claude_md() {
           in_block=0
         fi
       fi
-    done < "$CLAUDE_MD"
+    done < "$file"
     if [[ "$replaced" -eq 0 ]]; then
       rm -f "$tmp"
       return 1
     fi
-    mv "$tmp" "$CLAUDE_MD"
+    mv "$tmp" "$file"
     return
   fi
 
-  # Existing CLAUDE.md, no kicad-tools markers: append after a blank line,
-  # preserving all existing content untouched.
+  # Existing file, no kicad-tools markers: append after a blank line,
+  # preserving all existing content (including a same-file Loom block)
+  # untouched.
   local existing
-  existing="$(cat "$CLAUDE_MD")"
-  printf '%s\n\n%s\n' "${existing%$'\n'}" "$NEW_BLOCK" > "$CLAUDE_MD"
+  existing="$(cat "$file")"
+  printf '%s\n\n%s\n' "${existing%$'\n'}" "$new_block" > "$file"
 }
 
-if [[ "$DRY_RUN" == true ]]; then
-  if [[ ! -f "$CLAUDE_MD" ]]; then
-    echo "  [dry-run] create CLAUDE.md with kicad-tools marker block"
-  elif grep -qF "$KCT_MARK_BEGIN" "$CLAUDE_MD"; then
-    marker_err="$(claude_md_marker_error "$CLAUDE_MD")" || error "$marker_err"
-    echo "  [dry-run] replace existing kicad-tools block in CLAUDE.md (in place)"
+# Preview (dry-run) or apply a kct marker-block merge into $file, printing the
+# same messages the pre-refactor CLAUDE.md-only Stage 7 printed.
+apply_kct_block() {
+  local file="$1" new_block="$2" label="$3"
+  if [[ "$DRY_RUN" == true ]]; then
+    if [[ ! -f "$file" ]]; then
+      echo "  [dry-run] create $label with kicad-tools marker block"
+    elif grep -qF "$KCT_MARK_BEGIN" "$file"; then
+      local marker_err
+      marker_err="$(kct_marker_error "$file")" || error "$marker_err"
+      echo "  [dry-run] replace existing kicad-tools block in $label (in place)"
+    else
+      echo "  [dry-run] append kicad-tools marker block to $label (preserves existing content)"
+    fi
   else
-    echo "  [dry-run] append kicad-tools marker block to CLAUDE.md (preserves existing content)"
+    merge_kct_block "$file" "$new_block"
+    ok "$label updated"
   fi
+}
+
+# ----- Stage 7: guarded CLAUDE.md block (client: claude) --------------------
+# The block is a lightweight pointer (matching the Loom/Repo-Skills pattern):
+# it references the vendored files rather than inlining their substance. The
+# load-bearing conventions live verbatim in .kct/CONVENTIONS.md — a file the
+# installer owns outright and rewrites on every run (see Stage 6c) — so they
+# survive CLAUDE.md drift by construction, without needing to be inlined into a
+# file the consumer may hand-edit.
+if [[ "$CLIENT_WANTS_CLAUDE" == true ]]; then
+  info "Stage 7: CLAUDE.md guarded block"
+  CLAUDE_MD="$TARGET/CLAUDE.md"
+  NEW_CLAUDE_BLOCK="$KCT_MARK_BEGIN
+## kicad-tools ($KCT_VERSION)
+
+This repo uses [kicad-tools](https://github.com/rjwalters/kicad-tools) (\`kct\`)
+for PCB design/routing/DRC. Skills: \`/kct:<name>\` (see
+\`.claude/commands/kct/README.md\`). **Load-bearing conventions (native backend
+build, cross-gate DRC, artifact-first): \`.kct/CONVENTIONS.md\` — read before
+routing or sign-off.** Managed by \`install-kct.sh\` — edit outside the markers
+only; re-running the installer replaces it in place.
+$KCT_MARK_END"
+  apply_kct_block "$CLAUDE_MD" "$NEW_CLAUDE_BLOCK" "CLAUDE.md"
 else
-  merge_claude_md
-  ok "CLAUDE.md updated"
+  note "Stage 7: CLAUDE.md guarded block skipped (--client=$CLIENT excludes claude)"
+fi
+
+# ----- Stage 7b: guarded AGENTS.md block (client: codex) --------------------
+# Additive, same marker convention as Stage 7 but pointing at the Codex-shaped
+# artifacts (.agents/skills/kct-*/SKILL.md) instead of the Claude ones. NEVER
+# touches an existing Loom `AGENTS.md` block — Loom's own guard uses distinct
+# `<!-- BEGIN LOOM ORCHESTRATION (AGENTS) -->` markers, so this block is always
+# appended alongside it, never merged into it.
+if [[ "$CLIENT_WANTS_CODEX" == true ]]; then
+  info "Stage 7b: AGENTS.md guarded block"
+  AGENTS_MD="$TARGET/AGENTS.md"
+  NEW_AGENTS_BLOCK="$KCT_MARK_BEGIN
+## kicad-tools ($KCT_VERSION)
+
+This repo uses [kicad-tools](https://github.com/rjwalters/kicad-tools) (\`kct\`)
+for PCB design/routing/DRC. Skills: \`.agents/skills/kct-<name>/SKILL.md\`.
+**Load-bearing conventions (native backend build, cross-gate DRC,
+artifact-first): \`.kct/CONVENTIONS.md\` — read before routing or sign-off.**
+Managed by \`install-kct.sh\` — edit outside the markers only; re-running the
+installer replaces it in place.
+$KCT_MARK_END"
+  apply_kct_block "$AGENTS_MD" "$NEW_AGENTS_BLOCK" "AGENTS.md"
+else
+  note "Stage 7b: AGENTS.md guarded block skipped (--client=$CLIENT excludes codex)"
 fi
 
 # ----- Stage 8: install metadata --------------------------------------------
+# Repeated/switching --client selections must not lose a prior run's record
+# (Curator acceptance criterion): clients_installed / skills_selected /
+# installed_files are the UNION of whatever install-metadata.json already
+# recorded plus what this run adds — never a plain overwrite, or a second run
+# with a different --client (or a narrower --skills=) would silently forget
+# the first run's artifacts even though those files are still on disk.
 info "Stage 8: install metadata"
 METADATA_DIR="$TARGET/.kct"
 METADATA="$METADATA_DIR/install-metadata.json"
 
+# Extract a JSON string array field's bare (unquoted) entries, one per line,
+# from a PREVIOUSLY installer-written install-metadata.json. Best-effort: it
+# only needs to parse the exact compact single-line array format write_metadata
+# itself emits below. A missing file, missing field, or a format this can't
+# parse simply yields no prior entries — safe, because the union below still
+# contains every entry this run itself is about to write.
+json_array_field() {
+  local file="$1" field="$2"
+  [[ -f "$file" ]] || return 0
+  local line
+  line="$(grep -m1 "\"$field\"" "$file" || true)"
+  [[ -n "$line" ]] || return 0
+  line="${line#*[}"
+  line="${line%]*}"
+  [[ -z "$line" ]] && return 0
+  echo "$line" | tr ',' '\n' | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//'
+}
+
+# Union of two newline-delimited lists, de-duplicated: every "prior" entry
+# first (original order preserved), then any "current" entry not already seen.
+union_lists() {
+  local prior="$1" current="$2"
+  { printf '%s\n' "$prior"; printf '%s\n' "$current"; } | awk 'NF && !seen[$0]++'
+}
+
+CLIENTS_THIS_RUN=()
+[[ "$CLIENT_WANTS_CLAUDE" == true ]] && CLIENTS_THIS_RUN+=("claude")
+[[ "$CLIENT_WANTS_CODEX" == true ]] && CLIENTS_THIS_RUN+=("codex")
+
+PRIOR_CLIENTS="$(json_array_field "$METADATA" clients_installed)"
+PRIOR_SKILLS="$(json_array_field "$METADATA" skills_selected)"
+PRIOR_FILES="$(json_array_field "$METADATA" installed_files)"
+
+FINAL_CLIENTS_LIST="$(union_lists "$PRIOR_CLIENTS" "$(printf '%s\n' "${CLIENTS_THIS_RUN[@]}")")"
+FINAL_SKILLS_LIST="$(union_lists "$PRIOR_SKILLS" "$(printf '%s\n' "${SELECTED_SKILLS[@]}")")"
+FINAL_FILES_LIST="$(union_lists "$PRIOR_FILES" "$(printf '%s\n' "${VENDORED_FILES[@]}")")"
+
 write_metadata() {
   mkdir -p "$METADATA_DIR"
-  # Emit skills_selected and installed_files as JSON arrays.
-  local skills_json files_json
-  skills_json="$(printf '%s\n' "${SELECTED_SKILLS[@]}" \
-    | awk 'BEGIN{printf "["} {printf "%s\"%s\"", (NR>1?", ":""), $0} END{printf "]"}')"
-  files_json="$(printf '%s\n' "${VENDORED_FILES[@]}" \
-    | awk 'BEGIN{printf "["} {printf "%s\"%s\"", (NR>1?", ":""), $0} END{printf "]"}')"
+  # Emit clients_installed, skills_selected and installed_files as JSON arrays.
+  local clients_json skills_json files_json
+  clients_json="$(printf '%s\n' "$FINAL_CLIENTS_LIST" \
+    | awk 'BEGIN{printf "["} NF{printf "%s\"%s\"", (n++?", ":""), $0} END{printf "]"}')"
+  skills_json="$(printf '%s\n' "$FINAL_SKILLS_LIST" \
+    | awk 'BEGIN{printf "["} NF{printf "%s\"%s\"", (n++?", ":""), $0} END{printf "]"}')"
+  files_json="$(printf '%s\n' "$FINAL_FILES_LIST" \
+    | awk 'BEGIN{printf "["} NF{printf "%s\"%s\"", (n++?", ":""), $0} END{printf "]"}')"
   cat > "$METADATA" <<META_EOF
 {
   "kct_version": "$KCT_VERSION",
@@ -669,6 +901,7 @@ write_metadata() {
   "install_date": "$INSTALL_DATE",
   "source_mode": "$SOURCE_MODE",
   "source_ref": "$SOURCE_REF",
+  "clients_installed": $clients_json,
   "skills_selected": $skills_json,
   "installed_files": $files_json
 }
@@ -684,7 +917,13 @@ if [[ "$DRY_RUN" == true ]]; then
   info "dry-run complete — no files written to $TARGET"
 else
   info "kicad-tools v$KCT_VERSION installed into $TARGET"
+  note "client: $CLIENT"
   note "source: $SOURCE_MODE ($SOURCE_REF)"
   note "skills: ${SELECTED_SKILLS[*]}"
-  note "next: run 'uv sync' in the target, then 'uv run kct build-native' (see the CLAUDE.md block)"
+  if [[ "$CLIENT_WANTS_CLAUDE" == true ]]; then
+    note "next (claude): run 'uv sync' in the target, then 'uv run kct build-native' (see the CLAUDE.md block)"
+  fi
+  if [[ "$CLIENT_WANTS_CODEX" == true ]]; then
+    note "next (codex): run 'uv sync' in the target, then 'uv run kct build-native' (see the AGENTS.md block and .agents/skills/kct-*/SKILL.md)"
+  fi
 fi

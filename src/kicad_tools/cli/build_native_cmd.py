@@ -1,8 +1,10 @@
 """
 Build native C++ router backend command.
 
-Provides a simple way to build and install the C++ router extension
-for 10-100x faster routing performance.
+Provides a simple way to build and install the C++ router extension for
+10-100x faster routing performance. The same root CMake project also builds
+the ``placement_cpp`` extension (force-directed placement acceleration); this
+command installs both -- see Issue #5240.
 """
 
 from __future__ import annotations
@@ -35,6 +37,17 @@ class BuildResult:
     # ``backend_installed`` (``cpp_backend.probe_backend_info()`` output).
     # ``None`` when no build was performed (short-circuit / early failure).
     verification: dict | None = None
+    # Issue #5240: the root CMakeLists.txt build always compiles
+    # ``placement_cpp`` alongside ``router_cpp`` (both are subdirectories of
+    # the same project), but this command used to look for and install only
+    # ``router_cpp.*.so`` -- the freshly built placement extension was
+    # discarded with the temp build directory. ``PlacementOptimizer`` then
+    # silently fell back to its ~10-100x slower pure-Python force loop on
+    # every run, in every fresh worktree and CI job, with no error or
+    # warning anywhere. ``None`` when no placement extension was found to
+    # install (e.g. a source-less installed wheel, or an install failure --
+    # see ``warnings``).
+    placement_so_path: Path | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON output."""
@@ -42,6 +55,7 @@ class BuildResult:
             "success": self.success,
             "backend_installed": self.backend_installed,
             "so_path": str(self.so_path) if self.so_path else None,
+            "placement_so_path": str(self.placement_so_path) if self.placement_so_path else None,
             "error_message": self.error_message,
             "steps_completed": self.steps_completed,
             "warnings": self.warnings,
@@ -93,7 +107,7 @@ def _get_package_root() -> Path:
 
 
 def _get_cpp_source_dir() -> Path | None:
-    """Get the C++ source directory."""
+    """Get the router C++ source directory."""
     package_root = _get_package_root()
     cpp_dir = package_root / "router" / "cpp"
     if cpp_dir.exists():
@@ -101,8 +115,26 @@ def _get_cpp_source_dir() -> Path | None:
     return None
 
 
-def _extension_candidates(router_dir: Path) -> list[Path]:
-    """Return every installed ``router_cpp`` extension file, sorted by name.
+def _get_placement_dir() -> Path:
+    """Get the installed ``placement/`` package directory."""
+    return _get_package_root() / "placement"
+
+
+def _get_placement_cpp_source_dir() -> Path | None:
+    """Get the placement C++ source directory, if present in this checkout.
+
+    Absent for a source-less installed wheel (same convention as
+    :func:`_get_cpp_source_dir`) -- there is then nothing for this build
+    step to compile or install, which is not staleness.
+    """
+    cpp_dir = _get_placement_dir() / "cpp"
+    if cpp_dir.exists():
+        return cpp_dir
+    return None
+
+
+def _extension_candidates(directory: Path, module_name: str = "router_cpp") -> list[Path]:
+    """Return every installed ``module_name`` extension file, sorted by name.
 
     Sorted so the result never depends on filesystem (``Path.glob``) order --
     a multi-ABI directory (``router_cpp.cpython-312-darwin.so`` alongside
@@ -110,17 +142,19 @@ def _extension_candidates(router_dir: Path) -> list[Path]:
     """
     seen: set[Path] = set()
     for pattern in (
-        "router_cpp.*.so",
-        "router_cpp.*.pyd",
-        "router_cpp.so",
-        "router_cpp.pyd",
+        f"{module_name}.*.so",
+        f"{module_name}.*.pyd",
+        f"{module_name}.so",
+        f"{module_name}.pyd",
     ):
-        seen.update(router_dir.glob(pattern))
+        seen.update(directory.glob(pattern))
     return sorted(seen, key=lambda p: p.name)
 
 
-def _find_installed_so(router_dir: Path, *, abi_only: bool = False) -> Path | None:
-    """Return the installed router_cpp extension for the RUNNING interpreter.
+def _find_installed_so(
+    directory: Path, *, abi_only: bool = False, module_name: str = "router_cpp"
+) -> Path | None:
+    """Return the installed ``module_name`` extension for the RUNNING interpreter.
 
     Issue #4589: this used to return the first ``Path.glob`` hit, which is
     filesystem order, not interpreter order.  Measured on a checkout carrying
@@ -141,21 +175,24 @@ def _find_installed_so(router_dir: Path, *, abi_only: bool = False) -> Path | No
        deterministic even for a foreign-ABI-only directory.
 
     Args:
-        router_dir: Directory to search (the installed ``router/`` package).
+        directory: Directory to search (e.g. the installed ``router/`` or
+            ``placement/`` package directory).
         abi_only: When ``True``, return ``None`` instead of falling back to
             step 2 -- i.e. "is there an extension THIS interpreter could
             load?".  A foreign-ABI-only directory then reads as "not
             installed", which is what it actually is for this interpreter.
+        module_name: The extension module's base name (``router_cpp`` or
+            ``placement_cpp``).
     """
     import importlib.machinery
 
-    candidates = _extension_candidates(router_dir)
+    candidates = _extension_candidates(directory, module_name)
     if not candidates:
         return None
 
     by_name = {path.name: path for path in candidates}
     for suffix in importlib.machinery.EXTENSION_SUFFIXES:
-        match = by_name.get(f"router_cpp{suffix}")
+        match = by_name.get(f"{module_name}{suffix}")
         if match is not None:
             return match
 
@@ -184,7 +221,12 @@ def _newest_cpp_source_mtime(cpp_dir: Path) -> float | None:
     return newest
 
 
-def _is_so_stale(router_dir: Path) -> bool:
+def _is_so_stale(
+    router_dir: Path,
+    *,
+    module_name: str = "router_cpp",
+    cpp_source_dir: Path | None = None,
+) -> bool:
     """Decide whether the installed .so is older than its C++ sources.
 
     Returns ``True`` (rebuild needed) when the newest C++ source mtime is
@@ -193,12 +235,20 @@ def _is_so_stale(router_dir: Path) -> bool:
     when the source tree cannot be located (e.g. a pip-installed wheel without
     bundled sources) -- in those cases we defer to the existing
     version-matching guard rather than forcing a rebuild we cannot perform.
+
+    Args:
+        router_dir: Directory the extension is installed into.
+        module_name: The extension module's base name (``router_cpp`` or
+            ``placement_cpp``).
+        cpp_source_dir: The source tree to compare mtimes against. Defaults
+            to :func:`_get_cpp_source_dir` (the router source tree) when not
+            given, preserving the original router-only call signature.
     """
-    so_file = _find_installed_so(router_dir)
+    so_file = _find_installed_so(router_dir, module_name=module_name)
     if so_file is None:
         return False
 
-    cpp_dir = _get_cpp_source_dir()
+    cpp_dir = cpp_source_dir if cpp_source_dir is not None else _get_cpp_source_dir()
     if cpp_dir is None:
         return False
 
@@ -212,6 +262,37 @@ def _is_so_stale(router_dir: Path) -> bool:
         return False
 
     return newest_source > so_mtime
+
+
+def _placement_backend_up_to_date() -> bool:
+    """True when the placement C++ extension is installed and not stale.
+
+    Mirrors the router mtime-staleness short-circuit above (Issue #3621),
+    but for ``placement_cpp`` -- the extension ``build_native()`` used to
+    compile (via the root CMakeLists.txt) but never install (Issue #5240).
+
+    A checkout with no placement C++ source tree at all (e.g. a source-less
+    installed wheel) has nothing for this build step to produce, so that is
+    reported as "up to date" rather than stale -- absence of a build target
+    is not staleness.
+    """
+    placement_source_dir = _get_placement_cpp_source_dir()
+    if placement_source_dir is None:
+        return True
+
+    try:
+        from kicad_tools.placement.cpp_backend import is_cpp_available
+    except ImportError:
+        return False
+
+    if not is_cpp_available():
+        return False
+
+    return not _is_so_stale(
+        _get_placement_dir(),
+        module_name="placement_cpp",
+        cpp_source_dir=placement_source_dir,
+    )
 
 
 def _install_extension_atomically(source: Path, target: Path) -> None:
@@ -374,7 +455,12 @@ def build_native(
             from kicad_tools.router.cpp_backend import is_cpp_available
 
             if is_cpp_available():
-                if _is_so_stale(router_dir):
+                # Issue #5240: a stale/missing placement extension must also
+                # fall through to a real rebuild -- short-circuiting on the
+                # router's status alone is exactly how this command silently
+                # never installed placement_cpp in the first place.
+                router_stale = _is_so_stale(router_dir)
+                if router_stale or not _placement_backend_up_to_date():
                     if verbose:
                         print("C++ source is newer than the installed extension -- rebuilding.")
                     result.steps_completed.append(
@@ -387,8 +473,11 @@ def build_native(
                     result.steps_completed.append(
                         "C++ backend already installed (up to date) -- skipped rebuild"
                     )
-                    # Find the .so file
+                    # Find the .so file(s)
                     result.so_path = _find_installed_so(router_dir)
+                    result.placement_so_path = _find_installed_so(
+                        _get_placement_dir(), module_name="placement_cpp"
+                    )
                     return result
         except ImportError:
             pass
@@ -532,6 +621,42 @@ def build_native(
         result.so_path = target_path
         result.steps_completed.append(f"Installed: {target_path}")
 
+        # Step 6b: Find and install the placement_cpp extension too
+        # (Issue #5240).  The root CMakeLists.txt used as ``source_dir``
+        # whenever ``project_root`` was found above configures BOTH
+        # ``router/cpp`` and ``placement/cpp`` as subdirectories of the same
+        # CMake project, so this exact build already compiled
+        # ``placement_cpp`` into ``build_dir`` -- it was simply never looked
+        # for or installed, so ``PlacementOptimizer`` silently ran its
+        # ~10-100x slower pure-Python force loop on every invocation in
+        # every fresh worktree and CI job, with no error anywhere. When
+        # ``source_dir`` was instead the router-only ``cpp_dir`` fallback
+        # (pip-installed package without the placement subdirectory), this
+        # build never compiled a placement extension at all, so the globs
+        # below simply find nothing -- not an error, nothing to install.
+        try:
+            placement_so_files = sorted(build_dir.glob("**/placement_cpp.*.so"))
+            if not placement_so_files:
+                placement_so_files = sorted(build_dir.glob("**/placement_cpp.*.pyd"))
+            if placement_so_files:
+                placement_so_file = placement_so_files[0]
+                placement_target = _get_placement_dir() / placement_so_file.name
+
+                if verbose:
+                    print(f"Installing placement backend to {placement_target}...")
+
+                _install_extension_atomically(placement_so_file, placement_target)
+                result.placement_so_path = placement_target
+                result.steps_completed.append(f"Installed placement backend: {placement_target}")
+        except OSError as e:
+            # Do not fail the whole build over the placement extension: the
+            # router extension above is already installed and verified
+            # below. Surface it as a warning so it is visible, not silent.
+            result.warnings.append(
+                f"Placement C++ extension was built but could not be installed: "
+                f"{type(e).__name__}: {e}"
+            )
+
         # Verify the installation in a FRESH INTERPRETER (Issue #4589).
         #
         # The old code verified in-process with ``sys.modules.pop`` +
@@ -614,6 +739,8 @@ def format_result_text(result: BuildResult) -> str:
             lines.append("")
             if result.so_path:
                 lines.append(f"  Extension: {result.so_path.name}")
+            if result.placement_so_path:
+                lines.append(f"  Placement extension: {result.placement_so_path.name}")
             lines.append("")
             lines.append("Run `kct route --backend cpp` to use the C++ backend.")
         elif result.backend_installed:
@@ -621,6 +748,8 @@ def format_result_text(result: BuildResult) -> str:
             lines.append("")
             if result.so_path:
                 lines.append(f"  Extension: {result.so_path.name}")
+            if result.placement_so_path:
+                lines.append(f"  Placement extension: {result.placement_so_path.name}")
             lines.append("")
             lines.append("Run `kct route --backend cpp` to use the C++ backend.")
         else:
@@ -732,6 +861,27 @@ def main(argv: list[str] | None = None) -> int:
                     if reason:
                         print(f"  reason: {reason}")
                     print("Run `kct build-native` to install.")
+
+                # Issue #5240: report the placement backend too. This is
+                # additive/informational only -- it does not affect the
+                # command's exit code, which stays governed by the router
+                # backend to preserve the documented `--check` contract.
+                try:
+                    from kicad_tools.placement.cpp_backend import get_backend_info
+
+                    placement_info = get_backend_info()
+                    if placement_info.get("available"):
+                        print(
+                            f"Placement backend: available "
+                            f"(version {placement_info.get('version')})"
+                        )
+                    else:
+                        print("Placement backend: not installed")
+                        placement_reason = placement_info.get("unavailable_reason")
+                        if placement_reason:
+                            print(f"  reason: {placement_reason}")
+                except ImportError:
+                    print("Placement backend: not installed")
             return 0 if available else 1
         except ImportError:
             if args.format == "json":

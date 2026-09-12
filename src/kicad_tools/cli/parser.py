@@ -166,6 +166,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_fix_footprints_parser(subparsers)
     _add_fix_vias_parser(subparsers)
     _add_fix_silkscreen_parser(subparsers)
+    _add_place_silk_refs_parser(subparsers)
     _add_repair_clearance_parser(subparsers)
     _add_fix_drc_parser(subparsers)
     _add_fix_erc_parser(subparsers)
@@ -5142,6 +5143,11 @@ def _add_fix_vias_parser(subparsers) -> None:
     )
     fix_vias_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_vias_parser.add_argument(
+        "--search-alternatives",
+        action="store_true",
+        help="With --relocate-in-pad, search safe alternate escapes if the preferred slide is blocked",
+    )
+    fix_vias_parser.add_argument(
         "--mfr",
         choices=get_all_manufacturer_names(),
         default="jlcpcb",
@@ -5254,6 +5260,85 @@ def _add_fix_silkscreen_parser(subparsers) -> None:
         help="Preview changes without modifying files",
     )
     fix_silk_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_place_silk_refs_parser(subparsers) -> None:
+    """Add place-silk-refs subcommand parser (issue #5030)."""
+    from kicad_tools.silkscreen.place_refs import (
+        DEFAULT_CLEARANCE_MM,
+        DEFAULT_MAX_OFFSET_MM,
+        DEFAULT_STEP_MM,
+        SILK_EDGE_CLEARANCE_MM,
+    )
+
+    place_refs_parser = subparsers.add_parser(
+        "place-silk-refs",
+        help="Move readable silkscreen reference designators to clear collisions",
+    )
+    place_refs_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    place_refs_parser.add_argument(
+        "--mfr",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help="Manufacturer to source solder-mask clearance from (default: built-in 0.05mm)",
+    )
+    place_refs_parser.add_argument(
+        "--layers", type=int, default=2, help="Number of PCB layers (default: 2)"
+    )
+    place_refs_parser.add_argument(
+        "--copper", type=float, default=1.0, help="Outer copper weight in oz (default: 1.0)"
+    )
+    place_refs_parser.add_argument(
+        "--clearance",
+        type=float,
+        default=DEFAULT_CLEARANCE_MM,
+        help=f"Required silk-to-pad/silk-to-silk clearance in mm (default: {DEFAULT_CLEARANCE_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--edge-clearance",
+        type=float,
+        default=SILK_EDGE_CLEARANCE_MM,
+        help=f"Required silk-to-board-edge clearance in mm (default: {SILK_EDGE_CLEARANCE_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--max-offset",
+        type=float,
+        default=DEFAULT_MAX_OFFSET_MM,
+        help=f"Maximum search distance from the component body in mm (default: {DEFAULT_MAX_OFFSET_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--step",
+        type=float,
+        default=DEFAULT_STEP_MM,
+        help=f"Positive search ring spacing in mm; at most 4096 rings (default: {DEFAULT_STEP_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--allow-rotate",
+        action="store_true",
+        help="Also try a 90-degree rotated orientation when the original does not fit",
+    )
+    place_refs_parser.add_argument(
+        "-o", "--output", help="Output file path (default: overwrite input)"
+    )
+    place_refs_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview the move plan without modifying files"
+    )
+    place_refs_parser.add_argument(
+        "--verify-drc",
+        action="store_true",
+        help="After applying, run native DRC; fail on silk findings or unavailable/failed verification",
+    )
+    place_refs_parser.add_argument(
+        "--render",
+        metavar="SVG_PATH",
+        help="Write a rendered review artifact (SVG) of old/new reference positions",
+    )
+    place_refs_parser.add_argument(
         "--format",
         choices=["text", "json", "summary"],
         default="text",
@@ -6640,6 +6725,54 @@ def _add_analyze_parser(subparsers) -> None:
         help=(
             "Fallback LED forward voltage (V) for parts with If_max but no Vf "
             "field. Default: skip such parts (zero false positives)."
+        ),
+    )
+
+    # analyze component-stress (operates on a schematic, not a PCB)
+    stress_parser = analyze_subparsers.add_parser(
+        "component-stress",
+        help="Check MOSFET VDS/VGS against declared operating states (advisory)",
+        description=(
+            "Evaluate each MOSFET's terminal-to-terminal stress (VDS = V(D)-V(S), "
+            "VGS = V(G)-V(S)) in every state of an explicit, reviewed "
+            "operating-state manifest, against Vds_max/Vgs_max symbol fields. "
+            "No circuit-state inference is performed: a missing state, pin role, "
+            "node potential or source-backed rating is reported UNRESOLVED -- "
+            "never a silent pass."
+        ),
+    )
+    stress_parser.add_argument("schematic", help="Schematic file to analyze (.kicad_sch)")
+    stress_parser.add_argument(
+        "--states",
+        dest="analyze_states",
+        required=True,
+        metavar="MANIFEST",
+        help="Operating-state manifest (.yaml/.yml/.json) declaring per-net node potentials",
+    )
+    stress_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    stress_parser.add_argument(
+        "--allow-unresolved",
+        dest="analyze_allow_unresolved",
+        action="store_true",
+        help=(
+            "Do not gate on UNRESOLVED rows (default: an unresolved state, pin "
+            "role or rating is a release blocker and exits non-zero)"
+        ),
+    )
+    stress_parser.add_argument(
+        "--allow-uncited-ratings",
+        dest="analyze_allow_uncited_ratings",
+        action="store_true",
+        help=(
+            "Accept Vds_max/Vgs_max fields without a Rating_Source/Datasheet "
+            "citation (default: an uncited rating is UNRESOLVED)"
         ),
     )
 

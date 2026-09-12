@@ -367,6 +367,11 @@ def _dispatch_command(args) -> int:
 
         return run_fix_silkscreen_command(args)
 
+    elif args.command == "place-silk-refs":
+        from .commands import run_place_silk_refs_command
+
+        return run_place_silk_refs_command(args)
+
     elif args.command == "repair-clearance":
         from .commands import run_repair_clearance_command
 

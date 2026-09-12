@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix Codex-only installer workflows to resolve generated sibling skills and namespace help, with runtime-appropriate invocation and optional metadata handling.
 - Use shared project drill-clearance checks for Board07 relocation and fallback stubs; reject archived moves into foreign zone fill without saving partial repairs.
+
+### Fixed
+
+- Preserve authored pad shapes through router loading, workers, and native
+  conversion (#5229). Square pads no longer lose copper corners to a circular
+  approximation. Rotated search bounds enclose copper; unsupported custom or
+  layer-specific pad geometry stops routing explicitly.
 
 ### Added
 
@@ -44,6 +52,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exits 1 before any routing work); an auto-discovered one degrades to a
   warning; the authored input file is never overwritten (a collision diverts
   the derived sidecar to `current_paths.effective.json`, the #4428 rule).
+- **`kct analyze component-stress` — operating-state MOSFET VDS/VGS gate**
+  (#5039) — a new advisory analyzer
+  (`kicad_tools.analysis.component_stress.ComponentStressAnalyzer`) that asks
+  the question ERC, DRC, creepage and `analyze electrical-rating` all
+  structurally miss: *is the device itself rated for the potential difference
+  its own terminals will see?* Stress is computed as a terminal-to-terminal
+  differential (`VDS = V(D)-V(S)`, `VGS = V(G)-V(S)`) inside a **single** entry
+  of an explicit, reviewed operating-state manifest (`--states`, YAML or JSON),
+  so correlated nets are never combined across unrelated states and shifting a
+  floating gate-driver domain's reference leaves both differentials unchanged.
+  Ratings come only from sourced `Vds_max` / `Vgs_max` symbol fields (no
+  built-in defaults); an undeclared state from the required coverage checklist
+  (startup, precharge, both mains polarities, support, trip, loss-of-drive), an
+  unresolved D/G/S pin role, an unbound terminal or an uncited rating is
+  reported `UNRESOLVED` — a release blocker, never a silent pass. Pin-role
+  mappings are cached under a part identity that includes the MPN and
+  footprint, so a part swap cannot carry a stale pinout forward, and a
+  footprint creepage/spacing waiver can never suppress a device-stress finding
+  (the two read disjoint inputs). No automatic circuit-state inference is
+  performed in this pass.
+- **`kct place-silk-refs`: readable silkscreen reference placement** (#5030)
+  — a dry-run/apply solver that moves (and, optionally, rotates) visible
+  reference-designator text just far enough to clear real pad/via mask
+  apertures, other silk/text, and the board edge, while preserving
+  visibility, text height, and stroke width exactly (never hiding,
+  shrinking, or deleting a label to "clear" a DRC finding). References are
+  kept near their own component and never placed on top of a courtyard
+  (its own or a neighbor's); a reference with no collision-free candidate
+  in the search radius is left untouched and reported explicitly as
+  `unplaceable` or `under_component_fallback` (when it was already sitting
+  on its own body) rather than silently dropped. Only the reference text's
+  own `(at x y [angle])` node is ever written — footprint position, pads,
+  copper, and net bindings are untouched. Reads the same geometry helpers
+  `kct check`'s silk DRC rules use, so a clean plan reproduces a clean
+  native `kicad-cli pcb drc` (`--verify-drc`); `--render` writes an SVG
+  review artifact (old vs. new position, pad apertures, courtyards) since
+  a passing DRC run does not by itself prove the placement is readable.
+  Retires the need for the ad hoc
+  `hardware/chorus-test-revA/scripts/place_silk_refs.py` local helper.
+- **Installer: explicit Codex and Claude client targets** (#4905) —
+  `scripts/install-kct.sh` gains `--client claude|codex|both` (default
+  `claude`, fully backward-compatible). Codex selection generates one
+  `.agents/skills/kct-<name>/SKILL.md` per skill from the SAME source
+  `.claude/commands/kct/<name>.md` files Claude vendors — one maintained
+  source, not a hand-duplicated copy — with the `SKILL.md` frontmatter
+  carrying only `name`/`description` (Claude's `invocation`/`suggestedModel`
+  dispatch metadata is deliberately not copied), plus an additive guarded
+  `AGENTS.md` block pointing at the shared `.kct/CONVENTIONS.md`. The shared
+  uv dependency, `.kct/ci/` gates, and `.kct/CONVENTIONS.md` stay
+  client-independent. Selecting one client never overwrites, removes, or
+  duplicates the other client's files or a prior/switched install's valid
+  artifacts — `install-metadata.json`'s `clients_installed` /
+  `skills_selected` / `installed_files` fields accumulate (union) across
+  repeated or switched-client runs instead of being replaced.
 - **`kct route --reserve-plane-layers`: controlled-impedance signal-layer
   reservation guardrail** (#5014) — `LayerDefinition.is_routable` treats
   every copper layer as signal-eligible by design, including layers a
@@ -1277,6 +1339,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frame), and all in-pad nodes are shorted through the pad. This is a *false*
   fail-closed being removed, not a relaxation — copper outside the pad extent
   still never attaches, so genuinely moved/removed pads still fail closed.
+- **Declared current-path resolution reported `ambiguous` for an entire net
+  whenever a benign parallel via array was reachable from an endpoint**
+  (#5197) — `_component_has_cycle` (`router/current_paths.py`) flagged any
+  cycle reachable from a declared endpoint, including the standard
+  high-current practice of splitting a trunk across several parallel vias
+  that immediately recombine. On board09, `+5V_OUT`'s shunt pad `RSH1.4`
+  fans into three vias reunited by a wide `B.Cu` trace, and this one benign
+  array made *every* declaration on the net report ambiguous, including the
+  low-current LED and INA226-supply taps that never touch it. Cycle
+  detection now recognizes a hub whose legs are ALL via crossings, whose far
+  ends mutually tie back together, and contracts exactly that array before
+  checking for a genuine loop — a route that merely changes layer once, or
+  a hub whose legs leave a residual route uncontracted, still reports
+  ambiguous, matching the existing parallel-return-path regression tests.
 - **`kct route` accepted KiCad 10 name-only nets but wrote zero copper and
   reported a vacuous "SUCCESS" (0/0 nets)** (#4983) — a PCB saved in KiCad
   10's name-only net syntax (`(net "SIGNAL")` on pads, no numeric net table

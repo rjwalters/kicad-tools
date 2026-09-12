@@ -435,9 +435,10 @@ float Grid3D::memory_mb() const {
 
 void Grid3D::add_pad(float x, float y, float width, float height,
                      int net, int layer_idx, uint32_t ref_hash,
-                     float clearance_override, bool is_plane_net, float rotation) {
+                     float clearance_override, bool is_plane_net, float rotation,
+                     bool is_circular) {
     pads_.push_back({x, y, width, height, net, layer_idx, ref_hash,
-                     clearance_override, is_plane_net, rotation, clearance_override, false});
+                     clearance_override, is_plane_net, rotation, clearance_override, false, is_circular});
 }
 
 void Grid3D::set_pad_via_policy(size_t index, float clearance, bool carveout_eligible) {
@@ -794,18 +795,11 @@ ValidationResult Grid3D::validate_route(
             // Per-component clearance (Issue #1016)
             float required_clearance = pad.clearance_override;
 
-            // Issue #2908: Rect-aware geometry for rectangular SMD pads.
-            // The previous disc bound (``pad_radius = max(w, h) / 2``)
-            // over-rejected along the pad's SHORT axis -- a 1.475 x 0.3 mm
-            // LQFP-48 pad became a 0.7375 mm-radius disc, 0.587 mm of
-            // phantom inflation above / below the pad metal.  Vias and
-            // square pads (w == h within 1 micron) keep the disc model;
-            // it is exact for circular obstacles and cheaper to evaluate.
-            // Mirrors PR #2787 (validate/rules/clearance.py) and the
-            // Python validator at ``router/grid.py``.
+            // Issue #5229: Only explicitly circular pads use a disc. Equal
+            // dimensions do not imply a circle: square pad corners are copper.
+            // Oval and roundrect pads retain conservative rectangle bounds.
             float clearance;
-            const bool is_circular_pad = pad.rotation == 0.0f && std::abs(pad.width - pad.height) < 0.001f;
-            if (is_circular_pad) {
+            if (pad.is_circular) {
                 const float pad_radius = std::max(pad.width, pad.height) / 2.0f;
                 const float dist = point_to_segment_distance(
                     pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
@@ -995,7 +989,7 @@ ValidationResult Grid3D::validate_route(
             if (pad.layer_idx != -1 &&
                 (pad.layer_idx < layer_lo || pad.layer_idx > layer_hi)) continue;
             float clearance;
-            if (pad.rotation == 0.0f && std::abs(pad.width - pad.height) < 0.001f) {
+            if (pad.is_circular) {
                 clearance = std::hypot(via.x - pad.x, via.y - pad.y)
                     - std::max(pad.width, pad.height) / 2.0f - via_radius;
             } else {
