@@ -235,28 +235,55 @@ def test_no_staged_boards_is_a_noop_not_a_failure(tmp_path, http_server):
 
 
 def test_local_hash_failure_is_not_silently_treated_as_a_match(tmp_path, http_server):
-    """Regression: an unreadable local file must make sha256_of_file() fail
-    loudly, and verify_deployed_assets must report that as a mismatch --
-    never let an empty local hash and an empty (equally-failed) remote hash
-    compare equal and report OK."""
+    """Regression: when neither sha256sum nor shasum can produce a digest,
+    sha256_of_file() must fail loudly, and verify_deployed_assets must report
+    that as a mismatch under the EXACT production caller context
+    (`set -euo pipefail; if ! verify_deployed_assets ...`) -- bash suppresses
+    errexit for the whole dynamic extent of a command used as an `if`
+    condition, so this is precisely the context in which an unchecked
+    internal failure could go unnoticed. Never let an empty local hash and an
+    empty (equally-failed) remote hash compare equal and report OK.
+
+    Uses a fake sha256sum/shasum shadowing the real ones earlier on PATH --
+    deterministic and independent of host file permissions (a chmod-based
+    "unreadable file" trick is silently bypassed when tests run as root)."""
     server, handler = http_server
     base_url = f"http://127.0.0.1:{server.server_port}"
     staged = tmp_path / "staged"
-    pcb = _stage(
+    _stage(
         staged,
         "05-bldc-motor-controller",
         "board.kicad_pcb",
-        b"(kicad_pcb ; content is irrelevant, local read must fail\n",
+        b"(kicad_pcb ; content is irrelevant, hashing itself must fail\n",
     )
-    pcb.chmod(0o000)
     handler.board_bytes["/boards/05-bldc-motor-controller/board.kicad_pcb"] = b"whatever"
 
-    try:
-        result = _run_verify(staged, base_url)
-    finally:
-        pcb.chmod(0o644)  # restore so tmp_path cleanup can remove it
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    for name in ("sha256sum", "shasum"):
+        broken = fake_bin / name
+        broken.write_text("#!/bin/sh\nexit 1\n")
+        broken.chmod(0o755)
 
-    assert result.returncode == 1
+    script = (
+        "set -euo pipefail; "
+        f"source {LIB}; "
+        f'if ! verify_deployed_assets "{base_url}" "{staged}"; then exit 7; fi; '
+        "exit 0"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={
+            "VERIFY_RETRY_ATTEMPTS": "2",
+            "VERIFY_RETRY_SLEEP_SECONDS": "0",
+            "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/local/bin",
+        },
+    )
+
+    assert result.returncode == 7, result.stdout + result.stderr
     assert "error=local hash computation failed" in result.stderr
     assert "OK:" not in result.stdout
 

@@ -6,10 +6,10 @@
 #
 # Issue #5318: the live site served a pre-repair Board05 PCB (41
 # arbitrary-angle B.Cu segments) for weeks after the source-level fix
-# (#5045) merged to main, because the site is deployed manually (see
-# site/README.md "Deploying") and nobody re-ran the deploy after the fix
-# landed. Nothing ever re-checked the deployed bytes against main, so the
-# staleness went unnoticed until a user reported it.
+# (#5045) merged to main. The site is deployed manually (see
+# site/README.md "Deploying"), and the exact deployment history was not
+# established. Nothing ever re-checked the deployed bytes against main, so
+# the staleness went unnoticed until a user reported it.
 #
 # This script closes that detection gap WITHOUT requiring a deploy, a
 # Cloudflare login, or even `npm ci` / an Astro build: it re-stages
