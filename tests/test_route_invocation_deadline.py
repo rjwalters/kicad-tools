@@ -21,19 +21,23 @@ def test_expensive_optimizer_unwinds_and_saves_only_raw_partial(tmp_path, adapti
     output.write_text("previous successful output")
     script = f"""
 from pathlib import Path
-import signal
+import os, signal, threading, time
 from types import SimpleNamespace
 from kicad_tools.cli import route_cmd, route_deadline
 from kicad_tools.router.optimizer import TraceOptimizer
 signal.signal(signal.SIGTERM, route_cmd._handle_interrupt if {adaptive_handler!r} else route_deadline._deadline_signal)
 def expensive_cleanup(self, *args):
+    # Arm only after imports/setup: this fixture tests optimizer unwinding.
+    timer = threading.Timer(1.5, os.kill, args=(os.getpid(), signal.SIGTERM))
+    timer.daemon = True
+    timer.start()
     while True:
         sum(range(10000))
 TraceOptimizer.optimize_route = expensive_cleanup
 def work(argv):
     route_deadline.configure_output(SimpleNamespace(pcb={str(source)!r}, output={str(output)!r}))
     route_cmd._interrupt_state.update(router=SimpleNamespace(routes=[1], to_sexp=lambda **kw: '(segment (start 0 0) (end 1 1) (width 0.2) (layer "F.Cu") (net 1))'), output_path=Path({str(output)!r}), pcb_path=Path({str(source)!r}), best_completed_attempt=True)
-    route_deadline.record_stage("optimization")
+    route_deadline.record_stage("optimization", optimization_started_at=time.monotonic())
     try:
         TraceOptimizer().optimize_route(None)
     except Exception:
@@ -42,15 +46,18 @@ def work(argv):
 route_cmd._main_impl = work
 raise SystemExit(route_cmd._in_process_main([]))
 """
+    # A separate watchdog bounds broken fixtures, including slow startup.
+    # Startup inclusion in the production deadline has its own regression below.
     started = time.monotonic()
     assert (
         route_deadline._supervise(
-            [sys.executable, "-c", script], 1.5, tmp_path / "control.json", save_seconds=1
+            [sys.executable, "-c", script], 30, tmp_path / "control.json", save_seconds=1
         )
         == 124
     )
-    assert time.monotonic() - started < 4
+    assert time.monotonic() - started < 32
     report = json.loads(output.with_suffix(".timeout.json").read_text())
+    assert time.monotonic() - report["optimization_started_at"] < 4
     assert report["status"] == "partial"
     assert report["stage"] == "optimization"
     assert report["interrupted_function"] == "expensive_cleanup"
