@@ -3864,6 +3864,8 @@ knobs not yet audited here.
 | `autonomous.watchdog.intervalSecs` | `LOOM_SWEEP_WATCHDOG_INTERVAL_SECS` | `30` | Watchdog probe cadence (shared by all three backstops) |
 | `autonomous.watchdog.reviewStall` | `LOOM_SWEEP_REVIEW_STALL` | `true` | Review-phase stall watchdog on/off (#3910) |
 | `autonomous.watchdog.reviewStallTimeoutSecs` | `LOOM_SWEEP_REVIEW_STALL_TIMEOUT_SECS` | `2700` | Log-silence window before a hung Judge/Doctor sweep is re-dispatched |
+| `autonomous.watchdog.staleSweep` | `LOOM_SWEEP_STALE_SWEEP` | `true` | Stale-untracked-sweep backstop on/off (#7529). Runs in the same tick as the other three, but acts only on entries none of them can reach (see below) |
+| `autonomous.watchdog.staleSweepAgeSecs` | `LOOM_SWEEP_STALE_AGE_SECS` | `10800` (3h, 4× `reviewStallTimeoutSecs`) | Age sanity ceiling before an untracked, log-silent sweep is reaped |
 | `autonomous.collisionDetection.enabled` | `LOOM_DETECT_COLLISIONS` | `false` | Cross-host dispatch-collision detection and enforcement (#4085, upgraded from detection-only by #5789). Off by default — adds one extra `gh issue view --json labels` round-trip per dispatch. When enabled, a confirmed pre-flip collision backs off the dispatch instead of only logging/counting it |
 | `safehouse.enabled` | `LOOM_SAFEHOUSE_ENABLED` | `false` | Enables safehouse fleet-comms (#3997) **and** cross-host soft-claim coordination (#4028). Off by default — a byte-for-byte no-op (no socket, no coordination task) when unset |
 | `safehouse.peerClaimTtlSecs` | `LOOM_PEER_CLAIM_TTL_SECS` | `120` | Peer-claim TTL, in seconds (#4028) — how long a peer's soft claim suppresses local dispatch (measured against local receipt, not the advertiser's clock). Default = 2× the 60s work-finder tick. Since #4431 live claims are re-advertised every reaper tick, so the TTL only bounds how long a **crashed** host's claim lingers |
@@ -4090,6 +4092,45 @@ comes from the separate top-level `buildGate` block (#3749); `autonomous.mainHea
 is purely the on/off surface, so Phase C's already-tested `buildGate` semantics
 are untouched. `LOOM_MAIN_HEALTH_GATE` remains the master override; the config
 key just lets a repo turn the gate on without exporting an env var.
+
+**Stale-untracked-sweep backstop (#7529).** The three backstops above are
+gated on `self.children.contains_key(sweep_id)` (startup-hang and
+review-stall) or on a terminal state (mid-build-death) — but an entry this
+daemon instance never spawned itself has no `Child` handle by construction and
+is therefore invisible to the first two for its entire remaining life, however
+long that is. That happens via two otherwise-correct paths: `reconstruct()`
+re-admitting a `.loom/locks/issue-<N>/owner.json` whose `owner_pid` is still
+alive as `Running` on daemon startup, and `adopt_live_journal_sweeps` (#6262)
+adopting a surviving `~/.loom/sweeps.json` entry whose lock did not survive.
+Both correctly mark the sweep `Running`; neither backstop above can ever act on
+it. The observed incident: a `claude -p /loom:sweep <N>` process idle 5+ days,
+still `loom:building`, with no give-up comment because no watchdog ever
+evaluated it even once — every existing watchdog assumed coverage that this
+class of entry never had.
+
+The fourth backstop closes that gap: every tick, `stale_sweep_findings` scans
+for exactly the entries the other two cannot reach
+(`!self.children.contains_key`) whose age exceeds `staleSweepAgeSecs` (default
+3h, 4× the review-stall timeout) **and** whose log has gone silent past
+`reviewStallTimeoutSecs` (or is unreadable/missing — treated as stale, not
+healthy-by-default). A sweep still producing log output, however old, is left
+alone — the same "any observed progress is Healthy" rule every watchdog here
+follows. A match is cancelled (SIGTERM → grace → SIGKILL, releasing the claim
+lock and restoring `loom:building` → `loom:issue`, exactly like every other
+watchdog's cancel path) and a forge comment explains why; there is no bounded
+retry/give-up pair here, because the cancel itself transitions the entry out
+of `Running`, so it can never match again. Defaults **on**; disable with
+`LOOM_SWEEP_STALE_SWEEP=0` or `autonomous.watchdog.staleSweep = false`.
+
+Crucially, `stale_sweep_findings` is computed **fresh from the registry on
+every call** — never from a cache the watchdog tick populates — so
+`loom-daemon status`/`health`'s `stale_sweeps` field and `stale_sweeps`
+section report the same finding even on a host where the watchdog task's own
+tick has never fired a single iteration (e.g. it crashed, or was never
+spawned). This is the deliberate "out-of-band, non-tick-dependent" property:
+the original incident's gap was never fixable by adding a fifth in-process
+tick action alone, because the daemon process's own liveness (or the specific
+task's) is exactly what cannot be trusted as the sole detection path.
 
 **Insta-crash quarantine (#3939).** The startup watchdog (#3887) and mid-build-death
 watchdog (#3895) both rescue a sweep that made *some* observable progress before

@@ -19,6 +19,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Declared current paths now fail closed on same-net routed arcs and
+  copper pours** (#5273) — `resolve_current_path()` previously built its
+  copper graph only from routed `Segment` tracks and via barrels, so a
+  same-net routed **arc** or a non-keepout **zone/pour** — either of which
+  can form a parallel return path around a declared branch (a plane is the
+  archetypal case) — was invisible to it and never affected the result. A
+  declared branch on such a net now resolves `"ambiguous"` instead of
+  `"resolved"`, naming the unmodeled copper in the reason (endpoint
+  resolution failures still take precedence and remain `"unresolved"`).
+  New `unmodeled_copper()` inventories same-net arcs and non-keepout
+  zones/pours (kind, layer, representative location); keepout rule areas
+  are excluded since they carry no copper. `CurrentPathAudit` gains an
+  `unmodeled` field, surfaced by `kct pcb current-paths-audit` in both JSON
+  and text output, and `kct check`'s `path_ampacity` rule emits a
+  `warning` per unmodeled-copper object found (the `ambiguous` status
+  already produces the `error`). No change was needed in
+  `pcb/reinforce.py`: its allow-list gate only admits copper from a
+  *resolved* path, so a net with unmodeled copper drops out of
+  reinforcement eligibility for free once `resolve_current_path()` stops
+  returning `resolved` for it.
+- **Pulsed / duty-cycled current on declared branch current paths** (#4980) —
+  `CurrentPathSpec` gains optional `duty_cycle` and `pulse_duration_s`
+  alongside the existing `pulsed_a`, which until now was parsed, serialized
+  and then ignored by every consumer. A pulsed branch is now checked two
+  ways, because a repetitive pulse can destroy copper by a mechanism the
+  steady-state width check cannot see:
+  - **Thermally**, at the waveform's RMS current
+    (`CurrentPathSpec.thermal_design_current()` →
+    `physics.ampacity.rms_current_for_duty_cycle()`), not its peak and not
+    its average. An 18 A pulse at 8 % duty over a 3 A baseline heats copper
+    like 5.85 A, so it no longer demands 8.1 mm of 2 oz copper to pass.
+  - **Adiabatically**, against the Onderdonk fusing current for the declared
+    pulse duration (`physics.ampacity.adiabatic_fusing_current()`). A trace
+    comfortably sized on RMS heating can still be melted by a single inrush
+    or fault pulse; that is now an `error` rather than an invisible risk.
+
+  Every assumption is declared, never inferred, and every gap is visible: a
+  pulse with no `duty_cycle` is sized at its peak **and says so** (an `info`
+  finding naming the missing field), and a pulse with no `pulse_duration_s`
+  leaves fusing explicitly unchecked (a `warning`) instead of passing
+  silently. Half-declared waveforms — a `duty_cycle` or `pulse_duration_s`
+  with no `pulsed_a`, or a `pulsed_a` below `continuous_a` — are rejected at
+  load time rather than guessed at. Continuous-only declarations are
+  unaffected: their findings are byte-identical to before. Flows through all
+  existing surfaces (`kct check`, `kct route`, `kct pcb
+  current-paths-audit`), which now also report each branch's thermal design
+  current and which waveform assumption produced it.
 - **Flat signal-clearance table builder for clock-to-signal spacing**
   (#5021) — `build_signal_clearance_table()` in
   `router/pairwise_clearance.py` generalises the HV pairwise-clearance

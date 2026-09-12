@@ -61,9 +61,9 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # Bump this constant whenever routing logic is modified to ensure stale
 # cached results are not reused.  The value is included in every cache key
 # so incrementing it automatically invalidates all existing entries.
-# #5004 changes default clearance acceptance, pad seeds, tree connectivity,
-# and via repair. Invalidate earlier candidates as well as released routes.
-CACHE_VERSION = "2.4.0"
+# Authoritative Edge.Cuts bounds/origin change the routing domain for identical
+# PCB bytes; results made under the previous fallback domain cannot be replayed.
+CACHE_VERSION = "2.4.2"
 
 
 def get_default_cache_path() -> Path:
@@ -754,7 +754,7 @@ class RoutingCache:
         created_time = datetime.fromisoformat(created_at)
         return datetime.now() - created_time > self.ttl
 
-    def serialize_routes(self, routes: list[Route]) -> bytes:
+    def serialize_routes(self, routes: list[Route], *, route_usage: dict | None = None) -> bytes:
         """Serialize routes to compressed bytes for storage.
 
         Args:
@@ -769,6 +769,7 @@ class RoutingCache:
             route_dict = {
                 "net": route.net,
                 "net_name": route.net_name,
+                "is_escape": route.is_escape,
                 "segments": [
                     {
                         "x1": seg.x1,
@@ -806,8 +807,23 @@ class RoutingCache:
             }
             routes_data.append(route_dict)
 
-        json_bytes = json.dumps(routes_data).encode("utf-8")
+        payload = (
+            routes_data
+            if route_usage is None
+            else {"routes": routes_data, "route_usage": route_usage}
+        )
+        json_bytes = json.dumps(payload).encode("utf-8")
         return zlib.compress(json_bytes)
+
+    @staticmethod
+    def deserialize_route_usage(data: bytes) -> dict:
+        """Read the full-run congestion snapshot; legacy entries are misses."""
+        payload = json.loads(zlib.decompress(data))
+        if not isinstance(payload, dict) or not isinstance(payload.get("route_usage"), dict):
+            raise ValueError("Cached routes have no congestion snapshot")
+        usage = payload["route_usage"]
+        assert isinstance(usage, dict)
+        return usage
 
     def deserialize_routes(self, data: bytes) -> list[Route]:
         """Deserialize routes from compressed bytes.
@@ -822,7 +838,8 @@ class RoutingCache:
         from .primitives import Route, Segment, Via
 
         json_bytes = zlib.decompress(data)
-        routes_data = json.loads(json_bytes.decode("utf-8"))
+        payload = json.loads(json_bytes.decode("utf-8"))
+        routes_data = payload["routes"] if isinstance(payload, dict) else payload
 
         routes = []
         for route_dict in routes_data:
@@ -861,6 +878,7 @@ class RoutingCache:
                 net_name=route_dict["net_name"],
                 segments=segments,
                 vias=vias,
+                is_escape=route_dict.get("is_escape", False),
             )
             routes.append(route)
 
@@ -920,6 +938,8 @@ class RoutingCache:
         routes: list[Route],
         statistics: dict,
         compute_time_ms: int = 0,
+        *,
+        route_usage: dict | None = None,
     ) -> None:
         """
         Store routing result in cache.
@@ -930,7 +950,7 @@ class RoutingCache:
             statistics: Routing statistics dict
             compute_time_ms: Time taken for routing in milliseconds
         """
-        routes_data = self.serialize_routes(routes)
+        routes_data = self.serialize_routes(routes, route_usage=route_usage)
         data_size = len(routes_data)
         now = datetime.now().isoformat()
 

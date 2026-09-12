@@ -17,6 +17,9 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.router.current_paths import (
+    THERMAL_BASIS_CONTINUOUS,
+    THERMAL_BASIS_PEAK_AS_CONTINUOUS,
+    THERMAL_BASIS_RMS,
     CurrentPathSpec,
     PathEndpoint,
     audit_current_paths,
@@ -25,6 +28,7 @@ from kicad_tools.router.current_paths import (
     parse_current_path_specs,
     reinforcement_eligible_segment_ids,
     resolve_current_path,
+    unmodeled_copper,
 )
 from kicad_tools.schema.pcb import Footprint, Pad
 
@@ -322,6 +326,163 @@ class TestResolveCurrentPath:
         assert r.ok
         assert r.segments == ()
         assert r.length_mm == 0.0
+
+
+# --------------------------------------------------------------------------
+# unmodeled_copper() / STATUS_AMBIGUOUS on same-net arcs and pours (#5273)
+# --------------------------------------------------------------------------
+
+
+class TestUnmodeledCopper:
+    """A same-net routed arc or non-keepout pour can form a parallel return
+    path around a declared branch -- ``resolve_current_path`` must fail
+    closed to ``"ambiguous"`` rather than silently ignore it (#5273)."""
+
+    @staticmethod
+    def _add_arc(pcb, *, net_name: str = "NET1", start=(20, 50), mid=(70, 20), end=(120, 50)):
+        from kicad_tools.sexp import parse_string
+
+        net = pcb.get_net_by_name(net_name)
+        assert net is not None
+        pcb._sexp.append(
+            parse_string(
+                f"(arc (start {start[0]} {start[1]}) (mid {mid[0]} {mid[1]}) "
+                f'(end {end[0]} {end[1]}) (width 0.2) (layer "F.Cu") (net {net.number}))'
+            )
+        )
+
+    @staticmethod
+    def _add_zone(pcb, *, net_name: str = "NET1", layer: str = "F.Cu", keepout=None):
+        from kicad_tools.schema.pcb import Zone
+
+        net = pcb.get_net_by_name(net_name)
+        assert net is not None
+        pcb._zones.append(
+            Zone(
+                net.number,
+                net_name,
+                layer,
+                polygon=[(0, 0), (200, 0), (200, 120), (0, 120)],
+                keepout=keepout,
+            )
+        )
+
+    def test_unmodeled_copper_finds_same_net_arc(self) -> None:
+        pcb = _t_network_pcb()
+        self._add_arc(pcb)
+        found = unmodeled_copper(pcb, "NET1")
+        assert len(found) == 1
+        assert found[0].kind == "arc"
+        assert found[0].layer == "F.Cu"
+        assert found[0].location == (20.0, 50.0)
+
+    def test_unmodeled_copper_finds_same_net_pour(self) -> None:
+        pcb = _t_network_pcb()
+        self._add_zone(pcb)
+        found = unmodeled_copper(pcb, "NET1")
+        assert len(found) == 1
+        assert found[0].kind == "zone"
+        assert found[0].layer == "F.Cu"
+
+    def test_keepout_zone_excluded(self) -> None:
+        from kicad_tools.schema.pcb import ZoneKeepout
+
+        pcb = _t_network_pcb()
+        self._add_zone(pcb, keepout=ZoneKeepout())
+        assert unmodeled_copper(pcb, "NET1") == []
+
+    def test_different_net_arc_excluded(self) -> None:
+        pcb = _t_network_pcb()
+        _add_pad_footprint(pcb, ref="X1", x=5, y=5, net="OTHERNET")
+        self._add_arc(pcb, net_name="OTHERNET")
+        assert unmodeled_copper(pcb, "NET1") == []
+        assert len(unmodeled_copper(pcb, "OTHERNET")) == 1
+
+    def test_different_net_pour_in_same_physical_area_excluded(self) -> None:
+        pcb = _t_network_pcb()
+        _add_pad_footprint(pcb, ref="X1", x=5, y=5, net="OTHERNET")
+        self._add_zone(pcb, net_name="OTHERNET")
+        assert unmodeled_copper(pcb, "NET1") == []
+        assert len(unmodeled_copper(pcb, "OTHERNET")) == 1
+
+    def test_no_unmodeled_copper_empty_list(self) -> None:
+        pcb = _t_network_pcb()
+        assert unmodeled_copper(pcb, "NET1") == []
+
+    def test_resolve_reports_ambiguous_with_same_net_arc(self) -> None:
+        pcb = _t_network_pcb()
+        self._add_arc(pcb)
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert r.status == "ambiguous"
+        assert "arc" in r.reason
+
+    def test_resolve_reports_ambiguous_with_same_net_pour(self) -> None:
+        pcb = _t_network_pcb()
+        self._add_zone(pcb)
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert r.status == "ambiguous"
+        assert "zone" in r.reason
+
+    def test_keepout_zone_does_not_make_path_ambiguous(self) -> None:
+        from kicad_tools.schema.pcb import ZoneKeepout
+
+        pcb = _t_network_pcb()
+        self._add_zone(pcb, keepout=ZoneKeepout())
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert r.ok
+
+    def test_different_net_arc_does_not_make_path_ambiguous(self) -> None:
+        pcb = _t_network_pcb()
+        _add_pad_footprint(pcb, ref="X1", x=5, y=5, net="OTHERNET")
+        self._add_arc(pcb, net_name="OTHERNET")
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert r.ok
+
+    def test_endpoint_resolution_failure_takes_precedence_over_unmodeled_copper(self) -> None:
+        """A broken endpoint stays ``unresolved`` even when the net also
+        carries unmodeled copper -- endpoint failures fail closed first."""
+        pcb = _t_network_pcb()
+        self._add_arc(pcb)
+        spec = CurrentPathSpec(
+            name="BROKEN",
+            net_name="NET1",
+            source=PathEndpoint("J1", "1"),
+            sink=PathEndpoint("J99", "1"),
+            continuous_a=15.0,
+        )
+        r = resolve_current_path(pcb, spec)
+        assert r.status == "unresolved"
+
+    def test_degenerate_self_path_unaffected_by_unmodeled_copper(self) -> None:
+        """The ``source == sink`` trivial case never touches the graph, so
+        it stays resolved even when the net carries unmodeled copper."""
+        pcb = _t_network_pcb()
+        self._add_arc(pcb)
+        spec = CurrentPathSpec(
+            name="TRIVIAL",
+            net_name="NET1",
+            source=PathEndpoint("J1", "1"),
+            sink=PathEndpoint("J1", "1"),
+            continuous_a=1.0,
+        )
+        r = resolve_current_path(pcb, spec)
+        assert r.ok
+        assert r.segments == ()
+
+    def test_audit_surfaces_unmodeled_field(self) -> None:
+        pcb = _t_network_pcb()
+        self._add_arc(pcb)
+        audit = audit_current_paths(pcb, [_trunk_spec()])
+        assert "NET1" in audit.unmodeled
+        assert len(audit.unmodeled["NET1"]) == 1
+        assert audit.unmodeled["NET1"][0].kind == "arc"
+        assert audit.ambiguous
+        assert audit.ambiguous[0].spec.name == "TRUNK"
+
+    def test_audit_unmodeled_empty_when_no_arc_or_pour(self) -> None:
+        pcb = _t_network_pcb()
+        audit = audit_current_paths(pcb, [_trunk_spec(), _sense_spec()])
+        assert audit.unmodeled == {}
 
 
 class TestPadExtentEndpointBinding:
@@ -741,6 +902,59 @@ class TestPhysicalLayerGraph:
 
         assert board.read_bytes() == before
 
+    def test_board09_ordinary_branch_endpoint_is_not_a_fanout(self):
+        """Issue #4980: an ordinary branching pad must not be forced 'ambiguous'.
+
+        ``RSH1.1`` (the ``VOUT_PRE`` force-in shunt terminal) has exactly two
+        arms: the 2.0 mm force trunk continuing to ``L1.2``, and an unrelated
+        0.25 mm sense/feedback tap that happens to drop through a single via
+        to reach an inner layer. That single via-tap arm is not a second
+        via-array leg -- ``_endpoint_via_array``'s own proof correctly
+        rejects it as an array, but the coarser "any arm touches any via"
+        fallback in ``resolve_current_path`` used to treat the mere presence
+        of one via anywhere on the endpoint's arms as an unproved *damaged*
+        array and force the whole declaration ambiguous. ``R7.1`` (the
+        feedback-tap endpoint) has the same shape: one dangling stub to a
+        pad with nothing else attached, plus one single via-tap arm.
+        Neither hub has two independent via-array-leg candidates, so neither
+        should trip the fanout fallback.
+        """
+        from pathlib import Path
+
+        from kicad_tools.schema.pcb import PCB
+
+        board = (
+            Path(__file__).resolve().parents[1]
+            / "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb"
+        )
+        before = board.read_bytes()
+        pcb = PCB.load(board)
+
+        force = CurrentPathSpec(
+            name="vout_pre_force",
+            net_name="VOUT_PRE",
+            source=PathEndpoint("L1", "2"),
+            sink=PathEndpoint("RSH1", "1"),
+            continuous_a=3,
+        )
+        force_result = resolve_current_path(pcb, force)
+        assert force_result.status == "resolved"
+        assert force_result.segments
+        assert force_result.length_mm > 0.0
+
+        feedback = CurrentPathSpec(
+            name="vout_pre_feedback",
+            net_name="VOUT_PRE",
+            source=PathEndpoint("L1", "2"),
+            sink=PathEndpoint("R7", "1"),
+            continuous_a=0.001,
+            reinforcement_eligible=False,
+        )
+        feedback_result = resolve_current_path(pcb, feedback)
+        assert feedback_result.status == "resolved"
+
+        assert board.read_bytes() == before
+
     def test_transitive_pad_union_does_not_erase_external_return(self):
         pcb = _t_network_pcb()
         pcb.get_footprint("J1").pads[0].size = (1.6, 1.6)
@@ -786,3 +1000,148 @@ class TestPhysicalLayerGraph:
         audit = audit_current_paths(pcb, [_trunk_spec(), _sense_spec()])
         assert [id(s) for s in audit.uncovered["NET1"]] == [id(spur)]
         assert id(spur) not in reinforcement_eligible_segment_ids(pcb, [_trunk_spec()])
+
+
+# --------------------------------------------------------------------------
+# Pulsed / duty-cycled declarations (Issue #4980)
+# --------------------------------------------------------------------------
+
+
+def _pulsed_spec(**overrides) -> CurrentPathSpec:
+    kwargs = {
+        "name": "INRUSH",
+        "net_name": "NET1",
+        "source": PathEndpoint("J1", "1"),
+        "sink": PathEndpoint("J2", "1"),
+        "continuous_a": 3.0,
+        "pulsed_a": 18.0,
+        "duty_cycle": 0.08,
+        "pulse_duration_s": 0.002,
+        "reinforcement_eligible": True,
+    }
+    kwargs.update(overrides)
+    return CurrentPathSpec(**kwargs)
+
+
+class TestPulsedDeclarationValidation:
+    """A half-declared waveform fails closed at construction/load time."""
+
+    def test_duty_cycle_without_pulsed_a_rejected(self) -> None:
+        with pytest.raises(ValueError, match="duty_cycle.*without"):
+            _pulsed_spec(pulsed_a=None, duty_cycle=0.5, pulse_duration_s=None)
+
+    def test_pulse_duration_without_pulsed_a_rejected(self) -> None:
+        with pytest.raises(ValueError, match="pulse_duration_s.*without"):
+            _pulsed_spec(pulsed_a=None, duty_cycle=None, pulse_duration_s=0.01)
+
+    def test_pulsed_below_continuous_rejected(self) -> None:
+        with pytest.raises(ValueError, match="below 'continuous_a'"):
+            _pulsed_spec(continuous_a=10.0, pulsed_a=5.0)
+
+    def test_duty_cycle_out_of_range_rejected(self) -> None:
+        with pytest.raises(ValueError, match="duty_cycle"):
+            _pulsed_spec(duty_cycle=1.5)
+        with pytest.raises(ValueError, match="duty_cycle"):
+            _pulsed_spec(duty_cycle=0.0)
+
+    def test_non_positive_pulse_duration_rejected(self) -> None:
+        with pytest.raises(ValueError, match="pulse_duration_s"):
+            _pulsed_spec(pulse_duration_s=0.0)
+
+    def test_non_positive_continuous_rejected(self) -> None:
+        with pytest.raises(ValueError, match="continuous_a"):
+            _pulsed_spec(continuous_a=0.0, pulsed_a=None, duty_cycle=None, pulse_duration_s=None)
+
+    def test_from_dict_rejects_non_numeric_duty_cycle(self) -> None:
+        with pytest.raises(ValueError, match="duty_cycle"):
+            CurrentPathSpec.from_dict(
+                {
+                    "name": "X",
+                    "net": "NET1",
+                    "source": {"ref": "J1", "pad": "1"},
+                    "sink": {"ref": "J2", "pad": "1"},
+                    "continuous_a": 1.0,
+                    "pulsed_a": 5.0,
+                    "duty_cycle": "half",
+                }
+            )
+
+    def test_from_dict_rejects_half_declared_waveform(self) -> None:
+        with pytest.raises(ValueError, match="pulse_duration_s.*without"):
+            CurrentPathSpec.from_dict(
+                {
+                    "name": "X",
+                    "net": "NET1",
+                    "source": {"ref": "J1", "pad": "1"},
+                    "sink": {"ref": "J2", "pad": "1"},
+                    "continuous_a": 1.0,
+                    "pulse_duration_s": 0.01,
+                }
+            )
+
+
+class TestPulsedSerialization:
+    def test_round_trip_preserves_waveform_fields(self) -> None:
+        spec = _pulsed_spec()
+        restored = CurrentPathSpec.from_dict(spec.to_dict())
+        assert restored == spec
+        assert restored.duty_cycle == pytest.approx(0.08)
+        assert restored.pulse_duration_s == pytest.approx(0.002)
+
+    def test_sidecar_round_trip(self, tmp_path: Path) -> None:
+        specs = [_trunk_spec(), _pulsed_spec()]
+        sidecar = tmp_path / "current_paths.json"
+        sidecar.write_text(json.dumps(dump_current_path_specs(specs)))
+        assert load_current_path_specs(sidecar) == specs
+
+    def test_continuous_only_sidecar_is_unchanged_by_the_new_fields(self) -> None:
+        """A pre-existing continuous-only declaration still parses and keeps
+        every waveform field at ``None`` (backward compatible)."""
+        spec = CurrentPathSpec.from_dict(
+            {
+                "name": "TRUNK",
+                "net": "NET1",
+                "source": {"ref": "J1", "pad": "1"},
+                "sink": {"ref": "J2", "pad": "1"},
+                "continuous_a": 15.0,
+                "reinforcement_eligible": True,
+            }
+        )
+        assert spec.pulsed_a is None
+        assert spec.duty_cycle is None
+        assert spec.pulse_duration_s is None
+
+
+class TestThermalDesignCurrent:
+    def test_continuous_only_uses_its_own_current(self) -> None:
+        thermal = _trunk_spec(current_a=15.0).thermal_design_current()
+        assert thermal.basis == THERMAL_BASIS_CONTINUOUS
+        assert thermal.current_a == pytest.approx(15.0)
+        assert thermal.assumption == ""
+
+    def test_duty_cycle_gives_rms_not_peak_and_not_average(self) -> None:
+        """18A peak at 8% duty over a 3A baseline -> sqrt(.08*324+.92*9) RMS."""
+        thermal = _pulsed_spec().thermal_design_current()
+        assert thermal.basis == THERMAL_BASIS_RMS
+        assert thermal.current_a == pytest.approx(5.848, abs=0.005)
+        # Strictly between the naive average (4.2A) and the peak (18A).
+        assert 4.2 < thermal.current_a < 18.0
+        assert thermal.assumption == ""
+
+    def test_rms_never_drops_below_the_declared_continuous_current(self) -> None:
+        thermal = _pulsed_spec(duty_cycle=0.0001).thermal_design_current()
+        assert thermal.current_a >= 3.0
+
+    def test_pulse_without_duty_is_sized_at_peak_and_says_so(self) -> None:
+        thermal = _pulsed_spec(duty_cycle=None).thermal_design_current()
+        assert thermal.basis == THERMAL_BASIS_PEAK_AS_CONTINUOUS
+        assert thermal.current_a == pytest.approx(18.0)
+        assert "duty_cycle" in thermal.assumption
+
+    def test_full_duty_pulse_is_its_peak(self) -> None:
+        thermal = _pulsed_spec(duty_cycle=1.0).thermal_design_current()
+        assert thermal.current_a == pytest.approx(18.0)
+
+    def test_description_names_the_waveform(self) -> None:
+        assert "RMS" in _pulsed_spec().thermal_design_current().description
+        assert "continuous" in _trunk_spec().thermal_design_current().description

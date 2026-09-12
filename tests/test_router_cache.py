@@ -351,6 +351,11 @@ class TestRoutingCache:
         assert len(routes[1].vias) == 1
         assert routes[1].vias[0].drill == 0.3
 
+    def test_cache_round_trip_preserves_escape_route_identity(self, temp_cache, sample_routes):
+        sample_routes[0].is_escape = True
+        restored = temp_cache.deserialize_routes(temp_cache.serialize_routes(sample_routes))
+        assert restored == sample_routes
+
     def test_serialize_preserves_data(self, temp_cache, sample_routes):
         """Test that serialization preserves all route data."""
         data = temp_cache.serialize_routes(sample_routes)

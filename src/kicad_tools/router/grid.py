@@ -30,6 +30,7 @@ Thread Safety:
 
 from __future__ import annotations
 
+import base64
 import logging
 import math
 import threading
@@ -1130,6 +1131,31 @@ class RoutingGrid:
         pokes the occupancy planes) can keep occupancy-derived caches honest.
         """
         self._occupancy_generation += 1
+
+    def cell_at(self, layer: int, y: int, x: int) -> _CellView:
+        """Return a single ``_CellView`` for ``(layer, y, x)`` directly.
+
+        Equivalent to ``self.grid[layer][y][x]`` but allocates ONE object
+        instead of three: the legacy ``grid[layer][y][x]`` chain walks
+        ``_GridView.__getitem__`` -> new ``_LayerView`` ->
+        ``_LayerView.__getitem__`` -> new ``_RowView`` ->
+        ``_RowView.__getitem__`` -> new ``_CellView``, so every access pays
+        for two throwaway intermediate objects that are never used for
+        anything but reaching the next ``__getitem__``.
+
+        Issue #5240: profiling the pure-Python A* fallback's hot
+        neighbor-expansion loop (``Pathfinder._route_impl`` and its
+        per-neighbor helpers, e.g. ``_is_diagonal_corner_blocked``) showed
+        millions of ``_LayerView``/``_RowView``/``_CellView`` allocations
+        for a single small re-route -- the same class of temporary-object
+        overhead already removed from the sampled placement force
+        calculation (#5253) and the A* neighbor batch-cost helpers
+        (#5269). This accessor is a drop-in replacement at call sites that
+        already spell out all three indices at once (``self.grid.grid[layer][y][x]``);
+        it returns the identical ``_CellView`` type with identical
+        properties, so callers see no behavioral change.
+        """
+        return _CellView(self, x, y, layer)
 
     def _ensure_static_blockage_snapshot(self) -> None:
         """Capture the static blocked bitmap before the first route mark.
@@ -5318,6 +5344,27 @@ class RoutingGrid:
     # =========================================================================
     # NEGOTIATED CONGESTION ROUTING SUPPORT
     # =========================================================================
+
+    def export_route_usage(self) -> dict[str, Any]:
+        """Capture exact congestion counts, including all-zero basic routing."""
+        with self._acquire_lock():
+            counts = to_numpy(self._usage_count).astype("<i2", copy=False)
+            return {
+                "shape": list(counts.shape),
+                "counts": base64.b64encode(counts.tobytes()).decode("ascii"),
+            }
+
+    def import_route_usage(self, state: dict[str, Any]) -> None:
+        """Validate and restore a cache snapshot without guessing a strategy."""
+        if state.get("shape") != list(self._usage_count.shape):
+            raise ValueError("Cached congestion grid dimensions do not match routing grid")
+        raw = base64.b64decode(state["counts"], validate=True)
+        expected = math.prod(self._usage_count.shape) * 2
+        if len(raw) != expected:
+            raise ValueError("Cached congestion grid byte count does not match routing grid")
+        counts = np.frombuffer(raw, dtype="<i2").reshape(self._usage_count.shape)
+        with self._acquire_lock():
+            self._usage_count[...] = self._backend.asarray(counts)
 
     def reset_route_usage(self) -> None:
         """Reset all usage counts (start of new negotiation iteration).

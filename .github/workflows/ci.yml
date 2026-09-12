@@ -207,6 +207,20 @@ jobs:
         # 120-second subprocess cap and every manufacturing assertion.
         run: uv run pytest tests/test_board_05_drc_allowlist.py -o addopts= --benchmark-disable --timeout=60 -m "not slow"
 
+      - name: Run native mask-to-copper gate
+        env:
+          KCT_MASK_NATIVE_PYTHON: '["/usr/bin/python3"]'
+        run: uv run --frozen python scripts/ci/check_mask_copper_native.py --artifacts "$RUNNER_TEMP/mask-copper-native"
+
+      - name: Retain native mask diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mask-copper-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mask-copper-native/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run tests
         # Issue #3436: continue-on-error was removed from this step. It
         # made the job green regardless of pytest's exit code, hiding 162
@@ -220,7 +234,7 @@ jobs:
         env:
           BOARD_07_CI_ENABLED: ${{ vars.BOARD_07_CI_ENABLED }}
         run: |
-          test_args=(--ignore=tests/test_board_05_drc_allowlist.py)
+          test_args=(--ignore=tests/test_board_05_drc_allowlist.py --ignore=tests/test_mask_copper_native.py)
           if [[ "$BOARD_07_CI_ENABLED" != "true" ]]; then
             test_args+=(--ignore=tests/test_board_07_matchgroup_test.py)
           fi
