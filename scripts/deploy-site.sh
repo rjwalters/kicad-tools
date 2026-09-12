@@ -20,12 +20,14 @@
 #                     renders + manufacturing files into site/public/)
 #   4. deploy      -- `wrangler pages deploy site/dist` (guarded: asserts the
 #                     authenticated Cloudflare account before uploading)
-#   5. verify      -- fetch each deployed board.kicad_pcb and diff its SHA-256
-#                     against the copy just built in step 3 (Issue #5318:
-#                     the live site silently served a pre-repair Board05 PCB
-#                     for weeks because nothing checked this -- see
-#                     scripts/lib/site-verify.sh). Skipped for --preview
-#                     (dynamic URL) and --no-verify.
+#   5. verify      -- fetch every deployed board asset (PCB, renders, and
+#                     manufacturing downloads incl. kicad_project.zip) and
+#                     diff its SHA-256 against the copy just built in step 3
+#                     (Issue #5318: the live site silently served a
+#                     pre-repair Board05 PCB -- AND the same stale bytes via
+#                     the downloadable project ZIP -- for weeks because
+#                     nothing checked this -- see scripts/lib/site-verify.sh).
+#                     Skipped for --preview (dynamic URL) and --no-verify.
 #
 # Generated artifacts (board.json, renders, site/public/boards/, site/dist/)
 # are all git-ignored and never committed.
@@ -109,7 +111,7 @@ sha256_of() {
 # --- Deployed-artifact verification (Issue #5318) ---------------------------
 # Shared with the standalone scripts/verify-site-deployment.sh; see
 # scripts/lib/site-verify.sh for what/why. Provides sha256_of_file() and
-# verify_deployed_pcbs().
+# verify_deployed_assets().
 # shellcheck source=lib/site-verify.sh
 source "${SCRIPT_DIR}/lib/site-verify.sh"
 
@@ -372,14 +374,14 @@ elif [ "${NO_VERIFY}" -eq 1 ]; then
   info "Step 5/5: skipping deployed-artifact verification (--no-verify set)."
 elif ! command -v curl >/dev/null 2>&1; then
   warn "Step 5/5: 'curl' not found — cannot verify the deployed site matches what was just built."
-  warn "Manually confirm the public PCB(s) before trusting this deploy, or install curl and re-run './scripts/verify-site-deployment.sh' once it's available."
+  warn "Manually confirm the public board asset(s) before trusting this deploy, or install curl and re-run './scripts/verify-site-deployment.sh' once it's available."
 else
-  info "Step 5/5: verifying deployed board PCB(s) match the just-built site..."
+  info "Step 5/5: verifying deployed board asset(s) match the just-built site..."
   base_url="${KCT_SITE_BASE_URL:-https://kicad-tools.pages.dev}"
-  if ! verify_deployed_pcbs "${base_url}" "${REPO_ROOT}/site/dist/boards"; then
+  if ! verify_deployed_assets "${base_url}" "${REPO_ROOT}/site/dist/boards"; then
     err "Deployed-artifact verification FAILED (see mismatches above)."
     err "The Cloudflare Pages deploy command reported success, but the"
-    err "publicly served board PCB(s) do not match what was just built --"
+    err "publicly served board asset(s) do not match what was just built --"
     err "exactly the stale-publication failure mode from issue #5318."
     err "Wait a bit for CDN propagation and re-run:"
     err "  ./scripts/verify-site-deployment.sh --base-url ${base_url}"

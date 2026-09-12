@@ -13,10 +13,11 @@
 #
 # This script closes that detection gap WITHOUT requiring a deploy, a
 # Cloudflare login, or even `npm ci` / an Astro build: it re-stages
-# board.kicad_pcb from current source using the exact same staging logic
+# every published board asset (PCB, renders, manufacturing downloads incl.
+# kicad_project.zip) from current source using the exact same staging logic
 # the real build uses (site/scripts/copy-renders.mjs, run standalone --
 # see its own header for why: no external deps needed for the copy step),
-# then fetches the publicly served copy of each board and compares SHA-256
+# then fetches the publicly served copy of each asset and compares SHA-256
 # hashes via scripts/lib/site-verify.sh.
 #
 # Run this any time -- after landing a routing fix, before trusting a
@@ -32,7 +33,7 @@
 #                     https://kicad-tools.pages.dev
 #   --help            Show this help and exit.
 #
-# Exit codes: 0 = every checked board's deployed PCB matches current
+# Exit codes: 0 = every checked board asset's deployed bytes match current
 # source (or there was nothing to check); 1 = at least one mismatch.
 
 set -euo pipefail
@@ -82,7 +83,7 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[verify-site-deployment] staging current-source board PCBs (site/scripts/copy-renders.mjs)..."
+echo "[verify-site-deployment] staging current-source board assets (site/scripts/copy-renders.mjs)..."
 node "${REPO_ROOT}/site/scripts/copy-renders.mjs"
 
 STAGED_DIR="${REPO_ROOT}/site/public/boards"
@@ -92,4 +93,4 @@ if [ ! -d "${STAGED_DIR}" ]; then
 fi
 
 echo "[verify-site-deployment] comparing staged source against ${BASE_URL} ..."
-verify_deployed_pcbs "${BASE_URL}" "${STAGED_DIR}"
+verify_deployed_assets "${BASE_URL}" "${STAGED_DIR}"

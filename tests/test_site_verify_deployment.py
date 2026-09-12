@@ -3,15 +3,22 @@
 The live kicad-tools.org site served a pre-repair Board05 PCB (41
 arbitrary-angle B.Cu segments) for weeks after the source-level fix (#5045)
 landed on main, because the site is deployed manually and nothing ever
-checked the deployed bytes against current source. ``scripts/lib/site-verify.sh``
-(``verify_deployed_pcbs``) is the fix: it fetches each board's publicly
-served ``board.kicad_pcb`` and diffs its SHA-256 against a locally staged
-copy, failing loudly on any mismatch.
+checked the deployed bytes against current source. A follow-up audit found
+the SAME stale bytes were also served through the downloadable
+``manufacturing/kicad_project.zip``, not just the interactive-viewer PCB.
+``scripts/lib/site-verify.sh`` (``verify_deployed_assets``) is the fix: it
+walks every file staged under a board's directory (PCB, renders,
+manufacturing downloads) and fetches the corresponding publicly served path,
+diffing SHA-256 hashes, failing loudly on any mismatch -- including a local
+hashing failure, which must never be silently treated as a match against an
+equally-failed remote hash.
 
 This exercises that shell function directly -- against a real local HTTP
 server, never a live network call -- covering: an exact match, a byte
-mismatch, a fetch failure (404), a transient failure that a retry recovers
-from, and the "nothing staged" no-op case.
+mismatch on the PCB, a mismatch on a non-PCB asset (the #5318 audit's
+``kicad_project.zip`` scenario), a fetch failure (404), a transient failure
+that a retry recovers from, a local hashing failure, and the "nothing
+staged" no-op case.
 """
 
 from __future__ import annotations
@@ -31,14 +38,14 @@ LIB = REPO_ROOT / "scripts/lib/site-verify.sh"
 def _run_verify(
     staged_dir: Path, base_url: str, env_extra: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess:
-    """Source the library and invoke verify_deployed_pcbs against a fixture."""
+    """Source the library and invoke verify_deployed_assets against a fixture."""
     env = {
         "VERIFY_RETRY_ATTEMPTS": "2",
         "VERIFY_RETRY_SLEEP_SECONDS": "0",
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         **(env_extra or {}),
     }
-    script = f'source {LIB} && verify_deployed_pcbs "{base_url}" "{staged_dir}"'
+    script = f'source {LIB} && verify_deployed_assets "{base_url}" "{staged_dir}"'
     return subprocess.run(
         ["bash", "-c", script],
         capture_output=True,
@@ -88,17 +95,16 @@ def http_server():
         thread.join(timeout=5)
 
 
-def _stage(staged_dir: Path, slug: str, content: bytes) -> Path:
-    board_dir = staged_dir / slug
-    board_dir.mkdir(parents=True, exist_ok=True)
-    pcb = board_dir / "board.kicad_pcb"
-    pcb.write_bytes(content)
-    return pcb
+def _stage(staged_dir: Path, slug: str, rel_path: str, content: bytes) -> Path:
+    dest = staged_dir / slug / rel_path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(content)
+    return dest
 
 
 def test_lib_defines_expected_functions():
     text = LIB.read_text()
-    assert "verify_deployed_pcbs()" in text
+    assert "verify_deployed_assets()" in text
     assert "sha256_of_file()" in text
 
 
@@ -107,13 +113,13 @@ def test_matching_deployed_pcb_passes(tmp_path, http_server):
     base_url = f"http://127.0.0.1:{server.server_port}"
     staged = tmp_path / "staged"
     content = b"(kicad_pcb (version 20240101) ; matching bytes\n"
-    _stage(staged, "05-bldc-motor-controller", content)
+    _stage(staged, "05-bldc-motor-controller", "board.kicad_pcb", content)
     handler.board_bytes["/boards/05-bldc-motor-controller/board.kicad_pcb"] = content
 
     result = _run_verify(staged, base_url)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "OK: 1 deployed board PCB(s) match" in result.stdout
+    assert "OK: 1 deployed board asset(s) match" in result.stdout
 
 
 def test_stale_deployed_pcb_fails(tmp_path, http_server):
@@ -123,28 +129,61 @@ def test_stale_deployed_pcb_fails(tmp_path, http_server):
     staged = tmp_path / "staged"
     corrected = b"(kicad_pcb ; corrected, zero off-angle segments\n"
     stale = b"(kicad_pcb ; PRE-REPAIR, 41 off-angle B.Cu segments\n"
-    _stage(staged, "05-bldc-motor-controller", corrected)
+    _stage(staged, "05-bldc-motor-controller", "board.kicad_pcb", corrected)
     handler.board_bytes["/boards/05-bldc-motor-controller/board.kicad_pcb"] = stale
 
     result = _run_verify(staged, base_url)
 
     assert result.returncode == 1
-    assert "MISMATCH board=05-bldc-motor-controller" in result.stderr
+    assert "MISMATCH board=05-bldc-motor-controller asset=board.kicad_pcb" in result.stderr
     assert "do NOT match staged source" in result.stderr
 
 
-def test_fetch_failure_counts_as_mismatch(tmp_path, http_server):
-    """A board that 404s publicly (never deployed, or deploy failed) is a
-    reported failure, not a silent skip."""
-    server, _handler = http_server
+def test_stale_manufacturing_download_fails(tmp_path, http_server):
+    """Follow-up #5318 audit finding: manufacturing/kicad_project.zip served
+    the same stale PCB bytes even though a viewer-only check would have
+    passed. The verifier must check downloadable assets, not just the
+    interactive-viewer board.kicad_pcb."""
+    server, handler = http_server
     base_url = f"http://127.0.0.1:{server.server_port}"
     staged = tmp_path / "staged"
-    _stage(staged, "09-usbc-pd-power", b"whatever bytes")
+    matching_pcb = b"(kicad_pcb ; corrected\n"
+    stale_zip = b"PK\x03\x04 stale kicad_project.zip contents"
+    fresh_zip = b"PK\x03\x04 corrected kicad_project.zip contents"
+    _stage(staged, "05-bldc-motor-controller", "board.kicad_pcb", matching_pcb)
+    _stage(
+        staged,
+        "05-bldc-motor-controller",
+        "manufacturing/kicad_project.zip",
+        fresh_zip,
+    )
+    handler.board_bytes["/boards/05-bldc-motor-controller/board.kicad_pcb"] = matching_pcb
+    handler.board_bytes["/boards/05-bldc-motor-controller/manufacturing/kicad_project.zip"] = (
+        stale_zip
+    )
 
     result = _run_verify(staged, base_url)
 
     assert result.returncode == 1
-    assert "MISMATCH board=09-usbc-pd-power" in result.stderr
+    assert (
+        "MISMATCH board=05-bldc-motor-controller asset=manufacturing/kicad_project.zip"
+        in result.stderr
+    )
+    assert "MISMATCH board=05-bldc-motor-controller asset=board.kicad_pcb" not in result.stderr
+
+
+def test_fetch_failure_counts_as_mismatch(tmp_path, http_server):
+    """A board asset that 404s publicly (never deployed, or deploy failed) is
+    a reported failure, not a silent skip."""
+    server, _handler = http_server
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    staged = tmp_path / "staged"
+    _stage(staged, "09-usbc-pd-power", "board.kicad_pcb", b"whatever bytes")
+
+    result = _run_verify(staged, base_url)
+
+    assert result.returncode == 1
+    assert "MISMATCH board=09-usbc-pd-power asset=board.kicad_pcb" in result.stderr
     assert "<fetch failed>" in result.stderr
 
 
@@ -155,14 +194,14 @@ def test_transient_failure_recovers_via_retry(tmp_path, http_server):
     base_url = f"http://127.0.0.1:{server.server_port}"
     staged = tmp_path / "staged"
     content = b"(kicad_pcb ; eventually consistent\n"
-    _stage(staged, "01-voltage-divider", content)
+    _stage(staged, "01-voltage-divider", "board.kicad_pcb", content)
     handler.board_bytes["/boards/01-voltage-divider/board.kicad_pcb"] = content
     handler.fail_once_paths.add("/boards/01-voltage-divider/board.kicad_pcb")
 
     result = _run_verify(staged, base_url, env_extra={"VERIFY_RETRY_ATTEMPTS": "3"})
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "OK: 1 deployed board PCB(s) match" in result.stdout
+    assert "OK: 1 deployed board asset(s) match" in result.stdout
 
 
 def test_multiple_boards_reports_partial_mismatch_count(tmp_path, http_server):
@@ -170,15 +209,15 @@ def test_multiple_boards_reports_partial_mismatch_count(tmp_path, http_server):
     base_url = f"http://127.0.0.1:{server.server_port}"
     staged = tmp_path / "staged"
     good = b"good bytes"
-    _stage(staged, "board-a", good)
-    _stage(staged, "board-b", good)
+    _stage(staged, "board-a", "board.kicad_pcb", good)
+    _stage(staged, "board-b", "board.kicad_pcb", good)
     handler.board_bytes["/boards/board-a/board.kicad_pcb"] = good
     handler.board_bytes["/boards/board-b/board.kicad_pcb"] = b"stale bytes"
 
     result = _run_verify(staged, base_url)
 
     assert result.returncode == 1
-    assert "1/2 deployed board PCB(s)" in result.stderr
+    assert "1/2 deployed board asset(s)" in result.stderr
     assert "MISMATCH board=board-b" in result.stderr
     assert "MISMATCH board=board-a" not in result.stderr
 
@@ -195,6 +234,33 @@ def test_no_staged_boards_is_a_noop_not_a_failure(tmp_path, http_server):
     assert "nothing to verify" in result.stderr
 
 
+def test_local_hash_failure_is_not_silently_treated_as_a_match(tmp_path, http_server):
+    """Regression: an unreadable local file must make sha256_of_file() fail
+    loudly, and verify_deployed_assets must report that as a mismatch --
+    never let an empty local hash and an empty (equally-failed) remote hash
+    compare equal and report OK."""
+    server, handler = http_server
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    staged = tmp_path / "staged"
+    pcb = _stage(
+        staged,
+        "05-bldc-motor-controller",
+        "board.kicad_pcb",
+        b"(kicad_pcb ; content is irrelevant, local read must fail\n",
+    )
+    pcb.chmod(0o000)
+    handler.board_bytes["/boards/05-bldc-motor-controller/board.kicad_pcb"] = b"whatever"
+
+    try:
+        result = _run_verify(staged, base_url)
+    finally:
+        pcb.chmod(0o644)  # restore so tmp_path cleanup can remove it
+
+    assert result.returncode == 1
+    assert "error=local hash computation failed" in result.stderr
+    assert "OK:" not in result.stdout
+
+
 @pytest.mark.skipif(shutil.which("bash") is None, reason="requires bash")
 def test_deploy_site_sh_sources_the_shared_library():
     """deploy-site.sh must reuse the library rather than reimplementing
@@ -202,11 +268,11 @@ def test_deploy_site_sh_sources_the_shared_library():
     verify-site-deployment.sh script from drifting apart)."""
     text = (REPO_ROOT / "scripts/deploy-site.sh").read_text()
     assert 'source "${SCRIPT_DIR}/lib/site-verify.sh"' in text
-    assert "verify_deployed_pcbs" in text
+    assert "verify_deployed_assets" in text
     assert "--no-verify" in text
 
 
 def test_verify_site_deployment_sh_sources_the_shared_library():
     text = (REPO_ROOT / "scripts/verify-site-deployment.sh").read_text()
     assert 'source "${SCRIPT_DIR}/lib/site-verify.sh"' in text
-    assert "verify_deployed_pcbs" in text
+    assert "verify_deployed_assets" in text
