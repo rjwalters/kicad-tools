@@ -32,7 +32,7 @@ from .resource_guard import reraise_if_resource_exhaustion
 if TYPE_CHECKING:
     import numpy as np
 
-    from .grid import RoutingGrid
+    from .grid import CarveoutMode, RoutingGrid
     from .pathfinder import Router
     from .primitives import Pad, Route
     from .rules import DesignRules, NetClassRouting
@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 24
+_REQUIRED_CPP_BUILD_VERSION = 25
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -2712,20 +2712,54 @@ class CppPathfinder:
         stay in the C++ validator and sub-clearance copper is rejected at
         route construction time.  Mirrors
         ``RoutingGrid._same_component_carveout_active``.
+
+        Issue #5166: this stays the "is the carve-out active at all"
+        question.  Callers that must distinguish the full-skip
+        corridor-relief flavour from the clamp-to-configured-override
+        flavour use :meth:`_same_component_carveout_mode` instead.
+        """
+        return self._same_component_carveout_mode(py_grid, ref) != "none"
+
+    def _same_component_carveout_mode(self, py_grid, ref: str) -> CarveoutMode:
+        """Return the same-component carve-out STRENGTH for ``ref`` (#5166).
+
+        C++-side mirror of ``RoutingGrid._same_component_carveout_mode``;
+        see that docstring for the full rationale.  Summary:
+
+        ``"skip"``
+            Corridor relief (``_relax_same_component_clearance``, #2452)
+            physically unblocked the same-component overlap corridor down
+            to a ``trace_width / 2`` floor without shrinking any
+            clearance value, so the pad check must be skipped outright --
+            the ref goes into ``exclude_ref_hashes``.  The opt-in legacy
+            pitch-only carve-out is also ``"skip"``.
+        ``"clamp"``
+            A configured override (``component_clearances`` /
+            ``fine_pitch_clearance`` / net-class ``escape_clearance``)
+            resolved smaller than the default ``trace_clearance``.  That
+            authored value is enforced as a hard floor, so the ref goes
+            into ``clamp_ref_hashes`` and ``Grid3D::validate_route``
+            compares against the pad's own resolved
+            ``clearance_override`` instead of skipping.
+        ``"none"``
+            No carve-out; the pad stays in the validator at full
+            clearance.
         """
         if self._rules.strict_pad_clearance:
-            return False
+            return "none"
         relaxed_refs = getattr(py_grid, "_relaxed_clearance_refs", None)
         if relaxed_refs and ref in relaxed_refs:
-            return True
+            return "skip"
         pitch = self._get_component_pitches().get(ref)
         required = self._rules.get_clearance_for_component(ref, pitch)
         if required < self._rules.trace_clearance:
-            return True
+            return "clamp"
         if not self._rules.legacy_fine_pitch_carveout:
-            return False
+            return "none"
         threshold = getattr(self._rules, "fine_pitch_threshold", None)
-        return pitch is not None and threshold is not None and pitch < threshold
+        if pitch is not None and threshold is not None and pitch < threshold:
+            return "skip"
+        return "none"
 
     def _validate_route_clearance(
         self,
@@ -2782,10 +2816,28 @@ class CppPathfinder:
         # in the exclusion set ONLY when one of those relaxations is
         # actually in effect for that component.  Mirrors the Python
         # validator gate in ``RoutingGrid.validate_segment_clearance``.
+        #
+        # Issue #5166: the exclusion set is now SPLIT by carve-out
+        # strength.  ``exclude_ref_hashes`` keeps the full-skip semantics
+        # for a ref relaxed by ``_relax_same_component_clearance`` (#2452
+        # corridor relief -- its real floor is the ``trace_width / 2``
+        # blocked-cell construction the search already applied, and no
+        # clearance value was ever shrunk).  ``clamp_ref_hashes`` carries
+        # refs eligible only because a CONFIGURED override resolved
+        # smaller than the default clearance: ``Grid3D::validate_route``
+        # enforces that resolved per-pad value as a hard floor there,
+        # instead of the pre-#5166 unconditional skip that accepted any
+        # positive gap (e.g. 0.02mm against an authored 0.10mm).
         exclude_ref_hashes: list[int] = []
+        clamp_ref_hashes: list[int] = []
         for pad in (start, end):
-            if pad.ref and self._same_component_carveout_eligible(py_grid, pad.ref):
+            if not pad.ref:
+                continue
+            mode = self._same_component_carveout_mode(py_grid, pad.ref)
+            if mode == "skip":
                 exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.ref))
+            elif mode == "clamp":
+                clamp_ref_hashes.append(router_cpp.fnv1a_hash(pad.ref))
 
         # Build C++ segment/via lists from route
         cpp_segs: list[router_cpp.Segment] = []
@@ -2844,6 +2896,7 @@ class CppPathfinder:
             self._rules.min_drill_clearance,
             partner_net_id,
             intra_pair_clearance,
+            clamp_ref_hashes,
         )
 
         if not vresult.valid:

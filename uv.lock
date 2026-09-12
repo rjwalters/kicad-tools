@@ -2071,6 +2071,7 @@ name = "kicad-tools"
 version = "0.20.0"
 source = { editable = "." }
 dependencies = [
+    { name = "jsonschema" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pydantic" },
@@ -2228,6 +2229,7 @@ requires-dist = [
     { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1" },
     { name = "jinja2", marker = "extra == 'report'", specifier = ">=3.1" },
     { name = "joblib", marker = "extra == 'research'", specifier = ">=1.5.3" },
+    { name = "jsonschema", specifier = ">=4.20" },
     { name = "markdown", marker = "extra == 'all'", specifier = ">=3.5" },
     { name = "markdown", marker = "extra == 'dev'", specifier = ">=3.5" },
     { name = "markdown", marker = "extra == 'report'", specifier = ">=3.5" },

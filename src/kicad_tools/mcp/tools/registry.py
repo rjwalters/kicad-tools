@@ -2230,3 +2230,56 @@ register_tool(
     handler=_handler_create_pcb_from_schematic,
     category="workflow",
 )
+
+
+# -----------------------------------------------------------------------------
+# Observability Tools (issue #4897)
+# -----------------------------------------------------------------------------
+
+
+def _handler_get_recent_calls(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle get_recent_calls tool call."""
+    from kicad_tools.mcp.tools.observability import get_recent_calls
+
+    return get_recent_calls(
+        limit=params.get("limit", 20),
+        tool_name=params.get("tool_name"),
+        status=params.get("status"),
+    )
+
+
+register_tool(
+    name="get_recent_calls",
+    description=(
+        "Get recent MCP tool call history and aggregate statistics for "
+        "self-diagnosis. Returns a bounded, most-recent-first list of tool "
+        "calls (name, duration, status, error kind, error message) backed "
+        "by an in-memory ring buffer, plus all-time totals (calls per tool, "
+        "errors per kind, error rate). Use this after a tool call fails or "
+        "behaves unexpectedly to see exactly what happened, without relying "
+        "on stderr logs."
+    ),
+    parameters=_make_params(
+        properties={
+            "limit": {
+                "type": "integer",
+                "description": (
+                    "Maximum number of call records to return, most-recent-first (default: 20)"
+                ),
+                "default": 20,
+            },
+            "tool_name": {
+                "type": "string",
+                "description": "Optional filter: only return calls to this tool",
+            },
+            "status": {
+                "type": "string",
+                "description": "Optional filter: only return calls with this status",
+                "enum": ["ok", "error"],
+            },
+        },
+        required=[],
+    ),
+    handler=_handler_get_recent_calls,
+    category="observability",
+)

@@ -1,237 +1,209 @@
-# kicad-tools.org demo gallery (Astro site)
+# kicad-tools.org website
 
-Static site for the kicad-tools demo gallery (Epic #3674, Phase 2). It is a
-self-contained Astro project: it has its own `package.json` and does **not**
-depend on the repository's Python tooling or root `package.json`.
+The Astro site presents implemented capabilities, a board gallery and dated
+external-board routing evidence. It has its own `package.json` and lockfile;
+site development does not require the repository's Python or native tools.
 
-## Quick start
+## Develop and verify
 
-```bash
-cd site
-npm install        # installs Astro + TypeScript into site/node_modules
-npm run dev        # serves the site at http://localhost:4321/
-npm run build      # produces a static site in site/dist/
-npm run preview    # serves the built site/dist/ locally
-npm run check      # Astro + TypeScript type check
-npm test           # runs the loader unit tests (vitest)
-npm run copy-renders  # stage board renders into public/ (run automatically)
-```
-
-`npm run build` succeeds even on a fresh checkout with **zero** `board.json`
-files present — every board without data is listed as `status: no_artifacts`.
-
-## Gallery index page
-
-The home page (`src/pages/index.astro`) renders one card per discovered board
-using `src/components/BoardCard.astro`. Each card shows a thumbnail, the board
-name + description, a status chip, and metric badges (nets routed, DRC, layers,
-parts, cost). Badges follow the data contract's omit-when-absent rule — a badge
-appears only when its backing field is present. Cards link to `/<slug>`, the
-per-board detail route (issue #3681; that route 404s until it lands).
-
-The index also carries a static release-capabilities section (with a version
-badge) and a footer milestone marker; keep both in sync with the current
-release at each milestone.
-
-## Board detail pages
-
-Each board also has a per-board detail page at the static route `/<slug>`
-(`src/pages/[slug].astro`), generated via Astro's `getStaticPaths` driven by the
-same loader — one route per discovered board, including `no_artifacts` stubs so
-the gallery cards never 404. A detail page shows:
-
-- a four-render 2×2 gallery (`src/components/RenderGallery.astro`) — 2D
-  front/back and 3D front/back, each cell showing the real PNG or a labelled
-  placeholder so the grid never collapses;
-- a metrics table mapping every present `board.json` field (status, nets routed,
-  DRC, layers, board size, parts, cost breakdown, data-generated timestamp),
-  following the omit-when-absent rule — absent fields produce no row;
-- a downloads section linking the manufacturing package
-  (`kicad_project.zip`) plus any optional `report.pdf` / `bom_jlcpcb.csv` /
-  `cpl_jlcpcb.csv` that exist for the board (detected at build time);
-- an interactive PCB viewer (KiCanvas, vendored at
-  `public/vendor/kicanvas.js`) embedded via `<kicanvas-embed>` with a
-  loading overlay;
-- back-links to the gallery index.
-
-For `no_artifacts` boards the page renders a "not yet built" notice with four
-placeholder render cells, a status-only metrics table, and a "No manufacturing
-package available" notice — never a broken page.
-
-### Render images and downloads (`copy-renders` prebuild step)
-
-Astro's static output cannot import assets from outside `site/`, so board
-artifacts are staged into `site/public/` before the build. The
-`copy-renders` script (`scripts/copy-renders.mjs`) copies:
-
-- `boards/<id>/output/renders/*.png` →
-  `site/public/boards/<slug>/renders/<file>` (served at
-  `/boards/<slug>/renders/<file>`); and
-- the allow-listed manufacturing downloads
-  (`kicad_project.zip`, `report.pdf`, `bom_jlcpcb.csv`, `cpl_jlcpcb.csv`) from
-  `boards/<id>/output/manufacturing/` →
-  `site/public/boards/<slug>/manufacturing/<file>` (served at
-  `/boards/<slug>/manufacturing/<file>`). Bulky intermediates (gerbers, images)
-  are intentionally **not** staged.
-
-It runs automatically via the `predev` / `prebuild` npm hooks, so plain
-`npm run dev` and `npm run build` stage renders and downloads for you. It can
-also be run on its own with `npm run copy-renders`.
-
-The thumbnail fallback chain is: `renders["3d_front"]` → `renders["pcb_front"]`
-→ the static placeholder at `public/placeholder-board.svg` (used for
-`no_artifacts` boards or any board missing both render keys).
-
-The staged `site/public/boards/` tree is **git-ignored** and regenerated on
-every build — it is never committed, just like the source renders and
-`board.json` files (which are themselves generated artifacts).
-
-## Board data
-
-The build-time loader (`src/data/loadBoards.ts`) discovers board directories
-under the repository's `boards/` tree and reads each board's
-`boards/<id>/output/board.json` — the schema-v1 data contract documented in
-[`../docs/board-json-schema.md`](../docs/board-json-schema.md) and produced by
-`kct board-metrics`.
-
-The loader is resilient to missing data:
-
-- **No `board.json`** → a stub record with `status: "no_artifacts"`.
-- **Unknown `schema_version`** → skipped with a warning (a stub is emitted), so
-  the build still completes with the remaining boards.
-- **Valid `board.json`** → parsed into a typed `Board` (see `src/data/types.ts`).
-
-Boards are discovered with the same rules as the Python producer: immediate
-subdirectories of `boards/`, skipping hidden / `_`-prefixed entries, and
-descending one level into `boards/external/`.
-
-### Generating real board data (optional)
-
-`board.json` files are **not** committed to the repository — they are generated
-at runtime. To populate them for local development, run the Phase 1 command from
-the repository root:
+From the repository root:
 
 ```bash
-# From the repo root (not site/)
-uv run kct board-metrics --all
+npm --prefix site ci
+npm --prefix site run dev
 ```
 
-Then build or serve the site:
+Before requesting review:
 
 ```bash
-cd site
-npm install
-npm run dev
+npm --prefix site test
+npm --prefix site run check
+npm --prefix site run build
+npm --prefix site run preview -- --host 127.0.0.1
 ```
 
-With data present, the placeholder index lists every board's real `status`
-(`ok` / `partial` / `no_artifacts`).
+The preview serves the production build. Check the printed URL, then inspect
+home, `/benchmarks/`, a board with assets and a development board such as
+`/09-usbc-pd-power/`. Test narrow mobile and desktop widths, the first-Tab skip
+link, keyboard disclosures, focus visibility and table scrolling. Follow the
+capability/documentation links, gallery cards, report/reproduction links and
+available viewer/download links. A successful build alone does not verify
+these paths or the published website.
 
-## Deploying
+`predev` and `prebuild` run `scripts/copy-renders.mjs` automatically. To stage
+assets separately, run `npm --prefix site run copy-renders`. `site/dist/` and
+`site/public/boards/` are generated and ignored by git.
 
-Deploy after site-content or release changes; there is no scheduled deployment. The footer records the site build time and source commit, separately from board and benchmark evidence dates. Project version is read from `pyproject.toml` at build time.
+## Pages and content ownership
 
-The gallery is published **manually** to Cloudflare Pages with a locally
-authenticated `wrangler` — there is no CI auto-deploy. (The former
-`gallery-deploy.yml` GitHub Actions workflow was removed in favour of this
-script; manual `wrangler login` OAuth avoids managing Cloudflare API-token
-secrets — see operator issue #3686.)
+- `src/pages/index.astro`: capability introduction, documentation entry points
+  and gallery sections. Feature descriptions must match implemented behavior;
+  link to representative examples and identify experimental scope.
+- `src/components/Header.astro` and `src/styles/global.css`: shared navigation,
+  typography, responsive layout and keyboard focus/skip navigation.
+- `src/components/BoardCard.astro` and `src/pages/[slug].astro`: board cards,
+  detail views, evidence status, renders, KiCanvas and downloads.
+- `src/data/galleryConfig.mjs`: shared discovery exclusions. Preserve these
+  exclusions when refreshing content; do not inadvertently publish an
+  excluded project through asset staging.
+- `src/pages/benchmarks.astro` and `src/components/BenchmarkRun.astro`: current
+  dated routing attempts above the preserved historical archive.
 
-### Prerequisites (one-time)
+The primary navigation says **Routing status** and retains `/benchmarks/` for
+existing links. The September 12, 2026 collection includes actual partial
+router outputs, so it is useful engineering evidence, but it does not support
+competitive performance claims. Two other cases measured fallback inputs;
+STRF has a negative connectivity delta and its declared tuned run did not
+apply the intended rules. Keep these limitations beside the results. The
+label describes the page's purpose without promising successful routing.
 
-- **`uv`** — runs `kct board-metrics` + `kct render` ([install](https://astral.sh/uv)).
-- **`node` / `npm`** (Node 22+) — builds the Astro site.
-- **`kicad-cli`** — *optional*; needed only for board renders. Without it the
-  deploy still succeeds and the site serves placeholder thumbnails.
-- **`wrangler`**, authenticated once via `wrangler login` (OAuth). No
-  `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` env vars are required.
+Project version comes from `pyproject.toml`; no manual version badge update is
+needed. The footer separately records the site build time and source commit.
+Board report timestamps and benchmark run dates remain dates of their own
+evidence. Rebuilding the site does not make that evidence newer.
 
-### One command
+## Refresh board evidence and assets
 
-From the **repository root** (not `site/`):
+The loader discovers board directories under `boards/` and one level below
+`boards/external/`, applying the gallery exclusions. It reads optional
+`output/board.json` summaries produced by `kct board-metrics` and independently
+revalidates `output/readiness.json` against its recorded input hashes. See
+[the board data contract](../docs/board-json-schema.md).
+
+Missing, malformed or unsupported summaries do not break the gallery. Valid
+readiness can still show development progress without a summary or a
+manufacturing package. Missing/stale readiness is unverified; missing checks
+are unreported. A development status never creates a download or implies
+manufacturing release, assembly availability or hardware validation.
+
+1. Select an identified source revision and inspect the board's own generation,
+   checking and release instructions. Refresh its evidence with those producers
+   when necessary. Never edit hashes, timestamps or statuses to make stale
+   evidence look current. If verification cannot be completed, preserve the
+   unverified state and explain the limitation.
+2. Reconcile the selected PCB with its renders and any manufacturing package.
+   Check manifest hashes, the nested editable-project PCB and the standalone
+   viewer PCB. Existing committed outputs may be present; their existence is
+   not proof that they match newly generated copper.
+3. Generate optional summaries from the repository root:
+
+   ```bash
+   uv run kct board-metrics --all
+   ```
+
+   This extracts metadata and consumes readiness; it does not perform the
+   missing native checks or qualify a manufacturing package.
+4. Build and inspect the resulting gallery/detail pages. Confirm status,
+   evidence date, render correspondence and which downloads are actually
+   available. Keep generated summaries and staged assets out of source commits.
+
+The staging script copies SVG/PNG renders, the explicit manufacturing-file
+allowlist, an available full `manufacturing.zip`, and a selected output PCB.
+It prefers an output filename containing `_routed` and publishes the viewer
+file as `/boards/<slug>/board.kicad_pcb`. Inspect the selected source when
+multiple candidates exist. Missing assets produce placeholders or omitted
+links, not fabricated evidence. Adding a new download requires matching page
+and staging behavior; consult `scripts/copy-renders.mjs` and the detail page
+instead of copying an entire output directory into public assets.
+
+## Refresh external routing evidence
+
+Follow the pinned input/protocol procedure in
+[the external benchmark guide](../benchmarks/external/README.md) and
+[the results guide](../benchmarks/external/results/README.md). The
+[September collection](../benchmarks/external/results/2026-09-12/README.md)
+records a complete four-case example, including failures and limitations.
+
+- Preserve old collections. Commit new reports under a new dated directory;
+  retain raw JSON, human-readable reports and reproducibility records together.
+  Record the tested source revision, environment/backend, inputs, protocol,
+  runtime budget and actual outcome. Fetch third-party boards at runtime under
+  their licensing terms; do not vendor them just to provide a website link.
+- Distinguish input connectivity from newly routed connections and measured
+  final connectivity. Keep signed regressions, failed-attempt timing,
+  fallback-input provenance and absent checks explicit. A protocol name alone
+  does not prove that tuning was applied. Keep vendor references separate.
+- Review ingestion through `src/data/loadBenchmarks.ts` and the report contract
+  in [benchmark-external-report-schema.md](../docs/benchmark-external-report-schema.md).
+  The site reads committed data; building it does not launch routing runs.
+- Add reviewed interpretation in `src/data/benchmarkContext.ts` against the
+  exact report SHA-256. Never transfer old interpretation solely by board name
+  or silently rebind it after changing report bytes. Check collection/runtime
+  notes, per-run limitations and raw/reproduction links in the built page.
+- Run the site tests/check/build and inspect both the new cards and preserved
+  archive. A malformed or undiscovered report can be skipped by the loader;
+  confirm that every intended case is visibly represented.
+
+## Publish and verify public bytes
+
+Publication is manual through `../scripts/deploy-site.sh`; there is no scheduled
+or CI auto-deploy. Use one publication owner for a coordinated release. In
+particular, #5318 demonstrated why updating only Board05's viewer would leave
+its stale PCB in the downloadable project. Verify viewer, renders and packages
+as one set.
+
+The deployment workflow requires `uv`, Node/npm and authenticated `wrangler`
+(or its `npx` fallback). `kicad-cli` is optional for the script, but required
+for fresh renders. If it is absent, inspect and report the provenance of
+retained renders; do not describe them as newly rendered. The script's
+Cloudflare account identity guard must pass for the intended existing project.
+Do not bypass the guard to resolve an authentication or wrong-account failure.
+
+From the repository root, first prepare and inspect the build:
+
+```bash
+./scripts/deploy-site.sh --no-deploy --no-3d
+```
+
+This generates available renders/metrics and builds the site without uploading.
+Review its warnings, asset hashes and local pages. `--no-3d` omits fresh 3D
+rendering; use the full render path when new copper requires new images.
+After the content PR is reviewed and merged, select that clean integrated
+revision and publish:
 
 ```bash
 ./scripts/deploy-site.sh
 ```
 
-This runs the full pipeline — board metrics → renders (3D via `xvfb-run` when
-available, with a 2D-only fallback) → `npm --prefix site ci && run build` →
-`wrangler pages deploy site/dist --project-name kicad-tools --branch main` —
-and prints the deployed URL.
+The script rebuilds before upload, so inspect the final staged bytes as well.
+`--preview` targets a preview branch rather than production; inspect the
+returned URL and branch before treating it as a production release. See
+`./scripts/deploy-site.sh --help` for available options.
 
-Useful flags:
+Before uploading, retain the current production deployment identifier, source
+commit and a verified copy of its staged assets. Record the new deployment
+identifier, selected commit, deployed URL, build time and before/after
+verification results in the issue/PR:
 
-```bash
-./scripts/deploy-site.sh --no-deploy   # build only (metrics + render + build); skip wrangler
-./scripts/deploy-site.sh --preview     # deploy to a preview branch (not production main)
-./scripts/deploy-site.sh --no-3d       # skip 3D renders (headless machines without X)
-./scripts/deploy-site.sh --help        # show usage
-```
+1. Visit the public homepage, routing-status page and representative board
+   pages, including the changed board and a development board. Verify the
+   footer source/build identity, evidence dates and outcome/readiness labels.
+2. Repeat the mobile/keyboard and navigation checks against the deployed site.
+   Fetch report/doc links and all affected viewer/render/download assets.
+3. Compare public asset SHA-256 hashes to the final staged build. Inspect
+   nested package PCBs and manifest entries as well as the viewer. When copper
+   was repaired, repeat the relevant geometry census and visually inspect the
+   affected layer. Do not equate HTTP200 or a successful upload with freshness.
+4. Record unresolved checks explicitly. Close publication work only after the
+   public artifact checks pass; a local passing build is preparation evidence.
 
-Generated artifacts (`board.json`, renders, `site/public/boards/`,
-`site/dist/`) are git-ignored and never committed by the script.
+Check both the deployment-specific URL and the production domain. Record cache
+response headers and compare ordinary public requests with a fresh browser
+session and cache-bypassing requests. A fresh deployment URL alone does not
+prove that the production domain serves the same bytes. If results disagree,
+keep publication acceptance open and investigate the deployment mapping or
+cache before declaring the refresh complete.
 
-The custom domain (`kicad-tools.org` → `kicad-tools.pages.dev`) is operator
-issue #3686 and is out of scope for this script, which targets the default
-`kicad-tools.pages.dev` Pages hostname.
+If publication regresses pages or assets, the publication owner should restore
+the recorded, verified production deployment through the existing project's
+deployment controls. Confirm the intended account/project before acting. If
+that deployment cannot be restored, prepare the recorded source revision in a
+managed worktree and rebuild with its verified asset set, inspect it locally,
+then publish through the same guarded script. Rebuilding an old revision with
+different generated assets is not an exact rollback. After either recovery,
+repeat the public identity, page and asset checks above and record the restored
+deployment identifier and any remaining limitations.
 
-## Layout
-
-```
-site/
-  package.json          # Astro + TypeScript dependencies (isolated from repo root)
-  astro.config.mjs      # Astro configuration (static output)
-  tsconfig.json         # extends astro/tsconfigs/strict
-  scripts/
-    copy-renders.mjs    # prebuild: stage renders + manufacturing files into public/
-  public/
-    placeholder-board.svg  # thumbnail/render fallback for boards with no renders
-  src/
-    components/
-      BoardCard.astro    # gallery card (thumbnail + badges + status + link)
-      RenderGallery.astro # detail-page 2×2 render grid
-      Header.astro       # shared site header
-      Footer.astro       # shared site footer
-    data/
-      types.ts           # Board / BoardSize / CostEstimate types (schema v1)
-      loadBoards.ts      # build-time board data loader
-      loadBoards.test.ts
-      boardStatus.ts     # per-board readiness/status derivation
-      boardStatus.test.ts
-      galleryConfig.mjs  # gallery ordering/config
-    pages/
-      index.astro        # gallery index — one card per board
-      [slug].astro       # per-board detail page (renders, metrics, viewer, downloads)
-```
-
-## Scope
-
-This site ships the scaffold, the board data loader, the gallery index page
-(cards, renders, metric badges), and the per-board detail page (render gallery,
-metrics table, downloads, and the interactive KiCanvas PCB viewer).
-
-### Development readiness without a board summary
-
-`kct board-metrics` (`src/kicad_tools/cli/board_metrics_cmd.py`) already
-extracts static development metadata without a manufacturing directory and
-reads readiness through `board_readiness.py`; it does not manufacture passing
-checks or an export. Its `emit_board_json` writes the optional gallery summary.
-The readiness command/board-specific producer writes `output/readiness.json`
-independently. See `docs/board-json-schema.md`, “Development boards without
-manufacturing export”.
-
-The site also loads readiness when that summary is absent, unreadable, malformed,
-or unsupported. `loadReadiness` validates report shape, each recorded input's
-SHA-256 and board-relative path, and coverage of current project/rule files.
-Rejected evidence exposes no passing checks. A valid fallback record retains
-`no_artifacts` internally and displays **In development**, never a release-ready
-badge or inferred download. Full summaries retain their existing readiness gates.
-Gallery and detail pages share per-check labels and status explanations; absent
-checks are unreported, not passes. Evidence dates remain report dates.
-
-At main `696315f0`, Board09 (`09-usbc-pd-power`) has no `board.json` or
-manufacturing package but its September 10 readiness report validates all 20
-input hashes: eight checks passed, manufacturer rules failed, and manufacturing
-release was not run. This is a real ingestion example, not new board qualification.
-Refresh the readiness evidence against current files before rebuilding; do not
-edit hashes or statuses to make stale evidence appear current.
+This site presents project evidence. Publication does not itself establish
+DRC cleanliness, manufacturing readiness, component availability or physical
+hardware performance.

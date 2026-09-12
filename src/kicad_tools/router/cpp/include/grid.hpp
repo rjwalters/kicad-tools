@@ -272,8 +272,33 @@ public:
     //   - validate_same_net_drill_spacing (via vs stored vias, same net)
     //
     // exclude_net: net ID of the route being validated (same-net OK)
-    // exclude_ref_hashes: FNV-1a hashes of component refs to exclude
-    //                     (start/end pad components, Issue #1764)
+    // exclude_ref_hashes: FNV-1a hashes of component refs whose
+    //                     same-component carve-out FULLY SKIPS the
+    //                     positive-clearance check (start/end pad
+    //                     components, Issue #1764).  This is the
+    //                     ``_relax_same_component_clearance`` corridor-relief
+    //                     flavour (Issue #2452): the search physically
+    //                     unblocked the overlap corridor down to a
+    //                     ``trace_width / 2`` floor, which those blocked-cell
+    //                     constructions already enforce, and the pad's
+    //                     ``clearance_override`` was never shrunk -- so
+    //                     clamping here would reject the very routes #2452
+    //                     exists to permit.
+    // clamp_ref_hashes: Issue #5166 -- FNV-1a hashes of component refs whose
+    //                     same-component carve-out CLAMPS instead of skipping.
+    //                     A ref lands here when it reaches the carve-out only
+    //                     because a configured override (per-component
+    //                     ``component_clearances`` / ``fine_pitch_clearance``
+    //                     / net-class ``escape_clearance``) resolved SMALLER
+    //                     than the default ``trace_clearance``.  That smaller
+    //                     value is an authored design rule, so it is enforced
+    //                     as a hard floor (``pad.clearance_override`` /
+    //                     ``pad.via_clearance_override``) rather than meaning
+    //                     "clearance unchecked entirely" -- pre-#5166 the
+    //                     unconditional skip accepted ANY positive gap, e.g.
+    //                     0.02mm against a pad whose rules authored 0.10mm.
+    //                     Defaults to empty, which reproduces the pre-#5166
+    //                     behaviour exactly.
     // trace_clearance: default clearance for segments
     // via_clearance: default clearance for vias
     // min_drill_clearance: minimum drill-to-drill spacing (same-net)
@@ -304,7 +329,8 @@ public:
         float via_clearance,
         float min_drill_clearance,
         int partner_net = -1,
-        float intra_pair_clearance = 0.0f) const;
+        float intra_pair_clearance = 0.0f,
+        const std::vector<uint32_t>& clamp_ref_hashes = {}) const;
 
     // -----------------------------------------------------------------------
     // Pairwise (HV-isolation) domain clearance -- Issue #4510, Phase 2a of
