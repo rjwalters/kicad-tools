@@ -82,3 +82,24 @@ export function fmtDiffPairs(report: BenchmarkReport): string {
   if (pairs === null) return "n/a";
   return `${pairs.pairs_complete}/${pairs.pairs_total}`;
 }
+
+/** Archived README context applies only to the two documented August reports.
+ * Explicit provenance always takes precedence; zero copper alone proves no outcome.
+ * Legacy outcome/artifact cells still remain unknown.
+ */
+export function isHistoricalStoppedAttempt(report: BenchmarkReport): boolean {
+  return isLegacyOutcome(report)
+    && report.tool_commit === "636fd368"
+    && report.generated_at.startsWith("2026-08-25T")
+    && report.protocol === "zero-touch"
+    && ["pocketbeagle", "beagleconnect_freedom"].includes(report.board_id)
+    && report.copper.via_count === 0 && report.copper.wirelength_mm === 0
+    && report.notes.some((note) => note.startsWith("router produced no output file -- reporting the unrouted, ripped-up board"));
+}
+
+/** Render an ISO-8601 timestamp as a bare `YYYY-MM-DD` date, matching the
+ *  dated style `benchmarks/external/results/README.md` and the schema doc
+ *  already use (e.g. "2026-08-24"). */
+export function fmtDateOnly(iso: string): string {
+  return iso.slice(0, 10);
+}
