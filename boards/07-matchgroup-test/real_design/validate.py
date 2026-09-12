@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import TypedDict
 
 from shapely.geometry import Point, Polygon  # type: ignore[import-untyped]
 from shapely.ops import unary_union  # type: ignore[import-untyped]
@@ -203,6 +204,16 @@ def net_via_capacitance_pf(
     return total_pf
 
 
+class DirectionLoad(TypedDict):
+    receiver_allowance_pf: float
+    receiver_basis: str
+    estimated_external_load_pf: float
+    external_limit_pf: float
+    limit_basis: str
+    margin_pf: float
+    passes: bool
+
+
 # Driver-load screening budgets, not universal absolute-maximum ratings.
 DQ_DRIVER_LIMITS = {
     "SDRAM drives, MCU receives": (
@@ -258,7 +269,7 @@ def external_load(
         via_basis = "1 pF/via allowance (geometry unavailable)"
 
     limits = DQ_DRIVER_LIMITS if dq_driver_limits is None else dq_driver_limits
-    per_direction = {}
+    per_direction: dict[str, DirectionLoad] = {}
     for direction, (receiver_pf, basis) in directions.items():
         if name.startswith("DQ"):
             limit_pf, limit_basis = limits[direction]
