@@ -1830,21 +1830,6 @@ class ConnectivityValidator:
             return None
         return poly
 
-    def _synthetic_via_radii(self, synthetic_nodes: set[str]) -> dict[str, float]:
-        """Map each ``__via{index}`` node to its copper radius (``size / 2``).
-
-        The synthetic via node ids created in :meth:`extract_pad_partition`
-        (step 1b) are ``f"__via{index}"`` in board via order, so we recover the
-        copper radius by re-enumerating ``self.pcb.vias``.  Only nodes present
-        in ``synthetic_nodes`` are returned.
-        """
-        radii: dict[str, float] = {}
-        for via_index, via in enumerate(self.pcb.vias):
-            node_id = f"__via{via_index}"
-            if node_id in synthetic_nodes:
-                radii[node_id] = max(getattr(via, "size", 0.0) or 0.0, 0.0) / 2.0
-        return radii
-
     def _via_copper_geom(self, pos: tuple[float, float], radius: float) -> Any:
         """Build a shapely geometry approximating a via's copper (issue #3909).
 
