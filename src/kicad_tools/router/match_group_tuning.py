@@ -2587,6 +2587,7 @@ def _tune_match_group_of_pairs(
 
     # --- Measure every member length ------------------------------------
     from .length import LengthTracker  # avoid cycle
+    from .primitives import Route
 
     member_lengths: dict[int, float] = {}
     for net_id in group.net_ids:
@@ -2898,9 +2899,27 @@ def _tune_match_group_of_pairs(
                 outer_normal_hint=hint,
             )
             attempt_generator = SerpentineGenerator(attempt_config)
-            candidate_p_route, p_serp_result = attempt_generator.add_serpentine(
-                current_p, target_length
-            )
+            if fixed_segment_ids:
+                # Honor the selected mutable host. add_serpentine would rank
+                # the full route again and could select a longer fixed escape.
+                p_serp_result = attempt_generator.generate_trombone(
+                    p_insertion_segment, target_length - current_p_length
+                )
+                candidate_p_route = Route(
+                    net=current_p.net,
+                    net_name=current_p.net_name,
+                    segments=(
+                        current_p.segments[:_p_seg_idx]
+                        + p_serp_result.new_segments
+                        + current_p.segments[_p_seg_idx + 1 :]
+                    ),
+                    vias=current_p.vias.copy(),
+                    is_escape=current_p.is_escape,
+                )
+            else:
+                candidate_p_route, p_serp_result = attempt_generator.add_serpentine(
+                    current_p, target_length
+                )
             per_pair_result_p.serpentine_results.append(p_serp_result)
             per_pair_result_n.serpentine_results.append(p_serp_result)
 

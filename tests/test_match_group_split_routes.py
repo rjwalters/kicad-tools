@@ -203,13 +203,15 @@ def test_failed_insertion_preserves_original_fragment_objects():
     assert {id(r) for r in ar.grid.routes} == {id(r) for r in original}
 
 
-def test_pair_tuning_preserves_both_escape_fragments():
+@pytest.mark.parametrize("escape_end", [6, 17])
+def test_pair_tuning_preserves_both_escape_fragments(escape_end):
     ar, _ = setup_routes()
     ar.routes = [
-        fragment(net, 5, 6, y, escape=True) for net, y in [(1, 10), (2, 11), (3, 30), (4, 31)]
+        fragment(net, 5, escape_end, y, escape=True)
+        for net, y in [(1, 10), (2, 11), (3, 30), (4, 31)]
     ] + [
-        fragment(net, 6, end, y)
-        for net, end, y in [(1, 15, 10), (2, 15, 11), (3, 17, 30), (4, 17, 31)]
+        fragment(net, escape_end, end, y)
+        for net, end, y in [(1, 25, 10), (2, 25, 11), (3, 27, 30), (4, 27, 31)]
     ]
     ar.restore_route_snapshot(ar.routes)
     escapes = ar.routes[:4]
@@ -225,6 +227,6 @@ def test_pair_tuning_preserves_both_escape_fragments():
     assert results[1][1].reason == "tuned"
     assert results[2][1].reason == "tuned"
     for net in (1, 2):
-        assert length(ar, net) == pytest.approx(12, abs=0.1)
+        assert length(ar, net) == pytest.approx(22, abs=0.1)
         assert sum(r.net == net for r in ar.routes) == 2
     assert all(any(r is escape for r in ar.routes) for escape in escapes)
