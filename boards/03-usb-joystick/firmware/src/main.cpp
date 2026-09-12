@@ -39,6 +39,7 @@ void setup() {
 }
 
 void loop() {
+    USBDevice.poll(); // Restore clocks before cadence checks or endpoint traffic.
     static uint32_t previous = 0;
     const uint32_t now = millis();
     if (uint32_t(now - previous) < 2) return;

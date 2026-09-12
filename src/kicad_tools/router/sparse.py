@@ -257,11 +257,12 @@ class SparseRoutingGraph:
         2. Contour waypoints around the pad clearance boundary
         3. Registers the pad as an obstacle
         """
+        from .primitives import pad_half_extents
+
         # Determine effective dimensions
         if pad.through_hole:
             if pad.width > 0 and pad.height > 0:
-                half_w = pad.width / 2
-                half_h = pad.height / 2
+                half_w, half_h = pad_half_extents(pad)
             elif pad.drill > 0:
                 half_w = (pad.drill + 0.7) / 2
                 half_h = half_w
@@ -269,8 +270,7 @@ class SparseRoutingGraph:
                 half_w = 0.85
                 half_h = 0.85
         else:
-            half_w = pad.width / 2
-            half_h = pad.height / 2
+            half_w, half_h = pad_half_extents(pad)
 
         # Layers affected
         if pad.through_hole:
@@ -301,8 +301,26 @@ class SparseRoutingGraph:
             self.obstacles[layer].append((pad.x, pad.y, half_w, half_h, self.clearance_buffer))
 
             # Generate contour waypoints around clearance boundary
-            contour_dist = max(half_w, half_h) + self.clearance_buffer
-            self._add_contour_waypoints(pad.x, pad.y, contour_dist, layer, pad.net)
+            # Rectangle corners are essential: a circle based on max(half_w,
+            # half_h) can put diagonal waypoints inside the expanded obstacle.
+            expanded_w = half_w + self.clearance_buffer + 1e-9
+            expanded_h = half_h + self.clearance_buffer + 1e-9
+            offsets = {(sx * expanded_w, sy * expanded_h) for sx in (-1, 1) for sy in (-1, 1)}
+            for i in range(self.contour_samples):
+                angle = 2 * math.pi * i / self.contour_samples
+                dx, dy = math.cos(angle), math.sin(angle)
+                scale = min(
+                    expanded_w / abs(dx) if abs(dx) > 1e-12 else math.inf,
+                    expanded_h / abs(dy) if abs(dy) > 1e-12 else math.inf,
+                )
+                offsets.add((dx * scale, dy * scale))
+            for dx, dy in sorted(offsets):
+                x, y = pad.x + dx, pad.y + dy
+                if self._in_bounds(x, y):
+                    self.waypoints[layer].append(
+                        Waypoint(x=x, y=y, layer=layer, waypoint_type="contour", net=pad.net)
+                    )
+                    self.stats["contour_waypoints"] += 1
 
     def _add_contour_waypoints(
         self, cx: float, cy: float, radius: float, layer: int, exclude_net: int = 0
