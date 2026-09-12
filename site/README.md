@@ -19,6 +19,7 @@ Before requesting review:
 npm --prefix site test
 npm --prefix site run check
 npm --prefix site run build
+npm --prefix site run check-links -- --external
 npm --prefix site run preview -- --host 127.0.0.1
 ```
 
@@ -29,6 +30,15 @@ link, keyboard disclosures, focus visibility and table scrolling. Follow the
 capability/documentation links, gallery cards, report/reproduction links and
 available viewer/download links. A successful build alone does not verify
 these paths or the published website.
+
+`check-links` crawls the built `dist/` output for broken internal
+link/asset targets and unresolved same-page `#fragment` anchors, and lists
+external `http(s)://` destinations (report/doc links, GitHub references).
+Pass `--external` to also HEAD-check those external URLs; omit it in
+network-restricted environments and spot-check the printed list by hand
+instead. This is a fast automated first pass, not a substitute for the
+manual mobile/keyboard/contrast review above — it cannot see rendered
+layout, focus order or KiCanvas viewer behavior.
 
 `predev` and `prebuild` run `scripts/copy-renders.mjs` automatically. To stage
 assets separately, run `npm --prefix site run copy-renders`. `site/dist/` and
