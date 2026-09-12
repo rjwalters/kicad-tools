@@ -697,7 +697,14 @@ class TestPhysicalLayerGraph:
         fp.pads.append(deepcopy(fp.pads[0]))
         assert resolve_current_path(pcb, _trunk_spec()).status == "unresolved"
 
-    def test_board09_via_array_stays_ambiguous_and_read_only(self):
+    def test_board09_via_array_resolves_and_is_read_only(self):
+        """Issue #5197: a benign parallel via array must not force 'ambiguous'.
+
+        ``RSH1.4`` fans into three parallel vias reunited by a wide ``B.Cu``
+        trace -- standard high-current practice, not an alternate operating
+        mode. Before #5197 this made the WHOLE net ambiguous, including
+        unrelated low-current taps that never touch the array.
+        """
         from pathlib import Path
 
         from kicad_tools.schema.pcb import PCB
@@ -708,14 +715,30 @@ class TestPhysicalLayerGraph:
         )
         before = board.read_bytes()
         pcb = PCB.load(board)
-        spec = CurrentPathSpec(
+        trunk = CurrentPathSpec(
             name="output",
             net_name="+5V_OUT",
             source=PathEndpoint("RSH1", "4"),
             sink=PathEndpoint("J2", "1"),
             continuous_a=3,
         )
-        assert resolve_current_path(pcb, spec).status == "ambiguous"
+        result = resolve_current_path(pcb, trunk)
+        assert result.status == "resolved"
+        assert result.segments
+        assert result.length_mm > 0.0
+
+        # Unrelated low-current taps sharing the same array-tainted source
+        # pad must resolve too -- the array is not "the whole net".
+        for sink_ref, sink_pad in (("R16", "1"), ("U3", "8")):
+            tap = CurrentPathSpec(
+                name=f"tap-{sink_ref}",
+                net_name="+5V_OUT",
+                source=PathEndpoint("RSH1", "4"),
+                sink=PathEndpoint(sink_ref, sink_pad),
+                continuous_a=0.02,
+            )
+            assert resolve_current_path(pcb, tap).status == "resolved"
+
         assert board.read_bytes() == before
 
     def test_transitive_pad_union_does_not_erase_external_return(self):

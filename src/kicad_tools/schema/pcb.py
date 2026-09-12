@@ -504,6 +504,8 @@ class FootprintText:
     font_thickness: float  # stroke thickness in mm
     uuid: str = ""
     hidden: bool = False
+    # Serialized board-frame angle; position remains footprint-local for fp_text.
+    rotation: float = 0.0
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> FootprintText:
@@ -525,6 +527,7 @@ class FootprintText:
             x = at.get_float(0) or 0.0
             y = at.get_float(1) or 0.0
             fp_text.position = (x, y)
+            fp_text.rotation = at.get_float(2) or 0.0
 
         # Layer
         if layer := sexp.find("layer"):
@@ -571,6 +574,7 @@ class FootprintText:
             x = at.get_float(0) or 0.0
             y = at.get_float(1) or 0.0
             fp_text.position = (x, y)
+            fp_text.rotation = at.get_float(2) or 0.0
 
         # Layer
         if layer := sexp.find("layer"):
@@ -686,6 +690,8 @@ class GraphicText:
     font_thickness: float  # stroke thickness in mm
     uuid: str = ""
     hidden: bool = False
+    # Board text position and serialized angle are both board-frame.
+    rotation: float = 0.0
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> GraphicText:
@@ -703,6 +709,7 @@ class GraphicText:
         # Position
         if at := sexp.find("at"):
             gr_text.position = (at.get_float(0) or 0.0, at.get_float(1) or 0.0)
+            gr_text.rotation = at.get_float(2) or 0.0
 
         # Layer
         if layer := sexp.find("layer"):

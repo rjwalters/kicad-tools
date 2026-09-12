@@ -290,6 +290,7 @@ CLI_MFR_SITES: list[tuple[str, list[str], str]] = [
     ("check", ["check", "dummy.kicad_pcb"], "mfr"),
     ("fix-vias", ["fix-vias", "dummy.kicad_pcb"], "mfr"),
     ("fix-silkscreen", ["fix-silkscreen", "dummy.kicad_pcb"], "mfr"),
+    ("place-silk-refs", ["place-silk-refs", "dummy.kicad_pcb"], "mfr"),
     ("repair-clearance", ["repair-clearance", "dummy.kicad_pcb"], "mfr"),
     ("estimate cost", ["estimate", "cost", "dummy.kicad_pcb"], "mfr"),
     ("audit", ["audit", "dummy.kicad_pro"], "audit_mfr"),

@@ -2117,6 +2117,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             # Extract pad number/pin
             pin_match = re.search(r'\(pad\s+"?([^"\s)]+)"?', pad_block)
             pin = pin_match.group(1) if pin_match else ""
+            pad_shape = _pad_shape_from_block(pad_block, ref, pin)
 
             # Extract pad type for through_hole detection
             is_thru = "thru_hole" in pad_block
@@ -2182,6 +2183,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                     through_hole=is_thru,
                     footprint_name=footprint_name,
                     rotation=pad_rotation,
+                    shape=pad_shape,
                 )
             )
 
@@ -3140,6 +3142,7 @@ def route_pcb(
                     "x": cx + rx,
                     "y": cy + ry,
                     "width": pad.get("width", 0.5),
+                    "shape": pad.get("shape", "rect"),
                     "height": pad.get("height", 0.5),
                     "net": net_num,
                     "net_name": net_name,
@@ -3173,6 +3176,45 @@ def route_pcb(
     )
 
     return sexp, stats
+
+
+def _routing_pad_shape(shape: str, *, ref: str, pin: str, has_padstack: bool = False) -> str:
+    """Validate physical metadata before reducing a source pad to router geometry.
+
+    Oval and roundrect copper fits inside the rotated nominal rectangle.
+    Custom primitives and layer-specific padstacks can extend beyond that box;
+    routing must stop until their actual copper bounds are supported.
+    """
+    if has_padstack or shape not in {"circle", "rect", "oval", "roundrect"}:
+        geometry = "layer-specific padstack" if has_padstack else repr(shape)
+        raise ValueError(
+            f"Unsupported routing geometry {geometry} for pad {ref}.{pin}; "
+            "use circle, rect, oval, or roundrect pads without a padstack, "
+            "or route this board with a router supporting its full copper geometry."
+        )
+    return shape
+
+
+def _pad_shape_from_block(pad_block: str, ref: str, pin: str) -> str:
+    """Read the physical shape token, including empty or unquoted pad numbers."""
+    match = re.match(r'\(pad\s+(?:"[^\"]*"|[^\s()]+)\s+\w+\s+([^\s()]+)', pad_block)
+    return _routing_pad_shape(
+        match.group(1) if match else "",
+        ref=ref,
+        pin=pin,
+        has_padstack=re.search(r"\(padstack(?:\s|\))", pad_block) is not None,
+    )
+
+
+def _schema_pad_shape(pad, ref: str) -> str:
+    """Preserve schema shape while rejecting unsupported layer-specific copper."""
+    node = getattr(pad, "_sexp_node", None)
+    return _routing_pad_shape(
+        pad.shape,
+        ref=ref,
+        pin=pad.number,
+        has_padstack=node is not None and node.find("padstack") is not None,
+    )
 
 
 def _resolve_pad_dims_and_rotation(
@@ -3351,6 +3393,7 @@ def _install_fine_pitch_regions_from_components(
                         through_hole=bool(pad_info.get("through_hole", False)),
                         drill=float(pad_info.get("drill", 0.0)),
                         rotation=float(pad_info.get("rotation", 0.0)),
+                        shape=pad_info.get("shape", "rect"),
                     )
                 )
             except (TypeError, ValueError, KeyError):
@@ -3627,6 +3670,7 @@ def load_pcb_for_routing(
                 continue
             pad_num = pad_start.group(1) or pad_start.group(2)
             pad_type = pad_start.group(3)  # smd or thru_hole
+            pad_shape = _pad_shape_from_block(pad_block, ref, pad_num)
 
             # Extract at position (now searches entire multi-line block)
             at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", pad_block)
@@ -3730,6 +3774,7 @@ def load_pcb_for_routing(
                     "drill": drill_size,
                     "layer": pad_layer,
                     "rotation": pad_rotation,
+                    "shape": pad_shape,
                 }
             )
 

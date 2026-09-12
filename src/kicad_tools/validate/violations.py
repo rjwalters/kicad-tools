@@ -56,6 +56,7 @@ class DRCViolation:
     waived: bool = False
     waiver_reason: str | None = None
     waiver_issue: str | None = None
+    closest_locations: tuple[tuple[float, float], ...] = ()
 
     def __post_init__(self) -> None:
         """Validate severity value."""
@@ -113,6 +114,8 @@ class DRCViolation:
             "status": "waived" if self.waived else self.severity,
             "waived": self.waived,
         }
+        if self.closest_locations:
+            data["closest_locations"] = [list(point) for point in self.closest_locations]
         if self.waived:
             data["waiver_reason"] = self.waiver_reason
             data["waiver_issue"] = self.waiver_issue

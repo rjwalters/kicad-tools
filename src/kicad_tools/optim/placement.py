@@ -1135,33 +1135,32 @@ class PlacementOptimizer:
         Returns:
             Force vector on the point
         """
-        edge = edge_end - edge_start
-        edge_len = edge.magnitude()
+        # Keep intermediate coordinates scalar: this hot path runs once per
+        # edge sample, so temporary Vector2D objects dominate the CPU fallback.
+        edge_x = edge_end.x - edge_start.x
+        edge_y = edge_end.y - edge_start.y
+        edge_len = math.sqrt(edge_x * edge_x + edge_y * edge_y)
         if edge_len < 1e-10:
             return Vector2D(0.0, 0.0)
 
-        # Vector from edge start to point
-        to_point = point - edge_start
-
-        # Project point onto edge line
-        t = to_point.dot(edge) / (edge_len * edge_len)
-        t = max(0.0, min(1.0, t))  # Clamp to edge
-
-        # Closest point on edge
-        closest = edge_start + edge * t
-
-        # Vector from closest point to test point
-        displacement = point - closest
-        distance = displacement.magnitude()
-
-        # Clamp minimum distance to prevent singularity
-        distance = max(distance, self.config.min_distance)
-
-        # Force magnitude: lambda * L / r^2 (1/r^2 falloff prevents divergence)
+        point_x = point.x - edge_start.x
+        point_y = point.y - edge_start.y
+        t = (point_x * edge_x + point_y * edge_y) / (edge_len * edge_len)
+        t = max(0.0, min(1.0, t))
+        displacement_x = point.x - (edge_start.x + edge_x * t)
+        displacement_y = point.y - (edge_start.y + edge_y * t)
+        magnitude = math.sqrt(displacement_x * displacement_x + displacement_y * displacement_y)
+        distance = max(magnitude, self.config.min_distance)
         force_mag = charge_density * edge_len / (distance * distance)
 
-        # Force direction: away from edge
-        return displacement.normalized() * force_mag
+        # Normalize using the actual displacement, independently of the force
+        # singularity clamp, exactly as Vector2D.normalized() does.
+        if magnitude < 1e-10:
+            return Vector2D(0.0 * force_mag, 0.0 * force_mag)
+        return Vector2D(
+            (displacement_x / magnitude) * force_mag,
+            (displacement_y / magnitude) * force_mag,
+        )
 
     def compute_edge_to_edge_force(
         self,
