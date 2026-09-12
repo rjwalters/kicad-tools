@@ -382,6 +382,39 @@ def _silk_side(layer: str) -> str | None:
     return None
 
 
+def _shared_endpoint(
+    ends_a: tuple[tuple[float, float], tuple[float, float]],
+    ends_b: tuple[tuple[float, float], tuple[float, float]],
+    epsilon: float = _CLEARANCE_EPSILON_MM,
+) -> tuple[float, float] | None:
+    """Return the single point shared by two 2-endpoint segments, if any.
+
+    Endpoints are matched by **distance within ``epsilon``**, not exact
+    equality -- real-world footprint outlines routinely have nominally-shared
+    corner coordinates that differ by a few ULPs (independent rounding at
+    export time), which exact tuple equality misses (#4987).  ``epsilon``
+    mirrors ``_CLEARANCE_EPSILON_MM`` (0.1 micron), several orders of
+    magnitude below any manufacturing tolerance.
+
+    Returns ``None`` when zero or **more than one** endpoint pair matches --
+    two segments that coincide at both endpoints (a duplicate line) are not a
+    single-point join and must still be treated as a real overlap.
+    """
+    matched: list[tuple[float, float]] = []
+    used_b: set[int] = set()
+    for pa in ends_a:
+        for j, pb in enumerate(ends_b):
+            if j in used_b:
+                continue
+            if math.dist(pa, pb) <= epsilon:
+                matched.append(pa)
+                used_b.add(j)
+                break
+    if len(matched) == 1:
+        return matched[0]
+    return None
+
+
 def _fp_transform(footprint: Footprint) -> _Transform:
     """Return a ``(x, y) -> (X, Y)`` local->board transform for a footprint."""
     fp_x, fp_y = footprint.position
@@ -571,13 +604,17 @@ def _iter_via_apertures(
 
 def _iter_silk_geometries(
     pcb: PCB,
-) -> Iterator[tuple[str, _Geometry, str, tuple[float, float], str]]:
-    """Yield ``(side, geom, label, location, layer)`` for every silk element.
+) -> Iterator[tuple[str, _Geometry, str, tuple[float, float], str, str]]:
+    """Yield ``(side, geom, label, location, layer, uuid)`` for every silk element.
 
     ``side`` is ``"F"`` or ``"B"``.  ``geom`` is a shapely geometry in board
     coordinates.  Covers footprint texts/graphics (transformed from local) and
     board-level gr_text/gr_graphics (already board-relative).  Hidden text is
-    skipped; zero-length text and unmodeled graphics are skipped.
+    skipped; zero-length text and unmodeled graphics are skipped.  ``uuid`` is
+    the element's own KiCad UUID (``""`` when unset, e.g. synthetic fixtures)
+    -- consumers that need to disambiguate same-label siblings (multiple
+    ``fp_line`` strokes on one footprint all share the same generic label) can
+    append it; most consumers ignore it.
     """
     # Footprint silk
     for footprint in pcb.footprints:
@@ -594,7 +631,7 @@ def _iter_silk_geometries(
             if geom is None:
                 continue
             label = f"{footprint.reference} ({fp_text.text_type})"
-            yield side, geom, label, center, fp_text.layer
+            yield side, geom, label, center, fp_text.layer, fp_text.uuid
 
         for graphic in footprint.graphics:
             side = _silk_side(graphic.layer)
@@ -604,7 +641,7 @@ def _iter_silk_geometries(
             if geom is None:
                 continue
             label = f"{footprint.reference} (fp_{graphic.graphic_type})"
-            yield side, geom, label, footprint.position, graphic.layer
+            yield side, geom, label, footprint.position, graphic.layer, graphic.uuid
 
     # Board-level silk (already board-relative)
     for text in pcb.texts:
@@ -615,7 +652,7 @@ def _iter_silk_geometries(
         if geom is None:
             continue
         label = text.text[:20] if text.text else "gr_text"
-        yield side, geom, label, text.position, text.layer
+        yield side, geom, label, text.position, text.layer, text.uuid
 
     for board_graphic in pcb.graphics:
         side = _silk_side(board_graphic.layer)
@@ -625,7 +662,14 @@ def _iter_silk_geometries(
         if geom is None:
             continue
         label = f"gr_{board_graphic.graphic_type}"
-        yield side, geom, label, board_graphic.start, board_graphic.layer
+        yield (
+            side,
+            geom,
+            label,
+            board_graphic.start,
+            board_graphic.layer,
+            board_graphic.uuid,
+        )
 
 
 def _iter_pad_apertures(
@@ -729,7 +773,7 @@ def check_silk_over_copper(
             trees[side] = STRtree([g for g, _ in entries])
 
     found: list[DRCViolation] = []
-    for side, geom, silk_label, location, layer in _iter_silk_geometries(pcb):
+    for side, geom, silk_label, location, layer, _uuid in _iter_silk_geometries(pcb):
         side_entries = apertures.get(side)
         if not side_entries:
             continue
@@ -801,10 +845,10 @@ def check_silk_overlap(
 
     **Detection is bare intersection, not clearance.**  KiCad's silk-to-silk
     test enforces a configurable *clearance* (silk must be some distance apart);
-    this check requires the geometries to actually overlap.  That is the
-    deliberately conservative choice for an advisory rule -- it under-reports
-    rather than over-reports relative to kicad-cli on boards that configure a
-    non-zero silk clearance, and it needs no new profile field.
+    this check requires the modeled geometries to actually overlap and needs
+    no new profile field. It can miss clearance-only findings. Text bounding
+    boxes can also overlap when the actual glyph strokes do not, so this
+    approximation can report false positives relative to native KiCad.
 
     Args:
         pcb: The PCB to check.
@@ -823,9 +867,12 @@ def check_silk_overlap(
 
     # Reuse the single silk traversal shared with silk_over_copper /
     # silk_edge_clearance; partition by side so F silk never pairs with B silk.
-    by_side: dict[str, list[tuple[_Geometry, str, tuple[float, float], str]]] = {"F": [], "B": []}
-    for side, geom, label, location, layer in _iter_silk_geometries(pcb):
-        by_side[side].append((geom, label, location, layer))
+    by_side: dict[str, list[tuple[_Geometry, str, tuple[float, float], str, str]]] = {
+        "F": [],
+        "B": [],
+    }
+    for side, geom, label, location, layer, uuid in _iter_silk_geometries(pcb):
+        by_side[side].append((geom, label, location, layer, uuid))
 
     # A library outline is often several joined line primitives. Their round
     # stroke caps overlap at the common vertex, which is intentional artwork,
@@ -848,8 +895,8 @@ def check_silk_overlap(
     for entries in by_side.values():
         if len(entries) < 2:
             continue
-        tree = STRtree([g for g, _, _, _ in entries])
-        for i, (geom, label_a, location, layer) in enumerate(entries):
+        tree = STRtree([g for g, _, _, _, _ in entries])
+        for i, (geom, label_a, location, layer, uuid_a) in enumerate(entries):
             for raw_idx in tree.query(geom):
                 j = int(raw_idx)
                 # Skip self-pairing, and emit each unordered pair once by
@@ -858,7 +905,7 @@ def check_silk_overlap(
                 # elements and must still pair with each other.
                 if j <= i:
                     continue
-                other_geom, label_b, _, _ = entries[j]
+                other_geom, label_b, _, _, uuid_b = entries[j]
                 if not geom.intersects(other_geom):
                     continue
                 overlap = geom.intersection(other_geom)
@@ -867,23 +914,36 @@ def check_silk_overlap(
                 a = line_endpoints.get((label_a, geom.wkb))
                 b = line_endpoints.get((label_b, other_geom.wkb))
                 if label_a == label_b and a is not None and b is not None:
-                    common = set(a[0]) & set(b[0])
-                    # Duplicate lines share both endpoints and must still flag.
-                    if len(common) == 1:
-                        point = next(iter(common))
-                        end_a = a[0][1] if a[0][0] == point else a[0][0]
-                        end_b = b[0][1] if b[0][0] == point else b[0][0]
-                        da = (end_a[0] - point[0], end_a[1] - point[1])
-                        db = (end_b[0] - point[0], end_b[1] - point[1])
+                    # Duplicate lines share both endpoints and must still
+                    # flag; _shared_endpoint returns None in that case.
+                    joint_point = _shared_endpoint(a[0], b[0])
+                    if joint_point is not None:
+                        end_a = a[0][1] if a[0][0] == joint_point else a[0][0]
+                        origin_b, end_b = (
+                            b[0]
+                            if math.dist(b[0][0], joint_point) <= _CLEARANCE_EPSILON_MM
+                            else (b[0][1], b[0][0])
+                        )
+                        da = (end_a[0] - joint_point[0], end_a[1] - joint_point[1])
+                        # Use each stroke's own endpoint as its vector origin.
+                        # Snapping B to A's tolerant joint would tilt parallel
+                        # strokes and misclassify short overdraw as a corner.
+                        db = (end_b[0] - origin_b[0], end_b[1] - origin_b[1])
                         # Same-direction collinear lines overlap, even if the
                         # shorter line fits entirely inside the joint buffer.
                         # Opposite directions form a valid straight continuation.
                         collinear_overlap = da[0] * db[0] + da[1] * db[1] > 0 and abs(
                             da[0] * db[1] - da[1] * db[0]
                         ) <= 1e-9 * math.hypot(*da) * math.hypot(*db)
-                        joint = Point(point).buffer(max(a[1], b[1]))
+                        joint = Point(joint_point).buffer(max(a[1], b[1]))
                         if not collinear_overlap and overlap.difference(joint).area < 1e-9:
                             continue
+                # Same-label siblings (e.g. several fp_line strokes on one
+                # footprint) are otherwise indistinguishable in `items` --
+                # append the element's own UUID so a per-corner waiver can
+                # target exactly one of them (#4987).
+                item_a = f"{label_a} {{{uuid_a}}}" if uuid_a else label_a
+                item_b = f"{label_b} {{{uuid_b}}}" if uuid_b else label_b
                 found.append(
                     DRCViolation(
                         rule_id="silk_overlap",
@@ -891,7 +951,7 @@ def check_silk_overlap(
                         message=(f"Silkscreen {label_a} overlaps silkscreen {label_b}"),
                         location=location,
                         layer=layer,
-                        items=(label_a, label_b),
+                        items=(item_a, item_b),
                     )
                 )
 
@@ -938,7 +998,7 @@ def check_silk_edge_clearance(
 
     outline = MultiLineString([[seg_start, seg_end] for seg_start, seg_end in outline_segments])
 
-    for _side, geom, silk_label, location, layer in _iter_silk_geometries(pcb):
+    for _side, geom, silk_label, location, layer, _uuid in _iter_silk_geometries(pcb):
         distance = geom.distance(outline)
         if distance < SILK_EDGE_CLEARANCE_MM - _CLEARANCE_EPSILON_MM:
             results.add(

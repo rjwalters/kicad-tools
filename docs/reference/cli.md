@@ -859,16 +859,45 @@ Endpoints bind by the pad's real copper extent, not by an exact pad-center
 hit, so a trace terminating anywhere inside the pad attaches (and several
 stubs landing on one pad are shorted by it, as they are in reality).
 
-> **Known limitation (#5197):** the `ambiguous` test is whole-net, so a
-> benign parallel via array feeding a trunk from one pad makes *every*
-> declaration on that net ambiguous — including unrelated low-current taps.
-> Until that is scoped down, prefer declaring endpoints that do not sit on a
-> multi-via fan-out, or review the findings rather than waiving the rule.
+A bounded endpoint via array is recognized only when parallel straight stubs
+land on the actual pad, real outer-layer barrels join one straight receiving
+trunk, and each exit leads through acyclic copper to real pad terminals.
+Dangling branches, unmodeled local contacts, and other cycles remain ambiguous.
+Stub length and via spread must fit within the endpoint pad diagonal. Every
+original array segment remains in the evidence and is checked at the full
+declared current; this does not assume equal current sharing or qualify the
+array by summed widths. Unsupported same-net arcs and custom pad stacks prevent
+array recognition.
+
 Route-time width selection itself stays governed by the net-class
 `trace_width` (the same declarative/checked-post-route split
 `NetClassRouting.target_ampacity` already uses); see the
 `kicad_tools.router.current_paths` module docstring for that decision's
 rationale. `kct pcb current-paths-audit` runs the audit standalone.
+
+A positive `--timeout` supervises the whole route in a separate process, including
+conflict processing, Python fallback, conversion, optimization, nudge, native
+validation and output work. Its monotonic deadline is also passed to the existing
+routing budget helpers. Zero or a negative value retains unbounded behavior.
+Both `kct route` and `python -m kicad_tools.cli.route_cmd` use this supervision.
+
+On timeout, routing stops and up to **five additional seconds** are allowed to
+serialize a raw `<output>_partial.kicad_pcb`. The process group is then terminated
+and the worker reaped, even if native code ignores the graceful request. Exit
+status is **124**, and `<output>.timeout.json` records `status: partial`, the last
+stage, the interrupted Python function when available, and whether a snapshot
+finished. A stalled native call or slow serialization may leave **no snapshot**;
+this is reported explicitly. Partial snapshots are atomically published and have
+not passed final cleanup/DRC, so they are not manufacturing-ready.
+
+Timed runs reject aliases between the input (including its project/rule sidecars)
+and every reserved derived output: canonical/partial PCB, temporary saves, timeout
+report, project/rule sidecars and escalation/placement artifacts. Symlinks and
+existing hardlinks are checked before launching. If a canonical output exists
+when timeout occurs (including an older successful result), it is preserved under
+an `_timeout_unverified_` name recorded in the report. It cannot be mistaken for
+this run's canonical output. The input remains untouched. Sidecar generation and
+validation still use the normal route pipeline; supervision does not bypass them.
 
 #### Targeted completion mode (`--complete`)
 
@@ -915,7 +944,7 @@ footprints are auto-anchored, and the applied deltas are written to
 |--------|-------------|
 | `--placement-delta-feedback` / `--no-placement-delta-feedback` | Enable / explicitly disable the loop (default: disabled) |
 | `--placement-delta-feedback-budget N` | Maximum apply/keep-or-revert iterations (default: 3) |
-| `--placement-delta-feedback-timeout SECONDS` | Per-iteration wall-clock budget for the loop's re-routes; survives an already-exhausted `--timeout`. Default: share whatever remains of `--timeout`. |
+| `--placement-delta-feedback-timeout SECONDS` | Per-iteration wall-clock budget for the loop's re-routes; a positive total `--timeout` remains the outer ceiling. Default: share whatever remains of `--timeout`. |
 
 #### Feasibility / coupling flags (v0.15.0, all default off)
 

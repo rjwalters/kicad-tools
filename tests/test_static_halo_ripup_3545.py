@@ -70,6 +70,7 @@ def _tht_pad(x: float, y: float, net: int, net_name: str, ref: str, pin: str) ->
         pin=pin,
         through_hole=True,
         drill=1.0,
+        shape="circle",
     )
 
 

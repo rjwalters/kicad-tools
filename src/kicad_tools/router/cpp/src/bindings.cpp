@@ -270,7 +270,8 @@ NB_MODULE(router_cpp, m) {
         .def("add_pad", &Grid3D::add_pad,
              "x"_a, "y"_a, "width"_a, "height"_a,
              "net"_a, "layer_idx"_a, "ref_hash"_a, "clearance_override"_a,
-             "is_plane_net"_a = false, "rotation"_a = 0.0f)
+             "is_plane_net"_a = false, "rotation"_a = 0.0f,
+             "is_circular"_a = false)
         .def("set_pad_via_policy", &Grid3D::set_pad_via_policy,
              "index"_a, "clearance"_a, "carveout_eligible"_a)
         .def("add_stored_segment", &Grid3D::add_stored_segment,

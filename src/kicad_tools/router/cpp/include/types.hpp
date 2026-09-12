@@ -225,7 +225,8 @@ namespace router {
 // exists to end).  New module constant + four ``Pathfinder`` accessors =
 // binding-surface change; route output is unchanged (diagnostics only).
 // v22: residual pad rotation and candidate via-pad acceptance/policy refresh.
-constexpr int ROUTER_CPP_BUILD_VERSION = 22;
+// v23: explicit pad shape for segment/via clearance (Issue #5229).
+constexpr int ROUTER_CPP_BUILD_VERSION = 23;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -593,6 +594,7 @@ struct PadInfo {
     float rotation = 0.0f;  // Residual KiCad board-space degrees (#5182)
     float via_clearance_override = 0.0f; // Component trace floor (Python backstop)
     bool via_carveout_eligible = false;
+    bool is_circular = false;  // Explicit circle shape; other pads use rectangles (#5229)
 };
 
 // Stored segment for validation (Issue #2439)
