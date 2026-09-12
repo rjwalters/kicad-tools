@@ -1293,6 +1293,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frame), and all in-pad nodes are shorted through the pad. This is a *false*
   fail-closed being removed, not a relaxation — copper outside the pad extent
   still never attaches, so genuinely moved/removed pads still fail closed.
+- **Declared current-path resolution reported `ambiguous` for an entire net
+  whenever a benign parallel via array was reachable from an endpoint**
+  (#5197) — `_component_has_cycle` (`router/current_paths.py`) flagged any
+  cycle reachable from a declared endpoint, including the standard
+  high-current practice of splitting a trunk across several parallel vias
+  that immediately recombine. On board09, `+5V_OUT`'s shunt pad `RSH1.4`
+  fans into three vias reunited by a wide `B.Cu` trace, and this one benign
+  array made *every* declaration on the net report ambiguous, including the
+  low-current LED and INA226-supply taps that never touch it. Cycle
+  detection now recognizes a hub whose legs are ALL via crossings, whose far
+  ends mutually tie back together, and contracts exactly that array before
+  checking for a genuine loop — a route that merely changes layer once, or
+  a hub whose legs leave a residual route uncontracted, still reports
+  ambiguous, matching the existing parallel-return-path regression tests.
 - **`kct route` accepted KiCad 10 name-only nets but wrote zero copper and
   reported a vacuous "SUCCESS" (0/0 nets)** (#4983) — a PCB saved in KiCad
   10's name-only net syntax (`(net "SIGNAL")` on pads, no numeric net table
