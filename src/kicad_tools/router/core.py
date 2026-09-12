@@ -16368,7 +16368,60 @@ class Autorouter:
         results: dict[str, dict[int, tuple[Route, TuneResult]]] = {}
 
         # Build routes_by_net lookup from the autorouter's current state.
-        routes_by_net: dict[int, Route] = {r.net: r for r in self.routes}
+        #
+        # Issue #5289 / #5286: a net's copper can legitimately be split
+        # across MULTIPLE Route objects in ``self.routes`` (e.g. an
+        # ``is_escape=True`` sub-grid escape stub plus the main channel
+        # route committed separately -- ``consolidate_net_routes`` treats
+        # this as normal and deliberately keeps such fragments as distinct
+        # Route objects, see ``optimizer/consolidate.py``).  The naive
+        # ``{r.net: r for r in self.routes}`` dict comprehension silently
+        # collapses every net down to its LAST fragment, which:
+        #   1. Under-measures the net's true length (only the last
+        #      fragment's segments are counted), so the tuner's insertion
+        #      target is wrong.
+        #   2. On commit-back, would splice the tuned result into the
+        #      FIRST fragment's slot while leaving the untouched original
+        #      LAST fragment in place -- dropping the real first fragment
+        #      (a signal open) while leaving a stale duplicate of the last
+        #      fragment's pre-tuning geometry sitting on the board (a
+        #      physical short/clearance violation).
+        #
+        # Fix: merge every net's fragments into ONE synthetic Route (union
+        # of segments + vias) for measurement/tuning purposes, mirroring
+        # the whole-net view ``consolidate_net_routes`` already uses for
+        # vertex-degree computation.  The ``self.routes`` rebuild after the
+        # group loop below reverses the merge: untouched nets keep their
+        # ORIGINAL fragment objects (by-reference identity preserved,
+        # byte-for-byte prior behavior for the common single-fragment
+        # case), while tuned nets collapse to the single new merged Route
+        # (no fragment is ever silently dropped or duplicated).
+        fragment_indices_by_net: dict[int, list[int]] = {}
+        for i, r in enumerate(self.routes):
+            fragment_indices_by_net.setdefault(r.net, []).append(i)
+
+        routes_by_net: dict[int, Route] = {}
+        for net_id, indices in fragment_indices_by_net.items():
+            if len(indices) == 1:
+                routes_by_net[net_id] = self.routes[indices[0]]
+            else:
+                merged_segments = []
+                merged_vias = []
+                for idx in indices:
+                    merged_segments.extend(self.routes[idx].segments)
+                    merged_vias.extend(self.routes[idx].vias)
+                routes_by_net[net_id] = Route(
+                    net=net_id,
+                    net_name=self.routes[indices[0]].net_name,
+                    segments=merged_segments,
+                    vias=merged_vias,
+                    is_escape=False,
+                )
+        # Frozen snapshot of the pre-tuning routes_by_net values (by
+        # identity) so the commit-back step can tell "untouched" (same
+        # object) apart from "tuned" (new object) for EVERY net, single-
+        # or multi-fragment alike.
+        original_routes_by_net: dict[int, Route] = dict(routes_by_net)
 
         # Update the match-group skew tracker so the post-tuning results are
         # queryable.  Use the layer-stack count when available, else default
@@ -16519,27 +16572,19 @@ class Autorouter:
                 results[group.name] = {}
                 continue
 
-            # Commit any new Route references back into self.routes and the
-            # working ``routes_by_net`` map so subsequent groups' DRC
-            # self-checks see the updated geometry.  Mirrors the
-            # apply_diffpair_length_tuning per-pair commit-back loop.
-            #
-            # Issue #3440: compare against the CURRENT self.routes entry,
-            # not routes_by_net -- the tuner now publishes committed
-            # meanders into routes_by_net in place (the staleness fix),
-            # so ``new_route is not routes_by_net[net_id]`` is False for
-            # every tuned member and the legacy identity guard silently
-            # dropped all meanders from self.routes (they never reached
-            # the saved PCB).
+            # Commit any new Route references back into the working
+            # ``routes_by_net`` map so subsequent groups' DRC self-checks
+            # see the updated geometry.  Issue #5289 / #5286: ``self.routes``
+            # is rebuilt in ONE pass after every group has been processed
+            # (see the rebuild below the group loop) rather than per-member
+            # here -- ``fragment_indices_by_net`` was captured once against
+            # the pre-tuning ``self.routes`` layout, so mutating
+            # ``self.routes`` mid-loop (inserts/deletes for multi-fragment
+            # nets) would invalidate every later net's recorded indices.
             for net_id, (new_route, _result) in group_results.items():
                 if net_id not in routes_by_net:
                     continue  # unrouted member (empty-route placeholder)
                 routes_by_net[net_id] = new_route
-                for i, r in enumerate(self.routes):
-                    if r.net == net_id:
-                        if self.routes[i] is not new_route:
-                            self.routes[i] = new_route
-                        break
 
             results[group.name] = group_results
 
@@ -16583,6 +16628,42 @@ class Autorouter:
                     if res.reason in _diagnostic_reasons and res.message:
                         member_name = self.net_names.get(member_net_id, f"net {member_net_id}")
                         print(f"    {member_name}: {res.reason} -- {res.message}")
+
+        # Issue #5289 / #5286: rebuild ``self.routes`` in ONE pass from the
+        # final ``routes_by_net`` state, now that every group has been
+        # processed.  For each net:
+        #   - Untouched (``routes_by_net[net_id] is
+        #     original_routes_by_net[net_id]``): emit its ORIGINAL
+        #     fragment(s) unchanged, by reference -- byte-for-byte prior
+        #     behavior, preserving both single-fragment identity contracts
+        #     (existing rollback/reference tests) and any is_escape /
+        #     other per-fragment metadata for members no group touched.
+        #   - Tuned (new object): emit the single merged+tuned Route in
+        #     place of ALL of that net's original fragments -- no fragment
+        #     is silently dropped (the open) and no untouched fragment is
+        #     left behind alongside it (the short/clearance duplicate).
+        # Nets with no fragments recorded (shouldn't happen -- every route
+        # in self.routes contributed to fragment_indices_by_net) fall back
+        # to passing the entry through untouched.
+        new_self_routes: list[Route] = []
+        emitted_nets: set[int] = set()
+        for r in self.routes:
+            net_id = r.net
+            net_fragment_indices = fragment_indices_by_net.get(net_id)
+            if net_fragment_indices is None:
+                new_self_routes.append(r)
+                continue
+            if net_id in emitted_nets:
+                continue
+            emitted_nets.add(net_id)
+            final_route = routes_by_net.get(net_id)
+            original_route = original_routes_by_net.get(net_id)
+            if final_route is None or final_route is original_route:
+                for idx in net_fragment_indices:
+                    new_self_routes.append(self.routes[idx])
+            else:
+                new_self_routes.append(final_route)
+        self.routes = new_self_routes
 
         # Refresh the skew tracker after tuning so downstream consumers
         # (e.g. the Phase 2G match_group_length_skew DRC rule) see the

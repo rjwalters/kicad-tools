@@ -698,3 +698,252 @@ class TestViaInclusiveStackupThreading:
         )
         # A0 gained real copper meander (~1.6 mm), it has no via of its own.
         assert LengthTracker.calculate_route_length(tuned_a0) > 31.0
+
+
+# =============================================================================
+# Issue #5289 / #5286: multi-fragment same-net routes (escape stub + channel)
+# =============================================================================
+
+
+class TestMultiFragmentSameNetRoutes:
+    """A net's copper can legitimately span MULTIPLE ``Route`` objects.
+
+    ``consolidate_net_routes`` (``optimizer/consolidate.py``) deliberately
+    keeps an ``is_escape=True`` sub-grid escape stub as a separate ``Route``
+    object from the main channel route for the same net -- this is normal,
+    pre-existing architecture, not a bug.
+
+    Before the fix, ``apply_match_group_tuning`` built its
+    ``routes_by_net`` lookup with ``{r.net: r for r in self.routes}``,
+    silently collapsing every net down to its LAST fragment. That both
+    under-measured the net's true length (only the last fragment's
+    segments counted) and, on commit-back, spliced the tuned result into
+    the FIRST fragment's ``self.routes`` slot while leaving the untouched
+    original LAST fragment in place -- dropping the real escape geometry
+    (a signal open) while leaving stale duplicate channel copper behind
+    (a physical short / clearance violation). This is the corruption
+    path demonstrated in #5289 and implicated in the Board07 regression
+    (#5286).
+    """
+
+    @staticmethod
+    def _escape_plus_channel_route(
+        net_id: int,
+        name: str,
+        *,
+        escape_len: float,
+        channel_len: float,
+        y: float = 0.0,
+    ) -> tuple[Route, Route]:
+        """An off-grid escape stub followed by the main channel, as two
+        separate ``Route`` objects for the same net (mirrors what
+        ``consolidate_net_routes`` leaves behind for a real escape+route
+        pair)."""
+        escape = Route(
+            net=net_id,
+            net_name=name,
+            segments=[
+                Segment(
+                    x1=0.0,
+                    y1=y,
+                    x2=escape_len,
+                    y2=y,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net_id,
+                    net_name=name,
+                )
+            ],
+            is_escape=True,
+        )
+        channel = Route(
+            net=net_id,
+            net_name=name,
+            segments=[
+                Segment(
+                    x1=escape_len,
+                    y1=y,
+                    x2=escape_len + channel_len,
+                    y2=y,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=net_id,
+                    net_name=name,
+                )
+            ],
+        )
+        return escape, channel
+
+    def test_multi_fragment_length_measured_across_all_fragments(self):
+        """The tuner's current-length measurement must include EVERY
+        fragment of the net, not just the last one in ``self.routes``.
+
+        Net 1 is 1mm escape + 9mm channel = 10mm total, reference is
+        12mm.  Before the fix the tuner only saw the LAST fragment
+        (9mm), so this test also exercises the mis-measurement half of
+        the bug (in addition to the drop/duplicate half covered below).
+        """
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {1: "DQ0", 2: "DQ1"}
+        escape, channel = self._escape_plus_channel_route(
+            1, "DQ0", escape_len=1.0, channel_len=9.0, y=0.0
+        )
+        reference = _straight_route(2, "DQ1", 12.0, y=20.0)
+        ar.routes = [escape, channel, reference]
+        group = MatchGroup(
+            name="G",
+            net_ids=[1, 2],
+            tolerance=0.1,
+            reference_net_id=2,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+
+        tuned_result = results["G"][1][1]
+        assert tuned_result.reason == "tuned"
+        # Before the fix: current_length measured as 9.0mm (channel only)
+        # so the tuner would only add ~3mm.  After the fix it must see
+        # the true 10.0mm total.
+        assert abs(tuned_result.length_before_mm - 10.0) <= 1e-6, (
+            f"expected pre-tuning length 10.0mm (1mm escape + 9mm "
+            f"channel), got {tuned_result.length_before_mm}"
+        )
+
+    def test_multi_fragment_net_not_duplicated_or_dropped_after_tuning(self):
+        """After tuning, the net must collapse to exactly ONE Route in
+        ``self.routes`` -- no dropped escape, no orphaned duplicate
+        channel."""
+        from kicad_tools.router.length import LengthTracker
+
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {1: "DQ0", 2: "DQ1"}
+        escape, channel = self._escape_plus_channel_route(
+            1, "DQ0", escape_len=1.0, channel_len=9.0, y=0.0
+        )
+        reference = _straight_route(2, "DQ1", 12.0, y=20.0)
+        ar.routes = [escape, channel, reference]
+        group = MatchGroup(
+            name="G",
+            net_ids=[1, 2],
+            tolerance=0.1,
+            reference_net_id=2,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+
+        net1_routes = [r for r in ar.routes if r.net == 1]
+        assert len(net1_routes) == 1, (
+            f"net 1 must collapse to exactly one Route after tuning, "
+            f"got {len(net1_routes)}: this is the #5289 duplicate/drop bug"
+        )
+        # The escape's original pad-side start point must still be
+        # present -- pad connectivity was not severed by the tuner
+        # discarding the escape fragment.
+        assert any(
+            (seg.x1, seg.y1) == (0.0, 0.0) or (seg.x2, seg.y2) == (0.0, 0.0)
+            for seg in net1_routes[0].segments
+        ), "original escape pad connection point (0,0) was lost"
+        # And the committed length must reflect the WHOLE tuned net
+        # (escape + channel + meander), matching the 12mm reference
+        # within tolerance -- not a truncated or duplicated value.
+        committed_length = LengthTracker.calculate_route_length(net1_routes[0])
+        assert abs(committed_length - 12.0) <= 0.5, (
+            f"tuned net length {committed_length:.3f}mm should be ~12.0mm"
+        )
+
+    def test_multi_fragment_untouched_member_keeps_original_fragment_identity(self):
+        """A multi-fragment net that the tuner does NOT touch (e.g. the
+        explicit reference) must retain its ORIGINAL fragment objects,
+        by identity, un-merged -- exactly the existing single-fragment
+        rollback/reference contract, extended to the multi-fragment
+        case."""
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {1: "DQ0", 2: "DQ1"}
+        escape, channel = self._escape_plus_channel_route(
+            1, "DQ0", escape_len=1.0, channel_len=11.0, y=0.0
+        )
+        other = _straight_route(2, "DQ1", 6.0, y=20.0)
+        ar.routes = [escape, channel, other]
+        group = MatchGroup(
+            name="G",
+            net_ids=[1, 2],
+            tolerance=0.1,
+            # Net 1 (the multi-fragment net) is the explicit reference --
+            # never modified.
+            reference_net_id=1,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+
+        assert results["G"][1][1].reason == "reference"
+        net1_routes = [r for r in ar.routes if r.net == 1]
+        assert len(net1_routes) == 2, (
+            "untouched multi-fragment net must keep BOTH original "
+            f"fragments, got {len(net1_routes)}"
+        )
+        # ``in`` on a dataclass list checks value equality, not identity --
+        # use explicit ``is`` checks so this genuinely pins the by-reference
+        # contract (a merged-then-reverted copy would compare equal but
+        # would NOT be the same object).
+        assert any(r is escape for r in net1_routes), (
+            "untouched multi-fragment net must retain its ORIGINAL escape "
+            "fragment object by identity"
+        )
+        assert any(r is channel for r in net1_routes), (
+            "untouched multi-fragment net must retain its ORIGINAL channel "
+            "fragment object by identity"
+        )
+
+    def test_multi_fragment_pair_member_not_duplicated_or_dropped(self):
+        """The pair-aware (Phase 2F) dispatch path must get the same
+        multi-fragment safety as the scalar path -- Board07's opens
+        (MIPI/TMDS/DQS diff-pair halves) are pair members, not scalars."""
+        from kicad_tools.router.length import LengthTracker
+
+        ar = Autorouter(width=80.0, height=80.0)
+        ar.net_names = {10: "LANE_P", 11: "LANE_N", 20: "REF_P", 21: "REF_N"}
+        p_escape, p_channel = self._escape_plus_channel_route(
+            10, "LANE_P", escape_len=1.0, channel_len=9.0, y=0.0
+        )
+        n_escape, n_channel = self._escape_plus_channel_route(
+            11, "LANE_N", escape_len=1.0, channel_len=9.0, y=1.0
+        )
+        ar.routes = [
+            p_escape,
+            p_channel,
+            n_escape,
+            n_channel,
+            _straight_route(20, "REF_P", 14.0, y=10.0),
+            _straight_route(21, "REF_N", 14.0, y=11.0),
+        ]
+        group = MatchGroup(
+            name="LANES",
+            net_ids=[],
+            pair_ids=[(10, 11), (20, 21)],
+            tolerance=0.1,
+            reference_net_id=20,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
+
+        for net_id in (10, 11):
+            net_routes = [r for r in ar.routes if r.net == net_id]
+            assert len(net_routes) == 1, (
+                f"pair member net {net_id} must collapse to exactly one "
+                f"Route after tuning, got {len(net_routes)}"
+            )
+            assert any(
+                (seg.x1, seg.y1) == (0.0, 0.0 if net_id == 10 else 1.0)
+                or (seg.x2, seg.y2) == (0.0, 0.0 if net_id == 10 else 1.0)
+                for seg in net_routes[0].segments
+            ), f"net {net_id} lost its original escape pad connection point"
+            committed_length = LengthTracker.calculate_route_length(net_routes[0])
+            assert committed_length > 10.0, (
+                f"net {net_id} length {committed_length:.3f}mm should have "
+                "grown from its original 10mm (escape+channel) toward the "
+                "14mm reference lane"
+            )
