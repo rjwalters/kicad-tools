@@ -961,26 +961,7 @@ def test_pour_extraction_ignores_zone_and_pad_net_labels(tmp_path: Path) -> None
 
 
 def _pcb_pour_two_disjoint_islands() -> str:
-    """One GND zone whose fill is two DISJOINT same-net islands, one pad each.
-
-    Distilled from board 03: KiCad stores a single poured zone as many
-    ``filled_polygon`` entries when thermal reliefs / clearance moats fragment
-    the copper.  Here the GND F.Cu zone is filled as two separate solid squares
-    that do not touch (a 4 mm gap between them):
-
-    * island A: solid copper 0..4 in x, bonding ``C1`` pad "2" at board (2, 2)
-    * island B: solid copper 8..12 in x, bonding ``C2`` pad "2" at board (10, 2)
-
-    Both pads are declared GND and both sit squarely in solid copper, so the
-    bonding *test* (``region.intersects`` of the eroded pad box) succeeds for
-    each — there is no moat involved.  The ONLY thing under test is whether the
-    extractor unions pads across the zone's two disjoint fill islands.
-
-    * Per-fill (the #3769 bug): C1.2 bonds only within island A, C2.2 only
-      within island B -> two singleton components -> a false GND open.
-    * Per-zone (the fix): both pads are accumulated for the one ``zone`` object
-      and unioned together -> a single GND component -> clean.
-    """
+    """Two pads in separate solid islands of one zone, with no physical bridge."""
     return """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -1026,29 +1007,13 @@ def _pcb_pour_two_disjoint_islands() -> str:
 
 
 @requires_shapely
-def test_pour_extraction_unions_pads_across_disjoint_fill_islands_of_one_zone(
-    tmp_path: Path,
-) -> None:
-    """Regression (#3772): one zone, two disjoint fill islands -> one component.
-
-    KiCad fragments a single poured zone into multiple ``filled_polygon``
-    entries (board 03's GND F.Cu zone is one main pour plus a dozen tiny
-    per-pad fragments).  The pre-fix extractor unioned bonded pads only WITHIN
-    a single fill index, so a pad alone in its own fragment landed in a
-    singleton component and copper-LVS reported it as a false ``open``.
-
-    This fixture is that failure shape distilled: two GND pads, each bonded to
-    a *different* disjoint fill island of the SAME ``zone`` object.  Both must
-    land in one connected component.  FAILS on origin/main (per-fill unioning
-    splits them); PASSES after the per-zone unioning fix.
-    """
+def test_pour_extraction_keeps_disjoint_fill_islands_separate(tmp_path: Path) -> None:
+    """Zone ownership is not a physical bridge between disconnected solids (#5133)."""
     pcb_path = _write(tmp_path, "two_islands.kicad_pcb", _pcb_pour_two_disjoint_islands())
     partition = ConnectivityValidator(pcb_path).extract_pad_partition()
-    component = next(c for c in partition if "C1.2" in c)
-    assert {"C1.2", "C2.2"} <= component, (
-        "pads bonded to disjoint fill islands of the same zone must share one "
-        f"component (no false open); partition={partition}"
-    )
+    assert partition == [frozenset({"C1.2"}), frozenset({"C2.2"})]
+    result = compare_partitions({("C1", "2"): "GND", ("C2", "2"): "GND"}, partition)
+    assert len(result.opens) == 1
 
 
 @requires_shapely
@@ -1093,15 +1058,13 @@ def test_compare_copper_netlist_on_pour_heavy_board07_artifacts() -> None:
     ], "expected four remaining DDR/HDMI opens after the MIPI repair"
 
 
-def test_compare_copper_netlist_on_board06_wired_fixture_reports_unbonded_pads() -> None:
-    """The wired snapshot binds all 198 pads but still contains opens.
+def test_compare_copper_netlist_on_board06_recovers_verified_contact_paths() -> None:
+    """Corrected paths appear publicly without a zone-ownership waiver (#5133).
 
-    Removing the zone-ownership waiver (#4982) exposes U1.17/+3V3 and
-    U1.32/GND as singleton copper components. U1.15 now belongs to the
-    main GND component; the earlier three-open expectation is stale.
-    Check the partition as well as the report so a waiver cannot make
-    this frozen snapshot appear clean. Live Board06 regeneration has
-    its own clean-LVS gate and must not inherit this snapshot's opens.
+    Independent full-partition comparison found exactly the two repaired
+    unions and no other changes. The matching raw-contact witnesses are in
+    test_connectivity_contacts_5133. This is saved-copper checker output,
+    not native DRC or manufacturing qualification.
     """
     repo_root = Path(__file__).resolve().parent.parent
     board_out = repo_root / "boards" / "06-diffpair-test" / "regression-fixture"
@@ -1112,18 +1075,12 @@ def test_compare_copper_netlist_on_board06_wired_fixture_reports_unbonded_pads()
     result = compare_copper_netlist(sch, pcb)
     assert not result.vacuous
     assert result.bound_pad_count == 198
-    from kicad_tools.validate.connectivity import ConnectivityValidator
-
     partition = ConnectivityValidator(pcb).extract_pad_partition()
-    assert frozenset({"U1.17"}) in partition
-    assert frozenset({"U1.32"}) in partition
-    assert any({"U1.15", "J1.A1"} <= component for component in partition)
-    assert not result.clean
+    assert any({"U1.15", "U1.32", "J1.A1"} <= group for group in partition)
+    assert any({"U1.17", "J1.A8"} <= group for group in partition)
+    assert result.clean
     assert result.shorts == ()
-    assert {(o.net_a, o.pad_a, o.pad_b) for o in result.opens} == {
-        ("+3V3", "J1.A8", "U1.17"),
-        ("GND", "J1.A1", "U1.32"),
-    }
+    assert result.opens == ()
 
 
 # ---------------------------------------------------------------------------
@@ -1144,7 +1101,7 @@ def test_compare_copper_netlist_on_board06_wired_fixture_reports_unbonded_pads()
 # flattens a hole: one ring whose boundary dips into the cutout through a
 # narrow slit.  ``_fill_solid_region`` (shapely buffer(0)) re-derives the hole.
 # The via centre lands INSIDE this hole (a bare-point test bonds nothing), but
-# the via's copper ring (size 1.0 -> radius 0.5, eroded to 0.4) reaches 0.2 mm
+# the via's copper ring (size 1.0 -> outer radius 0.5, drill radius 0.2) reaches 0.2 mm
 # past the hole edge (at 0.2 mm) into the solid pour -> a real short.
 _VIA_POUR_FILL_RING = (
     "(xy 8 0) (xy 9.98 0) (xy 9.98 9.8) "
@@ -1159,7 +1116,8 @@ def _pcb_via_grazes_foreign_pour() -> str:
 
     * ``R2`` pad "1" at board (5, 10): declared **SIG**, sits OUTSIDE the pour
       (pour starts at x=8) so it is not bonded to GND by its own copper.
-    * A track segment ties R2.1 to a via at (10, 10) (also SIG copper).
+    * A B.Cu track ties R2.1 to the via at (10, 10). This isolates
+      via/pour contact from the feed trace; an F.Cu feed crosses the pour.
     * The via at (10, 10) sits in the GND pour's antipad hole, but its copper
       ring pokes past the too-small hole into the solid GND pour.
     * ``R3`` pad "1" at board (15, 10): declared **GND**, copper in the solid
@@ -1181,12 +1139,12 @@ def _pcb_via_grazes_foreign_pour() -> str:
   (net 1 "GND")
   (net 2 "SIG")
   (footprint "Resistor_SMD:R_0402_1005Metric"
-    (layer "F.Cu")
+    (layer "B.Cu")
     (uuid "00000000-0000-0000-0000-0000000000c1")
     (at 5 10)
     (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-c1-ref"))
     (property "Value" "1k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-c1-val"))
-    (pad "1" smd roundrect (at 0 0) (size 1.5 1.5) (layers "F.Cu" "F.Paste" "F.Mask")
+    (pad "1" smd roundrect (at 0 0) (size 1.5 1.5) (layers "B.Cu" "B.Paste" "B.Mask")
       (roundrect_rratio 0.25) (net 2 "SIG"))
   )
   (footprint "Resistor_SMD:R_0402_1005Metric"
@@ -1198,7 +1156,7 @@ def _pcb_via_grazes_foreign_pour() -> str:
     (pad "1" smd roundrect (at 0 0) (size 1.5 1.5) (layers "F.Cu" "F.Paste" "F.Mask")
       (roundrect_rratio 0.25) (net 1 "GND"))
   )
-  (segment (start 5 10) (end 10 10) (width 0.25) (layer "F.Cu") (net 2))
+  (segment (start 5 10) (end 10 10) (width 0.25) (layer "B.Cu") (net 2))
   (via (at 10 10) (size 1.0) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2 "SIG"))
   (zone
     (net 1 "GND")
@@ -1224,7 +1182,7 @@ _VIA_POUR_SCHEMATIC: dict[tuple[str, str], str | None] = {
 def _point_via_partition(pcb_path: Path) -> list[frozenset[str]]:
     """Extract the partition under the LEGACY bare-centre-point via model.
 
-    Patches :meth:`ConnectivityValidator._via_copper_geom` to return a bare
+    Patches :meth:`ConnectivityValidator._physical_via_annulus` to return a bare
     ``Point`` (the pre-#3909 behaviour) so the very same fixture can be run
     through the old via-vs-pour test on which the short was invisible.
     """
@@ -1232,10 +1190,10 @@ def _point_via_partition(pcb_path: Path) -> list[frozenset[str]]:
 
     from shapely.geometry import Point as _P  # type: ignore[import-untyped]
 
-    def _point_only(self: ConnectivityValidator, pos, radius):  # noqa: ANN001, ARG001
-        return _P(pos)
+    def _point_only(self: ConnectivityValidator, via):  # noqa: ANN001, ARG001
+        return _P(via.position)
 
-    with mock.patch.object(ConnectivityValidator, "_via_copper_geom", _point_only):
+    with mock.patch.object(ConnectivityValidator, "_physical_via_annulus", _point_only):
         return ConnectivityValidator(pcb_path).extract_pad_partition()
 
 
@@ -1284,11 +1242,10 @@ def test_via_on_net0_adjacent_to_pour_is_not_a_false_short(tmp_path: Path) -> No
     Relabel the via to net 0 (unconnected) and widen the antipad hole so the
     via copper stays clear of the solid pour (a DRC-clean placement).  The
     copper-circle test must NOT fabricate a short: with a proper clearance moat
-    the eroded ring never reaches the solid pour, and a net-0 via carries no
-    schematic net to short in any case.
+    the raw annulus never reaches the solid pour, regardless of its label.
     """
-    # Wider antipad hole (1.2 x 1.2 around the via) so the eroded via ring
-    # (radius 0.4) stays inside the hole -> no bond to the solid pour.
+    # Wider antipad hole (1.2 x 1.2 around the via) so the raw via annulus
+    # (outer radius 0.5) stays inside the hole -> no bond to the solid pour.
     wide_hole_ring = (
         "(xy 8 0) (xy 9.98 0) (xy 9.98 9.4) "
         "(xy 9.4 9.4) (xy 9.4 10.6) (xy 10.6 10.6) (xy 10.6 9.4) "
