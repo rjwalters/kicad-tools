@@ -75,7 +75,8 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # Edge.Cuts bounds/origin change the routing domain for identical PCB bytes.
 # Bumped strictly above both parents so neither isolated implementation's
 # cache entries are silently reused.
-CACHE_VERSION = "2.5.1-outline-domain"
+# Auto-grid candidate preference and phase-shifted zones change routed copper.
+CACHE_VERSION = "2.5.2-safe-auto-grid"
 
 
 def get_default_cache_path() -> Path:
