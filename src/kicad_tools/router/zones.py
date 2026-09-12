@@ -268,7 +268,7 @@ class ZoneFiller:
         Returns:
             True if cell can be filled
         """
-        cell = self.grid.grid[layer_index][gy][gx]
+        cell = self.grid.cell_at(layer_index, gy, gx)
 
         # If cell is an obstacle (pad center), only fill if same net
         if cell.is_obstacle:
@@ -319,7 +319,7 @@ class ZoneFiller:
                     if not (0 <= nx < self.grid.cols and 0 <= ny < self.grid.rows):
                         continue
 
-                    neighbor = self.grid.grid[layer_index][ny][nx]
+                    neighbor = self.grid.cell_at(layer_index, ny, nx)
 
                     # If neighbor is blocked by different net, this cell needs clearance
                     if neighbor.blocked and neighbor.net != 0 and neighbor.net != zone.net_number:

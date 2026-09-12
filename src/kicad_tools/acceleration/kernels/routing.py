@@ -932,7 +932,7 @@ class BatchPathfinder:
     ) -> bool:
         """Check if a cell is blocked for routing."""
         # Use grid's blocking check
-        cell = self.grid.grid[layer][y][x]
+        cell = self.grid.cell_at(layer, y, x)
 
         if not cell.blocked:
             return False
@@ -962,7 +962,7 @@ class BatchPathfinder:
         """Check if a via can be placed at (x, y)."""
         # Check all layers for blocking
         for layer in range(self.grid.num_layers):
-            cell = self.grid.grid[layer][y][x]
+            cell = self.grid.cell_at(layer, y, x)
             if cell.blocked and cell.net != net:
                 if cell.is_obstacle or cell.usage_count == 0:
                     return False

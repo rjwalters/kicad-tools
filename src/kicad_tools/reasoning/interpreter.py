@@ -736,7 +736,7 @@ class CommandInterpreter:
                 if 0 <= gx < grid.cols and 0 <= gy < grid.rows:
                     # Check all routable layers
                     for layer_idx in grid.get_routable_indices():
-                        cell = grid.grid[layer_idx][gy][gx]
+                        cell = grid.cell_at(layer_idx, gy, gx)
                         if not cell.blocked or cell.net == source_pad.net:
                             source_blocked = False
                             break
@@ -754,7 +754,7 @@ class CommandInterpreter:
                 gx, gy = target_gx + dx, target_gy + dy
                 if 0 <= gx < grid.cols and 0 <= gy < grid.rows:
                     for layer_idx in grid.get_routable_indices():
-                        cell = grid.grid[layer_idx][gy][gx]
+                        cell = grid.cell_at(layer_idx, gy, gx)
                         if not cell.blocked or cell.net == target_pad.net:
                             target_blocked = False
                             break
