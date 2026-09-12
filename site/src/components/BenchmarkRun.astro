@@ -21,9 +21,14 @@ const measuredLabel = r.route_outcome?.artifact_source === "router_output"
   <p>Evidence recorded <time datetime={r.generated_at}>{r.generated_at}</time> · Tested tool <code>{r.tool_commit}</code></p>
   <p><strong>Outcome: {fmtOutcome(r)}</strong>. {outcomeExplanation(r)}</p>
   <p>Measured artifact: <strong>{fmtArtifactSource(r)}</strong>.</p>
+  {run.context && <aside aria-label="Run limitations">
+    <h4>Run limitations</h4>
+    <ul>{run.context.notes.map(note => <li>{note}</li>)}</ul>
+    <a href={run.context.source}>Evidence and interpretation</a>
+  </aside>}
   <dl>
     <div><dt>Input connectivity before routing</dt><dd>{input ? `${input.connections_routed} of ${input.connections_total} (${input.completion_pct.toFixed(1)}%)` : "Not recorded"}</dd></div>
-    <div><dt>Newly routed connections</dt><dd>{r.newly_routed_connections == null ? "Not recorded" : r.newly_routed_connections}</dd></div>
+    <div><dt>{(r.newly_routed_connections ?? 0) < 0 ? "Measured connectivity change" : "Newly routed connections"}</dt><dd>{r.newly_routed_connections == null ? "Not recorded" : r.newly_routed_connections}{(r.newly_routed_connections ?? 0) < 0 && " (negative change, not routing improvement)"}</dd></div>
     <div><dt>{measuredLabel}</dt><dd>{r.completion.connections_routed} of {r.completion.connections_total} ({r.completion.completion_pct.toFixed(1)}%)</dd></div>
     <div><dt>Measured copper</dt><dd>{r.copper.via_count} vias · {r.copper.wirelength_mm.toFixed(2)} mm</dd></div>
     <div><dt>Attempt duration</dt><dd>{attemptDuration(r)}</dd></div>
@@ -47,6 +52,8 @@ const measuredLabel = r.route_outcome?.artifact_source === "router_output"
 <style>
   .run { border: 1px solid var(--border); border-radius: 6px; padding: 1.2rem; margin: 1rem 0; overflow-wrap: anywhere; }
   h3 { margin: 0; } p { color: var(--muted); }
+  aside { border-left: 3px solid var(--accent); padding: 0.5rem 1rem; margin: 1rem 0; }
+  h4 { margin: 0; } aside ul { padding-left: 1.2rem; }
   dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem 1.5rem; }
   dt { color: var(--muted); font-size: 0.9rem; } dd { margin: 0.25rem 0; }
   a { color: var(--accent); } summary { cursor: pointer; color: var(--accent); }

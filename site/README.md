@@ -226,3 +226,10 @@ Vendor notes are excluded from local diagnostic lists and remain available in
 raw reports and the separate external reference section. Synthetic outcome
 fixtures exist only in tests; validate every newly committed collection against
 its real records before publishing the site.
+
+Reviewed collection interpretation lives in `benchmarkContext.ts`, keyed by the
+SHA-256 of the exact report bytes. It supplies visible run limitations with a
+source writeup link, without changing raw outcomes or metrics. Re-check the
+collection writeup before adding context for a new hash; a board name or file
+path alone must never carry an earlier diagnosis forward to a new run. Negative
+connection deltas are labeled measured connectivity changes, not improvements.

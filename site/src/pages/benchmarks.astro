@@ -147,7 +147,8 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
           Input connectivity, newly routed connections and measured output are separate evidence.
           These software checks do not establish manufacturing readiness or tested hardware.</p>
         <h2>Dated routing attempts</h2>
-        <p>Zero-touch uses the shipped rules; tuned uses a declared configuration.
+        <p>Zero-touch requests the shipped rules; tuned requests a declared configuration.
+          Run limitations explain whether the intended rules actually took effect.
           Each protocol has its own record. Evidence dates are independent of the site build date.</p>
         {runs.length === 0 && <p>No dated rerun reports are published yet. The August records below remain available.</p>}
         {runs.map(run => <BenchmarkRun run={run} />)}

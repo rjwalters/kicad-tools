@@ -1,14 +1,17 @@
 /** Dated evidence collections, kept separate from the root-level historical archive. */
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { benchmarksResultsDir, loadBenchmarkFile } from "./loadBenchmarks.ts";
 import type { BenchmarkReport } from "./benchmarkTypes.ts";
+import { contextForReport, type RunContext } from "./benchmarkContext.ts";
 
 export interface BenchmarkRun {
   report: BenchmarkReport;
   /** Loader-owned relative path, never supplied by report JSON. */
   path: string;
   collection: string;
+  context?: RunContext;
 }
 
 export function loadBenchmarkRuns(root = benchmarksResultsDir()): BenchmarkRun[] {
@@ -21,8 +24,12 @@ export function loadBenchmarkRuns(root = benchmarksResultsDir()): BenchmarkRun[]
     for (const file of readdirSync(join(root, directory.name), { withFileTypes: true })) {
       // Provenance manifests are companions, not route reports. Ignore symlinks.
       if (!file.isFile() || !file.name.endsWith(".json") || file.name === "run-provenance.json") continue;
-      const report = loadBenchmarkFile(join(root, directory.name, file.name));
-      if (report) runs.push({ report, collection: directory.name, path: `${directory.name}/${file.name}` });
+      const path = join(root, directory.name, file.name);
+      const report = loadBenchmarkFile(path);
+      if (report) {
+        const hash = createHash("sha256").update(readFileSync(path)).digest("hex");
+        runs.push({ report, collection: directory.name, path: `${directory.name}/${file.name}`, context: contextForReport(hash) });
+      }
     }
   }
   return runs.sort((a, b) => b.collection.localeCompare(a.collection)

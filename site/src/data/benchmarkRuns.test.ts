@@ -11,12 +11,13 @@ it("retains separate dated runs and protocols without loading the historical arc
   const root = mkdtempSync(join(tmpdir(), "dated-runs-")); roots.push(root);
   for (const date of ["2026-09-11", "2026-09-12"]) {
     mkdirSync(join(root, date));
-    for (const protocol of ["zero-touch", "tuned"]) writeFileSync(join(root,date,`strf.${protocol}.json`),JSON.stringify({...report,board_id:"strf",protocol,path:"forged.json"}));
+    for (const protocol of ["zero-touch", "tuned"]) writeFileSync(join(root,date,`strf.${protocol}.json`),JSON.stringify({...report,board_id:"strf",protocol,path:"forged.json",sha256:"797c4819ea1ea43a2b6710d4ba4ab16e30b45b85562f7d65ee5ae0f2d2097b2e"}));
     writeFileSync(join(root,date,"run-provenance.json"), JSON.stringify({runs:[]}));
   }
   writeFileSync(join(root,"historical.json"),JSON.stringify(report));
   const runs = loadBenchmarkRuns(root);
   expect(runs.map(r=>r.path)).toEqual(["2026-09-12/strf.tuned.json","2026-09-12/strf.zero-touch.json","2026-09-11/strf.tuned.json","2026-09-11/strf.zero-touch.json"]);
+  expect(runs.every(r=>r.context === undefined)).toBe(true);
   expect(loadBenchmarkRuns(join(root,"missing"))).toEqual([]);
 });
 it.each(["completed","partial","stopped_before_routing","failed","timeout","unknown"])("explains %s without deriving outcome from connectivity", outcome => {

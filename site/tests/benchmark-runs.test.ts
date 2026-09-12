@@ -14,12 +14,15 @@ beforeAll(()=>{
  mkdirSync(fixtureSite); mkdirSync(dated,{recursive:true});mkdirSync(join(root,"boards"));
  cpSync(join(site,"..","pyproject.toml"),join(root,"pyproject.toml"));
  for(const entry of ["src","scripts","astro.config.mjs","package.json","tsconfig.json"])cpSync(join(site,entry),join(fixtureSite,entry),{recursive:true});
+ // Share installed packages, but keep Vite's mutable cache private to this build.
+ const configPath=join(fixtureSite,"astro.config.mjs");
+ writeFileSync(configPath,readFileSync(configPath,"utf8").replace('output: "static",',`output: "static", vite: { cacheDir: ${JSON.stringify(join(fixtureSite,".vite-cache"))} },`));
  symlinkSync(join(site,"node_modules"),join(fixtureSite,"node_modules"),"dir");
  const archived=join(site,"../benchmarks/external/results/pocketbeagle.zero-touch.json");
  cpSync(archived,join(results,"pocketbeagle.zero-touch.json"));
  const original=JSON.parse(readFileSync(archived,"utf8"));
  for(const outcome of outcomes){
-  const r={...original,board_id:`fixture-${outcome}`,generated_at:"2026-09-12T00:00:00Z",tool_commit:"fixture-tool",route_outcome:{outcome,artifact_source:outcome==="completed"?"router_output":"fallback_input",exit_code:outcome==="completed"?0:3,reason:`Synthetic ${outcome} reason`},pre_route_completion:{connections_routed:2,connections_total:10,completion_pct:20},newly_routed_connections:outcome==="completed"?8:0,completion:{connections_routed:outcome==="completed"?10:2,connections_total:10,completion_pct:outcome==="completed"?100:20},timing:{valid:true,wall_clock_s:5,refusal_reason:null,measured_phase:outcome},notes:["Synthetic test fixture, not a real board run", "DeepPCB published reference: fixture vendor value"]};
+  const r={...original,board_id:`fixture-${outcome}`,generated_at:"2026-09-12T00:00:00Z",tool_commit:"fixture-tool",route_outcome:{outcome,artifact_source:outcome==="completed"?"router_output":"fallback_input",exit_code:outcome==="completed"?0:3,reason:`Synthetic ${outcome} reason`},pre_route_completion:{connections_routed:2,connections_total:10,completion_pct:20},newly_routed_connections:outcome==="completed"?8:outcome==="partial"?-2:0,completion:{connections_routed:outcome==="completed"?10:2,connections_total:10,completion_pct:outcome==="completed"?100:20},timing:{valid:true,wall_clock_s:5,refusal_reason:null,measured_phase:outcome},notes:["Synthetic test fixture, not a real board run", "DeepPCB published reference: fixture vendor value"]};
   delete r.kct_check; delete r.kicad_cli_drc; delete r.diff_pairs;
   if(outcome==="failed") r.kct_check={ran:false,passed:null,error_count:null,warning_count:null,note:"Unsupported custom pad fixture"};
   if(outcome==="unknown"){delete r.route_outcome;delete r.pre_route_completion;delete r.newly_routed_connections;}
@@ -38,7 +41,8 @@ it.each(outcomes)("renders the real %s case with a raw source and keyboard discl
  expect(article).not.toContain("fixture vendor value");
  if(outcome==="failed") expect(article).toContain("Unsupported custom pad fixture");
  if(outcome==="unknown"){expect(article).toContain("unknown (legacy)");expect(article).toContain("Not recorded");}
- else {expect(article).toContain(`Synthetic ${outcome} reason`);expect(article).toContain("Input connectivity before routing");expect(article).toContain("Newly routed connections");}
+ else {expect(article).toContain(`Synthetic ${outcome} reason`);expect(article).toContain("Input connectivity before routing");expect(article).toContain(outcome==="partial"?"Measured connectivity change":"Newly routed connections");
+ if(outcome==="partial"){expect(article).toContain("-2 (negative change, not routing improvement)");expect(article).not.toContain("Newly routed connections");}}
  if(outcome==="completed")expect(article).toContain("Measured final connectivity");
  else if(outcome!=="unknown")expect(article).toContain("Measured fallback-input connectivity");
 });
