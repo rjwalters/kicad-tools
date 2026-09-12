@@ -177,7 +177,7 @@ from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from kicad_tools.schema.pcb import PCB, Segment
+    from kicad_tools.schema.pcb import PCB, Footprint, Pad, Segment, Via, Zone
 
 __all__ = [
     "CURRENT_PATHS_SIDECAR_BASENAME",
@@ -689,6 +689,115 @@ class _ViaArray:
     members: list[Segment]
 
 
+def _array_contacts_modeled(
+    pcb: PCB,
+    net_name: str,
+    fp: Footprint,
+    pad: Pad,
+    members: list[Segment],
+    far_nodes: list[_Node],
+    exits: list[tuple[_Node, _Node, _GraphEdge]],
+) -> bool:
+    """Reject unmodeled copper touching the local array, using copper extents.
+
+    Only the receiving segment's interval between barrels defines local scope;
+    evidence still retains that segment whole. A modeled outgoing track may
+    overlap the receiving copper at its graph port, within the sum of radii.
+    Unsupported same-net pad stacks and routed arcs conservatively disable this
+    recognition subset because their copper is not inventoried by this graph.
+    """
+    from shapely.geometry import LineString, Point, Polygon  # type: ignore[import-untyped]
+
+    from kicad_tools.validate.rules.clearance import _pad_on_layer, _pad_polygon
+
+    net = pcb.get_net_by_name(net_name)
+
+    def same_net(obj: Pad | Via | Zone) -> bool:
+        return obj.net_name == net_name or (net is not None and obj.net_number == net.number)
+
+    # Routed arcs are not exposed as Segment objects. Never silently omit them.
+    for arc in pcb._sexp.find_all("arc"):
+        arc_net = arc.find_child("net")
+        if arc_net is not None and net is not None and arc_net.get_int(0) == net.number:
+            return False
+    for footprint in pcb.footprints:
+        for candidate in footprint.pads:
+            if same_net(candidate) and candidate._sexp_node is not None:
+                if candidate._sexp_node.find_child("padstack") is not None:
+                    return False
+
+    trunk = members[-1]
+    ordered = sorted(far_nodes, key=lambda n: math.dist(n[:2], trunk.start))
+    # Each piece retains its width for a bounded, modeled port join allowance.
+    pieces = []
+    for member in members:
+        ends = (ordered[0][:2], ordered[-1][:2]) if member is trunk else (member.start, member.end)
+        pieces.append((member.layer, LineString(ends).buffer(member.width / 2), member.width / 2))
+    source = _pad_polygon(pad, fp)
+    if source is None:
+        return False
+    pieces.append((members[0].layer, source, 0.0))
+    positions = {node[:2] for node in far_nodes}
+    member_vias = [v for v in pcb.vias if _node_key(v.position) in positions]
+    for via in member_vias:
+        for copper_layer in pcb.copper_layers:
+            if via_spans_layer(via.layers, copper_layer.name):
+                pieces.append(
+                    (copper_layer.name, Point(via.position).buffer(via.size / 2), via.size / 2)
+                )
+    member_ids = {id(s) for s in members}
+    for segment in _net_segments(pcb, net_name):
+        if id(segment) in member_ids:
+            continue
+        copper = LineString((segment.start, segment.end)).buffer(segment.width / 2)
+        for layer, region, radius in pieces:
+            if layer != segment.layer:
+                continue
+            overlap = copper.intersection(region)
+            for node, _, edge in exits:
+                if edge.segment is segment and node[2] == layer:
+                    overlap = overlap.difference(
+                        Point(node[:2]).buffer(radius + segment.width / 2 + _PAD_EPS)
+                    )
+            if not overlap.is_empty:
+                return False
+    for footprint in pcb.footprints:
+        for candidate in footprint.pads:
+            if candidate is pad or not same_net(candidate) or candidate.type == "np_thru_hole":
+                continue
+            copper = _pad_polygon(candidate, footprint)
+            if copper is None:
+                return False
+            if any(
+                _pad_on_layer(candidate, layer) and copper.intersects(region)
+                for layer, region, _ in pieces
+            ):
+                return False
+    for via in pcb.vias:
+        if via in member_vias or not same_net(via):
+            continue
+        copper = Point(via.position).buffer(via.size / 2)
+        if any(
+            via_spans_layer(via.layers, layer) and copper.intersects(region)
+            for layer, region, _ in pieces
+        ):
+            return False
+    for zone in pcb.zones:
+        if not same_net(zone) or zone.keepout is not None:
+            continue
+        # Boundary is a conservative envelope, independent of stale fill data.
+        if len(zone.polygon) < 3:
+            return False
+        envelope = Polygon(zone.polygon).envelope
+        layers = zone.layers or [zone.layer]
+        if any(
+            (layer in layers or "*.Cu" in layers) and envelope.intersects(region)
+            for layer, region, _ in pieces
+        ):
+            return False
+    return True
+
+
 def _endpoint_via_array(
     graph: _CopperGraph, pcb: PCB, endpoint: PathEndpoint, net_name: str
 ) -> _ViaArray | None:
@@ -810,6 +919,8 @@ def _endpoint_via_array(
     if len(exits) != 1:
         return None
     members.append(trunk)
+    if not _array_contacts_modeled(pcb, net_name, fp, pad, members, far_nodes, exits):
+        return None
     return _ViaArray(nodes, edges, list({id(seg): seg for seg in members}.values()))
 
 

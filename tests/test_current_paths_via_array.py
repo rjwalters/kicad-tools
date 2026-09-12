@@ -116,3 +116,54 @@ def test_unproved_fanout_remains_nonresolved(mutation):
 @pytest.mark.parametrize("delta,expected", [(0, True), (0.001, False)])
 def test_explicit_pad_diagonal_locality_boundary(delta, expected):
     assert resolve_current_path(fixture(depth=math.hypot(2.4, 2.4) + delta), spec()).ok is expected
+
+
+@pytest.mark.parametrize("contact", ["track", "pad", "via", "inner_track"])
+def test_width_only_external_contacts_reject_array(contact):
+    pcb = fixture()
+    if contact == "track":
+        # Centerlines stay 0.5 mm apart; their 0.6 mm copper strokes overlap.
+        pcb.add_trace((18.7, 51.5), (18.7, 54), width=0.6, layer="F.Cu", net="NET1")
+    elif contact == "pad":
+        _add_pad_footprint(pcb, ref="EXTRA", x=18.7, y=51.5, net="NET1")
+        pad = pcb.get_footprint("EXTRA").pads[0]
+        pad.type, pad.shape, pad.size, pad.layers = "smd", "circle", (0.6, 0.6), ["F.Cu"]
+    elif contact == "via":
+        pcb.add_via(18.7, 51.5, net="NET1", size=0.6)
+    else:
+        # A barrel's annulus can touch inner-layer copper without a center contact.
+        pcb.add_trace((18.7, 51.8), (18.7, 54), width=0.6, layer="In1.Cu", net="NET1")
+    result = resolve_current_path(pcb, spec())
+    assert not result.ok
+    assert not result.segments
+    assert not reinforcement_eligible_segment_ids(pcb, [spec()])
+
+
+def test_remote_copper_does_not_expand_local_contact_scope():
+    pcb = fixture()
+    pcb.add_trace((10, 51.5), (10, 54), width=0.6, layer="F.Cu", net="NET1")
+    assert resolve_current_path(pcb, spec()).ok
+
+
+@pytest.mark.parametrize("unsupported", ["arc", "padstack", "zone"])
+def test_uninventoried_copper_disables_array_proof(unsupported):
+    from kicad_tools.schema.pcb import Zone
+    from kicad_tools.sexp import parse_string
+
+    pcb = fixture()
+    net = pcb.get_net_by_name("NET1")
+    if unsupported == "arc":
+        pcb._sexp.append(
+            parse_string(
+                f'(arc (start 18 51) (mid 19 52) (end 18 53) (width 0.6) (layer "F.Cu") (net {net.number}))'
+            )
+        )
+    elif unsupported == "padstack":
+        pcb.get_footprint("J1").pads[0]._sexp_node = parse_string(
+            '(pad "1" smd rect (padstack (mode custom)))'
+        )
+    else:
+        pcb._zones.append(
+            Zone(net.number, "NET1", "F.Cu", polygon=[(18, 51), (20, 51), (20, 53), (18, 53)])
+        )
+    assert not resolve_current_path(pcb, spec()).ok
