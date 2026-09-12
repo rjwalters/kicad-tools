@@ -290,10 +290,18 @@ NB_MODULE(router_cpp, m) {
              "via_clearance"_a, "min_drill_clearance"_a,
              "partner_net"_a = -1,
              "intra_pair_clearance"_a = 0.0f,
+             "clamp_ref_hashes"_a = std::vector<uint32_t>{},
              "Validate a candidate route against stored geometry.  Issue #2559 "
              "/ Phase 1C: when partner_net >= 0 and intra_pair_clearance >= 0, "
              "comparisons against partner_net use intra_pair_clearance instead "
-             "of trace_clearance (defaults preserve pre-#2559 behavior).")
+             "of trace_clearance (defaults preserve pre-#2559 behavior).  "
+             "Issue #5166: refs in exclude_ref_hashes keep the full-skip "
+             "same-component carve-out (#2452 corridor relief, whose floor is "
+             "the search's own trace_width/2 blocked-cell construction), while "
+             "refs in clamp_ref_hashes -- eligible only via a configured "
+             "override that resolved smaller than the default clearance -- "
+             "enforce that resolved per-pad value as a hard floor instead.  "
+             "An empty clamp_ref_hashes reproduces pre-#5166 behavior.")
         // Pairwise (HV-isolation) domain clearance -- Issue #4510 / #4431 Phase 2a
         .def("set_pairwise_domains", &Grid3D::set_pairwise_domains,
              "net_to_domain"_a, "matrix"_a,
