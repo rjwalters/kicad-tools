@@ -1426,10 +1426,14 @@ def _via_pad_copper(via: Via, router: Autorouter) -> list[tuple[int, set[Layer],
         if pad.net != via.net:
             continue
         layers = all_layers if pad.through_hole else {pad.layer}
-        # This head's router Pad stores rectangular, cardinal-normalized
-        # dimensions, not schema shape metadata. Preserve those represented
-        # contacts; honor residual rotation if a caller supplies it (KiCad
-        # uses clockwise-positive angles). Do not claim schema shape fidelity.
+        # A circle's bounding-box corners are not copper. Keep its radius
+        # analytic so a via exit cannot replace a real pad contact with a
+        # trace touching only an empty corner of the search bounds.
+        if pad.shape == "circle":
+            copper.append((id(pad), layers, Point(pad.x, pad.y), pad.width / 2))
+            continue
+        # Rectangular router envelopes retain their local dimensions and
+        # clockwise-positive KiCad rotation.
         # Search bounds are already expanded for rotation. Contact geometry
         # must start from the local rectangle and rotate exactly once.
         shape = box(
