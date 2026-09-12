@@ -122,8 +122,13 @@ class TestBuildNativeShortCircuit:
     def test_skips_and_marks_skipped_when_up_to_date(self, monkeypatch) -> None:
         _patch_available(monkeypatch, True)
         monkeypatch.setattr(bnc, "_is_so_stale", lambda _router_dir: False)
+        # Issue #5240: the short circuit also consults the placement
+        # extension's up-to-date status; pin it so this router-only test
+        # does not depend on whatever placement_cpp state happens to be
+        # installed in the environment running the test.
+        monkeypatch.setattr(bnc, "_placement_backend_up_to_date", lambda: True)
         fake_so = Path("/fake/router/router_cpp.cpython-311.so")
-        monkeypatch.setattr(bnc, "_find_installed_so", lambda _router_dir: fake_so)
+        monkeypatch.setattr(bnc, "_find_installed_so", lambda *_a, **_k: fake_so)
 
         result = bnc.build_native(force=False)
 
