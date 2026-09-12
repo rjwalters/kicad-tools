@@ -170,7 +170,9 @@ The script rebuilds before upload, so inspect the final staged bytes as well.
 returned URL and branch before treating it as a production release. See
 `./scripts/deploy-site.sh --help` for available options.
 
-For completion, retain the selected commit, deployed URL, build time and
+Before uploading, retain the current production deployment identifier, source
+commit and a verified copy of its staged assets. Record the new deployment
+identifier, selected commit, deployed URL, build time and before/after
 verification results in the issue/PR:
 
 1. Visit the public homepage, routing-status page and representative board
@@ -184,6 +186,23 @@ verification results in the issue/PR:
    affected layer. Do not equate HTTP200 or a successful upload with freshness.
 4. Record unresolved checks explicitly. Close publication work only after the
    public artifact checks pass; a local passing build is preparation evidence.
+
+Check both the deployment-specific URL and the production domain. Record cache
+response headers and compare ordinary public requests with a fresh browser
+session and cache-bypassing requests. A fresh deployment URL alone does not
+prove that the production domain serves the same bytes. If results disagree,
+keep publication acceptance open and investigate the deployment mapping or
+cache before declaring the refresh complete.
+
+If publication regresses pages or assets, the publication owner should restore
+the recorded, verified production deployment through the existing project's
+deployment controls. Confirm the intended account/project before acting. If
+that deployment cannot be restored, prepare the recorded source revision in a
+managed worktree and rebuild with its verified asset set, inspect it locally,
+then publish through the same guarded script. Rebuilding an old revision with
+different generated assets is not an exact rollback. After either recovery,
+repeat the public identity, page and asset checks above and record the restored
+deployment identifier and any remaining limitations.
 
 This site presents project evidence. Publication does not itself establish
 DRC cleanliness, manufacturing readiness, component availability or physical
