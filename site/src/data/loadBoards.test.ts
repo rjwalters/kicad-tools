@@ -54,12 +54,12 @@ describe("discoverBoardDirs", () => {
   it("lists immediate board dirs and descends into external/", () => {
     makeBoardDir("00-simple-led");
     makeBoardDir("01-voltage-divider");
-    mkdirSync(join(root, "external", "softstart", "output"), { recursive: true });
+    mkdirSync(join(root, "external", "example-project", "output"), { recursive: true });
 
     const dirs = discoverBoardDirs(root).map((d) => d.replace(root + "/", ""));
     expect(dirs).toContain("00-simple-led");
     expect(dirs).toContain("01-voltage-divider");
-    expect(dirs).toContain(join("external", "softstart"));
+    expect(dirs).toContain(join("external", "example-project"));
   });
 
   it("skips hidden and underscore-prefixed directories", () => {
@@ -159,15 +159,18 @@ describe("loadBoards", () => {
 });
 
 describe("excluded slugs (#3696)", () => {
-  it("drops chorus-test-revA from discovery under external/", () => {
-    mkdirSync(join(root, "external", "softstart", "output"), { recursive: true });
+  it("drops local-only designs from discovery under external/", () => {
+    mkdirSync(join(root, "external", "example-project", "output"), { recursive: true });
     mkdirSync(join(root, "external", "chorus-test-revA", "output"), { recursive: true });
 
     const slugs = discoverBoardDirs(root).map((d) =>
       d.split(/[\\/]/).filter(Boolean).pop(),
     );
-    expect(slugs).toContain("softstart");
+    expect(slugs).toContain("example-project");
     expect(slugs).not.toContain("chorus-test-revA");
+    const before = discoverBoardDirs(root);
+    mkdirSync(join(root, "external", "softstart", "output"), { recursive: true });
+    expect(discoverBoardDirs(root)).toEqual(before);
   });
 
   it("emits no Board for an excluded slug", () => {
@@ -187,22 +190,22 @@ describe("board category (#3696)", () => {
   });
 
   it("tags boards under external/ as project", () => {
-    mkdirSync(join(root, "external", "softstart", "output"), { recursive: true });
-    const board = loadBoard(join(root, "external", "softstart"));
+    mkdirSync(join(root, "external", "example-project", "output"), { recursive: true });
+    const board = loadBoard(join(root, "external", "example-project"));
     expect(board.category).toBe("project");
   });
 
   it("assigns category across a mixed set", () => {
     writeBoardJson("01-voltage-divider", validBoard("01-voltage-divider"));
-    mkdirSync(join(root, "external", "softstart", "output"), { recursive: true });
+    mkdirSync(join(root, "external", "example-project", "output"), { recursive: true });
     writeFileSync(
-      join(root, "external", "softstart", "output", "board.json"),
-      JSON.stringify(validBoard("softstart")),
+      join(root, "external", "example-project", "output", "board.json"),
+      JSON.stringify(validBoard("example-project")),
     );
 
     const boards = loadBoards(root);
     const bySlug = Object.fromEntries(boards.map((b) => [b.slug, b.category]));
     expect(bySlug["01-voltage-divider"]).toBe("demo");
-    expect(bySlug["softstart"]).toBe("project");
+    expect(bySlug["example-project"]).toBe("project");
   });
 });
