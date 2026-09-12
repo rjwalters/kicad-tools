@@ -195,10 +195,14 @@ field existed). **`null` must be treated as unknown, never as success.**
 - **`partial`** — real progress was made (router output exists) but the
   board is not fully routed. This is a **normal**, not a failure, result on
   a hard board under the zero-touch protocol.
-- **`stopped_before_routing`** — the router exited non-zero and produced no
-  output for this attempt. No routing progress was captured.
-- **`failed`** — the router raised.
-- **`timeout`** — the attempt was abandoned for exceeding a time budget.
+- **`stopped_before_routing`** — an explicit preflight refusal was captured
+  (currently the census gate exit code 9), with no output for this attempt.
+  Generic nonzero exits without output do not establish this phase.
+- **`failed`** — the router raised or exited nonzero without output, with
+  no explicit timeout or preflight-refusal evidence.
+- **`timeout`** — deadline exit 124, `TimeoutError`, or `TimeoutExpired`
+  records an exceeded budget. Partial output provenance remains independent;
+  elapsed native attempt time is retained even when the call raises.
 - **`unknown`** — no route-attempt evidence was supplied, or the evidence
   contradicts itself (e.g. exit `0` but no output file).
 

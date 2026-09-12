@@ -453,9 +453,9 @@ class TestRunOneBoard:
         assert any("no output file" in n for n in report.notes)
 
         # Structured outcome (#5280): a non-zero exit with no output file
-        # for this attempt is "stopped before routing" -- never success.
+        # for this attempt is failed with unknown phase -- never success.
         assert report.route_outcome is not None
-        assert report.route_outcome.outcome == "stopped_before_routing"
+        assert report.route_outcome.outcome == "failed"
         assert report.route_outcome.artifact_source == "fallback_input"
         assert report.route_outcome.exit_code == 1
         assert report.pre_route_completion is not None
@@ -463,7 +463,7 @@ class TestRunOneBoard:
         assert report.newly_routed_connections == 0
         # A refused/unmeasured timing must never look like a completed-
         # routing performance number.
-        assert report.timing.measured_phase == "stopped_before_routing"
+        assert report.timing.measured_phase == "failed"
 
     def test_router_raises_marks_failed_outcome(self, tmp_path):
         """A router exception (crash) is ``failed``, not silently dropped."""
@@ -497,7 +497,7 @@ class TestRunOneBoard:
         assert report.route_outcome.artifact_source == "fallback_input"
         assert report.route_outcome.exit_code is None
         assert "boom" in (report.route_outcome.reason or "")
-        assert report.timing.wall_clock_s is None
+        assert report.timing.wall_clock_s is not None
 
     def test_partial_output_from_nonzero_exit_is_not_mislabeled_success(self, tmp_path):
         """A router that exits non-zero but DID write output for this
@@ -546,7 +546,7 @@ class TestRunOneBoard:
         pre-seed ``routed/<slug>.<protocol>.kicad_pcb`` with a prior run's
         output, then run a NEW attempt whose (injected) router returns a
         non-zero exit and writes nothing. The new attempt must report
-        ``stopped_before_routing`` / ``fallback_input`` -- never silently
+        ``failed`` / ``fallback_input`` -- never silently
         pick up the stale file and look like a completed route.
         """
         fetch_boards, normalize = bench_cmd._load_external_modules()
@@ -578,7 +578,7 @@ class TestRunOneBoard:
 
         assert not stale_path.exists()  # cleared before this attempt's router ran
         assert report.route_outcome is not None
-        assert report.route_outcome.outcome == "stopped_before_routing"
+        assert report.route_outcome.outcome == "failed"
         assert report.route_outcome.artifact_source == "fallback_input"
         assert report.completion.completion_pct == 0.0
         assert any("no output file" in n for n in report.notes)
@@ -629,7 +629,7 @@ class TestRunOneBoard:
         )
 
         assert zero_touch_report.route_outcome.outcome == "completed"  # type: ignore[union-attr]
-        assert tuned_report.route_outcome.outcome == "stopped_before_routing"  # type: ignore[union-attr]
+        assert tuned_report.route_outcome.outcome == "failed"  # type: ignore[union-attr]
         assert (output_dir / "routed" / "fixture.zero-touch.kicad_pcb").exists()
         assert not (output_dir / "routed" / "fixture.tuned.kicad_pcb").exists()
 
@@ -1119,3 +1119,71 @@ class TestTunedProtocolCli:
         """
         args = create_parser().parse_args(["bench", "external"])
         assert getattr(args, "tuned", False) is False
+
+
+@pytest.mark.parametrize(
+    "signal,write_output,expected",
+    [
+        ("refusal", False, "stopped_before_routing"),
+        ("search_failure", False, "failed"),
+        ("deadline", False, "timeout"),
+        ("deadline", True, "timeout"),
+        ("timeout_error", False, "timeout"),
+        ("timeout_error", True, "timeout"),
+        ("subprocess_timeout", False, "timeout"),
+        ("subprocess_timeout", True, "timeout"),
+    ],
+)
+def test_runner_preserves_phase_evidence_and_attempt_time(
+    tmp_path, monkeypatch, signal, write_output, expected
+):
+    import subprocess
+
+    from kicad_tools.cli.route_deadline import TIMEOUT_EXIT
+    from kicad_tools.router.crosstail_advisory import GATE_EXIT_CODE
+
+    fetch_boards, normalize = bench_cmd._load_external_modules()
+    cache_dir = tmp_path / "cache"
+    (cache_dir / "fixture").mkdir(parents=True)
+    (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE)
+    entered_search = []
+
+    def route(argv):
+        if signal == "refusal":
+            return GATE_EXIT_CODE
+        entered_search.append(True)
+        if write_output:
+            Path(argv[argv.index("-o") + 1]).write_text(ROUTED_OUTPUT_FIXTURE)
+        if signal == "timeout_error":
+            raise TimeoutError("routing budget exhausted")
+        if signal == "subprocess_timeout":
+            raise subprocess.TimeoutExpired("route", 2.5)
+        return TIMEOUT_EXIT if signal == "deadline" else 1
+
+    ticks = iter([10.0, 12.5])
+    # Later measurement/check calls use the real clock.
+    real_clock = bench_cmd.time.perf_counter
+    monkeypatch.setattr(bench_cmd.time, "perf_counter", lambda: next(ticks, real_clock()))
+    report = bench_cmd._run_one_board(
+        _spec(fetch_boards),
+        fetch_boards,
+        normalize,
+        cache_dir=cache_dir,
+        output_dir=tmp_path / "out",
+        seed=1,
+        manufacturer="jlcpcb",
+        layers=2,
+        skip_fetch=True,
+        run_kicad_cli=False,
+        kicad_cli_timeout=60,
+        backend=_cpp_backend(),
+        verbose=False,
+        route_fn=route,
+    )
+    assert bool(entered_search) == (signal != "refusal")
+    assert report.route_outcome.outcome == expected
+    assert report.route_outcome.artifact_source == (
+        "router_output" if write_output else "fallback_input"
+    )
+    assert report.timing.wall_clock_s == 2.5
+    assert report.timing.measured_phase == expected

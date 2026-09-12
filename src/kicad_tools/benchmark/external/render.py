@@ -146,7 +146,7 @@ def render_markdown(
             lines.append(
                 f"- `{report.board_id}` ({report.protocol}): "
                 f"{fallback_reason or 'no reason recorded'} "
-                "-- the numbers above describe the pre-route input, NOT a routed board."
+                "-- connectivity, copper and check measurements describe the pre-route input. Runtime measures the routing attempt."
             )
 
     legacy = [r for r in reports if r.route_outcome is None]

@@ -527,6 +527,7 @@ def build_route_outcome(
     connections_total: int | None = None,
     exception: BaseException | None = None,
     timed_out: bool = False,
+    stopped_before_routing: bool = False,
 ) -> RouteOutcome:
     """Classify a routing attempt from the evidence actually captured.
 
@@ -549,6 +550,8 @@ def build_route_outcome(
         timed_out: Whether the attempt was abandoned for exceeding a time
             budget (reported as :data:`ROUTE_OUTCOME_TIMEOUT` rather than
             :data:`ROUTE_OUTCOME_FAILED`).
+        stopped_before_routing: Explicit preflight refusal evidence; never
+            infer this from output absence alone.
     """
     artifact_source = (
         ARTIFACT_SOURCE_ROUTER_OUTPUT if output_exists else ARTIFACT_SOURCE_FALLBACK_INPUT
@@ -568,6 +571,14 @@ def build_route_outcome(
                     "measuring the pre-route input as fallback"
                 )
             ),
+        )
+
+    if stopped_before_routing and not output_exists and exit_code not in (None, 0):
+        return RouteOutcome(
+            outcome=ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING,
+            artifact_source=artifact_source,
+            exit_code=exit_code,
+            reason="an explicit preflight gate refused the attempt before routing",
         )
 
     if exception is not None:
@@ -641,7 +652,7 @@ def build_route_outcome(
             ),
         )
     return RouteOutcome(
-        outcome=ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING,
+        outcome=ROUTE_OUTCOME_FAILED,
         artifact_source=artifact_source,
         exit_code=exit_code,
         reason=(
@@ -1073,6 +1084,7 @@ def collect_report(
     route_output_exists: bool | None = None,
     route_exception: BaseException | None = None,
     route_timed_out: bool = False,
+    route_stopped_before_routing: bool = False,
     pre_route_path: str | Path | None = None,
 ) -> BenchmarkReport:
     """Measure a routed benchmark board and assemble the full report.
@@ -1112,6 +1124,7 @@ def collect_report(
         route_exception: The exception the route call raised, if any.
         route_timed_out: Whether the attempt was abandoned for exceeding a
             time budget.
+        route_stopped_before_routing: Explicit preflight refusal evidence.
         pre_route_path: The pre-route (post rip-up) input board, used to
             populate :attr:`BenchmarkReport.pre_route_completion` -- the
             baseline this attempt started from. ``None`` when not supplied
@@ -1143,6 +1156,7 @@ def collect_report(
             connections_total=completion.connections_total,
             exception=route_exception,
             timed_out=route_timed_out,
+            stopped_before_routing=route_stopped_before_routing,
         )
         if route_attempted
         else None

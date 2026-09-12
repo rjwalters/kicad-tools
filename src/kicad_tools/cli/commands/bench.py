@@ -51,6 +51,7 @@ started around it, so no timing number is even produced to discard.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
@@ -407,23 +408,29 @@ def _run_one_board(
     wall_clock_s: float | None = None
     route_rc: int | None
     route_exc: Exception | None = None
+    # Measure the whole attempt, including failures, only with a native backend.
+    start = time.perf_counter() if backend.timing_valid else None
     try:
-        if backend.timing_valid:
-            # Gate BEFORE measuring (Epic #4932 risk register): the
-            # stopwatch is only ever started when the C++ backend is live,
-            # so a Python-fallback number is never even produced.
-            start = time.perf_counter()
-            route_rc = route(route_argv)
-            wall_clock_s = time.perf_counter() - start
-        else:
-            route_rc = route(route_argv)
+        route_rc = route(route_argv)
     except Exception as exc:  # defensive: a router crash must not abort the whole run
         route_rc = None
-        wall_clock_s = None
         route_exc = exc
         router_note = f"router raised {type(exc).__name__}: {exc}"
     else:
         router_note = f"router exit code: {route_rc}"
+    finally:
+        if start is not None:
+            wall_clock_s = time.perf_counter() - start
+
+    from kicad_tools.cli.route_deadline import TIMEOUT_EXIT
+    from kicad_tools.router.crosstail_advisory import GATE_EXIT_CODE
+
+    # These are explicit router contracts. Generic nonzero exit/output absence
+    # says nothing about whether search started, so never infer a preflight stop.
+    route_timed_out = route_rc == TIMEOUT_EXIT or isinstance(
+        route_exc, (TimeoutError, subprocess.TimeoutExpired)
+    )
+    route_stopped_before_routing = route_rc == GATE_EXIT_CODE
 
     # Evidence of THIS attempt's output -- correct regardless of whether the
     # path was previously bare or previously occupied, because it was
@@ -475,5 +482,7 @@ def _run_one_board(
         route_exit_code=route_rc,
         route_output_exists=output_exists,
         route_exception=route_exc,
+        route_timed_out=route_timed_out,
+        route_stopped_before_routing=route_stopped_before_routing,
         pre_route_path=normalized_path,
     )

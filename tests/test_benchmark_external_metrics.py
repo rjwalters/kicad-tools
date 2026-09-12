@@ -385,9 +385,9 @@ class TestBuildRouteOutcome:
         assert outcome.artifact_source == ARTIFACT_SOURCE_ROUTER_OUTPUT
         assert "partial progress" in (outcome.reason or "")
 
-    def test_stopped_before_routing_on_nonzero_exit_no_output(self) -> None:
+    def test_failed_on_nonzero_exit_no_output(self) -> None:
         outcome = build_route_outcome(exit_code=1, output_exists=False)
-        assert outcome.outcome == ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING
+        assert outcome.outcome == ROUTE_OUTCOME_FAILED
         assert outcome.artifact_source == ARTIFACT_SOURCE_FALLBACK_INPUT
         assert outcome.exit_code == 1
 
@@ -547,7 +547,7 @@ class TestCollectReportRouteOutcomeAndBaseline:
             route_output_exists=False,
         )
         assert report.route_outcome is not None
-        assert report.route_outcome.outcome == ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING
+        assert report.route_outcome.outcome == ROUTE_OUTCOME_FAILED
         assert report.route_outcome.artifact_source == ARTIFACT_SOURCE_FALLBACK_INPUT
 
 
@@ -825,8 +825,8 @@ class TestRenderMarkdown:
             route_outcome=RouteOutcome(
                 outcome=ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING,
                 artifact_source=ARTIFACT_SOURCE_FALLBACK_INPUT,
-                exit_code=1,
-                reason="router exited 1 and produced no output file",
+                exit_code=9,
+                reason="census gate refused before routing",
             ),
             timing=TimingMetrics(
                 wall_clock_s=4.4, valid=True, measured_phase=ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING
@@ -836,7 +836,8 @@ class TestRenderMarkdown:
         assert "| stopped before routing | fallback input |" in text
         assert "4.4 s (stopped before routing)" in text
         assert "**Measured artifact is fallback input, not router output**" in text
-        assert "router exited 1 and produced no output file" in text
+        assert "census gate refused before routing" in text
+        assert "Runtime measures the routing attempt" in text
 
     def test_legacy_report_without_route_outcome_is_flagged_not_success(self) -> None:
         report = _synthetic_report(route_outcome=None)
