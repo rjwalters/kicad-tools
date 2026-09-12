@@ -1121,14 +1121,25 @@ class NetStatusAnalyzer:
         centre sits in the antipad moat but whose copper edge reaches the
         thermal spokes, still bonds.
 
-        A zone's fill fragments are unioned into a single group: KiCad
-        fragments one pour into many ``filled_polygon`` entries around thermal
-        reliefs, and all fragments of one ``zone`` object are the same net and
-        DRC-bonded (this avoids a false ``open`` for a pad alone in its own
-        thermal fragment).  Crucially the union is **per zone object**, not
-        global across all zones, so two pads covered by genuinely separate
-        pours (or separate zones) are only connected when a via / trace bridges
-        them.
+        A zone's fill fragments are unioned into a single group ONLY when real
+        copper actually ties them together (Issue #5031) -- never merely
+        because they share a ``zone``/net identity.  KiCad commonly fragments
+        one continuous pour into many ``filled_polygon`` entries around
+        thermal reliefs; those fragments still touch/overlap geometrically, so
+        they are merged (avoiding a false ``open`` for a pad alone in its own
+        thermal fragment).  But KiCad's native refill can also leave a zone
+        with two genuinely disjoint pad-bearing fill islands under the SAME
+        zone UUID once a stitching via is removed -- those islands share no
+        copper at all, and native ``kicad-cli pcb drc`` correctly reports the
+        open between them.  A prior version of this method unioned every
+        fragment of a zone unconditionally, which is exactly what missed that
+        case: same net/zone identity was mistaken for a physical bond.
+        Fragments are now merged via a union-find keyed on real copper contact
+        (geometric fragment-to-fragment overlap, or a single via/trace whose
+        copper penetrates more than one fragment) rather than the zone object
+        itself, so two pads covered by genuinely separate pours (whether from
+        different zones or different islands of the SAME zone) are only
+        connected when copper -- fill, via, or trace -- actually bridges them.
 
         Vias whose copper penetrates a fill island bond the pads reached
         through them (directly, or via a segment chain ending at the via) into
@@ -1237,12 +1248,110 @@ class NetStatusAnalyzer:
         for zone in self.pcb.zones:
             if zone.net_number != net_number or not zone.filled_polygons:
                 continue
-            bonded: set[str] = set()
+
+            n_fragments = len(zone.filled_polygons)
+            regions: list[Any | None] = []
+            fill_layers: list[str] = []
             for i, fill_pts in enumerate(zone.filled_polygons):
-                region = cv._fill_solid_region(fill_pts)
+                regions.append(cv._fill_solid_region(fill_pts))
+                fill_layers.append(zone.filled_polygon_layer(i))
+
+            # Union-find over this zone's fill fragments.  Every fragment
+            # starts in its own singleton cluster; two fragments are merged
+            # ONLY when real copper ties them together, never merely because
+            # they belong to the same ``zone`` object (Issue #5031).
+            parent = list(range(n_fragments))
+
+            def _find(x: int, _parent: list[int] = parent) -> int:
+                while _parent[x] != x:
+                    _parent[x] = _parent[_parent[x]]
+                    x = _parent[x]
+                return x
+
+            def _union(a: int, b: int, _parent: list[int] = parent) -> None:
+                ra, rb = _find(a), _find(b)
+                if ra != rb:
+                    _parent[ra] = rb
+
+            # 1. Fragments that are themselves geometrically continuous
+            #    (touching/overlapping solid regions on the SAME copper
+            #    layer) are one physical pour that KiCad happened to
+            #    fracture into multiple ``filled_polygon`` entries (thermal
+            #    relief spokes / clearance moats) -- merge them.
+            for i in range(n_fragments):
+                region_i = regions[i]
+                if region_i is None:
+                    continue
+                for j in range(i + 1, n_fragments):
+                    region_j = regions[j]
+                    if region_j is None or fill_layers[i] != fill_layers[j]:
+                        continue
+                    if region_i.intersects(region_j):
+                        _union(i, j)
+
+            # 2. A single via whose copper penetrates more than one fragment
+            #    of this zone is a REAL physical bridge between them (a
+            #    stitching via embedded across a fill discontinuity) --
+            #    merge those fragments too.  This is what keeps a clean,
+            #    fully-stitched board reading connected once the blanket
+            #    same-zone union above is removed.
+            for via, via_geom, _via_raw in via_geoms:
+                touched: list[int] = []
+                for i in range(n_fragments):
+                    region_i = regions[i]
+                    if (
+                        region_i is not None
+                        and self._via_spans_layer(via.layers, fill_layers[i])
+                        and region_i.intersects(via_geom)
+                    ):
+                        touched.append(i)
+                for other in touched[1:]:
+                    _union(touched[0], other)
+
+            # 3. A segment chain and the vias it physically contacts form
+            #    one bridge. Include the vias' fill contacts even when the
+            #    chain has no pads: fill -> via -> trace -> via -> fill is a
+            #    real connection between islands on the opposite layer.
+            for chain in chain_seg_indices:
+                chain_vias = [
+                    (via, via_geom)
+                    for via, via_geom, _via_raw in via_geoms
+                    if any(
+                        self._via_spans_layer(via.layers, segments[s].layer)
+                        and self._segment_touches_via(segments[s], via, via_geom)
+                        for s in chain
+                    )
+                ]
+                touched = []
+                for i in range(n_fragments):
+                    region_i = regions[i]
+                    if region_i is None:
+                        continue
+                    if any(
+                        self._via_spans_layer([segments[s].layer], fill_layers[i])
+                        and region_i.intersects(self._segment_poly(segments[s]))
+                        for s in chain
+                    ) or any(
+                        self._via_spans_layer(via.layers, fill_layers[i])
+                        and region_i.intersects(via_geom)
+                        for via, via_geom in chain_vias
+                    ):
+                        touched.append(i)
+                for other in touched[1:]:
+                    _union(touched[0], other)
+
+            # Compute the bonded pad set per PHYSICAL cluster (union-find
+            # root), not per zone -- this is the crux of the fix.  The
+            # bonding rules themselves (direct pad overlap / via penetration
+            # / chain-touches-fill) are unchanged; only the grouping key
+            # changes from "zone object" to "real copper cluster".
+            cluster_bonded: dict[int, set[str]] = {}
+            for i, fill_pts in enumerate(zone.filled_polygons):
+                region = regions[i]
                 if region is None:
                     continue
-                fill_layer = zone.filled_polygon_layer(i)
+                fill_layer = fill_layers[i]
+                bonded = cluster_bonded.setdefault(_find(i), set())
 
                 # Direct pad bonds: pad copper box overlaps the solid fill.
                 for pad_id, pad_geom in pad_polys.items():
@@ -1298,8 +1407,9 @@ class NetStatusAnalyzer:
                     ):
                         bonded.update(pads_in_chain)
 
-            if bonded:
-                groups.append(bonded)
+            for bonded in cluster_bonded.values():
+                if bonded:
+                    groups.append(bonded)
         return groups
 
     def _merge_chains_via_vias(
