@@ -75,6 +75,8 @@ def test_board02_cache_replays_complete_copper(tmp_path):
             )
         evidence = log.read_text()
         assert ("Cache MISS" if run == 1 else "Cache HIT") in evidence, evidence[-2000:]
+        if run == 2:
+            assert "Using cached result (skipping routing)" in evidence, evidence[-2000:]
         assert output.exists(), evidence[-2000:]
         copper.append(_copper(output.read_text()))
     assert copper[0]
