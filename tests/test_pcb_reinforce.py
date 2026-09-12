@@ -763,6 +763,55 @@ class TestCurrentPathsCLI:
         # Board never mutated by the audit.
         assert len(PCB.load(pcb_path).vias) == 0
 
+    def test_current_paths_audit_cli_reports_waveform_assumptions(self, tmp_path, capsys):
+        """A pulsed declaration's thermal basis and unchecked fusing mode are
+        both visible in the audit's JSON and text output (issue #4980)."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = self._build_kelvin_board(tmp_path)
+        sidecar = tmp_path / "current_paths.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "paths": [
+                        {
+                            "name": "FORCE",
+                            "net": "PGND",
+                            "source": {"ref": "RSH1", "pad": "1"},
+                            "sink": {"ref": "J2", "pad": "1"},
+                            "continuous_a": 3.0,
+                            "pulsed_a": 18.0,
+                            "reinforcement_eligible": True,
+                        }
+                    ]
+                }
+            )
+        )
+
+        args = argparse.Namespace(
+            pcb_command="current-paths-audit",
+            pcb=str(pcb_path),
+            current_paths=str(sidecar),
+            format="json",
+        )
+        assert run_pcb_command(args) == 0
+        data = json.loads(capsys.readouterr().out)
+        resolution = data["resolutions"][0]
+        assert resolution["pulsed_a"] == 18.0
+        assert resolution["duty_cycle"] is None
+        # No duty cycle -> sized at the peak, and the audit says which.
+        assert resolution["thermal_basis"] == "peak-as-continuous"
+        assert resolution["thermal_design_a"] == 18.0
+        assert "duty_cycle" in resolution["thermal_assumption"]
+        # No pulse duration -> fusing could not be evaluated.
+        assert resolution["fusing_checked"] is False
+
+        args.format = "text"
+        assert run_pcb_command(args) == 0
+        text = capsys.readouterr().out
+        assert "peak treated as continuous" in text
+        assert "fusing survivability NOT checked" in text
+
     def test_current_paths_audit_cli_text_reports_unresolved(self, tmp_path, capsys):
         from kicad_tools.cli.commands.pcb import run_pcb_command
 

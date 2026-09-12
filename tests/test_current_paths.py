@@ -17,6 +17,9 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.router.current_paths import (
+    THERMAL_BASIS_CONTINUOUS,
+    THERMAL_BASIS_PEAK_AS_CONTINUOUS,
+    THERMAL_BASIS_RMS,
     CurrentPathSpec,
     PathEndpoint,
     audit_current_paths,
@@ -839,3 +842,148 @@ class TestPhysicalLayerGraph:
         audit = audit_current_paths(pcb, [_trunk_spec(), _sense_spec()])
         assert [id(s) for s in audit.uncovered["NET1"]] == [id(spur)]
         assert id(spur) not in reinforcement_eligible_segment_ids(pcb, [_trunk_spec()])
+
+
+# --------------------------------------------------------------------------
+# Pulsed / duty-cycled declarations (Issue #4980)
+# --------------------------------------------------------------------------
+
+
+def _pulsed_spec(**overrides) -> CurrentPathSpec:
+    kwargs = {
+        "name": "INRUSH",
+        "net_name": "NET1",
+        "source": PathEndpoint("J1", "1"),
+        "sink": PathEndpoint("J2", "1"),
+        "continuous_a": 3.0,
+        "pulsed_a": 18.0,
+        "duty_cycle": 0.08,
+        "pulse_duration_s": 0.002,
+        "reinforcement_eligible": True,
+    }
+    kwargs.update(overrides)
+    return CurrentPathSpec(**kwargs)
+
+
+class TestPulsedDeclarationValidation:
+    """A half-declared waveform fails closed at construction/load time."""
+
+    def test_duty_cycle_without_pulsed_a_rejected(self) -> None:
+        with pytest.raises(ValueError, match="duty_cycle.*without"):
+            _pulsed_spec(pulsed_a=None, duty_cycle=0.5, pulse_duration_s=None)
+
+    def test_pulse_duration_without_pulsed_a_rejected(self) -> None:
+        with pytest.raises(ValueError, match="pulse_duration_s.*without"):
+            _pulsed_spec(pulsed_a=None, duty_cycle=None, pulse_duration_s=0.01)
+
+    def test_pulsed_below_continuous_rejected(self) -> None:
+        with pytest.raises(ValueError, match="below 'continuous_a'"):
+            _pulsed_spec(continuous_a=10.0, pulsed_a=5.0)
+
+    def test_duty_cycle_out_of_range_rejected(self) -> None:
+        with pytest.raises(ValueError, match="duty_cycle"):
+            _pulsed_spec(duty_cycle=1.5)
+        with pytest.raises(ValueError, match="duty_cycle"):
+            _pulsed_spec(duty_cycle=0.0)
+
+    def test_non_positive_pulse_duration_rejected(self) -> None:
+        with pytest.raises(ValueError, match="pulse_duration_s"):
+            _pulsed_spec(pulse_duration_s=0.0)
+
+    def test_non_positive_continuous_rejected(self) -> None:
+        with pytest.raises(ValueError, match="continuous_a"):
+            _pulsed_spec(continuous_a=0.0, pulsed_a=None, duty_cycle=None, pulse_duration_s=None)
+
+    def test_from_dict_rejects_non_numeric_duty_cycle(self) -> None:
+        with pytest.raises(ValueError, match="duty_cycle"):
+            CurrentPathSpec.from_dict(
+                {
+                    "name": "X",
+                    "net": "NET1",
+                    "source": {"ref": "J1", "pad": "1"},
+                    "sink": {"ref": "J2", "pad": "1"},
+                    "continuous_a": 1.0,
+                    "pulsed_a": 5.0,
+                    "duty_cycle": "half",
+                }
+            )
+
+    def test_from_dict_rejects_half_declared_waveform(self) -> None:
+        with pytest.raises(ValueError, match="pulse_duration_s.*without"):
+            CurrentPathSpec.from_dict(
+                {
+                    "name": "X",
+                    "net": "NET1",
+                    "source": {"ref": "J1", "pad": "1"},
+                    "sink": {"ref": "J2", "pad": "1"},
+                    "continuous_a": 1.0,
+                    "pulse_duration_s": 0.01,
+                }
+            )
+
+
+class TestPulsedSerialization:
+    def test_round_trip_preserves_waveform_fields(self) -> None:
+        spec = _pulsed_spec()
+        restored = CurrentPathSpec.from_dict(spec.to_dict())
+        assert restored == spec
+        assert restored.duty_cycle == pytest.approx(0.08)
+        assert restored.pulse_duration_s == pytest.approx(0.002)
+
+    def test_sidecar_round_trip(self, tmp_path: Path) -> None:
+        specs = [_trunk_spec(), _pulsed_spec()]
+        sidecar = tmp_path / "current_paths.json"
+        sidecar.write_text(json.dumps(dump_current_path_specs(specs)))
+        assert load_current_path_specs(sidecar) == specs
+
+    def test_continuous_only_sidecar_is_unchanged_by_the_new_fields(self) -> None:
+        """A pre-existing continuous-only declaration still parses and keeps
+        every waveform field at ``None`` (backward compatible)."""
+        spec = CurrentPathSpec.from_dict(
+            {
+                "name": "TRUNK",
+                "net": "NET1",
+                "source": {"ref": "J1", "pad": "1"},
+                "sink": {"ref": "J2", "pad": "1"},
+                "continuous_a": 15.0,
+                "reinforcement_eligible": True,
+            }
+        )
+        assert spec.pulsed_a is None
+        assert spec.duty_cycle is None
+        assert spec.pulse_duration_s is None
+
+
+class TestThermalDesignCurrent:
+    def test_continuous_only_uses_its_own_current(self) -> None:
+        thermal = _trunk_spec(current_a=15.0).thermal_design_current()
+        assert thermal.basis == THERMAL_BASIS_CONTINUOUS
+        assert thermal.current_a == pytest.approx(15.0)
+        assert thermal.assumption == ""
+
+    def test_duty_cycle_gives_rms_not_peak_and_not_average(self) -> None:
+        """18A peak at 8% duty over a 3A baseline -> sqrt(.08*324+.92*9) RMS."""
+        thermal = _pulsed_spec().thermal_design_current()
+        assert thermal.basis == THERMAL_BASIS_RMS
+        assert thermal.current_a == pytest.approx(5.848, abs=0.005)
+        # Strictly between the naive average (4.2A) and the peak (18A).
+        assert 4.2 < thermal.current_a < 18.0
+        assert thermal.assumption == ""
+
+    def test_rms_never_drops_below_the_declared_continuous_current(self) -> None:
+        thermal = _pulsed_spec(duty_cycle=0.0001).thermal_design_current()
+        assert thermal.current_a >= 3.0
+
+    def test_pulse_without_duty_is_sized_at_peak_and_says_so(self) -> None:
+        thermal = _pulsed_spec(duty_cycle=None).thermal_design_current()
+        assert thermal.basis == THERMAL_BASIS_PEAK_AS_CONTINUOUS
+        assert thermal.current_a == pytest.approx(18.0)
+        assert "duty_cycle" in thermal.assumption
+
+    def test_full_duty_pulse_is_its_peak(self) -> None:
+        thermal = _pulsed_spec(duty_cycle=1.0).thermal_design_current()
+        assert thermal.current_a == pytest.approx(18.0)
+
+    def test_description_names_the_waveform(self) -> None:
+        assert "RMS" in _pulsed_spec().thermal_design_current().description
+        assert "continuous" in _trunk_spec().thermal_design_current().description
