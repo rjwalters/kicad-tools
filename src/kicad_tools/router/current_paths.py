@@ -992,6 +992,35 @@ def _endpoint_via_array(
     return _ViaArray(nodes, edges, list({id(seg): seg for seg in members}.values()))
 
 
+def _candidate_via_array_leg_count(
+    graph: _CopperGraph, pcb: PCB, hub: _Node, pad: Pad, net_name: str
+) -> int:
+    """Count intact local via arms; fewer than two does not prove safe branching.
+
+    Ordinary single-via branches also require terminal proof for every exit.
+    Missing, wrong-net or distant vias must not erase damaged-array evidence.
+    """
+    bound = math.hypot(*pad.size)
+    net = pcb.get_net_by_name(net_name)
+    count = 0
+    for top, edge in graph.adjacency.get(hub, []):
+        seg = edge.segment
+        if seg is None or seg.layer != hub[2]:
+            continue
+        if _seg_length(seg) > bound + _PAD_EPS:
+            continue
+        matching = [v for v in pcb.vias if _node_key(v.position) == top[:2]]
+        if len(matching) != 1:
+            continue
+        via = matching[0]
+        if len(via.layers) < 2 or not (
+            via.net_name == net_name or (net is not None and via.net_number == net.number)
+        ):
+            continue
+        count += 1
+    return count
+
+
 def _component_has_cycle(
     graph: _CopperGraph, start: _Node, arrays: Sequence[_ViaArray] = ()
 ) -> bool:
@@ -1246,16 +1275,26 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
                 else None
             )
             arms = adjacency.adjacency.get(hub, []) if hub is not None else []
-            # A broken fanout may become acyclic when receiving copper is
-            # removed. It must not fall back to checking one surviving arm.
+            # A single-via ordinary branch is supported only when all arms
+            # lead through acyclic copper to actual pad terminals. Counting
+            # surviving vias alone would accept a damaged array after missing
+            # barrels or receiving copper turn other arms into dangling ends.
             if (
-                endpoint_pad is not None
+                hub is not None
+                and endpoint_pad is not None
                 and endpoint_pad.type == "smd"
                 and len(arms) >= 2
                 and any(
                     edge.segment is not None
                     and any(_node_key(v.position) == node[:2] for v in pcb.vias)
                     for node, edge in arms
+                )
+                and (
+                    _candidate_via_array_leg_count(adjacency, pcb, hub, endpoint_pad, spec.net_name)
+                    >= 2
+                    or not _proved_load_exits(
+                        adjacency, {hub}, [(hub, node, edge) for node, edge in arms]
+                    )
                 )
             ):
                 return PathResolution(

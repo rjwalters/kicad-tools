@@ -741,6 +741,59 @@ class TestPhysicalLayerGraph:
 
         assert board.read_bytes() == before
 
+    def test_board09_ordinary_branch_endpoint_is_not_a_fanout(self):
+        """Issue #4980: an ordinary branching pad must not be forced 'ambiguous'.
+
+        ``RSH1.1`` (the ``VOUT_PRE`` force-in shunt terminal) has exactly two
+        arms: the 2.0 mm force trunk continuing to ``L1.2``, and an unrelated
+        0.25 mm sense/feedback tap that happens to drop through a single via
+        to reach an inner layer. That single via-tap arm is not a second
+        via-array leg -- ``_endpoint_via_array``'s own proof correctly
+        rejects it as an array, but the coarser "any arm touches any via"
+        fallback in ``resolve_current_path`` used to treat the mere presence
+        of one via anywhere on the endpoint's arms as an unproved *damaged*
+        array and force the whole declaration ambiguous. ``R7.1`` (the
+        feedback-tap endpoint) has the same shape: one dangling stub to a
+        pad with nothing else attached, plus one single via-tap arm.
+        Neither hub has two independent via-array-leg candidates, so neither
+        should trip the fanout fallback.
+        """
+        from pathlib import Path
+
+        from kicad_tools.schema.pcb import PCB
+
+        board = (
+            Path(__file__).resolve().parents[1]
+            / "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb"
+        )
+        before = board.read_bytes()
+        pcb = PCB.load(board)
+
+        force = CurrentPathSpec(
+            name="vout_pre_force",
+            net_name="VOUT_PRE",
+            source=PathEndpoint("L1", "2"),
+            sink=PathEndpoint("RSH1", "1"),
+            continuous_a=3,
+        )
+        force_result = resolve_current_path(pcb, force)
+        assert force_result.status == "resolved"
+        assert force_result.segments
+        assert force_result.length_mm > 0.0
+
+        feedback = CurrentPathSpec(
+            name="vout_pre_feedback",
+            net_name="VOUT_PRE",
+            source=PathEndpoint("L1", "2"),
+            sink=PathEndpoint("R7", "1"),
+            continuous_a=0.001,
+            reinforcement_eligible=False,
+        )
+        feedback_result = resolve_current_path(pcb, feedback)
+        assert feedback_result.status == "resolved"
+
+        assert board.read_bytes() == before
+
     def test_transitive_pad_union_does_not_erase_external_return(self):
         pcb = _t_network_pcb()
         pcb.get_footprint("J1").pads[0].size = (1.6, 1.6)
