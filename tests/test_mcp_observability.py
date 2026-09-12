@@ -507,3 +507,55 @@ def test_recorded_start_precedes_handler_completion(monkeypatch, fails):
     record = recorder.recent_calls()[0]
     assert record.started_at == 100.0
     assert record.duration_ms == 3000.0
+
+
+@pytest.mark.parametrize("transport", ["stdio", "fastmcp"])
+@pytest.mark.parametrize("field", ["error", "error_message", "empty_error_fallback"])
+@pytest.mark.parametrize("long_message", [False, True])
+def test_dispatch_preserves_handler_diagnostics(monkeypatch, transport, field, long_message):
+    import asyncio
+
+    from kicad_tools.mcp.observability import MAX_ERROR_MESSAGE_LENGTH
+    from kicad_tools.mcp.server import MCPServer, create_fastmcp_server
+    from kicad_tools.mcp.tools.registry import TOOL_REGISTRY
+
+    if transport == "fastmcp":
+        pytest.importorskip("mcp")
+    message = "Strategy module not available: The 'cmaes' package is required for placement"
+    if long_message:
+        message += "x" * (MAX_ERROR_MESSAGE_LENGTH * 2)
+    result = {
+        "success": False,
+        "error_message" if field == "empty_error_fallback" else field: message,
+    }
+    if field == "empty_error_fallback":
+        result["error"] = ""
+    spec = TOOL_REGISTRY["list_mistake_categories"]
+    monkeypatch.setattr(spec, "handler", lambda args: result)
+    server = MCPServer() if transport == "stdio" else create_fastmcp_server(http_mode=True)
+
+    async def exercise():
+        async def call(name, arguments):
+            if transport == "stdio":
+                return server.call_tool(name, arguments)
+            return await server.call_tool(name, arguments)
+
+        assert await call(spec.name, {}) == result
+        history = await call("get_recent_calls", {"tool_name": spec.name})
+        assert history["stats"]["total_calls"] == 1
+        assert history["stats"]["total_errors"] == 1
+        assert len(history["calls"]) == 1
+        record = history["calls"][0]
+        expected = (
+            message[:MAX_ERROR_MESSAGE_LENGTH] + "...(truncated)" if long_message else message
+        )
+        assert record["error_message"] == expected
+        assert record["error_kind"] == "dependency"
+        assert CALL_RECORDER.stats()["total_calls"] == 2
+        assert CALL_RECORDER.stats()["total_errors"] == 1
+
+    CALL_RECORDER.clear()
+    try:
+        asyncio.run(exercise())
+    finally:
+        CALL_RECORDER.clear()

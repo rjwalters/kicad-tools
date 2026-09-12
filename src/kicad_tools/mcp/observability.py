@@ -107,6 +107,8 @@ _MESSAGE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("permission denied", "permission"),
     ("failed to parse", "parse"),
     ("parse error", "parse"),
+    ("module not available", "dependency"),
+    ("package is required", "dependency"),
     ("required", "validation"),
     ("invalid", "validation"),
 )
@@ -119,7 +121,7 @@ def classify_error(exc: BaseException | None, message: str | None = None) -> str
         exc: The exception raised by the handler, or ``None`` if the
             handler instead returned a ``{"success": False, ...}`` dict.
         message: The failure message -- ``str(exc)`` for the raised-exception
-            path, or the handler's own ``"error"`` string for the dict path.
+            path, or the handler's ``"error"`` / ``"error_message"`` string for the dict path.
 
     Returns:
         One of the kinds documented in the module docstring's "error_kind
@@ -386,7 +388,7 @@ def record_call(
         raise
     duration_ms = (time.monotonic() - start) * 1000
     if isinstance(result, dict) and result.get("success") is False:
-        message = str(result.get("error", "unknown error"))
+        message = str(result.get("error") or result.get("error_message") or "unknown error")
         target.record_handler_error(tool_name, duration_ms, message, started_at=started_at)
     else:
         target.record_success(tool_name, duration_ms, started_at=started_at)
