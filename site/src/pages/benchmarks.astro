@@ -1,33 +1,50 @@
 ---
 /**
- * External autorouter benchmarks page (Epic #4932 Phase 3, issue #4952).
+ * External autorouter benchmarks page (Epic #4932 Phase 3, issue #4952;
+ * re-labeled as an archived historical snapshot by Epic #5278 Phase 1,
+ * issue #5279 — see that issue for why: the two committed August 2026
+ * attempts never produced routed output, so presenting them as a live
+ * competitive comparison misrepresented both the headline numbers and the
+ * runtimes).
  *
- * Publishes this epic's results (Phase 2: #4941/#4942/#4943, all merged)
- * side by side with DeepPCB's own published numbers
- * (https://deeppcb.ai/benchmarks/) for the three boards DeepPCB benchmarks
- * against: STRF (mixed-signal RF), PocketBeagle, and BeagleConnect Freedom.
+ * This page is an **archived, dated engineering snapshot**, not a live
+ * competitive comparison. It reports what happened when this repository's
+ * router was pointed at boards DeepPCB publishes its own numbers for
+ * (https://deeppcb.ai/benchmarks/) — STRF (mixed-signal RF), PocketBeagle,
+ * and BeagleConnect Freedom — at a specific pinned tool commit, on a
+ * specific date. Neither committed attempt reached routing.
  *
  * Data sources (both read at build time, never fetched client-side):
  *   - `loadBenchmarks()` — the committed schema-v1 JSON reports under
  *     `benchmarks/external/results/` (currently PocketBeagle and
- *     BeagleConnect Freedom, both zero-touch; see that directory's README
- *     for why STRF has no committed report yet).
+ *     BeagleConnect Freedom, both zero-touch, both recorded 2026-08-25; see
+ *     that directory's README for why STRF has no committed report yet, and
+ *     for the full "why these numbers don't mean what a bare percentage
+ *     implies" writeup this page mirrors).
  *   - `DEEP_PCB_REFERENCE` — DeepPCB's own published numbers, hand-mirrored
- *     from `benchmarks/external/boards.toml`.
+ *     from `benchmarks/external/boards.toml`. These are a **separate,
+ *     external, unverified** measurement — a different environment, board
+ *     revision pin, and toolchain — never a same-footing comparison with
+ *     this repo's own numbers until that is independently established.
  *
  * Honesty rules carried over from the CLI renderer
  * (`src/kicad_tools/benchmark/external/render.py`) and this epic's stated
  * risk register:
- *   - A board with no committed report renders as "not yet reproduced in
- *     this repository", never silently omitted and never backfilled with a
- *     guessed number.
+ *   - A board with no committed report renders as "no committed report",
+ *     never silently omitted and never backfilled with a guessed number.
  *   - Zero-touch and tuned results are never merged into one row — DeepPCB's
  *     STRF case study involved manual netclass setup, while its
  *     PocketBeagle/BeagleConnect numbers were zero-touch; conflating the two
  *     would misrepresent both.
+ *   - A report whose `copper` block shows zero vias and zero wirelength
+ *     (`producedNoRoutedOutput()`) never gets to present its `completion`/
+ *     `timing` figures as if they were a routed result's completion% or
+ *     route speed — both are the stripped input board's numbers, and both
+ *     are labeled as such wherever they render.
  *   - A board that did not route 100% is annotated with its filed
- *     generic-router-capability issue, not silently presented as a lesser
- *     percentage with no explanation.
+ *     generic-router-capability issue, described as a **historical,
+ *     dated observation** — never as an evergreen claim about whether that
+ *     issue is still open today.
  */
 import { loadBenchmarks } from "../data/loadBenchmarks.ts";
 import { DEEP_PCB_REFERENCE, deepPcbReferenceFor } from "../data/deepPcbReference.ts";
@@ -40,6 +57,8 @@ import {
   fmtKctCheck,
   fmtCliDrc,
   fmtDiffPairs,
+  fmtDateOnly,
+  producedNoRoutedOutput,
 } from "../data/benchmarkFormat.ts";
 import SiteHeader from "../components/Header.astro";
 import SiteFooter from "../components/Footer.astro";
@@ -48,26 +67,60 @@ const reports = loadBenchmarks();
 const reportedSlugs = new Set(reports.map((r) => r.board_id));
 const pendingBoards = DEEP_PCB_REFERENCE.filter((b) => !reportedSlugs.has(b.slug));
 
-// Per-board honest failure-mode annotations (results/README.md). Both
-// committed boards refuse to route zero-touch — filed as generic
-// router-capability issues, never board-specific patches.
+const EPIC_URL = "https://github.com/rjwalters/kicad-tools/issues/4932";
+const RELABEL_EPIC_URL = "https://github.com/rjwalters/kicad-tools/issues/5278";
+const REPO = "https://github.com/rjwalters/kicad-tools";
+const RESULTS_README_URL = `${REPO}/blob/main/benchmarks/external/results/README.md`;
+
+/** Absolute link to the exact committed JSON this row renders. */
+function rawReportUrl(report: (typeof reports)[number]): string {
+  return `${REPO}/blob/main/benchmarks/external/results/${report.board_id}.${report.protocol}.json`;
+}
+
+// Boards whose committed report stopped before producing any routed copper —
+// computed from the JSON itself (`producedNoRoutedOutput`), never hardcoded,
+// so this list can never drift from the data it describes.
+const noOutputReports = reports.filter(producedNoRoutedOutput);
+
+// Historical snapshot metadata, derived entirely from the committed reports
+// (never hand-typed, so it can't go stale independently of the JSON):
+//   - snapshot date range: earliest/latest `generated_at` across all reports
+//   - tested tool commit(s): distinct `tool_commit` values across all reports
+// Distinct from the site BUILD date below, which changes on every deploy.
+const generatedDates = reports.map((r) => r.generated_at).sort();
+const snapshotDateEarliest = generatedDates[0] ? fmtDateOnly(generatedDates[0]) : null;
+const snapshotDateLatest = generatedDates[generatedDates.length - 1]
+  ? fmtDateOnly(generatedDates[generatedDates.length - 1])
+  : null;
+const snapshotDateLabel =
+  snapshotDateEarliest && snapshotDateLatest
+    ? snapshotDateEarliest === snapshotDateLatest
+      ? snapshotDateEarliest
+      : `${snapshotDateEarliest} to ${snapshotDateLatest}`
+    : null;
+const toolCommits = [...new Set(reports.map((r) => r.tool_commit))];
+const buildDateLabel = fmtDateOnly(new Date().toISOString());
+
+// Per-board historical context for boards that stopped before routing
+// (results/README.md). Both committed 2026-08-25 attempts refused to route
+// zero-touch — filed as generic router-capability issues, never
+// board-specific patches. `summary` describes what was observed in THIS
+// snapshot; it deliberately makes no claim about whether the linked issue
+// is still open today — follow the link for current status.
 const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: string }> = {
   pocketbeagle: {
     issue: "#4945",
     url: "https://github.com/rjwalters/kicad-tools/issues/4945",
     summary:
-      "the auto-grid resolver's off-grid-escalation path blows its memory-cell budget on the board's two large low-density through-hole headers, and the router safely refuses to route at all rather than producing an unsafe result.",
+      "the auto-grid resolver's off-grid-escalation path blew its memory-cell budget on the board's two large low-density through-hole headers, and the router safely refused to route at all rather than producing an unsafe result.",
   },
   beagleconnect_freedom: {
     issue: "#4946",
     url: "https://github.com/rjwalters/kicad-tools/issues/4946",
     summary:
-      "one footprint (an RF shielding-can land pattern with real GND-net pads) sits outside Edge.Cuts in the pinned board, and the placement preflight gate aborts the entire route rather than routing the other ~455 connections and reporting just that footprint's nets as unresolved.",
+      "one footprint (an RF shielding-can land pattern with real GND-net pads) sat outside Edge.Cuts in the pinned board, and the placement preflight gate aborted the entire route rather than routing the other ~455 connections and reporting just that footprint's nets as unresolved.",
   },
 };
-
-const EPIC_URL = "https://github.com/rjwalters/kicad-tools/issues/4932";
-const REPO = "https://github.com/rjwalters/kicad-tools";
 ---
 
 <!doctype html>
@@ -75,37 +128,81 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>kicad-tools.org — external autorouter benchmarks</title>
+    <title>kicad-tools.org — external autorouter benchmarks (archived snapshot)</title>
     <meta
       name="description"
-      content="kicad-tools' autorouter results on DeepPCB's published benchmark boards (STRF, PocketBeagle, BeagleConnect Freedom), reported side by side with DeepPCB's own numbers."
+      content={`Archived engineering snapshot (${snapshotDateLabel ?? "no committed reports"}) of kicad-tools' routing attempts on DeepPCB's published benchmark boards (STRF, PocketBeagle, BeagleConnect Freedom). Neither committed attempt produced routed output; vendor figures are shown separately as unverified external references.`}
     />
   </head>
   <body>
     <SiteHeader />
     <main>
       <header class="page-header">
+        <p class="snapshot-bar" role="note">
+          <strong>Archived historical snapshot</strong>
+          {snapshotDateLabel ? (
+            <>
+              {" "}
+              recorded <strong>{snapshotDateLabel}</strong> at kicad-tools commit{" "}
+              {toolCommits.map((c, i) => (
+                <>
+                  {i > 0 && ", "}
+                  <code>{c}</code>
+                </>
+              ))}
+              .
+            </>
+          ) : (
+            " — no reports are currently committed."
+          )}
+          {" "}This is a record of a past attempt, not a live result — see{" "}
+          <a href={RESULTS_README_URL} target="_blank" rel="noopener noreferrer"
+            >results/README.md</a
+          > for the raw writeup. Page last built <strong>{buildDateLabel}</strong>.
+        </p>
         <h1>External autorouter benchmarks</h1>
         <p class="tagline">
-          Our autorouter's results on the same boards DeepPCB publishes
-          numbers for, reported side by side with
-          <a href="https://deeppcb.ai/benchmarks/" target="_blank" rel="noopener noreferrer"
-            >DeepPCB's own published figures</a
-          >. Public, honest, and reproducible from a clean checkout — see
-          <a href={EPIC_URL} target="_blank" rel="noopener noreferrer">Epic #4932</a> for the full
-          benchmark harness design.
+          What happened when this repository's router was pointed at boards
+          DeepPCB publishes its own numbers for. Neither committed attempt
+          below reached routing — the numbers describe a stopped attempt, not
+          a routed board. Public, honest, and reproducible from a clean
+          checkout — see <a href={EPIC_URL} target="_blank" rel="noopener noreferrer"
+            >Epic #4932</a
+          > for the original benchmark harness design and{" "}
+          <a href={RELABEL_EPIC_URL} target="_blank" rel="noopener noreferrer">Epic #5278</a> for
+          the ongoing work to re-run and correctly report these boards.
         </p>
+        {
+          noOutputReports.length > 0 && (
+            <p class="outcome-banner" role="note">
+              <strong>
+                {noOutputReports.map((r) => r.board_id).join(", ")}
+              </strong>{" "}
+              stopped before routing and produced <strong>no routed output</strong> — every
+              number for {noOutputReports.length === 1 ? "that board" : "those boards"} below
+              describes the <strong>stripped input board</strong> fed to the router (0 vias, 0 mm
+              of copper), never a routed result. See "Attempt outcome" below for what blocked
+              each one.
+            </p>
+          )
+        }
       </header>
 
       <section class="methodology">
         <h2>Methodology</h2>
         <p class="section-copy">
           Every headline number (completion, via count, wirelength) is
-          re-measured from the routed <code>.kicad_pcb</code> file itself,
-          never from a router-internal counter — so our numbers, DeepPCB's,
-          and a human's stand on the same footing. Two distinct protocols are
-          reported, and results from one are <strong>never</strong> merged
-          into the other:
+          re-measured directly from the <code>.kicad_pcb</code> file on disk
+          at measurement time, never from a router-internal counter — that
+          methodology is consistent across every run this repository
+          produces. It does <strong>not</strong> by itself make these numbers
+          comparable to DeepPCB's own published figures: those come from a
+          different environment and toolchain that this repository has not
+          independently reproduced. The "Vendor reference" column below is
+          shown as separate, external context — not a validated
+          apples-to-apples comparison. Two distinct protocols are reported,
+          and results from one are <strong>never</strong> merged into the
+          other:
         </p>
         <ul class="protocol-list" role="list">
           <li>
@@ -119,17 +216,28 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
             configuration applied before routing, mirroring DeepPCB's own
             published STRF case study (USB 2.0 differential pairs at a
             90&nbsp;ohm target, SPI bus on a compact-via netclass). Currently
-            defined for STRF only.
+            defined for STRF only, and STRF has no committed report (see
+            "No committed report" below).
           </li>
         </ul>
         <p class="section-copy">
           Timing is <strong>refused, not fudged</strong>, when the C++ router
           backend was not built for a given run — a Python-fallback runtime is
-          never published as if it were representative. Both{" "}
+          never published as if it were representative. For a report whose
+          attempt stopped before routing, the recorded duration is the{" "}
+          <strong>failed-attempt duration</strong> — how long the router ran
+          before its pre-route safety gates refused to proceed — never a
+          successful route's speed; cells below say so explicitly. Both{" "}
           <code>kct check</code> and <code>kicad-cli pcb drc</code> are
           required slots per report: the former catches connectivity shorts
           the latter is blind to, the latter catches diff-pair / match-group
-          rules the former can't express natively. Full schema:{" "}
+          rules the former can't express natively. Neither check count is
+          evidence of a connected or fully routed board by itself — a low or
+          zero violation count on an attempt that never placed copper simply
+          means there was less board present to violate anything, not that
+          the design is sound. A check that did not run always renders as{" "}
+          <code>not run</code>, never as a silent <code>0</code>. Full
+          schema:{" "}
           <a
             href={`${REPO}/blob/main/docs/benchmark-external-report-schema.md`}
             target="_blank"
@@ -144,17 +252,25 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
           <table>
             <thead>
               <tr>
-                <th scope="col">Board</th>
-                <th scope="col">Protocol</th>
-                <th scope="col">Completion</th>
+                <th rowspan="2" scope="col">Board</th>
+                <th rowspan="2" scope="col">Protocol</th>
+                <th colspan="7" scope="colgroup">
+                  Local measurement (this snapshot)
+                </th>
+                <th rowspan="2" scope="col">
+                  Vendor reference<br />
+                  <span class="th-sub">(external, unverified)</span>
+                </th>
+              </tr>
+              <tr>
+                <th scope="col">Connectivity*</th>
                 <th scope="col">Connections</th>
                 <th scope="col">Vias</th>
                 <th scope="col">Wirelength (mm)</th>
-                <th scope="col">Runtime</th>
+                <th scope="col">Duration*</th>
                 <th scope="col">kct check</th>
                 <th scope="col">kicad-cli DRC</th>
                 <th scope="col">Diff pairs</th>
-                <th scope="col">DeepPCB reference</th>
               </tr>
             </thead>
             <tbody>
@@ -166,6 +282,7 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
                   if (ref?.completionPct !== undefined)
                     refCells.push(`${ref.completionPct}% complete`);
                   if (ref?.vias !== undefined) refCells.push(`${ref.vias} vias`);
+                  const noOutput = producedNoRoutedOutput(report);
                   return (
                     <tr>
                       <th scope="row">{ref?.name ?? report.board_id}</th>
@@ -174,11 +291,20 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
                       </td>
                       <td class:list={[{ warn: report.completion.completion_pct < 100 }]}>
                         {fmtCompletion(report)}
+                        {noOutput && <sup title="Stripped-input connectivity, not a routed result">*</sup>}
                       </td>
                       <td>{fmtConnections(report)}</td>
                       <td>{fmtVias(report)}</td>
                       <td>{fmtWirelength(report)}</td>
-                      <td>{fmtTiming(report)}</td>
+                      <td>
+                        {fmtTiming(report)}
+                        {noOutput && (
+                          <>
+                            {" "}
+                            <sup title="Failed-attempt duration, not route speed">*</sup>
+                          </>
+                        )}
+                      </td>
                       <td class:list={[{ warn: !report.kct_check.passed }]}>
                         {fmtKctCheck(report)}
                       </td>
@@ -200,7 +326,11 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
                     <tr class="pending-row">
                       <th scope="row">{board.name}</th>
                       <td colspan="9" class="pending-cell">
-                        not yet reproduced in this repository's benchmark harness — see{" "}
+                        No committed report in this repository — see{" "}
+                        <a href={RESULTS_README_URL} target="_blank" rel="noopener noreferrer">
+                          results/README.md
+                        </a>{" "}
+                        and{" "}
                         <a href={EPIC_URL} target="_blank" rel="noopener noreferrer">
                           Epic #4932
                         </a>{" "}
@@ -215,32 +345,55 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
           </table>
         </div>
         <p class="table-note">
-          A <span class="warn">highlighted</span> completion or{" "}
+          <code>*</code> means the attempt stopped before routing: the{" "}
+          <strong>Connectivity</strong> figure is the stripped input board's
+          pre-route connectivity (single-pad nets, zone-stitched nets already
+          satisfied), not a routed result, and the <strong>Duration</strong>{" "}
+          is how long the failed attempt ran, never a successful route's
+          speed. A <span class="warn">highlighted</span> connectivity or{" "}
           <code>kct check</code> cell means the board did not route 100% or
-          did not pass our own connectivity/clearance checks — see
-          "Failure-mode annotations" below for why.
+          did not pass our own connectivity/clearance checks — see "Attempt
+          outcome" below for why. Neither <code>kct check</code> nor{" "}
+          <code>kicad-cli DRC</code> passing is evidence of a connected or
+          fully routed board on its own.
         </p>
       </section>
 
       {
         Object.keys(FAILURE_NOTES).length > 0 && (
           <section class="annotations">
-            <h2>Failure-mode annotations</h2>
+            <h2>Attempt outcome</h2>
             <p class="section-copy">
-              Honest reporting of every board we did not route 100% — no
-              board-specific patching, only generic router-capability issues:
+              Historical, dated observations from this snapshot for every
+              board that did not route 100% — no board-specific patching,
+              only generic router-capability issues. Following a link below
+              shows that issue's <strong>current</strong> status; the text
+              here describes only what this snapshot observed.
             </p>
             <ul class="annotation-list" role="list">
               {reports
                 .filter((r) => r.board_id in FAILURE_NOTES)
                 .map((r) => {
                   const note = FAILURE_NOTES[r.board_id];
+                  const noOutput = producedNoRoutedOutput(r);
                   return (
                     <li>
-                      <strong>{r.board_id}</strong> ({r.protocol}) —{" "}
-                      {note.summary} Filed as{" "}
+                      <strong>{r.board_id}</strong> ({r.protocol}, recorded{" "}
+                      {fmtDateOnly(r.generated_at)} at tool commit <code>{r.tool_commit}</code>) —
+                      {" "}
+                      {noOutput && (
+                        <>
+                          this attempt <strong>stopped before routing and produced no routed
+                          output</strong>: {" "}
+                        </>
+                      )}
+                      {note.summary} Observed against{" "}
                       <a href={note.url} target="_blank" rel="noopener noreferrer">
                         {note.issue}
+                      </a>
+                      ; see that issue for whether it is still open. Raw report:{" "}
+                      <a href={rawReportUrl(r)} target="_blank" rel="noopener noreferrer">
+                        {r.board_id}.{r.protocol}.json
                       </a>
                       .
                     </li>
@@ -254,8 +407,10 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
       <section class="reproduction">
         <h2>Reproduction</h2>
         <p class="section-copy">
-          Every result above is reproducible from a clean checkout with the
-          pinned upstream commit and the exact harness command:
+          Every attempt above is reproducible from a clean checkout with the
+          pinned upstream commit and the exact harness command — running it
+          again may not reproduce the same outcome if the router has changed
+          since the snapshot's tool commit:
         </p>
         <ul class="repro-list" role="list">
           {
@@ -263,15 +418,19 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
               <li>
                 <code>{r.board_id}</code>: {r.board_source ?? "source not recorded"} @{" "}
                 <code>{r.board_commit ?? "unpinned"}</code> (kicad-tools{" "}
-                <code>{r.tool_commit}</code>, protocol <code>{r.protocol}</code>)
+                <code>{r.tool_commit}</code>, protocol <code>{r.protocol}</code>,
+                recorded {fmtDateOnly(r.generated_at)}) — raw report:{" "}
+                <a href={rawReportUrl(r)} target="_blank" rel="noopener noreferrer">
+                  {r.board_id}.{r.protocol}.json
+                </a>
               </li>
             ))
           }
           {
             pendingBoards.map((b) => (
               <li>
-                <code>{b.slug}</code>: {b.repoUrl} @ <code>{b.commit}</code> — not yet run through
-                the harness in this repository
+                <code>{b.slug}</code>: {b.repoUrl} @ <code>{b.commit}</code> — no committed
+                report in this repository
               </li>
             ))
           }
@@ -289,7 +448,10 @@ uv run kct bench external --board strf --tuned`}</code></pre>
             href={`${REPO}/blob/main/benchmarks/external/README.md`}
             target="_blank"
             rel="noopener noreferrer">benchmarks/external/README.md</a
-          > for the full acquisition and normalization pipeline.
+          > for the full acquisition and normalization pipeline, and{" "}
+          <a href={RESULTS_README_URL} target="_blank" rel="noopener noreferrer"
+            >results/README.md</a
+          > for the full writeup behind every committed report above.
         </p>
       </section>
     </main>
@@ -345,6 +507,28 @@ uv run kct bench external --board strf --tuned`}</code></pre>
     margin-bottom: 2rem;
   }
 
+  .snapshot-bar {
+    margin: 0 0 1rem;
+    padding: 0.6rem 0.9rem;
+    background: var(--badge-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    font-size: 0.85rem;
+    max-width: 75ch;
+  }
+
+  .outcome-banner {
+    margin: 1rem 0 0;
+    padding: 0.75rem 1rem;
+    background: rgba(224, 168, 0, 0.12);
+    border: 1px solid #e0a800;
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 0.9rem;
+    max-width: 75ch;
+  }
+
   h1 {
     margin: 0 0 0.6rem;
     font-size: clamp(1.6rem, 4vw, 2.4rem);
@@ -360,7 +544,9 @@ uv run kct bench external --board strf --tuned`}</code></pre>
   .tagline a,
   .section-copy a,
   .annotation-list a,
-  .repro-list a {
+  .repro-list a,
+  .snapshot-bar a,
+  .outcome-banner a {
     color: var(--accent);
     text-decoration: none;
   }
@@ -368,7 +554,9 @@ uv run kct bench external --board strf --tuned`}</code></pre>
   .tagline a:hover,
   .section-copy a:hover,
   .annotation-list a:hover,
-  .repro-list a:hover {
+  .repro-list a:hover,
+  .snapshot-bar a:hover,
+  .outcome-banner a:hover {
     text-decoration: underline;
   }
 
@@ -455,6 +643,25 @@ uv run kct bench external --board strf --tuned`}</code></pre>
     color: var(--muted);
     font-weight: 500;
     background: var(--badge-bg);
+  }
+
+  thead th[scope="colgroup"] {
+    text-align: center;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .th-sub {
+    display: block;
+    font-weight: 400;
+    font-size: 0.75em;
+    color: var(--muted);
+  }
+
+  td sup,
+  th sup {
+    cursor: help;
+    color: var(--accent);
   }
 
   tbody th {

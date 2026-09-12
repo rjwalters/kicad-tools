@@ -8,6 +8,8 @@ import {
   fmtKctCheck,
   fmtCliDrc,
   fmtDiffPairs,
+  producedNoRoutedOutput,
+  fmtDateOnly,
 } from "./benchmarkFormat.ts";
 import type { BenchmarkReport } from "./benchmarkTypes.ts";
 
@@ -82,5 +84,27 @@ describe("benchmarkFormat", () => {
       diff_pairs: { pairs_total: 4, pairs_complete: 0, completion_pct: 0 },
     };
     expect(fmtDiffPairs(withPairs)).toBe("0/4");
+  });
+
+  it("producedNoRoutedOutput is true when via_count and wirelength_mm are both zero", () => {
+    expect(producedNoRoutedOutput(base)).toBe(true);
+  });
+
+  it("producedNoRoutedOutput is false once any copper was placed", () => {
+    const routed: BenchmarkReport = {
+      ...base,
+      copper: { via_count: 68, wirelength_mm: 1182.9 },
+    };
+    expect(producedNoRoutedOutput(routed)).toBe(false);
+    const partialLength: BenchmarkReport = {
+      ...base,
+      copper: { via_count: 0, wirelength_mm: 12.5 },
+    };
+    expect(producedNoRoutedOutput(partialLength)).toBe(false);
+  });
+
+  it("formats an ISO timestamp as a bare YYYY-MM-DD date", () => {
+    expect(fmtDateOnly("2026-08-25T04:10:36.208374+00:00")).toBe("2026-08-25");
+    expect(fmtDateOnly("2026-08-25")).toBe("2026-08-25");
   });
 });
