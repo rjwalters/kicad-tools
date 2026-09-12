@@ -36,6 +36,10 @@ def _relocate_escapes(pcb):
     # prevents an unrelated endpoint at the same coordinate from moving.
     net_names = {net.get_int(0): net.get_string(1) for net in pcb.find_children("net")}
     reviewed_moves = {
+        # Exact seed-42 variants exposed by the repaired edge parser (#5257).
+        # Use the existing C1/R5 destinations, outside their SMT copper.
+        ("GND", (155.1, 117.5)): (156.8, 117.5),
+        ("VCC", (139.7, 117.3)): (139.2, 115.5),
         ("VCC", (140.665, 117.3)): (139.2, 115.5),
         ("VCC", (140.665, 117.2)): (139.2, 115.5),
         ("RESET", (141.1, 118.1)): (140.9, 118.5),
