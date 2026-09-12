@@ -18,7 +18,9 @@ Design note (data model)
 - **Bound**: capacity defaults to :data:`DEFAULT_CAPACITY` (200) entries.
   ``deque(maxlen=...)`` silently evicts the oldest entry once full, which is
   exactly the "ring buffer" behavior this module is documented to provide --
-  memory use is O(capacity), never O(calls-ever-made).
+  memory use is O(capacity), never O(calls-ever-made). Tool names are
+  truncated to 200 characters; aggregate tool keys are capped at capacity
+  plus one ``<other>`` overflow bucket, including arbitrary unknown names.
 - **Concurrency**: a single :class:`threading.Lock` guards both the deque
   and the all-time counters. The stdio server dispatches one request at a
   time, but the FastMCP HTTP transport can serve concurrent requests, so the
@@ -67,6 +69,8 @@ DEFAULT_CAPACITY = 200
 #: exception whose message embeds a full file dump) cannot inflate a single
 #: ring-buffer entry unboundedly.
 MAX_ERROR_MESSAGE_LENGTH = 500
+MAX_TOOL_NAME_LENGTH = 200
+OTHER_TOOLS = "<other>"
 
 # Ordered (pattern, error_kind) heuristics. Checked in order against the
 # lowercased exception type name (for exceptions) or the lowercased message
@@ -93,6 +97,7 @@ _TYPE_NAME_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 
 _MESSAGE_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("unknown tool", "not_found"),
     ("not found", "not_found"),
     ("no such file", "not_found"),
     ("timed out", "timeout"),
@@ -213,11 +218,15 @@ class CallRecorder:
         self._buffer = deque(maxlen=self.capacity)
         self._lock = threading.Lock()
 
-    def record_success(self, tool_name: str, duration_ms: float) -> None:
+    def record_success(
+        self, tool_name: str, duration_ms: float, *, started_at: float | None = None
+    ) -> None:
         """Record a successful call."""
-        self._record(tool_name, duration_ms, status="ok")
+        self._record(tool_name, duration_ms, status="ok", started_at=started_at)
 
-    def record_handler_error(self, tool_name: str, duration_ms: float, message: str) -> None:
+    def record_handler_error(
+        self, tool_name: str, duration_ms: float, message: str, *, started_at: float | None = None
+    ) -> None:
         """Record a call whose handler returned ``{"success": False, ...}``
         without raising (no exception object available to classify)."""
         kind = classify_error(None, message)
@@ -225,17 +234,26 @@ class CallRecorder:
             tool_name,
             duration_ms,
             status="error",
+            started_at=started_at,
             error_kind=kind,
             error_message=_truncate(message),
         )
 
-    def record_exception(self, tool_name: str, duration_ms: float, exc: BaseException) -> None:
+    def record_exception(
+        self,
+        tool_name: str,
+        duration_ms: float,
+        exc: BaseException,
+        *,
+        started_at: float | None = None,
+    ) -> None:
         """Record a call whose handler raised ``exc``."""
         kind = classify_error(exc)
         self._record(
             tool_name,
             duration_ms,
             status="error",
+            started_at=started_at,
             error_kind=kind,
             error_message=_truncate(str(exc)),
         )
@@ -246,12 +264,13 @@ class CallRecorder:
         duration_ms: float,
         *,
         status: str,
+        started_at: float | None = None,
         error_kind: str | None = None,
         error_message: str | None = None,
     ) -> None:
         record = CallRecord(
-            tool_name=tool_name,
-            started_at=time.time(),
+            tool_name=tool_name[:MAX_TOOL_NAME_LENGTH],
+            started_at=started_at if started_at is not None else time.time(),
             duration_ms=duration_ms,
             status=status,
             error_kind=error_kind,
@@ -260,7 +279,12 @@ class CallRecorder:
         with self._lock:
             self._buffer.append(record)
             self._total_calls += 1
-            self._calls_by_tool[tool_name] = self._calls_by_tool.get(tool_name, 0) + 1
+            # Bound aggregate cardinality as well as individual record payloads.
+            # New names beyond capacity share one overflow counter.
+            key = record.tool_name
+            if key not in self._calls_by_tool and len(self._calls_by_tool) >= self.capacity:
+                key = OTHER_TOOLS
+            self._calls_by_tool[key] = self._calls_by_tool.get(key, 0) + 1
             if status == "error":
                 self._total_errors += 1
                 if error_kind is not None:
@@ -297,7 +321,8 @@ class CallRecorder:
 
         Note that these counters are all-time (since process start) and are
         *not* bounded by the ring buffer's capacity -- they track totals
-        even for entries the buffer has already evicted.
+        even for entries the buffer has already evicted. Tool-key cardinality
+        is bounded to capacity plus one overflow bucket.
         """
         with self._lock:
             total_calls = self._total_calls
@@ -326,7 +351,7 @@ class CallRecorder:
 
 
 #: Process-wide recorder shared by both MCP dispatch boundaries
-#: (``MCPServer.call_tool`` and the FastMCP tool wrapper) in
+#: (``MCPServer.call_tool`` and the shared FastMCP dispatch) in
 #: ``kicad_tools.mcp.server``.
 CALL_RECORDER = CallRecorder()
 
@@ -342,7 +367,7 @@ def record_call(
     what the handler returned (or raised).
 
     This is the single choke point both MCP dispatch boundaries
-    (``MCPServer.call_tool`` for stdio, the FastMCP wrapper for HTTP) route
+    (``MCPServer.call_tool`` for stdio, the FastMCP dispatch for HTTP) route
     through, so instrumentation only needs to be added in one place.
 
     Args:
@@ -351,17 +376,18 @@ def record_call(
             singleton. Production call sites never pass this.
     """
     target = recorder if recorder is not None else CALL_RECORDER
+    started_at = time.time()
     start = time.monotonic()
     try:
         result = handler(arguments)
     except Exception as exc:
         duration_ms = (time.monotonic() - start) * 1000
-        target.record_exception(tool_name, duration_ms, exc)
+        target.record_exception(tool_name, duration_ms, exc, started_at=started_at)
         raise
     duration_ms = (time.monotonic() - start) * 1000
     if isinstance(result, dict) and result.get("success") is False:
         message = str(result.get("error", "unknown error"))
-        target.record_handler_error(tool_name, duration_ms, message)
+        target.record_handler_error(tool_name, duration_ms, message, started_at=started_at)
     else:
-        target.record_success(tool_name, duration_ms)
+        target.record_success(tool_name, duration_ms, started_at=started_at)
     return result

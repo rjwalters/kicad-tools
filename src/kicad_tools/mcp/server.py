@@ -11,13 +11,15 @@ import json
 import logging
 import sys
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
+from jsonschema import validate  # type: ignore[import-untyped]  # Upstream has no inline types.
+
 from kicad_tools.mcp.observability import record_call
-from kicad_tools.mcp.tools.registry import TOOL_REGISTRY, ToolSpec
+from kicad_tools.mcp.tools.registry import TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -91,15 +93,16 @@ class MCPServer:
         Raises:
             ValueError: If tool not found
         """
-        if name not in self.tools:
-            raise ValueError(f"Unknown tool: {name}")
 
-        tool = self.tools[name]
-        # Route through the call-observability ring buffer (issue #4897) so
-        # every stdio dispatch is recorded (name/duration/status/error_kind)
-        # regardless of whether the handler returns normally, returns a
-        # {"success": False, ...} dict, or raises.
-        return record_call(name, tool.handler, arguments)
+        def dispatch(params: dict[str, Any]) -> dict[str, Any]:
+            if name not in self.tools:
+                raise ValueError(f"Unknown tool: {name}")
+            tool = self.tools[name]
+            validate(instance=params, schema=tool.parameters)
+            return cast(dict[str, Any], tool.handler(params))
+
+        # Include lookup and validation failures; handlers are recorded exactly once.
+        return record_call(name, dispatch, arguments)
 
     def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
         """
@@ -251,46 +254,24 @@ def create_fastmcp_server(
     if port is not None:
         settings["port"] = port
 
-    mcp = FastMCP("kicad-tools", stateless_http=http_mode, **settings)
+    class RegistryFastMCP(FastMCP):
+        """Use the registry's JSON schemas and dict handlers without a kwargs shim.
 
-    # Register all tools from the unified registry
-    for tool_name, tool_spec in TOOL_REGISTRY.items():
-        _register_fastmcp_tool(mcp, tool_spec)
+        FastMCP registers these public overrides with its low-level protocol
+        server (with low-level input validation disabled). Shared dispatch owns
+        validation and recording, including failures before a handler runs.
+        """
 
-    return mcp
+        async def list_tools(self) -> list[Any]:
+            from mcp.types import Tool
 
+            return [Tool(**item) for item in dispatcher.get_tools_list()]
 
-def _register_fastmcp_tool(mcp: FastMCP, tool_spec: ToolSpec) -> None:
-    """Register a single tool from the registry to FastMCP.
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return dispatcher.call_tool(name, arguments)
 
-    Creates a wrapper function with proper type annotations for FastMCP
-    and registers it using the @mcp.tool() decorator pattern.
-
-    Args:
-        mcp: The FastMCP server instance
-        tool_spec: The tool specification from the registry
-    """
-
-    # Create a dynamic wrapper function that FastMCP can introspect
-    # The function calls the registry handler with its kwargs as a dict
-    def create_handler(spec: ToolSpec) -> Callable:
-        """Create a handler function for FastMCP registration."""
-
-        def handler(**kwargs: Any) -> dict:
-            """Execute the tool with given parameters."""
-            # Route through the same call-observability ring buffer as the
-            # stdio dispatch path (issue #4897) -- see record_call().
-            return record_call(spec.name, spec.handler, kwargs)
-
-        # Copy metadata for FastMCP
-        handler.__name__ = spec.name
-        handler.__doc__ = spec.description
-
-        return handler
-
-    # Register the tool with FastMCP
-    handler_func = create_handler(tool_spec)
-    mcp.tool()(handler_func)
+    dispatcher = MCPServer()
+    return RegistryFastMCP("kicad-tools", stateless_http=http_mode, **settings)
 
 
 def run_server(

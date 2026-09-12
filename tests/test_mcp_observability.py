@@ -375,3 +375,135 @@ class TestServerDispatchIntegration:
         assert result["success"] is True
         assert "calls" in result
         assert "stats" in result
+
+
+@pytest.mark.parametrize(
+    "name,args,kind",
+    [
+        ("missing_tool", {}, "not_found"),
+        ("get_recent_calls", {"limit": "invalid"}, "validation"),
+        ("route_net", {}, "validation"),
+    ],
+)
+def test_stdio_rejected_dispatch_is_recorded(name, args, kind):
+    from kicad_tools.mcp.server import MCPServer
+
+    CALL_RECORDER.clear()
+    try:
+        response = MCPServer().handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": args},
+            }
+        )
+        assert "error" in response
+        assert CALL_RECORDER.stats()["total_calls"] == 1
+        assert CALL_RECORDER.recent_calls()[0].error_kind == kind
+    finally:
+        CALL_RECORDER.clear()
+
+
+def test_fastmcp_protocol_discovery_dispatch_and_diagnostics():
+    import asyncio
+    from datetime import timedelta
+
+    pytest.importorskip("mcp")
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    from kicad_tools.mcp.server import create_fastmcp_server
+    from kicad_tools.mcp.tools.registry import TOOL_REGISTRY
+
+    async def exercise():
+        server = create_fastmcp_server(http_mode=True)
+        async with create_connected_server_and_client_session(
+            server, read_timeout_seconds=timedelta(seconds=10)
+        ) as client:
+            discovery = await client.list_tools()
+            assert {t.name: t.inputSchema for t in discovery.tools} == {
+                name: spec.parameters for name, spec in TOOL_REGISTRY.items()
+            }
+            initial = await client.call_tool("get_recent_calls", {})
+            assert not initial.isError
+            assert initial.structuredContent["calls"] == []
+            assert CALL_RECORDER.stats()["total_calls"] == 1
+            for name, args, kind in [
+                ("missing_tool", {}, "not_found"),
+                ("get_recent_calls", {"limit": "invalid"}, "validation"),
+                ("route_net", {}, "validation"),
+            ]:
+                result = await client.call_tool(name, args)
+                assert result.isError
+                assert CALL_RECORDER.recent_calls()[0].error_kind == kind
+            assert CALL_RECORDER.stats()["total_calls"] == 4
+            filtered = await client.call_tool(
+                "get_recent_calls",
+                {
+                    "limit": 1,
+                    "tool_name": "route_net",
+                    "status": "error",
+                },
+            )
+            assert not filtered.isError
+            assert len(filtered.structuredContent["calls"]) == 1
+            assert filtered.structuredContent["calls"][0]["tool_name"] == "route_net"
+            assert filtered.structuredContent["stats"]["total_errors"] == 3
+            assert CALL_RECORDER.stats()["total_calls"] == 5
+            # A handler-reported failure is also counted once.
+            spec = TOOL_REGISTRY["list_mistake_categories"]
+            from unittest.mock import patch
+
+            with patch.object(spec, "handler", return_value={"success": False, "error": "timeout"}):
+                # Construct after patch: the dispatcher snapshots registry handlers.
+                other = create_fastmcp_server(http_mode=True)
+                result = await other.call_tool(spec.name, {})
+                assert result["success"] is False
+            assert CALL_RECORDER.stats()["total_calls"] == 6
+            assert CALL_RECORDER.recent_calls()[0].error_kind == "timeout"
+
+    CALL_RECORDER.clear()
+    try:
+        asyncio.run(exercise())
+    finally:
+        CALL_RECORDER.clear()
+
+
+def test_recorder_bounds_unique_name_counters_and_payloads():
+    from kicad_tools.mcp.observability import MAX_TOOL_NAME_LENGTH, OTHER_TOOLS
+
+    recorder = CallRecorder(capacity=3)
+    for i in range(100):
+        recorder.record_exception(f"{i}:" + "x" * 1000, 0, ValueError("Unknown tool"))
+    stats = recorder.stats()
+    assert stats["total_calls"] == stats["total_errors"] == 100
+    assert stats["buffer_size"] == 3
+    assert len(stats["calls_by_tool"]) == 4
+    assert stats["calls_by_tool"][OTHER_TOOLS] == 97
+    assert sum(stats["calls_by_tool"].values()) == 100
+    assert all(len(r.tool_name) <= MAX_TOOL_NAME_LENGTH for r in recorder.recent_calls())
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_recorded_start_precedes_handler_completion(monkeypatch, fails):
+    from kicad_tools.mcp import observability
+
+    recorder = CallRecorder()
+    clock = {"now": 100.0}
+    monkeypatch.setattr(observability.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(observability.time, "monotonic", lambda: clock["now"])
+
+    def handler(args):
+        clock["now"] = 103.0
+        if fails:
+            raise ValueError("invalid argument")
+        return {"success": True}
+
+    if fails:
+        with pytest.raises(ValueError):
+            record_call("test", handler, {}, recorder=recorder)
+    else:
+        record_call("test", handler, {}, recorder=recorder)
+    record = recorder.recent_calls()[0]
+    assert record.started_at == 100.0
+    assert record.duration_ms == 3000.0
