@@ -32,7 +32,7 @@ available viewer/download links. A successful build alone does not verify
 these paths or the published website.
 
 `check-links` crawls the built `dist/` output for broken internal
-link/asset targets and unresolved same-page `#fragment` anchors, and lists
+link/asset targets and unresolved `#fragment` anchors on built HTML pages, and lists
 external `http(s)://` destinations (report/doc links, GitHub references).
 Pass `--external` to also HEAD-check those external URLs; omit it in
 network-restricted environments and spot-check the printed list by hand

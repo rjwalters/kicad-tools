@@ -13,7 +13,7 @@
  *      that actually exists in `dist/` (a broken relative link or a stale
  *      asset path fails loudly instead of silently 404ing in production).
  *   2. Every in-page `#fragment` target referenced by an internal link
- *      resolves to an element with a matching `id` on the same page.
+ *      resolves to an element with a matching `id` on the target HTML page.
  *   3. External `http(s)://` destinations are listed for the reviewer to
  *      spot-check (report/doc links, GitHub issue references, etc.);
  *      network reachability is checked only with `--external`, since CI/
@@ -25,7 +25,7 @@
  *   node scripts/check-links.mjs --dist=dist    # override the dist directory
  */
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, relative, sep } from "node:path";
 
 const args = process.argv.slice(2);
 const checkExternal = args.includes("--external");
@@ -51,6 +51,11 @@ const HREF_RE = /(?:href|src)="([^"]+)"/g;
 const ID_RE = /\sid="([^"]+)"/g;
 
 const htmlFiles = walkHtml(DIST);
+if (htmlFiles.length === 0) {
+  console.error("error: no built HTML pages found -- run npm run build first.");
+  process.exit(1);
+}
+const SITE_ORIGIN = "https://built-site.invalid";
 const pageIds = new Map(); // page path (relative to DIST) -> Set of element ids
 const internalRefs = []; // { fromPage, url }
 const externalUrls = new Set();
@@ -61,46 +66,57 @@ for (const file of htmlFiles) {
   const ids = new Set();
   let m;
   while ((m = ID_RE.exec(content))) ids.add(m[1]);
-  pageIds.set(relPage, ids);
+  pageIds.set(file, ids);
 
   while ((m = HREF_RE.exec(content))) {
     const url = m[1];
-    if (url.startsWith("http://") || url.startsWith("https://")) {
-      externalUrls.add(url);
-    } else if (url.startsWith("/") || url.startsWith("./") || url.startsWith("../") || url.startsWith("#")) {
-      internalRefs.push({ fromPage: relPage, url });
+    let target;
+    try {
+      target = new URL(url, new URL(relPage, SITE_ORIGIN));
+    } catch {
+      internalRefs.push({ fromPage: relPage, url, target: null });
+      continue;
     }
+    if (!["http:", "https:"].includes(target.protocol)) continue;
+    if (target.origin !== SITE_ORIGIN) externalUrls.add(target.href);
+    else internalRefs.push({ fromPage: relPage, url, target });
   }
 }
 
-function resolveDistPath(pathPart) {
-  let clean = pathPart.split("?")[0];
-  if (clean === "") return DIST + "/index.html"; // same-page fragment only
-  if (clean.endsWith("/")) clean += "index.html";
-  else if (!clean.includes(".")) clean += "/index.html";
-  return join(DIST, clean);
+function resolveDistPath(pathname) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  const candidate = resolve(DIST, "." + decoded);
+  const rel = relative(DIST, candidate);
+  if (rel === ".." || rel.startsWith(".." + sep)) return null;
+  if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+  const index = join(candidate, "index.html");
+  return existsSync(index) && statSync(index).isFile() ? index : null;
 }
 
 const missingTargets = [];
 const missingFragments = [];
 
-for (const { fromPage, url } of internalRefs) {
-  const [pathPart, fragment] = url.split("#");
-  const isSamePage = url.startsWith("#");
-  const targetFile = isSamePage ? join(DIST, fromPage.replace(/\/$/, ""), "index.html") : resolveDistPath(pathPart);
-
-  if (!isSamePage && !existsSync(targetFile)) {
+for (const { fromPage, url, target } of internalRefs) {
+  const targetFile = target && resolveDistPath(target.pathname);
+  if (!targetFile) {
     missingTargets.push({ fromPage, url });
     continue;
   }
-
-  if (fragment) {
-    const targetPage = isSamePage
-      ? fromPage
-      : "/" + targetFile.slice(DIST.length + 1).replace(/index\.html$/, "");
-    const ids = pageIds.get(targetPage);
+  if (target.hash) {
+    let fragment;
+    try {
+      fragment = decodeURIComponent(target.hash.slice(1));
+    } catch {
+      fragment = target.hash.slice(1);
+    }
+    const ids = pageIds.get(targetFile);
     if (ids && !ids.has(fragment)) {
-      missingFragments.push({ fromPage, url, targetPage, fragment });
+      missingFragments.push({ fromPage, url, targetPage: target.pathname, fragment });
     }
   }
 }
