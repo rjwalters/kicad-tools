@@ -157,8 +157,11 @@ def test_unsupported_or_malformed_additional_edges_cannot_be_ignored(tmp_path, g
 def test_malformed_outline_is_diagnostic_only_for_silkscreen(tmp_path, edge):
     path = _board(tmp_path, _rect(100, 100, 120, 120) + edge, position=(110, 110))
     before = path.read_bytes()
-    with pytest.raises(ValueError, match="Malformed Edge.Cuts"):
-        PCB.load(path)
+    # Ordinary PCB.load() tolerates a malformed outline (falls back to a
+    # (0, 0) origin), matching its pre-existing behavior for other callers
+    # such as relocate_in_pad_vias (see test_fix_vias.py). Only the
+    # silkscreen consumer below treats it as diagnostic-worthy.
+    assert PCB.load(path)._board_origin == (0.0, 0.0)
     placer = SilkRefPlacer(path)
     result = placer.plan()
     ref = result.placements[0]
