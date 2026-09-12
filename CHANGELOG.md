@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add a daily CI guard (`.github/workflows/assert-no-bot-external.yml`) that
+  fails if any open issue labeled `external` has a Bot-type author (#5310).
+  `external` is a hard-exclusion label that blocks Loom dispatch, and a
+  GitHub App installation actor (e.g. `loom-fleet-dispatch[bot]`) never
+  passes `repos.checkCollaborator`, so every issue it filed before PR #5233
+  got mislabeled `external` and silently stalled the pipeline; this catches
+  a recurrence of that regression class automatically instead of via a
+  stalled sweep. The already-mislabeled open issues were also cleaned up as
+  a one-time forge-state fix (label removed by author id, not a blanket
+  strip).
 - Fix Codex-only installer workflows to resolve generated sibling skills and namespace help, with runtime-appropriate invocation and optional metadata handling.
 - Use shared project drill-clearance checks for Board07 relocation and fallback stubs; reject archived moves into foreign zone fill without saving partial repairs.
 
