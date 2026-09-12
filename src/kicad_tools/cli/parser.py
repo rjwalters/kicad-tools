@@ -688,6 +688,10 @@ def _add_check_parser(subparsers) -> None:
     check_parser = subparsers.add_parser("check", help="Pure Python DRC (no kicad-cli)")
     check_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     check_parser.add_argument("--physical-copper-gap", type=float, default=None, metavar="MM")
+    check_parser.add_argument(
+        "--mask-copper-config",
+        help="Path to explicit mask-to-copper process policy and native runtime JSON",
+    )
     check_parser.add_argument("--format", choices=["table", "json", "summary"], default="table")
     check_parser.add_argument("--errors-only", action="store_true")
     check_parser.add_argument("--strict", action="store_true", help="Exit with code 2 on warnings")
