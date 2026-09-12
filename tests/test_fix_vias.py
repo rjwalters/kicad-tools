@@ -3887,3 +3887,17 @@ def test_stub_hole_envelope_checks_new_extent_of_existing_violation(foreign_x):
         assert reason is None
     else:
         assert reason == "stub hole-to-copper to via on net 2"
+
+
+def test_public_cli_search_alternatives_moves_blocked_via(tmp_path):
+    from kicad_tools.cli import main as public_main
+
+    board = _blocked_slide_board(tmp_path)
+    before = board.read_bytes()
+    args = ["fix-vias", str(board), "--relocate-in-pad", "--search-alternatives", "--layers", "4"]
+    assert public_main([*args, "--dry-run"]) == 0
+    assert board.read_bytes() == before
+    assert public_main(args) == 0
+    pcb = PCB.load(board)
+    assert pcb.vias[0].position == pytest.approx((10, 10.8266))
+    assert pcb.vias[0].uuid == "11111111-1111-4111-8111-111111111111"

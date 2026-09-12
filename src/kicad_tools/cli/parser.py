@@ -5141,6 +5141,11 @@ def _add_fix_vias_parser(subparsers) -> None:
     )
     fix_vias_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_vias_parser.add_argument(
+        "--search-alternatives",
+        action="store_true",
+        help="With --relocate-in-pad, search safe alternate escapes if the preferred slide is blocked",
+    )
+    fix_vias_parser.add_argument(
         "--mfr",
         choices=get_all_manufacturer_names(),
         default="jlcpcb",
