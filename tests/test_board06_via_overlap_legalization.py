@@ -26,6 +26,29 @@ def recipe(monkeypatch):
     return module
 
 
+@pytest.mark.parametrize("trunk_width", [0.387, 0.272])
+def test_long_connector_restores_impedance_width_after_pad_escape(recipe, trunk_width):
+    legs = recipe._connector_profile([(113.1, 66.2), (113.1, 64.4)], 0.15, trunk_width)
+    assert legs == [
+        ((113.1, 66.2), (113.1, 65.45), 0.15),
+        ((113.1, 65.45), (113.1, 64.4), trunk_width),
+    ]
+
+
+def test_connector_neckdown_budget_is_cumulative_across_bends(recipe):
+    import math
+
+    points = [(0, 0), (0.3, 0), (0.3, 0.3), (0.6, 0.3), (0.6, 0.6), (0.9, 0.6)]
+    legs = recipe._connector_profile(points, 0.15, 0.387)
+    narrow = sum(math.dist(a, b) for a, b, width in legs if width == 0.15)
+    wide = sum(math.dist(a, b) for a, b, width in legs if width == 0.387)
+    assert narrow == pytest.approx(0.75)
+    assert wide == pytest.approx(0.75)
+    assert legs[0][0] == points[0]
+    assert legs[-1][1] == points[-1]
+    assert all(left[1] == right[0] for left, right in zip(legs, legs[1:], strict=False))
+
+
 def test_legalizer_repairs_partial_drill_overlaps_without_changing_fixture(tmp_path, recipe):
     fixture = ROOT / "regression-fixture/diffpair_test_routed.kicad_pcb"
     original = fixture.read_bytes()

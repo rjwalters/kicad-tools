@@ -1390,6 +1390,33 @@ def _via_overlaps_smd_pad(via, pad):
     )
 
 
+def _connector_profile(points, neck_width, trunk_width, neck_length=0.75):
+    """Bound the entire pad neck-down, then restore the impedance-sized trunk.
+
+    The length budget is cumulative across bends, not per emitted segment.
+    Splitting a path must never extend its narrow pad-escape region.
+    """
+    import math
+
+    legs = []
+    remaining = neck_length
+    for a, b in zip(points, points[1:], strict=False):
+        length = math.dist(a, b)
+        if length < 1e-9:
+            continue
+        if remaining >= length:
+            legs.append((a, b, neck_width))
+        elif remaining > 1e-9:
+            mid = tuple(
+                round(x + (y - x) * remaining / length, 3) for x, y in zip(a, b, strict=True)
+            )
+            legs.extend(((a, mid, neck_width), (mid, b, trunk_width)))
+        else:
+            legs.append((a, b, trunk_width))
+        remaining = max(0.0, remaining - length)
+    return legs
+
+
 def _legalize_signal_vias(pcb_path: Path) -> int:
     """Repair same-net ``via_in_pad`` + sub-floor drill-pair residuals.
 
@@ -1432,6 +1459,25 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
     _reserve_repair_uuids(pcb_path.read_text())
     fixed = 0
     pads = _parse_pads(pcb_path)
+    net_classes = build_net_class_map()
+    transmission_line = None
+    impedance_widths = {}
+
+    def _connector_legs(net, points, layer, width):
+        nonlocal transmission_line
+        net_class = net_classes.get(net)
+        target = net_class.target_single_impedance if net_class is not None else None
+        if not target:
+            return [(a, b, width) for a, b in zip(points, points[1:], strict=False)]
+        key = (target, layer)
+        if key not in impedance_widths:
+            from kicad_tools.physics import Stackup, TransmissionLine
+            from kicad_tools.schema.pcb import PCB
+
+            if transmission_line is None:
+                transmission_line = TransmissionLine(Stackup.from_pcb(PCB.load(pcb_path)))
+            impedance_widths[key] = round(transmission_line.width_for_impedance(target, layer), 3)
+        return _connector_profile(points, width, max(width, impedance_widths[key]))
 
     def _pad_box(p, inflate: float = 0.0):
         return box(
@@ -1484,13 +1530,13 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                     return False
         return True
 
-    def _leg_ok(net, p0, p1, layer, width, vias, skip_uuids=frozenset()):
+    def _leg_ok(net, p0, p1, layer, width, vias, skip_uuids=frozenset(), clearance=CLEAR):
         if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) < EPS:
             return True
         path = LineString([p0, p1]).buffer(width / 2)
         for p in pads:
             if p["net"] != net:
-                if layer in p["layers"] and path.distance(_pad_box(p)) < CLEAR:
+                if layer in p["layers"] and path.distance(_pad_box(p)) < clearance:
                     return False
                 # Track vs foreign TH pad hole (any layer).
                 if p["drill"] > 0:
@@ -1499,12 +1545,12 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
         for s in segs:
             if s["net"] != net and s["layer"] == layer:
                 sgeom = LineString([(s["x1"], s["y1"]), (s["x2"], s["y2"])]).buffer(s["w"] / 2)
-                if path.distance(sgeom) < CLEAR:
+                if path.distance(sgeom) < clearance:
                     return False
         for v in vias:
             if v["uuid"] in skip_uuids or v["net"] == net:
                 continue
-            if path.distance(Point(v["x"], v["y"]).buffer(v["size"] / 2)) < CLEAR:
+            if path.distance(Point(v["x"], v["y"]).buffer(v["size"] / 2)) < clearance:
                 return False
             # Track vs foreign via hole (KiCad ``hole_clearance``).
             if path.distance(Point(v["x"], v["y"]).buffer(v["drill"] / 2)) < HOLE_CLEAR:
@@ -1842,17 +1888,22 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                         net, nx, ny, radius, v["drill"], vias, skip_uuids={v["uuid"]}
                     ):
                         continue
+                    connectors = {
+                        lay: _connector_legs(net, [(v["x"], v["y"]), (nx, ny)], lay, 0.15)
+                        for lay in conn_layers
+                    }
                     if not all(
                         _leg_ok(
                             net,
-                            (v["x"], v["y"]),
-                            (nx, ny),
+                            a,
+                            b,
                             lay,
-                            0.15,
+                            width,
                             vias,
                             skip_uuids={v["uuid"]},
                         )
-                        for lay in conn_layers
+                        for lay, legs in connectors.items()
+                        for a, b, width in legs
                     ):
                         continue
                     import re as _re
@@ -1865,8 +1916,9 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                     )
                     new_text = text.replace(v["block"], new_block)
                     add = [
-                        _seg_line(net, (v["x"], v["y"]), (nx, ny), lay, 0.15, net_num_by_name[net])
-                        for lay in conn_layers
+                        _seg_line(net, a, b, lay, width, net_num_by_name[net])
+                        for lay, legs in connectors.items()
+                        for a, b, width in legs
                     ]
                     new_text = new_text.rstrip().rstrip(")")
                     new_text += "\n" + "\n".join(add) + "\n)\n"
@@ -1942,6 +1994,25 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                     rules,
                 )
                 if escape is not None:
+                    connectors = {
+                        lay: _connector_legs(net, escape.points, lay, rules.width)
+                        for lay in conn_layers
+                    }
+                    if not all(
+                        _leg_ok(
+                            net,
+                            a,
+                            b,
+                            lay,
+                            width,
+                            vias,
+                            skip_uuids={v["uuid"]},
+                            clearance=rules.clearance,
+                        )
+                        for lay, legs in connectors.items()
+                        for a, b, width in legs
+                    ):
+                        continue
                     nx, ny = escape.points[-1]
                     new_block = re.sub(
                         r"\(at [\d.-]+ [\d.-]+\)",
@@ -1957,9 +2028,9 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                     )
                     new_text = text.replace(v["block"], new_block)
                     add = [
-                        _seg_line(net, a, b, lay, rules.width, net_num_by_name[net])
-                        for lay in conn_layers
-                        for a, b in zip(escape.points, escape.points[1:], strict=False)
+                        _seg_line(net, a, b, lay, width, net_num_by_name[net])
+                        for lay, legs in connectors.items()
+                        for a, b, width in legs
                     ]
                     pcb_path.write_text(
                         new_text.rstrip().rstrip(")") + "\n" + "\n".join(add) + "\n)\n"
