@@ -12,6 +12,7 @@
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
+    "check-links": "node scripts/check-links.mjs",
     "test": "vitest run"
   },
   "dependencies": {
