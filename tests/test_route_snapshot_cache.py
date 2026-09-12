@@ -139,3 +139,30 @@ def test_cli_cache_apply_failure_never_routes_or_publishes(
     assert geometry.call_count == (failure_stage == "geometry")
     search.assert_not_called()
     assert not output.exists()
+
+
+@pytest.mark.parametrize("replacement_y", [None, 5])
+def test_snapshot_replay_invalidates_built_crossing_index(replacement_y):
+    ar = Autorouter(width=20, height=20, force_python=True)
+    old = _route(12)
+    ar._mark_route(old)
+    ar.routes.append(old)
+
+    def crossings(y):
+        x1, y1 = ar.grid.world_to_grid(10, y - 1)
+        x2, y2 = ar.grid.world_to_grid(10, y + 1)
+        layer = ar.grid.layer_to_index(Layer.F_CU.value)
+        return ar.router._count_edge_crossings(x1, y1, x2, y2, layer, 2)
+
+    ar.router._build_crossing_grid()
+    assert crossings(12) == 1
+    replacement = [] if replacement_y is None else [_route(replacement_y)]
+    ar.restore_route_snapshot(replacement)
+    assert crossings(12) == 0
+    if replacement_y is not None:
+        assert crossings(replacement_y) == 1
+    # A freshly rebuilt index must agree with the immediate replay state.
+    ar.router._build_crossing_grid()
+    assert crossings(12) == 0
+    if replacement_y is not None:
+        assert crossings(replacement_y) == 1
