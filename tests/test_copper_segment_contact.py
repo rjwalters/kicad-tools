@@ -276,9 +276,18 @@ def test_board09_copper_lvs_agrees_across_split_revisions(relative_pcb):
     # Net-specific: none of the five historical false opens survive.
     reported = {(m.net_a, m.pad_a, m.pad_b) for m in result.mismatches}
     assert not (reported & BOARD09_FALSE_OPENS), f"false opens still reported: {reported}"
-    # And nothing else appeared in their place.
-    assert result.mismatches == (), f"unexpected mismatches: {result.mismatches}"
+    assert reported == set()
+    assert not result.vacuous
     assert result.clean
+    assert result.shorts == ()
+    # Check physical connectivity independently of the top-level verdict.
+    # Occurrence-aware extraction (#5217) preserves the connector contacts
+    # that the former logical-pad projection lost.
+    partition, bindings = ConnectivityValidator(BOARD09 / relative_pcb).extract_pad_occurrences()
+    ground_pads = {("C1", "2"), ("J1", "A1"), ("J1", "A12"), ("J1", "B1"), ("J1", "B12")}
+    ground_nodes = {node for node, binding in bindings.items() if binding in ground_pads}
+    assert {bindings[node] for node in ground_nodes} == ground_pads
+    assert sum(ground_nodes <= component for component in partition) == 1
 
 
 def test_board09_split_revisions_share_a_pad_partition():

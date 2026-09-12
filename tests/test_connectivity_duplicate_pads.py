@@ -137,7 +137,7 @@ def test_ground_bridge_sees_edges_of_each_duplicate_land():
     assert result[0].bridge_count == 1
 
 
-def test_advisory_open_policy_remains_explicit():
+def test_legacy_advisory_hint_cannot_hide_duplicate_land_open():
     groups = [frozenset({"a"}), frozenset({"b"})]
     bindings = {"a": ("J1", "SH"), "b": ("J1", "SH")}
     enforced = compare_partitions({("J1", "SH"): "GND"}, groups, pad_bindings=bindings)
@@ -145,7 +145,8 @@ def test_advisory_open_policy_remains_explicit():
         {("J1", "SH"): "GND"}, groups, frozenset({"GND"}), pad_bindings=bindings
     )
     assert len(enforced.opens) == 1
-    assert advisory.clean
+    assert advisory == enforced
+    assert not advisory.clean
     assert advisory.bound_pad_count == enforced.bound_pad_count == 1
 
 
