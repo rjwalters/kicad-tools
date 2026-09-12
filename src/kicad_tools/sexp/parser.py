@@ -341,16 +341,21 @@ class SExp:
                 atom_idx += 1
         raise IndexError(f"No atom at index {index}")
 
-    def to_string(self, indent: int = 0, compact: bool = False) -> str:
+    def to_string(
+        self, indent: int = 0, compact: bool = False, *, preserve_source: bool = False
+    ) -> str:
         """
         Serialize to S-expression string matching KiCad format.
 
         Args:
             indent: Current indentation level
             compact: If True, minimize whitespace
+            preserve_source: Retain untouched copper arc text for PCB saves.
+                Default serialization remains canonical for semantic comparisons.
         """
         if (
-            not compact
+            preserve_source
+            and not compact
             and self._source_text is not None
             and self.to_string(compact=True) == self._source_canonical
         ):
@@ -409,7 +414,7 @@ class SExp:
                     lines[-1] += " " + child.to_string(compact=True)
             else:
                 # Complex children always on new lines
-                child_str = child.to_string(indent=indent + 1)
+                child_str = child.to_string(indent=indent + 1, preserve_source=preserve_source)
                 lines.append(child_str)
                 started_new_lines = True
 
@@ -1459,19 +1464,20 @@ def parse_sexp(text: str, track_positions: bool = False) -> SExp:
     return parse_string(text, track_positions=track_positions)
 
 
-def serialize_sexp(sexp: SExp, indent: str = "  ") -> str:
+def serialize_sexp(sexp: SExp, indent: str = "  ", *, preserve_source: bool = False) -> str:
     """Serialize an SExp tree to text.
 
     Provides backward compatibility with core/sexp.py's serialize_sexp() function.
 
     Args:
+        preserve_source: Preserve untouched copper arc text instead of normalizing it.
         sexp: The SExp tree to serialize
         indent: String to use for each indentation level (ignored - uses KiCad format)
 
     Returns:
         Serialized S-expression string
     """
-    return sexp.to_string()
+    return sexp.to_string(preserve_source=preserve_source)
 
 
 # Pad chamfer corner tokens (issue #4393). KiCad emits these as bare symbols

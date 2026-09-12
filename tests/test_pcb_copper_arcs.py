@@ -248,3 +248,10 @@ def test_pcb_summary_and_routing_status_include_curved_copper():
     assert routed["trace_length_mm"] == pytest.approx(5 * math.pi)
     assert routed["nets_with_traces"] == {1}
     assert routed["unrouted_pads"] == []
+
+
+def test_normal_serialization_is_canonical_while_pcb_save_preserves_source():
+    first = parse_string(ARC)
+    second = parse_string(ARC.replace(" (", "\n  ("))
+    assert first.to_string() == second.to_string()
+    assert first.to_string(preserve_source=True) != second.to_string(preserve_source=True)

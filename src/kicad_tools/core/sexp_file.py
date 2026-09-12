@@ -183,7 +183,7 @@ def save_pcb(sexp: SExp, path: str | Path) -> None:
         )
 
     path = Path(path)
-    text = serialize_sexp(sexp)
+    text = serialize_sexp(sexp, preserve_source=True)
     check_kicad_lock(path)
     atomic_write_text(path, text, encoding="utf-8", newline="")
 
