@@ -2727,7 +2727,14 @@ class PCB:
         for adding ``self._board_origin`` back when writing new copper
         primitives to the tree.
         """
-        bounds = board_outline_bounds(self._sexp)
+        try:
+            bounds = board_outline_bounds(self._sexp)
+        except ValueError:
+            # Malformed/unsupported Edge.Cuts geometry: preserve PCB.load()'s
+            # pre-existing tolerance (this is a *load-time* view, not the
+            # routing path -- routing's own board_outline_bounds() call
+            # still raises and fails loud).
+            bounds = None
         origin = bounds[:2] if bounds is not None else (0.0, 0.0)
 
         self._board_origin = origin
@@ -2887,9 +2894,14 @@ class PCB:
 
         Returns:
             Tuple (width, height) in mm.  Returns (0.0, 0.0) if no
-            Edge.Cuts geometry is found.
+            Edge.Cuts geometry is found, or if the geometry present is
+            malformed/unsupported (matching :meth:`_detect_board_origin`'s
+            load-time tolerance; routing keeps its own strict rejection).
         """
-        bounds = board_outline_bounds(self._sexp)
+        try:
+            bounds = board_outline_bounds(self._sexp)
+        except ValueError:
+            return (0.0, 0.0)
         if bounds is None:
             return (0.0, 0.0)
         return bounds[2] - bounds[0], bounds[3] - bounds[1]
