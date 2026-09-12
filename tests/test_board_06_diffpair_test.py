@@ -911,6 +911,199 @@ class TestPostQuantizeClearanceGate:
 
 
 # =============================================================================
+# Issue #5274: the step-12 treatment search must be able to REVISE a chord
+# =============================================================================
+
+
+def _corridor_via(x: float, y: float, uuid: str) -> str:
+    """A net-1 through via (size 0.6 / drill 0.3) at ``(x, y)``."""
+    return (
+        f"  (via (at {x} {y}) (size 0.6) (drill 0.3) "
+        f'(layers "F.Cu" "B.Cu") (net 1 "SIG1") (uuid "{uuid}"))\n'
+    )
+
+
+def _offangle_chord(uuid: str = "chord-1", width: float = 0.2) -> str:
+    """An off-angle net-2 chord ``(100,100) -> (101,98)`` (18.4 deg off 45).
+
+    Emitted in KiCad's multi-line ``(segment ...)`` dialect because that is
+    the only form ``quantize.py``'s block regex (and therefore the whole
+    quantizer) recognises.
+
+    Its two dogleg variants leave the chord's corridor on opposite sides:
+
+    * diag-first (the default) bulges RIGHT, through ``(101, 99)``;
+    * axis-first (the flip) bulges LEFT, through ``(100, 99)``.
+    """
+    return (
+        "  (segment\n"
+        "    (start 100 100)\n"
+        "    (end 101 98)\n"
+        f"    (width {width})\n"
+        '    (layer "F.Cu")\n'
+        f'    (uuid "{uuid}")\n'
+        "    (net 2)\n"
+        "  )\n"
+    )
+
+
+def _corridor_pcb(vias: str, chord: str = "") -> str:
+    return _GATE_HEADER_4L + vias + (chord or _offangle_chord()) + ")\n"
+
+
+class TestQuantizeTreatmentIsRevisable:
+    """A partially-clearing flip must not lock out the skip that clears (#5274).
+
+    PR #5219's SMD via-in-pad enforcement pushed a board-06 via off-pad into
+    the axis-first corridor of the net USB2_D- chord ``(113,57.5) ->
+    (114,55.5)``.  That produced exactly the shape these fixtures reproduce:
+    the chord's default dogleg grazes several neighbours, its flip grazes
+    strictly fewer but not zero, and leaving it off-angle grazes none.
+
+    The original resolver committed a chord's treatment the first time it
+    strictly reduced the global graze count and then excluded that chord
+    from every later round, so it took the "fewer" and could never reach the
+    "none" -- and step 12d aborted the Board 06 / Diff-Pair CI jobs on a
+    residual its own vocabulary could express.
+    """
+
+    # Two vias in the diag-first (default) corridor, one in the axis-first
+    # (flip) corridor: default -> 3 new grazes, flip -> 1, skip -> 0.
+    TRAP_VIAS = (
+        _corridor_via(101.0, 99.5, "via-a")
+        + _corridor_via(101.4, 98.5, "via-b")
+        + _corridor_via(99.65, 99.5, "via-c")
+    )
+
+    def _resolved_residual(self, mod, pcb_path: Path):
+        """Resolve treatment, quantize, and return the NEW-graze set."""
+        from kicad_tools.router.quantize import quantize_pcb_file
+
+        baseline = mod._clearance_signature(pcb_path)
+        axis_first, skip = mod._resolve_quantize_treatment(pcb_path, baseline)
+        quantize_pcb_file(
+            pcb_path,
+            axis_first_uuids=frozenset(axis_first),
+            skip_uuids=frozenset(skip),
+        )
+        return baseline, axis_first, skip, mod._clearance_signature(pcb_path) - baseline
+
+    def test_fixture_reproduces_the_partial_flip_trap(self, generate_design_mod, tmp_path: Path):
+        """Guard the fixture itself: default > flip > skip == 0 new grazes."""
+        from kicad_tools.router.quantize import quantize_pcb_file
+
+        counts = {}
+        for name, kwargs in (
+            ("default", {}),
+            ("flip", {"axis_first_uuids": frozenset({"chord-1"})}),
+            ("skip", {"skip_uuids": frozenset({"chord-1"})}),
+        ):
+            pcb_path = tmp_path / f"{name}.kicad_pcb"
+            pcb_path.write_text(_corridor_pcb(self.TRAP_VIAS))
+            baseline = generate_design_mod._clearance_signature(pcb_path)
+            assert baseline == set(), "the unquantized chord must start clean"
+            quantize_pcb_file(pcb_path, **kwargs)
+            counts[name] = len(generate_design_mod._clearance_signature(pcb_path) - baseline)
+        assert counts["default"] > counts["flip"] > counts["skip"] == 0, (
+            "fixture must reproduce the #5274 trap (a flip that only PARTIALLY "
+            f"clears the chord): got {counts}"
+        )
+
+    def test_resolver_escalates_a_partial_flip_to_a_clearing_skip(
+        self, generate_design_mod, tmp_path: Path
+    ):
+        """The resolved treatment must leave ZERO new grazes."""
+        pcb_path = tmp_path / "trap.kicad_pcb"
+        pcb_path.write_text(_corridor_pcb(self.TRAP_VIAS))
+        _baseline, axis_first, skip, residual = self._resolved_residual(
+            generate_design_mod, pcb_path
+        )
+        assert residual == set(), (
+            "the step-12 treatment search settled for a partially-clearing "
+            f"flip: axis_first={axis_first} skip={skip} left {residual}. A "
+            "chord already carrying a treatment must be re-treatable (#5274)."
+        )
+        assert "chord-1" in skip and "chord-1" not in axis_first
+
+    def test_resolver_keeps_the_45_preserving_flip_when_it_fully_clears(
+        self, generate_design_mod, tmp_path: Path
+    ):
+        """Only the flip-side corridor is occupied -> flip, not skip.
+
+        The revision mechanism must not make the resolver trigger-happy: a
+        flip that clears everything is strictly better than a skip (it keeps
+        the chord on the 45 set, so step 13 has nothing left to mid-split).
+        """
+        pcb_path = tmp_path / "diag_only.kicad_pcb"
+        pcb_path.write_text(
+            _corridor_pcb(_corridor_via(101.0, 99.5, "via-a") + _corridor_via(101.4, 98.5, "via-b"))
+        )
+        _baseline, axis_first, skip, residual = self._resolved_residual(
+            generate_design_mod, pcb_path
+        )
+        assert residual == set()
+        assert "chord-1" in axis_first and "chord-1" not in skip
+
+    def test_clean_corridor_needs_no_treatment_at_all(self, generate_design_mod, tmp_path: Path):
+        """No graze anywhere -> the resolver must not invent a treatment."""
+        pcb_path = tmp_path / "clean.kicad_pcb"
+        pcb_path.write_text(_corridor_pcb(_corridor_via(105.0, 105.0, "via-far")))
+        _baseline, axis_first, skip, residual = self._resolved_residual(
+            generate_design_mod, pcb_path
+        )
+        assert residual == set()
+        assert not axis_first and not skip
+
+
+class TestOffAngleChordReroute:
+    """``_reroute_offangle_chord`` is the step-12 re-route escape (#5274).
+
+    The step-12d abort message has always prescribed a re-route of the
+    offending chord; this is the pass that can perform one.  It must be
+    gate-equivalent (a candidate is written only when it introduces NOTHING
+    beyond the baseline) and transactional (no partial write on refusal).
+    """
+
+    def test_reroute_lands_the_chord_on_the_45_set(self, generate_design_mod, tmp_path: Path):
+        from kicad_tools.router.quantize import segment_angle_census
+
+        pcb_path = tmp_path / "reroute.kicad_pcb"
+        pcb_path.write_text(_corridor_pcb(_corridor_via(105.0, 105.0, "via-far")))
+        baseline = generate_design_mod._clearance_signature(pcb_path)
+        assert generate_design_mod._reroute_offangle_chord(pcb_path, baseline, "chord-1") is True
+        _total, off_angle = segment_angle_census(pcb_path)
+        assert off_angle == [], "the re-routed chord must leave the off-angle population"
+        assert generate_design_mod._clearance_signature(pcb_path) - baseline == set()
+        # Endpoints are preserved bit-for-bit, so connectivity is unchanged.
+        text = pcb_path.read_text()
+        assert "(start 100.000 100.000)" in text and "(end 101.000 98.000)" in text
+
+    def test_reroute_refuses_without_mutating_when_every_candidate_grazes(
+        self, generate_design_mod, tmp_path: Path
+    ):
+        """A fully-walled corridor must be refused, not written anyway."""
+        # A dense picket of foreign drills along the whole chord: no
+        # mid-split fraction (and neither narrowed width) can clear them.
+        vias = "".join(
+            _corridor_via(round(100 + i * 0.05, 3), round(100 - i * 0.1, 3), f"wall-{i}")
+            for i in range(1, 20)
+        )
+        pcb_path = tmp_path / "walled.kicad_pcb"
+        pcb_path.write_text(_corridor_pcb(vias))
+        before = pcb_path.read_bytes()
+        baseline = generate_design_mod._clearance_signature(pcb_path)
+        assert generate_design_mod._reroute_offangle_chord(pcb_path, baseline, "chord-1") is False
+        assert pcb_path.read_bytes() == before, "refusal must not mutate the artifact"
+
+    def test_reroute_of_an_unknown_uuid_is_a_no_op(self, generate_design_mod, tmp_path: Path):
+        pcb_path = tmp_path / "absent.kicad_pcb"
+        pcb_path.write_text(_corridor_pcb(_corridor_via(105.0, 105.0, "via-far")))
+        before = pcb_path.read_bytes()
+        assert generate_design_mod._reroute_offangle_chord(pcb_path, set(), "not-a-uuid") is False
+        assert pcb_path.read_bytes() == before
+
+
+# =============================================================================
 # Issue #4557: default connectivity model = strict (real copper geometry)
 # =============================================================================
 
