@@ -225,6 +225,10 @@ class TestAdvisoryBanner:
 
     def test_route_prints_banner(self, tmp_path, capsys):
         pcb = _write_pair(tmp_path, "board", MINIMAL_SCHEMATIC, PCB_MISSING_R1)
+        pcb.write_text(
+            pcb.read_text().rstrip()[:-1]
+            + '(gr_rect (start 110 90) (end 130 110) (layer "Edge.Cuts") (width 0.05)))'
+        )
         rc = route_main([str(pcb), "--dry-run"])
         out = capsys.readouterr().out
         assert "PCB out of sync with schematic" in out

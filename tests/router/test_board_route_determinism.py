@@ -18,7 +18,9 @@ pinned ``PYTHONHASHSEED=42``.
 
 These tests re-route a board's committed UNROUTED PCB twice with the
 production route flags and assert the UUID-normalized routed COPPER (the
-``(segment ...)`` / ``(via ...)`` / ``(arc ...)`` set) is byte-identical.
+``(segment ...)`` / ``(via ...)`` / ``(arc ...)`` multiset) is identical.
+Each run starts with an empty isolated cache so both execute the search.
+Cold/warm cache equivalence is a separate regression tracked in #5261.
 
 * ``board 02`` routes in ~20-30 s, so its test runs UNCONDITIONALLY (PR
   CI included) -- it is the fast regression backstop.
@@ -37,14 +39,18 @@ guards against, not encoded as a hard assertion.
 
 from __future__ import annotations
 
+import ast
+import json
 import os
-import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import NamedTuple
 
 import pytest
+
+from kicad_tools.sexp import SExp, parse_string
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -73,8 +79,10 @@ _BOARD_CONFIG: dict[str, _BoardRoute] = {
             "240",
             "--seed",
             "42",
-            "--skip-nets",
-            "GND",
+            "--no-auto-pour",
+            "--no-auto-layers",
+            "--grid",
+            "0.1",
             "--manufacturer",
             "jlcpcb",
         ],
@@ -99,29 +107,57 @@ _BOARD_CONFIG: dict[str, _BoardRoute] = {
     ),
 }
 
-_COPPER_LINE_RE = re.compile(r"^\s*\((segment|via|arc)\b")
-_UUID_RE = re.compile(r'\(uuid "[^"]*"\)')
-_TSTAMP_RE = re.compile(r"\(tstamp [^)]*\)")
+
+@pytest.mark.parametrize("recipe", ["generate_design.py", "route_demo.py"])
+def test_board02_determinism_flags_match_production_recipe(recipe: str) -> None:
+    """Exercise the shipped all-net recipe, not an obsolete auto-grid route."""
+    source = REPO_ROOT / _BOARD_CONFIG["02"].directory / recipe
+    tree = ast.parse(source.read_text())
+    commands = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "cmd" for target in node.targets)
+        and isinstance(node.value, ast.List)
+        and any(
+            isinstance(item, ast.Constant) and item.value == "kicad_tools.cli.route_cmd"
+            for item in node.value.elts
+        )
+    ]
+    assert len(commands) == 1, f"Expected one production routing command in {recipe}"
+    elements = commands[0].elts
+    start = next(
+        index
+        for index, item in enumerate(elements)
+        if isinstance(item, ast.Constant) and item.value == "--strategy"
+    )
+    production_flags = [ast.literal_eval(item) for item in elements[start:]]
+    assert _BOARD_CONFIG["02"].flags == production_flags
 
 
 def _normalize_copper(pcb_text: str) -> list[str]:
-    """Return the sorted, UUID/tstamp-stripped routed-copper line set.
+    """Compare complete copper expressions, ignoring IDs and file layout.
 
-    Keeps only ``(segment|via|arc)`` lines, strips the per-element UUID /
-    tstamp tokens (deterministic per-seed, but stripped defensively so a
-    UUID-toggle regression surfaces as a CONTENT mismatch rather than
-    masking a real routing-path divergence), and sorts so the ORDER of
-    elements in the file does not matter -- only the SET of copper geometry.
+    Preserve multiplicity and all geometry, net, and layer attributes.
+    Only direct board children count, excluding nested footprint drawings.
     """
-    lines: list[str] = []
-    for line in pcb_text.splitlines():
-        if not _COPPER_LINE_RE.match(line):
-            continue
-        line = _UUID_RE.sub('(uuid "X")', line)
-        line = _TSTAMP_RE.sub("(tstamp X)", line)
-        lines.append(line)
-    lines.sort()
-    return lines
+    root = parse_string("(fixture " + pcb_text + ")")
+    if len(root.children) == 1 and root.children[0].name == "kicad_pcb":
+        root = root.children[0]
+
+    def canonical(node: SExp) -> object:
+        if node.name is None:
+            return node.value
+        return [
+            node.name,
+            *[canonical(child) for child in node.children if child.name not in {"uuid", "tstamp"}],
+        ]
+
+    return sorted(
+        json.dumps(canonical(child))
+        for child in root.children
+        if child.name in {"segment", "via", "arc"}
+    )
 
 
 def _route_once(board: str, out_pcb: Path, log: Path) -> None:
@@ -152,6 +188,11 @@ def _route_once(board: str, out_pcb: Path, log: Path) -> None:
     ]
     env = os.environ.copy()
     env["PYTHONHASHSEED"] = "42"
+    # Both invocations must execute routing, independent of ambient cache
+    # state. A warm hit bypasses the deterministic search under test (#5261).
+    cache_home = out_pcb.parent / f"{out_pcb.stem}-cache"
+    cache_home.mkdir()
+    env["XDG_CACHE_HOME"] = str(cache_home)
     with log.open("w") as log_fh:
         subprocess.run(
             cmd,
@@ -183,14 +224,14 @@ def _assert_route_reproducible(board: str, tmp_path: Path) -> None:
 
     if norms[0] != norms[1]:
         # Build a compact diff for the failure message.
-        only_1 = sorted(set(norms[0]) - set(norms[1]))[:10]
-        only_2 = sorted(set(norms[1]) - set(norms[0]))[:10]
+        only_1 = sorted((Counter(norms[0]) - Counter(norms[1])).elements())[:10]
+        only_2 = sorted((Counter(norms[1]) - Counter(norms[0])).elements())[:10]
         pytest.fail(
             f"Board {board} routed copper diverged across two seed-42 + "
             f"--deterministic-budget + PYTHONHASHSEED=42 routes (Issue "
             f"#3799 regression).\n"
-            f"  run1 copper lines: {len(norms[0])}\n"
-            f"  run2 copper lines: {len(norms[1])}\n"
+            f"  run1 copper records: {len(norms[0])}\n"
+            f"  run2 copper records: {len(norms[1])}\n"
             f"  only in run1 (up to 10): {only_1}\n"
             f"  only in run2 (up to 10): {only_2}\n"
             f"  PCBs preserved at {tmp_path}"
@@ -212,8 +253,33 @@ def test_normalize_copper_strips_uuid_and_sorts() -> None:
     norm_b = _normalize_copper(pcb_b)
     # Non-copper line dropped, UUIDs stripped, sort makes order irrelevant.
     assert norm_a == norm_b
-    assert all('uuid "X"' in line for line in norm_a)
+    assert len(norm_a) == 2
+    assert not any("uuid" in line for line in norm_a)
     assert not any("gr_line" in line for line in norm_a)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("(end 3 4)", "(end 3 5)"),
+        ("(width 0.2)", "(width 0.3)"),
+        ('(layer "F.Cu")', '(layer "B.Cu")'),
+        ("(net 1)", "(net 2)"),
+    ],
+)
+def test_normalize_copper_detects_multiline_changes(before: str, after: str) -> None:
+    copper = '(segment\n (start 1 2)\n (end 3 4)\n (width 0.2)\n (layer "F.Cu")\n (net 1))'
+    pcb = "(kicad_pcb\n" + copper + ")"
+    assert _normalize_copper(pcb) != _normalize_copper(pcb.replace(before, after))
+
+
+def test_normalize_copper_layout_ids_and_multiplicity() -> None:
+    copper = '(arc (start 1 2) (mid 2 3) (end 3 4) (width 0.2) (layer "F.Cu") (net 1))'
+    plain = _normalize_copper("(kicad_pcb " + copper + ")")
+    multiline = copper.replace(" (", "\n (")[:-1] + ' (uuid "new") (tstamp old))'
+    assert plain == _normalize_copper("(kicad_pcb " + multiline + ")")
+    assert plain != _normalize_copper("(kicad_pcb " + copper + copper + ")")
+    assert not _normalize_copper("(kicad_pcb (footprint " + copper + "))")
 
 
 @pytest.mark.timeout(600)

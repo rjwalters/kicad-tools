@@ -61,8 +61,11 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # Bump this constant whenever routing logic is modified to ensure stale
 # cached results are not reused.  The value is included in every cache key
 # so incrementing it automatically invalidates all existing entries.
-# Complete snapshot replay plus revised clearance acceptance invalidate both parents.
-CACHE_VERSION = "2.4.1"
+# Authoritative Edge.Cuts bounds/origin change the routing domain for identical
+# PCB bytes. The outline-domain tag also separates this algorithm from the
+# independently developed SMD via-in-pad policy that already used 2.4.2;
+# incrementing to that shared ordinal allowed incompatible branch caches to mix.
+CACHE_VERSION = "2.4.3-outline-domain"
 
 
 def get_default_cache_path() -> Path:

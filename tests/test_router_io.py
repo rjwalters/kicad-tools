@@ -312,8 +312,8 @@ class TestLoadPcbForRouting:
         has_through_hole = any(pad.through_hole for pad in router.pads.values())
         assert has_through_hole
 
-    def test_load_pcb_default_dimensions(self, tmp_path):
-        """Test default dimensions when no edge cuts present."""
+    def test_load_pcb_missing_outline_is_rejected(self, tmp_path):
+        """Missing outline must not silently select a HAT routing domain."""
         # Create a PCB without gr_rect
         pcb_content = """(kicad_pcb
   (version 20240108)
@@ -336,11 +336,8 @@ class TestLoadPcbForRouting:
         pcb_file = tmp_path / "no_edge.kicad_pcb"
         pcb_file.write_text(pcb_content)
 
-        router, net_map = load_pcb_for_routing(str(pcb_file))
-
-        # Should use default HAT dimensions
-        assert router.grid.width == 65.0
-        assert router.grid.height == 56.0
+        with pytest.raises(ValueError, match="missing supported Edge.Cuts"):
+            load_pcb_for_routing(str(pcb_file))
 
     def test_load_pcb_unquoted_pad_numbers(self, tmp_path):
         """Test parsing pads with unquoted numeric pad numbers (Issue #173).
