@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix Codex-only installer workflows to resolve generated sibling skills and namespace help, with runtime-appropriate invocation and optional metadata handling.
 - Use shared project drill-clearance checks for Board07 relocation and fallback stubs; reject archived moves into foreign zone fill without saving partial repairs.
 
 ### Added
@@ -64,6 +65,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   footprint creepage/spacing waiver can never suppress a device-stress finding
   (the two read disjoint inputs). No automatic circuit-state inference is
   performed in this pass.
+- **Installer: explicit Codex and Claude client targets** (#4905) —
+  `scripts/install-kct.sh` gains `--client claude|codex|both` (default
+  `claude`, fully backward-compatible). Codex selection generates one
+  `.agents/skills/kct-<name>/SKILL.md` per skill from the SAME source
+  `.claude/commands/kct/<name>.md` files Claude vendors — one maintained
+  source, not a hand-duplicated copy — with the `SKILL.md` frontmatter
+  carrying only `name`/`description` (Claude's `invocation`/`suggestedModel`
+  dispatch metadata is deliberately not copied), plus an additive guarded
+  `AGENTS.md` block pointing at the shared `.kct/CONVENTIONS.md`. The shared
+  uv dependency, `.kct/ci/` gates, and `.kct/CONVENTIONS.md` stay
+  client-independent. Selecting one client never overwrites, removes, or
+  duplicates the other client's files or a prior/switched install's valid
+  artifacts — `install-metadata.json`'s `clients_installed` /
+  `skills_selected` / `installed_files` fields accumulate (union) across
+  repeated or switched-client runs instead of being replaced.
 - **`kct route --reserve-plane-layers`: controlled-impedance signal-layer
   reservation guardrail** (#5014) — `LayerDefinition.is_routable` treats
   every copper layer as signal-eligible by design, including layers a
