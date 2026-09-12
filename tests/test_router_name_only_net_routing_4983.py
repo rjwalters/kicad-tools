@@ -255,8 +255,10 @@ def _route_argv(pcb_path: Path, out_path: Path, nets: str = "SIGNAL") -> list[st
         "python",
         "--no-placement-feedback",
         "--no-cache",
+        # This is a copper/diagnostic regression, not a speed benchmark.
+        # Leave room for supervised startup and post-routing checks under CI.
         "--timeout",
-        "10",
+        "30",
         "--no-optimize",
         "-o",
         str(out_path),
@@ -325,7 +327,7 @@ class TestRouteCliNameOnlyDialect:
         assert numeric_segments > 0
         assert named_segments == numeric_segments
 
-    def test_genuinely_absent_net_fails_loudly(self, tmp_path: Path, capsys):
+    def test_genuinely_absent_net_fails_loudly(self, tmp_path: Path, capfd):
         """Negative test: a net name that does not exist on the board at
         all must abort with a non-zero exit and a clear error -- never a
         vacuous 0/0 SUCCESS."""
@@ -336,7 +338,7 @@ class TestRouteCliNameOnlyDialect:
         rc = route_main(_route_argv(pcb_path, out_path, nets="DOES_NOT_EXIST"))
 
         assert rc != 0
-        err = capsys.readouterr().err
+        err = capfd.readouterr().err
         assert "not present on the board" in err
         assert not out_path.exists()
 
@@ -348,14 +350,14 @@ class TestRouteCliSinglePadOnlyNetsRequest:
     exit 0 with a graceful warning, not be treated as a #4983-style lost
     binding."""
 
-    def test_single_pad_only_nets_request_succeeds_gracefully(self, tmp_path: Path, capsys):
+    def test_single_pad_only_nets_request_succeeds_gracefully(self, tmp_path: Path, capfd):
         pcb_path = tmp_path / "board.kicad_pcb"
         pcb_path.write_text(_SINGLE_PAD_NET_FIXTURE)
         out_path = tmp_path / "out.kicad_pcb"
 
         rc = route_main(_route_argv(pcb_path, out_path, nets="LONELY"))
 
-        err = capsys.readouterr().err
+        err = capfd.readouterr().err
         assert "fewer than 2 pads" in err
         assert "loader bug" not in err
         assert rc == 0

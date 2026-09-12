@@ -189,3 +189,80 @@ class TestViaLayerSpanAwarePourAudit:
         )
         stranded_names = {name for name, _ in info["stranded_pads"]}
         assert "R1.1" in stranded_names
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_pour_repair_finds_narrow_j1_escape(generate_design_mod, tmp_path, blocked):
+    """Board06 J1.B8 needs a ray between the eight compass directions.
+
+    The fixture retains J1 and nearby tracks/vias from issue5223's routed
+    snapshot, with a simple B.Cu anchor replacing the full board's pour.
+    The original search leaves B8 stranded. A foreign F.Cu track across
+    the remaining corridor must still prevent repair.
+    """
+    text = (REPO_ROOT / "tests/fixtures/board06_pour_escape.kicad_pcb").read_text()
+    if blocked:
+        text = (
+            text.rstrip()[:-1]
+            + """
+  (segment (start 111.5 57.9) (end 112.6 57.9) (width 0.2)
+    (layer "F.Cu") (net 0))
+)
+"""
+        )
+    pcb = tmp_path / "escape.kicad_pcb"
+    pcb.write_text(text)
+    before = generate_design_mod._audit_pour_nets(pcb, ["+3V3"])["+3V3"]
+    assert ("J1.B8", False) in before["stranded_pads"]
+
+    generate_design_mod._repair_pour_connectivity(pcb, ["+3V3"])
+
+    after = generate_design_mod._audit_pour_nets(pcb, ["+3V3"])["+3V3"]
+    if blocked:
+        assert ("J1.B8", False) in after["stranded_pads"]
+        assert not after["connected"]
+    else:
+        assert after["connected"]
+        assert not after["stranded_pads"]
+        assert "(via (at 112.325 58.063)" in pcb.read_text()
+
+        # Check the emitted witness against physical foreign trace copper,
+        # independently of the repair's candidate selection and audit.
+        import re
+
+        from shapely.geometry import LineString, Point
+
+        emitted = pcb.read_text()
+        net_id = re.search(r'\(net (\d+) "\+3V3"\)', emitted).group(1)
+        vias = generate_design_mod._find_sexp_blocks(emitted, "\n  (via")
+        added_via = next(v for v in vias if f"(net {net_id})" in v and "(at 112.325 58.063)" in v)
+        center = tuple(map(float, re.search(r"\(at ([\d.-]+) ([\d.-]+)\)", added_via).groups()))
+        diameter = float(re.search(r"\(size ([\d.]+)\)", added_via).group(1))
+        via = Point(center).buffer(diameter / 2)
+        segments = generate_design_mod._find_sexp_blocks(emitted, "\n\t(segment")
+        segments += generate_design_mod._find_sexp_blocks(emitted, "\n  (segment")
+        added_stub = next(
+            s for s in segments if f"(net {net_id})" in s and "(start 112.000 57.500)" in s
+        )
+        stub_start = tuple(
+            map(float, re.search(r"\(start ([\d.-]+) ([\d.-]+)\)", added_stub).groups())
+        )
+        stub_end = tuple(map(float, re.search(r"\(end ([\d.-]+) ([\d.-]+)\)", added_stub).groups()))
+        stub_width = float(re.search(r"\(width ([\d.]+)\)", added_stub).group(1))
+        assert stub_start == (112, 57.5)
+        assert stub_end == center
+        assert '(layer "F.Cu")' in added_stub
+        stub = LineString([stub_start, stub_end]).buffer(stub_width / 2)
+        checked = 0
+        for segment in segments:
+            if re.search(r"\(net (\d+)\)", segment).group(1) == net_id:
+                continue
+            start = tuple(map(float, re.search(r"\(start ([\d.-]+) ([\d.-]+)\)", segment).groups()))
+            end = tuple(map(float, re.search(r"\(end ([\d.-]+) ([\d.-]+)\)", segment).groups()))
+            width = float(re.search(r"\(width ([\d.]+)\)", segment).group(1))
+            copper = LineString([start, end]).buffer(width / 2)
+            assert via.distance(copper) >= 0.15
+            if '(layer "F.Cu")' in segment:
+                assert stub.distance(copper) >= 0.15
+            checked += 1
+        assert checked >= 40

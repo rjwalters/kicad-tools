@@ -341,7 +341,11 @@ class TestWorkflowJob:
         job must run inside the official KiCad container (same image as
         the test + kicad-cli-smoke jobs) so the fills actually run."""
         job = workflow["jobs"][JOB_NAME]
-        assert job["runs-on"] == "ubuntu-latest"
+        # Since 2AMLogic/2am#29 the job runs on the fleet's dedicated runner
+        # for same-repo runs and falls back to ubuntu-latest for fork PRs;
+        # either way the container below is what provides kicad-cli.
+        runs_on = str(job["runs-on"])
+        assert "ubuntu-latest" in runs_on, runs_on
         container = job.get("container")
         assert isinstance(container, dict), (
             "diffpair-routing-regression must run inside the kicad/kicad "
