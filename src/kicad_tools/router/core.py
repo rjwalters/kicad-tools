@@ -12363,15 +12363,7 @@ class Autorouter:
                     f"clearance_viol={final_metrics.clearance_violations}, "
                     f"overflow={final_metrics.overflow})"
                 )
-                # Unmark all current routes from the grid
-                for route in list(self.routes):
-                    self.grid.unmark_route_usage(route)
-                # Replace with best-state routes
-                self.routes.clear()
-                self.routes.extend(best_routes)
-                # Re-mark best routes on the grid
-                for route in self.routes:
-                    self.grid.mark_route_usage(route)
+                self._restore_negotiated_route_snapshot(best_routes)
                 # Update net_routes to best state
                 net_routes.clear()
                 net_routes.update(best_net_routes)
@@ -12629,6 +12621,24 @@ class Autorouter:
         self._finalize_routing()
 
         return list(self.routes)
+
+    def _restore_negotiated_route_snapshot(self, restored_routes: list[Route]) -> None:
+        """Restore committed geometry as well as congestion after a best-state rollback."""
+        stale_routes = list(self.routes)
+        for route in stale_routes:
+            self.grid.unmark_route_usage(route)
+        self.routes.clear()
+        self.routes.extend(restored_routes)
+        # Usage counters alone do not restore obstacle cells, spatial indexes,
+        # or the native validator's route snapshot. Post-route optimization
+        # must query the restored copper, not the discarded iteration's tree.
+        replacements: list[tuple[Route | None, Route | None]] = [
+            (route, None) for route in stale_routes
+        ]
+        replacements.extend((None, route) for route in restored_routes)
+        self.grid.resync_route_occupancy(replacements)
+        for route in restored_routes:
+            self.grid.mark_route_usage(route)
 
     def _flush_corridor_reservation(self, net_routes: dict[int, list[Route]]) -> None:
         """Close the iteration-scoped corridor-reservation window (#3438).

@@ -13,9 +13,13 @@ from kicad_tools.router.primitives import Pad, Route, Segment
 from kicad_tools.router.rules import DesignRules
 
 
-def fixture(strict, foreign_net=2):
+def fixture(strict, foreign_net=2, **rules_kwargs):
     rules = DesignRules(
-        grid_resolution=0.05, trace_width=0.15, trace_clearance=0.15, strict_pad_clearance=strict
+        grid_resolution=0.05,
+        trace_width=0.15,
+        trace_clearance=0.15,
+        strict_pad_clearance=strict,
+        **rules_kwargs,
     )
     grid = RoutingGrid(width=10, height=10, rules=rules)
     start = Pad(
@@ -43,21 +47,73 @@ def fixture(strict, foreign_net=2):
 @pytest.mark.parametrize("foreign_net", [0, 2])
 @pytest.mark.parametrize("strict", [False, True])
 def test_python_and_cpp_reject_same_component_subclearance_in_strict_mode(strict, foreign_net):
+    """Issue #5004: this fixture configures NO clearance relaxation for
+    U1 at all (no ``fine_pitch_clearance``, no ``component_clearances``
+    override) -- and the 0.5mm pitch is too tight for any
+    ``fine_pitch_clearance`` shrink to pass the narrow-channel guard
+    anyway.  Sub-clearance copper against a same-component foreign pad
+    is therefore rejected in BOTH strict mode and the (post-#5004)
+    default mode: the default mode's same-component carve-out no longer
+    grants an automatic, unconfigured exemption purely from fine pitch.
+    """
     rules, grid, start, end, bad = fixture(strict, foreign_net)
     valid, clearance, _ = grid.validate_segment_clearance(
         bad, exclude_net=1, exclude_refs={"U1", "J1"}
     )
-    assert valid is (not strict)
-    if strict:
-        assert clearance == pytest.approx(0.125)
-        deficit, _ = grid.worst_segment_pad_deficit(bad, 1, exclude_refs={"U1", "J1"})
-        assert deficit == pytest.approx(0.025)
+    assert valid is False
+    assert clearance == pytest.approx(0.125)
+    deficit, _ = grid.worst_segment_pad_deficit(bad, 1, exclude_refs={"U1", "J1"})
+    assert deficit == pytest.approx(0.025)
     if is_cpp_available():
         backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
         violation = backend._validate_route_clearance(
             Route(net=1, net_name="SIGNAL", segments=[bad]), start, end, 5
         )
-        assert (violation is not None) is strict
+        assert violation is not None
+
+
+def test_explicit_component_override_still_honored_in_default_mode():
+    """Issue #5004: an EXPLICITLY configured smaller clearance for U1
+    keeps the same-component carve-out active in default (non-strict)
+    mode -- only the automatic, unconfigured pitch-only exemption was
+    removed.  Explicit ``component_clearances`` overrides bypass the
+    narrow-channel feasibility guard, so the 0.1mm floor is honored
+    even though this fixture's 0.5mm pitch could never pass that guard
+    for an automatic ``fine_pitch_clearance`` shrink.
+    """
+    rules, grid, start, end, bad = fixture(False, component_clearances={"U1": 0.1})
+    valid, _clearance, _ = grid.validate_segment_clearance(
+        bad, exclude_net=1, exclude_refs={"U1", "J1"}
+    )
+    # Actual clearance (0.125mm) satisfies the explicitly configured
+    # 0.1mm floor, so the carve-out applies and the segment validates
+    # (leaving no other foreign pad in this fixture to report against).
+    assert valid is True
+    if is_cpp_available():
+        backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+        violation = backend._validate_route_clearance(
+            Route(net=1, net_name="SIGNAL", segments=[bad]), start, end, 5
+        )
+        assert violation is None
+
+
+def test_legacy_fine_pitch_carveout_opt_in_restores_pitch_only_exemption():
+    """Issue #5004: the pre-fix pitch-only exemption (any fine-pitch
+    component's foreign-net pads unconditionally excused, even with NO
+    configured relaxation) remains reachable, but only via the explicit
+    ``legacy_fine_pitch_carveout`` opt-in -- it is no longer the default.
+    """
+    rules, grid, start, end, bad = fixture(False, legacy_fine_pitch_carveout=True)
+    valid, _clearance, _ = grid.validate_segment_clearance(
+        bad, exclude_net=1, exclude_refs={"U1", "J1"}
+    )
+    assert valid is True
+    if is_cpp_available():
+        backend = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+        violation = backend._validate_route_clearance(
+            Route(net=1, net_name="SIGNAL", segments=[bad]), start, end, 5
+        )
+        assert violation is None
 
 
 @pytest.mark.parametrize("backend_name", ["python", "cpp"])
@@ -111,9 +167,11 @@ def test_strict_option_survives_main_cli_dispatch(tmp_path):
 
 
 @pytest.mark.parametrize("backend_name", ["python", "cpp"])
-def test_off_grid_qfp_escape_keeps_trace_radius_inside_seed_pad(backend_name):
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("neighbor_net", [0, 2])
+def test_off_grid_qfp_escape_keeps_trace_radius_inside_seed_pad(backend_name, strict, neighbor_net):
     rules = DesignRules(
-        grid_resolution=0.05, trace_width=0.15, trace_clearance=0.15, strict_pad_clearance=True
+        grid_resolution=0.05, trace_width=0.15, trace_clearance=0.15, strict_pad_clearance=strict
     )
     grid = RoutingGrid(width=10, height=10, rules=rules)
     start = Pad(
@@ -127,7 +185,7 @@ def test_off_grid_qfp_escape_keeps_trace_radius_inside_seed_pad(backend_name):
         pin="1",
         layer=Layer.F_CU,
     )
-    neighbor = replace(start, y=4.75, net=2, net_name="NEIGHBOR", pin="2")
+    neighbor = replace(start, y=4.75, net=neighbor_net, net_name="NEIGHBOR", pin="2")
     end = replace(start, x=8, y=3, width=0.6, height=0.6, ref="J1")
     for pad in (start, neighbor, end):
         grid.add_pad(pad)
