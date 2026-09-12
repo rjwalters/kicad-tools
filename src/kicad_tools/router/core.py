@@ -1923,6 +1923,29 @@ class Autorouter:
         if hasattr(self.router, "update_layer_fill_ratios"):
             self.router.update_layer_fill_ratios()
 
+    def restore_route_snapshot(self, routes: list[Route]) -> None:
+        """Replace managed copper while retaining fixed input-board copper.
+
+        Best-iteration rollback and cache replay must update the same grids,
+        indexes and pathfinder caches. Negotiated usage is restored separately
+        by the caller, since ordinary routing does not populate those counts.
+        """
+        restored = list(routes)
+        fixed_ids = {id(route) for route in self.existing_routes}
+        self.grid.resync_route_occupancy(
+            [(route, None) for route in list(self.grid.routes) if id(route) not in fixed_ids]
+            + [(None, route) for route in restored]
+        )
+        self.routes[:] = restored
+        if hasattr(self.router, "clear_routed_segments") and hasattr(
+            self.router, "add_routed_segments"
+        ):
+            self.router.clear_routed_segments()
+            for route in self.grid.routes:
+                self.router.add_routed_segments(route.segments)
+        if hasattr(self.router, "update_layer_fill_ratios"):
+            self.router.update_layer_fill_ratios()
+
     @property
     def physics_available(self) -> bool:
         """Check if physics calculations are available."""
@@ -12367,8 +12390,7 @@ class Autorouter:
                 for route in list(self.routes):
                     self.grid.unmark_route_usage(route)
                 # Replace with best-state routes
-                self.routes.clear()
-                self.routes.extend(best_routes)
+                self.restore_route_snapshot(best_routes)
                 # Re-mark best routes on the grid
                 for route in self.routes:
                     self.grid.mark_route_usage(route)

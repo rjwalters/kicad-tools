@@ -15735,10 +15735,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 # Deserialize and apply cached routes
                 cached_routes = cache.deserialize_routes(cached_result.routes_data)
 
-                router.routes = cached_routes
+                cached_usage = cache.deserialize_route_usage(cached_result.routes_data)
 
-                if not quiet:
-                    print("  Using cached routing result")
             else:
                 if not quiet:
                     print(f"  Cache MISS (key: {cache_key.full_key[:32]}...)")
@@ -15754,6 +15752,18 @@ def _main_impl(argv: list[str] | None = None) -> int:
             if args.cache_only:
                 print("Error: --cache-only specified but cache lookup failed", file=sys.stderr)
                 return 1
+
+    if cached_result is not None:
+        # Applying geometry can fail after partial mutation. Never turn that
+        # into a fresh search with a contaminated grid or publish its copper.
+        try:
+            router.grid.import_route_usage(cached_usage)
+            router.restore_route_snapshot(cached_routes)
+            if not quiet:
+                print("  Using cached routing result")
+        except Exception as exc:
+            print(f"Error: cannot restore cached routing state: {exc}", file=sys.stderr)
+            return 1
 
     # Track nets that needed clearance relaxation (for --progressive-clearance)
     relaxed_nets_report: dict[int, float] = {}
@@ -16325,6 +16335,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 pcb_path = _moved_placement_path
 
         _rss.mark("post-negotiation")
+        # Canonicalize the committed-copper boundary for every strategy,
+        # whether caching is enabled or not. Post-passes must not retain
+        # discarded search geometry in indexes or pathfinder caches.
+        router.restore_route_snapshot(router.routes)
 
         # Cache the routing result (if caching enabled and routing succeeded)
         if use_cache and cache_key is not None and router.routes:
@@ -16335,7 +16349,13 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     int((time.time() - routing_start_time) * 1000) if routing_start_time else 0
                 )
                 stats = router.get_statistics()
-                cache.put(cache_key, router.routes, stats, routing_time_ms)
+                cache.put(
+                    cache_key,
+                    router.routes,
+                    stats,
+                    routing_time_ms,
+                    route_usage=router.grid.export_route_usage(),
+                )
                 if not quiet:
                     print(f"  Cached routing result ({routing_time_ms}ms compute time)")
             except Exception as e:
