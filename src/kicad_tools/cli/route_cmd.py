@@ -329,10 +329,24 @@ def _restore_route_grid(router: "Autorouter", routes: list["Route"]) -> None:
     Best-iteration restoration and cache hits can leave grid copper different
     from ``router.routes``. Preserve static obstacles while replacing every
     grid route, usage count, and pathfinder crossing record with this snapshot.
+
+    Issue #5274: the per-route unmark loop below is not sufficient on its own.
+    Cell ownership (``grid._net``) is first-writer-wins on mark and net-guarded
+    on unmark, so a cell contested by two nets stays owned by whichever net
+    blocked it first -- and once that net's copper has been discarded (a
+    negotiated rip-up, a best-iteration rollback) nothing can unmark it.  The
+    surviving residue made the pre-post-pass grid a function of the run's
+    routing history instead of its final copper: a cold run and a warm cache
+    replay of the *same* routes handed the optimizer different own-net cell
+    sets, and its collision checker then merged a different number of
+    collinear runs (board 02: 1984 vs 1986 segments into consolidation).
+    ``reset_route_occupancy_to_static`` drops that residue so the re-mark
+    below is a pure function of ``routes``.
     """
     routes = list(routes)
     for existing in list(router.grid.routes):
         router.grid.unmark_route(existing)
+    router.grid.reset_route_occupancy_to_static()
     router.grid.reset_route_usage()
     if hasattr(router.router, "clear_routed_segments"):
         router.router.clear_routed_segments()

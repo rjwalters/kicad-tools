@@ -5254,6 +5254,15 @@ class RoutingGrid:
             return 0
 
         with self._acquire_lock():
+            # Issue #5274: parity with ``mark_route`` -- this method marks
+            # cells through ``_mark_segment``/``_mark_via`` directly, so
+            # without this the static baseline is never captured on a path
+            # whose FIRST route marking comes from here (cache replay:
+            # ``restore_route_snapshot`` runs before any ``mark_route``).  A
+            # missing snapshot makes the next rip-up free pad/edge clearance
+            # halos outright instead of restoring their static owner, so a
+            # warm run's grid diverges from the cold run's.
+            self._ensure_static_blockage_snapshot()
             # 1. Unmark stale geometry at the cell level (both grids).
             for stale, _current in changed:
                 if stale is None:
@@ -5340,6 +5349,50 @@ class RoutingGrid:
         counts = np.frombuffer(raw, dtype="<i2").reshape(self._usage_count.shape)
         with self._acquire_lock():
             self._usage_count[...] = self._backend.asarray(counts)
+
+    def reset_route_occupancy_to_static(self) -> bool:
+        """Drop every route-derived cell claim, keeping static obstacles (#5274).
+
+        Rip-up cannot fully undo itself.  ``_mark_segment``/``_mark_via`` are
+        **first-writer-wins** for cell ownership (``if not cell.blocked:
+        cell.net = seg.net``), and ``_unmark_segment``/``_unmark_via`` are
+        **net-guarded** (``elif cell.net == seg.net``).  So a cell inside two
+        nets' clearance envelopes is owned by whichever net blocked it first,
+        and ripping up the *other* net never releases it.  Once the owning
+        net's copper is discarded (a negotiated rip-up, a best-iteration
+        rollback), that ownership becomes residue no sequence of per-route
+        unmarks can clear: the owner has no geometry left to unmark with.
+
+        The residue makes ``_net`` a function of the run's routing *history*
+        rather than of its final route set, which is exactly the cold/warm
+        cache-replay divergence in issue #5274 -- a warm replay marks the
+        same routes onto a fresh grid and gets the canonical owner, a cold
+        run keeps the historical one, and the optimizer's collision checker
+        (which treats own-net cells as passable) then merges a different
+        number of collinear runs.
+
+        This resets the occupancy planes to the static baseline captured by
+        :meth:`_ensure_static_blockage_snapshot` -- static cells keep their
+        ``original_net`` owner (the same restoration ``_unmark_segment``
+        performs for a statically blocked cell), everything else is freed --
+        so a subsequent re-mark of the selected routes is a pure function of
+        those routes.  Usage counts are NOT touched (see
+        :meth:`reset_route_usage` / :meth:`import_route_usage`).
+
+        Returns:
+            ``True`` when the planes were reset, ``False`` when no static
+            snapshot exists yet (no route has ever been marked, so there is
+            no route-derived claim to drop and no baseline to restore to).
+        """
+        if self._static_blocked is None:
+            return False
+        xp = self._backend
+        with self._acquire_lock():
+            static = xp.asarray(self._static_blocked)
+            self._blocked[...] = static
+            self._net[...] = xp.where(static, self._original_net, 0)
+            self.bump_occupancy_generation()
+        return True
 
     def reset_route_usage(self) -> None:
         """Reset all usage counts (start of new negotiation iteration).
