@@ -345,8 +345,7 @@ def test_checker_rejects_source_replaced_between_preflight_and_native_capture(
     import hashlib
 
     from kicad_tools.schema.pcb import PCB
-    from kicad_tools.validate import DRCChecker
-    from kicad_tools.validate import mask_copper
+    from kicad_tools.validate import DRCChecker, mask_copper
 
     path = tmp_path / "board.kicad_pcb"
     PCB.create(width=10, height=10, layers=2).save(path)
