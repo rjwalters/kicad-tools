@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from shapely.geometry import Polygon, box
 
+from kicad_tools.schema.pcb import PCB
 from kicad_tools.silkscreen.place_refs import SilkRefPlacer, _oriented_text_geometry
 
 
@@ -144,3 +145,25 @@ def test_unsupported_or_malformed_additional_edges_cannot_be_ignored(tmp_path, g
     ref = SilkRefPlacer(path).plan().placements[0]
     assert ref.status == "unplaceable"
     assert "board outline unavailable" in ref.reason
+
+
+@pytest.mark.parametrize(
+    "edge",
+    [
+        '(gr_rect (start 100 100) (end 120) (layer "Edge.Cuts") (width .05))',
+        '(gr_line (start 100 100) (layer "Edge.Cuts") (width .05))',
+    ],
+)
+def test_malformed_outline_is_diagnostic_only_for_silkscreen(tmp_path, edge):
+    path = _board(tmp_path, _rect(100, 100, 120, 120) + edge, position=(110, 110))
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="Malformed Edge.Cuts"):
+        PCB.load(path)
+    placer = SilkRefPlacer(path)
+    result = placer.plan()
+    ref = result.placements[0]
+    assert ref.status == "unplaceable"
+    assert ref.old_position == ref.new_position == (110, 110)
+    assert "board outline unavailable" in ref.reason
+    assert placer.apply(result) == 0
+    assert path.read_bytes() == before
