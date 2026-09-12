@@ -317,11 +317,30 @@ PR LIFECYCLE (Builder only creates, Judge/Champion manage):
 
 ## Label Workflow
 
-**IMPORTANT: Ignore External Issues**
+**IMPORTANT: Ignore Hard-Excluded Issues**
 
-- **NEVER work on issues with the `external` label** - these are external suggestions for maintainers only
-- External issues are submitted by non-collaborators and require maintainer approval before being worked on
-- Focus only on issues labeled `loom:issue` without the `external` label
+A **hard exclusion** is a label that takes an issue out of the automated
+pipeline entirely — no role may curate it, build it, or promote it, and the
+daemon's work finder will not dispatch a sweep for it. `external` is the only
+one today: issues submitted by non-collaborators (or auto-labeled by an intake
+workflow) that require maintainer approval before being worked on.
+
+- **NEVER work on a hard-excluded issue** — not even when it also carries
+  `loom:issue`.
+- **The list is not hardcoded here.** Read it from the one shared source,
+  `./.loom/scripts/hard-exclusion-labels.sh` (Issue #7528) — the same list
+  `loom-daemon`'s work finder filters candidates on, so the daemon and this
+  prompt can never disagree about what is excluded:
+
+  ```bash
+  ./.loom/scripts/hard-exclusion-labels.sh            # one label per line
+  ./.loom/scripts/hard-exclusion-labels.sh --jq-not   # a jq select() fragment
+  ```
+
+- **If you find yourself dispatched onto one anyway** (a label added after
+  dispatch, an explicit operator dispatch), decline and exit — do not build it.
+  The daemon records the decline and holds the issue out of dispatch instead of
+  re-offering it next tick (#7528); you do not need to do anything else.
 
 **Workflow**:
 
@@ -1051,9 +1070,12 @@ gh issue list --label="loom:issue" --label="loom:curated" --state=open --limit=1
 **Step 3: If no curated, fall back to approved-only issues**
 
 ```bash
+# #7528: the hard-exclusion fragment comes from the shared source, never a
+# hardcoded `external` literal. Note the DOUBLE-quoted --jq so $EXCL expands.
+EXCL="$(./.loom/scripts/hard-exclusion-labels.sh --jq-not)"
 gh issue list --label="loom:issue" --state=open --json number,title,labels \
-  --jq '.[] | select(([.labels[].name] | contains(["loom:curated"]) | not) and ([.labels[].name] | contains(["external"]) | not)) |
-  "#\(.number): \(.title)"'
+  --jq ".[] | select(([.labels[].name] | contains([\"loom:curated\"]) | not) and $EXCL) |
+  \"#\(.number): \(.title)\""
 ```
 
 **Why allow this**: Work can proceed even if Curator hasn't run yet. Builder can implement based on human approval alone if needed.
@@ -1238,7 +1260,7 @@ merged by Champion using `./.loom/scripts/merge-pr.sh` — never use `gh pr merg
 
 Before claiming:
 - [ ] Issue has `loom:issue` label? (or explicit user override)
-- [ ] Issue does NOT have `external` label?
+- [ ] Issue does NOT carry a hard-exclusion label? (`./.loom/scripts/hard-exclusion-labels.sh` — #7528)
 
 When claiming:
 - [ ] Remove `loom:issue`

@@ -3787,6 +3787,7 @@ mask_ask_positional_args() {
     BEGIN {
         SQ = sprintf("%c", 39)
         DQ = sprintf("%c", 34)
+        BS = sprintf("%c", 92)
         # Command-name allowlist: known non-executing commands/scripts whose
         # positional string arguments are search/dedup text, never live shell
         # syntax. grep/egrep/fgrep/rg are deliberately NOT here — see the
@@ -3819,8 +3820,26 @@ mask_ask_positional_args() {
                 qc = substr(rest, 1, 1)
                 if (qc != DQ && qc != SQ) break
                 endpos = 0
-                for (i = 2; i <= length(rest); i++) {
-                    if (substr(rest, i, 1) == qc) { endpos = i; break }
+                if (qc == DQ) {
+                    # Escape-aware: a backslash swallows the NEXT character as
+                    # one atomic unit, so an escaped `\"` can never be misread
+                    # as the closing quote (#7516, mirroring the #7363 fix to
+                    # mask_stash_scan_positional_args() below).
+                    i = 2
+                    rlen = length(rest)
+                    while (i <= rlen) {
+                        c = substr(rest, i, 1)
+                        if (c == BS) { i += 2; continue }
+                        if (c == DQ) { endpos = i; break }
+                        i++
+                    }
+                } else {
+                    # Single-quoted: bash gives backslash no special meaning
+                    # inside real single quotes, so a plain same-character
+                    # scan is correct here.
+                    for (i = 2; i <= length(rest); i++) {
+                        if (substr(rest, i, 1) == qc) { endpos = i; break }
+                    }
                 }
                 if (endpos == 0) break
                 inner = substr(rest, 2, endpos - 2)
@@ -4029,8 +4048,10 @@ mask_catastrophic_positional_args() {
 # #7363).
 #
 # ESCAPE-AWARE double-quote scanning (unlike mask_catastrophic_positional_args()
-# / mask_ask_positional_args() above, which close a double-quoted span on the
-# FIRST raw `"` regardless of a preceding backslash): the real false-positive
+# above, which — as of this writing, with PR #7519/#7515 still unmerged —
+# still closes a double-quoted span on the FIRST raw `"` regardless of a
+# preceding backslash; mask_ask_positional_args() above already carries this
+# same escape-aware fix, ported via #7516): the real false-positive
 # repro from #7363 is `grep -n "^assert_ask \"stash-scope: git stash pop in
 # main checkout asks" file` — a single double-quoted argument containing a
 # backslash-escaped `\"`. A naive same-character scan stops at that escaped
