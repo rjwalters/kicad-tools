@@ -2832,9 +2832,7 @@ class Router:
             return self.rules.cost_congestion * (1.0 + excess * 2.0)
         return 0.0
 
-    def _batch_congestion_costs(
-        self, current_x: int, current_y: int, layer: int
-    ) -> list[float]:
+    def _batch_congestion_costs(self, current_x: int, current_y: int, layer: int) -> list[float]:
         """Compute congestion costs for all 2D neighbors of the current cell.
 
         Issue #963 originally vectorized this with NumPy to reduce

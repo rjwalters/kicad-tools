@@ -47,10 +47,7 @@ def _reference_batch_congestion_costs(
     ny_arr = current_y + router._neighbor_dy
 
     valid = (
-        (nx_arr >= 0)
-        & (nx_arr < router.grid.cols)
-        & (ny_arr >= 0)
-        & (ny_arr < router.grid.rows)
+        (nx_arr >= 0) & (nx_arr < router.grid.cols) & (ny_arr >= 0) & (ny_arr < router.grid.rows)
     )
 
     congestion_size = router.grid.congestion_size
@@ -64,17 +61,13 @@ def _reference_batch_congestion_costs(
         return costs
 
     max_cells = congestion_size * congestion_size
-    congestion_counts = router.grid._congestion[
-        layer, cy_arr[valid_indices], cx_arr[valid_indices]
-    ]
+    congestion_counts = router.grid._congestion[layer, cy_arr[valid_indices], cx_arr[valid_indices]]
     congestion_levels = np.minimum(1.0, congestion_counts / max_cells)
 
     threshold = router.rules.congestion_threshold
     exceeds = congestion_levels > threshold
     excess = np.maximum(0, congestion_levels - threshold)
-    valid_costs = np.where(
-        exceeds, router.rules.cost_congestion * (1.0 + excess * 2.0), 0.0
-    )
+    valid_costs = np.where(exceeds, router.rules.cost_congestion * (1.0 + excess * 2.0), 0.0)
     costs[valid_indices] = valid_costs
 
     return costs
