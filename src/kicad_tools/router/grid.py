@@ -30,6 +30,7 @@ Thread Safety:
 
 from __future__ import annotations
 
+import base64
 import logging
 import math
 import threading
@@ -5303,6 +5304,27 @@ class RoutingGrid:
     # =========================================================================
     # NEGOTIATED CONGESTION ROUTING SUPPORT
     # =========================================================================
+
+    def export_route_usage(self) -> dict[str, Any]:
+        """Capture exact congestion counts, including all-zero basic routing."""
+        with self._acquire_lock():
+            counts = to_numpy(self._usage_count).astype("<i2", copy=False)
+            return {
+                "shape": list(counts.shape),
+                "counts": base64.b64encode(counts.tobytes()).decode("ascii"),
+            }
+
+    def import_route_usage(self, state: dict[str, Any]) -> None:
+        """Validate and restore a cache snapshot without guessing a strategy."""
+        if state.get("shape") != list(self._usage_count.shape):
+            raise ValueError("Cached congestion grid dimensions do not match routing grid")
+        raw = base64.b64decode(state["counts"], validate=True)
+        expected = math.prod(self._usage_count.shape) * 2
+        if len(raw) != expected:
+            raise ValueError("Cached congestion grid byte count does not match routing grid")
+        counts = np.frombuffer(raw, dtype="<i2").reshape(self._usage_count.shape)
+        with self._acquire_lock():
+            self._usage_count[...] = self._backend.asarray(counts)
 
     def reset_route_usage(self) -> None:
         """Reset all usage counts (start of new negotiation iteration).
