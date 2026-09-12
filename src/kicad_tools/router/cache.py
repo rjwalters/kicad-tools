@@ -66,7 +66,12 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # geometry cache-policy changes from #5165/#5265 landed independently on
 # main (formerly 2.4.1). Bumped strictly above both so caches produced by
 # either isolated implementation are invalidated rather than silently reused.
-CACHE_VERSION = "2.4.2"
+# Issue #5274 raises it again: ``rules.manufacturer`` now keys both rules
+# hashes (it gates SMD via-in-pad eligibility in the grid pathfinders, so it
+# changes the routes themselves), and the pre-post-pass grid canonicalization
+# changed which copper a warm replay emits.  Entries written by any 2.4.x
+# implementation must be invalidated rather than silently reused.
+CACHE_VERSION = "2.5.0"
 
 
 def get_default_cache_path() -> Path:
@@ -176,6 +181,21 @@ class CacheKey:
         # routes produced before default-mode acceptance was tightened.
         if getattr(rules, "legacy_fine_pitch_carveout", False):
             rules_data["legacy_fine_pitch_carveout"] = True
+        # Issue #5274: the manufacturer/process tier selects SMD via-in-pad
+        # eligibility (``MfrLimits.via_in_pad_supported`` -> the grid
+        # pathfinders' ``_allow_smd_vias`` guard, and the C++ backend's
+        # ``allow_smd_vias``), so it changes which routes are generated -- a
+        # tier that forbids a via on SMD copper cannot be served a route that
+        # used one.  It also drives ``min_hole_to_hole`` and the stitch
+        # via-diameter floor.  ``routing_context`` covers the CLI, which
+        # forwards ``--manufacturer``/``--mfr`` in its options mapping, but
+        # NOT callers that build ``DesignRules`` and use these APIs directly:
+        # before this, ``manufacturer=None``, ``"jlcpcb"`` and
+        # ``"jlcpcb-tier1"`` all hashed identically.  Only keyed when set, so
+        # every pre-existing manufacturer-free key is preserved byte-for-byte
+        # (same contract as the #4602 / #4700 additions above).
+        if rules.manufacturer is not None:
+            rules_data["manufacturer"] = rules.manufacturer
         if routing_context is not None:
             rules_data["routing_context"] = routing_context
         rules_json = json.dumps(rules_data, sort_keys=True, default=str)
@@ -341,7 +361,7 @@ class SubProblemSignature:
         pad_entries.sort()
 
         # 6. Build rules hash (only routing-relevant fields)
-        rules_data = {
+        rules_data: dict[str, object] = {
             "trace_width": rules.trace_width,
             "trace_clearance": rules.trace_clearance,
             "via_drill": rules.via_drill,
@@ -359,6 +379,12 @@ class SubProblemSignature:
         # applies to reusable sub-problem signatures.
         if getattr(rules, "legacy_fine_pitch_carveout", False):
             rules_data["legacy_fine_pitch_carveout"] = True
+        # Issue #5274: see ``CacheKey.compute`` -- a sub-problem solution that
+        # placed a via on SMD copper must not be replayed under a tier that
+        # forbids it.  There is no ``routing_context`` fallback at all on this
+        # path, so the manufacturer is the only thing separating the two.
+        if rules.manufacturer is not None:
+            rules_data["manufacturer"] = rules.manufacturer
         rules_json = json.dumps(rules_data, sort_keys=True)
         rules_hash = hashlib.sha256(rules_json.encode()).hexdigest()
 

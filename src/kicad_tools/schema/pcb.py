@@ -1901,6 +1901,14 @@ class PCB:
         # (add_trace/add_via) emits name-based refs when this is True so a
         # name-based board stays name-based on save.
         self._net_name_only_dialect: bool = False
+        #: Non-empty when this board's ``Edge.Cuts`` geometry could not be read
+        #: well enough to prove a board origin (issue #5274).  ``PCB.load()``
+        #: deliberately tolerates such a board -- see
+        #: :meth:`_detect_board_origin` -- so consumers that *require* a proven
+        #: outline can fail closed on their own terms instead of every load
+        #: raising.  Empty on a board whose outline bounds were resolved (or
+        #: that has no outline geometry at all).
+        self.outline_error: str = ""
         #: Loud, human-readable signals raised while parsing this board -- used
         #: today for the "file has a component graph we could not read" guard
         #: (issue #4873).  Empty on a board the parser fully understands.
@@ -2726,8 +2734,39 @@ class PCB:
         :meth:`add_trace`, :meth:`add_via`, and :meth:`save` are responsible
         for adding ``self._board_origin`` back when writing new copper
         primitives to the tree.
+
+        Malformed outlines are tolerated here (issue #5274)
+        ---------------------------------------------------
+        :func:`~kicad_tools.core.board_outline.board_outline_bounds` keeps its
+        fail-loud contract: malformed or unsupported ``Edge.Cuts`` geometry
+        raises ``ValueError`` for every caller that asks for bounds directly
+        (routing's outline reader, :pyattr:`board_size`,
+        :meth:`_edge_cuts_bbox_sexp`).  ``PCB.load()`` must *not* inherit that
+        contract.  Loading is the entry point for tools whose whole job is to
+        inspect or repair a board that a human already knows is imperfect --
+        ``fix-vias --relocate-in-pad --search-alternatives`` proves containment
+        itself and refuses atomically when it cannot
+        (``_alternative_board_region`` fails closed to an empty region), and
+        silkscreen placement reports the outline problem per-reference.  If the
+        load itself raised, those consumers would never get to make their own
+        proof-based decision and a repair tool would abort instead of reporting.
+
+        So an unreadable outline degrades to "no proven origin": the origin
+        stays ``(0.0, 0.0)``, no coordinates are rewritten, and the reason is
+        recorded on :pyattr:`outline_error` for consumers that want to fail
+        closed on it.  That matches the tolerant behaviour every ``PCB.load()``
+        had before the shared outline reader was introduced.
         """
-        bounds = board_outline_bounds(self._sexp)
+        try:
+            bounds = board_outline_bounds(self._sexp)
+        except ValueError as exc:
+            # No proven origin: leave every coordinate in sheet-absolute space
+            # (identical to the no-outline case) and record why.
+            self.outline_error = str(exc)
+            self._board_origin = (0.0, 0.0)
+            return
+
+        self.outline_error = ""
         origin = bounds[:2] if bounds is not None else (0.0, 0.0)
 
         self._board_origin = origin
