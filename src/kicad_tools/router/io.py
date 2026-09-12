@@ -38,6 +38,7 @@ import logging
 import math
 import re
 import warnings
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1998,6 +1999,51 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
     return positions
 
 
+# Tokenize whole atoms before considering the next comment boundary. In the
+# project parser, SPI;SELECT and SPI#SELECT are atoms; # and ; start comments
+# only when encountered where a new token would begin.
+_NET_TOKEN = re.compile(r'(?P<comment>[#;][^\n]*)|"(?:\\.|[^"\\])*"|[()]|[^\s()]+')
+
+
+def _iter_net_references(text: str) -> Iterator[tuple[int | None, str]]:
+    """Read numeric/name, name-only and numeric-only references consistently."""
+    from kicad_tools.sexp import parse_string
+
+    tokens = (match.group() for match in _NET_TOKEN.finditer(text) if not match.group("comment"))
+    for token in tokens:
+        if token != "(":
+            continue
+        if next(tokens, None) != "net":
+            continue
+        values: list[str] = []
+        for token in tokens:
+            if token == ")":
+                break
+            values.append(token)
+        if not 1 <= len(values) <= 2 or "(" in values:
+            continue
+        first = values[0]
+        second = values[1] if len(values) == 2 else None
+        numeric = first.isdecimal()
+        if second is not None and not numeric:
+            continue
+        net_num = int(first) if numeric else None
+        name = second if second is not None else ("" if numeric else first)
+        if name.startswith('"'):
+            # Use the project's string decoder, including escaped quotes/backslashes.
+            name = str(parse_string(f"(name {name})").children[0].value)
+        yield net_num, name
+
+
+def _resolve_pad_net(text: str, net_map: dict[str, int]) -> tuple[int, str]:
+    net_num, name = next(_iter_net_references(text), (None, ""))
+    if net_num is None:
+        return net_map.get(name, 0), name
+    if not name:
+        name = next((key for key, value in net_map.items() if value == net_num), "")
+    return net_num, name
+
+
 def _build_net_number_map(pcb_text: str) -> dict[str, int]:
     """Resolve net name -> net number for BOTH KiCad net-reference dialects.
 
@@ -2022,20 +2068,17 @@ def _build_net_number_map(pcb_text: str) -> dict[str, int]:
     first-seen order -- so name-only nets get a stable, routable id
     instead of collapsing to ``net_num=0``.
     """
+    references = list(_iter_net_references(pcb_text))
     net_map: dict[str, int] = {}
-    for match in re.finditer(r'\(net\s+(\d+)\s+"([^"]*)"\)', pcb_text):
-        net_num, net_name = int(match.group(1)), match.group(2)
-        if net_num > 0 and net_name and net_name not in net_map:
+    for net_num, net_name in references:
+        if net_num is not None and net_num > 0 and net_name and net_name not in net_map:
             net_map[net_name] = net_num
 
-    used_ids = set(net_map.values())
+    # Reserve numeric-only references too, so synthesis never aliases authored IDs.
+    used_ids = {number for number, _ in references if number is not None and number > 0}
     next_id = 1
-    # Name-only inline references, e.g. pad/segment/via ``(net "NAME")``
-    # with no numeric id -- never matched by the pattern above (which
-    # requires a digit immediately after ``(net``).
-    for match in re.finditer(r'\(net\s+"([^"]*)"\)', pcb_text):
-        net_name = match.group(1)
-        if not net_name or net_name in net_map:
+    for net_num, net_name in references:
+        if net_num is not None or not net_name or net_name in net_map:
             continue
         while next_id in used_ids:
             next_id += 1
@@ -2074,7 +2117,6 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
     # Resolve net name <-> number for both KiCad net-reference dialects
     # (numeric-plus-name and KiCad 9/10 name-only) -- issue #4983.
     net_name_to_num = _build_net_number_map(pcb_text)
-    net_num_to_name = {v: k for k, v in net_name_to_num.items()}
 
     # Split by footprint for easier parsing
     footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
@@ -2147,22 +2189,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
             width, height, pad_rotation = _resolve_pad_dims_and_rotation(pad_rot, width, height)
 
-            # Extract net. Handles both the numeric-plus-name dialect
-            # (``(net N "NAME")``) and the KiCad 9/10 name-only dialect
-            # (``(net "NAME")`` with no numeric id) -- issue #4983.
-            net_match = re.search(r"\(net\s+(\d+)", pad_block)
-            if net_match:
-                net_num = int(net_match.group(1))
-                net_name_match = re.search(r'\(net\s+\d+\s+"?([^"\)]+)"?\)', pad_block)
-                net_name = (
-                    net_name_match.group(1).strip()
-                    if net_name_match
-                    else net_num_to_name.get(net_num, "")
-                )
-            else:
-                net_name_match = re.search(r'\(net\s+"([^"]*)"\)', pad_block)
-                net_name = net_name_match.group(1).strip() if net_name_match else ""
-                net_num = net_name_to_num.get(net_name, 0) if net_name else 0
+            net_num, net_name = _resolve_pad_net(pad_block, net_name_to_num)
 
             # Determine layer
             layer = Layer.F_CU
@@ -3297,7 +3324,10 @@ def _extract_pad_blocks(section: str) -> list[str]:
         while i < len(section):
             char = section[i]
 
-            if char == '"' and (i == 0 or section[i - 1] != "\\"):
+            if in_string and char == "\\":
+                i += 2
+                continue
+            if char == '"':
                 in_string = not in_string
             elif not in_string:
                 if char == "(":
@@ -3693,21 +3723,7 @@ def load_pcb_for_routing(
             pad_w = float(size_match.group(1))
             pad_h = float(size_match.group(2))
 
-            # Extract net (if present)
-            # KiCad 7/8: (net <number> "name"), KiCad 9+: (net "name")
-            net_match = re.search(r'\(net\s+(\d+)\s+"([^"]+)"\)', pad_block)
-            if net_match:
-                net_num = int(net_match.group(1))
-                net_name = net_match.group(2)
-            else:
-                # KiCad 9 name-only format
-                net_name_match = re.search(r'\(net\s+"([^"]+)"\)', pad_block)
-                if net_name_match:
-                    net_name = net_name_match.group(1)
-                    net_num = net_map.get(net_name, 0)
-                else:
-                    net_num = 0
-                    net_name = ""
+            net_num, net_name = _resolve_pad_net(pad_block, net_map)
 
             # Extract drill size if present
             drill_match = re.search(r"\(drill\s+([\d.]+)", pad_block)
