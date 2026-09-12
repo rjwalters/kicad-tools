@@ -3837,7 +3837,21 @@ def _add_route_parser(subparsers) -> None:
         "--timeout",
         type=float,
         default=None,
-        help="Total routing invocation budget in seconds (default: unbounded). Includes cleanup/native work; allows up to 5 extra seconds for raw partial serialization, then terminates the process group and exits 124.",
+        help="HARD TOTAL routing invocation budget in seconds (default: unbounded). Nothing escapes it -- escalation, placement feedback, placement-delta probes and auto-fix all share it. Includes cleanup/native work; allows up to 5 extra seconds for raw partial serialization, then terminates the process group and exits 124. Use --search-timeout to bound an individual search stage inside it.",
+    )
+    route_parser.add_argument(
+        "--search-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Per-search-stage wall-clock allocation in seconds (default: the "
+            "value of --timeout). Caps the initial routing pass, each "
+            "escalation attempt and each placement-feedback iteration "
+            "individually, INSIDE the hard total --timeout -- never an escape "
+            "from it. Set below --timeout to reserve budget for later stages "
+            "and postprocessing. Issue #5266."
+        ),
     )
     route_parser.add_argument(
         "--per-net-timeout",
@@ -4451,10 +4465,12 @@ def _add_route_parser(subparsers) -> None:
         metavar="SECONDS",
         help=(
             "Per-iteration wall-clock budget for the placement-delta feedback "
-            "loop's re-routes, in seconds. The loop's own allocation: it "
-            "survives an already-exhausted --timeout and gives each delta's "
-            "re-route the same budget the initial pass got. Default: share "
-            "whatever remains of --timeout. Issue #4468."
+            "loop's re-routes, in seconds. The loop's own allocation, "
+            "independent of the per-stage --search-timeout, so an exhausted "
+            "initial search stage no longer starves the probes. It does NOT "
+            "escape the hard total --timeout: it is clamped to what that "
+            "deadline has left. Default: share whatever remains of --timeout. "
+            "Issues #4468, #5266."
         ),
     )
     route_parser.add_argument(
