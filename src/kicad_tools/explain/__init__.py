@@ -43,11 +43,14 @@ from .formatters import (
     format_violations,
 )
 from .mistakes import (
+    CheckCoverage,
+    CheckIncomplete,
     Mistake,
     MistakeCategory,
     MistakeCheck,
     MistakeDetector,
     detect_mistakes,
+    detect_mistakes_with_coverage,
     get_default_checks,
 )
 from .models import (
@@ -82,7 +85,10 @@ __all__ = [
     "MistakeCategory",
     "MistakeCheck",
     "MistakeDetector",
+    "CheckCoverage",
+    "CheckIncomplete",
     "detect_mistakes",
+    "detect_mistakes_with_coverage",
     "get_default_checks",
     # Models
     "ExplanationResult",
