@@ -54,12 +54,14 @@ plated multilayer pad copper establish layer changes. Via/track centerline
 contacts and same-layer endpoint/interior contacts split graph edges, while
 public evidence retains each original routed segment once (including its
 whole length and width). Pad-internal convex copper is normalized before
-whole-component cycle detection. A benign parallel via array -- a hub
-fanning into two or more via legs whose far ends tie back together, current
-splitting and immediately recombining for capacity, not an alternate route
--- is recognized and contracted before that check (Issue #5197); a loop
-built entirely from track copper, or one where the hub's own legs leave a
-residual route uncontracted, remains ambiguous.
+whole-component cycle detection. A bounded endpoint-pad fanout can be contracted
+only after proving parallel straight stubs, actual same-net outer-layer via
+barrels, and one straight receiving trunk. Stub length and via span must not
+exceed the endpoint pad diagonal. Every original member remains in the resolved
+segment evidence and is checked at the declaration's full current; no I/N or
+summed-width assumption is made. The current interim proof permits one receiving
+exit only, pending the Board09 multi-exit policy decision. Other cycles and
+unproved endpoint via fanouts remain explicitly ambiguous.
 
 Unsupported custom/trapezoid pads, repeated physical pad numbers, and copper
 on absent stackup layers make the declaration unresolved. Supported pad
@@ -687,7 +689,9 @@ class _ViaArray:
     members: list[Segment]
 
 
-def _endpoint_via_array(graph: _CopperGraph, pcb: PCB, endpoint: PathEndpoint, net_name: str) -> _ViaArray | None:
+def _endpoint_via_array(
+    graph: _CopperGraph, pcb: PCB, endpoint: PathEndpoint, net_name: str
+) -> _ViaArray | None:
     """Prove straight parallel pad stubs, real barrels and one receiving trunk.
 
     Stub length and via span are bounded by the endpoint pad diagonal. This is
@@ -716,7 +720,9 @@ def _endpoint_via_array(graph: _CopperGraph, pcb: PCB, endpoint: PathEndpoint, n
         seg = edge.segment
         if seg is None or seg.layer != hub[2] or top in nodes or len(graph.adjacency[top]) != 2:
             return None
-        anchors = [p for p in (seg.start, seg.end) if _pad_covers(pcb, endpoint.ref, endpoint.pad, p)]
+        anchors = [
+            p for p in (seg.start, seg.end) if _pad_covers(pcb, endpoint.ref, endpoint.pad, p)
+        ]
         if len(anchors) != 1:
             return None
         anchor = anchors[0]
@@ -726,15 +732,19 @@ def _endpoint_via_array(graph: _CopperGraph, pcb: PCB, endpoint: PathEndpoint, n
         delta = (tip[0] - anchor[0], tip[1] - anchor[1])
         if direction is None:
             direction = delta
-        elif (abs(direction[0] * delta[1] - direction[1] * delta[0]) > _PAD_EPS
-              or direction[0] * delta[0] + direction[1] * delta[1] <= 0):
+        elif (
+            abs(direction[0] * delta[1] - direction[1] * delta[0]) > _PAD_EPS
+            or direction[0] * delta[0] + direction[1] * delta[1] <= 0
+        ):
             return None
         matching = [v for v in pcb.vias if _node_key(v.position) == top[:2]]
         if len(matching) != 1:
             return None
         via = matching[0]
         net = pcb.get_net_by_name(net_name)
-        if set(via.layers) != {"F.Cu", "B.Cu"} or not (via.net_name == net_name or (net is not None and via.net_number == net.number)):
+        if set(via.layers) != {"F.Cu", "B.Cu"} or not (
+            via.net_name == net_name or (net is not None and via.net_number == net.number)
+        ):
             return None
         members.append(seg)
         edges.add(edge)
@@ -756,9 +766,16 @@ def _endpoint_via_array(graph: _CopperGraph, pcb: PCB, endpoint: PathEndpoint, n
             previous, current = barrel, nxt
     if max(math.dist(a[:2], b[:2]) for a in far_nodes for b in far_nodes) > bound + _PAD_EPS:
         return None
-    candidates = [e.segment for _, e in graph.adjacency[far_nodes[0]]
-                  if e.segment is not None and e.segment.layer == far_layer
-                  and all(point_to_segment_distance(*n[:2], *e.segment.start, *e.segment.end) <= _PAD_EPS for n in far_nodes)]
+    candidates = [
+        e.segment
+        for _, e in graph.adjacency[far_nodes[0]]
+        if e.segment is not None
+        and e.segment.layer == far_layer
+        and all(
+            point_to_segment_distance(*n[:2], *e.segment.start, *e.segment.end) <= _PAD_EPS
+            for n in far_nodes
+        )
+    ]
     candidates = list({id(seg): seg for seg in candidates}.values())
     if len(candidates) != 1:
         return None
@@ -766,7 +783,10 @@ def _endpoint_via_array(graph: _CopperGraph, pcb: PCB, endpoint: PathEndpoint, n
     ordered = sorted(far_nodes, key=lambda n: math.dist(n[:2], trunk.start))
     first, last = ordered[0], ordered[-1]
     for node in graph.adjacency:
-        if node[2] == far_layer and point_to_segment_distance(*node[:2], *first[:2], *last[:2]) <= _PAD_EPS:
+        if (
+            node[2] == far_layer
+            and point_to_segment_distance(*node[:2], *first[:2], *last[:2]) <= _PAD_EPS
+        ):
             nodes.add(node)
     if any(node in nodes and node != hub for node in graph.pads.values()):
         return None
@@ -793,7 +813,9 @@ def _endpoint_via_array(graph: _CopperGraph, pcb: PCB, endpoint: PathEndpoint, n
     return _ViaArray(nodes, edges, list({id(seg): seg for seg in members}.values()))
 
 
-def _component_has_cycle(graph: _CopperGraph, start: _Node, arrays: Sequence[_ViaArray] = ()) -> bool:
+def _component_has_cycle(
+    graph: _CopperGraph, start: _Node, arrays: Sequence[_ViaArray] = ()
+) -> bool:
     """Contract only physically proved arrays; keep every other cycle visible."""
     roots = {node: next(iter(array.nodes)) for array in arrays for node in array.nodes}
     visited_nodes, visited_roots = {start}, {roots.get(start, start)}
@@ -1031,11 +1053,39 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
             sink=sink,
         )
 
-    arrays = []
+    arrays: list[_ViaArray] = []
     for endpoint in (spec.source, spec.sink):
         array = _endpoint_via_array(adjacency, pcb, endpoint, spec.net_name)
         if array is not None and not any(array.nodes & previous.nodes for previous in arrays):
             arrays.append(array)
+        elif array is None:
+            hub = adjacency.pads.get((endpoint.ref, endpoint.pad))
+            endpoint_fp = pcb.get_footprint(endpoint.ref)
+            endpoint_pad = (
+                next((p for p in endpoint_fp.pads if p.number == endpoint.pad), None)
+                if endpoint_fp
+                else None
+            )
+            arms = adjacency.adjacency.get(hub, []) if hub is not None else []
+            # A broken fanout may become acyclic when receiving copper is
+            # removed. It must not fall back to checking one surviving arm.
+            if (
+                endpoint_pad is not None
+                and endpoint_pad.type == "smd"
+                and len(arms) >= 2
+                and any(
+                    edge.segment is not None
+                    and any(_node_key(v.position) == node[:2] for v in pcb.vias)
+                    for node, edge in arms
+                )
+            ):
+                return PathResolution(
+                    spec=spec,
+                    status=STATUS_AMBIGUOUS,
+                    source=source,
+                    sink=sink,
+                    reason="endpoint via fanout is outside the proved local pad-to-trunk motif",
+                )
     if _component_has_cycle(adjacency, start, arrays):
         return PathResolution(
             spec=spec,
@@ -1050,7 +1100,12 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
         )
 
     # Every member remains physical evidence checked at the full current.
-    path_segments = list({id(seg): seg for seg in [*path_segments, *(seg for array in arrays for seg in array.members)]}.values())
+    path_segments = list(
+        {
+            id(seg): seg
+            for seg in [*path_segments, *(seg for array in arrays for seg in array.members)]
+        }.values()
+    )
 
     return PathResolution(
         spec=spec,
