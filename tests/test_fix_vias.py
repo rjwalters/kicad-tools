@@ -3901,3 +3901,24 @@ def test_public_cli_search_alternatives_moves_blocked_via(tmp_path):
     pcb = PCB.load(board)
     assert pcb.vias[0].position == pytest.approx((10, 10.8266))
     assert pcb.vias[0].uuid == "11111111-1111-4111-8111-111111111111"
+
+
+@pytest.mark.parametrize(
+    "outline",
+    [
+        '(gr_line (end 12 12) (layer "Edge.Cuts"))',
+        '(gr_rect (start 0 0) (layer "Edge.Cuts"))',
+        '(gr_line (start nope 0) (end 12 12) (layer "Edge.Cuts"))',
+        '(gr_poly (pts (xy 0 0) (xy 12) (xy 12 12)) (layer "Edge.Cuts"))',
+        '(gr_line (start nan 0) (end 12 12) (layer "Edge.Cuts"))',
+    ],
+)
+def test_alternative_invalid_outline_coordinates_refuse_without_mutation(tmp_path, outline):
+    board = _blocked_slide_board(tmp_path, outline)
+    pcb = PCB.load(board)
+    before = pcb._sexp.to_string()
+    result = relocate_in_pad_vias(
+        pcb, get_mfr_design_rules("jlcpcb", 4, 1.0), search_alternatives=True
+    )
+    assert not result.changed
+    assert pcb._sexp.to_string() == before

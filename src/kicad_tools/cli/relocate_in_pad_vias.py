@@ -399,7 +399,15 @@ def _alternative_board_region(pcb: PCB):
     ox, oy = pcb.board_origin
 
     def xy(node):
-        return (node.get_float(0) - ox, node.get_float(1) - oy)
+        if node is None or len(node.get_atoms()) != 2:
+            return None
+        try:
+            x, y = (float(value) for value in node.get_atoms())
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(x) or not math.isfinite(y):
+            return None
+        return (x - ox, y - oy)
 
     for node in pcb._sexp.children:
         if node.is_atom:
@@ -414,8 +422,11 @@ def _alternative_board_region(pcb: PCB):
             if item.name == "gr_line":
                 points = [xy(item.find("start")), xy(item.find("end"))]
             elif item.name == "gr_rect":
-                x1, y1 = xy(item.find("start"))
-                x2, y2 = xy(item.find("end"))
+                start, end = xy(item.find("start")), xy(item.find("end"))
+                if start is None or end is None:
+                    return GeometryCollection()
+                x1, y1 = start
+                x2, y2 = end
                 points = [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)]
             elif item.name == "gr_poly":
                 pts = item.find("pts")
@@ -426,6 +437,8 @@ def _alternative_board_region(pcb: PCB):
                     return GeometryCollection()
                 points.append(points[0])
             else:
+                return GeometryCollection()
+            if any(point is None for point in points):
                 return GeometryCollection()
             lines.append(LineString(points))
     if not lines:
