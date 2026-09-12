@@ -6,6 +6,7 @@ Provides classes for parsing and manipulating KiCad PCB files (.kicad_pcb).
 from __future__ import annotations
 
 import logging
+import math
 import re
 import tempfile
 import uuid
@@ -1238,6 +1239,98 @@ class Segment:
 
 
 @dataclass
+class Arc(Segment):
+    """Imported circular copper track, distinct from straight segments/graphics.
+
+    Coordinates use the same board-relative frame as ``Segment``. Length is
+    analytic; connectivity alone tessellates with a maximum 0.00001 mm sagitta.
+    Invalid circular geometry raises instead of silently becoming a chord.
+    """
+
+    mid: tuple[float, float] = (0.0, 0.0)
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> Arc:
+        arc = cast(Arc, super().from_sexp(sexp))
+        for tag in ("start", "mid", "end"):
+            node = sexp.find(tag)
+            if node is None or any(node.get_float(i) is None for i in (0, 1)):
+                raise ValueError(f"Copper arc is missing {tag} coordinates")
+            setattr(arc, tag, (node.get_float(0), node.get_float(1)))
+        arc.circular_geometry()  # Validate before exposing copper to consumers.
+        if not math.isfinite(arc.width) or arc.width <= 0:
+            raise ValueError("Copper arc width must be finite and positive")
+        if not arc.layer.endswith(".Cu"):
+            raise ValueError("Copper arc must be on a copper layer")
+        return arc
+
+    def circular_geometry(self) -> tuple[tuple[float, float], float, float, float]:
+        """Return center, radius, start angle and signed sweep through mid."""
+        if not all(math.isfinite(v) for p in (self.start, self.mid, self.end) for v in p):
+            raise ValueError("Copper arc coordinates must be finite")
+        # Translate first to avoid cancellation for boards far from the origin.
+        ax, ay = self.start
+        bx, by = self.mid[0] - ax, self.mid[1] - ay
+        cx, cy = self.end[0] - ax, self.end[1] - ay
+        determinant = 2 * (bx * cy - by * cx)
+        scale = max(bx * bx + by * by, cx * cx + cy * cy)
+        if scale == 0 or abs(determinant) <= 1e-14 * scale:
+            raise ValueError("Copper arc points must define a nondegenerate circle")
+        ux = ((bx * bx + by * by) * cy - (cx * cx + cy * cy) * by) / determinant
+        uy = (bx * (cx * cx + cy * cy) - cx * (bx * bx + by * by)) / determinant
+        radius = math.hypot(ux, uy)
+        start = math.atan2(-uy, -ux)
+        mid = (math.atan2(by - uy, bx - ux) - start) % math.tau
+        end = (math.atan2(cy - uy, cx - ux) - start) % math.tau
+        sweep = end if mid <= end else end - math.tau
+        if not all(math.isfinite(v) for v in (ux, uy, radius, sweep)) or radius <= 0:
+            raise ValueError("Copper arc geometry is not finite")
+        if not all(math.isfinite(v) for v in (ax + ux, ay + uy, radius * sweep)):
+            raise ValueError("Copper arc geometry is not finite")
+        return (ax + ux, ay + uy), radius, start, sweep
+
+    @property
+    def length(self) -> float:
+        """True swept centerline length in millimeters (never the chord)."""
+        _, radius, _, sweep = self.circular_geometry()
+        return radius * abs(sweep)
+
+    def centerline_points(self, max_error_mm: float = 0.00001) -> list[tuple[float, float]]:
+        """Polyline with sagitta <= max_error_mm; endpoints remain exact.
+
+        This is an analysis approximation, never routing output. The bound is
+        on centerline distance; buffered copper inherits that absolute bound.
+        Excessive geometry is rejected rather than silently relaxing the bound.
+        """
+        if not math.isfinite(max_error_mm) or max_error_mm <= 0:
+            raise ValueError("Arc approximation error must be finite and positive")
+        (cx, cy), radius, start, sweep = self.circular_geometry()
+        step = 4 * math.asin(math.sqrt(min(max_error_mm / (2 * radius), 0.5)))
+        if step == 0:
+            raise ValueError("Copper arc approximation exceeds floating-point resolution")
+        count = max(2, math.ceil(abs(sweep) / step))
+        if count > 100000:
+            raise ValueError("Copper arc requires more than 100000 approximation edges")
+        return (
+            [self.start]
+            + [
+                (
+                    cx + radius * math.cos(start + sweep * i / count),
+                    cy + radius * math.sin(start + sweep * i / count),
+                )
+                for i in range(1, count)
+            ]
+            + [self.end]
+        )
+
+    def to_sexp(self, offset: tuple[float, float] = (0.0, 0.0)) -> SExp:
+        node = super().to_sexp(offset)
+        node.name = "arc"
+        node.children.insert(1, SExp.list("mid", self.mid[0] + offset[0], self.mid[1] + offset[1]))
+        return node
+
+
+@dataclass
 class Via:
     """PCB via."""
 
@@ -1873,6 +1966,7 @@ class PCB:
         self._nets: dict[int, Net] = {}
         self._footprints: list[Footprint] = []
         self._segments: list[Segment] = []
+        self._arcs: list[Arc] = []
         self._vias: list[Via] = []
         # Incrementally-maintained dedup key sets (issue #4175).  Built lazily
         # from _segments/_vias on first add_trace/add_via, then updated on each
@@ -2270,6 +2364,8 @@ class PCB:
             elif tag == "segment":
                 seg = Segment.from_sexp(child)
                 self._segments.append(seg)
+            elif tag == "arc":
+                self._arcs.append(Arc.from_sexp(child))
             elif tag == "via":
                 via = Via.from_sexp(child)
                 self._vias.append(via)
@@ -2416,7 +2512,7 @@ class PCB:
         # NOT treat an empty ``self._nets`` alone as name-only, so a freshly
         # constructed board with no header table keeps numeric emission.
         self._net_name_only_dialect = (
-            any(seg.net_name_only for seg in self._segments)
+            any(seg.net_name_only for seg in [*self._segments, *self._arcs])
             or any(via.net_name_only for via in self._vias)
             or any(
                 pad.net_number == 0 and bool(pad.net_name)
@@ -2449,8 +2545,8 @@ class PCB:
                     if net:
                         pad.net_name = net.name
 
-        # Fix segments
-        for seg in self._segments:
+        # Fix straight and curved tracks
+        for seg in [*self._segments, *self._arcs]:
             if seg.net_number == 0 and seg.net_name:
                 seg.net_number = name_to_number.get(seg.net_name, 0)
             elif seg.net_number != 0 and not seg.net_name:
@@ -2530,7 +2626,7 @@ class PCB:
         for fp in self._footprints:
             for pad in fp.pads:
                 observe(pad.net_name, pad.net_number)
-        for seg in self._segments:
+        for seg in [*self._segments, *self._arcs]:
             observe(seg.net_name, seg.net_number)
         for via in self._vias:
             observe(via.net_name, via.net_number)
@@ -2789,6 +2885,11 @@ class PCB:
                 ex, ey = seg.end
                 seg.start = (sx - ox, sy - oy)
                 seg.end = (ex - ox, ey - oy)
+
+            for arc in self._arcs:
+                arc.start = (arc.start[0] - ox, arc.start[1] - oy)
+                arc.mid = (arc.mid[0] - ox, arc.mid[1] - oy)
+                arc.end = (arc.end[0] - ox, arc.end[1] - oy)
 
             # Vias: convert position.
             for via in self._vias:
@@ -3146,6 +3247,7 @@ class PCB:
         self._nets = {}
         self._footprints = []
         self._segments = []
+        self._arcs = []
         self._vias = []
         self._invalidate_dedup_keys()
         self._zones = []
@@ -3698,6 +3800,17 @@ class PCB:
             "Use add_trace() to add segments, or reload the PCB after modifying "
             "the file with merge_routes_into_pcb()."
         )
+
+    @property
+    def arcs(self) -> list[Arc]:
+        """Imported copper arcs; excluded from straight-segment angle statistics."""
+        return self._arcs
+
+    def arcs_on_layer(self, layer: str) -> Iterator[Arc]:
+        return (arc for arc in self._arcs if arc.layer == layer)
+
+    def arcs_in_net(self, net_number: int) -> Iterator[Arc]:
+        return (arc for arc in self._arcs if arc.net_number == net_number)
 
     def segments_on_layer(self, layer: str) -> Iterator[Segment]:
         """Get segments on a specific layer."""

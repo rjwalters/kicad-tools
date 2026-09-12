@@ -291,10 +291,9 @@ class CopperMetrics:
             ripped-up benchmark input every via is router-placed, which is
             what makes this directly comparable to DeepPCB's "68 vias".
         wirelength_mm: Total copper track length. Segments plus copper
-            ARC tracks (KiCad 7+ rounded tracks), which the ``PCB`` schema
-            does not model -- they are picked up straight from the
-            S-expression so an external board's arcs are never silently
-            dropped from the headline number.
+            arc tracks (KiCad 7+ rounded tracks), both read through the PCB
+            schema. Curved tracks contribute their swept centerline length,
+            exactly once, rather than the straight chord between endpoints.
         segment_count / arc_count: the populations behind ``wirelength_mm``.
         wirelength_by_layer_mm: per-copper-layer breakdown, for the
             per-board annotations the published table carries.
@@ -323,90 +322,12 @@ def _is_copper_layer(layer: str) -> bool:
     return layer.endswith(".Cu")
 
 
-def _arc_length_mm(
-    start: tuple[float, float],
-    mid: tuple[float, float],
-    end: tuple[float, float],
-) -> float:
-    """Length of the circular arc through ``start`` -> ``mid`` -> ``end``.
-
-    Falls back to the chord length ``|start-end|`` for a degenerate
-    (collinear / zero-radius) arc, which is what KiCad renders in that
-    case. Never raises -- a malformed arc must not abort a benchmark run.
-    """
-    (x1, y1), (x2, y2), (x3, y3) = start, mid, end
-
-    # Circumcenter via the perpendicular-bisector determinant.
-    d = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
-    if abs(d) < 1e-12:
-        return math.dist(start, end)
-
-    s1 = x1 * x1 + y1 * y1
-    s2 = x2 * x2 + y2 * y2
-    s3 = x3 * x3 + y3 * y3
-    cx = (s1 * (y2 - y3) + s2 * (y3 - y1) + s3 * (y1 - y2)) / d
-    cy = (s1 * (x3 - x2) + s2 * (x1 - x3) + s3 * (x2 - x1)) / d
-    radius = math.dist((cx, cy), start)
-    if radius <= 0:
-        return math.dist(start, end)
-
-    a1 = math.atan2(y1 - cy, x1 - cx)
-    a2 = math.atan2(y2 - cy, x2 - cx)
-    a3 = math.atan2(y3 - cy, x3 - cx)
-
-    # Sweep start->end the short way round unless ``mid`` says otherwise.
-    def _norm(angle: float) -> float:
-        return (angle + 2 * math.pi) % (2 * math.pi)
-
-    ccw_mid = _norm(a2 - a1)
-    ccw_end = _norm(a3 - a1)
-    sweep = ccw_end if ccw_mid <= ccw_end else 2 * math.pi - ccw_end
-    return abs(radius * sweep)
-
-
-def _copper_arcs(pcb_path: Path) -> list[tuple[str, float]]:
-    """Return ``(layer, length_mm)`` for every copper ``(arc ...)`` track.
-
-    KiCad 7+ writes curved tracks as top-level ``(arc ...)`` elements.
-    ``kicad_tools.schema.pcb.PCB`` models ``segment`` and ``via`` but not
-    ``arc``, so measuring wirelength from ``pcb.segments`` alone silently
-    under-reports any externally-sourced board that uses rounded tracks.
-    This reads them straight from the file (issue #4934).
-    """
-    from kicad_tools.sexp import parse_file
-
-    try:
-        root = parse_file(pcb_path)
-    except Exception:  # pragma: no cover - defensive; PCB.load already parsed
-        return []
-
-    arcs: list[tuple[str, float]] = []
-    for child in root.iter_children():
-        if child.tag != "arc":
-            continue
-        layer_node = child.find("layer")
-        layer = (layer_node.get_string(0) or "") if layer_node else ""
-        if not _is_copper_layer(layer):
-            continue
-        start_node = child.find("start")
-        mid_node = child.find("mid")
-        end_node = child.find("end")
-        if not (start_node and mid_node and end_node):
-            continue
-        start = (start_node.get_float(0) or 0.0, start_node.get_float(1) or 0.0)
-        mid = (mid_node.get_float(0) or 0.0, mid_node.get_float(1) or 0.0)
-        end = (end_node.get_float(0) or 0.0, end_node.get_float(1) or 0.0)
-        arcs.append((layer, _arc_length_mm(start, mid, end)))
-    return arcs
-
-
 def measure_copper(pcb_path: str | Path) -> CopperMetrics:
     """Measure via count and total wirelength from the board file.
 
     Takes a PATH, not a ``PCB``, on purpose: the acceptance criterion is
     that these numbers come from the board file itself so any router path
-    produces comparable figures, and the copper-arc sweep needs the raw
-    S-expression the ``PCB`` object does not retain.
+    produces comparable figures, including curved tracks exposed by the PCB schema.
     """
     from kicad_tools.schema.pcb import PCB
 
@@ -421,9 +342,9 @@ def measure_copper(pcb_path: str | Path) -> CopperMetrics:
         segment_count += 1
         by_layer[seg.layer] = by_layer.get(seg.layer, 0.0) + math.dist(seg.start, seg.end)
 
-    arcs = _copper_arcs(path)
-    for layer, length in arcs:
-        by_layer[layer] = by_layer.get(layer, 0.0) + length
+    arcs = pcb.arcs
+    for arc in arcs:
+        by_layer[arc.layer] = by_layer.get(arc.layer, 0.0) + arc.length
 
     return CopperMetrics(
         via_count=len(pcb.vias),
