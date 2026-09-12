@@ -1,0 +1,88 @@
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import signal
+import subprocess
+import time
+import tomllib
+
+ROOT = Path('/evidence')
+SOURCE = ROOT / 'source'
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+def write(path, data):
+    path.write_text(json.dumps(data, indent=2) + '\n')
+def capture(command):
+    p = subprocess.run(command, capture_output=True, text=True)
+    return {'command': command, 'returncode': p.returncode, 'stdout': p.stdout, 'stderr': p.stderr}
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+def source_manifest():
+    paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+    return {p: ({'symlink': os.readlink(p)} if Path(p).is_symlink() else {'sha256': digest(Path(p))})
+            for p in paths if p and (Path(p).is_file() or Path(p).is_symlink())}
+
+manifest = source_manifest()
+write(ROOT / 'source-before.json', manifest)
+runtime = {
+    'started_at': now(), 'tool_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip(),
+    'tracked_source_status': capture(['git', 'status', '--porcelain', '--untracked-files=no']),
+    'python': platform.python_version(), 'platform': platform.platform(), 'machine': platform.machine(),
+    'kicad': capture(['kicad-cli', '--version']),
+    'native_check': capture(['uv', 'run', 'kct', 'build-native', '--check']),
+    'cpu_limit': 4, 'memory_limit_gib': 12, 'seed': 42,
+    'image_id': 'sha256:96b2e23399bfd0dce7e52973f072e99a8efe46b9ac8a9a2c727e5bae6b4cd738',
+    'case_deadline_seconds': 1800, 'interrupt_grace_seconds': 60,
+    'kicad_cli_drc_timeout_seconds': 300,
+}
+write(ROOT / 'runtime.json', runtime)
+if runtime['tracked_source_status']['stdout'].strip():
+    raise RuntimeError('Tracked source differs from declared tool commit')
+boards = tomllib.loads((SOURCE / 'benchmarks/external/boards.toml').read_text())
+results = []
+for slug, tuned in [('pocketbeagle', False), ('beagleconnect_freedom', False), ('strf', False), ('strf', True)]:
+    protocol = 'tuned' if tuned else 'zero-touch'
+    case = ROOT / 'cases' / (slug + '.' + protocol)
+    case.mkdir(parents=True, exist_ok=True)
+    command = ['uv', 'run', 'kct', 'bench', 'external', '--board', slug,
+               '--cache-dir', str(ROOT / 'cache'), '--output-dir', str(case / 'output'),
+               '--seed', '42', '--mfr', 'jlcpcb', '--layers', '4', '--kicad-cli-timeout', '300', '--format', 'json']
+    if tuned:
+        command += ['--tuned']
+    record = {'board_id': slug, 'protocol': protocol, 'command': command, 'cwd': str(SOURCE),
+              'started_at': now(), 'board_commit': boards[slug]['commit'],
+              'source_url': boards[slug]['repo_url'], 'source_board_path': boards[slug]['board_path'],
+              'supervisor_timeout': False, 'forced_kill': False}
+    write(case / 'attempt.json', record)
+    print('Starting ' + slug + ' ' + protocol, flush=True)
+    start = time.monotonic()
+    with (case / 'stdout.json').open('w') as out, (case / 'stderr.log').open('w') as err:
+        process = subprocess.Popen(command, stdout=out, stderr=err, start_new_session=True)
+        try:
+            returncode = process.wait(timeout=1800)
+        except subprocess.TimeoutExpired:
+            record['supervisor_timeout'] = True
+            os.killpg(process.pid, signal.SIGINT)
+            try:
+                returncode = process.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                record['forced_kill'] = True
+                os.killpg(process.pid, signal.SIGKILL)
+                returncode = process.wait()
+    record.update(returncode=returncode, elapsed_seconds=time.monotonic() - start, ended_at=now())
+    acquired = ROOT / 'cache' / slug / Path(boards[slug]['board_path']).name
+    record['acquired_input_sha256'] = digest(acquired) if acquired.is_file() else None
+    record['output_files'] = {str(p.relative_to(case)): {'sha256': digest(p), 'bytes': p.stat().st_size}
+                              for p in sorted((case / 'output').rglob('*')) if p.is_file()}
+    write(case / 'attempt.json', record)
+    results.append(record)
+    write(ROOT / 'attempts.json', results)
+    print('Finished ' + slug + ' ' + protocol + ': exit=' + str(returncode), flush=True)
+current = source_manifest()
+write(ROOT / 'source-after.json', current)
+write(ROOT / 'source-verification.json', {'unchanged': current == manifest, 'tracked_paths': len(manifest)})
+if current != manifest:
+    raise RuntimeError('Tracked source changed during evidence collection')

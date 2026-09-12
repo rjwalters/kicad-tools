@@ -1,0 +1,93 @@
+{
+  "errors": {},
+  "markdown_path": "/evidence/cases/pocketbeagle.zero-touch/output/report.zero-touch.md",
+  "output_dir": "/evidence/cases/pocketbeagle.zero-touch/output",
+  "reports": [
+    {
+      "$schema": "https://kicad-tools.org/schemas/benchmark-external/v1.json",
+      "backend": {
+        "available": true,
+        "backend": "cpp",
+        "build_version": 23,
+        "unavailable_reason": null,
+        "version": "1.0.0"
+      },
+      "board_commit": "d793a63f48dd3041e333362d5ec870377d255f89",
+      "board_file": "pocketbeagle.kicad_pcb",
+      "board_id": "pocketbeagle",
+      "board_source": "https://github.com/beagleboard/pocketbeagle",
+      "completion": {
+        "completion_pct": 31.76,
+        "connections_routed": 94,
+        "connections_total": 296,
+        "nets_blocking_incomplete": 121,
+        "nets_complete": 57,
+        "nets_incomplete": 130,
+        "nets_total": 187,
+        "nets_unrouted": 0
+      },
+      "copper": {
+        "arc_count": 0,
+        "segment_count": 0,
+        "via_count": 0,
+        "wirelength_by_layer_mm": {},
+        "wirelength_mm": 0
+      },
+      "diff_pairs": null,
+      "generated_at": "2026-09-12T10:25:13.512106+00:00",
+      "kct_check": {
+        "error_count": 394,
+        "errors_by_rule": {
+          "connectivity": 121,
+          "edge_clearance_pad": 1,
+          "edge_clearance_zone": 218,
+          "single_pad_net": 54
+        },
+        "note": null,
+        "passed": false,
+        "ran": true,
+        "warning_count": 801
+      },
+      "kicad_cli_drc": {
+        "by_type": {},
+        "note": null,
+        "ran": true,
+        "violation_count": 0
+      },
+      "newly_routed_connections": 0,
+      "notes": [
+        "seed=42",
+        "router exit code: 1",
+        "human baseline (pre-rip-up): 1297 segments, 171 vias, 2561.0mm, 78 unrouted pads",
+        "router produced no output file for this attempt -- measuring the pre-route (ripped-up) input as fallback; the completion% below reflects pre-existing/trivial connectivity, NOT new routing progress (see route_outcome / pre_route_completion in the JSON report)",
+        "DeepPCB published reference: {'airwires': 290}"
+      ],
+      "pre_route_completion": {
+        "completion_pct": 31.76,
+        "connections_routed": 94,
+        "connections_total": 296,
+        "nets_blocking_incomplete": 121,
+        "nets_complete": 57,
+        "nets_incomplete": 130,
+        "nets_total": 187,
+        "nets_unrouted": 0
+      },
+      "protocol": "zero-touch",
+      "route_outcome": {
+        "artifact_source": "fallback_input",
+        "exit_code": 1,
+        "outcome": "failed",
+        "reason": "the router exited 1 (non-zero) and produced no output file for this attempt -- no routing progress was captured; measuring the pre-route input as fallback"
+      },
+      "schema_version": 1,
+      "timing": {
+        "measured_phase": "failed",
+        "refusal_reason": null,
+        "valid": true,
+        "wall_clock_s": 1.669
+      },
+      "tool_commit": "696315f"
+    }
+  ],
+  "success": true
+}
