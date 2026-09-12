@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,74 @@ from pathlib import Path
 from shapely.geometry import LineString, Point
 from shapely.ops import unary_union
 from shapely.prepared import prep
+
+from kicad_tools.manufacturers.dru_generator import (
+    DRU_FLOORS_BLOCK_BEGIN,
+    DRU_FLOORS_BLOCK_END,
+)
+
+# Rule-name families the fab-floors generator (Issue #4600) can emit that
+# this escape search knows how to fold into its physical minima.
+_KNOWN_FLOOR_FAMILY_FIELDS = {
+    "Trace Width": "width",
+    "Clearance": "clearance",
+    "Via Drill": "drill",
+    "Via Diameter": "diameter",
+    "Annular Ring": "annulus",
+}
+# Families the generator can also emit that this recipe never routes near
+# (board edge, silkscreen, solder mask, ampacity, pad-only annular ring) --
+# recognized and safely ignored rather than folded in.
+_IGNORED_FLOOR_FAMILIES = {
+    "PTH Annular Ring",
+    "Copper to Edge",
+    "Hole to Edge",
+    "Silkscreen Width",
+    "Silkscreen Height",
+    "Solder Mask Clearance",
+    "Solder Mask Dam",
+}
+_DRU_RULE_RE = re.compile(
+    r'\(rule "(?P<name>[^"]+)"\n'
+    r'(?:\s*\(condition "[^"]*"\)\n)?'
+    r"\s*\(constraint \w+ \(min (?P<value>[0-9.]+)mm\)\)\)"
+)
+
+
+def _kct_managed_floor_minima(dru_text: str) -> dict[str, float] | None:
+    """Extract escape minima from a *pure* kct fab-floors ``.kicad_dru``.
+
+    Returns ``None`` -- not safe to auto-extract -- unless the file is
+    *exactly* the sentinel-delimited managed block
+    :func:`kicad_tools.manufacturers.dru_generator.generate_dru` writes
+    (Issue #4600), with nothing else present (hand-authored rules, the
+    creepage exporter's separate block, ...). A file matching that shape is
+    safe to fold in even though it "exists": every rule family it can
+    contain is enumerated above, so nothing is silently ignored.
+    """
+    body_lines = [
+        line
+        for line in dru_text.splitlines()
+        if line.strip() and not line.strip().startswith("(version")
+    ]
+    body = "\n".join(body_lines).strip()
+    if not (body.startswith(DRU_FLOORS_BLOCK_BEGIN) and body.endswith(DRU_FLOORS_BLOCK_END)):
+        return None
+    inner = body[len(DRU_FLOORS_BLOCK_BEGIN) : -len(DRU_FLOORS_BLOCK_END)].strip("\n")
+    if not inner:
+        return {}
+    minima: dict[str, float] = {}
+    for stanza in re.split(r"\n(?=\(rule )", inner):
+        match = _DRU_RULE_RE.fullmatch(stanza.strip())
+        if match is None:
+            return None  # hand-edited or unrecognized stanza -- fail closed
+        family = match.group("name").split(" - ")[0]
+        field = _KNOWN_FLOOR_FAMILY_FIELDS.get(family)
+        if field is not None:
+            minima[field] = max(minima.get(field, 0.0), float(match.group("value")))
+        elif family not in _IGNORED_FLOOR_FAMILIES:
+            return None  # unrecognized rule family -- fail closed
+    return minima
 
 
 @dataclass(frozen=True)
@@ -28,8 +97,13 @@ class EscapeRules:
     @classmethod
     def from_project(cls, path: Path) -> EscapeRules:
         """Strengthen defaults with project minima; reject unmodeled custom rules."""
-        if path.with_suffix(".kicad_dru").exists():
-            raise ValueError("Escape search cannot evaluate custom DRC rules")
+        dru_path = path.with_suffix(".kicad_dru")
+        dru_floor_minima: dict[str, float] = {}
+        if dru_path.exists():
+            parsed = _kct_managed_floor_minima(dru_path.read_text())
+            if parsed is None:
+                raise ValueError("Escape search cannot evaluate custom DRC rules")
+            dru_floor_minima = parsed
         data = json.loads(path.read_text()) if path.exists() else {}
         if not isinstance(data, dict):
             raise ValueError("Project must be an object")
@@ -60,7 +134,11 @@ class EscapeRules:
             "hole_copper": ("hole_clearance",),
         }
         values = {
-            name: max([getattr(defaults, name)] + [number(rules[k]) for k in keys if k in rules])
+            name: max(
+                [getattr(defaults, name)]
+                + [number(rules[k]) for k in keys if k in rules]
+                + ([dru_floor_minima[name]] if name in dru_floor_minima else [])
+            )
             for name, keys in mapping.items()
         }
         # Taking the strongest class is conservative even when a project uses

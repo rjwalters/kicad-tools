@@ -122,6 +122,87 @@ def test_project_constraints_strengthen_defaults(tmp_path):
         escape.EscapeRules.from_project(p)
 
 
+def _kct_managed_dru(*rule_lines):
+    from kicad_tools.manufacturers.dru_generator import (
+        DRU_FLOORS_BLOCK_BEGIN,
+        DRU_FLOORS_BLOCK_END,
+    )
+
+    body = "\n".join(rule_lines)
+    return f"(version 1)\n\n{DRU_FLOORS_BLOCK_BEGIN}\n{body}\n{DRU_FLOORS_BLOCK_END}\n"
+
+
+def test_kct_managed_dru_sidecar_folds_in_floors(tmp_path):
+    """A pure kct fab-floors sidecar (Issue #4600) is known-safe, not rejected.
+
+    Every rule's floor here is set stronger than the ``EscapeRules``
+    dataclass default so folding it in is observable (a weaker fab floor,
+    like board 06's real 0.1016mm jlcpcb-tier1 trace width against the
+    0.2mm default, would be masked by the "strengthen, never weaken"
+    ``max()`` and prove nothing).
+    """
+    p = tmp_path / "board.kicad_pro"
+    p.write_text(json.dumps({}))
+    p.with_suffix(".kicad_dru").write_text(
+        _kct_managed_dru(
+            '(rule "Trace Width - jlcpcb-tier1"\n'
+            "  (condition \"A.Type == 'track'\")\n"
+            "  (constraint track_width (min 0.3mm)))",
+            '(rule "Clearance - jlcpcb-tier1"\n  (constraint clearance (min 0.25mm)))',
+            '(rule "Via Drill - jlcpcb-tier1"\n'
+            "  (condition \"A.Type == 'via' && A.Via_Type != 'Micro'\")\n"
+            "  (constraint hole_size (min 0.35mm)))",
+            '(rule "Via Diameter - jlcpcb-tier1"\n'
+            "  (condition \"A.Type == 'via' && A.Via_Type != 'Micro'\")\n"
+            "  (constraint via_diameter (min 0.6mm)))",
+            '(rule "Annular Ring - jlcpcb-tier1"\n'
+            "  (condition \"A.Via_Type != 'Micro'\")\n"
+            "  (constraint annular_width (min 0.2mm)))",
+            '(rule "PTH Annular Ring - jlcpcb-tier1"\n'
+            "  (condition \"A.Type == 'pad'\")\n"
+            "  (constraint annular_width (min 0.5mm)))",
+            '(rule "Copper to Edge - jlcpcb-tier1"\n  (constraint edge_clearance (min 0.3mm)))',
+        )
+    )
+    rules = escape.EscapeRules.from_project(p)
+    assert rules.width == pytest.approx(0.3)
+    assert rules.clearance == pytest.approx(0.25)
+    assert rules.drill == pytest.approx(0.35)
+    # The pad-only "PTH Annular Ring" floor (0.5mm) must not leak into the
+    # via annulus -- only the via "Annular Ring" floor (0.2mm) applies.
+    assert rules.annulus == pytest.approx(0.2)
+    # diameter is re-derived from drill + 2*annulus (0.35 + 0.4 = 0.75),
+    # which exceeds the raw "Via Diameter" floor (0.6mm).
+    assert rules.diameter == pytest.approx(0.75)
+
+
+def test_kct_managed_dru_sidecar_with_extra_content_still_rejected(tmp_path):
+    """Anything beyond the exact managed block is unmodeled -- fail closed."""
+    p = tmp_path / "board.kicad_pro"
+    p.write_text(json.dumps({}))
+    managed = _kct_managed_dru(
+        '(rule "Clearance - jlcpcb-tier1"\n  (constraint clearance (min 0.1016mm)))'
+    )
+    p.with_suffix(".kicad_dru").write_text(
+        managed + '\n(rule "Custom hand rule"\n  (constraint clearance (min 1mm)))\n'
+    )
+    with pytest.raises(ValueError, match="custom DRC"):
+        escape.EscapeRules.from_project(p)
+
+
+def test_kct_managed_dru_sidecar_with_unknown_rule_family_rejected(tmp_path):
+    """A rule family this recipe has never enumerated is not silently ignored."""
+    p = tmp_path / "board.kicad_pro"
+    p.write_text(json.dumps({}))
+    p.with_suffix(".kicad_dru").write_text(
+        _kct_managed_dru(
+            '(rule "Something New - jlcpcb-tier1"\n  (constraint clearance (min 1mm)))'
+        )
+    )
+    with pytest.raises(ValueError, match="custom DRC"):
+        escape.EscapeRules.from_project(p)
+
+
 @pytest.mark.parametrize("value", [-1, True, "0.2", float("nan")])
 def test_invalid_project_dimensions_fail_closed(tmp_path, value):
     p = tmp_path / "board.kicad_pro"
