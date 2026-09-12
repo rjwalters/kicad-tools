@@ -202,7 +202,9 @@ def check(output):
     circuit = json.loads((output / "circuit.json").read_text())
     calculations = calculate({p["ref"]: p["value"] for p in circuit["parts"]})
     (output / "calculations.json").write_text(json.dumps(calculations, indent=2) + "\n")
-    component_stress_clean, component_stress_blockers = evaluate_component_stress(schematic)
+    component_stress_clean, component_stress_blockers = evaluate_component_stress(
+        schematic, COMPONENT_STRESS_MANIFEST
+    )
     report = {
         "scope": "Routed development checkpoint; no manufacturing release",
         "native_erc_clean": erc.returncode == 0 and erc_path.exists(),
@@ -285,8 +287,14 @@ def check(output):
         # Only add a component_stress checks entry / new blockers when a
         # board-local operating-state manifest is present -- boards without
         # one (every board today) must see byte-identical readiness output
-        # to before this check existed (issue #5170).
+        # to before this check existed (issue #5170). When it IS present, its
+        # bytes must be bound into inputs too, or editing/deleting it after a
+        # passing report leaves every recorded hash unchanged and the site
+        # readiness loader keeps presenting the stale check as verified.
         if component_stress_clean is not None:
+            inputs["operating_states.yaml"] = hashlib.sha256(
+                COMPONENT_STRESS_MANIFEST.read_bytes()
+            ).hexdigest()
             readiness_blockers = readiness_blockers + component_stress_blockers
             readiness_checks.append(
                 {
