@@ -1275,17 +1275,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit `component_clearances` override, a net-class `escape_clearance`
   override, an applied `fine_pitch_clearance` shrink (narrow-channel guard
   permitting), or a corridor already relaxed by
-  `_relax_same_component_clearance` (Issue #2452) — any of which honor the
-  smaller *configured* clearance rather than skipping the check entirely.
+  `_relax_same_component_clearance` (Issue #2452). Configured relaxations
+  retain their existing exclusion behavior; enforcing numerical per-ref
+  floors is tracked separately in #5166.
   The gate is shared by the Python search-time validator (`grid.py`), the
   C++ pathfinder's post-route acceptance check (`cpp_backend.py`, which
   builds the `exclude_ref_hashes` list the C++ `Grid3D::validate_route`
   carve-out consumes), and the `validate_routes()` / `drc_nudge`
-  "component-inherent" classification (`io.py`) so a route accepted at the
-  pathfinder's own checkpoint cannot disagree with native KiCad DRC on this
-  axis. `CacheKey`/`SubProblemSignature` now key on the new flag so a cache
+  "component-inherent" classification (`io.py`) so those paths use the
+  same opt-in policy. `CacheKey`/`SubProblemSignature` now key on the new flag so a cache
   entry produced under one setting is never served to a run under the
-  other.
+  other. Pad seeds retain trace-radius clearance, and negotiated routing
+  preserves complete physical tree connectivity and best-state geometry.
+  Board04 recognizes reviewed oscillator escape variants. Board06 can find
+  bounded pour/via escapes and restores impedance-sized connector widths
+  beyond a cumulative 0.75 mm pad neck-down. Finalization rolls back if
+  refill breaks pour connectivity or introduces a clearance violation.
 - **`kct route` accepted KiCad 10 name-only nets but wrote zero copper and
   reported a vacuous "SUCCESS" (0/0 nets)** (#4983) — a PCB saved in KiCad
   10's name-only net syntax (`(net "SIGNAL")` on pads, no numeric net table
