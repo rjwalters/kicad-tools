@@ -1601,6 +1601,9 @@ missing, malformed, curved, or footprint-local outlines produce explicit
 unplaceable results and leave those references unchanged. The SVG uses approximate
 text envelopes; review it and use native DRC before relying on the placement.
 
+Footprint references must be unique, including hidden references. Duplicate
+references are rejected before planning; assign unique references first.
+
 Search spacing must be finite and positive, distances finite and nonnegative,
 and the search is limited to 4096 rings. An explicit `--output` is written even
 when no reference needs to move. `--verify-drc` prints the native result (also

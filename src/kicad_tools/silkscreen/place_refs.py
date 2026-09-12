@@ -742,6 +742,17 @@ class SilkRefPlacer:
         from shapely.geometry import MultiLineString, Polygon  # type: ignore[import-untyped]
 
         pcb = self.pcb
+        # Reference strings identify both move targets and own-component
+        # obstacle exclusions. Hidden references also participate in those
+        # exclusions, so require uniqueness across the whole footprint set.
+        seen_refs: set[str] = set()
+        for footprint in pcb.footprints:
+            if footprint.reference in seen_refs:
+                raise ValueError(
+                    f"Duplicate footprint reference {footprint.reference!r}; "
+                    "assign unique references before placing silkscreen"
+                )
+            seen_refs.add(footprint.reference)
         result = PlaceSilkRefsResult(clearance_mm=clearance_mm)
         self._ref_nodes = {}
 

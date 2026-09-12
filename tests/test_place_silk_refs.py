@@ -558,3 +558,29 @@ def test_rotated_dynamic_reference_obstacles(tmp_path):
         box = _text_bbox_geometry(ref.footprint_ref, (1, 1), 0.15, ref.new_position)
         geoms.append(rotate(box, -ref.new_rotation, origin=ref.new_position))
     assert geoms[0].distance(geoms[1]) >= 0.15 - 1e-4
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+@pytest.mark.parametrize("options", [[], ["--dry-run"], ["--output", "explicit"]])
+def test_duplicate_references_reject_without_mutating(tmp_path, capsys, hidden, options):
+    path = tmp_path / "duplicate.kicad_pcb"
+    # A hidden duplicate still aliases own-component obstacle identities.
+    original_ref = "K1" if hidden else "C2"
+    source = _dense_fixture_text().replace(f'reference "{original_ref}"', 'reference "C1"')
+    path.write_text(source)
+    original = path.read_bytes()
+    placer = SilkRefPlacer(path)
+    from kicad_tools.sexp import serialize_sexp
+
+    before = serialize_sexp(placer.doc)
+    with pytest.raises(ValueError, match="Duplicate footprint reference"):
+        placer.plan()
+    assert serialize_sexp(placer.doc) == before
+    output = tmp_path / "result.kicad_pcb"
+    args = [str(path), "--format", "json"] + [
+        str(output) if x == "explicit" else x for x in options
+    ]
+    assert cli_main(args) == 1
+    assert "Duplicate footprint reference" in capsys.readouterr().err
+    assert path.read_bytes() == original
+    assert not output.exists()
