@@ -3376,53 +3376,34 @@ def _extract_edge_segments(
     Returns:
         List of ((x1, y1), (x2, y2)) tuples for each edge segment.
     """
+    from kicad_tools.sexp import parse_string
+
     segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
-
-    # Look for gr_rect on Edge.Cuts (simple rectangular boards)
-    # Use .*? with re.DOTALL to match nested parentheses in stroke/fill attributes
-    for rect_match in re.finditer(
-        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)"
-        r'.*?\(layer\s+"Edge\.Cuts"\)',
-        pcb_text,
-        re.DOTALL,
-    ):
-        x1, y1, x2, y2 = map(float, rect_match.groups())
-        # Convert rectangle to 4 line segments
-        segments.extend(
-            [
-                ((x1, y1), (x2, y1)),  # Top
-                ((x2, y1), (x2, y2)),  # Right
-                ((x2, y2), (x1, y2)),  # Bottom
-                ((x1, y2), (x1, y1)),  # Left
-            ]
-        )
-
-    # Also handle gr_rect where layer comes before coordinates
-    for rect_match in re.finditer(
-        r'\(gr_rect.*?\(layer\s+"Edge\.Cuts"\).*?'
-        r"\(start\s+([\d.]+)\s+([\d.]+)\)\s*\(end\s+([\d.]+)\s+([\d.]+)\)",
-        pcb_text,
-        re.DOTALL,
-    ):
-        x1, y1, x2, y2 = map(float, rect_match.groups())
-        segments.extend(
-            [
-                ((x1, y1), (x2, y1)),
-                ((x2, y1), (x2, y2)),
-                ((x2, y2), (x1, y2)),
-                ((x1, y2), (x1, y1)),
-            ]
-        )
-
-    # Look for gr_line elements on Edge.Cuts (complex board outlines)
-    for line_match in re.finditer(
-        r"\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+"
-        r'\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)',
-        pcb_text,
-        re.DOTALL,
-    ):
-        x1, y1, x2, y2 = map(float, line_match.groups())
-        segments.append(((x1, y1), (x2, y2)))
+    root = parse_string(pcb_text)
+    for node in root.children:
+        if node.name not in {"gr_rect", "gr_line"}:
+            continue
+        layer = node.find_child("layer")
+        if layer is None or layer.get_string(0) != "Edge.Cuts":
+            continue
+        start, end = node.find_child("start"), node.find_child("end")
+        if start is None or end is None:
+            raise ValueError(f"Malformed Edge.Cuts {node.name}: missing start/end")
+        values = (start.get_float(0), start.get_float(1), end.get_float(0), end.get_float(1))
+        if any(value is None or not math.isfinite(value) for value in values):
+            raise ValueError(f"Malformed Edge.Cuts {node.name}: invalid coordinates")
+        x1, y1, x2, y2 = (float(value) for value in values if value is not None)
+        if node.name == "gr_line":
+            segments.append(((x1, y1), (x2, y2)))
+        else:
+            segments.extend(
+                [
+                    ((x1, y1), (x2, y1)),
+                    ((x2, y1), (x2, y2)),
+                    ((x2, y2), (x1, y2)),
+                    ((x1, y2), (x1, y1)),
+                ]
+            )
 
     return segments
 
