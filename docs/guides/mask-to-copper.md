@@ -142,6 +142,11 @@ retains overlapping conductors independently; subtracting an owning pad from a
 whole copper union would lose that evidence. Whole-layer agreement is an
 additional coverage check, not proof of ownership.
 
+Native objects on the inspected layers are checked against the source inventory
+before any owning-pad exclusion. Uninventoried objects (including copper targets
+and dimensions) make coverage incomplete even when other copper hides them in
+the whole-layer union. This does not qualify their individual geometry.
+
 Native support and context gaps are reported explicitly. For example, plotted
 text with unresolved project/CLI variables requires additional context and cannot
 be treated as fully attributed merely because other copper covers it. Inspect

@@ -314,3 +314,25 @@ def test_final_native_identity_defects_cannot_pass(tmp_path, native_options, def
     assert any(
         "uuid" in reason.lower() or "identity" in reason.lower() for reason in result.reasons
     ), result.reasons
+
+
+@pytest.mark.parametrize("covered_by_pad", [False, True])
+def test_uninventoried_native_target_cannot_hide_in_copper_union(
+    tmp_path, native_options, covered_by_pad
+):
+    identity = "00000000-0000-0000-0000-000000000099"
+    pad = """(footprint "P" (layer "F.Cu") (at 10 10)
+      (pad "1" smd rect (at 0 0) (size 4 4) (layers "F.Cu" "F.Mask")))"""
+    target = f'''(target plus (at 10 10) (size 1) (width .1)
+      (layer "F.Cu") (uuid "{identity}"))'''
+    path = _board(tmp_path / "target.kicad_pcb", (pad if covered_by_pad else "") + target)
+    before = path.read_bytes()
+    result = check_mask_to_copper(path, POLICY, **native_options)
+    # The target-only parameter proves this native object really plots copper;
+    # the covered parameter prevents union parity from hiding its omission.
+    copper = read_native_gerber(native_options["artifact_dir"] / "target-F_Cu.gbr")
+    assert copper.area > 0
+    assert path.read_bytes() == before
+    assert result.coverage == "incomplete", result.to_dict()
+    assert not result.passed
+    assert any(identity in reason and "uninventoried" in reason for reason in result.reasons)

@@ -102,6 +102,22 @@ def main():
         "source_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "max_error_mm": board.GetDesignSettings().m_MaxError / 1e6,
     }
+    # Layer unions cannot prove inventory coverage: an omitted conductor may
+    # be wholly covered by an owning pad and disappear from the comparison.
+    # Reconcile all native objects independently before applying UUID waivers.
+    requested = set(request["source_uuids"])
+    for identity, found in by_uuid.items():
+        if identity in requested:
+            continue
+        for item in found:
+            if hasattr(item, "IsVisible") and not item.IsVisible():
+                continue
+            participating = [name for name, layer in layers.items() if item.IsOnLayer(layer)]
+            if participating:
+                result["errors"].append(
+                    f"{identity}: uninventoried native {type(item).__name__} on "
+                    + ", ".join(participating)
+                )
     for identity in request["source_uuids"]:
         found = by_uuid.get(identity, [])
         if len(found) != 1:
