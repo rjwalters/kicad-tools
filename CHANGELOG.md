@@ -52,6 +52,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exits 1 before any routing work); an auto-discovered one degrades to a
   warning; the authored input file is never overwritten (a collision diverts
   the derived sidecar to `current_paths.effective.json`, the #4428 rule).
+- **`kct place-silk-refs`: readable silkscreen reference placement** (#5030)
+  — a dry-run/apply solver that moves (and, optionally, rotates) visible
+  reference-designator text just far enough to clear real pad/via mask
+  apertures, other silk/text, and the board edge, while preserving
+  visibility, text height, and stroke width exactly (never hiding,
+  shrinking, or deleting a label to "clear" a DRC finding). References are
+  kept near their own component and never placed on top of a courtyard
+  (its own or a neighbor's); a reference with no collision-free candidate
+  in the search radius is left untouched and reported explicitly as
+  `unplaceable` or `under_component_fallback` (when it was already sitting
+  on its own body) rather than silently dropped. Only the reference text's
+  own `(at x y [angle])` node is ever written — footprint position, pads,
+  copper, and net bindings are untouched. Reads the same geometry helpers
+  `kct check`'s silk DRC rules use, so a clean plan reproduces a clean
+  native `kicad-cli pcb drc` (`--verify-drc`); `--render` writes an SVG
+  review artifact (old vs. new position, pad apertures, courtyards) since
+  a passing DRC run does not by itself prove the placement is readable.
+  Retires the need for the ad hoc
+  `hardware/chorus-test-revA/scripts/place_silk_refs.py` local helper.
 - **Installer: explicit Codex and Claude client targets** (#4905) —
   `scripts/install-kct.sh` gains `--client claude|codex|both` (default
   `claude`, fully backward-compatible). Codex selection generates one

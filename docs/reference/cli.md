@@ -40,6 +40,7 @@ kct [--help] [--version] <command> [options]
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
 | | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs |
+| | `place-silk-refs` | Move readable reference designators to clear silk/pad/edge collisions |
 | | `fix-footprints` | Fix footprint pad spacing issues |
 | | `repair-clearance` | Repair clearance violations by nudging traces |
 | | `pipeline` | End-to-end repair pipeline for existing PCBs |
@@ -1593,3 +1594,23 @@ defaults (#4109).
 
 See [KiCad lock-marker advisories](kicad-lock-policy.md) for the covered write
 paths and `KCT_KICAD_LOCK_POLICY=warn|error|ignore` configuration.
+
+
+### Reference placement safety
+
+`kct place-silk-refs board.kicad_pcb --dry-run --render review.svg` previews
+reference moves without writing the board. Text envelopes must fit inside closed
+polygonal board material, outside cutouts and component courtyards, with the
+requested clearances. Line, rectangle, and polygon Edge.Cuts are supported;
+missing, malformed, curved, or footprint-local outlines produce explicit
+unplaceable results and leave those references unchanged. The SVG uses approximate
+text envelopes; review it and use native DRC before relying on the placement.
+
+Footprint references must be unique, including hidden references. Duplicate
+references are rejected before planning; assign unique references first.
+
+Search spacing must be finite and positive, distances finite and nonnegative,
+and the search is limited to 4096 rings. An explicit `--output` is written even
+when no reference needs to move. `--verify-drc` prints the native result (also
+included in JSON) and returns nonzero for remaining silk findings, unavailable
+KiCad, or failed verification. It runs after applying the move plan.
