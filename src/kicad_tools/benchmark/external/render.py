@@ -18,15 +18,40 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from .metrics import BenchmarkReport
+from .metrics import (
+    ARTIFACT_SOURCE_FALLBACK_INPUT,
+    ROUTE_OUTCOME_COMPLETED,
+    ROUTE_OUTCOME_UNKNOWN,
+    BenchmarkReport,
+)
 
 __all__ = ["render_markdown", "render_report_markdown"]
 
 
 def _fmt_timing(report: BenchmarkReport) -> str:
     if report.timing.valid and report.timing.wall_clock_s is not None:
+        phase = report.timing.measured_phase
+        if phase not in (ROUTE_OUTCOME_COMPLETED, ROUTE_OUTCOME_UNKNOWN):
+            # A real elapsed time on a non-completed attempt is time-to-
+            # refusal/partial-progress, NOT a completed-routing performance
+            # number -- never let it render as a bare seconds figure (#5280).
+            return f"{report.timing.wall_clock_s:.1f} s ({phase.replace('_', ' ')})"
         return f"{report.timing.wall_clock_s:.1f} s"
     return "refused"
+
+
+def _fmt_outcome(report: BenchmarkReport) -> str:
+    outcome = report.route_outcome
+    if outcome is None:
+        return "unknown (legacy)"
+    return outcome.outcome.replace("_", " ")
+
+
+def _fmt_artifact(report: BenchmarkReport) -> str:
+    outcome = report.route_outcome
+    if outcome is None:
+        return "unknown"
+    return outcome.artifact_source.replace("_", " ")
 
 
 def _fmt_kct_check(report: BenchmarkReport) -> str:
@@ -77,8 +102,8 @@ def render_markdown(
     lines.extend(
         [
             "| Board | Protocol | Completion | Connections | Vias | Wirelength (mm) "
-            "| Runtime | Backend | kct check | kicad-cli DRC | Diff pairs |",
-            "|---|---|---|---|---|---|---|---|---|---|---|",
+            "| Runtime | Backend | kct check | kicad-cli DRC | Diff pairs | Outcome | Artifact |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
     )
 
@@ -96,6 +121,8 @@ def render_markdown(
             _fmt_kct_check(report),
             _fmt_cli_drc(report),
             _fmt_diff_pairs(report),
+            _fmt_outcome(report),
+            _fmt_artifact(report),
         ]
         lines.append("| " + " | ".join(cells) + " |")
 
@@ -105,6 +132,32 @@ def render_markdown(
         for report in refusals:
             reason = report.timing.refusal_reason or "no reason recorded"
             lines.append(f"- `{report.board_id}` ({report.protocol}): {reason}")
+
+    fallback = [
+        r
+        for r in reports
+        if r.route_outcome is not None
+        and r.route_outcome.artifact_source == ARTIFACT_SOURCE_FALLBACK_INPUT
+    ]
+    if fallback:
+        lines.extend(["", "**Measured artifact is fallback input, not router output**", ""])
+        for report in fallback:
+            fallback_reason = report.route_outcome.reason if report.route_outcome else None
+            lines.append(
+                f"- `{report.board_id}` ({report.protocol}): "
+                f"{fallback_reason or 'no reason recorded'} "
+                "-- the numbers above describe the pre-route input, NOT a routed board."
+            )
+
+    legacy = [r for r in reports if r.route_outcome is None]
+    if legacy:
+        lines.extend(["", "**Legacy reports (outcome/artifact provenance not tracked)**", ""])
+        for report in legacy:
+            lines.append(
+                f"- `{report.board_id}` ({report.protocol}): generated before route-outcome/"
+                "artifact-provenance tracking (schema v1 pre-#5280) -- treat as unknown, "
+                "never as success."
+            )
 
     skipped_drc = [r for r in reports if not r.kicad_cli_drc.ran]
     if skipped_drc:

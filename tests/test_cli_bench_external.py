@@ -336,6 +336,19 @@ class TestRunOneBoard:
         assert any("human baseline" in n for n in report.notes)
         assert any("router exit code: 0" in n for n in report.notes)
 
+        # Structured outcome (#5280): router ran, exited 0, and produced
+        # output that measures 100% complete.
+        assert report.route_outcome is not None
+        assert report.route_outcome.outcome == "completed"
+        assert report.route_outcome.artifact_source == "router_output"
+        assert report.route_outcome.exit_code == 0
+
+        # Baseline (pre-route) connectivity was measured on the ripped-up
+        # input, separate from the routed result.
+        assert report.pre_route_completion is not None
+        assert report.pre_route_completion.connections_routed == 0
+        assert report.newly_routed_connections == 2
+
         # The normalized (ripped-up) board was written and stripped of copper.
         normalized_path = output_dir / "normalized" / "fixture.kicad_pcb"
         assert normalized_path.exists()
@@ -343,8 +356,10 @@ class TestRunOneBoard:
         assert len(normalized_pcb.segments) == 0
         assert len(normalized_pcb.vias) == 0
 
-        # The routed output was written by the (stub) router.
-        assert (output_dir / "routed" / "fixture.kicad_pcb").exists()
+        # The routed output was written by the (stub) router, named by
+        # slug AND protocol so a tuned/zero-touch run sharing a slug never
+        # collides (#5280).
+        assert (output_dir / "routed" / "fixture.zero-touch.kicad_pcb").exists()
 
         # The baseline sidecar captured the pre-rip-up human routing.
         baseline_path = normalized_path.with_name("fixture.baseline.json")
@@ -436,7 +451,187 @@ class TestRunOneBoard:
 
         assert report.completion.completion_pct == 0.0
         assert any("no output file" in n for n in report.notes)
-        assert any("router exit code: 1" in n for n in report.notes)
+
+        # Structured outcome (#5280): a non-zero exit with no output file
+        # for this attempt is "stopped before routing" -- never success.
+        assert report.route_outcome is not None
+        assert report.route_outcome.outcome == "stopped_before_routing"
+        assert report.route_outcome.artifact_source == "fallback_input"
+        assert report.route_outcome.exit_code == 1
+        assert report.pre_route_completion is not None
+        assert report.pre_route_completion.connections_routed == 0
+        assert report.newly_routed_connections == 0
+        # A refused/unmeasured timing must never look like a completed-
+        # routing performance number.
+        assert report.timing.measured_phase == "stopped_before_routing"
+
+    def test_router_raises_marks_failed_outcome(self, tmp_path):
+        """A router exception (crash) is ``failed``, not silently dropped."""
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+
+        def _crashing_route(argv: list[str]) -> int:
+            raise RuntimeError("boom")
+
+        report = bench_cmd._run_one_board(
+            _spec(fetch_boards),
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=tmp_path / "out",
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_crashing_route,
+        )
+
+        assert report.route_outcome is not None
+        assert report.route_outcome.outcome == "failed"
+        assert report.route_outcome.artifact_source == "fallback_input"
+        assert report.route_outcome.exit_code is None
+        assert "boom" in (report.route_outcome.reason or "")
+        assert report.timing.wall_clock_s is None
+
+    def test_partial_output_from_nonzero_exit_is_not_mislabeled_success(self, tmp_path):
+        """A router that exits non-zero but DID write output for this
+        attempt is ``partial`` -- real progress, never silently
+        relabeled as a clean success.
+        """
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+
+        def _partial_route(argv: list[str]) -> int:
+            output_path = Path(argv[argv.index("-o") + 1])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(ROUTED_OUTPUT_FIXTURE, encoding="utf-8")
+            return 2
+
+        report = bench_cmd._run_one_board(
+            _spec(fetch_boards),
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=tmp_path / "out",
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_partial_route,
+        )
+
+        assert report.route_outcome is not None
+        assert report.route_outcome.outcome == "partial"
+        assert report.route_outcome.artifact_source == "router_output"
+        assert report.route_outcome.exit_code == 2
+        # The fully-connected fixture output was actually measured (not
+        # discarded because of the non-zero exit).
+        assert report.completion.completion_pct == 100.0
+
+    def test_stale_prior_output_is_not_reused_by_a_failed_attempt(self, tmp_path):
+        """Reproduces the artifact-provenance failure from #5280's issue body:
+
+        pre-seed ``routed/<slug>.<protocol>.kicad_pcb`` with a prior run's
+        output, then run a NEW attempt whose (injected) router returns a
+        non-zero exit and writes nothing. The new attempt must report
+        ``stopped_before_routing`` / ``fallback_input`` -- never silently
+        pick up the stale file and look like a completed route.
+        """
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+        output_dir = tmp_path / "out"
+
+        stale_path = output_dir / "routed" / "fixture.zero-touch.kicad_pcb"
+        stale_path.parent.mkdir(parents=True)
+        stale_path.write_text(ROUTED_OUTPUT_FIXTURE, encoding="utf-8")
+
+        report = bench_cmd._run_one_board(
+            _spec(fetch_boards),
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_stub_route(write_output=False),
+        )
+
+        assert not stale_path.exists()  # cleared before this attempt's router ran
+        assert report.route_outcome is not None
+        assert report.route_outcome.outcome == "stopped_before_routing"
+        assert report.route_outcome.artifact_source == "fallback_input"
+        assert report.completion.completion_pct == 0.0
+        assert any("no output file" in n for n in report.notes)
+
+    def test_distinct_protocols_sharing_slug_do_not_collide(self, tmp_path):
+        """A tuned and a zero-touch run against the same board slug must
+        write/measure independent output files (#5280).
+        """
+        fetch_boards, normalize = bench_cmd._load_external_modules()
+        cache_dir = tmp_path / "cache"
+        (cache_dir / "fixture").mkdir(parents=True)
+        (cache_dir / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE, encoding="utf-8")
+        output_dir = tmp_path / "out"
+
+        zero_touch_report = bench_cmd._run_one_board(
+            _spec(fetch_boards),
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_stub_route(ROUTED_OUTPUT_FIXTURE),
+            protocol="zero-touch",
+        )
+        tuned_report = bench_cmd._run_one_board(
+            _spec(fetch_boards),
+            fetch_boards,
+            normalize,
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+            seed=1,
+            manufacturer="jlcpcb",
+            layers=2,
+            skip_fetch=True,
+            run_kicad_cli=False,
+            kicad_cli_timeout=60,
+            backend=_cpp_backend(),
+            verbose=False,
+            route_fn=_make_stub_route(write_output=False),
+            protocol="tuned",
+        )
+
+        assert zero_touch_report.route_outcome.outcome == "completed"  # type: ignore[union-attr]
+        assert tuned_report.route_outcome.outcome == "stopped_before_routing"  # type: ignore[union-attr]
+        assert (output_dir / "routed" / "fixture.zero-touch.kicad_pcb").exists()
+        assert not (output_dir / "routed" / "fixture.tuned.kicad_pcb").exists()
 
     def test_fetch_via_stubbed_opener(self, tmp_path):
         """``skip_fetch=False`` path with an in-memory tarball opener.

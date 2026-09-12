@@ -27,15 +27,26 @@ import pytest
 
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
 from kicad_tools.benchmark.external import (
+    ARTIFACT_SOURCE_FALLBACK_INPUT,
+    ARTIFACT_SOURCE_ROUTER_OUTPUT,
+    ROUTE_OUTCOME_COMPLETED,
+    ROUTE_OUTCOME_FAILED,
+    ROUTE_OUTCOME_PARTIAL,
+    ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING,
+    ROUTE_OUTCOME_TIMEOUT,
+    ROUTE_OUTCOME_UNKNOWN,
     SCHEMA_URL,
     SCHEMA_VERSION,
     BackendInfo,
     BenchmarkReport,
     CompletionMetrics,
     CopperMetrics,
+    DiffPairCompletion,
     KctCheckSummary,
     KicadCliDrcSummary,
+    RouteOutcome,
     TimingMetrics,
+    build_route_outcome,
     build_timing,
     collect_report,
     measure_completion,
@@ -315,6 +326,230 @@ class TestTimingValidity:
         assert backend.backend in {"cpp", "python", "unknown"}
         assert isinstance(backend.available, bool)
 
+    def test_measured_phase_labels_a_non_completed_attempt(self) -> None:
+        """A real, backend-eligible timing on a failed attempt is still
+        published (it IS real elapsed time), but is labeled so it can never
+        be read as a completed-routing performance number (#5280).
+        """
+        outcome = RouteOutcome(
+            outcome=ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING,
+            artifact_source=ARTIFACT_SOURCE_FALLBACK_INPUT,
+            exit_code=2,
+        )
+        timing = build_timing(4.4, _cpp_backend(), route_outcome=outcome)
+        assert timing.valid is True
+        assert timing.wall_clock_s == pytest.approx(4.4)
+        assert timing.measured_phase == ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING
+
+    def test_measured_phase_defaults_unknown_without_outcome(self) -> None:
+        timing = build_timing(1.0, _cpp_backend())
+        assert timing.measured_phase == ROUTE_OUTCOME_UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Route outcome + artifact provenance (issue #5280, Epic #5278 Phase 1)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildRouteOutcome:
+    def test_completed_on_exit_zero_with_full_completion(self) -> None:
+        outcome = build_route_outcome(
+            exit_code=0, output_exists=True, completion_pct=100.0, connections_total=2
+        )
+        assert outcome.outcome == ROUTE_OUTCOME_COMPLETED
+        assert outcome.artifact_source == ARTIFACT_SOURCE_ROUTER_OUTPUT
+        assert outcome.reason is None
+
+    def test_completed_when_nothing_was_required(self) -> None:
+        """``connections_total == 0`` is "nothing to route", not a failure."""
+        outcome = build_route_outcome(
+            exit_code=0, output_exists=True, completion_pct=100.0, connections_total=0
+        )
+        assert outcome.outcome == ROUTE_OUTCOME_COMPLETED
+
+    def test_partial_on_exit_zero_below_full_completion(self) -> None:
+        outcome = build_route_outcome(
+            exit_code=0, output_exists=True, completion_pct=32.6, connections_total=460
+        )
+        assert outcome.outcome == ROUTE_OUTCOME_PARTIAL
+        assert outcome.artifact_source == ARTIFACT_SOURCE_ROUTER_OUTPUT
+        assert "not a failure" in (outcome.reason or "")
+
+    def test_partial_output_preserved_despite_nonzero_exit(self) -> None:
+        """Real, newly-produced partial output must never be mislabeled as
+        a clean success just because the exit was non-zero -- but it must
+        also not be discarded as a failure when it IS real progress.
+        """
+        outcome = build_route_outcome(exit_code=2, output_exists=True)
+        assert outcome.outcome == ROUTE_OUTCOME_PARTIAL
+        assert outcome.artifact_source == ARTIFACT_SOURCE_ROUTER_OUTPUT
+        assert "partial progress" in (outcome.reason or "")
+
+    def test_stopped_before_routing_on_nonzero_exit_no_output(self) -> None:
+        outcome = build_route_outcome(exit_code=1, output_exists=False)
+        assert outcome.outcome == ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING
+        assert outcome.artifact_source == ARTIFACT_SOURCE_FALLBACK_INPUT
+        assert outcome.exit_code == 1
+
+    def test_failed_on_exception_without_output(self) -> None:
+        outcome = build_route_outcome(
+            exit_code=None, output_exists=False, exception=RuntimeError("boom")
+        )
+        assert outcome.outcome == ROUTE_OUTCOME_FAILED
+        assert outcome.artifact_source == ARTIFACT_SOURCE_FALLBACK_INPUT
+        assert "boom" in (outcome.reason or "")
+
+    def test_failed_on_exception_preserves_partial_output(self) -> None:
+        outcome = build_route_outcome(
+            exit_code=None, output_exists=True, exception=RuntimeError("boom")
+        )
+        assert outcome.outcome == ROUTE_OUTCOME_FAILED
+        assert outcome.artifact_source == ARTIFACT_SOURCE_ROUTER_OUTPUT
+
+    def test_timeout_takes_priority_over_exit_code(self) -> None:
+        outcome = build_route_outcome(exit_code=None, output_exists=False, timed_out=True)
+        assert outcome.outcome == ROUTE_OUTCOME_TIMEOUT
+        assert outcome.artifact_source == ARTIFACT_SOURCE_FALLBACK_INPUT
+
+    def test_unknown_when_no_attempt_evidence(self) -> None:
+        outcome = build_route_outcome(exit_code=None, output_exists=False)
+        assert outcome.outcome == ROUTE_OUTCOME_UNKNOWN
+        assert "no route attempt was recorded" in (outcome.reason or "")
+
+    def test_unknown_when_exit_zero_contradicts_missing_output(self) -> None:
+        """Exit 0 (claimed success) with no output file is a contradiction
+        the harness cannot resolve -- unknown, never assumed successful.
+        """
+        outcome = build_route_outcome(exit_code=0, output_exists=False)
+        assert outcome.outcome == ROUTE_OUTCOME_UNKNOWN
+        assert outcome.artifact_source == ARTIFACT_SOURCE_FALLBACK_INPUT
+
+    def test_to_dict_round_trips(self) -> None:
+        outcome = RouteOutcome(
+            outcome=ROUTE_OUTCOME_COMPLETED,
+            artifact_source=ARTIFACT_SOURCE_ROUTER_OUTPUT,
+            exit_code=0,
+        )
+        assert outcome.to_dict() == {
+            "outcome": "completed",
+            "artifact_source": "router_output",
+            "exit_code": 0,
+            "reason": None,
+        }
+
+
+class TestCollectReportRouteOutcomeAndBaseline:
+    def test_no_route_evidence_leaves_outcome_none(self, routed_board: Path) -> None:
+        """A bare re-measurement (no ``route_*`` kwargs) must not fabricate
+        an outcome -- absent evidence stays absent, not success-shaped.
+        """
+        report = collect_report(
+            routed_board,
+            board_id="fixture",
+            protocol="zero-touch",
+            run_kicad_cli=False,
+            backend=_cpp_backend(),
+        )
+        assert report.route_outcome is None
+        assert report.pre_route_completion is None
+        assert report.newly_routed_connections is None
+
+    def test_route_evidence_populates_outcome(self, routed_board: Path) -> None:
+        report = collect_report(
+            routed_board,
+            board_id="fixture",
+            protocol="zero-touch",
+            run_kicad_cli=False,
+            backend=_cpp_backend(),
+            route_exit_code=0,
+            route_output_exists=True,
+        )
+        assert report.route_outcome is not None
+        assert report.route_outcome.outcome == ROUTE_OUTCOME_PARTIAL  # 2/3, not 100%
+
+    def test_pre_route_completion_and_delta(self, routed_board: Path, tmp_path: Path) -> None:
+        # A pre-route board with only SIG1 connected (1 of 3 connections):
+        # SIG2's segments/via and SIG3's arc are absent, as if this were
+        # ``routed_board`` before this attempt's routing pass ran.
+        pre_route_text = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "SIG1")
+  (net 2 "SIG2")
+  (net 3 "SIG3")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 50 0) (end 50 20) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 50 20) (end 0 20) (layer "Edge.Cuts") (width 0.05))
+  (gr_line (start 0 20) (end 0 0) (layer "Edge.Cuts") (width 0.05))
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 10 10)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "SIG2"))
+  )
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 20 10)
+    (property "Reference" "R2")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SIG1"))
+    (pad "2" thru_hole circle (at 0.5 0) (size 0.9 0.9) (drill 0.4)
+      (layers "*.Cu") (net 2 "SIG2"))
+  )
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 30 10)
+    (property "Reference" "R3")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "SIG2"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "SIG3"))
+  )
+
+  (segment (start 9.5 10) (end 19.5 10) (width 0.25) (layer "F.Cu") (net 1))
+)
+"""
+        pre_route_path = tmp_path / "pre_route.kicad_pcb"
+        pre_route_path.write_text(pre_route_text, encoding="utf-8")
+        report = collect_report(
+            routed_board,
+            board_id="fixture",
+            protocol="zero-touch",
+            run_kicad_cli=False,
+            backend=_cpp_backend(),
+            route_exit_code=0,
+            route_output_exists=True,
+            pre_route_path=pre_route_path,
+        )
+        assert report.pre_route_completion is not None
+        # Pre-route board: only SIG1's 1 connection is routed.
+        assert report.pre_route_completion.connections_routed == 1
+        assert report.completion.connections_routed == 2
+        assert report.newly_routed_connections == 1
+
+    def test_fallback_input_note_never_looks_like_success(self, routed_board: Path) -> None:
+        report = collect_report(
+            routed_board,
+            board_id="fixture",
+            protocol="zero-touch",
+            run_kicad_cli=False,
+            backend=_cpp_backend(),
+            route_exit_code=1,
+            route_output_exists=False,
+        )
+        assert report.route_outcome is not None
+        assert report.route_outcome.outcome == ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING
+        assert report.route_outcome.artifact_source == ARTIFACT_SOURCE_FALLBACK_INPUT
+
 
 # ---------------------------------------------------------------------------
 # Strict gates: kct check + the mandatory kicad-cli cross-gate
@@ -435,7 +670,10 @@ class TestBenchmarkReport:
             "board_file",
             "protocol",
             "tool_commit",
+            "route_outcome",
             "completion",
+            "pre_route_completion",
+            "newly_routed_connections",
             "copper",
             "timing",
             "backend",
@@ -568,3 +806,141 @@ class TestRenderMarkdown:
     def test_real_report_renders(self, routed_board: Path) -> None:
         text = render_markdown([_report(routed_board)])
         assert "| fixture | zero-touch | 66.7% | 2 of 3 | 1 |" in text
+
+    def test_completed_outcome_and_router_output_artifact_are_rendered(self) -> None:
+        report = _synthetic_report(
+            route_outcome=RouteOutcome(
+                outcome=ROUTE_OUTCOME_COMPLETED,
+                artifact_source=ARTIFACT_SOURCE_ROUTER_OUTPUT,
+                exit_code=0,
+            )
+        )
+        text = render_markdown([report])
+        assert "| completed | router output |" in text
+        # A completed attempt's timing is bare seconds -- no phase suffix.
+        assert "142.7 s |" in text
+
+    def test_stopped_before_routing_gets_fallback_footnote_and_timing_label(self) -> None:
+        report = _synthetic_report(
+            route_outcome=RouteOutcome(
+                outcome=ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING,
+                artifact_source=ARTIFACT_SOURCE_FALLBACK_INPUT,
+                exit_code=1,
+                reason="router exited 1 and produced no output file",
+            ),
+            timing=TimingMetrics(
+                wall_clock_s=4.4, valid=True, measured_phase=ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING
+            ),
+        )
+        text = render_markdown([report])
+        assert "| stopped before routing | fallback input |" in text
+        assert "4.4 s (stopped before routing)" in text
+        assert "**Measured artifact is fallback input, not router output**" in text
+        assert "router exited 1 and produced no output file" in text
+
+    def test_legacy_report_without_route_outcome_is_flagged_not_success(self) -> None:
+        report = _synthetic_report(route_outcome=None)
+        text = render_markdown([report])
+        assert "| unknown (legacy) | unknown |" in text
+        assert "**Legacy reports (outcome/artifact provenance not tracked)**" in text
+        assert "treat as unknown, never as success" in text
+
+
+# ---------------------------------------------------------------------------
+# Both committed legacy records (Aug 25 2026, pre-#5280) -- issue #5280's
+# explicit "historical reports remain readable and explicitly historical"
+# acceptance criterion.
+# ---------------------------------------------------------------------------
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _load_legacy_json(rel_path: str) -> dict:
+    return json.loads((_repo_root() / rel_path).read_text())
+
+
+def _reconstruct_legacy_report(data: dict) -> BenchmarkReport:
+    """Rebuild a :class:`BenchmarkReport` from a committed schema-v1 JSON dict.
+
+    Mirrors what a hypothetical "load a report back into Python" consumer
+    would have to do -- ``route_outcome`` / ``pre_route_completion`` are
+    deliberately NOT reconstructed here because the committed file predates
+    them; this is the load-bearing point of the test.
+    """
+    completion_data = {k: v for k, v in data["completion"].items() if k != "completion_pct"}
+    diff_pairs_data = data.get("diff_pairs")
+    diff_pairs = None
+    if diff_pairs_data is not None:
+        diff_pairs = DiffPairCompletion(
+            pairs_total=diff_pairs_data["pairs_total"],
+            pairs_complete=diff_pairs_data["pairs_complete"],
+            pairs=diff_pairs_data.get("pairs", []),
+        )
+    return BenchmarkReport(
+        board_id=data["board_id"],
+        protocol=data["protocol"],
+        board_commit=data.get("board_commit"),
+        board_source=data.get("board_source"),
+        board_file=data.get("board_file"),
+        tool_commit=data.get("tool_commit", "unknown"),
+        generated_at=data.get("generated_at", ""),
+        completion=CompletionMetrics(**completion_data),
+        copper=CopperMetrics(**data["copper"]),
+        timing=TimingMetrics(**data["timing"]),
+        backend=BackendInfo(**data["backend"]),
+        kct_check=KctCheckSummary(**data["kct_check"]),
+        kicad_cli_drc=KicadCliDrcSummary(**data["kicad_cli_drc"]),
+        diff_pairs=diff_pairs,
+        notes=data.get("notes", []),
+        # route_outcome / pre_route_completion intentionally omitted.
+    )
+
+
+LEGACY_REPORT_FILES = [
+    "benchmarks/external/results/pocketbeagle.zero-touch.json",
+    "benchmarks/external/results/beagleconnect_freedom.zero-touch.json",
+]
+
+
+class TestCommittedLegacyReports:
+    """Both real committed reports (2026-08-25, generated by tool commit
+    ``636fd368``) predate route-outcome/artifact-provenance tracking. Per
+    this issue's "do not rewrite historical measurements" constraint they
+    are never edited -- so the contract instead requires every consumer to
+    treat their MISSING ``route_outcome``/``pre_route_completion`` as
+    unknown, never as an implicit success.
+    """
+
+    @pytest.mark.parametrize("rel_path", LEGACY_REPORT_FILES)
+    def test_legacy_json_on_disk_predates_outcome_tracking(self, rel_path: str) -> None:
+        data = _load_legacy_json(rel_path)
+        assert data["schema_version"] == SCHEMA_VERSION
+        assert "route_outcome" not in data
+        assert "pre_route_completion" not in data
+        # Both boards actually refused to route zero-touch (see
+        # benchmarks/external/results/README.md) -- captured via a
+        # non-zero exit code note and the "no output file" note, which
+        # predates this issue's structured route_outcome field.
+        assert any("router exit code:" in n for n in data["notes"])
+        assert any("no output file" in n for n in data["notes"])
+
+    @pytest.mark.parametrize("rel_path", LEGACY_REPORT_FILES)
+    def test_legacy_report_reconstructs_and_renders_as_unknown(self, rel_path: str) -> None:
+        data = _load_legacy_json(rel_path)
+        report = _reconstruct_legacy_report(data)
+        assert report.route_outcome is None
+        assert report.pre_route_completion is None
+        assert report.newly_routed_connections is None
+
+        text = render_markdown([report])
+        assert "| unknown (legacy) | unknown |" in text
+        assert "**Legacy reports (outcome/artifact provenance not tracked)**" in text
+        # The real measured completion% must be rendered as-is -- NOT the
+        # "0% complete" claim the original (pre-#5280) note text asserted,
+        # which was itself wrong (see the issue body): both boards'
+        # completion_pct is in the 30s, not 0.
+        expected_pct = f"{data['completion']['completion_pct']:.1f}%"
+        assert expected_pct in text
+        assert "| 0.0% |" not in text

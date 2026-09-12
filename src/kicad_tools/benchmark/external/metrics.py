@@ -69,6 +69,17 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "SCHEMA_URL",
     "SCHEMA_VERSION",
+    "ARTIFACT_SOURCE_FALLBACK_INPUT",
+    "ARTIFACT_SOURCE_ROUTER_OUTPUT",
+    "ARTIFACT_SOURCE_UNKNOWN",
+    "ROUTE_OUTCOME_COMPLETED",
+    "ROUTE_OUTCOME_FAILED",
+    "ROUTE_OUTCOME_PARTIAL",
+    "ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING",
+    "ROUTE_OUTCOME_TIMEOUT",
+    "ROUTE_OUTCOME_UNKNOWN",
+    "VALID_ARTIFACT_SOURCES",
+    "VALID_ROUTE_OUTCOMES",
     "BackendInfo",
     "BenchmarkReport",
     "CompletionMetrics",
@@ -76,7 +87,9 @@ __all__ = [
     "DiffPairCompletion",
     "KctCheckSummary",
     "KicadCliDrcSummary",
+    "RouteOutcome",
     "TimingMetrics",
+    "build_route_outcome",
     "build_timing",
     "collect_report",
     "measure_completion",
@@ -89,6 +102,12 @@ __all__ = [
 
 # Bump when a field is REMOVED or its meaning changes. Purely additive
 # fields do not require a bump (same policy as ``docs/board-json-schema.md``).
+# Issue #5280 (Epic #5278 Phase 1) added ``route_outcome`` and
+# ``pre_route_completion`` -- both purely additive, so v1 stands. A report
+# that predates them (schema v1, generated before #5280 landed) simply omits
+# those keys; consumers must treat the omission as "unknown", never as
+# success -- see "Legacy reports" in
+# ``docs/benchmark-external-report-schema.md``.
 SCHEMA_VERSION = 1
 SCHEMA_URL = "https://kicad-tools.org/schemas/benchmark-external/v1.json"
 
@@ -102,6 +121,56 @@ PROTOCOL_TUNED = "tuned"
 # register: "a Python-fallback timing number is invalid and must be
 # refused by the harness").
 TIMING_VALID_BACKEND = "cpp"
+
+# ---------------------------------------------------------------------------
+# Route outcome vocabulary (issue #5280, Epic #5278 Phase 1)
+# ---------------------------------------------------------------------------
+
+# The router ran to completion and every required connection is routed.
+ROUTE_OUTCOME_COMPLETED = "completed"
+# The router ran (and produced output) but the board is not 100% routed --
+# normal for the zero-touch protocol on a hard board, NOT a failure.
+ROUTE_OUTCOME_PARTIAL = "partial"
+# The router refused/exited non-zero before writing any output for this
+# attempt. No routing progress was captured.
+ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING = "stopped_before_routing"
+# The router raised or otherwise failed in a way that is not a clean
+# pre-route refusal.
+ROUTE_OUTCOME_FAILED = "failed"
+# The attempt was abandoned because it exceeded a time budget.
+ROUTE_OUTCOME_TIMEOUT = "timeout"
+# No route-attempt evidence was supplied (a bare re-measurement via
+# ``collect_report``), or the evidence available contradicts itself (e.g.
+# exit 0 but no output file). Never collapsed into a success-shaped record.
+ROUTE_OUTCOME_UNKNOWN = "unknown"
+
+VALID_ROUTE_OUTCOMES = frozenset(
+    {
+        ROUTE_OUTCOME_COMPLETED,
+        ROUTE_OUTCOME_PARTIAL,
+        ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING,
+        ROUTE_OUTCOME_FAILED,
+        ROUTE_OUTCOME_TIMEOUT,
+        ROUTE_OUTCOME_UNKNOWN,
+    }
+)
+
+# The measured board IS what the router wrote for this attempt.
+ARTIFACT_SOURCE_ROUTER_OUTPUT = "router_output"
+# The router produced no (usable) output for this attempt; the measured
+# board is the pre-route input instead. This must never be allowed to look
+# like a routed board downstream.
+ARTIFACT_SOURCE_FALLBACK_INPUT = "fallback_input"
+# No evidence was supplied about where the measured board came from.
+ARTIFACT_SOURCE_UNKNOWN = "unknown"
+
+VALID_ARTIFACT_SOURCES = frozenset(
+    {
+        ARTIFACT_SOURCE_ROUTER_OUTPUT,
+        ARTIFACT_SOURCE_FALLBACK_INPUT,
+        ARTIFACT_SOURCE_UNKNOWN,
+    }
+)
 
 
 def _utc_now_iso() -> str:
@@ -416,6 +485,174 @@ def probe_backend() -> BackendInfo:
 
 
 @dataclass(frozen=True)
+class RouteOutcome:
+    """What actually happened on this attempt, and where the measured board came from.
+
+    This is the structured answer to Epic #5278 Phase 1's core complaint: a
+    report that only carries ``connections_routed`` + a completion % +
+    a valid-looking timing cannot be told apart from a genuinely completed
+    route. ``outcome`` (one of the ``ROUTE_OUTCOME_*`` constants) and
+    ``artifact_source`` (one of the ``ARTIFACT_SOURCE_*`` constants) are
+    reported as SEPARATE axes -- a router can exit 0 without finishing
+    (``partial`` + ``router_output``), or refuse before writing anything
+    (``stopped_before_routing`` + ``fallback_input``) -- so no downstream
+    renderer can collapse them into one success-shaped cell.
+
+    ``None`` (not this type at all) on :class:`BenchmarkReport` means no
+    route-attempt evidence was supplied to :func:`collect_report` -- e.g. a
+    bare re-measurement of an already-produced board, or (far more common in
+    practice) a report generated before this issue existed. Consumers MUST
+    treat that absence as unknown, never as an implicit success.
+    """
+
+    outcome: str
+    artifact_source: str
+    exit_code: int | None = None
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "outcome": self.outcome,
+            "artifact_source": self.artifact_source,
+            "exit_code": self.exit_code,
+            "reason": self.reason,
+        }
+
+
+def build_route_outcome(
+    *,
+    exit_code: int | None,
+    output_exists: bool,
+    completion_pct: float | None = None,
+    connections_total: int | None = None,
+    exception: BaseException | None = None,
+    timed_out: bool = False,
+) -> RouteOutcome:
+    """Classify a routing attempt from the evidence actually captured.
+
+    Only classifies what the caller can actually attest to -- an exit code,
+    whether an output file exists FOR THIS ATTEMPT (never a stale artifact
+    from a previous run; see :func:`kicad_tools.cli.commands.bench._run_one_board`'s
+    per-attempt output ownership), and whether the call raised. Nothing here
+    infers intent the caller did not supply.
+
+    Args:
+        exit_code: The router's reported exit code, or ``None`` when the
+            call raised before returning one.
+        output_exists: Whether THIS attempt wrote an output file (the
+            caller is responsible for ensuring this reflects only the
+            current attempt, not a leftover from a prior run).
+        completion_pct / connections_total: The measured completion of the
+            artifact actually being reported on, used only to distinguish
+            ``completed`` from ``partial`` when the router claims success.
+        exception: The exception the route call raised, if any.
+        timed_out: Whether the attempt was abandoned for exceeding a time
+            budget (reported as :data:`ROUTE_OUTCOME_TIMEOUT` rather than
+            :data:`ROUTE_OUTCOME_FAILED`).
+    """
+    artifact_source = (
+        ARTIFACT_SOURCE_ROUTER_OUTPUT if output_exists else ARTIFACT_SOURCE_FALLBACK_INPUT
+    )
+
+    if timed_out:
+        return RouteOutcome(
+            outcome=ROUTE_OUTCOME_TIMEOUT,
+            artifact_source=artifact_source,
+            exit_code=exit_code,
+            reason=(
+                "the routing attempt exceeded its time budget"
+                + (
+                    " -- measuring the partial output it wrote before being stopped"
+                    if output_exists
+                    else " -- no output was written before it was stopped, "
+                    "measuring the pre-route input as fallback"
+                )
+            ),
+        )
+
+    if exception is not None:
+        return RouteOutcome(
+            outcome=ROUTE_OUTCOME_FAILED,
+            artifact_source=artifact_source,
+            exit_code=exit_code,
+            reason=(
+                f"the router raised {type(exception).__name__}: {exception} -- "
+                + (
+                    "measuring the partial output it wrote before failing"
+                    if output_exists
+                    else "no output was written, measuring the pre-route input as fallback"
+                )
+            ),
+        )
+
+    if exit_code is None:
+        return RouteOutcome(
+            outcome=ROUTE_OUTCOME_UNKNOWN,
+            artifact_source=ARTIFACT_SOURCE_UNKNOWN,
+            exit_code=None,
+            reason="no route attempt was recorded for this report",
+        )
+
+    if exit_code == 0:
+        if not output_exists:
+            return RouteOutcome(
+                outcome=ROUTE_OUTCOME_UNKNOWN,
+                artifact_source=ARTIFACT_SOURCE_FALLBACK_INPUT,
+                exit_code=exit_code,
+                reason=(
+                    "the router reported success (exit 0) but produced no output "
+                    "file for this attempt -- this contradiction cannot be "
+                    "resolved from available evidence, so the outcome is unknown "
+                    "rather than assumed successful; measuring the pre-route "
+                    "input as fallback"
+                ),
+            )
+        is_complete = connections_total == 0 or (
+            completion_pct is not None and completion_pct >= 100.0 - 1e-9
+        )
+        if is_complete:
+            return RouteOutcome(
+                outcome=ROUTE_OUTCOME_COMPLETED,
+                artifact_source=artifact_source,
+                exit_code=exit_code,
+                reason=None,
+            )
+        return RouteOutcome(
+            outcome=ROUTE_OUTCOME_PARTIAL,
+            artifact_source=artifact_source,
+            exit_code=exit_code,
+            reason=(
+                "the router exited 0 but the measured board is not at 100% "
+                "connection completion -- a normal zero-touch/tuned outcome on "
+                "a hard board, not a failure"
+            ),
+        )
+
+    # Non-zero exit, no exception, no timeout.
+    if output_exists:
+        return RouteOutcome(
+            outcome=ROUTE_OUTCOME_PARTIAL,
+            artifact_source=artifact_source,
+            exit_code=exit_code,
+            reason=(
+                f"the router exited {exit_code} (non-zero) but wrote an output "
+                "file for this attempt -- measuring the partial progress it "
+                "made, not treating this as success"
+            ),
+        )
+    return RouteOutcome(
+        outcome=ROUTE_OUTCOME_STOPPED_BEFORE_ROUTING,
+        artifact_source=artifact_source,
+        exit_code=exit_code,
+        reason=(
+            f"the router exited {exit_code} (non-zero) and produced no output "
+            "file for this attempt -- no routing progress was captured; "
+            "measuring the pre-route input as fallback"
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class TimingMetrics:
     """Wall-clock runtime of the routing pass, or an explicit refusal.
 
@@ -423,11 +660,21 @@ class TimingMetrics:
     deliberate: dropping the number rather than shipping it with a caveat
     flag makes it impossible for a downstream renderer to accidentally
     publish a Python-fallback timing (Epic #4932's stated risk).
+
+    ``measured_phase`` (issue #5280) labels what the elapsed time actually
+    measures -- one of the ``ROUTE_OUTCOME_*`` constants, or ``"unknown"``
+    when no route-attempt evidence was supplied. A valid, backend-eligible
+    timing on a ``stopped_before_routing`` or ``failed`` attempt is real
+    elapsed time, but it is time-to-refusal, NOT a completed-routing
+    performance number -- native backend availability alone does not make
+    it one, so every renderer must show this label whenever the phase is
+    not ``completed``.
     """
 
     wall_clock_s: float | None
     valid: bool
     refusal_reason: str | None = None
+    measured_phase: str = ROUTE_OUTCOME_UNKNOWN
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -436,21 +683,34 @@ class TimingMetrics:
             ),
             "valid": self.valid,
             "refusal_reason": self.refusal_reason,
+            "measured_phase": self.measured_phase,
         }
 
 
-def build_timing(wall_clock_s: float | None, backend: BackendInfo) -> TimingMetrics:
+def build_timing(
+    wall_clock_s: float | None,
+    backend: BackendInfo,
+    *,
+    route_outcome: RouteOutcome | None = None,
+) -> TimingMetrics:
     """Accept or refuse a measured wall-clock time given the live backend.
 
     A timing is published only when the C++ router extension was active.
     Anything else -- Python fallback, a probe that could not run, or no
     measurement at all -- yields ``valid=False`` and no number.
+
+    ``route_outcome``, when supplied, labels ``measured_phase`` so a
+    published number can never be read as a completed-routing performance
+    figure when the attempt was actually stopped before routing, partial,
+    or failed (#5280).
     """
+    phase = route_outcome.outcome if route_outcome is not None else ROUTE_OUTCOME_UNKNOWN
     if wall_clock_s is None:
         return TimingMetrics(
             wall_clock_s=None,
             valid=False,
             refusal_reason="no routing pass was timed for this report",
+            measured_phase=phase,
         )
     if not backend.timing_valid:
         detail = backend.unavailable_reason or f"active backend is {backend.backend!r}"
@@ -462,8 +722,11 @@ def build_timing(wall_clock_s: float | None, backend: BackendInfo) -> TimingMetr
                 f"({detail}). A Python-fallback runtime is 10-100x off and is "
                 "not comparable to a published vendor number."
             ),
+            measured_phase=phase,
         )
-    return TimingMetrics(wall_clock_s=float(wall_clock_s), valid=True, refusal_reason=None)
+    return TimingMetrics(
+        wall_clock_s=float(wall_clock_s), valid=True, refusal_reason=None, measured_phase=phase
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -702,6 +965,19 @@ class BenchmarkReport:
         kct_check / kicad_cli_drc: the two DRC engines. Both are required
             slots; a report with only one is not evidence of a clean board.
         diff_pairs: ``None`` when the board defines no pairs.
+        route_outcome: what happened on this attempt and where the measured
+            artifact came from (:class:`RouteOutcome`). ``None`` when no
+            route-attempt evidence was supplied to :func:`collect_report` --
+            including every report generated before issue #5280 landed.
+            Consumers MUST treat ``None`` as unknown, never as success.
+        pre_route_completion: :class:`CompletionMetrics` measured on the
+            pre-route (post rip-up, pre-routing) input, when the caller
+            supplied it. This is the baseline the router started from --
+            comparing it against ``completion`` (measured on the final
+            artifact) separates newly-routed progress from connectivity
+            that was already present (or trivially satisfied) before this
+            attempt ran. ``None`` when not measured -- never fabricated as
+            zero.
         notes: free-form annotations (e.g. "PocketBeagle: 3 nets left
             unrouted, see #NNNN"), rendered under the markdown table.
     """
@@ -720,7 +996,21 @@ class BenchmarkReport:
     tool_commit: str = field(default_factory=_tool_commit)
     generated_at: str = field(default_factory=_utc_now_iso)
     diff_pairs: DiffPairCompletion | None = None
+    route_outcome: RouteOutcome | None = None
+    pre_route_completion: CompletionMetrics | None = None
     notes: list[str] = field(default_factory=list)
+
+    @property
+    def newly_routed_connections(self) -> int | None:
+        """``completion`` minus ``pre_route_completion``, or ``None`` when unmeasured.
+
+        Never assumes a zero baseline: the delta is only meaningful (and
+        only ever computed) when ``pre_route_completion`` was actually
+        measured.
+        """
+        if self.pre_route_completion is None:
+            return None
+        return self.completion.connections_routed - self.pre_route_completion.connections_routed
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the stable schema-v1 JSON contract."""
@@ -734,7 +1024,12 @@ class BenchmarkReport:
             "board_file": self.board_file,
             "protocol": self.protocol,
             "tool_commit": self.tool_commit,
+            "route_outcome": (self.route_outcome.to_dict() if self.route_outcome else None),
             "completion": self.completion.to_dict(),
+            "pre_route_completion": (
+                self.pre_route_completion.to_dict() if self.pre_route_completion else None
+            ),
+            "newly_routed_connections": self.newly_routed_connections,
             "copper": self.copper.to_dict(),
             "timing": self.timing.to_dict(),
             "backend": self.backend.to_dict(),
@@ -774,11 +1069,19 @@ def collect_report(
     kicad_cli_timeout: int = 300,
     notes: Iterable[str] | None = None,
     backend: BackendInfo | None = None,
+    route_exit_code: int | None = None,
+    route_output_exists: bool | None = None,
+    route_exception: BaseException | None = None,
+    route_timed_out: bool = False,
+    pre_route_path: str | Path | None = None,
 ) -> BenchmarkReport:
     """Measure a routed benchmark board and assemble the full report.
 
     Args:
-        pcb_path: The ROUTED ``.kicad_pcb`` to measure.
+        pcb_path: The MEASURED ``.kicad_pcb`` -- router output when the
+            attempt produced any, otherwise the caller's fallback input
+            (never inferred here; the caller picks the path and reports
+            which it was via ``route_output_exists``).
         board_id: Manifest slug for the board.
         protocol: ``"zero-touch"`` / ``"tuned"`` (see Epic #4932).
         board_commit: Pinned upstream commit of the board source.
@@ -797,6 +1100,22 @@ def collect_report(
         notes: free-form annotations for the rendered table.
         backend: pre-probed backend info (the harness probes once BEFORE
             routing); probed here when omitted.
+        route_exit_code: The router's exit code for this attempt, or
+            ``None`` when ``route_exception`` (or no attempt at all) is why
+            there isn't one.
+        route_output_exists: Whether THIS attempt's own output file exists
+            (never a stale artifact from a previous run -- see
+            :func:`kicad_tools.cli.commands.bench._run_one_board`'s
+            per-attempt output ownership). Required (with the other
+            ``route_*`` args) to populate :attr:`BenchmarkReport.route_outcome`;
+            omitting all of them leaves it ``None`` (unknown provenance).
+        route_exception: The exception the route call raised, if any.
+        route_timed_out: Whether the attempt was abandoned for exceeding a
+            time budget.
+        pre_route_path: The pre-route (post rip-up) input board, used to
+            populate :attr:`BenchmarkReport.pre_route_completion` -- the
+            baseline this attempt started from. ``None`` when not supplied
+            (never fabricated as zero).
     """
     path = Path(pcb_path)
     resolved_backend = backend if backend is not None else probe_backend()
@@ -809,15 +1128,41 @@ def collect_report(
             note="kicad-cli cross-gate skipped by caller (run_kicad_cli=False)",
         )
 
+    completion = measure_completion(path, strict=strict)
+
+    route_attempted = (
+        route_exit_code is not None
+        or route_output_exists is not None
+        or route_exception is not None
+    )
+    route_outcome = (
+        build_route_outcome(
+            exit_code=route_exit_code,
+            output_exists=bool(route_output_exists),
+            completion_pct=completion.completion_pct,
+            connections_total=completion.connections_total,
+            exception=route_exception,
+            timed_out=route_timed_out,
+        )
+        if route_attempted
+        else None
+    )
+
+    pre_route_completion = (
+        measure_completion(pre_route_path, strict=strict) if pre_route_path is not None else None
+    )
+
     return BenchmarkReport(
         board_id=board_id,
         protocol=protocol,
         board_commit=board_commit,
         board_source=board_source,
         board_file=path.name,
-        completion=measure_completion(path, strict=strict),
+        route_outcome=route_outcome,
+        completion=completion,
+        pre_route_completion=pre_route_completion,
         copper=measure_copper(path),
-        timing=build_timing(wall_clock_s, resolved_backend),
+        timing=build_timing(wall_clock_s, resolved_backend, route_outcome=route_outcome),
         backend=resolved_backend,
         kct_check=run_kct_check(path, manufacturer=manufacturer, layers=layers),
         kicad_cli_drc=cli_drc,

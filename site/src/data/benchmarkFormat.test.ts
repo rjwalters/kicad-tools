@@ -8,6 +8,10 @@ import {
   fmtKctCheck,
   fmtCliDrc,
   fmtDiffPairs,
+  fmtOutcome,
+  fmtArtifactSource,
+  isLegacyOutcome,
+  isFallbackArtifact,
 } from "./benchmarkFormat.ts";
 import type { BenchmarkReport } from "./benchmarkTypes.ts";
 
@@ -82,5 +86,64 @@ describe("benchmarkFormat", () => {
       diff_pairs: { pairs_total: 4, pairs_complete: 0, completion_pct: 0 },
     };
     expect(fmtDiffPairs(withPairs)).toBe("0/4");
+  });
+
+  it("formats missing route_outcome as legacy, never success (#5280)", () => {
+    expect(fmtOutcome(base)).toBe("unknown (legacy)");
+    expect(fmtArtifactSource(base)).toBe("unknown");
+    expect(isLegacyOutcome(base)).toBe(true);
+    expect(isFallbackArtifact(base)).toBe(false);
+  });
+
+  it("formats a completed outcome and router_output artifact", () => {
+    const completed: BenchmarkReport = {
+      ...base,
+      route_outcome: {
+        outcome: "completed",
+        artifact_source: "router_output",
+        exit_code: 0,
+        reason: null,
+      },
+    };
+    expect(fmtOutcome(completed)).toBe("completed");
+    expect(fmtArtifactSource(completed)).toBe("router output");
+    expect(isLegacyOutcome(completed)).toBe(false);
+    expect(isFallbackArtifact(completed)).toBe(false);
+  });
+
+  it("formats stopped_before_routing / fallback_input and flags them", () => {
+    const stopped: BenchmarkReport = {
+      ...base,
+      route_outcome: {
+        outcome: "stopped_before_routing",
+        artifact_source: "fallback_input",
+        exit_code: 1,
+        reason: "router exited 1 and produced no output file",
+      },
+    };
+    expect(fmtOutcome(stopped)).toBe("stopped before routing");
+    expect(fmtArtifactSource(stopped)).toBe("fallback input");
+    expect(isFallbackArtifact(stopped)).toBe(true);
+  });
+
+  it("labels a valid timing by its non-completed phase, never bare seconds", () => {
+    const stoppedTiming: BenchmarkReport = {
+      ...base,
+      timing: { wall_clock_s: 4.4, valid: true, refusal_reason: null, measured_phase: "failed" },
+    };
+    expect(fmtTiming(stoppedTiming)).toBe("4.4 s (failed)");
+  });
+
+  it("renders a completed/unknown phase as bare seconds", () => {
+    const completedTiming: BenchmarkReport = {
+      ...base,
+      timing: {
+        wall_clock_s: 4.4,
+        valid: true,
+        refusal_reason: null,
+        measured_phase: "completed",
+      },
+    };
+    expect(fmtTiming(completedTiming)).toBe("4.4 s");
   });
 });

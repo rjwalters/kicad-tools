@@ -113,6 +113,42 @@ describe("loadBenchmarks", () => {
       "strf:zero-touch",
     ]);
   });
+
+  it("loads a legacy report (no route_outcome key) without error (#5280)", () => {
+    // `validReport()` deliberately omits route_outcome/pre_route_completion
+    // -- mirrors the two real committed 2026-08-25 reports, which predate
+    // issue #5280's additive fields.
+    writeReport("pocketbeagle.zero-touch.json", validReport("pocketbeagle"));
+    const reports = loadBenchmarks(root);
+    expect(reports).toHaveLength(1);
+    expect(reports[0].route_outcome).toBeUndefined();
+    expect(reports[0].pre_route_completion).toBeUndefined();
+  });
+
+  it("preserves route_outcome/pre_route_completion when a report has them", () => {
+    writeReport(
+      "fixture.zero-touch.json",
+      validReport("fixture", {
+        route_outcome: {
+          outcome: "stopped_before_routing",
+          artifact_source: "fallback_input",
+          exit_code: 1,
+          reason: "router exited 1 and produced no output file",
+        },
+        pre_route_completion: {
+          connections_routed: 10,
+          connections_total: 20,
+          completion_pct: 50.0,
+        },
+        newly_routed_connections: 0,
+      }),
+    );
+    const reports = loadBenchmarks(root);
+    expect(reports).toHaveLength(1);
+    expect(reports[0].route_outcome?.outcome).toBe("stopped_before_routing");
+    expect(reports[0].route_outcome?.artifact_source).toBe("fallback_input");
+    expect(reports[0].newly_routed_connections).toBe(0);
+  });
 });
 
 describe("loadBenchmarkFile", () => {
