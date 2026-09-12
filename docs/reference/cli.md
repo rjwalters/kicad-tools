@@ -833,6 +833,33 @@ reinforcement eligibility (issue #4980):
 }
 ```
 
+##### Pulsed and duty-cycled branches
+
+A branch that carries a repetitive pulse (switching ripple, capacitor
+inrush, a strobed LED) can declare `pulsed_a` with an optional `duty_cycle`
+and `pulse_duration_s`:
+
+```json
+{"name": "VOUT_INRUSH", "net": "/VOUT_PRE",
+ "source": {"ref": "L1", "pad": "2"}, "sink": {"ref": "RSH1", "pad": "1"},
+ "continuous_a": 3.0, "pulsed_a": 18.0, "duty_cycle": 0.08,
+ "pulse_duration_s": 0.002, "reinforcement_eligible": true}
+```
+
+Two independent checks follow, because a pulse can destroy copper two ways:
+
+| Field | What it buys |
+|-------|--------------|
+| `pulsed_a` alone | The peak is sized **as if continuous** (conservative). An `info` finding says so, so a pessimistic width requirement is never mistaken for a duty-cycle-aware one. |
+| `+ duty_cycle` | The IPC-2221 width check runs at the waveform's **RMS** current (`sqrt(D*peak² + (1-D)*continuous²)`) — the correct equivalent for I² heating. 18 A at 8 % duty over 3 A heats like 5.85 A, not 18 A and not its 4.2 A average. |
+| `+ pulse_duration_s` | Each segment is additionally checked against its **Onderdonk adiabatic fusing current**. A trace comfortable on RMS heating can still be melted by one inrush pulse; that is an `error`. Without this field the fusing mode is reported as explicitly **unchecked** (a `warning`), never silently passed. |
+
+Declaring `duty_cycle` or `pulse_duration_s` without `pulsed_a`, or a
+`pulsed_a` below `continuous_a`, is rejected when the sidecar loads — a
+half-declared waveform reads like modeled intent while leaving the checker
+to guess. Omitting all three leaves a purely continuous declaration whose
+results are unchanged.
+
 | Option | Description |
 |--------|-------------|
 | `--current-paths PATH` | Declared branch current-path sidecar. Auto-discovered next to the board as `<board-stem>.current_paths.json` or `current_paths.json` (board dir, then `output/`, then `../output/`) when omitted. |
@@ -860,6 +887,18 @@ declared net that no path covers is reported as uncovered rather than waived.
 Endpoints bind by the pad's real copper extent, not by an exact pad-center
 hit, so a trace terminating anywhere inside the pad attaches (and several
 stubs landing on one pad are shorted by it, as they are in reality).
+
+A same-net routed **arc** or a non-keepout same-net **zone/pour** is real
+copper the declared-path graph never builds from `Segment` tracks alone —
+either can form a parallel return path around a declared branch (a plane is
+the archetypal case), so a declared path on such a net resolves `ambiguous`
+too, naming the unmodeled copper in the reason (endpoint-resolution failures
+still take precedence and stay `unresolved`). `kct pcb current-paths-audit`
+surfaces the same inventory as an `unmodeled` block (kind, layer,
+representative location per object) in both JSON and text output, and
+`path_ampacity` emits a `warning` per object found — separate from the
+`ambiguous` status's own `error`. Keepout rule areas carry no copper and are
+excluded.
 
 A bounded endpoint via array is recognized only when parallel straight stubs
 land on the actual pad, real outer-layer barrels join one straight receiving

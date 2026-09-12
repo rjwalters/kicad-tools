@@ -19,7 +19,8 @@ pinned ``PYTHONHASHSEED=42``.
 These tests independently re-route a board's committed UNROUTED PCB twice with the
 production route flags and assert the UUID-normalized routed COPPER (the
 ``(segment ...)`` / ``(via ...)`` / ``(arc ...)`` set) is byte-identical.
-Board 02 also replays the first run's cache and compares its final copper.
+Board 02 also replays the first run's cache and compares its final copper
+(cold/warm cache equivalence, #5261/#5274).
 
 * ``board 02`` routes in ~20-30 s, so its test runs UNCONDITIONALLY (PR
   CI included) -- it is the fast regression backstop.
@@ -38,6 +39,7 @@ guards against, not encoded as a hard assertion.
 
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 import sys
@@ -45,6 +47,8 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
+
+from kicad_tools.sexp import parse_string
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -104,14 +108,39 @@ _BOARD_CONFIG: dict[str, _BoardRoute] = {
 }
 
 
+@pytest.mark.parametrize("recipe", ["generate_design.py", "route_demo.py"])
+def test_board02_determinism_flags_match_production_recipe(recipe: str) -> None:
+    """Exercise the shipped all-net recipe, not an obsolete auto-grid route."""
+    source = REPO_ROOT / _BOARD_CONFIG["02"].directory / recipe
+    tree = ast.parse(source.read_text())
+    commands = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "cmd" for target in node.targets)
+        and isinstance(node.value, ast.List)
+        and any(
+            isinstance(item, ast.Constant) and item.value == "kicad_tools.cli.route_cmd"
+            for item in node.value.elts
+        )
+    ]
+    assert len(commands) == 1, f"Expected one production routing command in {recipe}"
+    elements = commands[0].elts
+    start = next(
+        index
+        for index, item in enumerate(elements)
+        if isinstance(item, ast.Constant) and item.value == "--strategy"
+    )
+    production_flags = [ast.literal_eval(item) for item in elements[start:]]
+    assert _BOARD_CONFIG["02"].flags == production_flags
+
+
 def _normalize_copper(pcb_text: str) -> list[str]:
     """Compare complete copper records, ignoring only UUID/tstamp and order.
 
     Native/routed files use multiline records. Matching their opening lines
     alone counts segments/vias but discards the geometry the witness must test.
     """
-    from kicad_tools.sexp import parse_string
-
     wrapper = parse_string("(normalization " + pcb_text + ")")
     root = wrapper.find_child("kicad_pcb") or wrapper
     records = []
@@ -214,8 +243,33 @@ def test_normalize_copper_strips_uuid_and_sorts() -> None:
     norm_b = _normalize_copper(pcb_b)
     # Non-copper line dropped, UUIDs stripped, sort makes order irrelevant.
     assert norm_a == norm_b
+    assert len(norm_a) == 2
     assert all("uuid" not in record for record in norm_a)
     assert not any("gr_line" in line for line in norm_a)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("(end 3 4)", "(end 3 5)"),
+        ("(width 0.2)", "(width 0.3)"),
+        ('(layer "F.Cu")', '(layer "B.Cu")'),
+        ("(net 1)", "(net 2)"),
+    ],
+)
+def test_normalize_copper_detects_multiline_changes(before: str, after: str) -> None:
+    copper = '(segment\n (start 1 2)\n (end 3 4)\n (width 0.2)\n (layer "F.Cu")\n (net 1))'
+    pcb = "(kicad_pcb\n" + copper + ")"
+    assert _normalize_copper(pcb) != _normalize_copper(pcb.replace(before, after))
+
+
+def test_normalize_copper_layout_ids_and_multiplicity() -> None:
+    copper = '(arc (start 1 2) (mid 2 3) (end 3 4) (width 0.2) (layer "F.Cu") (net 1))'
+    plain = _normalize_copper("(kicad_pcb " + copper + ")")
+    multiline = copper.replace(" (", "\n (")[:-1] + ' (uuid "new") (tstamp old))'
+    assert plain == _normalize_copper("(kicad_pcb " + multiline + ")")
+    assert plain != _normalize_copper("(kicad_pcb " + copper + copper + ")")
+    assert not _normalize_copper("(kicad_pcb (footprint " + copper + "))")
 
 
 @pytest.mark.timeout(600)

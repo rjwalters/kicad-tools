@@ -2927,6 +2927,12 @@ class PCB:
         Returns:
             Tuple (width, height) in mm.  Returns (0.0, 0.0) if no
             Edge.Cuts geometry is found.
+
+        Raises:
+            ValueError: If the Edge.Cuts geometry present is malformed or
+                unsupported -- this asks for bounds directly, so it keeps
+                the shared reader's fail-loud contract (issue #5274) rather
+                than :meth:`_detect_board_origin`'s load-time tolerance.
         """
         bounds = board_outline_bounds(self._sexp)
         if bounds is None:

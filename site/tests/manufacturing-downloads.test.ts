@@ -44,6 +44,7 @@ beforeAll(() => {
   fixtureSite = join(root, "site");
   boards = join(root, "boards");
   mkdirSync(fixtureSite);
+  cpSync(join(site, "..", "pyproject.toml"), join(root, "pyproject.toml"));
   for (const entry of ["src", "scripts", "astro.config.mjs", "package.json", "tsconfig.json"]) {
     cpSync(join(site, entry), join(fixtureSite, entry), { recursive: true });
   }
@@ -107,5 +108,21 @@ describe("source and fabrication download presence", () => {
       expect(html("both")).not.toContain(`href="/boards/both/manufacturing/${file}"`);
       expect(existsSync(join(fixtureSite, "dist/boards/both/manufacturing", file))).toBe(false);
     }
+  }, 120_000);
+});
+
+
+describe("local-only gallery fixture", () => {
+  it("publishes identical pages with softstart absent or present", () => {
+    const indexBefore = readFileSync(join(fixtureSite, "dist/index.html"), "utf8");
+    const output = join(boards, "external/softstart/output");
+    mkdirSync(join(output, "manufacturing"), { recursive: true });
+    writeFileSync(join(output, "board.json"), JSON.stringify({schema_version: 1, slug: "softstart", status: "ok"}));
+    writeFileSync(join(output, "manufacturing/kicad_project.zip"), "local design");
+    build();
+    const normalizeBuildTime = (html: string) => html.replace(/\d{4}-\d{2}-\d{2}[T ][\d:.]+(?:Z| UTC)/g, "BUILD_TIME");
+    expect(normalizeBuildTime(readFileSync(join(fixtureSite, "dist/index.html"), "utf8"))).toBe(normalizeBuildTime(indexBefore));
+    expect(existsSync(join(fixtureSite, "dist/softstart"))).toBe(false);
+    expect(existsSync(join(fixtureSite, "public/boards/softstart"))).toBe(false);
   }, 120_000);
 });

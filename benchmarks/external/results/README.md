@@ -55,6 +55,22 @@ Per this issue's explicit convention, these are filed as **generic
 router-capability issues**, not board-specific patches — the pinned board
 files are not modified or special-cased anywhere in this repo.
 
+### Legacy status (issue #5280)
+
+Both committed JSON files here predate issue #5280 (Epic #5278 Phase 1),
+which added structured `route_outcome` / `pre_route_completion` /
+`newly_routed_connections` / `timing.measured_phase` fields to the schema.
+These two files are **not** rewritten to backfill them — per this project's
+convention, historical measurements are never edited to look like they came
+from current code. Both files' own `notes` list still carries the
+now-superseded (and, as the section above spells out, factually wrong)
+claim "... (0% complete)"; that phrasing was fixed going forward in
+`kct bench external`'s own note text, but is left as-is here. Any consumer
+(the CLI markdown renderer, the kicad-tools.org loader, or your own script)
+must treat the missing `route_outcome` as **unknown**, never as an implicit
+success — see "Legacy reports" in
+`docs/benchmark-external-report-schema.md`.
+
 ## License notes (Phase 1 convention)
 
 Both boards' licenses are recorded in `benchmarks/external/boards.toml`

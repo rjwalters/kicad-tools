@@ -20,6 +20,7 @@ import { loadBoards, boardsDir, discoverBoardDirs } from "../data/loadBoards.ts"
 import { displayStatus, displayStatusLabel } from "../data/boardStatus.ts";
 import type { Board } from "../data/types.ts";
 import RenderGallery from "../components/RenderGallery.astro";
+import ReadinessProgress from "../components/ReadinessProgress.astro";
 import SiteHeader from "../components/Header.astro";
 import SiteFooter from "../components/Footer.astro";
 
@@ -198,7 +199,7 @@ if (board.manifest_generated_at !== undefined) {
   </head>
   <body>
     <SiteHeader />
-    <main>
+    <main id="main-content" tabindex="-1">
       <p class="back-top">
         <a href="/">← Back to gallery</a>
       </p>
@@ -218,17 +219,16 @@ if (board.manifest_generated_at !== undefined) {
         {board.readiness?.mode === "pcb_only" && <p>Scope: bare PCB fabrication. Component procurement and assembly are not included.</p>}
         {board.readiness?.mode === "assembly" && <p>Scope: PCB fabrication and assembly files.</p>}
         {board.readiness?.blockers.length ? <ul>{board.readiness.blockers.map(reason => <li>{reason}</li>)}</ul> : null}
-        {board.readiness?.checks?.length ? <ul>{board.readiness.checks.map(check => <li><strong>{check.name}: {check.status.replace("_", " ")}</strong>{check.detail ? ` — ${check.detail}` : ""}</li>)}</ul> : null}
+        <ReadinessProgress board={board} />
         {statusVariant !== "ready" && <p>Downloads are design artifacts and are not verified for ordering.</p>}
       </section>
 
       {
         !isBuilt && (
           <p class="not-built">
-            This board has not been built yet — no renders, metrics, or
-            manufacturing package are available. Run <code>uv run kct
-            board-metrics --all</code> (and the render / manufacture steps) to
-            populate its data.
+            Complete design artifacts are not published here. Any verified
+            development checks are listed above; they do not establish a
+            manufacturing package or tested hardware.
           </p>
         )
       }
@@ -464,42 +464,7 @@ if (board.manifest_generated_at !== undefined) {
   </body>
 </html>
 
-<style is:global>
-  :root {
-    color-scheme: dark;
-    --bg: #0a0e12;
-    --text: #e6edf3;
-    --muted: #9aa7b2;
-    --accent: #3fae7a;
-    --border: #25303a;
-    --card-bg: #11171d;
-    --badge-bg: #1b2530;
-  }
 
-  * {
-    box-sizing: border-box;
-  }
-
-  html,
-  body {
-    margin: 0;
-    padding: 0;
-  }
-
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family:
-      system-ui,
-      -apple-system,
-      "Segoe UI",
-      Roboto,
-      Helvetica,
-      Arial,
-      sans-serif;
-    line-height: 1.5;
-  }
-</style>
 
 <style>
   main {
@@ -574,6 +539,8 @@ if (board.manifest_generated_at !== undefined) {
     color: #1a1300;
   }
 
+  .chip-development,
+  .chip-blocked,
   .chip-no_artifacts {
     background: rgba(120, 134, 148, 0.85);
     color: #0c1116;

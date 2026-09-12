@@ -427,7 +427,7 @@ cmd_check() {
         local lbody lfirst lparsed lhost lsweep lyielded="0"
         lbody="$(jq -r '.body // empty' <<< "$lease_line" 2> /dev/null || true)"
         [[ -z "$lbody" ]] && continue
-        lfirst="$(printf '%s\n' "$lbody" | head -n1)"
+        lfirst="${lbody%%$'\n'*}"
         lparsed="$(parse_lease_marker_line "$lfirst" || true)"
         if [[ -n "$lparsed" && -n "$yield_first_lines" ]]; then
             lhost="${lparsed%%$'\t'*}"
@@ -468,7 +468,7 @@ cmd_check() {
         echo "PASS: freshest lease comment on issue #${issue} is missing updated_at/body -- no evidence to fence against; proceeding with push/PR-open" >&2
         exit 0
     fi
-    first_line="$(printf '%s\n' "$body" | head -n1)"
+    first_line="${body%%$'\n'*}"
 
     local parsed lease_host lease_sweep
     if ! parsed="$(parse_lease_marker_line "$first_line")"; then

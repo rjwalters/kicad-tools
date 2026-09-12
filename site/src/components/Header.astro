@@ -5,16 +5,19 @@
  * Rendered at the top of every page (index + each board detail) by importing
  * this component into `index.astro` and `[slug].astro`. Carries a "View on
  * GitHub" link back to the project repo. Styling reuses the global CSS custom
- * properties (`--accent`, `--border`, `--muted`) declared on `:root` by each
- * page's `<style is:global>` block, so it inherits the dark theme.
+ * properties (`--accent`, `--border`, `--muted`) declared in the shared global stylesheet, so it inherits the dark theme.
  */
+import "../styles/global.css";
+const path = Astro.url.pathname.replace(/\/$/, "") || "/";
 const REPO = "https://github.com/rjwalters/kicad-tools";
 ---
 
+<a class="skip-link" href="#main-content">Skip to main content</a>
 <header class="site-header">
-  <a class="site-title" href="/">kicad-tools</a>
-  <nav class="site-nav">
-    <a class="nav-link" href="/benchmarks">Benchmarks</a>
+  <a class="site-title" href="/" aria-current={path === "/" ? "page" : undefined}>kicad-tools</a>
+  <nav class="site-nav" aria-label="Main navigation">
+    <a class="nav-link" href={`${REPO}/blob/main/README.md`}>Documentation</a>
+    <a class="nav-link" href="/benchmarks" aria-current={path === "/benchmarks" ? "page" : undefined}>Benchmarks</a>
     <a
       class="repo-link"
       href={REPO}
@@ -66,6 +69,13 @@ const REPO = "https://github.com/rjwalters/kicad-tools";
   .site-title:hover,
   .site-title:focus-visible {
     text-decoration: underline;
-    outline: none;
+
+  }
+  .skip-link { position: absolute; top: 0.5rem; left: 1rem; z-index: 100; padding: 0.75rem 1rem; background: var(--text); color: var(--bg); transform: translateY(-200%); }
+  .skip-link:focus { transform: translateY(0); }
+  [aria-current="page"] { text-decoration: underline; text-underline-offset: 0.3em; }
+  @media (max-width: 600px) {
+    .site-header { flex-direction: column; align-items: flex-start; gap: 0.65rem; }
+    .site-nav { flex-wrap: wrap; gap: 0.75rem 1rem; }
   }
 </style>

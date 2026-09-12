@@ -885,15 +885,7 @@ class TestPipelineCmdExitCodeHandling:
 
 
 class TestPartialOutputLabeling:
-    """Bug #4 regression: ``route`` must clarify the _partial vs -o relationship.
-
-    On partial routing ``route`` writes the canonical ``-o`` target (full route
-    + optimize + DRC) AND a separate ``<stem>_partial.kicad_pcb`` raw snapshot
-    built from the unrouted source (pre-optimize, pre-DRC). Previously nothing
-    distinguished them, so the less-processed ``_partial`` file could be mistaken
-    for authoritative. The output must name the canonical file and label
-    ``_partial`` as a raw pre-optimize snapshot.
-    """
+    """Partial snapshots use current routes and remain distinct from canonical output."""
 
     def _make_fake_router(self):
         router = MagicMock()
@@ -936,7 +928,8 @@ class TestPartialOutputLabeling:
         out = capsys.readouterr().out
         # _partial is explicitly labeled as a non-canonical raw snapshot.
         assert "partial snapshot saved to" in out.lower()
-        assert "pre-optimize" in out.lower()
+        assert "current routing state" in out.lower()
+        assert "pre-optimize" not in out.lower()
         assert "not canonical" in out.lower()
         # The canonical output is named so it is unambiguous.
         assert str(output_path) in out
@@ -970,3 +963,56 @@ class TestPartialOutputLabeling:
         assert not partial_path.exists()
         out = capsys.readouterr().out
         assert "not canonical" not in out.lower()
+
+
+@pytest.mark.parametrize("after_optimization", [False, True])
+def test_partial_snapshot_saves_current_geometry_without_claiming_a_stage(
+    tmp_path, capsys, monkeypatch, after_optimization
+):
+    """The same save path can run before or after a geometry-changing postpass."""
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.optimizer import TraceOptimizer
+    from kicad_tools.router.primitives import Route, Segment
+    from kicad_tools.sexp import parse_string
+
+    router = Autorouter(width=10, height=10, force_python=True)
+    route = Route(
+        net=1,
+        net_name="SIGNAL",
+        segments=[
+            Segment(1, 1, 2, 1, 0.2, Layer.F_CU, net=1),
+            Segment(2, 1, 3, 1, 0.2, Layer.F_CU, net=1),
+        ],
+    )
+    router.routes.append(route)
+    pcb_path = _make_minimal_pcb(tmp_path)
+    source_bytes = pcb_path.read_bytes()
+    output_path = tmp_path / "routed.kicad_pcb"
+    output_path.write_bytes(source_bytes)
+    monkeypatch.setattr(
+        route_cmd,
+        "_interrupt_state",
+        {
+            "router": router,
+            "output_path": output_path,
+            "pcb_path": pcb_path,
+            "quiet": False,
+            "best_completed_attempt": False,
+        },
+    )
+    if after_optimization:
+        router.routes[:] = [TraceOptimizer().optimize_route(route)]
+        assert len(router.routes[0].segments) == 1
+    assert route_cmd._save_partial_results()
+    partial = output_path.with_stem(output_path.stem + "_partial")
+    segments = parse_string(partial.read_text()).find_all("segment")
+    assert len(segments) == (1 if after_optimization else 2)
+    assert pcb_path.read_bytes() == source_bytes
+    assert output_path.read_bytes() == source_bytes
+    message = capsys.readouterr().out.lower()
+    assert "current routing state" in message
+    assert "not canonical" in message
+    assert "pre-optimize" not in message
+    assert "pre-drc" not in message

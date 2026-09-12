@@ -71,7 +71,11 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # changes the routes themselves), and the pre-post-pass grid canonicalization
 # changed which copper a warm replay emits.  Entries written by any 2.4.x
 # implementation must be invalidated rather than silently reused.
-CACHE_VERSION = "2.5.0"
+# Also folds in main's independent "2.4.3-outline-domain" bump: authoritative
+# Edge.Cuts bounds/origin change the routing domain for identical PCB bytes.
+# Bumped strictly above both parents so neither isolated implementation's
+# cache entries are silently reused.
+CACHE_VERSION = "2.5.1-outline-domain"
 
 
 def get_default_cache_path() -> Path:

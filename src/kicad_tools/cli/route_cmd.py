@@ -2081,17 +2081,17 @@ def _save_partial_results() -> bool:
 
             if not quiet:
                 stats = router.get_statistics()
-                # The _partial file is a raw router snapshot (routes inserted
-                # into the *unrouted* source) written BEFORE optimize/cleanup
-                # and DRC. It is therefore less-processed than the canonical
-                # -o output and should not be treated as authoritative. Only
-                # the adaptive best-completed case writes to output_path itself.
+                # This snapshot inserts the current router copper into the
+                # source board. Interrupts can save it at any stage; clean
+                # partial exits save after optimization/tuning. It is not a
+                # frozen pre-optimization artifact or the canonical export.
+                # Only adaptive best-completed attempts write output_path.
                 if save_path == output_path:
                     print(f"\n  Partial results saved to: {save_path}")
                 else:
                     print(
                         f"\n  Raw partial snapshot saved to: {save_path} "
-                        f"(pre-optimize, pre-DRC; NOT canonical)"
+                        f"(current routing state; NOT canonical)"
                     )
                     print(f"  Canonical output remains: {output_path}")
                 print(f"    Nets routed: {stats['nets_routed']}")
@@ -17342,8 +17342,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         if partial_saved and not quiet:
             # Make the authoritative file unambiguous: the -o target (written
             # by the routing pipeline with optimize + DRC applied) is canonical;
-            # the _partial file is a raw pre-optimize snapshot (see
-            # _save_partial_results). Emit exactly one canonical-output line.
+            # the _partial file serializes current in-memory copper into the
+            # source board (see _save_partial_results), not a frozen pre-pass
+            # snapshot. Emit exactly one canonical-output line.
             print(f"  Canonical output: {output_path} (full route + optimize + DRC)")
             print("  Open in KiCad to complete remaining nets manually")
 

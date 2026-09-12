@@ -629,7 +629,7 @@ class Router:
 
                 accessible = False
                 for li in check_layers:
-                    cell = self.grid.grid[li][gy][gx]
+                    cell = self.grid.cell_at(li, gy, gx)
                     # Inside pad metal — always accessible
                     if mgx1 <= gx <= mgx2 and mgy1 <= gy <= mgy2:
                         accessible = True
@@ -751,7 +751,7 @@ class Router:
                 cx, cy = gx + dx * step, gy + dy * step
                 if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
                     break
-                if self._cell_is_foreign_blocker(self.grid.grid[layer][cy][cx], pad.net):
+                if self._cell_is_foreign_blocker(self.grid.cell_at(layer, cy, cx), pad.net):
                     counts[d] += 1
 
         body_dir = max(counts, key=counts.get)
@@ -802,7 +802,7 @@ class Router:
 
             usable = False
             for layer in layers:
-                cell = self.grid.grid[layer][cy][cx]
+                cell = self.grid.cell_at(layer, cy, cx)
                 if self._cell_is_foreign_blocker(cell, net):
                     continue
                 # Skip routed cells from other nets (not obstacles, but
@@ -1823,7 +1823,7 @@ class Router:
             if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
                 return True  # Out of bounds = blocked
 
-            cell = self.grid.grid[layer][cy][cx]
+            cell = self.grid.cell_at(layer, cy, cx)
 
             if cell.blocked:
                 if allow_sharing and not cell.is_obstacle:
@@ -2997,13 +2997,13 @@ class Router:
         """Check if a cell is part of a zone (copper pour)."""
         if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
             return False
-        return self.grid.grid[layer][gy][gx].is_zone
+        return self.grid.cell_at(layer, gy, gx).is_zone
 
     def _get_zone_net(self, gx: int, gy: int, layer: int) -> int:
         """Get the net number of a zone cell, or 0 if not a zone."""
         if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
             return 0
-        cell = self.grid.grid[layer][gy][gx]
+        cell = self.grid.cell_at(layer, gy, gx)
         if cell.is_zone:
             return cell.net
         return 0
@@ -3739,7 +3739,7 @@ class Router:
                 # Check blocked cells carefully
                 # Allow routing through blocked cells that belong to OUR net
                 # This enables THT pads to be entered/exited on any layer
-                cell = self.grid.grid[nlayer][ny][nx]
+                cell = self.grid.cell_at(nlayer, ny, nx)
                 if cell.blocked:
                     # Issue #1764: Pad reachability - if the neighbor cell falls
                     # within either pad's metal area, allow entry regardless of blocked/net
@@ -4181,7 +4181,7 @@ class Router:
                 ):
                     cx, cy = gx + check_dx, gy + check_dy
                     if 0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows:
-                        cell = self.grid.grid[layer][cy][cx]
+                        cell = self.grid.cell_at(layer, cy, cx)
                         if (
                             cell.blocked
                             and cell.net != source_net
@@ -5348,7 +5348,7 @@ class Router:
             )
 
             # Check blocking
-            cell = self.grid.grid[nlayer][ny][nx]
+            cell = self.grid.cell_at(nlayer, ny, nx)
             if cell.blocked:
                 if cell.net == source_pad.net:
                     pass  # Same net - passable

@@ -1132,6 +1132,31 @@ class RoutingGrid:
         """
         self._occupancy_generation += 1
 
+    def cell_at(self, layer: int, y: int, x: int) -> _CellView:
+        """Return a single ``_CellView`` for ``(layer, y, x)`` directly.
+
+        Equivalent to ``self.grid[layer][y][x]`` but allocates ONE object
+        instead of three: the legacy ``grid[layer][y][x]`` chain walks
+        ``_GridView.__getitem__`` -> new ``_LayerView`` ->
+        ``_LayerView.__getitem__`` -> new ``_RowView`` ->
+        ``_RowView.__getitem__`` -> new ``_CellView``, so every access pays
+        for two throwaway intermediate objects that are never used for
+        anything but reaching the next ``__getitem__``.
+
+        Issue #5240: profiling the pure-Python A* fallback's hot
+        neighbor-expansion loop (``Pathfinder._route_impl`` and its
+        per-neighbor helpers, e.g. ``_is_diagonal_corner_blocked``) showed
+        millions of ``_LayerView``/``_RowView``/``_CellView`` allocations
+        for a single small re-route -- the same class of temporary-object
+        overhead already removed from the sampled placement force
+        calculation (#5253) and the A* neighbor batch-cost helpers
+        (#5269). This accessor is a drop-in replacement at call sites that
+        already spell out all three indices at once (``self.grid.grid[layer][y][x]``);
+        it returns the identical ``_CellView`` type with identical
+        properties, so callers see no behavioral change.
+        """
+        return _CellView(self, x, y, layer)
+
     def _ensure_static_blockage_snapshot(self) -> None:
         """Capture the static blocked bitmap before the first route mark.
 
@@ -1467,7 +1492,7 @@ class RoutingGrid:
             for gy in range(gy1, gy2 + 1):
                 for gx in range(gx1, gx2 + 1):
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
-                        self.grid[layer_idx][gy][gx].blocked = True
+                        self.cell_at(layer_idx, gy, gx).blocked = True
 
     def _clearance_for_pin_pitch(
         self,
@@ -1890,7 +1915,7 @@ class RoutingGrid:
             for gy in range(gy1, gy2 + 1):
                 for gx in range(gx1, gx2 + 1):
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
-                        cell = self.grid[layer_idx][gy][gx]
+                        cell = self.cell_at(layer_idx, gy, gx)
                         cell.blocked = True
                         cell.original_net = pad.net
 
@@ -2038,7 +2063,7 @@ class RoutingGrid:
 
             # Always mark the center cell with this pad's net
             if 0 <= center_gx < self.cols and 0 <= center_gy < self.rows:
-                center_cell = self.grid[layer_idx][center_gy][center_gx]
+                center_cell = self.cell_at(layer_idx, center_gy, center_gx)
                 center_cell.net = pad.net
                 center_cell.original_net = pad.net
 
@@ -2856,7 +2881,7 @@ class RoutingGrid:
                 for gy in range(gy1, gy2 + 1):
                     for gx in range(gx1, gx2 + 1):
                         if 0 <= gx < self.cols and 0 <= gy < self.rows:
-                            self.grid[layer_idx][gy][gx].blocked = True
+                            self.cell_at(layer_idx, gy, gx).blocked = True
 
     def mark_region_bound(
         self,
@@ -2921,7 +2946,7 @@ class RoutingGrid:
                     for gx in range(self.cols):
                         if inside_y and gx1 <= gx <= gx2:
                             continue  # inside the region -- leave untouched
-                        cell = self.grid[layer_idx][gy][gx]
+                        cell = self.cell_at(layer_idx, gy, gx)
                         if cell.blocked:
                             # Already an obstacle (pad halo / existing copper /
                             # board edge).  Nothing to add, and mirroring is
@@ -2980,7 +3005,7 @@ class RoutingGrid:
 
             gx, gy = self.world_to_grid(x, y)
             layer_idx = self.layer_to_index(layer.value)
-            cell = self.grid[layer_idx][gy][gx]
+            cell = self.cell_at(layer_idx, gy, gx)
             # Keep the cell blocked (it is real stub copper) but own it for the
             # stub's net so the pathfinder treats it as an own-net -- reachable --
             # cell while foreign nets still see a hard obstacle.
@@ -3010,7 +3035,7 @@ class RoutingGrid:
         if not (0 <= gx < self.cols and 0 <= gy < self.rows):
             return True
         layer_idx = self.layer_to_index(layer.value)
-        cell = self.grid[layer_idx][gy][gx]
+        cell = self.cell_at(layer_idx, gy, gx)
         if cell.blocked:
             return cell.net == 0 or cell.net != net
         return False
@@ -3029,7 +3054,7 @@ class RoutingGrid:
             return True
         if not (0 <= layer < self.num_layers):
             return True
-        cell = self.grid[layer][gy][gx]
+        cell = self.cell_at(layer, gy, gx)
         if cell.blocked:
             return cell.net == 0 or cell.net != net
         return False
@@ -4457,7 +4482,7 @@ class RoutingGrid:
                                 and rkey not in self._soft_reservations
                             ):
                                 continue
-                        cell = self.grid[layer_idx][ny][nx]
+                        cell = self.cell_at(layer_idx, ny, nx)
                         if not cell.blocked:
                             # First time blocking - this is a route cell
                             marked_cells.add((nx, ny))
@@ -4566,7 +4591,7 @@ class RoutingGrid:
                                 and rkey not in self._soft_reservations
                             ):
                                 continue
-                        cell = self.grid[layer_idx][ny][nx]
+                        cell = self.cell_at(layer_idx, ny, nx)
                         if not cell.blocked:
                             self._update_congestion(nx, ny, layer_idx)
                             cell.net = via.net
@@ -4876,7 +4901,7 @@ class RoutingGrid:
                 for dx in range(-clearance_cells, clearance_cells + 1):
                     nx, ny = gx + dx, gy + dy
                     if 0 <= nx < self.cols and 0 <= ny < self.rows:
-                        cell = self.grid[layer_idx][ny][nx]
+                        cell = self.cell_at(layer_idx, ny, nx)
                         if cell.pad_blocked:
                             # Don't unblock pad cells, just restore original net
                             cell.net = cell.original_net
@@ -4944,7 +4969,7 @@ class RoutingGrid:
                 for dx in range(-radius, radius + 1):
                     nx, ny = gx + dx, gy + dy
                     if 0 <= nx < self.cols and 0 <= ny < self.rows:
-                        cell = self.grid[layer_idx][ny][nx]
+                        cell = self.cell_at(layer_idx, ny, nx)
                         if cell.pad_blocked:
                             # Don't unblock pad cells, just restore original net
                             cell.net = cell.original_net
@@ -5440,7 +5465,7 @@ class RoutingGrid:
 
             for gx, gy, layer_idx in cells_used:
                 if 0 <= gx < self.cols and 0 <= gy < self.rows:
-                    self.grid[layer_idx][gy][gx].usage_count += 1
+                    self.cell_at(layer_idx, gy, gx).usage_count += 1
 
             if net_cells is not None:
                 if route.net not in net_cells:
@@ -5470,7 +5495,7 @@ class RoutingGrid:
 
             for gx, gy, layer_idx in cells_used:
                 if 0 <= gx < self.cols and 0 <= gy < self.rows:
-                    cell = self.grid[layer_idx][gy][gx]
+                    cell = self.cell_at(layer_idx, gy, gx)
                     cell.usage_count = max(0, cell.usage_count - 1)
 
             if net_cells is not None and route.net in net_cells:
@@ -5725,6 +5750,15 @@ class RoutingGrid:
         if not (0 <= gx < self.cols and 0 <= gy < self.rows):
             return float("inf")
 
+        # Issue #5240: intentionally NOT ``self.cell_at(...)`` here (unlike
+        # the other call sites in this file) -- ``get_negotiated_cost`` is
+        # exercised by tests that construct a ``RoutingGrid`` via
+        # ``__new__`` (bypassing ``__init__``) and hand-assign a plain
+        # nested-list stand-in to ``self.grid``, never populating the
+        # ``_blocked``/``_is_obstacle``/... NumPy arrays ``cell_at``
+        # reads directly off ``self``.  The legacy ``self.grid[...]``
+        # chain works against that stand-in because it walks whatever
+        # object ``self.grid`` actually is; ``cell_at`` does not.
         cell = self.grid[layer][gy][gx]
 
         # Issue #2963: own-net obstacle cells (e.g. the destination
@@ -6041,7 +6075,7 @@ class RoutingGrid:
         with self._acquire_lock():
             for gx, gy in filled_cells:
                 if 0 <= gx < self.cols and 0 <= gy < self.rows:
-                    cell = self.grid[layer_index][gy][gx]
+                    cell = self.cell_at(layer_index, gy, gx)
                     cell.is_zone = True
                     cell.zone_id = zone.uuid
                     cell.net = zone.net_number
@@ -6295,7 +6329,7 @@ class RoutingGrid:
                         if dx * dx + dy * dy <= clearance_cells * clearance_cells:
                             blocked_cells.add((nx, ny))
                             for layer_idx in layer_indices:
-                                cell = self.grid[layer_idx][ny][nx]
+                                cell = self.cell_at(layer_idx, ny, nx)
                                 if not cell.blocked:
                                     cell.blocked = True
                                     cell.is_obstacle = True
