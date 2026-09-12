@@ -596,8 +596,6 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
 
 def _relocate_pad_drills(pcb_path: Path) -> int:
     """Clear partial pad/drill overlaps before repairing plane connectivity."""
-    from dataclasses import replace
-
     from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias
     from kicad_tools.manufacturers import get_profile
     from kicad_tools.schema.pcb import PCB
@@ -605,19 +603,8 @@ def _relocate_pad_drills(pcb_path: Path) -> int:
 
     pcb = PCB.load(pcb_path)
     rules = get_profile("jlcpcb").get_design_rules(layers=4)
-    # KiCad's default hole-to-copper floor is 0.25 mm, independently of
-    # the manufacturer's copper-to-copper floor. Preserve project overrides.
-    project_path = pcb_path.with_suffix(".kicad_pro")
-    project = json.loads(project_path.read_text()) if project_path.exists() else {}
-    native_rules = project.get("board", {}).get("design_settings", {}).get("rules", {})
-    hole_clearance = native_rules.get("min_hole_clearance", 0.25)
-    # The relocation helper accepts one copper floor. Use the strictest
-    # equivalent annulus clearance among these vias so every drill clears
-    # foreign copper, including on layers without an attached signal stub.
-    effective_clearance = max(
-        [rules.min_clearance_mm] + [hole_clearance - (via.size - via.drill) / 2 for via in pcb.vias]
-    )
-    rules = replace(rules, min_clearance_mm=effective_clearance)
+    # The shared relocation API enforces the source project drill floor
+    # independently of manufacturer copper clearance.
     result = relocate_in_pad_vias(pcb, rules)
     extended = _extend_blocked_power_stubs(pcb, rules, result)
     remaining = ViaInPadRule().check(pcb, rules).violations
@@ -637,10 +624,7 @@ def _extend_blocked_power_stubs(pcb, rules, result) -> int:
     entire new stub against foreign copper before accepting the extension.
     """
 
-    from shapely.geometry import LineString, Point, box
-
     from kicad_tools.cli import relocate_in_pad_vias as relocation
-    from kicad_tools.validate.rules.via_pad_geometry import pad_absolute_bbox
 
     fixed = 0
     pads = relocation._collect_smd_pads_by_net(pcb)
@@ -693,22 +677,9 @@ def _extend_blocked_power_stubs(pcb, rules, result) -> int:
             for x, limit in zip(target, pcb.board_size, strict=True)
         ):
             continue
-        copper = LineString([via.position, target]).buffer(segment.width / 2)
-        obstacles = [
-            box(*pad_absolute_bbox(p, f))
-            for f in pcb.footprints
-            for p in f.pads
-            if p.net_number != via.net_number and (segment.layer in p.layers or "*.Cu" in p.layers)
-        ]
-        obstacles.extend(
-            LineString([s.start, s.end]).buffer(s.width / 2)
-            for s in pcb.segments
-            if s.net_number != via.net_number and s.layer == segment.layer
-        )
-        obstacles.extend(
-            Point(v.position).buffer(v.size / 2) for v in pcb.vias if v.net_number != via.net_number
-        )
-        if any(copper.distance(shape) < rules.min_clearance_mm - 1e-6 for shape in obstacles):
+        if relocation._check_stub_clearance(
+            pcb, via, target, [segment.layer], segment.width, rules.min_clearance_mm
+        ):
             continue
         old = via.position
         if not pcb.relocate_via(via, target):
