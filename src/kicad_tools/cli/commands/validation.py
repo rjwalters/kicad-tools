@@ -11,6 +11,7 @@ __all__ = [
     "run_fix_footprints_command",
     "run_fix_vias_command",
     "run_fix_silkscreen_command",
+    "run_place_silk_refs_command",
     "run_repair_clearance_command",
     "run_fix_drc_command",
     "run_constraints_command",
@@ -117,6 +118,43 @@ def run_fix_silkscreen_command(args) -> int:
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
     return fix_silkscreen_main(sub_argv)
+
+
+def run_place_silk_refs_command(args) -> int:
+    """Handle place-silk-refs command."""
+    from ..place_silk_refs_cmd import main as place_silk_refs_main
+
+    sub_argv = [args.pcb]
+    if getattr(args, "mfr", None):
+        sub_argv.extend(["--mfr", args.mfr])
+    if getattr(args, "layers", 2) != 2:
+        sub_argv.extend(["--layers", str(args.layers)])
+    if getattr(args, "copper", 1.0) != 1.0:
+        sub_argv.extend(["--copper", str(args.copper)])
+    if getattr(args, "clearance", None) is not None:
+        sub_argv.extend(["--clearance", str(args.clearance)])
+    if getattr(args, "edge_clearance", None) is not None:
+        sub_argv.extend(["--edge-clearance", str(args.edge_clearance)])
+    if getattr(args, "max_offset", None) is not None:
+        sub_argv.extend(["--max-offset", str(args.max_offset)])
+    if getattr(args, "step", None) is not None:
+        sub_argv.extend(["--step", str(args.step)])
+    if getattr(args, "allow_rotate", False):
+        sub_argv.append("--allow-rotate")
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    if getattr(args, "verify_drc", False):
+        sub_argv.append("--verify-drc")
+    if getattr(args, "render", None):
+        sub_argv.extend(["--render", args.render])
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return place_silk_refs_main(sub_argv)
 
 
 def run_repair_clearance_command(args) -> int:

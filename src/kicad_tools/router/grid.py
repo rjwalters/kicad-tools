@@ -77,7 +77,7 @@ from .geometry import (
     segments_intersect as _geom_segments_intersect,
 )
 from .layers import Layer, LayerStack
-from .primitives import Obstacle, Pad, Route, Segment, Via
+from .primitives import Obstacle, Pad, Route, Segment, Via, pad_half_extents
 from .rules import DesignRules
 
 # Issue #2908: Plane-net name patterns for same-component validator carve-out.
@@ -264,6 +264,7 @@ def _sync_pad_to_cpp_grid(
             clearance_override,
             is_plane_net,
             pad.rotation,
+            pad.shape == "circle",
         )
     except (AttributeError, TypeError):
         # Older C++ binding without is_plane_net argument; ignore -- the
@@ -1774,8 +1775,8 @@ class RoutingGrid:
 
         if pad.through_hole:
             if pad.width > 0 and pad.height > 0:
-                effective_width = pad.width
-                effective_height = pad.height
+                half_w, half_h = pad_half_extents(pad)
+                effective_width, effective_height = 2 * half_w, 2 * half_h
             elif pad.drill > 0:
                 effective_width = pad.drill + 0.7
                 effective_height = effective_width
@@ -1783,8 +1784,8 @@ class RoutingGrid:
                 effective_width = 1.7
                 effective_height = 1.7
         else:
-            effective_width = pad.width
-            effective_height = pad.height
+            half_w, half_h = pad_half_extents(pad)
+            effective_width, effective_height = 2 * half_w, 2 * half_h
 
         x1 = pad.x - effective_width / 2 - clearance
         y1 = pad.y - effective_height / 2 - clearance
@@ -3147,7 +3148,7 @@ class RoutingGrid:
                 )
             )
 
-            is_circular_pad = pad.rotation == 0.0 and abs(pad.width - pad.height) < 0.001
+            is_circular_pad = pad.shape == "circle"
             if is_circular_pad:
                 pad_radius = max(pad.width, pad.height) / 2
                 dist = self._point_to_segment_distance(pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2)
@@ -3247,7 +3248,7 @@ class RoutingGrid:
                 )
             )
 
-            is_circular_pad = pad.rotation == 0.0 and abs(pad.width - pad.height) < 0.001
+            is_circular_pad = pad.shape == "circle"
             if is_circular_pad:
                 pad_radius = max(pad.width, pad.height) / 2
                 dist = math.hypot(via.x - pad.x, via.y - pad.y)
@@ -3539,11 +3540,11 @@ class RoutingGrid:
             # a 0.7375 mm-radius disc, 0.587 mm of phantom inflation above /
             # below the pad metal) and under-detected at long-axis corners
             # (the disc's rounded corner clips inside the rectangle's sharp
-            # corner). Vias and square pads (w == h within 1 micron) keep
-            # the disc model -- it is exact for circular obstacles and
-            # cheaper to evaluate. This mirrors PR #2787's fix at
+            # corner). Only explicitly circular pads use the disc model;
+            # square rectangles retain their copper corners (#5229).
+            # This mirrors PR #2787's distance calculation at
             # ``validate/rules/clearance.py::_segment_circle_clearance``.
-            is_circular_pad = pad.rotation == 0.0 and abs(pad.width - pad.height) < 0.001
+            is_circular_pad = pad.shape == "circle"
             if is_circular_pad:
                 pad_radius = max(pad.width, pad.height) / 2
                 dist = self._point_to_segment_distance(pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2)
@@ -6344,8 +6345,8 @@ class RoutingGrid:
     def add_pad_vectorized(self, pad: Pad) -> None:
         """Add a pad using vectorized NumPy operations for better performance.
 
-        This method uses pre-computed circular masks and array slicing
-        instead of per-cell loops, providing ~5x speedup for pad addition.
+        Compatibility entry point using the canonical shape-aware insertion
+        path, including native synchronization and geometric backstops.
 
         Thread-safe when thread_safe=True.
 
@@ -6356,99 +6357,12 @@ class RoutingGrid:
             self._add_pad_vectorized_unsafe(pad)
 
     def _add_pad_vectorized_unsafe(self, pad: Pad) -> None:
-        """Internal vectorized pad addition without locking."""
-        # Clearance model: trace clearance + trace half-width from pad edge.
-        # The pathfinder checks if the trace CENTER can be placed at a cell,
-        # so we must block cells where the trace edge would violate clearance.
-        clearance = self.rules.trace_clearance + self.rules.trace_width / 2
+        """Use the canonical insertion path, including geometry and native sync.
 
-        # Determine effective dimensions
-        if pad.through_hole:
-            if pad.width > 0 and pad.height > 0:
-                effective_width = pad.width
-                effective_height = pad.height
-            elif pad.drill > 0:
-                effective_width = pad.drill + 0.7
-                effective_height = effective_width
-            else:
-                effective_width = 1.7
-                effective_height = 1.7
-        else:
-            effective_width = pad.width
-            effective_height = pad.height
-
-        # Calculate affected region in grid coordinates
-        half_w = effective_width / 2 + clearance
-        half_h = effective_height / 2 + clearance
-
-        x1, y1 = pad.x - half_w, pad.y - half_h
-        x2, y2 = pad.x + half_w, pad.y + half_h
-
-        gx1, gy1 = self.world_to_grid(x1, y1)
-        gx2, gy2 = self.world_to_grid(x2, y2)
-
-        # Clamp to grid bounds
-        gx1 = max(0, gx1)
-        gy1 = max(0, gy1)
-        gx2 = min(self.cols - 1, gx2)
-        gy2 = min(self.rows - 1, gy2)
-
-        # Determine affected layers
-        if pad.through_hole:
-            layers = list(range(self.num_layers))
-        else:
-            layers = [self.layer_to_index(pad.layer.value)]
-
-        # Calculate pad metal area bounds (without clearance)
-        # Issue #996: Use ceil/floor to ensure we only mark cells whose CENTER
-        # is inside the metal area, not cells that are merely nearby.
-        # round() would include cells whose center is outside the metal area.
-        metal_half_w = effective_width / 2
-        metal_half_h = effective_height / 2
-        metal_x1, metal_y1 = pad.x - metal_half_w, pad.y - metal_half_h
-        metal_x2, metal_y2 = pad.x + metal_half_w, pad.y + metal_half_h
-        metal_gx1 = int(math.ceil((metal_x1 - self.origin_x) / self.resolution))
-        metal_gy1 = int(math.ceil((metal_y1 - self.origin_y) / self.resolution))
-        metal_gx2 = int(math.floor((metal_x2 - self.origin_x) / self.resolution))
-        metal_gy2 = int(math.floor((metal_y2 - self.origin_y) / self.resolution))
-
-        # Get center coordinates
-        center_gx, center_gy = self.world_to_grid(pad.x, pad.y)
-
-        # Vectorized update for each layer
-        for layer_idx in layers:
-            # Block the entire clearance zone
-            self._blocked[layer_idx, gy1 : gy2 + 1, gx1 : gx2 + 1] = True
-            self._original_net[layer_idx, gy1 : gy2 + 1, gx1 : gx2 + 1] = pad.net
-
-            # Issue #996: Only mark metal area as pad-blocked, not clearance zone.
-            # This allows the router to distinguish actual pad copper from clearance.
-            # Set net for metal area
-            metal_gy1_clamped = max(0, metal_gy1)
-            metal_gy2_clamped = min(self.rows - 1, metal_gy2)
-            metal_gx1_clamped = max(0, metal_gx1)
-            metal_gx2_clamped = min(self.cols - 1, metal_gx2)
-
-            # Only set net where it's currently 0 (avoid overwriting other pads)
-            metal_slice = (
-                layer_idx,
-                slice(metal_gy1_clamped, metal_gy2_clamped + 1),
-                slice(metal_gx1_clamped, metal_gx2_clamped + 1),
-            )
-            net_slice = self._net[metal_slice]
-            self._net[metal_slice] = np.where(net_slice == 0, pad.net, net_slice)
-
-            # Issue #996: Mark only metal area as pad-blocked (not clearance zone)
-            self._pad_blocked[metal_slice] = True
-
-            # Mark center cell with this pad's net
-            if 0 <= center_gx < self.cols and 0 <= center_gy < self.rows:
-                self._net[layer_idx, center_gy, center_gx] = pad.net
-                self._original_net[layer_idx, center_gy, center_gx] = pad.net
-
-            # Issue #4794: one bump per layer covers the three writes above
-            # (``_blocked`` halo, ``_net`` metal, ``_net`` centre cell).
-            self.bump_occupancy_generation()
+        A separate raster-only implementation omitted the acceptance backstop's
+        pad registry. Keep both public entry points subject to the same policy.
+        """
+        self._add_pad_unsafe(pad)
 
     def get_grid_statistics(self) -> dict:
         """Get statistics about grid usage and memory.
