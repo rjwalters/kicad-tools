@@ -251,3 +251,35 @@ def test_staging_cleanup_failure_happens_before_publication(board, monkeypatch):
     with pytest.raises(OSError, match="staging cleanup failed"):
         repair.relocate_in_pad_vias_with_refill(board, _rules(), kicad_cli=Path("fake"))
     assert _bytes(board) == original
+
+
+def test_symlink_uses_adjacent_project_floor_and_preserves_link(board, monkeypatch):
+    alias_dir = board.parent / "project-context"
+    alias_dir.mkdir()
+    alias = alias_dir / "linked.kicad_pcb"
+    alias.symlink_to(board)
+    project = alias.with_suffix(".kicad_pro")
+    project.write_text(
+        json.dumps(
+            {
+                "board": {"design_settings": {"rules": {"min_hole_clearance": 0.3}}},
+            }
+        )
+    )
+    strict_project = project.read_bytes()
+    original = board.read_bytes()
+    observed = []
+
+    def native(path, executable):
+        assert path.with_suffix(".kicad_pro").read_bytes() == strict_project
+        observed.append(path)
+        return _empty()
+
+    monkeypatch.setattr(repair, "_native_refill", native)
+    result = repair.relocate_in_pad_vias_with_refill(alias, _rules(), kicad_cli=Path("fake"))
+    assert len(result.relocation.moved) == 1 and len(observed) == 2
+    assert alias.is_symlink() and alias.resolve() == board
+    assert board.read_bytes() != original
+    assert project.read_bytes() == strict_project
+    # The 0.27 mm preferred drill gap is insufficient in the alias's project.
+    assert PCB.load(board).vias[0].position != pytest.approx((10.7016, 10.0))
