@@ -2269,12 +2269,19 @@ def validate_routes(
         pitch = _pitches.get(ref)
         if rules.get_clearance_for_component(ref, pitch) < clearance:
             return True
-        # Fine-pitch leg: boards routed with ``fine_pitch_clearance``
-        # unset (the default) get no per-component relaxation signal,
-        # but sub-clearance proximity on a fine-pitch footprint is
-        # still forced by the component geometry -- inherent, not a
-        # repairable routing defect.  Mirrors
-        # ``RoutingGrid._same_component_carveout_active``.
+        # Issue #5004: a pitch-only leg used to classify ANY fine-pitch
+        # component's foreign-net pad violation as "inherent" (component
+        # geometry forces it, filtered from the ``drc_verify_and_nudge``
+        # repair pass and reported only informationally) even when
+        # ``fine_pitch_clearance`` was unset (the default) and no
+        # relaxation was actually configured for the component.  That
+        # under-reported real, repairable sub-clearance defects -- the
+        # router's own violation counts then disagreed with native KiCad
+        # DRC.  Pitch alone no longer classifies a violation as inherent;
+        # ``rules.legacy_fine_pitch_carveout`` restores the old pitch-only
+        # leg.  Mirrors ``RoutingGrid._same_component_carveout_active``.
+        if not getattr(rules, "legacy_fine_pitch_carveout", False):
+            return False
         threshold = getattr(rules, "fine_pitch_threshold", None)
         return pitch is not None and threshold is not None and pitch < threshold
 

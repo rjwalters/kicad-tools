@@ -31,11 +31,18 @@ def _relocate_escapes(pcb):
         (148.1, 95.5): (148.4, 95.5),  # NODE_D
         (157.1, 105.9): (156.7, 105.9),  # NODE_D
     }
-    # Linux seed-42 routing chooses adjacent escape grid cells at R5. Both
-    # observed variants need the same reviewed destinations. Net qualification
+    # Linux seed-42 routing chooses adjacent escape grid cells. The
+    # observed variants need reviewed destinations. Net qualification
     # prevents an unrelated endpoint at the same coordinate from moving.
     net_names = {net.get_int(0): net.get_string(1) for net in pcb.find_children("net")}
     net_qualified_moves = {
+        # Exact seed-42 variants exposed by the repaired edge parser (#5257).
+        ("GND", (155.1, 117.5)): (156.8, 117.5),
+        ("VCC", (139.7, 117.3)): (139.2, 115.5),
+        # Directed Steiner searches produce these seed-42 escapes.
+        ("NODE_A", (148.0, 84.9)): (148.0, 84.5),
+        ("NODE_D", (157.9, 106.0)): (158.3, 106.0),
+        ("GND", (155.2, 117.4)): (156.5, 117.4),
         ("VCC", (140.665, 117.3)): (139.2, 115.5),
         ("VCC", (140.665, 117.2)): (139.2, 115.5),
         ("RESET", (141.1, 118.1)): (140.9, 118.5),
