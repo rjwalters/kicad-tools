@@ -1923,6 +1923,35 @@ class Autorouter:
         if hasattr(self.router, "update_layer_fill_ratios"):
             self.router.update_layer_fill_ratios()
 
+    def restore_route_snapshot(
+        self, routes: list[Route], *, replaced_routes: list[Route] | None = None
+    ) -> None:
+        """Replace managed copper while retaining fixed input-board copper.
+
+        Best-iteration rollback and cache replay must update the same grids,
+        indexes and pathfinder caches. Negotiated usage is restored separately
+        by the caller, since ordinary routing does not populate those counts.
+        Negotiated rollback supplies the routes it owns so independently
+        registered grid obstacles survive. Cache replay replaces the complete
+        managed snapshot, including discarded grid routes absent from self.routes.
+        """
+        restored = list(routes)
+        fixed_ids = {id(route) for route in self.existing_routes}
+        replaced = list(self.grid.routes) if replaced_routes is None else list(replaced_routes)
+        self.grid.resync_route_occupancy(
+            [(route, None) for route in replaced if id(route) not in fixed_ids]
+            + [(None, route) for route in restored]
+        )
+        self.routes[:] = restored
+        if hasattr(self.router, "clear_routed_segments") and hasattr(
+            self.router, "add_routed_segments"
+        ):
+            self.router.clear_routed_segments()
+            for route in self.grid.routes:
+                self.router.add_routed_segments(route.segments)
+        if hasattr(self.router, "update_layer_fill_ratios"):
+            self.router.update_layer_fill_ratios()
+
     @property
     def physics_available(self) -> bool:
         """Check if physics calculations are available."""
@@ -12364,6 +12393,7 @@ class Autorouter:
                     f"overflow={final_metrics.overflow})"
                 )
                 self._restore_negotiated_route_snapshot(best_routes)
+
                 # Update net_routes to best state
                 net_routes.clear()
                 net_routes.update(best_net_routes)
@@ -12623,21 +12653,12 @@ class Autorouter:
         return list(self.routes)
 
     def _restore_negotiated_route_snapshot(self, restored_routes: list[Route]) -> None:
-        """Restore committed geometry as well as congestion after a best-state rollback."""
+        """Restore all route state and negotiated usage after a best-state rollback."""
         stale_routes = list(self.routes)
         for route in stale_routes:
             self.grid.unmark_route_usage(route)
-        self.routes.clear()
-        self.routes.extend(restored_routes)
-        # Usage counters alone do not restore obstacle cells, spatial indexes,
-        # or the native validator's route snapshot. Post-route optimization
-        # must query the restored copper, not the discarded iteration's tree.
-        replacements: list[tuple[Route | None, Route | None]] = [
-            (route, None) for route in stale_routes
-        ]
-        replacements.extend((None, route) for route in restored_routes)
-        self.grid.resync_route_occupancy(replacements)
-        for route in restored_routes:
+        self.restore_route_snapshot(restored_routes, replaced_routes=stale_routes)
+        for route in self.routes:
             self.grid.mark_route_usage(route)
 
     def _flush_corridor_reservation(self, net_routes: dict[int, list[Route]]) -> None:

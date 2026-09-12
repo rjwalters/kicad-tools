@@ -28,6 +28,7 @@ from unittest.mock import patch
 import pytest
 
 from kicad_tools.router.core import Autorouter, IterationMetrics
+from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment
 
 # =============================================================================
@@ -278,13 +279,40 @@ class TestOverflowRegressionRollback:
         reported overflow climbs but the routed-net count stays equal.
         """
         ar = trivial_autorouter
+        fixed = Route(
+            net=99, net_name="FIXED", segments=[Segment(2, 1, 18, 1, 0.2, Layer.F_CU, net=99)]
+        )
+        ar.existing_routes.append(fixed)
+        ar.grid.mark_route(fixed)
+        restore_snapshot = ar.restore_route_snapshot
+
+        def check_restored_occupancy(winner, *, replaced_routes=None):
+            discarded_ids = {id(route) for route in ar.routes}
+            assert winner and discarded_ids.isdisjoint(id(route) for route in winner)
+            restore_snapshot(winner, replaced_routes=replaced_routes)
+            assert {id(route) for route in ar.grid.routes} == {
+                id(fixed),
+                *(id(route) for route in winner),
+            }
+            assert all(id(route) not in discarded_ids for route in ar.grid.routes)
+            assert ar.routes == winner
+
         # Mock get_total_overflow to return a regression sequence:
         #   index 0 (initial pass): overflow=16
         #   index 1+ (iteration 1): overflow=36
         # The router will see iter-0 as 16, iter-1 as 36, and on exit
         # must restore the iter-0 snapshot.
         seq = _OverflowSequenceGrid(ar.grid, sequence=[16, 36, 36, 36, 36])
-        with patch.object(ar.grid, "get_total_overflow", side_effect=seq):
+        with (
+            patch.object(ar.grid, "get_total_overflow", side_effect=seq),
+            patch.object(
+                ar, "restore_route_snapshot", side_effect=check_restored_occupancy
+            ) as restore,
+            patch(
+                "kicad_tools.router.core.NegotiatedRouter.find_nets_through_overused_cells",
+                return_value={1, 2},
+            ),
+        ):
             ar.route_all_negotiated(
                 max_iterations=2,
                 timeout=10.0,
@@ -292,6 +320,7 @@ class TestOverflowRegressionRollback:
                 perturbation=False,
             )
 
+        restore.assert_called_once()
         captured = capsys.readouterr()
         out = captured.out
 

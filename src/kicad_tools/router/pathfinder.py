@@ -833,6 +833,9 @@ class Router:
         have been removed.
         """
         self._routed_segments.clear()
+        # Buckets hold indices into the cleared list; retaining them can
+        # miss relocated routes or dereference entries that no longer exist.
+        self._crossing_grid = None
 
     def get_via_diagnostics(self) -> dict[str, int]:
         """Return via placement diagnostic counters (Issue #2325).
