@@ -167,3 +167,49 @@ def test_uninventoried_copper_disables_array_proof(unsupported):
             Zone(net.number, "NET1", "F.Cu", polygon=[(18, 51), (20, 51), (20, 53), (18, 53)])
         )
     assert not resolve_current_path(pcb, spec()).ok
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_proved_load_exits_preserve_array_evidence(reverse):
+    pcb = fixture()
+    _add_pad_footprint(pcb, ref="LOAD", x=20, y=60, net="NET1")
+    pcb.add_trace((20, 52), (20, 60), width=0.2, layer="B.Cu", net="NET1")
+    declaration = spec()
+    if reverse:
+        declaration = replace(declaration, source=declaration.sink, sink=declaration.source)
+    result = resolve_current_path(pcb, declaration)
+    assert result.ok, result.reason
+    assert {id(s) for s in pcb.segments[:5]} <= {id(s) for s in result.segments}
+    assert id(pcb.segments[-1]) not in {id(s) for s in result.segments}
+
+
+def test_load_tree_with_dangling_branch_is_unproved():
+    pcb = fixture()
+    _add_pad_footprint(pcb, ref="LOAD", x=20, y=60, net="NET1")
+    pcb.add_trace((20, 52), (20, 60), width=0.2, layer="B.Cu", net="NET1")
+    pcb.add_trace((20, 60), (25, 65), width=0.2, layer="B.Cu", net="NET1")
+    assert not resolve_current_path(pcb, spec()).ok
+
+
+@pytest.mark.parametrize("net_token", ["1", '"NET1"'])
+def test_same_net_custom_via_padstack_is_unproved(net_token):
+    from kicad_tools.sexp import parse_string
+
+    pcb = fixture()
+    pcb._sexp.append(parse_string("(via (at 19.2 52) (net 1) (padstack (mode custom)))"))
+    assert not resolve_current_path(pcb, spec()).ok
+
+
+def test_off_angle_annular_overlap_is_not_lost_to_polygon_chords():
+    pcb = fixture()
+    angle = math.pi / 64
+    # Two radius-0.3 annuli overlap by 0.1 micrometre, halfway between
+    # polygon vertices. Their inscribed default buffers would be disjoint.
+    pcb.add_via(
+        19.2 - 0.5999 * math.cos(angle),
+        52 + 0.5999 * math.sin(angle),
+        net="NET1",
+        size=0.6,
+    )
+    pcb.vias[-1].layers = ["In1.Cu", "In2.Cu"]
+    assert not resolve_current_path(pcb, spec()).ok

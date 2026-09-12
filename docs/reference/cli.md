@@ -859,11 +859,16 @@ Endpoints bind by the pad's real copper extent, not by an exact pad-center
 hit, so a trace terminating anywhere inside the pad attaches (and several
 stubs landing on one pad are shorted by it, as they are in reality).
 
-> **Known limitation (#5197):** the `ambiguous` test is whole-net, so a
-> benign parallel via array feeding a trunk from one pad makes *every*
-> declaration on that net ambiguous — including unrelated low-current taps.
-> Until that is scoped down, prefer declaring endpoints that do not sit on a
-> multi-via fan-out, or review the findings rather than waiving the rule.
+A bounded endpoint via array is recognized only when parallel straight stubs
+land on the actual pad, real outer-layer barrels join one straight receiving
+trunk, and each exit leads through acyclic copper to real pad terminals.
+Dangling branches, unmodeled local contacts, and other cycles remain ambiguous.
+Stub length and via spread must fit within the endpoint pad diagonal. Every
+original array segment remains in the evidence and is checked at the full
+declared current; this does not assume equal current sharing or qualify the
+array by summed widths. Unsupported same-net arcs and custom pad stacks prevent
+array recognition.
+
 Route-time width selection itself stays governed by the net-class
 `trace_width` (the same declarative/checked-post-route split
 `NetClassRouting.target_ampacity` already uses); see the

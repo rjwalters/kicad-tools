@@ -59,8 +59,8 @@ only after proving parallel straight stubs, actual same-net outer-layer via
 barrels, and one straight receiving trunk. Stub length and via span must not
 exceed the endpoint pad diagonal. Every original member remains in the resolved
 segment evidence and is checked at the declaration's full current; no I/N or
-summed-width assumption is made. The current interim proof permits one receiving
-exit only, pending the Board09 multi-exit policy decision. Other cycles and
+summed-width assumption is made. The proof permits one or more receiving exits proved to terminate at real
+pads through acyclic copper. Other cycles and
 unproved endpoint via fanouts remain explicitly ambiguous.
 
 Unsupported custom/trapezoid pads, repeated physical pad numbers, and copper
@@ -702,7 +702,7 @@ def _array_contacts_modeled(
 
     Only the receiving segment's interval between barrels defines local scope;
     evidence still retains that segment whole. A modeled outgoing track may
-    overlap the receiving copper at its graph port, within the sum of radii.
+    overlap a convex local copper piece containing its modeled graph port.
     Unsupported same-net pad stacks and routed arcs conservatively disable this
     recognition subset because their copper is not inventoried by this graph.
     """
@@ -718,7 +718,10 @@ def _array_contacts_modeled(
     # Routed arcs are not exposed as Segment objects. Never silently omit them.
     for arc in pcb._sexp.find_all("arc"):
         arc_net = arc.find_child("net")
-        if arc_net is not None and net is not None and arc_net.get_int(0) == net.number:
+        if arc_net is not None and (
+            arc_net.get_string(0) == net_name
+            or (net is not None and arc_net.get_int(0) == net.number)
+        ):
             return False
     for footprint in pcb.footprints:
         for candidate in footprint.pads:
@@ -726,14 +729,43 @@ def _array_contacts_modeled(
                 if candidate._sexp_node.find_child("padstack") is not None:
                     return False
 
+    for raw_via in pcb._sexp.find_all("via"):
+        via_net = raw_via.find_child("net")
+        if (
+            via_net is not None
+            and (
+                via_net.get_string(0) == net_name
+                or (net is not None and via_net.get_int(0) == net.number)
+            )
+            and raw_via.find_child("padstack") is not None
+        ):
+            return False
+
+    # Default circular buffers use 16 chords per quadrant. Circumscribe
+    # strokes, and expand existing pad polygons by their maximum chord error.
+    # These envelopes only reject contacts; they never prove connectivity.
+    scale = 1 / math.cos(math.pi / 64)
+
+    def outer_buffer(geometry, radius):
+        return geometry.buffer(radius * scale, quad_segs=16)
+
+    def pad_envelope(candidate, footprint):
+        polygon = _pad_polygon(candidate, footprint)
+        if polygon is None or candidate.shape == "rect":
+            return polygon
+        error = max(candidate.size) * (1 - 1 / scale)
+        return outer_buffer(polygon, error)
+
     trunk = members[-1]
     ordered = sorted(far_nodes, key=lambda n: math.dist(n[:2], trunk.start))
     # Each piece retains its width for a bounded, modeled port join allowance.
     pieces = []
     for member in members:
         ends = (ordered[0][:2], ordered[-1][:2]) if member is trunk else (member.start, member.end)
-        pieces.append((member.layer, LineString(ends).buffer(member.width / 2), member.width / 2))
-    source = _pad_polygon(pad, fp)
+        pieces.append(
+            (member.layer, outer_buffer(LineString(ends), member.width / 2), member.width / 2)
+        )
+    source = pad_envelope(pad, fp)
     if source is None:
         return False
     pieces.append((members[0].layer, source, 0.0))
@@ -743,29 +775,41 @@ def _array_contacts_modeled(
         for copper_layer in pcb.copper_layers:
             if via_spans_layer(via.layers, copper_layer.name):
                 pieces.append(
-                    (copper_layer.name, Point(via.position).buffer(via.size / 2), via.size / 2)
+                    (
+                        copper_layer.name,
+                        outer_buffer(Point(via.position), via.size / 2),
+                        via.size / 2,
+                    )
                 )
     member_ids = {id(s) for s in members}
     for segment in _net_segments(pcb, net_name):
         if id(segment) in member_ids:
             continue
-        copper = LineString((segment.start, segment.end)).buffer(segment.width / 2)
+        copper = outer_buffer(LineString((segment.start, segment.end)), segment.width / 2)
         for layer, region, radius in pieces:
             if layer != segment.layer:
                 continue
             overlap = copper.intersection(region)
             for node, _, edge in exits:
                 if edge.segment is segment and node[2] == layer:
-                    overlap = overlap.difference(
-                        Point(node[:2]).buffer(radius + segment.width / 2 + _PAD_EPS)
-                    )
+                    # Both pieces are convex straight strokes/discs. Their
+                    # intersection is connected to this proved port, including
+                    # oblique joins whose overlap exceeds the sum of radii.
+                    if region.covers(Point(node[:2])):
+                        overlap = Polygon()
+                    else:
+                        overlap = overlap.difference(
+                            Point(node[:2]).buffer(
+                                (radius + segment.width / 2) * scale * scale + _PAD_EPS
+                            )
+                        )
             if not overlap.is_empty:
                 return False
     for footprint in pcb.footprints:
         for candidate in footprint.pads:
             if candidate is pad or not same_net(candidate) or candidate.type == "np_thru_hole":
                 continue
-            copper = _pad_polygon(candidate, footprint)
+            copper = pad_envelope(candidate, footprint)
             if copper is None:
                 return False
             if any(
@@ -776,7 +820,7 @@ def _array_contacts_modeled(
     for via in pcb.vias:
         if via in member_vias or not same_net(via):
             continue
-        copper = Point(via.position).buffer(via.size / 2)
+        copper = outer_buffer(Point(via.position), via.size / 2)
         if any(
             via_spans_layer(via.layers, layer) and copper.intersects(region)
             for layer, region, _ in pieces
@@ -795,6 +839,30 @@ def _array_contacts_modeled(
             for layer, region, _ in pieces
         ):
             return False
+    return True
+
+
+def _proved_load_exits(
+    graph: _CopperGraph,
+    array_nodes: set[_Node],
+    exits: list[tuple[_Node, _Node, _GraphEdge]],
+) -> bool:
+    """Every outgoing tree must end at pads, with no loops or return to the array."""
+    if not exits:
+        return False
+    terminals = set(graph.pads.values()) - array_nodes
+    visited: set[_Node] = set()
+    for _, first, incoming in exits:
+        pending = [(first, incoming)]
+        while pending:
+            node, previous = pending.pop()
+            if node in array_nodes or node in visited:
+                return False
+            visited.add(node)
+            onward = [(n, e) for n, e in graph.adjacency[node] if e is not previous]
+            if not onward and node not in terminals:
+                return False
+            pending.extend(onward)
     return True
 
 
@@ -916,7 +984,7 @@ def _endpoint_via_array(
         return None
     edges.update(trunk_edges)
     exits = [(n, other, e) for n in nodes for other, e in graph.adjacency[n] if other not in nodes]
-    if len(exits) != 1:
+    if not _proved_load_exits(graph, nodes, exits):
         return None
     members.append(trunk)
     if not _array_contacts_modeled(pcb, net_name, fp, pad, members, far_nodes, exits):
