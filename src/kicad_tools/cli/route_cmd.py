@@ -321,6 +321,25 @@ def _auto_fix_budget(args) -> float:
     return min(reserve, 0.5 * float(timeout))
 
 
+def _restore_route_grid(router: "Autorouter", routes: list["Route"]) -> None:
+    """Rebuild route-derived state from the selected copper before post-passes.
+
+    Best-iteration restoration and cache hits can leave grid copper different
+    from ``router.routes``. Preserve static obstacles while replacing every
+    grid route, usage count, and pathfinder crossing record with this snapshot.
+    """
+    routes = list(routes)
+    for existing in list(router.grid.routes):
+        router.grid.unmark_route(existing)
+    router.grid.reset_route_usage()
+    if hasattr(router.router, "clear_routed_segments"):
+        router.router.clear_routed_segments()
+    router.routes = routes
+    for route in routes:
+        router._mark_route(route)
+        router.grid.mark_route_usage(route)
+
+
 def _set_wall_clock_deadline(args) -> None:
     """Stamp a monotonic deadline on ``args`` from ``args.timeout``.
 
@@ -15659,7 +15678,6 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 # Deserialize and apply cached routes
                 cached_routes = cache.deserialize_routes(cached_result.routes_data)
 
-                # Apply cached routes to router
                 router.routes = cached_routes
 
                 if not quiet:
@@ -16288,6 +16306,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
     _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(router, args, quiet=quiet)
+        if _resolve_route_engine(args) == "grid":
+            _restore_route_grid(router, router.routes)
 
     # Optimize traces (unless --no-optimize/--raw flag is set)
     if _post_passes_enabled and not args.no_optimize and router.routes:

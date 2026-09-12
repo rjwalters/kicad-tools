@@ -16,9 +16,10 @@ machines.  Boards 02 / 03 / 04 opt into it in their
 ``generate_design.py:route_pcb()`` recipe (this issue), combined with a
 pinned ``PYTHONHASHSEED=42``.
 
-These tests re-route a board's committed UNROUTED PCB twice with the
+These tests independently re-route a board's committed UNROUTED PCB twice with the
 production route flags and assert the UUID-normalized routed COPPER (the
 ``(segment ...)`` / ``(via ...)`` / ``(arc ...)`` set) is byte-identical.
+Board 02 also replays the first run's cache and compares its final copper.
 
 * ``board 02`` routes in ~20-30 s, so its test runs UNCONDITIONALLY (PR
   CI included) -- it is the fast regression backstop.
@@ -38,7 +39,6 @@ guards against, not encoded as a hard assertion.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -103,32 +103,29 @@ _BOARD_CONFIG: dict[str, _BoardRoute] = {
     ),
 }
 
-_COPPER_LINE_RE = re.compile(r"^\s*\((segment|via|arc)\b")
-_UUID_RE = re.compile(r'\(uuid "[^"]*"\)')
-_TSTAMP_RE = re.compile(r"\(tstamp [^)]*\)")
-
 
 def _normalize_copper(pcb_text: str) -> list[str]:
-    """Return the sorted, UUID/tstamp-stripped routed-copper line set.
+    """Compare complete copper records, ignoring only UUID/tstamp and order.
 
-    Keeps only ``(segment|via|arc)`` lines, strips the per-element UUID /
-    tstamp tokens (deterministic per-seed, but stripped defensively so a
-    UUID-toggle regression surfaces as a CONTENT mismatch rather than
-    masking a real routing-path divergence), and sorts so the ORDER of
-    elements in the file does not matter -- only the SET of copper geometry.
+    Native/routed files use multiline records. Matching their opening lines
+    alone counts segments/vias but discards the geometry the witness must test.
     """
-    lines: list[str] = []
-    for line in pcb_text.splitlines():
-        if not _COPPER_LINE_RE.match(line):
+    from kicad_tools.sexp import parse_string
+
+    wrapper = parse_string("(normalization " + pcb_text + ")")
+    root = wrapper.find_child("kicad_pcb") or wrapper
+    records = []
+    for node in root.children:
+        if node.is_atom or node.name not in ("segment", "via", "arc"):
             continue
-        line = _UUID_RE.sub('(uuid "X")', line)
-        line = _TSTAMP_RE.sub("(tstamp X)", line)
-        lines.append(line)
-    lines.sort()
-    return lines
+        for key in ("uuid", "tstamp"):
+            for identity in node.find_children(key):
+                node.children.remove(identity)
+        records.append(node.to_string())
+    return sorted(records)
 
 
-def _route_once(board: str, out_pcb: Path, log: Path) -> None:
+def _route_once(board: str, out_pcb: Path, log: Path, cache_home: Path) -> None:
     """Route a board's unrouted PCB once with the production flags.
 
     Pins ``PYTHONHASHSEED=42`` on the subprocess (mirrors the recipe) so
@@ -156,6 +153,7 @@ def _route_once(board: str, out_pcb: Path, log: Path) -> None:
     ]
     env = os.environ.copy()
     env["PYTHONHASHSEED"] = "42"
+    env["XDG_CACHE_HOME"] = str(cache_home)
     with log.open("w") as log_fh:
         subprocess.run(
             cmd,
@@ -169,36 +167,36 @@ def _route_once(board: str, out_pcb: Path, log: Path) -> None:
 
 
 def _assert_route_reproducible(board: str, tmp_path: Path) -> None:
-    """Route ``board`` twice and assert byte-identical normalized copper."""
+    """Compare independent cold routes and, for board 02, a cache replay."""
     norms: list[list[str]] = []
-    for i in (1, 2):
-        out_pcb = tmp_path / f"run-{i}.kicad_pcb"
-        log = tmp_path / f"run-{i}.log"
-        _route_once(board, out_pcb, log)
+    runs = [("cold-1", "cache-1"), ("cold-2", "cache-2")]
+    if board == "02":
+        runs.append(("warm-1", "cache-1"))
+    for label, cache in runs:
+        out_pcb = tmp_path / f"{label}.kicad_pcb"
+        log = tmp_path / f"{label}.log"
+        _route_once(board, out_pcb, log, tmp_path / cache)
         assert out_pcb.exists() and out_pcb.stat().st_size > 0, (
-            f"Run {i} produced no routed PCB.  Log tail:\n"
+            f"Run {label} produced no routed PCB. Log tail:\n"
             f"{log.read_text()[-2000:] if log.exists() else '(no log)'}"
         )
-        norms.append(_normalize_copper(out_pcb.read_text()))
-
-    # Both runs must land at least some copper (guards against a silent
-    # all-failed route passing the equality check trivially).
-    assert norms[0], f"Board {board} run 1 produced no routed copper at all."
-
-    if norms[0] != norms[1]:
-        # Build a compact diff for the failure message.
-        only_1 = sorted(set(norms[0]) - set(norms[1]))[:10]
-        only_2 = sorted(set(norms[1]) - set(norms[0]))[:10]
-        pytest.fail(
-            f"Board {board} routed copper diverged across two seed-42 + "
-            f"--deterministic-budget + PYTHONHASHSEED=42 routes (Issue "
-            f"#3799 regression).\n"
-            f"  run1 copper lines: {len(norms[0])}\n"
-            f"  run2 copper lines: {len(norms[1])}\n"
-            f"  only in run1 (up to 10): {only_1}\n"
-            f"  only in run2 (up to 10): {only_2}\n"
-            f"  PCBs preserved at {tmp_path}"
-        )
+        if board == "02":
+            expected = "Cache HIT" if label.startswith("warm") else "Cache MISS"
+            assert expected in log.read_text(), f"{label} did not exercise {expected}: {log}"
+        norm = _normalize_copper(out_pcb.read_text())
+        assert norm, f"Board {board} run {label} produced no routed copper."
+        if norms and norm != norms[0]:
+            only_first = sorted(set(norms[0]) - set(norm))[:10]
+            only_current = sorted(set(norm) - set(norms[0]))[:10]
+            pytest.fail(
+                f"Board {board} copper differs between cold-1 and {label} with "
+                f"seed 42, --deterministic-budget and PYTHONHASHSEED=42.\n"
+                f"  cold-1 records: {len(norms[0])}; {label} records: {len(norm)}\n"
+                f"  only in cold-1 (up to 10): {only_first}\n"
+                f"  only in {label} (up to 10): {only_current}\n"
+                f"  PCBs preserved at {tmp_path}"
+            )
+        norms.append(norm)
 
 
 def test_normalize_copper_strips_uuid_and_sorts() -> None:
@@ -216,30 +214,18 @@ def test_normalize_copper_strips_uuid_and_sorts() -> None:
     norm_b = _normalize_copper(pcb_b)
     # Non-copper line dropped, UUIDs stripped, sort makes order irrelevant.
     assert norm_a == norm_b
-    assert all('uuid "X"' in line for line in norm_a)
+    assert all("uuid" not in record for record in norm_a)
     assert not any("gr_line" in line for line in norm_a)
 
 
 @pytest.mark.timeout(600)
 def test_board02_route_is_reproducible(tmp_path: Path) -> None:
-    """Board 02 routes byte-identical copper twice at seed 42 (Issue #3799).
+    """Compare two independent cold routes and one warm replay at seed 42.
 
-    Runs UNCONDITIONALLY (PR CI included): the fast determinism
-    regression backstop for the ``--deterministic-budget`` opt-in.  If
-    this fails, a board-02 route flag regressed (most likely
-    ``--deterministic-budget`` was dropped, re-introducing the per-net
-    wall-clock cutoff).
-
-    Timeout (Issue #3799 CI fix): a single board-02 route takes ~20-30 s
-    locally and this test routes TWICE, so ~40-60 s of wall-clock.  CI's
-    suite-wide default ``--timeout=60`` (see ``.github/workflows/ci.yml``
-    Test job) killed the two-route run spuriously on the slower hosted
-    runner.  The explicit ``@pytest.mark.timeout(600)`` marker OVERRIDES
-    that default with a host-speed- and xdist-contention-tolerant budget
-    while still catching a genuine router hang.  It does NOT slow the
-    happy path (the marker only changes the reaper deadline).  This keeps
-    the determinism regression running in the main Test job rather than
-    deferring it to the nightly slow-tests workflow.
+    Private cache directories guarantee the first two invocations actually
+    route. The third shares only the first cache, proving cached finalization
+    has the same copper. Each invocation keeps the production 240 s deadline;
+    the existing 600 s test budget also covers subprocess and comparison work.
     """
     _assert_route_reproducible("02", tmp_path)
 
@@ -292,3 +278,10 @@ def test_board02_determinism_uses_actual_recipe_command(recipe, function):
     assert getattr(_BOARD_CONFIG["02"], "module", "kicad_tools.cli") == ast.literal_eval(
         command.elts[2]
     )
+
+
+def test_normalize_copper_retains_multiline_coordinates():
+    first = '(kicad_pcb (segment\n (start 1 2)\n (end 3 4)\n (width .2) (layer "F.Cu") (net 1)\n (uuid "a")))'
+    moved = first.replace("(end 3 4)", "(end 3 5)")
+    assert _normalize_copper(first) != _normalize_copper(moved)
+    assert _normalize_copper(first) == _normalize_copper(first.replace('"a"', '"b"'))

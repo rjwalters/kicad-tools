@@ -61,7 +61,7 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # Bump this constant whenever routing logic is modified to ensure stale
 # cached results are not reused.  The value is included in every cache key
 # so incrementing it automatically invalidates all existing entries.
-CACHE_VERSION = "2.2.0"
+CACHE_VERSION = "2.2.1"
 
 
 def get_default_cache_path() -> Path:
@@ -755,6 +755,7 @@ class RoutingCache:
             route_dict = {
                 "net": route.net,
                 "net_name": route.net_name,
+                "is_escape": route.is_escape,
                 "segments": [
                     {
                         "x1": seg.x1,
@@ -845,6 +846,7 @@ class RoutingCache:
             route = Route(
                 net=route_dict["net"],
                 net_name=route_dict["net_name"],
+                is_escape=route_dict.get("is_escape", False),
                 segments=segments,
                 vias=vias,
             )
