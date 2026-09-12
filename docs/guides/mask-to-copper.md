@@ -33,7 +33,9 @@ Save this request as `mask-request.json`:
 ```
 
 Choose the Python interpreter that can import KiCad's `pcbnew` module. The CLI
-and Python must use matching KiCad 10 versions. `native_command` and
+and Python must both use KiCad 10.0.5. The object-attribution profile reproduces
+that version's plotting branches; other versions require separate verification
+and currently produce incomplete coverage. `native_command` and
 `native_python_command` are argument lists, so container launchers can be used
 without shell interpolation. Both processes must see the temporary source files
 at the same absolute paths; set `native.scratch_dir` to a shared mounted directory
@@ -109,7 +111,7 @@ membership alone is insufficient: the checker also requires direct physical
 connection on the selected copper side. Accepted declarations retain the measured
 exposure with disposition `intentional`; they do not erase it.
 
-Merged openings can create mask material beyond individual openings. Those
+Merged openings can create opening area beyond individual openings. Those
 regions retain the contributing source identities and are not assigned to one
 owner. A single-pad escape declaration does not waive a merged-region finding.
 

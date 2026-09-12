@@ -1152,7 +1152,8 @@ class DRCChecker:
 
     def check_mask_to_copper(self) -> DRCResults:
         """Run the explicitly requested native, immutable-source exposure check."""
-        from kicad_tools.sexp import parse_file
+
+        import hashlib
 
         from .mask_copper import (
             MaskCopperAssessment,
@@ -1162,16 +1163,32 @@ class DRCChecker:
         )
 
         request = self.mask_copper_request or MaskCopperRequest()
-        if self.pcb.path is None:
-            assessment = MaskCopperAssessment(reasons=["Mask geometry requires a saved source PCB"])
-        elif self.pcb._sexp.to_string() != parse_file(self.pcb.path).to_string():
-            assessment = MaskCopperAssessment(
-                coverage="incomplete", reasons=["PCB object differs from current source bytes"]
-            )
-        else:
-            assessment = check_mask_to_copper(
-                self.pcb.path, request.policy, request.intents, **request.native_options
-            )
+        try:
+            if self.pcb.path is None:
+                assessment = MaskCopperAssessment(
+                    reasons=["Mask geometry requires a saved source PCB"]
+                )
+            else:
+                from kicad_tools.sexp import parse_string
+
+                raw = self.pcb.path.read_bytes()
+                if self.pcb._sexp.to_string() != parse_string(raw.decode()).to_string():
+                    assessment = MaskCopperAssessment(
+                        coverage="incomplete",
+                        reasons=["PCB object differs from current source bytes"],
+                    )
+                else:
+                    assessment = check_mask_to_copper(
+                        self.pcb.path, request.policy, request.intents, **request.native_options
+                    )
+                    if (
+                        assessment.binding
+                        and assessment.binding.source_sha256 != hashlib.sha256(raw).hexdigest()
+                    ):
+                        assessment.coverage = "incomplete"
+                        assessment.reasons.append("Source changed after checker object validation")
+        except (OSError, ValueError) as exc:
+            assessment = MaskCopperAssessment(coverage="incomplete", reasons=[str(exc)])
         return assessment_results(assessment)
 
     def check_solder_mask_pads(self) -> DRCResults:

@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .violations import DRCResults
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,7 @@ class MaskCopperMeasurement:
     mask_defined: bool
     margin_provenance: str
     rationale: str | None = None
+    negative_expansion: bool = False
 
     def __post_init__(self):
         if self.disposition not in (
@@ -214,8 +218,8 @@ def assess_attributed_geometry(geometry, policy, intents=()):
     mislabeled as penetration depth. Exact-limit measurements remain uncertain
     within the native/Gerber construction budget, and cannot certify a pass.
     """
-    from shapely.geometry import GeometryCollection
-    from shapely.ops import nearest_points, unary_union
+    from shapely.geometry import GeometryCollection  # type: ignore[import-untyped]
+    from shapely.ops import nearest_points, unary_union  # type: ignore[import-untyped]
 
     binding = source_binding(geometry)
     result = MaskCopperAssessment(
@@ -225,11 +229,22 @@ def assess_attributed_geometry(geometry, policy, intents=()):
         binding=binding,
         geometry_provenance={"export": geometry.exported.to_dict(), "objects": geometry.provenance},
     )
+    result.geometry_provenance["source_objects"] = {
+        identity: {
+            "kind": item["kind"],
+            "net": item["net"],
+            "margin_mm": item["margin_mm"],
+            "margin_source": item.get("margin_source", "native effective expansion"),
+            "layers_wkt": {layer: shape.wkt for layer, shape in item["layers_geometry"].items()},
+        }
+        for identity, item in geometry.objects.items()
+    }
     # The native plot construction error comes from the captured board's
-    # m_MaxError (typically 5um for custom/chamfer polygons). Add 4nm for
-    # Gerber reconstruction and coordinate rounding. This is uncertainty,
-    # never a process clearance allowance.
-    uncertainty = geometry.provenance.get("max_error_mm_per_construction", 0) + 0.000004
+    # m_MaxError (typically 5um for custom/chamfer polygons). Both the mask
+    # contribution and the adjacent copper may be independently constructed,
+    # so add both bounds, then 4nm for Gerber reconstruction/rounding.
+    # This is uncertainty, never a process clearance allowance.
+    uncertainty = 2 * geometry.provenance.get("max_error_mm_per_construction", 0) + 0.000004
     approved = {}
     for intent in intents:
         owner = geometry.objects.get(intent.owner_uuid)
@@ -372,9 +387,16 @@ def assess_attributed_geometry(geometry, policy, intents=()):
                         disposition,
                         uncertainty,
                         kind,
-                        margin < 0,
+                        margin < 0
+                        and len(owners) == 1
+                        and opening.area
+                        < geometry.objects[owners[0]]["layers_geometry"]
+                        .get(layer, GeometryCollection())
+                        .area
+                        - uncertainty * opening.length,
                         provenance,
                         intent.rationale if intent else None,
+                        margin < 0,
                     )
                 )
     return result
@@ -439,7 +461,7 @@ class MaskCopperRequest:
         return cls(policy, tuple(intents), native)
 
 
-def assessment_results(assessment):
+def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
     from .violations import DRCResults, DRCViolation
 
     result = DRCResults(

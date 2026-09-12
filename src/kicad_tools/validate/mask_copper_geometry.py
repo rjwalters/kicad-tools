@@ -42,8 +42,8 @@ def inspect_attributed_mask_geometry(
     Full-layer native export parity is an additional coverage check, never an
     inference of an object's ownership from subtraction of a copper union.
     """
-    from shapely.geometry import Polygon
-    from shapely.ops import unary_union
+    from shapely.geometry import Polygon  # type: ignore[import-untyped]
+    from shapely.ops import unary_union  # type: ignore[import-untyped]
 
     from kicad_tools.sexp import parse_string
 
@@ -58,6 +58,29 @@ def inspect_attributed_mask_geometry(
     _validate_structure(raw.decode())
     tree = parse_string(raw.decode())
     inventory = _inventory(tree)
+    # Parent occurrences participate in source identity too. A pad UUID must
+    # not alias its footprint (or any other authored UUID), even though the
+    # footprint itself contributes no standalone copper polygon.
+    import uuid
+
+    seen_identities = set()
+    for uuid_field in tree.find_all("uuid"):
+        value = uuid_field.get_string(0)
+        if not isinstance(value, str):
+            raise ValueError("Missing source UUID value")
+        try:
+            canonical = str(uuid.UUID(value))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("Malformed source UUID") from exc
+        if canonical != value or canonical in seen_identities:
+            raise ValueError("Noncanonical or duplicate source UUID: " + value)
+        seen_identities.add(canonical)
+    for feature in inventory:
+        if not feature["source_uuid"]:
+            raise ValueError("Missing plotted source UUID")
+    for footprint in tree.find_all("footprint") + tree.find_all("module"):
+        if footprint.find_child("uuid") is None:
+            raise ValueError("Missing footprint occurrence UUID")
     options = options or MaskExportOptions(standalone_sources=False)
     # Separate standalone derivatives are unnecessary: attribution is native
     # original-context object geometry, including all overlapping neighbors.
@@ -118,6 +141,38 @@ def inspect_attributed_mask_geometry(
                 parents[field.get_string(0)] = parent
         setup = tree.find_child("setup")
         board_margin = setup.find_child("pad_to_mask_clearance") if setup else None
+        if options.board_plot_params:
+            params = setup.find_child("pcbplotparams") if setup else None
+            safe_plot_fields = {
+                "disableapertmacros",
+                "usegerberextensions",
+                "usegerberattributes",
+                "usegerberadvancedattributes",
+                "creategerberjobfile",
+                "outputformat",
+                "outputdirectory",
+                "gerberprecision",
+            }
+            for setting in params.children if params else []:
+                if setting.name not in safe_plot_fields:
+                    if setting.name in ("useauxorigin", "mirror") and setting.get_string(0) in (
+                        "false",
+                        "no",
+                    ):
+                        continue
+                    result.errors.append(
+                        "Native object plot-coordinate/context option unsupported: "
+                        + str(setting.name)
+                    )
+        # Source selectors that can change shape in a way the object API does
+        # not model must not be accepted just because another object hides it.
+        for feature in inventory:
+            stroke = feature["node"].find_child("stroke")
+            style = stroke.find_child("type") if stroke else None
+            if style and style.get_string(0) not in ("default", "solid"):
+                result.errors.append(
+                    feature["source_uuid"] + ": dashed native graphic attribution unsupported"
+                )
         worker = Path(__file__).with_name("_native_mask_objects.py")
         staged_worker = stage / worker.name
         worker_raw = worker.read_bytes()
@@ -138,10 +193,13 @@ def inspect_attributed_mask_geometry(
             )
             return result
         data = _read_worker_output(output.read_text(), {f["source_uuid"] for f in inventory})
-        if data.get("source_sha256") != exported.source_sha256 or not str(
-            data.get("native_version", "")
-        ).startswith("10."):
-            result.errors.append("Native object/source/version binding mismatch")
+        if data.get("source_sha256") != exported.source_sha256:
+            result.errors.append("Native object/source binding mismatch")
+            return result
+        if str(data.get("native_version", "")).split()[0] != "10.0.5":
+            result.errors.append(
+                "Native object attribution requires the verified KiCad 10.0.5 plot profile"
+            )
             return result
         if str(data["native_version"]).split()[0] != exported.native_version.split()[0]:
             result.errors.append("Native object/export versions differ")
@@ -167,8 +225,8 @@ def inspect_attributed_mask_geometry(
                     continue
                 geometries[layer] = unary_union(polygons)
             own_margin = feature["node"].find_child("solder_mask_margin")
-            parent = parents.get(feature["parent_uuid"])
-            parent_margin = parent.find_child("solder_mask_margin") if parent else None
+            parent_node = parents.get(feature["parent_uuid"])
+            parent_margin = parent_node.find_child("solder_mask_margin") if parent_node else None
             if own_margin is not None:
                 margin_source = (
                     "object:" + identity + ":solder_mask_margin=" + str(own_margin.get_value(0))

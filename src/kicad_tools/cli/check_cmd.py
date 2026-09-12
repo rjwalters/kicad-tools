@@ -3069,7 +3069,11 @@ def output_table(
     elif warnings:
         print("DRC WARNING - Review warnings")
     else:
-        print("DRC PASSED - Advisory infos only")
+        print(
+            "DRC PASSED - Advisory infos only"
+            if all(a.passed for a in results.mask_copper_assessments)
+            else "DRC NOT QUALIFIED - Requested mask coverage incomplete or failing"
+        )
 
 
 def _print_violation(v: DRCViolation, verbose: bool, indent: str = "  ") -> None:

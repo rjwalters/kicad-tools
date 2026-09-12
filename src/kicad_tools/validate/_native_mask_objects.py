@@ -8,6 +8,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 
 def pad_plot_polygon(pcbnew, item, layer, is_mask, margin, max_error):
@@ -20,7 +21,15 @@ def pad_plot_polygon(pcbnew, item, layer, is_mask, margin, max_error):
     """
     poly = pcbnew.SHAPE_POLY_SET()
     if is_mask and item.GetBoard().GetDesignSettings().m_SolderMaskMinWidth:
-        item.TransformShapeToPolygon(poly, layer, margin, max_error, pcbnew.ERROR_OUTSIDE)
+        if margin < 0 and item.GetShape(layer) != pcbnew.PAD_SHAPE_CUSTOM:
+            dummy = pcbnew.PAD(item)
+            size = item.GetSize(layer)
+            if size.x + 2 * margin <= 0 or size.y + 2 * margin <= 0:
+                return poly
+            dummy.SetSize(layer, pcbnew.VECTOR2I(size.x + 2 * margin, size.y + 2 * margin))
+            dummy.TransformShapeToPolygon(poly, layer, 0, max_error, pcbnew.ERROR_OUTSIDE)
+        else:
+            item.TransformShapeToPolygon(poly, layer, margin, max_error, pcbnew.ERROR_OUTSIDE)
         return poly
     shape = item.GetShape(layer)
     advanced = shape in (pcbnew.PAD_SHAPE_CUSTOM, pcbnew.PAD_SHAPE_CHAMFERED_RECT)
@@ -58,7 +67,7 @@ def pad_plot_polygon(pcbnew, item, layer, is_mask, margin, max_error):
 
 
 def main():
-    import pcbnew
+    import pcbnew  # type: ignore[import-not-found]  # Supplied by the selected KiCad runtime.
 
     path = Path(sys.argv[1])
     board = pcbnew.LoadBoard(str(path))
@@ -81,11 +90,11 @@ def main():
             objects.extend(footprint.GetFields())
         else:
             objects.extend([footprint.Reference(), footprint.Value()])
-    by_uuid = {}
+    by_uuid: dict[str, list[Any]] = {}
     for item in objects:
         identity = item.m_Uuid.AsString()
         by_uuid.setdefault(identity, []).append(item)
-    result = {
+    result: dict[str, Any] = {
         "schema": "kct.native-mask-objects.v1",
         "native_version": pcbnew.GetBuildVersion(),
         "objects": {},
@@ -99,7 +108,7 @@ def main():
             result["errors"].append(f"{identity}: missing/ambiguous native object")
             continue
         item = found[0]
-        entry = {
+        entry: dict[str, Any] = {
             "kind": type(item).__name__,
             "layers": {},
             "margin_mm": {},
@@ -145,6 +154,9 @@ def main():
                     item.TransformShapeToPolygon(poly, layer, margin, 1, pcbnew.ERROR_INSIDE)
                 else:
                     item.TransformShapeToPolySet(poly, layer, 0, 1, pcbnew.ERROR_INSIDE)
+
+                if isinstance(item, pcbnew.PCB_SHAPE):
+                    poly.Unfracture()
 
                 def points(chain):
                     return [
