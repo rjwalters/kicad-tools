@@ -61,11 +61,21 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # Bump this constant whenever routing logic is modified to ensure stale
 # cached results are not reused.  The value is included in every cache key
 # so incrementing it automatically invalidates all existing entries.
-# Authoritative Edge.Cuts bounds/origin change the routing domain for identical
-# PCB bytes. The outline-domain tag also separates this algorithm from the
-# independently developed SMD via-in-pad policy that already used 2.4.2;
-# incrementing to that shared ordinal allowed incompatible branch caches to mix.
-CACHE_VERSION = "2.4.3-outline-domain"
+# Combines the SMD via-in-pad process-guard + full route-state restoration
+# work (this branch, formerly 2.3.2) with the configured-clearance/contact-
+# geometry cache-policy changes from #5165/#5265 landed independently on
+# main (formerly 2.4.1). Bumped strictly above both so caches produced by
+# either isolated implementation are invalidated rather than silently reused.
+# Issue #5274 raises it again: ``rules.manufacturer`` now keys both rules
+# hashes (it gates SMD via-in-pad eligibility in the grid pathfinders, so it
+# changes the routes themselves), and the pre-post-pass grid canonicalization
+# changed which copper a warm replay emits.  Entries written by any 2.4.x
+# implementation must be invalidated rather than silently reused.
+# Also folds in main's independent "2.4.3-outline-domain" bump: authoritative
+# Edge.Cuts bounds/origin change the routing domain for identical PCB bytes.
+# Bumped strictly above both parents so neither isolated implementation's
+# cache entries are silently reused.
+CACHE_VERSION = "2.5.1-outline-domain"
 
 
 def get_default_cache_path() -> Path:
@@ -175,6 +185,21 @@ class CacheKey:
         # routes produced before default-mode acceptance was tightened.
         if getattr(rules, "legacy_fine_pitch_carveout", False):
             rules_data["legacy_fine_pitch_carveout"] = True
+        # Issue #5274: the manufacturer/process tier selects SMD via-in-pad
+        # eligibility (``MfrLimits.via_in_pad_supported`` -> the grid
+        # pathfinders' ``_allow_smd_vias`` guard, and the C++ backend's
+        # ``allow_smd_vias``), so it changes which routes are generated -- a
+        # tier that forbids a via on SMD copper cannot be served a route that
+        # used one.  It also drives ``min_hole_to_hole`` and the stitch
+        # via-diameter floor.  ``routing_context`` covers the CLI, which
+        # forwards ``--manufacturer``/``--mfr`` in its options mapping, but
+        # NOT callers that build ``DesignRules`` and use these APIs directly:
+        # before this, ``manufacturer=None``, ``"jlcpcb"`` and
+        # ``"jlcpcb-tier1"`` all hashed identically.  Only keyed when set, so
+        # every pre-existing manufacturer-free key is preserved byte-for-byte
+        # (same contract as the #4602 / #4700 additions above).
+        if rules.manufacturer is not None:
+            rules_data["manufacturer"] = rules.manufacturer
         if routing_context is not None:
             rules_data["routing_context"] = routing_context
         rules_json = json.dumps(rules_data, sort_keys=True, default=str)
@@ -340,7 +365,7 @@ class SubProblemSignature:
         pad_entries.sort()
 
         # 6. Build rules hash (only routing-relevant fields)
-        rules_data = {
+        rules_data: dict[str, object] = {
             "trace_width": rules.trace_width,
             "trace_clearance": rules.trace_clearance,
             "via_drill": rules.via_drill,
@@ -358,6 +383,12 @@ class SubProblemSignature:
         # applies to reusable sub-problem signatures.
         if getattr(rules, "legacy_fine_pitch_carveout", False):
             rules_data["legacy_fine_pitch_carveout"] = True
+        # Issue #5274: see ``CacheKey.compute`` -- a sub-problem solution that
+        # placed a via on SMD copper must not be replayed under a tier that
+        # forbids it.  There is no ``routing_context`` fallback at all on this
+        # path, so the manufacturer is the only thing separating the two.
+        if rules.manufacturer is not None:
+            rules_data["manufacturer"] = rules.manufacturer
         rules_json = json.dumps(rules_data, sort_keys=True)
         rules_hash = hashlib.sha256(rules_json.encode()).hexdigest()
 
@@ -878,9 +909,9 @@ class RoutingCache:
             route = Route(
                 net=route_dict["net"],
                 net_name=route_dict["net_name"],
+                is_escape=route_dict.get("is_escape", False),
                 segments=segments,
                 vias=vias,
-                is_escape=route_dict.get("is_escape", False),
             )
             routes.append(route)
 

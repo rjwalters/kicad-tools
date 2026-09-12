@@ -1931,6 +1931,7 @@ class Autorouter:
         Best-iteration rollback and cache replay must update the same grids,
         indexes and pathfinder caches. Negotiated usage is restored separately
         by the caller, since ordinary routing does not populate those counts.
+
         Negotiated rollback supplies the routes it owns so independently
         registered grid obstacles survive. Cache replay replaces the complete
         managed snapshot, including discarded grid routes absent from self.routes.
@@ -16235,8 +16236,23 @@ class Autorouter:
 
         results: dict[tuple[str, str], DiffPairTuneResult] = {}
 
-        # Build routes_by_net lookup from the autorouter's current state.
-        routes_by_net: dict[int, Route] = {r.net: r for r in self.routes}
+        # Complete-net views include fixed escapes and every mutable fragment.
+        fragments_by_net: dict[int, list[Route]] = {}
+        for route in self.routes:
+            fragments_by_net.setdefault(route.net, []).append(route)
+        routes_by_net = {
+            net: fragments[0]
+            if len(fragments) == 1
+            else Route(
+                net=net,
+                net_name=fragments[0].net_name,
+                segments=[segment for route in fragments for segment in route.segments],
+                vias=[via for route in fragments for via in route.vias],
+                is_escape=all(route.is_escape for route in fragments),
+            )
+            for net, fragments in fragments_by_net.items()
+        }
+        fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
 
         # Update the skew tracker so the post-tuning results are queryable.
         # Use the layer-stack count when available, else default to 2.
@@ -16245,7 +16261,7 @@ class Autorouter:
         else:
             num_layers = 2
         self._diffpair_length_tracker.record_routes(
-            routes=self.routes,
+            routes=list(routes_by_net.values()),
             detected_pairs=detected_pairs,
             num_copper_layers=num_layers,
         )
@@ -16281,25 +16297,41 @@ class Autorouter:
                 # True; flag-off keeps the pre-#4085 geometric selection.
                 grid=self.grid,
                 prefer_reserved_slack=self.enable_slack_corridor_widening,
+                fixed_segment_ids=fixed_segment_ids,
             )
 
-            # Commit any new Route references back into self.routes and the
-            # working ``routes_by_net`` map so the next pair's neighbor
-            # self-check sees the updated geometry.
-            if p_route is not None and dp.pair.positive.net_id in routes_by_net:
-                if p_route is not routes_by_net[dp.pair.positive.net_id]:
-                    routes_by_net[dp.pair.positive.net_id] = p_route
-                    for i, r in enumerate(self.routes):
-                        if r.net == dp.pair.positive.net_id:
-                            self.routes[i] = p_route
-                            break
-            if n_route is not None and dp.pair.negative.net_id in routes_by_net:
-                if n_route is not routes_by_net[dp.pair.negative.net_id]:
-                    routes_by_net[dp.pair.negative.net_id] = n_route
-                    for i, r in enumerate(self.routes):
-                        if r.net == dp.pair.negative.net_id:
-                            self.routes[i] = n_route
-                            break
+            changed = {
+                net: route
+                for net, route in (
+                    (dp.pair.positive.net_id, p_route),
+                    (dp.pair.negative.net_id, n_route),
+                )
+                if route is not None and net in routes_by_net and route is not routes_by_net[net]
+            }
+            routes_by_net.update(changed)
+            if changed:
+                previous = list(self.routes)
+                replacements = {}
+                for net, route in changed.items():
+                    escapes = [r for r in previous if r.net == net and r.is_escape]
+                    fixed_vias = {id(v) for r in escapes for v in r.vias}
+                    replacements[net] = (
+                        Route(
+                            net=net,
+                            net_name=route.net_name,
+                            segments=[s for s in route.segments if id(s) not in fixed_segment_ids],
+                            vias=[v for v in route.vias if id(v) not in fixed_vias],
+                        )
+                        if escapes
+                        else route
+                    )
+                published = []
+                for fragment in previous:
+                    if fragment.net not in changed or fragment.is_escape:
+                        published.append(fragment)
+                    elif fragment.net in replacements:
+                        published.append(replacements.pop(fragment.net))
+                self.restore_route_snapshot(published, replaced_routes=previous)
 
             results[(p_name, n_name)] = result
 
@@ -16316,7 +16348,7 @@ class Autorouter:
         # Refresh the skew tracker after tuning so downstream consumers
         # (e.g. the Phase 3J DRC rule) see the updated lengths.
         self._diffpair_length_tracker.record_routes(
-            routes=self.routes,
+            routes=list(routes_by_net.values()),
             detected_pairs=detected_pairs,
             num_copper_layers=num_layers,
         )

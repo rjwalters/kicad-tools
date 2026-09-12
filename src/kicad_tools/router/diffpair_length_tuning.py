@@ -156,6 +156,7 @@ def tune_diff_pair_skew(
     length_critical: bool = True,
     grid: RoutingGrid | None = None,
     prefer_reserved_slack: bool = False,
+    fixed_segment_ids: set[int] | None = None,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """Tune the skew of a detected diff pair by serpentining the shorter half.
 
@@ -194,6 +195,8 @@ def tune_diff_pair_skew(
             or ``prefer_reserved_slack=False`` (both defaults) segment
             selection is byte-identical to the pre-#4085 geometric
             heuristic.
+        fixed_segment_ids: Fixed escape segment identities; retained in measurement
+            and clearance views, but never selected or replaced as meander hosts.
         prefer_reserved_slack: Issue #4085.  Gate for the slack-aware
             segment preference above.  Default ``False`` (inert).  Has no
             effect unless ``grid`` is also supplied.
@@ -254,6 +257,7 @@ def tune_diff_pair_skew(
         )
 
     from .length import LengthTracker  # avoid cycle
+    from .primitives import Route
 
     l_p = LengthTracker.calculate_route_length(p_route)
     l_n = LengthTracker.calculate_route_length(n_route)
@@ -324,6 +328,7 @@ def tune_diff_pair_skew(
             current_shorter,
             grid=grid if prefer_reserved_slack else None,
             reserved_net_id=shorter_id if prefer_reserved_slack else None,
+            fixed_segment_ids=fixed_segment_ids,
         )
         if best is None:
             result.reason = "no_suitable_segment"
@@ -361,9 +366,23 @@ def tune_diff_pair_skew(
         )
         attempt_generator = SerpentineGenerator(attempt_config)
 
-        candidate_route, serp_result = attempt_generator.add_serpentine(
-            current_shorter, serpentine_target
-        )
+        if fixed_segment_ids:
+            # Generate on the selected mutable host; reranking the full net
+            # could otherwise select a longer fixed escape or a different corridor.
+            serp_result = attempt_generator.generate_trombone(insertion_segment, length_needed)
+            candidate_route = Route(
+                net=current_shorter.net,
+                net_name=current_shorter.net_name,
+                segments=current_shorter.segments[:seg_idx]
+                + serp_result.new_segments
+                + current_shorter.segments[seg_idx + 1 :],
+                vias=current_shorter.vias.copy(),
+                is_escape=current_shorter.is_escape,
+            )
+        else:
+            candidate_route, serp_result = attempt_generator.add_serpentine(
+                current_shorter, serpentine_target
+            )
         result.serpentine_results.append(serp_result)
 
         if not serp_result.success:

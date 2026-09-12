@@ -1,0 +1,10 @@
+#!/bin/bash
+set -euo pipefail
+trap 'rc=$?; echo "$rc" > /evidence/exit-code' EXIT
+export PATH=/root/.local/bin:$PATH
+export PYTHONHASHSEED=42 PYTHONUNBUFFERED=1
+cd /evidence/source
+uv sync --frozen --extra dev --python 3.12 > /evidence/setup.log 2>&1
+uv run kct build-native > /evidence/build.log 2>&1
+uv run python scripts/ci/init_kicad_libraries.py > /evidence/libraries.log 2>&1
+uv run python /evidence/run_cases.py

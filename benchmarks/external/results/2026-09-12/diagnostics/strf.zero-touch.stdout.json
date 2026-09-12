@@ -1,0 +1,116 @@
+{
+  "errors": {},
+  "markdown_path": "/evidence/cases/strf.zero-touch/output/report.zero-touch.md",
+  "output_dir": "/evidence/cases/strf.zero-touch/output",
+  "reports": [
+    {
+      "$schema": "https://kicad-tools.org/schemas/benchmark-external/v1.json",
+      "backend": {
+        "available": true,
+        "backend": "cpp",
+        "build_version": 23,
+        "unavailable_reason": null,
+        "version": "1.0.0"
+      },
+      "board_commit": "0525ef655e460ff6d91d770582b47925e7852e7a",
+      "board_file": "strf.zero-touch.kicad_pcb",
+      "board_id": "strf",
+      "board_source": "https://github.com/pms67/STRF-Kicad",
+      "completion": {
+        "completion_pct": 21.43,
+        "connections_routed": 21,
+        "connections_total": 98,
+        "nets_blocking_incomplete": 29,
+        "nets_complete": 17,
+        "nets_incomplete": 32,
+        "nets_total": 49,
+        "nets_unrouted": 0
+      },
+      "copper": {
+        "arc_count": 0,
+        "segment_count": 19,
+        "via_count": 0,
+        "wirelength_by_layer_mm": {
+          "F.Cu": 5.23
+        },
+        "wirelength_mm": 5.23
+      },
+      "diff_pairs": {
+        "completion_pct": 0.0,
+        "pairs": [
+          {
+            "complete": false,
+            "negative_complete": false,
+            "net_negative": "USB_CONN_D-",
+            "net_positive": "USB_CONN_D+",
+            "positive_complete": false
+          },
+          {
+            "complete": false,
+            "negative_complete": false,
+            "net_negative": "USB_D-",
+            "net_positive": "USB_D+",
+            "positive_complete": false
+          }
+        ],
+        "pairs_complete": 0,
+        "pairs_total": 2
+      },
+      "generated_at": "2026-09-12T10:31:24.539366+00:00",
+      "kct_check": {
+        "error_count": 43,
+        "errors_by_rule": {
+          "connectivity": 30,
+          "single_pad_net": 13
+        },
+        "note": null,
+        "passed": false,
+        "ran": true,
+        "warning_count": 121
+      },
+      "kicad_cli_drc": {
+        "by_type": {
+          "annular_width": 10,
+          "copper_edge_clearance": 8,
+          "solder_mask_bridge": 128
+        },
+        "note": null,
+        "ran": true,
+        "violation_count": 146
+      },
+      "newly_routed_connections": -2,
+      "notes": [
+        "seed=42",
+        "router exit code: 2",
+        "human baseline (pre-rip-up): 346 segments, 70 vias, 287.8mm, 17 unrouted pads",
+        "DeepPCB published reference: {'airwires': 98, 'completion_pct': 100, 'vias': 68, 'wall_clock_minutes_max': 3}"
+      ],
+      "pre_route_completion": {
+        "completion_pct": 23.47,
+        "connections_routed": 23,
+        "connections_total": 98,
+        "nets_blocking_incomplete": 29,
+        "nets_complete": 17,
+        "nets_incomplete": 32,
+        "nets_total": 49,
+        "nets_unrouted": 0
+      },
+      "protocol": "zero-touch",
+      "route_outcome": {
+        "artifact_source": "router_output",
+        "exit_code": 2,
+        "outcome": "partial",
+        "reason": "the router exited 2 (non-zero) but wrote an output file for this attempt -- measuring the partial progress it made, not treating this as success"
+      },
+      "schema_version": 1,
+      "timing": {
+        "measured_phase": "partial",
+        "refusal_reason": null,
+        "valid": true,
+        "wall_clock_s": 136.965
+      },
+      "tool_commit": "696315f"
+    }
+  ],
+  "success": true
+}

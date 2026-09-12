@@ -17,6 +17,9 @@ import importlib.util
 import sys
 from pathlib import Path
 
+from kicad_tools.drc.geometric import GeometricDRCResult
+from kicad_tools.recipes import gate as pipeline_gate
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "02-charlieplex-led"
 
@@ -87,11 +90,9 @@ class TestBoard02PartialRouteFastFail:
 
         assert rc == 1, "partial route must make main() exit non-zero"
         err = capsys.readouterr().err
-        assert "partial route" in err.lower(), (
-            "partial-route failure must be reported with a distinct 'partial "
-            f"route' message, got stderr:\n{err}"
-        )
-        assert "wall-clock budget" in err.lower()
+        assert "routing/finalization failed" in err.lower()
+        assert "has not qualified for manufacturing export" in err.lower()
+        assert "wall-clock budget" not in err.lower()
         assert "BoardNetlistMismatch" not in err, (
             "a partial route must NOT surface as an LVS BoardNetlistMismatch"
         )
@@ -101,6 +102,11 @@ class TestBoard02PartialRouteFastFail:
         self._stub_pipeline_prefix(module, monkeypatch, tmp_path)
         monkeypatch.setattr(module, "route_pcb", lambda *a, **k: True)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
+        monkeypatch.setattr(
+            pipeline_gate,
+            "run_geometric_drc",
+            lambda *a, **k: GeometricDRCResult(ran=True),
+        )
 
         lvs_called: list[bool] = []
 

@@ -429,3 +429,27 @@ class TestLoadWithUpgrade:
         # not a valid path to run).
         result = normalize.load_with_upgrade(FIXTURE_PCB, kicad_cli=Path("/should/not/be/used"))
         assert isinstance(result, PCB)
+
+
+def test_normalization_preserves_routing_net_names(normalize, tmp_path):
+    from kicad_tools.router.io import _build_net_number_map, load_pcb_for_routing
+
+    source = tmp_path / "source.kicad_pcb"
+    # Preserve bare atoms through the same load/rip-up/save path used by STRF.
+    source.write_text(FIXTURE_PCB.read_text().replace('"SIGNAL_A"', "SIGNAL_A"))
+    output = tmp_path / "normalized.kicad_pcb"
+    normalize.normalize_board(source, output)
+    board = PCB.load(output)
+    names = {net.name for net in board.nets.values() if net.name}
+    net_map = _build_net_number_map(output.read_text())
+    assert set(net_map) == names
+    router, routed_map = load_pcb_for_routing(str(output))
+    assert routed_map == net_map
+    expected = {
+        (fp.reference, pad.number): pad.net_name
+        for fp in board.footprints
+        for pad in fp.pads
+        if pad.net_name
+    }
+    actual = {key: router.net_names[net] for net, keys in router.nets.items() for key in keys}
+    assert actual == expected

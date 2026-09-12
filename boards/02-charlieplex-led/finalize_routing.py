@@ -7,8 +7,10 @@ native DRC; unmatched coordinates never silently certify a different board.
 """
 
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from kicad_tools.router.quantize import quantize_pcb_file
@@ -83,12 +85,85 @@ def _relocate_escapes(pcb):
                     point.set_value(i, value)
 
 
-def finalize_routing(path: Path) -> bool:
+def _native_report(path):
+    report = path.with_suffix(".native-drc.json")
+    subprocess.run(
+        [
+            "kicad-cli",
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--format",
+            "json",
+            "--units",
+            "mm",
+            "-o",
+            str(report),
+            str(path),
+        ],
+        check=True,
+        timeout=120,
+    )
+    return json.loads(report.read_text())
+
+
+def _lvs_report(schematic, path):
+    result = subprocess.run(
+        [sys.executable, "-m", "kicad_tools.lvs.copper_lvs", str(schematic), str(path)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    data = json.loads(result.stdout)
+    if result.returncode not in (0, 1):
+        raise ValueError(f"Copper LVS failed: {result.stderr}")
+    return data
+
+
+def _geometry(pcb):
+    from kicad_tools.core.board_outline import outline_graphics
+
+    return (
+        pcb.board_origin,
+        pcb.board_size,
+        tuple(serialize_sexp(n) for n in outline_graphics(pcb._sexp)),
+        tuple(
+            (
+                fp.reference,
+                fp.position,
+                fp.rotation,
+                fp.layer,
+                tuple(
+                    (
+                        p.number,
+                        p.position,
+                        p.size,
+                        p.rotation,
+                        p.shape,
+                        p.drill,
+                        tuple(p.layers),
+                        p.net_number,
+                        p.net_name,
+                    )
+                    for p in fp.pads
+                ),
+            )
+            for fp in pcb.footprints
+        ),
+    )
+
+
+def _finalize_candidate(path, schematic):
+    from native_via_repair import remove_reported_leaves, repair_report_vias
+
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    before = _geometry(PCB.load(path))
+    baseline = _lvs_report(schematic, path)
     pcb = parse_file(path)
     _relocate_escapes(pcb)
     path.write_text(serialize_sexp(pcb))
-    # Endpoint relocations preserve connectivity but can skew attached tracks.
-    # Restore exact 45-degree geometry before the independent native DRC gate.
     quantize_pcb_file(path)
     subprocess.run(
         [
@@ -103,25 +178,53 @@ def finalize_routing(path: Path) -> bool:
             "summary",
         ],
         check=True,
+        timeout=120,
     )
-    report = path.with_suffix(".native-drc.json")
-    subprocess.run(
-        ["kicad-cli", "pcb", "drc", "--format", "json", "-o", str(report), str(path)],
-        check=True,
-    )
-    data = json.loads(report.read_text())
-    clean = (
-        not data["violations"] and not data["unconnected_items"] and not data["schematic_parity"]
-    )
-    if not clean:
+    data = _native_report(path)
+    if data["violations"]:
+        pcb = PCB.load(path)
+        if repair_report_vias(path, pcb, data):
+            pcb.save(path)
+            data = _native_report(path)
+            pcb = PCB.load(path)
+            if remove_reported_leaves(pcb, data):
+                pcb.save(path)
+                data = _native_report(path)
+    if data["violations"] or data["unconnected_items"] or data["schematic_parity"]:
         print(json.dumps(data, indent=2), file=sys.stderr)
-    from kicad_tools.schema.pcb import PCB
-    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
-
-    via_findings = ViaInPadRule().check(PCB.load(path), None).violations
-    if via_findings:
-        print("Board02 via-in-pad findings:", file=sys.stderr)
-        for finding in via_findings:
-            print(finding, file=sys.stderr)
         return False
-    return clean
+    pcb = PCB.load(path)
+    if ViaInPadRule().check(pcb, None).violations:
+        raise ValueError("Board02 via-in-pad gate failed")
+    if _geometry(pcb) != before:
+        raise ValueError("Board02 pad or outline geometry changed")
+    lvs = _lvs_report(schematic, path)
+    if (
+        not lvs["clean"]
+        or lvs["bound_pad_count"] <= 0
+        or lvs["bound_pad_count"] != baseline["bound_pad_count"]
+    ):
+        raise ValueError(f"Board02 copper LVS gate failed: {lvs}")
+    return True
+
+
+def finalize_routing(path: Path, schematic_path: Path | None = None) -> bool:
+    """Commit only a fully qualified scratch result; failures retain original bytes."""
+    path = Path(path).resolve()
+    schematic = schematic_path or path.with_name(path.stem.removesuffix("_routed") + ".kicad_sch")
+    try:
+        with tempfile.TemporaryDirectory(prefix="board02-finalize-", dir=path.parent) as scratch:
+            candidate = Path(scratch) / path.name
+            shutil.copy2(path, candidate)
+            for suffix in (".kicad_pro", ".kicad_dru"):
+                sidecar = path.with_suffix(suffix)
+                if sidecar.exists():
+                    shutil.copy2(sidecar, candidate.with_suffix(suffix))
+            if not _finalize_candidate(candidate, schematic):
+                return False
+            # The scratch directory is on the same filesystem; replacement is atomic.
+            candidate.replace(path)
+            return True
+    except Exception as exc:
+        print(f"Board02 finalization failed; original PCB retained: {exc}", file=sys.stderr)
+        return False

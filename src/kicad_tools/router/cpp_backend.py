@@ -19,6 +19,7 @@ Or check its status with:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 23
+_REQUIRED_CPP_BUILD_VERSION = 24
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -886,7 +887,23 @@ class CppGrid:
         for layer in range(grid.num_layers):
             for y in range(grid.rows):
                 for x in range(grid.cols):
-                    py_cell = grid.grid[layer][y][x]
+                    # Issue #5240: ``grid.grid[layer][y][x]`` walks three
+                    # chained ``__getitem__`` calls (``_GridView`` ->
+                    # ``_LayerView`` -> ``_RowView``), allocating two
+                    # throwaway intermediate view objects per cell just to
+                    # reach the same ``_CellView`` that ``cell_at`` returns
+                    # in one call (see ``RoutingGrid.cell_at`` docstring,
+                    # added by #5307).  This loop is the C++ grid bulk-copy
+                    # -- it runs once per ``from_routing_grid`` call over
+                    # every cell in the board (cols*rows*layers), so it is
+                    # the single largest per-cell iteration in the router.
+                    # Profiling a full board-06 re-route (Issue #5240)
+                    # showed this exact call site as the top cumulative-time
+                    # contributor to ``from_routing_grid``.  ``cell_at`` is
+                    # a documented drop-in: identical ``_CellView`` type,
+                    # identical properties, callers see no behavioral
+                    # change.
+                    py_cell = grid.cell_at(layer, y, x)
                     if py_cell.blocked:
                         cpp_grid._impl.mark_blocked(
                             x,
@@ -1177,6 +1194,16 @@ class CppPathfinder:
         cpp_rules = router_cpp.DesignRules()
         cpp_rules.trace_width = rules.trace_width
         cpp_rules.trace_clearance = rules.trace_clearance
+        from .mfr_limits import get_mfr_limits
+
+        cpp_rules.allow_smd_vias = True
+        if rules.manufacturer:
+            # Unknown manufacturer -> unspecified capability is retained
+            # (permissive), matching pathfinder.Router's fallback.
+            with contextlib.suppress(ValueError):
+                cpp_rules.allow_smd_vias = bool(
+                    get_mfr_limits(rules.manufacturer).via_in_pad_supported
+                )
         cpp_rules.via_drill = rules.via_drill
         cpp_rules.via_diameter = rules.via_diameter
         cpp_rules.via_clearance = rules.via_clearance

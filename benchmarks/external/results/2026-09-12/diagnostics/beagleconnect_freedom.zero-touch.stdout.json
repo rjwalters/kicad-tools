@@ -1,0 +1,133 @@
+{
+  "errors": {},
+  "markdown_path": "/evidence/cases/beagleconnect_freedom.zero-touch/output/report.zero-touch.md",
+  "output_dir": "/evidence/cases/beagleconnect_freedom.zero-touch/output",
+  "reports": [
+    {
+      "$schema": "https://kicad-tools.org/schemas/benchmark-external/v1.json",
+      "backend": {
+        "available": true,
+        "backend": "cpp",
+        "build_version": 23,
+        "unavailable_reason": null,
+        "version": "1.0.0"
+      },
+      "board_commit": "3f99c08de7d81991f95eb2c23f30798a129ffdcf",
+      "board_file": "beagleconnect_freedom.kicad_pcb",
+      "board_id": "beagleconnect_freedom",
+      "board_source": "https://git.beagleboard.org/beagleconnect/freedom",
+      "completion": {
+        "completion_pct": 30.22,
+        "connections_routed": 139,
+        "connections_total": 460,
+        "nets_blocking_incomplete": 126,
+        "nets_complete": 26,
+        "nets_incomplete": 135,
+        "nets_total": 161,
+        "nets_unrouted": 0
+      },
+      "copper": {
+        "arc_count": 0,
+        "segment_count": 0,
+        "via_count": 0,
+        "wirelength_by_layer_mm": {},
+        "wirelength_mm": 0
+      },
+      "diff_pairs": {
+        "completion_pct": 0.0,
+        "pairs": [
+          {
+            "complete": false,
+            "negative_complete": false,
+            "net_negative": "/RF/RF_2_4GHZ_N",
+            "net_positive": "/RF/RF_2_4GHZ_P",
+            "positive_complete": false
+          },
+          {
+            "complete": false,
+            "negative_complete": false,
+            "net_negative": "/RF/RF_SUB_1GHZ_N",
+            "net_positive": "/RF/RF_SUB_1GHZ_P",
+            "positive_complete": false
+          },
+          {
+            "complete": false,
+            "negative_complete": false,
+            "net_negative": "/USB Input/D-",
+            "net_positive": "/USB Input/D+",
+            "positive_complete": false
+          },
+          {
+            "complete": false,
+            "negative_complete": false,
+            "net_negative": "/USB Input/D_N",
+            "net_positive": "/USB Input/D_P",
+            "positive_complete": false
+          }
+        ],
+        "pairs_complete": 0,
+        "pairs_total": 4
+      },
+      "generated_at": "2026-09-12T10:28:55.137311+00:00",
+      "kct_check": {
+        "error_count": null,
+        "errors_by_rule": {},
+        "note": "kct check failed: ValueError: Unsupported routing geometry 'custom' for pad U6.9; use circle, rect, oval, or roundrect pads without a padstack, or route this board with a router supporting its full copper geometry.",
+        "passed": null,
+        "ran": false,
+        "warning_count": null
+      },
+      "kicad_cli_drc": {
+        "by_type": {
+          "clearance": 81,
+          "copper_edge_clearance": 61,
+          "courtyards_overlap": 3,
+          "drill_out_of_range": 2,
+          "hole_clearance": 12,
+          "invalid_outline": 199,
+          "npth_inside_courtyard": 6,
+          "solder_mask_bridge": 16,
+          "starved_thermal": 48,
+          "zones_intersect": 1
+        },
+        "note": null,
+        "ran": true,
+        "violation_count": 429
+      },
+      "newly_routed_connections": 0,
+      "notes": [
+        "seed=42",
+        "router exit code: 2",
+        "human baseline (pre-rip-up): 2291 segments, 399 vias, 2791.2mm, 25 unrouted pads",
+        "router produced no output file for this attempt -- measuring the pre-route (ripped-up) input as fallback; the completion% below reflects pre-existing/trivial connectivity, NOT new routing progress (see route_outcome / pre_route_completion in the JSON report)",
+        "DeepPCB published reference: {'airwires': 414}"
+      ],
+      "pre_route_completion": {
+        "completion_pct": 30.22,
+        "connections_routed": 139,
+        "connections_total": 460,
+        "nets_blocking_incomplete": 126,
+        "nets_complete": 26,
+        "nets_incomplete": 135,
+        "nets_total": 161,
+        "nets_unrouted": 0
+      },
+      "protocol": "zero-touch",
+      "route_outcome": {
+        "artifact_source": "fallback_input",
+        "exit_code": 2,
+        "outcome": "failed",
+        "reason": "the router exited 2 (non-zero) and produced no output file for this attempt -- no routing progress was captured; measuring the pre-route input as fallback"
+      },
+      "schema_version": 1,
+      "timing": {
+        "measured_phase": "failed",
+        "refusal_reason": null,
+        "valid": true,
+        "wall_clock_s": 89.284
+      },
+      "tool_commit": "696315f"
+    }
+  ],
+  "success": true
+}
