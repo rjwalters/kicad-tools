@@ -367,3 +367,34 @@ def test_checker_rejects_source_replaced_between_preflight_and_native_capture(
     assessment = result.mask_copper_assessments[0]
     assert assessment.coverage == "incomplete"
     assert "Source changed after checker object validation" in assessment.reasons
+
+
+def test_public_cli_forwards_mask_config_and_preserves_incomplete(tmp_path, capsys):
+    import json
+
+    from kicad_tools.cli import main
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "source board.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+    before = board.read_bytes()
+    config = tmp_path / "mask request.json"
+    config.write_text('{"schema": "kct.mask-copper-request.v1"}')
+    result = main(
+        [
+            "check",
+            str(board),
+            "--mask-copper-config",
+            str(config),
+            "--drc-only",
+            "--format",
+            "json",
+        ]
+    )
+    assert result == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output["summary"]["passed"] is False
+    assessment = output["mask_copper_assessments"][0]
+    assert assessment["coverage"] == "not_run"
+    assert "explicit process-specific" in assessment["reasons"][0]
+    assert board.read_bytes() == before
