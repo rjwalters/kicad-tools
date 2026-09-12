@@ -22,6 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Imported copper arcs no longer cause false opens or under-reported
+  wirelength** (#4937) — `PCB` parsed `(segment ...)` and `(via ...)` copper
+  but had no branch for `(arc ...)`, the curved-track element KiCad 7+ writes
+  for rounded copper; an externally-sourced board routed only with an arc
+  reported two disconnected islands and 0 mm of trace length. A new `Arc`
+  schema class exposes analytic swept length and geometric connectivity
+  (`pcb.arcs`, `arcs_on_layer()`, `arcs_in_net()`), threaded into
+  `NetStatusAnalyzer` (arc-bearing boards always use real copper geometry,
+  even under `strict=False`, since endpoint proximity cannot describe curved
+  contact), `routing_quality`, `trace_length`/diff-pair skew, and the
+  external-benchmark wirelength metric. PCB saves preserve untouched arc
+  source text byte-for-byte (numeric spelling, whitespace, CRLF), while
+  edits invalidate the retained text so page-fit/reimport keep working.
+  Invalid or nonfinite arc geometry now fails explicitly instead of
+  silently degrading to a chord.
 - Preserve authored pad shapes through router loading, workers, and native
   conversion (#5229). Square pads no longer lose copper corners to a circular
   approximation. Rotated search bounds enclose copper; unsupported custom or
