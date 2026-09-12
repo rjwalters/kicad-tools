@@ -226,7 +226,8 @@ namespace router {
 // binding-surface change; route output is unchanged (diagnostics only).
 // v22: residual pad rotation and candidate via-pad acceptance/policy refresh.
 // v23: explicit pad shape for segment/via clearance (Issue #5229).
-constexpr int ROUTER_CPP_BUILD_VERSION = 23;
+// v24: combined pad-shape and allow_smd_vias process-policy bindings (#5216).
+constexpr int ROUTER_CPP_BUILD_VERSION = 24;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
