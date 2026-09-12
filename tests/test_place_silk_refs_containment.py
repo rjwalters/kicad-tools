@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 from shapely.geometry import Polygon, box
 
+from kicad_tools.core.board_outline import board_outline_bounds
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.sexp import parse_string
 from kicad_tools.silkscreen.place_refs import SilkRefPlacer, _oriented_text_geometry
 
 
@@ -157,8 +159,16 @@ def test_unsupported_or_malformed_additional_edges_cannot_be_ignored(tmp_path, g
 def test_malformed_outline_is_diagnostic_only_for_silkscreen(tmp_path, edge):
     path = _board(tmp_path, _rect(100, 100, 120, 120) + edge, position=(110, 110))
     before = path.read_bytes()
+    # Issue #5274: the shared reader keeps its fail-loud contract for every
+    # caller that asks for bounds directly (routing, board_size, ...), but
+    # PCB.load() tolerates the board and records why the origin is unproven --
+    # repair tools such as ``fix-vias --search-alternatives`` need to load a
+    # known-imperfect board in order to refuse on their own terms.
     with pytest.raises(ValueError, match="Malformed Edge.Cuts"):
-        PCB.load(path)
+        board_outline_bounds(parse_string(path.read_text()))
+    pcb = PCB.load(path)
+    assert "Malformed Edge.Cuts" in pcb.outline_error
+    assert pcb.board_origin == (0.0, 0.0)
     placer = SilkRefPlacer(path)
     result = placer.plan()
     ref = result.placements[0]

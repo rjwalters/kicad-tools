@@ -94,6 +94,55 @@ def test_malformed_or_unsupported_outline_is_explicit(outline):
         extract_board_dimensions(_board(outline))
 
 
+@pytest.mark.parametrize(
+    "outline",
+    [
+        '(gr_rect (start 0 0) (layer "Edge.Cuts"))',
+        '(gr_line (start nan 0) (end 12 12) (layer "Edge.Cuts"))',
+        '(gr_poly (pts (xy 0 0) (xy 12) (xy 12 12)) (layer "Edge.Cuts"))',
+        '(gr_text "unsupported" (at 1 1) (layer "Edge.Cuts"))',
+    ],
+)
+def test_malformed_outline_is_fail_loud_for_routing_but_tolerated_by_pcb_load(tmp_path, outline):
+    """Issue #5274: one reader, two contracts, split at ``PCB.load()``.
+
+    ``board_outline_bounds`` (and therefore every routing/bounds consumer that
+    calls it directly) stays fail-loud.  ``PCB.load()`` must **not** inherit
+    that: repair/inspection tools have to be able to open a board a human
+    already knows is imperfect and refuse on their own proof-based terms
+    (``fix-vias --relocate-in-pad --search-alternatives`` refuses atomically).
+    A tolerated load leaves the origin unproven at ``(0, 0)`` -- no coordinate
+    is rewritten -- and records the reason on ``PCB.outline_error``.
+    """
+    text = _board(outline)
+    path = tmp_path / "malformed.kicad_pcb"
+    path.write_text(text)
+
+    # Fail loud for routing and for anything asking for bounds directly.
+    with pytest.raises(ValueError, match="Edge.Cuts"):
+        board_outline_bounds(parse_string(text))
+    with pytest.raises(ValueError, match="Edge.Cuts"):
+        load_pcb_for_routing(path, validate_drc=False)
+
+    # Tolerant at load, with the reason retained for consumers that fail closed.
+    pcb = PCB.load(path)
+    assert "Edge.Cuts" in pcb.outline_error
+    assert pcb.board_origin == (0.0, 0.0)
+    # Coordinates are left exactly as written -- no guessed-origin subtraction.
+    assert pcb.footprints[0].position == (78.5, 65)
+    # Consumers that explicitly ask for bounds still get the loud failure.
+    with pytest.raises(ValueError, match="Edge.Cuts"):
+        _ = pcb.board_size
+
+
+def test_readable_outline_clears_outline_error(tmp_path):
+    path = tmp_path / "ok.kicad_pcb"
+    path.write_text(_board('(gr_rect (start 68.5 55) (end 228.5 155) (layer "Edge.Cuts"))'))
+    pcb = PCB.load(path)
+    assert pcb.outline_error == ""
+    assert pcb.board_origin == (68.5, 55)
+
+
 def test_circle_uses_radius_not_center_end_bbox():
     root = parse_string('(kicad_pcb (gr_circle (center -4 8) (end -1 12) (layer "Edge.Cuts")))')
     assert board_outline_bounds(root) == (-9, 3, 1, 13)
