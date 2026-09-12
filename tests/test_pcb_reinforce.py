@@ -1095,3 +1095,105 @@ class TestCurrentPathGating:
         )
         assert all(rs.path_excluded_reason is None for rs in result.runs)
         assert result.placed_count > 0
+
+
+@pytest.mark.parametrize("reverse_mask", range(8))
+def test_current_path_anchors_ignore_segment_orientation(reverse_mask, tmp_path):
+    """A serialized direction change cannot remove physical force eligibility."""
+
+    def anchors(pcb):
+        result = reinforce_net(
+            pcb,
+            "PGND",
+            spacing_mm=10.0,
+            all_runs=True,
+            dry_run=True,
+            current_paths=[_force_spec(), _kelvin_sense_spec()],
+        )
+        return sorted((round(a.x, 6), round(a.y, 6)) for a in result.placed)
+
+    import re
+
+    from tests.test_cli_route_current_paths import _T_NETWORK_PCB_TEMPLATE
+
+    text = (
+        _T_NETWORK_PCB_TEMPLATE.format(trunk_width=3.0, sense_width=0.2)
+        .replace("J1", "RSH1")
+        .replace("NET1", "PGND")
+    )
+    path = tmp_path / "reversed.kicad_pcb"
+    path.write_text(text)
+    expected = anchors(PCB.load(path))
+    assert expected
+    index = 0
+
+    def reverse(match):
+        nonlocal index
+        swapped = bool(reverse_mask & (1 << index))
+        index += 1
+        start, end = match.groups()
+        if swapped:
+            start, end = end, start
+        return f"(segment (start {start}) (end {end})"
+
+    path.write_text(re.sub(r"\(segment \(start ([^)]*)\) \(end ([^)]*)\)", reverse, text))
+    assert index == 3
+    assert anchors(PCB.load(path)) == expected
+
+
+def test_current_path_boundary_splits_force_from_continuing_sense():
+    """A degree-two force pad must end the eligible run before the sense tap."""
+    pcb = PCB.create(width=160, height=100, center=False)
+    for ref, x in [("RSH1", 20), ("J2", 80), ("U3", 120)]:
+        _add_pad_footprint(pcb, ref=ref, x=x, y=50, net="PGND")
+    pcb.add_trace((20, 50), (60, 50), width=3, layer="F.Cu", net="PGND")
+    pcb.add_trace((60, 50), (80, 50), width=3, layer="F.Cu", net="PGND")
+    pcb.add_trace((80, 50), (120, 50), width=0.2, layer="F.Cu", net="PGND")
+    result = reinforce_net(
+        pcb,
+        "PGND",
+        spacing_mm=10,
+        all_runs=True,
+        dry_run=True,
+        current_paths=[_force_spec(), _kelvin_sense_spec()],
+    )
+    assert result.placed
+    assert all(a.x <= 80 for a in result.placed)
+    assert any(r.length_mm == 60 and r.path_excluded_reason is None for r in result.runs)
+    assert any(r.length_mm == 40 and r.path_excluded_reason for r in result.runs)
+
+
+def test_board09_force_runs_survive_current_path_gate():
+    """Separate eligibility from clearance refusals on the real shunt fixture."""
+    board = (
+        Path(__file__).resolve().parents[1]
+        / "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb"
+    )
+    before = board.read_bytes()
+    pcb = PCB.load(board)
+    specs = [
+        CurrentPathSpec(
+            name="force",
+            net_name="VOUT_PRE",
+            source=PathEndpoint("L1", "2"),
+            sink=PathEndpoint("RSH1", "1"),
+            continuous_a=3,
+            reinforcement_eligible=True,
+        ),
+        CurrentPathSpec(
+            name="feedback",
+            net_name="VOUT_PRE",
+            source=PathEndpoint("L1", "2"),
+            sink=PathEndpoint("R7", "1"),
+            continuous_a=0.001,
+            reinforcement_eligible=False,
+        ),
+    ]
+    result = reinforce_net(
+        pcb, "VOUT_PRE", layer="F.Cu", all_runs=True, dry_run=True, current_paths=specs
+    )
+    eligible = [r for r in result.runs if r.path_excluded_reason is None]
+    assert eligible
+    assert sum(r.length_mm for r in eligible) > 20
+    assert any(r.path_excluded_reason for r in result.runs)
+    assert board.read_bytes() == before

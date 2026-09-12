@@ -688,6 +688,10 @@ def _add_check_parser(subparsers) -> None:
     check_parser = subparsers.add_parser("check", help="Pure Python DRC (no kicad-cli)")
     check_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     check_parser.add_argument("--physical-copper-gap", type=float, default=None, metavar="MM")
+    check_parser.add_argument(
+        "--mask-copper-config",
+        help="Path to explicit mask-to-copper process policy and native runtime JSON",
+    )
     check_parser.add_argument("--format", choices=["table", "json", "summary"], default="table")
     check_parser.add_argument("--errors-only", action="store_true")
     check_parser.add_argument("--strict", action="store_true", help="Exit with code 2 on warnings")
@@ -3837,7 +3841,21 @@ def _add_route_parser(subparsers) -> None:
         "--timeout",
         type=float,
         default=None,
-        help="Total routing invocation budget in seconds (default: unbounded). Includes cleanup/native work; allows up to 5 extra seconds for raw partial serialization, then terminates the process group and exits 124.",
+        help="HARD TOTAL routing invocation budget in seconds (default: unbounded). Nothing escapes it -- escalation, placement feedback, placement-delta probes and auto-fix all share it. Includes cleanup/native work; allows up to 5 extra seconds for raw partial serialization, then terminates the process group and exits 124. Use --search-timeout to bound an individual search stage inside it.",
+    )
+    route_parser.add_argument(
+        "--search-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Per-search-stage wall-clock allocation in seconds (default: the "
+            "value of --timeout). Caps the initial routing pass, each "
+            "escalation attempt and each placement-feedback iteration "
+            "individually, INSIDE the hard total --timeout -- never an escape "
+            "from it. Set below --timeout to reserve budget for later stages "
+            "and postprocessing. Issue #5266."
+        ),
     )
     route_parser.add_argument(
         "--per-net-timeout",
@@ -4451,10 +4469,12 @@ def _add_route_parser(subparsers) -> None:
         metavar="SECONDS",
         help=(
             "Per-iteration wall-clock budget for the placement-delta feedback "
-            "loop's re-routes, in seconds. The loop's own allocation: it "
-            "survives an already-exhausted --timeout and gives each delta's "
-            "re-route the same budget the initial pass got. Default: share "
-            "whatever remains of --timeout. Issue #4468."
+            "loop's re-routes, in seconds. The loop's own allocation, "
+            "independent of the per-stage --search-timeout, so an exhausted "
+            "initial search stage no longer starves the probes. It does NOT "
+            "escape the hard total --timeout: it is clamped to what that "
+            "deadline has left. Default: share whatever remains of --timeout. "
+            "Issues #4468, #5266."
         ),
     )
     route_parser.add_argument(
@@ -5142,6 +5162,11 @@ def _add_fix_vias_parser(subparsers) -> None:
         "fix-vias", help="Fix vias to meet manufacturer specifications"
     )
     fix_vias_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    fix_vias_parser.add_argument(
+        "--search-alternatives",
+        action="store_true",
+        help="With --relocate-in-pad, search safe alternate escapes if the preferred slide is blocked",
+    )
     fix_vias_parser.add_argument(
         "--mfr",
         choices=get_all_manufacturer_names(),
@@ -6720,6 +6745,54 @@ def _add_analyze_parser(subparsers) -> None:
         help=(
             "Fallback LED forward voltage (V) for parts with If_max but no Vf "
             "field. Default: skip such parts (zero false positives)."
+        ),
+    )
+
+    # analyze component-stress (operates on a schematic, not a PCB)
+    stress_parser = analyze_subparsers.add_parser(
+        "component-stress",
+        help="Check MOSFET VDS/VGS against declared operating states (advisory)",
+        description=(
+            "Evaluate each MOSFET's terminal-to-terminal stress (VDS = V(D)-V(S), "
+            "VGS = V(G)-V(S)) in every state of an explicit, reviewed "
+            "operating-state manifest, against Vds_max/Vgs_max symbol fields. "
+            "No circuit-state inference is performed: a missing state, pin role, "
+            "node potential or source-backed rating is reported UNRESOLVED -- "
+            "never a silent pass."
+        ),
+    )
+    stress_parser.add_argument("schematic", help="Schematic file to analyze (.kicad_sch)")
+    stress_parser.add_argument(
+        "--states",
+        dest="analyze_states",
+        required=True,
+        metavar="MANIFEST",
+        help="Operating-state manifest (.yaml/.yml/.json) declaring per-net node potentials",
+    )
+    stress_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    stress_parser.add_argument(
+        "--allow-unresolved",
+        dest="analyze_allow_unresolved",
+        action="store_true",
+        help=(
+            "Do not gate on UNRESOLVED rows (default: an unresolved state, pin "
+            "role or rating is a release blocker and exits non-zero)"
+        ),
+    )
+    stress_parser.add_argument(
+        "--allow-uncited-ratings",
+        dest="analyze_allow_uncited_ratings",
+        action="store_true",
+        help=(
+            "Accept Vds_max/Vgs_max fields without a Rating_Source/Datasheet "
+            "citation (default: an uncited rating is UNRESOLVED)"
         ),
     )
 

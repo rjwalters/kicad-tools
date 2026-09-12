@@ -286,10 +286,10 @@ class TestOverflowRegressionRollback:
         ar.grid.mark_route(fixed)
         restore_snapshot = ar.restore_route_snapshot
 
-        def check_restored_occupancy(winner):
+        def check_restored_occupancy(winner, *, replaced_routes=None):
             discarded_ids = {id(route) for route in ar.routes}
             assert winner and discarded_ids.isdisjoint(id(route) for route in winner)
-            restore_snapshot(winner)
+            restore_snapshot(winner, replaced_routes=replaced_routes)
             assert {id(route) for route in ar.grid.routes} == {
                 id(fixed),
                 *(id(route) for route in winner),

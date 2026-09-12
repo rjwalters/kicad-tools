@@ -52,6 +52,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exits 1 before any routing work); an auto-discovered one degrades to a
   warning; the authored input file is never overwritten (a collision diverts
   the derived sidecar to `current_paths.effective.json`, the #4428 rule).
+- **`kct analyze component-stress` — operating-state MOSFET VDS/VGS gate**
+  (#5039) — a new advisory analyzer
+  (`kicad_tools.analysis.component_stress.ComponentStressAnalyzer`) that asks
+  the question ERC, DRC, creepage and `analyze electrical-rating` all
+  structurally miss: *is the device itself rated for the potential difference
+  its own terminals will see?* Stress is computed as a terminal-to-terminal
+  differential (`VDS = V(D)-V(S)`, `VGS = V(G)-V(S)`) inside a **single** entry
+  of an explicit, reviewed operating-state manifest (`--states`, YAML or JSON),
+  so correlated nets are never combined across unrelated states and shifting a
+  floating gate-driver domain's reference leaves both differentials unchanged.
+  Ratings come only from sourced `Vds_max` / `Vgs_max` symbol fields (no
+  built-in defaults); an undeclared state from the required coverage checklist
+  (startup, precharge, both mains polarities, support, trip, loss-of-drive), an
+  unresolved D/G/S pin role, an unbound terminal or an uncited rating is
+  reported `UNRESOLVED` — a release blocker, never a silent pass. Pin-role
+  mappings are cached under a part identity that includes the MPN and
+  footprint, so a part swap cannot carry a stale pinout forward, and a
+  footprint creepage/spacing waiver can never suppress a device-stress finding
+  (the two read disjoint inputs). No automatic circuit-state inference is
+  performed in this pass.
 - **`kct place-silk-refs`: readable silkscreen reference placement** (#5030)
   — a dry-run/apply solver that moves (and, optionally, rotates) visible
   reference-designator text just far enough to clear real pad/via mask
@@ -1319,6 +1339,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frame), and all in-pad nodes are shorted through the pad. This is a *false*
   fail-closed being removed, not a relaxation — copper outside the pad extent
   still never attaches, so genuinely moved/removed pads still fail closed.
+- **Fine-pitch same-component carve-out silently bypassed authored pad
+  clearance** (#5004) — the router's same-component clearance carve-out
+  (`RoutingGrid._same_component_carveout_active` /
+  `CppPathfinder._same_component_carveout_eligible`) used to exempt a
+  FOREIGN-net pad from clearance checks purely because its component's pin
+  pitch was below `fine_pitch_threshold` — even when `fine_pitch_clearance`
+  was left unset (the default) and no per-component relaxation was actually
+  configured. On board07 (STM32F429 + SDRAM, 0.5mm-pitch LQFP144, 0.15mm
+  authored clearance) this silently accepted 46 clearance defects (30
+  against NC pads, 16 against named signal pads) that the router's own
+  `clearance_viol=0` metric never surfaced, while a fresh native KiCad DRC
+  on the same routed project reported all 46. The pitch-only branch is now
+  gated behind a new opt-in `DesignRules.legacy_fine_pitch_carveout` flag
+  (default `False`): with it left unset, the carve-out only activates where
+  a relaxation was actually configured or applied for the component — an
+  explicit `component_clearances` override, a net-class `escape_clearance`
+  override, an applied `fine_pitch_clearance` shrink (narrow-channel guard
+  permitting), or a corridor already relaxed by
+  `_relax_same_component_clearance` (Issue #2452). Configured relaxations
+  retain their existing exclusion behavior; enforcing numerical per-ref
+  floors is tracked separately in #5166.
+  The gate is shared by the Python search-time validator (`grid.py`), the
+  C++ pathfinder's post-route acceptance check (`cpp_backend.py`, which
+  builds the `exclude_ref_hashes` list the C++ `Grid3D::validate_route`
+  carve-out consumes), and the `validate_routes()` / `drc_nudge`
+  "component-inherent" classification (`io.py`) so those paths use the
+  same opt-in policy. `CacheKey`/`SubProblemSignature` now key on the new flag so a cache
+  entry produced under one setting is never served to a run under the
+  other. Pad seeds retain trace-radius clearance, and negotiated routing
+  preserves complete physical tree connectivity and best-state geometry.
+  Board04 recognizes reviewed oscillator escape variants. Board06 can find
+  bounded pour/via escapes and restores impedance-sized connector widths
+  beyond a cumulative 0.75 mm pad neck-down. Finalization rolls back if
+  refill breaks pour connectivity or introduces a clearance violation.
 - **Declared current-path resolution reported `ambiguous` for an entire net
   whenever a benign parallel via array was reachable from an endpoint**
   (#5197) — `_component_has_cycle` (`router/current_paths.py`) flagged any

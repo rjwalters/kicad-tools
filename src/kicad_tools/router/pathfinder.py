@@ -1466,9 +1466,29 @@ class Router:
             effective_width = pad.width
             effective_height = pad.height
 
-        if self.rules.strict_pad_clearance and trace_width is not None:
-            effective_width = max(0.0, effective_width - trace_width)
-            effective_height = max(0.0, effective_height - trace_width)
+        pitch = self.component_pitches.get(pad.ref)
+        required_clearance = self.rules.get_clearance_for_component(pad.ref, pitch)
+        # Dense fine-pitch pad-edge seeds can reconstruct a tail that grazes
+        # a foreign pad. Inset those unexempted seeds and all strict-mode pads;
+        # retain standard-pitch search freedom under the exact foreign-pad
+        # validator so unrelated negotiated route choices remain stable.
+        if (
+            trace_width is not None
+            and (
+                self.rules.strict_pad_clearance
+                or self.grid._component_is_fine_pitch(pad.ref, self.component_pitches)
+            )
+            and not self.grid._same_component_carveout_active(
+                pad.ref, required_clearance, self.rules.trace_clearance, self.component_pitches
+            )
+        ):
+            # Pad-center tails emit the configured local neck-down width.
+            # Eroding by the wider trunk can erase every legal narrow-pad seed.
+            seed_width = trace_width
+            if self.rules.should_apply_neck_down(pad.ref, pitch):
+                seed_width = self.rules.get_neck_down_width(0.0, pitch, base_width=trace_width)
+            effective_width = max(0.0, effective_width - seed_width)
+            effective_height = max(0.0, effective_height - seed_width)
 
         # Metal area bounds in world coordinates
         metal_x1 = pad.x - effective_width / 2
@@ -2834,11 +2854,21 @@ class Router:
             return self.rules.cost_congestion * (1.0 + excess * 2.0)
         return 0.0
 
-    def _batch_congestion_costs(self, current_x: int, current_y: int, layer: int) -> np.ndarray:
-        """Batch compute congestion costs for all 2D neighbors using vectorized NumPy.
+    def _batch_congestion_costs(self, current_x: int, current_y: int, layer: int) -> list[float]:
+        """Compute congestion costs for all 2D neighbors of the current cell.
 
-        Issue #963: Pre-compute congestion costs for all neighbors in a single
-        batch operation to reduce per-neighbor function call overhead.
+        Issue #963 originally vectorized this with NumPy to reduce
+        per-neighbor function call overhead. Issue #5240 (CI runtime
+        investigation): ``self.neighbors_2d`` only ever has 4-8 entries, so
+        the NumPy path paid for ~10 temporary array allocations (bounds
+        mask, congestion-grid coordinates, valid-index lookup, congestion
+        levels, threshold mask, excess, output) plus per-call ufunc
+        dispatch overhead on every single A* node expansion just to work on
+        a handful of scalars -- profiling the pure-Python router fallback
+        (which this method is only ever called from) showed it as the
+        single hottest function in that path. A plain Python loop over the
+        same fixed-size neighbor list produces bit-identical results with
+        none of that overhead.
 
         Args:
             current_x: Current grid x coordinate
@@ -2846,70 +2876,61 @@ class Router:
             layer: Current layer index
 
         Returns:
-            Array of congestion costs indexed by neighbor offset index.
+            List of congestion costs indexed by neighbor offset index.
             Out-of-bounds neighbors get cost 0 (will be filtered anyway).
         """
-        # Compute neighbor coordinates
-        nx_arr = current_x + self._neighbor_dx
-        ny_arr = current_y + self._neighbor_dy
-
-        # Bounds mask - identify valid neighbors
-        valid = (
-            (nx_arr >= 0) & (nx_arr < self.grid.cols) & (ny_arr >= 0) & (ny_arr < self.grid.rows)
-        )
-
-        # Convert to congestion grid coordinates
+        cols = self.grid.cols
+        rows = self.grid.rows
         congestion_size = self.grid.congestion_size
-        cx_arr = np.minimum(nx_arr // congestion_size, self.grid.congestion_cols - 1)
-        cy_arr = np.minimum(ny_arr // congestion_size, self.grid.congestion_rows - 1)
-
-        # Initialize costs array
-        costs = np.zeros(len(self.neighbors_2d), dtype=np.float64)
-
-        # Get valid indices
-        valid_indices = np.where(valid)[0]
-        if len(valid_indices) == 0:
-            return costs
-
-        # Batch lookup congestion counts using fancy indexing
+        congestion_cols = self.grid.congestion_cols
+        congestion_rows = self.grid.congestion_rows
+        congestion_arr = self.grid._congestion
         max_cells = congestion_size * congestion_size
-        congestion_counts = self.grid._congestion[
-            layer, cy_arr[valid_indices], cx_arr[valid_indices]
-        ]
-        congestion_levels = np.minimum(1.0, congestion_counts / max_cells)
-
-        # Compute costs where congestion exceeds threshold
         threshold = self.rules.congestion_threshold
-        exceeds = congestion_levels > threshold
-        excess = np.maximum(0, congestion_levels - threshold)
-        valid_costs = np.where(exceeds, self.rules.cost_congestion * (1.0 + excess * 2.0), 0.0)
-        costs[valid_indices] = valid_costs
+        cost_congestion = self.rules.cost_congestion
+
+        costs = [0.0] * len(self.neighbors_2d)
+        for i, (dx, dy, _dlayer, _cost_mult) in enumerate(self.neighbors_2d):
+            nx = current_x + dx
+            ny = current_y + dy
+            if not (0 <= nx < cols and 0 <= ny < rows):
+                continue
+
+            cx = min(nx // congestion_size, congestion_cols - 1)
+            cy = min(ny // congestion_size, congestion_rows - 1)
+            congestion_level = min(1.0, float(congestion_arr[layer, cy, cx]) / max_cells)
+            if congestion_level > threshold:
+                excess = congestion_level - threshold
+                costs[i] = cost_congestion * (1.0 + excess * 2.0)
 
         return costs
 
-    def _batch_turn_costs(self, current_direction: tuple[int, int]) -> np.ndarray:
-        """Batch compute turn costs for all 2D neighbors using vectorized NumPy.
+    def _batch_turn_costs(self, current_direction: tuple[int, int]) -> list[float]:
+        """Compute turn costs for all 2D neighbors of the current direction.
 
-        Issue #963: Pre-compute turn costs for all neighbors in a single
-        batch operation.
+        Issue #963 originally vectorized this with NumPy. Issue #5240: like
+        ``_batch_congestion_costs`` above, ``self.neighbors_2d`` is a
+        4-8-element fixed list, so a plain Python loop avoids the
+        per-call NumPy array allocation/comparison overhead while producing
+        identical results (see that method's docstring for the profiling
+        context).
 
         Args:
             current_direction: Current direction as (dx, dy) tuple
 
         Returns:
-            Array of turn costs indexed by neighbor offset index.
+            List of turn costs indexed by neighbor offset index.
         """
         if current_direction == (0, 0):
             # No current direction - no turn penalty
-            return np.zeros(len(self.neighbors_2d), dtype=np.float64)
+            return [0.0] * len(self.neighbors_2d)
 
-        # Check which neighbors match the current direction
-        dx_match = self._neighbor_dx == current_direction[0]
-        dy_match = self._neighbor_dy == current_direction[1]
-        matches = dx_match & dy_match
-
-        # Turn cost where direction doesn't match
-        return np.where(matches, 0.0, self.rules.cost_turn)
+        cost_turn = self.rules.cost_turn
+        dx0, dy0 = current_direction
+        return [
+            0.0 if (dx == dx0 and dy == dy0) else cost_turn
+            for dx, dy, _dlayer, _cost_mult in self.neighbors_2d
+        ]
 
     def _batch_negotiated_costs(
         self,

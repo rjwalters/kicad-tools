@@ -1923,17 +1923,24 @@ class Autorouter:
         if hasattr(self.router, "update_layer_fill_ratios"):
             self.router.update_layer_fill_ratios()
 
-    def restore_route_snapshot(self, routes: list[Route]) -> None:
+    def restore_route_snapshot(
+        self, routes: list[Route], *, replaced_routes: list[Route] | None = None
+    ) -> None:
         """Replace managed copper while retaining fixed input-board copper.
 
         Best-iteration rollback and cache replay must update the same grids,
         indexes and pathfinder caches. Negotiated usage is restored separately
         by the caller, since ordinary routing does not populate those counts.
+
+        Negotiated rollback supplies the routes it owns so independently
+        registered grid obstacles survive. Cache replay replaces the complete
+        managed snapshot, including discarded grid routes absent from self.routes.
         """
         restored = list(routes)
         fixed_ids = {id(route) for route in self.existing_routes}
+        replaced = list(self.grid.routes) if replaced_routes is None else list(replaced_routes)
         self.grid.resync_route_occupancy(
-            [(route, None) for route in list(self.grid.routes) if id(route) not in fixed_ids]
+            [(route, None) for route in replaced if id(route) not in fixed_ids]
             + [(None, route) for route in restored]
         )
         self.routes[:] = restored
@@ -12386,14 +12393,8 @@ class Autorouter:
                     f"clearance_viol={final_metrics.clearance_violations}, "
                     f"overflow={final_metrics.overflow})"
                 )
-                # Unmark all current routes from the grid
-                for route in list(self.routes):
-                    self.grid.unmark_route_usage(route)
-                # Replace with best-state routes
-                self.restore_route_snapshot(best_routes)
-                # Re-mark best routes on the grid
-                for route in self.routes:
-                    self.grid.mark_route_usage(route)
+                self._restore_negotiated_route_snapshot(best_routes)
+
                 # Update net_routes to best state
                 net_routes.clear()
                 net_routes.update(best_net_routes)
@@ -12651,6 +12652,15 @@ class Autorouter:
         self._finalize_routing()
 
         return list(self.routes)
+
+    def _restore_negotiated_route_snapshot(self, restored_routes: list[Route]) -> None:
+        """Restore all route state and negotiated usage after a best-state rollback."""
+        stale_routes = list(self.routes)
+        for route in stale_routes:
+            self.grid.unmark_route_usage(route)
+        self.restore_route_snapshot(restored_routes, replaced_routes=stale_routes)
+        for route in self.routes:
+            self.grid.mark_route_usage(route)
 
     def _flush_corridor_reservation(self, net_routes: dict[int, list[Route]]) -> None:
         """Close the iteration-scoped corridor-reservation window (#3438).

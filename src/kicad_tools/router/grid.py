@@ -182,6 +182,7 @@ def _sync_pad_via_policies(py_grid: RoutingGrid, cpp_grid: Any) -> None:
         rules.trace_clearance,
         rules.trace_width,
         rules.strict_pad_clearance,
+        rules.legacy_fine_pitch_carveout,
         rules.fine_pitch_clearance,
         rules.fine_pitch_threshold,
         tuple(sorted(rules.component_clearances.items())),
@@ -3066,32 +3067,46 @@ class RoutingGrid:
         min_clearance: float,
         component_pitches: dict[str, float] | None = None,
     ) -> bool:
-        """NET-AWARE same-component carve-out gate (Issue #3545).
+        """NET-AWARE same-component carve-out gate (Issue #3545 / #5004).
 
         Same-net pads are skipped before the carve-out is consulted, so
         every pad it exempts is on a FOREIGN net.  The exemption is only
         legitimate where the component's geometry forces sub-clearance
-        proximity:
+        proximity AND that relaxation was actually configured or applied:
 
         1. an explicit / fine-pitch clearance relaxation is in effect
-           (``required_clearance < min_clearance``, Issue #1764), or
+           (``required_clearance < min_clearance``, Issue #1764) -- this
+           covers explicit ``component_clearances`` overrides, net-class
+           ``escape_clearance`` overrides, and an applied
+           ``fine_pitch_clearance`` shrink (only when the narrow-channel
+           guard in ``get_clearance_for_component`` judged it geometrically
+           feasible), or
         2. the component's inter-pad corridor was relaxed by
-           ``_relax_same_component_clearance`` (Issue #2452), or
-        3. the component is fine-pitch (min pin pitch below
-           ``rules.fine_pitch_threshold``) -- covers boards that route
-           with ``fine_pitch_clearance`` unset (the default), where the
-           per-component clearance lookup cannot signal the relaxation.
+           ``_relax_same_component_clearance`` (Issue #2452).
 
-        Standard-pitch components (e.g. a 2.54mm THT connector) match
-        none of these, so their foreign-net pads stay in the validator
-        and sub-clearance copper is rejected (the routing-diagnostic
-        NET3-vs-J1.1 0.127mm defect).
+        Issue #5004: a THIRD branch used to exempt any component whose pin
+        pitch was below ``rules.fine_pitch_threshold``, even when
+        ``fine_pitch_clearance`` was left unset (the default) and no
+        relaxation was requested for that component.  That silently
+        accepted sub-clearance copper against fine-pitch NC and signal pads
+        alike -- 46 clearance defects on the board07 STM32F429 LQFP144,
+        invisible to the router's own acceptance metrics but caught by
+        native KiCad DRC.  Pitch alone no longer grants the carve-out;
+        ``rules.legacy_fine_pitch_carveout`` restores the old pitch-only
+        exemption for callers that explicitly opt back into it.
+
+        Standard-pitch components (e.g. a 2.54mm THT connector), and
+        fine-pitch components with no clearance relaxation actually
+        configured, match none of these, so their foreign-net pads stay in
+        the validator and sub-clearance copper is rejected.
         """
-        return not self.rules.strict_pad_clearance and (
-            required_clearance < min_clearance
-            or ref in self._relaxed_clearance_refs
-            or self._component_is_fine_pitch(ref, component_pitches)
-        )
+        if self.rules.strict_pad_clearance:
+            return False
+        if required_clearance < min_clearance or ref in self._relaxed_clearance_refs:
+            return True
+        if self.rules.legacy_fine_pitch_carveout:
+            return self._component_is_fine_pitch(ref, component_pitches)
+        return False
 
     def worst_segment_pad_deficit(
         self,
@@ -6232,6 +6247,22 @@ class RoutingGrid:
                                     cell.blocked = True
                                     cell.is_obstacle = True
                                     blocked_count += 1
+                                # The native backend is constructed before
+                                # load_pcb_for_routing adds the outline. Mirror
+                                # its static cells just as pad insertion does;
+                                # otherwise C++ A* never sees this keepout.
+                                if self._static_blocked is not None:
+                                    self._static_blocked[layer_idx, ny, nx] = True
+                                cpp_impl = getattr(self._cpp_grid, "_impl", None)
+                                if cpp_impl is not None:
+                                    cpp_impl.mark_blocked(
+                                        nx,
+                                        ny,
+                                        layer_idx,
+                                        cell.net,
+                                        cell.is_obstacle,
+                                        cell.pad_blocked,
+                                    )
 
         # Walk along the segment using Bresenham's algorithm
         if gx1 == gx2:  # Vertical line

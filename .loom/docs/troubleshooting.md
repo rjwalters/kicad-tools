@@ -1140,6 +1140,38 @@ duplicate, or `--reason "not planned"`) are not covered automatically —
 run `./.loom/scripts/clean-stale-building-labels.sh [--repo OWNER/NAME]
 [--dry-run]` to sweep those (idempotent, safe to re-run).
 
+### A sweep whose CLI has written nothing for days holds `loom:building` forever (#7529)
+
+**Symptom**: a `claude -p /loom:sweep <N>` process has an elapsed time of days,
+its log's last line is the spawn header (or the log has simply gone silent),
+the issue is still `loom:building`, `loom-daemon health` says nothing, and
+neither of the two `#3887`/`#3910` watchdog give-up comments ever posted — the
+sweep was never even *evaluated* by a watchdog, let alone rescued.
+
+**Root cause**: `reconstruct()` (a daemon restart) and `adopt_live_journal_sweeps`
+(#6262, the machine-level `~/.loom/sweeps.json` survivorship path) both
+correctly re-admit a surviving sweep into the registry as `Running` — but
+neither can ever populate a retained `Child` process handle for it (there is
+no way to resurrect one for a pid this daemon instance did not itself fork).
+The startup-hang (#3887) and review-stall (#3910) watchdogs are both gated on
+`self.children.contains_key(sweep_id)`, so a re-admitted entry is invisible to
+either for its entire remaining life — it stays `Running`, correctly listed in
+`status`'s `in_flight`, with zero liveness enforcement.
+
+**Fix**: a fourth backstop (`autonomous.watchdog.staleSweep`, default on)
+reaps exactly the entries the other two cannot reach once their age and log
+silence both cross a sanity ceiling (`staleSweepAgeSecs`, default 3h) — see
+[daemon-reference.md § Config surface](daemon-reference.md#config-surface-loomconfigjson--autonomous)
+for the knobs and the full write-up just below the review-stall watchdog
+section. Computed
+fresh from the registry on every call (not from a tick-populated cache), so
+`loom-daemon status`/`health`'s `stale_sweeps` field/section reports the same
+finding even if the watchdog task's own tick never ran. If you hit this on an
+older daemon build without the backstop, `./.loom/scripts/clean-stale-building-labels.sh`
+(above) does not help here (that script targets *closed* issues) — cancel the
+stray process by hand (`kill <pid>`) and run `loom-recover-orphans --recover`
+to restore `loom:issue`.
+
 ### Uncommitted work in the primary clone can be quarantined at any time — branching does not protect it (#5194)
 
 **Symptom**: uncommitted edits made directly in a Loom-managed repo's **primary
