@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
+from kicad_tools.mcp.observability import record_call
 from kicad_tools.mcp.tools.registry import TOOL_REGISTRY, ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -94,7 +95,11 @@ class MCPServer:
             raise ValueError(f"Unknown tool: {name}")
 
         tool = self.tools[name]
-        return tool.handler(arguments)
+        # Route through the call-observability ring buffer (issue #4897) so
+        # every stdio dispatch is recorded (name/duration/status/error_kind)
+        # regardless of whether the handler returns normally, returns a
+        # {"success": False, ...} dict, or raises.
+        return record_call(name, tool.handler, arguments)
 
     def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
         """
@@ -273,7 +278,9 @@ def _register_fastmcp_tool(mcp: FastMCP, tool_spec: ToolSpec) -> None:
 
         def handler(**kwargs: Any) -> dict:
             """Execute the tool with given parameters."""
-            return spec.handler(kwargs)
+            # Route through the same call-observability ring buffer as the
+            # stdio dispatch path (issue #4897) -- see record_call().
+            return record_call(spec.name, spec.handler, kwargs)
 
         # Copy metadata for FastMCP
         handler.__name__ = spec.name
