@@ -69,6 +69,7 @@ import SiteFooter from "../components/Footer.astro";
 
 const reports = loadBenchmarks();
 const runs = loadBenchmarkRuns();
+const runtimeNotes = [...new Set(runs.flatMap(run => run.context?.runtime ? [run.context.runtime] : []))];
 const pendingRuns = EXPECTED_CASES.filter(c => !runs.some(r => r.report.board_id === c.board && r.report.protocol === c.protocol));
 const reportedSlugs = new Set(reports.map((r) => r.board_id));
 const pendingBoards = DEEP_PCB_REFERENCE.filter((b) => !reportedSlugs.has(b.slug));
@@ -147,6 +148,7 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
           Input connectivity, newly routed connections and measured output are separate evidence.
           These software checks do not establish manufacturing readiness or tested hardware.</p>
         <h2>Dated routing attempts</h2>
+        {runtimeNotes.map(note => <p role="note">{note}</p>)}
         <p>Zero-touch requests the shipped rules; tuned requests a declared configuration.
           Run limitations explain whether the intended rules actually took effect.
           Each protocol has its own record. Evidence dates are independent of the site build date.</p>

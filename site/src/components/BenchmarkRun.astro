@@ -42,7 +42,7 @@ const measuredLabel = r.route_outcome?.artifact_source === "router_output"
     <p>Exit code: {r.route_outcome?.exit_code ?? "not recorded"}.</p>
     {r.kct_check?.note && <p>Design-check diagnostic: {r.kct_check.note}</p>}
     {r.kicad_cli_drc?.note && <p>Native DRC diagnostic: {r.kicad_cli_drc.note}</p>}
-    {localNotes.length ? <ul>{localNotes.map(note => <li>{note}</li>)}</ul> : <p>No additional diagnostics were recorded.</p>}
+    {localNotes.length ? <><h4>Recorded harness notes</h4><p>These original notes do not override the run limitations above.</p><ul>{localNotes.map(note => <li>{note}</li>)}</ul></> : <p>No additional diagnostics were recorded.</p>}
     <p>Board source: {r.board_source ?? "not recorded"}; board revision: <code>{r.board_commit ?? "not recorded"}</code>.</p>
     <p>Reproduce with the recorded tool and board revisions. The collection writeup records actual commands, budgets, environment and acquisition limitations.</p>
     <a href={root + run.collection + "/README.md"}>Collection writeup and reproduction</a>
