@@ -211,6 +211,8 @@ def run_check_command(args) -> int:
     from ..check_cmd import main as check_main
 
     sub_argv = [args.pcb]
+    if getattr(args, "physical_copper_gap", None) is not None:
+        sub_argv.extend(["--physical-copper-gap", str(args.physical_copper_gap)])
     if args.format != "table":
         sub_argv.extend(["--format", args.format])
     if args.errors_only:
