@@ -429,7 +429,10 @@ class RoutabilityAnalyzer:
 
             # Check if blocked
             if 0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows:
-                cell = self.grid.grid[layer_idx][gy][gx]
+                # Issue #5240: ``cell_at`` drop-in for the legacy
+                # ``grid.grid[layer][y][x]`` chain (one allocation instead
+                # of three chained ``__getitem__`` calls).
+                cell = self.grid.cell_at(layer_idx, gy, gx)
 
                 if cell.blocked and cell.net != net_id:
                     # Found a blocking obstacle
@@ -469,7 +472,7 @@ class RoutabilityAnalyzer:
         Returns:
             BlockingObstacle or None
         """
-        cell = self.grid.grid[layer_idx][gy][gx]
+        cell = self.grid.cell_at(layer_idx, gy, gx)
 
         if not cell.blocked:
             return None
@@ -565,7 +568,7 @@ class RoutabilityAnalyzer:
             for dx in range(-radius, radius + 1):
                 nx, ny = gx + dx, gy + dy
                 if 0 <= nx < self.grid.cols and 0 <= ny < self.grid.rows:
-                    cell = self.grid.grid[layer_idx][ny][nx]
+                    cell = self.grid.cell_at(layer_idx, ny, nx)
                     if cell.net != 0:
                         nets.add(cell.net)
 
@@ -621,7 +624,7 @@ class RoutabilityAnalyzer:
 
             for gy in range(self.grid.rows):
                 for gx in range(self.grid.cols):
-                    if self.grid.grid[layer_idx][gy][gx].blocked:
+                    if self.grid.cell_at(layer_idx, gy, gx).blocked:
                         blocked_count += 1
 
             utilization[layer_def.name] = blocked_count / total_cells if total_cells > 0 else 0.0
@@ -795,7 +798,7 @@ def analyze_routing_failure(
         gy = int(gy1 + t * dy)
 
         if 0 <= gx < grid.cols and 0 <= gy < grid.rows:
-            cell = grid.grid[layer_idx][gy][gx]
+            cell = grid.cell_at(layer_idx, gy, gx)
 
             if cell.blocked and cell.net != net_id:
                 wx, wy = grid.grid_to_world(gx, gy)
