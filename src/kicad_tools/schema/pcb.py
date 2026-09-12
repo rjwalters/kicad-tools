@@ -4509,6 +4509,11 @@ class PCB:
         )
 
     @property
+    def arc_count(self) -> int:
+        """Number of top-level copper arc nodes in the authoritative tree."""
+        return sum(1 for child in self._sexp.children if not child.is_atom and child.name == "arc")
+
+    @property
     def via_count(self) -> int:
         """Number of vias.
 
@@ -4558,6 +4563,7 @@ class PCB:
                 dx = seg.end[0] - seg.start[0]
                 dy = seg.end[1] - seg.start[1]
                 total += math.sqrt(dx * dx + dy * dy)
+        total += sum(arc.length for arc in self._arcs if layer is None or arc.layer == layer)
         return total
 
     def summary(self) -> dict:
@@ -4579,6 +4585,7 @@ class PCB:
             "footprints": self.footprint_count,
             "nets": self.net_count,
             "segments": self.segment_count,
+            "arcs": self.arc_count,
             "vias": self.via_count,
             "zones": self.zone_count,
             "trace_length_mm": round(self.total_trace_length(), 2),
@@ -6108,7 +6115,8 @@ class PCB:
 
         Returns:
             Dictionary with routing statistics:
-            - segments: Number of trace segments
+            - segments: Number of straight trace segments
+            - arcs: Number of curved copper tracks
             - vias: Number of vias
             - trace_length_mm: Total trace length in mm
             - nets_with_traces: Set of net numbers that have traces
@@ -6133,6 +6141,11 @@ class PCB:
             if seg.net_number > 0:
                 nets_with_traces.add(seg.net_number)
 
+        for arc in self._arcs:
+            total_length += arc.length
+            if arc.net_number > 0:
+                nets_with_traces.add(arc.net_number)
+
         # Add vias to nets with traces
         for via in self._vias:
             if via.net_number > 0:
@@ -6147,6 +6160,7 @@ class PCB:
 
         return {
             "segments": self.segment_count,
+            "arcs": self.arc_count,
             "vias": self.via_count,
             "trace_length_mm": total_length,
             "nets_with_traces": nets_with_traces,

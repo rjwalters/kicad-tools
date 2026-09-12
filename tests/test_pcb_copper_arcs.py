@@ -38,11 +38,13 @@ def status(pcb, strict):
 
 
 @pytest.mark.parametrize("name_only", [False, True])
-def test_load_save_preserves_exact_arc_node(tmp_path: Path, name_only):
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n"])
+def test_load_save_preserves_exact_arc_node(tmp_path: Path, name_only, line_ending):
     arc = ARC.replace("(net 1)", '(net "SIG")') if name_only else ARC
     header = HEADER.replace('(net 0 "") (net 1 "SIG") (net 2 "OTHER")', "") if name_only else HEADER
     source = tmp_path / "in.kicad_pcb"
-    source.write_text(header + arc + ")")
+    arc = arc.replace("\n", line_ending)
+    source.write_bytes((header + arc + ")").encode())
     pcb = PCB.load(source)
     (item,) = pcb.arcs
     assert item.start == (10, 10)
@@ -231,3 +233,18 @@ def test_arc_interior_to_filled_zone(filled, expected):
       (polygon {points}) {fill})"""
     pcb = board(ARC, zone, pad("J1", 10, 10), pad("J2", 15, 3.5))
     assert status(pcb, True).status == expected
+
+
+def test_pcb_summary_and_routing_status_include_curved_copper():
+    pcb = board(ARC, pad("J1", 10, 10), pad("J2", 20, 10))
+    assert pcb.arc_count == 1
+    assert pcb.total_trace_length() == pytest.approx(5 * math.pi)
+    assert pcb.total_trace_length("F.Cu") == pytest.approx(5 * math.pi)
+    assert pcb.total_trace_length("B.Cu") == 0
+    assert pcb.summary()["arcs"] == 1
+    assert pcb.summary()["trace_length_mm"] == round(5 * math.pi, 2)
+    routed = pcb.routing_status()
+    assert routed["arcs"] == 1
+    assert routed["trace_length_mm"] == pytest.approx(5 * math.pi)
+    assert routed["nets_with_traces"] == {1}
+    assert routed["unrouted_pads"] == []
