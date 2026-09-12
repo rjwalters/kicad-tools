@@ -992,6 +992,48 @@ def _endpoint_via_array(
     return _ViaArray(nodes, edges, list({id(seg): seg for seg in members}.values()))
 
 
+def _candidate_via_array_leg_count(
+    graph: _CopperGraph, pcb: PCB, hub: _Node, pad: Pad, net_name: str
+) -> int:
+    """Count arms at ``hub`` that individually look like a via-array leg.
+
+    A damaged/incomplete parallel via array (Issue #4980 upstream fanout
+    diagnosis) is only a meaningful concept when at least *two* surviving
+    arms each independently resemble one leg of that motif: a short,
+    same-layer stub (bounded by the pad diagonal, matching
+    :func:`_endpoint_via_array`'s own supported-subset limit) that
+    terminates at a real plated via on this net.
+
+    This is deliberately narrower than "any arm anywhere touches a via" --
+    that broader check also fires on an ordinary branching pad where one
+    arm is ,e.g., a force trunk trace and the *other*, unrelated, arm just
+    happens to drop through a via to reach an inner layer (a common,
+    completely ordinary sense/feedback-tap pattern). Requiring two or more
+    candidate legs keeps the "this might be a damaged fanout" suspicion
+    scoped to boards that actually attempted the parallel-via motif, without
+    inferring or assuming any current split between legs.
+    """
+    bound = math.hypot(*pad.size)
+    net = pcb.get_net_by_name(net_name)
+    count = 0
+    for top, edge in graph.adjacency.get(hub, []):
+        seg = edge.segment
+        if seg is None or seg.layer != hub[2]:
+            continue
+        if _seg_length(seg) > bound + _PAD_EPS:
+            continue
+        matching = [v for v in pcb.vias if _node_key(v.position) == top[:2]]
+        if len(matching) != 1:
+            continue
+        via = matching[0]
+        if len(via.layers) < 2 or not (
+            via.net_name == net_name or (net is not None and via.net_number == net.number)
+        ):
+            continue
+        count += 1
+    return count
+
+
 def _component_has_cycle(
     graph: _CopperGraph, start: _Node, arrays: Sequence[_ViaArray] = ()
 ) -> bool:
@@ -1247,16 +1289,21 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
             )
             arms = adjacency.adjacency.get(hub, []) if hub is not None else []
             # A broken fanout may become acyclic when receiving copper is
-            # removed. It must not fall back to checking one surviving arm.
+            # removed. It must not fall back to checking one surviving arm --
+            # but "a fanout" is only a meaningful suspicion once at least two
+            # arms independently resemble a via-array leg
+            # (:func:`_candidate_via_array_leg_count`). An ordinary branching
+            # pad -- e.g. one force-trunk arm plus one unrelated sense/
+            # feedback arm that happens to drop through a single via to
+            # reach an inner layer -- is not a damaged array and must not be
+            # forced ambiguous just because *some* arm touches *some* via.
             if (
-                endpoint_pad is not None
+                hub is not None
+                and endpoint_pad is not None
                 and endpoint_pad.type == "smd"
                 and len(arms) >= 2
-                and any(
-                    edge.segment is not None
-                    and any(_node_key(v.position) == node[:2] for v in pcb.vias)
-                    for node, edge in arms
-                )
+                and _candidate_via_array_leg_count(adjacency, pcb, hub, endpoint_pad, spec.net_name)
+                >= 2
             ):
                 return PathResolution(
                     spec=spec,
