@@ -418,3 +418,39 @@ class TestRejectLostRouteOnlyBindings:
         rc = _reject_lost_route_only_bindings(args, 0)
         assert rc is not None
         assert rc != 0
+
+
+class TestBareNetReferences:
+    def test_mixed_ids_escaping_and_nonreference_text(self):
+        text = r"""(kicad_pcb (net 41 USB_D+) (net SPI3_SCK) (net 1)
+          (net 9 "quoted\"name\\path") (net " spaced ")
+          (property "Description" "(net 99 FAKE)")
+          ; (net 88 COMMENT)
+          (net USB_D+) (net 0 ""))"""
+        assert _build_net_number_map(text) == {
+            "USB_D+": 41,
+            'quoted"name\\path': 9,
+            "SPI3_SCK": 2,
+            " spaced ": 3,
+        }
+
+    def test_quoted_bare_graph_equivalence_and_roundtrip(self, tmp_path):
+        from kicad_tools.sexp import parse_string
+
+        for template in (_NUMERIC_FIXTURE, _NAME_ONLY_FIXTURE):
+            for name in ("USB_D+", "SPI3_SCK", "/bus/D-", "+-_", 'quote"slash\\'):
+                encoded = name.replace("\\", "\\\\").replace('"', '\\"')
+                quoted = template.replace('"SIGNAL"', f'"{encoded}"')
+                forms = [quoted, parse_string(quoted).to_string()]
+                if '"' not in name and "\\" not in name:
+                    forms.append(quoted.replace(f'"{encoded}"', name))
+                for index, text in enumerate(forms):
+                    path = tmp_path / f"form-{index}.kicad_pcb"
+                    path.write_text(text)
+                    router, net_map = load_pcb_for_routing(str(path))
+                    assert net_map == {name: 1}
+                    assert len(router.nets[1]) == 2
+                    assert router.net_names[1] == name
+                    pads = load_pads_for_analysis(path)
+                    assert len(pads) == 2
+                    assert {pad.net for pad in pads} == {1}
