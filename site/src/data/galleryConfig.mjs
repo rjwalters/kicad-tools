@@ -14,4 +14,5 @@
  * it must produce no card, route, render, or staged PCB. Honored by both the
  * loader's discovery and the render-staging script so it is dropped uniformly.
  */
-export const EXCLUDED_SLUGS = new Set(["chorus-test-revA"]);
+// softstart is a local-only fixture whose sibling repository is not published.
+export const EXCLUDED_SLUGS = new Set(["chorus-test-revA", "softstart"]);

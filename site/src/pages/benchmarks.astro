@@ -136,7 +136,7 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
   </head>
   <body>
     <SiteHeader />
-    <main>
+    <main id="main-content" tabindex="-1">
       <header class="page-header">
         <p class="snapshot-bar" role="note">
           <strong>Archived historical snapshot</strong>
@@ -471,42 +471,7 @@ uv run kct bench external --board strf --tuned`}</code></pre>
   </body>
 </html>
 
-<style is:global>
-  :root {
-    color-scheme: dark;
-    --bg: #0a0e12;
-    --text: #e6edf3;
-    --muted: #9aa7b2;
-    --accent: #3fae7a;
-    --border: #25303a;
-    --card-bg: #11171d;
-    --badge-bg: #1b2530;
-  }
 
-  * {
-    box-sizing: border-box;
-  }
-
-  html,
-  body {
-    margin: 0;
-    padding: 0;
-  }
-
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family:
-      system-ui,
-      -apple-system,
-      "Segoe UI",
-      Roboto,
-      Helvetica,
-      Arial,
-      sans-serif;
-    line-height: 1.5;
-  }
-</style>
 
 <style>
   main {
