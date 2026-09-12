@@ -44,6 +44,8 @@
  *     dated observation** — never as an evergreen claim about whether that
  *     issue is still open today.
  */
+import BenchmarkRun from "../components/BenchmarkRun.astro";
+import { loadBenchmarkRuns, EXPECTED_CASES } from "../data/benchmarkRuns.ts";
 import { loadBenchmarks } from "../data/loadBenchmarks.ts";
 import { DEEP_PCB_REFERENCE, deepPcbReferenceFor } from "../data/deepPcbReference.ts";
 import {
@@ -66,6 +68,8 @@ import SiteHeader from "../components/Header.astro";
 import SiteFooter from "../components/Footer.astro";
 
 const reports = loadBenchmarks();
+const runs = loadBenchmarkRuns();
+const pendingRuns = EXPECTED_CASES.filter(c => !runs.some(r => r.report.board_id === c.board && r.report.protocol === c.protocol));
 const reportedSlugs = new Set(reports.map((r) => r.board_id));
 const pendingBoards = DEEP_PCB_REFERENCE.filter((b) => !reportedSlugs.has(b.slug));
 
@@ -128,15 +132,32 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>kicad-tools.org — external autorouter benchmarks (archived snapshot)</title>
+    <title>kicad-tools.org — external-board routing status</title>
     <meta
       name="description"
-      content={`Archived engineering snapshot (${snapshotDateLabel ?? "no committed reports"}) of kicad-tools' routing attempts on DeepPCB's published benchmark boards (STRF, PocketBeagle, BeagleConnect Freedom). Attempt outcomes are shown with their measurements; vendor figures are separate, unverified external references.`}
+      content="Recorded external-board routing attempts, their outcomes and measured artifacts, with a separate August archive. Vendor figures are external references, not a competitive comparison."
     />
   </head>
   <body>
     <SiteHeader />
     <main>
+      <section class="current-runs" aria-labelledby="routing-status">
+        <h1 id="routing-status">External-board routing status</h1>
+        <p class="tagline">Each run records what happened on a pinned board and tool version.
+          Input connectivity, newly routed connections and measured output are separate evidence.
+          These software checks do not establish manufacturing readiness or tested hardware.</p>
+        <h2>Dated routing attempts</h2>
+        <p>Zero-touch uses the shipped rules; tuned uses a declared configuration.
+          Each protocol has its own record. Evidence dates are independent of the site build date.</p>
+        {runs.length === 0 && <p>No dated rerun reports are published yet. The August records below remain available.</p>}
+        {runs.map(run => <BenchmarkRun run={run} />)}
+        {pendingRuns.length > 0 && <ul class="pending-runs">{pendingRuns.map(c => <li>
+          <strong>{deepPcbReferenceFor(c.board)?.name ?? c.board} · {c.protocol}: not tested in the dated collection</strong>
+          {" "}— no committed report is available. This is an evidence gap, not a routing failure or success.
+        </li>)}</ul>}
+        <p>Vendor references appear only in the separate historical section below.
+          Matching board revisions, protocols and metric definitions have not been established for a competitive comparison.</p>
+      </section>
       <header class="page-header">
         <p class="snapshot-bar" role="note">
           <strong>Archived historical snapshot</strong>
@@ -160,7 +181,7 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
             >results/README.md</a
           > for the raw writeup. Page last built <strong>{buildDateLabel}</strong>.
         </p>
-        <h1>External autorouter benchmarks</h1>
+        <h2>August historical archive</h2>
         <p class="tagline">
           What happened when this repository's router was pointed at boards
           DeepPCB publishes its own numbers for.
@@ -191,8 +212,8 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
         }
       </header>
 
-      <section class="methodology">
-        <h2>Methodology</h2>
+      <details class="methodology">
+        <summary>Historical methodology and measurement limits</summary>
         <p class="section-copy">
           Every headline number (completion, via count, wirelength) is
           re-measured directly from the <code>.kicad_pcb</code> file on disk
@@ -219,7 +240,7 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
             configuration applied before routing, mirroring DeepPCB's own
             published STRF case study (USB 2.0 differential pairs at a
             90&nbsp;ohm target, SPI bus on a compact-via netclass). Currently
-            defined for STRF only, and STRF has no committed report (see
+            defined for STRF only; this archive has no STRF report (see
             "No committed report" below).
           </li>
         </ul>
@@ -247,11 +268,11 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
             rel="noopener noreferrer">benchmark-external-report-schema.md</a
           >.
         </p>
-      </section>
+      </details>
 
       <section class="results">
-        <h2>Results</h2>
-        <div class="table-scroll">
+        <h2>Historical measurements</h2>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Historical measurements, scroll horizontally">
           <table>
             <thead>
               <tr>
@@ -737,4 +758,12 @@ uv run kct bench external --board strf --tuned`}</code></pre>
       padding: 1.1rem;
     }
   }
+</style>
+
+<style>
+.current-runs { margin-bottom: 3rem; }
+.current-runs h1 { font-size: clamp(1.8rem, 4vw, 2.8rem); line-height: 1.15; }
+.current-runs p, .pending-runs { color: var(--muted); }
+.methodology summary { cursor: pointer; color: var(--accent); font-size: 1.2rem; }
+summary:focus-visible, .table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 </style>
