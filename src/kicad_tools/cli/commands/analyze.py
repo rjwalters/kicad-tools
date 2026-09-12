@@ -9,7 +9,7 @@ def run_analyze_command(args) -> int:
         print("Usage: kicad-tools analyze <command> [options] <file>")
         print(
             "Commands: complexity, congestion, trace-lengths, signal-integrity, "
-            "thermal, current-sense, electrical-rating"
+            "thermal, current-sense, electrical-rating, component-stress"
         )
         return 1
 
@@ -33,6 +33,9 @@ def run_analyze_command(args) -> int:
 
     if args.analyze_command == "electrical-rating":
         return _run_electrical_rating_command(args)
+
+    if args.analyze_command == "component-stress":
+        return _run_component_stress_command(args)
 
     return 1
 
@@ -158,6 +161,24 @@ def _run_electrical_rating_command(args) -> int:
         sub_argv.extend(["--derate-margin", str(args.analyze_derate_margin)])
     if getattr(args, "analyze_led_default_vf", None) is not None:
         sub_argv.extend(["--led-default-vf", str(args.analyze_led_default_vf)])
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+
+    return analyze_main(sub_argv)
+
+
+def _run_component_stress_command(args) -> int:
+    """Handle analyze component-stress command (operates on a schematic)."""
+    from ..analyze_cmd import main as analyze_main
+
+    sub_argv = ["component-stress", args.schematic, "--states", args.analyze_states]
+
+    if getattr(args, "analyze_format", "text") != "text":
+        sub_argv.extend(["--format", args.analyze_format])
+    if getattr(args, "analyze_allow_unresolved", False):
+        sub_argv.append("--allow-unresolved")
+    if getattr(args, "analyze_allow_uncited_ratings", False):
+        sub_argv.append("--allow-uncited-ratings")
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
 
