@@ -39,8 +39,8 @@
  *   - A report whose `copper` block shows zero vias and zero wirelength
  *     (`producedNoRoutedOutput()`) never gets to present its `completion`/
  *     `timing` figures as if they were a routed result's completion% or
- *     route speed — both are the stripped input board's numbers, and both
- *     are labeled as such wherever they render.
+ *     route speed — connectivity/copper describe the measured input board;
+ *     duration describes the stopped attempt. Both are labeled explicitly.
  *   - A board that did not route 100% is annotated with its filed
  *     generic-router-capability issue, described as a **historical,
  *     dated observation** — never as an evergreen claim about whether that
@@ -131,7 +131,7 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
     <title>kicad-tools.org — external autorouter benchmarks (archived snapshot)</title>
     <meta
       name="description"
-      content={`Archived engineering snapshot (${snapshotDateLabel ?? "no committed reports"}) of kicad-tools' routing attempts on DeepPCB's published benchmark boards (STRF, PocketBeagle, BeagleConnect Freedom). Neither committed attempt produced routed output; vendor figures are shown separately as unverified external references.`}
+      content={`Archived engineering snapshot (${snapshotDateLabel ?? "no committed reports"}) of kicad-tools' routing attempts on DeepPCB's published benchmark boards (STRF, PocketBeagle, BeagleConnect Freedom). Attempt outcomes are shown with their measurements; vendor figures are separate, unverified external references.`}
     />
   </head>
   <body>
@@ -163,9 +163,12 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
         <h1>External autorouter benchmarks</h1>
         <p class="tagline">
           What happened when this repository's router was pointed at boards
-          DeepPCB publishes its own numbers for. Neither committed attempt
-          below reached routing — the numbers describe a stopped attempt, not
-          a routed board. Public, honest, and reproducible from a clean
+          DeepPCB publishes its own numbers for.
+          {noOutputReports.length > 0 && (
+            <>{noOutputReports.length} of {reports.length} recorded attempts produced no routed
+            output; their input-board measurements and elapsed attempt durations are labeled below. </>
+          )}
+          Public, honest, and reproducible from a clean
           checkout — see <a href={EPIC_URL} target="_blank" rel="noopener noreferrer"
             >Epic #4932</a
           > for the original benchmark harness design and{" "}
@@ -178,11 +181,11 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
               <strong>
                 {noOutputReports.map((r) => r.board_id).join(", ")}
               </strong>{" "}
-              stopped before routing and produced <strong>no routed output</strong> — every
-              number for {noOutputReports.length === 1 ? "that board" : "those boards"} below
-              describes the <strong>stripped input board</strong> fed to the router (0 vias, 0 mm
-              of copper), never a routed result. See "Attempt outcome" below for what blocked
-              each one.
+              stopped before routing and produced <strong>no routed output</strong>.
+              Connectivity and copper measurements describe the <strong>stripped input board</strong>
+              fed to the router (0 vias, 0 mm of copper). Duration is the elapsed time of the
+              <strong> stopped attempt</strong>, not completed routing performance.
+              See "Attempt outcome" below for what blocked each one.
             </p>
           )
         }
