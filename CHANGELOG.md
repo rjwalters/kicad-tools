@@ -19,6 +19,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Declared current paths now fail closed on same-net routed arcs and
+  copper pours** (#5273) — `resolve_current_path()` previously built its
+  copper graph only from routed `Segment` tracks and via barrels, so a
+  same-net routed **arc** or a non-keepout **zone/pour** — either of which
+  can form a parallel return path around a declared branch (a plane is the
+  archetypal case) — was invisible to it and never affected the result. A
+  declared branch on such a net now resolves `"ambiguous"` instead of
+  `"resolved"`, naming the unmodeled copper in the reason (endpoint
+  resolution failures still take precedence and remain `"unresolved"`).
+  New `unmodeled_copper()` inventories same-net arcs and non-keepout
+  zones/pours (kind, layer, representative location); keepout rule areas
+  are excluded since they carry no copper. `CurrentPathAudit` gains an
+  `unmodeled` field, surfaced by `kct pcb current-paths-audit` in both JSON
+  and text output, and `kct check`'s `path_ampacity` rule emits a
+  `warning` per unmodeled-copper object found (the `ambiguous` status
+  already produces the `error`). No change was needed in
+  `pcb/reinforce.py`: its allow-list gate only admits copper from a
+  *resolved* path, so a net with unmodeled copper drops out of
+  reinforcement eligibility for free once `resolve_current_path()` stops
+  returning `resolved` for it.
 - **Pulsed / duty-cycled current on declared branch current paths** (#4980) —
   `CurrentPathSpec` gains optional `duty_cycle` and `pulse_duration_s`
   alongside the existing `pulsed_a`, which until now was parsed, serialized

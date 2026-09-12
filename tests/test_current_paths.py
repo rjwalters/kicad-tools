@@ -28,6 +28,7 @@ from kicad_tools.router.current_paths import (
     parse_current_path_specs,
     reinforcement_eligible_segment_ids,
     resolve_current_path,
+    unmodeled_copper,
 )
 from kicad_tools.schema.pcb import Footprint, Pad
 
@@ -325,6 +326,163 @@ class TestResolveCurrentPath:
         assert r.ok
         assert r.segments == ()
         assert r.length_mm == 0.0
+
+
+# --------------------------------------------------------------------------
+# unmodeled_copper() / STATUS_AMBIGUOUS on same-net arcs and pours (#5273)
+# --------------------------------------------------------------------------
+
+
+class TestUnmodeledCopper:
+    """A same-net routed arc or non-keepout pour can form a parallel return
+    path around a declared branch -- ``resolve_current_path`` must fail
+    closed to ``"ambiguous"`` rather than silently ignore it (#5273)."""
+
+    @staticmethod
+    def _add_arc(pcb, *, net_name: str = "NET1", start=(20, 50), mid=(70, 20), end=(120, 50)):
+        from kicad_tools.sexp import parse_string
+
+        net = pcb.get_net_by_name(net_name)
+        assert net is not None
+        pcb._sexp.append(
+            parse_string(
+                f"(arc (start {start[0]} {start[1]}) (mid {mid[0]} {mid[1]}) "
+                f'(end {end[0]} {end[1]}) (width 0.2) (layer "F.Cu") (net {net.number}))'
+            )
+        )
+
+    @staticmethod
+    def _add_zone(pcb, *, net_name: str = "NET1", layer: str = "F.Cu", keepout=None):
+        from kicad_tools.schema.pcb import Zone
+
+        net = pcb.get_net_by_name(net_name)
+        assert net is not None
+        pcb._zones.append(
+            Zone(
+                net.number,
+                net_name,
+                layer,
+                polygon=[(0, 0), (200, 0), (200, 120), (0, 120)],
+                keepout=keepout,
+            )
+        )
+
+    def test_unmodeled_copper_finds_same_net_arc(self) -> None:
+        pcb = _t_network_pcb()
+        self._add_arc(pcb)
+        found = unmodeled_copper(pcb, "NET1")
+        assert len(found) == 1
+        assert found[0].kind == "arc"
+        assert found[0].layer == "F.Cu"
+        assert found[0].location == (20.0, 50.0)
+
+    def test_unmodeled_copper_finds_same_net_pour(self) -> None:
+        pcb = _t_network_pcb()
+        self._add_zone(pcb)
+        found = unmodeled_copper(pcb, "NET1")
+        assert len(found) == 1
+        assert found[0].kind == "zone"
+        assert found[0].layer == "F.Cu"
+
+    def test_keepout_zone_excluded(self) -> None:
+        from kicad_tools.schema.pcb import ZoneKeepout
+
+        pcb = _t_network_pcb()
+        self._add_zone(pcb, keepout=ZoneKeepout())
+        assert unmodeled_copper(pcb, "NET1") == []
+
+    def test_different_net_arc_excluded(self) -> None:
+        pcb = _t_network_pcb()
+        _add_pad_footprint(pcb, ref="X1", x=5, y=5, net="OTHERNET")
+        self._add_arc(pcb, net_name="OTHERNET")
+        assert unmodeled_copper(pcb, "NET1") == []
+        assert len(unmodeled_copper(pcb, "OTHERNET")) == 1
+
+    def test_different_net_pour_in_same_physical_area_excluded(self) -> None:
+        pcb = _t_network_pcb()
+        _add_pad_footprint(pcb, ref="X1", x=5, y=5, net="OTHERNET")
+        self._add_zone(pcb, net_name="OTHERNET")
+        assert unmodeled_copper(pcb, "NET1") == []
+        assert len(unmodeled_copper(pcb, "OTHERNET")) == 1
+
+    def test_no_unmodeled_copper_empty_list(self) -> None:
+        pcb = _t_network_pcb()
+        assert unmodeled_copper(pcb, "NET1") == []
+
+    def test_resolve_reports_ambiguous_with_same_net_arc(self) -> None:
+        pcb = _t_network_pcb()
+        self._add_arc(pcb)
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert r.status == "ambiguous"
+        assert "arc" in r.reason
+
+    def test_resolve_reports_ambiguous_with_same_net_pour(self) -> None:
+        pcb = _t_network_pcb()
+        self._add_zone(pcb)
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert r.status == "ambiguous"
+        assert "zone" in r.reason
+
+    def test_keepout_zone_does_not_make_path_ambiguous(self) -> None:
+        from kicad_tools.schema.pcb import ZoneKeepout
+
+        pcb = _t_network_pcb()
+        self._add_zone(pcb, keepout=ZoneKeepout())
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert r.ok
+
+    def test_different_net_arc_does_not_make_path_ambiguous(self) -> None:
+        pcb = _t_network_pcb()
+        _add_pad_footprint(pcb, ref="X1", x=5, y=5, net="OTHERNET")
+        self._add_arc(pcb, net_name="OTHERNET")
+        r = resolve_current_path(pcb, _trunk_spec())
+        assert r.ok
+
+    def test_endpoint_resolution_failure_takes_precedence_over_unmodeled_copper(self) -> None:
+        """A broken endpoint stays ``unresolved`` even when the net also
+        carries unmodeled copper -- endpoint failures fail closed first."""
+        pcb = _t_network_pcb()
+        self._add_arc(pcb)
+        spec = CurrentPathSpec(
+            name="BROKEN",
+            net_name="NET1",
+            source=PathEndpoint("J1", "1"),
+            sink=PathEndpoint("J99", "1"),
+            continuous_a=15.0,
+        )
+        r = resolve_current_path(pcb, spec)
+        assert r.status == "unresolved"
+
+    def test_degenerate_self_path_unaffected_by_unmodeled_copper(self) -> None:
+        """The ``source == sink`` trivial case never touches the graph, so
+        it stays resolved even when the net carries unmodeled copper."""
+        pcb = _t_network_pcb()
+        self._add_arc(pcb)
+        spec = CurrentPathSpec(
+            name="TRIVIAL",
+            net_name="NET1",
+            source=PathEndpoint("J1", "1"),
+            sink=PathEndpoint("J1", "1"),
+            continuous_a=1.0,
+        )
+        r = resolve_current_path(pcb, spec)
+        assert r.ok
+        assert r.segments == ()
+
+    def test_audit_surfaces_unmodeled_field(self) -> None:
+        pcb = _t_network_pcb()
+        self._add_arc(pcb)
+        audit = audit_current_paths(pcb, [_trunk_spec()])
+        assert "NET1" in audit.unmodeled
+        assert len(audit.unmodeled["NET1"]) == 1
+        assert audit.unmodeled["NET1"][0].kind == "arc"
+        assert audit.ambiguous
+        assert audit.ambiguous[0].spec.name == "TRUNK"
+
+    def test_audit_unmodeled_empty_when_no_arc_or_pour(self) -> None:
+        pcb = _t_network_pcb()
+        audit = audit_current_paths(pcb, [_trunk_spec(), _sense_spec()])
+        assert audit.unmodeled == {}
 
 
 class TestPadExtentEndpointBinding:

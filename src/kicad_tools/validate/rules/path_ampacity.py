@@ -60,6 +60,15 @@ waived" requirement. This is a warning, not an error: uncovered copper on
 a net that also has declared paths is usually deliberate (an unmodeled
 low-current branch the designer hasn't gotten around to declaring yet),
 not necessarily a defect -- but it must never be silent.
+
+Similarly, a routed arc or a non-keepout same-net zone/pour is real
+current-carrying copper :func:`~kicad_tools.router.current_paths
+.resolve_current_path`'s graph never sees at all (Issue #5273). Either can
+form a parallel return path around a declared branch, so any declared path
+on such a net already resolves as ``"ambiguous"`` (an ``error``, via the
+branch above). This rule additionally emits a ``warning`` per unmodeled
+copper object found -- naming the specific arc/pour responsible, rather
+than leaving the reader to infer it from the ambiguous-status error alone.
 """
 
 from __future__ import annotations
@@ -89,6 +98,7 @@ if TYPE_CHECKING:
         CurrentPathSpec,
         PathResolution,
         ThermalDesignCurrent,
+        UnmodeledCopper,
     )
     from kicad_tools.schema.pcb import PCB, Segment
 
@@ -156,9 +166,10 @@ class PathAmpacityRule(DRCRule):
 
         Returns:
             DRCResults with an ``error`` per under-width segment on a
-            resolved path, an ``error`` per unresolved/ambiguous path, and
-            a ``warning`` per segment of a declared net not covered by any
-            resolved path. Empty when no path is declared.
+            resolved path, an ``error`` per unresolved/ambiguous path, a
+            ``warning`` per segment of a declared net not covered by any
+            resolved path, and a ``warning`` per same-net unmodeled arc/pour
+            object found on a declared net. Empty when no path is declared.
         """
         results = DRCResults(rules_checked=1)
         if not self.specs:
@@ -225,6 +236,10 @@ class PathAmpacityRule(DRCRule):
         for net_name, segments in audit.uncovered.items():
             for segment in segments:
                 results.add(self._uncovered_violation(net_name, segment))
+
+        for net_name, unmodeled_items in audit.unmodeled.items():
+            for item in unmodeled_items:
+                results.add(self._unmodeled_copper_violation(net_name, item))
 
         return results
 
@@ -400,6 +415,30 @@ class PathAmpacityRule(DRCRule):
             ),
             location=(loc_x, loc_y),
             layer=layer,
+            actual_value=None,
+            required_value=None,
+            items=(net_name,),
+        )
+
+    def _unmodeled_copper_violation(self, net_name: str, item: UnmodeledCopper) -> DRCViolation:
+        """One same-net arc/pour object :func:`resolve_current_path` never models.
+
+        A warning, not an error: the ``ambiguous`` status this copper
+        already forces onto every declared path on the net is the error
+        (via :meth:`_unresolved_violation`). This finding's job is only to
+        name the specific object responsible, since the status alone does
+        not say *why* a branch that used to resolve cleanly no longer does.
+        """
+        return DRCViolation(
+            rule_id=self.rule_id,
+            severity="warning",
+            message=(
+                f"Net {net_name!r} has declared current path(s) but carries a same-net "
+                f"{item.kind} on {item.layer} that is not modeled by the declared-path "
+                "graph -- it may form a parallel return path around a declared branch"
+            ),
+            location=item.location,
+            layer=item.layer,
             actual_value=None,
             required_value=None,
             items=(net_name,),

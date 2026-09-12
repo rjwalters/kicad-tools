@@ -845,6 +845,51 @@ class TestCurrentPathsCLI:
         assert "unresolved" in out
         assert "BROKEN" in out
 
+    def test_current_paths_audit_cli_reports_unmodeled_copper(self, tmp_path, capsys):
+        """A same-net pour (#5273) makes the force path ambiguous and is
+        surfaced by name in both JSON and text audit output."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.sexp import parse_string
+
+        pcb_path = self._build_kelvin_board(tmp_path)
+        pcb = PCB.load(pcb_path)
+        net = pcb.get_net_by_name("PGND")
+        assert net is not None
+        # A real ``(zone ...)`` sexp node, not just a ``Zone`` dataclass
+        # appended to ``pcb._zones`` -- ``save()`` serializes ``pcb._sexp``
+        # directly, and re-parsing on the next ``PCB.load()`` is what
+        # populates ``pcb._zones``, so the node has to round-trip for real.
+        pcb._sexp.append(
+            parse_string(
+                f'(zone (net {net.number} "PGND") (layer "F.Cu") '
+                "(min_thickness 0.2) "
+                "(polygon (pts (xy 0 0) (xy 200 0) (xy 200 120) (xy 0 120))))"
+            )
+        )
+        pcb.save(pcb_path)
+        assert len(PCB.load(pcb_path).zones) == 1
+        sidecar = self._write_current_paths(tmp_path)
+
+        args = argparse.Namespace(
+            pcb_command="current-paths-audit",
+            pcb=str(pcb_path),
+            current_paths=str(sidecar),
+            format="json",
+        )
+        assert run_pcb_command(args) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["all_resolved"] is False
+        assert data["resolutions"][0]["status"] == "ambiguous"
+        assert "PGND" in data["unmodeled"]
+        assert data["unmodeled"]["PGND"][0]["kind"] == "zone"
+
+        args.format = "text"
+        assert run_pcb_command(args) == 0
+        text = capsys.readouterr().out
+        assert "Unmodeled copper" in text
+        assert "zone on F.Cu" in text
+
 
 class TestAllRunsAnchoring:
     def test_default_mode_anchors_only_longest_run(self):
@@ -1124,6 +1169,38 @@ class TestCurrentPathGating:
         result = reinforce_net(
             pcb, "PGND", spacing_mm=10.0, all_runs=True, current_paths=[broken_force]
         )
+        assert result.placed_count == 0
+        assert all(rs.path_excluded_reason is not None for rs in result.runs)
+
+    def test_same_net_pour_excludes_force_path_from_reinforcement(self):
+        """A same-net copper pour (#5273) makes ``resolve_current_path``
+        report the force path as ``"ambiguous"`` rather than ``"resolved"``.
+        No code change is needed in ``pcb/reinforce.py`` itself --
+        ``reinforcement_eligible_segment_ids()`` is an allow-list gated on
+        ``resolution.ok``, so a net whose declared force path can no longer
+        resolve cleanly drops out of reinforcement eligibility for free."""
+        from kicad_tools.schema.pcb import Zone
+
+        pcb = _kelvin_shunt_pcb()
+        net = pcb.get_net_by_name("PGND")
+        assert net is not None
+        pcb._zones.append(
+            Zone(
+                net.number,
+                "PGND",
+                "F.Cu",
+                polygon=[(0, 0), (200, 0), (200, 120), (0, 120)],
+            )
+        )
+        result = reinforce_net(
+            pcb,
+            "PGND",
+            spacing_mm=10.0,
+            all_runs=True,
+            current_paths=[_force_spec(), _kelvin_sense_spec()],
+        )
+        # Every run is excluded -- the force path that used to anchor now
+        # resolves ambiguous, and the sense spur was already ineligible.
         assert result.placed_count == 0
         assert all(rs.path_excluded_reason is not None for rs in result.runs)
 

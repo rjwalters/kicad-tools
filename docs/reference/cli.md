@@ -888,6 +888,18 @@ Endpoints bind by the pad's real copper extent, not by an exact pad-center
 hit, so a trace terminating anywhere inside the pad attaches (and several
 stubs landing on one pad are shorted by it, as they are in reality).
 
+A same-net routed **arc** or a non-keepout same-net **zone/pour** is real
+copper the declared-path graph never builds from `Segment` tracks alone —
+either can form a parallel return path around a declared branch (a plane is
+the archetypal case), so a declared path on such a net resolves `ambiguous`
+too, naming the unmodeled copper in the reason (endpoint-resolution failures
+still take precedence and stay `unresolved`). `kct pcb current-paths-audit`
+surfaces the same inventory as an `unmodeled` block (kind, layer,
+representative location per object) in both JSON and text output, and
+`path_ampacity` emits a `warning` per object found — separate from the
+`ambiguous` status's own `error`. Keepout rule areas carry no copper and are
+excluded.
+
 A bounded endpoint via array is recognized only when parallel straight stubs
 land on the actual pad, real outer-layer barrels join one straight receiving
 trunk, and each exit leads through acyclic copper to real pad terminals.
