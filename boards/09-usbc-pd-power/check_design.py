@@ -53,6 +53,61 @@ CRITICAL_NETS = {
 }
 
 
+# Fixed convention (issue #5170): a board opts into the component-stress gate
+# by shipping this file alongside its schematic. No board ships one yet, so
+# absence must leave every existing check untouched.
+COMPONENT_STRESS_MANIFEST = ROOT / "operating_states.yaml"
+
+
+def _component_stress_blocker(row: dict) -> str:
+    """Render one FAIL/UNRESOLVED census row as a human-readable blocker.
+
+    Reuses the detail already carried by :meth:`ComponentStressResult.to_dict`
+    (reference/state/check/reason) rather than inventing a new format.
+    """
+    detail = row.get("reason")
+    if not detail:
+        detail = (
+            f"stress={row.get('stress_v')}V rated={row.get('rated_v')}V "
+            f"margin={row.get('margin_v')}V"
+        )
+    return (
+        f"Component stress {row['status']}: {row['reference']} {row['check'].upper()} "
+        f"in state '{row['state']}' ({detail})"
+    )
+
+
+def evaluate_component_stress(
+    schematic_path: Path, manifest_path: Path = COMPONENT_STRESS_MANIFEST
+) -> tuple[bool | None, list[str]]:
+    """Run the MOSFET VDS/VGS stress gate when a manifest is present.
+
+    Returns ``(component_stress_clean, blockers)``. ``component_stress_clean``
+    is ``None`` when *manifest_path* does not exist -- the caller must not add
+    a ``component_stress`` checks entry or any new blocker in that case, so
+    boards without a manifest are completely unaffected (issue #5170).
+
+    A manifest that exists but fails to load (``OperatingStateManifest.load``
+    raises ``FileNotFoundError``/``ValueError`` on a malformed document) is
+    reported as a single blocker with ``component_stress_clean=False`` rather
+    than raising. ``ComponentStressAnalyzer.analyze`` itself never raises
+    (advisory contract), so no further exception handling is needed around it.
+    """
+    if not manifest_path.exists():
+        return None, []
+
+    from kicad_tools.analysis import ComponentStressAnalyzer, OperatingStateManifest
+
+    try:
+        manifest = OperatingStateManifest.load(manifest_path)
+    except (FileNotFoundError, ValueError) as exc:
+        return False, [f"Component-stress manifest {manifest_path.name} could not be loaded: {exc}"]
+
+    rows = [r.to_dict() for r in ComponentStressAnalyzer(manifest).analyze(schematic_path)]
+    bad_rows = [r for r in rows if r["status"] in ("FAIL", "UNRESOLVED")]
+    return not bad_rows, [_component_stress_blocker(r) for r in bad_rows]
+
+
 def inner_ground_planes_valid(board):
     inner = {"In1.Cu", "In2.Cu"}
     zones = [z for z in board.zones if z.layer in inner and z.keepout is None]
@@ -147,6 +202,7 @@ def check(output):
     circuit = json.loads((output / "circuit.json").read_text())
     calculations = calculate({p["ref"]: p["value"] for p in circuit["parts"]})
     (output / "calculations.json").write_text(json.dumps(calculations, indent=2) + "\n")
+    component_stress_clean, component_stress_blockers = evaluate_component_stress(schematic)
     report = {
         "scope": "Routed development checkpoint; no manufacturing release",
         "native_erc_clean": erc.returncode == 0 and erc_path.exists(),
@@ -189,6 +245,9 @@ def check(output):
             ]
         },
     }
+    if component_stress_clean is not None:
+        report["component_stress_clean"] = component_stress_clean
+        report["component_stress_blockers"] = component_stress_blockers
     (output / "development-check.json").write_text(json.dumps(report, indent=2) + "\n")
     if output.resolve() == (ROOT / "output").resolve():
         inputs = {"output/" + name: digest for name, digest in report["sha256"].items()}
@@ -208,28 +267,42 @@ def check(output):
             "output/calculations.json",
         ]:
             inputs[name] = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+        readiness_blockers = list(report["pending"])
+        readiness_checks = [
+            {"name": key, "status": "passed" if report[key] else "failed"}
+            for key in [
+                "native_erc_clean",
+                "native_drc_geometry_clean",
+                "critical_routes_connected",
+                "inner_ground_planes_valid",
+                "all_nets_connected",
+                "label_lvs_clean",
+                "copper_lvs_clean",
+                "analytical_screen_passed",
+                "manufacturer_rules_passed",
+            ]
+        ]
+        # Only add a component_stress checks entry / new blockers when a
+        # board-local operating-state manifest is present -- boards without
+        # one (every board today) must see byte-identical readiness output
+        # to before this check existed (issue #5170).
+        if component_stress_clean is not None:
+            readiness_blockers = readiness_blockers + component_stress_blockers
+            readiness_checks.append(
+                {
+                    "name": "component_stress",
+                    "status": "passed" if component_stress_clean else "failed",
+                }
+            )
+        readiness_checks.append({"name": "manufacturing_release", "status": "not_run"})
         readiness = {
             "schema_version": 1,
             "mode": "assembly",
             "status": "blocked",
             "checked_at": datetime.now(timezone.utc).isoformat(),
             "inputs": inputs,
-            "blockers": report["pending"],
-            "checks": [
-                {"name": key, "status": "passed" if report[key] else "failed"}
-                for key in [
-                    "native_erc_clean",
-                    "native_drc_geometry_clean",
-                    "critical_routes_connected",
-                    "inner_ground_planes_valid",
-                    "all_nets_connected",
-                    "label_lvs_clean",
-                    "copper_lvs_clean",
-                    "analytical_screen_passed",
-                    "manufacturer_rules_passed",
-                ]
-            ]
-            + [{"name": "manufacturing_release", "status": "not_run"}],
+            "blockers": readiness_blockers,
+            "checks": readiness_checks,
         }
         (output / "readiness.json").write_text(json.dumps(readiness, indent=2) + "\n")
     return all(
