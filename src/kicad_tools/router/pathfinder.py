@@ -17,6 +17,7 @@ The Router accepts a pluggable Heuristic for experimentation with
 different routing strategies. See heuristics.py for available options.
 """
 
+import contextlib
 import heapq
 import itertools
 import math
@@ -35,6 +36,7 @@ from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer
+from .pad_geometry import pad_point_distance
 from .primitives import Pad, Route, Segment, Via
 from .quantize import dogleg_points, is_45_aligned
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
@@ -228,6 +230,16 @@ class Router:
         """
         self.grid = grid
         self.rules = rules
+        from .mfr_limits import get_mfr_limits
+
+        self._allow_smd_vias = True
+        if rules.manufacturer:
+            # Unknown manufacturer -> unspecified capability is retained
+            # (permissive), matching the fallback used elsewhere for
+            # unrecognized manufacturer ids (see
+            # Router._build_manufacturer_design_rules).
+            with contextlib.suppress(ValueError):
+                self._allow_smd_vias = bool(get_mfr_limits(rules.manufacturer).via_in_pad_supported)
         # Issue #3524: copy the default map instead of aliasing the
         # module-level singleton -- in-place writes must stay local.
         self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
@@ -2747,6 +2759,16 @@ class Router:
             cache_key = (gx, gy, net, effective_radius)
             if cache_key in self._via_cache:
                 return self._via_cache[cache_key]
+
+        # Process restrictions also apply to own-net copper and plane layers.
+        if not self._allow_smd_vias:
+            wx, wy = self.grid.grid_to_world(gx, gy)
+            drill_radius = self.rules.via_drill / 2.0
+            for pad in self.grid._pads:
+                if pad.through_hole:
+                    continue
+                if pad_point_distance(pad, wx, wy) < drill_radius:
+                    return False
 
         # Check all layers using priority ordering.
         # Issue #2325: Skip plane layers when checking via blockage.  On plane

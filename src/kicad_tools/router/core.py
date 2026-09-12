@@ -1931,6 +1931,7 @@ class Autorouter:
         Best-iteration rollback and cache replay must update the same grids,
         indexes and pathfinder caches. Negotiated usage is restored separately
         by the caller, since ordinary routing does not populate those counts.
+
         Negotiated rollback supplies the routes it owns so independently
         registered grid obstacles survive. Cache replay replaces the complete
         managed snapshot, including discarded grid routes absent from self.routes.

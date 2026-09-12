@@ -1197,3 +1197,52 @@ class TestSchemaMigrationV2toV3:
         version = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
         conn.close()
         assert version == "3"
+
+
+@pytest.mark.parametrize("scope", ["board", "subproblem"])
+def test_manufacturer_process_policy_changes_cache_identity(scope):
+    """Issue #5274: a tier that forbids SMD vias must not replay a tier that allows one.
+
+    ``rules.manufacturer`` gates ``MfrLimits.via_in_pad_supported`` -> the grid
+    pathfinders' ``_allow_smd_vias`` guard (and the C++ backend's
+    ``allow_smd_vias``), so it changes which routes are generated.  The CLI's
+    ``routing_context`` binds ``--manufacturer`` for ``kct route``, but callers
+    that build ``DesignRules`` and use these APIs directly had no such
+    protection: all three values below hashed identically.
+    """
+    pads = [
+        Pad(x=0, y=0, width=0.6, height=0.6, net=1, net_name="N", layer=Layer.F_CU),
+        Pad(x=10, y=0, width=0.6, height=0.6, net=1, net_name="N", layer=Layer.F_CU),
+    ]
+    identities = []
+    for manufacturer in (None, "jlcpcb", "jlcpcb-tier1"):
+        rules = DesignRules(manufacturer=manufacturer)
+        if scope == "board":
+            identities.append(CacheKey.compute(b"same board", rules, 0.1).rules_hash)
+        else:
+            identities.append(SubProblemSignature.compute(pads, rules).rules_hash)
+    assert len(set(identities)) == 3, (
+        f"manufacturer/process tier is not part of the {scope} cache identity: {identities}"
+    )
+
+
+def test_manufacturer_free_rules_keep_their_historic_identity():
+    """The #5274 addition is keyed only when set, so old keys survive untouched."""
+    rules = DesignRules(manufacturer=None)
+    import hashlib
+    import json
+
+    baseline = {
+        "trace_width": rules.trace_width,
+        "trace_clearance": rules.trace_clearance,
+        "via_drill": rules.via_drill,
+        "via_diameter": rules.via_diameter,
+        "via_clearance": rules.via_clearance,
+        "grid_resolution": 0.1,
+        "preferred_layer": rules.preferred_layer.value,
+        "alternate_layer": rules.alternate_layer.value,
+    }
+    expected = hashlib.sha256(
+        json.dumps(baseline, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    assert CacheKey.compute(b"board", rules, 0.1).rules_hash == expected
