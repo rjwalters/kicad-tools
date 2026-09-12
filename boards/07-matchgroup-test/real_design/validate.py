@@ -63,25 +63,164 @@ def via_travel_mm(via, segments, elevations: dict[str, float]) -> float:
     return max(depths) - min(depths)
 
 
-def external_load(name: str, trace_pf: float, physical_via_count: int) -> dict:
+def via_barrel_capacitance_pf(
+    pad_diameter_mm: float,
+    antipad_diameter_mm: float,
+    board_thickness_mm: float,
+    epsilon_r: float,
+) -> float | None:
+    """Full-barrel via capacitance from measured pad/antipad/stackup geometry.
+
+    TI SLYT335 p30: ``Cvia[pF] = 1.41 * er * T[inches] * Dpad / (Dantipad - Dpad)``.
+    Returns ``None`` for degenerate geometry (antipad at or inside the pad, or
+    any non-positive input) so callers fall back to the flat per-via allowance
+    instead of dividing by zero or a negative gap.
+    """
+    gap_mm = antipad_diameter_mm - pad_diameter_mm
+    if pad_diameter_mm <= 0 or board_thickness_mm <= 0 or epsilon_r <= 0 or gap_mm <= 0:
+        return None
+    thickness_in = board_thickness_mm / 25.4
+    return 1.41 * epsilon_r * thickness_in * pad_diameter_mm / gap_mm
+
+
+def stackup_average_epsilon_r(stack: Stackup) -> float | None:
+    """Thickness-weighted average epsilon_r across the stackup's dielectrics.
+
+    A standard through-hole via barrel spans every dielectric between the
+    outer copper layers, not one core, so no single layer's epsilon_r
+    represents the whole barrel. ``None`` when no dielectric layer publishes
+    a permittivity (geometry unavailable).
+    """
+    dielectrics = [
+        layer
+        for layer in stack.layers
+        if getattr(layer, "is_dielectric", False) and layer.epsilon_r > 0
+    ]
+    total_thickness = sum(layer.thickness_mm for layer in dielectrics)
+    if total_thickness <= 0:
+        return None
+    return sum(layer.thickness_mm * layer.epsilon_r for layer in dielectrics) / total_thickness
+
+
+def board_antipad_clearance_mm(board_path: Path) -> float | None:
+    """Copper-to-via clearance the native zone refill just applied around every via.
+
+    Read from the project rules ``write_drc_constraints`` persisted before the
+    native ``--refill-zones`` pass earlier in :func:`check`, so this is the
+    clearance that governed the antipad gap in the copper already measured
+    elsewhere in this run -- not a separately assumed constant. ``None`` when
+    the project file is missing or malformed (geometry unavailable).
+    """
+    try:
+        project = json.loads(board_path.with_suffix(".kicad_pro").read_text())
+        clearance = project["board"]["design_settings"]["rules"]["min_clearance"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(clearance, (int, float)) or clearance <= 0:
+        return None
+    return float(clearance)
+
+
+def net_via_capacitance_pf(
+    vias: list,
+    antipad_clearance_mm: float | None,
+    board_thickness_mm: float,
+    epsilon_r: float | None,
+) -> float | None:
+    """Sum measured per-via capacitance for every physical via on a net.
+
+    Each physical via (including dangling barrel stubs) is counted once,
+    matching the flat-allowance counting this supplements. ``None`` propagates
+    from any single via whose pad size is degenerate, or when the board-level
+    clearance/permittivity inputs are unavailable -- so the caller falls back
+    to the flat allowance for the whole net rather than mixing measured and
+    assumed contributions.
+    """
+    if antipad_clearance_mm is None or epsilon_r is None or not vias:
+        return None
+    total_pf = 0.0
+    for via in vias:
+        pad_mm = getattr(via, "size", 0.0)
+        capacitance = via_barrel_capacitance_pf(
+            pad_diameter_mm=pad_mm,
+            antipad_diameter_mm=pad_mm + 2 * antipad_clearance_mm,
+            board_thickness_mm=board_thickness_mm,
+            epsilon_r=epsilon_r,
+        )
+        if capacitance is None:
+            return None
+        total_pf += capacitance
+    return total_pf
+
+
+def external_load(
+    name: str,
+    trace_pf: float,
+    physical_via_count: int,
+    via_capacitance_pf: float | None = None,
+) -> dict:
     """Per-driver load screen; unused through barrels still contribute load.
 
     ST DS9405 tables 103/105 specify 15 pF for SDCLK and 30 pF otherwise.
-    ISSI specifies maximum 3.5 pF CLK and 3.8 pF other inputs. Bidirectional
-    DQ uses a conservative 10 pF receiver allowance: ISSI's 6.5 pF maximum
-    fits, while the MCU's 5 pF *typical* is not silently treated as a maximum.
-    The 1 pF/barrel allowance exceeds the 0.681 pF nominal TI SLYT335 model
-    for this .5/.8 mm pad/antipad, 1.6 mm board and Er4.6 construction.
+    ISSI specifies maximum 3.5 pF CLK and 3.8 pF other inputs. DQ is
+    bidirectional and is now evaluated explicitly in both directions instead
+    of one folded number: SDRAM-drives/MCU-receives uses a 10 pF engineering
+    reserve (ST's DS9405 only publishes a 5 pF *typical* CIO with no maximum),
+    while MCU-drives/SDRAM-receives uses ISSI's sourced 6.5 pF DQ maximum
+    (RevG1 p14). The worse direction governs today only because both share
+    the same 30 pF net-level limit -- a future asymmetric per-direction limit
+    would now be caught instead of silently passing (#5134).
+
+    ``via_capacitance_pf``, when provided, is the TI SLYT335 geometry-derived
+    capacitance summed over this net's actual physical vias (see
+    :func:`net_via_capacitance_pf`); ``None`` falls back to the conservative
+    flat 1 pF/via allowance (which exceeds the ~0.68 pF nominal SLYT335
+    estimate for board07's own .5/.8 mm pad/antipad, 1.6 mm, Er4.6
+    construction -- see ``engineering/load-review.md``).
     """
-    receiver_pf = 3.5 if name == "SDCLK" else 10.0 if name.startswith("DQ") else 3.8
+    if name == "SDCLK":
+        directions = {"SDRAM drives, MCU receives (clock)": (3.5, "ISSI maximum")}
+    elif name.startswith("DQ"):
+        directions = {
+            "SDRAM drives, MCU receives": (10.0, "engineering reserve"),
+            "MCU drives, SDRAM receives": (6.5, "ISSI maximum"),
+        }
+    else:
+        directions = {"MCU drives, SDRAM receives": (3.8, "ISSI maximum")}
+
+    if via_capacitance_pf is not None:
+        via_pf = via_capacitance_pf
+        via_basis = "TI SLYT335 geometry (measured pad/antipad/stackup)"
+    else:
+        via_pf = float(physical_via_count)
+        via_basis = "1 pF/via allowance (geometry unavailable)"
+
+    direction_entries = [
+        (direction, float(receiver_pf), basis, trace_pf + via_pf + receiver_pf)
+        for direction, (receiver_pf, basis) in directions.items()
+    ]
+    per_direction = {
+        direction: {
+            "receiver_allowance_pf": receiver_pf,
+            "receiver_basis": basis,
+            "estimated_external_load_pf": estimated_pf,
+        }
+        for direction, receiver_pf, basis, estimated_pf in direction_entries
+    }
+    worst_direction, worst_receiver_pf, worst_basis, worst_estimated_pf = max(
+        direction_entries, key=lambda entry: entry[3]
+    )
     return {
         "trace_pf": trace_pf,
         "full_through_via_count": physical_via_count,
-        "via_allowance_pf": float(physical_via_count),
-        "receiver_allowance_pf": receiver_pf,
-        "estimated_external_load_pf": trace_pf + physical_via_count + receiver_pf,
+        "via_allowance_pf": via_pf,
+        "via_basis": via_basis,
+        "directions": per_direction,
+        "worst_direction": worst_direction,
+        "receiver_allowance_pf": worst_receiver_pf,
+        "receiver_basis": worst_basis,
+        "estimated_external_load_pf": worst_estimated_pf,
         "external_limit_pf": 15.0 if name == "SDCLK" else 30.0,
-        "receiver_basis": "engineering reserve" if name.startswith("DQ") else "ISSI maximum",
     }
 
 
@@ -248,6 +387,13 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
     line = TransmissionLine(stack)
     elevations = copper_elevations(stack)
     signal_layers = {layer.name for layer in stack.layers if layer.is_signal_layer}
+    # Geometry-derived via capacitance inputs (#5134): the clearance the
+    # native refill just applied around every via, and the stackup's own
+    # thickness-weighted dielectric constant. Computed once per board; a
+    # missing/malformed input disables geometry for every net this run and
+    # each net falls back to the flat 1 pF/via allowance individually.
+    antipad_clearance_mm = board_antipad_clearance_mm(board_path)
+    dielectric_epsilon_r = stackup_average_epsilon_r(stack)
     for via in board.vias:
         if set(via.layers) != {"F.Cu", "B.Cu"} or via.via_type is not None:
             errors.append(f"Nonstandard via span/type at {via.position}: {via.layers}")
@@ -299,7 +445,21 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
                 errors.append(f"{name}: {layer} width {width} gives {z:.2f} ohm outside 45–55")
         impedance[name] = measured
         trace_capacitance[name] = capacitance_pf
-        load = external_load(name, capacitance_pf, report.via_count)
+        # Only trust the geometry path when the physical vias actually found
+        # on this net match the count the trace-length analyzer used for
+        # ``physical_via_count`` -- keeps the reported allowance and its
+        # measured basis describing the same set of physical barrels.
+        physical_vias = list(board.vias_in_net(net.number))
+        via_pf_measured = (
+            net_via_capacitance_pf(
+                physical_vias, antipad_clearance_mm, stack.board_thickness_mm, dielectric_epsilon_r
+            )
+            if len(physical_vias) == report.via_count
+            else None
+        )
+        load = external_load(
+            name, capacitance_pf, report.via_count, via_capacitance_pf=via_pf_measured
+        )
         external_loads[name] = load
         if load["estimated_external_load_pf"] > load["external_limit_pf"]:
             errors.append(
@@ -410,9 +570,17 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
         "manufacturing_manifest_status": manifest_status,
         "capacitance_scope": (
             "trace_capacitance_pf models traces only; external_load_estimates includes "
-            "receiver and full-via engineering allowances (ISSI receiver maxima where "
-            "specified; DQ receiver reserve). Geometry-derived via capacitance and "
-            "confirmed MCU package/input corners remain excluded; see #5134."
+            "receiver and full-via allowances, and DQ is evaluated in both directions "
+            "(ISSI receiver maxima where specified; DQ MCU-receiver engineering reserve). "
+            "The via allowance is now TI SLYT335 geometry-derived from the board's own "
+            "measured pad size, native-refill antipad clearance and stackup dielectric "
+            "when that geometry is available, else the conservative flat 1 pF/via "
+            "allowance. MCU package/input capacitance corners remain an unconfirmed "
+            "engineering reserve -- ST's IBIS archive was still unreachable during this "
+            "pass, so the reserve is retained rather than invented; see #5134 and "
+            "engineering/load-review.md. Slew/overshoot/undershoot/setup-hold/SSN "
+            "modeling stays explicitly out of scope for this static lumped-capacitance "
+            "screen and belongs to hardware bring-up or a dedicated SI simulation tool."
         ),
         "hardware_tested": False,
         "assembly_inventory_verified": False,

@@ -89,11 +89,144 @@ def test_clock_load_uses_stricter_driver_limit_and_counts_unused_via_barrels():
     assert clock["estimated_external_load_pf"] == 15.5
     assert clock["external_limit_pf"] == 15.0
     assert clock["estimated_external_load_pf"] > clock["external_limit_pf"]
+    assert clock["via_basis"] == "1 pF/via allowance (geometry unavailable)"
     address = validate.external_load("A0", 10.0, 2)
     assert address["estimated_external_load_pf"] < address["external_limit_pf"]
     data = validate.external_load("DQ0", 10.0, 2)
     assert data["receiver_allowance_pf"] == 10.0
     assert data["receiver_basis"] == "engineering reserve"
+
+
+def test_dq_load_evaluates_both_receiver_directions_explicitly():
+    """#5134: DQ must not fold both directions into a single opaque number."""
+    validate = load("validate")
+    data = validate.external_load("DQ0", 10.0, 2)
+    directions = data["directions"]
+    assert set(directions) == {"SDRAM drives, MCU receives", "MCU drives, SDRAM receives"}
+    mcu_receives = directions["SDRAM drives, MCU receives"]
+    sdram_receives = directions["MCU drives, SDRAM receives"]
+    # The two directions use different, independently sourced receiver
+    # allowances -- they would diverge today if the two directions were ever
+    # given asymmetric net-level limits instead of sharing one 30 pF budget.
+    assert mcu_receives["receiver_allowance_pf"] == 10.0
+    assert mcu_receives["receiver_basis"] == "engineering reserve"
+    assert sdram_receives["receiver_allowance_pf"] == 6.5
+    assert sdram_receives["receiver_basis"] == "ISSI maximum"
+    assert mcu_receives["estimated_external_load_pf"] > sdram_receives["estimated_external_load_pf"]
+    # The net-level fields still report the governing (worse) direction, so
+    # existing single-number consumers keep working unchanged.
+    assert data["worst_direction"] == "SDRAM drives, MCU receives"
+    assert data["estimated_external_load_pf"] == mcu_receives["estimated_external_load_pf"]
+    # A single-direction net (clock, address/control) has exactly one entry.
+    clock = validate.external_load("SDCLK", 10.0, 2)
+    assert list(clock["directions"]) == ["SDRAM drives, MCU receives (clock)"]
+    address = validate.external_load("A0", 10.0, 2)
+    assert list(address["directions"]) == ["MCU drives, SDRAM receives"]
+
+
+def test_via_barrel_capacitance_matches_hand_computed_slyt335_value():
+    """Board07's actual .5/.8 mm pad/antipad, 1.6 mm, Er4.6 construction."""
+    import pytest
+
+    validate = load("validate")
+    # load-review.md "Via allowance and implementation recommendation":
+    # er4.6, .5mm pad, .8mm antipad (.15mm edge clearance) -> ~0.681 pF.
+    capacitance = validate.via_barrel_capacitance_pf(
+        pad_diameter_mm=0.5,
+        antipad_diameter_mm=0.8,
+        board_thickness_mm=1.6,
+        epsilon_r=4.6,
+    )
+    assert capacitance == pytest.approx(0.681, abs=0.001)
+    # The flat 1 pF/via allowance is conservative relative to the measured value.
+    assert capacitance < 1.0
+
+
+def test_via_barrel_capacitance_falls_back_to_none_on_degenerate_geometry():
+    validate = load("validate")
+    # Antipad at or inside the pad (no clearance gap) cannot be evaluated.
+    assert (
+        validate.via_barrel_capacitance_pf(
+            pad_diameter_mm=0.5, antipad_diameter_mm=0.5, board_thickness_mm=1.6, epsilon_r=4.6
+        )
+        is None
+    )
+    assert (
+        validate.via_barrel_capacitance_pf(
+            pad_diameter_mm=0.0, antipad_diameter_mm=0.8, board_thickness_mm=1.6, epsilon_r=4.6
+        )
+        is None
+    )
+    assert (
+        validate.via_barrel_capacitance_pf(
+            pad_diameter_mm=0.5, antipad_diameter_mm=0.8, board_thickness_mm=1.6, epsilon_r=0.0
+        )
+        is None
+    )
+
+
+def test_stackup_average_epsilon_r_weights_by_dielectric_thickness():
+    from types import SimpleNamespace as NS
+
+    import pytest
+
+    validate = load("validate")
+    stack = NS(
+        layers=[
+            NS(is_dielectric=True, thickness_mm=1.0, epsilon_r=4.0),
+            NS(is_dielectric=True, thickness_mm=3.0, epsilon_r=5.0),
+            NS(is_dielectric=False, thickness_mm=0.035, epsilon_r=0.0),
+        ]
+    )
+    # (1.0*4.0 + 3.0*5.0) / 4.0 = 4.75
+    assert validate.stackup_average_epsilon_r(stack) == pytest.approx(4.75)
+    assert validate.stackup_average_epsilon_r(NS(layers=[])) is None
+
+
+def test_board_antipad_clearance_reads_the_boards_own_min_clearance_rule(tmp_path):
+    import json
+
+    validate = load("validate")
+    board_path = tmp_path / "checked.kicad_pcb"
+    board_path.write_text("(kicad_pcb)")
+    board_path.with_suffix(".kicad_pro").write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"min_clearance": 0.15}}}})
+    )
+    assert validate.board_antipad_clearance_mm(board_path) == 0.15
+    # Missing/malformed project data is "geometry unavailable", not an error.
+    board_path.with_suffix(".kicad_pro").write_text("not json")
+    assert validate.board_antipad_clearance_mm(board_path) is None
+    board_path.with_suffix(".kicad_pro").unlink()
+    assert validate.board_antipad_clearance_mm(board_path) is None
+
+
+def test_net_via_capacitance_sums_measured_barrels_and_falls_back_when_unavailable():
+    from types import SimpleNamespace as NS
+
+    import pytest
+
+    validate = load("validate")
+    vias = [NS(size=0.5), NS(size=0.5)]
+    total = validate.net_via_capacitance_pf(vias, 0.15, 1.6, 4.6)
+    assert total == pytest.approx(2 * 0.681, abs=0.002)
+    # Any missing input (clearance, epsilon_r, or an empty via list) disables
+    # the geometry path for the whole net rather than partially measuring it.
+    assert validate.net_via_capacitance_pf(vias, None, 1.6, 4.6) is None
+    assert validate.net_via_capacitance_pf(vias, 0.15, 1.6, None) is None
+    assert validate.net_via_capacitance_pf([], 0.15, 1.6, 4.6) is None
+
+
+def test_external_load_uses_measured_via_capacitance_when_provided():
+    import pytest
+
+    validate = load("validate")
+    measured = validate.external_load("A0", 10.0, 2, via_capacitance_pf=1.362)
+    assert measured["via_allowance_pf"] == pytest.approx(1.362)
+    assert measured["via_basis"] == "TI SLYT335 geometry (measured pad/antipad/stackup)"
+    assert measured["estimated_external_load_pf"] == pytest.approx(10.0 + 1.362 + 3.8)
+    fallback = validate.external_load("A0", 10.0, 2, via_capacitance_pf=None)
+    assert fallback["via_allowance_pf"] == 2.0
+    assert fallback["via_basis"] == "1 pF/via allowance (geometry unavailable)"
 
 
 def test_preexport_gate_never_accepts_missing_design_checks_or_existing_bad_bundle():
@@ -263,6 +396,11 @@ def test_external_load_gate_and_report_scope(tmp_path, monkeypatch):
         assert report["trace_capacitance_pf"][name] == pytest.approx(trace_pf)
         estimate = report["external_load_estimates"][name]
         assert estimate["via_allowance_pf"] == 2
+        # No via geometry is reachable from this synthetic board (an empty
+        # via list can never match the stubbed via_count=2), so every net
+        # must fall back to the flat allowance rather than silently using a
+        # partial/mismatched measurement.
+        assert estimate["via_basis"] == "1 pF/via allowance (geometry unavailable)"
         assert (estimate["estimated_external_load_pf"] <= estimate["external_limit_pf"]) is expected
         if expected:
             assert estimate["estimated_external_load_pf"] == pytest.approx(26.8)
@@ -273,7 +411,7 @@ def test_external_load_gate_and_report_scope(tmp_path, monkeypatch):
         assert "trace capacitance" not in " ".join(report["errors"])
         scope = report["capacitance_scope"]
         assert "receiver" in scope and "full-via" in scope
-        assert "engineering allowances" in scope
+        assert "engineering reserve" in scope
         assert "geometry-derived" in scope.lower() and "MCU" in scope and "#5134" in scope
         assert report["hardware_tested"] is False
         assert report["manufacturing_complete"] is False
