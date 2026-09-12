@@ -488,6 +488,7 @@ def tune_match_group_v2(
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
+    fixed_segment_ids: set[int] | None = None,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Tune the lengths of an N-trace match group to within tolerance.
 
@@ -616,6 +617,10 @@ def tune_match_group_v2(
             had, so ``kct check`` re-derived a nonzero skew from the
             promoted through-vias (board 07 ADDR_BUS 0.000 vs 1.069mm).
             Defaults to ``True`` (legacy partial-span behavior).
+        fixed_segment_ids: Identities of escape segments included in the
+            complete-net view. These contribute length and block foreign
+            copper, but cannot be merged or replaced by a meander. The caller
+            keeps the referenced segments alive throughout tuning.
 
     Returns:
         ``{net_id: (route, result)}`` for every member of ``group``.
@@ -697,6 +702,7 @@ def tune_match_group_v2(
             max_inserts_per_member=max_inserts_per_member,
             length_critical=length_critical,
             grid_resolution_mm=grid_resolution_mm,
+            fixed_segment_ids=fixed_segment_ids,
         )
 
     return _tune_match_group_single_ended(
@@ -715,6 +721,7 @@ def tune_match_group_v2(
         board_thickness_mm=board_thickness_mm,
         num_copper_layers=num_copper_layers,
         blind_buried_supported=blind_buried_supported,
+        fixed_segment_ids=fixed_segment_ids,
     )
 
 
@@ -735,6 +742,7 @@ def _tune_match_group_single_ended(
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
+    fixed_segment_ids: set[int] | None = None,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Scalar Phase 2E path: each net in ``group.net_ids`` tuned independently.
 
@@ -985,11 +993,22 @@ def _tune_match_group_single_ended(
         # return the ORIGINAL route reference; the merged route is only
         # ever returned when at least one insert commits.
         if len(route.segments) > 1:
+            # Normalize each mutable run separately. Escape segments must keep
+            # their identity and endpoints, including at collinear boundaries.
+            from itertools import groupby
+
             from .optimizer.algorithms import merge_collinear as _merge_collinear
             from .optimizer.config import OptimizationConfig as _OptConfig
             from .primitives import Route as _RouteForMerge
 
-            merged_segments = _merge_collinear(route.segments, _OptConfig())
+            merged_segments = []
+            for fixed, run in groupby(
+                route.segments, key=lambda segment: id(segment) in (fixed_segment_ids or ())
+            ):
+                segments = list(run)
+                merged_segments.extend(
+                    segments if fixed else _merge_collinear(segments, _OptConfig())
+                )
             if len(merged_segments) < len(route.segments):
                 current_route = _RouteForMerge(
                     net=route.net,
@@ -1049,6 +1068,7 @@ def _tune_match_group_single_ended(
                 current_route,
                 min_segment_length=host_floor,
                 max_candidates=MAX_SEGMENT_RETRY_CANDIDATES,
+                fixed_segment_ids=fixed_segment_ids,
             )
             if not candidates:
                 # Issue #3440 fallback: heavily-jogged routes (post
@@ -1066,6 +1086,7 @@ def _tune_match_group_single_ended(
                         current_route,
                         min_segment_length=host_floor,
                         max_candidates=MAX_SEGMENT_RETRY_CANDIDATES,
+                        fixed_segment_ids=fixed_segment_ids,
                     )
             if not candidates:
                 per_member_result.reason = "no_suitable_segment"
@@ -1343,6 +1364,7 @@ def _rank_candidate_segments(
     route: Route,
     min_segment_length: float,
     max_candidates: int = MAX_SEGMENT_RETRY_CANDIDATES,
+    fixed_segment_ids: set[int] | None = None,
 ) -> list[tuple[int, Segment]]:
     """Return up to ``max_candidates`` segments ranked for trombone insertion.
 
@@ -1395,6 +1417,8 @@ def _rank_candidate_segments(
     last_idx = len(route.segments) - 1
 
     for i, seg in enumerate(route.segments):
+        if fixed_segment_ids and id(seg) in fixed_segment_ids:
+            continue
         dx_full = seg.x2 - seg.x1
         dy_full = seg.y2 - seg.y1
         length = math.sqrt(dx_full * dx_full + dy_full * dy_full)
@@ -2244,6 +2268,7 @@ def _find_corresponding_n_segment(
     p_seg: Segment,
     *,
     max_span_mismatch_mm: float = 0.05,
+    fixed_segment_ids: set[int] | None = None,
 ) -> tuple[int, Segment] | None:
     """Find the N-side segment "corresponding" to ``p_seg``.
 
@@ -2289,6 +2314,8 @@ def _find_corresponding_n_segment(
     best_seg: Segment | None = None
     best_d2 = float("inf")
     for i, nseg in enumerate(n_route.segments):
+        if fixed_segment_ids and id(nseg) in fixed_segment_ids:
+            continue
         if nseg.layer != p_seg.layer:
             continue
         n_length = math.hypot(nseg.x2 - nseg.x1, nseg.y2 - nseg.y1)
@@ -2493,6 +2520,7 @@ def _tune_match_group_of_pairs(
     max_inserts_per_member: int,
     length_critical: bool = True,
     grid_resolution_mm: float = 0.01,
+    fixed_segment_ids: set[int] | None = None,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Pair-aware Phase 2F path: mirrored serpentine geometry for pair members.
 
@@ -2559,6 +2587,7 @@ def _tune_match_group_of_pairs(
 
     # --- Measure every member length ------------------------------------
     from .length import LengthTracker  # avoid cycle
+    from .primitives import Route
 
     member_lengths: dict[int, float] = {}
     for net_id in group.net_ids:
@@ -2803,7 +2832,16 @@ def _tune_match_group_of_pairs(
 
             # --- Step 1: pick a P-side segment.
             provisional = SerpentineGenerator(base_config)
-            best = provisional.find_best_segment(current_p)
+            if fixed_segment_ids:
+                hosts = _rank_candidate_segments(
+                    current_p,
+                    base_config.min_segment_length,
+                    max_candidates=1,
+                    fixed_segment_ids=fixed_segment_ids,
+                )
+                best = hosts[0] if hosts else None
+            else:
+                best = provisional.find_best_segment(current_p)
             if best is None:
                 for r in (per_pair_result_p, per_pair_result_n):
                     r.reason = "no_suitable_segment"
@@ -2818,7 +2856,9 @@ def _tune_match_group_of_pairs(
             _p_seg_idx, p_insertion_segment = best
 
             # --- Step 2: find the corresponding N-side segment.
-            n_corr = _find_corresponding_n_segment(current_n, p_insertion_segment)
+            n_corr = _find_corresponding_n_segment(
+                current_n, p_insertion_segment, fixed_segment_ids=fixed_segment_ids
+            )
             if n_corr is None:
                 for r in (per_pair_result_p, per_pair_result_n):
                     r.reason = "no_suitable_segment"
@@ -2859,9 +2899,27 @@ def _tune_match_group_of_pairs(
                 outer_normal_hint=hint,
             )
             attempt_generator = SerpentineGenerator(attempt_config)
-            candidate_p_route, p_serp_result = attempt_generator.add_serpentine(
-                current_p, target_length
-            )
+            if fixed_segment_ids:
+                # Honor the selected mutable host. add_serpentine would rank
+                # the full route again and could select a longer fixed escape.
+                p_serp_result = attempt_generator.generate_trombone(
+                    p_insertion_segment, target_length - current_p_length
+                )
+                candidate_p_route = Route(
+                    net=current_p.net,
+                    net_name=current_p.net_name,
+                    segments=(
+                        current_p.segments[:_p_seg_idx]
+                        + p_serp_result.new_segments
+                        + current_p.segments[_p_seg_idx + 1 :]
+                    ),
+                    vias=current_p.vias.copy(),
+                    is_escape=current_p.is_escape,
+                )
+            else:
+                candidate_p_route, p_serp_result = attempt_generator.add_serpentine(
+                    current_p, target_length
+                )
             per_pair_result_p.serpentine_results.append(p_serp_result)
             per_pair_result_n.serpentine_results.append(p_serp_result)
 
@@ -3036,6 +3094,7 @@ def _tune_match_group_of_pairs(
             config=config,
             max_inserts_per_member=max_inserts_per_member,
             length_critical=True,
+            fixed_segment_ids=fixed_segment_ids,
         )
         for nid, (r_route, r_result) in scalar_results.items():
             results[nid] = (r_route, r_result)
