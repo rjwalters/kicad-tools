@@ -309,3 +309,94 @@ def test_ordinary_rear_rectangle_reports_padstack_witness_gap():
     assert any(
         v.layer == "B.Cu" and v.actual_value == pytest.approx(0.1) for v in result.violations
     )
+
+
+@pytest.mark.parametrize(
+    "kind", ["gr_text", "gr_text_box", "gr_curve", "fp_text", "fp_text_box", "fp_curve", "property"]
+)
+@pytest.mark.parametrize("layer", ["F.Cu", "B.Cu", "F.SilkS"])
+def test_raw_graphic_inventory_api_and_cli(kind, layer, tmp_path, capsys):
+    import json
+
+    from kicad_tools.cli import main
+    from kicad_tools.sexp import serialize_sexp
+
+    content = (
+        'user "label"'
+        if kind == "fp_text"
+        else '"Reference" "U1"'
+        if kind == "property"
+        else '"label"'
+        if "text" in kind
+        else ""
+    )
+    item = f'({kind} {content} (at 1 1) (start 1 1) (end 3 3) (pts (xy 1 1) (xy 2 2) (xy 3 2) (xy 4 1)) (layer "{layer}") (stroke (width .2) (type default)) (effects (font (size 1 1) (thickness .15))))'
+    if kind.startswith("fp_") or kind == "property":
+        item = f'(footprint "test" (layer "F.Cu") (at 0 0) {item})'
+    pcb = board(item)
+    result = check_physical_copper_gap(pcb, 0.25)
+    expected = layer.endswith(".Cu")
+    assert bool(result.violations) is expected
+    assert all(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+    path = tmp_path / "graphic.kicad_pcb"
+    original = serialize_sexp(pcb._sexp)
+    path.write_text(original)
+    status = main(
+        [
+            "check",
+            str(path),
+            "--drc-only",
+            "--only",
+            "physical_copper_gap",
+            "--physical-copper-gap",
+            ".25",
+            "--format",
+            "json",
+        ]
+    )
+    assert status == (2 if expected else 0)
+    data = json.loads(capsys.readouterr().out)
+    assert bool(data["violations"]) is expected
+    assert path.read_text() == original
+
+
+@pytest.mark.parametrize("kind", ["gr_text", "fp_text", "property", "gr_text_box", "fp_text_box"])
+@pytest.mark.parametrize(
+    "hide", ["hide", "(hide yes)", "(effects (hide yes))", "(effects hide)", "(hide no)"]
+)
+def test_hidden_copper_text_inventory(kind, hide):
+    content = (
+        'user "label"'
+        if kind == "fp_text"
+        else '"Reference" "U1"'
+        if kind == "property"
+        else '"label"'
+    )
+    item = f'({kind} {content} (at 1 1) (start 1 1) (end 3 3) (layer "F.Cu") {hide})'
+    if kind.startswith("fp_") or kind == "property":
+        item = f'(footprint "test" (layer "F.Cu") (at 0 0) {item})'
+    result = check_physical_copper_gap(board(item), 0.25)
+    assert bool(result.violations) is (hide == "(hide no)")
+
+
+def test_unrecognized_raw_copper_object_is_incomplete():
+    pcb = board('(gr_future_shape (layer "F.Cu") (at 1 1))')
+    assert any(
+        v.rule_id == "physical_copper_gap_incomplete"
+        for v in check_physical_copper_gap(pcb, 0.25).violations
+    )
+
+
+@pytest.mark.parametrize("kind", ["gr_text", "fp_text", "property", "gr_text_box", "fp_text_box"])
+def test_visible_literal_hide_is_not_a_visibility_marker(kind):
+    content = (
+        'user "hide"'
+        if kind == "fp_text"
+        else '"Reference" "hide"'
+        if kind == "property"
+        else '"hide"'
+    )
+    item = f'({kind} {content} (at 1 1) (start 1 1) (end 3 3) (layer "F.Cu"))'
+    if kind.startswith("fp_") or kind == "property":
+        item = f'(footprint "test" (layer "F.Cu") (at 0 0) {item})'
+    assert check_physical_copper_gap(board(item), 0.25).violations

@@ -63,6 +63,49 @@ def _arc_geometry(node):
     ).buffer(width.get_float(0) / 2, quad_segs=64)
 
 
+def _raw_copper_graphic_issues(pcb):
+    """Inventory raw layer-bearing objects the typed copper model omits."""
+    issues = []
+    text_kinds = {"gr_text", "fp_text", "property", "gr_text_box", "fp_text_box"}
+
+    def hidden(node):
+        # Native text supports legacy bare hide, effects/hide, and hide yes.
+        containers = [node]
+        effects = node.find_child("effects")
+        if effects is not None:
+            containers.append(effects)
+        for container in containers:
+            prefix = (2 if node.name in {"fp_text", "property"} else 1) if container is node else 0
+            for child in container.children[prefix:]:
+                if child.is_atom and child.value == "hide" and not child._originally_quoted:
+                    return True
+                if child.name == "hide" and (not child.children or child.get_string(0) == "yes"):
+                    return True
+        return False
+
+    def inspect(container, supported):
+        for index, node in enumerate(container.children):
+            if node.name in supported or node.is_atom:
+                continue
+            layers = [c for c in node.children if c.name in {"layer", "layers"}]
+            if not any(
+                isinstance(atom.value, str) and atom.value.endswith(".Cu")
+                for layer in layers
+                for atom in layer.children
+                if atom.is_atom
+            ):
+                continue
+            if node.name in text_kinds and hidden(node):
+                continue
+            issues.append(f"unsupported copper graphic: {container.name}/{node.name}:{index}")
+
+    inspect(pcb._sexp, {"segment", "arc", "via", "zone", "footprint", "module"})
+    for node in pcb._sexp.children:
+        if node.name in {"footprint", "module"}:
+            inspect(node, {"pad", "zone"})
+    return issues
+
+
 def _raw_geometry_issues(pcb):
     """Do not let tolerant schema recovery manufacture supported copper.
 
@@ -152,7 +195,7 @@ def _collect(pcb):
     from shapely.geometry import LineString, Point, Polygon
 
     sources: list[CopperSource] = []
-    unsupported = _raw_geometry_issues(pcb)
+    unsupported = _raw_geometry_issues(pcb) + _raw_copper_graphic_issues(pcb)
     if unsupported:
         return sources, unsupported
     layer_names = [layer.name for layer in pcb.copper_layers]
@@ -170,8 +213,6 @@ def _collect(pcb):
             )
         )
     for fp in pcb.footprints:
-        if any(graphic.layer in layer_names for graphic in fp.graphics):
-            unsupported.append(f"unsupported footprint copper graphic: {fp.reference}")
         for index, pad in enumerate(fp.pads):
             if pad.type == "np_thru_hole":
                 continue
@@ -223,14 +264,11 @@ def _collect(pcb):
     # Copper track arcs are not represented in PCB.segments; read only these
     # nodes from the source tree instead of silently dropping them.
     for index, node in enumerate(pcb._sexp.children):
-        if node.name not in {"arc", "gr_line", "gr_arc", "gr_rect", "gr_poly", "gr_circle"}:
+        if node.name != "arc":
             continue
         layer_node = node.find_child("layer")
         layer = layer_node.get_string(0) if layer_node else ""
         if layer not in layer_names:
-            continue
-        if node.name != "arc":
-            unsupported.append(f"unsupported copper graphic: {node.name}:{index}")
             continue
         try:
             geom = _arc_geometry(node)
