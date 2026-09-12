@@ -2088,23 +2088,31 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
     return positions
 
 
-# Match complete references while skipping quoted strings and comments elsewhere.
-# This keeps text such as a property containing "(net 7 FAKE)" out of the map.
-_NET_ATOM = r'"(?:\\.|[^"\\])*"|[^\s()";]+'
-_NET_REFERENCE = re.compile(
-    rf"(?P<reference>\(net\s+(?P<first>{_NET_ATOM})"
-    rf'(?:\s+(?P<second>{_NET_ATOM}))?\s*\))|"(?:\\.|[^"\\])*"|;[^\n]*'
-)
+# Tokenize whole atoms before considering the next comment boundary. In the
+# project parser, SPI;SELECT and SPI#SELECT are atoms; # and ; start comments
+# only when encountered where a new token would begin.
+_NET_TOKEN = re.compile(r'(?P<comment>[#;][^\n]*)|"(?:\\.|[^"\\])*"|[()]|[^\s()]+')
 
 
 def _iter_net_references(text: str) -> Iterator[tuple[int | None, str]]:
     """Read numeric/name, name-only and numeric-only references consistently."""
     from kicad_tools.sexp import parse_string
 
-    for match in _NET_REFERENCE.finditer(text):
-        if match.group("reference") is None:
+    tokens = (match.group() for match in _NET_TOKEN.finditer(text) if not match.group("comment"))
+    for token in tokens:
+        if token != "(":
             continue
-        first, second = match.group("first", "second")
+        if next(tokens, None) != "net":
+            continue
+        values: list[str] = []
+        for token in tokens:
+            if token == ")":
+                break
+            values.append(token)
+        if not 1 <= len(values) <= 2 or "(" in values:
+            continue
+        first = values[0]
+        second = values[1] if len(values) == 2 else None
         numeric = first.isdecimal()
         if second is not None and not numeric:
             continue

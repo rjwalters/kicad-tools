@@ -438,7 +438,15 @@ class TestBareNetReferences:
         from kicad_tools.sexp import parse_string
 
         for template in (_NUMERIC_FIXTURE, _NAME_ONLY_FIXTURE):
-            for name in ("USB_D+", "SPI3_SCK", "/bus/D-", "+-_", 'quote"slash\\'):
+            for name in (
+                "USB_D+",
+                "SPI3_SCK",
+                "SPI;SELECT",
+                "SPI#SELECT",
+                "/bus/D-",
+                "+-_",
+                'quote"slash\\',
+            ):
                 encoded = name.replace("\\", "\\\\").replace('"', '\\"')
                 quoted = template.replace('"SIGNAL"', f'"{encoded}"')
                 forms = [quoted, parse_string(quoted).to_string()]
@@ -454,3 +462,18 @@ class TestBareNetReferences:
                     pads = load_pads_for_analysis(path)
                     assert len(pads) == 2
                     assert {pad.net for pad in pads} == {1}
+
+    def test_comment_boundaries_match_parser(self):
+        from kicad_tools.sexp import parse_string
+
+        text = """(kicad_pcb
+          # (net 99 FAKE_HASH)
+          ; (net 88 FAKE_SEMICOLON)
+          (net # ignored before numeric id
+            41 ; ignored before name
+            USB_D+)
+          (net 42 SPI;SELECT) (net 43 SPI#SELECT)
+          (net "#quoted") (net ";quoted"))"""
+        expected = {"USB_D+": 41, "SPI;SELECT": 42, "SPI#SELECT": 43, "#quoted": 1, ";quoted": 2}
+        assert _build_net_number_map(text) == expected
+        assert _build_net_number_map(parse_string(text).to_string()) == expected
