@@ -20,21 +20,34 @@
 #                     renders + manufacturing files into site/public/)
 #   4. deploy      -- `wrangler pages deploy site/dist` (guarded: asserts the
 #                     authenticated Cloudflare account before uploading)
+#   5. verify      -- fetch every deployed board asset (PCB, renders, and
+#                     manufacturing downloads incl. kicad_project.zip) and
+#                     diff its SHA-256 against the copy just built in step 3
+#                     (Issue #5318: the live site silently served a
+#                     pre-repair Board05 PCB -- AND the same stale bytes via
+#                     the downloadable project ZIP -- for weeks because
+#                     nothing checked this -- see scripts/lib/site-verify.sh).
+#                     Skipped for --preview (dynamic URL) and --no-verify.
 #
 # Generated artifacts (board.json, renders, site/public/boards/, site/dist/)
 # are all git-ignored and never committed.
 #
 # Custom domain (kicad-tools.org -> kicad-tools.pages.dev) is operator issue
 # #3686 and is OUT OF SCOPE here: this script targets the default Pages
-# hostname kicad-tools.pages.dev.
+# hostname kicad-tools.pages.dev (override the verification target with
+# KCT_SITE_BASE_URL if you need to check the custom domain instead).
 #
 # Usage:
-#   ./scripts/deploy-site.sh [--no-deploy] [--preview] [--no-3d] [--help]
+#   ./scripts/deploy-site.sh [--no-deploy] [--preview] [--no-3d] [--no-verify] [--help]
 #
-#   --no-deploy   Run metrics + render + build only; skip the wrangler deploy.
+#   --no-deploy   Run metrics + render + build only; skip the wrangler deploy
+#                 (and therefore step 5 -- verification needs a deploy to check).
 #   --preview     Deploy to a non-main preview branch (omit `--branch main`;
 #                 wrangler auto-names the preview by the current branch).
+#                 Step 5 is skipped: the preview URL is dynamic.
 #   --no-3d       Skip 3D renders (skip xvfb-run; useful on machines without X).
+#   --no-verify   Skip step 5 (deployed-artifact verification). Use sparingly --
+#                 this is the check that catches issue #5318 recurring.
 #   --help        Show this help and exit.
 #
 # Prerequisites (the script warns clearly if any are missing):
@@ -43,6 +56,9 @@
 #   wrangler  -- required unless --no-deploy (run `wrangler login` once)
 #   kicad-cli -- optional; if absent, renders are skipped and the site serves
 #                placeholder thumbnails (warn-then-continue, not an abort)
+#   curl      -- required for step 5 (deployed-artifact verification); if
+#                absent, step 5 is skipped with a warning rather than failing
+#                the whole deploy
 #
 # Cloudflare account guard (deploy path only):
 #   Before deploying, the script asserts the authenticated wrangler account ID
@@ -91,6 +107,13 @@ sha256_of() {
     return 1
   fi
 }
+
+# --- Deployed-artifact verification (Issue #5318) ---------------------------
+# Shared with the standalone scripts/verify-site-deployment.sh; see
+# scripts/lib/site-verify.sh for what/why. Provides sha256_of_file() and
+# verify_deployed_assets().
+# shellcheck source=lib/site-verify.sh
+source "${SCRIPT_DIR}/lib/site-verify.sh"
 
 # assert_cloudflare_account WRANGLER_CMD...
 #   Checks the explicit account ID (or falls back to `wrangler whoami`)
@@ -186,12 +209,14 @@ assert_cloudflare_account() {
 NO_DEPLOY=0
 PREVIEW=0
 NO_3D=0
+NO_VERIFY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-deploy) NO_DEPLOY=1 ;;
     --preview)   PREVIEW=1 ;;
     --no-3d)     NO_3D=1 ;;
+    --no-verify) NO_VERIFY=1 ;;
     -h|--help)   usage; exit 0 ;;
     *)
       err "Unknown argument: $1"
@@ -243,9 +268,9 @@ fi
 # the renders have to be generated first or a fresh deploy produces board.json
 # without a `renders` field (placeholder thumbnails everywhere).
 if [ "${SKIP_RENDERS}" -eq 1 ]; then
-  info "Step 1/4: skipping renders (kicad-cli absent)."
+  info "Step 1/5: skipping renders (kicad-cli absent)."
 else
-  info "Step 1/4: rendering board images (uv run kct render boards/)"
+  info "Step 1/5: rendering board images (uv run kct render boards/)"
   rendered=0
 
   # Prefer 3D (2D + 3D) unless --no-3d.  The 3D pass (kicad-cli pcb render)
@@ -287,21 +312,21 @@ fi
 # Runs AFTER renders so board-metrics captures the freshly generated PNG paths
 # into board.json (`renders` field).  A metrics regression must not block the
 # deploy; the site tolerates a board without board.json.
-info "Step 2/4: generating board metrics (uv run kct board-metrics --all)"
+info "Step 2/5: generating board metrics (uv run kct board-metrics --all)"
 uv run kct board-metrics --all || warn "board-metrics returned non-zero; continuing (site tolerates missing board.json)."
 
 # --- Step 3: build the Astro site ------------------------------------------
 # `prebuild` (site/scripts/copy-renders.mjs) runs automatically before `build`
 # and stages renders + manufacturing files from boards/<id>/output/ into
 # site/public/.  No manual copy step needed.
-info "Step 3/4: building the Astro site (npm --prefix site ci && run build)"
+info "Step 3/5: building the Astro site (npm --prefix site ci && run build)"
 npm --prefix site ci
 npm --prefix site run build
 info "Site built to site/dist/."
 
 # --- Step 4: deploy --------------------------------------------------------
 if [ "${NO_DEPLOY}" -eq 1 ]; then
-  info "Step 4/4: --no-deploy set; skipping Cloudflare Pages deploy."
+  info "Step 4/5: --no-deploy set; skipping Cloudflare Pages deploy."
   info "Done. Build is in site/dist/ (not deployed)."
   exit 0
 fi
@@ -328,12 +353,39 @@ fi
 assert_cloudflare_account "${WRANGLER[@]}"
 
 if [ "${PREVIEW}" -eq 1 ]; then
-  info "Step 4/4: deploying PREVIEW to Cloudflare Pages (wrangler auto-names the branch)."
+  info "Step 4/5: deploying PREVIEW to Cloudflare Pages (wrangler auto-names the branch)."
   # Omit --branch so wrangler auto-names the preview by the current branch.
   "${WRANGLER[@]}" pages deploy site/dist --project-name kicad-tools
 else
-  info "Step 4/4: deploying PRODUCTION (branch main) to Cloudflare Pages."
+  info "Step 4/5: deploying PRODUCTION (branch main) to Cloudflare Pages."
   "${WRANGLER[@]}" pages deploy site/dist --project-name kicad-tools --branch main
 fi
 
 info "Deploy complete. The deployed URL is printed above by wrangler."
+
+# --- Step 5: verify the deploy actually took (Issue #5318) ------------------
+# A successful `wrangler pages deploy` exit code is NOT proof the public site
+# now serves the bytes we just built -- see scripts/lib/site-verify.sh for the
+# incident this closes. Skipped for --preview (the preview URL is dynamic,
+# printed by wrangler above, and not derivable here) and --no-verify.
+if [ "${PREVIEW}" -eq 1 ]; then
+  info "Step 5/5: skipping deployed-artifact verification (--preview: URL is dynamic, see above)."
+elif [ "${NO_VERIFY}" -eq 1 ]; then
+  info "Step 5/5: skipping deployed-artifact verification (--no-verify set)."
+elif ! command -v curl >/dev/null 2>&1; then
+  warn "Step 5/5: 'curl' not found — cannot verify the deployed site matches what was just built."
+  warn "Manually confirm the public board asset(s) before trusting this deploy, or install curl and re-run './scripts/verify-site-deployment.sh' once it's available."
+else
+  info "Step 5/5: verifying deployed board asset(s) match the just-built site..."
+  base_url="${KCT_SITE_BASE_URL:-https://kicad-tools.pages.dev}"
+  if ! verify_deployed_assets "${base_url}" "${REPO_ROOT}/site/dist/boards"; then
+    err "Deployed-artifact verification FAILED (see mismatches above)."
+    err "The Cloudflare Pages deploy command reported success, but the"
+    err "publicly served board asset(s) do not match what was just built --"
+    err "exactly the stale-publication failure mode from issue #5318."
+    err "Wait a bit for CDN propagation and re-run:"
+    err "  ./scripts/verify-site-deployment.sh --base-url ${base_url}"
+    err "before considering this deploy complete."
+    exit 1
+  fi
+fi
