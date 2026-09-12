@@ -156,6 +156,8 @@ def _category_description(cat: MistakeCategory) -> str:
         MistakeCategory.GROUNDING: "Grounding and return path issues",
         MistakeCategory.VIA: "Via placement problems",
         MistakeCategory.MANUFACTURABILITY: "Manufacturing-related issues",
+        MistakeCategory.CONNECTIVITY: "Pull-up / series-resistor connectivity issues",
+        MistakeCategory.BOM_HEALTH: "BOM part-number health issues",
     }
     return descriptions.get(cat, "General PCB design issues")
 
@@ -165,7 +167,6 @@ def _analyze_pcb(args) -> int:
     from kicad_tools.explain.mistakes import (
         MistakeCategory,
         MistakeDetector,
-        detect_mistakes,
     )
     from kicad_tools.schema.pcb import PCB
 
@@ -187,13 +188,16 @@ def _analyze_pcb(args) -> int:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
 
-    # Detect mistakes
+    # Detect mistakes. Always ask for coverage (issue #4899) so a check
+    # that could not run (CheckIncomplete) is reported explicitly instead
+    # of silently looking like a clean pass -- mirrors the #4011
+    # vacuity-guard discipline used for `kct check`'s `lvs` sub-check.
+    detector = MistakeDetector()
     if args.category:
         cat = MistakeCategory(args.category)
-        detector = MistakeDetector()
-        mistakes = detector.detect_by_category(pcb, cat)
+        mistakes, coverage = detector.detect_by_category_with_coverage(pcb, cat)
     else:
-        mistakes = detect_mistakes(pcb)
+        mistakes, coverage = detector.detect_with_coverage(pcb)
 
     # Filter by severity if specified
     if args.severity:
@@ -203,7 +207,7 @@ def _analyze_pcb(args) -> int:
 
     # Output results
     if args.format == "json":
-        _output_json(mistakes)
+        _output_json(mistakes, coverage)
     elif args.format == "tree":
         _output_tree(mistakes)
     elif args.format == "summary":
@@ -211,13 +215,20 @@ def _analyze_pcb(args) -> int:
     else:
         _output_table(mistakes, args.verbose)
 
+    incomplete = [c for c in coverage if c.status == "incomplete"]
+    if incomplete and args.format != "json":
+        print("\n" + "-" * 60)
+        print(f"INCOMPLETE COVERAGE: {len(incomplete)} check(s) could not run:")
+        for c in incomplete:
+            print(f"  - {c.check_name} ({c.category.value}): {c.reason}")
+
     # Determine exit code
     error_count = sum(1 for m in mistakes if m.severity == "error")
     warning_count = sum(1 for m in mistakes if m.severity == "warning")
 
     if error_count > 0:
         return 1
-    elif warning_count > 0 and args.strict:
+    elif (warning_count > 0 or incomplete) and args.strict:
         return 2
     return 0
 
@@ -308,8 +319,9 @@ def _print_mistake(m, verbose: bool = False) -> None:
             print(f"      Learn more: {m.learn_more_url}")
 
 
-def _output_json(mistakes: list) -> None:
-    """Output mistakes as JSON."""
+def _output_json(mistakes: list, coverage: list | None = None) -> None:
+    """Output mistakes (and coverage, issue #4899) as JSON."""
+    coverage = coverage or []
     data = {
         "summary": {
             "errors": sum(1 for m in mistakes if m.severity == "error"),
@@ -317,6 +329,8 @@ def _output_json(mistakes: list) -> None:
             "info": sum(1 for m in mistakes if m.severity == "info"),
         },
         "mistakes": [m.to_dict() for m in mistakes],
+        "coverage": [c.to_dict() for c in coverage],
+        "coverage_complete": all(c.status == "ran" for c in coverage),
     }
     print(json.dumps(data, indent=2))
 
