@@ -1166,6 +1166,7 @@ CHECK_CATEGORIES = [
     "silkscreen",
     "single_pad_net",
     "solder_mask",
+    "mask_to_copper",
     "via_in_pad",
     "zero_length_segment",
     "zones",
@@ -1247,6 +1248,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Pure Python DRC for PCBs (no kicad-cli required)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
+    )
+    parser.add_argument(
+        "--mask-copper-config",
+        type=Path,
+        help="Explicit process policy, source-bound escape intent and native runtime JSON (kct.mask-copper-request.v1); engages mask_to_copper",
     )
     parser.add_argument(
         "pcb",
@@ -2123,6 +2129,25 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
 
+    mask_copper_request = None
+    if getattr(args, "mask_copper_config", None):
+        from kicad_tools.validate.mask_copper import MaskCopperRequest
+
+        try:
+            mask_copper_request = MaskCopperRequest.from_file(args.mask_copper_config)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            print(f"Error: invalid mask-to-copper request: {exc}", file=sys.stderr)
+            return 1
+
+    if mask_copper_request is not None and (
+        "mask_to_copper" in skip_set or (only_set is not None and "mask_to_copper" not in only_set)
+    ):
+        print(
+            "Error: explicit mask-copper config conflicts with --only/--skip selection",
+            file=sys.stderr,
+        )
+        return 1
+
     # Create checker with manufacturer rules
     try:
         checker = DRCChecker(
@@ -2154,6 +2179,7 @@ def main(argv: list[str] | None = None) -> int:
             # Issue #4980/#5124: declared branch-specific current-path
             # intent (--current-paths sidecar, auto-discovered).
             current_path_specs=current_path_specs,
+            mask_copper_request=mask_copper_request,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -2350,7 +2376,11 @@ def main(argv: list[str] | None = None) -> int:
     # PASSED iff 0 errors and (0 warnings under --strict).
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = sum(1 for v in violations if v.is_warning)
-    drc_passed = error_count == 0 and not (warning_count > 0 and args.strict)
+    drc_passed = (
+        error_count == 0
+        and all(a.passed for a in results.mask_copper_assessments)
+        and not (warning_count > 0 and args.strict)
+    )
     drc_sub = SubCheckResult(
         status="PASSED" if drc_passed else "FAILED",
         detail=(
@@ -2372,6 +2402,12 @@ def main(argv: list[str] | None = None) -> int:
             schematic=getattr(args, "schematic", None),
             strict=args.strict,
         )
+
+    if results.mask_copper_assessments and args.format != "json":
+        for assessment in results.mask_copper_assessments:
+            print(f"Mask-to-copper: {assessment.coverage}; passed={assessment.passed}")
+            for reason in assessment.reasons:
+                print(f"  {reason}")
 
     # Output results
     if args.format == "json":
@@ -2428,6 +2464,9 @@ def main(argv: list[str] | None = None) -> int:
             net_class_map=net_class_map,
             emit_both=getattr(args, "emit_drc_constraints", False),
         )
+
+    if any(not a.passed for a in results.mask_copper_assessments):
+        return 2
 
     # Determine exit code
     # Exit 2 = check ran successfully but found issues (errors, or warnings+strict)
@@ -2676,12 +2715,20 @@ def run_selected_checks(
         "silkscreen": checker.check_silkscreen,
         "single_pad_net": checker.check_single_pad_nets,
         "solder_mask": checker.check_solder_mask_pads,
+        "mask_to_copper": checker.check_mask_to_copper,
         "via_in_pad": checker.check_via_in_pad,
         "zero_length_segment": checker.check_zero_length_segments,
         "zones": checker.check_zones,
     }
 
     for category, method in check_methods.items():
+        if (
+            category == "mask_to_copper"
+            and only_set is None
+            and checker.mask_copper_request is None
+        ):
+            continue
+
         # Skip if --only specified and this category not in it
         if only_set is not None and category not in only_set:
             continue
@@ -2870,7 +2917,11 @@ def output_table(
 
     if not violations:
         print(f"\n{'=' * 60}")
-        print("DRC PASSED - No violations found")
+        print(
+            "DRC PASSED - No violations found"
+            if all(a.passed for a in results.mask_copper_assessments)
+            else "DRC NOT QUALIFIED - Requested mask coverage incomplete or failing"
+        )
         return
 
     # Issue #3803: render the manufacturing-vs-advisory category buckets so
@@ -3108,7 +3159,7 @@ def output_json(
         # (even when empty) so downstream consumers can rely on the
         # field being present.
         "rules_checked_by_rule": dict(results.rules_checked_by_rule),
-        "passed": error_count == 0,
+        "passed": error_count == 0 and all(a.passed for a in results.mask_copper_assessments),
     }
     if results.suppressed_count > 0:
         summary_data["suppressed"] = results.suppressed_count
@@ -3119,6 +3170,7 @@ def output_json(
         "layers": layers,
         "summary": summary_data,
         "violations": [v.to_dict() for v in violations],
+        "mask_copper_assessments": [a.to_dict() for a in results.mask_copper_assessments],
     }
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
@@ -3163,7 +3215,7 @@ def write_json_report(
         # alongside the aggregate ``rules_checked`` integer.  Issue
         # #2660 / Epic #2556 Phase 4N.
         "rules_checked_by_rule": dict(results.rules_checked_by_rule),
-        "passed": error_count == 0,
+        "passed": error_count == 0 and all(a.passed for a in results.mask_copper_assessments),
     }
     if results.suppressed_count > 0:
         summary_data["suppressed"] = results.suppressed_count
@@ -3174,6 +3226,7 @@ def write_json_report(
         "layers": layers,
         "summary": summary_data,
         "violations": [v.to_dict() for v in violations],
+        "mask_copper_assessments": [a.to_dict() for a in results.mask_copper_assessments],
     }
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
@@ -3195,7 +3248,9 @@ def output_summary(
                 f"\n  ({results.suppressed_count} silkscreen warnings suppressed"
                 f" -- standard library footprints)"
             )
-        print(f"DRC PASSED: {pcb_path.name}")
+        print(
+            f"DRC {'PASSED' if all(a.passed for a in results.mask_copper_assessments) else 'NOT QUALIFIED'}: {pcb_path.name}"
+        )
         print(msg)
         return
 

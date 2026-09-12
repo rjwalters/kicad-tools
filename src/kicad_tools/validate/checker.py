@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.filters import ViolationFilter
+    from kicad_tools.validate.mask_copper import MaskCopperRequest
     from kicad_tools.validate.rules.courtyard_waivers import CourtyardWaivers
 
 
@@ -84,6 +85,7 @@ class DRCChecker:
         copper_oz_outer: float | None = None,
         copper_oz_inner: float | None = None,
         current_path_specs: Sequence[CurrentPathSpec] | None = None,
+        mask_copper_request: MaskCopperRequest | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -176,6 +178,7 @@ class DRCChecker:
         Raises:
             ValueError: If manufacturer ID is not recognized
         """
+        self.mask_copper_request = mask_copper_request
         self.pcb = pcb
         self.manufacturer = manufacturer
         self.layers = layers
@@ -270,6 +273,7 @@ class DRCChecker:
         "check_match_group_length_skew",
         "check_silkscreen",
         "check_solder_mask_pads",
+        "check_mask_to_copper",
         "check_footprint_placement",
         "check_netlist",
         "check_single_pad_nets",
@@ -557,6 +561,8 @@ class DRCChecker:
 
         # Run each category of checks (order matches CHECK_ALL_METHODS).
         for method_name in self.CHECK_ALL_METHODS:
+            if method_name == "check_mask_to_copper" and self.mask_copper_request is None:
+                continue
             method = getattr(self, method_name)
             if method_name == "check_pad_grid_alignment":
                 results.merge(method(auto_derive_threshold=pad_grid_auto_derive))
@@ -1143,6 +1149,30 @@ class DRCChecker:
                 self.pcb, self.design_rules, suppress_library=self.suppress_library
             )
         )
+
+    def check_mask_to_copper(self) -> DRCResults:
+        """Run the explicitly requested native, immutable-source exposure check."""
+        from kicad_tools.sexp import parse_file
+
+        from .mask_copper import (
+            MaskCopperAssessment,
+            MaskCopperRequest,
+            assessment_results,
+            check_mask_to_copper,
+        )
+
+        request = self.mask_copper_request or MaskCopperRequest()
+        if self.pcb.path is None:
+            assessment = MaskCopperAssessment(reasons=["Mask geometry requires a saved source PCB"])
+        elif self.pcb._sexp.to_string() != parse_file(self.pcb.path).to_string():
+            assessment = MaskCopperAssessment(
+                coverage="incomplete", reasons=["PCB object differs from current source bytes"]
+            )
+        else:
+            assessment = check_mask_to_copper(
+                self.pcb.path, request.policy, request.intents, **request.native_options
+            )
+        return assessment_results(assessment)
 
     def check_solder_mask_pads(self) -> DRCResults:
         """Check solder mask and pad dimension rules.
