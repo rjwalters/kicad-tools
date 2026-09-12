@@ -1235,6 +1235,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`clearance_pad_segment` reported false-positive DRC violations against
+  rotated `roundrect`/`oval` pads' rounded corners** (#4985) — the
+  segment-vs-pad clearance path (`_segment_circle_clearance` in
+  `validate/rules/clearance.py`) still measured distance to the pad's
+  axis-aligned bounding box even after #3826 fixed the analogous pad-vs-pad
+  and pad-vs-zone over-approximation. A rotated `roundrect`/`oval` pad's true
+  copper cuts back the AABB's corners, so a trace routed near a corner could
+  be reported tighter (even below the manufacturing clearance floor) than
+  the true rounded geometry allows — reproduced on `chorus-test-revA`'s C19
+  footprint, where the AABB path reported 0.0812 mm against a real 0.1846 mm
+  (per `pcbnew.PAD.GetEffectivePolygon`), a false violation at the board's
+  0.1016 mm floor. `_segment_circle_clearance` now routes `roundrect` and
+  non-square `oval`/`obround` pads through the same true-geometry shapely
+  polygon (`CopperElement.polygon`, from `_pad_polygon`) already used for
+  pad-pad/pad-zone clearance; plain `rect` pads and circular
+  pads/vias are unaffected. A genuine sub-clearance violation against the
+  true rounded geometry still fires — the fix narrows false positives
+  without masking real shorts.
 - **Noncardinal pad clearance geometry** (#5227) — orient rect, roundrect,
   and oval copper polygons using KiCad's negative-angle board transform.
   This removes mirrored false overlaps and missed physical overlaps while
