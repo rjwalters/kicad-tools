@@ -27,9 +27,41 @@ export function fmtWirelength(report: BenchmarkReport): string {
 
 export function fmtTiming(report: BenchmarkReport): string {
   if (report.timing.valid && report.timing.wall_clock_s !== null) {
+    const phase = report.timing.measured_phase;
+    if (phase && phase !== "completed" && phase !== "unknown") {
+      // A real, backend-eligible elapsed time on a non-completed attempt
+      // is time-to-refusal/partial-progress, NOT a completed-routing
+      // performance number -- never render it as a bare seconds figure
+      // (issue #5280).
+      return `${report.timing.wall_clock_s.toFixed(1)} s (${phase.replace(/_/g, " ")})`;
+    }
     return `${report.timing.wall_clock_s.toFixed(1)} s`;
   }
   return "refused";
+}
+
+/** `"unknown (legacy)"` when `route_outcome` is absent -- never success. */
+export function fmtOutcome(report: BenchmarkReport): string {
+  const outcome = report.route_outcome;
+  if (outcome == null) return "unknown (legacy)";
+  return outcome.outcome.replace(/_/g, " ");
+}
+
+/** Whether the measured board is router output, a fallback input, or unknown. */
+export function fmtArtifactSource(report: BenchmarkReport): string {
+  const outcome = report.route_outcome;
+  if (outcome == null) return "unknown";
+  return outcome.artifact_source.replace(/_/g, " ");
+}
+
+/** True when this report predates route-outcome/artifact-provenance tracking (#5280). */
+export function isLegacyOutcome(report: BenchmarkReport): boolean {
+  return report.route_outcome == null;
+}
+
+/** True when the measured board is the pre-route input, not router output. */
+export function isFallbackArtifact(report: BenchmarkReport): boolean {
+  return report.route_outcome?.artifact_source === "fallback_input";
 }
 
 export function fmtKctCheck(report: BenchmarkReport): string {
@@ -51,22 +83,18 @@ export function fmtDiffPairs(report: BenchmarkReport): string {
   return `${pairs.pairs_complete}/${pairs.pairs_total}`;
 }
 
-/**
- * True when a report's `copper` block shows no routed copper at all — the
- * schema-native signal this page uses to distinguish "an attempt that
- * stopped before routing" from a genuinely routed (even if incomplete)
- * result. Mirrors the criterion `benchmarks/external/results/README.md`
- * itself uses for the two committed 2026-08-25 reports: "`copper.via_count`
- * and `copper.wirelength_mm` are both `0` for both boards, confirming the
- * router placed no copper."
- *
- * Not a universal proof for every conceivable board (a board could in
- * principle finish routing needing zero vias and zero length), but it is
- * the concrete, JSON-derived signal available today — never a hardcoded
- * per-board flag that could go stale.
+/** Archived README context applies only to the two documented August reports.
+ * Explicit provenance always takes precedence; zero copper alone proves no outcome.
+ * Legacy outcome/artifact cells still remain unknown.
  */
-export function producedNoRoutedOutput(report: BenchmarkReport): boolean {
-  return report.copper.via_count === 0 && report.copper.wirelength_mm === 0;
+export function isHistoricalStoppedAttempt(report: BenchmarkReport): boolean {
+  return isLegacyOutcome(report)
+    && report.tool_commit === "636fd368"
+    && report.generated_at.startsWith("2026-08-25T")
+    && report.protocol === "zero-touch"
+    && ["pocketbeagle", "beagleconnect_freedom"].includes(report.board_id)
+    && report.copper.via_count === 0 && report.copper.wirelength_mm === 0
+    && report.notes.some((note) => note.startsWith("router produced no output file -- reporting the unrouted, ripped-up board"));
 }
 
 /** Render an ISO-8601 timestamp as a bare `YYYY-MM-DD` date, matching the

@@ -36,11 +36,9 @@
  *     STRF case study involved manual netclass setup, while its
  *     PocketBeagle/BeagleConnect numbers were zero-touch; conflating the two
  *     would misrepresent both.
- *   - A report whose `copper` block shows zero vias and zero wirelength
- *     (`producedNoRoutedOutput()`) never gets to present its `completion`/
- *     `timing` figures as if they were a routed result's completion% or
- *     route speed — connectivity/copper describe the measured input board;
- *     duration describes the stopped attempt. Both are labeled explicitly.
+ *   - Explicit outcome/artifact fields are authoritative. Legacy reports
+ *     remain unknown in those columns; archived notes apply only to the
+ *     two documented August attempts, never inferred from zero copper alone.
  *   - A board that did not route 100% is annotated with its filed
  *     generic-router-capability issue, described as a **historical,
  *     dated observation** — never as an evergreen claim about whether that
@@ -58,7 +56,11 @@ import {
   fmtCliDrc,
   fmtDiffPairs,
   fmtDateOnly,
-  producedNoRoutedOutput,
+  isHistoricalStoppedAttempt,
+  fmtOutcome,
+  fmtArtifactSource,
+  isLegacyOutcome,
+  isFallbackArtifact,
 } from "../data/benchmarkFormat.ts";
 import SiteHeader from "../components/Header.astro";
 import SiteFooter from "../components/Footer.astro";
@@ -77,10 +79,8 @@ function rawReportUrl(report: (typeof reports)[number]): string {
   return `${REPO}/blob/main/benchmarks/external/results/${report.board_id}.${report.protocol}.json`;
 }
 
-// Boards whose committed report stopped before producing any routed copper —
-// computed from the JSON itself (`producedNoRoutedOutput`), never hardcoded,
-// so this list can never drift from the data it describes.
-const noOutputReports = reports.filter(producedNoRoutedOutput);
+// Reports matching the documented August attempts, without explicit provenance.
+const noOutputReports = reports.filter(isHistoricalStoppedAttempt);
 
 // Historical snapshot metadata, derived entirely from the committed reports
 // (never hand-typed, so it can't go stale independently of the JSON):
@@ -257,7 +257,7 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
               <tr>
                 <th rowspan="2" scope="col">Board</th>
                 <th rowspan="2" scope="col">Protocol</th>
-                <th colspan="8" scope="colgroup">
+                <th colspan="10" scope="colgroup">
                   Local measurement (this snapshot)
                 </th>
                 <th rowspan="2" scope="col">
@@ -274,6 +274,8 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
                 <th scope="col">kct check</th>
                 <th scope="col">kicad-cli DRC</th>
                 <th scope="col">Diff pairs</th>
+                <th scope="col">Outcome</th>
+                <th scope="col">Artifact</th>
               </tr>
             </thead>
             <tbody>
@@ -285,7 +287,9 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
                   if (ref?.completionPct !== undefined)
                     refCells.push(`${ref.completionPct}% complete`);
                   if (ref?.vias !== undefined) refCells.push(`${ref.vias} vias`);
-                  const noOutput = producedNoRoutedOutput(report);
+                  const noOutput = isHistoricalStoppedAttempt(report);
+                  const legacy = isLegacyOutcome(report);
+                  const fallback = isFallbackArtifact(report);
                   return (
                     <tr>
                       <th scope="row">{ref?.name ?? report.board_id}</th>
@@ -313,6 +317,8 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
                       </td>
                       <td>{fmtCliDrc(report)}</td>
                       <td>{fmtDiffPairs(report)}</td>
+                      <td class:list={[{ warn: legacy || fallback }]}>{fmtOutcome(report)}</td>
+                      <td class:list={[{ warn: fallback }]}>{fmtArtifactSource(report)}</td>
                       <td class="ref-cell">{refCells.length > 0 ? refCells.join(" · ") : "—"}</td>
                     </tr>
                   );
@@ -328,7 +334,7 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
                   return (
                     <tr class="pending-row">
                       <th scope="row">{board.name}</th>
-                      <td colspan="9" class="pending-cell">
+                      <td colspan="11" class="pending-cell">
                         No committed report in this repository — see{" "}
                         <a href={RESULTS_README_URL} target="_blank" rel="noopener noreferrer">
                           results/README.md
@@ -359,6 +365,9 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
           outcome" below for why. Neither <code>kct check</code> nor{" "}
           <code>kicad-cli DRC</code> passing is evidence of a connected or
           fully routed board on its own.
+          Outcome and Artifact use explicit report provenance when available.
+          Missing fields remain unknown (legacy); the historical notes below
+          supply context for the documented August attempts.
         </p>
       </section>
 
@@ -375,10 +384,10 @@ const FAILURE_NOTES: Record<string, { issue: string; url: string; summary: strin
             </p>
             <ul class="annotation-list" role="list">
               {reports
-                .filter((r) => r.board_id in FAILURE_NOTES)
+                .filter(isHistoricalStoppedAttempt)
                 .map((r) => {
                   const note = FAILURE_NOTES[r.board_id];
-                  const noOutput = producedNoRoutedOutput(r);
+                  const noOutput = isHistoricalStoppedAttempt(r);
                   return (
                     <li>
                       <strong>{r.board_id}</strong> ({r.protocol}, recorded{" "}
