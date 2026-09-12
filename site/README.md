@@ -207,3 +207,29 @@ site/
 This site ships the scaffold, the board data loader, the gallery index page
 (cards, renders, metric badges), and the per-board detail page (render gallery,
 metrics table, downloads, and the interactive KiCanvas PCB viewer).
+
+### Development readiness without a board summary
+
+`kct board-metrics` (`src/kicad_tools/cli/board_metrics_cmd.py`) already
+extracts static development metadata without a manufacturing directory and
+reads readiness through `board_readiness.py`; it does not manufacture passing
+checks or an export. Its `emit_board_json` writes the optional gallery summary.
+The readiness command/board-specific producer writes `output/readiness.json`
+independently. See `docs/board-json-schema.md`, “Development boards without
+manufacturing export”.
+
+The site also loads readiness when that summary is absent, unreadable, malformed,
+or unsupported. `loadReadiness` validates report shape, each recorded input's
+SHA-256 and board-relative path, and coverage of current project/rule files.
+Rejected evidence exposes no passing checks. A valid fallback record retains
+`no_artifacts` internally and displays **In development**, never a release-ready
+badge or inferred download. Full summaries retain their existing readiness gates.
+Gallery and detail pages share per-check labels and status explanations; absent
+checks are unreported, not passes. Evidence dates remain report dates.
+
+At main `696315f0`, Board09 (`09-usbc-pd-power`) has no `board.json` or
+manufacturing package but its September 10 readiness report validates all 20
+input hashes: eight checks passed, manufacturer rules failed, and manufacturing
+release was not run. This is a real ingestion example, not new board qualification.
+Refresh the readiness evidence against current files before rebuilding; do not
+edit hashes or statuses to make stale evidence appear current.

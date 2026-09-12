@@ -11,6 +11,7 @@
  * The whole card links to `/<slug>` — the per-board detail route built in
  * issue #3681. Until that page exists the link 404s, which is expected.
  */
+import ReadinessProgress from "./ReadinessProgress.astro";
 import type { Board } from "../data/types.ts";
 import { displayStatus, displayStatusLabel } from "../data/boardStatus.ts";
 
@@ -73,6 +74,7 @@ const statusLabel = displayStatusLabel(board);
   <div class="body">
     <h2 class="name">{displayName}</h2>
     {board.description && <p class="desc">{board.description}</p>}
+    <ReadinessProgress board={board} compact />
 
     <ul class="badges">
       {
@@ -218,6 +220,8 @@ const statusLabel = displayStatusLabel(board);
   /* LVS-not-run chip (#3749): neutral gray for "unknown" — visually similar
      to no_artifacts so the message is "we have not verified" rather than "we
      verified and it is a problem". Never reads as Ready. */
+  .chip-development,
+  .chip-blocked,
   .chip-unverified {
     background: rgba(120, 134, 148, 0.85);
     color: #0c1116;
