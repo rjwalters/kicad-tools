@@ -886,7 +886,23 @@ class CppGrid:
         for layer in range(grid.num_layers):
             for y in range(grid.rows):
                 for x in range(grid.cols):
-                    py_cell = grid.grid[layer][y][x]
+                    # Issue #5240: ``grid.grid[layer][y][x]`` walks three
+                    # chained ``__getitem__`` calls (``_GridView`` ->
+                    # ``_LayerView`` -> ``_RowView``), allocating two
+                    # throwaway intermediate view objects per cell just to
+                    # reach the same ``_CellView`` that ``cell_at`` returns
+                    # in one call (see ``RoutingGrid.cell_at`` docstring,
+                    # added by #5307).  This loop is the C++ grid bulk-copy
+                    # -- it runs once per ``from_routing_grid`` call over
+                    # every cell in the board (cols*rows*layers), so it is
+                    # the single largest per-cell iteration in the router.
+                    # Profiling a full board-06 re-route (Issue #5240)
+                    # showed this exact call site as the top cumulative-time
+                    # contributor to ``from_routing_grid``.  ``cell_at`` is
+                    # a documented drop-in: identical ``_CellView`` type,
+                    # identical properties, callers see no behavioral
+                    # change.
+                    py_cell = grid.cell_at(layer, y, x)
                     if py_cell.blocked:
                         cpp_grid._impl.mark_blocked(
                             x,
