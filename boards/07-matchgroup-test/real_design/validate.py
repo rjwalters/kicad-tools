@@ -203,11 +203,23 @@ def net_via_capacitance_pf(
     return total_pf
 
 
+# Driver-load screening budgets, not universal absolute-maximum ratings.
+DQ_DRIVER_LIMITS = {
+    "SDRAM drives, MCU receives": (
+        30.0,
+        "engineering screening budget; ISSI driver limit unconfirmed",
+    ),
+    "MCU drives, SDRAM receives": (30.0, "ST DS9405 tables 103/105 characterization load"),
+}
+
+
 def external_load(
     name: str,
     trace_pf: float,
     physical_via_count: int,
     via_capacitance_pf: float | None = None,
+    *,
+    dq_driver_limits: dict[str, tuple[float, str]] | None = None,
 ) -> dict:
     """Per-driver load screen; unused through barrels still contribute load.
 
@@ -217,9 +229,9 @@ def external_load(
     of one folded number: SDRAM-drives/MCU-receives uses a 10 pF engineering
     reserve (ST's DS9405 only publishes a 5 pF *typical* CIO with no maximum),
     while MCU-drives/SDRAM-receives uses ISSI's sourced 6.5 pF DQ maximum
-    (RevG1 p14). The worse direction governs today only because both share
-    the same 30 pF net-level limit -- a future asymmetric per-direction limit
-    would now be caught instead of silently passing (#5134).
+    (RevG1 p14). Each direction is checked against its own driver budget and
+    provenance. The smallest margin governs the compatibility summary;
+    ``passes`` requires all directions to pass, including asymmetric budgets.
 
     ``via_capacitance_pf``, when provided, is the TI SLYT335 geometry-derived
     capacitance summed over this net's actual physical vias (see
@@ -245,20 +257,31 @@ def external_load(
         via_pf = float(physical_via_count)
         via_basis = "1 pF/via allowance (geometry unavailable)"
 
-    direction_entries = [
-        (direction, float(receiver_pf), basis, trace_pf + via_pf + receiver_pf)
-        for direction, (receiver_pf, basis) in directions.items()
-    ]
-    per_direction = {
-        direction: {
-            "receiver_allowance_pf": receiver_pf,
+    limits = DQ_DRIVER_LIMITS if dq_driver_limits is None else dq_driver_limits
+    per_direction = {}
+    for direction, (receiver_pf, basis) in directions.items():
+        if name.startswith("DQ"):
+            limit_pf, limit_basis = limits[direction]
+        else:
+            limit_pf = 15.0 if name == "SDCLK" else 30.0
+            limit_basis = "ST DS9405 tables 103/105 characterization load"
+        if not math.isfinite(limit_pf) or limit_pf <= 0 or not limit_basis.strip():
+            raise ValueError("Driver budgets require a finite positive limit and provenance")
+        estimated_pf = trace_pf + via_pf + receiver_pf
+        margin_pf = limit_pf - estimated_pf
+        per_direction[direction] = {
+            "receiver_allowance_pf": float(receiver_pf),
             "receiver_basis": basis,
             "estimated_external_load_pf": estimated_pf,
+            "external_limit_pf": limit_pf,
+            "limit_basis": limit_basis,
+            "margin_pf": margin_pf,
+            "passes": math.isfinite(estimated_pf) and margin_pf >= 0,
         }
-        for direction, receiver_pf, basis, estimated_pf in direction_entries
-    }
-    worst_direction, worst_receiver_pf, worst_basis, worst_estimated_pf = max(
-        direction_entries, key=lambda entry: entry[3]
+    # Keep old scalar fields, but bind them to the governing budget margin,
+    # not the largest absolute capacitance (which can hide asymmetric failures).
+    worst_direction = min(
+        per_direction, key=lambda direction: per_direction[direction]["margin_pf"]
     )
     return {
         "trace_pf": trace_pf,
@@ -267,10 +290,8 @@ def external_load(
         "via_basis": via_basis,
         "directions": per_direction,
         "worst_direction": worst_direction,
-        "receiver_allowance_pf": worst_receiver_pf,
-        "receiver_basis": worst_basis,
-        "estimated_external_load_pf": worst_estimated_pf,
-        "external_limit_pf": 15.0 if name == "SDCLK" else 30.0,
+        **per_direction[worst_direction],
+        "passes": all(entry["passes"] for entry in per_direction.values()),
     }
 
 
@@ -505,14 +526,21 @@ def check(candidate: Path, source: Path, evidence: Path) -> bool:
             else None
         )
         load = external_load(
-            name, capacitance_pf, report.via_count, via_capacitance_pf=via_pf_measured
+            name,
+            capacitance_pf,
+            report.via_count,
+            via_capacitance_pf=via_pf_measured,
+            dq_driver_limits=DQ_DRIVER_LIMITS,
         )
         external_loads[name] = load
-        if load["estimated_external_load_pf"] > load["external_limit_pf"]:
-            errors.append(
-                f"{name}: external load {load['estimated_external_load_pf']:.3f} pF "
-                f"exceeds {load['external_limit_pf']} pF"
-            )
+        if not load["passes"]:
+            failures = [
+                f"{direction}: external load {entry['estimated_external_load_pf']:.3f} pF "
+                f"exceeds {entry['external_limit_pf']} pF ({entry['limit_basis']})"
+                for direction, entry in load["directions"].items()
+                if not entry["passes"]
+            ]
+            errors.append(f"{name}: " + "; ".join(failures))
     if board._sexp.find_children("arc"):
         errors.append(
             "Arc copper length is not supported by this checker; measure it before release"

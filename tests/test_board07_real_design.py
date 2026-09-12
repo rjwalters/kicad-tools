@@ -455,18 +455,36 @@ def test_external_load_gate_and_report_scope(tmp_path, monkeypatch):
         ("A0", 27, False),
         ("SDCLK", 10, False),
         ("DQ0", 21, False),
+        ("DQ0", 13, False),  # 25pF passes 30pF, but 21.5pF fails 20pF.
     ):
         (source / "sdram_constraints.json").write_text(json.dumps({"groups": {"bus": [name]}}))
         segment.end = (trace_pf * 5, 0)  # C'=0.2 pF/mm from the stubbed line model.
         segment.net_name = name
         segment.layer = "In2.Cu" if name.startswith("DQ") else "In3.Cu"
         stack.layers = [NS(name=segment.layer, is_signal_layer=True)]
+        if name == "DQ0" and trace_pf == 13:
+            monkeypatch.setattr(
+                validate,
+                "DQ_DRIVER_LIMITS",
+                {
+                    "SDRAM drives, MCU receives": (30.0, "synthetic engineering budget"),
+                    "MCU drives, SDRAM receives": (20.0, "synthetic engineering budget"),
+                },
+            )
         evidence = tmp_path / f"{name}-{trace_pf}"
         assert validate.check(source / "sdram_demo.kicad_pcb", source, evidence) is expected
         report = json.loads((evidence / "validation.json").read_text())
         assert report["trace_capacitance_pf"][name] == pytest.approx(trace_pf)
         estimate = report["external_load_estimates"][name]
         assert estimate["via_allowance_pf"] == 2
+        assert estimate["passes"] is expected
+        if name == "DQ0" and trace_pf == 13:
+            directions = estimate["directions"]
+            assert directions["SDRAM drives, MCU receives"]["passes"] is True
+            assert directions["MCU drives, SDRAM receives"]["passes"] is False
+            assert estimate["worst_direction"] == "MCU drives, SDRAM receives"
+            assert estimate["margin_pf"] == pytest.approx(-1.5)
+            assert estimate["limit_basis"] == "synthetic engineering budget"
         # No via geometry is reachable from this synthetic board (an empty
         # via list can never match the stubbed via_count=2), so every net
         # must fall back to the flat allowance rather than silently using a
@@ -528,3 +546,22 @@ def test_via_formula_rejects_nonfinite_inputs():
             inputs = [0.5, 0.8, 1.6, 4.6]
             inputs[index] = value
             assert validate.via_barrel_capacitance_pf(*inputs) is None
+
+
+def test_dq_asymmetric_driver_budgets():
+    validate = load("validate")
+    report = validate.external_load(
+        "DQ0",
+        15.0,
+        0,
+        dq_driver_limits={
+            "SDRAM drives, MCU receives": (30.0, "synthetic engineering budget"),
+            "MCU drives, SDRAM receives": (20.0, "synthetic engineering budget"),
+        },
+    )
+    assert report["directions"]["SDRAM drives, MCU receives"]["estimated_external_load_pf"] == 25
+    assert report["directions"]["SDRAM drives, MCU receives"]["passes"] is True
+    assert report["directions"]["MCU drives, SDRAM receives"]["estimated_external_load_pf"] == 21.5
+    assert report["passes"] is False
+    assert report["external_limit_pf"] == 20
+    assert report["margin_pf"] == -1.5
