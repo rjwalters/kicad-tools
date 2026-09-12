@@ -113,6 +113,23 @@ def test_unproved_fanout_remains_nonresolved(mutation):
     assert not reinforcement_eligible_segment_ids(pcb, [spec()])
 
 
+@pytest.mark.parametrize("damage", ["two_missing_vias", "long_missing_trunk", "two_wrong_net_vias"])
+def test_compound_array_damage_cannot_become_eligible_ordinary_branch(damage):
+    pcb = fixture(depth=20 if damage == "long_missing_trunk" else 2)
+    if damage == "two_missing_vias":
+        pcb._vias = pcb._vias[-1:]
+    elif damage == "long_missing_trunk":
+        pcb._segments.pop(3)
+    else:
+        other = pcb.add_net("OTHER")
+        for via in pcb.vias[:2]:
+            via.net_number, via.net_name = other.number, "OTHER"
+    declaration = replace(spec(), continuous_a=1)
+    assert resolve_current_path(pcb, declaration).status == "ambiguous"
+    assert PathAmpacityRule([declaration]).check(pcb, _design_rules_2oz()).errors
+    assert not reinforcement_eligible_segment_ids(pcb, [declaration])
+
+
 @pytest.mark.parametrize("delta,expected", [(0, True), (0.001, False)])
 def test_explicit_pad_diagonal_locality_boundary(delta, expected):
     assert resolve_current_path(fixture(depth=math.hypot(2.4, 2.4) + delta), spec()).ok is expected

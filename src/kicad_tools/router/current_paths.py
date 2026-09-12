@@ -995,23 +995,10 @@ def _endpoint_via_array(
 def _candidate_via_array_leg_count(
     graph: _CopperGraph, pcb: PCB, hub: _Node, pad: Pad, net_name: str
 ) -> int:
-    """Count arms at ``hub`` that individually look like a via-array leg.
+    """Count intact local via arms; fewer than two does not prove safe branching.
 
-    A damaged/incomplete parallel via array (Issue #4980 upstream fanout
-    diagnosis) is only a meaningful concept when at least *two* surviving
-    arms each independently resemble one leg of that motif: a short,
-    same-layer stub (bounded by the pad diagonal, matching
-    :func:`_endpoint_via_array`'s own supported-subset limit) that
-    terminates at a real plated via on this net.
-
-    This is deliberately narrower than "any arm anywhere touches a via" --
-    that broader check also fires on an ordinary branching pad where one
-    arm is ,e.g., a force trunk trace and the *other*, unrelated, arm just
-    happens to drop through a via to reach an inner layer (a common,
-    completely ordinary sense/feedback-tap pattern). Requiring two or more
-    candidate legs keeps the "this might be a damaged fanout" suspicion
-    scoped to boards that actually attempted the parallel-via motif, without
-    inferring or assuming any current split between legs.
+    Ordinary single-via branches also require terminal proof for every exit.
+    Missing, wrong-net or distant vias must not erase damaged-array evidence.
     """
     bound = math.hypot(*pad.size)
     net = pcb.get_net_by_name(net_name)
@@ -1288,22 +1275,27 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
                 else None
             )
             arms = adjacency.adjacency.get(hub, []) if hub is not None else []
-            # A broken fanout may become acyclic when receiving copper is
-            # removed. It must not fall back to checking one surviving arm --
-            # but "a fanout" is only a meaningful suspicion once at least two
-            # arms independently resemble a via-array leg
-            # (:func:`_candidate_via_array_leg_count`). An ordinary branching
-            # pad -- e.g. one force-trunk arm plus one unrelated sense/
-            # feedback arm that happens to drop through a single via to
-            # reach an inner layer -- is not a damaged array and must not be
-            # forced ambiguous just because *some* arm touches *some* via.
+            # A single-via ordinary branch is supported only when all arms
+            # lead through acyclic copper to actual pad terminals. Counting
+            # surviving vias alone would accept a damaged array after missing
+            # barrels or receiving copper turn other arms into dangling ends.
             if (
                 hub is not None
                 and endpoint_pad is not None
                 and endpoint_pad.type == "smd"
                 and len(arms) >= 2
-                and _candidate_via_array_leg_count(adjacency, pcb, hub, endpoint_pad, spec.net_name)
-                >= 2
+                and any(
+                    edge.segment is not None
+                    and any(_node_key(v.position) == node[:2] for v in pcb.vias)
+                    for node, edge in arms
+                )
+                and (
+                    _candidate_via_array_leg_count(adjacency, pcb, hub, endpoint_pad, spec.net_name)
+                    >= 2
+                    or not _proved_load_exits(
+                        adjacency, {hub}, [(hub, node, edge) for node, edge in arms]
+                    )
+                )
             ):
                 return PathResolution(
                     spec=spec,
