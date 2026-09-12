@@ -5143,6 +5143,11 @@ def _add_fix_vias_parser(subparsers) -> None:
     )
     fix_vias_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_vias_parser.add_argument(
+        "--search-alternatives",
+        action="store_true",
+        help="With --relocate-in-pad, search safe alternate escapes if the preferred slide is blocked",
+    )
+    fix_vias_parser.add_argument(
         "--mfr",
         choices=get_all_manufacturer_names(),
         default="jlcpcb",
@@ -6720,6 +6725,54 @@ def _add_analyze_parser(subparsers) -> None:
         help=(
             "Fallback LED forward voltage (V) for parts with If_max but no Vf "
             "field. Default: skip such parts (zero false positives)."
+        ),
+    )
+
+    # analyze component-stress (operates on a schematic, not a PCB)
+    stress_parser = analyze_subparsers.add_parser(
+        "component-stress",
+        help="Check MOSFET VDS/VGS against declared operating states (advisory)",
+        description=(
+            "Evaluate each MOSFET's terminal-to-terminal stress (VDS = V(D)-V(S), "
+            "VGS = V(G)-V(S)) in every state of an explicit, reviewed "
+            "operating-state manifest, against Vds_max/Vgs_max symbol fields. "
+            "No circuit-state inference is performed: a missing state, pin role, "
+            "node potential or source-backed rating is reported UNRESOLVED -- "
+            "never a silent pass."
+        ),
+    )
+    stress_parser.add_argument("schematic", help="Schematic file to analyze (.kicad_sch)")
+    stress_parser.add_argument(
+        "--states",
+        dest="analyze_states",
+        required=True,
+        metavar="MANIFEST",
+        help="Operating-state manifest (.yaml/.yml/.json) declaring per-net node potentials",
+    )
+    stress_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    stress_parser.add_argument(
+        "--allow-unresolved",
+        dest="analyze_allow_unresolved",
+        action="store_true",
+        help=(
+            "Do not gate on UNRESOLVED rows (default: an unresolved state, pin "
+            "role or rating is a release blocker and exits non-zero)"
+        ),
+    )
+    stress_parser.add_argument(
+        "--allow-uncited-ratings",
+        dest="analyze_allow_uncited_ratings",
+        action="store_true",
+        help=(
+            "Accept Vds_max/Vgs_max fields without a Rating_Source/Datasheet "
+            "citation (default: an uncited rating is UNRESOLVED)"
         ),
     )
 

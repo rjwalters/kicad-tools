@@ -1318,12 +1318,14 @@ class TestValidateRoutes:
         assert "GND" in result
         assert "15.00" in result
 
-    def test_same_component_pad_marked_component_inherent(self):
-        """Test that pad violations within the same component are marked component_inherent."""
+    @pytest.mark.parametrize("legacy_carveout", [False, True])
+    def test_same_component_pad_requires_opt_in_for_inherent_classification(self, legacy_carveout):
+        """Unconfigured fine pitch cannot classify a copper violation as inherent."""
         rules = DesignRules(
             trace_width=0.2,
             trace_clearance=0.15,
             grid_resolution=0.1,
+            legacy_fine_pitch_carveout=legacy_carveout,
         )
         router = Autorouter(width=50, height=50, rules=rules)
 
@@ -1351,11 +1353,11 @@ class TestValidateRoutes:
 
         violations = validate_routes(router)
 
-        # The pad-to-pad violation should be marked as component_inherent
+        # Preserve the legacy opt-in, while default mode reports a real violation.
         pad_violations = [v for v in violations if v.obstacle_type == "pad"]
         assert len(pad_violations) >= 1
         for v in pad_violations:
-            assert v.component_inherent is True
+            assert v.component_inherent is legacy_carveout
 
     def test_cross_component_pad_not_marked_component_inherent(self):
         """Test that pad violations between different components are NOT component_inherent."""

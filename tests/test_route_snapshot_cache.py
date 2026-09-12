@@ -166,3 +166,27 @@ def test_snapshot_replay_invalidates_built_crossing_index(replacement_y):
     assert crossings(12) == 0
     if replacement_y is not None:
         assert crossings(replacement_y) == 1
+
+
+def test_negotiated_rollback_restores_pathfinder_and_preserved_copper():
+    router, fixed = _router()
+    stale, selected = _route(12, 1), _route(8, 2)
+    router._mark_route(stale)
+    router.grid.mark_route_usage(stale)
+    router.routes.append(stale)
+    router.router._build_crossing_grid()
+
+    router._restore_negotiated_route_snapshot([selected])
+
+    assert router.routes == [selected]
+    assert router.grid.routes == [fixed, selected]
+    assert {segment[-1] for segment in router.router._routed_segments} == {99, 2}
+    layer = router.grid.layer_to_index(Layer.F_CU.value)
+    for y, expected in [(12, 0), (8, 1), (2, 1)]:
+        x1, y1 = router.grid.world_to_grid(10, y - 1)
+        x2, y2 = router.grid.world_to_grid(10, y + 1)
+        assert router.router._count_edge_crossings(x1, y1, x2, y2, layer, 3) == expected
+    expected_usage = router.grid._usage_count.copy()
+    router.grid.reset_route_usage()
+    router.grid.mark_route_usage(selected)
+    np.testing.assert_array_equal(expected_usage, router.grid._usage_count)

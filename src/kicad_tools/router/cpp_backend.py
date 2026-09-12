@@ -1754,12 +1754,28 @@ class CppPathfinder:
             effective_width = pad.width
             effective_height = pad.height
 
-        # Strict routing seeds the trace CENTER inside the pad by its radius.
-        # Seeding directly on a metal edge lets the reconstructed pad-center
-        # tail run closer to a neighboring pad than the authored clearance.
-        if self._rules.strict_pad_clearance and trace_width is not None:
-            effective_width = max(0.0, effective_width - trace_width)
-            effective_height = max(0.0, effective_height - trace_width)
+        # Match Python: inset unexempted fine-pitch seeds and all strict-mode
+        # pads to keep reconstructed tails clear of dense neighboring copper.
+        # Standard-pitch seeds retain their search freedom; the exact foreign-
+        # pad validator still enforces their authored clearance.
+        py_grid = getattr(self._grid, "_py_grid", None)
+        pitch = self._get_component_pitches().get(pad.ref)
+        threshold = self._rules.fine_pitch_threshold
+        if (
+            trace_width is not None
+            and (
+                self._rules.strict_pad_clearance
+                or (pitch is not None and threshold is not None and pitch < threshold)
+            )
+            and not self._same_component_carveout_eligible(py_grid, pad.ref)
+        ):
+            # Pad-center tails emit the configured local neck-down width.
+            # Eroding by the wider trunk can erase every legal narrow-pad seed.
+            seed_width = trace_width
+            if self._rules.should_apply_neck_down(pad.ref, pitch):
+                seed_width = self._rules.get_neck_down_width(0.0, pitch, base_width=trace_width)
+            effective_width = max(0.0, effective_width - seed_width)
+            effective_height = max(0.0, effective_height - seed_width)
 
         # Metal area bounds in world coordinates
         metal_x1 = pad.x - effective_width / 2
@@ -2652,15 +2668,22 @@ class CppPathfinder:
            ``_relax_same_component_clearance`` (Issue #2452), or
         2. A fine-pitch / explicit per-component clearance relaxation
            applies (``get_clearance_for_component`` returns less than
-           the default ``trace_clearance``, Issue #1764), or
-        3. The component is fine-pitch (min pin pitch below
-           ``rules.fine_pitch_threshold``) -- covers boards routed with
-           ``fine_pitch_clearance`` unset (the default), where the
-           clearance lookup cannot signal the relaxation.
+           the default ``trace_clearance``, Issue #1764).
 
-        Standard-pitch components return False, so their FOREIGN-net
-        pads stay in the C++ validator and sub-clearance copper is
-        rejected at route construction time.  Mirrors
+        Issue #5004: a third, pitch-only branch used to grant the
+        carve-out to ANY component below ``rules.fine_pitch_threshold``,
+        even when ``fine_pitch_clearance`` was unset (the default) and no
+        relaxation was actually requested for that component -- silently
+        exempting fine-pitch NC and signal pads alike from clearance
+        checks the authored board/net-class rules required.  That branch
+        is now gated behind ``rules.legacy_fine_pitch_carveout`` (default
+        ``False``); leave it unset to get full authored-clearance
+        enforcement for fine-pitch parts with no configured relaxation.
+
+        Standard-pitch components (and fine-pitch components with no
+        relaxation configured) return False, so their FOREIGN-net pads
+        stay in the C++ validator and sub-clearance copper is rejected at
+        route construction time.  Mirrors
         ``RoutingGrid._same_component_carveout_active``.
         """
         if self._rules.strict_pad_clearance:
@@ -2672,6 +2695,8 @@ class CppPathfinder:
         required = self._rules.get_clearance_for_component(ref, pitch)
         if required < self._rules.trace_clearance:
             return True
+        if not self._rules.legacy_fine_pitch_carveout:
+            return False
         threshold = getattr(self._rules, "fine_pitch_threshold", None)
         return pitch is not None and threshold is not None and pitch < threshold
 

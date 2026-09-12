@@ -16,10 +16,15 @@ REPAIR = runpy.run_path(
 @pytest.mark.parametrize(
     "name,old,new",
     [
+        ("GND", (155.1, 117.5), (156.8, 117.5)),
+        ("VCC", (139.7, 117.3), (139.2, 115.5)),
         ("VCC", (140.665, 117.3), (139.2, 115.5)),
         ("VCC", (140.665, 117.2), (139.2, 115.5)),
         ("RESET", (141.1, 118.1), (140.9, 118.5)),
         ("RESET", (141.3, 118.3), (140.9, 118.5)),
+        ("NODE_A", (148.0, 84.9), (148.0, 84.5)),
+        ("NODE_D", (157.9, 106.0), (158.3, 106.0)),
+        ("GND", (155.2, 117.4), (156.5, 117.4)),
     ],
 )
 def test_escape_variant_moves_via_and_both_layers_only_on_its_net(named_nets, name, old, new):

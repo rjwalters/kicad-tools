@@ -1454,9 +1454,29 @@ class Router:
             effective_width = pad.width
             effective_height = pad.height
 
-        if self.rules.strict_pad_clearance and trace_width is not None:
-            effective_width = max(0.0, effective_width - trace_width)
-            effective_height = max(0.0, effective_height - trace_width)
+        pitch = self.component_pitches.get(pad.ref)
+        required_clearance = self.rules.get_clearance_for_component(pad.ref, pitch)
+        # Dense fine-pitch pad-edge seeds can reconstruct a tail that grazes
+        # a foreign pad. Inset those unexempted seeds and all strict-mode pads;
+        # retain standard-pitch search freedom under the exact foreign-pad
+        # validator so unrelated negotiated route choices remain stable.
+        if (
+            trace_width is not None
+            and (
+                self.rules.strict_pad_clearance
+                or self.grid._component_is_fine_pitch(pad.ref, self.component_pitches)
+            )
+            and not self.grid._same_component_carveout_active(
+                pad.ref, required_clearance, self.rules.trace_clearance, self.component_pitches
+            )
+        ):
+            # Pad-center tails emit the configured local neck-down width.
+            # Eroding by the wider trunk can erase every legal narrow-pad seed.
+            seed_width = trace_width
+            if self.rules.should_apply_neck_down(pad.ref, pitch):
+                seed_width = self.rules.get_neck_down_width(0.0, pitch, base_width=trace_width)
+            effective_width = max(0.0, effective_width - seed_width)
+            effective_height = max(0.0, effective_height - seed_width)
 
         # Metal area bounds in world coordinates
         metal_x1 = pad.x - effective_width / 2
