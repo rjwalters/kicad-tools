@@ -1040,8 +1040,8 @@ def _compute_zone_resolution_and_offset(
     Args:
         comp_pads: List of Pad objects belonging to the component.
         coarse_resolution: The coarse global grid resolution in mm.  The
-            chosen fine resolution will be strictly finer than this (a
-            fine zone at the coarse resolution would be redundant).
+            chosen resolution can equal this when a different origin offset
+            aligns the component; a shifted zone is not redundant.
         min_fine_resolution: Floor for the fine grid resolution (mm).
             Below this, the candidate is rejected as impractical.
 
@@ -1056,17 +1056,16 @@ def _compute_zone_resolution_and_offset(
     # Build candidate resolutions: fixed grid-fraction values plus
     # GCD-derived candidates from this component's pad spacings.  Coarsest
     # values come first so we prefer the cheapest fine zone that works.
-    fixed_candidates = [0.1, 0.05, 0.04, 0.025, 0.02, 0.0125, 0.01]
+    fixed_candidates = [coarse_resolution, 0.1, 0.0635, 0.05, 0.04, 0.025, 0.02, 0.0125, 0.01]
     gcd_candidates = _compute_gcd_grid_candidates(comp_pads, min_grid=min_fine_resolution)
     raw_candidates = sorted(
         {round(c, 6) for c in (fixed_candidates + gcd_candidates)},
         reverse=True,
     )
 
-    # Keep only candidates strictly finer than the coarse grid and at or
-    # above the minimum floor.  A fine zone at >= coarse_resolution would
-    # not refine anything (the coarse grid would suffice).
-    candidates = [c for c in raw_candidates if c < coarse_resolution and c >= min_fine_resolution]
+    # A phase-shifted zone can use the same spacing as the coarse grid.
+    # Keep the existing minimum floor and never choose a coarser spacing.
+    candidates = [c for c in raw_candidates if c <= coarse_resolution and c >= min_fine_resolution]
 
     if not candidates:
         # Fall back to half the coarse grid floored at the minimum.  This
@@ -1117,7 +1116,7 @@ def auto_select_grid_resolution(
         board_height: Board height in mm (for memory constraint check)
         max_cells: Maximum grid cells to allow (default: 500k for performance)
         candidates: Optional list of candidate resolutions to try.
-                   Default: [0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508]
+                   Default: [0.5, 0.25, 0.127, 0.1, 0.065, 0.0635, 0.05, 0.0508]
                    plus GCD-derived candidates from pad spacings.
                    When candidates is None, GCD-based candidates are
                    automatically computed from pad positions and added
@@ -1165,12 +1164,13 @@ def auto_select_grid_resolution(
     #             imperial THT (2.54mm / 0.127 = 20, 5.08mm / 0.127 = 40)
     #   - 0.1mm: Metric footprints, QFP (0.5mm / 0.1 = 5)
     #   - 0.065mm: TSSOP (0.65mm / 0.065 = 10 exact)
+    #   - 0.0635mm (2.5 mil): half the 5-mil lattice, with tighter clearance
     #   - 0.05mm: Good metric alignment but NOT imperial-compatible
     #             (2.54 / 0.05 = 50.8, off-grid by 0.04mm)
     #   - 0.0508mm (2 mil): Imperial-compatible for tight DRC constraints
     #             (2.54 / 0.0508 = 50 exact, 5.08 / 0.0508 = 100 exact)
     if candidates is None:
-        candidates = [0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508]
+        candidates = [0.5, 0.25, 0.127, 0.1, 0.065, 0.0635, 0.05, 0.0508]
 
         # Add GCD-derived candidates from pad spacings.  This handles
         # packages like SSOP/TSSOP whose 0.65mm pitch doesn't align to
@@ -1452,6 +1452,17 @@ def auto_select_grid_resolution(
         min_spacing = _min_pad_center_spacing(pad_list)
         has_fine_pitch = min_spacing is not None and min_spacing <= FINE_PITCH_SPACING_MM
     memory_forced_unsafe_grid = grid_unsafe_by_memory_cap and not lattice_rescued and has_fine_pitch
+    if memory_forced_unsafe_grid:
+        # Pad alignment must not make us reject an otherwise usable safe grid.
+        # The memory filter has already bounded these candidates. Prefer the
+        # best aligned clearance-safe survivor before invoking the hard gate.
+        safe_candidates = [c for c in valid_candidates if c <= recommended_max]
+        if safe_candidates:
+            best_resolution = min(safe_candidates, key=lambda c: (_off_grid_for(c)[0], -c))
+            best_off_grid, best_offset = _off_grid_for(best_resolution)
+            off_grid_pct = best_off_grid / total_pads * 100 if total_pads else 0.0
+            grid_unsafe_by_memory_cap = False
+            memory_forced_unsafe_grid = False
     if grid_unsafe_by_memory_cap:
         if lattice_rescued:
             # Issue #3441: the lattice rescue *chose* this grid because it
