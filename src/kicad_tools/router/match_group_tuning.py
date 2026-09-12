@@ -600,9 +600,9 @@ def tune_match_group_v2(
             reference and the copper-only members receive F.Cu meander to
             match its drilled length.  When ``None`` (the default) vias
             contribute ``0.0`` and the measurement collapses to the legacy
-            planar-only sum -- byte-for-byte prior behavior for callers
-            without a stackup context.  Only the single-ended (Phase 2E)
-            path is via-aware; the pair-aware path is unchanged.
+            planar-only sum for callers without a stackup context. Pair lanes are measured by the average
+            physical length of their halves. Mirrored inserts preserve any
+            existing within-pair imbalance; this pass matches lane averages.
         num_copper_layers: Number of copper layers in the stack
             (Issue #3931).  Used with ``board_thickness_mm`` to compute
             per-via drilled length.  Defaults to 4; ignored when
@@ -703,6 +703,13 @@ def tune_match_group_v2(
             length_critical=length_critical,
             grid_resolution_mm=grid_resolution_mm,
             fixed_segment_ids=fixed_segment_ids,
+            via_clearance_mm=via_clearance_mm,
+            diff_pair_partners=diff_pair_partners,
+            pads_by_net=pads_by_net,
+            pad_clearance_mm=pad_clearance_mm,
+            board_thickness_mm=board_thickness_mm,
+            num_copper_layers=num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
         )
 
     return _tune_match_group_single_ended(
@@ -743,6 +750,7 @@ def _tune_match_group_single_ended(
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
     fixed_segment_ids: set[int] | None = None,
+    reference_length_mm: float | None = None,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Scalar Phase 2E path: each net in ``group.net_ids`` tuned independently.
 
@@ -854,6 +862,8 @@ def _tune_match_group_single_ended(
     # byte-for-byte: the reference returns ``reason="reference"`` and
     # members within tolerance above it return
     # ``reason="longer_than_reference"``.
+    if reference_length_mm is not None:
+        ref_length = reference_length_mm
     effective_reference_net_id: int | None = group.reference_net_id
     if group.reference_net_id is not None and ref_length is not None and member_lengths:
         longest_id, longest_len = max(member_lengths.items(), key=lambda kv: kv[1])
@@ -2377,6 +2387,11 @@ def _post_insertion_clearance_detail_pair_group(
     routes_by_net: dict[int, Route],
     intra_group_clearance_mm: float,
     intra_pair_clearance_mm: float,
+    via_clearance_mm: float | None = None,
+    pads_by_net: dict[int, list[Pad]] | None = None,
+    pad_clearance_mm: float | None = None,
+    candidate_p_route: Route | None = None,
+    candidate_n_route: Route | None = None,
 ) -> str | None:
     """Paired DRC self-check for pair-aware serpentine insertion.
 
@@ -2384,8 +2399,7 @@ def _post_insertion_clearance_detail_pair_group(
     the FIRST violation found (rule + offending neighbor + layer +
     measured-vs-required clearance) so pair rollbacks are actionable.
 
-    Three-pronged generalization of
-    :func:`_post_insertion_clearance_ok_group` for the pair-aware case:
+    Shared scalar clearance checks extended for paired candidates:
 
     1. **Within-pair coupling** -- each new P segment is checked against
        each new N segment at threshold ``intra_pair_clearance_mm``.
@@ -2398,6 +2412,9 @@ def _post_insertion_clearance_detail_pair_group(
     3. **Inter-net** -- every new P AND every new N segment is checked
        against every segment of every routed net that is NOT a group
        member at the same ``intra_group_clearance_mm`` threshold.
+    4. **Physical context** -- foreign vias and pads use their respective
+       supplied floors; retained partner segments use the intra-pair floor.
+       Candidate routes must include unchanged copper alongside the inserts.
 
     Reuses :func:`segment_clearance` and the ``clearance + 1e-9 <
     threshold`` epsilon byte-for-byte from the scalar Phase 2E helper.
@@ -2447,64 +2464,39 @@ def _post_insertion_clearance_detail_pair_group(
                     f"{intra_pair_clearance_mm:.3f}mm"
                 )
 
-    # Pass 2: intra-group.  Every other group member.
-    for other_id in group_net_ids:
-        if other_id in (candidate_p_id, candidate_n_id):
-            continue
-        other_route = routes_by_net.get(other_id)
-        if other_route is None:
-            continue
-        for new_seg in list(new_p_segments) + list(new_n_segments):
-            for pseg in other_route.segments:
-                if pseg.layer != new_seg.layer:
-                    continue
-                clearance = segment_clearance(
-                    new_seg.x1,
-                    new_seg.y1,
-                    new_seg.x2,
-                    new_seg.y2,
-                    new_seg.width,
-                    pseg.x1,
-                    pseg.y1,
-                    pseg.x2,
-                    pseg.y2,
-                    pseg.width,
-                )
-                if clearance + 1e-9 < intra_group_clearance_mm:
-                    return (
-                        f"intra-group clearance vs group member "
-                        f"{other_route.net_name!r} on {new_seg.layer}: "
-                        f"{clearance:.3f}mm < {intra_group_clearance_mm:.3f}mm"
-                    )
-
-    # Pass 3: inter-net.  Every non-group routed net.
-    for other_net_id, other_route in routes_by_net.items():
-        if other_net_id in (candidate_p_id, candidate_n_id):
-            continue
-        if other_net_id in group_net_ids:
-            continue
-        for new_seg in list(new_p_segments) + list(new_n_segments):
-            for oseg in other_route.segments:
-                if oseg.layer != new_seg.layer:
-                    continue
-                clearance = segment_clearance(
-                    new_seg.x1,
-                    new_seg.y1,
-                    new_seg.x2,
-                    new_seg.y2,
-                    new_seg.width,
-                    oseg.x1,
-                    oseg.y1,
-                    oseg.x2,
-                    oseg.y2,
-                    oseg.width,
-                )
-                if clearance + 1e-9 < intra_group_clearance_mm:
-                    return (
-                        f"inter-net clearance vs neighbor net "
-                        f"{other_route.net_name!r} on {new_seg.layer}: "
-                        f"{clearance:.3f}mm < {intra_group_clearance_mm:.3f}mm"
-                    )
+    # Reuse scalar segment/via/pad checks for every foreign net. The
+    # partner gets its own pass at the tighter pair floor, using its full
+    # candidate geometry so retained copper is checked alongside the insert.
+    for net, partner, segments, partner_route in (
+        (candidate_p_id, candidate_n_id, new_p_segments, candidate_n_route),
+        (candidate_n_id, candidate_p_id, new_n_segments, candidate_p_route),
+    ):
+        foreign_pads = [
+            pad for other, pads in (pads_by_net or {}).items() if other != net for pad in pads
+        ]
+        detail = _post_insertion_clearance_detail_group(
+            new_segments=segments,
+            candidate_net_id=net,
+            group_net_ids=group_net_ids - {partner},
+            routes_by_net={nid: route for nid, route in routes_by_net.items() if nid != partner},
+            intra_group_clearance_mm=intra_group_clearance_mm,
+            via_clearance_mm=via_clearance_mm,
+            foreign_pads=foreign_pads,
+            pad_clearance_mm=pad_clearance_mm,
+        )
+        if detail is not None:
+            return detail
+        if partner_route is not None:
+            detail = _post_insertion_clearance_detail_group(
+                new_segments=segments,
+                candidate_net_id=net,
+                group_net_ids={partner},
+                routes_by_net={partner: partner_route},
+                intra_group_clearance_mm=intra_pair_clearance_mm,
+                via_clearance_mm=via_clearance_mm,
+            )
+            if detail is not None:
+                return f"retained partner copper: {detail}"
 
     return None
 
@@ -2521,6 +2513,13 @@ def _tune_match_group_of_pairs(
     length_critical: bool = True,
     grid_resolution_mm: float = 0.01,
     fixed_segment_ids: set[int] | None = None,
+    via_clearance_mm: float | None = None,
+    diff_pair_partners: dict[int, int] | None = None,
+    pads_by_net: dict[int, list[Pad]] | None = None,
+    pad_clearance_mm: float | None = None,
+    board_thickness_mm: float | None = None,
+    num_copper_layers: int = 4,
+    blind_buried_supported: bool = True,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Pair-aware Phase 2F path: mirrored serpentine geometry for pair members.
 
@@ -2586,19 +2585,30 @@ def _tune_match_group_of_pairs(
         return results
 
     # --- Measure every member length ------------------------------------
+    import math
+
     from .length import LengthTracker  # avoid cycle
+    from .match_group_length import MatchGroupTracker
     from .primitives import Route
+
+    def _measure(route: Route) -> float:
+        return MatchGroupTracker._measure_route_total(
+            route,
+            board_thickness_mm,
+            num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
+        )
 
     member_lengths: dict[int, float] = {}
     for net_id in group.net_ids:
         route = routes_by_net.get(net_id)
         if route is not None:
-            member_lengths[net_id] = LengthTracker.calculate_route_length(route)
+            member_lengths[net_id] = _measure(route)
     for p_id, n_id in group.pair_ids:
         for nid in (p_id, n_id):
             route = routes_by_net.get(nid)
             if route is not None:
-                member_lengths[nid] = LengthTracker.calculate_route_length(route)
+                member_lengths[nid] = _measure(route)
 
     # --- Compute per-lane length (pair average) ------------------------
     lane_lengths: dict[tuple[int, int], float] = {}
@@ -2770,9 +2780,8 @@ def _tune_match_group_of_pairs(
             results[n_id] = (original_n_route, per_pair_result_n)
             continue
 
-        # The pair-aware target on each half is the reference lane
-        # length: we want both halves to end up at ``ref_length`` after
-        # the mirrored serpentine raises BOTH by the same amount.
+        # Mirrored copper increases both halves equally, so the target is
+        # the reference lane average, measured with the same via context.
         target_length = ref_length
 
         # Inner attempt loop (mirrors Phase 2E single-ended structure
@@ -2781,41 +2790,16 @@ def _tune_match_group_of_pairs(
             per_pair_result_p.attempts = attempt + 1
             per_pair_result_n.attempts = attempt + 1
 
-            # Re-check the cascade exit condition BEFORE attempting a
-            # new insertion.  ``add_serpentine`` returns the FULL route
-            # segments as ``new_segments`` when the P-length already
-            # meets the target (the "Route already meets target length"
-            # early return on serpentine.py:409-414).  Splicing the FULL
-            # P-route segments into N would catastrophically expand N's
-            # length, which is exactly the multiply-during-cascade bug
-            # the Phase 2F drift-prevention tests guard against.
-            current_p_length = LengthTracker.calculate_route_length(current_p)
-            if current_p_length >= target_length - 1e-9:
-                # P-side already at-or-past target; lane average may be
-                # off but no further insertion is meaningful.
-                if per_pair_result_p.inserts_applied > 0:
-                    for r in (per_pair_result_p, per_pair_result_n):
-                        r.success = current_skew <= tolerance_mm
-                        r.reason = "tuned" if r.success else "exceeded_max_inserts"
-                else:
-                    # Issue #3440: zero inserts means the pair arrived
-                    # with its P half already at/over the reference
-                    # while the lane AVERAGE is short (N much shorter
-                    # than P).  The mirrored-geometry tuner cannot fix
-                    # within-pair asymmetry; classify explicitly so the
-                    # member never lands in an empty / silent reason
-                    # bucket (the ``other()`` line this branch produced
-                    # on board 07's TMDS_D0 lane).
-                    for r in (per_pair_result_p, per_pair_result_n):
-                        r.success = True
-                        r.reason = "longer_than_reference"
-                        r.message = (
-                            f"Pair ({p_id}, {n_id}): P half already at/over "
-                            f"the reference ({current_p_length:.4f}mm >= "
-                            f"{target_length:.4f}mm) while the lane average "
-                            "is short; mirrored insertion cannot fix "
-                            "within-pair asymmetry."
-                        )
+            # Mirroring adds the same planar length to both halves. Target
+            # the remaining physical lane-average deficit, retaining any
+            # pre-existing within-pair imbalance rather than hiding it.
+            length_needed = target_length - current_lane
+            if length_needed <= 1e-9:
+                for result in (per_pair_result_p, per_pair_result_n):
+                    result.success = current_skew <= tolerance_mm
+                    result.reason = (
+                        "tuned" if result.inserts_applied else "already_within_tolerance"
+                    )
                 break
 
             if total_inserts_committed >= MAX_TOTAL_INSERTS_PER_GROUP:
@@ -2888,9 +2872,11 @@ def _tune_match_group_of_pairs(
             )
 
             # --- Step 4: generate P-side meander.
+            loops = max(1, math.ceil(length_needed / (2.0 * base_config.amplitude)))
+            amplitude = length_needed / (2.0 * loops) * (1.0 + 1e-9)
             attempt_config = SerpentineConfig(
                 style=base_config.style,
-                amplitude=base_config.amplitude,
+                amplitude=amplitude,
                 min_spacing=base_config.min_spacing,
                 min_segment_length=base_config.min_segment_length,
                 gap_factor=base_config.gap_factor,
@@ -2903,7 +2889,7 @@ def _tune_match_group_of_pairs(
                 # Honor the selected mutable host. add_serpentine would rank
                 # the full route again and could select a longer fixed escape.
                 p_serp_result = attempt_generator.generate_trombone(
-                    p_insertion_segment, target_length - current_p_length
+                    p_insertion_segment, length_needed
                 )
                 candidate_p_route = Route(
                     net=current_p.net,
@@ -2918,7 +2904,7 @@ def _tune_match_group_of_pairs(
                 )
             else:
                 candidate_p_route, p_serp_result = attempt_generator.add_serpentine(
-                    current_p, target_length
+                    current_p, LengthTracker.calculate_route_length(current_p) + length_needed
                 )
             per_pair_result_p.serpentine_results.append(p_serp_result)
             per_pair_result_n.serpentine_results.append(p_serp_result)
@@ -2980,6 +2966,11 @@ def _tune_match_group_of_pairs(
                 routes_by_net=routes_by_net,
                 intra_group_clearance_mm=intra_group_clearance_mm,
                 intra_pair_clearance_mm=intra_pair_clearance_mm,
+                via_clearance_mm=via_clearance_mm,
+                pads_by_net=pads_by_net,
+                pad_clearance_mm=pad_clearance_mm,
+                candidate_p_route=candidate_p_route,
+                candidate_n_route=candidate_n_route,
             )
             if pair_drc_detail is not None:
                 # Rollback BOTH halves atomically -- the drift-prevention
@@ -3006,8 +2997,8 @@ def _tune_match_group_of_pairs(
             per_pair_result_n.inserts_applied += 1
             total_inserts_committed += 1
 
-            new_p_length = LengthTracker.calculate_route_length(current_p)
-            new_n_length = LengthTracker.calculate_route_length(current_n)
+            new_p_length = _measure(current_p)
+            new_n_length = _measure(current_n)
             current_lane = (new_p_length + new_n_length) / 2.0
             current_skew = abs(target_length - current_lane)
 
@@ -3033,7 +3024,7 @@ def _tune_match_group_of_pairs(
                     f"tol={tolerance_mm:.4f}mm)"
                 )
             if r.inserts_applied > 0:
-                r.length_after_mm = LengthTracker.calculate_route_length(route)
+                r.length_after_mm = _measure(route)
             else:
                 r.length_after_mm = member_lengths[nid]
 
@@ -3075,17 +3066,8 @@ def _tune_match_group_of_pairs(
             else None,
             source=group.source,
         )
-        # If the reference is a paired half, we need to set up the
-        # scalar tuner with a *synthetic* reference length matching the
-        # ref_length we already resolved.  Easiest way: leave
-        # reference_net_id=None (longest-in-scalars policy) and add a
-        # post-hoc filter that respects the global ref_length.
-        # Simpler still: pass the scalars through the single-ended path
-        # with their own reference resolution; the lane reference may
-        # disagree slightly but for the canonical "scalar clock as
-        # reference, paired data lanes match the clock" use case
-        # (Phase 2F AC #5) the scalar IS the reference and the
-        # paired lanes already pulled their lane average to match.
+        # Share the physical group reference, including a paired reference's
+        # lane average, instead of silently retargeting to the longest scalar.
         scalar_results = _tune_match_group_single_ended(
             scalar_group,
             routes_by_net,
@@ -3095,6 +3077,14 @@ def _tune_match_group_of_pairs(
             max_inserts_per_member=max_inserts_per_member,
             length_critical=True,
             fixed_segment_ids=fixed_segment_ids,
+            via_clearance_mm=via_clearance_mm,
+            diff_pair_partners=diff_pair_partners,
+            pads_by_net=pads_by_net,
+            pad_clearance_mm=pad_clearance_mm,
+            board_thickness_mm=board_thickness_mm,
+            num_copper_layers=num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
+            reference_length_mm=ref_length,
         )
         for nid, (r_route, r_result) in scalar_results.items():
             results[nid] = (r_route, r_result)
