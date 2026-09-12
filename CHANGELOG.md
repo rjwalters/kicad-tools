@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix Codex-only installer workflows to resolve generated sibling skills and namespace help, with runtime-appropriate invocation and optional metadata handling.
+- Use shared project drill-clearance checks for Board07 relocation and fallback stubs; reject archived moves into foreign zone fill without saving partial repairs.
+
 ### Added
 
 - **Flat signal-clearance table builder for clock-to-signal spacing**
@@ -61,6 +64,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a passing DRC run does not by itself prove the placement is readable.
   Retires the need for the ad hoc
   `hardware/chorus-test-revA/scripts/place_silk_refs.py` local helper.
+- **Installer: explicit Codex and Claude client targets** (#4905) —
+  `scripts/install-kct.sh` gains `--client claude|codex|both` (default
+  `claude`, fully backward-compatible). Codex selection generates one
+  `.agents/skills/kct-<name>/SKILL.md` per skill from the SAME source
+  `.claude/commands/kct/<name>.md` files Claude vendors — one maintained
+  source, not a hand-duplicated copy — with the `SKILL.md` frontmatter
+  carrying only `name`/`description` (Claude's `invocation`/`suggestedModel`
+  dispatch metadata is deliberately not copied), plus an additive guarded
+  `AGENTS.md` block pointing at the shared `.kct/CONVENTIONS.md`. The shared
+  uv dependency, `.kct/ci/` gates, and `.kct/CONVENTIONS.md` stay
+  client-independent. Selecting one client never overwrites, removes, or
+  duplicates the other client's files or a prior/switched install's valid
+  artifacts — `install-metadata.json`'s `clients_installed` /
+  `skills_selected` / `installed_files` fields accumulate (union) across
+  repeated or switched-client runs instead of being replaced.
 - **`kct route --reserve-plane-layers`: controlled-impedance signal-layer
   reservation guardrail** (#5014) — `LayerDefinition.is_routable` treats
   every copper layer as signal-eligible by design, including layers a
@@ -1252,6 +1270,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`clearance_pad_segment` reported false-positive DRC violations against
+  rotated `roundrect`/`oval` pads' rounded corners** (#4985) — the
+  segment-vs-pad clearance path (`_segment_circle_clearance` in
+  `validate/rules/clearance.py`) still measured distance to the pad's
+  axis-aligned bounding box even after #3826 fixed the analogous pad-vs-pad
+  and pad-vs-zone over-approximation. A rotated `roundrect`/`oval` pad's true
+  copper cuts back the AABB's corners, so a trace routed near a corner could
+  be reported tighter (even below the manufacturing clearance floor) than
+  the true rounded geometry allows — reproduced on `chorus-test-revA`'s C19
+  footprint, where the AABB path reported 0.0812 mm against a real 0.1846 mm
+  (per `pcbnew.PAD.GetEffectivePolygon`), a false violation at the board's
+  0.1016 mm floor. `_segment_circle_clearance` now routes `roundrect` and
+  non-square `oval`/`obround` pads through the same true-geometry shapely
+  polygon (`CopperElement.polygon`, from `_pad_polygon`) already used for
+  pad-pad/pad-zone clearance; plain `rect` pads and circular
+  pads/vias are unaffected. A genuine sub-clearance violation against the
+  true rounded geometry still fires — the fix narrows false positives
+  without masking real shorts.
 - **Noncardinal pad clearance geometry** (#5227) — orient rect, roundrect,
   and oval copper polygons using KiCad's negative-angle board transform.
   This removes mirrored false overlaps and missed physical overlaps while
