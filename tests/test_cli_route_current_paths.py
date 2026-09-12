@@ -645,6 +645,40 @@ class TestCurrentPathsSidecarEmission:
         assert [s.continuous_a for s in reloaded] == [15.0, 0.01]
         assert [s.reinforcement_eligible for s in reloaded] == [True, False]
 
+    def test_waveform_fields_survive_the_emitted_sidecar(self, tmp_path, monkeypatch):
+        """A pulsed declaration's duty cycle and pulse duration round-trip
+        through the emitted sidecar (issue #4980).
+
+        Without this, a later bare ``kct check`` would re-derive the branch
+        at its *peak* while the route gate judged it at its RMS -- the two
+        surfaces disagreeing on intent rather than on copper, which is
+        exactly what the re-emission exists to prevent.
+        """
+        _patch_geometric_absent(monkeypatch)
+        _capture_drc_results(monkeypatch)
+        out_dir = tmp_path / "output"
+        out_dir.mkdir()
+        board = _write_t_network_pcb(
+            out_dir / "routed.kicad_pcb", trunk_width=ADEQUATE_TRUNK_WIDTH_MM
+        )
+        pulsed = CurrentPathSpec(
+            name="TRUNK",
+            net_name="NET1",
+            source=PathEndpoint("J1", "1"),
+            sink=PathEndpoint("J2", "1"),
+            continuous_a=3.0,
+            pulsed_a=18.0,
+            duty_cycle=0.08,
+            pulse_duration_s=0.002,
+            reinforcement_eligible=True,
+        )
+
+        _run_gate(board, [pulsed])
+
+        reloaded = load_current_path_specs(out_dir / "current_paths.json")
+        assert reloaded == [pulsed]
+        assert reloaded[0].thermal_design_current().basis == "rms"
+
     def test_no_sidecar_written_when_nothing_declared(self, tmp_path, monkeypatch):
         """An empty sidecar would read as 'declared and clean' -- never write one."""
         _patch_geometric_absent(monkeypatch)

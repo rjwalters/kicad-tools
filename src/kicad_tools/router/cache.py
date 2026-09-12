@@ -61,7 +61,8 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # Bump this constant whenever routing logic is modified to ensure stale
 # cached results are not reused.  The value is included in every cache key
 # so incrementing it automatically invalidates all existing entries.
-CACHE_VERSION = "2.2.0"
+# Complete snapshot replay plus revised clearance acceptance invalidate both parents.
+CACHE_VERSION = "2.4.1"
 
 
 def get_default_cache_path() -> Path:
@@ -163,6 +164,14 @@ class CacheKey:
             rules_data["min_trace_width_floor"] = float(min_trace_floor)
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
+        # Issue #5004: flips whether the same-component carve-out grants an
+        # automatic exemption from bare fine pitch alone (no configured
+        # relaxation).  Changes which routes clear validation, so a cache
+        # entry produced with one setting must not be served to a run with
+        # the other. Only key non-default (True); CACHE_VERSION invalidates
+        # routes produced before default-mode acceptance was tightened.
+        if getattr(rules, "legacy_fine_pitch_carveout", False):
+            rules_data["legacy_fine_pitch_carveout"] = True
         if routing_context is not None:
             rules_data["routing_context"] = routing_context
         rules_json = json.dumps(rules_data, sort_keys=True, default=str)
@@ -342,6 +351,10 @@ class SubProblemSignature:
             rules_data["min_trace_width_floor"] = float(min_trace_floor)
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
+        # Issue #5004: see ``CacheKey.compute`` above -- same reasoning
+        # applies to reusable sub-problem signatures.
+        if getattr(rules, "legacy_fine_pitch_carveout", False):
+            rules_data["legacy_fine_pitch_carveout"] = True
         rules_json = json.dumps(rules_data, sort_keys=True)
         rules_hash = hashlib.sha256(rules_json.encode()).hexdigest()
 
@@ -740,7 +753,7 @@ class RoutingCache:
         created_time = datetime.fromisoformat(created_at)
         return datetime.now() - created_time > self.ttl
 
-    def serialize_routes(self, routes: list[Route]) -> bytes:
+    def serialize_routes(self, routes: list[Route], *, route_usage: dict | None = None) -> bytes:
         """Serialize routes to compressed bytes for storage.
 
         Args:
@@ -755,6 +768,7 @@ class RoutingCache:
             route_dict = {
                 "net": route.net,
                 "net_name": route.net_name,
+                "is_escape": route.is_escape,
                 "segments": [
                     {
                         "x1": seg.x1,
@@ -792,8 +806,23 @@ class RoutingCache:
             }
             routes_data.append(route_dict)
 
-        json_bytes = json.dumps(routes_data).encode("utf-8")
+        payload = (
+            routes_data
+            if route_usage is None
+            else {"routes": routes_data, "route_usage": route_usage}
+        )
+        json_bytes = json.dumps(payload).encode("utf-8")
         return zlib.compress(json_bytes)
+
+    @staticmethod
+    def deserialize_route_usage(data: bytes) -> dict:
+        """Read the full-run congestion snapshot; legacy entries are misses."""
+        payload = json.loads(zlib.decompress(data))
+        if not isinstance(payload, dict) or not isinstance(payload.get("route_usage"), dict):
+            raise ValueError("Cached routes have no congestion snapshot")
+        usage = payload["route_usage"]
+        assert isinstance(usage, dict)
+        return usage
 
     def deserialize_routes(self, data: bytes) -> list[Route]:
         """Deserialize routes from compressed bytes.
@@ -808,7 +837,8 @@ class RoutingCache:
         from .primitives import Route, Segment, Via
 
         json_bytes = zlib.decompress(data)
-        routes_data = json.loads(json_bytes.decode("utf-8"))
+        payload = json.loads(json_bytes.decode("utf-8"))
+        routes_data = payload["routes"] if isinstance(payload, dict) else payload
 
         routes = []
         for route_dict in routes_data:
@@ -847,6 +877,7 @@ class RoutingCache:
                 net_name=route_dict["net_name"],
                 segments=segments,
                 vias=vias,
+                is_escape=route_dict.get("is_escape", False),
             )
             routes.append(route)
 
@@ -906,6 +937,8 @@ class RoutingCache:
         routes: list[Route],
         statistics: dict,
         compute_time_ms: int = 0,
+        *,
+        route_usage: dict | None = None,
     ) -> None:
         """
         Store routing result in cache.
@@ -916,7 +949,7 @@ class RoutingCache:
             statistics: Routing statistics dict
             compute_time_ms: Time taken for routing in milliseconds
         """
-        routes_data = self.serialize_routes(routes)
+        routes_data = self.serialize_routes(routes, route_usage=route_usage)
         data_size = len(routes_data)
         now = datetime.now().isoformat()
 

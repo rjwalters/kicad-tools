@@ -30,6 +30,7 @@ Thread Safety:
 
 from __future__ import annotations
 
+import base64
 import logging
 import math
 import threading
@@ -181,6 +182,7 @@ def _sync_pad_via_policies(py_grid: RoutingGrid, cpp_grid: Any) -> None:
         rules.trace_clearance,
         rules.trace_width,
         rules.strict_pad_clearance,
+        rules.legacy_fine_pitch_carveout,
         rules.fine_pitch_clearance,
         rules.fine_pitch_threshold,
         tuple(sorted(rules.component_clearances.items())),
@@ -1129,6 +1131,31 @@ class RoutingGrid:
         pokes the occupancy planes) can keep occupancy-derived caches honest.
         """
         self._occupancy_generation += 1
+
+    def cell_at(self, layer: int, y: int, x: int) -> _CellView:
+        """Return a single ``_CellView`` for ``(layer, y, x)`` directly.
+
+        Equivalent to ``self.grid[layer][y][x]`` but allocates ONE object
+        instead of three: the legacy ``grid[layer][y][x]`` chain walks
+        ``_GridView.__getitem__`` -> new ``_LayerView`` ->
+        ``_LayerView.__getitem__`` -> new ``_RowView`` ->
+        ``_RowView.__getitem__`` -> new ``_CellView``, so every access pays
+        for two throwaway intermediate objects that are never used for
+        anything but reaching the next ``__getitem__``.
+
+        Issue #5240: profiling the pure-Python A* fallback's hot
+        neighbor-expansion loop (``Pathfinder._route_impl`` and its
+        per-neighbor helpers, e.g. ``_is_diagonal_corner_blocked``) showed
+        millions of ``_LayerView``/``_RowView``/``_CellView`` allocations
+        for a single small re-route -- the same class of temporary-object
+        overhead already removed from the sampled placement force
+        calculation (#5253) and the A* neighbor batch-cost helpers
+        (#5269). This accessor is a drop-in replacement at call sites that
+        already spell out all three indices at once (``self.grid.grid[layer][y][x]``);
+        it returns the identical ``_CellView`` type with identical
+        properties, so callers see no behavioral change.
+        """
+        return _CellView(self, x, y, layer)
 
     def _ensure_static_blockage_snapshot(self) -> None:
         """Capture the static blocked bitmap before the first route mark.
@@ -3065,32 +3092,46 @@ class RoutingGrid:
         min_clearance: float,
         component_pitches: dict[str, float] | None = None,
     ) -> bool:
-        """NET-AWARE same-component carve-out gate (Issue #3545).
+        """NET-AWARE same-component carve-out gate (Issue #3545 / #5004).
 
         Same-net pads are skipped before the carve-out is consulted, so
         every pad it exempts is on a FOREIGN net.  The exemption is only
         legitimate where the component's geometry forces sub-clearance
-        proximity:
+        proximity AND that relaxation was actually configured or applied:
 
         1. an explicit / fine-pitch clearance relaxation is in effect
-           (``required_clearance < min_clearance``, Issue #1764), or
+           (``required_clearance < min_clearance``, Issue #1764) -- this
+           covers explicit ``component_clearances`` overrides, net-class
+           ``escape_clearance`` overrides, and an applied
+           ``fine_pitch_clearance`` shrink (only when the narrow-channel
+           guard in ``get_clearance_for_component`` judged it geometrically
+           feasible), or
         2. the component's inter-pad corridor was relaxed by
-           ``_relax_same_component_clearance`` (Issue #2452), or
-        3. the component is fine-pitch (min pin pitch below
-           ``rules.fine_pitch_threshold``) -- covers boards that route
-           with ``fine_pitch_clearance`` unset (the default), where the
-           per-component clearance lookup cannot signal the relaxation.
+           ``_relax_same_component_clearance`` (Issue #2452).
 
-        Standard-pitch components (e.g. a 2.54mm THT connector) match
-        none of these, so their foreign-net pads stay in the validator
-        and sub-clearance copper is rejected (the routing-diagnostic
-        NET3-vs-J1.1 0.127mm defect).
+        Issue #5004: a THIRD branch used to exempt any component whose pin
+        pitch was below ``rules.fine_pitch_threshold``, even when
+        ``fine_pitch_clearance`` was left unset (the default) and no
+        relaxation was requested for that component.  That silently
+        accepted sub-clearance copper against fine-pitch NC and signal pads
+        alike -- 46 clearance defects on the board07 STM32F429 LQFP144,
+        invisible to the router's own acceptance metrics but caught by
+        native KiCad DRC.  Pitch alone no longer grants the carve-out;
+        ``rules.legacy_fine_pitch_carveout`` restores the old pitch-only
+        exemption for callers that explicitly opt back into it.
+
+        Standard-pitch components (e.g. a 2.54mm THT connector), and
+        fine-pitch components with no clearance relaxation actually
+        configured, match none of these, so their foreign-net pads stay in
+        the validator and sub-clearance copper is rejected.
         """
-        return not self.rules.strict_pad_clearance and (
-            required_clearance < min_clearance
-            or ref in self._relaxed_clearance_refs
-            or self._component_is_fine_pitch(ref, component_pitches)
-        )
+        if self.rules.strict_pad_clearance:
+            return False
+        if required_clearance < min_clearance or ref in self._relaxed_clearance_refs:
+            return True
+        if self.rules.legacy_fine_pitch_carveout:
+            return self._component_is_fine_pitch(ref, component_pitches)
+        return False
 
     def worst_segment_pad_deficit(
         self,
@@ -5304,6 +5345,27 @@ class RoutingGrid:
     # NEGOTIATED CONGESTION ROUTING SUPPORT
     # =========================================================================
 
+    def export_route_usage(self) -> dict[str, Any]:
+        """Capture exact congestion counts, including all-zero basic routing."""
+        with self._acquire_lock():
+            counts = to_numpy(self._usage_count).astype("<i2", copy=False)
+            return {
+                "shape": list(counts.shape),
+                "counts": base64.b64encode(counts.tobytes()).decode("ascii"),
+            }
+
+    def import_route_usage(self, state: dict[str, Any]) -> None:
+        """Validate and restore a cache snapshot without guessing a strategy."""
+        if state.get("shape") != list(self._usage_count.shape):
+            raise ValueError("Cached congestion grid dimensions do not match routing grid")
+        raw = base64.b64decode(state["counts"], validate=True)
+        expected = math.prod(self._usage_count.shape) * 2
+        if len(raw) != expected:
+            raise ValueError("Cached congestion grid byte count does not match routing grid")
+        counts = np.frombuffer(raw, dtype="<i2").reshape(self._usage_count.shape)
+        with self._acquire_lock():
+            self._usage_count[...] = self._backend.asarray(counts)
+
     def reset_route_usage(self) -> None:
         """Reset all usage counts (start of new negotiation iteration).
 
@@ -6210,6 +6272,22 @@ class RoutingGrid:
                                     cell.blocked = True
                                     cell.is_obstacle = True
                                     blocked_count += 1
+                                # The native backend is constructed before
+                                # load_pcb_for_routing adds the outline. Mirror
+                                # its static cells just as pad insertion does;
+                                # otherwise C++ A* never sees this keepout.
+                                if self._static_blocked is not None:
+                                    self._static_blocked[layer_idx, ny, nx] = True
+                                cpp_impl = getattr(self._cpp_grid, "_impl", None)
+                                if cpp_impl is not None:
+                                    cpp_impl.mark_blocked(
+                                        nx,
+                                        ny,
+                                        layer_idx,
+                                        cell.net,
+                                        cell.is_obstacle,
+                                        cell.pad_blocked,
+                                    )
 
         # Walk along the segment using Bresenham's algorithm
         if gx1 == gx2:  # Vertical line

@@ -862,7 +862,7 @@ def test_shadow_construction_flag_plumbed_from_config():
 # ---------------------------------------------------------------------------
 
 
-def _two_pad_coupled_router_and_pair():
+def _two_pad_coupled_router_and_pair(pad_size: float = 0.4):
     """A 2-pad diff pair + its router, ready for the coupled pre-phase.
 
     Returns ``(router, pair)`` where ``router._diffpair`` is the
@@ -886,8 +886,8 @@ def _two_pad_coupled_router_and_pair():
                 "number": "1",
                 "x": 5.0,
                 "y": p_y,
-                "width": 0.4,
-                "height": 0.4,
+                "width": pad_size,
+                "height": pad_size,
                 "net": 1,
                 "net_name": "USB_D+",
             },
@@ -895,8 +895,8 @@ def _two_pad_coupled_router_and_pair():
                 "number": "2",
                 "x": 5.0,
                 "y": n_y,
-                "width": 0.4,
-                "height": 0.4,
+                "width": pad_size,
+                "height": pad_size,
                 "net": 2,
                 "net_name": "USB_D-",
             },
@@ -909,8 +909,8 @@ def _two_pad_coupled_router_and_pair():
                 "number": "1",
                 "x": 25.0,
                 "y": p_y,
-                "width": 0.4,
-                "height": 0.4,
+                "width": pad_size,
+                "height": pad_size,
                 "net": 1,
                 "net_name": "USB_D+",
             },
@@ -918,8 +918,8 @@ def _two_pad_coupled_router_and_pair():
                 "number": "2",
                 "x": 25.0,
                 "y": n_y,
-                "width": 0.4,
-                "height": 0.4,
+                "width": pad_size,
+                "height": pad_size,
                 "net": 2,
                 "net_name": "USB_D-",
             },
@@ -2534,7 +2534,8 @@ def test_span_pad_clear_flags_a_pad_on_a_different_layer_only_when_shared():
     assert dpr._span_pad_clear(3.0, 5.0, 7.0, 5.0, b_cu, 7, 0.2) is True
 
 
-def test_partner_pad_on_a_shared_connector_ref_is_not_carveout_exempt():
+@pytest.mark.parametrize("legacy_carveout", [False, True])
+def test_partner_pad_on_a_shared_connector_ref_is_not_carveout_exempt(legacy_carveout):
     """The #3545 same-component carve-out must never hide a PARTNER pad.
 
     Diff-pair P and N legs routinely land on the same fine-pitch connector
@@ -2545,6 +2546,7 @@ def test_partner_pad_on_a_shared_connector_ref_is_not_carveout_exempt():
     intra-pair overlap this gate exists to catch.
     """
     dpr = _pad_gate_router()
+    dpr.autorouter.rules.legacy_fine_pitch_carveout = legacy_carveout
     grid = dpr.autorouter.grid
     # Both pair legs on one fine-pitch (0.4 mm pitch) connector ref.
     grid.add_pad(_pad_at(5.0, 5.0, net=8, name="MIPI_CLK+", ref="J1", pin="1"))
@@ -2561,9 +2563,10 @@ def test_partner_pad_on_a_shared_connector_ref_is_not_carveout_exempt():
         net=7,
         net_name="MIPI_CLK-",
     )
-    # The single-ended backstop's call shape: the carve-out silences it.
+    # Pitch alone no longer exempts the single-ended backstop. Explicit
+    # legacy mode still must not silence the diff-pair partner-pad gate.
     exempted, _ = grid.worst_segment_pad_deficit(seg, exclude_net=7, exclude_refs={"J1"})
-    assert exempted == 0.0
+    assert exempted == pytest.approx(0.0 if legacy_carveout else _GRAZE_DEFICIT)
     # The constructor's gate passes ``exclude_net`` ONLY -- the partner's pad
     # (and MIPI_CLK-'s own pad, which is same-net and correctly skipped) is
     # measured exactly.
@@ -4387,7 +4390,9 @@ def _spy_shadow_entry(monkeypatch, shadow_enabled: bool) -> list[str]:
     """Drive the coupled pre-phase once and record whether #4570 code ran."""
     from kicad_tools.router.diffpair_routing import DiffPairRouter
 
-    router, pair = _two_pad_coupled_router_and_pair()
+    # Give the entry-point control legal pad copper: the old 0.4 mm pads
+    # touched across the 0.4 mm pitch and relied on the implicit carve-out.
+    router, pair = _two_pad_coupled_router_and_pair(pad_size=0.2)
     dpr = router._diffpair
     assert dpr.enable_shadow_construction is False, "the default must stay OFF"
     dpr.enable_shadow_construction = shadow_enabled

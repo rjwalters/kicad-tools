@@ -50,6 +50,44 @@ def record_stage(stage: str, **fields) -> None:
     temporary.replace(path)
 
 
+def current_stage() -> str | None:
+    """Return the stage currently published to the control file.
+
+    ``None`` when no supervisor is attached (``CONTROL_ENV`` unset), which is
+    also the "nothing to restore" signal :func:`restore_stage` keys on.
+    """
+    name = os.environ.get(CONTROL_ENV)
+    if not name:
+        return None
+    stage = _read_control(Path(name)).get("stage")
+    return stage if isinstance(stage, str) else None
+
+
+@contextlib.contextmanager
+def restore_stage():
+    """Snapshot the published stage and restore it when the block exits.
+
+    Issue #5266.  Some work is a *transient excursion* out of the stage the
+    invocation is really in -- most importantly a best-so-far checkpoint
+    write, which routes through ``_write_routed_pcb`` and therefore stamps
+    ``serialization`` even though the router is mid-search.  Without a
+    restore, the very first checkpoint leaves ``serialization`` published for
+    the rest of the run and a later timeout is misattributed to it (the stale
+    label that made the #5164 Board 07 evidence unreadable).
+
+    The restore is deliberately *not* a substitute for the interrupt record:
+    :func:`_deadline_signal` stamps ``interrupted_stage`` at signal time and
+    :func:`_supervise` prefers that field, so a timeout that genuinely lands
+    *inside* the checkpoint write is still reported as ``serialization``.
+    """
+    previous = current_stage()
+    try:
+        yield previous
+    finally:
+        if previous is not None:
+            record_stage(previous)
+
+
 def _paths_alias(left: Path, right: Path) -> bool:
     """Compare names, symlink destinations and existing hardlink identities."""
     return left.resolve() == right.resolve() or (

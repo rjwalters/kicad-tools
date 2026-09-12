@@ -113,6 +113,23 @@ def test_unproved_fanout_remains_nonresolved(mutation):
     assert not reinforcement_eligible_segment_ids(pcb, [spec()])
 
 
+@pytest.mark.parametrize("damage", ["two_missing_vias", "long_missing_trunk", "two_wrong_net_vias"])
+def test_compound_array_damage_cannot_become_eligible_ordinary_branch(damage):
+    pcb = fixture(depth=20 if damage == "long_missing_trunk" else 2)
+    if damage == "two_missing_vias":
+        pcb._vias = pcb._vias[-1:]
+    elif damage == "long_missing_trunk":
+        pcb._segments.pop(3)
+    else:
+        other = pcb.add_net("OTHER")
+        for via in pcb.vias[:2]:
+            via.net_number, via.net_name = other.number, "OTHER"
+    declaration = replace(spec(), continuous_a=1)
+    assert resolve_current_path(pcb, declaration).status == "ambiguous"
+    assert PathAmpacityRule([declaration]).check(pcb, _design_rules_2oz()).errors
+    assert not reinforcement_eligible_segment_ids(pcb, [declaration])
+
+
 @pytest.mark.parametrize("delta,expected", [(0, True), (0.001, False)])
 def test_explicit_pad_diagonal_locality_boundary(delta, expected):
     assert resolve_current_path(fixture(depth=math.hypot(2.4, 2.4) + delta), spec()).ok is expected
@@ -188,6 +205,70 @@ def test_load_tree_with_dangling_branch_is_unproved():
     _add_pad_footprint(pcb, ref="LOAD", x=20, y=60, net="NET1")
     pcb.add_trace((20, 52), (20, 60), width=0.2, layer="B.Cu", net="NET1")
     pcb.add_trace((20, 60), (25, 65), width=0.2, layer="B.Cu", net="NET1")
+    assert not resolve_current_path(pcb, spec()).ok
+
+
+def test_single_via_tap_arm_is_not_a_fanout():
+    """Issue #4980: one via-tap arm plus one ordinary trunk arm must resolve.
+
+    A hub with exactly one arm that happens to drop through a via is not
+    "a fanout" -- ``_endpoint_via_array``'s own proof correctly rejects it
+    (it needs >= 2 legs), but the endpoint-fanout fallback in
+    ``resolve_current_path`` must not treat the mere presence of *one* via
+    anywhere on the hub's arms as evidence of a *damaged* parallel array.
+    This shape (a force trunk plus a single sense/feedback tap through one
+    via to an inner layer) is completely ordinary and ships on real boards
+    (see the ``VOUT_PRE``/``RSH1.1`` real-board regression in
+    ``tests/test_current_paths.py::TestPhysicalLayerGraph::
+    test_board09_ordinary_branch_endpoint_is_not_a_fanout``).
+    """
+    pcb = fixture()
+    pcb._segments = []
+    pcb._vias = []
+    # Force trunk: straight from J1 to J2, no via at all.
+    pcb.add_trace(("J1", "1"), ("J2", "1"), width=2.0, layer="F.Cu", net="NET1")
+    # Unrelated sense/feedback tap: a single via-tap arm off the same J1
+    # pad, landing on a completely different pad via B.Cu.
+    pcb.add_trace((20, 50), (20, 52), width=0.2, layer="F.Cu", net="NET1")
+    # dedupe=False: the fixture's own vias (already cleared from `_vias`
+    # above) left dedup keys at these exact reused coordinates -- without
+    # this, `add_via` silently treats the new via as an already-seen
+    # duplicate and skips it.
+    pcb.add_via(20, 52, net="NET1", dedupe=False)
+    pcb.add_trace((20, 52), (60, 60), width=0.2, layer="B.Cu", net="NET1")
+    _add_pad_footprint(pcb, ref="TAP", x=60, y=60, net="NET1")
+    result = resolve_current_path(pcb, spec())
+    assert result.ok, result.reason
+
+
+def test_two_unrelated_via_arms_still_ambiguous_without_array_proof():
+    """Two candidate via-legs that fail the full array proof stay ambiguous.
+
+    Unlike the single-via-tap case above, a hub with *two* independent
+    candidate via-array legs is exactly the "might be a damaged fanout"
+    shape the fallback exists to catch -- even though these two legs go
+    off in unrelated directions (never a real parallel-via motif), the
+    fallback's job is only to detect the *suspicious shape*, not to prove
+    or disprove a specific current split.
+    """
+    pcb = fixture()
+    pcb._segments = []
+    pcb._vias = []
+    pcb.add_trace(("J1", "1"), ("J2", "1"), width=2.0, layer="F.Cu", net="NET1")
+    # Two short, non-parallel via-tap arms off the same hub -- each looks
+    # like an array leg in isolation, but they never converge on one
+    # receiving trunk.
+    pcb.add_trace((20, 50), (20, 52), width=0.2, layer="F.Cu", net="NET1")
+    # dedupe=False: see the comment in test_single_via_tap_arm_is_not_a_fanout.
+    pcb.add_via(20, 52, net="NET1", dedupe=False)
+    pcb.add_trace((20, 52), (60, 60), width=0.2, layer="B.Cu", net="NET1")
+    _add_pad_footprint(pcb, ref="TAP1", x=60, y=60, net="NET1")
+
+    pcb.add_trace((21, 49), (21, 47), width=0.2, layer="F.Cu", net="NET1")
+    pcb.add_via(21, 47, net="NET1", dedupe=False)
+    pcb.add_trace((21, 47), (60, 40), width=0.2, layer="B.Cu", net="NET1")
+    _add_pad_footprint(pcb, ref="TAP2", x=60, y=40, net="NET1")
+
     assert not resolve_current_path(pcb, spec()).ok
 
 

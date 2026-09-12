@@ -96,6 +96,41 @@ PLACEMENT_DELTA_FEEDBACK = True
 PLACEMENT_DELTA_FEEDBACK_BUDGET = 2
 PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S = 600
 
+# Issue #5266: this board's route step is a STAGED budget contract, and the
+# two halves of it have to be stated separately.
+#
+#   * ``--search-timeout`` bounds ONE search stage.  600 s is the measured
+#     ceiling of the initial negotiated pass here (607-630 s of work that the
+#     iteration budget, not the clock, actually terminates).
+#   * ``--timeout`` is the HARD TOTAL deadline.  ``route_deadline._supervise``
+#     runs the whole invocation under it out-of-process and terminates the
+#     process group when it fires -- so it must cover every stage that is
+#     allowed to run, not just the first one.  Before #5266 the two were the
+#     same number: ``--timeout 600`` meant the initial pass consumed the whole
+#     invocation budget and the supervisor killed the run during the FIRST
+#     delta probe, leaving only ``*_partial`` / ``*_timeout_unverified_*``
+#     artifacts and no routed PCB at all.
+#
+# The total is therefore derived, not hand-tuned: one initial search stage,
+# one full probe allocation per delta-feedback budget unit, plus a reserve for
+# the required postprocessing (optimize, DRC nudge, length-match tuning,
+# consolidation, native zone fill, serialization).  With the loop on that is
+# 600 + 2x600 + 600 = 2400 s, comfortably inside the 90-minute CI allowance
+# these jobs already carry, and comfortably above the ~27-minute measured
+# full-route wall clock.
+ROUTE_SEARCH_TIMEOUT_S = 600
+ROUTE_POSTPROCESS_RESERVE_S = 600
+
+
+def _route_total_timeout_s() -> int:
+    """Hard total ``--timeout`` covering every stage the recipe permits."""
+    probes = (
+        PLACEMENT_DELTA_FEEDBACK_BUDGET * PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S
+        if PLACEMENT_DELTA_FEEDBACK
+        else 0
+    )
+    return ROUTE_SEARCH_TIMEOUT_S + probes + ROUTE_POSTPROCESS_RESERVE_S
+
 
 # =============================================================================
 # Per-Group Net Class Declarations
@@ -1299,7 +1334,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     invocation of the ``kct route`` CLI:
 
         --manufacturer jlcpcb --strategy negotiated --no-auto-layers
-        --layers 4 --seed 42 --timeout 600
+        --layers 4 --seed 42 --search-timeout 600 --timeout <derived total>
 
     Recipe-vs-AC deviation (Issue #2991, builder empirical validation
     2026-05-17):
@@ -1370,10 +1405,18 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
       seeding the global ``random`` module (the ``random.seed(args.seed)``
       call in ``route_cmd.py``).
       This is the issue's stated HARD LIMIT and is preserved.
-    - ``--timeout 600``: outer wall-clock budget; per-net timeout
-      defaults to 30 s.  600 s gives the pure-Python fallback path on
-      CI runners (no native router_cpp.*.so) enough budget for 31
-      nets while remaining under the GitHub Actions 10-min ceiling.
+    - ``--search-timeout 600``: per-SEARCH-STAGE wall-clock allocation;
+      per-net timeout defaults to 30 s.  600 s gives the pure-Python
+      fallback path on CI runners (no native router_cpp.*.so) enough
+      budget for 31 nets.  This is the number that used to be spelled
+      ``--timeout 600`` (issue #5266).
+    - ``--timeout <derived>``: the HARD TOTAL invocation deadline,
+      derived by ``_route_total_timeout_s()`` as one search stage plus
+      one probe allocation per placement-delta budget unit plus a
+      postprocessing reserve (2400 s with the delta loop on).  The
+      out-of-process supervisor terminates the whole process group when
+      it fires, so it must cover every stage this recipe permits -- not
+      just the initial pass.
 
     Skip nets ``GND``, ``+1V2``, ``+1V8`` remain handled via copper
     pours on inner planes (In1.Cu / In2.Cu) emitted post-route by
@@ -1714,16 +1757,26 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "4",
         "--seed",
         "42",
+        # Issue #5266: the HARD TOTAL invocation deadline (see
+        # ``_route_total_timeout_s`` above) -- it must cover the initial search
+        # stage, every placement-delta probe, and postprocessing, because the
+        # out-of-process supervisor terminates the run when it fires.
         "--timeout",
-        "600",
+        str(_route_total_timeout_s()),
+        # Issue #5266: the per-SEARCH-STAGE allocation.  This is the 600 s the
+        # initial negotiated pass used to get from ``--timeout 600``; splitting
+        # it out is what lets the total above grow to cover the later stages
+        # without handing the enlarged budget to the first pass.
+        "--search-timeout",
+        str(ROUTE_SEARCH_TIMEOUT_S),
         # Issue #3538: bound the per-net A* search by an ITERATION budget
         # (fixed node-expansion count) instead of the per-net wall-clock
         # cutoff, so the seed-42 re-route lands the SAME copper -- and the
         # SAME DRC count -- regardless of runner speed/load.  This is the
         # fix for the "#3466 wall-clock-budget cliff" that forced the
         # board-07 floor in .github/routed-drc-tolerance.yml to absorb a
-        # machine-variance band (21 -> 28 -> 34 -> ...).  --timeout 600
-        # above is now a SAFETY backstop only; the iteration budget is the
+        # machine-variance band (21 -> 28 -> 34 -> ...).  The two budgets
+        # above are SAFETY backstops only; the iteration budget is the
         # binding constraint.  Combined with --seed 42 + PYTHONHASHSEED=42
         # the re-route is reproducible across CI ubuntu-latest and local
         # macOS arm64.
@@ -1801,13 +1854,16 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             "--placement-delta-feedback",
             "--placement-delta-feedback-budget",
             str(PLACEMENT_DELTA_FEEDBACK_BUDGET),
-            # The initial negotiated pass CONSUMES the whole ``--timeout 600``
-            # budget on this board (measured 607-630 s), so without an explicit
-            # allocation the loop is skipped before it starts.  Granting each
-            # delta's re-route the SAME 600 s the initial pass got is also what
-            # makes the keep/revert decision meaningful: a re-route on a smaller
-            # budget would under-route for budget reasons and revert every delta
-            # regardless of whether the placement change helped.
+            # The initial negotiated pass CONSUMES its whole 600 s search-stage
+            # allocation on this board (measured 607-630 s), so without an
+            # explicit allocation the loop is skipped before it starts.
+            # Granting each delta's re-route the SAME 600 s the initial pass
+            # got is also what makes the keep/revert decision meaningful: a
+            # re-route on a smaller budget would under-route for budget reasons
+            # and revert every delta regardless of whether the placement change
+            # helped.  Issue #5266: this allocation no longer has to "survive"
+            # an exhausted ``--timeout`` -- the total above is sized to contain
+            # both probes, which is what the hard supervisor requires.
             "--placement-delta-feedback-timeout",
             str(PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S),
         ]

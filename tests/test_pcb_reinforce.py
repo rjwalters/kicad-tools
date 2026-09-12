@@ -763,6 +763,55 @@ class TestCurrentPathsCLI:
         # Board never mutated by the audit.
         assert len(PCB.load(pcb_path).vias) == 0
 
+    def test_current_paths_audit_cli_reports_waveform_assumptions(self, tmp_path, capsys):
+        """A pulsed declaration's thermal basis and unchecked fusing mode are
+        both visible in the audit's JSON and text output (issue #4980)."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = self._build_kelvin_board(tmp_path)
+        sidecar = tmp_path / "current_paths.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "paths": [
+                        {
+                            "name": "FORCE",
+                            "net": "PGND",
+                            "source": {"ref": "RSH1", "pad": "1"},
+                            "sink": {"ref": "J2", "pad": "1"},
+                            "continuous_a": 3.0,
+                            "pulsed_a": 18.0,
+                            "reinforcement_eligible": True,
+                        }
+                    ]
+                }
+            )
+        )
+
+        args = argparse.Namespace(
+            pcb_command="current-paths-audit",
+            pcb=str(pcb_path),
+            current_paths=str(sidecar),
+            format="json",
+        )
+        assert run_pcb_command(args) == 0
+        data = json.loads(capsys.readouterr().out)
+        resolution = data["resolutions"][0]
+        assert resolution["pulsed_a"] == 18.0
+        assert resolution["duty_cycle"] is None
+        # No duty cycle -> sized at the peak, and the audit says which.
+        assert resolution["thermal_basis"] == "peak-as-continuous"
+        assert resolution["thermal_design_a"] == 18.0
+        assert "duty_cycle" in resolution["thermal_assumption"]
+        # No pulse duration -> fusing could not be evaluated.
+        assert resolution["fusing_checked"] is False
+
+        args.format = "text"
+        assert run_pcb_command(args) == 0
+        text = capsys.readouterr().out
+        assert "peak treated as continuous" in text
+        assert "fusing survivability NOT checked" in text
+
     def test_current_paths_audit_cli_text_reports_unresolved(self, tmp_path, capsys):
         from kicad_tools.cli.commands.pcb import run_pcb_command
 
@@ -795,6 +844,51 @@ class TestCurrentPathsCLI:
         out = capsys.readouterr().out
         assert "unresolved" in out
         assert "BROKEN" in out
+
+    def test_current_paths_audit_cli_reports_unmodeled_copper(self, tmp_path, capsys):
+        """A same-net pour (#5273) makes the force path ambiguous and is
+        surfaced by name in both JSON and text audit output."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.sexp import parse_string
+
+        pcb_path = self._build_kelvin_board(tmp_path)
+        pcb = PCB.load(pcb_path)
+        net = pcb.get_net_by_name("PGND")
+        assert net is not None
+        # A real ``(zone ...)`` sexp node, not just a ``Zone`` dataclass
+        # appended to ``pcb._zones`` -- ``save()`` serializes ``pcb._sexp``
+        # directly, and re-parsing on the next ``PCB.load()`` is what
+        # populates ``pcb._zones``, so the node has to round-trip for real.
+        pcb._sexp.append(
+            parse_string(
+                f'(zone (net {net.number} "PGND") (layer "F.Cu") '
+                "(min_thickness 0.2) "
+                "(polygon (pts (xy 0 0) (xy 200 0) (xy 200 120) (xy 0 120))))"
+            )
+        )
+        pcb.save(pcb_path)
+        assert len(PCB.load(pcb_path).zones) == 1
+        sidecar = self._write_current_paths(tmp_path)
+
+        args = argparse.Namespace(
+            pcb_command="current-paths-audit",
+            pcb=str(pcb_path),
+            current_paths=str(sidecar),
+            format="json",
+        )
+        assert run_pcb_command(args) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["all_resolved"] is False
+        assert data["resolutions"][0]["status"] == "ambiguous"
+        assert "PGND" in data["unmodeled"]
+        assert data["unmodeled"]["PGND"][0]["kind"] == "zone"
+
+        args.format = "text"
+        assert run_pcb_command(args) == 0
+        text = capsys.readouterr().out
+        assert "Unmodeled copper" in text
+        assert "zone on F.Cu" in text
 
 
 class TestAllRunsAnchoring:
@@ -1078,6 +1172,38 @@ class TestCurrentPathGating:
         assert result.placed_count == 0
         assert all(rs.path_excluded_reason is not None for rs in result.runs)
 
+    def test_same_net_pour_excludes_force_path_from_reinforcement(self):
+        """A same-net copper pour (#5273) makes ``resolve_current_path``
+        report the force path as ``"ambiguous"`` rather than ``"resolved"``.
+        No code change is needed in ``pcb/reinforce.py`` itself --
+        ``reinforcement_eligible_segment_ids()`` is an allow-list gated on
+        ``resolution.ok``, so a net whose declared force path can no longer
+        resolve cleanly drops out of reinforcement eligibility for free."""
+        from kicad_tools.schema.pcb import Zone
+
+        pcb = _kelvin_shunt_pcb()
+        net = pcb.get_net_by_name("PGND")
+        assert net is not None
+        pcb._zones.append(
+            Zone(
+                net.number,
+                "PGND",
+                "F.Cu",
+                polygon=[(0, 0), (200, 0), (200, 120), (0, 120)],
+            )
+        )
+        result = reinforce_net(
+            pcb,
+            "PGND",
+            spacing_mm=10.0,
+            all_runs=True,
+            current_paths=[_force_spec(), _kelvin_sense_spec()],
+        )
+        # Every run is excluded -- the force path that used to anchor now
+        # resolves ambiguous, and the sense spur was already ineligible.
+        assert result.placed_count == 0
+        assert all(rs.path_excluded_reason is not None for rs in result.runs)
+
     def test_current_paths_for_other_net_do_not_gate(self):
         """Specs targeting a different net are ignored -- gating is
         per-net, opt-in only where declared."""
@@ -1095,3 +1221,105 @@ class TestCurrentPathGating:
         )
         assert all(rs.path_excluded_reason is None for rs in result.runs)
         assert result.placed_count > 0
+
+
+@pytest.mark.parametrize("reverse_mask", range(8))
+def test_current_path_anchors_ignore_segment_orientation(reverse_mask, tmp_path):
+    """A serialized direction change cannot remove physical force eligibility."""
+
+    def anchors(pcb):
+        result = reinforce_net(
+            pcb,
+            "PGND",
+            spacing_mm=10.0,
+            all_runs=True,
+            dry_run=True,
+            current_paths=[_force_spec(), _kelvin_sense_spec()],
+        )
+        return sorted((round(a.x, 6), round(a.y, 6)) for a in result.placed)
+
+    import re
+
+    from tests.test_cli_route_current_paths import _T_NETWORK_PCB_TEMPLATE
+
+    text = (
+        _T_NETWORK_PCB_TEMPLATE.format(trunk_width=3.0, sense_width=0.2)
+        .replace("J1", "RSH1")
+        .replace("NET1", "PGND")
+    )
+    path = tmp_path / "reversed.kicad_pcb"
+    path.write_text(text)
+    expected = anchors(PCB.load(path))
+    assert expected
+    index = 0
+
+    def reverse(match):
+        nonlocal index
+        swapped = bool(reverse_mask & (1 << index))
+        index += 1
+        start, end = match.groups()
+        if swapped:
+            start, end = end, start
+        return f"(segment (start {start}) (end {end})"
+
+    path.write_text(re.sub(r"\(segment \(start ([^)]*)\) \(end ([^)]*)\)", reverse, text))
+    assert index == 3
+    assert anchors(PCB.load(path)) == expected
+
+
+def test_current_path_boundary_splits_force_from_continuing_sense():
+    """A degree-two force pad must end the eligible run before the sense tap."""
+    pcb = PCB.create(width=160, height=100, center=False)
+    for ref, x in [("RSH1", 20), ("J2", 80), ("U3", 120)]:
+        _add_pad_footprint(pcb, ref=ref, x=x, y=50, net="PGND")
+    pcb.add_trace((20, 50), (60, 50), width=3, layer="F.Cu", net="PGND")
+    pcb.add_trace((60, 50), (80, 50), width=3, layer="F.Cu", net="PGND")
+    pcb.add_trace((80, 50), (120, 50), width=0.2, layer="F.Cu", net="PGND")
+    result = reinforce_net(
+        pcb,
+        "PGND",
+        spacing_mm=10,
+        all_runs=True,
+        dry_run=True,
+        current_paths=[_force_spec(), _kelvin_sense_spec()],
+    )
+    assert result.placed
+    assert all(a.x <= 80 for a in result.placed)
+    assert any(r.length_mm == 60 and r.path_excluded_reason is None for r in result.runs)
+    assert any(r.length_mm == 40 and r.path_excluded_reason for r in result.runs)
+
+
+def test_board09_force_runs_survive_current_path_gate():
+    """Separate eligibility from clearance refusals on the real shunt fixture."""
+    board = (
+        Path(__file__).resolve().parents[1]
+        / "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb"
+    )
+    before = board.read_bytes()
+    pcb = PCB.load(board)
+    specs = [
+        CurrentPathSpec(
+            name="force",
+            net_name="VOUT_PRE",
+            source=PathEndpoint("L1", "2"),
+            sink=PathEndpoint("RSH1", "1"),
+            continuous_a=3,
+            reinforcement_eligible=True,
+        ),
+        CurrentPathSpec(
+            name="feedback",
+            net_name="VOUT_PRE",
+            source=PathEndpoint("L1", "2"),
+            sink=PathEndpoint("R7", "1"),
+            continuous_a=0.001,
+            reinforcement_eligible=False,
+        ),
+    ]
+    result = reinforce_net(
+        pcb, "VOUT_PRE", layer="F.Cu", all_runs=True, dry_run=True, current_paths=specs
+    )
+    eligible = [r for r in result.runs if r.path_excluded_reason is None]
+    assert eligible
+    assert sum(r.length_mm for r in eligible) > 20
+    assert any(r.path_excluded_reason for r in result.runs)
+    assert board.read_bytes() == before
