@@ -66,19 +66,20 @@ export function isFallbackArtifact(report: BenchmarkReport): boolean {
 
 export function fmtKctCheck(report: BenchmarkReport): string {
   const summary = report.kct_check;
-  if (!summary.ran) return "not run";
+  if (!summary?.ran) return "not run";
   const verdict = summary.passed ? "PASS" : "FAIL";
   return `${verdict} (${summary.error_count}E / ${summary.warning_count}W)`;
 }
 
 export function fmtCliDrc(report: BenchmarkReport): string {
   const summary = report.kicad_cli_drc;
-  if (!summary.ran || summary.violation_count === null) return "not run";
+  if (!summary?.ran || summary.violation_count == null) return "not run";
   return String(summary.violation_count);
 }
 
 export function fmtDiffPairs(report: BenchmarkReport): string {
   const pairs = report.diff_pairs;
+  if (pairs === undefined) return "not run";
   if (pairs === null) return "n/a";
   return `${pairs.pairs_complete}/${pairs.pairs_total}`;
 }

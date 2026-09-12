@@ -210,6 +210,32 @@ This site ships the scaffold, the board data loader, the gallery index page
 (cards, renders, metric badges), and the per-board detail page (render gallery,
 metrics table, downloads, and the interactive KiCanvas PCB viewer).
 
+### Dated external-board routing evidence
+
+The benchmarks route separates root-level August reports from dated collections
+under `benchmarks/external/results/YYYY-MM-DD/`. `loadBenchmarkRuns` discovers
+regular report JSON files in those collections, preserving the exact relative
+file path for raw links; `run-provenance.json` is a companion, not a report.
+Each collection must retain a `README.md` with commands, environment, budgets
+and acquisition limitations. No routing or downloads run during a site build.
+
+Run cards show the explicit outcome, measured artifact source, pre-route
+connectivity, newly routed connections, measured connectivity, phase-labeled
+attempt duration and independent check results. Missing outcome/progress stays
+unknown; checks that did not run stay not run, including their recorded failure
+notes. Full diagnostics use native keyboard-operable details/summary controls.
+Vendor notes are excluded from local diagnostic lists and remain available in
+raw reports and the separate external reference section. Synthetic outcome
+fixtures exist only in tests; validate every newly committed collection against
+its real records before publishing the site.
+
+Reviewed collection interpretation lives in `benchmarkContext.ts`, keyed by the
+SHA-256 of the exact report bytes. It supplies visible run limitations with a
+source writeup link, without changing raw outcomes or metrics. Re-check the
+collection writeup before adding context for a new hash; a board name or file
+path alone must never carry an earlier diagnosis forward to a new run. Negative
+connection deltas are labeled measured connectivity changes, not improvements.
+
 ### Development readiness without a board summary
 
 `kct board-metrics` (`src/kicad_tools/cli/board_metrics_cmd.py`) already
