@@ -1033,6 +1033,13 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
     missing = [
         i for i in items if i.status in (AvailabilityStatus.NO_LCSC, AvailabilityStatus.NOT_FOUND)
     ]
+    if any(
+        not alt.inventory.get("stock_verified", False)
+        for item in low_stock + out_of_stock
+        for alt in item.alternatives
+    ):
+        print("Stock unverified for alternatives: refresh live inventory before ordering.")
+        print()
 
     # Available parts (collapsed)
     if available:
@@ -1055,7 +1062,14 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
                         elif alt.price_diff < 0:
                             price_info = f", -${abs(alt.price_diff):.4f}"
                     basic = " [Basic]" if alt.is_basic else ""
-                    print(f"      • {alt.lcsc_part}: {alt.stock:,} in stock{price_info}{basic}")
+                    stock_status = (
+                        "in stock"
+                        if alt.inventory.get("stock_verified", False)
+                        else "reported (stock unverified)"
+                    )
+                    print(
+                        f"      • {alt.lcsc_part}: {alt.stock:,} {stock_status}{price_info}{basic}"
+                    )
         print()
 
     # Out of stock parts
@@ -1075,7 +1089,14 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
                         elif alt.price_diff < 0:
                             price_info = f", -${abs(alt.price_diff):.4f}"
                     basic = " [Basic]" if alt.is_basic else ""
-                    print(f"      • {alt.lcsc_part}: {alt.stock:,} in stock{price_info}{basic}")
+                    stock_status = (
+                        "in stock"
+                        if alt.inventory.get("stock_verified", False)
+                        else "reported (stock unverified)"
+                    )
+                    print(
+                        f"      • {alt.lcsc_part}: {alt.stock:,} {stock_status}{price_info}{basic}"
+                    )
             else:
                 print("    No alternatives found")
         print()
