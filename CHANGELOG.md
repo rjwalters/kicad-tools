@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add read-only netclass diagnostics for undefined assignment targets, duplicate
+  declarations and KiCad 10.0.5-verified pattern membership against supplied
+  board nets, with explicit malformed/unsupported diagnostics (#5334).
+
 - Add a daily CI guard (`.github/workflows/assert-no-bot-external.yml`) that
   fails if any open issue labeled `external` has a Bot-type author (#5310).
   `external` is a hard-exclusion label that blocks Loom dispatch, and a
