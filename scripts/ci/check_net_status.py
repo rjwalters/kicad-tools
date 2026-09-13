@@ -56,9 +56,11 @@ by this script.
 
 ``--known-open-nets NET[,NET...]``
 ----------------------------------
-Board 07 ("matchgroup-test") routes PARTIAL by design: 5 seed-invariant
-unroutable nets (#3438/#4012: ``DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N``).
-Passing those via ``--known-open-nets`` excludes THEIR unconnected pads from
+Board 07 ("matchgroup-test") routes PARTIAL by design.  Issue #5286
+(user-approved 2026-09-13) narrowed the historical 5-open plateau
+(#3438/#4012: ``DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N``) to a single
+approved open, ``DQ3``.  Passing it via ``--known-open-nets`` excludes its
+unconnected pads from
 the gated count while still failing on an unconnected pad appearing on ANY
 OTHER net -- so a *different* net silently going open is still caught (tighter
 than merely raising ``--max-unconnected`` to their pad count, which would let

@@ -357,7 +357,10 @@ job_board_06_end_to_end() {
 }
 
 job_board_07_end_to_end() {
-  local known_opens="DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N"
+  # #5286 (user-approved 2026-09-13): narrowed from the historical 5-open
+  # plateau (#3438) to a single approved open, DQ3.  DQ4, MIPI_DAT0_N,
+  # TMDS_D0_N and TMDS_D1_N must now stay connected.
+  local known_opens="DQ3"
   uv run kct build-native
   rm -rf /tmp/board07-ci
   mkdir -p /tmp/board07-ci

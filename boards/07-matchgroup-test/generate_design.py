@@ -2593,22 +2593,23 @@ def main() -> int:
             # all 244 pins, PIN_NETS mirroring generate_pcb.py
             # pad-for-pad), so the copper comparator binds 244/244 pads
             # and carries real evidence.  Board 07 routes PARTIAL by
-            # design -- 5 seed-invariant unroutable nets (#3438: DQ3, DQ4,
-            # MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N) -- so copper-LVS reports
-            # exactly those 5 opens and ``lvs.json`` carries the honest
-            # ``clean=false`` verdict (label comparator: clean; it is run
-            # so the payload records both legs).  ``require_clean=False``
-            # (advisory) because the 5 opens are EXPECTED here: a hard
-            # gate would abort the recipe before the manufacturing-bundle
-            # export.  ``kct board-metrics`` renders lvs_clean=false /
-            # lvs_mismatches=5 and downgrades status to 'partial' -- that
-            # is the truthful gallery state.  The board-07-end-to-end CI
-            # job regenerates into a tmp dir and asserts exactly these 5
-            # named opens and nothing else (``check_copper_lvs.py
-            # --expect-opens`` + ``check_board_00_e2e.py
-            # --lvs-known-opens``), so a NEW open/short -- or one of the 5
-            # becoming routable -- fails the job and forces this comment
-            # to be updated.  This step only runs in ``--step all`` (the
+            # design -- issue #5286 (user-approved 2026-09-13) narrowed the
+            # historical 5-open plateau (#3438: DQ3, DQ4, MIPI_DAT0_N,
+            # TMDS_D0_N, TMDS_D1_N) to a single approved open, DQ3 -- so
+            # copper-LVS reports exactly that one open and ``lvs.json``
+            # carries the honest ``clean=false`` verdict (label comparator:
+            # clean; it is run so the payload records both legs).
+            # ``require_clean=False`` (advisory) because the DQ3 open is
+            # EXPECTED here: a hard gate would abort the recipe before the
+            # manufacturing-bundle export.  ``kct board-metrics`` renders
+            # lvs_clean=false / lvs_mismatches=1 and downgrades status to
+            # 'partial' -- that is the truthful gallery state.  The
+            # board-07-end-to-end CI job regenerates into a tmp dir and
+            # asserts exactly that named open and nothing else
+            # (``check_copper_lvs.py --expect-opens`` + ``check_board_00_e2e.py
+            # --lvs-known-opens``), so a NEW open/short -- or DQ3 becoming
+            # routable -- fails the job and forces this comment to be
+            # updated.  This step only runs in ``--step all`` (the
             # ``--step route`` CI branch has no schematic).
             copper_clean, _label_clean = write_lvs_report(
                 sch_path,
@@ -2621,13 +2622,13 @@ def main() -> int:
             if not copper_clean:
                 print(
                     "[lvs] copper-LVS is dirty -- EXPECTED on this "
-                    "partial-by-design board (#3438 known opens: DQ3, DQ4, "
-                    "MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N).  lvs.json carries "
-                    "the honest clean=false verdict; board-metrics "
-                    "downgrades status to 'partial'.  The CI e2e job "
-                    "asserts the mismatch set is EXACTLY those 5 opens and "
-                    "no shorts (check_copper_lvs.py --expect-opens); see "
-                    "the summary above for what this run actually produced."
+                    "partial board (#5286 approved known open: DQ3).  "
+                    "lvs.json carries the honest clean=false verdict; "
+                    "board-metrics downgrades status to 'partial'.  The CI "
+                    "e2e job asserts the mismatch set is EXACTLY the DQ3 "
+                    "open and no shorts (check_copper_lvs.py "
+                    "--expect-opens); see the summary above for what this "
+                    "run actually produced."
                 )
 
             # Export manufacturing bundle (#3147) so ``kct fleet status``
@@ -2644,20 +2645,20 @@ def main() -> int:
             # ``DRC:`` line -- exactly the exit-code-vs-SUMMARY drift this
             # issue eliminates.
             #
-            # Board 07 is PARTIAL BY DESIGN: 5 seed-invariant unroutable nets
-            # (#3438: DQ3, DQ4, MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N).  The gate
-            # reflects that PARTIAL state HONESTLY rather than papering over
-            # it:
+            # Board 07 is PARTIAL BY DESIGN: the #5286-approved DQ3 open
+            # (narrowed 2026-09-13 from the historical 5-open #3438
+            # plateau).  The gate reflects that PARTIAL state HONESTLY
+            # rather than papering over it:
             #   * ``route_ok=route_success`` -- ``kct route`` exits non-zero
             #     on a partial route, so ``route_success`` is False and the
             #     ``Routing:`` line honestly reads PARTIAL.  ``route_allowance``
             #     is left at 0 ON PURPOSE: inflating it to swallow the known
-            #     opens would flip the ``Routing:`` line to a FALSE "SUCCESS"
+            #     open would flip the ``Routing:`` line to a FALSE "SUCCESS"
             #     (route_status() reads SUCCESS whenever route_ok is True),
             #     which is the opposite of reflecting PARTIAL honestly.
-            #   * ``lvs_ok=None`` -- the 5 copper-LVS opens ARE the documented
-            #     #3438 plateau (``write_lvs_report(require_clean=False)``
-            #     above keeps them advisory); making them a gating leg would
+            #   * ``lvs_ok=None`` -- the DQ3 copper-LVS open IS the
+            #     documented #5286 plateau (``write_lvs_report(require_clean=False)``
+            #     above keeps it advisory); making it a gating leg would
             #     FALSELY FAIL the board for being exactly at its plateau.
             #   * ``supplemental_drc_ok=drc_ok`` -- ``run_drc``
             #     (``kct check --mfr jlcpcb``) is the only engine that sees
