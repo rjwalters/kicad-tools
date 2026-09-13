@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Normalize legacy center/angle arcs in contour editing, board graphics, and placement linearization so rounded outlines remain connected and replacement preserves only actual mounting-hole contours (#4884).
 - Add read-only netclass diagnostics for undefined assignment targets, duplicate
   declarations and KiCad 10.0.5-verified pattern membership against supplied
   board nets, with explicit malformed/unsupported diagnostics (#5334).

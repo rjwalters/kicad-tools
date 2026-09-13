@@ -754,6 +754,7 @@ class BoardGraphic:
     end: tuple[float, float] = (0.0, 0.0)
     center: tuple[float, float] | None = None
     uuid: str = ""
+    mid: tuple[float, float] | None = None  # Appended for positional compatibility
 
     @classmethod
     def from_sexp(cls, sexp: SExp, graphic_type: str) -> BoardGraphic:
@@ -778,6 +779,9 @@ class BoardGraphic:
             graphic.start = (start.get_float(0) or 0.0, start.get_float(1) or 0.0)
         if end := sexp.find("end"):
             graphic.end = (end.get_float(0) or 0.0, end.get_float(1) or 0.0)
+
+        if graphic_type == "arc":
+            graphic.start, graphic.mid, graphic.end = _arc_points_from_sexp(sexp)
 
         # Center (for circle/arc)
         if center := sexp.find("center"):
@@ -4254,7 +4258,10 @@ class PCB:
                 continue
 
             endpoints: list[tuple[float, float]] = []
-            if tag in ("gr_line", "gr_arc"):
+            if tag == "gr_arc":
+                start, _, end = _arc_points_from_sexp(child)
+                endpoints = [start, end]
+            elif tag == "gr_line":
                 s = child.find("start")
                 e = child.find("end")
                 if s and e:
@@ -4348,6 +4355,9 @@ class PCB:
         """Collect all coordinate points from a list of sexp graphic nodes."""
         points: list[tuple[float, float]] = []
         for node in nodes:
+            if node.tag == "gr_arc":
+                points.extend(_arc_points_from_sexp(node))
+                continue
             for attr in ("start", "end", "mid", "center"):
                 n = node.find(attr)
                 if n:
