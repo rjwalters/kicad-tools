@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -16,6 +17,7 @@ from kicad_tools.parts import (
     JLCPermissionError,
     JLCQuotaError,
 )
+from kicad_tools.parts.jlcpcb_api import ComponentInventory
 
 
 def digest(data):
@@ -334,15 +336,17 @@ class FakeSource:
         self._error = error
         self.calls: list[list[str]] = []
 
-    def get_component_detail_raw(self, codes):
+    def get_component_inventory(self, codes):
         self.calls.append(list(codes))
         if self._error is not None:
             raise self._error
-        return self._components
+        return ComponentInventory(
+            tuple(self._components), datetime(2026, 1, 1, tzinfo=timezone.utc)
+        )
 
 
 class FailIfInvokedSource:
-    def get_component_detail_raw(self, codes):
+    def get_component_inventory(self, codes):
         pytest.fail("Inventory refresh reached the adapter after a local failure")
 
 
@@ -372,18 +376,20 @@ def test_refresh_observes_verified_missing_malformed_and_unrequested(inputs, tmp
     )
     assert source.calls == [codes]
     core = json.loads(snapshot.snapshot_bytes)
-    assert core["schema_version"] == 1
+    assert core["schema_version"] == 2
     assert core["plan_sha256"] == plan.sha256
     assert core["board_quantity"] == 1
-    assert core["observed_at"] == "2026-01-01T00:00:00Z"
+    assert core["read_at"] == "2026-01-01T00:00:00Z"
     by_id = {o["catalog_id"]: o for o in core["observations"]}
     assert len(by_id) == 21
-    assert by_id[codes[0]] == {"catalog_id": codes[0], "status": "verified", "raw_stock": 4200}
+    assert by_id[codes[0]]["status"] == "verified"
+    assert by_id[codes[0]]["raw_stock"] == 4200
     assert by_id[codes[1]]["status"] == "missing-field"
     assert by_id[codes[2]]["status"] == "malformed"
     assert by_id[codes[3]]["status"] == "malformed"
     assert by_id[codes[4]]["status"] == "malformed"
-    assert by_id[codes[5]] == {"catalog_id": codes[5], "status": "verified", "raw_stock": 0}
+    assert by_id[codes[5]]["status"] == "verified"
+    assert by_id[codes[5]]["raw_stock"] == 0
     assert by_id[codes[6]]["status"] == "not-returned"
     assert "C999999-UNREQUESTED" not in by_id
     assert all(o["raw_stock"] is None for o in core["observations"] if o["status"] != "verified")
@@ -411,7 +417,7 @@ def test_refresh_classifies_whole_batch_adapter_failures(inputs, tmp_path, error
     codes = _demand_codes(plan)
     source = FakeSource(error=error)
     snapshot = sp.refresh_inventory(
-        plan, source=source, destination=tmp_path / "inv.json", observed_at="t0"
+        plan, source=source, destination=tmp_path / "inv.json", observed_at="2026-01-01T00:00:00Z"
     )
     core = json.loads(snapshot.snapshot_bytes)
     assert len(core["observations"]) == len(codes)
@@ -425,7 +431,7 @@ def test_refresh_no_network_on_malformed_plan(inputs, tmp_path):
             sp.SubmissionPlan(tmp_path, b'{"not": "a plan"}'),
             source=FailIfInvokedSource(),
             destination=tmp_path / "inv.json",
-            observed_at="t0",
+            observed_at="2026-01-01T00:00:00Z",
         )
 
 
@@ -444,7 +450,7 @@ def test_refresh_rejects_destination_inside_handoff(inputs):
             plan,
             source=FailIfInvokedSource(),
             destination=plan.directory / "inv.json",
-            observed_at="t0",
+            observed_at="2026-01-01T00:00:00Z",
         )
 
 
@@ -453,7 +459,9 @@ def test_refresh_does_not_overwrite_existing_snapshot(inputs, tmp_path):
     dest = tmp_path / "inv.json"
     dest.write_bytes(b"peer-owned snapshot")
     with pytest.raises(sp.SubmissionError, match="exists"):
-        sp.refresh_inventory(plan, source=FailIfInvokedSource(), destination=dest, observed_at="t0")
+        sp.refresh_inventory(
+            plan, source=FailIfInvokedSource(), destination=dest, observed_at="2026-01-01T00:00:00Z"
+        )
     assert dest.read_bytes() == b"peer-owned snapshot"
 
 
@@ -465,20 +473,20 @@ def test_repeated_refresh_is_deterministic_and_reusable(inputs, tmp_path):
         plan,
         source=FakeSource(components),
         destination=tmp_path / "first.json",
-        observed_at="same-time",
+        observed_at="2026-01-01T00:00:00Z",
     )
     second = sp.refresh_inventory(
         plan,
         source=FakeSource(components),
         destination=tmp_path / "second.json",
-        observed_at="same-time",
+        observed_at="2026-01-01T00:00:00Z",
     )
     assert first.snapshot_bytes == second.snapshot_bytes
     later = sp.refresh_inventory(
         plan,
         source=FakeSource(components),
         destination=tmp_path / "later.json",
-        observed_at="different-time",
+        observed_at="2026-01-02T00:00:00Z",
     )
     assert later.snapshot_bytes != first.snapshot_bytes
     changed_qty = sp.prepare_submission(
@@ -488,7 +496,7 @@ def test_repeated_refresh_is_deterministic_and_reusable(inputs, tmp_path):
         plan=changed_qty,
         source=FakeSource(components),
         destination=tmp_path / "ten.json",
-        observed_at="same-time",
+        observed_at="2026-01-01T00:00:00Z",
     )
     assert retargeted.snapshot_bytes != first.snapshot_bytes
     assert json.loads(retargeted.snapshot_bytes)["board_quantity"] == 10
@@ -499,7 +507,7 @@ def test_refresh_credentials_never_reach_snapshot(inputs, tmp_path):
     codes = _demand_codes(plan)
     source = FakeSource([{"componentCode": codes[0], "stockCount": 1}])
     snapshot = sp.refresh_inventory(
-        plan, source=source, destination=tmp_path / "inv.json", observed_at="t0"
+        plan, source=source, destination=tmp_path / "inv.json", observed_at="2026-01-01T00:00:00Z"
     )
     assert b"JLCPCB_SECRET_KEY" not in snapshot.snapshot_bytes
     assert b"secret" not in snapshot.snapshot_bytes.lower()
@@ -699,3 +707,265 @@ def test_invalid_decimal_does_not_change_caller_flags(inputs):
         with pytest.raises(sp.SubmissionError):
             sp.prepare_submission(**inputs)
         assert _context_signature(context) == before
+
+
+@pytest.mark.parametrize("mutation", ["changed", "missing", "extra"])
+def test_refresh_rechecks_handoff_before_network(inputs, tmp_path, mutation):
+    plan = sp.prepare_submission(**inputs)
+    plan.directory.chmod(0o755)
+    bom = plan.directory / "bom.csv"
+    if mutation == "extra":
+        (plan.directory / "unexpected").write_bytes(b"extra")
+    elif mutation == "missing":
+        bom.unlink()
+    else:
+        bom.chmod(0o644)
+        bom.write_bytes(b"changed")
+    with pytest.raises(sp.SubmissionError):
+        sp.refresh_inventory(
+            plan,
+            source=FailIfInvokedSource(),
+            destination=tmp_path / "stock.json",
+            observed_at="2026-01-01T00:00:00Z",
+        )
+
+
+def test_refresh_rejects_frozen_bundle_destination(inputs):
+    plan = sp.prepare_submission(**inputs)
+    with pytest.raises(sp.SubmissionError):
+        sp.refresh_inventory(
+            plan,
+            source=FailIfInvokedSource(),
+            destination=inputs["bundle_root"] / "stock.json",
+            observed_at="2026-01-01T00:00:00Z",
+        )
+
+
+@pytest.mark.parametrize("location", ["bundle", "source"])
+def test_refresh_rechecks_original_inputs(inputs, tmp_path, location):
+    plan = sp.prepare_submission(**inputs)
+    path = (
+        inputs["bundle_root"] / "bom.csv"
+        if location == "bundle"
+        else inputs["source_root"] / "board.kicad_pcb"
+    )
+    path.write_bytes(b"changed")
+    with pytest.raises(sp.SubmissionError):
+        sp.refresh_inventory(
+            plan,
+            source=FailIfInvokedSource(),
+            destination=tmp_path / "inv.json",
+            observed_at="2026-01-01T00:00:00Z",
+        )
+
+
+def test_snapshot_verification_rejects_wrong_plan_and_tampered_bytes(inputs, tmp_path):
+    plan = sp.prepare_submission(**inputs)
+    snapshot = sp.refresh_inventory(
+        plan,
+        source=FakeSource(),
+        destination=tmp_path / "inv.json",
+        observed_at="2026-01-01T00:00:00Z",
+    )
+    assert (
+        sp.verify_inventory_snapshot(snapshot.path, snapshot.sha256, plan).snapshot_bytes
+        == snapshot.snapshot_bytes
+    )
+    other = sp.prepare_submission(
+        **(inputs | {"destination": tmp_path / "other", "board_quantity": 10})
+    )
+    with pytest.raises(sp.SubmissionError):
+        sp.verify_inventory_snapshot(snapshot.path, snapshot.sha256, other)
+    snapshot.path.chmod(0o644)
+    snapshot.path.write_bytes(b"changed")
+    with pytest.raises(sp.SubmissionError):
+        sp.verify_inventory_snapshot(snapshot.path, snapshot.sha256, plan)
+
+
+@pytest.mark.parametrize(
+    "age,source_kind,verified",
+    [(0, "live", True), (25, "live", False), (-1, "live", False), (0, "offline", False)],
+)
+def test_original_observation_provenance_and_safe_partial_coverage(
+    inputs, tmp_path, age, source_kind, verified
+):
+    plan = sp.prepare_submission(**inputs)
+    codes = _demand_codes(plan)
+    original_time = datetime.now(timezone.utc) - timedelta(hours=age)
+    result = ComponentInventory(
+        (
+            {"componentCode": codes[0], "stockCount": 0},
+            {"componentCode": codes[1], "stockCount": 50},
+            {"componentCode": codes[1], "stockCount": 0},
+            {"componentCode": codes[2], "stockCount": "Authorization credential-secret"},
+            {"componentCode": "C999999", "stockCount": 100},
+            "credential-secret",
+            {"componentCode": "credential-secret"},
+        ),
+        original_time,
+        source_kind,
+        True,
+    )
+
+    class Source:
+        def get_component_inventory(self, requested):
+            assert requested == codes
+            return result
+
+    snap = sp.refresh_inventory(
+        plan, source=Source(), destination=tmp_path / "inv.json", observed_at="2026-01-01T00:00:00Z"
+    )
+    core = json.loads(snap.snapshot_bytes)
+    assert core["provenance"]["observed_at"] == original_time.isoformat()
+    assert core["provenance"]["from_cache"] is True
+    assert core["provenance"]["source"] == source_kind
+    assert core["provenance"]["stock_verified"] is verified
+    assert core["coverage"] == {
+        "unexpected_ids": ["C999999"],
+        "invalid_rows": 2,
+        "duplicate_ids": [codes[1]],
+    }
+    by_id = {row["catalog_id"]: row for row in core["observations"]}
+    assert by_id[codes[0]]["raw_stock"] == 0
+    assert by_id[codes[0]]["stock_verified"] is verified
+    assert by_id[codes[1]]["status"] == "incomplete-response"
+    assert by_id[codes[2]]["stock_field_value"] == {"redacted_type": "str"}
+    assert b"credential-secret" not in snap.snapshot_bytes
+
+
+def test_refresh_claimed_destination_never_calls_adapter(inputs, tmp_path):
+    plan = sp.prepare_submission(**inputs)
+    lock = tmp_path / ".stock.json.snapshot-lock"
+    lock.write_text("peer")
+    with pytest.raises(sp.SubmissionError, match="claimed"):
+        sp.refresh_inventory(
+            plan,
+            source=FailIfInvokedSource(),
+            destination=tmp_path / "stock.json",
+            observed_at="2026-01-01T00:00:00Z",
+        )
+    assert lock.read_text() == "peer"
+
+
+def test_refresh_mutation_during_observation_does_not_publish(inputs, tmp_path):
+    plan = sp.prepare_submission(**inputs)
+
+    class Source:
+        def get_component_inventory(self, codes):
+            (inputs["bundle_root"] / "bom.csv").write_bytes(b"mutated")
+            return ComponentInventory((), None)
+
+    destination = tmp_path / "stock.json"
+    with pytest.raises(sp.SubmissionError):
+        sp.refresh_inventory(
+            plan, source=Source(), destination=destination, observed_at="2026-01-01T00:00:00Z"
+        )
+    assert not destination.exists()
+    assert not (tmp_path / ".stock.json.snapshot-lock").exists()
+
+
+def test_refresh_reloaded_plan_requires_verified_explicit_roots(inputs, tmp_path):
+    plan = sp.prepare_submission(**inputs)
+    loaded = sp.verify_submission(plan.directory, plan.sha256)
+    with pytest.raises(sp.SubmissionError, match="roots"):
+        sp.refresh_inventory(
+            loaded,
+            source=FailIfInvokedSource(),
+            destination=tmp_path / "stock.json",
+            observed_at="2026-01-01T00:00:00Z",
+        )
+    snapshot = sp.refresh_inventory(
+        loaded,
+        source=FakeSource(),
+        destination=tmp_path / "stock.json",
+        observed_at="2026-01-01T00:00:00Z",
+        bundle_root=inputs["bundle_root"],
+        source_root=inputs["source_root"],
+    )
+    assert json.loads(snapshot.snapshot_bytes)["plan_sha256"] == plan.sha256
+
+
+def test_malformed_adapter_metadata_cannot_create_fresh_stock_or_leak(inputs, tmp_path):
+    plan = sp.prepare_submission(**inputs)
+
+    class Source:
+        def get_component_inventory(self, codes):
+            return ComponentInventory(
+                ({"componentCode": codes[0], "stockCount": 2},),
+                "credential-secret",
+                ["credential-secret"],
+                "credential-secret",
+            )
+
+    snapshot = sp.refresh_inventory(
+        plan,
+        source=Source(),
+        destination=tmp_path / "stock.json",
+        observed_at="2026-01-01T00:00:00Z",
+    )
+    core = json.loads(snapshot.snapshot_bytes)
+    assert core["provenance"]["observed_at"] is None
+    assert core["provenance"]["source"] == "unknown"
+    assert core["provenance"]["stock_verified"] is False
+    assert b"credential-secret" not in snapshot.snapshot_bytes
+
+
+def test_refresh_composes_real_official_adapter_without_other_endpoints(
+    inputs, tmp_path, monkeypatch
+):
+    from kicad_tools.parts.jlcpcb_api import COMPONENT_DETAIL_PATH, JLCCredentials, JLCOpenAPIClient
+
+    plan = sp.prepare_submission(**inputs)
+    calls = []
+    client = JLCOpenAPIClient(JLCCredentials("fake-app", "fake-access", "fake-secret"))
+
+    def post(path, body):
+        calls.append((path, body))
+        return {
+            "data": [
+                {"componentCode": "C1", "stockCount": 0},
+                {"componentCode": "C2"},
+                {"componentCode": "C3", "stockCount": "fake-secret"},
+                None,
+            ]
+        }
+
+    monkeypatch.setattr(client, "_post_signed", post)
+    snapshot = sp.refresh_inventory(
+        plan, source=client, destination=tmp_path / "stock.json", observed_at="2026-01-01T00:00:00Z"
+    )
+    assert calls == [(COMPONENT_DETAIL_PATH, {"componentCodes": _demand_codes(plan)})]
+    core = json.loads(snapshot.snapshot_bytes)
+    assert core["provenance"]["observed_at"] != core["read_at"]
+    assert core["coverage"]["invalid_rows"] == 1
+    by_id = {row["catalog_id"]: row for row in core["observations"]}
+    assert by_id["C1"]["raw_stock"] == 0
+    assert by_id["C2"]["status"] == "missing-field"
+    assert by_id["C3"]["status"] == "malformed"
+    assert b"fake-secret" not in snapshot.snapshot_bytes
+
+
+def test_real_official_client_missing_requests_is_dependency_failure(inputs, tmp_path, monkeypatch):
+    """Exercise actual client/session construction, not a FakeSource exception."""
+    import builtins
+
+    from kicad_tools.parts.jlcpcb_api import JLCCredentials, JLCOpenAPIClient
+
+    plan = sp.prepare_submission(**inputs)
+    client = JLCOpenAPIClient(JLCCredentials("fake-app", "fake-access", "fake-secret"))
+    original_import = builtins.__import__
+
+    def without_requests(name, *args, **kwargs):
+        if name == "requests":
+            raise ImportError("requests is deliberately absent")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_requests)
+    snapshot = sp.refresh_inventory(
+        plan, source=client, destination=tmp_path / "stock.json", observed_at="2026-01-01T00:00:00Z"
+    )
+    rows = json.loads(snapshot.snapshot_bytes)["observations"]
+    assert len(rows) == 21
+    assert {row["status"] for row in rows} == {"dependency-error"}
+    assert all(row["raw_stock"] is None for row in rows)
+    assert client._session is None
