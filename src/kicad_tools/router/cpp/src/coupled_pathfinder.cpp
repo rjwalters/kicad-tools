@@ -69,19 +69,20 @@ CoupledPathfinder::CoupledPathfinder(Grid3D& grid,
       num_layers_(grid.layers()) {}
 
 // Mirror of Python ``_is_via_blocked`` (diffpair_routing.py:793-832).
-bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net) const {
+bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net, bool allow_own_pad) const {
     for (int layer = 0; layer < num_layers_; ++layer) {
         for (int dy = -via_extra_cells_; dy <= via_extra_cells_; ++dy) {
             for (int dx = -via_extra_cells_; dx <= via_extra_cells_; ++dx) {
                 if (is_cell_blocked(gx + dx, gy + dy, layer, net)) return true;
             }
         }
-        // Issue #3508: no via-in-pad regardless of net ownership.
+        // Endpoint exception applies only to pad copper belonging to this net.
         for (int dy = -via_drill_cells_; dy <= via_drill_cells_; ++dy) {
             for (int dx = -via_drill_cells_; dx <= via_drill_cells_; ++dx) {
                 int cgx = gx + dx, cgy = gy + dy;
                 if (cgx < 0 || cgx >= cols_ || cgy < 0 || cgy >= rows_) return true;
-                if (grid_.at(cgx, cgy, layer).pad_blocked) return true;
+                const auto& cell = grid_.at(cgx, cgy, layer);
+                if (cell.pad_blocked && !(allow_own_pad && cell.net == net)) return true;
             }
         }
     }
@@ -674,10 +675,10 @@ CoupledRouteResult CoupledPathfinder::route(
                 // Candidate pair copper is not in grid_: enforce the mutual
                 // copper and drill pitch even at endpoint cells.
                 if (!pair_vias_clear) { rej("via_pair_pitch"); continue; }
-                if (!p_at_ep && is_via_blocked(current.p_x, current.p_y, p_net)) { rej("via_blocked_p"); continue; }
-                if (!n_at_ep && is_via_blocked(current.n_x, current.n_y, n_net)) { rej("via_blocked_n"); continue; }
-                if (!p_at_ep && is_trace_blocked(current.p_x, current.p_y, new_layer, p_net)) { rej("via_trace_blocked_p"); continue; }
-                if (!n_at_ep && is_trace_blocked(current.n_x, current.n_y, new_layer, n_net)) { rej("via_trace_blocked_n"); continue; }
+                if (is_via_blocked(current.p_x, current.p_y, p_net, p_at_ep)) { rej("via_blocked_p"); continue; }
+                if (is_via_blocked(current.n_x, current.n_y, n_net, n_at_ep)) { rej("via_blocked_n"); continue; }
+                if (is_trace_blocked(current.p_x, current.p_y, new_layer, p_net)) { rej("via_trace_blocked_p"); continue; }
+                if (is_trace_blocked(current.n_x, current.n_y, new_layer, n_net)) { rej("via_trace_blocked_n"); continue; }
                 double cost = rules_.cost_via * 2.0;
                 // Issue #4080: corridor attractor on the via-drop
                 // destination cells -- the reservation is what makes the

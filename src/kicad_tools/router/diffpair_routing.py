@@ -1812,7 +1812,7 @@ class CoupledPathfinder:
             self.rules.via_diameter / 2 + self.rules.via_clearance + width / 2
         ) / self.grid.resolution
 
-    def _is_via_blocked(self, gx: int, gy: int, net: int) -> bool:
+    def _is_via_blocked(self, gx: int, gy: int, net: int, *, allow_own_pad: bool = False) -> bool:
         """Check if placing a via at this position would conflict on any layer.
 
         Issue #3508: the swept radius is now the DIFFERENCE between the
@@ -1836,6 +1836,8 @@ class CoupledPathfinder:
         via-in-pad).  ``cell.pad_blocked`` marks cells whose extent
         overlaps continuous pad metal (#3233), so reject the via when
         any cell under its DRILL footprint is pad metal on any layer.
+        The legacy endpoint exception may allow its own pad metal via
+        ``allow_own_pad``; foreign copper and pads remain obstacles.
         """
         drill_cells = max(0, int(math.ceil((self.rules.via_drill / 2) / self.grid.resolution)))
         for layer in range(self.grid.num_layers):
@@ -1849,7 +1851,8 @@ class CoupledPathfinder:
                     cgx, cgy = gx + dx, gy + dy
                     if not (0 <= cgx < self.grid.cols and 0 <= cgy < self.grid.rows):
                         return True
-                    if self.grid.cell_at(layer, cgy, cgx).pad_blocked:
+                    cell = self.grid.cell_at(layer, cgy, cgx)
+                    if cell.pad_blocked and not (allow_own_pad and cell.net == net):
                         return True
         return False
 
@@ -2412,16 +2415,8 @@ class CoupledPathfinder:
                 new_state = CoupledState(cand_p2, cand_n2, (dx, dy))
                 neighbors.append((new_state, cost, False))
 
-        # Issue #2490: Endpoint via exception.  When the current state
-        # sits exactly on a start or goal pad, the pad's footprint is
-        # already part of the board geometry — the same cells that
-        # ``_is_via_blocked`` would inspect are occupied by the pad
-        # whose net we are trying to drop a via for.  Without this
-        # exception, ``_is_via_blocked`` rejects via placement at the
-        # source pad of the coupled run on dense pad fields (e.g.,
-        # USB-C 0.5mm pitch), trapping the search on layer 0 even when
-        # an inner/back layer is wide open.  We mirror the existing
-        # trace-blocked exception at endpoints (lines 311-316).
+        # Endpoint pads retain the legacy own-pad exception, but it must
+        # never exempt foreign copper in the via's all-layer envelope.
         p_at_endpoint = self._is_at_goal(state.p_pos, p_goal) or self._is_at_goal(
             state.p_pos, p_start
         )
@@ -2455,20 +2450,24 @@ class CoupledPathfinder:
                 self.last_rejections["via_partner_trail"] += 1
                 continue
 
-            # Check if vias can be placed at both positions.  Skip the
-            # via-blocked check at endpoint pads — see comment above.
-            if not p_at_endpoint and self._is_via_blocked(state.p_pos.x, state.p_pos.y, p_net):
+            if self._is_via_blocked(
+                state.p_pos.x, state.p_pos.y, p_net, allow_own_pad=p_at_endpoint
+            ):
+                self.last_rejections["via_blocked_p"] += 1
                 continue
-            if not n_at_endpoint and self._is_via_blocked(state.n_pos.x, state.n_pos.y, n_net):
+            if self._is_via_blocked(
+                state.n_pos.x, state.n_pos.y, n_net, allow_own_pad=n_at_endpoint
+            ):
+                self.last_rejections["via_blocked_n"] += 1
                 continue
 
             new_p = GridPos(state.p_pos.x, state.p_pos.y, new_layer)
             new_n = GridPos(state.n_pos.x, state.n_pos.y, new_layer)
 
             # Check if new layer positions are valid
-            if not p_at_endpoint and self._is_trace_blocked(new_p.x, new_p.y, new_p.layer, p_net):
+            if self._is_trace_blocked(new_p.x, new_p.y, new_p.layer, p_net):
                 continue
-            if not n_at_endpoint and self._is_trace_blocked(new_n.x, new_n.y, new_n.layer, n_net):
+            if self._is_trace_blocked(new_n.x, new_n.y, new_n.layer, n_net):
                 continue
 
             # Via cost for both traces
@@ -2509,14 +2508,14 @@ class CoupledPathfinder:
                     self.last_rejections["via_partner_trail"] += 1
                     continue
 
-                # Both pads must be able to host a via at their current
-                # position on every layer (the via spans through-hole).
-                # Issue #2490: Endpoint pads are exempt — the pad
-                # footprint already occupies the cells the via would
-                # span.
-                if not p_at_endpoint and self._is_via_blocked(state.p_pos.x, state.p_pos.y, p_net):
+                # Preserve only the same-net pad exception at endpoints.
+                if self._is_via_blocked(
+                    state.p_pos.x, state.p_pos.y, p_net, allow_own_pad=p_at_endpoint
+                ):
                     continue
-                if not n_at_endpoint and self._is_via_blocked(state.n_pos.x, state.n_pos.y, n_net):
+                if self._is_via_blocked(
+                    state.n_pos.x, state.n_pos.y, n_net, allow_own_pad=n_at_endpoint
+                ):
                     continue
 
                 # After the swap, the P-trace continues from where N was,

@@ -24,8 +24,8 @@ def test_landing_clears_partner_source_barrel(use_cpp, goal_y, success):
         grid_resolution=0.1,
     )
     grid = RoutingGrid(width=4, height=3, rules=rules, resolution_override=0.1)
-    # Force the existing endpoint layer transitions before either head can
-    # advance. B.Cu is empty; ordinary endpoint exemptions permit those vias.
+    # Confine departure to the two own-net pad envelopes. B.Cu is empty;
+    # the source vias must clear foreign copper even at endpoint cells.
     grid._blocked[0, :, :] = True
     grid._is_obstacle[0, :, :] = True
 
@@ -36,6 +36,11 @@ def test_landing_clears_partner_source_barrel(use_cpp, goal_y, success):
     finder = CoupledPathfinder(
         grid, rules, target_spacing_cells=10, min_spacing_cells=2, heuristic_weight=1.5
     )
+    # The inflated via envelope must be legal, rather than depending on
+    # the old endpoint exception that bypassed foreign-copper checks.
+    radius = finder._via_extra_cells
+    for x, net in ((10, 1), (20, 2)):
+        grid._net[0, 10 - radius : 11 + radius, x - radius : x + radius + 1] = net
     finder._use_cpp_coupled = use_cpp
     result = finder.route_coupled(
         pad(10, 10, Layer.F_CU, 1),

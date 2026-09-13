@@ -155,7 +155,7 @@ private:
     inline bool is_trace_blocked(int gx, int gy, int layer, int net) const {
         return is_cell_blocked(gx, gy, layer, net);
     }
-    bool is_via_blocked(int gx, int gy, int net) const;
+    bool is_via_blocked(int gx, int gy, int net, bool allow_own_pad = false) const;
 
     inline bool at_goal(int x, int y, int gx, int gy) const {
         return x == gx && y == gy;

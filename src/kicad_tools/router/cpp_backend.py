@@ -957,6 +957,17 @@ class CppGrid:
                         (layer, y, x) in grid._pad_halo_cells,
                     )
 
+            # Escape carve-outs can clear a routing block while retaining
+            # pad-metal occupancy. Via drill checks and pad-exit guards need
+            # that metadata independently of the blocked bit. Copy these
+            # sparse cells without mark_blocked, which would close the escape.
+            pad_layers, pad_ys, pad_xs = np.nonzero(pad_blocked_np & ~blocked_np)
+            for pad_layer, pad_y, pad_x in zip(pad_layers, pad_ys, pad_xs, strict=True):
+                cell = cpp_grid._impl.at(int(pad_x), int(pad_y), int(pad_layer))
+                cell.net = int(net_np[pad_layer, pad_y, pad_x])
+                cell.is_obstacle = bool(obstacle_np[pad_layer, pad_y, pad_x])
+                cell.pad_blocked = True
+
         # Issue #4071: marshal corridor reservations into the C++ grid.
         # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner
         # net frozenset, written by ``EscapeRouter``'s reservation helpers
