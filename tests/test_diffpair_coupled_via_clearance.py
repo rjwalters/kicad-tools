@@ -107,3 +107,105 @@ def test_native_layer_transition_obeys_mutual_via_pitch(dx, dy, rule_overrides, 
         assert path[-1][6]
     else:
         assert diagnostics["rejections"]["via_pair_pitch"] > 0
+
+
+@pytest.mark.parametrize("allow_swap", [False, True])
+@pytest.mark.parametrize("distance,allowed", [(3, False), (8, True)])
+def test_new_via_clears_partner_copper_on_other_layer(allow_swap, distance, allowed):
+    finder, _ = _neighbors(12, 0, allow_swap=allow_swap)
+    state = CoupledState(GridPos(30, 30, 0), GridPos(42, 30, 0), (1, 0))
+    neighbors = finder._get_coupled_neighbors(
+        state,
+        1,
+        2,
+        p_start=state.p_pos,
+        n_start=state.n_pos,
+        n_copper_cells=frozenset({(30, 30 + distance, 1)}),
+    )
+    assert any(via for _, _, via in neighbors) is allowed
+    if not allowed:
+        assert finder.last_rejections["via_partner_trail"] > 0
+
+
+@pytest.mark.parametrize("distance,allowed", [(6, False), (8, True)])
+def test_new_via_clears_earlier_partner_barrel(distance, allowed):
+    finder, _ = _neighbors(12, 0)
+    state = CoupledState(GridPos(30, 30, 0), GridPos(42, 30, 0), (1, 0))
+    neighbors = finder._get_coupled_neighbors(
+        state, 1, 2, n_via_sites=frozenset({(30, 30 + distance)})
+    )
+    assert any(via for _, _, via in neighbors) is allowed
+    if not allowed:
+        assert finder.last_rejections["via_partner_barrel"] > 0
+
+
+@pytest.mark.parametrize("layer", [0, 1])
+@pytest.mark.parametrize("endpoint", [False, True])
+@pytest.mark.parametrize("distance,allowed", [(3, False), (8, True)])
+def test_advancing_trace_clears_prior_barrel_even_at_endpoint(layer, endpoint, distance, allowed):
+    finder, _ = _neighbors(12, 0)
+    finder.target_spacing_cells = 12
+    state = CoupledState(GridPos(30, 30, layer), GridPos(42, 30, layer), (1, 0))
+    target = GridPos(31, 30, layer)
+    neighbors = finder._get_coupled_neighbors(
+        state,
+        1,
+        2,
+        p_goal=target if endpoint else None,
+        n_via_sites=frozenset({(31, 30 + distance)}),
+    )
+    assert any(s.p_pos == target and not via for s, _, via in neighbors) is allowed
+
+
+def test_barrel_clearance_uses_active_trace_net_class_width():
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad
+    from kicad_tools.router.rules import NetClassRouting
+
+    finder, _ = _neighbors(12, 0)
+    finder.target_spacing_cells = 12
+    state = CoupledState(GridPos(30, 30, 0), GridPos(42, 30, 0), (1, 0))
+    target = GridPos(31, 30, 0)
+    history = frozenset({(31, 36)})  # .762 mm away from P's candidate trace.
+    narrow = finder._get_coupled_neighbors(state, 1, 2, n_via_sites=history)
+    assert any(s.p_pos == target and not via for s, _, via in narrow)
+    p = Pad(x=0, y=0, width=1, height=1, net=1, net_name="wide", layer=Layer.F_CU)
+    n = Pad(x=0, y=2, width=1, height=1, net=2, net_name="narrow", layer=Layer.F_CU)
+    finder.net_class_map = {"wide": NetClassRouting(name="wide", trace_width=0.8)}
+    finder._cpp_reconstruct_pads = (p, p, n, n)
+    assert finder._via_trace_clearance_cells("wide") == pytest.approx(0.9 / 0.127)
+    wide = finder._get_coupled_neighbors(state, 1, 2, n_via_sites=history)
+    assert not any(s.p_pos == target and not via for s, _, via in wide)
+
+
+def test_native_cache_refreshes_when_active_trace_width_changes(monkeypatch):
+    from kicad_tools.router import cpp_backend
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad
+    from kicad_tools.router.rules import NetClassRouting
+
+    finder, _ = _neighbors(12, 0)
+    builds = []
+
+    def construct(*args, **kwargs):
+        instance = object()
+        builds.append((instance, kwargs))
+        return instance
+
+    monkeypatch.setattr(cpp_backend.CppGrid, "from_routing_grid", lambda grid: object())
+    monkeypatch.setattr(cpp_backend, "CppCoupledPathfinder", construct)
+    first = finder._get_cpp_coupled_impl()
+    assert first is not None
+    assert finder._get_cpp_coupled_impl() is first
+    p = Pad(x=0, y=0, width=1, height=1, net=1, net_name="wide", layer=Layer.F_CU)
+    n = Pad(x=0, y=2, width=1, height=1, net=2, net_name="narrow", layer=Layer.F_CU)
+    finder.net_class_map = {"wide": NetClassRouting(name="wide", trace_width=0.8)}
+    finder._cpp_reconstruct_pads = (p, p, n, n)
+    second = finder._get_cpp_coupled_impl()
+    assert second is not first
+    assert finder._get_cpp_coupled_impl() is second
+    assert len(builds) == 2
+    assert builds[1][1]["p_via_trace_clearance_cells"] == pytest.approx(0.9 / 0.127)
+    assert (
+        builds[0][1]["n_via_trace_clearance_cells"] == builds[1][1]["n_via_trace_clearance_cells"]
+    )

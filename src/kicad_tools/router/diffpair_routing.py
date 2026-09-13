@@ -1803,6 +1803,13 @@ class CoupledPathfinder:
             / self.grid.resolution
         )
 
+    def _via_trace_clearance_cells(self, net_name: str | None = None) -> float:
+        """Ordinary barrel clearance to the specified trace's copper."""
+        width = self._get_trace_width_for_net(net_name) if net_name else self.rules.trace_width
+        return (
+            self.rules.via_diameter / 2 + self.rules.via_clearance + width / 2
+        ) / self.grid.resolution
+
     def _is_via_blocked(self, gx: int, gy: int, net: int) -> bool:
         """Check if placing a via at this position would conflict on any layer.
 
@@ -1866,6 +1873,10 @@ class CoupledPathfinder:
         n_visited: frozenset[tuple[int, int, int]] | None = None,
         p_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
         n_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
+        p_via_sites: frozenset[tuple[int, int]] | None = None,
+        n_via_sites: frozenset[tuple[int, int]] | None = None,
+        p_copper_cells: frozenset[tuple[int, int, int]] | None = None,
+        n_copper_cells: frozenset[tuple[int, int, int]] | None = None,
     ) -> list[tuple[CoupledState, float, bool]]:
         """Generate valid coupled moves maintaining spacing.
 
@@ -1916,6 +1927,13 @@ class CoupledPathfinder:
                 permissive behaviour).
             n_visited: Issue #3078: companion to ``p_visited`` for the
                 negative trace.  Same encoding and semantics.
+            p_via_sites: Positive trace's earlier ordinary barrel centers,
+                in grid XY coordinates. Barrels protect every copper layer.
+            n_via_sites: Corresponding negative-trace barrel centers.
+            p_copper_cells: Complete positive trail before endpoint stripping;
+                new partner vias must clear endpoint copper too. Defaults to
+                ``p_visited`` plus the current positive head for direct callers.
+            n_copper_cells: Corresponding complete negative copper trail.
 
         Returns list of (new_state, cost, is_via) tuples.
         """
@@ -1929,6 +1947,26 @@ class CoupledPathfinder:
         # callers that did not opt in.
         p_visited_set = p_visited if p_visited else frozenset()
         n_visited_set = n_visited if n_visited else frozenset()
+
+        p_barrels = p_via_sites or frozenset()
+        n_barrels = n_via_sites or frozenset()
+        p_copper = p_copper_cells if p_copper_cells is not None else p_visited_set
+        n_copper = n_copper_cells if n_copper_cells is not None else n_visited_set
+        p_copper = p_copper | {(state.p_pos.x, state.p_pos.y, state.p_pos.layer)}
+        n_copper = n_copper | {(state.n_pos.x, state.n_pos.y, state.n_pos.layer)}
+        pads = getattr(self, "_cpp_reconstruct_pads", None)
+        p_barrel_clearance = self._via_trace_clearance_cells(pads[0].net_name if pads else None)
+        n_barrel_clearance = self._via_trace_clearance_cells(pads[2].net_name if pads else None)
+
+        def near_barrel(pos: GridPos, sites: frozenset[tuple[int, int]], radius: float) -> bool:
+            # Ordinary vias span every copper layer, regardless of the
+            # layer on which the path first recorded the transition.
+            return any(math.hypot(pos.x - x, pos.y - y) + 1e-9 < radius for x, y in sites)
+
+        def near_copper(
+            pos: GridPos, cells: frozenset[tuple[int, int, int]], radius: float
+        ) -> bool:
+            return any(math.hypot(pos.x - x, pos.y - y) + 1e-9 < radius for x, y, _ in cells)
 
         # Issue #3508: trail PROXIMITY guard.  The exact-cell guard
         # below only rejects landing ON the partner's trail; a landing
@@ -1982,6 +2020,12 @@ class CoupledPathfinder:
             sits on those cells regardless of routing history.  The
             self-loop check still fires at non-endpoint cells.
             """
+            # Endpoint exemptions cannot permit contact with a partner's
+            # earlier barrel, even when ordinary visited sets are empty.
+            if (p_advances and near_barrel(new_p_pos, n_barrels, p_barrel_clearance)) or (
+                n_advances and near_barrel(new_n_pos, p_barrels, n_barrel_clearance)
+            ):
+                return True
             if not p_visited_set and not n_visited_set:
                 return False
             p_key = (new_p_pos.x, new_p_pos.y, new_p_pos.layer)
@@ -2388,11 +2432,25 @@ class CoupledPathfinder:
         # The grid contains neither candidate barrel. Trace spacing alone
         # cannot protect these two vias, including at endpoint pads.
         via_pair_pitch_ok = state.spacing + 1e-9 >= self._minimum_via_pitch_cells()
+        via_partner_trail_clear = not (
+            near_copper(state.p_pos, n_copper, n_barrel_clearance)
+            or near_copper(state.n_pos, p_copper, p_barrel_clearance)
+        )
+        via_partner_barrel_clear = not (
+            near_barrel(state.p_pos, n_barrels, self._minimum_via_pitch_cells())
+            or near_barrel(state.n_pos, p_barrels, self._minimum_via_pitch_cells())
+        )
         for new_layer in routable_layers:
             if new_layer == state.p_pos.layer:
                 continue
             if not via_pair_pitch_ok:
                 self.last_rejections["via_pair_pitch"] += 1
+                continue
+            if not via_partner_barrel_clear:
+                self.last_rejections["via_partner_barrel"] += 1
+                continue
+            if not via_partner_trail_clear:
+                self.last_rejections["via_partner_trail"] += 1
                 continue
 
             # Check if vias can be placed at both positions.  Skip the
@@ -2441,6 +2499,12 @@ class CoupledPathfinder:
                     continue
                 if not via_pair_pitch_ok:
                     self.last_rejections["via_pair_pitch"] += 1
+                    continue
+                if not via_partner_barrel_clear:
+                    self.last_rejections["via_partner_barrel"] += 1
+                    continue
+                if not via_partner_trail_clear:
+                    self.last_rejections["via_partner_trail"] += 1
                     continue
 
                 # Both pads must be able to host a via at their current
@@ -2568,7 +2632,17 @@ class CoupledPathfinder:
         Returns ``None`` when the backend is unavailable or construction
         raises (the caller then falls back to pure Python).
         """
-        if self._cpp_coupled_impl is not None and self._cpp_coupled_grid is self.grid:
+        pads = getattr(self, "_cpp_reconstruct_pads", None)
+        via_thresholds = (
+            self._minimum_via_pitch_cells(),
+            self._via_trace_clearance_cells(pads[0].net_name if pads else None),
+            self._via_trace_clearance_cells(pads[2].net_name if pads else None),
+        )
+        if (
+            self._cpp_coupled_impl is not None
+            and self._cpp_coupled_grid is self.grid
+            and getattr(self, "_cpp_coupled_via_thresholds", None) == via_thresholds
+        ):
             return self._cpp_coupled_impl
         try:
             from .cpp_backend import CppCoupledPathfinder, CppGrid
@@ -2613,7 +2687,9 @@ class CoupledPathfinder:
                 min_spacing_cells=self.min_spacing_cells,
                 trace_half_width_cells=self._trace_half_width_cells,
                 via_extra_cells=self._via_extra_cells,
-                min_via_pitch_cells=self._minimum_via_pitch_cells(),
+                min_via_pitch_cells=via_thresholds[0],
+                p_via_trace_clearance_cells=via_thresholds[1],
+                n_via_trace_clearance_cells=via_thresholds[2],
                 via_drill_cells=max(
                     0, int(math.ceil((self.rules.via_drill / 2) / self.grid.resolution))
                 ),
@@ -2625,6 +2701,7 @@ class CoupledPathfinder:
             self._use_cpp_coupled = False
             return None
         self._cpp_coupled_impl = impl
+        self._cpp_coupled_via_thresholds = via_thresholds
         self._cpp_coupled_grid = self.grid
         return impl
 
@@ -3142,6 +3219,8 @@ class CoupledPathfinder:
             # moves let one trace loop around its partner.
             p_visited_cells: set[tuple[int, int, int]] = set()
             n_visited_cells: set[tuple[int, int, int]] = set()
+            p_via_sites: set[tuple[int, int]] = set()
+            n_via_sites: set[tuple[int, int]] = set()
             # Issue #3508: spatial buckets over the SAME trail cells for
             # the proximity guard (see ``_too_close_to_trail``).  Bucket
             # size = the proximity radius so any cell within the radius
@@ -3157,6 +3236,9 @@ class CoupledPathfinder:
                 n_cell = (walker.state.n_pos.x, walker.state.n_pos.y, walker.state.n_pos.layer)
                 p_visited_cells.add(p_cell)
                 n_visited_cells.add(n_cell)
+                if walker.via_from_parent:
+                    p_via_sites.add((p_cell[0], p_cell[1]))
+                    n_via_sites.add((n_cell[0], n_cell[1]))
                 if prox_radius > 1:
                     p_trail_buckets.setdefault(
                         (p_cell[0] // bucket, p_cell[1] // bucket), []
@@ -3165,6 +3247,8 @@ class CoupledPathfinder:
                         (n_cell[0] // bucket, n_cell[1] // bucket), []
                     ).append(n_cell)
                 walker = walker.parent
+            p_copper_cells = frozenset(p_visited_cells)
+            n_copper_cells = frozenset(n_visited_cells)
             # Endpoint pads are legitimate landing cells regardless of
             # history -- strip them so the check doesn't disqualify a
             # via at the source pad or a same-cell re-entry into the
@@ -3200,6 +3284,10 @@ class CoupledPathfinder:
                 n_visited=n_visited_frozen,
                 p_trail_buckets=p_trail_buckets,
                 n_trail_buckets=n_trail_buckets,
+                p_via_sites=frozenset(p_via_sites),
+                n_via_sites=frozenset(n_via_sites),
+                p_copper_cells=p_copper_cells,
+                n_copper_cells=n_copper_cells,
             ):
                 # Issue #3439: corridor-bounded search.  Prune any
                 # state whose P or N head leaves the corridor mask

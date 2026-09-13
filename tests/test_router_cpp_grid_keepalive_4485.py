@@ -90,7 +90,9 @@ def test_coupled_pathfinder_keeps_grid_alive() -> None:
 
     grid = router_cpp.Grid3D(100, 100, 2, 0.5, 0.0, 0.0)
     before = sys.getrefcount(grid)
-    coupled = router_cpp.CoupledPathfinder(grid, _make_rules(), 4, 2, 1, 0, 1, 1.0, 1.0, 1.6)
+    coupled = router_cpp.CoupledPathfinder(
+        grid, _make_rules(), 4, 2, 1, 0, 1, 1.0, 1.0, 1.6, 1.2, 1.2
+    )
     after = sys.getrefcount(grid)
 
     assert after > before, (

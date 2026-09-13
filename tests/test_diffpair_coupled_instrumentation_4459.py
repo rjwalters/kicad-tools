@@ -57,6 +57,8 @@ _KNOWN_REJECTION_KEYS = {
     "asym_floor_n",
     "asym_trail_n",
     "via_pair_pitch",
+    "via_partner_barrel",
+    "via_partner_trail",
     "via_blocked_p",
     "via_blocked_n",
     "via_trace_blocked_p",

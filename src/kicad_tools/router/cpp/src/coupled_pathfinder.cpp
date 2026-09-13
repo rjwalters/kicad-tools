@@ -49,7 +49,9 @@ CoupledPathfinder::CoupledPathfinder(Grid3D& grid,
                                      int via_drill_cells,
                                      double spacing_penalty_factor,
                                      double heuristic_weight,
-                                     double min_via_pitch_cells)
+                                     double min_via_pitch_cells,
+                                     double p_via_trace_clearance_cells,
+                                     double n_via_trace_clearance_cells)
     : grid_(grid),
       rules_(rules),
       target_spacing_cells_(target_spacing_cells),
@@ -60,6 +62,8 @@ CoupledPathfinder::CoupledPathfinder(Grid3D& grid,
       spacing_penalty_factor_(std::clamp(spacing_penalty_factor, 0.0, 1.0)),
       heuristic_weight_(std::max(1.0, heuristic_weight)),
       min_via_pitch_cells_(std::max(0.0, min_via_pitch_cells)),
+      p_via_trace_clearance_cells_(std::max(0.0, p_via_trace_clearance_cells)),
+      n_via_trace_clearance_cells_(std::max(0.0, n_via_trace_clearance_cells)),
       cols_(grid.cols()),
       rows_(grid.rows()),
       num_layers_(grid.layers()) {}
@@ -359,6 +363,7 @@ CoupledRouteResult CoupledPathfinder::route(
         // longer chain does not leak into this one.
         for (auto& kv : p_prox) kv.second.clear();
         for (auto& kv : n_prox) kv.second.clear();
+        std::vector<std::pair<int, int>> p_via_sites, n_via_sites;
         {
             int walk = current_idx;
             while (walk >= 0) {
@@ -367,6 +372,10 @@ CoupledRouteResult CoupledPathfinder::route(
                 uint64_t nc = xyl_key(nd.n_x, nd.n_y, nd.n_layer);
                 p_visited.insert(pc);
                 n_visited.insert(nc);
+                if (nd.via_from_parent) {
+                    p_via_sites.emplace_back(nd.p_x, nd.p_y);
+                    n_via_sites.emplace_back(nd.n_x, nd.n_y);
+                }
                 if (prox_r > 1) {
                     p_prox[xy_key(nd.p_x / prox_bucket, nd.p_y / prox_bucket)].push_back(pc);
                     n_prox[xy_key(nd.n_x / prox_bucket, nd.n_y / prox_bucket)].push_back(nc);
@@ -413,6 +422,16 @@ CoupledRouteResult CoupledPathfinder::route(
                                    int nn_x, int nn_y, int nn_l,
                                    bool p_adv, bool n_adv,
                                    bool p_ep, bool n_ep) -> bool {
+            // Regular vias span the board: a different trace layer or an
+            // endpoint exemption cannot make crossing a partner barrel legal.
+            if (p_adv) for (const auto& site : n_via_sites) {
+                if (std::hypot(np_x - site.first, np_y - site.second) + 1e-9 <
+                    p_via_trace_clearance_cells_) return true;
+            }
+            if (n_adv) for (const auto& site : p_via_sites) {
+                if (std::hypot(nn_x - site.first, nn_y - site.second) + 1e-9 <
+                    n_via_trace_clearance_cells_) return true;
+            }
             if (p_visited.empty() && n_visited.empty()) return false;
             uint64_t pk = xyl_key(np_x, np_y, np_l);
             uint64_t nk = xyl_key(nn_x, nn_y, nn_l);
@@ -624,8 +643,34 @@ CoupledRouteResult CoupledPathfinder::route(
             double via_dx = current.p_x - current.n_x;
             double via_dy = current.p_y - current.n_y;
             bool pair_vias_clear = std::hypot(via_dx, via_dy) + 1e-9 >= min_via_pitch_cells_;
+            // The candidate pair has not been published to grid_. Check
+            // the complete parent chain, including endpoints and all layers.
+            const char* history_rejection = nullptr;
+            if (pair_vias_clear) {
+                for (const auto& site : n_via_sites) {
+                    if (std::hypot(current.p_x - site.first, current.p_y - site.second) + 1e-9 <
+                        min_via_pitch_cells_) history_rejection = "via_partner_barrel";
+                }
+                for (const auto& site : p_via_sites) {
+                    if (std::hypot(current.n_x - site.first, current.n_y - site.second) + 1e-9 <
+                        min_via_pitch_cells_) history_rejection = "via_partner_barrel";
+                }
+                int walk = current_idx;
+                while (!history_rejection && walk >= 0) {
+                    const CoupledAStarNode& nd = pool[static_cast<size_t>(walk)];
+                    double p_to_n = std::hypot(current.p_x - nd.n_x, current.p_y - nd.n_y);
+                    double n_to_p = std::hypot(current.n_x - nd.p_x, current.n_y - nd.p_y);
+                    if (p_to_n + 1e-9 < n_via_trace_clearance_cells_ ||
+                        n_to_p + 1e-9 < p_via_trace_clearance_cells_) {
+                        history_rejection = "via_partner_trail";
+                        break;
+                    }
+                    walk = nd.parent_idx;
+                }
+            }
             for (int new_layer : routable_layers) {
                 if (new_layer == current.p_layer) continue;
+                if (history_rejection) { rej(history_rejection); continue; }
                 // Candidate pair copper is not in grid_: enforce the mutual
                 // copper and drill pitch even at endpoint cells.
                 if (!pair_vias_clear) { rej("via_pair_pitch"); continue; }
