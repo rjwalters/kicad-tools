@@ -8,6 +8,7 @@ routing failures.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import math
@@ -1553,6 +1554,30 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         """
         return [(pad, pad.x, pad.y, getattr(pad, "layer", None)) for pad in self._router_pads()]
 
+    def _invalidate_router_pad_geometry(self) -> None:
+        """Drop pathfinder caches derived from Pad geometry after an in-place edit.
+
+        PR #5330 review: :meth:`_apply_delta_to_router_pads` and
+        :meth:`_restore_router_pads` mutate ``Pad.x``/``Pad.y``/``layer`` on
+        the SAME ``Pad`` objects the pathfinder holds, without changing the
+        pad count, while ``run()`` reuses one ``Autorouter`` (and therefore
+        one pathfinder ``Router``) across every iteration.  Any pathfinder
+        cache keyed on pad geometry -- notably the vectorized
+        non-through-hole pad arrays behind ``_check_via_placement_cached``
+        -- is stale the instant we return, so tell the pathfinder
+        explicitly rather than relying on a subsequent route call to clear
+        it.  Best-effort by design: pathfinder backends without these hooks
+        (the C++ pathfinder, test doubles) simply have nothing to drop.
+        """
+        pathfinder = getattr(self.router, "router", None)
+        if pathfinder is None:
+            return
+        for hook in ("invalidate_pad_geometry_cache", "clear_via_cache"):
+            fn = getattr(pathfinder, hook, None)
+            if callable(fn):
+                with contextlib.suppress(Exception):  # pragma: no cover - defensive
+                    fn()
+
     def _restore_router_pads(self, snapshot: list[tuple[Any, float, float, Any]]) -> None:
         """Restore router Pad state captured by :meth:`_snapshot_router_pads`."""
         for pad, x, y, layer in snapshot:
@@ -1560,6 +1585,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             pad.y = y
             if layer is not None:
                 pad.layer = layer
+        self._invalidate_router_pad_geometry()
 
     def _clearance_violation_count(self) -> int | None:
         """Router-level clearance-violation count, or ``None`` when unavailable.
@@ -1597,40 +1623,49 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
           pinned by the ``tests/fixtures/mirror_flip`` golden) and swap SMD pad
           routing layers ``F_CU <-> B_CU``.  Through-hole pads mirror position
           only (they span all layers).  Inner-layer SMD pads do not exist.
+
+        Every mutation here is IN PLACE on the pathfinder's own ``Pad``
+        objects and leaves the pad count unchanged, so
+        :meth:`_invalidate_router_pad_geometry` is called on the way out to
+        drop any pathfinder cache derived from that geometry (PR #5330
+        review).
         """
         pads = self._router_pads()
-        if delta.kind == "translate":
-            for pad in pads:
-                if getattr(pad, "ref", "") == delta.target_ref:
-                    pad.x += delta.dx
-                    pad.y += delta.dy
-        elif delta.kind == "rotate_180":
-            fp = self._find_footprint(delta.target_ref)
-            if fp is None:
-                return
-            cx, cy = fp.position[0], fp.position[1]
-            for pad in pads:
-                if getattr(pad, "ref", "") == delta.target_ref:
-                    pad.x = 2.0 * cx - pad.x
-                    pad.y = 2.0 * cy - pad.y
-        elif delta.kind == "mirror":
-            from kicad_tools.router.layers import Layer
+        try:
+            if delta.kind == "translate":
+                for pad in pads:
+                    if getattr(pad, "ref", "") == delta.target_ref:
+                        pad.x += delta.dx
+                        pad.y += delta.dy
+            elif delta.kind == "rotate_180":
+                fp = self._find_footprint(delta.target_ref)
+                if fp is None:
+                    return
+                cx, cy = fp.position[0], fp.position[1]
+                for pad in pads:
+                    if getattr(pad, "ref", "") == delta.target_ref:
+                        pad.x = 2.0 * cx - pad.x
+                        pad.y = 2.0 * cy - pad.y
+            elif delta.kind == "mirror":
+                from kicad_tools.router.layers import Layer
 
-            fp = self._find_footprint(delta.target_ref)
-            if fp is None:
-                return
-            cx = fp.position[0]
-            for pad in pads:
-                if getattr(pad, "ref", "") != delta.target_ref:
-                    continue
-                pad.x = 2.0 * cx - pad.x
-                if getattr(pad, "through_hole", False):
-                    continue
-                layer = getattr(pad, "layer", None)
-                if layer == Layer.F_CU:
-                    pad.layer = Layer.B_CU
-                elif layer == Layer.B_CU:
-                    pad.layer = Layer.F_CU
+                fp = self._find_footprint(delta.target_ref)
+                if fp is None:
+                    return
+                cx = fp.position[0]
+                for pad in pads:
+                    if getattr(pad, "ref", "") != delta.target_ref:
+                        continue
+                    pad.x = 2.0 * cx - pad.x
+                    if getattr(pad, "through_hole", False):
+                        continue
+                    layer = getattr(pad, "layer", None)
+                    if layer == Layer.F_CU:
+                        pad.layer = Layer.B_CU
+                    elif layer == Layer.B_CU:
+                        pad.layer = Layer.F_CU
+        finally:
+            self._invalidate_router_pad_geometry()
 
     # --- driver ------------------------------------------------------------
 

@@ -376,9 +376,14 @@ class Router:
         # the (x, y, half-width, half-height, cos, sin) arrays once and
         # answers every subsequent query with one vectorized NumPy sweep --
         # same ``pad_local_point``/``pad_point_distance`` math, evaluated in
-        # bulk instead of per-pad-per-call.  Rebuilt whenever the pad count
-        # changes (pads are only ever appended during a routing session --
-        # ``RoutingGrid.add_pad`` -- never removed or reordered in place).
+        # bulk instead of per-pad-per-call.  Invalidated by
+        # ``clear_via_cache`` (PR #5330 review) -- the SAME trigger the
+        # ``_via_cache`` above uses, i.e. the start of every route call and
+        # every foreign-context change -- plus the pad-count guard in
+        # ``_non_th_pad_geometry`` for pads appended mid-pass.  Pad count
+        # alone is NOT a sound key: pad geometry is mutated in place, on the
+        # same Pad objects and with no count change, by
+        # ``PlacementFeedbackLoop``.
         self._non_th_pad_cache: tuple[int, tuple[np.ndarray, ...]] | None = None
 
         # Issue #2947: World-coord foreign-net clearance context for via
@@ -2752,9 +2757,22 @@ class Router:
         :meth:`_check_via_placement_cached` with a single NumPy pass instead
         of a per-pad Python loop that recomputed each rotated pad's
         cos/sin (via ``pad_point_distance`` -> ``pad_local_point``) on every
-        call.  Cached per instance and rebuilt only when the pad count
-        changes -- pads are exclusively appended during a routing session
-        (``RoutingGrid.add_pad``), never removed or replaced in place.
+        call.
+
+        Invalidation (PR #5330 review): the cache is dropped by
+        :meth:`clear_via_cache`, i.e. on exactly the same trigger as the
+        sibling ``_via_cache`` -- at the start of every ``route_net`` /
+        ``_astar_search`` and whenever the foreign-net context changes,
+        because "grid state may have changed".  The pad-count check below
+        is only a cheap *additional* guard for freshly appended pads
+        (``RoutingGrid.add_pad``) within a single routing pass; it is NOT
+        the invalidation contract.  Pad *count* alone is insufficient
+        because pad geometry is mutated IN PLACE, on the same ``Pad``
+        objects, without changing the count --
+        ``PlacementFeedbackLoop._apply_delta_to_router_pads`` /
+        ``_restore_router_pads`` do exactly that for
+        ``translate``/``rotate_180``/``mirror`` deltas while reusing one
+        ``Router`` instance for the whole feedback loop.
         """
         pads = self.grid._pads
         cached = self._non_th_pad_cache
@@ -2913,8 +2931,31 @@ class Router:
 
         Call this when grid state changes (routes added/removed) to ensure
         cache doesn't return stale results.
+
+        PR #5330 review: this also drops the vectorized non-through-hole pad
+        geometry cache (:meth:`_non_th_pad_geometry`), so the two caches that
+        feed :meth:`_check_via_placement_cached` share one invalidation
+        contract.  Keying the pad geometry on pad count alone was unsound:
+        ``PlacementFeedbackLoop`` mutates ``Pad.x``/``Pad.y``/``Pad.rotation``
+        in place, on the same objects, without changing the count, while
+        reusing a single ``Router`` for the whole feedback loop.
         """
         self._via_cache.clear()
+        self.invalidate_pad_geometry_cache()
+
+    def invalidate_pad_geometry_cache(self) -> None:
+        """Drop the cached non-through-hole pad geometry arrays.
+
+        PR #5330 review: call this after mutating any ``Pad`` on
+        ``grid._pads`` in place (position, size, rotation, through-hole
+        flag).  :meth:`clear_via_cache` already calls it, so every
+        ``route_net`` / ``_astar_search`` start and every foreign-context
+        change is covered; this entry point exists for mutators that do not
+        (or may not) go through a route call before the next via check --
+        e.g. ``PlacementFeedbackLoop._apply_delta_to_router_pads`` and
+        ``_restore_router_pads``.
+        """
+        self._non_th_pad_cache = None
 
     def set_via_cache_enabled(self, enabled: bool) -> None:
         """Enable or disable via caching.
