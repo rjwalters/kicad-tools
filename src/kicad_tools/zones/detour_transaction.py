@@ -12,7 +12,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from kicad_tools.cli.runner import find_kicad_cli, run_fill_zones
+from kicad_tools.cli.runner import (
+    _restore_net_declarations,
+    _snapshot_element_nets,
+    _snapshot_net_declarations,
+    find_kicad_cli,
+    run_fill_zones,
+)
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.connectivity import ConnectivityValidator
 
@@ -21,6 +27,8 @@ from .local_detour import LocalDetour, PairMatch
 
 def _native_refill_report(board: Path, executable: Path, *, refill: bool = True) -> dict[str, Any]:
     report = board.with_suffix(".drc.json")
+    net_nodes = _snapshot_net_declarations(board) if refill else []
+    element_nets = _snapshot_element_nets(board) if refill else {}
     completed = subprocess.run(
         [
             str(executable),
@@ -54,6 +62,11 @@ def _native_refill_report(board: Path, executable: Path, *, refill: bool = True)
                 not entry["items"] or any(not item.get("uuid") for item in entry["items"])
             ):
                 raise RuntimeError("Native connectivity finding has no item identity")
+    if refill:
+        # KiCad 10 writes name-only nets. Keep the same canonical numeric
+        # representation as the recipe's existing refill path so downstream
+        # audits can read the published board without losing net identities.
+        _restore_net_declarations(board, net_nodes, element_nets)
     return result
 
 
