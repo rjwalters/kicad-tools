@@ -70,7 +70,7 @@ public:
     // mirroring the Python grid's ``_pad_blocked[metal_slice] = True``
     // at ``grid.py:4458``.
     void mark_blocked(int x, int y, int layer, int net, bool is_obstacle = false,
-                      bool pad_blocked = false);
+                      bool pad_blocked = false, bool pad_halo_only = false);
     void mark_rect_blocked(int x1, int y1, int x2, int y2, int layer, int net,
                            bool is_obstacle = false);
 
