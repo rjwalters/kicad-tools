@@ -522,7 +522,7 @@ def test_board06_merged_trunk_keeps_resolved_width(backend):
 
     from kicad_tools.router.cpp_backend import CppPathfinder
     from kicad_tools.router.pathfinder import Router
-    from kicad_tools.router.primitives import Pad, Route
+    from kicad_tools.router.primitives import Layer, Pad, Route
 
     rules = DesignRules(
         trace_width=0.375, trace_clearance=0.15, min_trace_width=0.1016, grid_resolution=0.05
@@ -530,7 +530,9 @@ def test_board06_merged_trunk_keeps_resolved_width(backend):
     start = Pad(106.5, 116, 0.5, 0.5, 26, "MIPI_RST", ref="J4")
     end = Pad(122.25, 115.9, 0.5, 0.5, 26, "MIPI_RST", ref="U4")
     points = [(106.5, 116), (106.6, 115.9), (106.8, 115.9), (122.25, 115.9)]
-    grid = SimpleNamespace(index_to_layer=lambda i: 0, resolution=0.05)
+    grid = SimpleNamespace(
+        num_layers=2, index_to_layer=lambda i: (Layer.F_CU, Layer.B_CU)[i], resolution=0.05
+    )
     pitches = {"J4": 0.5}
     if backend == "python":
         finder = SimpleNamespace(
