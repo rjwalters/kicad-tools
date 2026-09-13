@@ -234,7 +234,8 @@ namespace router {
 // construction); refs in the new set reach the carve-out only because a
 // CONFIGURED override resolved smaller than the default clearance, and
 // enforce that resolved value as a hard floor instead of skipping.
-constexpr int ROUTER_CPP_BUILD_VERSION = 28;
+// v29: coupled departure-prefix expansion constraints (#5333).
+constexpr int ROUTER_CPP_BUILD_VERSION = 29;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the

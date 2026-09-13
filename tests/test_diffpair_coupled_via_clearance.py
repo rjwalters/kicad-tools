@@ -179,7 +179,11 @@ def test_barrel_clearance_uses_active_trace_net_class_width():
 
 
 def test_native_cache_refreshes_when_active_trace_width_changes(monkeypatch):
-    from kicad_tools.router import cpp_backend
+    import importlib
+
+    # Backend staleness tests may replace sys.modules without updating the
+    # package attribute; patch the module used by the lazy constructor import.
+    cpp_backend = importlib.import_module("kicad_tools.router.cpp_backend")
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.primitives import Pad
     from kicad_tools.router.rules import NetClassRouting

@@ -10,6 +10,7 @@
 #include "types.hpp"
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
+#include <nanobind/stl/array.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/optional.h>
@@ -637,7 +638,8 @@ NB_MODULE(router_cpp, m) {
              "effective_target_spacing"_a, "effective_approach_radius"_a,
              "effective_departure_radius"_a,
              "routable_layers"_a, "corridor_bitset"_a,
-             "max_iterations_budget"_a, "timeout_seconds"_a);
+             "max_iterations_budget"_a, "timeout_seconds"_a,
+             "departure_prefix"_a = std::vector<std::array<int, 6>>{});
 
     // Geometry functions (Issue #2439)
     m.def("fnv1a_hash", [](const std::string& s) -> uint32_t {

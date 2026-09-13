@@ -127,7 +127,8 @@ CoupledRouteResult CoupledPathfinder::route(
     const std::vector<int>& routable_layers,
     const std::vector<uint8_t>& corridor_bitset,
     int max_iterations_budget,
-    double timeout_seconds) {
+    double timeout_seconds,
+    const std::vector<std::array<int, 6>>& departure_prefix) {
 
     CoupledRouteResult result;
 
@@ -313,7 +314,7 @@ CoupledRouteResult CoupledPathfinder::route(
                           current.p_layer == end_layer);
         bool n_at_goal = (current.n_x == n_goal_x && current.n_y == n_goal_y &&
                           current.n_layer == end_layer);
-        if (p_at_goal && n_at_goal) {
+        if (p_at_goal && n_at_goal && current.prefix_step == departure_prefix.size()) {
             // Reconstruct root->goal path from the pool parent chain.
             std::vector<CoupledPathNode> rev;
             int idx = current_idx;
@@ -701,6 +702,17 @@ CoupledRouteResult CoupledPathfinder::route(
 
         // Expand neighbors into the open set (diffpair_routing.py:1842-1890).
         for (const Cand& c : neighbors) {
+            // Constrain initial expansion, never inject a pre-built path.
+            // Every requested step has passed the ordinary physical/history
+            // guards above and consumes the same search budget as any move.
+            if (current.prefix_step < departure_prefix.size()) {
+                const auto& next = departure_prefix[current.prefix_step];
+                if (c.px != next[0] || c.py != next[1] || c.pl != next[2] ||
+                    c.nx != next[3] || c.ny != next[4] || c.nl != next[5]) {
+                    rej("departure_prefix");
+                    continue;
+                }
+            }
             // Corridor pruning (diffpair_routing.py:1864-1871).
             if (have_corridor) {
                 if (!in_corridor(c.px, c.py) || !in_corridor(c.nx, c.ny)) {
@@ -727,6 +739,7 @@ CoupledRouteResult CoupledPathfinder::route(
                 node.g_score = new_g;
                 node.parent_idx = current_idx;
                 node.via_from_parent = c.is_via;
+                node.prefix_step = std::min(current.prefix_step + 1, departure_prefix.size());
                 node.seq = seq_counter++;
                 open_set.push(node);
             }

@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 28
+_REQUIRED_CPP_BUILD_VERSION = 29
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -3904,8 +3904,15 @@ class CppCoupledPathfinder:
         corridor_bitset: list[int],
         max_iterations_budget: int,
         timeout_seconds: float,
+        departure_prefix: list[tuple[int, int, int, int, int, int]] | None = None,
     ) -> tuple[list[tuple[int, int, int, int, int, int, bool]] | None, dict]:
         """Run the coupled C++ search.
+
+        ``departure_prefix`` lists required successive joint grid states
+        after the original start, excluding the root. Every step must pass
+        normal neighbor, spacing, copper/history and corridor checks. The
+        original endpoints and parent history remain intact; prefix steps
+        consume the ordinary iteration/time budgets. Empty means no constraint.
 
         Returns ``(path, diagnostics)`` where ``path`` is a list of
         ``(p_x, p_y, p_layer, n_x, n_y, n_layer, via_from_parent)`` tuples in
@@ -3937,6 +3944,7 @@ class CppCoupledPathfinder:
             corridor_bitset,
             int(max_iterations_budget),
             float(timeout_seconds),
+            departure_prefix or [],
         )
         diagnostics = {
             "iterations": int(res.iterations),
