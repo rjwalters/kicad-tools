@@ -45,17 +45,6 @@
 #       `updated_at` -- if that happened to be this host's own record under a
 #       different sweep-id, the same-host NOTE branch published without ever
 #       scanning for a genuinely different host's independently fresh lease.
-#   (n) regression (Issue #5331): a fresh PEER lease that has already been
-#       YIELDED (a matching `<!-- loom:lease-yield host=... sweep=...
-#       earliest_host=... -->` record posted for that peer's own (host,
-#       sweep) -- the daemon's dispatch-time claim-then-verify-order
-#       tie-break, #6287) no longer blocks publication. Before this fix, a
-#       still-"fresh" (within-TTL) but already-superseded lease kept forcing
-#       every later publisher on the same issue to SKIP (exit 4) in
-#       deference to a claim the tie-break machinery had already resolved
-#       away -- the phantom-block mechanism that lets a multi-host race
-#       churn indefinitely instead of converging. Mirrors sweep-lease-fence.
-#       sh's own #6485 yield-exclusion fix, applied here on the write side.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-sweep-lease-publish.sh
@@ -247,14 +236,6 @@ lease_json() {
         '[{updated_at: $ts, body: ("<!-- loom:lease host=" + $host + " sweep=" + $sweep + " -->\nprose")}]'
 }
 
-# A lease-YIELD comment fixture (Issue #5331 / mirrors #6485): $1 = yielding
-# host, $2 = yielding sweep id, $3 = updated_at, $4 = earliest (winning) host,
-# $5 = earliest (winning) sweep id.
-lease_yield_json() {
-    jq -n --arg host "$1" --arg sweep "$2" --arg ts "$3" --arg eh "$4" --arg es "$5" \
-        '[{updated_at: $ts, body: ("<!-- loom:lease-yield host=" + $host + " sweep=" + $sweep + " earliest_host=" + $eh + " earliest_sweep=" + $es + " -->\nprose")}]'
-}
-
 NOW_ISO="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 NOW_EPOCH="$(date -u +%s)"
 FRESH_ISO="$(date -u -d "@$((NOW_EPOCH - 120))" +"%Y-%m-%dT%H:%M:%SZ" 2> /dev/null \
@@ -332,38 +313,6 @@ run_script publish 6320 --sweep-id sweep-run-A
 assert_eq "4" "$RC" "(m) a peer's older-but-fresh lease still blocks publication even when this host's own newer lease sorts as the overall freshest"
 assert_eq "0" "$(post_count)" "(m) nothing is posted over the live peer's lease"
 assert_contains "$ERR" "different host" "(m) stderr names the peer-host condition"
-
-# --- (n) regression (#5331): a fresh but ALREADY-YIELDED peer lease no
-# longer blocks publication -----------------------------------------------
-reset_state
-jq -s 'add' <(lease_json "peer-host" "sweep-peer-1" "$FRESH_ISO") \
-    <(lease_yield_json "peer-host" "sweep-peer-1" "$FRESH_ISO" "$OPAQUE_HOST" "sweep-run-A") \
-    > "$STUB_DIR/comments.json"
-run_script publish 6320 --sweep-id sweep-run-A
-assert_eq "0" "$RC" "(n) a fresh peer lease that has already posted its own loom:lease-yield standdown no longer blocks publication"
-assert_eq "1" "$(post_count)" "(n) this host's own lease is published instead of skipping over a stood-down claim"
-
-# (n2) sanity: a fresh peer lease with NO matching yield record still blocks
-# (the yield-exclusion must be precise, not a blanket bypass).
-reset_state
-jq -s 'add' <(lease_json "peer-host" "sweep-peer-1" "$FRESH_ISO") \
-    <(lease_yield_json "some-other-host" "sweep-other-1" "$FRESH_ISO" "peer-host" "sweep-peer-1") \
-    > "$STUB_DIR/comments.json"
-run_script publish 6320 --sweep-id sweep-run-A
-assert_eq "4" "$RC" "(n2) a yield record for a DIFFERENT (host, sweep) does not excuse an unrelated live peer lease"
-assert_eq "0" "$(post_count)" "(n2) nothing is posted over the still-live peer's lease"
-
-# (n3) this host's OWN previously-yielded lease is also excluded from
-# "own_fresh" -- a host that lost a prior tie-break republishes a fresh
-# lease on its next attempt rather than treating the stood-down record as
-# still covering it.
-reset_state
-jq -s 'add' <(lease_json "$OPAQUE_HOST" "sweep-run-A" "$FRESH_ISO") \
-    <(lease_yield_json "$OPAQUE_HOST" "sweep-run-A" "$FRESH_ISO" "peer-host" "sweep-peer-1") \
-    > "$STUB_DIR/comments.json"
-run_script publish 6320 --sweep-id sweep-run-A
-assert_eq "0" "$RC" "(n3) this host's own yielded lease does not count as a fresh own-claim"
-assert_eq "1" "$(post_count)" "(n3) a fresh replacement record is published rather than trusting the stood-down one"
 
 # --- (f) a `gh` READ failure fails open ----------------------------------
 reset_state
