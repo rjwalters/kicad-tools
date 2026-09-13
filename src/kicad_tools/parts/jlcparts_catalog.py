@@ -100,15 +100,36 @@ class JlcpartsCatalog:
             part = catalog.lookup("C123456")
     """
 
-    def __init__(self, db_path: Path | None = None):
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        *,
+        snapshot_revision: str | None = None,
+        snapshot_at: datetime | None = None,
+        observed_at: datetime | None = None,
+    ):
         """Initialize the catalog reader.
 
         Args:
             db_path: Path to the jlcparts SQLite file (default:
                 ``~/.cache/kicad-tools/jlcparts.sqlite3``). The file is not
                 required to exist.
+            snapshot_revision: Trusted dataset revision, when supplied by its producer.
+            snapshot_at: Dataset snapshot time, not local download/read time.
+            observed_at: Original stock observation time, if known. Missing
+                metadata remains unknown; filesystem mtimes are never substituted.
         """
         self.db_path = db_path or get_catalog_path()
+        self.snapshot_revision = snapshot_revision
+        self.snapshot_at = snapshot_at
+        self.observed_at = observed_at
+
+    def _part_from_row(self, row: sqlite3.Row) -> Part:
+        part = _row_to_part(row)
+        part.snapshot_revision = self.snapshot_revision
+        part.snapshot_at = self.snapshot_at
+        part.fetched_at = self.observed_at
+        return part
 
     @property
     def available(self) -> bool:
@@ -148,7 +169,7 @@ class JlcpartsCatalog:
         if row is None:
             return None
 
-        return _row_to_part(row)
+        return self._part_from_row(row)
 
     def lookup_many(self, lcsc_parts: list[str]) -> dict[str, Part]:
         """Look up multiple parts by exact LCSC number.
@@ -184,7 +205,7 @@ class JlcpartsCatalog:
                     list(id_to_key.keys()),
                 )
                 for row in cursor:
-                    part = _row_to_part(row)
+                    part = self._part_from_row(row)
                     key = id_to_key.get(int(row["lcsc"]), part.lcsc_part)
                     result[key] = part
         except sqlite3.Error as e:
@@ -287,7 +308,7 @@ class JlcpartsCatalog:
             logger.warning(f"jlcparts catalog search failed for {query!r}: {e}")
             return []
 
-        return [_row_to_part(row) for row in rows]
+        return [self._part_from_row(row) for row in rows]
 
     def count(self) -> int:
         """Return the number of components in the catalog (0 if absent)."""
@@ -386,7 +407,8 @@ def _row_to_part(row: sqlite3.Row) -> Part:
         is_preferred=library_type == "preferred",
         datasheet_url=col_str("datasheet"),
         product_url=f"https://jlcpcb.com/partdetail/{lcsc_part}" if lcsc_part else "",
-        fetched_at=datetime.now(),
+        stock_source="offline_catalog",
+        read_at=datetime.now(),
     )
 
 

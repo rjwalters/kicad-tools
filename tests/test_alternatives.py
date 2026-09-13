@@ -1,5 +1,6 @@
 """Tests for the alternative part finder module."""
 
+from datetime import datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -414,12 +415,14 @@ class TestAlternativePartFinder:
         )
         assert finder._get_availability_status(avail) == "low_stock"
 
-        # OK - no alternatives needed
+        # OK - no alternatives needed (matched parts carry a verified Part,
+        # per the real check_bom() population path in parts/lcsc.py)
         avail = PartAvailability(
             reference="R1",
             value="10k",
             footprint="0402",
             lcsc_part="C123",
+            part=Part("C123", stock_source="live", fetched_at=datetime.now()),
             matched=True,
             in_stock=True,
             quantity_needed=10,

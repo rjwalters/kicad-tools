@@ -42,6 +42,7 @@ class AlternativePart:
     stock: int
     price_diff: float | None  # Price difference vs original (None if unknown)
     is_basic: bool
+    inventory: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -75,11 +76,15 @@ class PartAvailabilityResult:
 
     # Error info
     error: str | None = None
+    inventory: dict = field(default_factory=dict)
 
     @property
     def sufficient_stock(self) -> bool:
         """Check if enough stock for needed quantity."""
-        return self.quantity_available >= self.quantity_needed
+        return (
+            self.status in (AvailabilityStatus.AVAILABLE, AvailabilityStatus.LOW_STOCK)
+            and self.quantity_available >= self.quantity_needed
+        )
 
     @property
     def unit_price(self) -> float | None:
@@ -113,6 +118,7 @@ class PartAvailabilityResult:
             "status": self.status.value,
             "in_stock": self.in_stock,
             "sufficient_stock": self.sufficient_stock,
+            "inventory": self.inventory,
             "min_order_qty": self.min_order_qty,
             "price_breaks": self.price_breaks,
             "unit_price": self.unit_price,
@@ -124,6 +130,7 @@ class PartAvailabilityResult:
                     "mfr_part": alt.mfr_part,
                     "description": alt.description,
                     "stock": alt.stock,
+                    "inventory": alt.inventory,
                     "price_diff": alt.price_diff,
                     "is_basic": alt.is_basic,
                 }
@@ -188,6 +195,7 @@ class BOMAvailabilityResult:
             "low_stock": len(self.low_stock),
             "out_of_stock": len(self.out_of_stock),
             "missing": len(self.missing),
+            "unverified": sum(item.status == AvailabilityStatus.UNKNOWN for item in self.items),
             "unavailable": sum(
                 item.status == AvailabilityStatus.UNAVAILABLE for item in self.items
             ),
@@ -403,8 +411,12 @@ class LCSCAvailabilityChecker:
             )
 
         # Determine status
-        status = self._determine_status(part.stock, quantity_needed)
-        in_stock = part.stock > 0
+        status = (
+            self._determine_status(part.stock, quantity_needed)
+            if part.stock_verified
+            else AvailabilityStatus.UNKNOWN
+        )
+        in_stock = part.stock_verified and part.stock > 0
 
         # Extract price breaks
         price_breaks = [(p.quantity, p.unit_price) for p in part.prices]
@@ -428,6 +440,8 @@ class LCSCAvailabilityChecker:
             price_breaks=price_breaks,
             lead_time_days=None,  # LCSC API doesn't provide this currently
             alternatives=alternatives,
+            inventory=part.inventory_provenance(),
+            error=None if part.stock_verified else "Stock unverified: refresh live inventory",
         )
 
     def _determine_status(self, stock: int, needed: int) -> AvailabilityStatus:
@@ -477,6 +491,7 @@ class LCSCAvailabilityChecker:
                         mfr_part=part.mfr_part,
                         description=part.description,
                         stock=part.stock,
+                        inventory=part.inventory_provenance(),
                         price_diff=price_diff,
                         is_basic=part.is_basic,
                     )

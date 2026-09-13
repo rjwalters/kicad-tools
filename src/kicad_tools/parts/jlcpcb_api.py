@@ -634,4 +634,5 @@ def _parse_official_component(data: dict) -> Part:
         datasheet_url=datasheet_url,
         product_url=f"https://jlcpcb.com/partdetail/{code}" if code else "",
         fetched_at=datetime.now(),
+        stock_source="live",
     )
