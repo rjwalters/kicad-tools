@@ -77,9 +77,10 @@ from .jlcpcb_api import (
     JLCPermissionError,
     JLCQuotaError,
 )
-from .lcsc import LCSCClient, LCSCForbiddenError, RateLimiter
+from .lcsc import LCSCClient, LCSCForbiddenError, LCSCUnavailableError, RateLimiter
 from .models import (
     BOMAvailability,
+    LookupResult,
     PackageType,
     Part,
     PartAvailability,
@@ -92,6 +93,8 @@ __all__ = [
     # Client
     "LCSCClient",
     "LCSCForbiddenError",
+    "LCSCUnavailableError",
+    "LookupResult",
     "RateLimiter",
     # Importer
     "PartImporter",

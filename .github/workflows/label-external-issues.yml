@@ -19,7 +19,22 @@ jobs:
         with:
           script: |
             const { owner, repo } = context.repo;
-            const username = context.payload.issue.user.login;
+            const author = context.payload.issue?.user;
+            if (!author || typeof author.login !== 'string' || author.login.length === 0) {
+              throw new Error('Issue author metadata is missing');
+            }
+            const username = author.login;
+
+            // Verified GitHub App account (app ID 4486636, owned by rjwalters).
+            // App installation actors do not pass the user collaborator API.
+            // Pin the immutable account ID as well as login/type: other bots
+            // and similarly named accounts still require collaborator checks.
+            if (author.id === 313063438 &&
+                author.login === 'loom-fleet-dispatch[bot]' &&
+                author.type === 'Bot') {
+              console.log(`${username} is trusted Loom automation`);
+              return { isCollaborator: true };
+            }
 
             try {
               await github.rest.repos.checkCollaborator({
@@ -30,6 +45,11 @@ jobs:
               console.log(`${username} is a collaborator`);
               return { isCollaborator: true };
             } catch (error) {
+              // Only 404 means "not a collaborator". Authentication, rate
+              // limits, server and network errors must fail without labeling.
+              if (error.status !== 404) {
+                throw error;
+              }
               console.log(`${username} is NOT a collaborator`);
               return { isCollaborator: false };
             }

@@ -61,7 +61,22 @@ def routing_cache_context(options: Mapping[str, object], net_class_map: dict) ->
 # Bump this constant whenever routing logic is modified to ensure stale
 # cached results are not reused.  The value is included in every cache key
 # so incrementing it automatically invalidates all existing entries.
-CACHE_VERSION = "2.2.0"
+# Combines the SMD via-in-pad process-guard + full route-state restoration
+# work (this branch, formerly 2.3.2) with the configured-clearance/contact-
+# geometry cache-policy changes from #5165/#5265 landed independently on
+# main (formerly 2.4.1). Bumped strictly above both so caches produced by
+# either isolated implementation are invalidated rather than silently reused.
+# Issue #5274 raises it again: ``rules.manufacturer`` now keys both rules
+# hashes (it gates SMD via-in-pad eligibility in the grid pathfinders, so it
+# changes the routes themselves), and the pre-post-pass grid canonicalization
+# changed which copper a warm replay emits.  Entries written by any 2.4.x
+# implementation must be invalidated rather than silently reused.
+# Also folds in main's independent "2.4.3-outline-domain" bump: authoritative
+# Edge.Cuts bounds/origin change the routing domain for identical PCB bytes.
+# Bumped strictly above both parents so neither isolated implementation's
+# cache entries are silently reused.
+# Auto-grid candidate preference and phase-shifted zones change routed copper.
+CACHE_VERSION = "2.5.2-safe-auto-grid"
 
 
 def get_default_cache_path() -> Path:
@@ -163,6 +178,29 @@ class CacheKey:
             rules_data["min_trace_width_floor"] = float(min_trace_floor)
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
+        # Issue #5004: flips whether the same-component carve-out grants an
+        # automatic exemption from bare fine pitch alone (no configured
+        # relaxation).  Changes which routes clear validation, so a cache
+        # entry produced with one setting must not be served to a run with
+        # the other. Only key non-default (True); CACHE_VERSION invalidates
+        # routes produced before default-mode acceptance was tightened.
+        if getattr(rules, "legacy_fine_pitch_carveout", False):
+            rules_data["legacy_fine_pitch_carveout"] = True
+        # Issue #5274: the manufacturer/process tier selects SMD via-in-pad
+        # eligibility (``MfrLimits.via_in_pad_supported`` -> the grid
+        # pathfinders' ``_allow_smd_vias`` guard, and the C++ backend's
+        # ``allow_smd_vias``), so it changes which routes are generated -- a
+        # tier that forbids a via on SMD copper cannot be served a route that
+        # used one.  It also drives ``min_hole_to_hole`` and the stitch
+        # via-diameter floor.  ``routing_context`` covers the CLI, which
+        # forwards ``--manufacturer``/``--mfr`` in its options mapping, but
+        # NOT callers that build ``DesignRules`` and use these APIs directly:
+        # before this, ``manufacturer=None``, ``"jlcpcb"`` and
+        # ``"jlcpcb-tier1"`` all hashed identically.  Only keyed when set, so
+        # every pre-existing manufacturer-free key is preserved byte-for-byte
+        # (same contract as the #4602 / #4700 additions above).
+        if rules.manufacturer is not None:
+            rules_data["manufacturer"] = rules.manufacturer
         if routing_context is not None:
             rules_data["routing_context"] = routing_context
         rules_json = json.dumps(rules_data, sort_keys=True, default=str)
@@ -328,7 +366,7 @@ class SubProblemSignature:
         pad_entries.sort()
 
         # 6. Build rules hash (only routing-relevant fields)
-        rules_data = {
+        rules_data: dict[str, object] = {
             "trace_width": rules.trace_width,
             "trace_clearance": rules.trace_clearance,
             "via_drill": rules.via_drill,
@@ -342,6 +380,16 @@ class SubProblemSignature:
             rules_data["min_trace_width_floor"] = float(min_trace_floor)
         if rules.strict_pad_clearance:
             rules_data["strict_pad_clearance"] = True
+        # Issue #5004: see ``CacheKey.compute`` above -- same reasoning
+        # applies to reusable sub-problem signatures.
+        if getattr(rules, "legacy_fine_pitch_carveout", False):
+            rules_data["legacy_fine_pitch_carveout"] = True
+        # Issue #5274: see ``CacheKey.compute`` -- a sub-problem solution that
+        # placed a via on SMD copper must not be replayed under a tier that
+        # forbids it.  There is no ``routing_context`` fallback at all on this
+        # path, so the manufacturer is the only thing separating the two.
+        if rules.manufacturer is not None:
+            rules_data["manufacturer"] = rules.manufacturer
         rules_json = json.dumps(rules_data, sort_keys=True)
         rules_hash = hashlib.sha256(rules_json.encode()).hexdigest()
 
@@ -740,7 +788,7 @@ class RoutingCache:
         created_time = datetime.fromisoformat(created_at)
         return datetime.now() - created_time > self.ttl
 
-    def serialize_routes(self, routes: list[Route]) -> bytes:
+    def serialize_routes(self, routes: list[Route], *, route_usage: dict | None = None) -> bytes:
         """Serialize routes to compressed bytes for storage.
 
         Args:
@@ -755,6 +803,7 @@ class RoutingCache:
             route_dict = {
                 "net": route.net,
                 "net_name": route.net_name,
+                "is_escape": route.is_escape,
                 "segments": [
                     {
                         "x1": seg.x1,
@@ -792,8 +841,23 @@ class RoutingCache:
             }
             routes_data.append(route_dict)
 
-        json_bytes = json.dumps(routes_data).encode("utf-8")
+        payload = (
+            routes_data
+            if route_usage is None
+            else {"routes": routes_data, "route_usage": route_usage}
+        )
+        json_bytes = json.dumps(payload).encode("utf-8")
         return zlib.compress(json_bytes)
+
+    @staticmethod
+    def deserialize_route_usage(data: bytes) -> dict:
+        """Read the full-run congestion snapshot; legacy entries are misses."""
+        payload = json.loads(zlib.decompress(data))
+        if not isinstance(payload, dict) or not isinstance(payload.get("route_usage"), dict):
+            raise ValueError("Cached routes have no congestion snapshot")
+        usage = payload["route_usage"]
+        assert isinstance(usage, dict)
+        return usage
 
     def deserialize_routes(self, data: bytes) -> list[Route]:
         """Deserialize routes from compressed bytes.
@@ -808,7 +872,8 @@ class RoutingCache:
         from .primitives import Route, Segment, Via
 
         json_bytes = zlib.decompress(data)
-        routes_data = json.loads(json_bytes.decode("utf-8"))
+        payload = json.loads(json_bytes.decode("utf-8"))
+        routes_data = payload["routes"] if isinstance(payload, dict) else payload
 
         routes = []
         for route_dict in routes_data:
@@ -845,6 +910,7 @@ class RoutingCache:
             route = Route(
                 net=route_dict["net"],
                 net_name=route_dict["net_name"],
+                is_escape=route_dict.get("is_escape", False),
                 segments=segments,
                 vias=vias,
             )
@@ -906,6 +972,8 @@ class RoutingCache:
         routes: list[Route],
         statistics: dict,
         compute_time_ms: int = 0,
+        *,
+        route_usage: dict | None = None,
     ) -> None:
         """
         Store routing result in cache.
@@ -916,7 +984,7 @@ class RoutingCache:
             statistics: Routing statistics dict
             compute_time_ms: Time taken for routing in milliseconds
         """
-        routes_data = self.serialize_routes(routes)
+        routes_data = self.serialize_routes(routes, route_usage=route_usage)
         data_size = len(routes_data)
         now = datetime.now().isoformat()
 

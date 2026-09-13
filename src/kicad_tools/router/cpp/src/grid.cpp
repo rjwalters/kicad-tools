@@ -435,9 +435,33 @@ float Grid3D::memory_mb() const {
 
 void Grid3D::add_pad(float x, float y, float width, float height,
                      int net, int layer_idx, uint32_t ref_hash,
-                     float clearance_override, bool is_plane_net) {
+                     float clearance_override, bool is_plane_net, float rotation,
+                     bool is_circular) {
     pads_.push_back({x, y, width, height, net, layer_idx, ref_hash,
-                     clearance_override, is_plane_net});
+                     clearance_override, is_plane_net, rotation, clearance_override, false, is_circular});
+}
+
+void Grid3D::set_pad_via_policy(size_t index, float clearance, bool carveout_eligible) {
+    auto& pad = pads_.at(index);
+    pad.via_clearance_override = clearance;
+    pad.via_carveout_eligible = carveout_eligible;
+}
+
+// Transform into local copper axes, not the enclosing board-space box.
+static float pad_rect_distance(const PadInfo& pad, float x1, float y1,
+                               float x2, float y2) {
+    if (pad.rotation == 0.0f) {
+        return rect_segment_centerline_distance(
+            pad.x, pad.y, pad.width, pad.height, x1, y1, x2, y2);
+    }
+    const float angle = pad.rotation * 3.14159265358979323846f / 180.0f;
+    const float c = std::cos(angle), s = std::sin(angle);
+    const float dx1 = x1 - pad.x, dy1 = y1 - pad.y;
+    const float dx2 = x2 - pad.x, dy2 = y2 - pad.y;
+    return rect_segment_centerline_distance(
+        0.0f, 0.0f, pad.width, pad.height,
+        c * dx1 - s * dy1, s * dx1 + c * dy1,
+        c * dx2 - s * dy2, s * dx2 + c * dy2);
 }
 
 void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
@@ -661,7 +685,8 @@ ValidationResult Grid3D::validate_route(
     float via_clearance,
     float min_drill_clearance,
     int partner_net,
-    float intra_pair_clearance) const
+    float intra_pair_clearance,
+    const std::vector<uint32_t>& clamp_ref_hashes) const
 {
     ValidationResult result;
     result.valid = true;
@@ -706,12 +731,44 @@ ValidationResult Grid3D::validate_route(
         return required;
     };
 
-    // Helper: check if a ref_hash is in the exclusion set
+    // Issue #5166: helper -- is this ref_hash in the CLAMPING exclusion set?
+    //
+    // A ref lands in ``clamp_ref_hashes`` (instead of ``exclude_ref_hashes``)
+    // when the ONLY thing that made it eligible for the same-component
+    // carve-out is a CONFIGURED clearance override that resolved smaller than
+    // the default ``trace_clearance`` -- an explicit ``component_clearances``
+    // entry, an applied ``fine_pitch_clearance`` shrink, or a net-class
+    // ``escape_clearance``.  That resolved value is an authored design rule,
+    // already carried per-pad as ``pad.clearance_override`` (segments) /
+    // ``pad.via_clearance_override`` (vias), so it is enforced as a hard
+    // FLOOR below rather than skipped.  Pre-#5166 every excluded ref got an
+    // unconditional ``continue``, which accepted ANY positive gap (e.g.
+    // 0.02mm against a pad whose rules authored 0.10mm) -- a real DRC hazard.
+    //
+    // Refs that reach the carve-out for the OTHER reason -- the
+    // ``_relax_same_component_clearance`` corridor relief (#2452), which
+    // physically unblocks the same-component overlap corridor down to a
+    // ``trace_width / 2`` floor without ever shrinking
+    // ``pad.clearance_override`` -- stay in ``exclude_ref_hashes`` and keep
+    // the full skip.  Clamping those to the (still full) override would
+    // reject exactly the routes #2452 exists to permit.
+    auto is_clamped_ref = [&](uint32_t ref_hash) -> bool {
+        for (auto h : clamp_ref_hashes) {
+            if (h == ref_hash) return true;
+        }
+        return false;
+    };
+
+    // Helper: does this ref_hash reach the same-component carve-out at all?
+    // The union of both exclusion flavours -- the structural parts of the
+    // carve-out (plane-pad retention #2908, metal-overlap strictness #2933,
+    // the net-0 NC-pad exception #3490) apply identically to both; only the
+    // positive-clearance decision differs (skip vs. clamp).
     auto is_excluded_ref = [&](uint32_t ref_hash) -> bool {
         for (auto h : exclude_ref_hashes) {
             if (h == ref_hash) return true;
         }
-        return false;
+        return is_clamped_ref(ref_hash);
     };
 
     // ---------------------------------------------------------------
@@ -771,18 +828,11 @@ ValidationResult Grid3D::validate_route(
             // Per-component clearance (Issue #1016)
             float required_clearance = pad.clearance_override;
 
-            // Issue #2908: Rect-aware geometry for rectangular SMD pads.
-            // The previous disc bound (``pad_radius = max(w, h) / 2``)
-            // over-rejected along the pad's SHORT axis -- a 1.475 x 0.3 mm
-            // LQFP-48 pad became a 0.7375 mm-radius disc, 0.587 mm of
-            // phantom inflation above / below the pad metal.  Vias and
-            // square pads (w == h within 1 micron) keep the disc model;
-            // it is exact for circular obstacles and cheaper to evaluate.
-            // Mirrors PR #2787 (validate/rules/clearance.py) and the
-            // Python validator at ``router/grid.py``.
+            // Issue #5229: Only explicitly circular pads use a disc. Equal
+            // dimensions do not imply a circle: square pad corners are copper.
+            // Oval and roundrect pads retain conservative rectangle bounds.
             float clearance;
-            const bool is_circular_pad = std::abs(pad.width - pad.height) < 0.001f;
-            if (is_circular_pad) {
+            if (pad.is_circular) {
                 const float pad_radius = std::max(pad.width, pad.height) / 2.0f;
                 const float dist = point_to_segment_distance(
                     pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2);
@@ -791,9 +841,8 @@ ValidationResult Grid3D::validate_route(
                 // Rect-aware: signed centerline-to-rect distance.  Negative
                 // means the segment centerline lies inside the pad rectangle
                 // (a real DRC defect).
-                const float center_dist = rect_segment_centerline_distance(
-                    pad.x, pad.y, pad.width, pad.height,
-                    seg.x1, seg.y1, seg.x2, seg.y2);
+                const float center_dist = pad_rect_distance(
+                    pad, seg.x1, seg.y1, seg.x2, seg.y2);
                 clearance = center_dist - seg_half_width;
             }
 
@@ -814,7 +863,23 @@ ValidationResult Grid3D::validate_route(
             // negative clearance too -- but ONLY for net=0 pads.  Foreign
             // SIGNAL pads (net != 0) keep the strict >= 0 guard so the
             // trace-through-pad-copper pathology (#2933) stays caught.
-            if (same_component_signal_carveout && (clearance >= 0.0f || pad.net == 0)) {
+            //
+            // Issue #5166: a ref in ``clamp_ref_hashes`` reaches the
+            // carve-out only because a configured override resolved smaller
+            // than the default clearance, so the positive-clearance branch
+            // must ENFORCE that resolved value (``pad.clearance_override``,
+            // which is exactly the floor the check below already uses)
+            // instead of skipping.  The net-0 branch stays an unconditional
+            // skip even for a clamped ref: a same-component NC pad carries no
+            // electrical net, and the #3490 / #1764 geometry (a signal pin
+            // 0.2mm from an NC pin) makes reaching the signal pad's centre
+            // impossible without entering the NC pad's rectangle -- clamping
+            // there would make the configured relaxation unroutable rather
+            // than merely enforced.  With an empty clamp set this condition
+            // is identical to the pre-#5166 ``(clearance >= 0 || net == 0)``.
+            if (same_component_signal_carveout &&
+                (pad.net == 0 ||
+                 (clearance >= 0.0f && !is_clamped_ref(pad.ref_hash)))) {
                 continue;
             }
 
@@ -964,6 +1029,39 @@ ValidationResult Grid3D::validate_route(
         // Via spans from layer_from to layer_to
         int layer_lo = std::min(via.layer_from, via.layer_to);
         int layer_hi = std::max(via.layer_from, via.layer_to);
+
+        // Candidate via vs foreign pads (#5182): match worst_via_pad_deficit.
+        // Its floor is the component TRACE clearance; other via quadrants below
+        // retain their existing via clearance and pairwise widening policies.
+        for (const auto& pad : pads_) {
+            if (pad.net == exclude_net) continue;
+            if (pad.layer_idx != -1 &&
+                (pad.layer_idx < layer_lo || pad.layer_idx > layer_hi)) continue;
+            float clearance;
+            if (pad.is_circular) {
+                clearance = std::hypot(via.x - pad.x, via.y - pad.y)
+                    - std::max(pad.width, pad.height) / 2.0f - via_radius;
+            } else {
+                clearance = pad_rect_distance(pad, via.x, via.y, via.x, via.y) - via_radius;
+            }
+            // No net-0 metal-overlap exception for vias.
+            //
+            // Issue #5166: a CLAMPING ref (configured override that resolved
+            // smaller than the default) enforces ``pad.via_clearance_override``
+            // -- the component trace clearance, per #5182 -- instead of
+            // skipping.  Corridor-relief refs (#2452) keep the full skip.
+            if (!pad.is_plane_net && pad.via_carveout_eligible &&
+                is_excluded_ref(pad.ref_hash) && !is_clamped_ref(pad.ref_hash) &&
+                clearance >= 0.0f) continue;
+            result.min_clearance = std::min(result.min_clearance, clearance);
+            if (clearance < pad.via_clearance_override - CLEARANCE_EPSILON_MM) {
+                result.valid = false;
+                result.violation_x = pad.x;
+                result.violation_y = pad.y;
+                result.violation_type = 8;  // via-pad (7 reserved for search pairwise)
+                return result;
+            }
+        }
 
         for (const auto& seg : stored_segments_) {
             if (seg.net == exclude_net) continue;

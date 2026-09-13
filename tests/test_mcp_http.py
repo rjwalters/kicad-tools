@@ -43,7 +43,7 @@ class TestFastMCPServerCreation:
         async def get_tools():
             return await mcp.list_tools()
 
-        tools = asyncio.get_event_loop().run_until_complete(get_tools())
+        tools = asyncio.run(get_tools())
         tool_names = [t.name for t in tools]
 
         # Verify key tools are registered

@@ -31,7 +31,7 @@ from kicad_tools.cli.route_cmd import (
     _resolve_lattice_link_budget,
 )
 from kicad_tools.cli.route_cmd import (
-    main as route_main,
+    _in_process_main as route_main,
 )
 
 # The Phase 1 stranded-board fixture: two 0402s, NET1 pre-routed, NET2 stranded.
@@ -63,6 +63,9 @@ def route_netset_spy(monkeypatch):
 
 
 def _lattice_route(board: Path, out: Path, *extra: str) -> int:
+    # Exercise the worker seam: in-memory spies and lattice diagnostics belong
+    # here. The public supervisor can expire before the lattice even starts;
+    # test_route_invocation_deadline covers its real process/time bounds.
     return route_main(
         [
             str(board),
@@ -443,7 +446,7 @@ class TestCliDispatchIsBounded:
 
 
 # ---------------------------------------------------------------------------
-# End-to-end: a short --timeout terminates the run and reports honestly.
+# Worker pipeline: a short --timeout terminates the lattice and reports honestly.
 # ---------------------------------------------------------------------------
 class TestShortTimeoutTerminatesEarly:
     def test_expired_timeout_declines_with_deadline_exceeded(self, board, tmp_path, capsys):

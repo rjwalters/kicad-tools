@@ -419,13 +419,15 @@ def test_route_demo_refreshes_manifest_mtime(route_demo_run: _RouteDemoRun) -> N
 
     assert routed_pcb.exists(), (
         f"route_demo.py did not produce routed PCB at {routed_pcb}.\n"
-        f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}"
+        f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}\n"
+        f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}"
     )
     assert mfg_manifest.exists(), (
         f"route_demo.py did not produce manufacturing manifest at "
         f"{mfg_manifest}.  Issue #3264 fix expects the demo to invoke "
         f"`kct export` after routing.\n"
-        f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}"
+        f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}\n"
+        f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}"
     )
 
     routed_mtime = routed_pcb.stat().st_mtime
@@ -488,7 +490,8 @@ def test_route_demo_achieves_minimum_completion(route_demo_run: _RouteDemoRun) -
         "This typically means the router crashed before producing a "
         "summary, or the output format changed (update "
         "_parse_routed_net_count in this test).\n"
-        f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}"
+        f"stdout (last 4000 chars):\n{proc.stdout[-4000:]}\n"
+        f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}"
     )
     routed, total = parsed
     assert routed >= MIN_FULLY_ROUTED_NETS, (

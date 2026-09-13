@@ -151,3 +151,8 @@ def test_no_router_output_is_unknown_not_zero_net_success(tmp_path, monkeypatch)
     assert set(result["nets"]) == set(benchmark.TARGETS)
     assert all(n["status"] == "unknown" for n in result["nets"].values())
     assert result["native_validation"]["status"] == "unavailable"
+
+
+def test_disconnected_duplicate_land_cannot_complete_target():
+    result = benchmark.classify({"SCL": {"J1.1", "U1.1"}}, [{"J1.1", "U1.1"}, {"J1.1"}])
+    assert result["SCL"]["status"] == "partial"

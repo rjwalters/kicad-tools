@@ -10,11 +10,10 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from kicad_tools.router.algorithms.two_phase import TwoPhaseRouter
+from kicad_tools.router.grid import RoutingGrid
+from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment
-
-# =============================================================================
-# Helpers
-# =============================================================================
+from kicad_tools.router.rules import DesignRules
 
 
 def _make_route(net: int, tag: str = "") -> Route:
@@ -29,7 +28,7 @@ def _make_route(net: int, tag: str = "") -> Route:
                 x2=1.0,
                 y2=1.0,
                 width=0.2,
-                layer=0,
+                layer=Layer.F_CU,
                 net=net,
             )
         ],
@@ -49,6 +48,7 @@ class FakeGrid:
         self.origin_x = 0.0
         self.origin_y = 0.0
         self.num_layers = 1
+        self.geometry = RoutingGrid(width=20, height=20, rules=DesignRules())
 
     def get_total_overflow(self) -> int:
         idx = min(self._overflow_idx, len(self._overflow_seq) - 1)
@@ -64,7 +64,10 @@ class FakeGrid:
             self._marked_routes.remove(route)
 
     def unmark_route(self, route: Route) -> None:
-        pass
+        self.geometry.unmark_route(route)
+
+    def resync_route_occupancy(self, replacements):
+        return self.geometry.resync_route_occupancy(replacements)
 
     def update_history_costs(self, increment: float) -> None:
         pass
@@ -182,7 +185,7 @@ class TestBestStateTracking:
             get_net_priority=lambda n: n,
             route_net=lambda n: [_make_route(n)],
             route_net_with_corridor=fake_route_net_with_corridor,
-            mark_route=lambda r: None,
+            mark_route=grid.geometry.mark_route,
         )
 
         return two_phase, grid
@@ -356,6 +359,12 @@ class TestBestStateTracking:
         assert len(two_phase.routes) == len(routes)
         # Grid's _marked_routes should have the same count
         assert len(grid._marked_routes) == len(routes)
+        assert {id(r) for r in grid.geometry.routes} == {id(r) for r in routes}
+        if grid.geometry._rtree_available:
+            indexed = {
+                id(s) for items in grid.geometry._seg_rtree_items.values() for s in items.values()
+            }
+            assert indexed == {id(s) for r in routes for s in r.segments}
 
 
 class TestEarlyStopOverflowRegression:
@@ -397,7 +406,7 @@ class TestEarlyStopOverflowRegression:
             get_net_priority=lambda n: n,
             route_net=lambda n: [_make_route(n)],
             route_net_with_corridor=fake_route_net_with_corridor,
-            mark_route=lambda r: None,
+            mark_route=grid.geometry.mark_route,
         )
 
         return two_phase, grid
@@ -508,6 +517,12 @@ class TestEarlyStopOverflowRegression:
         assert len(routes) > 0
         assert len(two_phase.routes) == len(routes)
         assert len(grid._marked_routes) == len(routes)
+        assert {id(r) for r in grid.geometry.routes} == {id(r) for r in routes}
+        if grid.geometry._rtree_available:
+            indexed = {
+                id(s) for items in grid.geometry._seg_rtree_items.values() for s in items.values()
+            }
+            assert indexed == {id(s) for r in routes for s in r.segments}
 
     def test_patience_parameter_respected(self, capsys):
         """Higher patience value delays early termination."""

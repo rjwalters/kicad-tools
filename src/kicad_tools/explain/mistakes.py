@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from ..schema.pcb import PCB
@@ -40,6 +40,10 @@ class MistakeCategory(Enum):
     GROUNDING = "grounding"
     VIA = "via_placement"
     MANUFACTURABILITY = "manufacturability"
+    # Issue #4899: net-new categories added for the Konnect design-review
+    # audit parity pass (audit_connections / check_bom_health).
+    CONNECTIVITY = "connectivity"
+    BOM_HEALTH = "bom_health"
 
 
 @dataclass
@@ -92,18 +96,80 @@ class Mistake:
         return "\n".join(lines)
 
 
+class CheckIncomplete(Exception):
+    """Raised by :meth:`MistakeCheck.check` to report partial coverage.
+
+    Issue #4899 mirrors the #4011 ``lvs`` vacuity-guard discipline for
+    ``detect_mistakes``: a check that lacked the input data it needed to
+    reach a verdict (e.g. a schematic-dependent check with no sibling
+    schematic file next to the PCB) must say so explicitly rather than
+    silently returning an empty ``list[Mistake]`` -- which is
+    indistinguishable from "I looked and found nothing wrong".
+
+    This is deliberately **not** the same signal as "I ran and found zero
+    applicable components" (e.g. a board with no crystals) -- that is a
+    legitimate clean run and should return ``[]`` normally, not raise.
+    ``CheckIncomplete`` is reserved for "I could not evaluate this at
+    all".
+
+    Args:
+        reason: Human-readable explanation of what prerequisite was
+            missing, surfaced verbatim in :attr:`CheckCoverage.reason`.
+    """
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+@dataclass
+class CheckCoverage:
+    """Coverage outcome for a single :class:`MistakeCheck` run (issue #4899).
+
+    Mirrors the ``SubCheckResult`` pattern used by ``kct check``'s meta
+    rollup (#3750/#4011): findings (``Mistake``) and coverage
+    (``CheckCoverage``) are reported on separate channels so an
+    ``incomplete`` check can never be mistaken for "ran clean".
+    """
+
+    check_name: str
+    category: MistakeCategory
+    status: Literal["ran", "incomplete"]
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "check_name": self.check_name,
+            "category": self.category.value,
+            "status": self.status,
+            "reason": self.reason,
+        }
+
+
 class MistakeCheck(Protocol):
     """Protocol for mistake detection checks.
 
     Each check implementation must provide:
     - category: The MistakeCategory this check relates to
     - check(pcb): Method that returns list of detected mistakes
+
+    A check that cannot reach a verdict because required input data is
+    unavailable (e.g. no sibling schematic for a schematic-dependent
+    check) should raise :class:`CheckIncomplete` instead of returning
+    ``[]`` -- see that class's docstring for the "incomplete" vs.
+    "ran clean" distinction.
     """
 
     category: MistakeCategory
 
     def check(self, pcb: PCB) -> list[Mistake]:
-        """Run the check on a PCB and return detected mistakes."""
+        """Run the check on a PCB and return detected mistakes.
+
+        Raises:
+            CheckIncomplete: If the check could not run to completion
+                because required input data was unavailable.
+        """
         ...
 
 
@@ -144,14 +210,32 @@ class MistakeDetector:
 
         Returns:
             List of Mistake objects sorted by severity (error > warning > info)
-        """
-        mistakes: list[Mistake] = []
-        for check in self._checks:
-            mistakes.extend(check.check(pcb))
 
-        # Sort by severity: error > warning > info
-        severity_order = {"error": 0, "warning": 1, "info": 2}
-        return sorted(mistakes, key=lambda m: severity_order.get(m.severity, 99))
+        Note:
+            A check that raised :class:`CheckIncomplete` contributes no
+            mistakes here and is silently skipped -- this method keeps its
+            original ``list[Mistake]``-only signature for backward
+            compatibility. Callers that need the honest "did every check
+            actually run" signal (issue #4899, mirroring #4011) should use
+            :meth:`detect_with_coverage` instead, which is what
+            ``kct detect-mistakes`` and the ``detect_mistakes`` MCP tool
+            use by default.
+        """
+        mistakes, _coverage = self.detect_with_coverage(pcb)
+        return mistakes
+
+    def detect_with_coverage(self, pcb: PCB) -> tuple[list[Mistake], list[CheckCoverage]]:
+        """Run all checks and return both mistakes and per-check coverage.
+
+        Args:
+            pcb: The PCB to analyze
+
+        Returns:
+            ``(mistakes, coverage)`` -- mistakes sorted by severity, and one
+            :class:`CheckCoverage` entry per registered check recording
+            whether it ran or was ``incomplete`` (issue #4899).
+        """
+        return self._run(self._checks, pcb)
 
     def detect_by_category(
         self,
@@ -167,11 +251,65 @@ class MistakeDetector:
         Returns:
             List of Mistake objects from checks in the specified category
         """
-        mistakes: list[Mistake] = []
-        for check in self._checks:
-            if check.category == category:
-                mistakes.extend(check.check(pcb))
+        mistakes, _coverage = self.detect_by_category_with_coverage(pcb, category)
         return mistakes
+
+    def detect_by_category_with_coverage(
+        self,
+        pcb: PCB,
+        category: MistakeCategory,
+    ) -> tuple[list[Mistake], list[CheckCoverage]]:
+        """Run only checks in a specific category, with coverage (issue #4899).
+
+        Args:
+            pcb: The PCB to analyze
+            category: Only run checks in this category
+
+        Returns:
+            ``(mistakes, coverage)`` for checks in the specified category.
+        """
+        checks = [c for c in self._checks if c.category == category]
+        return self._run(checks, pcb)
+
+    @staticmethod
+    def _run(checks: list[MistakeCheck], pcb: PCB) -> tuple[list[Mistake], list[CheckCoverage]]:
+        """Run *checks* against *pcb*, catching :class:`CheckIncomplete` per-check.
+
+        A check that raises ``CheckIncomplete`` contributes a ``"incomplete"``
+        :class:`CheckCoverage` entry (and no mistakes); every other check
+        -- including one that ran cleanly and found nothing -- contributes a
+        ``"ran"`` entry.
+        """
+        mistakes: list[Mistake] = []
+        coverage: list[CheckCoverage] = []
+        for check in checks:
+            check_name = type(check).__name__
+            try:
+                found = check.check(pcb)
+            except CheckIncomplete as exc:
+                coverage.append(
+                    CheckCoverage(
+                        check_name=check_name,
+                        category=check.category,
+                        status="incomplete",
+                        reason=exc.reason,
+                    )
+                )
+                continue
+            mistakes.extend(found)
+            coverage.append(
+                CheckCoverage(
+                    check_name=check_name,
+                    category=check.category,
+                    status="ran",
+                    reason=None,
+                )
+            )
+
+        # Sort by severity: error > warning > info
+        severity_order = {"error": 0, "warning": 1, "info": 2}
+        mistakes.sort(key=lambda m: severity_order.get(m.severity, 99))
+        return mistakes, coverage
 
 
 def detect_mistakes(pcb: PCB) -> list[Mistake]:
@@ -196,6 +334,34 @@ def detect_mistakes(pcb: PCB) -> list[Mistake]:
     return detector.detect(pcb)
 
 
+def detect_mistakes_with_coverage(pcb: PCB) -> tuple[list[Mistake], list[CheckCoverage]]:
+    """Detect mistakes *and* report per-check coverage (issue #4899).
+
+    This is the recommended entry point when the caller needs to honor the
+    #4011 vacuity-guard discipline: a check that could not run (e.g. a
+    schematic-dependent check with no sibling schematic file) must not
+    silently look like a clean pass. ``kct detect-mistakes`` and the
+    ``detect_mistakes`` MCP tool use this function.
+
+    Args:
+        pcb: The PCB to analyze
+
+    Returns:
+        ``(mistakes, coverage)`` -- see :meth:`MistakeDetector.detect_with_coverage`.
+
+    Example:
+        >>> from kicad_tools.schema.pcb import PCB
+        >>> from kicad_tools.explain.mistakes import detect_mistakes_with_coverage
+        >>> pcb = PCB.load("my_board.kicad_pcb")
+        >>> mistakes, coverage = detect_mistakes_with_coverage(pcb)
+        >>> incomplete = [c for c in coverage if c.status == "incomplete"]
+        >>> if incomplete:
+        ...     print(f"{len(incomplete)} check(s) could not run")
+    """
+    detector = MistakeDetector()
+    return detector.detect_with_coverage(pcb)
+
+
 def get_default_checks() -> list[MistakeCheck]:
     """Get the default set of mistake checks.
 
@@ -205,11 +371,15 @@ def get_default_checks() -> list[MistakeCheck]:
     # Import checks here to avoid circular imports
     from .checks import (
         AcidTrapCheck,
+        BomFieldHealthCheck,
         BypassCapDistanceCheck,
         CrystalNoiseProximityCheck,
         CrystalTraceLengthCheck,
         DifferentialPairSkewCheck,
+        LedSeriesResistorCheck,
+        MissingDecouplingCapCheck,
         PowerTraceWidthCheck,
+        PullUpResistorCheck,
         ThermalPadConnectionCheck,
         TombstoningRiskCheck,
         ViaInPadCheck,
@@ -225,6 +395,11 @@ def get_default_checks() -> list[MistakeCheck]:
         ViaInPadCheck(),
         AcidTrapCheck(),
         TombstoningRiskCheck(),
+        # Issue #4899: Konnect design-review audit parity (net-new checks).
+        MissingDecouplingCapCheck(),
+        PullUpResistorCheck(),
+        LedSeriesResistorCheck(),
+        BomFieldHealthCheck(),
     ]
 
 

@@ -9,6 +9,7 @@ This module provides analysis tools for PCB designs:
 - Signal integrity analysis (crosstalk and impedance discontinuities)
 - Thermal analysis and hotspot detection
 - Analog component detection for layout-sensitive parts
+- Operating-state component electrical-stress checks (MOSFET VDS/VGS)
 """
 
 from .analog_detect import (
@@ -21,6 +22,14 @@ from .complexity import (
     ComplexityRating,
     LayerPrediction,
     RoutingComplexity,
+)
+from .component_stress import (
+    REQUIRED_COVERAGE_STATES,
+    ComponentStressAnalyzer,
+    ComponentStressResult,
+    OperatingState,
+    OperatingStateManifest,
+    normalize_state_name,
 )
 from .congestion import CongestionAnalyzer, CongestionReport, Severity
 from .current_sense import (
@@ -75,6 +84,7 @@ from .trace_length import (
 
 __all__ = [
     "FRAGMENT_LENGTH_MM",
+    "REQUIRED_COVERAGE_STATES",
     "RULE_FRAGMENT_FRACTION",
     "RULE_STAIRCASE_FRACTION",
     "STAIRCASE_STEP_MM",
@@ -82,6 +92,8 @@ __all__ = [
     "Bottleneck",
     "ComplexityAnalyzer",
     "ComplexityRating",
+    "ComponentStressAnalyzer",
+    "ComponentStressResult",
     "CongestionAnalyzer",
     "CongestionReport",
     "CrosstalkRisk",
@@ -95,6 +107,8 @@ __all__ = [
     "NetStatus",
     "NetStatusAnalyzer",
     "NetStatusResult",
+    "OperatingState",
+    "OperatingStateManifest",
     "PadInfo",
     "PowerEstimator",
     "QualitySegmentRecord",
@@ -118,5 +132,6 @@ __all__ = [
     "detect_analog_components",
     "evaluate_routing_quality_thresholds",
     "infer_rail_voltage",
+    "normalize_state_name",
     "routing_quality_gate_dict",
 ]

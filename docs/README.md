@@ -52,6 +52,7 @@ Point-in-time working documents — dated entries describe the tree as of their 
 
 | Document | Description |
 |----------|-------------|
+| [Website Content Audit (2026-09)](website-content-audit-2026-09.md) | kicad-tools.org content/navigation/presentation audit vs. repository evidence (#5281, Epic #5278 Phase 1) |
 | [HV Pairwise Proof: softstart rev-C (2026-08)](hv-pairwise-softstart-proof.md) | #4507 T4 manual proof run on the local-only mains HV fixture |
 | [Placement Pad-Anchoring Audit (2026-08)](placement-pad-anchoring-audit.md) | Centre- vs pad-anchored placement objective terms (#4831) |
 | [OmniLayout / OmniRouting Recon (2026-08)](research/omnilayout-recon.md) | External LLM layout/routing benchmark (#4830); verdict: adapt the metric protocol, drop the data (no licence) |

@@ -112,6 +112,7 @@ class SerpentineGenerator:
         *,
         grid: RoutingGrid | None = None,
         reserved_net_id: int | None = None,
+        fixed_segment_ids: set[int] | None = None,
     ) -> tuple[int, Segment] | None:
         """Find the best segment in a route for serpentine insertion.
 
@@ -135,6 +136,7 @@ class SerpentineGenerator:
                 the pre-#4085 purely-geometric heuristic -- every existing
                 caller (``tune_match_group``, ``apply_length_tuning``,
                 ...) is unaffected.
+            fixed_segment_ids: Segments that contribute length but cannot host a meander.
             reserved_net_id: Issue #4085.  The net id whose reservation
                 marks the slack corridor.  Ignored when ``grid`` is
                 ``None``.
@@ -150,6 +152,8 @@ class SerpentineGenerator:
         best_segment: Segment | None = None
 
         for i, seg in enumerate(route.segments):
+            if fixed_segment_ids and id(seg) in fixed_segment_ids:
+                continue
             length = segment_length(seg)
 
             # Skip segments that are too short

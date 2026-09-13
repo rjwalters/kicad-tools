@@ -1724,3 +1724,42 @@ class TestIssue2387MultiResPlanWithBoardDims:
                     f"memory-busting grid; got {plan.coarse_resolution}mm "
                     f"-> {cells:.0f} cells"
                 )
+
+
+class TestShiftedCoarseGridSelection:
+    @pytest.mark.parametrize("noise", [0.0, 0.0000001])
+    def test_shifted_header_uses_coarse_spacing_without_refinement(self, noise):
+        from kicad_tools.router.io import _compute_zone_resolution_and_offset
+
+        pads = [
+            PadPosition(x=10.0111 + i * 2.54 + (noise if i % 2 else 0), y=20.0136)
+            for i in range(18)
+        ]
+        resolution, x_offset, y_offset = _compute_zone_resolution_and_offset(pads, 0.127)
+        assert resolution == 0.127
+        assert _count_off_grid_with_offset(pads, resolution, x_offset, y_offset) == 0
+
+    def test_genuinely_off_grid_pad_still_requires_refinement(self):
+        from kicad_tools.router.io import _compute_zone_resolution_and_offset
+
+        pads = [PadPosition(x=i * 2.54, y=0) for i in range(18)]
+        pads[-1].x += 0.04
+        resolution, x_offset, y_offset = _compute_zone_resolution_and_offset(pads, 0.127)
+        assert resolution < 0.127
+        assert _count_off_grid_with_offset(pads, resolution, x_offset, y_offset) == 0
+
+    def test_safe_survivor_precedes_coarse_alignment_under_memory_pressure(self):
+        pads = [PadPosition(x=0, y=0), PadPosition(x=0.5, y=0)]
+        result = auto_select_grid_resolution(
+            pads,
+            clearance=0.15,
+            board_width=30,
+            board_height=30,
+            max_cells=500_000,
+            candidates=[0.1, 0.05, 0.005],
+        )
+        assert result.memory_capped
+        assert result.resolution == 0.05
+        assert result.clearance_compliant_at_clearance_over_2
+        assert not result.memory_forced_unsafe_grid
+        assert 30 * 30 / result.resolution**2 <= result.memory_budget_used

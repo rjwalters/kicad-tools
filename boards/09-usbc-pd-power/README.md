@@ -47,6 +47,14 @@ pads disconnected despite native KiCad's clean result; this disagreement is
 tracked in [#5061](https://github.com/rjwalters/kicad-tools/issues/5061).
 Physical copper LVS does not independently prove plane connectivity.
 
+The fleet 45-degree angle census
+(`tests/test_fleet_45_census.py`) now discovers `output/usbc_pd_power.kicad_pcb`
+independently of its filename (it does not carry a `_routed` suffix), but the
+board's 61 off-angle segments out of 318 are an explicit, hash-pinned
+exemption pending a source-emitter repair -- not a silent skip and not a
+manufacturing-readiness claim. See issue
+[#5084](https://github.com/rjwalters/kicad-tools/issues/5084).
+
 From the repository root:
 
 ```sh

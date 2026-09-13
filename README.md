@@ -551,7 +551,7 @@ full list (every command and subcommand) lives in
 | `kct check <pcb>` | Pure Python DRC (no kicad-cli needed) |
 | `kct creepage <pcb>` | HV surface-path (creepage) audit vs IEC 60664-1 / 62368-1 |
 | `kct creepage-export-rules <project>` | Export voltage-domain netclasses + pairwise HV clearance rules so kicad-cli DRC enforces creepage |
-| `kct analyze <pcb>` | Signal-integrity, current-sense, and electrical-rating layout lint |
+| `kct analyze <pcb>` | Signal-integrity, current-sense, electrical-rating, and operating-state component-stress lint |
 | `kct audit <project>` | Manufacturing readiness audit (ERC, DRC, connectivity, compatibility) |
 | `kct impedance <subcommand>` | Transmission line impedance calculations |
 
@@ -677,6 +677,20 @@ entries live in [CHANGELOG.md](CHANGELOG.md).
   `.kicad_dru` / `.kicad_pro` sidecars from the checker's already-resolved
   `--mfr` floors, so `kicad-cli pcb drc` and `kct check` reason over identical
   rules by construction.
+- **`kct analyze component-stress`** (v0.20.0) — operating-state MOSFET
+  VDS/VGS gate: evaluates `V(D)-V(S)` / `V(G)-V(S)` per state of an explicit
+  `--states` manifest against sourced `Vds_max`/`Vgs_max` symbol fields. No
+  circuit-state inference — an undeclared state, unresolved D/G/S pin role,
+  unbound terminal or uncited rating is reported `UNRESOLVED` (a release
+  blocker), never a silent pass, and a creepage waiver can never suppress it.
+  Exact MPN and distinct, valid terminal-pin assignments are required;
+  conflicting rating or identity fields remain unresolved. The
+  census includes identifiable MOSFETs in child sheets; reused sheets, duplicate
+  references, and repeated local labels without proven global connections remain
+  unresolved. State/net aliases and duplicate JSON/YAML
+  keys cannot overwrite operating data. A project-specific coverage checklist
+  must be nonempty, and structured states cannot mix `nets:` with shorthand
+  potentials. These checks do not infer circuit states or qualify hardware.
 - **`kct analyze electrical-rating`** (v0.19.0) — deterministic, advisory
   LED-overcurrent and capacitor voltage-derating checks sourced from schematic
   fields; parts missing ratings are skipped, never failed.

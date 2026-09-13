@@ -1213,12 +1213,18 @@ class TwoPhaseRouter:
                 f"(clearance_viol={final_clearance_violations}, "
                 f"overflow={final_overflow})"
             )
-            # Unmark all current routes from the grid
-            for route in list(self.routes):
+            # Restore geometry/indexes as well as congestion: later collision
+            # queries must not see the discarded iteration's copper.
+            stale_routes = list(self.routes)
+            for route in stale_routes:
                 self.grid.unmark_route_usage(route)
-            # Replace with best-state routes
             self.routes.clear()
             self.routes.extend(best_routes)
+            replacements: list[tuple[Route | None, Route | None]] = [
+                (route, None) for route in stale_routes
+            ]
+            replacements.extend((None, route) for route in best_routes)
+            self.grid.resync_route_occupancy(replacements)
             # Re-mark best routes on the grid
             for route in self.routes:
                 self.grid.mark_route_usage(route)

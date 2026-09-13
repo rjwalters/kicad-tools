@@ -97,32 +97,32 @@
       "size": 6
     },
     "firmware/README.md": {
-      "sha256": "50174a09ffdc8ac6442e539725ae1c75cc63ceeb449f4f2cacc1de95bdef1f27",
-      "size": 4535
+      "sha256": "08667b811161162459ab9950164f799e0549aa760c124e1fc4a933a20ce79e40",
+      "size": 8319
     },
     "firmware/artifacts/build-report.json": {
-      "sha256": "eea77752ef6205ac76bebe86fdfd7b5d1334132e4ce1b1aa526adccb6ef44134",
-      "size": 673
+      "sha256": "b0a0d5abf82faedfe23b6c787b7d8e8681de5f3b21e2ec525a15bda9169239bf",
+      "size": 757
     },
     "firmware/artifacts/firmware.bin": {
-      "sha256": "477e4b8c07890e584a39c5207f8eb0d3ef1e9e1e9b94e55c8de3f995f61c0c3d",
-      "size": 7104
+      "sha256": "6b815d0720f7a15b32c2c1fecf66e3b3c6cf4f72904ace56dea400124734bfd4",
+      "size": 7284
     },
     "firmware/artifacts/firmware.elf": {
-      "sha256": "2a9de8ac92d1564020ee68e5f3bdd4efe2bf35e1f04a834b43a1dd04956ca4a6",
-      "size": 23884
+      "sha256": "7a536ba67de87b34a4217310de38104db830fc873e29b7643e28c305ab99f011",
+      "size": 24156
     },
     "firmware/artifacts/firmware.hex": {
-      "sha256": "7637638b3d85d90a861eaa629a6ae5b23098e8e5c3b62c6ca0494232a6f517ac",
-      "size": 20006
+      "sha256": "ac7e071658cc4721a0aeb1023098d423e8f40e48025fe898e1a80f60bc55f21e",
+      "size": 20509
     },
     "firmware/boards/kct_joystick.json": {
       "sha256": "a0baeaf5f9d3b93488634f985e0ee1c783cf904bcfb1b5467b7dd14a0c70f5bb",
       "size": 679
     },
     "firmware/build.py": {
-      "sha256": "03129fb44ecc0002d1e9b752cacfbb6c49f88df103080487038050624d52a2d4",
-      "size": 2842
+      "sha256": "237740f5e2a56af45f799654c54259e91433d6e4bb3667a5b6abd605dfeb2ab6",
+      "size": 4167
     },
     "firmware/dependency-sources.zip": {
       "sha256": "f0b78c5202617223d1436629ee825cc09f15a96bc04603ede8ba287cefdb667a",
@@ -160,13 +160,21 @@
       "sha256": "070e66d808687f1b7a558032802155c4e32775613c6ec13a76b8c241d8a0d452",
       "size": 7670
     },
+    "firmware/patches/apply_usbcore_patch.py": {
+      "sha256": "3ec095edc8dbe5f0103d9b796ce93262ac48aaf5ba984e9746fb6d9393f3e8b7",
+      "size": 3618
+    },
+    "firmware/patches/usbcore-suspend-resume.patch": {
+      "sha256": "a2e64bec8ccd7f674f3497fa795cc33171091b2259c10f0c68138ea325333269",
+      "size": 4838
+    },
     "firmware/platformio.ini": {
-      "sha256": "217d6a5969528e628ff9eff889e80b85f0499f111b7ac35342ed589e64120fb2",
-      "size": 762
+      "sha256": "f0364755a15cb54900ef01d3c0576a24f5d517c68a16648f1782a1111bd08052",
+      "size": 1042
     },
     "firmware/src/main.cpp": {
-      "sha256": "188bcfce3038a1664f66a726566bd7344c03c1ef839884fb7abca08b443f1ec5",
-      "size": 2109
+      "sha256": "8dae81d2e930969d6160d2f98509623bbd77fd46f5334cf5809bb9193dd996cf",
+      "size": 2192
     },
     "gerbers/gerbers.zip": {
       "sha256": "af4f2ac7ba2e858c39d45533cef5de7580539d29d011ffb84bad3d8add1cd2c0",

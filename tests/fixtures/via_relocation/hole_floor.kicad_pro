@@ -1,0 +1,1 @@
+{"board": {"design_settings": {"rules": {"min_clearance": 0.1016, "min_hole_clearance": 0.25, "min_through_hole_diameter": 0.2, "min_via_diameter": 0.45}}}, "net_settings": {"classes": [{"name": "Default", "clearance": 0.1016}]}}

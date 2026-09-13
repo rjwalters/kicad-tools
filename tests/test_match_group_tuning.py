@@ -1753,6 +1753,7 @@ from kicad_tools.router.match_group_tuning import (  # noqa: E402
     _post_insertion_clearance_ok_pair_group,
     _reflect_point_about_axis,
     _snap_to_grid,
+    _splice_mirrored_n_route,
 )
 
 
@@ -2019,6 +2020,103 @@ class TestPhase2FRollbackBothHalves:
         assert results[10][0].segments is original_p_segments
         assert results[11][0] is original_n
         assert results[11][0].segments is original_n_segments
+
+
+# =============================================================================
+# Issue #4984: end-to-end -- unequal host spans never produce a malformed
+# (discontinuous / duplicated-copper) route through the public entrypoint.
+# =============================================================================
+
+
+class TestPhase2FUnequalHostSpanRejection:
+    """The pair-aware tuner must reject an insertion attempt outright when
+    the N-side host segment does not correspond to the P-side insertion
+    segment's span, rather than commit a discontinuous route with
+    asymmetric added length (issue #4984)."""
+
+    @staticmethod
+    def _assert_contiguous(route: Route, *, label: str) -> None:
+        for a, b in zip(route.segments, route.segments[1:], strict=False):
+            assert (a.x2, a.y2) == (b.x1, b.y1), (
+                f"{label}: route is not contiguous between {(a.x2, a.y2)} and {(b.x1, b.y1)}"
+            )
+
+    def test_unequal_host_spans_rejected_not_spliced(self):
+        from kicad_tools.router.length import LengthTracker
+
+        def seg(x1: float, y1: float, x2: float, y2: float, net: int) -> Segment:
+            return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=net)
+
+        group = MatchGroup(
+            name="MIPI_ASYM",
+            net_ids=[32],
+            pair_ids=[(30, 31)],
+            tolerance=0.1,
+            reference_net_id=32,
+            source=MatchGroupSource.LEGACY_API,
+        )
+
+        # P's longest (and therefore preferred) segment spans 8mm (x=1..9).
+        p_route = Route(
+            net=30,
+            net_name="DAT_P",
+            segments=[seg(0, 0, 1, 0, 30), seg(1, 0, 9, 0, 30), seg(9, 0, 10, 0, 30)],
+        )
+        # N is parallel (offset in y) but segmented completely differently
+        # -- no N segment spans anywhere near 8mm, so the nearest-midpoint
+        # candidate the pre-#4984 heuristic would have picked (the
+        # (4.5,1)-(7,1) 2.5mm segment) does NOT correspond to P's host.
+        n_route = Route(
+            net=31,
+            net_name="DAT_N",
+            segments=[
+                seg(0, 1, 1.5, 1, 31),
+                seg(1.5, 1, 4.5, 1, 31),
+                seg(4.5, 1, 7, 1, 31),
+                seg(7, 1, 8, 1, 31),
+            ],
+        )
+        clk_route = Route(net=32, net_name="CLK", segments=[seg(0, 5, 12, 5, 32)])
+        routes = {30: p_route, 31: n_route, 32: clk_route}
+
+        original_p_length = LengthTracker.calculate_route_length(p_route)
+        original_n_length = LengthTracker.calculate_route_length(n_route)
+
+        results = tune_match_group_v2(
+            group,
+            routes,
+            tolerance_mm=0.1,
+            intra_group_clearance_mm=0.2,
+            intra_pair_clearance_mm=0.1,
+            config=SerpentineConfig(amplitude=0.3, gap_factor=2.0),
+            max_inserts_per_member=3,
+        )
+
+        p_result_route, p_result = results[30]
+        n_result_route, n_result = results[31]
+
+        # The candidate must be rejected -- never silently committed.
+        assert p_result.reason == "no_suitable_segment"
+        assert n_result.reason == "no_suitable_segment"
+
+        # Drift-prevention: rejected candidate means the routes are
+        # returned byte-for-byte unchanged.
+        assert p_result_route is p_route
+        assert n_result_route is n_route
+
+        # Independent verification (per issue #4984): whatever the tuner
+        # decided, the resulting routes must still be geometrically
+        # contiguous and have NOT silently grown/shrunk in length --
+        # the two symptoms of the original bug (duplicated/overlapping
+        # copper and asymmetric added length).
+        self._assert_contiguous(p_result_route, label="P")
+        self._assert_contiguous(n_result_route, label="N")
+        assert LengthTracker.calculate_route_length(p_result_route) == pytest.approx(
+            original_p_length
+        )
+        assert LengthTracker.calculate_route_length(n_result_route) == pytest.approx(
+            original_n_length
+        )
 
 
 # =============================================================================
@@ -2568,6 +2666,210 @@ class TestPhase2FFindCorrespondingN:
         n_route = _straight_route(11, "N", 10.0, y=2.0, layer=Layer.B_CU)
         result = _find_corresponding_n_segment(n_route, p_seg)
         assert result is None
+
+    # -- Issue #4984: unequal parallel spans / nearby nonparallel segments --
+
+    def test_rejects_nearest_midpoint_host_with_mismatched_span(self):
+        """A same-layer segment can be the nearest-midpoint match while
+        having a completely different span than ``p_seg`` -- the exact
+        precondition hole from issue #4984. The heuristic must not treat
+        that segment as "corresponding" just because it is closest.
+        """
+        p_seg = Segment(
+            x1=1.0,
+            y1=0.3,
+            x2=9.0,
+            y2=0.3,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="P",
+        )  # 8mm span, midpoint (5, 0.3)
+        n_route = Route(
+            net=3,
+            net_name="N",
+            segments=[
+                Segment(x1=0.0, y1=1.0, x2=1.5, y2=1.0, width=0.2, layer=Layer.F_CU, net=3),
+                # Nearest midpoint to (5, 0.3) is this 3mm segment (midpoint
+                # (4.5, 1.0)) -- but its span is nowhere close to 8mm.
+                Segment(x1=1.5, y1=1.0, x2=4.5, y2=1.0, width=0.2, layer=Layer.F_CU, net=3),
+                Segment(x1=4.5, y1=1.0, x2=7.0, y2=1.0, width=0.2, layer=Layer.F_CU, net=3),
+                Segment(x1=7.0, y1=1.0, x2=8.0, y2=1.0, width=0.2, layer=Layer.F_CU, net=3),
+            ],
+        )
+        result = _find_corresponding_n_segment(n_route, p_seg)
+        assert result is None, (
+            "expected the span-mismatched, nearest-midpoint host to be "
+            "rejected rather than returned as a false correspondence"
+        )
+
+    def test_prefers_span_matching_segment_over_closer_mismatched_neighbor(self):
+        """When a genuinely corresponding (matching-span) segment exists
+        further from the midpoint than a mismatched decoy, the matching
+        one must win."""
+        p_seg = Segment(
+            x1=1.0,
+            y1=0.3,
+            x2=9.0,
+            y2=0.3,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="P",
+        )  # 8mm span, midpoint (5, 0.3)
+        n_route = Route(
+            net=3,
+            net_name="N",
+            segments=[
+                # Decoy: very close midpoint but a short (1mm) span.
+                Segment(x1=4.5, y1=0.4, x2=5.5, y2=0.4, width=0.2, layer=Layer.F_CU, net=3),
+                # True correspondence: matching 8mm span, further away.
+                Segment(x1=1.0, y1=5.0, x2=9.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=3),
+            ],
+        )
+        result = _find_corresponding_n_segment(n_route, p_seg)
+        assert result is not None
+        idx, seg = result
+        assert idx == 1
+        assert seg.x1 == 1.0 and seg.x2 == 9.0
+
+    def test_rejects_nearby_nonparallel_segment_with_coincidental_length(self):
+        """A nearby but nonparallel (perpendicular) segment must not be
+        treated as corresponding merely because its length happens to
+        match ``p_seg``'s span -- it still fails on midpoint-adjacent
+        selection producing an unusable host once ``_splice_mirrored_n_route``
+        validates endpoints (covered separately); this test locks down that
+        the finder itself does not special-case orientation and callers
+        rely on the splice-time endpoint guard as the backstop."""
+        p_seg = Segment(
+            x1=0.0,
+            y1=0.0,
+            x2=8.0,
+            y2=0.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,
+            net_name="P",
+        )  # 8mm horizontal span, midpoint (4, 0)
+        # A vertical (nonparallel) segment near the midpoint with the SAME
+        # length (8mm) as p_seg -- length alone cannot distinguish it from
+        # a true corresponding segment.
+        nonparallel = Segment(x1=4.0, y1=-4.0, x2=4.0, y2=4.0, width=0.2, layer=Layer.F_CU, net=3)
+        n_route = Route(net=3, net_name="N", segments=[nonparallel])
+        result = _find_corresponding_n_segment(n_route, p_seg)
+        # The finder has no other same-layer candidate, so it returns this
+        # nonparallel segment (length matches, same layer) -- but the
+        # splice-time endpoint guard below is what actually protects the
+        # route from a malformed splice using it.
+        assert result is not None
+        idx, seg = result
+        assert seg is nonparallel
+
+
+# =============================================================================
+# Issue #4984: `_splice_mirrored_n_route` must reject a non-corresponding host
+# =============================================================================
+
+
+class TestSpliceMirroredNRouteHostValidation:
+    """The splice must reject a host whose endpoints do not match the
+    reflected chain's endpoints, rather than build a discontinuous route."""
+
+    @staticmethod
+    def _seg(x1: float, y1: float, x2: float, y2: float) -> Segment:
+        return Segment(x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=2)
+
+    def test_issue_4984_minimal_repro_is_rejected(self):
+        """The exact minimal reproduction from issue #4984: an 8mm host
+        (index 1, spanning x=1..9) receiving a mirrored chain that
+        actually spans x=0..10. Pre-fix this silently spliced a
+        discontinuous, overlapping-copper route; post-fix it must be
+        rejected outright."""
+        s = self._seg
+        n_route = Route(
+            net=2,
+            net_name="TEST_N",
+            segments=[s(0, 0.3, 1, 0.3), s(1, 0.3, 9, 0.3), s(9, 0.3, 10, 0.3)],
+        )
+        mirrored = [
+            s(0, 0.3, 2, 0.3),
+            s(2, 0.3, 2, 1.3),
+            s(2, 1.3, 8, 1.3),
+            s(8, 1.3, 8, 0.3),
+            s(8, 0.3, 10, 0.3),
+        ]
+        result = _splice_mirrored_n_route(n_route, 1, mirrored)
+        assert result is None
+
+    def test_matching_host_span_splices_contiguously(self):
+        """When the mirrored chain's endpoints DO match the host's own
+        endpoints, the splice succeeds and the resulting route is fully
+        contiguous (no gap, no duplication)."""
+        s = self._seg
+        n_route = Route(
+            net=2,
+            net_name="TEST_N",
+            segments=[s(0, 0.3, 1, 0.3), s(1, 0.3, 9, 0.3), s(9, 0.3, 10, 0.3)],
+        )
+        mirrored = [
+            s(1, 0.3, 3, 0.3),
+            s(3, 0.3, 3, 1.3),
+            s(3, 1.3, 7, 1.3),
+            s(7, 1.3, 7, 0.3),
+            s(7, 0.3, 9, 0.3),
+        ]
+        result = _splice_mirrored_n_route(n_route, 1, mirrored)
+        assert result is not None
+        for a, b in zip(result.segments, result.segments[1:], strict=False):
+            assert (a.x2, a.y2) == (b.x1, b.y1), "spliced route must be contiguous"
+        assert result.segments[0].x1 == 0 and result.segments[0].y1 == 0.3
+        assert result.segments[-1].x2 == 10 and result.segments[-1].y2 == 0.3
+
+    def test_reversed_mirrored_chain_still_splices_contiguously(self):
+        """The mirror can flip direction relative to the host (the
+        reflection axis crosses through the host segment); the splice
+        must reorder/flip the chain rather than reject a legitimately
+        corresponding, reversed-direction match."""
+        s = self._seg
+        n_route = Route(
+            net=2,
+            net_name="TEST_N",
+            segments=[s(0, 0.3, 1, 0.3), s(1, 0.3, 9, 0.3), s(9, 0.3, 10, 0.3)],
+        )
+        mirrored_reversed = [
+            s(9, 0.3, 7, 0.3),
+            s(7, 0.3, 7, 1.3),
+            s(7, 1.3, 3, 1.3),
+            s(3, 1.3, 3, 0.3),
+            s(3, 0.3, 1, 0.3),
+        ]
+        result = _splice_mirrored_n_route(n_route, 1, mirrored_reversed)
+        assert result is not None
+        for a, b in zip(result.segments, result.segments[1:], strict=False):
+            assert (a.x2, a.y2) == (b.x1, b.y1), "spliced route must be contiguous"
+
+    def test_nonparallel_host_is_rejected(self):
+        """A nonparallel (perpendicular) host segment can never have its
+        endpoints coincide with a mirrored chain built in the parallel
+        plane -- the splice must reject it."""
+        s = self._seg
+        n_route = Route(
+            net=2,
+            net_name="TEST_N",
+            segments=[
+                s(0, 0.3, 1, 0.3),
+                Segment(x1=4, y1=-4, x2=4, y2=4, width=0.2, layer=Layer.F_CU, net=2),
+                s(9, 0.3, 10, 0.3),
+            ],
+        )
+        mirrored = [s(1, 0.3, 3, 0.3), s(3, 0.3, 3, 1.3), s(3, 1.3, 7, 1.3), s(7, 1.3, 9, 0.3)]
+        result = _splice_mirrored_n_route(n_route, 1, mirrored)
+        assert result is None
+
+    def test_empty_mirrored_segments_is_rejected(self):
+        s = self._seg
+        n_route = Route(net=2, net_name="TEST_N", segments=[s(0, 0.3, 10, 0.3)])
+        assert _splice_mirrored_n_route(n_route, 0, []) is None
 
 
 # =============================================================================
