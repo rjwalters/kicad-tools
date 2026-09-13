@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Normalize legacy center/angle arcs in contour editing, board graphics, and placement linearization so rounded outlines remain connected and replacement preserves only actual mounting-hole contours (#4884).
+
 - Add a daily CI guard (`.github/workflows/assert-no-bot-external.yml`) that
   fails if any open issue labeled `external` has a Bot-type author (#5310).
   `external` is a hard-exclusion label that blocks Loom dispatch, and a
