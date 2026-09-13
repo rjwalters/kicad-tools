@@ -189,16 +189,14 @@ class TestMeasureCopper:
         assert copper.arc_count == 1
         assert copper.wirelength_mm == pytest.approx(EXPECTED_WIRELENGTH_MM, abs=1e-6)
 
-    def test_arc_is_invisible_to_pcb_segments(self, routed_board: Path) -> None:
-        """Regression guard: the schema PCB does not model copper arcs.
-
-        If it ever does, ``measure_copper`` must stop adding them
-        separately or the arc would be double-counted.
-        """
+    def test_arcs_are_separate_from_straight_segments(self, routed_board: Path) -> None:
+        """Schema exposes both populations; benchmark counts each once."""
         from kicad_tools.schema.pcb import PCB
 
         pcb = PCB.load(str(routed_board))
         assert len(pcb.segments) == 3
+        assert len(pcb.arcs) == 1
+        assert pcb.arcs[0].length == pytest.approx(math.pi)
         straight_only = sum(math.dist(s.start, s.end) for s in pcb.segments)
         assert straight_only == pytest.approx(20.0, abs=1e-6)
 

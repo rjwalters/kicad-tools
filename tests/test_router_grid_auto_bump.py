@@ -142,8 +142,8 @@ def _on_grid_resistor_pads(
 class TestComputeZoneResolutionAndOffset:
     """Tests for the per-component (resolution, offset) solver."""
 
-    def test_on_grid_component_picks_coarsest_finer_than_coarse(self):
-        """A component whose pads are on a 0.05mm grid prefers 0.05mm."""
+    def test_on_grid_component_keeps_coarse_spacing(self):
+        """Already aligned pads do not require a finer spacing."""
         # 4 pads at x = 10, 11, 12, 13; y = 5 (all multiples of 0.05)
         pads = [_make_pad(10.0 + i, 5.0, "R1", str(i + 1)) for i in range(4)]
         res, x_off, y_off = _compute_zone_resolution_and_offset(
@@ -151,12 +151,11 @@ class TestComputeZoneResolutionAndOffset:
             coarse_resolution=0.1,
             min_fine_resolution=0.005,
         )
-        # The coarsest fine grid finer than 0.1mm that aligns is 0.05mm.
-        assert res == 0.05
+        assert res == 0.1
         assert (x_off, y_off) == (0.0, 0.0)
 
     def test_half_grid_pads_use_offset(self):
-        """Pads at half-grid use 0.05mm with no offset (50.025mm % 0.05 = 0.025)."""
+        """A shifted origin aligns half-grid pads without doubling resolution."""
         # USB-C-style pads at x = 137.250 (10x exact for 0.05mm: 2745.0)
         pads = [
             _make_pad(137.250, 100.0, "J1", "1"),
@@ -168,9 +167,8 @@ class TestComputeZoneResolutionAndOffset:
             coarse_resolution=0.1,
             min_fine_resolution=0.005,
         )
-        # 137.250 % 0.05 = 0 (250.5 = exact 250 in float terms within
-        # threshold). 0.05 should be chosen at offset (0, 0).
-        assert res == 0.05
+        assert res == 0.1
+        assert x_off == pytest.approx(0.05)
         # All pads must be on the chosen (res, offset) grid:
         for p in pads:
             assert _is_on_grid_with_offset(p.x, res, x_off)

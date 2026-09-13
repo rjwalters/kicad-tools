@@ -65,10 +65,11 @@ from kicad_tools.schema.pcb import Segment as SchemaSegment
 
 
 class _StubPCB:
-    """``compute_routing_quality`` only reads ``pcb.segments``."""
+    """Straight-only board fixture for the public segment/arc collections."""
 
     def __init__(self, segments: list[SchemaSegment]):
         self.segments = segments
+        self.arcs = []
 
 
 def _schema_seg(

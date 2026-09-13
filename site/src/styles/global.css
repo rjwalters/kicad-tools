@@ -1,0 +1,38 @@
+:root {
+    color-scheme: dark;
+    --bg: #0a0e12;
+    --text: #e6edf3;
+    --muted: #9aa7b2;
+    --accent: #3fae7a;
+    --border: #25303a;
+    --card-bg: #11171d;
+    --badge-bg: #1b2530;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family:
+      system-ui,
+      -apple-system,
+      "Segoe UI",
+      Roboto,
+      Helvetica,
+      Arial,
+      sans-serif;
+    line-height: 1.5;
+  }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+html { scroll-padding-top: 1rem; }
+main { overflow-wrap: anywhere; }

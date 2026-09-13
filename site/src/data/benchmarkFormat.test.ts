@@ -8,6 +8,8 @@ import {
   fmtKctCheck,
   fmtCliDrc,
   fmtDiffPairs,
+  isHistoricalStoppedAttempt,
+  fmtDateOnly,
   fmtOutcome,
   fmtArtifactSource,
   isLegacyOutcome,
@@ -30,7 +32,7 @@ const base: BenchmarkReport = {
   kct_check: { ran: true, passed: false, error_count: 394, warning_count: 801 },
   kicad_cli_drc: { ran: true, violation_count: 0 },
   diff_pairs: null,
-  notes: [],
+  notes: ["router produced no output file -- reporting the unrouted, ripped-up board (0% complete) rather than a stale artifact"],
 };
 
 describe("benchmarkFormat", () => {
@@ -86,6 +88,40 @@ describe("benchmarkFormat", () => {
       diff_pairs: { pairs_total: 4, pairs_complete: 0, completion_pct: 0 },
     };
     expect(fmtDiffPairs(withPairs)).toBe("0/4");
+  });
+
+  it("recognizes the documented August stopped attempt", () => {
+    expect(isHistoricalStoppedAttempt(base)).toBe(true);
+  });
+
+  it("isHistoricalStoppedAttempt is false once any copper was placed", () => {
+    const routed: BenchmarkReport = {
+      ...base,
+      copper: { via_count: 68, wirelength_mm: 1182.9 },
+    };
+    expect(isHistoricalStoppedAttempt(routed)).toBe(false);
+    const partialLength: BenchmarkReport = {
+      ...base,
+      copper: { via_count: 0, wirelength_mm: 12.5 },
+    };
+    expect(isHistoricalStoppedAttempt(partialLength)).toBe(false);
+  });
+
+  it("never infers a stopped attempt from zero copper or overrides explicit provenance", () => {
+    expect(isHistoricalStoppedAttempt({ ...base, notes: [] })).toBe(false);
+    expect(isHistoricalStoppedAttempt({ ...base, tool_commit: "new-commit" })).toBe(false);
+    expect(isHistoricalStoppedAttempt({ ...base, generated_at: "2026-09-12" })).toBe(false);
+    expect(isHistoricalStoppedAttempt({ ...base, protocol: "tuned" })).toBe(false);
+    for (const outcome of ["completed", "partial", "failed", "timeout", "unknown", "stopped_before_routing"] as const) {
+      expect(isHistoricalStoppedAttempt({ ...base, route_outcome: {
+        outcome, artifact_source: "router_output", exit_code: 0, reason: null,
+      } })).toBe(false);
+    }
+  });
+
+  it("formats an ISO timestamp as a bare YYYY-MM-DD date", () => {
+    expect(fmtDateOnly("2026-08-25T04:10:36.208374+00:00")).toBe("2026-08-25");
+    expect(fmtDateOnly("2026-08-25")).toBe("2026-08-25");
   });
 
   it("formats missing route_outcome as legacy, never success (#5280)", () => {

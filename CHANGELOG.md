@@ -7,11 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add a daily CI guard (`.github/workflows/assert-no-bot-external.yml`) that
+  fails if any open issue labeled `external` has a Bot-type author (#5310).
+  `external` is a hard-exclusion label that blocks Loom dispatch, and a
+  GitHub App installation actor (e.g. `loom-fleet-dispatch[bot]`) never
+  passes `repos.checkCollaborator`, so every issue it filed before PR #5233
+  got mislabeled `external` and silently stalled the pipeline; this catches
+  a recurrence of that regression class automatically instead of via a
+  stalled sweep. The already-mislabeled open issues were also cleaned up as
+  a one-time forge-state fix (label removed by author id, not a blanket
+  strip).
 - Fix Codex-only installer workflows to resolve generated sibling skills and namespace help, with runtime-appropriate invocation and optional metadata handling.
 - Use shared project drill-clearance checks for Board07 relocation and fallback stubs; reject archived moves into foreign zone fill without saving partial repairs.
 
 ### Fixed
 
+- **Imported copper arcs no longer cause false opens or under-reported
+  wirelength** (#4937) — `PCB` parsed `(segment ...)` and `(via ...)` copper
+  but had no branch for `(arc ...)`, the curved-track element KiCad 7+ writes
+  for rounded copper; an externally-sourced board routed only with an arc
+  reported two disconnected islands and 0 mm of trace length. A new `Arc`
+  schema class exposes analytic swept length and geometric connectivity
+  (`pcb.arcs`, `arcs_on_layer()`, `arcs_in_net()`), threaded into
+  `NetStatusAnalyzer` (arc-bearing boards always use real copper geometry,
+  even under `strict=False`, since endpoint proximity cannot describe curved
+  contact), `routing_quality`, `trace_length`/diff-pair skew, and the
+  external-benchmark wirelength metric. PCB saves preserve untouched arc
+  source text byte-for-byte (numeric spelling, whitespace, CRLF), while
+  edits invalidate the retained text so page-fit/reimport keep working.
+  Invalid or nonfinite arc geometry now fails explicitly instead of
+  silently degrading to a chord.
 - Preserve authored pad shapes through router loading, workers, and native
   conversion (#5229). Square pads no longer lose copper corners to a circular
   approximation. Rotated search bounds enclose copper; unsupported custom or

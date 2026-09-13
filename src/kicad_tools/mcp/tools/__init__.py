@@ -42,6 +42,7 @@ from kicad_tools.mcp.tools.mistakes import (
     detect_mistakes,
     list_mistake_categories,
 )
+from kicad_tools.mcp.tools.observability import get_recent_calls
 from kicad_tools.mcp.tools.patterns import (
     adapt_pattern,
     get_requirements,
@@ -90,6 +91,7 @@ __all__ = [
     "get_decision_history",
     "get_design_intent",
     "get_drc_violations",
+    "get_recent_calls",
     "get_requirements",
     "get_session_context",
     "get_session_summary",

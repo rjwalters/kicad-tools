@@ -107,7 +107,7 @@ export function discoverBoardDirs(root: string): string[] {
 }
 
 /** Construct a `no_artifacts` stub for a board with no parsable `board.json`. */
-function makeStub(slug: string, category: BoardCategory): Board {
+function makeStub(slug: string, category: BoardCategory, boardPath: string): Board {
   return {
     $schema: "https://kicad-tools.org/schemas/board/v1.json",
     schema_version: SCHEMA_VERSION,
@@ -115,6 +115,7 @@ function makeStub(slug: string, category: BoardCategory): Board {
     slug,
     status: "no_artifacts",
     category,
+    readiness: loadReadiness(boardPath),
   };
 }
 
@@ -168,7 +169,7 @@ export function loadBoard(boardPath: string): Board {
   const jsonPath = join(boardPath, "output", "board.json");
 
   if (!existsSync(jsonPath)) {
-    return makeStub(slug, category);
+    return makeStub(slug, category, boardPath);
   }
 
   let raw: string;
@@ -176,7 +177,7 @@ export function loadBoard(boardPath: string): Board {
     raw = readFileSync(jsonPath, "utf8");
   } catch (err) {
     console.warn(`[loadBoards] ${slug}: failed to read board.json (${String(err)}); using stub`);
-    return makeStub(slug, category);
+    return makeStub(slug, category, boardPath);
   }
 
   let parsed: unknown;
@@ -184,11 +185,11 @@ export function loadBoard(boardPath: string): Board {
     parsed = JSON.parse(raw);
   } catch (err) {
     console.warn(`[loadBoards] ${slug}: board.json is not valid JSON (${String(err)}); using stub`);
-    return makeStub(slug, category);
+    return makeStub(slug, category, boardPath);
   }
 
   const board = validateBoard(parsed, slug);
-  if (!board) return makeStub(slug, category);
+  if (!board) return makeStub(slug, category, boardPath);
   // `category` is loader-assigned (not part of board.json); always set it.
   board.category = category;
   // Always revalidate the current report: board.json itself may be months old.

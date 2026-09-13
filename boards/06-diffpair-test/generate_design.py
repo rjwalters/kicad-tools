@@ -2064,6 +2064,150 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
     return fixed
 
 
+# Mid-split geometry, shared by the step-13 residual pass
+# (``_split_offangle_chords``) and the step-12 re-route escape
+# (``_reroute_offangle_chord``, issue #5274).
+_MIDSPLIT_EPS = 1e-3
+_MIDSPLIT_FRACTIONS = (0.5, 0.35, 0.65, 0.25, 0.75, 0.15, 0.85)
+_MIDSPLIT_HOLE_CLEAR = 0.25  # KiCad board-setup hole_clearance (see _legalize_signal_vias)
+
+
+def _midsplit_leg_candidates(p0, p1):
+    """Yield ``(frac, legs)`` 3-leg mid-split candidates for an off-angle chord.
+
+    A mid-split replaces the chord with ``axis leg -> exact 45 diagonal ->
+    axis leg`` and slides the diagonal along the chord by *frac*, so each
+    candidate threads a DIFFERENT corridor than either two-leg dogleg
+    ``quantize_pcb_file`` can emit.  The endpoints are preserved
+    bit-for-bit, so connectivity (and every net's reach) is unchanged.
+
+    Pure geometry: no I/O and no clearance model.  Callers must validate
+    the emitted copper themselves -- both call sites re-run the step-12d
+    clearance-signature diff before writing anything.
+
+    Yields nothing when the chord has no usable split (a pure diagonal or
+    a pure axis run), which is the caller's signal to leave it alone.
+    """
+    import math
+
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    adx, ady = abs(dx), abs(dy)
+    diag = min(adx, ady)
+    extra = max(adx, ady) - diag
+    if diag < _MIDSPLIT_EPS or extra < _MIDSPLIT_EPS:
+        return
+    sx = math.copysign(1.0, dx)
+    sy = math.copysign(1.0, dy)
+    for frac in _MIDSPLIT_FRACTIONS:
+        # Round the split length to the emitted 3-decimal precision so
+        # the diagonal leg is EXACTLY 45 degrees after formatting (a
+        # half-thousandth propagation would re-trip the census).
+        a_len = round(extra * frac, 3)
+        if adx > ady:
+            m1 = (round(p0[0] + sx * a_len, 3), p0[1])
+            m2 = (round(m1[0] + sx * diag, 3), round(p0[1] + sy * diag, 3))
+            m2 = (m2[0], round(m1[1] + sy * abs(m2[0] - m1[0]), 3))
+        else:
+            m1 = (p0[0], round(p0[1] + sy * a_len, 3))
+            m2 = (round(p0[0] + sx * diag, 3), round(m1[1] + sy * diag, 3))
+            m2 = (m2[0], round(m1[1] + sy * abs(m2[0] - m1[0]), 3))
+        legs = [(p0, m1), (m1, m2), (m2, p1)]
+        legs = [
+            (q0, q1) for q0, q1 in legs if math.hypot(q1[0] - q0[0], q1[1] - q0[1]) >= _MIDSPLIT_EPS
+        ]
+        yield frac, legs
+
+
+def _legs_clear_foreign_holes(legs, width: float, net: str, vias) -> bool:
+    """True when every leg keeps ``hole_clearance`` from every FOREIGN drill.
+
+    KiCad's board-setup hole clearance is a separate constraint from the
+    copper clearance rules ``_clearance_signature`` measures, so a leg can
+    pass every ``kct`` rule and still be unmanufacturable.
+    """
+    from shapely.geometry import LineString as _LS
+    from shapely.geometry import Point as _Pt
+
+    for q0, q1 in legs:
+        path = _LS([q0, q1]).buffer(width / 2)
+        for v in vias:
+            if v["net"] == net:
+                continue
+            if path.distance(_Pt(v["x"], v["y"]).buffer(v["drill"] / 2)) < _MIDSPLIT_HOLE_CLEAR:
+                return False
+    return True
+
+
+def _chord_replaced_by_legs(text: str, seg: dict, legs, width: float, net_num: str) -> str:
+    """Return *text* with ``seg``'s block replaced by the mid-split ``legs``."""
+    add = "\n".join(
+        f"  (segment (start {q0[0]:.3f} {q0[1]:.3f}) (end {q1[0]:.3f} {q1[1]:.3f}) "
+        f'(width {width}) (layer "{seg["layer"]}") (net {net_num}) '
+        f'(uuid "{_generate_uuid()}"))'
+        for q0, q1 in legs
+    )
+    new_text = text.replace(seg["block"], "").rstrip().rstrip(")")
+    return new_text + "\n" + add + "\n)\n"
+
+
+def _reroute_offangle_chord(
+    pcb_path: Path, baseline: set[tuple[str, ...]], chord_uuid: str
+) -> bool:
+    """Re-route ONE named off-angle chord as a validated mid-split (#5274).
+
+    The step-12d abort message has always prescribed the remedy -- *"the
+    offending chord needs a re-route so its corridor is no longer shared
+    with the via barrel"* -- but step 12 had no way to perform one: its
+    vocabulary was the quantizer's two dogleg variants plus "leave
+    off-angle", and when none of those cleared the graze the build simply
+    failed.  This is that re-route.  A mid-split slides the diagonal along
+    the chord and threads a corridor neither two-leg bulge can, and --
+    unlike a skip -- the replacement is already 45-aligned, so the
+    quantizer leaves it untouched and the fleet-45 census stays at zero.
+
+    Transactional and gate-equivalent: a candidate is written only when its
+    clearance signature introduces NOTHING beyond ``baseline`` (exactly the
+    predicate step 12d applies) and every leg clears foreign drills.  No
+    clearance rule is relaxed, widened, or bypassed; when no candidate
+    qualifies the file is left untouched and the gate still fires.
+
+    Returns ``True`` when ``pcb_path`` was rewritten.
+    """
+    import os
+    import re as _re
+    import tempfile
+
+    text = pcb_path.read_text()
+    _reserve_repair_uuids(text)
+    _net_ids, segs, vias = _parse_copper(text)
+    seg = next((s for s in segs if s["uuid"] == chord_uuid), None)
+    if seg is None:
+        return False
+    m = _re.search(r"\(net (\d+)\)", seg["block"])
+    net_num = m.group(1) if m else "0"
+    for frac, legs in _midsplit_leg_candidates((seg["x1"], seg["y1"]), (seg["x2"], seg["y2"])):
+        for width in (seg["w"], 0.15):
+            if not _legs_clear_foreign_holes(legs, width, seg["net"], vias):
+                continue
+            new_text = _chord_replaced_by_legs(text, seg, legs, width, net_num)
+            fd, tmp = tempfile.mkstemp(suffix=".kicad_pcb")
+            os.close(fd)
+            try:
+                Path(tmp).write_text(new_text)
+                if _clearance_signature(Path(tmp)) - baseline:
+                    continue
+            finally:
+                os.unlink(tmp)
+            pcb_path.write_text(new_text)
+            print(
+                f"   re-routed off-angle chord {chord_uuid[:8]} (net {seg['net']}) as "
+                f"{len(legs)} 45-aligned leg(s) [mid-split frac={frac}, width={width}] "
+                f"-- corridor no longer shared with the via barrel (#5274)"
+            )
+            return True
+    return False
+
+
 def _split_offangle_chords(pcb_path: Path, baseline: set[tuple[str, ...]]) -> int:
     """Mid-split 3-leg fallback for off-angle chords the quantizer skipped.
 
@@ -2079,14 +2223,11 @@ def _split_offangle_chords(pcb_path: Path, baseline: set[tuple[str, ...]]) -> in
     mutated copy's clearance signature must introduce nothing beyond
     ``baseline``.  Returns the number of chords replaced.
     """
-    import math
     import os
     import tempfile
 
     from kicad_tools.router.quantize import segment_angle_census
 
-    EPS = 1e-3
-    HOLE_CLEAR = 0.25  # KiCad board-setup hole_clearance (see _legalize_signal_vias)
     _total, off_angle = segment_angle_census(pcb_path)
     if not off_angle:
         return 0
@@ -2096,73 +2237,31 @@ def _split_offangle_chords(pcb_path: Path, baseline: set[tuple[str, ...]]) -> in
     _net_ids, segs, vias = _parse_copper(text)
     fixed = 0
 
-    def _legs_clear_foreign_holes(legs, width: float, net: str) -> bool:
-        from shapely.geometry import LineString as _LS
-        from shapely.geometry import Point as _Pt
-
-        for q0, q1 in legs:
-            path = _LS([q0, q1]).buffer(width / 2)
-            for v in vias:
-                if v["net"] == net:
-                    continue
-                if path.distance(_Pt(v["x"], v["y"]).buffer(v["drill"] / 2)) < HOLE_CLEAR:
-                    return False
-        return True
-
     for entry in off_angle:
         uuid = entry["uuid"]
         seg = next((s for s in segs if s["uuid"] == uuid), None)
         if seg is None:
             continue
-        p0 = (seg["x1"], seg["y1"])
-        p1 = (seg["x2"], seg["y2"])
-        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
-        adx, ady = abs(dx), abs(dy)
-        diag = min(adx, ady)
-        extra = max(adx, ady) - diag
-        if diag < EPS or extra < EPS:
+        candidates = list(_midsplit_leg_candidates((seg["x1"], seg["y1"]), (seg["x2"], seg["y2"])))
+        if not candidates:
             continue
-        sx = math.copysign(1.0, dx)
-        sy = math.copysign(1.0, dy)
-        net_num = None
         import re as _re
 
         m = _re.search(r"\(net (\d+)\)", seg["block"])
         net_num = m.group(1) if m else "0"
         replaced = False
-        for frac in (0.5, 0.35, 0.65, 0.25, 0.75, 0.15, 0.85):
+        for frac, legs in candidates:
             if replaced:
                 break
-            # Round the split length to the emitted 3-decimal precision so
-            # the diagonal leg is EXACTLY 45 degrees after formatting (a
-            # half-thousandth propagation would re-trip the census).
-            a_len = round(extra * frac, 3)
-            if adx > ady:
-                m1 = (round(p0[0] + sx * a_len, 3), p0[1])
-                m2 = (round(m1[0] + sx * diag, 3), round(p0[1] + sy * diag, 3))
-                m2 = (m2[0], round(m1[1] + sy * abs(m2[0] - m1[0]), 3))
-            else:
-                m1 = (p0[0], round(p0[1] + sy * a_len, 3))
-                m2 = (round(p0[0] + sx * diag, 3), round(m1[1] + sy * diag, 3))
-                m2 = (m2[0], round(m1[1] + sy * abs(m2[0] - m1[0]), 3))
-            legs = [(p0, m1), (m1, m2), (m2, p1)]
-            legs = [(q0, q1) for q0, q1 in legs if math.hypot(q1[0] - q0[0], q1[1] - q0[1]) >= EPS]
             # Width fallback: the original width first; then a narrowed
             # bridge (>= the 0.1016 mm fab floor) -- corridor chords sit in
             # via-dense fields where the full-width leg can violate the
             # 0.25 mm KiCad hole-clearance even though every kct clearance
             # rule passes (the 2 um USB3_RX2 graze this pass exists for).
             for width in (seg["w"], 0.15):
-                if not _legs_clear_foreign_holes(legs, width, seg["net"]):
+                if not _legs_clear_foreign_holes(legs, width, seg["net"], vias):
                     continue
-                add = "\n".join(
-                    f"  (segment (start {q0[0]:.3f} {q0[1]:.3f}) (end {q1[0]:.3f} {q1[1]:.3f}) "
-                    f'(width {width}) (layer "{seg["layer"]}") (net {net_num}) '
-                    f'(uuid "{_generate_uuid()}"))'
-                    for q0, q1 in legs
-                )
-                new_text = text.replace(seg["block"], "").rstrip().rstrip(")")
-                new_text += "\n" + add + "\n)\n"
+                new_text = _chord_replaced_by_legs(text, seg, legs, width, net_num)
                 fd, tmp = tempfile.mkstemp(suffix=".kicad_pcb")
                 os.close(fd)
                 try:
@@ -2505,11 +2604,41 @@ def _resolve_quantize_treatment(
     hard-coded uuid therefore silently no-ops on the CI re-route and the
     step-12d gate aborts the build (issue #3913).
 
-    This resolver instead reads the CURRENT artifact's uuids and greedily
-    assigns each grazing chord the cheapest clean treatment -- prefer a
-    flip (which keeps the chord 45-aligned), fall back to a skip -- so the
+    This resolver instead reads the CURRENT artifact's uuids and searches
+    for a treatment assignment that leaves ZERO new grazes -- prefer a flip
+    (which keeps the chord 45-aligned), fall back to a skip -- so the
     remediation tracks the geometry, not a run-specific uuid.  Returns
     ``(axis_first_uuids, skip_uuids)`` ready for ``quantize_pcb_file``.
+
+    Treatments are REVISABLE (issue #5274)
+    --------------------------------------
+    The original search committed each chord's treatment irrevocably the
+    first time it strictly reduced the global graze count, and then excluded
+    that chord from every later round.  That is unsound whenever a flip only
+    *partially* clears a chord: board 06 at PR #5219's head has one such
+    chord (net USB2_D-, ``(113,57.5)->(114,55.5)``) whose diag-first dogleg
+    grazes 8 neighbours, whose axis-first flip grazes exactly 1 -- a via the
+    PR's new SMD via-in-pad enforcement had just pushed off-pad into the
+    flip-side corridor -- and whose skip grazes none.  The old loop took the
+    8 -> 1 improvement, locked the chord as "flipped", and could then never
+    reach the skip that clears it, so the step-12d gate aborted the build on
+    a residual the vocabulary could in fact express.
+
+    So a chord already carrying a treatment may be re-treated.  Every
+    accepted move strictly decreases the residual count, which both
+    guarantees termination (no oscillation is possible) and bounds the
+    number of accepted moves by the initial residual count.
+
+    Re-routing is the last escape (issue #5274)
+    -------------------------------------------
+    When NO assignment over the three treatments clears the residual, the
+    chord's corridor is genuinely shared with foreign copper on both sides
+    and the remedy the step-12d message has always prescribed applies: the
+    chord is re-routed (:func:`_reroute_offangle_chord`) as a 3-leg
+    mid-split that threads a different corridor, validated against the same
+    ``baseline`` predicate the gate uses.  Nothing is suppressed: if no
+    validated re-route exists either, the residual survives and step 12d
+    still aborts the build.
     """
     import os
     import shutil
@@ -2517,50 +2646,93 @@ def _resolve_quantize_treatment(
 
     from kicad_tools.router.quantize import quantize_pcb_file
 
-    def _new_grazes(axis_first: set[str], skip: set[str]) -> set[tuple[str, ...]]:
+    # Wall-clock guard rail: one probe is a full quantize + clearance sweep
+    # (~0.6 s on board 06).  The search is bounded by construction, but cap
+    # the probe count too so a pathological artifact degrades into the
+    # step-12d failure report rather than eating the CI job's deadline.
+    probe_budget = 512
+
+    def _new_grazes(treatment: dict[str, str]) -> set[tuple[str, ...]]:
+        nonlocal probe_budget
+        probe_budget -= 1
         fd, tmp = tempfile.mkstemp(suffix=".kicad_pcb")
         os.close(fd)
         try:
             shutil.copy(pre_quantize_path, tmp)
             quantize_pcb_file(
                 tmp,
-                axis_first_uuids=frozenset(axis_first),
-                skip_uuids=frozenset(skip),
+                axis_first_uuids=frozenset(u for u, t in treatment.items() if t == "flip"),
+                skip_uuids=frozenset(u for u, t in treatment.items() if t == "skip"),
             )
             return _clearance_signature(Path(tmp)) - baseline
         finally:
             os.unlink(tmp)
 
-    # ``dry_run`` lists every off-angle chord's uuid without mutating the file.
-    off_angle = quantize_pcb_file(pre_quantize_path, dry_run=True)
-    axis_first: set[str] = set()
-    skip: set[str] = set(seed_skip_uuids)
+    treatment: dict[str, str] = dict.fromkeys(seed_skip_uuids, "skip")
+    rerouted: set[str] = set()
 
-    # Greedy fixpoint: each iteration commits at most one new treatment that
-    # strictly reduces the NEW-graze count; bounded by the off-angle count.
-    for _ in range(len(off_angle) + 1):
-        remaining = _new_grazes(axis_first, skip)
+    while True:
+        # ``dry_run`` lists every off-angle chord's uuid without mutating the
+        # file.  Re-read it each pass: a re-route below replaces a chord with
+        # 45-aligned legs, so it leaves the off-angle population entirely.
+        off_angle = quantize_pcb_file(pre_quantize_path, dry_run=True)
+        treatment = {u: t for u, t in treatment.items() if u in off_angle or u in seed_skip_uuids}
+        remaining = _new_grazes(treatment)
+
+        # Fixpoint over the three treatments.  Each accepted move strictly
+        # reduces the residual, so the loop cannot cycle and runs at most
+        # ``len(remaining)`` times.
+        while remaining and probe_budget > 0:
+            chosen: tuple[str, str | None] | None = None
+            for u in off_angle:
+                current = treatment.get(u)
+                # Prefer the 45-preserving flip, then the off-angle skip
+                # (step 13 mid-splits it back onto the 45 set), then a
+                # revert to the default diag-first dogleg.
+                for candidate in ("flip", "skip", None):
+                    if candidate == current or probe_budget <= 0:
+                        continue
+                    trial = dict(treatment)
+                    if candidate is None:
+                        trial.pop(u, None)
+                    else:
+                        trial[u] = candidate
+                    residual = _new_grazes(trial)
+                    if len(residual) < len(remaining):
+                        treatment, remaining, chosen = trial, residual, (u, candidate)
+                        break
+                if chosen is not None:
+                    break
+            if chosen is None:
+                break
+            label = chosen[1] or "default"
+            print(f"   auto-remediate ({label}) off-angle chord {chosen[0]} (#3913)")
+
         if not remaining:
             break
-        chosen: tuple[str, str] | None = None
-        for u in off_angle:
-            if u in axis_first or u in skip:
-                continue
-            if len(_new_grazes(axis_first | {u}, skip)) < len(remaining):
-                axis_first.add(u)
-                chosen = ("flip", u)
-                break
-            if len(_new_grazes(axis_first, skip | {u})) < len(remaining):
-                skip.add(u)
-                chosen = ("skip", u)
-                break
-        if chosen is None:
-            # No single-segment flip/skip reduces the residual -- let the
-            # step-12d gate report it as a hard failure (a genuinely new,
-            # non-corridor short that a re-route must resolve).
+
+        # No treatment assignment clears the residual: re-route a chord so
+        # its corridor stops overlapping the foreign barrel (#5274).  One
+        # chord per pass, then re-derive the off-angle set and search again.
+        progressed = False
+        if probe_budget > 0:
+            for u in off_angle:
+                if u in rerouted:
+                    continue
+                if _reroute_offangle_chord(pre_quantize_path, baseline, u):
+                    rerouted.add(u)
+                    treatment.pop(u, None)
+                    progressed = True
+                    break
+        if not progressed:
+            # Nothing left to try -- let the step-12d gate report it as a
+            # hard failure (a genuinely new, non-corridor short).
             break
-        print(f"   auto-remediate ({chosen[0]}) off-angle chord {chosen[1]} (#3913)")
-    return axis_first, skip
+
+    return (
+        {u for u, t in treatment.items() if t == "flip"},
+        {u for u, t in treatment.items() if t == "skip"},
+    )
 
 
 def _finalize_signal_copper(
@@ -3644,7 +3816,12 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # whose BOTH dogleg variants clip a via is held off-angle -- the skip
     # assignment is computed per-run by ``_resolve_quantize_treatment`` (#3913)
     # from the current artifact's uuids, robust to the pour-repair bridge
-    # uuids that change every re-route.
+    # uuids that change every re-route.  That assignment is REVISABLE
+    # (#5274): a flip that only partially clears a chord must not lock out
+    # the skip that clears it, and a chord no assignment can clear is
+    # re-routed as a validated mid-split rather than aborting the build.
+    # Whatever stays skipped is landed back on the 45 set by the step-13
+    # ``_split_offangle_chords`` pass below.
     print("\n12. 45-degree quantization of off-angle copper (#3855 / #3532)...")
     try:
         from kicad_tools.router.quantize import quantize_pcb_file
@@ -3688,10 +3865,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
                         "Post-quantize clearance violation(s) detected -- "
                         "aborting build. The 45-degree quantizer's dogleg "
                         "bulge grazed foreign copper (the #3855 mode) and "
-                        "``_resolve_quantize_treatment`` could not clear it "
-                        "with a single-segment flip/skip. See the clearance "
-                        "report above; the offending chord needs a re-route so "
-                        "its corridor is no longer shared with the via barrel."
+                        "``_resolve_quantize_treatment`` could clear it with "
+                        "neither a flip/skip assignment nor a validated "
+                        "mid-split re-route of the offending chord (#5274). "
+                        "See the clearance report above: the corridor is "
+                        "shared with the via barrel on every path the "
+                        "post-route passes can emit, so the fix belongs "
+                        "upstream in routing, not in this gate."
                     )
             else:
                 print(

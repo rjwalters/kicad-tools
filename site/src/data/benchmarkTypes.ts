@@ -72,11 +72,13 @@ export interface BenchmarkKctCheck {
   passed: boolean;
   error_count: number;
   warning_count: number;
+  note?: string | null;
 }
 
 export interface BenchmarkKicadCliDrc {
   ran: boolean;
   violation_count: number | null;
+  note?: string | null;
 }
 
 export interface BenchmarkDiffPairs {

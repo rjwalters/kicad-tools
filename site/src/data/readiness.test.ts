@@ -96,3 +96,48 @@ it.each(["missing check", "missing project hash", "malformed", "path traversal"]
   save();
   expect(displayStatus(loadBoard(root))).toBe("unverified");
 });
+
+
+it.each(["missing", "malformed", "unknown schema"])("retains verified readiness with %s board metadata", kind => {
+  if (kind === "missing") rmSync(join(root, "output/board.json"));
+  if (kind === "malformed") writeFileSync(join(root, "output/board.json"), "{");
+  if (kind === "unknown schema") writeFileSync(join(root, "output/board.json"), JSON.stringify({schema_version: 99}));
+  // Development evidence is useful independently of a manufacturing export.
+  rmSync(join(root, "output/manufacturing"), { recursive: true });
+  for (const name of Object.keys(report.inputs)) if (name.includes("manufacturing/")) delete report.inputs[name];
+  report.status = "blocked";
+  report.blockers = ["Manufacturing export not run"];
+  report.checks = [
+    { name: "native_erc_clean", status: "passed" },
+    { name: "native_drc", status: "failed" },
+    { name: "copper_lvs_clean", status: "passed" },
+    { name: "manufacturing_release", status: "not_run" },
+  ];
+  save();
+  const board = loadBoard(root);
+  expect(board.status).toBe("no_artifacts");
+  expect(displayStatus(board)).toBe("development");
+  expect(board.readiness?.checks).toEqual(report.checks);
+  expect(board.manufacturing_package).toBeUndefined();
+  expect(board.drc_violations).toBeUndefined();
+  writeFileSync(join(root, "output/demo_routed.kicad_pcb"), "changed");
+  const stale = loadBoard(root);
+  expect(displayStatus(stale)).toBe("unverified");
+  expect(stale.readiness?.checks).toBeUndefined();
+});
+
+it.each(["missing", "malformed", "bad hash"])("fails closed on %s readiness without board metadata", kind => {
+  rmSync(join(root, "output/board.json"));
+  if (kind === "missing") rmSync(join(root, "output/readiness.json"));
+  if (kind === "malformed") writeFileSync(join(root, "output/readiness.json"), "{");
+  if (kind === "bad hash") { report.inputs["output/demo_routed.kicad_pcb"] = "0".repeat(64); save(); }
+  const board = loadBoard(root);
+  expect(displayStatus(board)).toBe("unverified");
+  expect(board.readiness?.checks).toBeUndefined();
+  expect(board.manufacturing_package).toBeUndefined();
+});
+
+it("does not promote a missing summary from a ready report", () => {
+  rmSync(join(root, "output/board.json"));
+  expect(displayStatus(loadBoard(root))).toBe("development");
+});

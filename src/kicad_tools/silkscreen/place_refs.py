@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools._shapely import require_shapely
+from kicad_tools.core.board_outline import board_outline_bounds
 from kicad_tools.core.sexp_file import save_pcb
 from kicad_tools.geometry.courtyard import _courtyard_polygon, _fp_transform, _side_has_geometry
 from kicad_tools.schema.pcb import PCB, _is_footprint_tag
@@ -310,7 +311,24 @@ def _candidate_points(
     return points
 
 
-def _board_material(pcb: PCB, Polygon: Any) -> tuple[list, Any | None, str]:
+class _SilkscreenPCB(PCB):
+    """Retain malformed outlines for placement diagnostics, without a guessed origin."""
+
+    outline_error: str = ""
+
+    def _detect_board_origin(self) -> None:
+        # Validate before the schema converts any coordinates. Only silkscreen
+        # planning can proceed without an outline; every placement will fail
+        # closed below. Ordinary PCB/routing loads retain strict validation.
+        try:
+            board_outline_bounds(self._sexp)
+        except ValueError as exc:
+            self.outline_error = f"board outline unavailable: {exc}"
+            return
+        super()._detect_board_origin()
+
+
+def _board_material(pcb: _SilkscreenPCB, Polygon: Any) -> tuple[list, Any | None, str]:
     """Resolve closed polygon contours without guessing missing board material.
 
     Reuse the schema's segment stitching and 0.01mm endpoint tolerance.
@@ -318,6 +336,8 @@ def _board_material(pcb: PCB, Polygon: Any) -> tuple[list, Any | None, str]:
     outlines are explicitly unsupported here: the schema's two-chord arc
     approximation is not sufficiently accurate to prove containment.
     """
+    if pcb.outline_error:
+        return [], None, pcb.outline_error
     segments = pcb.get_board_outline_segments()
     ox, oy = pcb._board_origin
     for node in pcb._sexp.children:
@@ -681,7 +701,7 @@ class SilkRefPlacer:
     def __init__(self, pcb_path: str | Path) -> None:
         self.path = Path(pcb_path)
         self.doc: SExp = parse_file(self.path)
-        self.pcb: PCB = PCB(self.doc, self.path)
+        self.pcb: _SilkscreenPCB = _SilkscreenPCB(self.doc, self.path)
         # Populated by plan(): footprint reference -> live (fp_text
         # reference)/(property "Reference") node, for apply().
         self._ref_nodes: dict[str, SExp] = {}

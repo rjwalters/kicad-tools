@@ -1638,23 +1638,37 @@ Priority 1/2 discovery and does not change what gets curated this pass.
 
 ### Extracting the stated reference
 
-Reuse the exact machine-readable phrasings this file and
-`detect-dependency-cycle.sh` / `warn-operator-gated.sh` already parse, rather
-than inventing a new pattern — a bare prose mention (e.g. a backtick-quoted
-`` `owner/repo#123` ``) does not count:
+Use the shared script's `extract-refs` subcommand — never re-derive this
+extraction inline. It reuses the exact machine-readable phrasings this file
+and `detect-dependency-cycle.sh` / `warn-operator-gated.sh` already parse (a
+bare prose mention, e.g. a backtick-quoted `` `owner/repo#123` ``, does not
+count):
 
 ```bash
 ISSUE_NUMBER=<number>
-ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" --json body,comments)
-# NOTE: printf '%s\n' "$VAR" | jq, never echo "$VAR" | jq (#5094).
-TEXT=$(printf '%s\n' "$ISSUE_JSON" | jq -r '[.body] + [.comments[].body] | join("\n")')
-
-REFS=$(printf '%s\n' "$TEXT" \
-  | grep -oE '(Blocked by|Depends on|Requires|\*\*Epic\*\*)[*_:[:space:]]*#[0-9]+' \
-  | grep -oE '#[0-9]+' | tr -d '#' | sort -un)
+eval "$(./.loom/scripts/dep-recheck-fingerprint.sh extract-refs --number "$ISSUE_NUMBER")"
+# REFS is now a space-separated (possibly empty) list of referenced numbers.
+# The helper shell-quotes the assignment so multiple refs remain one value.
 ```
 
-- **No reference found** → no-op. Most `loom:operator-mechanical` /
+**Why not just scan `[.body] + [.comments[].body]` directly (#4963):** an
+earlier version of this section did exactly that, and it self-perpetuates.
+The report comment below quotes the matched phrase back into the thread
+verbatim (`` the reference this issue is parked on, #4510 ("Depends on
+#4510"), is now closed ``) — so the *next* pass's extraction, scanning the
+same unconditional comment history, re-matches its own prior report as if it
+were new evidence. On kicad-tools#4507 this produced 13 near-identical
+heartbeat comments over 10 days, and survived a body-only fix (rewording away
+the matched phrase) because the comment history is immutable — the phrase
+lived on forever in a past comment. `extract-refs` closes the loop instead of
+papering over it: it scans the **body** unconditionally, but a **comment**
+only when it is neither authored by the automation identity (`--bot-login`,
+default `loom-fleet-dispatch`) nor itself carrying a
+`curator:dep-recheck:`/`curator:operator-premise-recheck:` marker — so the
+bot's own historical heartbeat comments are never treated as new evidence,
+while a genuine NEW human-authored "Blocked by #N" comment still is.
+
+- **No reference found** (`REFS` empty) → no-op. Most `loom:operator-mechanical` /
   `loom:operator-decision` / `loom:operator-objective` issues have nothing
   checkable — leave them exactly as found, silently.
 - **One or more references found** → compute the fingerprint with the same
@@ -1666,9 +1680,10 @@ REFS=$(printf '%s\n' "$TEXT" \
 ```bash
 eval "$(./.loom/scripts/dep-recheck-fingerprint.sh operator-premise --refs "$REFS")"
 # VERDICT=stale-premise (>=1 reference closed) or VERDICT=open (all still open).
-# REFS is always populated (one `<ref>:<state>` line per reference checked,
-# in both verdicts); only CONCLUSION_HASH is empty when VERDICT=open — see
-# "Idempotency" below for why that means nothing is posted or compared.
+# REFS is now overwritten with the operator-premise subcommand's own REFS
+# output (one `<ref>:<state>` line per reference checked, in both verdicts);
+# only CONCLUSION_HASH is empty when VERDICT=open — see "Idempotency" below
+# for why that means nothing is posted or compared.
 ```
 
 Internally this fetches each reference's current state via `gh issue view

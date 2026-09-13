@@ -38,6 +38,7 @@ import logging
 import math
 import re
 import warnings
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1039,8 +1040,8 @@ def _compute_zone_resolution_and_offset(
     Args:
         comp_pads: List of Pad objects belonging to the component.
         coarse_resolution: The coarse global grid resolution in mm.  The
-            chosen fine resolution will be strictly finer than this (a
-            fine zone at the coarse resolution would be redundant).
+            chosen resolution can equal this when a different origin offset
+            aligns the component; a shifted zone is not redundant.
         min_fine_resolution: Floor for the fine grid resolution (mm).
             Below this, the candidate is rejected as impractical.
 
@@ -1055,17 +1056,16 @@ def _compute_zone_resolution_and_offset(
     # Build candidate resolutions: fixed grid-fraction values plus
     # GCD-derived candidates from this component's pad spacings.  Coarsest
     # values come first so we prefer the cheapest fine zone that works.
-    fixed_candidates = [0.1, 0.05, 0.04, 0.025, 0.02, 0.0125, 0.01]
+    fixed_candidates = [coarse_resolution, 0.1, 0.0635, 0.05, 0.04, 0.025, 0.02, 0.0125, 0.01]
     gcd_candidates = _compute_gcd_grid_candidates(comp_pads, min_grid=min_fine_resolution)
     raw_candidates = sorted(
         {round(c, 6) for c in (fixed_candidates + gcd_candidates)},
         reverse=True,
     )
 
-    # Keep only candidates strictly finer than the coarse grid and at or
-    # above the minimum floor.  A fine zone at >= coarse_resolution would
-    # not refine anything (the coarse grid would suffice).
-    candidates = [c for c in raw_candidates if c < coarse_resolution and c >= min_fine_resolution]
+    # A phase-shifted zone can use the same spacing as the coarse grid.
+    # Keep the existing minimum floor and never choose a coarser spacing.
+    candidates = [c for c in raw_candidates if c <= coarse_resolution and c >= min_fine_resolution]
 
     if not candidates:
         # Fall back to half the coarse grid floored at the minimum.  This
@@ -1116,7 +1116,7 @@ def auto_select_grid_resolution(
         board_height: Board height in mm (for memory constraint check)
         max_cells: Maximum grid cells to allow (default: 500k for performance)
         candidates: Optional list of candidate resolutions to try.
-                   Default: [0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508]
+                   Default: [0.5, 0.25, 0.127, 0.1, 0.065, 0.0635, 0.05, 0.0508]
                    plus GCD-derived candidates from pad spacings.
                    When candidates is None, GCD-based candidates are
                    automatically computed from pad positions and added
@@ -1164,12 +1164,13 @@ def auto_select_grid_resolution(
     #             imperial THT (2.54mm / 0.127 = 20, 5.08mm / 0.127 = 40)
     #   - 0.1mm: Metric footprints, QFP (0.5mm / 0.1 = 5)
     #   - 0.065mm: TSSOP (0.65mm / 0.065 = 10 exact)
+    #   - 0.0635mm (2.5 mil): half the 5-mil lattice, with tighter clearance
     #   - 0.05mm: Good metric alignment but NOT imperial-compatible
     #             (2.54 / 0.05 = 50.8, off-grid by 0.04mm)
     #   - 0.0508mm (2 mil): Imperial-compatible for tight DRC constraints
     #             (2.54 / 0.0508 = 50 exact, 5.08 / 0.0508 = 100 exact)
     if candidates is None:
-        candidates = [0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508]
+        candidates = [0.5, 0.25, 0.127, 0.1, 0.065, 0.0635, 0.05, 0.0508]
 
         # Add GCD-derived candidates from pad spacings.  This handles
         # packages like SSOP/TSSOP whose 0.65mm pitch doesn't align to
@@ -1451,6 +1452,17 @@ def auto_select_grid_resolution(
         min_spacing = _min_pad_center_spacing(pad_list)
         has_fine_pitch = min_spacing is not None and min_spacing <= FINE_PITCH_SPACING_MM
     memory_forced_unsafe_grid = grid_unsafe_by_memory_cap and not lattice_rescued and has_fine_pitch
+    if memory_forced_unsafe_grid:
+        # Pad alignment must not make us reject an otherwise usable safe grid.
+        # The memory filter has already bounded these candidates. Prefer the
+        # best aligned clearance-safe survivor before invoking the hard gate.
+        safe_candidates = [c for c in valid_candidates if c <= recommended_max]
+        if safe_candidates:
+            best_resolution = min(safe_candidates, key=lambda c: (_off_grid_for(c)[0], -c))
+            best_off_grid, best_offset = _off_grid_for(best_resolution)
+            off_grid_pct = best_off_grid / total_pads * 100 if total_pads else 0.0
+            grid_unsafe_by_memory_cap = False
+            memory_forced_unsafe_grid = False
     if grid_unsafe_by_memory_cap:
         if lattice_rescued:
             # Issue #3441: the lattice rescue *chose* this grid because it
@@ -1901,121 +1913,32 @@ class PadPosition:
     y: float
 
 
-def extract_board_dimensions(pcb_path_or_text: str | Path) -> tuple[float, float] | None:
-    """Extract board width and height from a KiCad PCB file.
+def _read_outline_bounds(pcb_path_or_text: str | Path) -> tuple[float, float, float, float] | None:
+    from kicad_tools.core.board_outline import board_outline_bounds
+    from kicad_tools.sexp import parse_string
 
-    Parses the Edge.Cuts outline (``gr_rect`` or four ``gr_line`` segments)
-    to determine board dimensions. This is a lightweight extraction that
-    avoids full PCB parsing.
-
-    Args:
-        pcb_path_or_text: Path to .kicad_pcb file or PCB file contents
-
-    Returns:
-        Tuple of (width_mm, height_mm) or None if no board outline found.
-
-    Example:
-        >>> dims = extract_board_dimensions("board.kicad_pcb")
-        >>> if dims:
-        ...     width, height = dims
-        ...     print(f"Board: {width}mm x {height}mm")
-    """
-    # Read file if path provided
-    if isinstance(pcb_path_or_text, Path):
-        pcb_text = pcb_path_or_text.read_text()
-    elif not pcb_path_or_text.startswith("("):
-        # Looks like a path string
-        pcb_text = Path(pcb_path_or_text).read_text()
+    if isinstance(pcb_path_or_text, str) and pcb_path_or_text.lstrip().startswith("("):
+        text = pcb_path_or_text
     else:
-        pcb_text = pcb_path_or_text
-
-    edge_match = re.search(
-        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)",
-        pcb_text,
-    )
-    if edge_match:
-        x1, y1, x2, y2 = map(float, edge_match.groups())
-        return (abs(x2 - x1), abs(y2 - y1))
-
-    # Fallback: board outlines emitted as four gr_line Edge.Cuts segments
-    # (PCB.create / replace_outline; issue #3805).  Derive the size from the
-    # bounding box of all Edge.Cuts gr_line endpoints.
-    bbox = _edge_cuts_gr_line_bbox(pcb_text)
-    if bbox is not None:
-        min_x, min_y, max_x, max_y = bbox
-        return (max_x - min_x, max_y - min_y)
-    return None
+        text = Path(pcb_path_or_text).read_text()
+    return board_outline_bounds(parse_string(text))
 
 
-def _edge_cuts_gr_line_bbox(pcb_text: str) -> tuple[float, float, float, float] | None:
-    """Bounding box (min_x, min_y, max_x, max_y) of Edge.Cuts gr_line endpoints.
+def extract_board_dimensions(pcb_path_or_text: str | Path) -> tuple[float, float] | None:
+    """Read outline dimensions using the same bounds as schema and routing.
 
-    Lightweight regex scan used by :func:`extract_board_dimensions` and
-    :func:`extract_board_origin` to support board outlines written as four
-    ``gr_line`` segments (issue #3805) rather than a single ``gr_rect``.
-    Returns ``None`` when no Edge.Cuts gr_line geometry is present.
+    Returns None for missing geometry; malformed/unsupported outlines raise ValueError.
     """
-    xs: list[float] = []
-    ys: list[float] = []
-    # Split on the gr_line opener; each chunk holds one gr_line's body up to
-    # the next graphic element.  Only consider chunks on the Edge.Cuts layer.
-    chunks = pcb_text.split("(gr_line")
-    for chunk in chunks[1:]:
-        # Bound the chunk at the next graphic opener so a later element's
-        # layer/coords cannot leak in.
-        next_gr = re.search(r"\(gr_", chunk)
-        body = chunk[: next_gr.start()] if next_gr else chunk
-        if "Edge.Cuts" not in body:
-            continue
-        for cx, cy in re.findall(r"\((?:start|end)\s+(-?[\d.]+)\s+(-?[\d.]+)\)", body):
-            xs.append(float(cx))
-            ys.append(float(cy))
-    if xs and ys:
-        return (min(xs), min(ys), max(xs), max(ys))
-    return None
+    bounds = _read_outline_bounds(pcb_path_or_text)
+    if bounds is None:
+        return None
+    return bounds[2] - bounds[0], bounds[3] - bounds[1]
 
 
 def extract_board_origin(pcb_path_or_text: str | Path) -> tuple[float, float] | None:
-    """Extract board outline origin (bottom-left corner) from a KiCad PCB file.
-
-    Issue #3352 (P_AS4): companion to :func:`extract_board_dimensions`.
-    Used by the auto-pcb-size escalation loop to normalise a recipe's
-    mounting-hole-group anchor against the board outline origin -- KiCad's
-    default origin is ``(100, 100)``, but a hole group declared at
-    ``anchor=(5, 5)`` in the spec typically means "5 mm in from the
-    envelope's bottom-left corner", not "absolute board coord (5, 5)".
-
-    Parses the Edge.Cuts gr_rect to find the start coordinate, then
-    returns ``(min_x, min_y)`` -- the bottom-left corner of the outline.
-
-    Args:
-        pcb_path_or_text: Path to .kicad_pcb file or PCB file contents.
-
-    Returns:
-        ``(origin_x, origin_y)`` in mm, or ``None`` if no board outline
-        gr_rect is detected.
-    """
-    if isinstance(pcb_path_or_text, Path):
-        pcb_text = pcb_path_or_text.read_text()
-    elif not pcb_path_or_text.startswith("("):
-        pcb_text = Path(pcb_path_or_text).read_text()
-    else:
-        pcb_text = pcb_path_or_text
-
-    edge_match = re.search(
-        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)",
-        pcb_text,
-    )
-    if edge_match:
-        x1, y1, x2, y2 = map(float, edge_match.groups())
-        return (min(x1, x2), min(y1, y2))
-
-    # Fallback: four gr_line Edge.Cuts segments (issue #3805).
-    bbox = _edge_cuts_gr_line_bbox(pcb_text)
-    if bbox is not None:
-        min_x, min_y, _max_x, _max_y = bbox
-        return (min_x, min_y)
-    return None
+    """Return the sheet-absolute minimum outline corner, or None if missing."""
+    bounds = _read_outline_bounds(pcb_path_or_text)
+    return bounds[:2] if bounds is not None else None
 
 
 def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
@@ -2087,6 +2010,51 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
     return positions
 
 
+# Tokenize whole atoms before considering the next comment boundary. In the
+# project parser, SPI;SELECT and SPI#SELECT are atoms; # and ; start comments
+# only when encountered where a new token would begin.
+_NET_TOKEN = re.compile(r'(?P<comment>[#;][^\n]*)|"(?:\\.|[^"\\])*"|[()]|[^\s()]+')
+
+
+def _iter_net_references(text: str) -> Iterator[tuple[int | None, str]]:
+    """Read numeric/name, name-only and numeric-only references consistently."""
+    from kicad_tools.sexp import parse_string
+
+    tokens = (match.group() for match in _NET_TOKEN.finditer(text) if not match.group("comment"))
+    for token in tokens:
+        if token != "(":
+            continue
+        if next(tokens, None) != "net":
+            continue
+        values: list[str] = []
+        for token in tokens:
+            if token == ")":
+                break
+            values.append(token)
+        if not 1 <= len(values) <= 2 or "(" in values:
+            continue
+        first = values[0]
+        second = values[1] if len(values) == 2 else None
+        numeric = first.isdecimal()
+        if second is not None and not numeric:
+            continue
+        net_num = int(first) if numeric else None
+        name = second if second is not None else ("" if numeric else first)
+        if name.startswith('"'):
+            # Use the project's string decoder, including escaped quotes/backslashes.
+            name = str(parse_string(f"(name {name})").children[0].value)
+        yield net_num, name
+
+
+def _resolve_pad_net(text: str, net_map: dict[str, int]) -> tuple[int, str]:
+    net_num, name = next(_iter_net_references(text), (None, ""))
+    if net_num is None:
+        return net_map.get(name, 0), name
+    if not name:
+        name = next((key for key, value in net_map.items() if value == net_num), "")
+    return net_num, name
+
+
 def _build_net_number_map(pcb_text: str) -> dict[str, int]:
     """Resolve net name -> net number for BOTH KiCad net-reference dialects.
 
@@ -2111,20 +2079,17 @@ def _build_net_number_map(pcb_text: str) -> dict[str, int]:
     first-seen order -- so name-only nets get a stable, routable id
     instead of collapsing to ``net_num=0``.
     """
+    references = list(_iter_net_references(pcb_text))
     net_map: dict[str, int] = {}
-    for match in re.finditer(r'\(net\s+(\d+)\s+"([^"]*)"\)', pcb_text):
-        net_num, net_name = int(match.group(1)), match.group(2)
-        if net_num > 0 and net_name and net_name not in net_map:
+    for net_num, net_name in references:
+        if net_num is not None and net_num > 0 and net_name and net_name not in net_map:
             net_map[net_name] = net_num
 
-    used_ids = set(net_map.values())
+    # Reserve numeric-only references too, so synthesis never aliases authored IDs.
+    used_ids = {number for number, _ in references if number is not None and number > 0}
     next_id = 1
-    # Name-only inline references, e.g. pad/segment/via ``(net "NAME")``
-    # with no numeric id -- never matched by the pattern above (which
-    # requires a digit immediately after ``(net``).
-    for match in re.finditer(r'\(net\s+"([^"]*)"\)', pcb_text):
-        net_name = match.group(1)
-        if not net_name or net_name in net_map:
+    for net_num, net_name in references:
+        if net_num is not None or not net_name or net_name in net_map:
             continue
         while next_id in used_ids:
             next_id += 1
@@ -2163,7 +2128,6 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
     # Resolve net name <-> number for both KiCad net-reference dialects
     # (numeric-plus-name and KiCad 9/10 name-only) -- issue #4983.
     net_name_to_num = _build_net_number_map(pcb_text)
-    net_num_to_name = {v: k for k, v in net_name_to_num.items()}
 
     # Split by footprint for easier parsing
     footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
@@ -2236,22 +2200,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
             width, height, pad_rotation = _resolve_pad_dims_and_rotation(pad_rot, width, height)
 
-            # Extract net. Handles both the numeric-plus-name dialect
-            # (``(net N "NAME")``) and the KiCad 9/10 name-only dialect
-            # (``(net "NAME")`` with no numeric id) -- issue #4983.
-            net_match = re.search(r"\(net\s+(\d+)", pad_block)
-            if net_match:
-                net_num = int(net_match.group(1))
-                net_name_match = re.search(r'\(net\s+\d+\s+"?([^"\)]+)"?\)', pad_block)
-                net_name = (
-                    net_name_match.group(1).strip()
-                    if net_name_match
-                    else net_num_to_name.get(net_num, "")
-                )
-            else:
-                net_name_match = re.search(r'\(net\s+"([^"]*)"\)', pad_block)
-                net_name = net_name_match.group(1).strip() if net_name_match else ""
-                net_num = net_name_to_num.get(net_name, 0) if net_name else 0
+            net_num, net_name = _resolve_pad_net(pad_block, net_name_to_num)
 
             # Determine layer
             layer = Layer.F_CU
@@ -3386,7 +3335,10 @@ def _extract_pad_blocks(section: str) -> list[str]:
         while i < len(section):
             char = section[i]
 
-            if char == '"' and (i == 0 or section[i - 1] != "\\"):
+            if in_string and char == "\\":
+                i += 2
+                continue
+            if char == '"':
                 in_string = not in_string
             elif not in_string:
                 if char == "(":
@@ -3407,47 +3359,11 @@ def _extract_pad_blocks(section: str) -> list[str]:
 def _extract_edge_segments(
     pcb_text: str,
 ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
-    """Extract board edge segments from Edge.Cuts layer.
-
-    Parses gr_rect and gr_line elements on the Edge.Cuts layer to build
-    a list of line segments defining the board outline.
-
-    Args:
-        pcb_text: Contents of a .kicad_pcb file
-
-    Returns:
-        List of ((x1, y1), (x2, y2)) tuples for each edge segment.
-    """
+    """Read layer-qualified straight outline edges without crossing S-expression nodes."""
+    from kicad_tools.core.board_outline import board_outline_segments
     from kicad_tools.sexp import parse_string
 
-    segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
-    root = parse_string(pcb_text)
-    for node in root.children:
-        if node.name not in {"gr_rect", "gr_line"}:
-            continue
-        layer = node.find_child("layer")
-        if layer is None or layer.get_string(0) != "Edge.Cuts":
-            continue
-        start, end = node.find_child("start"), node.find_child("end")
-        if start is None or end is None:
-            raise ValueError(f"Malformed Edge.Cuts {node.name}: missing start/end")
-        values = (start.get_float(0), start.get_float(1), end.get_float(0), end.get_float(1))
-        if any(value is None or not math.isfinite(value) for value in values):
-            raise ValueError(f"Malformed Edge.Cuts {node.name}: invalid coordinates")
-        x1, y1, x2, y2 = (float(value) for value in values if value is not None)
-        if node.name == "gr_line":
-            segments.append(((x1, y1), (x2, y2)))
-        else:
-            segments.extend(
-                [
-                    ((x1, y1), (x2, y1)),
-                    ((x2, y1), (x2, y2)),
-                    ((x2, y2), (x1, y2)),
-                    ((x1, y2), (x1, y1)),
-                ]
-            )
-
-    return segments
+    return board_outline_segments(parse_string(pcb_text))
 
 
 def _install_fine_pitch_regions_from_components(
@@ -3736,23 +3652,15 @@ def load_pcb_for_routing(
     if rules is None and use_pcb_rules:
         pcb_rules = parse_pcb_design_rules(pcb_text)
 
-    # Parse board dimensions from Edge.Cuts gr_rect
-    edge_match = re.search(
-        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)",
-        pcb_text,
-    )
-    if edge_match:
-        x1, y1, x2, y2 = map(float, edge_match.groups())
-        board_width = x2 - x1
-        board_height = y2 - y1
-        origin_x = x1
-        origin_y = y1
-    else:
-        # Default HAT dimensions
-        board_width = 65.0
-        board_height = 56.0
-        origin_x = 115.0
-        origin_y = 75.0
+    bounds = _read_outline_bounds(pcb_text)
+    if bounds is None:
+        raise ValueError("Cannot route PCB: missing supported Edge.Cuts outline")
+    origin_x, origin_y, max_x, max_y = bounds
+    board_width, board_height = max_x - origin_x, max_y - origin_y
+    if board_width <= 0 or board_height <= 0:
+        raise ValueError("Cannot route PCB: Edge.Cuts outline has zero width or height")
+
+    edge_segments = _extract_edge_segments(pcb_text)
 
     # Parse nets. Resolves both the numeric-plus-name dialect (top-level
     # ``(net N "NAME")`` table) and the KiCad 9/10 name-only dialect, where
@@ -3826,21 +3734,7 @@ def load_pcb_for_routing(
             pad_w = float(size_match.group(1))
             pad_h = float(size_match.group(2))
 
-            # Extract net (if present)
-            # KiCad 7/8: (net <number> "name"), KiCad 9+: (net "name")
-            net_match = re.search(r'\(net\s+(\d+)\s+"([^"]+)"\)', pad_block)
-            if net_match:
-                net_num = int(net_match.group(1))
-                net_name = net_match.group(2)
-            else:
-                # KiCad 9 name-only format
-                net_name_match = re.search(r'\(net\s+"([^"]+)"\)', pad_block)
-                if net_name_match:
-                    net_name = net_name_match.group(1)
-                    net_num = net_map.get(net_name, 0)
-                else:
-                    net_num = 0
-                    net_name = ""
+            net_num, net_name = _resolve_pad_net(pad_block, net_map)
 
             # Extract drill size if present
             drill_match = re.search(r"\(drill\s+([\d.]+)", pad_block)
@@ -4091,7 +3985,6 @@ def load_pcb_for_routing(
     # Extract edge segments for board bbox and optional edge clearance
     # (Issue #2039).  The bbox derived from actual edge cuts is more
     # accurate than grid origin/dimensions for OOB filtering.
-    edge_segments = _extract_edge_segments(pcb_text)
     if edge_segments:
         all_xs = [p[0] for seg in edge_segments for p in seg]
         all_ys = [p[1] for seg in edge_segments for p in seg]

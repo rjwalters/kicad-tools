@@ -9263,6 +9263,8 @@ def _add_detect_mistakes_parser(subparsers) -> None:
             "grounding",
             "via_placement",
             "manufacturability",
+            "connectivity",
+            "bom_health",
         ],
         help="Only check specific category",
     )

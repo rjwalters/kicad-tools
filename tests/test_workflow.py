@@ -536,10 +536,12 @@ class TestBoardSize:
 
     def test_board_size_no_outline(self):
         """Test board_size returns (0,0) when no Edge.Cuts outline exists."""
-        # Create a PCB and clear its graphics to simulate no outline
+        # Remove authoritative outline nodes, not only the cached graphics.
         pcb = PCB.create(width=100, height=100)
-        pcb._graphics = []
-        pcb._graphic_lines = []
+        from kicad_tools.core.board_outline import outline_graphics
+
+        for node in list(outline_graphics(pcb._sexp)):
+            pcb._sexp.remove(node)
         w, h = pcb.board_size
         assert w == 0.0
         assert h == 0.0

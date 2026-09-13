@@ -51,8 +51,23 @@ def detect_mistakes(
                     "learn_more_url": "docs/mistakes/bypass-cap-placement.md"
                 },
                 ...
-            ]
+            ],
+            "coverage": [
+                {"check_name": "BomFieldHealthCheck", "category": "bom_health",
+                 "status": "incomplete", "reason": "..."},
+                ...
+            ],
+            "coverage_complete": false
         }
+
+        ``coverage`` (issue #4899) reports one entry per check that was run,
+        with ``status`` either ``"ran"`` or ``"incomplete"``. A check is
+        ``"incomplete"`` when it could not reach a verdict because required
+        input data was unavailable (e.g. no MPN/LCSC data anywhere on the
+        board for ``BomFieldHealthCheck``) -- this must not be read as a
+        clean pass for that check (mirrors the #4011 vacuity-guard
+        discipline used by ``kct check``'s ``lvs`` sub-check).
+        ``coverage_complete`` is ``true`` only when every check ran.
 
     Raises:
         FileNotFoundError: If the PCB file doesn't exist
@@ -63,15 +78,15 @@ def detect_mistakes(
         >>> print(f"Found {result['summary']['errors']} errors")
         >>> for m in result['mistakes']:
         ...     print(f"[{m['severity']}] {m['title']}")
+        >>> if not result["coverage_complete"]:
+        ...     print("Warning: some checks could not run")
     """
     from pathlib import Path
 
     from kicad_tools.explain.mistakes import (
+        CheckCoverage,
         MistakeCategory,
         MistakeDetector,
-    )
-    from kicad_tools.explain.mistakes import (
-        detect_mistakes as detect_fn,
     )
     from kicad_tools.schema.pcb import PCB
 
@@ -97,12 +112,15 @@ def detect_mistakes(
             "pcb_file": pcb_path,
         }
 
-    # Detect mistakes
+    # Detect mistakes. Always request coverage (issue #4899) so a check
+    # that could not run is reported explicitly rather than silently
+    # looking like a clean pass.
+    detector = MistakeDetector()
+    coverage: list[CheckCoverage]
     if category:
         try:
             cat = MistakeCategory(category)
-            detector = MistakeDetector()
-            mistakes = detector.detect_by_category(pcb, cat)
+            mistakes, coverage = detector.detect_by_category_with_coverage(pcb, cat)
         except ValueError:
             return {
                 "error": f"Invalid category: {category}",
@@ -110,7 +128,7 @@ def detect_mistakes(
                 "valid_categories": [c.value for c in MistakeCategory],
             }
     else:
-        mistakes = detect_fn(pcb)
+        mistakes, coverage = detector.detect_with_coverage(pcb)
 
     # Filter by severity if specified
     if severity:
@@ -133,6 +151,8 @@ def detect_mistakes(
             "info": sum(1 for m in mistakes if m.severity == "info"),
         },
         "mistakes": [m.to_dict() for m in mistakes],
+        "coverage": [c.to_dict() for c in coverage],
+        "coverage_complete": all(c.status == "ran" for c in coverage),
     }
 
 
@@ -185,6 +205,8 @@ def list_mistake_categories() -> dict[str, Any]:
         MistakeCategory.GROUNDING: "Grounding and return path issues",
         MistakeCategory.VIA: "Via placement problems",
         MistakeCategory.MANUFACTURABILITY: "Manufacturing-related issues",
+        MistakeCategory.CONNECTIVITY: "Pull-up / series-resistor connectivity issues",
+        MistakeCategory.BOM_HEALTH: "BOM part-number health issues",
     }
 
     # Format category names
