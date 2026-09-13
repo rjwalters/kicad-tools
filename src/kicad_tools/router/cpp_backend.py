@@ -2341,6 +2341,12 @@ class CppPathfinder:
 
             for attempt in range(max_resume_attempts + 1):
                 route = self._convert_result_to_route(result, start, end, net_class)
+                from .via_reuse import reuse_same_net_vias
+
+                if self._grid._py_grid is not None:
+                    reuse_same_net_vias(
+                        route, self._grid._py_grid.routes, self._rules.min_drill_clearance
+                    )
 
                 # Issue #3438: relief PROBES deliberately cross foreign
                 # copper/halos -- post-route clearance validation would
