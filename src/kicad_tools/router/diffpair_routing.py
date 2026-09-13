@@ -6056,6 +6056,159 @@ class DiffPairRouter:
                     return True
         return False
 
+    def _layer_return_tails(
+        self,
+        pathfinder: CoupledPathfinder,
+        head: Pad,
+        goal: Pad,
+        partner: Route,
+        body: Route,
+        *,
+        deadline: float | None = None,
+    ) -> Iterator[Route]:
+        """Yield bounded, uncommitted one-through-via layer-return candidates.
+
+        Both planar portions use the existing pad/partner-aware synthesizer.
+        Exact final checks include every committed route and the uncommitted
+        partner, including barrel copper on every layer and drilled holes.
+        The caller must still validate the assembled pair and its quality.
+        """
+        from .via_clearance import drill_hole_to_hole_clear
+
+        grid, rules = self.autorouter.grid, self.autorouter.rules
+        start_layer = grid.layer_to_index(head.layer.value)
+        end_layer = grid.layer_to_index(goal.layer.value)
+        if start_layer == end_layer or any(
+            li not in grid.get_routable_indices() for li in (start_layer, end_layer)
+        ):
+            return
+        foreign = [r for r in [*self.autorouter.routes, partner] if r.net != head.net]
+        drills = self._collect_existing_drills() + [
+            (v.x, v.y, v.drill) for r in (partner, body) for v in r.vias
+        ]
+        pair_edge_clearance = self._pair_seg_clearance(
+            pathfinder, head.net_name
+        ) - pathfinder._get_trace_width_for_net(head.net_name)
+        partner_center_clearance = max(
+            (
+                (pathfinder._get_trace_width_for_net(head.net_name) + s.width) / 2
+                + pair_edge_clearance
+                for s in partner.segments
+            ),
+            default=0.0,
+        )
+        sites: set[tuple[int, int]] = set()
+        # Grid-aligned sites avoid placing a barrel between checked cells.
+        for anchor in (goal, head):
+            for radius in (0.0, 0.6, 1.2, 1.8, 2.4):
+                for dx, dy in (
+                    (1, 0),
+                    (-1, 0),
+                    (0, 1),
+                    (0, -1),
+                    (1, 1),
+                    (1, -1),
+                    (-1, 1),
+                    (-1, -1),
+                ):
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return
+                    gx, gy = grid.world_to_grid(anchor.x + dx * radius, anchor.y + dy * radius)
+                    if (gx, gy) in sites:
+                        continue
+                    sites.add((gx, gy))
+                    if pathfinder._is_via_blocked(gx, gy, head.net):
+                        continue
+                    x, y = grid.grid_to_world(gx, gy)
+                    via = Via(
+                        x=x,
+                        y=y,
+                        drill=rules.via_drill,
+                        diameter=rules.via_diameter,
+                        layers=(
+                            Layer(grid.index_to_layer(0)),
+                            Layer(grid.index_to_layer(grid.num_layers - 1)),
+                        ),
+                        net=head.net,
+                        net_name=head.net_name,
+                    )
+                    if (
+                        grid.worst_via_pad_deficit(
+                            via, exclude_net=head.net, clearance_floor=rules.via_clearance
+                        )[0]
+                        > 1e-9
+                    ):
+                        continue
+                    if not drill_hole_to_hole_clear(
+                        x, y, via.drill, drills, rules.min_hole_to_hole
+                    ):
+                        continue
+                    if any(
+                        self._point_segment_distance(x, y, seg)
+                        < (via.diameter + seg.width) / 2 + rules.via_clearance - 1e-9
+                        for r in foreign
+                        for seg in r.segments
+                    ) or any(
+                        math.hypot(x - v.x, y - v.y)
+                        < (via.diameter + v.diameter) / 2 + rules.via_clearance - 1e-9
+                        for r in foreign
+                        for v in r.vias
+                    ):
+                        continue
+                    before = self._virtual_pad_at(head, x, y, start_layer)
+                    after = self._virtual_pad_at(goal, x, y, end_layer)
+                    pieces = []
+                    for a, b, li in ((head, before, start_layer), (after, goal, end_layer)):
+                        if math.hypot(a.x - b.x, a.y - b.y) < 1e-9:
+                            pieces.append(Route(net=head.net, net_name=head.net_name))
+                            continue
+                        part = self._synthesize_tail(
+                            pathfinder,
+                            a,
+                            b,
+                            li,
+                            partner_segments=partner.segments,
+                            partner_clearance=partner_center_clearance,
+                        )
+                        if part is None:
+                            break
+                        pieces.append(part)
+                    if len(pieces) != 2:
+                        continue
+                    segments = [seg for part in pieces for seg in part.segments]
+                    if any(
+                        self._point_segment_distance(v.x, v.y, seg)
+                        < (seg.width + v.diameter) / 2 + rules.via_clearance - 1e-9
+                        for seg in segments
+                        for r in foreign
+                        for v in r.vias
+                    ) or any(
+                        _segment_to_segment_distance(
+                            seg.x1,
+                            seg.y1,
+                            seg.x2,
+                            seg.y2,
+                            other.x1,
+                            other.y1,
+                            other.x2,
+                            other.y2,
+                        )
+                        < (
+                            (seg.width + other.width) / 2 + rules.trace_clearance
+                            if r.net != partner.net
+                            else (seg.width + other.width) / 2 + pair_edge_clearance
+                        )
+                        - 1e-9
+                        for seg in segments
+                        for r in foreign
+                        for other in r.segments
+                        if seg.layer == other.layer
+                    ):
+                        continue
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return
+                    yield Route(net=head.net, net_name=head.net_name, segments=segments, vias=[via])
+
     def _synthesize_crossing_tail(
         self,
         pathfinder: CoupledPathfinder,

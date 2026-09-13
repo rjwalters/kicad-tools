@@ -3334,6 +3334,7 @@ class RoutingGrid:
         exclude_net: int,
         component_pitches: dict[str, float] | None = None,
         exclude_refs: set[str] | None = None,
+        clearance_floor: float | None = None,
     ) -> tuple[float, tuple[float, float] | None]:
         """Worst via-vs-FOREIGN-pad clearance deficit for one via.
 
@@ -3360,12 +3361,17 @@ class RoutingGrid:
             exclude_refs: Refs of the net's own components (the
                 same-component carve-out is only consulted for these).
 
+            clearance_floor: Optional minimum edge clearance, including on
+                fine-pitch components. Does not lower larger component rules.
+
         Returns:
             ``(worst_deficit, worst_location)`` where ``worst_deficit``
             is ``max(required_clearance - actual_clearance)`` over all
             checked pads (<= 0 means no violation) and
             ``worst_location`` is the violating pad center (or ``None``).
         """
+        # Callers constructing ordinary vias can enforce the via clearance
+        # independently of trace/component reductions used by legacy callers.
         min_clearance = self.rules.trace_clearance
         via_radius = via.diameter / 2
         worst_deficit = 0.0
@@ -3389,6 +3395,8 @@ class RoutingGrid:
             pad_ref = pad.ref
             pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
             required_clearance = self.rules.get_clearance_for_component(pad_ref, pin_pitch)
+            if clearance_floor is not None:
+                required_clearance = max(required_clearance, clearance_floor)
 
             # Issue #3545 net-aware carve-out (see validate_segment_clearance)
             # Issue #5166: mode-aware -- see the segment sibling.
@@ -3422,7 +3430,7 @@ class RoutingGrid:
             # ``required_clearance`` -- the configured, deliberately smaller
             # component clearance.  There is no net=0 exemption on the via
             # quadrant (mirrors the C++ via-pad branch, #5182).
-            if carveout_mode == "skip" and clearance >= 0:
+            if carveout_mode == "skip" and clearance >= 0 and clearance_floor is None:
                 continue
 
             deficit = required_clearance - clearance
