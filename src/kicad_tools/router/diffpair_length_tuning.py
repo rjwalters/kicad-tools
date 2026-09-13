@@ -29,7 +29,7 @@ Design notes
   serpentine segments against every other route's segments and rejects
   the insertion if any pair drops below the configured intra-pair
   clearance threshold. When a routing grid is supplied, it also checks
-  precise foreign-pad geometry and retries three interior positions on
+  precise foreign-pad geometry and foreign via barrels, and retries three interior positions on
   the same host. On rejection the tuner discards the proposed
   ``new_route`` and returns the **original** ``route`` reference (and
   its original ``.segments`` list reference) -- the byte-for-byte
@@ -679,8 +679,8 @@ def _post_insertion_clearance_ok(
         longer_net_id: Net id of the partner trace.
         routes_by_net: ``{net_id: Route}`` lookup for all routed nets.
         intra_pair_clearance_mm: Edge-to-edge clearance floor in mm.
-        grid: When supplied, also checks foreign-pad geometry using the
-            grid's manufacturing clearances. This is not full-board DRC.
+        grid: When supplied, also checks foreign-pad geometry and foreign
+            via barrels using manufacturing clearances. This is not full-board DRC.
 
     Returns:
         ``True`` if no clearance violation is introduced; ``False``
@@ -696,6 +696,27 @@ def _post_insertion_clearance_ok(
             deficit, _ = grid.worst_segment_pad_deficit(new_seg, exclude_net=shorter_net_id)
             if deficit > 1e-9:
                 return False
+
+        from kicad_tools.core.geometry import point_to_segment_distance
+
+        # Through barrels occupy every copper layer, including when search
+        # endpoints under-report their span. Match the group tuner's policy:
+        # only explicit microvias are restricted to their declared span.
+        for other_net, route in routes_by_net.items():
+            if other_net == shorter_net_id:
+                continue
+            for via in route.vias:
+                first, last = sorted(layer.value for layer in via.layers)
+                for seg in new_segments:
+                    if via.is_micro and not first <= seg.layer.value <= last:
+                        continue
+                    clearance = (
+                        point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
+                        - via.diameter / 2
+                        - seg.width / 2
+                    )
+                    if clearance + 1e-9 < grid.rules.via_clearance:
+                        return False
 
     # Pair-internal check.
     partner = routes_by_net.get(longer_net_id)

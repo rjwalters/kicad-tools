@@ -272,3 +272,30 @@ def test_via_length_can_reverse_which_half_needs_tuning():
     tracker = DiffPairLengthTracker()
     tracker.record_routes([p_out, n_out], [pair], **policy)
     assert abs(tracker.lengths[p.net] - tracker.lengths[n.net]) <= 0.05
+
+
+@pytest.mark.parametrize("via_net", [1, 2, 3])
+@pytest.mark.parametrize("layer", [Layer.F_CU, Layer.IN1_CU, Layer.B_CU])
+@pytest.mark.parametrize("gap", [0.175, 0.225])
+def test_tuning_checks_foreign_through_barrels_on_every_layer(via_net, layer, gap):
+    from kicad_tools.router.diffpair_length_tuning import _post_insertion_clearance_ok
+    from kicad_tools.router.primitives import Via
+
+    grid = RoutingGrid(width=10, height=10, rules=DesignRules(via_clearance=0.2))
+    segment = Segment(x1=2, y1=4, x2=8, y2=4, width=0.2, layer=layer, net=2)
+    via = Via(
+        x=5,
+        y=4 + 0.3 + 0.1 + gap,
+        drill=0.3,
+        diameter=0.6,
+        layers=(Layer.F_CU, Layer.IN1_CU),
+        net=via_net,
+    )
+    assert _post_insertion_clearance_ok(
+        new_segments=[segment],
+        shorter_net_id=2,
+        longer_net_id=1,
+        routes_by_net={via_net: Route(net=via_net, net_name=f"NET_{via_net}", vias=[via])},
+        intra_pair_clearance_mm=0.1,
+        grid=grid,
+    ) is (via_net == 2 or gap >= 0.2)
