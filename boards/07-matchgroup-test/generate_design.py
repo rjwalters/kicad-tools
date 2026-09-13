@@ -666,7 +666,13 @@ def _extend_blocked_power_stubs(pcb, rules, result) -> int:
     return extend_blocked_stubs(pcb, rules, result, nets=set(POUR_NETS))
 
 
-def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int, int]:
+def _repair_pour_connectivity(
+    pcb_path: Path,
+    net_names: list[str],
+    *,
+    failed_escapes: list[dict] | None = None,
+    dry_run: bool = False,
+) -> tuple[int, int]:
     """Repair pour-net connectivity: offset vias + stubs + island bridges.
 
     Issue #3413 phase 4.  Three residual classes survive the zone fill +
@@ -1048,6 +1054,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             target = candidates[0]
 
             merged = False
+            pending_escapes: list[dict] = []
 
             # Sub-stage A: lone SMD pad (or pad cluster) with no via -- try
             # an offset via + stub whose barrel lands on PRIMARY copper.
@@ -1265,21 +1272,23 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         if layer in own[i][1]
                     ]
                 for start_name, start, layer in starts:
-                    escape = find_escape(
-                        start,
-                        net,
-                        layer,
-                        pad_index,
-                        seg_index,
-                        [
+                    context = {
+                        "start": start,
+                        "net": net,
+                        "layer": layer,
+                        "pads": list(pad_index),
+                        "segments": list(seg_index),
+                        "vias": [
                             (pt, name, radius, drill_r * 2)
                             for pt, name, radius, drill_r in via_index
                         ],
-                        [own[i] for i in primary],
-                        (min_x, min_y, max_x, max_y),
-                        escape_rules,
-                    )
+                        "primary": [own[i] for i in primary],
+                        "bounds": (min_x, min_y, max_x, max_y),
+                        "rules": escape_rules,
+                    }
+                    escape = find_escape(**context)
                     if escape is None:
+                        pending_escapes.append(context)
                         continue
                     if escape.via:
                         vx, vy = escape.points[-1]
@@ -1304,19 +1313,170 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                     break
 
             if not merged:
+                if failed_escapes is not None:
+                    failed_escapes.extend(pending_escapes)
                 names = [own[i][2] for i in target if own[i][2].startswith("pad:")]
                 failed.append(
                     f"{net}: cannot reconnect component {[n[4:] for n in names] or '(fill island)'}"
                 )
                 skipped_roots.add(_find(target[0]))
 
-    if via_lines or seg_lines:
+    if (via_lines or seg_lines) and not dry_run:
         content = pcb_path.read_text().rstrip().rstrip(")")
         content += "\n" + "\n".join(via_lines + seg_lines) + "\n)\n"
         pcb_path.write_text(content)
     for msg in failed:
         print(f"   UNREPAIRED: {msg}")
     return vias_placed, bridges_placed
+
+
+def _try_local_pour_detour(pcb_path: Path, net_names: list[str]) -> bool:
+    """Try one fully validated detour after ordinary pour repair stalls."""
+    import hashlib
+    import math
+    from dataclasses import replace
+
+    from shapely.geometry import Point
+
+    from kicad_tools.router.diffpair import detect_differential_pairs
+    from kicad_tools.router.rules import net_class_map_from_path
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.zones.detour_transaction import publish_local_detour
+    from kicad_tools.zones.local_detour import Track, match_detour_pair, plan_local_detour
+
+    contexts: list[dict] = []
+    if any(_repair_pour_connectivity(pcb_path, net_names, failed_escapes=contexts, dry_run=True)):
+        return False  # Let the next ordinary repair/refill round do this work.
+    if not contexts:
+        return False
+    sidecar = pcb_path.parent / "net_class_map.json"
+    if not sidecar.exists():
+        return False
+    classes = net_class_map_from_path(sidecar, pcb_path=pcb_path)
+    board = PCB.load(pcb_path)
+    thickness_node = board._sexp.find("general").find("thickness")
+    if thickness_node is None:
+        return False
+    thickness = thickness_node.get_float(0)
+    if not math.isfinite(thickness) or thickness <= 0:
+        return False
+    source_hash = hashlib.sha256(pcb_path.read_bytes()).hexdigest()
+    ox, oy = board.board_origin
+    tracks = [
+        Track(
+            track.uuid,
+            board.nets[track.net_number].name,
+            track.layer,
+            tuple(round(x + offset, 6) for x, offset in zip(track.start, (ox, oy), strict=True)),
+            tuple(round(x + offset, 6) for x, offset in zip(track.end, (ox, oy), strict=True)),
+            track.width,
+        )
+        for track in board.segments
+    ]
+    vias = [
+        (
+            Point(v.position[0] + ox, v.position[1] + oy),
+            board.nets[v.net_number].name,
+            v.size / 2,
+            v.drill,
+        )
+        for v in board.vias
+    ]
+
+    def measured_lengths(pcb, names):
+        lengths = dict.fromkeys(names, 0.0)
+        for track in pcb.segments:
+            name = pcb.nets[track.net_number].name
+            if name in lengths:
+                lengths[name] += math.dist(track.start, track.end)
+        for via in pcb.vias:
+            name = pcb.nets[via.net_number].name
+            if name in lengths:
+                if via.via_type is not None or set(via.layers) != {"F.Cu", "B.Cu"}:
+                    raise RuntimeError("Local detour pair contains an unsupported via span")
+                lengths[name] += thickness
+        return lengths
+
+    # Consider at most three stalled pad escapes per invocation. Each planner
+    # separately caps candidate nets and shares a 200k-node per-net budget.
+    for context in contexts[:3]:
+        rules = context["rules"]
+        eligible = {}
+        partners = {}
+        tolerances = {}
+        for pair in detect_differential_pairs(
+            {key: value.name for key, value in board.nets.items()}
+        ):
+            names = (pair.positive.net_name, pair.negative.net_name)
+            if any(name not in classes or name in net_names for name in names):
+                continue
+            pair_classes = [classes[name] for name in names]
+            if any(not item.coupled_routing or item.avoid_layers for item in pair_classes):
+                continue
+            try:
+                measured_lengths(board, names)
+            except RuntimeError:
+                continue
+            pair_rules = replace(
+                rules,
+                width=max(rules.width, *(item.trace_width for item in pair_classes)),
+                clearance=max(rules.clearance, *(item.clearance for item in pair_classes)),
+                diameter=max(rules.diameter, *(item.via_size for item in pair_classes)),
+            )
+            for name, partner in (names, names[::-1]):
+                eligible[name] = pair_rules
+                partners[name] = partner
+                tolerances[name] = min(item.effective_skew_tolerance() for item in pair_classes)
+        plan = plan_local_detour(
+            start=context["start"],
+            net=context["net"],
+            layer=context["layer"],
+            pads=context["pads"],
+            tracks=tracks,
+            vias=vias,
+            primary=context["primary"],
+            bounds=context["bounds"],
+            rules=rules,
+            signal_rules=eligible,
+        )
+        if plan is None:
+            continue
+        names = (plan.signal_net, partners[plan.signal_net])
+        tolerance = tolerances[plan.signal_net]
+        match = match_detour_pair(
+            plan,
+            power_net=context["net"],
+            power_layer=context["layer"],
+            partner_net=names[1],
+            tracks=tracks,
+            pads=context["pads"],
+            vias=vias,
+            initial_lengths_mm=measured_lengths(board, names),
+            new_via_length_mm=thickness,
+            tolerance_mm=tolerance,
+            bounds=context["bounds"],
+            rules=eligible[plan.signal_net],
+        )
+        if match is None:
+            continue
+
+        def validate_pair(candidate):
+            lengths = measured_lengths(candidate, names)
+            if abs(lengths[names[0]] - lengths[names[1]]) > tolerance:
+                raise RuntimeError("Local detour exceeds the authored pair-skew tolerance")
+
+        publish_local_detour(
+            pcb_path,
+            plan,
+            match,
+            power_net=context["net"],
+            power_layer=context["layer"],
+            source_sha256=source_hash,
+            validate_pair=validate_pair,
+        )
+        print(f"   Validated local detour: {plan.signal_net} frees {context['net']}")
+        return True
+    return False
 
 
 # =============================================================================
@@ -2170,6 +2330,14 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         pour_ok = _run_pour_audit(f"[r{repair_round}]")
         if pour_ok:
             break
+        if refill_ok:
+            try:
+                if _try_local_pour_detour(output_path, skip_nets):
+                    pour_ok = _run_pour_audit("[detour]")
+                    if pour_ok:
+                        break
+            except Exception as exc:
+                print(f"   Local detour rejected: {exc}")
         # Issue #3617: short-circuit when the filler is structurally
         # unavailable (first pass AND this round's re-fill both failed).
         if not first_fill_ok and not refill_ok:

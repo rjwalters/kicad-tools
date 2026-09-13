@@ -1038,7 +1038,9 @@ def test_captured_pour_boundaries_require_a_copper_bridge(generate_design_mod, t
     assert generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]["connected"]
 
 
-def test_repair_routes_around_barrier_between_existing_via_islands(tmp_path, generate_design_mod):
+def test_repair_routes_around_barrier_between_existing_via_islands(
+    tmp_path, generate_design_mod, monkeypatch
+):
     """Straight bridges fail, but existing barrels allow a bent B.Cu path."""
     from kicad_tools.manufacturers import get_profile
     from kicad_tools.schema.pcb import PCB
@@ -1064,6 +1066,19 @@ def test_repair_routes_around_barrier_between_existing_via_islands(tmp_path, gen
     board.write_text("\n".join(parts) + "\n)\n")
     before = PCB.load(board)
     assert not generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]["connected"]
+    original_bytes = board.read_bytes()
+    from kicad_tools.zones import pour_escape
+
+    contexts = []
+    with monkeypatch.context() as patch:
+        patch.setattr(pour_escape, "find_escape", lambda **_: None)
+        assert generate_design_mod._repair_pour_connectivity(
+            board, ["+1V2"], failed_escapes=contexts, dry_run=True
+        ) == (0, 0)
+    assert contexts and all(context["net"] == "+1V2" for context in contexts)
+    assert board.read_bytes() == original_bytes
+    assert generate_design_mod._repair_pour_connectivity(board, ["+1V2"], dry_run=True) == (0, 1)
+    assert board.read_bytes() == original_bytes
     vias, bridges = generate_design_mod._repair_pour_connectivity(board, ["+1V2"])
     assert vias == 0 and bridges == 1
     assert generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]["connected"]
