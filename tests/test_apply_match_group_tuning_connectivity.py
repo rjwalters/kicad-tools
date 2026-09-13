@@ -287,6 +287,7 @@ def test_multi_fragment_net_survives_tuning_without_connectivity_regression():
     """
     ar, group = _make_autorouter_with_multi_fragment_net()
     snapshot = snapshot_connectivity(ar)
+    original_fragments = [r for r in ar.routes if r.net == 1]
 
     results = ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
     assert results["DDR_DATA_BYTE_0"][1][1].reason == "tuned"
@@ -298,10 +299,8 @@ def test_multi_fragment_net_survives_tuning_without_connectivity_regression():
         f"Tuning a real multi-fragment net should not regress connectivity, "
         f"but got {result.regressed_nets}"
     )
-    # Exactly one Route object for net 1 post-tuning -- no orphaned
-    # duplicate fragment left on the board.
+    # The original fixed escape survives beside the replaced channel.
     net1_routes = [r for r in ar.routes if r.net == 1]
-    assert len(net1_routes) == 1, (
-        f"net 1 must collapse to exactly one Route after tuning, got "
-        f"{len(net1_routes)} (duplicate/drop bug #5289)"
-    )
+    assert len(net1_routes) == 2
+    assert net1_routes[0] is original_fragments[0]
+    assert net1_routes[1] is not original_fragments[1]

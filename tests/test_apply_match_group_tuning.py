@@ -811,9 +811,7 @@ class TestMultiFragmentSameNetRoutes:
         )
 
     def test_multi_fragment_net_not_duplicated_or_dropped_after_tuning(self):
-        """After tuning, the net must collapse to exactly ONE Route in
-        ``self.routes`` -- no dropped escape, no orphaned duplicate
-        channel."""
+        """Tuning preserves the fixed escape and replaces only the channel."""
         from kicad_tools.router.length import LengthTracker
 
         ar = Autorouter(width=80.0, height=80.0)
@@ -834,21 +832,21 @@ class TestMultiFragmentSameNetRoutes:
         ar.apply_match_group_tuning(detected_groups=[group], verbose=False)
 
         net1_routes = [r for r in ar.routes if r.net == 1]
-        assert len(net1_routes) == 1, (
-            f"net 1 must collapse to exactly one Route after tuning, "
-            f"got {len(net1_routes)}: this is the #5289 duplicate/drop bug"
-        )
+        assert len(net1_routes) == 2
+        assert net1_routes[0] is escape
+        assert net1_routes[1] is not channel
         # The escape's original pad-side start point must still be
         # present -- pad connectivity was not severed by the tuner
         # discarding the escape fragment.
         assert any(
             (seg.x1, seg.y1) == (0.0, 0.0) or (seg.x2, seg.y2) == (0.0, 0.0)
-            for seg in net1_routes[0].segments
+            for route in net1_routes
+            for seg in route.segments
         ), "original escape pad connection point (0,0) was lost"
         # And the committed length must reflect the WHOLE tuned net
         # (escape + channel + meander), matching the 12mm reference
         # within tolerance -- not a truncated or duplicated value.
-        committed_length = LengthTracker.calculate_route_length(net1_routes[0])
+        committed_length = sum(LengthTracker.calculate_route_length(r) for r in net1_routes)
         assert abs(committed_length - 12.0) <= 0.5, (
             f"tuned net length {committed_length:.3f}mm should be ~12.0mm"
         )
@@ -932,16 +930,16 @@ class TestMultiFragmentSameNetRoutes:
 
         for net_id in (10, 11):
             net_routes = [r for r in ar.routes if r.net == net_id]
-            assert len(net_routes) == 1, (
-                f"pair member net {net_id} must collapse to exactly one "
-                f"Route after tuning, got {len(net_routes)}"
-            )
+            assert len(net_routes) == 2
+            assert net_routes[0] is (p_escape if net_id == 10 else n_escape)
+            assert net_routes[1] is not (p_channel if net_id == 10 else n_channel)
             assert any(
                 (seg.x1, seg.y1) == (0.0, 0.0 if net_id == 10 else 1.0)
                 or (seg.x2, seg.y2) == (0.0, 0.0 if net_id == 10 else 1.0)
-                for seg in net_routes[0].segments
+                for route in net_routes
+                for seg in route.segments
             ), f"net {net_id} lost its original escape pad connection point"
-            committed_length = LengthTracker.calculate_route_length(net_routes[0])
+            committed_length = sum(LengthTracker.calculate_route_length(r) for r in net_routes)
             assert committed_length > 10.0, (
                 f"net {net_id} length {committed_length:.3f}mm should have "
                 "grown from its original 10mm (escape+channel) toward the "
