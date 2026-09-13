@@ -890,14 +890,15 @@ class TestPostInsertionBroaderDRC:
             net=1,
             net_name="D0",
         )
-        # Via spans B.Cu <-> In1.Cu only; the F.Cu segment must not
+        # Explicit microvia spans In2.Cu <-> In1.Cu; the F.Cu segment must not
         # conflict regardless of XY proximity.
         other_via = Via(
             x=2.5,
             y=0.4,
             drill=0.35,
             diameter=0.7,
-            layers=(Layer.B_CU, Layer.IN1_CU),
+            layers=(Layer.IN2_CU, Layer.IN1_CU),
+            is_micro=True,
             net=2,
             net_name="OTHER",
         )
