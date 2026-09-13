@@ -36,7 +36,6 @@ from .geometry import segments_intersect as _geom_segments_intersect
 from .grid import RoutingGrid
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer
-from .pad_geometry import pad_point_distance
 from .primitives import Pad, Route, Segment, Via
 from .quantize import dogleg_points, is_45_aligned
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
@@ -363,6 +362,29 @@ class Router:
         # Cache is cleared when routes are modified (invalidates blocking state)
         self._via_cache: dict[tuple[int, int, int, int], bool] = {}
         self._via_cache_enabled: bool = True
+
+        # Issue #5240: vectorized geometry for the non-through-hole pad
+        # sweep in ``_check_via_placement_cached`` (the ``not
+        # self._allow_smd_vias`` branch -- the default for jlcpcb and any
+        # other manufacturer profile without via-in-pad support).  That
+        # sweep previously called ``pad_point_distance`` once per pad, in a
+        # plain Python loop, for EVERY via candidate the pure-Python A*
+        # fallback considers -- board 06's fallback path (triggered when the
+        # C++ search exhausts its resume budget) re-walks all ~200 board
+        # pads per candidate cell, recomputing each rotated pad's cos/sin
+        # from scratch every time.  ``_non_th_pad_geometry`` below caches
+        # the (x, y, half-width, half-height, cos, sin) arrays once and
+        # answers every subsequent query with one vectorized NumPy sweep --
+        # same ``pad_local_point``/``pad_point_distance`` math, evaluated in
+        # bulk instead of per-pad-per-call.  Invalidated by
+        # ``clear_via_cache`` (PR #5330 review) -- the SAME trigger the
+        # ``_via_cache`` above uses, i.e. the start of every route call and
+        # every foreign-context change -- plus the pad-count guard in
+        # ``_non_th_pad_geometry`` for pads appended mid-pass.  Pad count
+        # alone is NOT a sound key: pad geometry is mutated in place, on the
+        # same Pad objects and with no count change, by
+        # ``PlacementFeedbackLoop``.
+        self._non_th_pad_cache: tuple[int, tuple[np.ndarray, ...]] | None = None
 
         # Issue #2947: World-coord foreign-net clearance context for via
         # placement.  The coarse-grid obstacle map consulted by
@@ -2728,6 +2750,69 @@ class Router:
         """Invalidate cached layer priority (call when congestion changes significantly)."""
         self._layer_priority = None
 
+    def _non_th_pad_geometry(self) -> tuple[np.ndarray, ...]:
+        """Vectorized (x, y, half_w, half_h, cos, sin) for non-through-hole pads.
+
+        Issue #5240: backs the ``not self._allow_smd_vias`` sweep in
+        :meth:`_check_via_placement_cached` with a single NumPy pass instead
+        of a per-pad Python loop that recomputed each rotated pad's
+        cos/sin (via ``pad_point_distance`` -> ``pad_local_point``) on every
+        call.
+
+        Invalidation (PR #5330 review): the cache is dropped by
+        :meth:`clear_via_cache`, i.e. on exactly the same trigger as the
+        sibling ``_via_cache`` -- at the start of every ``route_net`` /
+        ``_astar_search`` and whenever the foreign-net context changes,
+        because "grid state may have changed".  The pad-count check below
+        is only a cheap *additional* guard for freshly appended pads
+        (``RoutingGrid.add_pad``) within a single routing pass; it is NOT
+        the invalidation contract.  Pad *count* alone is insufficient
+        because pad geometry is mutated IN PLACE, on the same ``Pad``
+        objects, without changing the count --
+        ``PlacementFeedbackLoop._apply_delta_to_router_pads`` /
+        ``_restore_router_pads`` do exactly that for
+        ``translate``/``rotate_180``/``mirror`` deltas while reusing one
+        ``Router`` instance for the whole feedback loop.
+        """
+        pads = self.grid._pads
+        cached = self._non_th_pad_cache
+        if cached is not None and cached[0] == len(pads):
+            return cached[1]
+
+        xs: list[float] = []
+        ys: list[float] = []
+        half_w: list[float] = []
+        half_h: list[float] = []
+        cos_r: list[float] = []
+        sin_r: list[float] = []
+        for pad in pads:
+            if pad.through_hole:
+                continue
+            xs.append(pad.x)
+            ys.append(pad.y)
+            half_w.append(pad.width / 2.0)
+            half_h.append(pad.height / 2.0)
+            if pad.rotation:
+                angle = math.radians(pad.rotation)
+                cos_r.append(math.cos(angle))
+                sin_r.append(math.sin(angle))
+            else:
+                # Matches pad_local_point's rotation==0 fast path exactly
+                # (no trig call, identity transform).
+                cos_r.append(1.0)
+                sin_r.append(0.0)
+
+        arrays = (
+            np.array(xs, dtype=np.float64),
+            np.array(ys, dtype=np.float64),
+            np.array(half_w, dtype=np.float64),
+            np.array(half_h, dtype=np.float64),
+            np.array(cos_r, dtype=np.float64),
+            np.array(sin_r, dtype=np.float64),
+        )
+        self._non_th_pad_cache = (len(pads), arrays)
+        return arrays
+
     def _check_via_placement_cached(
         self,
         gx: int,
@@ -2764,10 +2849,24 @@ class Router:
         if not self._allow_smd_vias:
             wx, wy = self.grid.grid_to_world(gx, gy)
             drill_radius = self.rules.via_drill / 2.0
-            for pad in self.grid._pads:
-                if pad.through_hole:
-                    continue
-                if pad_point_distance(pad, wx, wy) < drill_radius:
+            # Issue #5240: vectorized replacement for the equivalent
+            # per-pad ``pad_point_distance(pad, wx, wy) < drill_radius``
+            # Python loop -- same pad_local_point/pad_point_distance math
+            # (rotate into the pad frame, clamp to the rectangle, hypot the
+            # residual), evaluated for every non-through-hole pad in one
+            # NumPy sweep instead of a per-pad function call + trig
+            # recompute.  This branch is hot: it is the default for jlcpcb
+            # (no via-in-pad support) and runs once per via candidate the
+            # pure-Python A* fallback considers.
+            pxs, pys, half_w, half_h, cos_r, sin_r = self._non_th_pad_geometry()
+            if pxs.size:
+                dx = wx - pxs
+                dy = wy - pys
+                lx = cos_r * dx - sin_r * dy
+                ly = sin_r * dx + cos_r * dy
+                ex = np.maximum(np.abs(lx) - half_w, 0.0)
+                ey = np.maximum(np.abs(ly) - half_h, 0.0)
+                if np.any(np.hypot(ex, ey) < drill_radius):
                     return False
 
         # Check all layers using priority ordering.
@@ -2832,8 +2931,31 @@ class Router:
 
         Call this when grid state changes (routes added/removed) to ensure
         cache doesn't return stale results.
+
+        PR #5330 review: this also drops the vectorized non-through-hole pad
+        geometry cache (:meth:`_non_th_pad_geometry`), so the two caches that
+        feed :meth:`_check_via_placement_cached` share one invalidation
+        contract.  Keying the pad geometry on pad count alone was unsound:
+        ``PlacementFeedbackLoop`` mutates ``Pad.x``/``Pad.y``/``Pad.rotation``
+        in place, on the same objects, without changing the count, while
+        reusing a single ``Router`` for the whole feedback loop.
         """
         self._via_cache.clear()
+        self.invalidate_pad_geometry_cache()
+
+    def invalidate_pad_geometry_cache(self) -> None:
+        """Drop the cached non-through-hole pad geometry arrays.
+
+        PR #5330 review: call this after mutating any ``Pad`` on
+        ``grid._pads`` in place (position, size, rotation, through-hole
+        flag).  :meth:`clear_via_cache` already calls it, so every
+        ``route_net`` / ``_astar_search`` start and every foreign-context
+        change is covered; this entry point exists for mutators that do not
+        (or may not) go through a route call before the next via check --
+        e.g. ``PlacementFeedbackLoop._apply_delta_to_router_pads`` and
+        ``_restore_router_pads``.
+        """
+        self._non_th_pad_cache = None
 
     def set_via_cache_enabled(self, enabled: bool) -> None:
         """Enable or disable via caching.
