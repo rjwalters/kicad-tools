@@ -1243,11 +1243,24 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 if not project.exists():
                     project = pcb_path.parent / "diffpair_test.kicad_pro"
                 escape_rules = EscapeRules.from_project(project)
-                for pad_name in comp_pads:
+                starts = [(name, pad_center[name], "F.Cu") for name in comp_pads]
+                if comp_has_via:
+                    starts = [
+                        (
+                            "existing via",
+                            (own[i][0].centroid.x, own[i][0].centroid.y),
+                            layer,
+                        )
+                        for i in target
+                        if own[i][2] == "via"
+                        for layer in ("B.Cu", "F.Cu", "In1.Cu", "In2.Cu")
+                        if layer in own[i][1]
+                    ]
+                for start_name, start, layer in starts:
                     escape = find_escape(
-                        pad_center[pad_name],
+                        start,
                         net,
-                        "F.Cu",
+                        layer,
                         pad_index,
                         seg_index,
                         via_index,
@@ -1264,17 +1277,19 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                             (Point(vx, vy).buffer(escape_rules.diameter / 2), all_layers, "via")
                         )
                     for p0, p1 in zip(escape.points, escape.points[1:], strict=False):
-                        _emit_seg(net, p0, p1, "F.Cu", escape_rules.width)
+                        _emit_seg(net, p0, p1, layer, escape_rules.width)
                         _append_own(
                             (
                                 LineString([p0, p1]).buffer(escape_rules.width / 2),
-                                frozenset({"F.Cu"}),
+                                frozenset({layer}),
                                 "seg",
                             )
                         )
                     bridges_placed += 1
                     merged = True
-                    print(f"   Grid escape: {net} {pad_name}, {len(escape.points) - 1} segment(s)")
+                    print(
+                        f"   Grid escape: {net} {start_name}, {len(escape.points) - 1} segment(s)"
+                    )
                     break
 
             if not merged:
