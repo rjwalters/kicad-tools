@@ -151,3 +151,28 @@ def test_settled_fill_cannot_add_findings(staged_board, monkeypatch):
     with pytest.raises(RuntimeError, match="settled DRC"):
         _publish(board, plan)
     assert board.read_bytes() == original
+
+
+def test_native_refill_preserves_numeric_net_contract(staged_board, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from kicad_tools.core.sexp_file import load_pcb
+
+    board, _ = staged_board
+
+    def native(command, **_):
+        text = board.read_text()
+        text = text.replace('(net 0 "") (net 1 "N") (net 2 "VCC")', "")
+        board.write_text(text.replace("(net 1)", '(net "N")'))
+        board.with_suffix(".drc.json").write_text(
+            json.dumps({"violations": [], "unconnected_items": []})
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(transaction.subprocess, "run", native)
+    transaction._native_refill_report(board, Path("kicad-cli"))
+    result = load_pcb(str(board))
+    nets = [node for node in result.children if node.name == "net"]
+    assert any(node.get_int(0) == 1 and node.get_string(1) == "N" for node in nets)
+    assert result.find("segment").find("net").get_int(0) == 1
