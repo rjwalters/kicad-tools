@@ -1813,12 +1813,13 @@ def _post_insertion_clearance_detail_group(
             if other_net_id == candidate_net_id:
                 continue
             for via in other_route.vias:
-                # Vias span (at least) two layers.  Check against any
-                # new segment whose layer is one of the via's layers.
-                via_layers = set(via.layers)
+                # The endpoints describe a copper barrel, not two isolated
+                # annuli. Include internal layers, matching the optimizer's
+                # via collision check (issue #5286).
+                first_layer, last_layer = sorted(layer.value for layer in via.layers)
                 via_radius = via.diameter / 2.0
                 for new_seg in new_segments:
-                    if new_seg.layer not in via_layers:
+                    if not first_layer <= new_seg.layer.value <= last_layer:
                         continue
                     center_dist = point_to_segment_distance(
                         via.x,
