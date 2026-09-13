@@ -102,7 +102,8 @@ public:
                       int via_extra_cells,
                       int via_drill_cells,
                       double spacing_penalty_factor,
-                      double heuristic_weight);
+                      double heuristic_weight,
+                      double min_via_pitch_cells);
 
     // Route a coupled pair.  All positions are GRID coordinates (the Python
     // wrapper does world_to_grid + layer_to_index before calling, exactly as
@@ -138,6 +139,7 @@ private:
     int via_drill_cells_;
     double spacing_penalty_factor_;
     double heuristic_weight_;
+    double min_via_pitch_cells_;
     int cols_, rows_, num_layers_;
 
     // Grid-cell predicates (inlined mirror of the Python helpers).

@@ -1793,6 +1793,16 @@ class CoupledPathfinder:
         """
         return self._is_cell_blocked(gx, gy, layer, net)
 
+    def _minimum_via_pitch_cells(self) -> float:
+        """Mutual via copper and hole clearance, without raster rounding."""
+        return (
+            max(
+                self.rules.via_diameter + self.rules.via_clearance,
+                self.rules.via_drill + self.rules.min_hole_to_hole,
+            )
+            / self.grid.resolution
+        )
+
     def _is_via_blocked(self, gx: int, gy: int, net: int) -> bool:
         """Check if placing a via at this position would conflict on any layer.
 
@@ -2375,8 +2385,14 @@ class CoupledPathfinder:
 
         # Try layer change (via) - both traces must change layer together
         routable_layers = self.grid.get_routable_indices()
+        # The grid contains neither candidate barrel. Trace spacing alone
+        # cannot protect these two vias, including at endpoint pads.
+        via_pair_pitch_ok = state.spacing + 1e-9 >= self._minimum_via_pitch_cells()
         for new_layer in routable_layers:
             if new_layer == state.p_pos.layer:
+                continue
+            if not via_pair_pitch_ok:
+                self.last_rejections["via_pair_pitch"] += 1
                 continue
 
             # Check if vias can be placed at both positions.  Skip the
@@ -2422,6 +2438,9 @@ class CoupledPathfinder:
         if self.allow_swap_via:
             for new_layer in routable_layers:
                 if new_layer == state.p_pos.layer:
+                    continue
+                if not via_pair_pitch_ok:
+                    self.last_rejections["via_pair_pitch"] += 1
                     continue
 
                 # Both pads must be able to host a via at their current
@@ -2594,6 +2613,7 @@ class CoupledPathfinder:
                 min_spacing_cells=self.min_spacing_cells,
                 trace_half_width_cells=self._trace_half_width_cells,
                 via_extra_cells=self._via_extra_cells,
+                min_via_pitch_cells=self._minimum_via_pitch_cells(),
                 via_drill_cells=max(
                     0, int(math.ceil((self.rules.via_drill / 2) / self.grid.resolution))
                 ),

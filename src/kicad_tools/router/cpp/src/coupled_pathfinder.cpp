@@ -48,7 +48,8 @@ CoupledPathfinder::CoupledPathfinder(Grid3D& grid,
                                      int via_extra_cells,
                                      int via_drill_cells,
                                      double spacing_penalty_factor,
-                                     double heuristic_weight)
+                                     double heuristic_weight,
+                                     double min_via_pitch_cells)
     : grid_(grid),
       rules_(rules),
       target_spacing_cells_(target_spacing_cells),
@@ -58,6 +59,7 @@ CoupledPathfinder::CoupledPathfinder(Grid3D& grid,
       via_drill_cells_(std::max(0, via_drill_cells)),
       spacing_penalty_factor_(std::clamp(spacing_penalty_factor, 0.0, 1.0)),
       heuristic_weight_(std::max(1.0, heuristic_weight)),
+      min_via_pitch_cells_(std::max(0.0, min_via_pitch_cells)),
       cols_(grid.cols()),
       rows_(grid.rows()),
       num_layers_(grid.layers()) {}
@@ -619,8 +621,14 @@ CoupledRouteResult CoupledPathfinder::route(
                            at_goal(current.p_x, current.p_y, p_start_x, p_start_y);
             bool n_at_ep = at_goal(current.n_x, current.n_y, n_goal_x, n_goal_y) ||
                            at_goal(current.n_x, current.n_y, n_start_x, n_start_y);
+            double via_dx = current.p_x - current.n_x;
+            double via_dy = current.p_y - current.n_y;
+            bool pair_vias_clear = std::hypot(via_dx, via_dy) + 1e-9 >= min_via_pitch_cells_;
             for (int new_layer : routable_layers) {
                 if (new_layer == current.p_layer) continue;
+                // Candidate pair copper is not in grid_: enforce the mutual
+                // copper and drill pitch even at endpoint cells.
+                if (!pair_vias_clear) { rej("via_pair_pitch"); continue; }
                 if (!p_at_ep && is_via_blocked(current.p_x, current.p_y, p_net)) { rej("via_blocked_p"); continue; }
                 if (!n_at_ep && is_via_blocked(current.n_x, current.n_y, n_net)) { rej("via_blocked_n"); continue; }
                 if (!p_at_ep && is_trace_blocked(current.p_x, current.p_y, new_layer, p_net)) { rej("via_trace_blocked_p"); continue; }

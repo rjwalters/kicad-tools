@@ -622,10 +622,10 @@ NB_MODULE(router_cpp, m) {
         // 2) to the constructed CoupledPathfinder (nurse, index 1) to prevent
         // the same dangling-reference use-after-free.
         .def(nb::init<Grid3D&, const DesignRules&, int, int, int, int, int,
-                      double, double>(),
+                      double, double, double>(),
              "grid"_a, "rules"_a, "target_spacing_cells"_a, "min_spacing_cells"_a,
              "trace_half_width_cells"_a, "via_extra_cells"_a, "via_drill_cells"_a,
-             "spacing_penalty_factor"_a, "heuristic_weight"_a,
+             "spacing_penalty_factor"_a, "heuristic_weight"_a, "min_via_pitch_cells"_a,
              nb::keep_alive<1, 2>())
         .def("route", &CoupledPathfinder::route,
              "p_start_x"_a, "p_start_y"_a, "n_start_x"_a, "n_start_y"_a,

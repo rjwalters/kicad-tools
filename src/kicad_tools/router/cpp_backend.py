@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 26
+_REQUIRED_CPP_BUILD_VERSION = 27
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -3811,6 +3811,7 @@ class CppCoupledPathfinder:
         via_drill_cells: int,
         spacing_penalty_factor: float,
         heuristic_weight: float,
+        min_via_pitch_cells: float | None = None,
     ):
         if not _CPP_AVAILABLE:
             raise RuntimeError("C++ router backend not available")
@@ -3834,6 +3835,14 @@ class CppCoupledPathfinder:
         # this issue wires up).  Marshalled here so a future coupled-attractor
         # port needs no additional plumbing.
         cpp_rules.cost_corridor_attractor = float(rules.cost_corridor_attractor)
+        if min_via_pitch_cells is None:
+            min_via_pitch_cells = (
+                max(
+                    rules.via_diameter + rules.via_clearance,
+                    rules.via_drill + rules.min_hole_to_hole,
+                )
+                / cpp_grid.resolution
+            )
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
             cpp_rules,
@@ -3844,6 +3853,7 @@ class CppCoupledPathfinder:
             int(via_drill_cells),
             float(spacing_penalty_factor),
             float(heuristic_weight),
+            float(min_via_pitch_cells),
         )
 
     def route(
