@@ -136,6 +136,7 @@ def test_return_barrel_uses_via_clearance_for_foreign_pad(monkeypatch, pad_gap, 
     # the unused bottom layer, so it affects the barrel, not either tail.
     monkeypatch.setattr(finder, "_is_via_blocked", lambda x, y, net: (x, y) != site)
     monkeypatch.setattr(router, "_via_has_only_pad_blockers", lambda *args: False)
+    monkeypatch.setattr(router, "_via_has_only_geometry_blockers", lambda *args: False)
 
     candidates = list(router._layer_return_tails(finder, head, goal, partner, body))
 
@@ -275,3 +276,92 @@ def test_uncommitted_partner_via_selects_alternative_planar_tail(layer_idx):
         for s in tail.segments
     )
     assert router.autorouter.routes == []
+
+
+def _routed_halo_case(order=None):
+    router, finder, head, goal, partner, body = _case()
+    grid = router.autorouter.grid
+    # A via at (3.8,3) clears this trace by .3 mm, but the padded grid
+    # envelope and square via sweep touch. The route is grid-only on purpose.
+    route = Route(
+        net=4,
+        net_name="other",
+        segments=[Segment(x1=3, y1=2.3, x2=4.5, y2=2.3, width=0.2, layer=Layer.B_CU, net=4)],
+    )
+    if order == "before":
+        grid.add_keepout(3.8, 2.7, 3.8, 2.7, layers=[Layer.B_CU])
+    grid.mark_route(route)
+    if order == "after":
+        grid.add_keepout(3.8, 2.7, 3.8, 2.7, layers=[Layer.B_CU])
+    return router, finder, head, goal, partner, body, route
+
+
+def test_exact_landing_checks_live_grid_route_geometry():
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    grid = router.autorouter.grid
+    gx, gy = grid.world_to_grid(3.8, 3)
+    assert finder._is_via_blocked(gx, gy, head.net)
+    assert not router._via_has_only_pad_blockers(finder, gx, gy)
+    assert router._via_has_only_geometry_blockers(finder, gx, gy)
+    tails = list(router._layer_return_tails(finder, head, goal, partner, body))
+    assert any((t.vias[0].x, t.vias[0].y) == pytest.approx((3.8, 3)) for t in tails)
+    assert router.autorouter.routes == []
+
+
+@pytest.mark.parametrize("order", ["before", "after"])
+def test_keepout_over_route_halo_is_never_exact_geometry(order):
+    router, finder, head, goal, partner, body, route = _routed_halo_case(order)
+    grid = router.autorouter.grid
+    assert not router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))
+
+
+def test_missing_route_source_refuses_exact_exception():
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    grid = router.autorouter.grid
+    grid.routes.remove(route)
+    assert not router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))
+
+
+def test_known_route_still_rejects_actual_via_clearance_violation():
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    # Update the actual copper without changing its identity. Exact geometry
+    # must be consulted, even when recorded ownership remains available.
+    route.segments[0].y1 = route.segments[0].y2 = 2.5
+    tails = list(router._layer_return_tails(finder, head, goal, partner, body))
+    assert not any((t.vias[0].x, t.vias[0].y) == pytest.approx((3.8, 3)) for t in tails)
+
+
+def test_every_overlapping_route_source_must_still_be_available():
+    from dataclasses import replace
+
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    grid = router.autorouter.grid
+    other = Route(net=5, net_name="second", segments=[replace(route.segments[0], net=5)])
+    grid.mark_route(other)
+    assert router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))
+    grid.routes.remove(route)
+    assert not router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))
+
+
+def test_deserialized_route_metadata_without_live_sources_fails_closed():
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    grid = router.autorouter.grid
+    del grid._route_geometry_sources
+    assert not router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))
+
+
+def test_region_bound_revokes_existing_route_geometry():
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    grid = router.autorouter.grid
+    grid.mark_region_bound(0, 0, 3.4, 6)
+    assert not router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))
+
+
+def test_raw_occupancy_write_loses_geometry_provenance_on_generation_bump():
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    grid = router.autorouter.grid
+    gx, gy = grid.world_to_grid(3.8, 3)
+    assert router._via_has_only_geometry_blockers(finder, gx, gy)
+    grid._blocked[0, gy, gx] = True
+    grid.bump_occupancy_generation()
+    assert not router._via_has_only_geometry_blockers(finder, gx, gy)

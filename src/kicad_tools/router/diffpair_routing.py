@@ -6075,15 +6075,31 @@ class DiffPairRouter:
         return False
 
     def _via_has_only_pad_blockers(self, pathfinder: CoupledPathfinder, gx: int, gy: int) -> bool:
-        """Allow exact-pad adjudication only with recorded blocker provenance.
+        return self._via_has_only_geometry_blockers(pathfinder, gx, gy, include_routes=False)
+
+    def _via_has_only_geometry_blockers(
+        self, pathfinder: CoupledPathfinder, gx: int, gy: int, *, include_routes: bool = True
+    ) -> bool:
+        """Allow exact adjudication only with recorded blocker provenance.
 
         A recreated pad grid cannot prove that a keepout was not superimposed
         on a halo. Missing provenance therefore fails closed. The caller must
         still check actual pad geometry, route copper and drilled holes.
         """
         grid = self.autorouter.grid
-        proven = getattr(grid, "_pad_geometry_cells", None)
-        if not proven:
+        proven = getattr(grid, "_pad_geometry_cells", ())
+        routed = getattr(grid, "_route_geometry_cells", {}) if include_routes else {}
+        live_routes = {id(route) for route in grid.routes} if include_routes else set()
+        available = (
+            {
+                token
+                for token, reference in getattr(grid, "_route_geometry_sources", {}).items()
+                if (route := reference()) is not None and id(route) in live_routes
+            }
+            if include_routes
+            else set()
+        )
+        if not proven and not routed:
             return False
         radius = max(
             pathfinder._via_extra_cells,
@@ -6095,8 +6111,11 @@ class DiffPairRouter:
                     if not (0 <= x < grid.cols and 0 <= y < grid.rows):
                         return False
                     cell = grid.cell_at(layer, y, x)
-                    if (cell.blocked or cell.pad_blocked) and (layer, y, x) not in proven:
-                        return False
+                    key = (layer, y, x)
+                    if (cell.blocked or cell.pad_blocked) and key not in proven:
+                        sources = routed.get(key)
+                        if not sources or not sources <= available:
+                            return False
         return True
 
     def _layer_return_tails(
@@ -6125,9 +6144,9 @@ class DiffPairRouter:
             li not in grid.get_routable_indices() for li in (start_layer, end_layer)
         ):
             return
-        foreign = [r for r in [*self.autorouter.routes, partner] if r.net != head.net]
+        foreign = [r for r in [*self.autorouter.routes, *grid.routes, partner] if r.net != head.net]
         drills = self._collect_existing_drills() + [
-            (v.x, v.y, v.drill) for r in (partner, body) for v in r.vias
+            (v.x, v.y, v.drill) for r in (*grid.routes, partner, body) for v in r.vias
         ]
         pair_edge_clearance = self._pair_seg_clearance(
             pathfinder, head.net_name
@@ -6161,7 +6180,9 @@ class DiffPairRouter:
                         continue
                     sites.add((gx, gy))
                     raster_blocked = pathfinder._is_via_blocked(gx, gy, head.net)
-                    if raster_blocked and not self._via_has_only_pad_blockers(pathfinder, gx, gy):
+                    if raster_blocked and not self._via_has_only_geometry_blockers(
+                        pathfinder, gx, gy
+                    ):
                         continue
                     x, y = grid.grid_to_world(gx, gy)
                     via = Via(
