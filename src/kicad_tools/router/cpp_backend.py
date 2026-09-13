@@ -1924,18 +1924,21 @@ class CppPathfinder:
             Route object if successful, None if no path found
         """
         if not self._per_call_timing_enabled:
-            return self._route_impl(
-                start,
-                end,
-                net_class=net_class,
-                negotiated_mode=negotiated_mode,
-                present_cost_factor=present_cost_factor,
-                weight=weight,
-                start_layers=start_layers,
-                end_layers=end_layers,
-                per_net_timeout=per_net_timeout,
-                extra_goal_cells=extra_goal_cells,
-            )
+            try:
+                return self._route_impl(
+                    start,
+                    end,
+                    net_class=net_class,
+                    negotiated_mode=negotiated_mode,
+                    present_cost_factor=present_cost_factor,
+                    weight=weight,
+                    start_layers=start_layers,
+                    end_layers=end_layers,
+                    per_net_timeout=per_net_timeout,
+                    extra_goal_cells=extra_goal_cells,
+                )
+            finally:
+                self.clear_avoidance_costs()
 
         t0 = time.monotonic()
         succeeded = False
@@ -1955,6 +1958,7 @@ class CppPathfinder:
             succeeded = result is not None
             return result
         finally:
+            self.clear_avoidance_costs()
             elapsed = time.monotonic() - t0
             # 1.2x slack matches the Issue #2929 acceptance criterion: the
             # C++ deadline check fires every 1024 iterations, plus the
@@ -2279,6 +2283,12 @@ class CppPathfinder:
 
             for attempt in range(max_resume_attempts + 1):
                 route = self._convert_result_to_route(result, start, end, net_class)
+                from .via_reuse import reuse_same_net_vias
+
+                if self._grid._py_grid is not None:
+                    reuse_same_net_vias(
+                        route, self._grid._py_grid.routes, self._rules.min_drill_clearance
+                    )
 
                 # Issue #3438: relief PROBES deliberately cross foreign
                 # copper/halos -- post-route clearance validation would
@@ -3016,8 +3026,10 @@ class CppPathfinder:
     def clear_avoidance_costs(self) -> None:
         """Clear all avoidance costs from the grid.
 
-        Should be called after a net is fully routed (success or failure)
-        to prevent avoidance costs from polluting subsequent net routing.
+        Each connection clears these penalties when route() exits, including
+        failure and exception paths. Penalties remain active throughout that
+        connection's resumable search, but must not obstruct another pad pair
+        on the same net.
         """
         self._grid._impl.clear_avoidance_costs()
 
