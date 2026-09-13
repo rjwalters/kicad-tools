@@ -28,7 +28,9 @@ Design notes
   :func:`_post_insertion_clearance_ok`, which iterates the new
   serpentine segments against every other route's segments and rejects
   the insertion if any pair drops below the configured intra-pair
-  clearance threshold.  On rejection the tuner discards the proposed
+  clearance threshold. When a routing grid is supplied, it also checks
+  precise foreign-pad geometry and retries three interior positions on
+  the same host. On rejection the tuner discards the proposed
   ``new_route`` and returns the **original** ``route`` reference (and
   its original ``.segments`` list reference) -- the byte-for-byte
   rollback contract.
@@ -55,7 +57,7 @@ Out of scope for Phase 3I:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from .optimizer.geometry import segment_length
@@ -101,7 +103,8 @@ class DiffPairTuneResult:
               segment long enough to host any trombone amplitude.
             * ``"unrouted"`` -- one or both halves were not in
               ``routes_by_net``.
-        attempts: Number of trombone insertions actually attempted.
+        attempts: Number of cascade iterations attempted. Each may try the
+            initial placement and up to three interior placements.
         inserts_applied: Number of trombones whose post-insertion check
             passed and were committed.
         skew_before_mm: Pair skew (``|L_p - L_n|``) at entry.
@@ -118,7 +121,7 @@ class DiffPairTuneResult:
     skew_after_mm: float = 0.0
     message: str = ""
     # The trombone results, kept for diagnostic / test inspection.  An
-    # entry is present for every attempt (including rejected ones).
+    # entry is present for every placement (including rejected ones).
     serpentine_results: list[SerpentineResult] = field(default_factory=list)
 
 
@@ -194,7 +197,9 @@ def tune_diff_pair_skew(
             so the meander lands in already-protected space.  When ``None``
             or ``prefer_reserved_slack=False`` (both defaults) segment
             selection is byte-identical to the pre-#4085 geometric
-            heuristic.
+            heuristic. Whenever supplied, the grid also checks foreign-pad
+            clearance, independently of the slack preference. Rejected placements
+            are retried at three interior points of the selected mutable host.
         fixed_segment_ids: Fixed escape segment identities; retained in measurement
             and clearance views, but never selected or replaced as meander hosts.
         prefer_reserved_slack: Issue #4085.  Gate for the slack-aware
@@ -366,7 +371,7 @@ def tune_diff_pair_skew(
         )
         attempt_generator = SerpentineGenerator(attempt_config)
 
-        if fixed_segment_ids:
+        if fixed_segment_ids or grid is not None:
             # Generate on the selected mutable host; reranking the full net
             # could otherwise select a longer fixed escape or a different corridor.
             serp_result = attempt_generator.generate_trombone(insertion_segment, length_needed)
@@ -401,13 +406,48 @@ def tune_diff_pair_skew(
         # ``serp_result.new_segments`` contains *only* the trombone
         # segments (entry + loops + exit) -- those are the segments to
         # check.
-        if not _post_insertion_clearance_ok(
+        clearance_ok = _post_insertion_clearance_ok(
             new_segments=serp_result.new_segments,
             shorter_net_id=shorter_id,
             longer_net_id=longer_id,
             routes_by_net=routes_by_net,
             intra_pair_clearance_mm=intra_pair_clearance_mm,
-        ):
+            grid=grid,
+        )
+        if not clearance_ok and grid is not None:
+            # Pad rows near a host's entry can obstruct the first bulge while
+            # leaving its interior free. Try a bounded set of placements on
+            # this same mutable host; splitting off an unchanged collinear
+            # lead preserves its copper and all other segment identities.
+            for fraction in (0.25, 0.5, 0.75):
+                x = insertion_segment.x1 + fraction * (insertion_segment.x2 - insertion_segment.x1)
+                y = insertion_segment.y1 + fraction * (insertion_segment.y2 - insertion_segment.y1)
+                lead = replace(insertion_segment, x2=x, y2=y)
+                suffix = replace(insertion_segment, x1=x, y1=y)
+                retry = attempt_generator.generate_trombone(suffix, length_needed)
+                result.serpentine_results.append(retry)
+                if not retry.success:
+                    continue
+                replacement = [lead, *retry.new_segments]
+                if not _post_insertion_clearance_ok(
+                    new_segments=replacement,
+                    shorter_net_id=shorter_id,
+                    longer_net_id=longer_id,
+                    routes_by_net=routes_by_net,
+                    intra_pair_clearance_mm=intra_pair_clearance_mm,
+                    grid=grid,
+                ):
+                    continue
+                candidate_route = replace(
+                    current_shorter,
+                    segments=current_shorter.segments[:seg_idx]
+                    + replacement
+                    + current_shorter.segments[seg_idx + 1 :],
+                    vias=current_shorter.vias.copy(),
+                )
+                clearance_ok = True
+                break
+        if not clearance_ok:
             # Rollback: discard the candidate, return the ORIGINAL shorter
             # route (and the original longer route reference).
             result.reason = "post_insertion_drc_violation"
@@ -572,10 +612,11 @@ def _post_insertion_clearance_ok(
     longer_net_id: int,
     routes_by_net: dict[int, Route],
     intra_pair_clearance_mm: float,
+    grid: RoutingGrid | None = None,
 ) -> bool:
-    """Return True if the proposed serpentine segments are DRC-safe.
+    """Check proposed segments against routed traces and available pad geometry.
 
-    The check is two-pronged:
+    The route checks are:
 
     1. Intra-pair clearance: every new segment is checked against every
        segment of the partner trace (``longer_net_id``).  Threshold is
@@ -599,12 +640,23 @@ def _post_insertion_clearance_ok(
         longer_net_id: Net id of the partner trace.
         routes_by_net: ``{net_id: Route}`` lookup for all routed nets.
         intra_pair_clearance_mm: Edge-to-edge clearance floor in mm.
+        grid: When supplied, also checks foreign-pad geometry using the
+            grid's manufacturing clearances. This is not full-board DRC.
 
     Returns:
         ``True`` if no clearance violation is introduced; ``False``
         otherwise (the caller must roll back).
     """
     from kicad_tools.core.geometry import segment_clearance
+
+    # Route-only checks cannot see pad metal. Use the grid's precise pad
+    # geometry and manufacturing clearances, not its rasterized partner halo.
+    # Only same-net pads are exempt; do not exclude the whole source component.
+    if grid is not None:
+        for new_seg in new_segments:
+            deficit, _ = grid.worst_segment_pad_deficit(new_seg, exclude_net=shorter_net_id)
+            if deficit > 1e-9:
+                return False
 
     # Pair-internal check.
     partner = routes_by_net.get(longer_net_id)
