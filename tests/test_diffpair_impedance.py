@@ -497,3 +497,52 @@ class TestImpedanceSizingResultMetadata:
         assert r.stackup_mismatch is None
         assert r.clamp_errors is None
         assert r.used_target is False
+
+
+@pytest.mark.parametrize("gap", [0.1, 0.1016, 0.13317])
+def test_explicit_gap_survives_impedance_sizing(gap, jlcpcb_4layer_stackup, jlcpcb_4layer_rules):
+    """Board07's compact pair must not become an eight-millimetre clearance."""
+    from kicad_tools.physics import CoupledLines
+
+    nc = make_net_class(target_diff=100.0, trace_width=0.225, intra_pair_clearance=gap)
+    resolved, _, errors = resolve_impedance_for_net_classes(
+        {"TMDS_D2_N": nc}, jlcpcb_4layer_stackup, jlcpcb_4layer_rules
+    )
+    actual = resolved["TMDS_D2_N"]
+    assert actual.intra_pair_clearance == max(gap, jlcpcb_4layer_rules.min_clearance_mm)
+    if gap <= jlcpcb_4layer_rules.min_clearance_mm:
+        assert actual.trace_width == 0.225
+    impedance = (
+        CoupledLines(jlcpcb_4layer_stackup)
+        .edge_coupled_microstrip(actual.trace_width, actual.intra_pair_clearance, "F.Cu")
+        .zdiff
+    )
+    assert abs(impedance - 100.0) <= 10.0
+    assert any(error.kind == "gap" for error in errors) == (
+        gap < jlcpcb_4layer_rules.min_clearance_mm
+    )
+    repeated, _, _ = resolve_impedance_for_net_classes(
+        resolved, jlcpcb_4layer_stackup, jlcpcb_4layer_rules
+    )
+    assert repeated == resolved
+
+
+def test_unspecified_gap_keeps_unconstrained_solver(jlcpcb_4layer_stackup, jlcpcb_4layer_rules):
+    nc = make_net_class(target_diff=100.0, intra_pair_clearance=None)
+    result = apply_impedance_driven_sizing(nc, jlcpcb_4layer_stackup, jlcpcb_4layer_rules)
+    assert result.used_target
+    assert result.gap_mm > 1.0
+
+
+def test_fixed_gap_width_solver_checks_geometry_and_convergence(jlcpcb_4layer_stackup):
+    from kicad_tools.physics import CoupledLines
+
+    lines = CoupledLines(jlcpcb_4layer_stackup)
+    width = lines.width_for_differential_impedance(100, 0.1, "F.Cu")
+    assert lines.edge_coupled_microstrip(width, 0.1, "F.Cu").zdiff == pytest.approx(100, rel=0.001)
+    with pytest.raises(ValueError, match="positive"):
+        lines.width_for_differential_impedance(0, 0.1, "F.Cu")
+    with pytest.raises(ValueError, match="bounds"):
+        lines.width_for_differential_impedance(1e6, 0.1, "F.Cu")
+    with pytest.raises(ValueError, match="converge"):
+        lines.width_for_differential_impedance(100, 0.1, "F.Cu", max_iterations=0)
