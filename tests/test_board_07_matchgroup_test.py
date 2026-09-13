@@ -991,3 +991,48 @@ def test_native_staged_pad_drill_repair_preserves_connectivity(
         candidate, rules, kicad_cli=executable
     ).relocation.changed
     assert candidate.read_bytes() == published
+
+
+def test_captured_pour_boundaries_require_a_copper_bridge(generate_design_mod, tmp_path):
+    """A shared fill boundary must not hide the native U5.24 open."""
+    from shapely import wkt
+
+    data = json.loads((REPO_ROOT / "tests/fixtures/board07_touching_pour_regions.json").read_text())
+    polygons = [wkt.loads(value) for value in data["polygons"]]
+    contact = polygons[0].intersection(polygons[1])
+    assert contact.length > 3
+    assert contact.area == 0
+    fills = "\n".join(
+        '(filled_polygon (layer "In2.Cu") (pts '
+        + " ".join(f"(xy {x} {y})" for x, y in poly.exterior.coords)
+        + "))"
+        for poly in polygons
+    )
+    pads = "\n".join(
+        f"""(footprint "test" (layer "F.Cu") (at {x} 113)
+          (property "Reference" "R{i}" (at 0 0) (layer "F.SilkS"))
+          (pad "1" smd rect (at 0 0) (size 0.5 0.5)
+            (layers "F.Cu") (net 1 "+1V2")))
+  (via (at {x} 113) (size 0.5) (drill 0.3)
+    (layers "F.Cu" "B.Cu") (net 1))"""
+        for i, x in enumerate((155.5, 157.5), 1)
+    )
+    board = tmp_path / "boundary.kicad_pcb"
+    board.write_text(
+        f"""(kicad_pcb (version 20240108) (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "") (net 1 "+1V2")
+  {pads}
+  (zone (net 1) (net_name "+1V2") (layer "In2.Cu")
+    (fill yes) {fills})
+)"""
+    )
+    before = generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]
+    assert not before["connected"]
+    assert len(before["pad_groups"]) == 2
+    vias, bridges = generate_design_mod._repair_pour_connectivity(board, ["+1V2"])
+    assert bridges > 0
+    assert vias == 0
+    assert generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]["connected"]

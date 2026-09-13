@@ -595,6 +595,11 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
             for j in range(i + 1, len(elems)):
                 gj, lj = elems[j]
                 if (li & lj) and gi.intersects(gj):
+                    # Separate native filled regions can share a boundary
+                    # without being electrically connected. Require copper
+                    # area overlap before joining two fill elements.
+                    if i < n_fills and j < n_fills and gi.intersection(gj).area == 0:
+                        continue
                     parent[_find(i)] = _find(j)
 
         groups: dict[int, list[tuple[str, bool]]] = {}
@@ -993,6 +998,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             for j in range(i + 1, len(own)):
                 gj, lj, _ = own[j]
                 if (li & lj) and gi.intersects(gj):
+                    if own[i][2] == own[j][2] == "fill" and gi.intersection(gj).area == 0:
+                        continue
                     parent[_find(i)] = _find(j)
 
         def _append_own(elem: tuple) -> None:
