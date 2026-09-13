@@ -301,8 +301,10 @@ CoupledRouteResult CoupledPathfinder::route(
         pool.push_back(current);
 
         // Goal check (diffpair_routing.py:1762-1771).
-        bool p_at_goal = (current.p_x == p_goal_x && current.p_y == p_goal_y);
-        bool n_at_goal = (current.n_x == n_goal_x && current.n_y == n_goal_y);
+        bool p_at_goal = (current.p_x == p_goal_x && current.p_y == p_goal_y &&
+                          current.p_layer == end_layer);
+        bool n_at_goal = (current.n_x == n_goal_x && current.n_y == n_goal_y &&
+                          current.n_layer == end_layer);
         if (p_at_goal && n_at_goal) {
             // Reconstruct root->goal path from the pool parent chain.
             std::vector<CoupledPathNode> rev;

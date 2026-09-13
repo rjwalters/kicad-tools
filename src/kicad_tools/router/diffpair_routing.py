@@ -3088,12 +3088,9 @@ class CoupledPathfinder:
                 )
 
             # Goal check - both traces must reach their goals
-            p_at_goal = (
-                current.state.p_pos.x == p_goal_pos.x and current.state.p_pos.y == p_goal_pos.y
-            )
-            n_at_goal = (
-                current.state.n_pos.x == n_goal_pos.x and current.state.n_pos.y == n_goal_pos.y
-            )
+            # XY coincidence on another layer does not connect an SMD pad.
+            p_at_goal = current.state.p_pos == p_goal_pos
+            n_at_goal = current.state.n_pos == n_goal_pos
 
             if p_at_goal and n_at_goal:
                 return self._reconstruct_coupled_routes(current, p_start, p_end, n_start, n_end)

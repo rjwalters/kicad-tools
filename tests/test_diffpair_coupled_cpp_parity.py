@@ -543,3 +543,19 @@ def test_cpp_partial_geometry_does_not_promote_budget_failure(monkeypatch, termi
                 + abs(current[offset + 1] - previous[offset + 1])
                 <= 1
             )
+
+
+@pytest.mark.parametrize("use_cpp", [False, True], ids=["python", "cpp"])
+def test_coupled_goal_requires_destination_layer(use_cpp):
+    """Coincident XY pads on opposite layers still require a connection."""
+    from dataclasses import replace
+
+    p_start, _, n_start, _ = _make_simple_pair_pads()
+    p_end = replace(p_start, layer=Layer.B_CU)
+    n_end = replace(n_start, layer=Layer.B_CU)
+    pf = _make_pf(_make_grid(), use_cpp=use_cpp)
+    result = pf.route_coupled(p_start, p_end, n_start, n_end, max_iterations_budget=1000)
+    assert result is not None
+    for route in result:
+        assert len(route.vias) == 1
+        assert set(route.vias[0].layers) == {Layer.F_CU, Layer.B_CU}
