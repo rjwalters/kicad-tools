@@ -1,11 +1,7 @@
-"""Offline, exact-byte assembly handoffs. No supplier clients or transaction APIs.
+"""Exact-byte assembly handoffs and separate official inventory observations.
 
-See docs/guides/submission-preparation.md for the strict input dialect and
-publication contract, milestone A. ``refresh_inventory`` is a narrow milestone
-B increment: exact-ID stock observation through an explicit, caller-supplied
-official adapter. It preserves unknown-vs-zero stock evidence, never infers
-substitutes, and never mutates a published plan. Full milestone B (landed
-#5033/#5034 provenance/freshness semantics) remains tracked by #5142.
+Preparation is deterministic and offline. Refresh rechecks local integrity and
+composes the official adapter's stock evidence with parts provenance semantics.
 """
 
 from __future__ import annotations
@@ -22,19 +18,23 @@ import tempfile
 import unicodedata
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Context, Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from ..parts.jlcpcb_api import (
+    ComponentInventory,
     JLCAPIError,
     JLCAuthError,
+    JLCDependencyError,
     JLCIncompleteResponseError,
     JLCIPNotWhitelistedError,
     JLCPermissionError,
     JLCQuotaError,
 )
+from ..parts.models import Part
 from .bom_formats import JLCPCBBOMFormatter
 from .pnp import JLCPCBPnPFormatter
 
@@ -73,6 +73,8 @@ class SubmissionPlan:
 
     directory: Path
     plan_bytes: bytes
+    bundle_root: Path | None = field(default=None, compare=False, repr=False)
+    source_root: Path | None = field(default=None, compare=False, repr=False)
 
     @property
     def sha256(self) -> str:
@@ -535,7 +537,7 @@ def prepare_submission(
             raise SubmissionError("Destination already exists")
         os.rename(stage, destination)
         stage = None
-        return SubmissionPlan(destination, plan_bytes)
+        return SubmissionPlan(destination, plan_bytes, bundle, source)
     finally:
         os.close(lock_fd)
         lock.unlink()
@@ -568,53 +570,15 @@ def verify_submission(directory: Path, expected_sha256: str) -> SubmissionPlan:
     return SubmissionPlan(directory, plan)
 
 
-_INVENTORY_STATUSES = frozenset(
-    {
-        "verified",
-        "missing-field",
-        "malformed",
-        "not-returned",
-        "forbidden",
-        "quota-error",
-        "transport-error",
-        "dependency-error",
-        "incomplete-response",
-    }
-)
-
-
 class InventorySource(Protocol):
-    """What ``refresh_inventory`` needs from an exact-ID official adapter.
+    """Explicit official adapter; no credentials or client built implicitly."""
 
-    :class:`~kicad_tools.parts.jlcpcb_api.JLCOpenAPIClient` satisfies this
-    structurally; a test double can too, without constructing credentials or
-    a network session. This module never builds a client itself.
-    """
-
-    def get_component_detail_raw(self, codes: list[str]) -> list[dict[str, Any]]: ...
-
-
-@dataclass(frozen=True)
-class StockObservation:
-    """One approved-ID outcome. A verified numeric zero is not "unknown".
-
-    ``status`` is one of :data:`_INVENTORY_STATUSES`. ``raw_stock`` is the
-    exact non-negative int the adapter returned, present only when
-    ``status == "verified"`` -- never a fabricated zero for any other status.
-    """
-
-    catalog_id: str
-    status: str
-    raw_stock: int | None
+    def get_component_inventory(self, codes: list[str]) -> ComponentInventory: ...
 
 
 @dataclass(frozen=True)
 class InventorySnapshot:
-    """Immutable stock-observation record bound to plan/BOM/quantity/demand identity.
-
-    Written outside the frozen fabrication bundle and outside the published
-    handoff directory (which is read-only after ``prepare_submission``).
-    """
+    """Immutable stock evidence bound to the exact plan and demand."""
 
     path: Path
     snapshot_bytes: bytes
@@ -624,53 +588,134 @@ class InventorySnapshot:
         return _digest(self.snapshot_bytes)
 
 
-def _observe(source: InventorySource, codes: list[str]) -> list[StockObservation]:
-    """Call the adapter once for every requested code and classify each outcome.
+def _safe_stock(value: Any) -> Any:
+    # Strings/objects can echo credentials: retain only their type.
+    if value is None or type(value) is bool:
+        return value
+    if type(value) is int and value.bit_length() <= 256:
+        return value
+    return {
+        "redacted_type": type(value).__name__
+        if type(value) in (str, list, dict, float, int)
+        else "unsupported"
+    }
 
-    A whole-batch adapter failure (auth/permission/IP/quota/transport/
-    dependency/incomplete-response) is recorded for every requested code --
-    never silently dropped and never coerced into a verified value. IDs the
-    adapter returns that were not requested are read but discarded; they can
-    never satisfy a different code's demand.
-    """
-    if not codes:
-        return []
+
+def _observe(source: InventorySource, codes: list[str], read_at: str) -> dict:
+    status = None
     try:
-        raw = source.get_component_detail_raw(codes)
+        result = source.get_component_inventory(codes) if codes else ComponentInventory((), None)
     except JLCIncompleteResponseError:
-        return [StockObservation(code, "incomplete-response", None) for code in codes]
+        status = "incomplete-response"
     except (JLCIPNotWhitelistedError, JLCPermissionError, JLCAuthError):
-        return [StockObservation(code, "forbidden", None) for code in codes]
+        status = "forbidden"
     except JLCQuotaError:
-        return [StockObservation(code, "quota-error", None) for code in codes]
+        status = "quota-error"
+    except JLCDependencyError:
+        status = "dependency-error"
     except JLCAPIError:
-        return [StockObservation(code, "transport-error", None) for code in codes]
+        status = "transport-error"
     except ImportError:
-        return [StockObservation(code, "dependency-error", None) for code in codes]
-
-    by_code: dict[str, dict[str, Any]] = {}
-    for component in raw:
-        code = component.get("componentCode")
-        if isinstance(code, str) and code.strip():
-            # First occurrence wins; a duplicated/substituted code cannot
-            # override an already-classified requested code.
-            by_code.setdefault(code.strip().upper(), component)
-
+        status = "dependency-error"
+    if status:
+        result = ComponentInventory((), None, "unknown")
+    if not isinstance(result, ComponentInventory) or not isinstance(result.rows, (tuple, list)):
+        result = ComponentInventory((), None, "unknown")
+        status = "incomplete-response"
+    provenance = Part(
+        lcsc_part="",
+        stock_source=result.source
+        if isinstance(result.source, str)
+        and result.source in {"live", "offline", "offline_catalog", "unknown"}
+        else "unknown",
+        fetched_at=result.observed_at if isinstance(result.observed_at, datetime) else None,
+        from_cache=result.from_cache is True,
+        read_at=datetime.fromisoformat(read_at.replace("Z", "+00:00")),
+    ).inventory_provenance()
+    by_code: dict[str, list[dict]] = {}
+    diagnostics: dict[str, Any] = {"unexpected_ids": [], "invalid_rows": 0, "duplicate_ids": []}
+    for row in result.rows if isinstance(result.rows, (tuple, list)) else ():
+        if not isinstance(row, dict):
+            diagnostics["invalid_rows"] += 1
+            continue
+        code = row.get("componentCode")
+        if not isinstance(code, str) or not re.fullmatch(r"C[0-9]{1,20}", code):
+            diagnostics["invalid_rows"] += 1
+            continue
+        if code not in codes:
+            diagnostics["unexpected_ids"].append(code)
+            continue
+        by_code.setdefault(code, []).append(row)
     observations = []
     for code in codes:
-        matched = by_code.get(code)
-        if matched is None:
-            observations.append(StockObservation(code, "not-returned", None))
-            continue
-        if "stockCount" not in matched:
-            observations.append(StockObservation(code, "missing-field", None))
-            continue
-        value = matched["stockCount"]
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            observations.append(StockObservation(code, "malformed", None))
-            continue
-        observations.append(StockObservation(code, "verified", value))
-    return observations
+        rows = by_code.get(code, [])
+        present = len(rows) == 1 and "stockCount" in rows[0]
+        value = rows[0].get("stockCount") if len(rows) == 1 else None
+        numeric = type(value) is int and value >= 0 and value.bit_length() <= 256
+        outcome = status or (
+            "not-returned"
+            if not rows
+            else "incomplete-response"
+            if len(rows) != 1
+            else "missing-field"
+            if not present
+            else "verified"
+            if numeric
+            else "malformed"
+        )
+        if len(rows) > 1:
+            diagnostics["duplicate_ids"].append(code)
+        observations.append(
+            {
+                "catalog_id": code,
+                "status": outcome,
+                "raw_stock": value if outcome == "verified" else None,
+                "stock_field_present": present,
+                "stock_field_value": _safe_stock(value) if present else None,
+                "stock_verified": outcome == "verified" and provenance["stock_verified"],
+                "stock_fields": [
+                    {"present": "stockCount" in row, "value": _safe_stock(row.get("stockCount"))}
+                    for row in rows[:100]
+                ],
+                "returned_rows": len(rows),
+            }
+        )
+    diagnostics["unexpected_ids"] = sorted(set(diagnostics["unexpected_ids"]))
+    return {"provenance": provenance, "coverage": diagnostics, "observations": observations}
+
+
+def _verify_refresh_inputs(plan: SubmissionPlan, bundle: Path, sources: Path) -> None:
+    verify_submission(plan.directory, plan.sha256)
+    core = _load_json(plan.plan_bytes)
+    try:
+        intent = core["settings"]
+        sides = tuple(intent["assembly_sides"])
+        if _settings(FactorySettings(intent["factory"], intent["board_layers"], sides)) != intent:
+            raise SubmissionError("Malformed factory settings")
+        matches = _population(
+            _read(plan.directory, core["artifacts"]["bom"]["output_name"]).data,
+            _read(plan.directory, core["artifacts"]["cpl"]["output_name"]).data,
+            sides,
+            core["exclusions"],
+        )
+        counts = Counter(match["catalog_id"] for match in matches)
+        demand = [
+            {"catalog_id": code, "per_board": count, "required": count * core["board_quantity"]}
+            for code, count in sorted(counts.items())
+        ]
+        if demand != core["demand"] or _read(plan.directory, "expected-matches.json").data != _json(
+            matches
+        ):
+            raise SubmissionError("Demand or expected matches disagree with frozen CSVs")
+        manifest = core["bundle_manifest"]
+        _inventory(bundle, set(core["bundle_files"]) | {manifest["path"]})
+        _check_record(_read(bundle, manifest["path"]).data, manifest)
+        for name, record in core["bundle_files"].items():
+            _check_record(_read(bundle, name).data, record)
+        for record in core["sources"].values():
+            _check_record(_read(sources, record["path"]).data, record)
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise SubmissionError("Malformed plan integrity bindings") from exc
 
 
 def refresh_inventory(
@@ -679,27 +724,20 @@ def refresh_inventory(
     source: InventorySource,
     destination: Path,
     observed_at: str,
+    bundle_root: Path | None = None,
+    source_root: Path | None = None,
 ) -> InventorySnapshot:
-    """Observe exact-ID official stock for a prepared plan's approved demand.
+    """Recheck local integrity, then observe exact-ID stock without substitution.
 
-    Milestone B, narrow increment: this reads ``plan.plan_bytes`` (never the
-    published directory's files, which stay untouched) to recover the exact
-    approved-ID demand map, calls ``source`` once with the deduplicated
-    catalog IDs, and writes a new immutable snapshot file bound to the plan
-    digest, the bound BOM output hash, board quantity, and the demand
-    mapping. It never multiplies, substitutes, infers absence, or reports a
-    reservation/feeder/attrition outcome.
-
-    ``source`` must already be fully constructed by the caller (credentials,
-    session, base URL): this function never builds one, never reads supplier
-    environment variables, and never falls back to an anonymous or offline
-    source. All local plan-shape validation happens before ``source`` is
-    touched, so a malformed plan or destination never causes a network call.
-
-    Full milestone B (landed #5033/#5034 provenance/freshness contracts, live
-    smoke-tested signing) remains tracked by #5142; this increment targets
-    the current, pre-merge ``jlcpcb_api`` adapter contract only.
+    ``observed_at`` is the caller refresh/read time, never supplier observation
+    time. Reloaded plans require explicit bundle/source roots.
     """
+    selected_bundle = bundle_root or plan.bundle_root
+    selected_sources = source_root or plan.source_root
+    if selected_bundle is None or selected_sources is None:
+        raise SubmissionError("Explicit frozen bundle and source roots required")
+    bundle, sources = _root(selected_bundle), _root(selected_sources)
+    verify_submission(plan.directory, plan.sha256)
     core = _load_json(plan.plan_bytes)
     if (
         not isinstance(core, dict)
@@ -708,6 +746,7 @@ def refresh_inventory(
         or not isinstance(core.get("artifacts"), dict)
         or not isinstance(core.get("outputs"), dict)
         or type(core.get("board_quantity")) is not int
+        or core["board_quantity"] <= 0
     ):
         raise SubmissionError("Unsupported or malformed plan")
     demand = core["demand"]
@@ -724,6 +763,8 @@ def refresh_inventory(
         ):
             raise SubmissionError("Malformed plan demand entry")
         code = entry["catalog_id"]
+        if not re.fullmatch(r"C[0-9]+", code):
+            raise SubmissionError("Malformed approved catalog id")
         if code in seen_ids:
             raise SubmissionError("Duplicate plan demand catalog id")
         seen_ids.add(code)
@@ -734,43 +775,24 @@ def refresh_inventory(
     bom_output = core["outputs"].get(bom_artifact["output_name"])
     if not isinstance(bom_output, dict) or not isinstance(bom_output.get("sha256"), str):
         raise SubmissionError("Plan is missing bound BOM output hash")
-    if not isinstance(observed_at, str) or not observed_at.strip():
-        raise SubmissionError("Explicit observation time required")
+    try:
+        read_time = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        if read_time.tzinfo is None:
+            raise ValueError
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise SubmissionError("Explicit ISO 8601 time with timezone required") from exc
 
     destination = Path(os.path.abspath(destination))
     parent = _root(destination.parent)
     _path(destination.name)
-    if destination.is_relative_to(plan.directory):
-        raise SubmissionError("Inventory snapshot must be outside the published handoff")
+    if any(destination.is_relative_to(root) for root in (plan.directory, bundle, sources)):
+        raise SubmissionError(
+            "Inventory snapshot must be outside handoff, frozen bundle and sources"
+        )
     if os.path.lexists(destination):
         raise SubmissionError("Destination already exists")
 
-    observations = _observe(source, sorted(approved))
-    if {o.status for o in observations} - _INVENTORY_STATUSES:
-        raise SubmissionError("Adapter returned an unrecognized observation status")
-
-    snapshot_core = {
-        "schema_version": 1,
-        "plan_sha256": plan.sha256,
-        "bom_sha256": bom_output["sha256"],
-        "board_quantity": core["board_quantity"],
-        "demand": demand,
-        "observed_at": observed_at,
-        "observations": [
-            {"catalog_id": o.catalog_id, "status": o.status, "raw_stock": o.raw_stock}
-            for o in observations
-        ],
-        "states": {
-            "inventory": "observed",
-            "human_approval": "not-established",
-            "factory_matching": "not-observed",
-            "reservation": "not-performed",
-            "feeder_attrition": "not-established",
-            "upload": "not-performed",
-            "order": "not-performed",
-        },
-    }
-    snapshot_bytes = _json(snapshot_core)
+    _verify_refresh_inputs(plan, bundle, sources)
 
     lock = parent / ("." + destination.name + ".snapshot-lock")
     try:
@@ -780,6 +802,28 @@ def refresh_inventory(
     try:
         if os.path.lexists(destination):
             raise SubmissionError("Destination already exists")
+        evidence = _observe(source, sorted(approved), observed_at)
+        _verify_refresh_inputs(plan, bundle, sources)
+        snapshot_core = {
+            "schema_version": 2,
+            "plan_sha256": plan.sha256,
+            "bom_sha256": bom_output["sha256"],
+            "board_quantity": core["board_quantity"],
+            "demand": demand,
+            "read_at": observed_at,
+            **evidence,
+            "states": {
+                "inventory": "observed",
+                "human_approval": "not-established",
+                "factory_matching": "not-observed",
+                "reservation": "not-performed",
+                "feeder_attrition": "not-established",
+                "upload": "not-performed",
+                "order": "not-performed",
+            },
+        }
+        snapshot_bytes = _json(snapshot_core)
+
         _write_bytes(destination, snapshot_bytes)
         if _read(parent, destination.name).data != snapshot_bytes:
             raise SubmissionError("Destination bytes differ from computed snapshot")
@@ -788,3 +832,34 @@ def refresh_inventory(
     finally:
         os.close(lock_fd)
         lock.unlink()
+
+
+def verify_inventory_snapshot(
+    path: Path, expected_sha256: str, plan: SubmissionPlan
+) -> InventorySnapshot:
+    """Verify saved bytes and plan binding, never renew inventory freshness.
+
+    ``stock_verified`` records freshness at refresh time. Consumers needing
+    current freshness must apply Part.stock_verified to the retained source
+    and original observed_at, never to read_at or this verification time.
+    """
+    verify_submission(plan.directory, plan.sha256)
+    path = Path(os.path.abspath(path))
+    data = _read(_root(path.parent), path.name).data
+    if _digest(data) != expected_sha256:
+        raise SubmissionError("Inventory snapshot digest mismatch")
+    snapshot = _load_json(data)
+    core = _load_json(plan.plan_bytes)
+    try:
+        bom = core["outputs"][core["artifacts"]["bom"]["output_name"]]["sha256"]
+        if (
+            snapshot["schema_version"] != 2
+            or snapshot["plan_sha256"] != plan.sha256
+            or snapshot["bom_sha256"] != bom
+            or snapshot["board_quantity"] != core["board_quantity"]
+            or snapshot["demand"] != core["demand"]
+        ):
+            raise SubmissionError("Inventory snapshot belongs to a different plan")
+    except (KeyError, TypeError) as exc:
+        raise SubmissionError("Malformed inventory snapshot binding") from exc
+    return InventorySnapshot(path, data)
