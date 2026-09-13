@@ -255,3 +255,23 @@ def test_stitch_reservation_does_not_acquire_geometry_only_provenance():
     added = grid._blocked & ~before
     assert added.any()
     assert not any(added[layer, y, x] for layer, y, x in grid._pad_geometry_cells)
+
+
+@pytest.mark.parametrize("layer_idx", [1, 3])
+def test_uncommitted_partner_via_selects_alternative_planar_tail(layer_idx):
+    router, finder, head, goal, partner, body = _case()
+    head = router._virtual_pad_at(head, head.x, head.y, layer_idx)
+    goal = router._virtual_pad_at(goal, goal.x, goal.y, layer_idx)
+    via = Via(x=3.5, y=3, diameter=0.6, drill=0.3, layers=(Layer.F_CU, Layer.IN1_CU), net=2)
+    original = router._synthesize_tail(finder, head, goal, layer_idx)
+    assert original and len(original.segments) == 1
+    tail = router._synthesize_tail(finder, head, goal, layer_idx, partner_vias=[via])
+    assert tail and len(tail.segments) > 1
+    from shapely.geometry import Point
+
+    assert all(
+        Point(via.x, via.y).distance(LineString([s.start, s.end])) - (via.diameter + s.width) / 2
+        >= finder.rules.via_clearance - 1e-9
+        for s in tail.segments
+    )
+    assert router.autorouter.routes == []

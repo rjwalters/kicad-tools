@@ -5092,6 +5092,7 @@ class DiffPairRouter:
         layer_idx: int,
         partner_segments: list[Segment] | None = None,
         partner_clearance: float = 0.0,
+        partner_vias: list[Via] | None = None,
     ) -> Route | None:
         """Geometric head->pad tail on the head's layer (issue #3508).
 
@@ -5247,6 +5248,23 @@ class DiffPairRouter:
                     for x1, y1, x2, y2 in segs
                 ):
                     continue
+                # The paired tail may have been constructed but not committed
+                # to the grid or foreign-copper cache yet. Filter its barrels
+                # here, while alternative planar candidates remain available.
+                if partner_vias:
+                    from kicad_tools.core.geometry import point_to_segment_distance
+
+                    if any(
+                        point_to_segment_distance(v.x, v.y, x1, y1, x2, y2)
+                        < (width + v.diameter) / 2 + self.autorouter.rules.via_clearance - 1e-9
+                        for v in partner_vias
+                        if not v.is_micro
+                        or min(l.value for l in v.layers)
+                        <= layer.value
+                        <= max(l.value for l in v.layers)
+                        for x1, y1, x2, y2 in segs
+                    ):
+                        continue
                 route = Route(net=head.net, net_name=head.net_name)
                 for x1, y1, x2, y2 in segs:
                     if abs(x2 - x1) < 0.01 and abs(y2 - y1) < 0.01:
@@ -6205,6 +6223,7 @@ class DiffPairRouter:
                             li,
                             partner_segments=partner.segments,
                             partner_clearance=partner_center_clearance,
+                            partner_vias=partner.vias,
                         )
                         if part is None:
                             break
