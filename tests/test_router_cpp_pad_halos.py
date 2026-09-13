@@ -47,7 +47,10 @@ def test_pad_provenance_survives_bulk_and_incremental_sync(incremental):
     rules = DesignRules(grid_resolution=0.1)
     grid = RoutingGrid(width=10, height=10, rules=rules, layer_stack=LayerStack.two_layer())
     cpp = CppGrid.from_routing_grid(grid) if incremental else None
-    grid.add_pad(Pad(x=5, y=5, width=0.45, height=0.45, net=0, net_name="GND", layer=Layer.F_CU))
+    grid.add_pad(
+        Pad(x=5, y=5, width=0.45, height=0.45, net=0, net_name="GND", layer=Layer.F_CU),
+        pin_pitch=1.27,
+    )
     if cpp is None:
         cpp = CppGrid.from_routing_grid(grid)
     halo_cells = [
@@ -69,7 +72,10 @@ def test_python_keepout_overlap_stays_blocked_after_bulk_sync(keepout_first):
     x, y = grid.world_to_grid(5.4, 5)
     if keepout_first:
         grid.cell_at(0, y, x).blocked = True
-    grid.add_pad(Pad(x=5, y=5, width=0.45, height=0.45, net=0, net_name="GND", layer=Layer.F_CU))
+    grid.add_pad(
+        Pad(x=5, y=5, width=0.45, height=0.45, net=0, net_name="GND", layer=Layer.F_CU),
+        pin_pitch=1.27,
+    )
     if not keepout_first:
         grid.cell_at(0, y, x).blocked = True
     cpp = CppGrid.from_routing_grid(grid)

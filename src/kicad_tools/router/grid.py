@@ -2021,13 +2021,24 @@ class RoutingGrid:
         gx2 = max(gx2, pad_gx2)
         gy2 = max(gy2, pad_gy2)
 
+        # Only power/ground plane pads carry this padding exemption. NC
+        # pads and skipped signal nets can also have net=0; their existing
+        # hard halos still protect endpoint seed/escape constraints.
+        # Keep the coarse-pitch routing envelope unchanged. Dense packages
+        # need metal-based radius checks to avoid sealing their escape lanes.
+        plane_pad = (
+            _is_plane_net_pad(pad)
+            and pin_pitch is not None
+            and self.rules.fine_pitch_threshold is not None
+            and pin_pitch < self.rules.fine_pitch_threshold
+        )
         for layer_idx in layers_to_block:
             for gy in range(gy1, gy2 + 1):
                 for gx in range(gx1, gx2 + 1):
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         cell = self.cell_at(layer_idx, gy, gx)
                         key = (layer_idx, gy, gx)
-                        halo_only = not cell.blocked or key in self._pad_halo_cells
+                        halo_only = plane_pad and (not cell.blocked or key in self._pad_halo_cells)
                         cell.blocked = True
                         if halo_only:
                             self._pad_halo_cells.add(key)
