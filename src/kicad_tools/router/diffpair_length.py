@@ -87,6 +87,7 @@ class DiffPairLengthTracker:
         detected_pairs: list[DetectedPair],
         board_thickness_mm: float | None = None,
         num_copper_layers: int = 2,
+        blind_buried_supported: bool = True,
     ) -> None:
         """Measure and record the routed length of each half of each detected pair.
 
@@ -105,6 +106,8 @@ class DiffPairLengthTracker:
             num_copper_layers: Number of copper layers in the stack (used
                 to compute per-via drilled length when ``board_thickness_mm``
                 is supplied).  Defaults to ``2`` (typical 2-layer stack).
+            blind_buried_supported: When false, ordinary vias contribute full
+                board thickness, matching their manufactured through barrels.
 
         Notes:
             * Routes whose ``net`` is not the P or N of any detected pair
@@ -123,12 +126,12 @@ class DiffPairLengthTracker:
             pair_net_ids.add(dp.pair.positive.net_id)
             pair_net_ids.add(dp.pair.negative.net_id)
 
-        # Build a {net_id -> Route} lookup for O(1) access (a board can
-        # have hundreds of routes; linear scans per pair would be O(n*m)).
-        routes_by_net: dict[int, Route] = {}
+        # A net can own separate escape and body fragments. Measure all of
+        # them so a post-tuning refresh agrees with the tuner's combined view.
+        routes_by_net: dict[int, list[Route]] = {}
         for route in routes:
             if route.net in pair_net_ids:
-                routes_by_net[route.net] = route
+                routes_by_net.setdefault(route.net, []).append(route)
 
         # Measure each side of each detected pair, and refresh the
         # name-keyed skew cache used by :meth:`get_all_skews`.
@@ -137,16 +140,22 @@ class DiffPairLengthTracker:
             p_id = dp.pair.positive.net_id
             n_id = dp.pair.negative.net_id
 
-            p_route = routes_by_net.get(p_id)
-            if p_route is not None:
-                self.lengths[p_id] = self._measure_route(
-                    p_route, board_thickness_mm, num_copper_layers
+            p_routes = routes_by_net.get(p_id)
+            if p_routes is not None:
+                self.lengths[p_id] = sum(
+                    self._measure_route(
+                        route, board_thickness_mm, num_copper_layers, blind_buried_supported
+                    )
+                    for route in p_routes
                 )
 
-            n_route = routes_by_net.get(n_id)
-            if n_route is not None:
-                self.lengths[n_id] = self._measure_route(
-                    n_route, board_thickness_mm, num_copper_layers
+            n_routes = routes_by_net.get(n_id)
+            if n_routes is not None:
+                self.lengths[n_id] = sum(
+                    self._measure_route(
+                        route, board_thickness_mm, num_copper_layers, blind_buried_supported
+                    )
+                    for route in n_routes
                 )
 
             # Populate the name-keyed cache only when BOTH halves are

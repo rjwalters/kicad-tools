@@ -5651,15 +5651,9 @@ class Autorouter:
         callers add components between passes and is consistent with
         PR #2653's "consume on demand" approach for engaged_pairs.
 
-        ``board_thickness_mm`` is left as ``None`` -- the
-        ``DiffPairLengthTracker.record_routes`` and
-        ``MatchGroupTracker.record_routes`` contracts both document
-        this as the zero-via-length default (vias contribute 0.0 mm).
-        See the curator note on issue #2657 and the docstring at
-        ``diffpair_length.py:172``: ``router.rules.DesignRules`` has no
-        ``board_thickness_mm`` field (only ``manufacturers.base.DesignRules``
-        does), so threading real thickness through is deferred to a
-        follow-up.
+        Differential-pair measurements use manufacturer thickness and the
+        router's drilled-via policy, matching the skew tuner. Match-group
+        bookkeeping retains its zero-via-length default here.
 
         Safe to call when there are no diff pairs / match groups (no-op
         via ``record_routes`` early-exit on empty detection results).
@@ -5716,14 +5710,18 @@ class Autorouter:
                 detected_pairs = []
 
             if detected_pairs:
-                # board_thickness_mm=None: zero-via-length default (see docstring).
-                # num_copper_layers=None: update_diffpair_skew defaults to
-                # len(self.layer_stack.layers) or 2 -- matches the per-call branch
-                # at the original ``update_diffpair_skew`` definition.
+                # Keep final bookkeeping in the same drilled-length model as
+                # the tuner and checker; do not overwrite it with planar skew.
+                manufacturer_rules = self._build_manufacturer_design_rules()
+                via_rules = getattr(self, "via_rules", None)
                 self.update_diffpair_skew(
                     detected_pairs,
-                    board_thickness_mm=None,
+                    board_thickness_mm=getattr(manufacturer_rules, "board_thickness_mm", None),
                     num_copper_layers=None,
+                    blind_buried_supported=bool(
+                        getattr(via_rules, "allow_blind", False)
+                        or getattr(via_rules, "allow_buried", False)
+                    ),
                 )
         except ImportError:
             # diffpair_detection module unavailable -- silently skip the
@@ -16051,6 +16049,7 @@ class Autorouter:
         detected_pairs: list,
         board_thickness_mm: float | None = None,
         num_copper_layers: int | None = None,
+        blind_buried_supported: bool = True,
     ) -> DiffPairLengthTracker:
         """Populate the diff-pair length tracker with current route skews.
 
@@ -16070,6 +16069,8 @@ class Autorouter:
             num_copper_layers: Number of copper layers in the stack.
                 Defaults to the layer-stack count when ``None`` (or 2
                 when no stack has been configured).
+            blind_buried_supported: When false, ordinary vias contribute full
+                board thickness even when their route endpoints span fewer layers.
 
         Returns:
             The internal :class:`DiffPairLengthTracker` instance (also
@@ -16088,6 +16089,7 @@ class Autorouter:
             detected_pairs=detected_pairs,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
         )
         return self._diffpair_length_tracker
 
@@ -16260,10 +16262,18 @@ class Autorouter:
             num_layers = len(self.layer_stack.layers)
         else:
             num_layers = 2
+        manufacturer_rules = self._build_manufacturer_design_rules()
+        board_thickness_mm = getattr(manufacturer_rules, "board_thickness_mm", None)
+        via_rules = getattr(self, "via_rules", None)
+        blind_buried_supported = bool(
+            getattr(via_rules, "allow_blind", False) or getattr(via_rules, "allow_buried", False)
+        )
         self._diffpair_length_tracker.record_routes(
             routes=list(routes_by_net.values()),
             detected_pairs=detected_pairs,
             num_copper_layers=num_layers,
+            board_thickness_mm=board_thickness_mm,
+            blind_buried_supported=blind_buried_supported,
         )
 
         for dp in detected_pairs:
@@ -16297,6 +16307,9 @@ class Autorouter:
                 grid=self.grid,
                 prefer_reserved_slack=self.enable_slack_corridor_widening,
                 fixed_segment_ids=fixed_segment_ids,
+                board_thickness_mm=board_thickness_mm,
+                num_copper_layers=num_layers,
+                blind_buried_supported=blind_buried_supported,
             )
 
             changed = {
@@ -16350,6 +16363,8 @@ class Autorouter:
             routes=list(routes_by_net.values()),
             detected_pairs=detected_pairs,
             num_copper_layers=num_layers,
+            board_thickness_mm=board_thickness_mm,
+            blind_buried_supported=blind_buried_supported,
         )
         return results
 

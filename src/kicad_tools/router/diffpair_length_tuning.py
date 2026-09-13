@@ -57,6 +57,7 @@ Out of scope for Phase 3I:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
@@ -160,6 +161,9 @@ def tune_diff_pair_skew(
     grid: RoutingGrid | None = None,
     prefer_reserved_slack: bool = False,
     fixed_segment_ids: set[int] | None = None,
+    board_thickness_mm: float | None = None,
+    num_copper_layers: int = 2,
+    blind_buried_supported: bool = True,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """Tune the skew of a detected diff pair by serpentining the shorter half.
 
@@ -202,6 +206,11 @@ def tune_diff_pair_skew(
             are retried at three interior points of the selected mutable host.
         fixed_segment_ids: Fixed escape segment identities; retained in measurement
             and clearance views, but never selected or replaced as meander hosts.
+        board_thickness_mm: Include drilled via length when supplied, using
+            the same measurement as the differential-pair skew tracker.
+        num_copper_layers: Stack layer count for via-span measurement.
+        blind_buried_supported: When false, ordinary vias contribute the full
+            board thickness even if their routing endpoints span fewer layers.
         prefer_reserved_slack: Issue #4085.  Gate for the slack-aware
             segment preference above.  Default ``False`` (inert).  Has no
             effect unless ``grid`` is also supplied.
@@ -261,11 +270,17 @@ def tune_diff_pair_skew(
             result,
         )
 
+    from .diffpair_length import DiffPairLengthTracker
     from .length import LengthTracker  # avoid cycle
     from .primitives import Route
 
-    l_p = LengthTracker.calculate_route_length(p_route)
-    l_n = LengthTracker.calculate_route_length(n_route)
+    def measure(route: Route) -> float:
+        return DiffPairLengthTracker._measure_route(
+            route, board_thickness_mm, num_copper_layers, blind_buried_supported
+        )
+
+    l_p = measure(p_route)
+    l_n = measure(n_route)
     skew = abs(l_p - l_n)
 
     # Already within tolerance -- byte-for-byte unchanged.
@@ -374,14 +389,14 @@ def tune_diff_pair_skew(
         # partner trace at the insertion segment's midpoint.
         hint = _outer_normal_hint(insertion_segment, longer_route)
 
-        # A trombone adds twice its amplitude. For a sub-loop deficit,
-        # using the configured maximum (1 mm by default) needlessly adds
-        # 2 mm and can hit a neighboring lane before the DRC guard rejects
-        # it. Scale that final loop to the actual remaining target instead.
-        length_needed = serpentine_target - LengthTracker.calculate_route_length(current_shorter)
+        # Each loop adds twice its amplitude. Divide the deficit across
+        # the required loops so rounding the loop count up cannot overshoot
+        # the target (including deficits larger than one loop).
+        length_needed = serpentine_target - measure(current_shorter)
         amplitude = base_config.amplitude
-        if length_needed > 0:
-            amplitude = min(amplitude, length_needed / 2.0)
+        if length_needed > 0 and amplitude > 0:
+            loops = math.ceil(length_needed / (2.0 * amplitude))
+            amplitude = min(amplitude, math.nextafter(length_needed / (2.0 * loops), math.inf))
 
         # Build the per-attempt config with side="outer" + the hint.
         attempt_config = SerpentineConfig(
@@ -411,7 +426,8 @@ def tune_diff_pair_skew(
             )
         else:
             candidate_route, serp_result = attempt_generator.add_serpentine(
-                current_shorter, serpentine_target
+                current_shorter,
+                LengthTracker.calculate_route_length(current_shorter) + length_needed,
             )
         result.serpentine_results.append(serp_result)
 
@@ -490,7 +506,7 @@ def tune_diff_pair_skew(
         # Commit this attempt's new route and re-measure skew.
         current_shorter = candidate_route
         result.inserts_applied += 1
-        new_shorter_length = LengthTracker.calculate_route_length(current_shorter)
+        new_shorter_length = measure(current_shorter)
         current_skew = (
             abs(new_shorter_length - target_length)
             if longer_is_p
@@ -515,9 +531,7 @@ def tune_diff_pair_skew(
         )
 
     result.skew_after_mm = (
-        abs(target_length - LengthTracker.calculate_route_length(current_shorter))
-        if result.inserts_applied > 0
-        else skew
+        abs(target_length - measure(current_shorter)) if result.inserts_applied > 0 else skew
     )
 
     # Assemble return values, restoring P/N polarity ordering.  The

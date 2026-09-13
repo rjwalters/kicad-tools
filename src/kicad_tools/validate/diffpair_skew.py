@@ -62,6 +62,7 @@ def derive_skew_data(
     net_class_map: dict[str, NetClassRouting] | None,
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 2,
+    blind_buried_supported: bool = False,
 ) -> tuple[dict[tuple[str, str], float], dict[tuple[int, int], float]]:
     """Re-derive ``(skew_data, threshold_map)`` from a routed PCB.
 
@@ -88,6 +89,11 @@ def derive_skew_data(
         num_copper_layers: Number of copper layers in the stack (used
             to compute per-via drilled length when ``board_thickness_mm``
             is supplied).  Defaults to ``2``.
+        blind_buried_supported: When ``False`` (the default), ordinary
+            vias contribute the full board thickness, matching through-via
+            manufacturing and the match-group checker.  Set ``True`` for
+            boards supporting their declared blind/buried spans.  Micro
+            vias always retain their declared span.
 
     Returns:
         ``(skew_data, threshold_map)`` where
@@ -105,7 +111,7 @@ def derive_skew_data(
 
     Notes:
         Idempotence guarantee (drift-prevention AC): given the same
-        physical routing and the same net classes, this function returns
+        physical routing, via-span policy, and net classes, this function returns
         the same ``skew_data`` as the producer-side
         :meth:`DiffPairLengthTracker.get_all_skews` for routes recorded
         via :meth:`DiffPairLengthTracker.record_routes`.  This is the
@@ -195,10 +201,18 @@ def derive_skew_data(
             continue
 
         l_p = DiffPairLengthTracker.measure_net_from_pcb(
-            pcb, p_id, board_thickness_mm, num_copper_layers
+            pcb,
+            p_id,
+            board_thickness_mm,
+            num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
         )
         l_n = DiffPairLengthTracker.measure_net_from_pcb(
-            pcb, n_id, board_thickness_mm, num_copper_layers
+            pcb,
+            n_id,
+            board_thickness_mm,
+            num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
         )
         skew_mm = abs(l_p - l_n)
         skew_data[(p_name, n_name)] = skew_mm

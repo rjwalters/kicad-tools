@@ -225,3 +225,50 @@ def test_compaction_retains_same_net_pad_junction():
     assert result.success and result.skew_after_mm <= 0.05
     assert any(segment.start == (10, 9) or segment.end == (10, 9) for segment in n_out.segments)
     assert _worst(grid, n_out) == 0
+
+
+@pytest.mark.parametrize("with_grid", [False, True])
+@pytest.mark.parametrize("blind_buried", [False, True])
+def test_tuner_targets_total_length_including_via_policy(with_grid, blind_buried):
+    from kicad_tools.router.diffpair_length import DiffPairLengthTracker
+    from kicad_tools.router.primitives import Via
+
+    grid, pair, p, n = _fixture()
+    p.segments = [replace(p.segments[0], x2=15)]
+    p.vias = [
+        Via(x=x, y=8, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.IN1_CU), net=p.net)
+        for x in (5, 15)
+    ]
+    policy = {
+        "board_thickness_mm": 1.6,
+        "num_copper_layers": 4,
+        "blind_buried_supported": blind_buried,
+    }
+    p_out, n_out, result = _tune(grid if with_grid else None, pair, p, n, **policy)
+    assert result.success
+    assert p_out is p
+    tracker = DiffPairLengthTracker()
+    tracker.record_routes([p_out, n_out], [pair], **policy)
+    measured = abs(tracker.lengths[p.net] - tracker.lengths[n.net])
+    assert measured <= 0.05
+    assert result.skew_after_mm == pytest.approx(measured)
+    assert result.skew_before_mm == pytest.approx(1.6 * 2 * (1 / 3 if blind_buried else 1))
+
+
+def test_via_length_can_reverse_which_half_needs_tuning():
+    from kicad_tools.router.diffpair_length import DiffPairLengthTracker
+    from kicad_tools.router.primitives import Via
+
+    grid, pair, p, n = _fixture()
+    n.vias = [
+        Via(x=x, y=9, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.IN1_CU), net=n.net)
+        for x in (5, 15)
+    ]
+    policy = {"board_thickness_mm": 1.6, "num_copper_layers": 4, "blind_buried_supported": False}
+    p_out, n_out, result = _tune(grid, pair, p, n, **policy)
+    assert result.success
+    assert n_out is n
+    assert p_out is not p
+    tracker = DiffPairLengthTracker()
+    tracker.record_routes([p_out, n_out], [pair], **policy)
+    assert abs(tracker.lengths[p.net] - tracker.lengths[n.net]) <= 0.05
