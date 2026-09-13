@@ -1575,3 +1575,44 @@ def test_captured_pour_boundaries_require_a_copper_bridge(generate_design_mod, t
     assert bridges > 0
     assert vias == 0
     assert generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]["connected"]
+
+
+def test_repair_routes_around_barrier_between_existing_via_islands(tmp_path, generate_design_mod):
+    """Straight bridges fail, but existing barrels allow a bent B.Cu path."""
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.clearance import ClearanceRule
+
+    parts = [
+        """(kicad_pcb (version 20240108) (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "") (net 1 "+1V2") (net 2 "BLOCKER")"""
+    ]
+    for number, x in enumerate((110, 115), 1):
+        parts.append(f"""
+  (footprint "test:pad" (layer "F.Cu") (at {x} 129)
+    (property "Reference" "J{number}" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu") (net 1 "+1V2")))
+  (via (at {x} 130) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+  (segment (start {x} 129) (end {x} 130) (width 0.2) (layer "F.Cu") (net 1))""")
+    for layer in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
+        parts.append(f'''
+  (segment (start 112.5 128) (end 112.5 132) (width 1) (layer "{layer}") (net 2))''')
+    board = tmp_path / "islands.kicad_pcb"
+    board.write_text("\n".join(parts) + "\n)\n")
+    before = PCB.load(board)
+    assert not generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]["connected"]
+    vias, bridges = generate_design_mod._repair_pour_connectivity(board, ["+1V2"])
+    assert vias == 0 and bridges == 1
+    assert generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]["connected"]
+    after = PCB.load(board)
+    assert len(after.vias) == len(before.vias)
+    assert [(s.start, s.end, s.layer) for s in after.segments[: len(before.segments)]] == [
+        (s.start, s.end, s.layer) for s in before.segments
+    ]
+    assert (
+        not ClearanceRule()
+        .check(after, get_profile("jlcpcb").get_design_rules(layers=4))
+        .violations
+    )
