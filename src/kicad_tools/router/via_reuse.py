@@ -45,7 +45,7 @@ def reuse_same_net_vias(route: Route, existing_routes: list[Route], clearance: f
             continue
         _, other = min(eligible, key=lambda item: item[0])
         other_lo, other_hi = _physical_span(other)
-        widths = {}
+        widths: dict[Layer, float] = {}
         for segment in route.segments:
             if any(
                 math.hypot(x - via.x, y - via.y) < 1e-6 for x, y in (segment.start, segment.end)
