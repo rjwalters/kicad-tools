@@ -335,6 +335,31 @@ def tune_diff_pair_skew(
             reserved_net_id=shorter_id if prefer_reserved_slack else None,
             fixed_segment_ids=fixed_segment_ids,
         )
+        if best is None and grid is not None:
+            # Coupled search emits one segment per grid step. A straight run
+            # can therefore be long enough for tuning while every individual
+            # segment is too short. Consolidate only collinear copper, retaining
+            # pad/via junctions and the endpoints of every fixed escape.
+            from .optimizer.consolidate import consolidate_segments
+
+            protected = [(pad.x, pad.y) for pad in grid._pads]
+            protected.extend((via.x, via.y) for via in current_shorter.vias)
+            for segment in current_shorter.segments:
+                if fixed_segment_ids and id(segment) in fixed_segment_ids:
+                    protected.extend((segment.start, segment.end))
+            segments, stats = consolidate_segments(
+                current_shorter.segments,
+                protected_points=protected,
+                tolerance=1e-9,
+            )
+            if stats.segments_removed:
+                current_shorter = replace(current_shorter, segments=segments)
+                best = generator.find_best_segment(
+                    current_shorter,
+                    grid=grid if prefer_reserved_slack else None,
+                    reserved_net_id=shorter_id if prefer_reserved_slack else None,
+                    fixed_segment_ids=fixed_segment_ids,
+                )
         if best is None:
             result.reason = "no_suitable_segment"
             result.message = (

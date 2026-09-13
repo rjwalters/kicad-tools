@@ -162,3 +162,66 @@ def test_interior_retry_preserves_fixed_escape_segment_identity():
     assert any(segment is fixed_escape for segment in n_out.segments)
     assert (fixed_escape.x1, fixed_escape.y1, fixed_escape.x2, fixed_escape.y2) == (14, 9, 15, 9)
     assert _worst(grid, n_out) == 0
+
+
+def _fragment(route):
+    host = route.segments[0]
+    route.segments = [
+        replace(host, x1=host.x1 + i * 0.1, x2=host.x1 + (i + 1) * 0.1)
+        for i in range(round((host.x2 - host.x1) / 0.1))
+    ]
+
+
+def test_fragmented_straight_host_can_be_tuned_without_manual_compaction():
+    grid, pair, p, n = _fixture()
+    _fragment(n)
+    original_segments = n.segments
+    p_out, n_out, result = _tune(grid, pair, p, n)
+    assert result.success and result.skew_after_mm <= 0.05
+    assert p_out is p
+    assert n.segments is original_segments
+    assert _worst(grid, n_out) == 0
+    assert len(n_out.segments) < len(n.segments)
+
+
+def test_obstructed_fragmented_host_rolls_back_without_publishing_compaction():
+    grid, pair, p, n = _fixture(block_all=True)
+    _fragment(n)
+    original_segments = n.segments
+    p_out, n_out, result = _tune(grid, pair, p, n)
+    assert not result.success
+    assert p_out is p and n_out is n
+    assert n_out.segments is original_segments
+
+
+def test_compaction_retains_fixed_escape_at_end_of_fragmented_host():
+    grid, pair, p, n = _fixture()
+    _fragment(n)
+    fixed = n.segments[-1]
+    p_out, n_out, result = _tune(grid, pair, p, n, fixed_segment_ids={id(fixed)})
+    assert result.success and result.skew_after_mm <= 0.05
+    assert p_out is p
+    assert any(segment is fixed for segment in n_out.segments)
+    assert _worst(grid, n_out) == 0
+
+
+def test_compaction_retains_same_net_pad_junction():
+    grid, pair, p, n = _fixture()
+    _fragment(n)
+    pad = Pad(
+        x=10,
+        y=9,
+        width=0.3,
+        height=0.3,
+        net=n.net,
+        net_name=n.net_name,
+        layer=Layer.F_CU,
+        ref="TP",
+        pin="1",
+        shape="rect",
+    )
+    grid.add_pad(pad)
+    _, n_out, result = _tune(grid, pair, p, n)
+    assert result.success and result.skew_after_mm <= 0.05
+    assert any(segment.start == (10, 9) or segment.end == (10, 9) for segment in n_out.segments)
+    assert _worst(grid, n_out) == 0

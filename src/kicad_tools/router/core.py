@@ -16292,9 +16292,8 @@ class Autorouter:
                 length_critical=length_critical,
                 # Issue #4085 (Phase 1): when the slack-corridor gate is on,
                 # let the tuner prefer segments inside the pair's own
-                # reserved slack corridor.  Grid is passed unconditionally
-                # (cheap) but only consulted when prefer_reserved_slack is
-                # True; flag-off keeps the pre-#4085 geometric selection.
+                # reserved slack corridor. The grid also supplies pad geometry
+                # for the tuning self-check, independently of that preference.
                 grid=self.grid,
                 prefer_reserved_slack=self.enable_slack_corridor_widening,
                 fixed_segment_ids=fixed_segment_ids,
