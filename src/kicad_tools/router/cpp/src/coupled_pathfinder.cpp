@@ -70,6 +70,7 @@ CoupledPathfinder::CoupledPathfinder(Grid3D& grid,
 
 // Mirror of Python ``_is_via_blocked`` (diffpair_routing.py:793-832).
 bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net, bool allow_own_pad) const {
+    allow_own_pad = allow_own_pad && rules_.allow_smd_vias;
     for (int layer = 0; layer < num_layers_; ++layer) {
         for (int dy = -via_extra_cells_; dy <= via_extra_cells_; ++dy) {
             for (int dx = -via_extra_cells_; dx <= via_extra_cells_; ++dx) {

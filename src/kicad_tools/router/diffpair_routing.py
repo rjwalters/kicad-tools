@@ -1812,6 +1812,16 @@ class CoupledPathfinder:
             self.rules.via_diameter / 2 + self.rules.via_clearance + width / 2
         ) / self.grid.resolution
 
+    def _endpoint_via_in_pad_supported(self) -> bool:
+        """Use the same manufacturer capability policy as the per-net router."""
+        from .mfr_limits import get_mfr_limits
+
+        if self.rules.manufacturer:
+            with contextlib.suppress(ValueError):
+                return bool(get_mfr_limits(self.rules.manufacturer).via_in_pad_supported)
+        # Preserve the per-net router's unspecified/unknown-process behavior.
+        return True
+
     def _is_via_blocked(self, gx: int, gy: int, net: int, *, allow_own_pad: bool = False) -> bool:
         """Check if placing a via at this position would conflict on any layer.
 
@@ -1839,6 +1849,7 @@ class CoupledPathfinder:
         The legacy endpoint exception may allow its own pad metal via
         ``allow_own_pad``; foreign copper and pads remain obstacles.
         """
+        allow_own_pad = allow_own_pad and self._endpoint_via_in_pad_supported()
         drill_cells = max(0, int(math.ceil((self.rules.via_drill / 2) / self.grid.resolution)))
         for layer in range(self.grid.num_layers):
             for dy in range(-self._via_extra_cells, self._via_extra_cells + 1):
@@ -2634,6 +2645,7 @@ class CoupledPathfinder:
         raises (the caller then falls back to pure Python).
         """
         pads = getattr(self, "_cpp_reconstruct_pads", None)
+        allow_smd_vias = self._endpoint_via_in_pad_supported()
         via_thresholds = (
             self._minimum_via_pitch_cells(),
             self._via_trace_clearance_cells(pads[0].net_name if pads else None),
@@ -2643,6 +2655,7 @@ class CoupledPathfinder:
             self._cpp_coupled_impl is not None
             and self._cpp_coupled_grid is self.grid
             and getattr(self, "_cpp_coupled_via_thresholds", None) == via_thresholds
+            and getattr(self, "_cpp_coupled_allow_smd_vias", None) == allow_smd_vias
         ):
             return self._cpp_coupled_impl
         try:
@@ -2703,6 +2716,7 @@ class CoupledPathfinder:
             return None
         self._cpp_coupled_impl = impl
         self._cpp_coupled_via_thresholds = via_thresholds
+        self._cpp_coupled_allow_smd_vias = allow_smd_vias
         self._cpp_coupled_grid = self.grid
         return impl
 

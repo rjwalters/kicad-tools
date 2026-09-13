@@ -138,3 +138,36 @@ def test_cpp_grid_preserves_unblocked_foreign_pad_metadata(layer):
     assert not cell.blocked
     assert cell.pad_blocked
     assert cell.net == 99
+
+
+@pytest.mark.parametrize("backend", ["python", "python_swap", "cpp"])
+@pytest.mark.parametrize(
+    "manufacturer,allowed",
+    [
+        ("jlcpcb", False),
+        ("oshpark", False),
+        ("jlcpcb-tier1", True),
+        ("pcbway", True),
+        (None, True),
+        ("unknown-test-process", True),
+    ],
+)
+def test_endpoint_via_respects_manufacturer_capability(backend, manufacturer, allowed):
+    finder = _finder()
+    finder.rules.manufacturer = manufacturer
+    assert _has_endpoint_transition(finder, backend) is allowed
+
+
+@pytest.mark.parametrize(
+    "initial,updated", [("jlcpcb-tier1", "jlcpcb"), ("jlcpcb", "jlcpcb-tier1")]
+)
+def test_native_endpoint_policy_refreshes_after_manufacturer_change(initial, updated):
+    if not is_cpp_available():
+        pytest.skip("requires the matching native router backend")
+    finder = _finder()
+    finder.rules.manufacturer = initial
+    assert _has_endpoint_transition(finder, "cpp") is (initial == "jlcpcb-tier1")
+    previous = finder._get_cpp_coupled_impl()
+    finder.rules.manufacturer = updated
+    assert _has_endpoint_transition(finder, "cpp") is (updated == "jlcpcb-tier1")
+    assert finder._get_cpp_coupled_impl() is not previous

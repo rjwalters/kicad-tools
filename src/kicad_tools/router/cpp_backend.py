@@ -3832,6 +3832,14 @@ class CppCoupledPathfinder:
         # Marshal the DesignRules scalars into the C++ struct (mirrors the
         # single-ended CppPathfinder rules marshalling).
         cpp_rules = router_cpp.DesignRules()
+        from .mfr_limits import get_mfr_limits
+
+        cpp_rules.allow_smd_vias = True
+        if rules.manufacturer:
+            with contextlib.suppress(ValueError):
+                cpp_rules.allow_smd_vias = bool(
+                    get_mfr_limits(rules.manufacturer).via_in_pad_supported
+                )
         cpp_rules.trace_width = float(rules.trace_width)
         cpp_rules.trace_clearance = float(rules.trace_clearance)
         cpp_rules.via_drill = float(rules.via_drill)
