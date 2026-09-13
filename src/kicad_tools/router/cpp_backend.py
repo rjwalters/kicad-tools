@@ -964,7 +964,15 @@ class CppGrid:
                     pad_blocked_np[ls, ys, xs].tolist(),
                     strict=True,
                 ):
-                    mark_blocked(x, y, layer, net, is_obstacle, pad_blocked)
+                    mark_blocked(
+                        x,
+                        y,
+                        layer,
+                        net,
+                        is_obstacle,
+                        pad_blocked,
+                        (layer, y, x) in grid._pad_halo_cells,
+                    )
 
         # Issue #4071: marshal corridor reservations into the C++ grid.
         # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner
