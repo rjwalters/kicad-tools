@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
-    from .primitives import Pad
+    from .primitives import Pad, Segment
     from .stub_terminals import StubTerminal
 
 from .core import Autorouter
@@ -2286,6 +2286,50 @@ def validate_routes(
     def _resolve_net_name(net_id: int) -> str:
         return net_names.get(net_id, f"Net {net_id}")
 
+    # Issue #5240: cheap circle-based lower-bound rejection.  Both loops
+    # below are O(segments x pads) / O(segments^2) with no spatial
+    # pruning, so this function dominates the "Re-route + check
+    # coverage" / DRC-nudge repair loop's CI time on boards with a few
+    # hundred segments.  A segment's centerline is fully contained in a
+    # circle at its midpoint with radius = half its length; a pad's
+    # rectangle (at any rotation) is fully contained in a circle at its
+    # center with radius = its half-diagonal.  Center-to-center distance
+    # minus both radii (and both trace half-widths, where applicable) is
+    # therefore a mathematically guaranteed LOWER BOUND on the true
+    # copper-to-copper gap -- when that bound already meets the required
+    # clearance, the expensive exact rectangle/segment distance call
+    # below is provably >= the clearance and would never register a
+    # violation, so it is skipped.  This changes no violation, no
+    # ordering, and no distance value ever reported; it only elides
+    # geometry calls whose outcome is already decided.  Results are
+    # cached by object identity since the same Segment/Pad is compared
+    # against many partners within one ``validate_routes`` call.
+    _seg_reach_cache: dict[int, tuple[float, float, float]] = {}
+    _pad_radius_cache: dict[int, float] = {}
+
+    def _seg_reach(seg: Segment) -> tuple[float, float, float]:
+        """Return (mid_x, mid_y, half_length) for ``seg``'s centerline."""
+        key = id(seg)
+        cached = _seg_reach_cache.get(key)
+        if cached is not None:
+            return cached
+        mid_x = (seg.x1 + seg.x2) / 2.0
+        mid_y = (seg.y1 + seg.y2) / 2.0
+        half_len = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1) / 2.0
+        result = (mid_x, mid_y, half_len)
+        _seg_reach_cache[key] = result
+        return result
+
+    def _pad_radius(pad: Pad) -> float:
+        """Return the pad's bounding half-diagonal (its worst-case reach)."""
+        key = id(pad)
+        cached = _pad_radius_cache.get(key)
+        if cached is not None:
+            return cached
+        radius = math.hypot(pad.width / 2.0, pad.height / 2.0)
+        _pad_radius_cache[key] = radius
+        return radius
+
     # Issue #3545: NET-AWARE component_inherent classification.  A
     # same-component FOREIGN-net pad violation is only "inherent" (and
     # thus filtered from ``drc_verify_and_nudge`` repair) when a
@@ -2364,6 +2408,30 @@ def validate_routes(
                 if not pad.through_hole and pad.layer != segment.layer:
                     continue
 
+                # For skipped-pour-net pads, look up the clearance under the
+                # named net (GND, +3V3, ...) rather than net 0, so the
+                # per-class clearance map is honoured.  Falls through to
+                # ``clearance`` when no class match is found.
+                pad_class_clear = clearance
+                if pad.net == 0 and pad.net_name and ncm is not None:
+                    pad_class = ncm.get(pad.net_name)
+                    if pad_class is not None:
+                        pad_class_clear = pad_class.clearance
+                pair_clear = max(
+                    _get_pair_clearance(route_net, pad.net, clearance, net_names, ncm),
+                    pad_class_clear,
+                )
+
+                # Cheap lower-bound rejection (Issue #5240): see the
+                # module-level comment above ``_seg_reach``/``_pad_radius``.
+                # Skips the exact rectangle/segment distance below only
+                # when it is mathematically guaranteed to clear.
+                seg_mid_x, seg_mid_y, seg_half_len = _seg_reach(segment)
+                center_dist = math.hypot(pad.x - seg_mid_x, pad.y - seg_mid_y)
+                gap_lower_bound = center_dist - seg_half_len - _pad_radius(pad) - seg_half_width
+                if gap_lower_bound >= pair_clear - _CLEARANCE_EPSILON_MM:
+                    continue
+
                 # Calculate minimum distance from the segment to the
                 # pad's true axis-aligned rectangle.  Issue #3592: the
                 # previous model treated every pad as a circle of radius
@@ -2384,20 +2452,6 @@ def validate_routes(
                         pad.height / 2,
                     )
                     - seg_half_width
-                )
-
-                # For skipped-pour-net pads, look up the clearance under the
-                # named net (GND, +3V3, ...) rather than net 0, so the
-                # per-class clearance map is honoured.  Falls through to
-                # ``clearance`` when no class match is found.
-                pad_class_clear = clearance
-                if pad.net == 0 and pad.net_name and ncm is not None:
-                    pad_class = ncm.get(pad.net_name)
-                    if pad_class is not None:
-                        pad_class_clear = pad_class.clearance
-                pair_clear = max(
-                    _get_pair_clearance(route_net, pad.net, clearance, net_names, ncm),
-                    pad_class_clear,
                 )
 
                 if effective_dist < pair_clear - _CLEARANCE_EPSILON_MM:
@@ -2457,6 +2511,34 @@ def validate_routes(
                     if other_seg.layer != segment.layer:
                         continue
 
+                    # Edge-to-edge clearance (both segment half-widths)
+                    other_half_width = other_seg.width / 2
+
+                    pair_clear = _get_pair_clearance(
+                        route_net, other_route.net, clearance, net_names, ncm
+                    )
+
+                    # Cheap lower-bound rejection (Issue #5240): see the
+                    # module-level comment above ``_seg_reach``.  Both
+                    # centerlines are contained in their midpoint +
+                    # half-length circles, so center-to-center distance
+                    # minus both radii and both half-widths is a
+                    # guaranteed lower bound on the true gap -- skip the
+                    # exact (and much costlier) segment-to-segment
+                    # distance call only when that bound already clears.
+                    seg_mid_x, seg_mid_y, seg_half_len = _seg_reach(segment)
+                    other_mid_x, other_mid_y, other_half_len = _seg_reach(other_seg)
+                    center_dist = math.hypot(other_mid_x - seg_mid_x, other_mid_y - seg_mid_y)
+                    gap_lower_bound = (
+                        center_dist
+                        - seg_half_len
+                        - other_half_len
+                        - seg_half_width
+                        - other_half_width
+                    )
+                    if gap_lower_bound >= pair_clear - _CLEARANCE_EPSILON_MM:
+                        continue
+
                     dist = _segment_to_segment_distance(
                         segment.x1,
                         segment.y1,
@@ -2468,13 +2550,7 @@ def validate_routes(
                         other_seg.y2,
                     )
 
-                    # Edge-to-edge clearance (both segment half-widths)
-                    other_half_width = other_seg.width / 2
                     effective_dist = dist - seg_half_width - other_half_width
-
-                    pair_clear = _get_pair_clearance(
-                        route_net, other_route.net, clearance, net_names, ncm
-                    )
 
                     if effective_dist < pair_clear - _CLEARANCE_EPSILON_MM:
                         # Approximate violation location at midpoint of closest approach
