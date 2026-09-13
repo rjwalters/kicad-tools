@@ -18,7 +18,7 @@ import logging
 import math
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
@@ -4133,6 +4133,26 @@ class DiffPairRouter:
     def analyze_differential_pairs(self) -> dict[str, any]:
         """Analyze net names for differential pairs."""
         return analyze_differential_pairs(self.autorouter.net_names)
+
+    def _apply_authored_skew_limit(self, pair: DifferentialPair) -> None:
+        """Keep routing and length correction within both nets' authored limits."""
+        if pair.rules is None:
+            return
+        classes, membership, _ = self._resolve_detection_inputs()
+        if not classes:
+            return
+        limit = pair.rules.max_length_delta
+        for signal in (pair.positive, pair.negative):
+            net_class = classes.get(signal.net_name)
+            if net_class is None and membership:
+                net_class = classes.get(membership.get(signal.net_name))
+            authored = getattr(net_class, "skew_tolerance_mm", None)
+            if authored is not None:
+                limit = min(limit, authored)
+        if limit != pair.rules.max_length_delta:
+            # Pair-type/config rules can be shared by multiple pairs. Tighten
+            # this pair without changing unrelated pairs or caller defaults.
+            pair.rules = replace(pair.rules, max_length_delta=limit)
 
     def _resolve_engagement(self, pair: DifferentialPair) -> tuple[bool, str]:
         """Resolve whether ``pair`` should engage CoupledPathfinder.
@@ -9599,6 +9619,8 @@ class DiffPairRouter:
         if pair.rules is None:
             return [], None
 
+        self._apply_authored_skew_limit(pair)
+
         if spacing is None:
             spacing = pair.rules.spacing
 
@@ -10790,6 +10812,8 @@ class DiffPairRouter:
         """
         if pair.rules is None:
             return [], None
+
+        self._apply_authored_skew_limit(pair)
 
         if spacing is None:
             spacing = pair.rules.spacing
