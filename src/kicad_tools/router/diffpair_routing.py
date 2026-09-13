@@ -1669,6 +1669,8 @@ class CoupledPathfinder:
         self.last_best_progress: float = float("inf")
         self.last_best_state: CoupledState | None = None
         self.last_best_node: CoupledNode | None = None
+        # Native diagnostic geometry is a partial path, never a completed route.
+        self.last_best_cpp_path: list[tuple[int, int, int, int, int, int, bool]] = []
         # Issue #4459: backend that served the most-recent coupled search
         # ("python" or "cpp").  Lets the ``[coupled-timing]`` diagnostic report
         # ``best_state=n/a (cpp)`` instead of a misleading ``best_state=None``
@@ -2793,6 +2795,7 @@ class CoupledPathfinder:
         # ``best_progress`` / ``rejections`` instead of the None red herring.
         self.last_best_state = None
         self.last_best_node = None
+        self.last_best_cpp_path = list(diagnostics.get("best_path", []))
         self.last_coupled_backend = "cpp"
         self.last_timeout_exceeded = bool(diagnostics["timeout_exceeded"])
         self.last_iteration_limited = bool(diagnostics["iteration_limited"])
@@ -2809,6 +2812,8 @@ class CoupledPathfinder:
     def _reconstruct_coupled_routes_from_cpp_path(
         self,
         path: list[tuple[int, int, int, int, int, int, bool]],
+        *,
+        partial: bool = False,
     ) -> tuple[Route, Route]:
         """Build (p_route, n_route) from a C++ joint grid-cell path.
 
@@ -2819,8 +2824,19 @@ class CoupledPathfinder:
         byte-identical for the same joint path (Issue #4065).  The Pad
         identity for width/net/name is recovered from the endpoint cells
         via the stored ``_cpp_reconstruct_pads`` set by the caller.
+
+        ``partial=True`` stops at the saved search heads. It must not append
+        unchecked segments to the destination pads or mutate the endpoints
+        used by a later complete reconstruction. This only reconstructs
+        diagnostic geometry; callers must validate any proposed completion.
         """
         p_start, p_end, n_start, n_end = self._cpp_reconstruct_pads
+        if partial and path:
+            px, py, pl, nx, ny, nl, _ = path[-1]
+            p_wx, p_wy = self.grid.grid_to_world(px, py)
+            n_wx, n_wy = self.grid.grid_to_world(nx, ny)
+            p_end = replace(p_end, x=p_wx, y=p_wy, layer=Layer(self.grid.index_to_layer(pl)))
+            n_end = replace(n_end, x=n_wx, y=n_wy, layer=Layer(self.grid.index_to_layer(nl)))
         p_route = Route(net=p_start.net, net_name=p_start.net_name)
         n_route = Route(net=n_start.net, net_name=n_start.net_name)
 
@@ -2924,6 +2940,8 @@ class CoupledPathfinder:
         self.last_best_progress: float = float("inf")
         self.last_best_state: CoupledState | None = None
         self.last_best_node: CoupledNode | None = None
+        # Native diagnostic geometry is a partial path, never a completed route.
+        self.last_best_cpp_path: list[tuple[int, int, int, int, int, int, bool]] = []
         # Issue #4459: which backend served the most-recent search.  Defaults
         # to ``"python"`` here; ``_try_cpp_route_coupled`` overrides it to
         # ``"cpp"`` when the C++ joint-state search handles the pair.  The

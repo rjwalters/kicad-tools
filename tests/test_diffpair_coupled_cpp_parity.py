@@ -520,6 +520,7 @@ def test_cpp_partial_geometry_does_not_promote_budget_failure(monkeypatch, termi
     assert diag["iteration_limited"] == (termination in {"iterations", "before_start"})
     assert diag["timeout_exceeded"] == (termination != "exhaustion")
     trail = diag["best_path"]
+    assert pf.last_best_cpp_path == trail
     if termination == "before_start":
         assert trail == []
         assert diag["best_progress"] == -1
@@ -559,3 +560,38 @@ def test_coupled_goal_requires_destination_layer(use_cpp):
     for route in result:
         assert len(route.vias) == 1
         assert set(route.vias[0].layers) == {Layer.F_CU, Layer.B_CU}
+
+
+def test_native_partial_path_cleared_before_python_search():
+    """A later backend fallback cannot reuse geometry from an earlier search."""
+    pf = _make_pf(_make_grid(), use_cpp=True)
+    pads = _make_simple_pair_pads()
+    assert pf.route_coupled(*pads, max_iterations_budget=8) is None
+    assert pf.last_best_cpp_path
+
+    pf._use_cpp_coupled = False
+    assert pf.route_coupled(*pads, max_iterations_budget=1) is None
+    assert pf.last_coupled_backend == "python"
+    assert pf.last_best_cpp_path == []
+
+
+@pytest.mark.parametrize("trim", [0, 2])
+def test_native_partial_reconstruction_stops_at_saved_heads(trim):
+    """A diagnostic trail must not gain unchecked straight tails to the goals."""
+    pf = _make_pf(_make_grid(), use_cpp=True)
+    pads = _make_simple_pair_pads()
+    assert pf.route_coupled(*pads, max_iterations_budget=8) is None
+    path = pf.last_best_cpp_path
+    if trim:
+        path = path[:-trim]
+    assert len(path) > 1
+    original_pads = pf._cpp_reconstruct_pads
+    routes = pf._reconstruct_coupled_routes_from_cpp_path(path, partial=True)
+    for route, offset, goal in zip(routes, (0, 3), (pads[1], pads[3]), strict=True):
+        expected = pf.grid.grid_to_world(*path[-1][offset : offset + 2])
+        last = route.segments[-1]
+        assert (last.x2, last.y2) == pytest.approx(expected)
+        assert (last.x2, last.y2) != pytest.approx((goal.x, goal.y))
+        assert not route.vias
+    assert pf._cpp_reconstruct_pads is original_pads
+    assert len(pf.last_best_cpp_path) == len(path) + trim
