@@ -135,6 +135,7 @@ def test_return_barrel_uses_via_clearance_for_foreign_pad(monkeypatch, pad_gap, 
     # Only this known off-pad via site is offered; the foreign pad occupies
     # the unused bottom layer, so it affects the barrel, not either tail.
     monkeypatch.setattr(finder, "_is_via_blocked", lambda x, y, net: (x, y) != site)
+    monkeypatch.setattr(router, "_via_has_only_pad_blockers", lambda *args: False)
 
     candidates = list(router._layer_return_tails(finder, head, goal, partner, body))
 
@@ -170,3 +171,87 @@ def test_return_tail_checks_exact_clearance_between_sampling_points():
             if segment.layer == stub.layer:
                 copper = LineString([(segment.x1, segment.y1), (segment.x2, segment.y2)])
                 assert copper.distance(obstacle) >= required - 1e-9
+
+
+def _interpad_case(keepout_order=None):
+    router, finder, head, goal, partner, body = _case()
+    grid = router.autorouter.grid
+    if keepout_order == "before":
+        grid.add_keepout(3.5, 2.7, 3.5, 2.7)
+    for x in (3.15, 4.45):
+        for y in (2.35, 3.65):
+            grid.add_pad(
+                Pad(x=x, y=y, width=0.45, height=0.45, net=3, net_name="foreign", layer=Layer.F_CU)
+            )
+    if keepout_order == "after":
+        grid.add_keepout(3.5, 2.7, 3.5, 2.7)
+    return router, finder, head, goal, partner, body
+
+
+def test_exact_pad_landing_recovers_clear_interpad_site():
+    router, finder, head, goal, partner, body = _interpad_case()
+    grid = router.autorouter.grid
+    gx, gy = grid.world_to_grid(3.8, 3)
+    assert finder._is_via_blocked(gx, gy, head.net)
+    assert router._via_has_only_pad_blockers(finder, gx, gy)
+    candidates = list(router._layer_return_tails(finder, head, goal, partner, body))
+    assert any((t.vias[0].x, t.vias[0].y) == pytest.approx((3.8, 3)) for t in candidates)
+
+
+@pytest.mark.parametrize("order", ["before", "after"])
+def test_keepout_overlapping_pad_halo_never_acquires_pad_provenance(order):
+    router, finder, head, goal, partner, body = _interpad_case(order)
+    grid = router.autorouter.grid
+    gx, gy = grid.world_to_grid(3.8, 3)
+    assert not router._via_has_only_pad_blockers(finder, gx, gy)
+    candidates = list(router._layer_return_tails(finder, head, goal, partner, body))
+    assert not any((t.vias[0].x, t.vias[0].y) == pytest.approx((3.8, 3)) for t in candidates)
+
+
+def test_old_grid_without_pad_provenance_cannot_use_exact_exception():
+    router, finder, head, goal, partner, body = _interpad_case()
+    grid = router.autorouter.grid
+    del grid._pad_geometry_cells
+    assert not router._via_has_only_pad_blockers(finder, *grid.world_to_grid(3.8, 3))
+
+
+@pytest.mark.parametrize("blocker", ["route", "region", "obstacle", "unknown"])
+def test_other_blocking_writes_revoke_pad_geometry_provenance(blocker):
+    from kicad_tools.router.primitives import Obstacle
+
+    router, finder, head, goal, partner, body = _interpad_case()
+    grid = router.autorouter.grid
+    site = grid.world_to_grid(3.8, 3)
+    assert router._via_has_only_pad_blockers(finder, *site)
+    if blocker == "route":
+        grid.mark_route(
+            Route(
+                net=4,
+                net_name="other",
+                segments=[
+                    Segment(x1=3.5, y1=2.7, x2=3.6, y2=2.7, width=0.2, layer=Layer.F_CU, net=4)
+                ],
+            )
+        )
+    elif blocker == "region":
+        grid.mark_region_bound(0, 0, 3.4, 6)
+    elif blocker == "obstacle":
+        grid.add_obstacle(Obstacle(x=3.5, y=2.7, width=0.1, height=0.1, layer=Layer.F_CU))
+    else:
+        x, y = grid.world_to_grid(3.5, 2.7)
+        grid.cell_at(0, y, x).blocked = True
+    assert not router._via_has_only_pad_blockers(finder, *site)
+
+
+def test_stitch_reservation_does_not_acquire_geometry_only_provenance():
+    router, finder, head, goal, partner, body = _case()
+    grid = router.autorouter.grid
+    grid.rules.stitch_via_halo = False
+    pad = Pad(x=4, y=3, width=0.1, height=0.1, net=0, net_name="GND", layer=Layer.F_CU)
+    grid.add_pad(pad)
+    before = grid._blocked.copy()
+    grid.rules.stitch_via_halo = True
+    grid.add_pad(pad)
+    added = grid._blocked & ~before
+    assert added.any()
+    assert not any(added[layer, y, x] for layer, y, x in grid._pad_geometry_cells)

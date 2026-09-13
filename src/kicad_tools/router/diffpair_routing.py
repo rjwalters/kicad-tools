@@ -6056,6 +6056,31 @@ class DiffPairRouter:
                     return True
         return False
 
+    def _via_has_only_pad_blockers(self, pathfinder: CoupledPathfinder, gx: int, gy: int) -> bool:
+        """Allow exact-pad adjudication only with recorded blocker provenance.
+
+        A recreated pad grid cannot prove that a keepout was not superimposed
+        on a halo. Missing provenance therefore fails closed. The caller must
+        still check actual pad geometry, route copper and drilled holes.
+        """
+        grid = self.autorouter.grid
+        proven = getattr(grid, "_pad_geometry_cells", None)
+        if not proven:
+            return False
+        radius = max(
+            pathfinder._via_extra_cells,
+            math.ceil(pathfinder.rules.via_drill / (2 * grid.resolution)),
+        )
+        for layer in range(grid.num_layers):
+            for y in range(gy - radius, gy + radius + 1):
+                for x in range(gx - radius, gx + radius + 1):
+                    if not (0 <= x < grid.cols and 0 <= y < grid.rows):
+                        return False
+                    cell = grid.cell_at(layer, y, x)
+                    if (cell.blocked or cell.pad_blocked) and (layer, y, x) not in proven:
+                        return False
+        return True
+
     def _layer_return_tails(
         self,
         pathfinder: CoupledPathfinder,
@@ -6117,7 +6142,8 @@ class DiffPairRouter:
                     if (gx, gy) in sites:
                         continue
                     sites.add((gx, gy))
-                    if pathfinder._is_via_blocked(gx, gy, head.net):
+                    raster_blocked = pathfinder._is_via_blocked(gx, gy, head.net)
+                    if raster_blocked and not self._via_has_only_pad_blockers(pathfinder, gx, gy):
                         continue
                     x, y = grid.grid_to_world(gx, gy)
                     via = Via(
@@ -6132,6 +6158,16 @@ class DiffPairRouter:
                         net=head.net,
                         net_name=head.net_name,
                     )
+                    if (
+                        raster_blocked
+                        and grid.worst_via_pad_deficit(
+                            via, exclude_net=-1, clearance_floor=rules.via_clearance
+                        )[0]
+                        > 1e-9
+                    ):
+                        # The exact fallback exempts no pad, including own-net
+                        # metal. Thus it cannot introduce a via-in-pad escape.
+                        continue
                     if (
                         grid.worst_via_pad_deficit(
                             via, exclude_net=head.net, clearance_floor=rules.via_clearance

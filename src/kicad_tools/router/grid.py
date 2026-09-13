@@ -620,6 +620,9 @@ class _CellView:
     @blocked.setter
     def blocked(self, value: bool) -> None:
         self._grid._pad_halo_cells.discard((self._layer, self._y, self._x))
+        pad_geometry = getattr(self._grid, "_pad_geometry_cells", None)
+        if pad_geometry is not None:
+            pad_geometry.discard((self._layer, self._y, self._x))
         self._grid._blocked[self._layer, self._y, self._x] = value
         # Issue #4794: this setter is THE per-cell choke point for
         # ``mark_route``/``unmark_route``/``add_pad`` -- bump inline (rather
@@ -895,6 +898,10 @@ class RoutingGrid:
         self._pads: list[Pad] = []
         # Provenance for padding that must not be inflated a second time.
         self._pad_halo_cells: set[tuple[int, int, int]] = set()
+        # Separate from the narrow plane-pad routing exemption above. These
+        # cells have only pad-geometry blockers; any other blocking write
+        # revokes the provenance, even when the cell was already blocked.
+        self._pad_geometry_cells: set[tuple[int, int, int]] = set()
 
         # Issue #2452: Track pads by component reference for same-component
         # clearance relaxation. When pads share the same component (e.g.,
@@ -1765,6 +1772,8 @@ class RoutingGrid:
 
     def _add_pad_unsafe(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Internal pad addition without locking."""
+        # Old serialized grids have no provenance for their existing blocks.
+        self.__dict__.setdefault("_pad_geometry_cells", set())
         # Store pad geometry for geometric clearance validation (Issue #750)
         self._pads.append(pad)
 
@@ -1951,7 +1960,10 @@ class RoutingGrid:
                         cell = self.cell_at(layer_idx, gy, gx)
                         key = (layer_idx, gy, gx)
                         halo_only = plane_pad and (not cell.blocked or key in self._pad_halo_cells)
+                        geometry_only = not cell.blocked or key in self._pad_geometry_cells
                         cell.blocked = True
+                        if geometry_only:
+                            self._pad_geometry_cells.add(key)
                         if halo_only:
                             self._pad_halo_cells.add(key)
                         cell.original_net = pad.net
@@ -2446,6 +2458,7 @@ class RoutingGrid:
                         # pathfinder ``_is_trace_blocked`` and
                         # ``allow_sharing`` paths).
                         self._blocked[layer_idx, gy, gx] = True
+                        getattr(self, "_pad_geometry_cells", set()).discard((layer_idx, gy, gx))
                         self.bump_occupancy_generation()  # Issue #4794
                     else:
                         # Cell already owned by a routable signal net
@@ -2457,6 +2470,7 @@ class RoutingGrid:
                         # leave its net assignment intact so its owner can
                         # still route through it.
                         self._is_obstacle[layer_idx, gy, gx] = True
+                        getattr(self, "_pad_geometry_cells", set()).discard((layer_idx, gy, gx))
 
     def _apply_narrow_channel_halo(
         self,
@@ -2718,6 +2732,7 @@ class RoutingGrid:
                             # (``cell.net == routing_net`` passes both
                             # checks).  Preserve cell.net.
                             self._blocked[layer_idx, gy, gx] = True
+                            getattr(self, "_pad_geometry_cells", set()).discard((layer_idx, gy, gx))
                             self._is_obstacle[layer_idx, gy, gx] = True
                             self.bump_occupancy_generation()  # Issue #4794
                         elif cell_net == 0:
@@ -2734,6 +2749,7 @@ class RoutingGrid:
                             # nuance for the negotiated-mode shared
                             # net flow).
                             self._blocked[layer_idx, gy, gx] = True
+                            getattr(self, "_pad_geometry_cells", set()).discard((layer_idx, gy, gx))
                             self.bump_occupancy_generation()  # Issue #4794
                         else:
                             # Bucket C: foreign component / foreign
@@ -2984,6 +3000,7 @@ class RoutingGrid:
                         if inside_y and gx1 <= gx <= gx2:
                             continue  # inside the region -- leave untouched
                         cell = self.cell_at(layer_idx, gy, gx)
+                        getattr(self, "_pad_geometry_cells", set()).discard((layer_idx, gy, gx))
                         if cell.blocked:
                             # Already an obstacle (pad halo / existing copper /
                             # board edge).  Nothing to add, and mirroring is
@@ -6468,6 +6485,9 @@ class RoutingGrid:
                             for layer_idx in layer_indices:
                                 cell = self.cell_at(layer_idx, ny, nx)
                                 self._pad_halo_cells.discard((layer_idx, ny, nx))
+                                getattr(self, "_pad_geometry_cells", set()).discard(
+                                    (layer_idx, ny, nx)
+                                )
                                 if not cell.blocked:
                                     cell.blocked = True
                                     cell.is_obstacle = True
