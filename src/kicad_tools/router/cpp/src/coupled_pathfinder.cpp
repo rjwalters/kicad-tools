@@ -225,9 +225,8 @@ CoupledRouteResult CoupledPathfinder::route(
     int best_node_idx = -1;
     // Preserve geometry for failed-search diagnosis without returning it as
     // a successful route. Pool indices remain valid across reallocations.
-    auto best_partial_path = [&pool, &best_node_idx]() {
+    auto partial_path = [&pool](int idx) {
         std::vector<CoupledPathNode> path;
-        int idx = best_node_idx;
         while (idx >= 0) {
             const CoupledAStarNode& nd = pool[static_cast<size_t>(idx)];
             CoupledPathNode pn;
@@ -239,6 +238,10 @@ CoupledRouteResult CoupledPathfinder::route(
         }
         std::reverse(path.begin(), path.end());
         return path;
+    };
+
+    auto best_partial_path = [&partial_path, &best_node_idx]() {
+        return partial_path(best_node_idx);
     };
 
     // Issue #4459: per-reason move-rejection histogram.  Counts which guard
@@ -308,6 +311,11 @@ CoupledRouteResult CoupledPathfinder::route(
         // Record this node in the pool so its children can reference it.
         int current_idx = static_cast<int>(pool.size());
         pool.push_back(current);
+
+        if (!departure_prefix.empty() && result.validated_departure_path.empty() &&
+            current.prefix_step == departure_prefix.size()) {
+            result.validated_departure_path = partial_path(current_idx);
+        }
 
         // Goal check (diffpair_routing.py:1762-1771).
         bool p_at_goal = (current.p_x == p_goal_x && current.p_y == p_goal_y &&

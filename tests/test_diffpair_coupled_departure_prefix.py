@@ -67,8 +67,9 @@ def test_departure_cannot_bypass_normal_constraints(obstruction):
         prefix = [(10, 10, 3, 22, 10, 3)]
     else:
         corridor = [0] * (finder.grid.rows * finder.grid.cols)
-    path, _ = _route(finder, prefix, corridor=corridor)
+    path, diagnostics = _route(finder, prefix, corridor=corridor)
     assert path is None
+    assert diagnostics["validated_departure_path"] == []
 
 
 def test_prefix_steps_consume_original_iteration_budget():
@@ -76,8 +77,26 @@ def test_prefix_steps_consume_original_iteration_budget():
     assert path is None
     assert diagnostics["iteration_limited"]
     assert diagnostics["iterations"] == 4
+    assert diagnostics["validated_departure_path"] == []
 
 
 def test_empty_prefix_preserves_default_search():
     finder = _finder()
     assert _route(finder) == _route(finder, [])
+
+
+def test_completed_prefix_survives_failure_without_goal_progress():
+    finder = _finder()
+    finder.rules.manufacturer = "jlcpcb"
+    prefix = _prefix()
+    path, diagnostics = _route(finder, prefix, budget=len(prefix) + 2)
+    assert path is None
+    assert diagnostics["iteration_limited"]
+    validated = diagnostics["validated_departure_path"]
+    assert validated[0][:6] == (10, 10, 0, 22, 10, 0)
+    assert [step[:6] for step in validated[1:]] == prefix
+    assert validated[-1][6] is True
+    # The prefix moves away from these goals; best progress is a separate view.
+    assert diagnostics["best_path"] != validated
+    _, fresh = _route(finder, [], budget=2)
+    assert fresh["validated_departure_path"] == []

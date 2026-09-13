@@ -235,7 +235,7 @@ namespace router {
 // CONFIGURED override resolved smaller than the default clearance, and
 // enforce that resolved value as a hard floor instead of skipping.
 // v29: coupled departure-prefix expansion constraints (#5333).
-constexpr int ROUTER_CPP_BUILD_VERSION = 29;
+constexpr int ROUTER_CPP_BUILD_VERSION = 30;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -467,6 +467,9 @@ struct CoupledRouteResult {
     // Diagnostic root->best-progress path on failure; never a routed result.
     // Empty on success or when no state was expanded before termination.
     std::vector<CoupledPathNode> best_path;
+    // Root through the last required departure step, once expanded legally.
+    // Independent of goal progress; empty for absent or incomplete prefixes.
+    std::vector<CoupledPathNode> validated_departure_path;
     bool success = false;
     // Diagnostics (always populated, success or not).
     int iterations = 0;

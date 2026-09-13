@@ -602,6 +602,7 @@ NB_MODULE(router_cpp, m) {
         .def(nb::init<>())
         .def_ro("path", &CoupledRouteResult::path)
         .def_ro("best_path", &CoupledRouteResult::best_path)
+        .def_ro("validated_departure_path", &CoupledRouteResult::validated_departure_path)
         .def_ro("success", &CoupledRouteResult::success)
         .def_ro("iterations", &CoupledRouteResult::iterations)
         .def_ro("best_progress", &CoupledRouteResult::best_progress)

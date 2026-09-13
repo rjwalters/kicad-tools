@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 29
+_REQUIRED_CPP_BUILD_VERSION = 30
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -3923,6 +3923,10 @@ class CppCoupledPathfinder:
         bookkeeping. On failure, ``best_path`` retains the root-to-best
         partial geometry in the same tuple format; it is diagnostic evidence,
         not a successful route. It is empty on success or before any expansion.
+        ``validated_departure_path`` separately retains root through the last
+        required prefix step once legally expanded, even when that departure
+        moves away from the goal. It is empty for absent/incomplete prefixes
+        and never changes search success or its budget.
         """
         res = self._impl.route(
             int(p_start_xy[0]),
@@ -3959,6 +3963,10 @@ class CppCoupledPathfinder:
             "rejections": {str(k): int(v) for k, v in dict(res.rejections).items()},
             # A failed search remains failed; retain its best geometry only
             # for replay/landing diagnosis, separately from the result path.
+            "validated_departure_path": [
+                (n.p_x, n.p_y, n.p_layer, n.n_x, n.n_y, n.n_layer, n.via_from_parent)
+                for n in res.validated_departure_path
+            ],
             "best_path": [
                 (n.p_x, n.p_y, n.p_layer, n.n_x, n.n_y, n.n_layer, n.via_from_parent)
                 for n in res.best_path
