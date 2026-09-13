@@ -166,6 +166,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_fix_footprints_parser(subparsers)
     _add_fix_vias_parser(subparsers)
     _add_fix_silkscreen_parser(subparsers)
+    _add_place_silk_refs_parser(subparsers)
     _add_repair_clearance_parser(subparsers)
     _add_fix_drc_parser(subparsers)
     _add_fix_erc_parser(subparsers)
@@ -686,6 +687,11 @@ def _add_check_parser(subparsers) -> None:
     """Add check subcommand parser (pure Python DRC)."""
     check_parser = subparsers.add_parser("check", help="Pure Python DRC (no kicad-cli)")
     check_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    check_parser.add_argument("--physical-copper-gap", type=float, default=None, metavar="MM")
+    check_parser.add_argument(
+        "--mask-copper-config",
+        help="Path to explicit mask-to-copper process policy and native runtime JSON",
+    )
     check_parser.add_argument("--format", choices=["table", "json", "summary"], default="table")
     check_parser.add_argument("--errors-only", action="store_true")
     check_parser.add_argument("--strict", action="store_true", help="Exit with code 2 on warnings")
@@ -1781,6 +1787,13 @@ def _add_sch_parser(subparsers) -> None:
         "--backup", action="store_true", help="Create backup before modifying"
     )
     add_format_flag(sch_disconnect)
+
+    sch_fix_wire_stubs = sch_subparsers.add_parser(
+        "fix-wire-stubs", help="Safely extend exact-grid wire stubs to pins"
+    )
+    sch_fix_wire_stubs.add_argument("schematic", help="Root .kicad_sch file")
+    sch_fix_wire_stubs.add_argument("--dry-run", "-n", action="store_true")
+    add_format_flag(sch_fix_wire_stubs)
 
     # sch reconnect-pin
     sch_reconnect_pin = sch_subparsers.add_parser(
@@ -3828,7 +3841,21 @@ def _add_route_parser(subparsers) -> None:
         "--timeout",
         type=float,
         default=None,
-        help="Timeout in seconds for routing (default: no timeout). Returns best partial result if reached.",
+        help="HARD TOTAL routing invocation budget in seconds (default: unbounded). Nothing escapes it -- escalation, placement feedback, placement-delta probes and auto-fix all share it. Includes cleanup/native work; allows up to 5 extra seconds for raw partial serialization, then terminates the process group and exits 124. Use --search-timeout to bound an individual search stage inside it.",
+    )
+    route_parser.add_argument(
+        "--search-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Per-search-stage wall-clock allocation in seconds (default: the "
+            "value of --timeout). Caps the initial routing pass, each "
+            "escalation attempt and each placement-feedback iteration "
+            "individually, INSIDE the hard total --timeout -- never an escape "
+            "from it. Set below --timeout to reserve budget for later stages "
+            "and postprocessing. Issue #5266."
+        ),
     )
     route_parser.add_argument(
         "--per-net-timeout",
@@ -4273,6 +4300,25 @@ def _add_route_parser(subparsers) -> None:
             "avoided layer must never carry a given net."
         ),
     )
+    # Issue #5014: opt-in HARD signal-layer eligibility for controlled-impedance
+    # plane assignments.  Mirror of the inner route_cmd.py flag; both sites
+    # must stay in sync per ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--reserve-plane-layers",
+        action="store_true",
+        default=False,
+        help=(
+            "Hard-restrict signal routing to the resolved layer stack's "
+            "non-PLANE layers (e.g. with --layers 4, only F.Cu/B.Cu stay "
+            "routable -- In1.Cu/In2.Cu are reserved for the GND/PWR "
+            "reference planes). By default LayerDefinition.is_routable "
+            "treats every copper layer -- including declared reference "
+            "planes -- as signal-eligible, so a controlled-impedance recipe "
+            "can silently lose its continuous reference construction to "
+            "ordinary signal. A no-op on a stack with no PLANE layers "
+            "(--layers 2, 4-all, or an all-signal auto-detected board)."
+        ),
+    )
     route_parser.add_argument(
         "--auto-fix",
         action="store_true",
@@ -4423,10 +4469,12 @@ def _add_route_parser(subparsers) -> None:
         metavar="SECONDS",
         help=(
             "Per-iteration wall-clock budget for the placement-delta feedback "
-            "loop's re-routes, in seconds. The loop's own allocation: it "
-            "survives an already-exhausted --timeout and gives each delta's "
-            "re-route the same budget the initial pass got. Default: share "
-            "whatever remains of --timeout. Issue #4468."
+            "loop's re-routes, in seconds. The loop's own allocation, "
+            "independent of the per-stage --search-timeout, so an exhausted "
+            "initial search stage no longer starves the probes. It does NOT "
+            "escape the hard total --timeout: it is clamped to what that "
+            "deadline has left. Default: share whatever remains of --timeout. "
+            "Issues #4468, #5266."
         ),
     )
     route_parser.add_argument(
@@ -5115,6 +5163,11 @@ def _add_fix_vias_parser(subparsers) -> None:
     )
     fix_vias_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_vias_parser.add_argument(
+        "--search-alternatives",
+        action="store_true",
+        help="With --relocate-in-pad, search safe alternate escapes if the preferred slide is blocked",
+    )
+    fix_vias_parser.add_argument(
         "--mfr",
         choices=get_all_manufacturer_names(),
         default="jlcpcb",
@@ -5227,6 +5280,85 @@ def _add_fix_silkscreen_parser(subparsers) -> None:
         help="Preview changes without modifying files",
     )
     fix_silk_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_place_silk_refs_parser(subparsers) -> None:
+    """Add place-silk-refs subcommand parser (issue #5030)."""
+    from kicad_tools.silkscreen.place_refs import (
+        DEFAULT_CLEARANCE_MM,
+        DEFAULT_MAX_OFFSET_MM,
+        DEFAULT_STEP_MM,
+        SILK_EDGE_CLEARANCE_MM,
+    )
+
+    place_refs_parser = subparsers.add_parser(
+        "place-silk-refs",
+        help="Move readable silkscreen reference designators to clear collisions",
+    )
+    place_refs_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    place_refs_parser.add_argument(
+        "--mfr",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help="Manufacturer to source solder-mask clearance from (default: built-in 0.05mm)",
+    )
+    place_refs_parser.add_argument(
+        "--layers", type=int, default=2, help="Number of PCB layers (default: 2)"
+    )
+    place_refs_parser.add_argument(
+        "--copper", type=float, default=1.0, help="Outer copper weight in oz (default: 1.0)"
+    )
+    place_refs_parser.add_argument(
+        "--clearance",
+        type=float,
+        default=DEFAULT_CLEARANCE_MM,
+        help=f"Required silk-to-pad/silk-to-silk clearance in mm (default: {DEFAULT_CLEARANCE_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--edge-clearance",
+        type=float,
+        default=SILK_EDGE_CLEARANCE_MM,
+        help=f"Required silk-to-board-edge clearance in mm (default: {SILK_EDGE_CLEARANCE_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--max-offset",
+        type=float,
+        default=DEFAULT_MAX_OFFSET_MM,
+        help=f"Maximum search distance from the component body in mm (default: {DEFAULT_MAX_OFFSET_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--step",
+        type=float,
+        default=DEFAULT_STEP_MM,
+        help=f"Positive search ring spacing in mm; at most 4096 rings (default: {DEFAULT_STEP_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--allow-rotate",
+        action="store_true",
+        help="Also try a 90-degree rotated orientation when the original does not fit",
+    )
+    place_refs_parser.add_argument(
+        "-o", "--output", help="Output file path (default: overwrite input)"
+    )
+    place_refs_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview the move plan without modifying files"
+    )
+    place_refs_parser.add_argument(
+        "--verify-drc",
+        action="store_true",
+        help="After applying, run native DRC; fail on silk findings or unavailable/failed verification",
+    )
+    place_refs_parser.add_argument(
+        "--render",
+        metavar="SVG_PATH",
+        help="Write a rendered review artifact (SVG) of old/new reference positions",
+    )
+    place_refs_parser.add_argument(
         "--format",
         choices=["text", "json", "summary"],
         default="text",
@@ -6616,6 +6748,54 @@ def _add_analyze_parser(subparsers) -> None:
         ),
     )
 
+    # analyze component-stress (operates on a schematic, not a PCB)
+    stress_parser = analyze_subparsers.add_parser(
+        "component-stress",
+        help="Check MOSFET VDS/VGS against declared operating states (advisory)",
+        description=(
+            "Evaluate each MOSFET's terminal-to-terminal stress (VDS = V(D)-V(S), "
+            "VGS = V(G)-V(S)) in every state of an explicit, reviewed "
+            "operating-state manifest, against Vds_max/Vgs_max symbol fields. "
+            "No circuit-state inference is performed: a missing state, pin role, "
+            "node potential or source-backed rating is reported UNRESOLVED -- "
+            "never a silent pass."
+        ),
+    )
+    stress_parser.add_argument("schematic", help="Schematic file to analyze (.kicad_sch)")
+    stress_parser.add_argument(
+        "--states",
+        dest="analyze_states",
+        required=True,
+        metavar="MANIFEST",
+        help="Operating-state manifest (.yaml/.yml/.json) declaring per-net node potentials",
+    )
+    stress_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    stress_parser.add_argument(
+        "--allow-unresolved",
+        dest="analyze_allow_unresolved",
+        action="store_true",
+        help=(
+            "Do not gate on UNRESOLVED rows (default: an unresolved state, pin "
+            "role or rating is a release blocker and exits non-zero)"
+        ),
+    )
+    stress_parser.add_argument(
+        "--allow-uncited-ratings",
+        dest="analyze_allow_uncited_ratings",
+        action="store_true",
+        help=(
+            "Accept Vds_max/Vgs_max fields without a Rating_Source/Datasheet "
+            "citation (default: an uncited rating is UNRESOLVED)"
+        ),
+    )
+
 
 def _add_constraints_parser(subparsers) -> None:
     """Add constraints subcommand parser with its subcommands."""
@@ -7356,7 +7536,16 @@ def _add_impedance_parser(subparsers) -> None:
             "--preset",
             "-p",
             dest="impedance_preset",
-            choices=["jlcpcb-4", "oshpark-4", "generic-2", "generic-4", "generic-6"],
+            choices=[
+                "jlcpcb-4",
+                "jlcpcb-4-legacy",
+                "jlcpcb-3313",
+                "jlcpcb-7628",
+                "oshpark-4",
+                "generic-2",
+                "generic-4",
+                "generic-6",
+            ],
             help="Use a preset stackup instead of reading from PCB",
         )
         parser.add_argument(
@@ -9074,6 +9263,8 @@ def _add_detect_mistakes_parser(subparsers) -> None:
             "grounding",
             "via_placement",
             "manufacturability",
+            "connectivity",
+            "bom_health",
         ],
         help="Only check specific category",
     )

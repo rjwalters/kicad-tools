@@ -36,8 +36,10 @@ LOCAL_GATE = REPO_ROOT / "scripts" / "ci" / "local-gate.sh"
 
 # Jobs that exist in ci.yml but are intentionally NOT mirrored by
 # local-gate.sh.  Every entry needs a comment explaining why the job has no
-# local analogue.  Currently empty: all 16 ci.yml jobs are mirrored.
-CI_ONLY_JOBS: set[str] = set()
+# local analogue. The changes detector selects remote jobs from PR metadata;
+# it performs no validation. The local gate runs its explicitly requested
+# validation jobs without GitHub event filtering, so no detector is needed.
+CI_ONLY_JOBS: set[str] = {"changes"}
 
 
 def _ci_job_ids() -> set[str]:

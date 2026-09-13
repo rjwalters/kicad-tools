@@ -26,11 +26,17 @@ def classify(pads, partition):
         expected = pads.get(name, set())
         sizes = [len(expected & group) for group in partition]
         largest = max(sizes, default=0)
+        # A logical pad can occur on several disconnected physical islands.
+        split_land = any(sum(pad in group for group in partition) > 1 for pad in expected)
         status = (
             "missing"
             if len(expected) < 2
             else (
-                "complete" if largest == len(expected) else "partial" if largest > 1 else "unrouted"
+                "complete"
+                if largest == len(expected) and not split_land
+                else "partial"
+                if largest > 1
+                else "unrouted"
             )
         )
         result[name] = {

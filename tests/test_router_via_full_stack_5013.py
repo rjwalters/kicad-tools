@@ -257,3 +257,29 @@ class TestViaSpansLayerDetectsIntermediateForeignCopper:
         assert via_spans_layer(full_span, "In1.Cu") is True
         assert via_spans_layer(full_span, "In2.Cu") is True
         assert via_spans_layer(full_span, "B.Cu") is True
+
+
+@pytest.mark.parametrize("backend", ["cpp", "python"])
+def test_reconstructed_barrel_exposes_foreign_back_copper(backend, tmp_path):
+    """The first F.Cu-to-inner crossing must expose B.Cu copper to DRC."""
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+
+    route = _route_forced_inner_crossing(backend)
+    assert route is not None and route.vias
+    via = route.vias[0]
+    # Serialize the reconstructed via directly, without an exporter fixing
+    # its span. Offset the foreign trace to avoid any co-location exception.
+    x = via.x + 0.2
+    text = f"""(kicad_pcb
+      (version 20240108) (generator "test")
+      (layers (0 "F.Cu" signal) (4 "In1.Cu" signal)
+              (6 "In2.Cu" signal) (2 "B.Cu" signal) (44 "Edge.Cuts" user))
+      (net 0 "") (net 1 "SIG") (net 2 "FOREIGN")
+      {via.to_sexp()}
+      (segment (start {x} {via.y - 1}) (end {x} {via.y + 1})
+        (width 0.2) (layer "B.Cu") (net 2) (uuid "foreign-segment")))"""
+    board_path = tmp_path / "barrel.kicad_pcb"
+    board_path.write_text(text)
+    checker = DRCChecker(PCB.load(board_path), manufacturer="jlcpcb", layers=4)
+    assert any(v.rule_id == "clearance_segment_via" for v in checker.check_clearances().violations)

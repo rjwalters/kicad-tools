@@ -735,6 +735,8 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
             "layer": pad_layer,
             "through_hole": pad_data.get("through_hole", False),
             "drill": pad_data.get("drill", 0.0),
+            "rotation": pad_data.get("rotation", 0.0),
+            "shape": pad_data.get("shape", "rect"),
         }
         # Add directly to avoid component grouping overhead
         from kicad_tools.router.primitives import Pad
@@ -752,6 +754,8 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
             pin=pin,
             through_hole=pad_info["through_hole"],
             drill=pad_info["drill"],
+            rotation=pad_info["rotation"],
+            shape=pad_info["shape"],
         )
         key = (ref, pin)
         router.pads[key] = pad
@@ -1919,6 +1923,36 @@ class Autorouter:
         if hasattr(self.router, "update_layer_fill_ratios"):
             self.router.update_layer_fill_ratios()
 
+    def restore_route_snapshot(
+        self, routes: list[Route], *, replaced_routes: list[Route] | None = None
+    ) -> None:
+        """Replace managed copper while retaining fixed input-board copper.
+
+        Best-iteration rollback and cache replay must update the same grids,
+        indexes and pathfinder caches. Negotiated usage is restored separately
+        by the caller, since ordinary routing does not populate those counts.
+
+        Negotiated rollback supplies the routes it owns so independently
+        registered grid obstacles survive. Cache replay replaces the complete
+        managed snapshot, including discarded grid routes absent from self.routes.
+        """
+        restored = list(routes)
+        fixed_ids = {id(route) for route in self.existing_routes}
+        replaced = list(self.grid.routes) if replaced_routes is None else list(replaced_routes)
+        self.grid.resync_route_occupancy(
+            [(route, None) for route in replaced if id(route) not in fixed_ids]
+            + [(None, route) for route in restored]
+        )
+        self.routes[:] = restored
+        if hasattr(self.router, "clear_routed_segments") and hasattr(
+            self.router, "add_routed_segments"
+        ):
+            self.router.clear_routed_segments()
+            for route in self.grid.routes:
+                self.router.add_routed_segments(route.segments)
+        if hasattr(self.router, "update_layer_fill_ratios"):
+            self.router.update_layer_fill_ratios()
+
     @property
     def physics_available(self) -> bool:
         """Check if physics calculations are available."""
@@ -2039,6 +2073,8 @@ class Autorouter:
                 pin=pin,
                 through_hole=pad_info.get("through_hole", False),
                 drill=pad_info.get("drill", 0.0),
+                rotation=pad_info.get("rotation", 0.0),
+                shape=pad_info.get("shape", "rect"),
             )
             key = (ref, pin)
             # Issue #4271: ``self.pads`` is keyed (ref, pin), so a footprint
@@ -12357,15 +12393,8 @@ class Autorouter:
                     f"clearance_viol={final_metrics.clearance_violations}, "
                     f"overflow={final_metrics.overflow})"
                 )
-                # Unmark all current routes from the grid
-                for route in list(self.routes):
-                    self.grid.unmark_route_usage(route)
-                # Replace with best-state routes
-                self.routes.clear()
-                self.routes.extend(best_routes)
-                # Re-mark best routes on the grid
-                for route in self.routes:
-                    self.grid.mark_route_usage(route)
+                self._restore_negotiated_route_snapshot(best_routes)
+
                 # Update net_routes to best state
                 net_routes.clear()
                 net_routes.update(best_net_routes)
@@ -12623,6 +12652,15 @@ class Autorouter:
         self._finalize_routing()
 
         return list(self.routes)
+
+    def _restore_negotiated_route_snapshot(self, restored_routes: list[Route]) -> None:
+        """Restore all route state and negotiated usage after a best-state rollback."""
+        stale_routes = list(self.routes)
+        for route in stale_routes:
+            self.grid.unmark_route_usage(route)
+        self.restore_route_snapshot(restored_routes, replaced_routes=stale_routes)
+        for route in self.routes:
+            self.grid.mark_route_usage(route)
 
     def _flush_corridor_reservation(self, net_routes: dict[int, list[Route]]) -> None:
         """Close the iteration-scoped corridor-reservation window (#3438).
@@ -15001,6 +15039,8 @@ class Autorouter:
                     "layer": pad.layer.value if hasattr(pad.layer, "value") else str(pad.layer),
                     "through_hole": pad.through_hole,
                     "drill": pad.drill,
+                    "rotation": pad.rotation,
+                    "shape": pad.shape,
                 }
             )
 
@@ -16196,8 +16236,23 @@ class Autorouter:
 
         results: dict[tuple[str, str], DiffPairTuneResult] = {}
 
-        # Build routes_by_net lookup from the autorouter's current state.
-        routes_by_net: dict[int, Route] = {r.net: r for r in self.routes}
+        # Complete-net views include fixed escapes and every mutable fragment.
+        fragments_by_net: dict[int, list[Route]] = {}
+        for route in self.routes:
+            fragments_by_net.setdefault(route.net, []).append(route)
+        routes_by_net = {
+            net: fragments[0]
+            if len(fragments) == 1
+            else Route(
+                net=net,
+                net_name=fragments[0].net_name,
+                segments=[segment for route in fragments for segment in route.segments],
+                vias=[via for route in fragments for via in route.vias],
+                is_escape=all(route.is_escape for route in fragments),
+            )
+            for net, fragments in fragments_by_net.items()
+        }
+        fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
 
         # Update the skew tracker so the post-tuning results are queryable.
         # Use the layer-stack count when available, else default to 2.
@@ -16206,7 +16261,7 @@ class Autorouter:
         else:
             num_layers = 2
         self._diffpair_length_tracker.record_routes(
-            routes=self.routes,
+            routes=list(routes_by_net.values()),
             detected_pairs=detected_pairs,
             num_copper_layers=num_layers,
         )
@@ -16242,25 +16297,41 @@ class Autorouter:
                 # True; flag-off keeps the pre-#4085 geometric selection.
                 grid=self.grid,
                 prefer_reserved_slack=self.enable_slack_corridor_widening,
+                fixed_segment_ids=fixed_segment_ids,
             )
 
-            # Commit any new Route references back into self.routes and the
-            # working ``routes_by_net`` map so the next pair's neighbor
-            # self-check sees the updated geometry.
-            if p_route is not None and dp.pair.positive.net_id in routes_by_net:
-                if p_route is not routes_by_net[dp.pair.positive.net_id]:
-                    routes_by_net[dp.pair.positive.net_id] = p_route
-                    for i, r in enumerate(self.routes):
-                        if r.net == dp.pair.positive.net_id:
-                            self.routes[i] = p_route
-                            break
-            if n_route is not None and dp.pair.negative.net_id in routes_by_net:
-                if n_route is not routes_by_net[dp.pair.negative.net_id]:
-                    routes_by_net[dp.pair.negative.net_id] = n_route
-                    for i, r in enumerate(self.routes):
-                        if r.net == dp.pair.negative.net_id:
-                            self.routes[i] = n_route
-                            break
+            changed = {
+                net: route
+                for net, route in (
+                    (dp.pair.positive.net_id, p_route),
+                    (dp.pair.negative.net_id, n_route),
+                )
+                if route is not None and net in routes_by_net and route is not routes_by_net[net]
+            }
+            routes_by_net.update(changed)
+            if changed:
+                previous = list(self.routes)
+                replacements = {}
+                for net, route in changed.items():
+                    escapes = [r for r in previous if r.net == net and r.is_escape]
+                    fixed_vias = {id(v) for r in escapes for v in r.vias}
+                    replacements[net] = (
+                        Route(
+                            net=net,
+                            net_name=route.net_name,
+                            segments=[s for s in route.segments if id(s) not in fixed_segment_ids],
+                            vias=[v for v in route.vias if id(v) not in fixed_vias],
+                        )
+                        if escapes
+                        else route
+                    )
+                published = []
+                for fragment in previous:
+                    if fragment.net not in changed or fragment.is_escape:
+                        published.append(fragment)
+                    elif fragment.net in replacements:
+                        published.append(replacements.pop(fragment.net))
+                self.restore_route_snapshot(published, replaced_routes=previous)
 
             results[(p_name, n_name)] = result
 
@@ -16277,7 +16348,7 @@ class Autorouter:
         # Refresh the skew tracker after tuning so downstream consumers
         # (e.g. the Phase 3J DRC rule) see the updated lengths.
         self._diffpair_length_tracker.record_routes(
-            routes=self.routes,
+            routes=list(routes_by_net.values()),
             detected_pairs=detected_pairs,
             num_copper_layers=num_layers,
         )
@@ -16322,14 +16393,31 @@ class Autorouter:
             :func:`tune_match_group_v2` per-group, keyed by
             :attr:`MatchGroup.name`.  The per-member ``result`` values
             are :class:`~kicad_tools.router.match_group_tuning.TuneResult`
-            instances.
+            instances. Returned routes describe complete nets; ``self.routes``
+            retains separate fixed escape fragments when present.
         """
         from .match_group_tuning import TuneResult, tune_match_group_v2
 
         results: dict[str, dict[int, tuple[Route, TuneResult]]] = {}
 
-        # Build routes_by_net lookup from the autorouter's current state.
-        routes_by_net: dict[int, Route] = {r.net: r for r in self.routes}
+        # A net can contain separate escape and channel Route objects. The
+        # tuner needs their complete geometry for lengths and foreign clearance.
+        fragments_by_net: dict[int, list[Route]] = {}
+        for route in self.routes:
+            fragments_by_net.setdefault(route.net, []).append(route)
+        routes_by_net = {
+            net: fragments[0]
+            if len(fragments) == 1
+            else Route(
+                net=net,
+                net_name=fragments[0].net_name,
+                segments=[s for r in fragments for s in r.segments],
+                vias=[v for r in fragments for v in r.vias],
+                is_escape=all(r.is_escape for r in fragments),
+            )
+            for net, fragments in fragments_by_net.items()
+        }
+        fixed_segment_ids = {id(s) for r in self.routes if r.is_escape for s in r.segments}
 
         # Update the match-group skew tracker so the post-tuning results are
         # queryable.  Use the layer-stack count when available, else default
@@ -16455,6 +16543,7 @@ class Autorouter:
             # single-ended path inside tune_match_group_v2 ignores it
             # (see match_group_tuning.py docstring).  We pass it
             # unconditionally so the dispatch is fully transparent here.
+            before_by_net = dict(routes_by_net)
             try:
                 group_results = tune_match_group_v2(
                     group=group,
@@ -16470,6 +16559,7 @@ class Autorouter:
                     board_thickness_mm=board_thickness_mm,
                     num_copper_layers=num_layers,
                     blind_buried_supported=blind_buried_supported,
+                    fixed_segment_ids=fixed_segment_ids,
                 )
             except ValueError as exc:
                 # Defensive: a malformed group (e.g. mixed pair/scalar
@@ -16480,27 +16570,37 @@ class Autorouter:
                 results[group.name] = {}
                 continue
 
-            # Commit any new Route references back into self.routes and the
-            # working ``routes_by_net`` map so subsequent groups' DRC
-            # self-checks see the updated geometry.  Mirrors the
-            # apply_diffpair_length_tuning per-pair commit-back loop.
-            #
-            # Issue #3440: compare against the CURRENT self.routes entry,
-            # not routes_by_net -- the tuner now publishes committed
-            # meanders into routes_by_net in place (the staleness fix),
-            # so ``new_route is not routes_by_net[net_id]`` is False for
-            # every tuned member and the legacy identity guard silently
-            # dropped all meanders from self.routes (they never reached
-            # the saved PCB).
-            for net_id, (new_route, _result) in group_results.items():
-                if net_id not in routes_by_net:
-                    continue  # unrouted member (empty-route placeholder)
-                routes_by_net[net_id] = new_route
-                for i, r in enumerate(self.routes):
-                    if r.net == net_id:
-                        if self.routes[i] is not new_route:
-                            self.routes[i] = new_route
-                        break
+            # The tuner mutates its lookup as members commit. Compare against
+            # the pre-call view, preserving original fragments on no-op/rollback.
+            changed = {
+                net: route
+                for net, (route, _) in group_results.items()
+                if net in before_by_net and route is not before_by_net[net]
+            }
+            routes_by_net.update(changed)
+            if changed:
+                previous_routes = list(self.routes)
+                replacements: dict[int, Route] = {}
+                for net, route in changed.items():
+                    escapes = [r for r in previous_routes if r.net == net and r.is_escape]
+                    escape_via_ids = {id(v) for r in escapes for v in r.vias}
+                    replacements[net] = (
+                        Route(
+                            net=route.net,
+                            net_name=route.net_name,
+                            segments=[s for s in route.segments if id(s) not in fixed_segment_ids],
+                            vias=[v for v in route.vias if id(v) not in escape_via_ids],
+                        )
+                        if escapes
+                        else route
+                    )
+                published: list[Route] = []
+                for fragment in previous_routes:
+                    if fragment.net not in changed or fragment.is_escape:
+                        published.append(fragment)
+                    elif fragment.net in replacements:
+                        published.append(replacements.pop(fragment.net))
+                self.restore_route_snapshot(published, replaced_routes=previous_routes)
 
             results[group.name] = group_results
 
@@ -17478,6 +17578,8 @@ class Autorouter:
                         pin=pad.pin,
                         through_hole=pad.through_hole,
                         drill=pad.drill,
+                        rotation=pad.rotation,
+                        shape=pad.shape,
                     )
                     self._escape_pad_overrides[pad_key] = virtual_pad
 
@@ -17563,6 +17665,8 @@ class Autorouter:
                         pin=pad.pin,
                         through_hole=pad.through_hole,
                         drill=pad.drill,
+                        rotation=pad.rotation,
+                        shape=pad.shape,
                     )
                     self._escape_pad_overrides[pad_key] = virtual_pad
 

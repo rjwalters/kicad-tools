@@ -71,11 +71,28 @@ Three things can add `loom:issue` to a `loom:curated` issue. **The Curator is ne
 
 A Curator subagent that finds `loom:curated` with no `loom:issue` should do exactly what the rest of this file says elsewhere: leave the label alone and move on — including when the Curator is itself running inside a `/loom:sweep` invocation. Promoting is never the Curator's call, under any of the three paths above.
 
-**IMPORTANT: Ignore External Issues**
+**IMPORTANT: Ignore Hard-Excluded Issues**
 
-- **NEVER enhance or mark issues with the `external` label as ready** - these are external suggestions for maintainers only
-- External issues are submitted by non-collaborators and require maintainer approval (removal of `external` label) before being curated
-- Only work on issues that do NOT have the `external` label
+A **hard exclusion** is a label that takes an issue out of the automated
+pipeline entirely — no role may curate it, build it, or promote it, and the
+daemon's work finder will not dispatch a sweep for it. `external` is the only
+one today: issues filed by non-collaborators (or auto-labeled by an intake
+workflow) that require maintainer approval (removal of the label) before any
+agent touches them.
+
+- **NEVER enhance or mark a hard-excluded issue as ready.**
+- **The list is not hardcoded here.** Read it from the one shared source,
+  `./.loom/scripts/hard-exclusion-labels.sh` (Issue #7528) — the same list
+  `loom-daemon`'s work finder filters candidates on, so the daemon and this
+  prompt can never disagree about what is excluded:
+
+  ```bash
+  ./.loom/scripts/hard-exclusion-labels.sh            # one label per line
+  ./.loom/scripts/hard-exclusion-labels.sh --jq-not   # a jq select() fragment
+  ```
+
+  Every `gh issue list` query below composes the `--jq-not` fragment rather
+  than spelling `external` out again.
 
 ## Exception: Explicit User Instructions
 
@@ -155,9 +172,12 @@ Use a **priority-based search** to find the highest-value curation opportunity:
 Issues with `loom:issue` (human-approved) but missing `loom:curated`:
 
 ```bash
+# #7528: the hard-exclusion fragment comes from the shared source, never a
+# hardcoded `external` literal. Note the DOUBLE-quoted --jq so $EXCL expands.
+EXCL="$(./.loom/scripts/hard-exclusion-labels.sh --jq-not)"
 gh issue list --label="loom:issue" --state=open --limit 500 --json number,title,labels,createdAt \
-  --jq 'sort_by(.createdAt) | .[] | select(([.labels[].name] | contains(["loom:curated"]) | not) and ([.labels[].name] | contains(["external"]) | not)) |
-  "#\(.number): \(.title)"'
+  --jq "sort_by(.createdAt) | .[] | select(([.labels[].name] | contains([\"loom:curated\"]) | not) and $EXCL) |
+  \"#\(.number): \(.title)\""
 ```
 
 **Why prioritize these**: Human already approved the concept, Curator adds technical detail before Builder starts. The query is sorted oldest-first (`sort_by(.createdAt)`) so the first result is always the oldest un-curated approved issue — no separate age computation needed.
@@ -294,9 +314,9 @@ enhancement") is the entry point, so **target it first**:
 
 ```bash
 # Newly filed issues awaiting Curator enhancement
+EXCL="$(./.loom/scripts/hard-exclusion-labels.sh --jq-not)"   # #7528 shared source
 gh issue list --label="loom:triage" --state=open --limit 500 --json number,title,labels,createdAt \
-  --jq 'sort_by(.createdAt) | .[] | select(([.labels[].name] | contains(["external"]) | not)) |
-  "#\(.number) \(.title)"'
+  --jq "sort_by(.createdAt) | .[] | select($EXCL) | \"#\(.number) \(.title)\""
 ```
 
 If nothing carries `loom:triage`, fall back to any issue that is not already
@@ -305,20 +325,21 @@ reserved for a human operator, so an autonomous Curator never "curates" an
 issue being built, awaiting evaluation, or outside its authority entirely:
 
 ```bash
+EXCL="$(./.loom/scripts/hard-exclusion-labels.sh --jq-not)"   # #7528 shared source
 gh issue list --state=open --limit 500 --json number,title,labels,createdAt \
-  --jq 'sort_by(.createdAt) | .[] | select(
-    ([.labels[].name] | contains(["loom:curated"]) | not) and
-    ([.labels[].name] | contains(["loom:curating"]) | not) and
-    ([.labels[].name] | contains(["loom:issue"]) | not) and
-    ([.labels[].name] | contains(["loom:building"]) | not) and
-    ([.labels[].name] | contains(["loom:architect"]) | not) and
-    ([.labels[].name] | contains(["loom:hermit"]) | not) and
-    ([.labels[].name] | contains(["loom:auditor"]) | not) and
-    ([.labels[].name] | contains(["loom:epic"]) | not) and
-    ([.labels[].name] | contains(["loom:blocked"]) | not) and
-    ([.labels[].name] | contains(["loom:operator-only"]) | not) and
-    ([.labels[].name] | contains(["external"]) | not)
-  ) | "#\(.number) \(.title)"'
+  --jq "sort_by(.createdAt) | .[] | select(
+    ([.labels[].name] | contains([\"loom:curated\"]) | not) and
+    ([.labels[].name] | contains([\"loom:curating\"]) | not) and
+    ([.labels[].name] | contains([\"loom:issue\"]) | not) and
+    ([.labels[].name] | contains([\"loom:building\"]) | not) and
+    ([.labels[].name] | contains([\"loom:architect\"]) | not) and
+    ([.labels[].name] | contains([\"loom:hermit\"]) | not) and
+    ([.labels[].name] | contains([\"loom:auditor\"]) | not) and
+    ([.labels[].name] | contains([\"loom:epic\"]) | not) and
+    ([.labels[].name] | contains([\"loom:blocked\"]) | not) and
+    ([.labels[].name] | contains([\"loom:operator-only\"]) | not) and
+    $EXCL
+  ) | \"#\(.number) \(.title)\""
 ```
 
 Note: `loom:blocked` and `loom:operator-only` both stay excluded from this
@@ -1617,23 +1638,37 @@ Priority 1/2 discovery and does not change what gets curated this pass.
 
 ### Extracting the stated reference
 
-Reuse the exact machine-readable phrasings this file and
-`detect-dependency-cycle.sh` / `warn-operator-gated.sh` already parse, rather
-than inventing a new pattern — a bare prose mention (e.g. a backtick-quoted
-`` `owner/repo#123` ``) does not count:
+Use the shared script's `extract-refs` subcommand — never re-derive this
+extraction inline. It reuses the exact machine-readable phrasings this file
+and `detect-dependency-cycle.sh` / `warn-operator-gated.sh` already parse (a
+bare prose mention, e.g. a backtick-quoted `` `owner/repo#123` ``, does not
+count):
 
 ```bash
 ISSUE_NUMBER=<number>
-ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" --json body,comments)
-# NOTE: printf '%s\n' "$VAR" | jq, never echo "$VAR" | jq (#5094).
-TEXT=$(printf '%s\n' "$ISSUE_JSON" | jq -r '[.body] + [.comments[].body] | join("\n")')
-
-REFS=$(printf '%s\n' "$TEXT" \
-  | grep -oE '(Blocked by|Depends on|Requires|\*\*Epic\*\*)[*_:[:space:]]*#[0-9]+' \
-  | grep -oE '#[0-9]+' | tr -d '#' | sort -un)
+eval "$(./.loom/scripts/dep-recheck-fingerprint.sh extract-refs --number "$ISSUE_NUMBER")"
+# REFS is now a space-separated (possibly empty) list of referenced numbers.
+# The helper shell-quotes the assignment so multiple refs remain one value.
 ```
 
-- **No reference found** → no-op. Most `loom:operator-mechanical` /
+**Why not just scan `[.body] + [.comments[].body]` directly (#4963):** an
+earlier version of this section did exactly that, and it self-perpetuates.
+The report comment below quotes the matched phrase back into the thread
+verbatim (`` the reference this issue is parked on, #4510 ("Depends on
+#4510"), is now closed ``) — so the *next* pass's extraction, scanning the
+same unconditional comment history, re-matches its own prior report as if it
+were new evidence. On kicad-tools#4507 this produced 13 near-identical
+heartbeat comments over 10 days, and survived a body-only fix (rewording away
+the matched phrase) because the comment history is immutable — the phrase
+lived on forever in a past comment. `extract-refs` closes the loop instead of
+papering over it: it scans the **body** unconditionally, but a **comment**
+only when it is neither authored by the automation identity (`--bot-login`,
+default `loom-fleet-dispatch`) nor itself carrying a
+`curator:dep-recheck:`/`curator:operator-premise-recheck:` marker — so the
+bot's own historical heartbeat comments are never treated as new evidence,
+while a genuine NEW human-authored "Blocked by #N" comment still is.
+
+- **No reference found** (`REFS` empty) → no-op. Most `loom:operator-mechanical` /
   `loom:operator-decision` / `loom:operator-objective` issues have nothing
   checkable — leave them exactly as found, silently.
 - **One or more references found** → compute the fingerprint with the same
@@ -1645,9 +1680,10 @@ REFS=$(printf '%s\n' "$TEXT" \
 ```bash
 eval "$(./.loom/scripts/dep-recheck-fingerprint.sh operator-premise --refs "$REFS")"
 # VERDICT=stale-premise (>=1 reference closed) or VERDICT=open (all still open).
-# REFS is always populated (one `<ref>:<state>` line per reference checked,
-# in both verdicts); only CONCLUSION_HASH is empty when VERDICT=open — see
-# "Idempotency" below for why that means nothing is posted or compared.
+# REFS is now overwritten with the operator-premise subcommand's own REFS
+# output (one `<ref>:<state>` line per reference checked, in both verdicts);
+# only CONCLUSION_HASH is empty when VERDICT=open — see "Idempotency" below
+# for why that means nothing is posted or compared.
 ```
 
 Internally this fetches each reference's current state via `gh issue view

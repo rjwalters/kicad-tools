@@ -255,8 +255,10 @@ def _route_argv(pcb_path: Path, out_path: Path, nets: str = "SIGNAL") -> list[st
         "python",
         "--no-placement-feedback",
         "--no-cache",
+        # This is a copper/diagnostic regression, not a speed benchmark.
+        # Leave room for supervised startup and post-routing checks under CI.
         "--timeout",
-        "10",
+        "30",
         "--no-optimize",
         "-o",
         str(out_path),
@@ -325,7 +327,7 @@ class TestRouteCliNameOnlyDialect:
         assert numeric_segments > 0
         assert named_segments == numeric_segments
 
-    def test_genuinely_absent_net_fails_loudly(self, tmp_path: Path, capsys):
+    def test_genuinely_absent_net_fails_loudly(self, tmp_path: Path, capfd):
         """Negative test: a net name that does not exist on the board at
         all must abort with a non-zero exit and a clear error -- never a
         vacuous 0/0 SUCCESS."""
@@ -336,7 +338,7 @@ class TestRouteCliNameOnlyDialect:
         rc = route_main(_route_argv(pcb_path, out_path, nets="DOES_NOT_EXIST"))
 
         assert rc != 0
-        err = capsys.readouterr().err
+        err = capfd.readouterr().err
         assert "not present on the board" in err
         assert not out_path.exists()
 
@@ -348,14 +350,14 @@ class TestRouteCliSinglePadOnlyNetsRequest:
     exit 0 with a graceful warning, not be treated as a #4983-style lost
     binding."""
 
-    def test_single_pad_only_nets_request_succeeds_gracefully(self, tmp_path: Path, capsys):
+    def test_single_pad_only_nets_request_succeeds_gracefully(self, tmp_path: Path, capfd):
         pcb_path = tmp_path / "board.kicad_pcb"
         pcb_path.write_text(_SINGLE_PAD_NET_FIXTURE)
         out_path = tmp_path / "out.kicad_pcb"
 
         rc = route_main(_route_argv(pcb_path, out_path, nets="LONELY"))
 
-        err = capsys.readouterr().err
+        err = capfd.readouterr().err
         assert "fewer than 2 pads" in err
         assert "loader bug" not in err
         assert rc == 0
@@ -416,3 +418,62 @@ class TestRejectLostRouteOnlyBindings:
         rc = _reject_lost_route_only_bindings(args, 0)
         assert rc is not None
         assert rc != 0
+
+
+class TestBareNetReferences:
+    def test_mixed_ids_escaping_and_nonreference_text(self):
+        text = r"""(kicad_pcb (net 41 USB_D+) (net SPI3_SCK) (net 1)
+          (net 9 "quoted\"name\\path") (net " spaced ")
+          (property "Description" "(net 99 FAKE)")
+          ; (net 88 COMMENT)
+          (net USB_D+) (net 0 ""))"""
+        assert _build_net_number_map(text) == {
+            "USB_D+": 41,
+            'quoted"name\\path': 9,
+            "SPI3_SCK": 2,
+            " spaced ": 3,
+        }
+
+    def test_quoted_bare_graph_equivalence_and_roundtrip(self, tmp_path):
+        from kicad_tools.sexp import parse_string
+
+        for template in (_NUMERIC_FIXTURE, _NAME_ONLY_FIXTURE):
+            for name in (
+                "USB_D+",
+                "SPI3_SCK",
+                "SPI;SELECT",
+                "SPI#SELECT",
+                "/bus/D-",
+                "+-_",
+                'quote"slash\\',
+            ):
+                encoded = name.replace("\\", "\\\\").replace('"', '\\"')
+                quoted = template.replace('"SIGNAL"', f'"{encoded}"')
+                forms = [quoted, parse_string(quoted).to_string()]
+                if '"' not in name and "\\" not in name:
+                    forms.append(quoted.replace(f'"{encoded}"', name))
+                for index, text in enumerate(forms):
+                    path = tmp_path / f"form-{index}.kicad_pcb"
+                    path.write_text(text)
+                    router, net_map = load_pcb_for_routing(str(path))
+                    assert net_map == {name: 1}
+                    assert len(router.nets[1]) == 2
+                    assert router.net_names[1] == name
+                    pads = load_pads_for_analysis(path)
+                    assert len(pads) == 2
+                    assert {pad.net for pad in pads} == {1}
+
+    def test_comment_boundaries_match_parser(self):
+        from kicad_tools.sexp import parse_string
+
+        text = """(kicad_pcb
+          # (net 99 FAKE_HASH)
+          ; (net 88 FAKE_SEMICOLON)
+          (net # ignored before numeric id
+            41 ; ignored before name
+            USB_D+)
+          (net 42 SPI;SELECT) (net 43 SPI#SELECT)
+          (net "#quoted") (net ";quoted"))"""
+        expected = {"USB_D+": 41, "SPI;SELECT": 42, "SPI#SELECT": 43, "#quoted": 1, ";quoted": 2}
+        assert _build_net_number_map(text) == expected
+        assert _build_net_number_map(parse_string(text).to_string()) == expected

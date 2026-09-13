@@ -513,3 +513,135 @@ class TestNeckDownRouting:
                 assert seg.width <= neck_down_rules.trace_width, (
                     f"Width {seg.width} exceeds normal trace width {neck_down_rules.trace_width}"
                 )
+
+
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+def test_board06_merged_trunk_keeps_resolved_width(backend):
+    """A pad-adjacent endpoint must not neck down a 15.45 mm trunk (#5223)."""
+    from types import SimpleNamespace
+
+    from kicad_tools.router.cpp_backend import CppPathfinder
+    from kicad_tools.router.pathfinder import Router
+    from kicad_tools.router.primitives import Pad, Route
+
+    rules = DesignRules(
+        trace_width=0.375, trace_clearance=0.15, min_trace_width=0.1016, grid_resolution=0.05
+    )
+    start = Pad(106.5, 116, 0.5, 0.5, 26, "MIPI_RST", ref="J4")
+    end = Pad(122.25, 115.9, 0.5, 0.5, 26, "MIPI_RST", ref="U4")
+    points = [(106.5, 116), (106.6, 115.9), (106.8, 115.9), (122.25, 115.9)]
+    grid = SimpleNamespace(index_to_layer=lambda i: 0, resolution=0.05)
+    pitches = {"J4": 0.5}
+    if backend == "python":
+        finder = SimpleNamespace(
+            rules=rules,
+            grid=grid,
+            component_pitches=pitches,
+            _get_trace_width_for_net=lambda _: 0.375,
+            _get_net_class=lambda _: None,
+        )
+        route = Route(net=26, net_name="MIPI_RST")
+        Router._convert_path_to_route(
+            finder, [(x, y, 0, False) for x, y in points], route, start, end
+        )
+    else:
+        finder = SimpleNamespace(_rules=rules, _grid=grid, _get_component_pitches=lambda: pitches)
+        segments = [
+            SimpleNamespace(x1=a[0], y1=a[1], x2=b[0], y2=b[1], layer=0, net=26)
+            for a, b in zip(points, points[1:], strict=False)
+        ]
+        route = CppPathfinder._convert_result_to_route(
+            finder, SimpleNamespace(segments=segments, vias=[]), start, end, None
+        )
+    trunk = [s for s in route.segments if min(s.x1, s.x2) >= 107.49]
+    assert trunk, "The long corridor must be separated from the pad taper"
+    assert all(s.width == pytest.approx(0.375) for s in trunk)
+    assert sum(((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in trunk) > 13
+    assert any(s.width < 0.2 for s in route.segments)
+    assert all(s.width <= 0.375 for s in route.segments)
+
+    # The actual optimizer and PCB emitter must preserve the width transition.
+    import re
+
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+
+    optimized = TraceOptimizer(config=OptimizationConfig(pull_tight=True)).optimize_route(route)
+    emitted = optimized.to_sexp()
+    emitted_trunk = re.findall(
+        r"\(start ([\d.]+) ([\d.]+)\)\s+\(end ([\d.]+) ([\d.]+)\).*?\(width ([\d.]+)\)",
+        emitted,
+        re.DOTALL,
+    )
+    assert any(
+        float(x2) - float(x1) > 13 and float(w) == 0.375 for x1, _, x2, _, w in emitted_trunk
+    )
+
+    # A foreign pad in the extra copper occupied by the full-width trunk
+    # must be rejected by the real post-route geometry validator. Merely
+    # restoring impedance must never publish that clearance violation.
+    grid = RoutingGrid(width=25, height=10, origin_x=100, origin_y=110, rules=rules)
+    validator = Router(grid, rules)
+    assert validator._validate_route_clearance(optimized, exclude_net=26)
+    grid.add_pad(Pad(110, 116.24, 0.1, 0.1, 99, "FOREIGN", ref="R99"))
+    assert not validator._validate_route_clearance(optimized, exclude_net=26)
+    # The old under-width trunk fit here: rejection is specifically due to
+    # the additional copper required for the real impedance width.
+    from dataclasses import replace
+
+    narrow = Route(
+        net=26,
+        net_name="MIPI_RST",
+        segments=[replace(seg, width=min(seg.width, 0.1881)) for seg in optimized.segments],
+    )
+    assert validator._validate_route_clearance(narrow, exclude_net=26)
+
+
+def test_optimizer_preserves_neck_down_width_transition():
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+    from kicad_tools.router.primitives import Route, Segment
+
+    route = Route(
+        net=26,
+        net_name="MIPI_RST",
+        segments=[
+            Segment(106.8, 115.9, 107.5, 115.9, 0.1881, Layer.F_CU, 26, "MIPI_RST"),
+            Segment(107.5, 115.9, 115, 115.9, 0.375, Layer.F_CU, 26, "MIPI_RST"),
+            Segment(115, 115.9, 122.25, 115.9, 0.375, Layer.F_CU, 26, "MIPI_RST"),
+        ],
+    )
+    optimized = TraceOptimizer(
+        config=OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=True,
+            compress_staircase=True,
+            convert_45_corners=True,
+            pull_tight=True,
+        )
+    ).optimize_route(route)
+    assert len(optimized.segments) == 2
+    assert [s.width for s in optimized.segments] == pytest.approx([0.1881, 0.375])
+    assert optimized.segments[1].x1 == pytest.approx(107.5)
+    assert optimized.segments[1].x2 == pytest.approx(122.25)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_taper_split_retains_diagonal_and_full_width_middle(reverse):
+    import math
+
+    from kicad_tools.router.neck_down import taper_points
+
+    p0, p1 = ((0.0, 0.0), (10.0, 10.0))
+    if reverse:
+        p0, p1 = p1, p0
+    points = taper_points(p0, p1, [(0, 0), (10, 10)], 1.0, 0.05)
+    assert points[0] == p0
+    assert points[-1] == p1
+    assert all(x == pytest.approx(y) for x, y in points)
+    lengths = [math.dist(a, b) for a, b in zip(points, points[1:], strict=False)]
+    assert sum(lengths) == pytest.approx(math.sqrt(200))
+    assert sum(length > 1 for length in lengths) == 1
+    assert max(lengths) == pytest.approx(math.sqrt(200) - 2)
+    assert max(length for length in lengths if length < 1) <= 0.05 + 1e-12
+    assert taper_points(p0, p1, [], 1, 0.05) == [p0, p1]

@@ -183,6 +183,30 @@ class TestFixOscEscapeStep:
         assert recipe.fix_osc_escape(pcb) is True
         assert pcb.read_text() == fixed
 
+    @pytest.mark.parametrize("endpoint", ["144.9 88.75", "145.1875 88.6"])
+    def test_reviewed_west_escape_preserves_route_endpoint(self, tmp_path, endpoint):
+        recipe = _load_recipe()
+        pcb = self._routed_with_offending_hop(tmp_path, recipe)
+        # Physical witnesses from the fresh integrated route and historical
+        # route; independent of the recipe's variant list.
+        pcb.write_text(pcb.read_text().replace("(end 145.95 88.75)", f"(end {endpoint})"))
+        assert recipe.fix_osc_escape(pcb)
+        fixed = pcb.read_text()
+        assert f"(start 145.3375 89.25)\n\t\t(end {endpoint})" in fixed
+        assert "(start 145.3375 88.75)" not in fixed
+        assert fixed.count("(segment") == 1
+        assert recipe.fix_osc_escape(pcb)
+        assert pcb.read_text() == fixed
+
+    def test_unknown_follow_on_fails_without_mutating_board(self, tmp_path):
+        recipe = _load_recipe()
+        pcb = self._routed_with_offending_hop(tmp_path, recipe)
+        original = pcb.read_text().replace("(end 145.95 88.75)", "(end 144 88.75)")
+        pcb.write_text(original)
+        with pytest.raises(AssertionError, match="reviewed follow-on"):
+            recipe.fix_osc_escape(pcb)
+        assert pcb.read_text() == original
+
     def test_fix_asserts_when_escape_geometry_missing(self, tmp_path: Path) -> None:
         """The router-drift guard must fire if the OSC escape hop is absent."""
         recipe = _load_recipe()

@@ -56,18 +56,15 @@ the files actually present:
    ls .claude/commands/kct/*.md
    ```
 
-   For each `<name>.md` **other than** `README.md` and `help.md` itself, read
-   its YAML frontmatter block (the `name`, `invocation`, `suggestedModel`,
-   `description` keys between the leading `---` fences). Render one row per
-   skill — mirroring the table in `.claude/commands/kct/README.md` rather than
-   inventing a new format:
-
-   | Skill | Purpose (from `description`) | Model |
-   |-------|------------------------------|-------|
-   | `/kct:<invocation>` | one-line `description` | `suggestedModel` |
-
-   Skip `README.md` (it is the namespace index, not a skill) and `help.md`
-   (this file — describing yourself in the table is noise).
+   For each skill file other than the namespace README and this help skill,
+   read its YAML `name` and `description`. A skill can be stored as `<name>.md`
+   or as `kct-<name>/SKILL.md`; identify it from frontmatter, not the basename.
+   Render one row per installed skill with its name, purpose, and invocation.
+   For Claude command files, use the `invocation` field. For Codex SKILL.md
+   files, invoke the skill as `$` followed by its `name` field. Include a
+   suggested model only when that optional metadata is present; Codex does
+   not require or dispatch through Claude's model metadata. Do not infer the
+   installed skill list from the namespace README's full catalog.
 
 2. **Caption with install metadata, if present.** If
    `.kct/install-metadata.json` exists, read it and caption the overview with

@@ -250,6 +250,25 @@ class PartAvailability:
         return "OK"
 
 
+class BatchLookupResult(dict[str, Part]):
+    """Part mapping with per-part query source; cached/offline is not live stock."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sources: dict[str, str] = {}
+        self.diagnostics: list[str] = []
+
+
+@dataclass
+class LookupResult:
+    """Lookup coverage, distinct from a part's stock observation provenance."""
+
+    part: Part | None = None
+    source: str = "unknown"
+    status: str = "unavailable"
+    diagnostics: list[str] = field(default_factory=list)
+
+
 @dataclass
 class SearchResult:
     """Result from a parts search."""
@@ -259,6 +278,10 @@ class SearchResult:
     total_count: int = 0
     page: int = 1
     page_size: int = 20
+
+    source: str = "unknown"
+    coverage: str = "unknown"
+    diagnostics: list[str] = field(default_factory=list)
 
     @property
     def has_more(self) -> bool:

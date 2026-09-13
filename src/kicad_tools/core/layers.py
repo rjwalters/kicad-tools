@@ -14,6 +14,8 @@ the two endpoint layers KiCad lists in ``(layers "F.Cu" "B.Cu")``).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 # Canonical copper layer ordering from top (front) to bottom (back).
 # KiCad supports up to 30 inner layers named In1.Cu .. In30.Cu.
 COPPER_LAYER_ORDER: tuple[str, ...] = (
@@ -23,6 +25,59 @@ COPPER_LAYER_ORDER: tuple[str, ...] = (
 )
 
 _COPPER_LAYER_INDEX: dict[str, int] = {name: idx for idx, name in enumerate(COPPER_LAYER_ORDER)}
+
+
+def is_declared_copper_layer(name: str, layer_type: str) -> bool:
+    """Recognize canonical copper declarations, including mixed/jumper types.
+
+    KiCad layer types: https://dev-docs.kicad.org/en/file-formats/sexpr-pcb/#layers-section
+    User/graphic declarations cannot establish enabled copper membership.
+    """
+    return name in COPPER_LAYER_ORDER and layer_type in ("signal", "power", "mixed", "jumper")
+
+
+def validate_copper_layer(layer: str, available_layers: Iterable[str]) -> None:
+    """Reject a layer that is not a real, board-enabled copper layer.
+
+    Two independent checks (Issue #4907):
+
+    1. *Canonical spelling* -- ``layer`` must be one of the well-known
+       KiCad copper layer names (:data:`COPPER_LAYER_ORDER`: ``F.Cu``,
+       ``B.Cu``, ``In1.Cu``..``In30.Cu``). This rejects typos as well as
+       non-copper layers such as ``F.SilkS`` or ``Edge.Cuts``.
+    2. *Board availability* -- ``layer`` must appear in
+       ``available_layers``, the set of copper layers this specific board
+       actually declares as enabled (e.g. a 2-layer board only declares
+       ``F.Cu``/``B.Cu``, so ``In1.Cu`` is rejected even though it passes
+       check 1). Callers pass the board's own declared copper layer names
+       here (e.g. ``PCB.copper_layers``) rather than a hardcoded list, so
+       this rejects layers that are merely undeclared/disabled on *this*
+       board without hardcoding a stackup.
+
+    Empty or missing layer evidence rejects every requested copper layer;
+    canonical spelling alone cannot establish that a layer is enabled.
+
+    Args:
+        layer: Layer name to validate (e.g. ``"F.Cu"``, ``"In1.Cu"``).
+        available_layers: Copper layer names declared as enabled
+            (``signal``/``power``/``mixed``/``jumper`` type) in the board's own layer table.
+
+    Raises:
+        ValueError: If *layer* is not a recognised copper layer name, or
+            is not among the board's declared/enabled copper layers.
+    """
+    if layer not in COPPER_LAYER_ORDER:
+        raise ValueError(
+            f"{layer!r} is not a valid copper layer name. Copper layers are "
+            f"'F.Cu', 'B.Cu', or an inner layer like 'In1.Cu'..'In30.Cu'."
+        )
+
+    available = set(available_layers)
+    if layer not in available:
+        raise ValueError(
+            f"Layer {layer!r} is not available on this board. "
+            f"Declared copper layers: {', '.join(sorted(available, key=_COPPER_LAYER_INDEX.__getitem__))}."
+        )
 
 
 def via_spans_layer(via_layers: list[str] | tuple[str, ...], target_layer: str) -> bool:

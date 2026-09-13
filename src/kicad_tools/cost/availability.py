@@ -29,6 +29,7 @@ class AvailabilityStatus(Enum):
     UNKNOWN = "unknown"
     NO_LCSC = "no_lcsc"
     NOT_FOUND = "not_found"
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass
@@ -187,6 +188,9 @@ class BOMAvailabilityResult:
             "low_stock": len(self.low_stock),
             "out_of_stock": len(self.out_of_stock),
             "missing": len(self.missing),
+            "unavailable": sum(
+                item.status == AvailabilityStatus.UNAVAILABLE for item in self.items
+            ),
             "all_available": self.all_available,
             "total_cost": self.total_cost,
             "quantity_multiplier": self.quantity_multiplier,
@@ -260,7 +264,14 @@ class LCSCAvailabilityChecker:
                 lcsc_parts.append(group.lcsc)
 
         # Bulk fetch parts
-        parts_map = client.lookup_many(list(set(lcsc_parts))) if lcsc_parts else {}
+        from ..parts.lcsc import LCSCUnavailableError
+
+        unavailable: set[str] = set()
+        try:
+            parts_map = client.lookup_many(list(set(lcsc_parts))) if lcsc_parts else {}
+        except LCSCUnavailableError as exc:
+            parts_map = exc.partial_results
+            unavailable = exc.unavailable_parts
 
         # Check each group
         for group in groups:
@@ -277,6 +288,7 @@ class LCSCAvailabilityChecker:
                 lcsc=group.lcsc or None,
                 quantity_needed=qty_needed,
                 parts_map=parts_map,
+                unavailable=unavailable,
             )
             results.append(result)
 
@@ -308,7 +320,14 @@ class LCSCAvailabilityChecker:
         lcsc_parts = [item.lcsc for item in items if item.lcsc]
 
         # Bulk fetch parts
-        parts_map = client.lookup_many(list(set(lcsc_parts))) if lcsc_parts else {}
+        from ..parts.lcsc import LCSCUnavailableError
+
+        unavailable: set[str] = set()
+        try:
+            parts_map = client.lookup_many(list(set(lcsc_parts))) if lcsc_parts else {}
+        except LCSCUnavailableError as exc:
+            parts_map = exc.partial_results
+            unavailable = exc.unavailable_parts
 
         # Check each item
         for item in items:
@@ -326,6 +345,7 @@ class LCSCAvailabilityChecker:
                 lcsc=item.lcsc or None,
                 quantity_needed=qty_needed,
                 parts_map=parts_map,
+                unavailable=unavailable,
             )
             results.append(result)
 
@@ -344,6 +364,7 @@ class LCSCAvailabilityChecker:
         lcsc: str | None,
         quantity_needed: int,
         parts_map: dict[str, Part],
+        unavailable: set[str] | None = None,
     ) -> PartAvailabilityResult:
         """Check availability for a single item."""
         # No LCSC part number
@@ -372,9 +393,13 @@ class LCSCAvailabilityChecker:
                 lcsc_part=lcsc,
                 quantity_needed=quantity_needed,
                 quantity_available=0,
-                status=AvailabilityStatus.NOT_FOUND,
+                status=AvailabilityStatus.UNAVAILABLE
+                if lcsc.upper() in (unavailable or set())
+                else AvailabilityStatus.NOT_FOUND,
                 in_stock=False,
-                error="Part not found in LCSC database",
+                error="Lookup unavailable; catalog absence not verified"
+                if lcsc.upper() in (unavailable or set())
+                else "Part not found in LCSC database",
             )
 
         # Determine status

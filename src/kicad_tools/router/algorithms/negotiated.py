@@ -1190,7 +1190,18 @@ class NegotiatedRouter:
             # the routed path.  Subsequent edges can terminate A* early
             # when they reach any cell of the existing net tree, avoiding
             # full-grid searches for high-fanout nets like GNDD.
-            routed_cells: set[tuple[int, int, int]] = set()
+            # Cost-sorted RSMT edges can build a forest, not one tree. A
+            # shortcut is valid only into the target's connected component.
+            # Membership is established by an exact-target route, or a route
+            # from a new source into an already established target component.
+            tree_parent = list(range(len(pad_objs)))
+            tree_cells: dict[int, set[tuple[int, int, int]]] = {}
+
+            def tree_root(node: int) -> int:
+                while tree_parent[node] != node:
+                    tree_parent[node] = tree_parent[tree_parent[node]]
+                    node = tree_parent[node]
+                return node
 
             # Issue #2769: ``per_net_timeout`` brackets the WHOLE net, not
             # each RSMT edge.  Compute a single cumulative deadline before
@@ -1229,13 +1240,20 @@ class NegotiatedRouter:
                 else:
                     edge_timeout = None
 
+                source_root, target_root = tree_root(i), tree_root(j)
+                search_start, search_end = source_pad, target_pad
+                # Preserve the RSMT edge's search direction. When only the
+                # source is connected, route to the exact new target rather
+                # than reversing native A* or returning to the source tree.
+                # An established target component still offers safe shortcuts.
+                goal_cells = tree_cells.get(target_root) if source_root != target_root else None
                 route = self.router.route(
-                    source_pad,
-                    target_pad,
+                    search_start,
+                    search_end,
                     negotiated_mode=True,
                     present_cost_factor=present_cost_factor,
                     per_net_timeout=edge_timeout,
-                    extra_goal_cells=routed_cells if routed_cells else None,
+                    extra_goal_cells=goal_cells,
                 )
                 # Issue #2934: ``Route`` is a dataclass and therefore always
                 # truthy regardless of segment count.  Defensive check for
@@ -1250,7 +1268,11 @@ class NegotiatedRouter:
                     routes.append(route)
                     # Collect grid cells from the routed segments so later
                     # edges can terminate early upon reaching this tree.
-                    self._collect_route_cells(route, routed_cells)
+                    joined_cells = tree_cells.setdefault(target_root, set())
+                    if source_root != target_root:
+                        joined_cells.update(tree_cells.pop(source_root, set()))
+                        tree_parent[source_root] = target_root
+                    self._collect_route_cells(route, joined_cells)
                 else:
                     # Issue #2476: Capture structured via-blocked failure
                     # diagnostics from the cpp pathfinder so the negotiated
@@ -1447,7 +1469,7 @@ class NegotiatedRouter:
 
         For each segment, walk grid cells between the two endpoints and
         insert ``(gx, gy, layer_index)`` tuples.  Via locations are added
-        on all routable layers so the A* can connect through them.
+        only on routable layers within their copper span.
 
         Issue #2306: Used by incremental Steiner routing to build the
         target-set for subsequent RSMT-edge A* searches.
@@ -1464,12 +1486,14 @@ class NegotiatedRouter:
                 gy = int(gy1 + t * (gy2 - gy1))
                 cell_set.add((gx, gy, layer_idx))
 
-        # Add via locations on all routable layers
+        # Blind/buried vias cannot provide a tree contact outside their span.
         routable = self.grid.get_routable_indices()
         for via in route.vias:
             gx, gy = self.grid.world_to_grid(via.x, via.y)
+            first, last = sorted(self.grid.layer_to_index(layer.value) for layer in via.layers)
             for li in routable:
-                cell_set.add((gx, gy, li))
+                if first <= li <= last:
+                    cell_set.add((gx, gy, li))
 
     def find_nets_through_overused_cells(
         self,

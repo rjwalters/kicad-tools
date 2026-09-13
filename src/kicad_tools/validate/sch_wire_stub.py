@@ -83,6 +83,8 @@ class WireStubFinding:
     candidate_pin_position: tuple[float, float]
     grid_steps_short: int
     axis: str
+    wire_uuid: str = ""
+    endpoint_index: int = -1
 
 
 def _approx_eq(a: float, b: float, eps: float = _COORD_EPS) -> bool:
@@ -278,7 +280,7 @@ def find_wire_stubs(
 
         for w_idx, wire in enumerate(sch.wires):
             other_endpoints = [pos for idx, pos in indexed_endpoints if idx != w_idx]
-            for endpoint in (wire.start, wire.end):
+            for endpoint_index, endpoint in enumerate((wire.start, wire.end)):
                 if _endpoint_is_connected(
                     endpoint,
                     pin_positions,
@@ -307,6 +309,8 @@ def find_wire_stubs(
                         candidate_pin_position=(px, py),
                         grid_steps_short=steps,
                         axis=axis,
+                        wire_uuid=getattr(wire, "uuid", ""),
+                        endpoint_index=endpoint_index,
                     )
                 )
 

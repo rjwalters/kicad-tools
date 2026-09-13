@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..layers import LayerStack
-from ..primitives import Pad, Route, Segment, Via
+from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..rules import DesignRules
 from .geometry import (
     Pt,
@@ -507,8 +507,9 @@ class MeshPathfinder:
         for pad in self.pads:
             if pad.net == net:
                 continue  # same-net copper is not an obstacle
-            hx = pad.width / 2.0 + agent_radius
-            hy = pad.height / 2.0 + agent_radius
+            half_w, half_h = pad_half_extents(pad)
+            hx = half_w + agent_radius
+            hy = half_h + agent_radius
             r = (pad.x - hx, pad.y - hy, pad.x + hx, pad.y + hy)
             r = (
                 max(r[0], bx0 + margin),
@@ -574,8 +575,9 @@ class MeshPathfinder:
             # SMD pad on another layer does not block this one; PTH blocks all.
             if not pad.through_hole and layer_enum is not None and pad.layer != layer_enum:
                 continue
-            hx = pad.width / 2.0 + agent_radius
-            hy = pad.height / 2.0 + agent_radius
+            half_w, half_h = pad_half_extents(pad)
+            hx = half_w + agent_radius
+            hy = half_h + agent_radius
             r = (
                 max(pad.x - hx, bx0 + margin),
                 max(pad.y - hy, by0 + margin),
@@ -609,8 +611,9 @@ class MeshPathfinder:
         is "allowed"; this gate exists to prune the pathological sites.
         """
         for pad in self.pads:
-            hx = pad.width / 2.0 + via_radius
-            hy = pad.height / 2.0 + via_radius
+            half_w, half_h = pad_half_extents(pad)
+            hx = half_w + via_radius
+            hy = half_h + via_radius
             if abs(site[0] - pad.x) <= hx and abs(site[1] - pad.y) <= hy:
                 if pad.net == net:
                     if not self._via_in_pad_allowed:

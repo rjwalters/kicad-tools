@@ -229,6 +229,67 @@ def create_zones_for_pcb(pcb_path: Path) -> int:
     return zone_count
 
 
+def apply_manufacturing_profile(routed_path: Path, *, manufacturer: str = "jlcpcb-tier1") -> None:
+    """Persist the manufacturer profile's design-rule floors BEFORE any fill.
+
+    Issue #5326: ``apply_plan()`` (the reviewed-plan replay ``route_pcb()``
+    uses by default) only ever touches the routed ``.kicad_pcb`` copper --
+    it never writes the sibling ``.kicad_pro``/``.kicad_dru`` -- so those
+    sidecars carry whatever :func:`create_project` wrote at Step 1 (stock
+    KiCad defaults, e.g. the stock ``Default`` netclass clearance) until
+    :func:`run_drc` calls ``kct check --emit-drc-constraints`` at Step 6.
+    If the one fill downstream DRC/LVS/CI/net-status all consume (Step 5.5)
+    runs BEFORE that emission, KiCad's native fill engine computes copper
+    against the wrong (stock, generally wider) clearance instead of the
+    ``manufacturer`` profile's actual floor -- carving pads that were laid
+    out and reviewed under the tighter tier-1 clearance off the pour
+    entirely, a real (not phantom) floating-pad defect in the saved bytes.
+
+    Calling this BEFORE :func:`fill_zones_in_routed_pcb` makes the fill --
+    and therefore the persisted ``routed_path`` bytes every downstream step
+    consumes -- reflect the SAME profile-aware rules :func:`run_drc` and
+    :func:`export_manufacturing_bundle` check/export against.  ``run_drc``
+    still re-emits the identical sidecars afterward (via
+    ``--emit-drc-constraints`` and :func:`routing_plan.apply_native_fab_floor`)
+    for its own report generation; that re-emission is idempotent given the
+    same profile/overrides and is left in place as a safety net.
+    """
+    from kicad_tools.manufacturers import (
+        get_profile,
+        resolve_pcb_fabrication_overrides,
+        write_drc_constraints,
+    )
+    from kicad_tools.schema.pcb import PCB
+
+    print("\n" + "=" * 60)
+    print(f"Applying {manufacturer} design-rule floors (pre-fill)...")
+    print("=" * 60)
+
+    try:
+        layers = len(PCB.load(str(routed_path)).copper_layers) or 4
+    except Exception:
+        layers = 4
+
+    profile = get_profile(manufacturer)
+    rules = profile.get_design_rules(layers=layers, copper_oz=1.0)
+    rules, fab_override_msg = resolve_pcb_fabrication_overrides(
+        routed_path, rules, manufacturer_id=profile.id
+    )
+    if fab_override_msg is not None:
+        prefix = "   WARNING: " if fab_override_msg.startswith("ignoring") else "   [INFO] "
+        print(prefix + fab_override_msg)
+
+    written = write_drc_constraints(
+        routed_path,
+        rules,
+        manufacturer_id=profile.id,
+        layers=layers,
+        copper_oz=1.0,
+    )
+    if written:
+        print("   DRC-constraint sidecars: " + ", ".join(str(p) for p in written))
+
+
 def fill_zones_in_routed_pcb(routed_path: Path) -> int:
     """Fill copper zones in the routed PCB via ``kicad-cli``.
 
@@ -933,10 +994,20 @@ def main() -> int:
         # the new vias into both GND planes.
         add_gnd_stitching_vias(routed_path)
 
+        # Step 5.45: Persist the jlcpcb-tier1 manufacturing profile's
+        # design-rule floors to routed_path's .kicad_pro/.kicad_dru BEFORE
+        # the fill below (#5326).  Without this, the one fill downstream
+        # DRC/LVS/CI/net-status all consume runs against stock KiCad
+        # defaults instead of the profile the board is reviewed/routed/
+        # exported against, producing real (not phantom) floating pads.
+        apply_manufacturing_profile(routed_path)
+
         # Step 5.5: Fill the zone polygons in the routed PCB so DRC's
         # ``connectivity`` rule sees the power-net pads as connected.  This
-        # MUST run after Step 5.4 so the fill engine recomputes copper that
-        # bonds through the freshly-added GND stitching vias.
+        # MUST run after Step 5.4 (new GND stitching vias) and Step 5.45
+        # (manufacturing-profile floors) so the fill engine both bonds the
+        # freshly-added vias and computes copper under the SAME rules
+        # downstream DRC/LVS/CI/net-status check the saved bytes against.
         fill_zones_in_routed_pcb(routed_path)
 
         # Step 6: Run DRC

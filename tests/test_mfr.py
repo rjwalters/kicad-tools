@@ -1079,6 +1079,7 @@ class TestDruGeneratorAmpacity:
         the generated .kicad_dru.  If kicad-cli is unavailable, falls back to
         asserting the DRU text is well-formed.
         """
+        import re
         import shutil
         import subprocess
 
@@ -1093,7 +1094,28 @@ class TestDruGeneratorAmpacity:
             # Fallback: assert the rule is well-formed KiCad DRU syntax.
             assert dru_content.startswith("(version 1)")
             assert "A.NetClass == 'FUSED_LINE'" in dru_content
-            assert dru_content.count("(rule ") >= 13
+            # Assert on the specific rule names this fixture must produce,
+            # rather than a bare count: a name-based check fails with a
+            # useful diff instead of a number drifting out of sync with the
+            # generator (e.g. solder-mask rules were intentionally dropped
+            # and "PTH Annular Ring" conditionally added in #4999/#5042-era
+            # changes -- see d95b6eff).
+            expected_rule_names = {
+                "Trace Width - JLCPCB",
+                "Clearance - JLCPCB",
+                "Via Drill - JLCPCB",
+                "Via Diameter - JLCPCB",
+                "Annular Ring - JLCPCB",
+                "PTH Annular Ring - JLCPCB",
+                "Copper to Edge - JLCPCB",
+                "Hole to Edge - JLCPCB",
+                "Silkscreen Width - JLCPCB",
+                "Silkscreen Height - JLCPCB",
+                "Ampacity Min Width (FUSED_LINE, external) - JLCPCB",
+                "Ampacity Min Width (FUSED_LINE, internal) - JLCPCB",
+            }
+            actual_rule_names = set(re.findall(r'\(rule "([^"]+)"', dru_content))
+            assert actual_rule_names == expected_rule_names
             # Balanced parentheses per rule line group.
             assert dru_content.count("(") == dru_content.count(")")
             pytest.skip("kicad-cli not available; asserted DRU text structure only")

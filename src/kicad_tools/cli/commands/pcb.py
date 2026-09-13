@@ -699,6 +699,17 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 "source": r.spec.source.label(),
                 "sink": r.spec.sink.label(),
                 "continuous_a": r.spec.continuous_a,
+                "pulsed_a": r.spec.pulsed_a,
+                "duty_cycle": r.spec.duty_cycle,
+                "pulse_duration_s": r.spec.pulse_duration_s,
+                # The current the IPC-2221 width check actually runs at, and
+                # which waveform assumption produced it (#4980). Reported
+                # even when it equals ``continuous_a`` so a reader never has
+                # to re-derive it.
+                "thermal_design_a": round(r.spec.thermal_design_current().current_a, 6),
+                "thermal_basis": r.spec.thermal_design_current().basis,
+                "thermal_assumption": r.spec.thermal_design_current().assumption,
+                "fusing_checked": r.spec.pulsed_a is None or r.spec.pulse_duration_s is not None,
                 "reinforcement_eligible": r.spec.reinforcement_eligible,
                 "status": r.status,
                 "reason": r.reason,
@@ -719,6 +730,17 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
             ]
             for net_name, segments in audit.uncovered.items()
         },
+        # Same-net routed arcs / non-keepout zones-pours the declared-path
+        # graph never models (#5273). Any entry here means every declared
+        # path on that net resolves "ambiguous" -- a parallel return path
+        # this bounded model cannot rule out.
+        "unmodeled": {
+            net_name: [
+                {"kind": item.kind, "layer": item.layer, "location": list(item.location)}
+                for item in items
+            ]
+            for net_name, items in audit.unmodeled.items()
+        },
     }
 
     if output_format == "json":
@@ -737,11 +759,16 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
             if r.reason:
                 print(f"      {r.reason}")
             if r.ok:
+                thermal = r.spec.thermal_design_current()
                 print(
                     f"      {len(r.segments)} segment(s), {r.length_mm:.2f} mm, "
-                    f"{r.spec.continuous_a:.2f}A declared, "
+                    f"sized for {thermal.description}, "
                     f"reinforcement_eligible={r.spec.reinforcement_eligible}"
                 )
+                if thermal.assumption:
+                    print(f"      assumption: {thermal.assumption}")
+                if r.spec.pulsed_a is not None and r.spec.pulse_duration_s is None:
+                    print("      fusing survivability NOT checked (no 'pulse_duration_s' declared)")
         if audit.uncovered:
             print()
             print("  Uncovered copper (declared net, no resolved path covers it):")
@@ -750,6 +777,17 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
         else:
             print()
             print("  No uncovered copper on any net with a declared path.")
+        if audit.unmodeled:
+            print()
+            print("  Unmodeled copper (same-net arc/pour not in the declared-path graph):")
+            for net_name, items in audit.unmodeled.items():
+                print(f"    {net_name}: {len(items)} object(s)")
+                for item in items:
+                    x, y = item.location
+                    print(f"      {item.kind} on {item.layer} near ({x:.3f}, {y:.3f})")
+        else:
+            print()
+            print("  No unmodeled arcs/pours on any net with a declared path.")
 
     return 0
 

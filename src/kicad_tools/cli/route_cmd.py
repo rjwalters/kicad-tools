@@ -67,7 +67,11 @@ import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+
+from kicad_tools.core.kicad_lock import check_kicad_lock
+
+from .route_deadline import record_stage, restore_stage
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -319,6 +323,39 @@ def _auto_fix_budget(args) -> float:
     return min(reserve, 0.5 * float(timeout))
 
 
+def _restore_route_grid(router: "Autorouter", routes: list["Route"]) -> None:
+    """Rebuild route-derived state from the selected copper before post-passes.
+
+    Best-iteration restoration and cache hits can leave grid copper different
+    from ``router.routes``. Preserve static obstacles while replacing every
+    grid route, usage count, and pathfinder crossing record with this snapshot.
+
+    Issue #5274: the per-route unmark loop below is not sufficient on its own.
+    Cell ownership (``grid._net``) is first-writer-wins on mark and net-guarded
+    on unmark, so a cell contested by two nets stays owned by whichever net
+    blocked it first -- and once that net's copper has been discarded (a
+    negotiated rip-up, a best-iteration rollback) nothing can unmark it.  The
+    surviving residue made the pre-post-pass grid a function of the run's
+    routing history instead of its final copper: a cold run and a warm cache
+    replay of the *same* routes handed the optimizer different own-net cell
+    sets, and its collision checker then merged a different number of
+    collinear runs (board 02: 1984 vs 1986 segments into consolidation).
+    ``reset_route_occupancy_to_static`` drops that residue so the re-mark
+    below is a pure function of ``routes``.
+    """
+    routes = list(routes)
+    for existing in list(router.grid.routes):
+        router.grid.unmark_route(existing)
+    router.grid.reset_route_occupancy_to_static()
+    router.grid.reset_route_usage()
+    if hasattr(router.router, "clear_routed_segments"):
+        router.router.clear_routed_segments()
+    router.routes = routes
+    for route in routes:
+        router._mark_route(route)
+        router.grid.mark_route_usage(route)
+
+
 def _set_wall_clock_deadline(args) -> None:
     """Stamp a monotonic deadline on ``args`` from ``args.timeout``.
 
@@ -335,6 +372,11 @@ def _set_wall_clock_deadline(args) -> None:
     """
     timeout = getattr(args, "timeout", None)
     now = time.monotonic()
+    from .route_deadline import remaining_deadline
+
+    invocation_deadline = remaining_deadline()
+    if invocation_deadline is not None and timeout and timeout > 0:
+        timeout = max(0.000001, min(timeout, invocation_deadline - now))
     if timeout and timeout > 0:
         args._wall_clock_deadline = now + float(timeout)
         reserve = _auto_fix_budget(args)
@@ -409,26 +451,58 @@ def _total_deadline_expired(args) -> bool:
     return rem is not None and rem <= 0.0
 
 
+def _search_stage_cap(args) -> float | None:
+    """Return the per-search-stage wall-clock cap (issue #5266).
+
+    ``--timeout`` is the **hard total** deadline for the whole invocation:
+    :mod:`kicad_tools.cli.route_deadline` supervises the worker process
+    against it and terminates the process group when it fires.  Historically
+    the same number *also* doubled as the per-stage cap handed to inner
+    router routines, which made the two contracts impossible to express
+    separately: a recipe that wants "600 s for the initial search, then two
+    600 s placement probes, then postprocessing" could only ask for it by
+    raising ``--timeout``, at which point the initial search happily consumed
+    the whole enlarged budget and nothing was left for the later stages.
+
+    ``--search-timeout`` breaks that tie.  When set (positive) it caps each
+    *individual* search stage -- the initial negotiated pass, each escalation
+    attempt, each placement-feedback iteration -- while ``--timeout`` keeps
+    hard-capping the invocation as a whole.  When unset this returns
+    ``args.timeout`` unchanged, so every pre-#5266 invocation keeps its exact
+    previous behaviour.
+
+    Note this is only ever an *upper bound*: :func:`_budgeted_timeout` and
+    :func:`_per_attempt_budgeted_timeout` still take the minimum with the
+    remaining total budget, so a ``--search-timeout`` larger than what
+    ``--timeout`` still has left can never escape the hard deadline.
+    """
+    search = getattr(args, "search_timeout", None)
+    if search is not None and search > 0:
+        return float(search)
+    return getattr(args, "timeout", None)
+
+
 def _budgeted_timeout(args) -> float | None:
     """Return the per-call timeout to pass into inner router routines.
 
-    When a deadline is configured this is the smaller of the original
-    ``--timeout`` (preserving per-stage semantics for the *first* stage)
-    and the remaining wall-clock budget (so the *final* stage shortens
-    naturally as time runs out).  When no deadline is configured this
-    returns ``args.timeout`` unchanged so existing behaviour is preserved
-    for users who never passed ``--timeout``.
+    When a deadline is configured this is the smaller of the per-stage cap
+    (:func:`_search_stage_cap` -- ``--search-timeout`` when set, otherwise
+    ``--timeout``, preserving per-stage semantics for the *first* stage) and
+    the remaining wall-clock budget (so the *final* stage shortens naturally
+    as time runs out).  When no deadline is configured this returns the cap
+    unchanged so existing behaviour is preserved for users who never passed
+    ``--timeout``.
     """
-    timeout = getattr(args, "timeout", None)
+    cap = _search_stage_cap(args)
     remaining = _remaining_budget(args)
     if remaining is None:
-        return timeout
-    if timeout is None:
+        return cap
+    if cap is None:
         # ``_wall_clock_deadline`` is derived from ``args.timeout`` so this
         # branch is unreachable in practice; guard against future refactors
         # that decouple the two.
         return remaining
-    return min(float(timeout), remaining)
+    return min(float(cap), remaining)
 
 
 # =============================================================================
@@ -451,7 +525,8 @@ def _budgeted_timeout(args) -> float | None:
 #
 # The fix is a *per-attempt* helper that divides the remaining wall-clock
 # budget evenly across the remaining attempts, returning the minimum of:
-#   1. ``args.timeout``          - never exceed user's original cap
+#   1. ``_search_stage_cap``     - never exceed the per-stage cap
+#                                  (``--search-timeout``, else ``--timeout``)
 #   2. ``remaining_budget``      - never overrun the total deadline
 #   3. ``per_attempt_budget``    - fair slice across remaining attempts
 #
@@ -496,22 +571,24 @@ def _per_attempt_budgeted_timeout(args, attempt_index: int, max_attempts: int) -
           divided by the *new* ``remaining_attempts`` count, so an early
           completion on attempt N enlarges the slice available to N+1.
     """
-    timeout = getattr(args, "timeout", None)
+    # Issue #5266: ``--search-timeout`` (when set) is the per-stage cap; it
+    # falls back to ``args.timeout`` so pre-#5266 runs are bit-identical.
+    cap = _search_stage_cap(args)
     remaining = _remaining_budget(args)
     if remaining is None:
         # No deadline configured -> legacy unbounded behaviour.
-        return timeout
+        return cap
 
     # Attempts still outstanding *including* the current one.
     remaining_attempts = max(1, max_attempts - attempt_index)
     per_attempt_slice = remaining / remaining_attempts
 
-    if timeout is None:
+    if cap is None:
         # Defensive: ``_wall_clock_deadline`` is derived from ``args.timeout``,
         # so this branch is unreachable in practice.
         return per_attempt_slice
 
-    return min(float(timeout), remaining, per_attempt_slice)
+    return min(float(cap), remaining, per_attempt_slice)
 
 
 def _routable_multi_pad_nets(router: "Autorouter") -> list[int]:
@@ -993,6 +1070,8 @@ def _write_routed_pcb(
             the save would drop >90% of a non-trivial input's copper
             (issue #4413).  The output file is left untouched.
     """
+    record_stage("serialization")
+    check_kicad_lock(output_path)
     original_content = pcb_path.read_text()
 
     # Update layer stackup for terminal writes when we escalated above 2L.
@@ -1043,6 +1122,20 @@ def _write_routed_pcb(
 
     # Atomic write: tmp file -> fsync -> rename.  Sibling-in-same-dir
     # ensures os.replace is a same-filesystem rename (atomic on POSIX).
+    #
+    # NOTE (issue #4898): this stays a direct inline os.fsync/os.replace
+    # implementation rather than delegating to the new shared
+    # ``kicad_tools.core.atomic_write.atomic_write_text`` helper (used by
+    # ``save_pcb``/``save_schematic``/``save_project``/``save_footprint``/
+    # ``save_design_rules``). ``tests/test_route_zones_preserved.py``
+    # structurally asserts (via AST) that ``_write_routed_pcb`` calls
+    # ``fsync``/``replace`` directly in its own body as part of its
+    # zone-preservation guard; delegating to a helper in another module would
+    # make those calls invisible to that shallow-walk audit. The
+    # implementation is already identical to ``atomic_write_text`` -- this is
+    # a "keep the existing, already-tested/guarded code as-is" decision, not
+    # a functional difference. ``_save_partial_results`` (below) mirrors this
+    # same inline pattern for the same reason.
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     tmp_path.write_text(output_content)
     # fsync the file so a crash between write and rename does not leave
@@ -1434,12 +1527,23 @@ def _make_checkpoint_callback(
         # _write_routed_pcb does not erase it from the staged input.
         if preserved_sexp:
             route_sexp = f"{route_sexp}\n\t{preserved_sexp}" if route_sexp else preserved_sexp
-        _write_routed_pcb(
-            pcb_path,
-            output_path,
-            route_sexp,
-            is_checkpoint=True,
-        )
+        # Issue #5266: ``_write_routed_pcb`` stamps ``serialization`` on the
+        # deadline-supervisor control file.  A *checkpoint* write is a
+        # transient excursion out of whatever stage the router is actually in,
+        # so restore that stage on the way out -- otherwise the first
+        # checkpoint leaves ``serialization`` published for the rest of the
+        # run and a later timeout is misattributed to serialization instead of
+        # the search that was really running.  A timeout landing *inside* this
+        # write is still reported as ``serialization`` (the signal handler
+        # stamps ``interrupted_stage`` before this restore runs, and the
+        # supervisor prefers that field).
+        with restore_stage():
+            _write_routed_pcb(
+                pcb_path,
+                output_path,
+                route_sexp,
+                is_checkpoint=True,
+            )
 
         last_time[0] = now
         if not quiet:
@@ -1816,7 +1920,7 @@ def _finalize_routes(
 
 
 # Global state for Ctrl+C handling
-_interrupt_state = {
+_interrupt_state: dict[str, Any] = {
     "interrupted": False,
     "router": None,
     "output_path": None,
@@ -1828,6 +1932,12 @@ _interrupt_state = {
 
 def _handle_interrupt(signum, frame):
     """Handle Ctrl+C by setting the interrupted flag and saving partial results."""
+    # Adaptive/combined routing also installs this handler for SIGTERM.
+    # A supervisor deadline must never promote its best-completed attempt.
+    from .route_deadline import CONTROL_ENV, _deadline_signal
+
+    if signum == signal.SIGTERM and CONTROL_ENV in os.environ:
+        _deadline_signal(signum, frame)
     _interrupt_state["interrupted"] = True
     if not _interrupt_state["quiet"]:
         print("\n\n⚠ Interrupt received! Saving partial results...")
@@ -1947,24 +2057,41 @@ def _save_partial_results() -> bool:
             else:
                 save_path = output_path.with_stem(output_path.stem + "_partial")
 
+            check_kicad_lock(cast(Path, save_path))
+
             # Insert routes before final closing parenthesis
             output_content = _insert_sexp_before_closing(original_content, route_sexp)
 
-            save_path.write_text(output_content)
+            # Issue #4898: this SIGINT-triggered save previously used a plain
+            # ``write_text`` -- no tmp file, no fsync, no ``os.replace`` --
+            # unlike the terminal ``_write_routed_pcb`` path (#2808), so a
+            # second SIGINT (or a crash) during this very write could leave a
+            # torn partial-results file. Apply the same tmp -> fsync -> rename
+            # pattern here inline (mirroring ``_write_routed_pcb`` rather than
+            # calling the shared ``atomic_write_text`` helper) so this write
+            # site stays visible to
+            # ``tests/test_route_zones_preserved.py``'s AST-based
+            # zone-preservation audit, which discovers PCB-write sites by the
+            # ``<path>.write_text(<content variable>)`` shape.
+            tmp_path = save_path.with_suffix(save_path.suffix + ".tmp")
+            tmp_path.write_text(output_content)
+            with open(tmp_path, "rb") as f:
+                os.fsync(f.fileno())
+            os.replace(tmp_path, save_path)
 
             if not quiet:
                 stats = router.get_statistics()
-                # The _partial file is a raw router snapshot (routes inserted
-                # into the *unrouted* source) written BEFORE optimize/cleanup
-                # and DRC. It is therefore less-processed than the canonical
-                # -o output and should not be treated as authoritative. Only
-                # the adaptive best-completed case writes to output_path itself.
+                # This snapshot inserts the current router copper into the
+                # source board. Interrupts can save it at any stage; clean
+                # partial exits save after optimization/tuning. It is not a
+                # frozen pre-optimization artifact or the canonical export.
+                # Only adaptive best-completed attempts write output_path.
                 if save_path == output_path:
                     print(f"\n  Partial results saved to: {save_path}")
                 else:
                     print(
                         f"\n  Raw partial snapshot saved to: {save_path} "
-                        f"(pre-optimize, pre-DRC; NOT canonical)"
+                        f"(current routing state; NOT canonical)"
                     )
                     print(f"  Canonical output remains: {output_path}")
                 print(f"    Nets routed: {stats['nets_routed']}")
@@ -2790,6 +2917,7 @@ def run_post_route_drc(
     Returns:
         Tuple of (error_count, warning_count)
     """
+    record_stage("post-route-drc")
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate import DRCChecker
 
@@ -2993,6 +3121,7 @@ def _run_auto_fix(
         Returns a non-zero "skipped" code (1) when the wall-clock
         deadline has already expired.
     """
+    record_stage("auto-fix")
     from kicad_tools.cli.fix_drc_cmd import main as fix_drc_main
 
     # Issue #2802 + #3238: skip auto-fix when the *total* wall-clock
@@ -3348,6 +3477,64 @@ def _run_placement_feedback(
     return diff_data
 
 
+def _delta_probe_timeout(args, *, quiet: bool = True) -> float | None:
+    """Resolve the per-probe wall clock for the placement-delta feedback loop.
+
+    Issue #5266.  ``--placement-delta-feedback-timeout`` is the loop's own
+    per-iteration allocation and is deliberately **independent of the
+    per-search-stage cap** (:func:`_search_stage_cap`): an initial pass that
+    spent its whole stage allocation must not starve the probes, because a
+    probe re-route granted less budget than the baseline under-routes for
+    budget reasons and gets reverted regardless of whether the placement change
+    helped.
+
+    What it is *not* is an escape hatch from ``--timeout``.  That deadline is
+    enforced out-of-process by :func:`route_deadline._supervise`, which
+    terminates the whole process group when it fires -- a probe allowed to
+    "survive" it just buys an unverified partial artifact and a killed run.  So
+    the allocation is clamped to whatever the total budget still has left.
+
+    Sizing the contract is the caller's job: ``--timeout`` must cover the
+    initial search stage + ``--placement-delta-feedback-budget`` x this
+    allocation + postprocessing.  When it does not, this emits an advisory note
+    naming the shortfall (see ``boards/07-matchgroup-test/generate_design.py``
+    for a recipe that derives a total which fits).
+
+    Args:
+        args: Parsed CLI namespace.
+        quiet: Suppress the advisory clamp/shortfall notes.
+
+    Returns:
+        ``None`` for unbounded, otherwise the effective per-probe timeout.
+    """
+    loop_timeout_raw = getattr(args, "placement_delta_feedback_timeout", None)
+    if loop_timeout_raw is None:
+        # No explicit allocation: share what the total deadline has left,
+        # bounded by the per-search-stage cap (pre-#5266 behaviour).
+        return _budgeted_timeout(args)
+
+    loop_timeout = float(loop_timeout_raw)
+    remaining_total = _remaining_budget(args)
+    if remaining_total is None:
+        return loop_timeout
+
+    budget = int(getattr(args, "placement_delta_feedback_budget", 3) or 3)
+    timeout = min(loop_timeout, remaining_total)
+    if not quiet:
+        if timeout < loop_timeout:
+            print(
+                f"  Probe allocation clamped to the total --timeout: "
+                f"{timeout:.0f}s (requested {loop_timeout:g}s)"
+            )
+        elif budget * loop_timeout > remaining_total:
+            print(
+                f"  Note: {budget} x {loop_timeout:g}s of probe budget exceeds the "
+                f"{remaining_total:.0f}s left of the total --timeout; later probes "
+                "will be truncated or skipped"
+            )
+    return timeout
+
+
 def _placement_delta_path(args, pcb_path: Path) -> Path:
     """Resolve the path of the ``<output>_placement_delta.json`` artifact."""
     if getattr(args, "output", None):
@@ -3399,21 +3586,42 @@ def _run_placement_delta_feedback(
     from kicad_tools.schema.pcb import PCB
 
     # An explicit per-iteration budget (``--placement-delta-feedback-timeout``)
-    # is the loop's OWN allocation: it survives an exhausted routing deadline
-    # and gives each delta's re-route the SAME wall clock the initial pass got.
-    # That equality is load-bearing for the keep/revert decision -- a re-route
-    # granted less budget than the baseline would under-route for reasons that
-    # have nothing to do with the placement change and revert every delta.
+    # is the loop's OWN allocation: it is independent of the per-search-stage
+    # cap (``--search-timeout``), so an initial pass that spent its whole stage
+    # allocation does NOT starve the probes.  Granting each delta's re-route
+    # the SAME wall clock the initial pass got is load-bearing for the
+    # keep/revert decision -- a re-route granted less budget than the baseline
+    # would under-route for reasons that have nothing to do with the placement
+    # change and revert every delta.
+    #
+    # Issue #5266: the allocation is NOT an escape hatch from ``--timeout``.
+    # That value is a hard TOTAL deadline enforced out-of-process by
+    # ``route_deadline._supervise``, which terminates the process group when it
+    # fires -- so a probe budget that "survived" it only bought an unverified
+    # partial artifact and a killed run.  The allocation is therefore clamped
+    # to whatever the total budget still has left, and the loop is skipped when
+    # nothing is left.  Sizing the contract is the caller's job: ``--timeout``
+    # must cover the initial search stage + budget x this allocation +
+    # postprocessing (see boards/07-matchgroup-test/generate_design.py).
     loop_timeout_raw = getattr(args, "placement_delta_feedback_timeout", None)
     loop_timeout = float(loop_timeout_raw) if loop_timeout_raw is not None else None
 
-    if loop_timeout is None and _deadline_expired(args):
+    if _deadline_expired(args):
         if not quiet:
             print("\n--- Classifier-Driven Placement-Delta Feedback ---")
-            print(
-                "  Skipping: routing wall-clock deadline reached (--timeout, issue #2802); "
-                "pass --placement-delta-feedback-timeout to give the loop its own budget"
-            )
+            if loop_timeout is None:
+                print(
+                    "  Skipping: routing wall-clock deadline reached (--timeout, issue #2802); "
+                    "pass --placement-delta-feedback-timeout to give the loop its own budget"
+                )
+            else:
+                print(
+                    "  Skipping: the hard total --timeout deadline is exhausted, so the "
+                    f"{loop_timeout:g}s per-iteration allocation has nowhere to run "
+                    "(issue #5266).  Raise --timeout to cover the initial search stage "
+                    "(--search-timeout) + --placement-delta-feedback-budget x "
+                    "--placement-delta-feedback-timeout + postprocessing."
+                )
         return None
 
     if not quiet:
@@ -3435,7 +3643,10 @@ def _run_placement_delta_feedback(
     budget = int(getattr(args, "placement_delta_feedback_budget", 3) or 3)
     max_movement = float(getattr(args, "placement_feedback_max_movement", 5.0) or 5.0)
     use_negotiated = getattr(args, "strategy", "negotiated") == "negotiated"
-    timeout = loop_timeout if loop_timeout is not None else _budgeted_timeout(args)
+    timeout = _delta_probe_timeout(args, quiet=quiet)
+    # Issue #5266: attribute a timeout inside a probe to this loop rather than
+    # to the initial search stage (or a stale checkpoint ``serialization``).
+    record_stage("placement-delta-feedback")
     # Issue #4776: ``or None`` normalizes the ``--deterministic-budget``
     # ``0.0`` sentinel away, matching every other call site (see
     # ``_run_placement_feedback``).
@@ -3643,6 +3854,7 @@ def _fill_zones_after_route(output_path: Path, quiet: bool = False) -> None:
         output_path: Path to the routed PCB file (modified in place).
         quiet: Suppress informational output.
     """
+    record_stage("native-zone-fill")
     from kicad_tools.cli.runner import (
         find_kicad_cli,
         run_fill_zones,
@@ -5800,6 +6012,98 @@ def _warn_layer_selection_advisories(args, layer_stack, *, is_auto: bool) -> Non
         print("\n".join(lines), file=sys.stderr)
 
 
+def _warn_plane_layer_reservation(args, layer_stack) -> None:
+    """Emit the Issue #5014 Tier-3 plane-layer reservation advisory.
+
+    Deliberately a SEPARATE function from :func:`_warn_layer_selection_advisories`
+    (Tiers 1 & 2) rather than folded into it: that function's
+    ``test_route_cmd_helper_silent_on_plane_stack`` pins byte-identical
+    silence for a plane-aware stack, and Tier 3 is the one guard that DOES
+    fire on exactly that stack shape (a bare ``--layers 4`` with no
+    ``--reserve-plane-layers``). Keeping it separate means the pre-existing
+    Tier 1/2 no-new-warnings contract for other net-class-map shapes stays
+    untouched.
+
+    Advisory only -- stderr, never suppressed by ``--quiet``, exit code
+    unchanged. A pure no-op when ``layer_stack`` declares no ``PLANE``
+    layers, or when ``--reserve-plane-layers`` was already passed.
+    """
+    from kicad_tools.router.layer_advisories import plane_layer_reservation_advisory
+
+    msg = plane_layer_reservation_advisory(
+        layer_stack,
+        reserve_plane_layers=getattr(args, "reserve_plane_layers", False),
+    )
+    if msg:
+        print(msg, file=sys.stderr)
+
+
+def _apply_plane_layer_reservation(rules, layer_stack, args) -> None:
+    """Hard-restrict ``rules.allowed_layers`` to non-PLANE layers (#5014).
+
+    A strict no-op unless ``--reserve-plane-layers`` was passed: the early
+    ``return`` leaves ``rules.allowed_layers`` completely untouched,
+    preserving pre-#5014 routing byte for byte.
+
+    When the flag IS passed, the assignment is **unconditional** -- a
+    ``layer_stack`` that declares no ``PLANE`` layers writes ``None``,
+    which *clears* any restriction rather than leaving a stale one in
+    place.  That distinction matters in
+    :func:`route_with_layer_escalation`, where a single ``DesignRules``
+    instance is built once and shared by reference across every rung of
+    the ladder: only the first iteration runs against a freshly
+    constructed ``rules``, so a plane-free rung (e.g.
+    ``four_layer_all_signal``) reached after a plane-bearing one must
+    reset ``allowed_layers`` or it would inherit the previous stack's
+    ``['F.Cu', 'B.Cu']`` and silently degenerate into a 2-layer route.
+    At the three call sites that *do* construct ``rules`` immediately
+    beforehand, this writes ``None`` over an already-``None`` field.
+
+    Mutates ``rules`` in place (``DesignRules`` is not frozen) so callers
+    can invoke this immediately after each ``DesignRules(...)`` construction
+    without threading a new constructor argument through every relaxation
+    tier / escalation loop in this module.
+    """
+    if not getattr(args, "reserve_plane_layers", False):
+        return
+    from kicad_tools.router.layer_advisories import reserve_plane_layers_allowed_layers
+
+    # Assign unconditionally: a stack with no PLANE layers must CLEAR any
+    # restriction left behind by a previous escalation rung, not keep it.
+    rules.allowed_layers = reserve_plane_layers_allowed_layers(layer_stack)
+
+
+def _audit_plane_layer_reservation(router: "Autorouter", layer_stack) -> "list":
+    """Post-route audit: report committed signal on a declared plane layer.
+
+    Issue #5014.  Closes the loop on :func:`_apply_plane_layer_reservation`:
+    even when ``--reserve-plane-layers`` was not passed (or, as a
+    defense-in-depth check, when it WAS passed but something still slipped
+    through), scan the committed ``router.routes`` for any segment on a
+    layer the resolved stack designates ``PLANE`` and print one line per
+    offending ``(net, layer)`` pair.
+
+    Advisory only -- stderr, never suppressed by ``--quiet``, exit code
+    unaffected. Mirrors the ``_audit_pairwise_clearance`` pattern (#4588):
+    the search-time constraint is enforced elsewhere; this audits the
+    actually-committed copper engine-agnostically. A strict no-op when the
+    stack declares no ``PLANE`` layers.
+
+    Returns the list of :class:`~kicad_tools.router.layer_advisories.PlaneLayerSignalViolation`
+    found (empty when clean), so a future caller can fold this into a
+    harder gate without re-scanning.
+    """
+    from kicad_tools.router.layer_advisories import plane_layer_signal_violations
+
+    violations = plane_layer_signal_violations(router.routes, layer_stack)
+    if violations:
+        print(
+            "\n".join(v.message for v in violations),
+            file=sys.stderr,
+        )
+    return violations
+
+
 def _resolve_analog_net_names(router: "Autorouter", args) -> set[str]:
     """Resolve the set of analog net names selected by the analog flags (#3171).
 
@@ -6199,6 +6503,7 @@ def route_with_layer_escalation(
     Returns:
         Exit code (0 = success, 1 = failure)
     """
+    record_stage("layer-escalation")
     from kicad_tools.cli.progress import flush_print, spinner
     from kicad_tools.router import (
         DesignRules,
@@ -6434,6 +6739,15 @@ def route_with_layer_escalation(
     _attempted_rung_fingerprints: set[tuple[int, str, bool, tuple[str, ...]]] = set()
 
     for attempt_num, (layer_count, layer_stack, via_in_pad_fallback) in enumerate(layer_configs, 1):
+        # Issue #5014: recompute the --reserve-plane-layers hard restriction
+        # for THIS attempt's stack. ``rules`` is a single mutable object
+        # shared across every rung of this ladder (only ``layer_stack``
+        # varies per attempt), so allowed_layers must be re-derived here
+        # rather than once before the loop.  A strict no-op unless
+        # --reserve-plane-layers was passed.
+        _apply_plane_layer_reservation(rules, layer_stack, args)
+        _warn_plane_layer_reservation(args, layer_stack)
+
         # Issue #3371 / P_FP5: stamp / clear the via-in-pad fallback env var
         # *around* this attempt so the lazily-constructed EscapeRouter
         # picks up the per-attempt opt-in.  The env var is sticky across
@@ -7110,6 +7424,7 @@ def route_with_layer_escalation(
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
+    record_stage("optimization")
     # Optimize traces
     if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
@@ -7158,6 +7473,7 @@ def route_with_layer_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
+    record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate)
     if _post_passes_enabled and final_result.router.routes:
@@ -7182,6 +7498,7 @@ def route_with_layer_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
+    record_stage("consolidation")
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -7192,6 +7509,7 @@ def route_with_layer_escalation(
         quiet=quiet,
     )
 
+    record_stage("finalization")
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -7318,6 +7636,9 @@ def route_with_layer_escalation(
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
+    # Each escalation flow returns before the direct-route audit. Use the
+    # selected router's stack, which can differ from the last attempted rung.
+    _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
     # Final summary
     if not quiet:
@@ -7503,6 +7824,9 @@ def route_with_rule_relaxation(
     # Issue #4314: warn if auto is pour-net-blind and/or a target_ampacity
     # net would be stranded on an inner layer (advisory, never suppressed).
     _warn_layer_selection_advisories(args, layer_stack, is_auto=args.layers == "auto")
+    # Issue #5014: recommend --reserve-plane-layers when the resolved stack
+    # declares reference planes and the hard restriction is not already on.
+    _warn_plane_layer_reservation(args, layer_stack)
 
     if not quiet:
         flush_print("=" * 60)
@@ -7592,6 +7916,9 @@ def route_with_rule_relaxation(
             # bit-for-bit pre-#4475.
             via_in_pad_last_resort=getattr(args, "via_in_pad_last_resort", False),
         )
+        # Issue #5014: hard-restrict to non-PLANE layers when
+        # --reserve-plane-layers was passed. No-op otherwise.
+        _apply_plane_layer_reservation(rules, layer_stack, args)
 
         # Issue #2823: divide the remaining wall-clock budget fairly across
         # the remaining rule-relaxation tiers so the looser-rule attempts
@@ -7946,6 +8273,7 @@ def route_with_rule_relaxation(
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
+    record_stage("optimization")
     # Optimize traces
     if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
@@ -7991,6 +8319,7 @@ def route_with_rule_relaxation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
+    record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate)
     if _post_passes_enabled and final_result.router.routes:
@@ -8013,6 +8342,7 @@ def route_with_rule_relaxation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
+    record_stage("consolidation")
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -8023,6 +8353,7 @@ def route_with_rule_relaxation(
         quiet=quiet,
     )
 
+    record_stage("finalization")
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -8147,6 +8478,9 @@ def route_with_rule_relaxation(
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
+    # Each escalation flow returns before the direct-route audit. Use the
+    # selected router's stack, which can differ from the last attempted rung.
+    _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
     # Final summary
     if not quiet:
@@ -9652,6 +9986,7 @@ def route_with_combined_escalation(
     Returns:
         Exit code (0 = success, 1 = failure)
     """
+    record_stage("combined-routing")
     from kicad_tools.cli.progress import flush_print, spinner
     from kicad_tools.router import (
         DesignRules,
@@ -9827,6 +10162,10 @@ def route_with_combined_escalation(
                 )
             break
 
+        # Issue #5014: recommend --reserve-plane-layers once per column (this
+        # stack is fixed across every tier in the inner loop below).
+        _warn_plane_layer_reservation(args, layer_stack)
+
         best_completion_for_layer: float | None = None
         for _tier_idx, tier in enumerate(tiers):
             # Issue #2802: honor the deadline before each tier within the
@@ -9880,6 +10219,9 @@ def route_with_combined_escalation(
                 # bit-for-bit pre-#4475.
                 via_in_pad_last_resort=getattr(args, "via_in_pad_last_resort", False),
             )
+            # Issue #5014: hard-restrict to non-PLANE layers when
+            # --reserve-plane-layers was passed. No-op otherwise.
+            _apply_plane_layer_reservation(rules, layer_stack, args)
 
             # Issue #2823: divide the remaining wall-clock budget fairly
             # across all remaining cells of the 2D combined-escalation
@@ -10278,6 +10620,7 @@ def route_with_combined_escalation(
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(final_result.router, args, quiet=quiet)
 
+    record_stage("optimization")
     # Optimize traces
     if _post_passes_enabled and not args.no_optimize and final_result.router.routes:
         from kicad_tools.router.optimizer import (
@@ -10323,6 +10666,7 @@ def route_with_combined_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, final_result.router)
 
+    record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate)
     if _post_passes_enabled and final_result.router.routes:
@@ -10345,6 +10689,7 @@ def route_with_combined_escalation(
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, final_result.router)
 
+    record_stage("consolidation")
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -10355,6 +10700,7 @@ def route_with_combined_escalation(
         quiet=quiet,
     )
 
+    record_stage("finalization")
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -10478,6 +10824,9 @@ def route_with_combined_escalation(
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
+    # Each escalation flow returns before the direct-route audit. Use the
+    # selected router's stack, which can differ from the last attempted rung.
+    _audit_plane_layer_reservation(final_result.router, final_result.router.layer_stack)
 
     # Final summary
     if not quiet:
@@ -12177,6 +12526,12 @@ def format_dry_run_grid_plan(plan: DryRunGridPlan) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .route_deadline import run
+
+    return run(argv)
+
+
+def _in_process_main(argv: list[str] | None = None) -> int:
     """Entry point for the route command.
 
     Thin wrapper (issue #4559): ``_process_state_guard`` restores the
@@ -12187,6 +12542,8 @@ def main(argv: list[str] | None = None) -> int:
     suite) are not poisoned.  The state stays stamped for the entire
     invocation; only the outermost exit (return *or* raise) restores it.
     """
+    from .route_deadline import TIMEOUT_EXIT, RouteDeadlineExpired, record_stage
+
     with _process_state_guard():
         try:
             return _main_impl(argv)
@@ -12195,10 +12552,23 @@ def main(argv: list[str] | None = None) -> int:
             # clear. Abort every route flow before its ordinary DRC handling.
             print(f"Error: {exc}", file=sys.stderr)
             return 1
+        except RouteDeadlineExpired:
+            # Do not promote a best-attempt result on an invocation timeout.
+            _interrupt_state["best_completed_attempt"] = False
+            _interrupt_state["quiet"] = True
+            saved = _save_partial_results()
+            output = _interrupt_state.get("output_path")
+            snapshot = (
+                str(output.with_stem(output.stem + "_partial"))
+                if saved and isinstance(output, Path)
+                else None
+            )
+            record_stage("partial-save", snapshot_saved=saved, snapshot=snapshot)
+            return TIMEOUT_EXIT
 
 
-def _main_impl(argv: list[str] | None = None) -> int:
-    """Main entry point for route command."""
+def _route_parser() -> argparse.ArgumentParser:
+    """Shared parser for supervisor preflight and worker execution."""
     parser = argparse.ArgumentParser(
         prog="kicad-tools route",
         description="Autoroute a KiCad PCB file",
@@ -12562,12 +12932,35 @@ def _main_impl(argv: list[str] | None = None) -> int:
         type=float,
         default=None,
         help=(
-            "Total wall-clock timeout in seconds for the whole routing "
-            "invocation (default: no timeout).  This is a TOTAL budget: "
-            "auto-layer escalation, placement-routing feedback, auto-fix "
-            "passes, and inner negotiated/two-phase/escape calls all share "
-            "the same deadline.  The command returns the best partial "
-            "result available when the deadline fires (issue #2802)."
+            "HARD TOTAL wall-clock timeout in seconds for the whole routing "
+            "invocation (default: no timeout).  Nothing escapes it: auto-layer "
+            "escalation, placement-routing feedback, placement-delta probes, "
+            "auto-fix passes, and inner negotiated/two-phase/escape calls all "
+            "share this one deadline.  The command returns the best partial "
+            "result available when the deadline fires. Cleanup and native calls are "
+            "supervised too; up to 5 additional seconds are allowed for raw partial "
+            "serialization, then the process group is terminated. Timeout exits 124; "
+            "a snapshot may be unavailable if serialization cannot finish. "
+            "Use --search-timeout to bound an INDIVIDUAL search stage inside "
+            "this total, so a long initial pass cannot swallow the whole "
+            "budget (issue #5266)."
+        ),
+    )
+    parser.add_argument(
+        "--search-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Per-search-stage wall-clock allocation in seconds: the initial "
+            "routing pass, each layer/rule escalation attempt, and each "
+            "placement-feedback iteration are individually capped at this "
+            "value.  Default: the value of --timeout, i.e. the first stage may "
+            "consume the whole total budget (pre-#5266 behaviour).  This is an "
+            "upper bound INSIDE --timeout, never an escape from it: every "
+            "stage is still clamped to whatever the total deadline has left. "
+            "Set it below --timeout to reserve room for later stages and "
+            "postprocessing. Issue #5266."
         ),
     )
     parser.add_argument(
@@ -13136,6 +13529,25 @@ def _main_impl(argv: list[str] | None = None) -> int:
             "avoided layer must never carry a given net."
         ),
     )
+    # Issue #5014: opt-in HARD signal-layer eligibility for controlled-impedance
+    # plane assignments.  Mirror of the outer parser.py flag; both sites must
+    # stay in sync per ``tests/test_cli_parser_drift.py``.
+    parser.add_argument(
+        "--reserve-plane-layers",
+        action="store_true",
+        default=False,
+        help=(
+            "Hard-restrict signal routing to the resolved layer stack's "
+            "non-PLANE layers (e.g. with --layers 4, only F.Cu/B.Cu stay "
+            "routable -- In1.Cu/In2.Cu are reserved for the GND/PWR "
+            "reference planes). By default LayerDefinition.is_routable "
+            "treats every copper layer -- including declared reference "
+            "planes -- as signal-eligible, so a controlled-impedance recipe "
+            "can silently lose its continuous reference construction to "
+            "ordinary signal. A no-op on a stack with no PLANE layers "
+            "(--layers 2, 4-all, or an all-signal auto-detected board)."
+        ),
+    )
     # Issue #3154: advisory schematic/PCB drift banner.  When a schematic is
     # auto-discovered (or passed via --schematic) and the component sets have
     # drifted, kct route prints a one-line, non-blocking warning before
@@ -13423,12 +13835,15 @@ def _main_impl(argv: list[str] | None = None) -> int:
         metavar="SECONDS",
         help=(
             "Per-iteration wall-clock budget for the placement-delta feedback "
-            "loop's re-routes, in seconds. This is the loop's OWN allocation: "
-            "it survives an already-exhausted --timeout and gives each delta's "
-            "re-route the same budget the initial pass got (an unequal budget "
-            "would revert every delta for reasons unrelated to the placement "
-            "change). Default: share whatever remains of --timeout, and skip "
-            "the loop entirely when nothing remains. Issue #4468."
+            "loop's re-routes, in seconds. This is the loop's OWN allocation, "
+            "independent of the per-stage --search-timeout, so an initial pass "
+            "that spent its whole stage allocation does not starve the probes "
+            "(an unequal budget would revert every delta for reasons unrelated "
+            "to the placement change). It does NOT escape the hard total "
+            "--timeout: it is clamped to whatever that deadline has left, and "
+            "the loop is skipped once nothing remains -- size --timeout to "
+            "cover --search-timeout + budget x this value + postprocessing. "
+            "Default: share whatever remains of --timeout. Issues #4468, #5266."
         ),
     )
     parser.add_argument(
@@ -13963,7 +14378,19 @@ def _main_impl(argv: list[str] | None = None) -> int:
         ),
     )
 
+    return parser
+
+
+def _main_impl(argv: list[str] | None = None) -> int:
+    parser = _route_parser()
     args = parser.parse_args(argv)
+    from .route_deadline import configure_output
+
+    try:
+        configure_output(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
     # Issue #4471 (epic #4465): stamp the --complete mode implications
     # (--preserve-existing + the lattice engine, unless the user overrode
@@ -14818,6 +15245,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
     # Issue #4314: warn if auto is pour-net-blind and/or a target_ampacity
     # net would be stranded on an inner layer (advisory, never suppressed).
     _warn_layer_selection_advisories(args, layer_stack, is_auto=args.layers == "auto")
+    # Issue #5014: recommend --reserve-plane-layers when the resolved stack
+    # declares reference planes and the hard restriction is not already on.
+    _warn_plane_layer_reservation(args, layer_stack)
 
     # Configure design rules
     grid_origin_offset = getattr(args, "_grid_origin_offset", (0.0, 0.0))
@@ -14854,6 +15284,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         # Default off preserves that pre-#4475 behaviour bit-for-bit.
         via_in_pad_last_resort=getattr(args, "via_in_pad_last_resort", False),
     )
+    # Issue #5014: hard-restrict to non-PLANE layers when
+    # --reserve-plane-layers was passed. No-op otherwise.
+    _apply_plane_layer_reservation(rules, layer_stack, args)
 
     # Import progress helpers
     from kicad_tools.cli.progress import flush_print, spinner
@@ -15070,6 +15503,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     _interrupt_state["interrupted"] = False
     signal.signal(signal.SIGINT, _handle_interrupt)
 
+    record_stage("routing-conflict-fallback-conversion")
     # Count nets by category for accurate status reporting (Issue #812)
     # - Multi-pad nets: 2+ pads, need actual routing
     # - Single-pad nets: 1 pad, trivially complete (no routing needed)
@@ -15466,11 +15900,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 # Deserialize and apply cached routes
                 cached_routes = cache.deserialize_routes(cached_result.routes_data)
 
-                # Apply cached routes to router
-                router.routes = cached_routes
+                cached_usage = cache.deserialize_route_usage(cached_result.routes_data)
 
-                if not quiet:
-                    print("  Using cached routing result")
             else:
                 if not quiet:
                     print(f"  Cache MISS (key: {cache_key.full_key[:32]}...)")
@@ -15486,6 +15917,18 @@ def _main_impl(argv: list[str] | None = None) -> int:
             if args.cache_only:
                 print("Error: --cache-only specified but cache lookup failed", file=sys.stderr)
                 return 1
+
+    if cached_result is not None:
+        # Applying geometry can fail after partial mutation. Never turn that
+        # into a fresh search with a contaminated grid or publish its copper.
+        try:
+            router.grid.import_route_usage(cached_usage)
+            router.restore_route_snapshot(cached_routes)
+            if not quiet:
+                print("  Using cached routing result")
+        except Exception as exc:
+            print(f"Error: cannot restore cached routing state: {exc}", file=sys.stderr)
+            return 1
 
     # Track nets that needed clearance relaxation (for --progressive-clearance)
     relaxed_nets_report: dict[int, float] = {}
@@ -15562,6 +16005,14 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 flush_print(f"  Profiling enabled: {profile_output}")
 
         import time
+
+        # Issue #5266: publish the stage the search itself runs under, so the
+        # timeout report names ``routing`` rather than whatever the last
+        # incidental ``record_stage`` call happened to leave behind (before
+        # this, a fixed-layer negotiated run reported the setup-time
+        # ``routing-conflict-fallback-conversion`` label, or -- once the first
+        # best-so-far checkpoint fired -- a stale ``serialization``).
+        record_stage("routing")
 
         routing_start_time = time.time()
 
@@ -16057,6 +16508,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 pcb_path = _moved_placement_path
 
         _rss.mark("post-negotiation")
+        # Canonicalize the committed-copper boundary for every strategy,
+        # whether caching is enabled or not. Post-passes must not retain
+        # discarded search geometry in indexes or pathfinder caches.
+        router.restore_route_snapshot(router.routes)
 
         # Cache the routing result (if caching enabled and routing succeeded)
         if use_cache and cache_key is not None and router.routes:
@@ -16067,7 +16522,13 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     int((time.time() - routing_start_time) * 1000) if routing_start_time else 0
                 )
                 stats = router.get_statistics()
-                cache.put(cache_key, router.routes, stats, routing_time_ms)
+                cache.put(
+                    cache_key,
+                    router.routes,
+                    stats,
+                    routing_time_ms,
+                    route_usage=router.grid.export_route_usage(),
+                )
                 if not quiet:
                     print(f"  Cached routing result ({routing_time_ms}ms compute time)")
             except Exception as e:
@@ -16076,6 +16537,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
         _rss.mark("post-cache-write")
 
+    record_stage("optimization")
     # Get pre-optimization statistics (also used in the no-optimize path
     # below so the segment/via summary print does not raise
     # UnboundLocalError when --no-optimize is set).
@@ -16095,6 +16557,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
     _post_passes_enabled = _engine_post_passes_enabled(args, quiet=quiet)
     if _post_passes_enabled:
         _mark_nongrid_routes_for_post_pass(router, args, quiet=quiet)
+        if _resolve_route_engine(args) == "grid":
+            _restore_route_grid(router, router.routes)
 
     # Optimize traces (unless --no-optimize/--raw flag is set)
     if _post_passes_enabled and not args.no_optimize and router.routes:
@@ -16141,6 +16605,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         )
         _record_stage_quality(_stage_quality, STAGE_POST_OPTIMIZE, router)
 
+    record_stage("drc-nudge")
     # Post-optimization DRC nudge pass (#4281: gated like the optimizer --
     # the nudge is NOT covered by --no-optimize, so it needs its own gate)
     if _post_passes_enabled and router.routes:
@@ -16163,6 +16628,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         )
         _record_stage_quality(_stage_quality, STAGE_POST_NUDGE, router)
 
+    record_stage("consolidation")
     # Issue #4732: post-nudge collinear consolidation.  Runs LAST of the
     # geometric passes so it also absorbs fragments the nudge introduced.
     _run_consolidation_pass(
@@ -16173,6 +16639,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         quiet=quiet,
     )
 
+    record_stage("finalization")
     # Issue #4208 (Unit 3): re-run the Unit-2 seg-seg finalize gate
     # over the post-optimize/post-nudge copper.  An rtree-less
     # optimizer can introduce a cross-net crossing the pre-optimize
@@ -16718,6 +17185,13 @@ def _main_impl(argv: list[str] | None = None) -> int:
         )
     layer_intent_new_count = len(_new_layer_intent_violations(layer_intent_violations))
 
+    # Issue #5014: post-route audit for signal committed onto a declared
+    # controlled-impedance reference-plane layer.  Runs whenever any copper
+    # was committed (mirrors the pairwise audit's dry-run guard above);
+    # a strict no-op when the resolved stack has no PLANE layers.
+    if not args.dry_run:
+        _audit_plane_layer_reservation(router, layer_stack)
+
     # Summary
     all_nets_routed = stats["nets_routed"] == nets_to_route
     drc_passed = drc_errors <= 0  # -1 means DRC failed to run, treat as passed
@@ -16868,8 +17342,9 @@ def _main_impl(argv: list[str] | None = None) -> int:
         if partial_saved and not quiet:
             # Make the authoritative file unambiguous: the -o target (written
             # by the routing pipeline with optimize + DRC applied) is canonical;
-            # the _partial file is a raw pre-optimize snapshot (see
-            # _save_partial_results). Emit exactly one canonical-output line.
+            # the _partial file serializes current in-memory copper into the
+            # source board (see _save_partial_results), not a frozen pre-pass
+            # snapshot. Emit exactly one canonical-output line.
             print(f"  Canonical output: {output_path} (full route + optimize + DRC)")
             print("  Open in KiCad to complete remaining nets manually")
 

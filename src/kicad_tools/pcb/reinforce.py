@@ -237,12 +237,15 @@ def _to_router_segment(seg: Segment) -> RouterSegment:
     )
 
 
-def _chain_polylines(segments: list[Segment]) -> list[list[Segment]]:
+def _chain_polylines(
+    segments: list[Segment], *, original_ids: dict[int, int] | None = None
+) -> list[list[Segment]]:
     """Chain schema segments into ordered, junction-split polylines.
 
-    Returns a list of runs, each an ordered list of the *original* schema
-    ``Segment`` objects walked endpoint-to-endpoint. Junctions (degree>=3)
-    split runs so branched nets are not silently merged.
+    Returns ordered schema segments walked endpoint-to-endpoint, copying
+    segments that need reversing. When supplied, ``original_ids`` maps each
+    returned object's id to its original PCB object's id. Junctions
+    (degree>=3) split runs so branched nets are not silently merged.
     """
     if not segments:
         return []
@@ -311,6 +314,8 @@ def _chain_polylines(segments: list[Segment]) -> list[list[Segment]]:
                         uuid=orig.uuid,
                     )
                 )
+            if original_ids is not None:
+                original_ids[id(run[-1])] = id(orig)
         if run:
             result.append(run)
     return result
@@ -668,40 +673,41 @@ def reinforce_net(
         target_layer = max(by_layer, key=lambda lay: sum(_seg_length(s) for s in by_layer[lay]))
     result.layer = target_layer
 
-    runs = _chain_polylines(by_layer[target_layer])
-    if not runs:
+    # Chaining can reverse a segment by copying it. Carry its original PCB
+    # identity through the walk so path eligibility remains physical.
+    original_ids: dict[int, int] = {}
+    runs = _chain_polylines(by_layer[target_layer], original_ids=original_ids)
+    net_path_specs = [spec for spec in (current_paths or ()) if spec.net_name == net_name]
+    classified_runs: list[tuple[list[Segment], str | None]] = []
+    if net_path_specs:
+        allowed_ids = reinforcement_eligible_segment_ids(pcb, net_path_specs)
+        excluded_reason = (
+            "excluded by declared current-path intent (Issue #4980): not fully "
+            "covered by a resolved, reinforcement-eligible CurrentPathSpec for "
+            f"net {net_name!r}"
+        )
+        for run in runs:
+            parts: list[tuple[list[Segment], str | None]] = []
+            for seg in run:
+                reason = None if original_ids[id(seg)] in allowed_ids else excluded_reason
+                # A degree-two force pad can continue into a sense stub.
+                # Split that eligibility boundary while retaining all of the
+                # chainer's existing physical-junction boundaries.
+                if not parts or parts[-1][1] != reason:
+                    parts.append(([], reason))
+                parts[-1][0].append(seg)
+            classified_runs.extend(parts)
+    else:
+        classified_runs = [(run, None) for run in runs]
+    if not classified_runs:
         raise ReinforceError(f"net {net_name!r} produced no walkable polyline")
 
-    # Longest-first so the "primary" run (default mode) is runs[0] and the
-    # per-run summary is stably ordered.
-    runs.sort(key=_run_length, reverse=True)
-
-    # Tier 3: coalesce contiguous collinear fragments within each run so the
-    # reported segment count reflects true geometric runs (anchor positions
-    # unchanged -- merge only removes collinear interior vertices).
+    classified_runs.sort(key=lambda item: _run_length(item[0]), reverse=True)
+    runs = [run for run, _ in classified_runs]
     geoms = [_run_geometry(run) for run in runs]
-
-    # Issue #4980: declared current-path gating. When at least one spec
-    # targets this net, reinforcement flips to an ALLOW-list -- a run may
-    # only be anchored when every one of its segments is covered by a
-    # resolved, reinforcement-eligible CurrentPathSpec. This is what keeps a
-    # Kelvin sense tap (or any branch declared reinforcement_eligible=False)
-    # from ever being anchored/bridged, and what makes a broken/moved
-    # endpoint mapping fail closed (a spec that no longer resolves simply
-    # never contributes segments to the allow-list, rather than falling
-    # back to "anchor it anyway").
-    path_excluded_reasons: dict[int, str] = {}
-    net_path_specs = [spec for spec in (current_paths or ()) if spec.net_name == net_name]
-    if net_path_specs:
-        eligible_segment_ids = reinforcement_eligible_segment_ids(pcb, net_path_specs)
-        for i, run in enumerate(runs):
-            run_segment_ids = {id(s) for s in run}
-            if not run_segment_ids.issubset(eligible_segment_ids):
-                path_excluded_reasons[i] = (
-                    "excluded by declared current-path intent (Issue #4980): not fully "
-                    "covered by a resolved, reinforcement-eligible CurrentPathSpec for "
-                    f"net {net_name!r}"
-                )
+    path_excluded_reasons = {
+        index: reason for index, (_, reason) in enumerate(classified_runs) if reason is not None
+    }
 
     # Selection: filter by min length (report -- do not drop -- shorter runs),
     # then by the current-path gate (report -- do not drop -- excluded runs),
