@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Hashable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import median
 from typing import TYPE_CHECKING
 
@@ -69,8 +69,11 @@ RULE_STAIRCASE_FRACTION = "routing_quality_staircase_fraction"
 class RoutingQualityMetrics:
     """Descriptive routing-quality statistics for one board.
 
-    All counts are over ``pcb.segments`` (copper trace segments).  The
-    length/direction statistics exclude zero-length segments; the
+    Direction, fragmentation and staircase counts are over ``pcb.segments``.
+    Imported arcs have their own count and total length; they are never
+    classified as off-axis straight segments. ``nets_with_copper`` retains
+    its straight-segment population so its ratio denominator stays coherent.
+    The length/direction statistics exclude zero-length segments; the
     fractions use the same zero-length-excluded population as their
     denominator (and are ``0.0`` when that population is empty).
     """
@@ -87,6 +90,8 @@ class RoutingQualityMetrics:
     off_axis_count: int
     staircase_step_count: int
     staircase_fraction: float
+    copper_arc_count: int = 0
+    copper_arc_length_mm: float = 0.0
 
     @property
     def diagonal_45_fraction(self) -> float:
@@ -105,7 +110,7 @@ class RoutingQualityMetrics:
 
     def to_dict(self) -> dict[str, int | float]:
         """Serialize to the stable JSON contract emitted by ``kct check``."""
-        return {
+        result: dict[str, int | float] = {
             "total_segments": self.total_segments,
             "nets_with_copper": self.nets_with_copper,
             "segments_per_net": self.segments_per_net,
@@ -119,6 +124,13 @@ class RoutingQualityMetrics:
             "staircase_step_count": self.staircase_step_count,
             "staircase_fraction": self.staircase_fraction,
         }
+
+        # Preserve the established straight-only JSON contract when no arcs
+        # exist; disclose curved copper separately when present.
+        if self.copper_arc_count:
+            result["copper_arc_count"] = self.copper_arc_count
+            result["copper_arc_length_mm"] = self.copper_arc_length_mm
+        return result
 
 
 @dataclass(frozen=True)
@@ -270,8 +282,13 @@ def compute_routing_quality(pcb: PCB) -> RoutingQualityMetrics:
     per-stage router instrumentation) measure identically.
     """
     segments: list[Segment] = list(pcb.segments)
-    return compute_routing_quality_from_records(
+    metrics = compute_routing_quality_from_records(
         (seg.start, seg.end, seg.layer, seg.net_number) for seg in segments
+    )
+    return replace(
+        metrics,
+        copper_arc_count=len(pcb.arcs),
+        copper_arc_length_mm=sum(arc.length for arc in pcb.arcs),
     )
 
 
