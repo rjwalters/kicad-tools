@@ -892,14 +892,16 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     bridges_placed = 0
     failed: list[str] = []
 
-    def _emit_via(net: str, vx: float, vy: float) -> None:
+    def _emit_via(
+        net: str, vx: float, vy: float, diameter: float = 0.45, drill: float = 0.25
+    ) -> None:
         nonlocal vias_placed
         nid = net_id_by_name[net]
         via_lines.append(
-            f"  (via (at {vx:.3f} {vy:.3f}) (size 0.45) (drill 0.25) "
+            f"  (via (at {vx:.3f} {vy:.3f}) (size {diameter}) (drill {drill}) "
             f'(layers "F.Cu" "B.Cu") (net {nid}) (uuid "{_generate_uuid()}"))'
         )
-        via_index.append((Point(vx, vy), net, VIA_R, VIA_DRILL_R))
+        via_index.append((Point(vx, vy), net, diameter / 2, drill / 2))
         vias_placed += 1
 
     def _emit_seg(
@@ -1237,6 +1239,69 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                             break
                     if done:
                         break
+
+            # The fixed rays cannot follow a narrow corridor. A component
+            # that already has a via can still be stranded behind foreign
+            # copper, so also search from its existing barrel on each layer.
+            # Commit only a complete path under the same physical rules.
+            if not merged and comp_pads:
+                from kicad_tools.zones.pour_escape import EscapeRules, find_escape
+
+                project = pcb_path.with_suffix(".kicad_pro")
+                if not project.exists():
+                    project = pcb_path.parent / "matchgroup_test.kicad_pro"
+                escape_rules = EscapeRules.from_project(project)
+                starts = [(name, pad_center[name], "F.Cu") for name in comp_pads]
+                if comp_has_via:
+                    starts = [
+                        (
+                            "existing via",
+                            (own[i][0].centroid.x, own[i][0].centroid.y),
+                            layer,
+                        )
+                        for i in target
+                        if own[i][2] == "via"
+                        for layer in ("B.Cu", "F.Cu", "In1.Cu", "In2.Cu")
+                        if layer in own[i][1]
+                    ]
+                for start_name, start, layer in starts:
+                    escape = find_escape(
+                        start,
+                        net,
+                        layer,
+                        pad_index,
+                        seg_index,
+                        [
+                            (pt, name, radius, drill_r * 2)
+                            for pt, name, radius, drill_r in via_index
+                        ],
+                        [own[i] for i in primary],
+                        (min_x, min_y, max_x, max_y),
+                        escape_rules,
+                    )
+                    if escape is None:
+                        continue
+                    if escape.via:
+                        vx, vy = escape.points[-1]
+                        _emit_via(net, vx, vy, escape_rules.diameter, escape_rules.drill)
+                        _append_own(
+                            (Point(vx, vy).buffer(escape_rules.diameter / 2), all_layers, "via")
+                        )
+                    for p0, p1 in zip(escape.points, escape.points[1:], strict=False):
+                        _emit_seg(net, p0, p1, layer, escape_rules.width)
+                        _append_own(
+                            (
+                                LineString([p0, p1]).buffer(escape_rules.width / 2),
+                                frozenset({layer}),
+                                "seg",
+                            )
+                        )
+                    bridges_placed += 1
+                    merged = True
+                    print(
+                        f"   Grid escape: {net} {start_name}, {len(escape.points) - 1} segment(s)"
+                    )
+                    break
 
             if not merged:
                 names = [own[i][2] for i in target if own[i][2].startswith("pad:")]
