@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 25
+_REQUIRED_CPP_BUILD_VERSION = 26
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -3873,7 +3873,9 @@ class CppCoupledPathfinder:
         ``diagnostics`` carries ``iterations`` / ``best_progress`` /
         ``timeout_exceeded`` / ``iteration_limited`` and (Issue #4459) the
         per-reason ``rejections`` histogram for the caller's ``last_*``
-        bookkeeping.
+        bookkeeping. On failure, ``best_path`` retains the root-to-best
+        partial geometry in the same tuple format; it is diagnostic evidence,
+        not a successful route. It is empty on success or before any expansion.
         """
         res = self._impl.route(
             int(p_start_xy[0]),
@@ -3907,6 +3909,12 @@ class CppCoupledPathfinder:
             # forcing the caller's ``last_rejections`` to a categorically-empty
             # dict).  ``res.rejections`` is a ``dict[str, int]`` from nanobind.
             "rejections": {str(k): int(v) for k, v in dict(res.rejections).items()},
+            # A failed search remains failed; retain its best geometry only
+            # for replay/landing diagnosis, separately from the result path.
+            "best_path": [
+                (n.p_x, n.p_y, n.p_layer, n.n_x, n.n_y, n.n_layer, n.via_from_parent)
+                for n in res.best_path
+            ],
         }
         if not res.success:
             return None, diagnostics

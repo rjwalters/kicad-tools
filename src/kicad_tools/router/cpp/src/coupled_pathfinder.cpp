@@ -213,6 +213,24 @@ CoupledRouteResult CoupledPathfinder::route(
     const bool have_iter_budget = max_iterations_budget > 0;
 
     double best_progress = -1.0;  // -1 sentinel = "nothing popped yet".
+    int best_node_idx = -1;
+    // Preserve geometry for failed-search diagnosis without returning it as
+    // a successful route. Pool indices remain valid across reallocations.
+    auto best_partial_path = [&pool, &best_node_idx]() {
+        std::vector<CoupledPathNode> path;
+        int idx = best_node_idx;
+        while (idx >= 0) {
+            const CoupledAStarNode& nd = pool[static_cast<size_t>(idx)];
+            CoupledPathNode pn;
+            pn.p_x = nd.p_x; pn.p_y = nd.p_y; pn.p_layer = nd.p_layer;
+            pn.n_x = nd.n_x; pn.n_y = nd.n_y; pn.n_layer = nd.n_layer;
+            pn.via_from_parent = nd.via_from_parent;
+            path.push_back(pn);
+            idx = nd.parent_idx;
+        }
+        std::reverse(path.begin(), path.end());
+        return path;
+    };
 
     // Issue #4459: per-reason move-rejection histogram.  Counts which guard
     // pruned each candidate so a 0/9 budget-exit can be triaged (which
@@ -250,6 +268,7 @@ CoupledRouteResult CoupledPathfinder::route(
         // Iteration-budget classifier (diffpair_routing.py:1707-1721).
         if (have_iter_budget && iterations >= max_iterations_budget) {
             result.success = false;
+            result.best_path = best_partial_path();
             result.iterations = static_cast<int>(iterations);
             result.best_progress = best_progress;
             result.timeout_exceeded = true;
@@ -260,6 +279,7 @@ CoupledRouteResult CoupledPathfinder::route(
         // Wall-clock check every 64 iters (diffpair_routing.py:1728-1743).
         if (have_deadline && (iterations & 63) == 0 && clock::now() >= deadline) {
             result.success = false;
+            result.best_path = best_partial_path();
             result.iterations = static_cast<int>(iterations);
             result.best_progress = best_progress;
             result.timeout_exceeded = true;
@@ -311,6 +331,7 @@ CoupledRouteResult CoupledPathfinder::route(
             std::abs(current.n_x - n_goal_x) + std::abs(current.n_y - n_goal_y));
         if (best_progress < 0.0 || progress < best_progress) {
             best_progress = progress;
+            best_node_idx = current_idx;
         }
 
         // ------------------------------------------------------------------
@@ -657,6 +678,7 @@ CoupledRouteResult CoupledPathfinder::route(
 
     // No path found (open set exhausted or memory backstop hit).
     result.success = false;
+    result.best_path = best_partial_path();
     result.iterations = static_cast<int>(iterations);
     result.best_progress = best_progress;
     result.rejections = std::move(rejections);  // #4459

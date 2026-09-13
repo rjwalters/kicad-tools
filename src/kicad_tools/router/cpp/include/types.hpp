@@ -234,7 +234,7 @@ namespace router {
 // construction); refs in the new set reach the carve-out only because a
 // CONFIGURED override resolved smaller than the default clearance, and
 // enforce that resolved value as a hard floor instead of skipping.
-constexpr int ROUTER_CPP_BUILD_VERSION = 25;
+constexpr int ROUTER_CPP_BUILD_VERSION = 26;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -463,6 +463,9 @@ struct CoupledPathNode {
 //                           categorically-empty dict on the C++ path.
 struct CoupledRouteResult {
     std::vector<CoupledPathNode> path;  // root->goal; empty when !success.
+    // Diagnostic root->best-progress path on failure; never a routed result.
+    // Empty on success or when no state was expanded before termination.
+    std::vector<CoupledPathNode> best_path;
     bool success = false;
     // Diagnostics (always populated, success or not).
     int iterations = 0;
