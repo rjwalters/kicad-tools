@@ -299,3 +299,23 @@ def test_tuning_checks_foreign_through_barrels_on_every_layer(via_net, layer, ga
         intra_pair_clearance_mm=0.1,
         grid=grid,
     ) is (via_net == 2 or gap >= 0.2)
+
+
+def test_fragmented_run_is_ranked_even_when_short_landing_is_eligible():
+    from kicad_tools.router.optimizer.serpentine import SerpentineConfig, SerpentineGenerator
+
+    grid, pair, p, n = _fixture()
+    host = n.segments[0]
+    n.segments = [replace(host, x1=5 + i * 0.1, x2=5 + (i + 1) * 0.1) for i in range(70)]
+    landing = replace(host, x1=12)
+    n.segments.append(landing)
+    generator = SerpentineGenerator(SerpentineConfig())
+    assert generator.find_best_segment(n)[1] is landing
+
+    p_out, n_out, result = _tune(grid, pair, p, n)
+    assert result.success and result.skew_after_mm <= 0.05
+    assert p_out is p
+    assert _worst(grid, n_out) <= 0
+    # The complete straight run offers an earlier legal insertion than the
+    # landing alone, while retaining the pad-aware interior retry.
+    assert min(s.x1 for s in n_out.segments if abs(s.y2 - s.y1) > 0.01) < 12

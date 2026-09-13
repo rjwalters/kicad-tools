@@ -350,10 +350,12 @@ def tune_diff_pair_skew(
             reserved_net_id=shorter_id if prefer_reserved_slack else None,
             fixed_segment_ids=fixed_segment_ids,
         )
-        if best is None and grid is not None:
+        if grid is not None:
             # Coupled search emits one segment per grid step. A straight run
             # can therefore be long enough for tuning while every individual
-            # segment is too short. Consolidate only collinear copper, retaining
+            # segment is too short. Even if a short landing is eligible, rank
+            # the complete straight runs before choosing a host: tuning the
+            # landing can lose coupling unnecessarily. Consolidate only collinear copper, retaining
             # pad/via junctions and the endpoints of every fixed escape.
             from .optimizer.consolidate import consolidate_segments
 
