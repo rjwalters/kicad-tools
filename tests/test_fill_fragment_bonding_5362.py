@@ -118,6 +118,7 @@ _BOARD = """(kicad_pcb
 """
 
 _FAT_NO = "    (filled_areas_thickness no)\n"
+_FAT_YES = "    (filled_areas_thickness yes)\n"
 
 
 def _fill(points: list[tuple[float, float]]) -> str:
@@ -138,6 +139,16 @@ class Case:
     native_unconnected: int
     min_thickness: float = 0.25
     stroke_encoded: bool = False  # True => omit (filled_areas_thickness no)
+    # True => write an explicit ``(filled_areas_thickness yes)`` instead of
+    # omitting the token.  Takes priority over ``stroke_encoded``.  Native
+    # KiCad 10.0.6 measures this identically to the token being absent at
+    # every version -- confirmed down to the parser source
+    # (``pcb_io_kicad_sexpr_parser.cpp``'s ``T_filled_areas_thickness``
+    # handler only ever *clears* ``isStrokedFill``; there is no branch that
+    # sets it, so an explicit ``yes`` cannot force-stroke a >= 20250210 file,
+    # unlike an earlier revision of :meth:`Zone.is_stroked_fill` assumed;
+    # Issue #5382).
+    explicit_yes: bool = False
     p1: tuple[float, float] = (12, 25)
     p2: tuple[float, float] = (28, 25)
     extra: str = ""
@@ -152,13 +163,19 @@ class Case:
         return self.native_unconnected == 0
 
     def board(self) -> str:
+        if self.explicit_yes:
+            fat = _FAT_YES
+        elif self.stroke_encoded:
+            fat = ""
+        else:
+            fat = _FAT_NO
         return _BOARD.format(
             p1x=self.p1[0],
             p1y=self.p1[1],
             p2x=self.p2[0],
             p2y=self.p2[1],
             min_thickness=self.min_thickness,
-            fat="" if self.stroke_encoded else _FAT_NO,
+            fat=fat,
             fills=self.fills,
             extra=self.extra,
         ).replace("(version 20240108)", f"(version {self.version})")
@@ -258,6 +275,42 @@ CASES: list[Case] = [
             (20260206, 1),
         )
     ],
+    # An EXPLICIT ``yes`` measures identically to the token being absent at
+    # every version -- it does NOT force-stroke a >= 20250210 file.  Native
+    # KiCad 10.0.6, same board/gap templates as the absent series above but
+    # with a literal ``(filled_areas_thickness yes)`` token (Issue #5382):
+    *[
+        Case(
+            f"explicit_yes_v{ver}_gap0.0",
+            _TWO_RECTS_GAP[0.0],
+            native,
+            explicit_yes=True,
+            version=ver,
+        )
+        for ver, native in (
+            (20240108, 0),
+            (20250209, 0),
+            (20250210, 1),
+            (20260101, 1),
+            (20260206, 1),
+        )
+    ],
+    *[
+        Case(
+            f"explicit_yes_v{ver}_gap0.2",
+            _TWO_RECTS_GAP[0.2],
+            native,
+            explicit_yes=True,
+            version=ver,
+        )
+        for ver, native in (
+            (20240108, 0),
+            (20250209, 0),
+            (20250210, 1),
+            (20260101, 1),
+            (20260206, 1),
+        )
+    ],
     # Control: a conductor bridge stays connected on both sides of the
     # boundary -- the version gates fill-adjacency only, never real copper.
     *[
@@ -326,42 +379,56 @@ def test_pad_partition_matches_native_fill_fragment_bonding(
 
 
 @pytest.mark.parametrize(
-    ("stroke_encoded", "version", "token", "stroked", "inflation"),
+    ("stroke_encoded", "explicit_yes", "version", "token", "stroked", "inflation"),
     [
         # Explicit ``no``: solid at every version.
-        (False, 20240108, False, False, 0.0),
-        (False, 20260206, False, False, 0.0),
+        (False, False, 20240108, False, False, 0.0),
+        (False, False, 20260206, False, False, 0.0),
         # Token absent: resolved by the 20250210 parser boundary.
-        (True, 20240108, None, True, 0.125),
-        (True, 20250209, None, True, 0.125),
-        (True, 20250210, None, False, 0.0),
-        (True, 20260206, None, False, 0.0),
+        (True, False, 20240108, None, True, 0.125),
+        (True, False, 20250209, None, True, 0.125),
+        (True, False, 20250210, None, False, 0.0),
+        (True, False, 20260206, None, False, 0.0),
+        # Explicit ``yes``: measured IDENTICAL to the token being absent at
+        # every version, not unconditionally stroked (Issue #5382).  KiCad's
+        # ``T_filled_areas_thickness`` handler is ``if (!parseBool())
+        # isStrokedFill = false;`` -- there is no branch that sets the flag,
+        # so ``yes`` can only ever leave the version-derived default alone.
+        (False, True, 20240108, True, True, 0.125),
+        (False, True, 20250209, True, True, 0.125),
+        (False, True, 20250210, True, False, 0.0),
+        (False, True, 20260206, True, False, 0.0),
     ],
 )
 def test_zone_fill_encoding_follows_token_then_file_version(
     tmp_path: Path,
     stroke_encoded: bool,
+    explicit_yes: bool,
     version: int,
     token: bool | None,
     stroked: bool,
     inflation: float,
 ) -> None:
-    """``Zone`` mirrors KiCad's ``isStrokedFill`` resolution order (#5362).
+    """``Zone`` mirrors KiCad's ``isStrokedFill`` resolution order (#5362, #5382).
 
     The parser initialises ``isStrokedFill = m_requiredVersion < 20250210``
-    and only then overrides it from an explicit
-    ``(filled_areas_thickness ...)`` token, so an absent token is
-    version-dependent while an explicit ``no`` is not.  Reading the absent
-    case as unconditionally stroked is what kept the #5362 witness -- a
-    ``(version 20260206)`` board with no token -- reporting false-clean.
+    and only then applies ``if (!parseBool()) isStrokedFill = false;`` for an
+    explicit ``(filled_areas_thickness ...)`` token -- there is no branch that
+    *sets* the flag, so an absent OR explicit-``yes`` token is equally
+    version-dependent, while an explicit ``no`` always clears it. Reading the
+    absent case as unconditionally stroked is what kept the #5362 witness --
+    a ``(version 20260206)`` board with no token -- reporting false-clean;
+    reading an explicit ``yes`` as unconditionally stroked would keep the
+    same combination false-clean under an explicit token instead (#5382).
     """
-    path = tmp_path / f"zone_v{version}_{stroke_encoded}.kicad_pcb"
+    path = tmp_path / f"zone_v{version}_{stroke_encoded}_{explicit_yes}.kicad_pcb"
     path.write_text(
         Case(
             "encoding",
             _fill(_rect(10, 30)),
             0,
             stroke_encoded=stroke_encoded,
+            explicit_yes=explicit_yes,
             version=version,
         ).board()
     )
