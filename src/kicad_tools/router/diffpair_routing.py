@@ -6346,7 +6346,24 @@ class DiffPairRouter:
             ),
             default=0.0,
         )
-        sites: set[tuple[int, int]] = set()
+        # Issue #5333 (TMDS_D1): sites used to be visited in a fixed
+        # anchor/radius/direction raster order, so the caller's
+        # ``itertools.islice(tails, 10)`` stopped at the first ten LEGAL
+        # candidates in THAT order regardless of how well any of them
+        # actually couples to the partner. Meeting the authored
+        # ``effective_coupled_continuity_threshold`` needs the tail to run
+        # close to the partner's own committed copper for most of its
+        # length, so candidate grid sites are visited in order of ascending
+        # distance from the site to the partner's nearest existing segment
+        # or via instead. This only reorders WHICH legal site is tried
+        # first -- every legality/clearance/hole-spacing/occupancy check
+        # below, and "a failed check just moves on to the next site", are
+        # unchanged. When the partner has no committed copper yet (empty
+        # ``partner.segments``/``partner.vias``, e.g. the very first leg of
+        # a pair), every site scores ``inf`` and the stable sort leaves the
+        # original raster order intact.
+        candidate_sites: list[tuple[float, int, int, int]] = []
+        seen_sites: set[tuple[int, int]] = set()
         # Grid-aligned sites avoid placing a barrel between checked cells.
         for anchor in (goal, head):
             for radius in (0.0, 0.6, 1.2, 1.8, 2.4):
@@ -6360,123 +6377,135 @@ class DiffPairRouter:
                     (-1, 1),
                     (-1, -1),
                 ):
-                    if deadline is not None and time.monotonic() >= deadline:
-                        return
                     gx, gy = grid.world_to_grid(anchor.x + dx * radius, anchor.y + dy * radius)
                     if allowed_via_sites is not None and (gx, gy) not in allowed_via_sites:
                         continue
-                    if (gx, gy) in sites:
+                    if (gx, gy) in seen_sites:
                         continue
-                    sites.add((gx, gy))
-                    raster_blocked = pathfinder._is_via_blocked(gx, gy, head.net)
-                    if raster_blocked and not self._via_has_only_geometry_blockers(
-                        pathfinder, gx, gy
-                    ):
-                        continue
-                    x, y = grid.grid_to_world(gx, gy)
-                    via = Via(
-                        x=x,
-                        y=y,
-                        drill=rules.via_drill,
-                        diameter=rules.via_diameter,
-                        layers=(
-                            Layer(grid.index_to_layer(0)),
-                            Layer(grid.index_to_layer(grid.num_layers - 1)),
+                    seen_sites.add((gx, gy))
+                    site_x, site_y = grid.grid_to_world(gx, gy)
+                    score = min(
+                        (
+                            self._point_segment_distance(site_x, site_y, seg)
+                            for seg in partner.segments
                         ),
-                        net=head.net,
-                        net_name=head.net_name,
+                        default=math.inf,
                     )
-                    if (
-                        raster_blocked
-                        and grid.worst_via_pad_deficit(
-                            via, exclude_net=-1, clearance_floor=rules.via_clearance
-                        )[0]
-                        > 1e-9
-                    ):
-                        # The exact fallback exempts no pad, including own-net
-                        # metal. Thus it cannot introduce a via-in-pad escape.
-                        continue
-                    if (
-                        grid.worst_via_pad_deficit(
-                            via, exclude_net=head.net, clearance_floor=rules.via_clearance
-                        )[0]
-                        > 1e-9
-                    ):
-                        continue
-                    if not drill_hole_to_hole_clear(
-                        x, y, via.drill, drills, rules.min_hole_to_hole
-                    ):
-                        continue
-                    if any(
-                        self._point_segment_distance(x, y, seg)
-                        < (via.diameter + seg.width) / 2 + rules.via_clearance - 1e-9
-                        for r in foreign
-                        for seg in r.segments
-                    ) or any(
-                        math.hypot(x - v.x, y - v.y)
-                        < (via.diameter + v.diameter) / 2 + rules.via_clearance - 1e-9
-                        for r in foreign
-                        for v in r.vias
-                    ):
-                        continue
-                    before = self._virtual_pad_at(head, x, y, start_layer)
-                    after = self._virtual_pad_at(goal, x, y, end_layer)
-                    pieces = []
-                    for a, b, li in ((head, before, start_layer), (after, goal, end_layer)):
-                        if math.hypot(a.x - b.x, a.y - b.y) < 1e-9:
-                            pieces.append(Route(net=head.net, net_name=head.net_name))
-                            continue
-                        part = self._synthesize_tail(
-                            pathfinder,
-                            a,
-                            b,
-                            li,
-                            partner_segments=partner.segments,
-                            partner_clearance=partner_center_clearance,
-                            partner_vias=partner.vias,
-                            prefer_shortest=prefer_shortest_approach and li == start_layer,
-                            reserved_routes=reserved_routes,
-                            preceding_segments=body.segments
-                            + [s for p in pieces for s in p.segments],
+                    if partner.vias:
+                        score = min(
+                            score,
+                            min(math.hypot(site_x - v.x, site_y - v.y) for v in partner.vias),
                         )
-                        if part is None:
-                            break
-                        pieces.append(part)
-                    if len(pieces) != 2:
-                        continue
-                    segments = [seg for part in pieces for seg in part.segments]
-                    if any(
-                        self._point_segment_distance(v.x, v.y, seg)
-                        < (seg.width + v.diameter) / 2 + rules.via_clearance - 1e-9
-                        for seg in segments
-                        for r in foreign
-                        for v in r.vias
-                    ) or any(
-                        _segment_to_segment_distance(
-                            seg.x1,
-                            seg.y1,
-                            seg.x2,
-                            seg.y2,
-                            other.x1,
-                            other.y1,
-                            other.x2,
-                            other.y2,
-                        )
-                        < (
-                            (seg.width + other.width) / 2 + rules.trace_clearance
-                            if r.net != partner.net
-                            else (seg.width + other.width) / 2 + pair_edge_clearance
-                        )
-                        - 1e-9
-                        for seg in segments
-                        for r in foreign
-                        for other in r.segments
-                        if seg.layer == other.layer
-                    ):
-                        continue
-                    if deadline is not None and time.monotonic() >= deadline:
-                        return
-                    yield Route(net=head.net, net_name=head.net_name, segments=segments, vias=[via])
+                    candidate_sites.append((score, len(candidate_sites), gx, gy))
+        candidate_sites.sort(key=lambda c: (c[0], c[1]))
+
+        for _score, _order, gx, gy in candidate_sites:
+            if deadline is not None and time.monotonic() >= deadline:
+                return
+            raster_blocked = pathfinder._is_via_blocked(gx, gy, head.net)
+            if raster_blocked and not self._via_has_only_geometry_blockers(pathfinder, gx, gy):
+                continue
+            x, y = grid.grid_to_world(gx, gy)
+            via = Via(
+                x=x,
+                y=y,
+                drill=rules.via_drill,
+                diameter=rules.via_diameter,
+                layers=(
+                    Layer(grid.index_to_layer(0)),
+                    Layer(grid.index_to_layer(grid.num_layers - 1)),
+                ),
+                net=head.net,
+                net_name=head.net_name,
+            )
+            if (
+                raster_blocked
+                and grid.worst_via_pad_deficit(
+                    via, exclude_net=-1, clearance_floor=rules.via_clearance
+                )[0]
+                > 1e-9
+            ):
+                # The exact fallback exempts no pad, including own-net
+                # metal. Thus it cannot introduce a via-in-pad escape.
+                continue
+            if (
+                grid.worst_via_pad_deficit(
+                    via, exclude_net=head.net, clearance_floor=rules.via_clearance
+                )[0]
+                > 1e-9
+            ):
+                continue
+            if not drill_hole_to_hole_clear(x, y, via.drill, drills, rules.min_hole_to_hole):
+                continue
+            if any(
+                self._point_segment_distance(x, y, seg)
+                < (via.diameter + seg.width) / 2 + rules.via_clearance - 1e-9
+                for r in foreign
+                for seg in r.segments
+            ) or any(
+                math.hypot(x - v.x, y - v.y)
+                < (via.diameter + v.diameter) / 2 + rules.via_clearance - 1e-9
+                for r in foreign
+                for v in r.vias
+            ):
+                continue
+            before = self._virtual_pad_at(head, x, y, start_layer)
+            after = self._virtual_pad_at(goal, x, y, end_layer)
+            pieces = []
+            for a, b, li in ((head, before, start_layer), (after, goal, end_layer)):
+                if math.hypot(a.x - b.x, a.y - b.y) < 1e-9:
+                    pieces.append(Route(net=head.net, net_name=head.net_name))
+                    continue
+                part = self._synthesize_tail(
+                    pathfinder,
+                    a,
+                    b,
+                    li,
+                    partner_segments=partner.segments,
+                    partner_clearance=partner_center_clearance,
+                    partner_vias=partner.vias,
+                    prefer_shortest=prefer_shortest_approach and li == start_layer,
+                    reserved_routes=reserved_routes,
+                    preceding_segments=body.segments + [s for p in pieces for s in p.segments],
+                )
+                if part is None:
+                    break
+                pieces.append(part)
+            if len(pieces) != 2:
+                continue
+            segments = [seg for part in pieces for seg in part.segments]
+            if any(
+                self._point_segment_distance(v.x, v.y, seg)
+                < (seg.width + v.diameter) / 2 + rules.via_clearance - 1e-9
+                for seg in segments
+                for r in foreign
+                for v in r.vias
+            ) or any(
+                _segment_to_segment_distance(
+                    seg.x1,
+                    seg.y1,
+                    seg.x2,
+                    seg.y2,
+                    other.x1,
+                    other.y1,
+                    other.x2,
+                    other.y2,
+                )
+                < (
+                    (seg.width + other.width) / 2 + rules.trace_clearance
+                    if r.net != partner.net
+                    else (seg.width + other.width) / 2 + pair_edge_clearance
+                )
+                - 1e-9
+                for seg in segments
+                for r in foreign
+                for other in r.segments
+                if seg.layer == other.layer
+            ):
+                continue
+            if deadline is not None and time.monotonic() >= deadline:
+                return
+            yield Route(net=head.net, net_name=head.net_name, segments=segments, vias=[via])
 
     def _synthesize_crossing_tail(
         self,

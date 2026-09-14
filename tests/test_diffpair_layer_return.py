@@ -449,6 +449,47 @@ def test_planned_return_site_restricts_candidates_without_waiving_barrel_clearan
     assert not list(router._layer_return_tails(finder, head, goal, partner, body, **options))
 
 
+def test_return_sites_are_visited_by_proximity_to_partner_copper_not_raster_order():
+    """Issue #5333 (TMDS_D1): prefer landings near the partner's own copper.
+
+    With an empty partner, the very first candidate the fixed anchor/radius/
+    direction raster enumerates is ``(5.6, 3.0)`` (asserted below as a
+    control). Giving the partner a short committed segment well off that
+    raster-first site but near a DIFFERENT, also-legal site must reorder
+    the candidates: the near-partner site should now come first, even
+    though it is later in the raw raster sequence. This is exactly the
+    defect measured on TMDS_D1 -- a blind raster-first search finds legal
+    sites that are geometrically clear but too far from the partner's path
+    to meet the authored coupled-continuity threshold.
+    """
+    router, finder, head, goal, empty_partner, body = _case()
+    raster_first = next(router._layer_return_tails(finder, head, goal, empty_partner, body)).vias[0]
+    assert (raster_first.x, raster_first.y) == pytest.approx((5.6, 3.0))
+
+    partner = Route(
+        net=2,
+        net_name="N",
+        segments=[
+            Segment(
+                x1=5.0, y1=1.8, x2=5.0, y2=2.1, width=0.2, layer=Layer.F_CU, net=2, net_name="N"
+            )
+        ],
+    )
+    candidates = list(router._layer_return_tails(finder, head, goal, partner, body))
+    assert candidates
+    first_via = candidates[0].vias[0]
+    # Closer to the partner's committed copper than the raster-first site,
+    # and NOT the site a pure raster scan would still try first.
+    assert (first_via.x, first_via.y) == pytest.approx((5.6, 2.4))
+    assert (first_via.x, first_via.y) != pytest.approx((raster_first.x, raster_first.y))
+
+    def score(via):
+        return min(router._point_segment_distance(via.x, via.y, seg) for seg in partner.segments)
+
+    scores = [score(c.vias[0]) for c in candidates]
+    assert scores == sorted(scores)
+
+
 def test_reserved_trace_filters_planar_candidates_before_selecting_a_tail():
     from dataclasses import replace
 
