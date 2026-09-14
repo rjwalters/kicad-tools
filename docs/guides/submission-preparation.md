@@ -538,3 +538,113 @@ recorded as successful in the ledger for the same app identity and file hash,
 and it persists its own record binding the attempt, file key, file hash and
 payload digest. Interpreting the preview/DFM payload is #5146's scope; nothing
 here derives a verdict from it.
+
+## DFM report attachment and binding (#5146)
+
+`kicad_tools.export.factory_dfm` binds an original factory DFM report and a
+typed manual/OCR-assisted transcription of its findings to an exact upload
+identity. Like `factory_selection.py`, this is a pure, dependency-injectable
+binding module: it makes no network call, performs no filesystem I/O, and
+does not run JLCPCB's own DFM checker or claim "headless DFM verification."
+A human (or another tool) already produced the report bytes and, when the
+report is raster/image-only, already produced the transcription; this module
+only validates and binds that already-produced evidence.
+
+```python
+from kicad_tools.export.factory_dfm import (
+    CategoryFinding,
+    ModuleCoverage,
+    TranscriptionEvidence,
+    attach_dfm_report,
+    verify_dfm_attachment,
+)
+
+transcription = TranscriptionEvidence(
+    provenance="manual",          # or "ocr", or "unknown" if even that isn't known
+    performed_by="alice@example.com",
+    confidence=0.95,               # 0.0-1.0, or None when unknown
+    extracted_rows=12,
+    ocr_failed=False,
+    image_only_source=True,        # a raster-only/scanned report page
+    categories=(
+        CategoryFinding(
+            category="silkscreen-clearance",
+            count=3,
+            limit=10,
+            capped=False,           # True marks a truncated/capped count
+            coordinates_available=True,
+            threshold="0.1 mm",
+        ),
+    ),
+    modules=(
+        ModuleCoverage("pcb_fabrication", True),
+        ModuleCoverage("smt_assembly", True),
+    ),
+)
+
+attachment = attach_dfm_report(
+    report_bytes=report_pdf_bytes,       # never edited or re-encoded
+    report_revision="v27",
+    checker_time="2026-01-03T00:00:00Z",
+    gerber_sha256=receipt.file_sha256,   # exact Gerber bundle hash, from #5145
+    app_identity=receipt.app_identity,
+    endpoint=receipt.endpoint,
+    transcription=transcription,
+    ledger=ledger,                       # optional; omit for a fully offline attachment
+)
+verify_dfm_attachment(attachment, report_pdf_bytes)  # raises on any byte drift
+```
+
+`report_bytes` is never edited, re-encoded, or "cleaned up" -- only its own
+SHA-256 and size are recorded (`attachment.report_sha256` /
+`.report_size`), for later re-verification with `verify_dfm_attachment`. A
+bare filename or revision string alone is never accepted as identity; there
+is no such parameter. The binding is the combination of the exact Gerber
+bundle hash, the application identity/endpoint, and the report's own
+declared revision and checker/report timestamp.
+
+An optional `report_claimed_gerber_sha256` lets a caller transcribe a hash
+the report itself echoes as the file it audited. When supplied and it
+disagrees with the current `gerber_sha256` (for example, a stale v25 report
+reviewed against the current v27 Gerber), `attach_dfm_report` raises
+`DFMError` rather than silently binding a report to a bundle it never
+examined.
+
+When `ledger` is supplied, this looks up a receipt for the exact
+`(gerber_sha256, app_identity, endpoint)` binding via
+`jlc_upload.find_receipt` -- never by filename or upload order. A ledger
+that has no matching receipt (for example, a report bound to the wrong
+upload) leaves `attachment.upload_binding` at `"unknown"` rather than
+raising; when `plan`/`review` are also supplied and a receipt *is* found,
+its own bound `plan_sha256`/`review_sha256` must still match them, or the
+receipt is stale relative to the current submission state and
+`attach_dfm_report` raises. **A DFM attachment can be created entirely
+offline** with no ledger at all -- `upload_binding` then stays explicitly
+`"unknown"`.
+
+`attachment.dfm_status` (`"pass"`, `"fail"`, or `"unresolved"`) is computed
+here from `transcription`, never accepted as a caller claim:
+
+- Zero `extracted_rows`, an explicit `ocr_failed`, or an entirely empty
+  `categories` tuple all keep the status at `"unresolved"` -- a raster-only
+  report with no successful transcription is never an implicit clean bill of
+  health.
+- Any category left `"unknown"` -- a missing `count`/`limit`, or a
+  `capped=True` truncation flag (the true count may exceed what was
+  recorded) -- also keeps the overall status `"unresolved"`.
+- A category whose `count` exceeds its `limit` (and isn't `capped`) makes
+  the status `"fail"`.
+- Only when every category resolves within its limit does the status become
+  `"pass"`.
+
+`attachment.modules` always reports both `"pcb_fabrication"` and
+`"smt_assembly"`, filling in `covered=None` for any module the report never
+mentions -- coverage is recorded exactly as transcribed, never inferred from
+`factory_selection.py`'s component-selection comparison (that module has no
+concept of DFM analysis-module coverage).
+
+`attachment.readiness_eligible` is `True` only when `dfm_status == "pass"`
+**and** `upload_binding == "bound"`. Readiness/Ready-badge integration must
+consult this property, not `dfm_status` alone: a passing transcription bound
+to an `"unknown"` upload (no verified #5145 receipt yet) must never promote
+a board.
