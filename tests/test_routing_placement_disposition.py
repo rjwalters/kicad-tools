@@ -279,3 +279,64 @@ def test_quoted_net_punctuation_survives_copper_handoff(board, net_name, name_on
     assert board.read_bytes() == original
     for block in router.placement_preserved_copper.splitlines():
         assert block in original.decode()
+
+
+def _empty_number_board(board):
+    """Two mechanical lands share a footprint with ordinary numbered pads."""
+    text = board_text(invalid=False)
+    original = '(pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "BAD"))'
+    replacement = """(pad 1 smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "BAD"))
+      (pad "A1" smd rect (at 0 1) (size 0.6 0.6) (layers "F.Cu") (net 1 "BAD"))
+      (pad "" smd rect (at 1 0) (size 0.6 0.6) (layers "F.Cu"))
+      (pad "" smd rect (at 2 0) (size 0.6 0.6) (layers "F.Cu"))"""
+    assert original in text
+    board.write_text(text.replace(original, replacement, 1))
+    return board
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_loader_empty_pad_numbers_match_schema_identity_multiset(board, override):
+    from kicad_tools.schema.pcb import PCB
+
+    _empty_number_board(board)
+    before = board.read_bytes()
+    mapping = {"X1.": "MECHANICAL"} if override else None
+    disposition = analyze_routing_placement(board, netlist=mapping)
+    schema_numbers = [
+        p.number for fp in PCB.load(board).footprints if fp.reference == "X1" for p in fp.pads
+    ]
+    assert schema_numbers == ["1", "A1", "", ""]
+    identity = ("X1", "", "", "MECHANICAL" if override else "")
+    assert disposition.pad_net_identities.count(identity) == 2
+    router, net_map = load_pcb_for_routing(
+        str(board), netlist=mapping, placement_disposition=disposition, force_python=True
+    )
+    assert ("X1", "") in router.pads
+    assert ("X1", '""') not in router.pads
+    assert ("X1", None) not in router.pads
+    assert ("X1", "1") in router.pads and ("X1", "A1") in router.pads
+    assert router.pads[("X1", "")].net == (net_map["MECHANICAL"] if override else 0)
+    assert router.placement_disposition.pad_net_identities.count(identity) == 2
+    for x in (111, 112):
+        gx, gy = router.grid.world_to_grid(x, 105)
+        assert router.grid.is_blocked_for_net(gx, gy, 0, net_map["GOOD"])
+    assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize("mismatch", ["netlist", "remove_occurrence"])
+def test_empty_number_fix_keeps_identity_mismatch_rejection(board, mismatch):
+    _empty_number_board(board)
+    disposition = analyze_routing_placement(board)
+    mapping = None
+    if mismatch == "netlist":
+        mapping = {"X1.": "MECHANICAL"}
+    else:
+        board.write_text(
+            board.read_text().replace(
+                '(pad "" smd rect (at 2 0) (size 0.6 0.6) (layers "F.Cu"))', ""
+            )
+        )
+    with pytest.raises(ValueError, match="pad/net identities do not match"):
+        load_pcb_for_routing(
+            str(board), netlist=mapping, placement_disposition=disposition, force_python=True
+        )
