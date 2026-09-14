@@ -101,6 +101,61 @@ def test_an_exhausted_ledger_attempts_nothing(monkeypatch, budget):
     assert calls == {"departures": [], "landings": [], "bodies": []}
 
 
+def test_the_ledger_tallies_which_stage_spent_the_allowance(monkeypatch):
+    """#5333: a failed pair has to name its failing stage without a re-run."""
+
+    def fake_complete(router, finder, pair, pads, group, landing, budget, **kwargs):
+        budget.bodies_used = budget.bodies_remaining
+        budget.bodies_remaining = 0
+        budget.bodies_built += 2
+        budget.bodies_geometry_rejected += 1
+        budget.completions_tried += 3
+        budget.geometry_reasons["trace_clearance"] += 1
+        return None
+
+    _stub(monkeypatch, departures=[_departure((1, 0), 3), _departure((-1, 0), 3)], landings=["a"])
+    monkeypatch.setattr(pair_construction, "complete_departures", fake_complete)
+    monkeypatch.setattr(pair_construction, "time", SimpleNamespace(monotonic=lambda: 0))
+    budget = ConstructionBudget(deadline=1, iterations_remaining=64, bodies_remaining=16)
+    assert _run(budget, max_landings=1, max_bodies_per_departure=8) is None
+    assert budget.departures_found == 2
+    assert budget.landings_found == 2
+    assert budget.bodies_built == 4
+    assert budget.bodies_geometry_rejected == 2
+    assert budget.completions_tried == 6
+    assert budget.geometry_reasons == {"trace_clearance": 2}
+    assert budget.stage_summary() == (
+        "departures=2 landings=2 bodies=16 built=4 geom_rejected=2 completions=6 "
+        "geom_reasons={'trace_clearance': 2}"
+    )
+
+
+def test_geometry_reasons_are_reported_most_frequent_first():
+    budget = ConstructionBudget(deadline=1, iterations_remaining=1, bodies_remaining=1)
+    budget.geometry_reasons.update(
+        {"via_clearance": 3, "trace_clearance": 40, "pad_clearance": 3, "disconnected": 7}
+    )
+    assert budget.stage_summary().endswith(
+        "geom_reasons={'trace_clearance': 40, 'disconnected': 7, "
+        "'pad_clearance': 3, 'via_clearance': 3}"
+    )
+
+
+def test_no_validated_departure_is_distinguishable_from_no_landing(monkeypatch):
+    """Both spend zero bodies; only the tally separates them."""
+    _stub(monkeypatch, departures=[], landings=["a"], clock=[0])
+    starved = ConstructionBudget(deadline=1, iterations_remaining=64, bodies_remaining=16)
+    assert _run(starved) is None
+    assert starved.departures_found == 0 and starved.landings_found == 0
+    assert starved.bodies_used == 0
+
+    _stub(monkeypatch, departures=[_departure((1, 0), 3)], landings=[], clock=[0])
+    landless = ConstructionBudget(deadline=1, iterations_remaining=64, bodies_remaining=16)
+    assert _run(landless) is None
+    assert landless.departures_found == 1 and landless.landings_found == 0
+    assert landless.bodies_used == 0
+
+
 def test_native_charges_survive_a_raising_stage(monkeypatch):
     def explode(finder, pads, budget):
         budget.iterations_used += 7

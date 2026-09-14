@@ -10713,11 +10713,19 @@ class DiffPairRouter:
                         board_thickness_mm=thickness,
                         num_copper_layers=self.autorouter.grid.num_layers,
                     )
+                    # Issue #5333: report the STAGE tally, not just the total
+                    # spend.  ``bodies=0`` alone cannot distinguish "no escape
+                    # validated natively" from "no mutually clear landing",
+                    # and an exhausted ledger cannot distinguish "the shape
+                    # lattice ran out" from "every body collided with copper
+                    # committed by an earlier pair".  Those are different
+                    # defects with different fixes, so the per-pair line has to
+                    # name which one fired.
                     print(
                         "    [coupled-construction] "
                         f"success={result is not None} "
                         f"native_iters={budget.iterations_used} "
-                        f"bodies={budget.bodies_used}"
+                        f"{budget.stage_summary()}"
                     )
                     if result is not None:
                         coupled_phase = "construction"

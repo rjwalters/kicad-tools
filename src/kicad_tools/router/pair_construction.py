@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import itertools
 import time
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .body_search import BodySearchBudget, complete_departures
@@ -40,6 +41,15 @@ class ConstructionBudget:
     only its own prefix length plus a small constant); ``bodies_remaining``
     caps the geometric shape attempts.  Both are debited in place so a caller
     can audit the true spend after the fact.
+
+    The trailing counters are a diagnostic tally, never an input: they record
+    which stage consumed the allowance so a failed construction can be
+    classified without re-running it.  ``departures_found`` is the number of
+    natively validated escapes, ``landings_found`` the number of mutually
+    clear goal-barrel plans offered across those escape directions, and the
+    three body counters split ``bodies_used`` into geometry that was built,
+    geometry rejected against committed/reserved copper, and terminal
+    completions attempted.
     """
 
     deadline: float
@@ -47,6 +57,25 @@ class ConstructionBudget:
     bodies_remaining: int
     iterations_used: int = 0
     bodies_used: int = 0
+    departures_found: int = 0
+    landings_found: int = 0
+    bodies_built: int = 0
+    bodies_geometry_rejected: int = 0
+    completions_tried: int = 0
+    geometry_reasons: Counter[str] = field(default_factory=Counter)
+
+    def stage_summary(self) -> str:
+        """One-line tally of where this pair's construction allowance went."""
+        reasons = dict(sorted(self.geometry_reasons.items(), key=lambda kv: (-kv[1], kv[0])))
+        return (
+            f"departures={self.departures_found} "
+            f"landings={self.landings_found} "
+            f"bodies={self.bodies_used} "
+            f"built={self.bodies_built} "
+            f"geom_rejected={self.bodies_geometry_rejected} "
+            f"completions={self.completions_tried} "
+            f"geom_reasons={reasons}"
+        )
 
 
 def construct_pair_routes(
@@ -81,6 +110,7 @@ def construct_pair_routes(
     ):
         return None
     departures = _validated_departures(finder, pads, budget, max_departures)
+    budget.departures_found = len(departures)
     if not departures:
         return None
     for outward, group in _by_escape_direction(departures):
@@ -90,6 +120,7 @@ def construct_pair_routes(
             router, finder, pads, outward=outward, deadline=budget.deadline
         )
         for landing in itertools.islice(landings, max_landings):
+            budget.landings_found += 1
             if time.monotonic() >= budget.deadline or budget.bodies_remaining <= 0:
                 return None
             portion = BodySearchBudget(
@@ -113,6 +144,10 @@ def construct_pair_routes(
             finally:
                 budget.bodies_remaining -= portion.bodies_used
                 budget.bodies_used += portion.bodies_used
+                budget.bodies_built += portion.bodies_built
+                budget.bodies_geometry_rejected += portion.bodies_geometry_rejected
+                budget.completions_tried += portion.completions_tried
+                budget.geometry_reasons.update(portion.geometry_reasons)
             if result is not None:
                 return result
     return None
