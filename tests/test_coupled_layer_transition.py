@@ -144,7 +144,9 @@ def test_joint_search_cannot_cross_a_barrier_that_requires_a_via():
     """
     for budget in (20000, 200000):
         _, finder, _, pads = fixture(barrier=True)
-        assert finder.route_coupled(*pads, timeout_seconds=120.0, max_iterations_budget=budget) is None
+        assert (
+            finder.route_coupled(*pads, timeout_seconds=120.0, max_iterations_budget=budget) is None
+        )
         path = finder.last_best_cpp_path or []
         assert path, "expected a saved partial path"
         start_layer = finder.grid.layer_to_index(pads[0].layer.value)
