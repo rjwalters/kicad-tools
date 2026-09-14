@@ -149,6 +149,32 @@ def render_markdown(
                 "-- connectivity, copper and check measurements describe the pre-route input. Runtime measures the routing attempt."
             )
 
+    placement_reports = [r for r in reports if r.placement_disposition is not None]
+    if placement_reports:
+        lines.extend(["", "**Placement disposition for this attempt**", ""])
+        for report in placement_reports:
+            placement = report.placement_disposition
+            assert placement is not None
+            data = placement.to_dict()
+            lines.append(
+                f"- `{report.board_id}` ({report.protocol}): {data['status']}; "
+                f"{data['nets_requested']} requested, {data['nets_eligible']} eligible, "
+                f"{data['nets_completed']} completed, {data['nets_placement_blocked']} "
+                "requested placement-blocked. Physical connectivity above is measured separately."
+            )
+            for key, label in [
+                ("invalid_references", "Invalid footprint references"),
+                ("direct_invalid_nets", "Direct: placement-invalid, not attempted"),
+                ("coupled_invalid_nets", "Coupled: placement-invalid, not attempted"),
+                ("user_excluded_nets", "Intentional user exclusions"),
+                ("plane_excluded_nets", "Plane/pour exclusions"),
+                ("unrequested_nets", "Unrequested nets"),
+            ]:
+                if data[key]:
+                    lines.append(
+                        f"  {label}: " + ", ".join(f"`{name}`" for name in data[key]) + "."
+                    )
+
     legacy = [r for r in reports if r.route_outcome is None]
     if legacy:
         lines.extend(["", "**Legacy reports (outcome/artifact provenance not tracked)**", ""])

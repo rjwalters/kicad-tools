@@ -2368,6 +2368,75 @@ def validate_routes(
         threshold = getattr(rules, "fine_pitch_threshold", None)
         return pitch is not None and threshold is not None and pitch < threshold
 
+    fixed = getattr(getattr(router, "grid", None), "fixed_fills", None)
+    if fixed:
+        from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
+
+        for route in router.routes:
+            name = route.net_name or _resolve_net_name(route.net)
+            klass = ncm.get(name) if ncm else None
+            gap = klass.clearance if klass else clearance
+            candidates: list[
+                tuple[int, float, float, float, float, float, tuple[int, ...], float, Layer]
+            ] = [
+                (
+                    i,
+                    seg.x1,
+                    seg.y1,
+                    seg.x2,
+                    seg.y2,
+                    seg.width / 2,
+                    (router.grid.layer_to_index(seg.layer.value),),
+                    gap,
+                    seg.layer,
+                )
+                for i, seg in enumerate(route.segments)
+            ]
+            for via in route.vias:
+                lo, hi = sorted(router.grid.layer_to_index(layer.value) for layer in via.layers)
+                candidates.append(
+                    (
+                        -1,
+                        via.x,
+                        via.y,
+                        via.x,
+                        via.y,
+                        via.diameter / 2,
+                        tuple(range(lo, hi + 1)),
+                        via_clear,
+                        via.layers[0],
+                    )
+                )
+            for index, x1, y1, x2, y2, half, layers, query_gap, layer in candidates:
+                geom = Point(x1, y1) if (x1, y1) == (x2, y2) else LineString(((x1, y1), (x2, y2)))
+                for fill in fixed.fills:
+                    if fill.layer not in layers:
+                        continue
+                    distance = geom.distance(fill.geometry) - half
+                    required = max(query_gap, fill.clearance)
+                    if (
+                        geom.intersects(fill.geometry)
+                        or distance < required - _CLEARANCE_EPSILON_MM
+                    ):
+                        violations.append(
+                            ClearanceViolation(
+                                segment_index=index,
+                                x1=x1,
+                                y1=y1,
+                                x2=x2,
+                                y2=y2,
+                                net=route.net,
+                                net_name=name,
+                                obstacle_type="fixed_copper",
+                                obstacle_net=fill.source_net_id,
+                                obstacle_net_name=fill.source_net,
+                                distance=distance,
+                                required=required,
+                                location=(x1, y1),
+                                layer=layer,
+                            )
+                        )
+
     # Check each route segment against pads of different nets
     for route_idx, route in enumerate(router.routes):
         route_net = route.net
@@ -4157,27 +4226,30 @@ def load_pcb_for_routing(
         preserved_blocks: list[tuple[int, str]] = []
         expected_geometry: dict[tuple[str, str], int] = {}
         zone_blocks = _extract_balanced_blocks(pcb_text, "zone") if preserve_placement else []
+        preserved_zones = []
         for _start, _end, zone in zone_blocks:
             identity = resolve_block_net(zone, id_to_name, net_map)
-            if (
-                identity is not None
-                and identity[1] in preserve_placement
-                and re.search(r"\((?:filled_polygon|fill_segments)\b", zone)
-            ):
-                raise ValueError(
-                    f"Cannot preserve placement-invalid net {identity[1]!r}: "
-                    "filled zone copper is not supported as a routing obstacle"
-                )
+            if identity is not None and identity[1] in preserve_placement:
+                preserved_zones.append(zone)
+        # Source zones are already retained by the writer. This handoff tells
+        # consumers which exact blocks must survive refills/checkpoints; never
+        # append them again alongside placement_preserved_copper.
+        router.placement_preserved_zones = tuple(preserved_zones)
+        from .fixed_copper import load_fixed_fills
+
+        router.grid.install_fixed_fills(
+            load_fixed_fills(pcb_path, preserve_placement, router.grid, router.net_class_map)
+        )
         for kind in ("segment", "via", "arc") if preserve_placement else ():
             for start, _end, block in _extract_balanced_blocks(pcb_text, kind):
                 identity = resolve_block_net(block, id_to_name, net_map)
                 if identity is None or identity[1] not in preserve_placement:
                     continue
                 if kind == "arc":
-                    raise ValueError(
-                        f"Cannot preserve placement-invalid net {identity[1]!r}: "
-                        "arc copper is not supported as a routing obstacle"
-                    )
+                    # Like zones, authored arcs survive the writer's strip of
+                    # straight tracks/vias; do not append and duplicate them.
+                    router.placement_preserved_arcs += (block,)
+                    continue
                 preserved_blocks.append((start, block))
                 key = (kind, identity[1])
                 expected_geometry[key] = expected_geometry.get(key, 0) + 1

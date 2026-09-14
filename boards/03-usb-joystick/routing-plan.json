@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "physical_sha256": "e085799ad4a71a7069291f23a5083e35e11e5cc6c1da4b86af1a61b7867cae92",
-  "description": "Revision B fixed-placement copper, manually completed, USB pair repaired, and 45-degree aligned",
+  "description": "Revision B fixed-placement copper, manually completed, USB pair repaired, and 45-degree aligned; C10/U2 plane stitches and VCC supply bridge (#5358)",
   "required_factory_options": {
     "layers": 4,
     "stackup": "JLC7628",
@@ -2219,7 +2219,11 @@
     "(segment\n\t(start 148.325 79.1)\n\t(end 148.1 79.325)\n\t(width 0.2)\n\t(layer \"F.Cu\")\n\t(net \"USB_MCU_D+\")\n\t(uuid \"04f470b5-2d7b-48b8-aa2c-d81cdae1bf94\")\n)",
     "(segment\n\t(start 147.95 76.125)\n\t(end 148.325 76.5)\n\t(width 0.2)\n\t(layer \"F.Cu\")\n\t(net \"USB_MCU_D+\")\n\t(uuid \"59ddd9b9-16da-59c7-9863-2b337d0c060a\")\n)",
     "(segment\n\t(start 147.95 76.01)\n\t(end 147.95 76.125)\n\t(width 0.2)\n\t(layer \"F.Cu\")\n\t(net \"USB_MCU_D+\")\n\t(uuid \"68dfe283-b314-4333-8967-42174bec1c2b\")\n)",
-    "(segment\n\t(start 148.325 76.5)\n\t(end 148.325 79.1)\n\t(width 0.2)\n\t(layer \"F.Cu\")\n\t(net \"USB_MCU_D+\")\n\t(uuid \"cf04e7ab-f337-4442-84bc-cc29a81ad871\")\n)"
+    "(segment\n\t(start 148.325 76.5)\n\t(end 148.325 79.1)\n\t(width 0.2)\n\t(layer \"F.Cu\")\n\t(net \"USB_MCU_D+\")\n\t(uuid \"cf04e7ab-f337-4442-84bc-cc29a81ad871\")\n)",
+    "(segment\n\t(start 152.1625 79.5)\n\t(end 152.75 79.5)\n\t(width 0.5)\n\t(layer \"F.Cu\")\n\t(net \"VCC\")\n\t(uuid \"bd20af1e-c604-4faa-a8f0-a0cdb07e08fb\")\n)",
+    "(via\n\t(at 131.275 89.5)\n\t(size 0.6)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(net \"GND\")\n\t(uuid \"4d7efcaa-7743-47ce-b165-4c12c2769b74\")\n)",
+    "(via\n\t(at 146.5 66.8625)\n\t(size 0.6)\n\t(drill 0.3)\n\t(layers \"F.Cu\" \"B.Cu\")\n\t(net \"GND\")\n\t(uuid \"0d641117-365d-4d1a-9e09-dea048a05a5b\")\n)",
+    "(segment\n\t(start 147.68 105.47)\n\t(end 155.68 105.47)\n\t(width 0.5)\n\t(layer \"F.Cu\")\n\t(net \"VCC\")\n\t(uuid \"76e0026b-4b86-4b73-bef2-2816504e4368\")\n)"
   ],
   "silkscreen": {
     "C2": [

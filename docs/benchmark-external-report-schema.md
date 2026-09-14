@@ -343,3 +343,68 @@ that did not exist yet. Those files are never rewritten to backfill them
   `completion.completion_pct` in those files was always correct (in the
   30s for both boards) — only the prose in `notes` was misleading. Current
   code's own generated notes no longer make that claim.
+
+### `placement_disposition` (additive, issue #5347)
+
+`null` (or absent in older reports) means this attempt did not supply placement
+metadata. It does **not** mean valid placement. An object with
+`check_available: false` and `status: "unavailable"` explicitly records that the
+placement check was unavailable; an empty invalid-net list in that object is
+not evidence of clean placement. Supported-geometry loader refusal still uses
+the existing nonzero/no-output outcome, never an inferred successful route.
+
+The route callback can return `router.reporting.RouteAttemptResult(exit_code,
+placement_disposition)` instead of an integer. Its optional disposition is the
+frozen `placement.routing.RoutingPlacementDisposition` contract. Benchmark
+collection retains this value only for that invocation, including all-invalid
+attempts without output; integer callbacks retain their existing behavior. No
+sidecar discovery, human diagnostic parsing, or process-global metadata is used.
+This is dormant reporting support; default partial routing is activated by
+separate integration work (#5348), not by this field.
+
+| Field | Meaning |
+|---|---|
+| `check_available` | Whether placement checking was available for this attempt |
+| `status` | `valid`, `placement_invalid`, or `unavailable` |
+| `invalid_references` | Footprint references with placement errors |
+| `direct_invalid_nets` | Named nets directly affected by invalid footprints |
+| `coupled_invalid_nets` | Named partners excluded through active coupling constraints |
+| `invalid_net_status` | `placement-invalid, not attempted` for these invalid nets |
+| `requested_nets` / `nets_requested` | Original requests, before placement exclusion, after intentional user/plane exclusions |
+| `eligible_nets` / `nets_eligible` | Requests eligible for routing after placement exclusion |
+| `completed_nets` / `nets_completed` | Eligible requests physically complete in this attempt's output; empty without output |
+| `requested_blocked_nets` / `nets_placement_blocked` | Requested direct or coupled invalid nets; never counted completed |
+| `user_excluded_nets` | Intentional user skips, distinct from placement failures |
+| `plane_excluded_nets` | Plane/pour skips, distinct from placement failures |
+| `unrequested_nets` | Nets outside the selected population |
+| `clean_success` | All requested nets complete, no requested placement errors, and placement check available; **not** a DRC/manufacturing verdict |
+
+Name lists are sorted. Invalid nets remain visible even when intentionally
+excluded or unrequested; only their intersection with original requests blocks
+routing-population success. A permissive routing completion threshold cannot
+turn requested placement errors into success. Internal pad identities and
+preserved-copper bindings are not serialized.
+
+`completion`, `copper`, `pre_route_completion`, and `newly_routed_connections`
+continue to measure the actual exported board/fallback input, independently of
+these routing populations. In particular, pre-existing physically connected
+copper on a placement-blocked net remains measured copper/connectivity but is
+never a completed routing request. A nonzero attempt with a valid output remains
+`partial`; even exit zero with 100% physical connectivity remains `partial` if
+requested placement errors remain. Unavailable placement checking preserves the
+existing permissive routing outcome policy while explicitly reporting unavailable
+placement assurance (`clean_success: false`); it does not create a new routing
+failure. Timeout/preflight/exception classifications and backend timing eligibility
+remain unchanged. Purely additive fields retain schema version 1.
+
+For routing diagnostics with placement metadata, `nets_routed` retains its
+connected/completed-net meaning and agrees with `nets_completed` over the
+original requested population. Valid single-pad requests are trivially complete;
+retained existing copper can also complete a request without a newly created
+route. Such diagnostic entries have `status: "already_connected"` and zero new
+`length_mm`/vias, and `nets_completed_without_new_routes` counts them explicitly.
+`total_nets_on_board` is the distinct named board population, so single-pad
+requests already included in `nets_requested` are never added a second time.
+Requested placement-invalid single-pad/coupled nets remain blocked even though
+physical benchmark connectivity can report them trivially complete. Metadata-
+absent callers retain the historical multi-pad denominator and single-pad count.

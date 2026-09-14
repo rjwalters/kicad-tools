@@ -12,6 +12,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <map>
 
 namespace router {
 
@@ -19,6 +20,25 @@ class Grid3D {
 public:
     Grid3D(int cols, int rows, int layers, float resolution,
            float origin_x, float origin_y);
+
+    using FillRing = std::vector<std::pair<double, double>>;
+    struct FillEdge { double ax, ay, bx, by; };
+    struct FixedFill {
+        int layer;
+        double clearance;
+        std::vector<FillRing> rings;
+        double minx, miny, maxx, maxy;
+        std::vector<FillEdge> edges;
+        // One-mm bins: horizontal rows accelerate even-odd containment;
+        // two-dimensional bins accelerate exact edge-distance queries.
+        std::map<int, std::vector<size_t>> rows;
+        std::map<std::pair<int, int>, std::vector<size_t>> bins;
+    };
+    void clear_fixed_fills() { fixed_fills_.clear(); }
+    void add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings);
+    bool fixed_fill_clear(double ax, double ay, double bx, double by,
+                          int layer, double half, double reach) const;
+    bool has_fixed_fills() const { return !fixed_fills_.empty(); }
 
     // Cell access - inline for performance
     inline GridCell& at(int x, int y, int layer) {
@@ -439,6 +459,7 @@ private:
     // Geometric validation storage (Issue #2439)
     std::vector<PadInfo> pads_;
     std::vector<StoredSegment> stored_segments_;
+    std::vector<FixedFill> fixed_fills_;
     std::vector<StoredVia> stored_vias_;
 
     // Pairwise (HV-isolation) domain clearance storage (Issue #4510).

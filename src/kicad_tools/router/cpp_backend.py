@@ -836,6 +836,15 @@ class CppGrid:
         # (Issue #2439: C++ geometric validation)
         self._synced_route_count: int = 0
 
+    def install_fixed_fills(self, fills) -> None:
+        if not hasattr(self._impl, "add_fixed_fill"):
+            if fills:
+                raise RuntimeError("Rebuild native router: fixed filled-copper support required")
+            return
+        self._impl.clear_fixed_fills()
+        for layer, clearance, rings in fills.native_polygons():
+            self._impl.add_fixed_fill(layer, clearance, rings)
+
     @classmethod
     def from_routing_grid(cls, grid: RoutingGrid) -> CppGrid:
         """Create a CppGrid from an existing RoutingGrid."""
@@ -850,6 +859,7 @@ class CppGrid:
 
         # Store reference to original Python grid for post-route validation
         cpp_grid._py_grid = grid
+        cpp_grid.install_fixed_fills(grid.fixed_fills)
 
         # Issue #2481: Establish the back-reference from the Python grid
         # to this CppGrid so ``RoutingGrid.unmark_route`` can invalidate
@@ -2200,6 +2210,8 @@ class CppPathfinder:
         # fallback on a stale .so without the #4511 setter).
         if hasattr(self._impl, "set_search_pair_widths"):
             self._impl.set_search_pair_widths(net_trace_width / 2.0, net_via_size / 2.0)
+        if hasattr(self._impl, "set_search_fill_clearances"):
+            self._impl.set_search_fill_clearances(net_trace_clearance, self._rules.via_clearance)
 
         try:
             result = self._impl.route_resumable(
@@ -2949,6 +2961,20 @@ class CppPathfinder:
             from .grid import _sync_pad_via_policies
 
             _sync_pad_via_policies(py_grid, self._grid)
+
+        if py_grid is not None and py_grid.fixed_fills:
+            fill_class = self._net_class_map.get(start.net_name)
+            fill_clearance = fill_class.clearance if fill_class else self._rules.trace_clearance
+            for segment in route.segments:
+                layer = py_grid.layer_to_index(segment.layer.value)
+                if not py_grid.fixed_fills.segment_clear(
+                    (segment.x1, segment.y1),
+                    (segment.x2, segment.y2),
+                    layer,
+                    segment.width / 2,
+                    fill_clearance,
+                ):
+                    return (segment.x1, segment.y1)
 
         vresult = self._grid._impl.validate_route(
             cpp_segs,

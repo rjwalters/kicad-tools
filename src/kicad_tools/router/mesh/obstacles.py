@@ -101,10 +101,19 @@ class ObstacleModel:
         outline: list[Pt],
         keepouts: list[Rect],
         pours: list[list[Pt]] | None = None,
+        *,
+        fixed_fills=None,
+        layer: int = 0,
+        half: float = 0.0,
+        clearance: float = 0.0,
     ) -> None:
         self.outline = outline
         self.keepouts = keepouts
         self.pours = pours or []
+        self.fixed_fills = fixed_fills
+        self.layer = layer
+        self.half = half
+        self.clearance = clearance
 
     def is_clear(self, a: Pt, b: Pt) -> bool:
         """True if straight leg ``a-b`` is inside the board and clears keep-outs.
@@ -112,6 +121,14 @@ class ObstacleModel:
         This is the exact predicate the 45-fit checks each dogleg leg against
         (the generalised ``subgrid.py:1004-1030`` per-leg obstacle consult).
         """
+        if self.fixed_fills and not self.fixed_fills.segment_clear(
+            a,
+            b,
+            self.layer,
+            self.half,
+            self.clearance,
+        ):
+            return False
         if self.outline and not (
             point_in_polygon(a, self.outline) and point_in_polygon(b, self.outline)
         ):

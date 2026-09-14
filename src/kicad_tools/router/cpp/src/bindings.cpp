@@ -208,6 +208,9 @@ NB_MODULE(router_cpp, m) {
         // foreign pad copper.  Defaults to ``false`` so existing callers
         // that mark obstacle cells (board outline, copper-pour clearance
         // halos) preserve their pre-#3224 behavior.
+        .def("clear_fixed_fills", &Grid3D::clear_fixed_fills)
+        .def("add_fixed_fill", &Grid3D::add_fixed_fill)
+        .def("fixed_fill_clear", &Grid3D::fixed_fill_clear)
         .def("mark_blocked", &Grid3D::mark_blocked,
              "x"_a, "y"_a, "layer"_a, "net"_a, "is_obstacle"_a = false,
              "pad_blocked"_a = false)
@@ -530,6 +533,7 @@ NB_MODULE(router_cpp, m) {
              "zero-overflow hard failure can produce a min-conflict probe "
              "path whose crossed owner nets feed the targeted rip-up.")
         .def_prop_ro("relief_mode", &Pathfinder::relief_mode)
+        .def("set_search_fill_clearances", &Pathfinder::set_search_fill_clearances)
         .def("set_search_pair_widths", &Pathfinder::set_search_pair_widths,
              "trace_half_width_mm"_a, "via_half_diam_mm"_a,
              "Issue #4511 / Epic #4431 Phase 2b: set the routing net's copper "
@@ -614,6 +618,7 @@ NB_MODULE(router_cpp, m) {
     // the string-keyed rejection histogram out of the C++ search (previously
     // Python-only), surfaced on ``CoupledRouteResult::rejections``.
     nb::class_<CoupledPathfinder>(m, "CoupledPathfinder")
+        .def("set_fill_rail_dimensions", &CoupledPathfinder::set_fill_rail_dimensions)
         // Issue #4485: like ``Pathfinder``, ``CoupledPathfinder`` holds a bare
         // ``Grid3D& grid_`` reference, so the grid argument must outlive the
         // pathfinder.  ``keep_alive<1, 2>`` ties the grid (patient, arg index

@@ -926,3 +926,155 @@ class TestPartialRouteHeadline:
         assert "Nets routed: 1/4" in output
         assert "Partial routes: 2/4" in output
         assert "Unrouted: 1/4" in output
+
+
+class TestPlacementDispositionDiagnostics:
+    def test_mixed_original_population_and_permissive_threshold(self):
+        from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+        router = _make_router(routes=[_route(1), _route(2)])
+        router.placement_disposition = RoutingPlacementDisposition(
+            all_nets=frozenset({"GOOD", "BAD", "PAIR", "SKIP"}),
+            invalid_references=frozenset({"U1"}),
+            direct_invalid_nets=frozenset({"BAD", "SKIP"}),
+            coupled_invalid_nets=frozenset({"PAIR"}),
+            requested_nets=frozenset({"GOOD", "BAD", "PAIR"}),
+            user_excluded_nets=frozenset({"SKIP"}),
+        )
+        data = get_routing_diagnostics_json(
+            router,
+            {"GOOD": 1, "BAD": 2, "PAIR": 3, "SKIP": 4},
+            nets_to_route=1,
+            nets_to_route_ids={1},
+            min_completion=0.1,
+        )
+        assert data["summary"]["nets_requested"] == 3
+        assert data["summary"]["nets_eligible"] == 1
+        assert data["summary"]["nets_routed"] == 1
+        assert data["summary"]["nets_placement_blocked"] == 2
+        assert data["summary"]["clean_success"] is False
+        placement = data["placement_disposition"]
+        assert placement["invalid_references"] == ["U1"]
+        assert placement["direct_invalid_nets"] == ["BAD", "SKIP"]
+        assert placement["coupled_invalid_nets"] == ["PAIR"]
+        assert placement["user_excluded_nets"] == ["SKIP"]
+        assert {f["net_name"] for f in data["failed_routes"]} == {"BAD", "PAIR"}
+        assert all(f["status"] == "not_attempted" for f in data["failed_routes"])
+        assert all(f["failure_cause"] == "placement_invalid" for f in data["failed_routes"])
+
+    def test_all_invalid_and_unrequested_invalid(self):
+        from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+        router = _make_router()
+        router.placement_disposition = RoutingPlacementDisposition(
+            invalid_references=frozenset({"U1"}),
+            direct_invalid_nets=frozenset({"BAD", "UNREQUESTED"}),
+            requested_nets=frozenset({"BAD"}),
+            unrequested_nets=frozenset({"UNREQUESTED"}),
+        )
+        data = get_routing_diagnostics_json(router, {}, nets_to_route=0)
+        assert data["summary"]["nets_requested"] == 1
+        assert data["summary"]["nets_eligible"] == 0
+        assert data["summary"]["nets_routed"] == 0
+        assert data["summary"]["success_rate"] == 0
+        assert data["summary"]["clean_success"] is False
+        assert data["placement_disposition"]["unrequested_nets"] == ["UNREQUESTED"]
+        assert data["failed_routes"][0]["net_name"] == "BAD"
+
+
+def _route(net):
+    from kicad_tools.router.primitives import Route
+
+    return Route(net=net, net_name=f"Net{net}")
+
+
+def test_unrequested_invalid_nets_do_not_fail_eligible_requests():
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+    router = _make_router(routes=[_route(1)])
+    router.placement_disposition = RoutingPlacementDisposition(
+        invalid_references=frozenset({"U1"}),
+        direct_invalid_nets=frozenset({"BAD", "PLANE"}),
+        requested_nets=frozenset({"GOOD"}),
+        unrequested_nets=frozenset({"BAD"}),
+        plane_excluded_nets=frozenset({"PLANE"}),
+    )
+    data = get_routing_diagnostics_json(router, {"GOOD": 1, "BAD": 2}, 1)
+    assert data["summary"]["nets_requested"] == data["summary"]["nets_routed"] == 1
+    assert data["summary"]["nets_placement_blocked"] == 0
+    assert data["summary"]["clean_success"] is True
+    assert data["failed_routes"] == []
+    assert data["placement_disposition"]["plane_excluded_nets"] == ["PLANE"]
+    assert data["placement_disposition"]["status"] == "placement_invalid"
+
+
+def test_unavailable_and_absent_placement_metadata_are_distinct():
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+    router = _make_router(routes=[_route(1)])
+    legacy = get_routing_diagnostics_json(router, {"GOOD": 1}, 1)
+    assert "placement_disposition" not in legacy
+    router.placement_disposition = RoutingPlacementDisposition(
+        requested_nets=frozenset({"GOOD"}),
+        check_available=False,
+    )
+    data = get_routing_diagnostics_json(router, {"GOOD": 1}, 1, min_completion=0)
+    assert data["placement_disposition"]["status"] == "unavailable"
+    assert data["summary"]["clean_success"] is False
+    assert data["summary"]["nets_routed"] == 1
+
+
+def test_adaptive_result_preserves_blocked_population():
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+    from kicad_tools.router.adaptive import RoutingResult
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.reporting import RoutingPlacementReport
+
+    disposition = RoutingPlacementDisposition(
+        requested_nets=frozenset({"GOOD", "BAD"}),
+        direct_invalid_nets=frozenset({"BAD"}),
+    )
+    result = RoutingResult(
+        routes=[_route(1), _route(2)],
+        layer_count=2,
+        layer_stack=LayerStack.two_layer(),
+        nets_requested=1,
+        nets_routed=2,
+        overflow=0,
+        converged=True,
+        iterations_used=1,
+        statistics={},
+        placement_report=RoutingPlacementReport(disposition, frozenset({"GOOD", "BAD"})),
+    )
+    assert result.nets_requested == 2
+    assert result.nets_eligible == 1
+    assert result.nets_routed == 1
+    assert result.nets_placement_blocked == 1
+    assert result.success_rate == 0.5
+    assert result.converged is False
+
+
+def test_adaptive_unavailable_placement_does_not_impose_new_failure():
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+    from kicad_tools.router.adaptive import RoutingResult
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.reporting import RoutingPlacementReport
+
+    disposition = RoutingPlacementDisposition(
+        requested_nets=frozenset({"GOOD"}), check_available=False
+    )
+    result = RoutingResult(
+        routes=[_route(1)],
+        layer_count=2,
+        layer_stack=LayerStack.two_layer(),
+        nets_requested=1,
+        nets_routed=1,
+        overflow=0,
+        converged=True,
+        iterations_used=1,
+        statistics={},
+        placement_report=RoutingPlacementReport(disposition, frozenset({"GOOD"})),
+    )
+    assert result.converged is True
+    assert result.success_rate == 1
+    assert result.placement_report.to_dict()["status"] == "unavailable"
