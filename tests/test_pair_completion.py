@@ -477,3 +477,65 @@ def test_qualify_constructed_pair_rejects_a_raw_result_that_misses_skew_toleranc
     )
     assert result is None
     assert reasons == {"skew_tolerance": 1}
+
+
+def test_qualify_debug_prints_the_numeric_skew_miss_when_enabled(monkeypatch, capsys):
+    """#5333: the ``reasons`` counter only ever records that a candidate
+    missed ``skew_tolerance``, never by how much -- so a near-miss (a small
+    tuning/budget change might clear it) is indistinguishable from one that
+    misses by a wide margin (only a genuinely different search can clear
+    it, as measured on Board07's MIPI_DAT0: 1.75mm over a 0.05mm tolerance,
+    35x over). ``KCT_QUALIFY_DEBUG`` exists so a session investigating a
+    corridor-guided rejection can see the exact numbers without a one-off
+    hand-instrumented replay. Off by default (module-level flag mirrors
+    ``pair_construction._CORRIDOR_DEBUG``'s env-var convention) -- this test
+    monkeypatches the already-imported flag directly rather than re-running
+    under a real env var, since the flag is read once at import time.
+    """
+    import kicad_tools.router.pair_completion as pc
+
+    auto, finder, pair, pads, body, sites = case()
+    good = complete_pair_body(
+        auto._diffpair,
+        finder,
+        pair,
+        pads,
+        body,
+        deadline=time.monotonic() + 5,
+        board_thickness_mm=1.6,
+        num_copper_layers=2,
+        allowed_via_sites=sites,
+    )
+    assert good is not None
+
+    def fake_tune(detected, corpus, **kwargs):
+        return good[0], good[1], False
+
+    monkeypatch.setattr(pc, "tune_diff_pair_skew", fake_tune)
+
+    lengths = iter([10.0, 10.2])
+
+    class _FakeTracker:
+        @staticmethod
+        def _measure_route_total(*args, **kwargs):
+            return next(lengths)
+
+    monkeypatch.setattr(pc, "MatchGroupTracker", _FakeTracker)
+    monkeypatch.setattr(pc, "_QUALIFY_DEBUG", True)
+
+    result = qualify_constructed_pair(
+        auto._diffpair,
+        finder,
+        pair,
+        pads,
+        good,
+        board_thickness_mm=1.6,
+        num_copper_layers=2,
+        deadline=time.monotonic() + 5,
+    )
+    assert result is None
+    out = capsys.readouterr().out
+    assert "[qualify-debug] skew_tolerance miss" in out
+    assert "skew=0.2000mm" in out
+    assert "tolerance=0.0500mm" in out
+    assert "over_by=0.1500mm" in out

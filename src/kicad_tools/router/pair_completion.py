@@ -38,6 +38,22 @@ if TYPE_CHECKING:
 # per-pair budget stays split across landings instead of being spent by one.
 WIDEN_FALLBACK_ATTEMPTS: int = int(os.environ.get("KCT_WIDEN_FALLBACK_ATTEMPTS", "40"))
 
+# Issue #5333: opt-in diagnostic for the ``skew_tolerance`` / ``coupling_threshold``
+# rejection branches in :func:`qualify_constructed_pair`. The ``reasons`` counter
+# a caller passes in only ever records that a candidate missed one of these two
+# authored limits, never by how much -- so a corridor-guided candidate that is a
+# near-miss (a small tuning/budget change might clear it) is indistinguishable
+# from one that misses by a wide margin (only a genuinely different search can
+# clear it). Measured on Board07 MIPI_DAT0 (seed 42, native ABI 31): the raw
+# corridor result's P/N length differed by 1.75mm against a 0.05mm tolerance --
+# 35x over, clearly the "different search needed" case -- but that number only
+# surfaced because a session hand-instrumented a one-off replay; it was never
+# visible from the token alone on a normal run. Off by default; matches this
+# module's existing convention for measurement-only knobs (mirrors
+# ``pair_construction._CORRIDOR_DEBUG``). Diagnostic only -- never changes
+# which route ships or how a candidate is scored.
+_QUALIFY_DEBUG: bool = os.environ.get("KCT_QUALIFY_DEBUG", "0") == "1"
+
 
 @dataclass
 class WidenBudget:
@@ -245,17 +261,31 @@ def qualify_constructed_pair(
         )
         for r in (p, n)
     ]
-    if abs(lengths[0] - lengths[1]) > nc.effective_skew_tolerance():
+    skew = abs(lengths[0] - lengths[1])
+    skew_tolerance = nc.effective_skew_tolerance()
+    if skew > skew_tolerance:
         reasons["skew_tolerance"] += 1
+        if _QUALIFY_DEBUG:
+            print(
+                f"    [qualify-debug] skew_tolerance miss: skew={skew:.4f}mm "
+                f"tolerance={skew_tolerance:.4f}mm over_by={skew - skew_tolerance:.4f}mm",
+                flush=True,
+            )
         return None
-    if (
-        min(
-            router._tail_coupled_fraction(p, n.segments),
-            router._tail_coupled_fraction(n, p.segments),
-        )
-        < nc.effective_coupled_continuity_threshold()
-    ):
+    coupled_fraction = min(
+        router._tail_coupled_fraction(p, n.segments),
+        router._tail_coupled_fraction(n, p.segments),
+    )
+    coupling_threshold = nc.effective_coupled_continuity_threshold()
+    if coupled_fraction < coupling_threshold:
         reasons["coupling_threshold"] += 1
+        if _QUALIFY_DEBUG:
+            print(
+                f"    [qualify-debug] coupling_threshold miss: "
+                f"coupled_fraction={coupled_fraction:.4f} threshold={coupling_threshold:.4f} "
+                f"short_by={coupling_threshold - coupled_fraction:.4f}",
+                flush=True,
+            )
         return None
     final_issue = constructed_pair_geometry_issue(
         router,
