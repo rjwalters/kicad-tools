@@ -46,6 +46,60 @@ def test_valid_departure_keeps_original_start_and_via_history():
 
 
 @pytest.mark.parametrize(
+    ("obstruction", "progress"),
+    [
+        # Issue #5333: the step each obstruction actually blocks.  0 means the
+        # very first required step was refused; a value one below the prefix
+        # length means only the closing paired via was.
+        ("jump", 0),
+        ("self_trail", 2),
+        ("partner_barrel", 11),
+        ("foreign_barrel", 4),
+        ("unsupported_pad", 0),
+        ("corridor", 0),
+    ],
+)
+def test_a_refused_departure_reports_the_step_that_blocked_it(obstruction, progress):
+    """Without this, every refusal looks identical: an empty validated path.
+
+    A pair whose escape dies leaving the pad row and one whose escape dies on
+    its layer transition need different fixes, and ``departures=0`` alone
+    cannot tell them apart (#5333).
+    """
+    finder = _finder()
+    finder.rules.manufacturer = "jlcpcb"
+    prefix = _prefix()
+    corridor = None
+    if obstruction == "jump":
+        prefix = [prefix[2]]
+    elif obstruction == "self_trail":
+        prefix = [prefix[0], prefix[1], prefix[0]]
+    elif obstruction == "partner_barrel":
+        prefix += [(x, 6, 3, 22, 6, 3) for x in range(11, 19)]
+    elif obstruction == "foreign_barrel":
+        finder.grid._blocked[1, 6, 10] = True
+        finder.grid._net[1, 6, 10] = 99
+    elif obstruction == "unsupported_pad":
+        prefix = [(10, 10, 3, 22, 10, 3)]
+    else:
+        corridor = [0] * (finder.grid.rows * finder.grid.cols)
+    path, diagnostics = _route(finder, prefix, corridor=corridor)
+    assert path is None
+    assert diagnostics["departure_prefix_progress"] == progress < len(prefix)
+
+
+def test_a_validated_departure_reports_its_full_prefix_progress():
+    finder = _finder()
+    finder.rules.manufacturer = "jlcpcb"
+    prefix = _prefix()
+    _, diagnostics = _route(finder, prefix, budget=len(prefix) + 2)
+    assert diagnostics["departure_prefix_progress"] == len(prefix)
+    assert [step[:6] for step in diagnostics["validated_departure_path"][1:]] == prefix
+    # No prefix requested means no prefix progress to report.
+    assert _route(finder, [])[1]["departure_prefix_progress"] == 0
+
+
+@pytest.mark.parametrize(
     "obstruction",
     ["jump", "self_trail", "partner_barrel", "foreign_barrel", "unsupported_pad", "corridor"],
 )

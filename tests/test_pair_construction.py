@@ -125,8 +125,9 @@ def test_the_ledger_tallies_which_stage_spent_the_allowance(monkeypatch):
     assert budget.completions_tried == 6
     assert budget.geometry_reasons == {"trace_clearance": 2}
     assert budget.stage_summary() == (
-        "departures=2 landings=2 bodies=16 built=4 geom_rejected=2 completions=6 "
-        "geom_reasons={'trace_clearance': 2} completion_reasons={}"
+        "proposals=0 departures=2 landings=2 bodies=16 built=4 geom_rejected=2 completions=6 "
+        "geom_reasons={'trace_clearance': 2} completion_reasons={} "
+        "departure_reasons={} departure_rejections={}"
     )
 
 
@@ -146,10 +147,67 @@ def test_completion_reasons_are_reported_most_frequent_first():
     budget.completion_reasons.update(
         {"no_tail": 3, "skew_tolerance": 40, "coupling_threshold": 3, "post_tune_pad_clearance": 7}
     )
-    assert budget.stage_summary().endswith(
+    assert (
         "completion_reasons={'skew_tolerance': 40, 'post_tune_pad_clearance': 7, "
         "'coupling_threshold': 3, 'no_tail': 3}"
+    ) in budget.stage_summary()
+
+
+def test_departure_reasons_are_reported_most_frequent_first():
+    budget = ConstructionBudget(deadline=1, iterations_remaining=1, bodies_remaining=1)
+    budget.departure_reasons.update({"stalled_at_step_0_of_9": 6, "stalled_at_step_3_of_15": 12})
+    budget.departure_rejections.update({"sym_blocked_p": 60, "via_blocked_p": 9})
+    assert budget.stage_summary().endswith(
+        "departure_reasons={'stalled_at_step_3_of_15': 12, 'stalled_at_step_0_of_9': 6} "
+        "departure_rejections={'sym_blocked_p': 60, 'via_blocked_p': 9}"
     )
+
+
+def test_departure_reasons_propagate_from_the_native_stage(monkeypatch):
+    """#5333: ``departures=0`` is the only stage tally with no split at all.
+
+    MIPI_DAT1 on board 07 spends a real native allowance and validates
+    nothing; that is compatible with an enumerator that offered no shape, an
+    escape refused on its first step, and one refused only on its closing
+    via.  The parent ledger has to carry the departure stage's own tally for
+    those to be distinguishable after the fact.
+    """
+
+    def fake_validated(finder, pads, budget):
+        budget.iterations_used += 30
+        budget.iterations_remaining -= 30
+        budget.proposals_seen += 12
+        budget.reasons.update({"stalled_at_step_0_of_9": 6, "stalled_at_step_3_of_15": 6})
+        budget.native_rejections.update({"sym_blocked_p": 60})
+        return iter(())
+
+    monkeypatch.setattr(pair_construction, "validated_departures", fake_validated)
+    monkeypatch.setattr(pair_construction, "time", SimpleNamespace(monotonic=lambda: 0))
+    budget = ConstructionBudget(deadline=1, iterations_remaining=64, bodies_remaining=16)
+    assert _run(budget) is None
+    assert budget.departures_found == 0 and budget.departure_proposals_seen == 12
+    assert budget.departure_reasons == {
+        "stalled_at_step_0_of_9": 6,
+        "stalled_at_step_3_of_15": 6,
+    }
+    assert budget.departure_rejections == {"sym_blocked_p": 60}
+    assert budget.iterations_used == 30
+
+
+def test_an_unoffered_escape_is_distinguishable_from_a_refused_one(monkeypatch):
+    """Both report ``departures=0``; only the proposal count separates them."""
+
+    def never_offered(finder, pads, budget):
+        budget.reasons["start_pads_not_axis_aligned"] += 1
+        return iter(())
+
+    monkeypatch.setattr(pair_construction, "validated_departures", never_offered)
+    monkeypatch.setattr(pair_construction, "time", SimpleNamespace(monotonic=lambda: 0))
+    budget = ConstructionBudget(deadline=1, iterations_remaining=64, bodies_remaining=16)
+    assert _run(budget) is None
+    assert budget.departure_proposals_seen == 0
+    assert budget.departure_reasons == {"start_pads_not_axis_aligned": 1}
+    assert budget.iterations_used == 0
 
 
 def test_completion_reasons_propagate_from_the_body_stage(monkeypatch):

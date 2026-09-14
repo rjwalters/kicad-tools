@@ -1678,6 +1678,11 @@ class CoupledPathfinder:
         self.last_best_node: CoupledNode | None = None
         # Native diagnostic geometry is a partial path, never a completed route.
         self.last_best_cpp_path: list[tuple[int, int, int, int, int, int, bool]] = []
+        # Issue #5333: how many required departure-prefix steps the most recent
+        # search actually expanded.  0 for an unprefixed request; equal to the
+        # requested prefix length exactly when the departure validated, and
+        # below it when a guard refused the next required step.
+        self.last_departure_prefix_progress: int = 0
         # Issue #4459: backend that served the most-recent coupled search
         # ("python" or "cpp").  Lets the ``[coupled-timing]`` diagnostic report
         # ``best_state=n/a (cpp)`` instead of a misleading ``best_state=None``
@@ -2819,6 +2824,10 @@ class CoupledPathfinder:
         self.last_best_node = None
         self.last_best_cpp_path = list(diagnostics.get("best_path", []))
         self.last_validated_departure_path = list(diagnostics.get("validated_departure_path", []))
+        # Issue #5333: deepest required departure step the native search
+        # expanded.  Equals the requested prefix length exactly when the
+        # departure validated; below that it names the step that blocked.
+        self.last_departure_prefix_progress = int(diagnostics.get("departure_prefix_progress", 0))
         self.last_coupled_backend = "cpp"
         self.last_timeout_exceeded = bool(diagnostics["timeout_exceeded"])
         self.last_iteration_limited = bool(diagnostics["iteration_limited"])
@@ -2975,6 +2984,10 @@ class CoupledPathfinder:
         # Native diagnostic geometry is a partial path, never a completed route.
         self.last_best_cpp_path = []
         self.last_validated_departure_path = []
+        # Issue #5333: no required departure step has been expanded yet.  The
+        # pure-Python loop never serves a prefixed request (it fails closed),
+        # so this stays 0 unless the native search reports otherwise.
+        self.last_departure_prefix_progress = 0
         # Issue #4459: which backend served the most-recent search.  Defaults
         # to ``"python"`` here; ``_try_cpp_route_coupled`` overrides it to
         # ``"cpp"`` when the C++ joint-state search handles the pair.  The

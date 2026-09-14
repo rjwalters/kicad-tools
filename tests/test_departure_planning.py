@@ -1,11 +1,13 @@
 import math
 import time
+from collections import Counter
 from dataclasses import replace
 
 import pytest
 
 from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.departure_planning import (
+    PREFIX_CONSTRAINT_REJECTION,
     DepartureBudget,
     departure_proposals,
     validated_departures,
@@ -153,3 +155,138 @@ def test_native_validation_accepts_a_fanned_out_fine_pitch_escape():
             finder.rules.via_drill + finder.rules.min_hole_to_hole,
         )
     assert 0 < budget.iterations_used <= 512
+
+
+def _foreign_wall(finder, cells, layer=0, net=99):
+    """Real foreign copper, blocking exactly the given start-layer cells."""
+    for x, y in cells:
+        finder.grid._blocked[layer, y, x] = True
+        finder.grid._net[layer, y, x] = net
+
+
+def test_default_tallies_are_never_shared_between_budgets():
+    """A mutable default would merge two pairs' departure diagnostics."""
+    first = DepartureBudget(1, 1)
+    second = DepartureBudget(1, 1)
+    first.reasons["stalled_at_step_0_of_9"] += 1
+    first.native_rejections["asym_blocked_p"] += 1
+    assert second.reasons == Counter() and second.native_rejections == Counter()
+
+
+def test_start_layer_mismatch_names_itself_instead_of_yielding_nothing():
+    """#5333: ``departures=0`` must separate "never offered" from "refused"."""
+    finder = _finder()
+    p_start, p_goal, n_start, n_goal = _public_pads(finder)
+    reasons: Counter[str] = Counter()
+    pads = (p_start, p_goal, replace(n_start, layer=n_goal.layer), n_goal)
+    assert list(departure_proposals(finder, pads, reasons)) == []
+    assert reasons == {"start_layers_differ": 1}
+
+
+@pytest.mark.parametrize("offset", [(0, 0), (12, 4)])
+def test_a_non_axis_aligned_pad_pair_names_itself(offset):
+    """Coincident or diagonal starts define no across/outward frame."""
+    finder = _finder()
+    p_start, p_goal, n_start, n_goal = _public_pads(finder)
+    gx, gy = finder.grid.world_to_grid(p_start.x, p_start.y)
+    wx, wy = finder.grid.grid_to_world(gx + offset[0], gy + offset[1])
+    reasons: Counter[str] = Counter()
+    pads = (p_start, p_goal, replace(n_start, x=wx, y=wy), n_goal)
+    assert list(departure_proposals(finder, pads, reasons)) == []
+    assert reasons == {"start_pads_not_axis_aligned": 1}
+
+
+def test_a_stack_with_no_other_routable_layer_names_itself(monkeypatch):
+    """Every proposal ends on a paired via, so one layer offers none."""
+    finder = _finder()
+    monkeypatch.setattr(finder.grid, "get_routable_indices", lambda: [0])
+    reasons: Counter[str] = Counter()
+    assert list(departure_proposals(finder, _public_pads(finder), reasons)) == []
+    assert reasons == {"no_target_layer": 1}
+
+
+def test_a_structurally_sound_enumeration_records_no_reason():
+    finder = _finder()
+    reasons: Counter[str] = Counter()
+    assert len(list(departure_proposals(finder, _public_pads(finder), reasons))) == 12
+    assert reasons == Counter()
+
+
+@pytest.mark.skipif(not is_cpp_available(), reason="requires matching native backend")
+def test_a_blocked_escape_names_the_required_step_it_never_got_past():
+    """#5333, MIPI_DAT1's signature: zero departures with a real spend.
+
+    Foreign copper laid one cell beyond both pads on the start layer makes
+    every straight escape illegal at its FIRST step, while the bend variants
+    travel three legal steps before meeting the same wall.  Without this
+    tally both collapse into ``departures=0``, which cannot say whether the
+    escape never left the pad row or died on its paired via.
+    """
+    finder = _finder()
+    finder.rules.manufacturer = "jlcpcb"
+    _foreign_wall(finder, [(10, 9), (22, 9), (10, 11), (22, 11)])
+    budget = DepartureBudget(time.monotonic() + 60, 512)
+    assert list(validated_departures(finder, _public_pads(finder), budget)) == []
+    assert budget.proposals_seen == 12 and budget.proposals_validated == 0
+    assert budget.reasons == {"stalled_at_step_0_of_9": 6, "stalled_at_step_3_of_15": 6}
+    assert budget.iterations_used > 0
+    # The guard histogram survives, minus the tautological prefix token.
+    assert budget.native_rejections["sym_blocked_p"] > 0
+    assert PREFIX_CONSTRAINT_REJECTION not in budget.native_rejections
+
+
+@pytest.mark.skipif(not is_cpp_available(), reason="requires matching native backend")
+def test_an_unblocked_escape_stalls_on_its_via_step_not_its_first():
+    """The same tally on an open board points at a different step entirely."""
+    finder = _finder()
+    finder.rules.manufacturer = "jlcpcb"
+    budget = DepartureBudget(time.monotonic() + 60, 512)
+    departures = list(validated_departures(finder, _public_pads(finder), budget))
+    assert departures and budget.proposals_validated == len(departures)
+    assert budget.proposals_seen == 12
+    # Every refusal here is on the LAST required step -- the paired via.
+    for reason, count in budget.reasons.items():
+        reached, _, steps = reason.removeprefix("stalled_at_step_").partition("_of_")
+        assert int(reached) == int(steps) - 1, (reason, count)
+    assert budget.native_rejections["via_blocked_p"] > 0
+
+
+@pytest.mark.skipif(not is_cpp_available(), reason="requires matching native backend")
+def test_a_starved_allowance_is_not_reported_as_a_blocked_escape():
+    """An unfinished proof is not evidence the escape is illegal."""
+    finder = _finder()
+    finder.rules.manufacturer = "jlcpcb"
+    budget = DepartureBudget(time.monotonic() + 60, 4)
+    assert list(validated_departures(finder, _public_pads(finder), budget)) == []
+    assert budget.proposals_seen >= 1
+    assert budget.reasons == {
+        "iteration_limited_at_step_2_of_9": 1,
+        "allowance_spent_before_attempt": 1,
+    }
+    # None of these is a ``stalled_at_step_*`` claim: the escapes may well be
+    # legal, the search simply was not allowed to finish proving it.
+    assert not any(r.startswith("stalled_at_step_") for r in budget.reasons)
+
+
+def test_an_expired_deadline_is_charged_to_the_allowance_not_the_geometry(monkeypatch):
+    finder = _finder()
+    monkeypatch.setattr(
+        finder, "route_coupled", lambda *a, **kw: pytest.fail("expired native call")
+    )
+    budget = DepartureBudget(0, 100)
+    assert list(validated_departures(finder, _public_pads(finder), budget)) == []
+    assert budget.proposals_seen == 1
+    assert budget.reasons == {"allowance_spent_before_attempt": 1}
+
+
+def test_the_departure_summary_reports_most_frequent_first():
+    budget = DepartureBudget(1, 1)
+    budget.proposals_seen = 12
+    budget.proposals_validated = 2
+    budget.reasons.update({"stalled_at_step_0_of_9": 4, "stalled_at_step_3_of_15": 6})
+    budget.native_rejections.update({"sym_blocked_p": 3, "via_blocked_p": 40})
+    assert budget.stage_summary() == (
+        "proposals=12 validated=2 "
+        "departure_reasons={'stalled_at_step_3_of_15': 6, 'stalled_at_step_0_of_9': 4} "
+        "departure_rejections={'via_blocked_p': 40, 'sym_blocked_p': 3}"
+    )

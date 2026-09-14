@@ -312,6 +312,13 @@ CoupledRouteResult CoupledPathfinder::route(
         int current_idx = static_cast<int>(pool.size());
         pool.push_back(current);
 
+        // Issue #5333: deepest required departure step actually expanded.
+        // Recorded on the POP (not the push) so it counts steps that survived
+        // the closed-set/goal checks, and carried on every return path below
+        // because it lives on ``result``.  Diagnostic only.
+        result.departure_prefix_progress = std::max(
+            result.departure_prefix_progress, static_cast<int>(current.prefix_step));
+
         if (!departure_prefix.empty() && result.validated_departure_path.empty() &&
             current.prefix_step == departure_prefix.size()) {
             result.validated_departure_path = partial_path(current_idx);

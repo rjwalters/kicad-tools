@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 30
+_REQUIRED_CPP_BUILD_VERSION = 31
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -3927,6 +3927,9 @@ class CppCoupledPathfinder:
         required prefix step once legally expanded, even when that departure
         moves away from the goal. It is empty for absent/incomplete prefixes
         and never changes search success or its budget.
+        ``departure_prefix_progress`` counts how many of those required steps
+        were expanded (0..len(prefix)), so an incomplete prefix names the step
+        that blocked instead of only reporting emptiness.
         """
         res = self._impl.route(
             int(p_start_xy[0]),
@@ -3967,6 +3970,11 @@ class CppCoupledPathfinder:
                 (n.p_x, n.p_y, n.p_layer, n.n_x, n.n_y, n.n_layer, n.via_from_parent)
                 for n in res.validated_departure_path
             ],
+            # Issue #5333: how many required departure steps were expanded.
+            # ``validated_departure_path`` is non-empty exactly when this
+            # equals the requested prefix length; a smaller value names the
+            # step no legal candidate could satisfy.
+            "departure_prefix_progress": int(res.departure_prefix_progress),
             "best_path": [
                 (n.p_x, n.p_y, n.p_layer, n.n_x, n.n_y, n.n_layer, n.via_from_parent)
                 for n in res.best_path

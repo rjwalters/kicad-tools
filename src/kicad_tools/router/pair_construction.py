@@ -54,6 +54,15 @@ class ConstructionBudget:
     nonzero ``completions`` count still needs this to tell "no legal
     layer-return tail exists" apart from "every tail passes the geometry
     gate but misses the authored skew or coupling threshold" (#5333).
+
+    ``departure_proposals_seen`` / ``departure_reasons`` /
+    ``departure_rejections`` are the same split one stage EARLIER, for the
+    only stage that previously had none: a pair reporting
+    ``departures_found=0`` spent its native allowance proving something, and
+    these say what.  ``departure_proposals_seen == 0`` means the geometry
+    enumerator itself declined (its reason token is in ``departure_reasons``);
+    otherwise every offered shape carries a token naming the required step it
+    never got past, plus the native guard histogram from that attempt.
     """
 
     deadline: float
@@ -61,6 +70,7 @@ class ConstructionBudget:
     bodies_remaining: int
     iterations_used: int = 0
     bodies_used: int = 0
+    departure_proposals_seen: int = 0
     departures_found: int = 0
     landings_found: int = 0
     bodies_built: int = 0
@@ -68,6 +78,8 @@ class ConstructionBudget:
     completions_tried: int = 0
     geometry_reasons: Counter[str] = field(default_factory=Counter)
     completion_reasons: Counter[str] = field(default_factory=Counter)
+    departure_reasons: Counter[str] = field(default_factory=Counter)
+    departure_rejections: Counter[str] = field(default_factory=Counter)
 
     def stage_summary(self) -> str:
         """One-line tally of where this pair's construction allowance went."""
@@ -75,7 +87,14 @@ class ConstructionBudget:
         completion_reasons = dict(
             sorted(self.completion_reasons.items(), key=lambda kv: (-kv[1], kv[0]))
         )
+        departure_reasons = dict(
+            sorted(self.departure_reasons.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        departure_rejections = dict(
+            sorted(self.departure_rejections.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
         return (
+            f"proposals={self.departure_proposals_seen} "
             f"departures={self.departures_found} "
             f"landings={self.landings_found} "
             f"bodies={self.bodies_used} "
@@ -83,7 +102,9 @@ class ConstructionBudget:
             f"geom_rejected={self.bodies_geometry_rejected} "
             f"completions={self.completions_tried} "
             f"geom_reasons={reasons} "
-            f"completion_reasons={completion_reasons}"
+            f"completion_reasons={completion_reasons} "
+            f"departure_reasons={departure_reasons} "
+            f"departure_rejections={departure_rejections}"
         )
 
 
@@ -176,6 +197,9 @@ def _validated_departures(
     finally:
         budget.iterations_remaining -= portion.iterations_used
         budget.iterations_used += portion.iterations_used
+        budget.departure_proposals_seen += portion.proposals_seen
+        budget.departure_reasons.update(portion.reasons)
+        budget.departure_rejections.update(portion.native_rejections)
 
 
 def _by_escape_direction(

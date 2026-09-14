@@ -603,6 +603,8 @@ NB_MODULE(router_cpp, m) {
         .def_ro("path", &CoupledRouteResult::path)
         .def_ro("best_path", &CoupledRouteResult::best_path)
         .def_ro("validated_departure_path", &CoupledRouteResult::validated_departure_path)
+        // Issue #5333: deepest required departure step expanded (0..prefix len).
+        .def_ro("departure_prefix_progress", &CoupledRouteResult::departure_prefix_progress)
         .def_ro("success", &CoupledRouteResult::success)
         .def_ro("iterations", &CoupledRouteResult::iterations)
         .def_ro("best_progress", &CoupledRouteResult::best_progress)
