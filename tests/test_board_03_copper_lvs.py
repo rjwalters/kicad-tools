@@ -1,29 +1,25 @@
-"""Copper-LVS coverage for board 03 (usb-joystick) — issue #3787.
+"""Board03 copper-LVS regressions: historical opens and fresh connected output.
 
-Board 03 carries GND planes on *both* ``F.Cu`` and ``B.Cu`` but the
-router emits zero GND vias (every via is a signal-net layer change).
-Without a via tying the two GND planes together, the J1 USB-C connector's
-F.Cu-only shield/return pads (``J1.A12`` / ``J1.B1``) strand in their own
-copper islands and ``compare_copper_netlist`` correctly reports them as
-GND *opens* — a physical bond the schematic-blind copper extractor
-catches even though KiCad's DRC (which treats same-net zones as logically
-connected) does not.
+The archived USB-C design contains stitching vias but still has 13 real
+opens (11 GND, one VBUS, one VCC). Native KiCad 10.0.6 independently reported
+13 unconnected items on its unchanged saved bytes, without refill/save
+(PR #5236 review, issuecomment-5670971843). The old zone-identity union hid
+these islands; the archive is a negative physical-contact witness, not a
+manufacturing-clean board. Preserve its bytes rather than regenerating it
+with the current, different recipe.
 
-Issue #3787 adds an ``add_gnd_stitching_vias`` recipe step that drops a
-GND ``F.Cu``<->``B.Cu`` stitching via at each fragmented GND island; the
-subsequent zone re-fill bonds them into one net.  This test pins that
-outcome on the committed routed artifact: copper-LVS must be clean and the
-GND stitching vias must be present.
-
-It is fast (sub-second) and hermetic — it reads the committed files only,
-never spawns ``kicad-cli`` and never invokes the router.
+The historical tests are hermetic. The separate opt-in fresh-generation
+regression below retains the clean-copper contract, saved-byte native gate,
+and removed-stitch negative control for the repaired current Board03 recipe.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -31,6 +27,7 @@ import pytest
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.drc.geometric import GeometricDRCResult
 from kicad_tools.lvs import compare_copper_netlist
+from kicad_tools.validate.connectivity import ConnectivityValidator
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "03-usb-joystick"
@@ -60,39 +57,81 @@ def _count_gnd_fb_stitch_vias(pcb_text: str) -> int:
 
 @pytest.fixture(scope="module")
 def board03_artifacts() -> tuple[Path, Path]:
-    """The committed board 03 schematic + routed PCB.
-
-    Skips if either artifact is missing (e.g. a contributor wiped the
-    output directory) — run ``boards/03-usb-joystick/generate_design.py``
-    to regenerate.
-    """
-    if not BOARD_SCH.exists() or not BOARD_PCB.exists():
-        pytest.skip(
-            f"board 03 artifacts not present "
-            f"(sch={BOARD_SCH.exists()}, pcb={BOARD_PCB.exists()}); "
-            "run boards/03-usb-joystick/generate_design.py to regenerate."
-        )
+    """Immutable archived inputs; the current recipe cannot recreate them."""
+    assert BOARD_SCH.is_file(), "restore the archived schematic from git"
+    assert BOARD_PCB.is_file(), "restore the archived PCB from git"
+    assert hashlib.sha256(BOARD_SCH.read_bytes()).hexdigest() == (
+        "fce9cfd4cd75d895a8a007b0d0d14baa56df4f0821b1113abb98412762489d21"
+    )
+    assert hashlib.sha256(BOARD_PCB.read_bytes()).hexdigest() == (
+        "f4ee2d9b1cf82f10aa86d5ac8277118518d0d9a9ba9de2c3abdafe69eee14397"
+    )
     return BOARD_SCH, BOARD_PCB
 
 
-class TestBoard03CopperLVSClean:
-    """The committed board 03 routed PCB must be copper-LVS clean (#3787)."""
+class TestHistoricalBoard03CopperIslands:
+    """The archive exposes native-confirmed opens despite its stitch vias."""
 
-    def test_no_copper_opens_or_shorts(self, board03_artifacts: tuple[Path, Path]) -> None:
+    def test_native_confirmed_opens_and_no_shorts(self, board03_artifacts):
         sch, pcb = board03_artifacts
         result = compare_copper_netlist(sch, pcb)
-        assert result.clean is True, (
-            "copper-LVS unexpectedly dirty on the committed board 03 routed "
-            f"PCB: shorts={list(result.shorts)} opens={list(result.opens)}.  "
-            "The GND F.Cu<->B.Cu stitching vias (add_gnd_stitching_vias, "
-            "#3787) may be missing or the route/fill regressed — regenerate "
-            "via generate_design.py."
-        )
+        assert result.clean is False
+        assert result.bound_pad_count == 84
         assert result.shorts == ()
-        assert result.opens == ()
+        assert not result.vacuous
+        assert len(result.mismatches) == len(result.opens) == 13
+        assert Counter(m.net_a for m in result.opens) == {"GND": 11, "VBUS": 1, "VCC": 1}
+
+        groups, bindings = ConnectivityValidator(pcb).extract_pad_occurrences()
+        occurrences = [pad for group in groups for pad in group]
+        assert len(occurrences) == len(set(occurrences)) == len(bindings) == 87
+        assert set(occurrences) == set(bindings)
+        assert len(set(bindings.values())) == 86
+        # Preserve multiplicity: J1.SH has two distinct physical occurrences.
+        named_groups = [tuple(sorted(".".join(bindings[p]) for p in g)) for g in groups]
+        expected = {
+            "GND": [
+                ("C1.2",),
+                ("C10.2",),
+                ("C11.2",),
+                (
+                    "C2.2",
+                    "C5.2",
+                    "C6.2",
+                    "J1.A1",
+                    "J1.A12",
+                    "J1.B1",
+                    "J1.B12",
+                    "J1.SH",
+                    "J1.SH",
+                    "J2.2",
+                    "SW1.2",
+                    "SW2.2",
+                    "SW3.2",
+                    "SW4.2",
+                ),
+                ("C3.2",),
+                ("C4.2",),
+                ("U1.1",),
+                ("U1.16",),
+                ("U1.18", "U1.19", "U1.20", "U1.21", "U1.22", "U1.23"),
+                ("U1.25",),
+                ("U1.31", "U1.32"),
+                ("U1.5", "U1.6", "U1.7"),
+            ],
+            "VBUS": [("C4.1", "J1.A4", "J1.B9", "U1.26"), ("J1.A9", "J1.B4")],
+            "VCC": [
+                ("C1.1", "C2.1", "J2.1", "R12.2", "U1.17", "U1.24", "U1.4", "U1.8"),
+                ("C3.1",),
+            ],
+        }
+        for net, components in expected.items():
+            members = {pad for component in components for pad in component}
+            actual = [group for group in named_groups if members.intersection(group)]
+            assert sorted(actual) == sorted(components), net
 
     def test_gnd_stitching_vias_present(self, board03_artifacts: tuple[Path, Path]) -> None:
-        """At least one GND-net via must bond the F.Cu and B.Cu GND planes."""
+        """Stitch vias exist; their presence alone does not prove global connectivity."""
         _, pcb = board03_artifacts
         text = pcb.read_text()
         net_table = dict(re.findall(r'\(net (\d+) "([^"]*)"\)', text))
