@@ -253,3 +253,24 @@ def test_malformed_affected_copper_is_rejected(board):
     result = analyze_routing_placement(board)
     with pytest.raises(ValueError, match="unsupported or malformed segment"):
         load_pcb_for_routing(str(board), placement_disposition=result, force_python=True)
+
+
+@pytest.mark.parametrize("net_name", ["BAD)", "BAD(", 'BAD\\"(quoted)', "BAD(segment ", "BAD(via "])
+@pytest.mark.parametrize("name_only", [False, True])
+def test_quoted_net_punctuation_survives_copper_handoff(board, net_name, name_only):
+    from kicad_tools.cli.route_cmd import _write_routed_pcb
+    from kicad_tools.schema.pcb import PCB
+
+    board.write_text(board_text(name_only=name_only).replace("BAD", net_name))
+    original = board.read_bytes()
+    result = analyze_routing_placement(board)
+    router, _ = load_pcb_for_routing(str(board), placement_disposition=result, force_python=True)
+    assert len(router.placement_preserved_routes) == 1
+    output = board.with_stem("quoted_export")
+    _write_routed_pcb(board, output, router.placement_preserved_copper)
+    parsed = PCB.load(output)
+    assert len(parsed.segments) == 1
+    assert len(parsed.vias) == 1
+    assert board.read_bytes() == original
+    for block in router.placement_preserved_copper.splitlines():
+        assert block in original.decode()
