@@ -244,12 +244,13 @@ def test_offline_creation_has_explicit_unknown_upload_binding(bound):
 
 def test_bound_receipt_matching_exact_identity_is_recorded(bound):
     attachment = attach(bound, ledger=bound["ledger"])
-    assert attachment.upload_binding == "bound"
+    assert attachment.upload_binding == "unknown"
     assert attachment.receipt_sha256 == bound["receipt"].sha256
 
 
-def test_readiness_requires_both_pass_and_bound(bound):
-    passing = attach(bound, ledger=bound["ledger"])
+def test_readiness_requires_both_pass_and_bound(synthetic_factory_receipt):
+    bound = synthetic_factory_receipt
+    passing = attach(bound, ledger=bound["ledger"], plan=bound["plan"], review=bound["record"])
     assert passing.dfm_status == "pass"
     assert passing.readiness_eligible
 
@@ -412,7 +413,7 @@ def test_attachment_hash_is_deterministic_and_content_bound(bound):
 
 def test_states_property_reflects_dfm_and_binding(bound):
     attachment = attach(bound, ledger=bound["ledger"])
-    assert attachment.states == {"dfm": "pass", "upload_binding": "bound"}
+    assert attachment.states == {"dfm": "pass", "upload_binding": "unknown"}
 
 
 # ---------------------------------------------------------------------------
@@ -519,3 +520,123 @@ def test_blank_category_threshold_rejected_when_supplied(bound):
     bad = good_category(threshold="   ")
     with pytest.raises(fd.DFMError):
         attach(bound, transcription=good_transcription(categories=(bad,)))
+
+
+@pytest.mark.parametrize("evidence", [ju.EVIDENCE_MOCK, ju.EVIDENCE_RECONCILED])
+def test_nonfactory_receipts_never_allow_readiness(bound, monkeypatch, evidence):
+    from dataclasses import replace
+
+    receipt = replace(bound["receipt"], evidence=evidence)
+    monkeypatch.setattr(ju, "find_receipt", lambda *args, **kwargs: receipt)
+    result = attach(bound, ledger=bound["ledger"], plan=bound["plan"], review=bound["record"])
+    assert not result.readiness_eligible
+    assert result.upload_binding == "unknown"
+    assert result.receipt_evidence == evidence
+    assert result.receipt_sha256 == receipt.sha256
+
+
+@pytest.fixture
+def synthetic_factory_receipt(bound, monkeypatch):
+    """Model the future receipt consumer only; never call/enable live transport."""
+    from dataclasses import replace
+
+    receipt = replace(bound["receipt"], evidence=ju.EVIDENCE_LIVE)
+    monkeypatch.setattr(ju, "find_receipt", lambda *args, **kwargs: receipt)
+    return bound
+
+
+def test_factory_receipt_requires_current_verified_review(synthetic_factory_receipt):
+    handoff = synthetic_factory_receipt
+    assert not attach(handoff, ledger=handoff["ledger"]).readiness_eligible
+    result = attach(
+        handoff, ledger=handoff["ledger"], plan=handoff["plan"], review=handoff["record"]
+    )
+    assert result.readiness_eligible
+    (handoff["plan"].source_root / "board.kicad_pcb").write_bytes(b"changed after approval")
+    assert not result.readiness_eligible
+    with pytest.raises(fd.DFMError, match="review|source"):
+        attach(handoff, ledger=handoff["ledger"], plan=handoff["plan"], review=handoff["record"])
+
+
+def test_changed_published_bundle_rejects_readiness(synthetic_factory_receipt):
+    handoff = synthetic_factory_receipt
+    result = attach(
+        handoff, ledger=handoff["ledger"], plan=handoff["plan"], review=handoff["record"]
+    )
+    core = json.loads(handoff["plan"].plan_bytes)
+    output = handoff["plan"].directory / core["artifacts"]["gerber"]["output_name"]
+    output.chmod(0o600)
+    output.write_bytes(b"changed")
+    assert not result.readiness_eligible
+    with pytest.raises(fd.DFMError, match="handoff"):
+        attach(handoff, ledger=handoff["ledger"], plan=handoff["plan"], review=handoff["record"])
+
+
+def test_coordinate_evidence_preserved_in_attachment_identity(bound):
+    from dataclasses import replace
+
+    coordinate = fd.FindingCoordinate(x="12.340", y="-2.5", units="mm", context="F.SilkS R1")
+    category = good_category(coordinates=(coordinate,))
+    result = attach(bound, transcription=good_transcription(categories=(category,)))
+    encoded = json.loads(result.attachment_bytes)["transcription"]["categories"][0]
+    assert encoded["coordinates"] == [
+        {"x": "12.340", "y": "-2.5", "units": "mm", "context": "F.SilkS R1"}
+    ]
+    changed = replace(category, coordinates=(replace(coordinate, x="12.341"),))
+    assert (
+        attach(bound, transcription=good_transcription(categories=(changed,))).sha256
+        != result.sha256
+    )
+    unknown = good_category(coordinates_available=None, coordinates=None, threshold=None)
+    unknown_encoded = json.loads(
+        attach(bound, transcription=good_transcription(categories=(unknown,))).attachment_bytes
+    )["transcription"]["categories"][0]
+    assert unknown_encoded["coordinates"] is None
+    assert unknown_encoded["coordinates_available"] is None
+    assert unknown_encoded["threshold"] is None
+
+
+@pytest.mark.parametrize("missing", ["plan", "review"])
+def test_partial_review_chain_is_not_ready(synthetic_factory_receipt, missing):
+    handoff = synthetic_factory_receipt
+    options = {"ledger": handoff["ledger"], "plan": handoff["plan"], "review": handoff["record"]}
+    options.pop(missing)
+    assert not attach(handoff, **options).readiness_eligible
+
+
+def test_review_content_is_verified_even_when_receipt_hash_matches(
+    synthetic_factory_receipt, monkeypatch
+):
+    from dataclasses import replace
+
+    handoff = synthetic_factory_receipt
+    core = json.loads(handoff["record"].record_bytes)
+    core["checklist"][REQUIRED[0]] = False
+    review = replace(handoff["record"], record_bytes=sp._json(core))
+    receipt = replace(handoff["receipt"], evidence=ju.EVIDENCE_LIVE, review_sha256=review.sha256)
+    monkeypatch.setattr(ju, "find_receipt", lambda *args, **kwargs: receipt)
+    with pytest.raises(fd.DFMError, match="review"):
+        attach(handoff, ledger=handoff["ledger"], plan=handoff["plan"], review=review)
+
+
+def test_receipt_rechecked_after_attachment(synthetic_factory_receipt, monkeypatch):
+    handoff = synthetic_factory_receipt
+    result = attach(
+        handoff, ledger=handoff["ledger"], plan=handoff["plan"], review=handoff["record"]
+    )
+    assert result.readiness_eligible
+    monkeypatch.setattr(ju, "find_receipt", lambda *args, **kwargs: None)
+    assert not result.readiness_eligible
+
+
+@pytest.mark.parametrize(
+    "coordinate", [fd.FindingCoordinate("", "1", "mm"), fd.FindingCoordinate("1", "2", 1)]
+)
+def test_invalid_coordinate_text_rejected(bound, coordinate):
+    with pytest.raises(fd.DFMError, match="Coordinate"):
+        attach(
+            bound,
+            transcription=good_transcription(
+                categories=(good_category(coordinates=(coordinate,)),)
+            ),
+        )

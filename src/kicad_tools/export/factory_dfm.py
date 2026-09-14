@@ -47,9 +47,8 @@ What this module never does
   all; its :attr:`DFMAttachment.upload_binding` then stays explicitly
   ``"unknown"`` rather than silently ``"bound"``.
 * **No Windows dependency.** Like its siblings, this module performs no
-  filesystem I/O of its own (it is a pure comparison/binding module, matching
-  :mod:`kicad_tools.export.factory_selection`'s style rather than the
-  file-publishing style of ``submission_plan``/``submission_review``) and
+  filesystem writes. Current review checks read the published handoff and
+  source files through the established verification helpers. It
   runs anywhere Python does.
 
 Filename/revision alone is never sufficient identity
@@ -80,10 +79,10 @@ fail-closed identity pattern.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .submission_plan import SubmissionPlan, _digest, _json
+from .submission_plan import SubmissionPlan, _digest, _json, _load_json, verify_submission
 
 if TYPE_CHECKING:
     from ..manufacturers.jlc_upload import UploadLedger, UploadReceipt
@@ -93,6 +92,7 @@ __all__ = [
     "CategoryFinding",
     "DFMAttachment",
     "DFMError",
+    "FindingCoordinate",
     "ModuleCoverage",
     "TranscriptionEvidence",
     "attach_dfm_report",
@@ -111,6 +111,20 @@ class DFMError(ValueError):
 
 
 @dataclass(frozen=True)
+class FindingCoordinate:
+    """Original coordinate text, without rounding or inferred units/axes.
+
+    Missing axes, units, or location context stay ``None``. Context may
+    retain a report's layer, reference, row identifier, or coordinate frame.
+    """
+
+    x: str | None
+    y: str | None
+    units: str | None
+    context: str | None = None
+
+
+@dataclass(frozen=True)
 class CategoryFinding:
     """One DFM finding category's transcribed evidence.
 
@@ -120,15 +134,19 @@ class CategoryFinding:
     ``count``), ``False`` when the report explicitly states the category was
     not truncated, and ``None`` when the report doesn't say either way.
     ``threshold`` is the raw transcribed threshold text (for example,
-    ``"0.1 mm"``), or ``None`` when not stated.
+    ``"0.1 mm"``), or ``None`` when not stated. ``coordinates`` preserves
+    original position text and units; ``None`` means unknown/untranscribed,
+    an empty tuple means no transcribed positions. Coordinate availability
+    itself can be ``None`` when the report never states it.
     """
 
     category: str
     count: int | None
     limit: int | None
     capped: bool | None
-    coordinates_available: bool
+    coordinates_available: bool | None
     threshold: str | None
+    coordinates: tuple[FindingCoordinate, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -199,6 +217,10 @@ class DFMAttachment:
     dfm_status: str
     transcription: TranscriptionEvidence
     modules: tuple[ModuleCoverage, ...]
+    receipt_evidence: str | None
+    _ledger: UploadLedger | None = field(repr=False, compare=False)
+    _plan: SubmissionPlan | None = field(repr=False, compare=False)
+    _review: ReviewRecord | None = field(repr=False, compare=False)
 
     @property
     def states(self) -> dict[str, str]:
@@ -207,14 +229,40 @@ class DFMAttachment:
 
     @property
     def readiness_eligible(self) -> bool:
-        """``True`` only once the DFM evidence passed AND the upload is bound.
+        """Recheck real receipt, published handoff, and reviewed sources now.
 
         Readiness/Ready-badge integration must consult this rather than
         ``dfm_status`` alone: a "pass" transcription bound to an
         ``upload_binding`` of ``"unknown"`` (no verified #5145 receipt yet)
         must never promote a board.
         """
-        return self.dfm_status == "pass" and self.upload_binding == "bound"
+        if self.dfm_status != "pass" or self.upload_binding != "bound":
+            return False
+        if self._plan is None or self._review is None:
+            return False
+        if self._ledger is None:
+            return False
+        from ..manufacturers.jlc_upload import find_receipt
+
+        try:
+            receipt = find_receipt(
+                self._ledger,
+                file_sha256=self.gerber_sha256,
+                app_identity=self.app_identity,
+                endpoint=self.endpoint,
+            )
+            if (
+                receipt is None
+                or not receipt.is_factory_receipt
+                or receipt.sha256 != self.receipt_sha256
+                or receipt.plan_sha256 != self._plan.sha256
+                or receipt.review_sha256 != self._review.sha256
+            ):
+                return False
+            _verify_current_review(self._plan, self._review, self.gerber_sha256)
+        except (ValueError, OSError):
+            return False
+        return True
 
     @property
     def attachment_bytes(self) -> bytes:
@@ -235,6 +283,9 @@ class DFMAttachment:
                 "endpoint": self.endpoint,
                 "upload_binding": self.upload_binding,
                 "receipt_sha256": self.receipt_sha256,
+                "receipt_evidence": self.receipt_evidence,
+                "plan_sha256": self._plan.sha256 if self._plan else None,
+                "review_sha256": self._review.sha256 if self._review else None,
                 "dfm_status": self.dfm_status,
                 "modules": [
                     {"module": module.module, "covered": module.covered} for module in self.modules
@@ -254,6 +305,19 @@ class DFMAttachment:
                             "capped": finding.capped,
                             "coordinates_available": finding.coordinates_available,
                             "threshold": finding.threshold,
+                            "coordinates": (
+                                [
+                                    {
+                                        "x": point.x,
+                                        "y": point.y,
+                                        "units": point.units,
+                                        "context": point.context,
+                                    }
+                                    for point in finding.coordinates
+                                ]
+                                if finding.coordinates is not None
+                                else None
+                            ),
                         }
                         for finding in transcription.categories
                     ],
@@ -278,8 +342,22 @@ def _check_category(finding: CategoryFinding) -> None:
         raise DFMError(f"{finding.category}: capped must be an explicit boolean or unknown")
     if finding.capped is True and finding.count is None:
         raise DFMError(f"{finding.category}: a capped/truncated category needs its observed count")
-    if type(finding.coordinates_available) is not bool:
-        raise DFMError(f"{finding.category}: coordinates_available must be an explicit boolean")
+    if (
+        finding.coordinates_available is not None
+        and type(finding.coordinates_available) is not bool
+    ):
+        raise DFMError(f"{finding.category}: coordinates_available must be boolean or unknown")
+    if finding.coordinates is not None:
+        if not isinstance(finding.coordinates, tuple):
+            raise DFMError("coordinates must be a tuple or unknown")
+        if finding.coordinates and finding.coordinates_available is not True:
+            raise DFMError("Transcribed coordinates require explicit coordinate availability")
+        for point in finding.coordinates:
+            if not isinstance(point, FindingCoordinate):
+                raise DFMError("Every coordinate needs typed FindingCoordinate evidence")
+            for value in (point.x, point.y, point.units, point.context):
+                if value is not None and (not isinstance(value, str) or not value.strip()):
+                    raise DFMError("Coordinate fields must be nonblank source text or unknown")
     if finding.threshold is not None and (
         not isinstance(finding.threshold, str) or not finding.threshold.strip()
     ):
@@ -370,6 +448,28 @@ def _dfm_status(transcription: TranscriptionEvidence) -> str:
     return "pass"
 
 
+def _verify_current_review(plan: SubmissionPlan, review: ReviewRecord, gerber_sha256: str) -> None:
+    """Re-read the published outputs and original source bytes before trust."""
+    from .submission_review import verify_review
+
+    try:
+        verified = verify_submission(plan.directory, plan.sha256)
+        if verified.plan_bytes != plan.plan_bytes:
+            raise DFMError("Published plan differs from the supplied plan")
+        core = _load_json(verified.plan_bytes)
+        gerber_name = core["artifacts"]["gerber"]["output_name"]
+        if core["outputs"][gerber_name]["sha256"] != gerber_sha256:
+            raise DFMError("Reviewed Gerber output differs from the report binding")
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        raise DFMError(f"Published handoff failed reverification: {exc}") from exc
+    if plan.source_root is None:
+        raise DFMError("Current source root required to verify the human review")
+    try:
+        verify_review(review, plan, source_root=plan.source_root)
+    except (ValueError, OSError) as exc:
+        raise DFMError(f"Bound human review is not valid: {exc}") from exc
+
+
 def attach_dfm_report(
     *,
     report_bytes: bytes,
@@ -408,7 +508,10 @@ def attach_dfm_report(
     :class:`DFMError` rather than being silently bound. When no ledger is
     supplied, or no matching receipt exists yet, the resulting
     :attr:`DFMAttachment.upload_binding` is explicitly ``"unknown"`` -- this
-    attachment can be created entirely offline.
+    attachment can be created entirely offline. Mock/reconciled receipts
+    retain their hash and evidence but never produce a bound factory upload.
+    Supplying both plan and review rechecks published outputs and current
+    source files; readiness also repeats these checks whenever queried.
 
     :attr:`DFMAttachment.dfm_status` is computed here from ``transcription``,
     never accepted as a caller claim: zero extracted rows, an explicit OCR
@@ -456,7 +559,10 @@ def attach_dfm_report(
         if review is not None and receipt.review_sha256 != review.sha256:
             raise DFMError("Bound upload receipt is stale relative to the current review record")
 
-    upload_binding = "bound" if receipt is not None else "unknown"
+    if plan is not None and review is not None:
+        _verify_current_review(plan, review, gerber_sha256)
+
+    upload_binding = "bound" if receipt is not None and receipt.is_factory_receipt else "unknown"
     receipt_sha256 = receipt.sha256 if receipt is not None else None
 
     return DFMAttachment(
@@ -470,6 +576,10 @@ def attach_dfm_report(
         endpoint=endpoint,
         upload_binding=upload_binding,
         receipt_sha256=receipt_sha256,
+        receipt_evidence=receipt.evidence if receipt is not None else None,
+        _ledger=ledger,
+        _plan=plan,
+        _review=review,
         dfm_status=_dfm_status(transcription),
         transcription=transcription,
         modules=_normalized_modules(transcription.modules),

@@ -543,8 +543,7 @@ here derives a verdict from it.
 
 `kicad_tools.export.factory_dfm` binds an original factory DFM report and a
 typed manual/OCR-assisted transcription of its findings to an exact upload
-identity. Like `factory_selection.py`, this is a pure, dependency-injectable
-binding module: it makes no network call, performs no filesystem I/O, and
+identity. This binding module makes no network call or filesystem write, and
 does not run JLCPCB's own DFM checker or claim "headless DFM verification."
 A human (or another tool) already produced the report bytes and, when the
 report is raster/image-only, already produced the transcription; this module
@@ -553,6 +552,7 @@ only validates and binds that already-produced evidence.
 ```python
 from kicad_tools.export.factory_dfm import (
     CategoryFinding,
+    FindingCoordinate,
     ModuleCoverage,
     TranscriptionEvidence,
     attach_dfm_report,
@@ -560,20 +560,21 @@ from kicad_tools.export.factory_dfm import (
 )
 
 transcription = TranscriptionEvidence(
-    provenance="manual",          # or "ocr", or "unknown" if even that isn't known
+    provenance="manual",  # or "ocr", or "unknown" if even that isn't known
     performed_by="alice@example.com",
-    confidence=0.95,               # 0.0-1.0, or None when unknown
+    confidence=0.95,  # 0.0-1.0, or None when unknown
     extracted_rows=12,
     ocr_failed=False,
-    image_only_source=True,        # a raster-only/scanned report page
+    image_only_source=True,  # a raster-only/scanned report page
     categories=(
         CategoryFinding(
             category="silkscreen-clearance",
             count=3,
             limit=10,
-            capped=False,           # True marks a truncated/capped count
+            capped=False,  # True marks a truncated/capped count
             coordinates_available=True,
             threshold="0.1 mm",
+            coordinates=(FindingCoordinate("12.340", "-2.5", "mm", "F.SilkS R1"),),
         ),
     ),
     modules=(
@@ -583,14 +584,16 @@ transcription = TranscriptionEvidence(
 )
 
 attachment = attach_dfm_report(
-    report_bytes=report_pdf_bytes,       # never edited or re-encoded
+    report_bytes=report_pdf_bytes,  # never edited or re-encoded
     report_revision="v27",
     checker_time="2026-01-03T00:00:00Z",
-    gerber_sha256=receipt.file_sha256,   # exact Gerber bundle hash, from #5145
+    gerber_sha256=receipt.file_sha256,  # exact Gerber bundle hash, from #5145
     app_identity=receipt.app_identity,
     endpoint=receipt.endpoint,
     transcription=transcription,
-    ledger=ledger,                       # optional; omit for a fully offline attachment
+    ledger=ledger,  # optional; omit for an attachment with unknown binding
+    plan=plan,  # published handoff, including its current source_root
+    review=review_record,  # reverified before readiness can be true
 )
 verify_dfm_attachment(attachment, report_pdf_bytes)  # raises on any byte drift
 ```
@@ -643,8 +646,22 @@ mentions -- coverage is recorded exactly as transcribed, never inferred from
 `factory_selection.py`'s component-selection comparison (that module has no
 concept of DFM analysis-module coverage).
 
-`attachment.readiness_eligible` is `True` only when `dfm_status == "pass"`
-**and** `upload_binding == "bound"`. Readiness/Ready-badge integration must
-consult this property, not `dfm_status` alone: a passing transcription bound
-to an `"unknown"` upload (no verified #5145 receipt yet) must never promote
-a board.
+`attachment.readiness_eligible` requires passing DFM evidence, a matching
+`live-factory-response` receipt, and a valid current human review. Every query
+rechecks receipt identity, published handoff bytes, and reviewed source bytes.
+Provide both `plan` (with `source_root`) and `review` to enable that check;
+omitting either keeps readiness false. Changed or unreadable files also make
+it false. At attachment time, an invalid supplied plan/review chain raises
+`DFMError`. Readiness is a current check, not a value to cache across changes.
+
+Mock-protocol and human-reconciled receipts retain their `receipt_sha256` and
+`receipt_evidence` for audit, but leave `upload_binding` unknown and cannot
+promote readiness. Synthetic tests of future live-receipt consumption do not
+provide actual factory evidence or enable the blocked live transport.
+
+Category coordinates preserve original axis text, units, and optional location
+context through `FindingCoordinate`; no rounding or unit inference occurs.
+`coordinates=None` means unknown/untranscribed, while an empty tuple records no
+transcribed positions. `coordinates_available=None` means the report did not
+state availability. Missing axes, units, context, and thresholds remain `None`.
+Coordinate values and receipt provenance participate in the attachment hash.
