@@ -132,6 +132,24 @@ CONSTRUCTION_DEPARTURE_ITERATIONS: int = int(
 )
 CONSTRUCTION_BODY_ATTEMPTS: int = int(os.environ.get("KCT_CONSTRUCTION_BODY_ATTEMPTS", "400"))
 
+# Issue #5333 (TMDS_D1): radii (mm, from each of the goal/head anchors)
+# ``_layer_return_tails`` samples when building its candidate via-site
+# lattice.  The historical set (0/0.6/1.2/1.8/2.4mm) was sized for the
+# ordinary pitch-transition search (#2490/#3508), not for finding a site
+# close enough to a partner's committed copper to clear the authored
+# ``effective_coupled_continuity_threshold`` under real BGA-field congestion
+# -- measured on Board07 (seed 42): TMDS_D1's widened (full-lattice) retry
+# still returns ``no_tail`` for the overwhelming majority of attempts
+# (828/894 completion attempts), meaning too few LEGAL sites exist within
+# 2.4mm at all, not merely too few well-coupled ones. Overridable for
+# controlled A/B measurement; every site this lattice yields still passes
+# every existing clearance/hole-spacing/occupancy check unchanged.
+LAYER_RETURN_SEARCH_RADII_MM: tuple[float, ...] = tuple(
+    float(r)
+    for r in os.environ.get("KCT_LAYER_RETURN_RADII_MM", "0.0,0.6,1.2,1.8,2.4").split(",")
+    if r.strip()
+)
+
 # Issue #3508: maximum length (mm) the shadow constructor may trim from
 # EACH end of the offset polyline before tail-connecting to the pads.
 # Endpoint zones are always contested by neighbour-pad clearance halos
@@ -6366,7 +6384,7 @@ class DiffPairRouter:
         seen_sites: set[tuple[int, int]] = set()
         # Grid-aligned sites avoid placing a barrel between checked cells.
         for anchor in (goal, head):
-            for radius in (0.0, 0.6, 1.2, 1.8, 2.4):
+            for radius in LAYER_RETURN_SEARCH_RADII_MM:
                 for dx, dy in (
                     (1, 0),
                     (-1, 0),

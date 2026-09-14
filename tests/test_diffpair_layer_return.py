@@ -1,5 +1,6 @@
 """One-via landings retain pad, partner-barrel and hole clearances."""
 
+import os
 import time
 from types import SimpleNamespace
 
@@ -512,6 +513,101 @@ def test_reserved_trace_filters_planar_candidates_before_selecting_a_tail():
             >= (segment.width + obstacle.width) / 2 + finder.rules.trace_clearance - 1e-9
         )
     assert not router.autorouter.routes and not finder.grid.routes
+
+
+def test_layer_return_search_radii_default_matches_historical_lattice():
+    """Issue #5333 (TMDS_D1): the radii list is now a tunable, not a literal.
+
+    Refactoring the hard-coded ``(0.0, 0.6, 1.2, 1.8, 2.4)`` tuple inline in
+    ``_layer_return_tails`` into ``LAYER_RETURN_SEARCH_RADII_MM`` must not by
+    itself change any pair's routed outcome -- pin the untouched default here
+    so a future edit to the env-var default is a deliberate, reviewed change.
+    """
+    from kicad_tools.router.diffpair_routing import LAYER_RETURN_SEARCH_RADII_MM
+
+    assert LAYER_RETURN_SEARCH_RADII_MM == (0.0, 0.6, 1.2, 1.8, 2.4)
+
+
+def test_layer_return_search_radii_env_override_is_read_at_import():
+    """``KCT_LAYER_RETURN_RADII_MM`` overrides the default radii lattice.
+
+    Issue #5333: TMDS_D1's terminal-completion stage stays scarce
+    (``no_tail``-dominated) even after the full-lattice widen fallback
+    (#5333, ``5488958b``) -- this env var exists so a future session can A/B
+    a wider candidate-site lattice without a code edit. Verified via
+    subprocess (not ``importlib.reload``) so this test cannot leak a mutated
+    module-global into any other test in the session.
+    """
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from kicad_tools.router.diffpair_routing import LAYER_RETURN_SEARCH_RADII_MM as r; "
+            "print(','.join(str(v) for v in r))",
+        ],
+        env={**os.environ, "KCT_LAYER_RETURN_RADII_MM": "0.0,1.5,3.0"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout.strip() == "0.0,1.5,3.0"
+
+
+def test_layer_return_search_radii_widening_reaches_farther_sites(monkeypatch):
+    """A widened radii lattice yields legal sites the default cannot reach.
+
+    Issue #5333: on Board07 (seed 42, real congestion near U4's BGA-49
+    field), widening ``LAYER_RETURN_SEARCH_RADII_MM`` from the default max
+    2.4mm to 4.8mm left TMDS_D1's ``no_tail`` count UNCHANGED (828/828) but
+    raised ``coupling_threshold`` misses (66 -> 122) -- the wider lattice
+    genuinely reaches new copper, it just doesn't clear the authored
+    coupled-continuity threshold there. This synthetic control isolates
+    just the mechanism (more sites reachable, gated by the SAME clearance
+    checks) on an open grid large enough that the default lattice's 2.4mm
+    radius is not the board edge -- the small ``_case()`` grid (8x6mm) is
+    too tight for this: the default and widened lattices both clip to the
+    same on-grid subset there, which would make this control degenerate.
+    """
+    import math
+
+    rules = DesignRules(grid_resolution=0.1, manufacturer="jlcpcb")
+    grid = RoutingGrid(
+        width=20, height=20, rules=rules, layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig()
+    )
+    head = Pad(x=5, y=10, width=0.3, height=0.3, net=1, net_name="P", layer=Layer.IN1_CU)
+    goal = Pad(x=12, y=10, width=0.3, height=0.3, net=1, net_name="P", layer=Layer.F_CU)
+    grid.add_pad(head)
+    grid.add_pad(goal)
+    router = DiffPairRouter.__new__(DiffPairRouter)
+    router.autorouter = SimpleNamespace(
+        grid=grid, rules=rules, pads={}, routes=[], net_class_map={}
+    )
+    router._shadow_foreign_universe = None
+    router._shadow_via_gate_rejections = 0
+    finder = CoupledPathfinder(grid, rules, target_spacing_cells=3, min_spacing_cells=2)
+    partner = Route(net=2, net_name="N")
+    body = Route(net=1, net_name="P")
+
+    def farthest(radii):
+        import kicad_tools.router.diffpair_routing as dpr
+
+        monkeypatch.setattr(dpr, "LAYER_RETURN_SEARCH_RADII_MM", radii)
+        sites = {
+            (round(c.vias[0].x, 2), round(c.vias[0].y, 2))
+            for c in router._layer_return_tails(finder, head, goal, partner, body)
+        }
+        return sites, max(
+            min(math.hypot(x - head.x, y - head.y), math.hypot(x - goal.x, y - goal.y))
+            for x, y in sites
+        )
+
+    default_sites, default_max = farthest((0.0, 0.6, 1.2, 1.8, 2.4))
+    wide_sites, wide_max = farthest((0.0, 0.6, 1.2, 1.8, 2.4, 3.6, 4.8))
+    assert wide_max > default_max
+    assert wide_sites - default_sites
 
 
 def test_planar_tail_avoids_backtracking_through_its_preceding_body():
