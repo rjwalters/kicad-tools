@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-09-14T21:12:05.803365+00:00",
+  "checked_at": "2026-09-14T21:54:03.674654+00:00",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -23,7 +23,7 @@
     {
       "name": "artifacts",
       "status": "passed",
-      "detail": "23 BOM groups/42 exact identities,36 SMT placements,6 manual parts; complete Gerber/drill/drawings/KiCad source/firmware package and SHA256 integrity."
+      "detail": "23 BOM groups/42 exact identities,36 SMT placements,6 manual parts; complete Gerber/drill/drawings/KiCad source/firmware package and SHA256 integrity. CPL regenerated through manufacturer profile: D1/D2/D3=180 degrees, U1=270 degrees; library-qualified names preserve corrections. Other CPL fields unchanged; package archive and manifest verified."
     },
     {
       "name": "source_reconstruction",
@@ -74,7 +74,7 @@
     "output/manufacturing/assembly-front.pdf": "d9430611b0e50677ba6b913b7dfd87ed4983191a90b3aeeb3682f9b3fe1dddb9",
     "output/manufacturing/bom_jlcpcb.csv": "6e04b5c78e81ebd85f18e72142d21906dda4165d5ca9b7f7d6159729b54c5506",
     "output/manufacturing/check-report.json": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
-    "output/manufacturing/cpl_jlcpcb.csv": "31bc6669b6c7e24cf777af71e201ce79a2da1104614874307fea7db25c738bf7",
+    "output/manufacturing/cpl_jlcpcb.csv": "84a86a6db7a27d9a52b1aa7f45e7a4b7c4fd5965e45b23dbd4a48d2866b558cc",
     "output/manufacturing/firmware/Makefile": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
     "output/manufacturing/firmware/bldc.hex": "4482dd25f19c36ab8ed4a6514904b6668bbe7a11264f788b50a9cd0810916412",
     "output/manufacturing/firmware/commutation.h": "2193ce070b97ab9591b9045b0b58fe84070fa04726e2f0ed7a7a7fb6111380d0",
@@ -92,7 +92,7 @@
     "output/manufacturing/kct-check.json": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
     "output/manufacturing/kicad_project.zip": "48877f98b4bfed3b9f783b18635d5415e90a2213c686847f26ef73a4e43ae63d",
     "output/manufacturing/lvs.json": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
-    "output/manufacturing/manifest.json": "9fdf07a17afb2a45d349e5b0f064a0f3bae060f2712b8560778e3db4cf6a5b9b",
+    "output/manufacturing/manifest.json": "0f94d795ec9aafa4a19254bd3e7783e62c447a74ba63357a2888d22da72e5ca4",
     "output/manufacturing/native-drc.json": "3ebacdeb5abaecf41f218fd65fb65a5d37857479245838e568d13a5f3f0bb541",
     "output/manufacturing/native-erc.json": "413700ae1e92136ad5d319314d28bdc3624dfb25a55cbf8fffc6edbd43569891",
     "output/manufacturing/project.kct": "ba6911aa5aefe513c5e4db8fac019c11723b4e627d1554329d69b9c5131917ae",
@@ -103,7 +103,7 @@
     "output/manufacturing/report.md": "2a8be894b2281161fa0df2b4b92e44e3da615c5e908edd91f573c93e006d1774",
     "output/manufacturing/report.pdf": "0ecfb21366b397388d2e6e91eced43a7ea180c6528d3ea596c91a375d4f64b31",
     "output/manufacturing/schematic.pdf": "3bb8564323757ed17fbffed573e01e456c851fbd84863ce978028e45f065e9b2",
-    "output/manufacturing.zip": "3161d851a35d578714494020cd2b0c216333e320e06d97614150a117df3814fc",
+    "output/manufacturing.zip": "9d210b6fe3355c87cf09aa5aadc7aa6b515c2155008cdca010c057eaa697e179",
     "output/project.kct": "4369ceb55221ee30b4a25e636e1fb6d41c9cb12fcebc11a3a6136f9090e20af7",
     "output/readiness/45-alignment.json": "5f7217e95e929fbe8ea5c45aa0d8535ebd5ec39ef3f131539cc7413d30a5eedf",
     "output/readiness/drill-relocations.json": "aff479ed240c2180417e10dd9068b9f2d8ad6c40befb33ae1183a4ee2ece94cd",
