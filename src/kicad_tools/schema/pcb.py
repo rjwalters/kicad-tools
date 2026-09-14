@@ -1566,6 +1566,35 @@ class Zone:
     fill_type: str = "solid"
     # Whether zone is filled (has copper)
     is_filled: bool = False
+    # KiCad's ``(filled_areas_thickness yes|no)``.  ``True`` (the format
+    # default when the token is absent) means the stored ``filled_polygons``
+    # are *centre-lines* of copper ``min_thickness`` wide, so the real copper
+    # extends ``min_thickness / 2`` beyond each stored outline.  ``False``
+    # means the stored outlines already are the final copper.  See
+    # :meth:`fill_inflation` (Issue #5362).
+    filled_areas_thickness: bool = True
+
+    def fill_inflation(self) -> float:
+        """Half-width the stored fill outlines must grow by to be real copper.
+
+        KiCad's zone filler can store a fill either as the final copper
+        outline (``(filled_areas_thickness no)``) or as the centre-line of a
+        ``min_thickness``-wide stroke (``yes``, and the default when the token
+        is absent).  In the latter case the manufactured copper is the stored
+        polygon inflated by ``min_thickness / 2``, which is what makes two
+        adjacent fill fragments of one zone electrically continuous.
+
+        Measured against native ``kicad-cli pcb drc`` (KiCad 10.0.5, no
+        ``--refill-zones``): with the token absent and ``min_thickness 0.25``,
+        two same-zone fill fragments report ``connected`` for every gap up to
+        and including 0.25 mm and ``unconnected`` from 0.26 mm; with
+        ``(filled_areas_thickness no)`` they report ``unconnected`` at every
+        gap, including an exact zero-gap shared edge.  Both series are exactly
+        this inflation rule.
+        """
+        if not self.filled_areas_thickness:
+            return 0.0
+        return max(self.min_thickness, 0.0) / 2.0
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Zone:
@@ -1625,6 +1654,10 @@ class Zone:
         # Minimum thickness
         if min_thickness := sexp.find("min_thickness"):
             zone.min_thickness = min_thickness.get_float(0) or 0.2
+
+        # ``(filled_areas_thickness no)`` -- absent means ``yes`` (#5362).
+        if fat := sexp.find("filled_areas_thickness"):
+            zone.filled_areas_thickness = fat.get_string(0) != "no"
 
         # Connect pads - can be (connect_pads yes) or (connect_pads (clearance X))
         # or (connect_pads thru_hole_only (clearance X)) etc.

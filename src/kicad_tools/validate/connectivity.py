@@ -2091,6 +2091,30 @@ class ConnectivityValidator:
         Existing terminal bonds and pad/trace tolerances are retained; raw via
         annuli supply the physical layer bridges. Pad-to-fill geometry keeps
         its existing erosion policy. No declared net is consulted.
+
+        Two fill fragments **of one zone** are a special case (Issue #5362):
+        whether they are continuous depends on the fill *encoding*, not on
+        whether their stored outlines happen to touch.  Unless the zone
+        carries ``(filled_areas_thickness no)``, KiCad stores each outline as
+        the centre-line of ``min_thickness``-wide copper, so real metal
+        reaches ``min_thickness / 2`` past the stored boundary and fragments
+        within ``min_thickness`` are one piece (:meth:`Zone.fill_inflation`).
+        Under the ``no`` encoding the stored outline *is* the copper and
+        native KiCad bonds no two fill outlines of one zone directly.
+
+        Measured with ``kicad-cli pcb drc`` 10.0.5 on identical saved bytes
+        (no ``--refill-zones``, hash unchanged), a pad on each of two
+        fragments reports ``connected`` for every gap up to and including
+        ``min_thickness`` under the default encoding and ``unconnected`` from
+        just past it; under ``(filled_areas_thickness no)`` it reports
+        ``unconnected`` at every gap, including fragments meeting at a point,
+        sharing an edge, or overlapping across a 2 mm band.  A bare
+        ``intersects`` test matches neither series.
+
+        The rule is applied to same-zone pairs only, which is exactly what
+        was measured; fills of *different* zone objects keep the existing
+        intersection behaviour.  Conductor-mediated bonds (pad, via, track
+        reaching into both fragments) are unaffected and still merge them.
         """
         from shapely.strtree import STRtree  # type: ignore[import-untyped]
 
@@ -2122,17 +2146,31 @@ class ConnectivityValidator:
             if geom is not None:
                 segment_indices[index] = len(items)
                 items.append((None, "segment", frozenset({seg.layer}), geom))
+        # Fill items, plus the bookkeeping the same-zone stroke-adjacency pass
+        # below needs: each zone's own fill item indices and its inflation
+        # (Issue #5362).
+        zone_fill_items: list[tuple[float, list[int], list[str]]] = []
+        same_zone_fill_pairs: set[tuple[int, int]] = set()
         for zone in self.pcb.zones:
+            zone_items: list[int] = []
+            zone_item_layers: list[str] = []
             for index, points in enumerate(zone.filled_polygons):
                 region = self._fill_solid_region(points)
                 if region is None:
                     continue
+                layer = zone.filled_polygon_layer(index)
                 # A repaired flat contour can itself contain separate solids.
                 solids = region.geoms if region.geom_type == "MultiPolygon" else [region]
                 for solid in solids:
-                    items.append(
-                        (None, "fill", frozenset({zone.filled_polygon_layer(index)}), solid)
-                    )
+                    zone_items.append(len(items))
+                    zone_item_layers.append(layer)
+                    items.append((None, "fill", frozenset({layer}), solid))
+            if zone_items:
+                zone_fill_items.append((zone.fill_inflation(), zone_items, zone_item_layers))
+        for _inflation, zone_items, _layers in zone_fill_items:
+            for a_pos, a_item in enumerate(zone_items):
+                for b_item in zone_items[a_pos + 1 :]:
+                    same_zone_fill_pairs.add((min(a_item, b_item), max(a_item, b_item)))
         if not items:
             return
         parent = list(range(len(items)))
@@ -2181,7 +2219,31 @@ class ConnectivityValidator:
                     # steps, including their contact-depth guards. Do not
                     # bypass those guards with a new raw intersection edge.
                     continue
+                if (
+                    kind == "fill"
+                    and other_kind == "fill"
+                    and (left, right) in same_zone_fill_pairs
+                ):
+                    # Two fill fragments of ONE zone are not bonded by their
+                    # stored outlines touching -- that is an artefact of the
+                    # fill encoding, not copper (Issue #5362).  The
+                    # stroke-adjacency pass below decides these pairs.
+                    continue
                 union(left, right)
+
+        # Same-zone fill fragments: continuous iff their REAL copper meets.
+        # Unless the zone carries ``(filled_areas_thickness no)`` KiCad stores
+        # each outline as the centre-line of ``min_thickness``-wide copper, so
+        # fragments within ``min_thickness`` are one piece of metal; under the
+        # ``no`` encoding the stored outline IS the copper and native KiCad
+        # bonds no two fill outlines of one zone directly (Issue #5362,
+        # measured against kicad-cli 10.0.5 on identical saved bytes).
+        for inflation, zone_items, zone_item_layers in zone_fill_items:
+            if inflation <= 0.0 or len(zone_items) < 2:
+                continue
+            geoms = [items[index][3] for index in zone_items]
+            for a_pos, b_pos in self._adjacent_fill_pairs(geoms, zone_item_layers, 2.0 * inflation):
+                union(zone_items[a_pos], zone_items[b_pos])
         fill_components = {find(index) for index, item in enumerate(items) if item[1] == "fill"}
         components: dict[int, list[str]] = defaultdict(list)
         for key, index in terminal_index.items():
@@ -2191,6 +2253,38 @@ class ConnectivityValidator:
         for keys in components.values():
             for key in keys[1:]:
                 connect(keys[0], key)
+
+    @staticmethod
+    def _adjacent_fill_pairs(
+        regions: list[Any],
+        fill_layers: list[str],
+        reach: float,
+    ) -> list[tuple[int, int]]:
+        """Position pairs of same-layer fill solids within ``reach`` of each other.
+
+        ``reach`` is the summed stroke half-width the two stored outlines are
+        inflated by to recover real copper (Issue #5362).  Uses an ``STRtree``
+        ``dwithin`` query so a zone fractured into hundreds of
+        ``filled_polygon`` entries costs O(n log n) rather than O(n^2)
+        pairwise ``distance`` calls.  Returns *positions within the inputs*,
+        not board-level indices.
+        """
+        from shapely.strtree import STRtree
+
+        indices = [i for i, region in enumerate(regions) if region is not None]
+        if len(indices) < 2:
+            return []
+        tree = STRtree([regions[i] for i in indices])
+        pairs: list[tuple[int, int]] = []
+        for position, i in enumerate(indices):
+            for candidate in tree.query(regions[i], predicate="dwithin", distance=reach):
+                other = int(candidate)
+                if other <= position:
+                    continue
+                j = indices[other]
+                if fill_layers[i] == fill_layers[j]:
+                    pairs.append((i, j))
+        return pairs
 
     def _connect_pour_pads_by_declared_net(
         self,

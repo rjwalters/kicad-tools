@@ -1644,8 +1644,7 @@ _ZONE_FILL_PCB_TEMPLATE = """(kicad_pcb
     (hatch edge 0.5)
     (connect_pads (clearance 0.2))
     (min_thickness 0.15)
-    (filled_areas_thickness no)
-    {fill_clause}
+{fat_clause}    {fill_clause}
     (polygon
       (pts
         (xy 10 10)
@@ -1658,17 +1657,31 @@ _ZONE_FILL_PCB_TEMPLATE = """(kicad_pcb
 )
 """
 
+# --- fill encodings (Issue #5362) -------------------------------------------
+# ``(filled_areas_thickness no)``: the stored outlines ARE the copper.  Native
+# KiCad bonds no two fill outlines of one zone directly under this encoding --
+# not across a gap, a shared corner, a shared edge, or an overlapping band.
+_FAT_SOLID = "    (filled_areas_thickness no)\n"
+# Token omitted: the KiCad format default (``yes``).  Each stored outline is
+# the centre-line of ``min_thickness``-wide copper, so fragments within
+# ``min_thickness`` of each other are one continuous piece.  This is how a real
+# board's thermal-relief-fragmented pour is actually encoded, which is why the
+# DISJOINT_* fixtures below (which model exactly that) use it.
+_FAT_STROKE = ""
+
 # Zone with fill ENABLED but zero filled polygons (e.g. fully shadowed by a
 # higher-priority overlapping zone or carved away entirely by clearances).
 # This is the exact softstart AC_NEUTRAL/ISENSE_POS failure mode from
 # Issue #3482: both pads sit inside the zone BOUNDARY but there is no copper.
 ZERO_FILL_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fat_clause=_FAT_SOLID,
     fill_clause="(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))",
     filled_polygons="",
 )
 
 # Zone with fill DISABLED (boundary-only zone, board 06 style).
 BOUNDARY_ONLY_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fat_clause=_FAT_SOLID,
     fill_clause="(fill (thermal_gap 0.2) (thermal_bridge_width 0.2))",
     filled_polygons="",
 )
@@ -1679,6 +1692,7 @@ BOUNDARY_ONLY_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
 # boundary only.  The Issue #479 thermal-relief heuristic applies because
 # the zone genuinely has filled copper.
 PARTIAL_FILL_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fat_clause=_FAT_SOLID,
     fill_clause="(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))",
     filled_polygons="""    (filled_polygon
       (layer "F.Cu")
@@ -1701,6 +1715,7 @@ PARTIAL_FILL_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
 # negative this fixture pins.  The island-aware model must report it
 # ``incomplete``.
 DISCONTINUOUS_FILL_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fat_clause=_FAT_SOLID,
     fill_clause="(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))",
     filled_polygons="""    (filled_polygon
       (layer "F.Cu")
@@ -1736,6 +1751,7 @@ DISCONTINUOUS_FILL_ZONE_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
 # all.  Native `kicad-cli pcb drc` reports a real unconnected-items error
 # here, so strict net-status must report ``incomplete`` with island_count=2.
 DISJOINT_ISLANDS_BOTH_PADS_OPEN_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fat_clause=_FAT_STROKE,
     fill_clause="(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))",
     filled_polygons="""    (filled_polygon
       (layer "F.Cu")
@@ -1768,6 +1784,7 @@ DISJOINT_ISLANDS_BOTH_PADS_OPEN_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
 # "no clustering at all, only via/track bonds" (which would wrongly split any
 # thermal-relief-fragmented pour into many false opens).
 DISJOINT_ISLANDS_BOTH_PADS_FILL_BRIDGED_PCB = _ZONE_FILL_PCB_TEMPLATE.format(
+    fat_clause=_FAT_STROKE,
     fill_clause="(fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))",
     filled_polygons="""    (filled_polygon
       (layer "F.Cu")
@@ -2163,7 +2180,12 @@ class TestDisjointZoneIslandConnectivity:
             ("(xy 24 14) (xy 26 14) (xy 26 16) (xy 24 16)", False),
             # Control: the same satellite fragment extended left so it touches
             # the main pour's x = 20 edge -- one physical piece of copper, so
-            # the chain's pads DO join the pour.
+            # the chain's pads DO join the pour.  This holds because the zone
+            # omits ``filled_areas_thickness`` (the KiCad default), making each
+            # stored outline the centre-line of ``min_thickness``-wide copper;
+            # native kicad-cli 10.0.5 reports 0 unconnected items for a
+            # zero-gap pair under that encoding and 1 for a 4 mm gap, matching
+            # both rows here (Issue #5362).
             ("(xy 20 14) (xy 26 14) (xy 26 16) (xy 20 16)", True),
         ],
     )
@@ -2233,7 +2255,6 @@ class TestDisjointZoneIslandConnectivity:
     (hatch edge 0.5)
     (connect_pads (clearance 0.2))
     (min_thickness 0.15)
-    (filled_areas_thickness no)
     (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))
     (polygon
       (pts

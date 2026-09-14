@@ -1278,21 +1278,32 @@ class NetStatusAnalyzer:
                 if ra != rb:
                     _parent[ra] = rb
 
-            # 1. Fragments that are themselves geometrically continuous
-            #    (touching/overlapping solid regions on the SAME copper
-            #    layer) are one physical pour that KiCad happened to
-            #    fracture into multiple ``filled_polygon`` entries (thermal
+            # 1. Fragments that are one physical pour KiCad happened to
+            #    fracture into several ``filled_polygon`` entries (thermal
             #    relief spokes / clearance moats) -- merge them.
-            for i in range(n_fragments):
-                region_i = regions[i]
-                if region_i is None:
-                    continue
-                for j in range(i + 1, n_fragments):
-                    region_j = regions[j]
-                    if region_j is None or fill_layers[i] != fill_layers[j]:
-                        continue
-                    if region_i.intersects(region_j):
-                        _union(i, j)
+            #
+            #    Whether two fragments are continuous depends on the fill
+            #    ENCODING, not on whether their stored outlines touch (Issue
+            #    #5362).  Unless the zone carries ``(filled_areas_thickness
+            #    no)``, KiCad stores each outline as the centre-line of
+            #    ``min_thickness``-wide copper, so the real metal reaches
+            #    ``min_thickness / 2`` past the stored boundary and two
+            #    fragments within ``min_thickness`` of each other are
+            #    continuous (:meth:`Zone.fill_inflation`).  Under the ``no``
+            #    encoding the stored outline IS the copper and native KiCad
+            #    bonds no two fill outlines of one zone directly at all.
+            #
+            #    The previous ``region_i.intersects(region_j)`` test matched
+            #    neither encoding: it split stroke-encoded fragments that
+            #    native calls connected (any positive gap, however small) and
+            #    merged solid-encoded fragments that native calls open
+            #    (shared corner, shared edge, overlapping band).  Measured
+            #    against kicad-cli 10.0.5 on identical saved bytes; see
+            #    ``tests/test_fill_fragment_bonding_5362.py``.
+            inflation = zone.fill_inflation()
+            if inflation > 0.0:
+                for i, j in self._adjacent_fill_pairs(regions, fill_layers, 2.0 * inflation):
+                    _union(i, j)
 
             # 2. A single via whose copper penetrates more than one fragment
             #    of this zone is a REAL physical bridge between them (a
@@ -1416,6 +1427,37 @@ class NetStatusAnalyzer:
                 if bonded:
                     groups.append(bonded)
         return groups
+
+    @staticmethod
+    def _adjacent_fill_pairs(
+        regions: list[Any | None],
+        fill_layers: list[str],
+        reach: float,
+    ) -> list[tuple[int, int]]:
+        """Index pairs of same-layer fill fragments within ``reach`` of each other.
+
+        ``reach`` is the summed stroke half-width the two stored outlines are
+        inflated by to recover real copper (Issue #5362).  Uses an ``STRtree``
+        ``dwithin`` query so a zone fractured into hundreds of
+        ``filled_polygon`` entries costs O(n log n) rather than O(n^2)
+        pairwise ``distance`` calls.
+        """
+        from shapely.strtree import STRtree  # type: ignore[import-untyped]
+
+        indices = [i for i, region in enumerate(regions) if region is not None]
+        if len(indices) < 2:
+            return []
+        tree = STRtree([regions[i] for i in indices])
+        pairs: list[tuple[int, int]] = []
+        for position, i in enumerate(indices):
+            for candidate in tree.query(regions[i], predicate="dwithin", distance=reach):
+                other = int(candidate)
+                if other <= position:
+                    continue
+                j = indices[other]
+                if fill_layers[i] == fill_layers[j]:
+                    pairs.append((i, j))
+        return pairs
 
     def _merge_chains_via_vias(
         self,
