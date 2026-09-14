@@ -191,6 +191,14 @@ def committed_seg_clear_grown(
     ``CommittedCopper.seg_clear`` (pairwise-aware when a projection is
     installed) and the #4588 post-route audit gates the committed copper.
     """
+    if not committed.fixed_fills.segment_clear(
+        a,
+        b,
+        layer,
+        committed.trace_half + extra,
+        committed.clearance,
+    ):
+        return False
     pad = committed.trace_half + committed.clearance + extra + 0.5
     for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(a, b, pad=pad):
         gap = committed.trace_half + hw + max(committed.clearance, iclr) + extra
@@ -214,6 +222,14 @@ def committed_point_clear_grown(
     extra: float,
 ) -> bool:
     """``CommittedCopper.node_clear`` with gaps grown by ``extra``."""
+    if not committed.fixed_fills.segment_clear(
+        point,
+        point,
+        layer,
+        committed.trace_half + extra,
+        committed.clearance,
+    ):
+        return False
     pad = committed.trace_half + committed.clearance + extra + 0.5
     for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(point, point, pad=pad):
         gap = committed.trace_half + hw + max(committed.clearance, iclr) + extra

@@ -181,15 +181,18 @@ def test_loader_without_disposition_retains_old_behavior(board):
     assert not router.existing_routes
 
 
-def test_unsupported_affected_arc_is_rejected(board):
+def test_affected_arc_is_retained_as_physical_copper(board):
     text = board.read_text()
     board.write_text(
         text[:-1]
         + '\n(arc (start 105 103) (mid 106 104) (end 107 103) (width 0.2) (layer "F.Cu") (net 1)))'
     )
     result = analyze_routing_placement(board)
-    with pytest.raises(ValueError, match="arc copper is not supported"):
-        load_pcb_for_routing(str(board), placement_disposition=result, force_python=True)
+    router, _ = load_pcb_for_routing(str(board), placement_disposition=result, force_python=True)
+    assert router.placement_preserved_arcs
+    assert router.grid.fixed_fills
+    assert not router.grid.fixed_fills.segment_clear((106, 104), (106, 104), 0, 0.1, 0.2)
+    assert router.grid.fixed_fills.segment_clear((106, 103), (106, 103), 0, 0.1, 0.2)
 
 
 def test_export_handoff_retains_authored_blocks_exactly_once(board):
@@ -235,7 +238,7 @@ def test_loader_rejects_different_effective_netlist(board):
         load_pcb_for_routing(str(board), placement_disposition=result, force_python=True)
 
 
-def test_unsupported_affected_filled_zone_is_rejected(board):
+def test_affected_filled_zone_is_retained_as_physical_obstacle(board):
     board.write_text(
         board.read_text()[:-1]
         + """
@@ -244,8 +247,10 @@ def test_unsupported_affected_filled_zone_is_rejected(board):
         (filled_polygon (layer "F.Cu") (pts (xy 104 102) (xy 107 102) (xy 107 104)))))"""
     )
     result = analyze_routing_placement(board)
-    with pytest.raises(ValueError, match="filled zone copper is not supported"):
-        load_pcb_for_routing(str(board), placement_disposition=result, force_python=True)
+    router, _ = load_pcb_for_routing(str(board), placement_disposition=result, force_python=True)
+    assert router.grid.fixed_fills
+    assert len(router.placement_preserved_zones) == 1
+    assert not router.grid.fixed_fills.segment_clear((106, 102.5), (106, 102.5), 0, 0.1, 0.2)
 
 
 def test_malformed_affected_copper_is_rejected(board):

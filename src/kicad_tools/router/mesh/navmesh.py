@@ -216,6 +216,7 @@ class NavMesh:
         present_cost_factor: float = 0.0,
         cost_congestion: float = 0.0,
         congestion_threshold: float = 0.0,
+        edge_clear: Callable[[Pt, Pt], bool] | None = None,
     ) -> list[int] | None:
         """Return a corridor (triangle-index sequence) from ``start`` to ``goal``.
 
@@ -260,10 +261,12 @@ class NavMesh:
             # Stale-entry guard: f encodes g at push time; recompute is cheap.
             if f - h(entry) > g + 1e-6:
                 continue
-            if tri in goal_tris:
+            if tri in goal_tris and (edge_clear is None or edge_clear(entry, goal)):
                 return self._reconstruct(came_from, tri, start_tris)
             for nbr, edge in self._adj[tri]:
                 mid = edge_mid(edge)
+                if edge_clear is not None and not edge_clear(entry, mid):
+                    continue
                 step = math.hypot(mid[0] - entry[0], mid[1] - entry[1])
                 if negotiating:
                     penalty = self.portal_penalty(

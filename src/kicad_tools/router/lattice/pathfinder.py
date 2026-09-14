@@ -307,6 +307,9 @@ class LatticePathfinder:
         # rule areas) keeps every predicate on its pre-#4605 path
         # byte-for-byte.
         self._keepouts: LatticeKeepoutMask | None = None
+        from ..fixed_copper import FixedFillObstacles
+
+        self.fixed_fills = FixedFillObstacles()
 
     def set_pairwise(self, pairwise: LatticePairwise | None) -> None:
         """Install (or clear) the id-space HV pairwise projection (#4602).
@@ -449,6 +452,8 @@ class LatticePathfinder:
         # seed set is empty unless ``route_netset`` was given ``fixed_copper``,
         # so this is a no-op on the pre-#4355 paths.
         self._seed_fixed_copper(committed)
+        committed.fixed_fills = self.fixed_fills
+        committed.fixed_fill_via_clearance = self.rules.via_clearance
         return committed
 
     def _seed_fixed_copper(self, committed: CommittedCopper) -> None:

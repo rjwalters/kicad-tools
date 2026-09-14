@@ -242,6 +242,11 @@ public:
         search_via_half_diam_mm_ = via_half_diam_mm;
     }
 
+    void set_search_fill_clearances(float trace, float via) {
+        search_fill_trace_clearance_ = trace;
+        search_fill_via_clearance_ = via;
+    }
+
     // Issue #4511 / Epic #4431 Phase 2b: search-time pairwise (HV-isolation)
     // avoidance.  All of these are HARD no-ops (single ``pairwise_active()``
     // boolean) when the grid carries no domain matrix, so the no-voltage-map
@@ -390,6 +395,8 @@ private:
     // => fall back to the global ``rules_`` widths.
     float search_trace_half_width_mm_ = 0.0f;
     float search_via_half_diam_mm_ = 0.0f;
+    float search_fill_trace_clearance_ = -1.0f;
+    float search_fill_via_clearance_ = -1.0f;
 
     // Issue #3438: per-step relief penalty helper.  Returns
     // ``relief_conflict_penalty_`` when (x, y, layer) holds a foreign-net

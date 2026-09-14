@@ -1007,6 +1007,10 @@ class RoutingGrid:
         # match the rest of the grid's Via.net / Segment.net typing.
         self._reserved_for_nets: dict[tuple[int, int, int], frozenset[int]] = {}
 
+        from .fixed_copper import FixedFillObstacles
+
+        self.fixed_fills = FixedFillObstacles()
+
         # PR #4078 Path B: (layer, y, x) keys reserved with mirror_to_cpp=False
         # (the single-ended #2983 inner-corner / #4053 bundle-river byte-lane
         # reservations).  These stay Python-only -- honouring them on the C++
@@ -1174,6 +1178,13 @@ class RoutingGrid:
         properties, so callers see no behavioral change.
         """
         return _CellView(self, x, y, layer)
+
+    def install_fixed_fills(self, fills) -> None:
+        """Install immutable geometry in Python and any live native mirror."""
+        self.fixed_fills = fills
+        cpp_grid = getattr(self, "_cpp_grid", None)
+        if cpp_grid is not None:
+            cpp_grid.install_fixed_fills(fills)
 
     def _ensure_static_blockage_snapshot(self) -> None:
         """Capture the static blocked bitmap before the first route mark.
@@ -3566,6 +3577,15 @@ class RoutingGrid:
         if min_clearance is None:
             min_clearance = self.rules.trace_clearance
 
+        if not self.fixed_fills.segment_clear(
+            (seg.x1, seg.y1),
+            (seg.x2, seg.y2),
+            self.layer_to_index(seg.layer.value),
+            seg.width / 2,
+            min_clearance,
+        ):
+            return False, 0.0, (seg.x1, seg.y1)
+
         # Issue #2559: Tighter clearance is only applied when both arguments
         # are present and the partner clearance is tighter than the default.
         partner_active = (
@@ -3978,6 +3998,19 @@ class RoutingGrid:
             min_clearance = self.rules.via_clearance
 
         via_radius = via.diameter / 2
+        if not self.fixed_fills.via_clear(
+            (via.x, via.y),
+            tuple(
+                range(
+                    min(self.layer_to_index(layer.value) for layer in via.layers),
+                    max(self.layer_to_index(layer.value) for layer in via.layers) + 1,
+                )
+            ),
+            via.diameter / 2,
+            min_clearance,
+        ):
+            return False, 0.0, (via.x, via.y)
+
         min_actual_clearance = float("inf")
         violation_loc: tuple[float, float] | None = None
         has_violation = False
