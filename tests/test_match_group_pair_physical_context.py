@@ -218,3 +218,31 @@ def test_sqlite_cache_hit_preserves_pre_tuning_fragments_and_physical_result(tmp
     assert (physical_length(warm, 1) + physical_length(warm, 2)) / 2 == pytest.approx(
         11.6, abs=0.02
     )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_pair_meanders_outward_despite_neighbor_on_p_side(reverse):
+    from kicad_tools.router.match_group_tuning import tune_match_group_v2
+
+    # The reference pair is on P's outer side. Its position must not push
+    # the short pair's reflected meanders inward toward each other.
+    p, n = route(1, 5, 15, 10), route(2, 5, 15, 10.4)
+    if reverse:
+        for r in (p, n):
+            seg = r.segments[0]
+            seg.x1, seg.x2 = seg.x2, seg.x1
+    corpus = {1: p, 2: n, 3: route(3, 5, 16.13, 5), 4: route(4, 5, 16.13, 5.4)}
+    group = MatchGroup(name="outward", net_ids=[], pair_ids=[(1, 2), (3, 4)], tolerance=0.05)
+    results = tune_match_group_v2(
+        group,
+        corpus,
+        intra_group_clearance_mm=0.15,
+        intra_pair_clearance_mm=0.1,
+        grid_resolution_mm=0.127,
+    )
+    assert results[1][1].success and results[2][1].success
+    tuned_p, tuned_n = results[1][0], results[2][0]
+    assert LengthTracker.calculate_route_length(tuned_p) == pytest.approx(11.13, abs=1e-7)
+    assert LengthTracker.calculate_route_length(tuned_n) == pytest.approx(11.13, abs=1e-7)
+    assert max(max(s.y1, s.y2) for s in tuned_p.segments) <= 10 + 1e-9
+    assert min(min(s.y1, s.y2) for s in tuned_n.segments) >= 10.4 - 1e-9

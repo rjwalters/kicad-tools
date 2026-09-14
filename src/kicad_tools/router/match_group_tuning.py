@@ -38,10 +38,10 @@ Design notes
   coupling room and trigger an intra-group clearance violation
   immediately.  See :func:`_outer_normal_hint_group`.
 
-  For pair-aware members the outer-normal is computed **at the pair
-  centerline** (not per-half) so the bulge direction chosen is the same
-  for both P and N halves -- this is what makes the mirror-about-centerline
-  step geometrically meaningful.  See :func:`_outer_normal_hint_pair_group`.
+  For pair-aware members the normal is perpendicular to the P host and
+  points from N toward P. Mirroring across the pair centerline then sends
+  the two bulges away from one another. Other copper remains subject to
+  the candidate clearance checks. See :func:`_pair_outward_normal`.
 
 * **Per-insertion DRC self-check.**  Five-pronged (extended in Issue
   #3317 follow-up to catch broader-DRC violations the legacy
@@ -134,7 +134,7 @@ Design notes
   3. Generate the P-side meander using the same Phase 2E single-ended
      serpentine engine.
   4. Mirror the P-side new segments by reflection-about-centerline,
-     snapping each reflected endpoint to ``grid_resolution_mm``.
+     preserving already legal geometry and its connection endpoints.
   5. Run the paired DRC self-check on BOTH halves; rollback BOTH on
      failure.
 
@@ -557,11 +557,10 @@ def tune_match_group_v2(
             ``False`` every member is returned unchanged with
             ``reason="not_length_critical"`` (matches the pair tuner's
             gate at :func:`tune_diff_pair_skew`).
-        grid_resolution_mm: Routing grid resolution used to snap the
-            mirrored N-side endpoints in the pair-aware path.  Default
-            ``0.01`` mm matches the typical 10um router grid; tests pass
-            an explicit value when they need a coarser grid to verify
-            the snap behavior.
+        grid_resolution_mm: Interior snapping resolution for reflected
+            geometry that needs angle correction. Already legal reflected
+            geometry stays exact so both halves gain the same length.
+            Existing connection endpoints always remain fixed.
         via_clearance_mm: Optional segment-to-via clearance floor in mm
             (Issue #3317 follow-up).  When supplied, the post-insertion
             DRC self-check additionally rejects inserts whose new
@@ -2040,6 +2039,26 @@ def _outer_normal_hint_pair_group(
     return (rx / mag, ry / mag)
 
 
+def _pair_outward_normal(p_seg: Segment, n_seg: Segment) -> tuple[float, float]:
+    """Geometric reflection normal, oriented from N toward P.
+
+    A neighboring lane cannot choose the reflection axis: doing so can
+    rotate the mirrored endpoints or direct both meanders into the pair.
+    Neighbor copper is still checked by the candidate clearance gate.
+    """
+    import math
+
+    dx, dy = p_seg.x2 - p_seg.x1, p_seg.y2 - p_seg.y1
+    length = math.hypot(dx, dy)
+    if length <= 1e-12:
+        return (0.0, 1.0)
+    nx, ny = -dy / length, dx / length
+    separation = (p_seg.x1 + p_seg.x2 - n_seg.x1 - n_seg.x2) * nx + (
+        p_seg.y1 + p_seg.y2 - n_seg.y1 - n_seg.y2
+    ) * ny
+    return (nx, ny) if separation >= 0 else (-nx, -ny)
+
+
 def _snap_to_grid(value: float, grid_resolution_mm: float) -> float:
     """Snap ``value`` to the nearest multiple of ``grid_resolution_mm``.
 
@@ -2101,7 +2120,8 @@ def _mirror_segments_about_centerline(
     centerline axis (defined by point ``(cx, cy)`` and normal
     ``(nx, ny)``), snaps each reflected coordinate to the routing grid,
     and emits a new :class:`Segment` carrying the N-side net id / name.
-    The first and last reflected endpoints stay exact; interior snapping
+    Already 45-aligned reflected geometry stays exact, preserving pair length.
+    Otherwise, the first and last endpoints stay exact and interior snapping
     uses the first reflected endpoint as its grid origin.
 
     The reflection preserves segment length (modulo grid snapping
@@ -2133,9 +2153,25 @@ def _mirror_segments_about_centerline(
     first = (new_p_segments[0].x1, new_p_segments[0].y1)
     last = (new_p_segments[-1].x2, new_p_segments[-1].y2)
     ox, oy = _reflect_point_about_axis(*first, cx, cy, nx, ny)
+    reflected = {
+        point: _reflect_point_about_axis(*point, cx, cy, nx, ny)
+        for segment in new_p_segments
+        for point in ((segment.x1, segment.y1), (segment.x2, segment.y2))
+    }
+    already_aligned = all(
+        is_45_aligned(
+            reflected[(segment.x2, segment.y2)][0] - reflected[(segment.x1, segment.y1)][0],
+            reflected[(segment.x2, segment.y2)][1] - reflected[(segment.x1, segment.y1)][1],
+        )
+        for segment in new_p_segments
+    )
 
     def reflected_point(x: float, y: float) -> tuple[float, float]:
-        rx, ry = _reflect_point_about_axis(x, y, cx, cy, nx, ny)
+        rx, ry = reflected[(x, y)]
+        # Reflection already preserves length. Independently rounding only N
+        # would create pair skew even when every reflected leg is legal.
+        if already_aligned:
+            return rx, ry
         # Existing host endpoints are connection anchors, not new grid sites.
         # Snap interior vertices relative to that host so translating a board
         # cannot move the replacement away from its original copper.
@@ -2555,8 +2591,8 @@ def _tune_match_group_of_pairs(
        both halves).
     4. Generate the P-side meander using the Phase 2E single-ended
        trombone engine.
-    5. Mirror the P-side new segments across the centerline, snapping
-       each reflected endpoint to ``grid_resolution_mm``.
+    5. Mirror the P-side new segments across the centerline, preserving
+       legal angles and exact connection endpoints.
     6. Run the paired DRC self-check; rollback BOTH halves on failure.
 
     Scalar members in ``group.net_ids`` (e.g. a mixed group with a
@@ -2875,19 +2911,7 @@ def _tune_match_group_of_pairs(
 
             # --- Step 3: pair centerline midpoint + outer-normal hint.
             cx, cy = _pair_centerline_midpoint(p_insertion_segment, n_insertion_segment)
-            other_member_routes: dict[int, Route] = {}
-            for other_id in group_net_ids:
-                if other_id in (p_id, n_id):
-                    continue
-                if other_id in routes_by_net:
-                    other_member_routes[other_id] = routes_by_net[other_id]
-            hint = _outer_normal_hint_pair_group(
-                p_insertion_segment,
-                n_insertion_segment,
-                candidate_p_id=p_id,
-                candidate_n_id=n_id,
-                group_routes=other_member_routes,
-            )
+            hint = _pair_outward_normal(p_insertion_segment, n_insertion_segment)
 
             # --- Step 4: generate P-side meander.
             loops = max(1, math.ceil(length_needed / (2.0 * base_config.amplitude)))
