@@ -10,6 +10,7 @@ of actual git topology, not of the Python glue around it.
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -92,49 +93,58 @@ class TestResolvePushBase:
     def test_explicit_before_used_verbatim(self, srp, repo: GitRepo) -> None:
         c1 = repo.commit("c1")
         c2 = repo.commit("c2")
-        base = srp.resolve_push_base(repo.root, c2, c1, "origin/main")
+        base = srp.resolve_push_base(repo.root, c2, c1)
         assert base == c1
 
-    def test_zero_before_falls_back_to_parent(self, srp, repo: GitRepo) -> None:
+    def test_zero_before_uses_empty_tree(self, srp, repo: GitRepo) -> None:
+        """Zero `before` => conservative empty-tree base, NOT `head^`.
+
+        `head^` would only describe the push's final commit; a multi-commit
+        push would have its earlier commits silently ignored.
+        """
         repo.commit("c1")
         c2 = repo.commit("c2")
-        base = srp.resolve_push_base(repo.root, c2, "0" * 40, "origin/main")
-        assert base == f"{c2}^"
-        # And that ref must actually resolve to the c1 commit.
-        resolved = subprocess.run(
-            ["git", "rev-parse", base], cwd=repo.root, capture_output=True, text=True, check=True
-        ).stdout.strip()
-        c1_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD^"], cwd=repo.root, capture_output=True, text=True, check=True
-        ).stdout.strip()
-        assert resolved == c1_sha
+        base = srp.resolve_push_base(repo.root, c2, "0" * 40)
+        assert base == srp.resolve_empty_tree(repo.root)
+        assert base != f"{c2}^"
 
-    def test_missing_before_falls_back_to_parent(self, srp, repo: GitRepo) -> None:
+    def test_missing_before_uses_empty_tree(self, srp, repo: GitRepo) -> None:
         repo.commit("c1")
         c2 = repo.commit("c2")
-        base = srp.resolve_push_base(repo.root, c2, None, "origin/main")
-        assert base == f"{c2}^"
+        assert srp.resolve_push_base(repo.root, c2, None) == srp.resolve_empty_tree(repo.root)
 
-    def test_empty_string_before_falls_back_to_parent(self, srp, repo: GitRepo) -> None:
+    def test_empty_string_before_uses_empty_tree(self, srp, repo: GitRepo) -> None:
         repo.commit("c1")
         c2 = repo.commit("c2")
-        base = srp.resolve_push_base(repo.root, c2, "", "origin/main")
-        assert base == f"{c2}^"
+        assert srp.resolve_push_base(repo.root, c2, "") == srp.resolve_empty_tree(repo.root)
 
-    def test_root_commit_with_zero_before_raises(self, srp, repo: GitRepo) -> None:
-        """A repo's very first commit has no parent AND (in this test) no
-        fallback ref either -- must fail loudly, not silently."""
+    def test_root_commit_with_zero_before_uses_empty_tree(self, srp, repo: GitRepo) -> None:
+        """A repo's very first commit has no parent -- the empty tree is
+        still a valid, non-self-referential base (and git resolves it even
+        though the object was never written to this repo's object store)."""
         c1 = repo.commit("only commit")
+        base = srp.resolve_push_base(repo.root, c1, "0" * 40)
+        assert base == srp.resolve_empty_tree(repo.root)
+        assert srp.run_git_diff(repo.root, base, c1) is not None
+
+    def test_zero_before_with_unresolvable_head_raises(self, srp, repo: GitRepo) -> None:
+        """A pushed commit that doesn't exist must fail loudly, never
+        degrade into an empty selection."""
+        repo.commit("c1")
         with pytest.raises(srp.GitCommandError):
-            srp.resolve_push_base(repo.root, c1, "0" * 40, "origin/nonexistent-ref")
+            srp.resolve_push_base(repo.root, "0" * 40, "0" * 40)
 
-    def test_root_commit_with_zero_before_uses_fallback_ref_if_resolvable(
-        self, srp, repo: GitRepo
-    ) -> None:
-        c1 = repo.commit("only commit")
-        repo._run(["branch", "some-fallback", c1])
-        base = srp.resolve_push_base(repo.root, c1, "0" * 40, "some-fallback")
-        assert base == "some-fallback"
+    def test_empty_tree_is_the_canonical_object(self, srp, repo: GitRepo) -> None:
+        repo.commit("c1")
+        resolved = srp.resolve_empty_tree(repo.root)
+        expected = subprocess.run(
+            ["git", "hash-object", "-t", "tree", os.devnull],
+            cwd=repo.root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert resolved == expected
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +337,52 @@ class TestSelectRoutedPcbs:
         c2 = repo.commit("c2: board 03 change")
         result = srp.select_routed_pcbs(repo.root, "push", c2, push_before="0" * 40)
         assert result.ordinary_files == ["boards/03-x/output/x_routed.kicad_pcb"]
+
+    @pytest.mark.parametrize("push_before", [None, "", "0" * 40])
+    def test_push_zero_before_selects_board_added_in_a_middle_commit(
+        self, srp, repo: GitRepo, push_before: str | None
+    ) -> None:
+        """Regression (Judge review of PR #5353): a push introduces MANY
+        commits. Basing the diff on `head^..head` inspected only the final
+        commit, so a routed board added by commit 2 of a 3-commit push was
+        silently omitted -- the exact reproduction below returned []."""
+        repo.write("README.md")
+        repo.commit("c1: README")
+        repo.write("boards/03-x/output/x_routed.kicad_pcb")
+        repo.commit("c2: add routed board")
+        repo.write("docs/notes.md")
+        c3 = repo.commit("c3: docs only")
+
+        result = srp.select_routed_pcbs(repo.root, "push", c3, push_before=push_before)
+        assert result.ordinary_files == ["boards/03-x/output/x_routed.kicad_pcb"]
+        assert result.all_files == ["boards/03-x/output/x_routed.kicad_pcb"]
+        # And the base must not be the final commit's parent.
+        assert result.base != f"{c3}^"
+
+    @pytest.mark.parametrize("push_before", [None, "", "0" * 40])
+    def test_push_zero_before_on_root_commit_does_not_self_diff(
+        self, srp, repo: GitRepo, push_before: str | None
+    ) -> None:
+        """Regression (Judge review of PR #5353): for a root commit that
+        itself carries a routed board, the old fallback resolved to
+        `fallback_ref` -- which (right after a push to that ref) IS the
+        pushed commit. That self-diff silently returned [] instead of
+        failing loudly. The empty-tree base must select the board."""
+        repo.write("boards/03-x/output/x_routed.kicad_pcb")
+        c1 = repo.commit("root commit carrying a routed board")
+        # `main` points at exactly the commit under test -- the self-reference.
+        assert repo._run(["rev-parse", "main"]).stdout.strip() == c1
+
+        result = srp.select_routed_pcbs(
+            repo.root,
+            "push",
+            c1,
+            push_before=push_before,
+            fallback_ref="main",
+        )
+        assert result.ordinary_files == ["boards/03-x/output/x_routed.kicad_pcb"]
+        assert result.base != "main"
+        assert result.base != c1
 
     def test_unresolvable_topology_propagates_as_selection_error(self, srp, repo: GitRepo) -> None:
         base_sha = repo.commit("base")

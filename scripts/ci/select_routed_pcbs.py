@@ -24,12 +24,17 @@ Correct provenance instead:
   hard failure, not a guess.
 * ``push`` events -- diff the explicit before/current commit pair GitHub
   provides. A missing/all-zero ``before`` (first push to a fresh ref, or a
-  force-push GitHub could not resolve) falls back to the pushed commit's own
-  parent so the gate still evaluates *something* concrete; if that doesn't
-  resolve either (e.g. a repository's very first commit) the gate fails
-  loudly rather than silently comparing the ref to itself (which -- since
-  ``origin/main`` already IS the just-pushed commit at that point -- would
-  always yield an empty, falsely-reassuring diff).
+  force-push GitHub could not resolve) means the *full range of commits the
+  push introduced* is unknowable, so we diff against the **empty tree**:
+  every file in the pushed commit's tree counts as changed. That is
+  deliberately conservative (it over-selects) because every cheaper
+  approximation silently *under*-selects. In particular we do NOT fall back
+  to the pushed commit's own parent (``head^``): a push can introduce many
+  commits, and ``head^..head`` inspects only the last one -- a routed board
+  added by any earlier commit in the same push would be silently skipped.
+  Nor do we fall back to a ref like ``origin/main``, which immediately after
+  a push to that same ref already IS ``head`` -- a self-diff that always
+  yields an empty, falsely-reassuring result.
 
 Git failures (unresolvable revision, non-zero ``git diff`` exit code) are
 distinct from a genuinely empty match: the former raises and the CLI exits
@@ -46,6 +51,7 @@ path it changes, instead of silently taking the cheap no-files shortcut.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -128,32 +134,57 @@ def _revision_exists(repo_root: Path, revision: str) -> bool:
     return proc.returncode == 0
 
 
-def resolve_push_base(repo_root: Path, head_sha: str, before: str | None, fallback_ref: str) -> str:
+def resolve_empty_tree(repo_root: Path) -> str:
+    """Return this repository's empty-tree object id.
+
+    Asked of ``git`` rather than hardcoding the familiar SHA-1 constant so
+    the value is also correct in a SHA-256 repository. Git resolves the
+    empty tree even when that object was never written to the object
+    database, so ``git diff <empty-tree> <commit>`` works in a brand-new
+    repository too.
+    """
+    proc = _run_git(repo_root, ["hash-object", "-t", "tree", os.devnull])
+    sha = proc.stdout.strip()
+    if proc.returncode != 0 or not sha:
+        raise GitCommandError(
+            "failed to resolve the empty-tree object id "
+            f"(exit {proc.returncode}): {proc.stderr.strip()}"
+        )
+    return sha
+
+
+def resolve_push_base(repo_root: Path, head_sha: str, before: str | None) -> str:
     """Resolve the diff base for a ``push`` event.
 
-    Explicit zero/missing-``before`` policy: fall back to the pushed
-    commit's own parent (still a concrete, meaningful diff) and only fall
-    back further to ``fallback_ref`` if that parent doesn't resolve (e.g.
-    a repository's very first commit). If neither resolves, raise --
-    silently comparing against a ref that (immediately after a push to
-    that same ref) is identical to ``head_sha`` would produce a
-    false-negative empty diff.
+    Explicit zero/missing-``before`` policy: **diff against the empty
+    tree**, so every file in ``head_sha``'s tree is treated as changed.
+
+    A push can introduce an arbitrary number of commits, and a zero/missing
+    ``before`` means GitHub could not tell us where that range starts. Every
+    cheaper approximation under-selects silently:
+
+    * ``head^..head`` inspects only the push's *final* commit -- a routed
+      board added by an earlier commit of the same push is missed.
+    * a fallback ref such as ``origin/main`` already points AT ``head_sha``
+      immediately after a push to that ref, so the diff is a self-comparison
+      that is empty by construction.
+
+    Over-selection (a full scan of the pushed tree) is the only failure mode
+    that cannot hide a modified board, so that is the one we take. The
+    explicit valid before/current pair is returned verbatim and is entirely
+    unaffected by this branch.
     """
     if before and before != ZERO_SHA:
         return before
 
-    parent_candidate = f"{head_sha}^"
-    if _revision_exists(repo_root, parent_candidate):
-        return parent_candidate
+    if not _revision_exists(repo_root, head_sha):
+        raise GitCommandError(
+            f"push event has no usable 'before' commit (got {before!r}) and "
+            f"the pushed commit {head_sha!r} does not resolve; cannot "
+            "compute a diff base."
+        )
 
-    if _revision_exists(repo_root, fallback_ref):
-        return fallback_ref
-
-    raise GitCommandError(
-        f"push event has no usable 'before' commit (got {before!r}) and "
-        f"neither {parent_candidate!r} nor {fallback_ref!r} resolve to a "
-        "commit; cannot compute a diff base."
-    )
+    return resolve_empty_tree(repo_root)
 
 
 def resolve_pr_base(repo_root: Path, head_sha: str, pr_head_sha: str | None) -> str:
@@ -232,7 +263,7 @@ def select_routed_pcbs(
     this as a job failure, never as an empty-success selection.
     """
     if event_name == "push":
-        base = resolve_push_base(repo_root, head_sha, push_before, fallback_ref)
+        base = resolve_push_base(repo_root, head_sha, push_before)
     elif event_name == "pull_request":
         base = resolve_pr_base(repo_root, head_sha, pr_head_sha)
     else:
@@ -301,8 +332,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--fallback-ref",
         default="origin/main",
-        help="Ref used when a push event's 'before' is missing/zero and the "
-        "pushed commit has no resolvable parent (default: origin/main).",
+        help="Ref used as the diff base for event types other than "
+        "push/pull_request (default: origin/main). Push events with a "
+        "missing/zero 'before' deliberately do NOT use this -- they diff "
+        "against the empty tree instead; see the module docstring.",
     )
     parser.add_argument(
         "--github-output",
