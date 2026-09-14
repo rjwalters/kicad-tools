@@ -347,20 +347,13 @@ _SHADOW_PAD_PROBE_STEP_MM: float = 0.2
 # the generic clearance check ONLY when both elements are SEGMENTS
 # (``validate/rules/clearance.py`` -- the #2560 scoping).  A segment-vs-via or
 # via-vs-via pair between P and N is therefore checked at the full board
-# minimum.  This gate must use ``rules.trace_clearance`` /
-# ``rules.via_clearance``, NOT ``_pair_seg_clearance``'s intra-pair relaxation:
+# minimum.  This gate must use ``rules.via_clearance``, NOT ``_pair_seg_clearance``'s intra-pair relaxation:
 # the relaxed bound is deliberately tighter than the manufacturer clearance, so
 # a gate built on it could never fire on the very finding it exists to close.
 #
 # Same noise floor as the pad quadrant (one serialization quantum, and the same
 # value as ``DRC_TOLERANCE``) so the gate and the checker agree at the boundary.
 _SHADOW_VIA_DEFICIT_EPS: float = _SHADOW_PAD_DEFICIT_EPS
-# Mirrors ``validate.rules.clearance._COLOCATION_EPSILON_MM`` (#2706): the
-# in-pad-escape router places segment endpoints EXACTLY at via centres, and the
-# DRC skips such pairs.  A gate without the same carve-out would be stricter
-# than the checker and decline sides over geometry that is never reported --
-# pure reach loss for zero DRC gain.
-_SHADOW_VIA_COLOCATION_EPS: float = 1e-4
 
 # Issue #4574: the constructed crossover's via sites are chosen FIRST-LEGAL out
 # of a fixed 3x5 lattice, so the winning site carries no information about what
@@ -4907,21 +4900,6 @@ class DiffPairRouter:
         finally:
             self._shadow_foreign_universe = prev
 
-    @staticmethod
-    def _seg_via_colocated(seg: Segment, via: Via) -> bool:
-        """#2706 co-location carve-out, matching ``ClearanceRule`` (#4575).
-
-        The in-pad-escape router places segment endpoints EXACTLY at via
-        centres, and the DRC skips any segment/via pair whose segment
-        endpoint is within ``_COLOCATION_EPSILON_MM`` of the via centre.
-        Without the same carve-out this gate would be STRICTER than the
-        checker and decline sides over geometry the checker never reports.
-        """
-        return (
-            math.hypot(seg.x1 - via.x, seg.y1 - via.y) < _SHADOW_VIA_COLOCATION_EPS
-            or math.hypot(seg.x2 - via.x, seg.y2 - via.y) < _SHADOW_VIA_COLOCATION_EPS
-        )
-
     def _segment_via_deficit(self, seg: Segment) -> tuple[float, tuple[float, float] | None]:
         """Worst exact clearance deficit of a segment vs FOREIGN vias (#4575).
 
@@ -4931,20 +4909,23 @@ class DiffPairRouter:
         DRC checks at the full board minimum because its diff-pair exemption
         covers segment-to-SEGMENT edges only.
 
+        Ordinary vias span the full stack even when their routing endpoints
+        name a shorter transition. Only microvias use a restricted span.
+        Foreign-net endpoint contact is a short and is never exempted.
+
         Returns ``(0.0, None)`` when the gate is disarmed.
         """
         universe = self._shadow_foreign_universe
         if universe is None:
             return 0.0, None
-        clearance = self.autorouter.rules.trace_clearance
+        clearance = self.autorouter.rules.via_clearance
         worst = 0.0
         worst_loc: tuple[float, float] | None = None
         for via in universe.vias:
             if via.net == seg.net:
                 continue  # own-net copper may touch (a tail lands on it)
-            if self._seg_via_colocated(seg, via):
-                continue
-            deficit = segment_via_deficit(seg, via, clearance)
+            physical_via = via if via.is_micro else replace(via, layers=(Layer.F_CU, Layer.B_CU))
+            deficit = segment_via_deficit(seg, physical_via, clearance)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
         return worst, worst_loc
@@ -5011,9 +4992,8 @@ class DiffPairRouter:
         for seg in universe.segments:
             if seg.net == via.net:
                 continue
-            if self._seg_via_colocated(seg, via):
-                continue
-            deficit = segment_via_deficit(seg, via, clearance)
+            physical_via = via if via.is_micro else replace(via, layers=(Layer.F_CU, Layer.B_CU))
+            deficit = segment_via_deficit(seg, physical_via, clearance)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
         v_lo = min(via.layers[0].value, via.layers[1].value)
@@ -5023,7 +5003,7 @@ class DiffPairRouter:
                 continue
             o_lo = min(other.layers[0].value, other.layers[1].value)
             o_hi = max(other.layers[0].value, other.layers[1].value)
-            if o_hi < v_lo or o_lo > v_hi:
+            if via.is_micro and other.is_micro and (o_hi < v_lo or o_lo > v_hi):
                 continue  # barrels never share a layer
             dist = math.hypot(via.x - other.x, via.y - other.y)
             deficit = via.diameter / 2 + other.diameter / 2 + clearance - dist

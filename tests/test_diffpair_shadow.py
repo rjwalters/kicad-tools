@@ -2876,14 +2876,8 @@ def test_partner_via_on_a_shared_connector_ref_is_still_measured():
         assert dpr._route_via_violation(shadow)[0] == pytest.approx(_BARREL_DEFICIT, abs=1e-9)
 
 
-def test_segment_endpoint_colocated_with_a_foreign_via_is_not_flagged():
-    """AC-7: mirror ``ClearanceRule``'s #2706 in-pad-escape carve-out.
-
-    The router's in-pad escape places segment endpoints EXACTLY at via
-    centres, and the DRC skips such pairs.  A gate without the carve-out
-    would be STRICTER than the checker and decline sides over geometry that
-    is never reported -- pure reach loss for zero DRC gain.
-    """
+def test_segment_endpoint_colocated_with_a_foreign_via_is_rejected():
+    """Foreign copper at a shared endpoint is a short, even in a pad escape."""
     dpr = _pad_gate_router()
 
     foreign = Route(net=99, net_name="OTHER")
@@ -2892,16 +2886,16 @@ def test_segment_endpoint_colocated_with_a_foreign_via_is_not_flagged():
     shadow.segments.append(_via_gate_seg(5.0, 5.0, 8.0, 5.0))  # endpoint ON the via centre
 
     with dpr._shadow_foreign_copper(foreign):
-        assert dpr._route_via_violation(shadow)[0] == 0.0
+        assert dpr._route_via_violation(shadow)[0] > 0.0
 
-    # One quantum away from the carve-out epsilon the copper IS measured.
+    # Moving the endpoint slightly must still report the short.
     moved = Route(net=7, net_name="USB3_TX1+")
     moved.segments.append(_via_gate_seg(5.01, 5.0, 8.0, 5.0))
     with dpr._shadow_foreign_copper(foreign):
         assert dpr._route_via_violation(moved)[0] > 0.0
 
 
-def test_blind_via_that_does_not_span_the_segments_layer_is_not_flagged():
+def test_microvia_that_does_not_span_the_segments_layer_is_not_flagged():
     """Layer-span awareness: a barrel is only copper where it actually runs."""
     dpr = _pad_gate_router()
 
@@ -2914,6 +2908,7 @@ def test_blind_via_that_does_not_span_the_segments_layer_is_not_flagged():
     blind.vias.append(
         _via_gate_via(5.0, 5.0, net=99, name="OTHER", layers=(Layer.B_CU, Layer.B_CU))
     )
+    blind.vias[0].is_micro = True
     with dpr._shadow_foreign_copper(blind):
         assert dpr._route_via_violation(shadow)[0] == 0.0
 
@@ -5015,3 +5010,44 @@ def test_crossing_ranking_deadline_returns_validated_best_without_census_credit(
         )
         is None
     )
+
+
+def test_construction_via_gate_uses_via_clearance_in_both_directions():
+    dpr = _pad_gate_router()
+    dpr.autorouter.rules.trace_clearance = 0.1
+    dpr.autorouter.rules.via_clearance = 0.25
+    trace = Route(net=7, net_name="P", segments=[_via_gate_seg(3, 5.6, 7, 5.6)])
+    barrel = Route(net=8, net_name="N", vias=[_via_gate_via(5, 5, net=8, name="N")])
+    # Actual edge gap is .15 mm: ordinary trace clearance would accept it.
+    with dpr._shadow_foreign_copper(barrel):
+        forward = dpr._route_via_violation(trace)[0]
+    with dpr._shadow_foreign_copper(trace):
+        reverse = dpr._route_via_violation(barrel)[0]
+    assert forward == pytest.approx(0.1)
+    assert reverse == pytest.approx(forward)
+
+
+def test_ordinary_construction_vias_span_layers_beyond_routing_endpoints():
+    dpr = _pad_gate_router()
+    trace = Route(net=7, net_name="P", segments=[_via_gate_seg(3, 5.55, 7, 5.55, layer=Layer.F_CU)])
+    barrel = Route(
+        net=8,
+        net_name="N",
+        vias=[_via_gate_via(5, 5, net=8, name="N", layers=(Layer.B_CU, Layer.B_CU))],
+    )
+    with dpr._shadow_foreign_copper(barrel):
+        assert dpr._route_via_violation(trace)[0] > 0
+    with dpr._shadow_foreign_copper(trace):
+        assert dpr._route_via_violation(barrel)[0] > 0
+    other = Route(
+        net=7,
+        net_name="P",
+        vias=[_via_gate_via(5.6, 5, net=7, name="P", layers=(Layer.F_CU, Layer.F_CU))],
+    )
+    with dpr._shadow_foreign_copper(other):
+        assert dpr._route_via_violation(barrel)[0] > 0
+    assert barrel.vias[0].layers == (Layer.B_CU, Layer.B_CU)
+    barrel.vias[0].is_micro = True
+    other.vias[0].is_micro = True
+    with dpr._shadow_foreign_copper(other):
+        assert dpr._route_via_violation(barrel)[0] == 0
