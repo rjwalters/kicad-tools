@@ -1161,20 +1161,34 @@ class TestDefaultNetStatusOnCommittedArtifact:
         )
 
     def test_legacy_opt_out_reproduces_historical_false_opens(self, routed_pcb_path: Path) -> None:
-        """Characterization: ``strict=False`` still shows the legacy 16 opens.
+        """Characterization: ``strict=False`` still shows the legacy false opens.
 
         Pins the explicit legacy opt-out's divergence so a silent behavior
         change in either model is caught.  If the committed artifact is ever
         regenerated with pad-center trace landings this count may change --
         update the pin alongside the artifact refresh.
+
+        The GND count moved 14 -> 21 under Issue #5031: the fixture's GND
+        zone has two fill fragments that do not geometrically touch (they
+        are bridged only through a via/trace, which the legacy endpoint-
+        proximity chain-following does not resolve as reliably as strict
+        mode's real-copper-geometry check).  Before #5031 those fragments
+        were unconditionally unioned as one group purely on shared zone
+        identity, which incidentally papered over that legacy-mode gap.
+        Removing that blanket union (the whole point of #5031, since it
+        also hid genuinely disjoint islands) exposes the legacy heuristic's
+        pre-existing inaccuracy more fully here; the *default* (strict)
+        model -- the path issue #4557 actually cares about -- still reports
+        0 opens on this artifact (see ``test_default_path_reports_zero_open_pads``),
+        matching ``kicad-cli pcb drc``.
         """
         from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
         result = NetStatusAnalyzer(routed_pcb_path, strict=False).analyze()
         opens_by_net = {n.net_name: n.unconnected_count for n in result.incomplete}
-        assert opens_by_net == {"GND": 14, "+1V2": 1, "VBUS_USB": 1}, (
+        assert opens_by_net == {"GND": 21, "+1V2": 1, "VBUS_USB": 1}, (
             f"Legacy proximity model characterization drifted: expected the "
-            f"historical 16 false opens (GND 14, +1V2 1, VBUS_USB 1); got "
+            f"historical 23 false opens (GND 21, +1V2 1, VBUS_USB 1); got "
             f"{opens_by_net}."
         )
 
