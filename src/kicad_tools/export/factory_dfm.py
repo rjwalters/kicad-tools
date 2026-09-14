@@ -221,6 +221,7 @@ class DFMAttachment:
     _ledger: UploadLedger | None = field(repr=False, compare=False)
     _plan: SubmissionPlan | None = field(repr=False, compare=False)
     _review: ReviewRecord | None = field(repr=False, compare=False)
+    required_modules: tuple[str, ...] | None = None
 
     @property
     def states(self) -> dict[str, str]:
@@ -234,9 +235,24 @@ class DFMAttachment:
         Readiness/Ready-badge integration must consult this rather than
         ``dfm_status`` alone: a "pass" transcription bound to an
         ``upload_binding`` of ``"unknown"`` (no verified #5145 receipt yet)
-        must never promote a board.
+        must never promote a board. A nonempty explicit required-module set
+        must also have report-declared coverage=True for every member.
         """
         if self.dfm_status != "pass" or self.upload_binding != "bound":
+            return False
+        try:
+            required = _checked_required_modules(self.required_modules)
+            _check_transcription(self.transcription)
+        except DFMError:
+            return False
+        if not required:
+            return False
+        # Recheck report evidence, rather than trusting a cached pass or a
+        # separately replaced normalized coverage field.
+        if self.modules != _normalized_modules(self.transcription.modules):
+            return False
+        covered = {module.module: module.covered for module in self.modules}
+        if any(covered.get(module) is not True for module in required):
             return False
         if self._plan is None or self._review is None:
             return False
@@ -287,6 +303,9 @@ class DFMAttachment:
                 "plan_sha256": self._plan.sha256 if self._plan else None,
                 "review_sha256": self._review.sha256 if self._review else None,
                 "dfm_status": self.dfm_status,
+                "required_modules": list(self.required_modules)
+                if self.required_modules is not None
+                else None,
                 "modules": [
                     {"module": module.module, "covered": module.covered} for module in self.modules
                 ],
@@ -415,6 +434,21 @@ def _check_transcription(transcription: TranscriptionEvidence) -> None:
         raise DFMError("Duplicate DFM module coverage entry")
 
 
+def _checked_required_modules(required: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    """Validate caller-selected analysis scope, independently of report coverage."""
+    if required is None:
+        return None
+    if not isinstance(required, tuple) or any(
+        not isinstance(name, str) or name not in _MODULES for name in required
+    ):
+        raise DFMError(
+            "Explicit required analysis modules must be a tuple of recognized names or unknown"
+        )
+    if len(set(required)) != len(required):
+        raise DFMError("Duplicate required analysis module")
+    return tuple(sorted(required))
+
+
 def _normalized_modules(modules: tuple[ModuleCoverage, ...]) -> tuple[ModuleCoverage, ...]:
     """Every recognized module, filling anything the report never stated as unknown."""
     by_name = {module.module: module for module in modules}
@@ -484,6 +518,7 @@ def attach_dfm_report(
     ledger: UploadLedger | None = None,
     plan: SubmissionPlan | None = None,
     review: ReviewRecord | None = None,
+    required_modules: tuple[str, ...] | None = None,
 ) -> DFMAttachment:
     """Bind an original DFM report and its transcription to an exact upload.
 
@@ -510,6 +545,12 @@ def attach_dfm_report(
     :attr:`DFMAttachment.upload_binding` is explicitly ``"unknown"`` -- this
     attachment can be created entirely offline. Mock/reconciled receipts
     retain their hash and evidence but never produce a bound factory upload.
+    ``required_modules`` is the caller's explicitly established analysis
+    request, separate from what the report says it covered. Use a nonempty
+    tuple of ``pcb_fabrication`` / ``smt_assembly`` names (PCB-only is valid).
+    Omitted/None or empty scope permits offline attachment but never readiness.
+    Scope is canonicalized and included in the attachment digest; it is never
+    inferred from component selections, report coverage, or the presence of BOM/CPL.
     Supplying both plan and review rechecks published outputs and current
     source files; readiness also repeats these checks whenever queried.
 
@@ -545,6 +586,7 @@ def attach_dfm_report(
                 "DFM report is stale or bound to a different Gerber bundle than the one supplied"
             )
     _check_transcription(transcription)
+    required_modules = _checked_required_modules(required_modules)
 
     receipt: UploadReceipt | None = None
     if ledger is not None:
@@ -583,16 +625,25 @@ def attach_dfm_report(
         dfm_status=_dfm_status(transcription),
         transcription=transcription,
         modules=_normalized_modules(transcription.modules),
+        required_modules=required_modules,
     )
 
 
-def verify_dfm_attachment(attachment: DFMAttachment, report_bytes: bytes) -> None:
+def verify_dfm_attachment(
+    attachment: DFMAttachment,
+    report_bytes: bytes,
+    *,
+    required_modules: tuple[str, ...] | None = None,
+) -> None:
     """Recheck ``attachment`` against the exact report bytes it claims to bind.
 
     Raises :class:`DFMError` if the original report bytes no longer match the
     attachment's bound hash/size -- the report itself is never edited,
     re-encoded, or "cleaned up" by this module, so any drift here means the
     caller is holding the wrong file, not that the file changed legitimately.
+    Supply the current request's ``required_modules`` to also reject reuse
+    under a changed analysis scope. Omission checks report bytes only and is
+    not a readiness grant; consult ``readiness_eligible`` for current gates.
     """
     if not isinstance(report_bytes, (bytes, bytearray)):
         raise DFMError("Explicit report bytes required")
@@ -601,3 +652,8 @@ def verify_dfm_attachment(attachment: DFMAttachment, report_bytes: bytes) -> Non
         or len(report_bytes) != attachment.report_size
     ):
         raise DFMError("DFM report bytes no longer match the bound attachment")
+
+    expected = _checked_required_modules(required_modules)
+    bound = _checked_required_modules(attachment.required_modules)
+    if expected is not None and expected != bound:
+        raise DFMError("DFM attachment required analysis context differs from the current request")

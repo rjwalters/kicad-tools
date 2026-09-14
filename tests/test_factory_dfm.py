@@ -188,6 +188,7 @@ def attach(handoff, **kwargs):
     kwargs.setdefault("app_identity", FAKE_APP_ID)
     kwargs.setdefault("endpoint", "https://open.jlcpcb.com" + ju.UPLOAD_GERBER_PATH)
     kwargs.setdefault("transcription", good_transcription())
+    kwargs.setdefault("required_modules", ("pcb_fabrication", "smt_assembly"))
     return fd.attach_dfm_report(**kwargs)
 
 
@@ -640,3 +641,159 @@ def test_invalid_coordinate_text_rejected(bound, coordinate):
                 categories=(good_category(coordinates=(coordinate,)),)
             ),
         )
+
+
+@pytest.mark.parametrize("required", [None, ()])
+def test_readiness_requires_explicit_nonempty_analysis_context(synthetic_factory_receipt, required):
+    handoff = synthetic_factory_receipt
+    result = attach(
+        handoff,
+        ledger=handoff["ledger"],
+        plan=handoff["plan"],
+        review=handoff["record"],
+        required_modules=required,
+    )
+    assert result.dfm_status == "pass"
+    assert not result.readiness_eligible
+
+
+@pytest.mark.parametrize("coverage", [None, False, "omitted"])
+@pytest.mark.parametrize("module", ["pcb_fabrication", "smt_assembly"])
+def test_required_analysis_coverage_blocks_readiness(synthetic_factory_receipt, module, coverage):
+    handoff = synthetic_factory_receipt
+    modules = tuple(
+        fd.ModuleCoverage(name, coverage if name == module else True)
+        for name in ("pcb_fabrication", "smt_assembly")
+        if name != module or coverage != "omitted"
+    )
+    result = attach(
+        handoff,
+        ledger=handoff["ledger"],
+        plan=handoff["plan"],
+        review=handoff["record"],
+        required_modules=("pcb_fabrication", "smt_assembly"),
+        transcription=good_transcription(modules=modules),
+    )
+    assert result.dfm_status == "pass"
+    assert not result.readiness_eligible
+    assert {m.module: m.covered for m in result.modules}[module] is (
+        None if coverage == "omitted" else coverage
+    )
+
+
+@pytest.mark.parametrize("required", [("pcb_fabrication",), ("pcb_fabrication", "smt_assembly")])
+def test_complete_explicit_analysis_coverage_can_be_ready(synthetic_factory_receipt, required):
+    handoff = synthetic_factory_receipt
+    result = attach(
+        handoff,
+        ledger=handoff["ledger"],
+        plan=handoff["plan"],
+        review=handoff["record"],
+        required_modules=required,
+        transcription=good_transcription(
+            modules=tuple(fd.ModuleCoverage(m, True) for m in required)
+        ),
+    )
+    assert result.readiness_eligible
+    if len(required) == 1:
+        assert {m.module: m.covered for m in result.modules}["smt_assembly"] is None
+    fd.verify_dfm_attachment(result, SAMPLE_REPORT, required_modules=required)
+    # Explicit coverage does not bypass existing source/review freshness.
+    (handoff["plan"].source_root / "board.kicad_pcb").write_bytes(b"changed")
+    assert not result.readiness_eligible
+
+
+def test_analysis_requirements_bind_identity_and_reverification(bound):
+    pcb = attach(bound, required_modules=("pcb_fabrication",))
+    both = attach(bound, required_modules=("pcb_fabrication", "smt_assembly"))
+    unknown = attach(bound, required_modules=None)
+    assert len({pcb.sha256, both.sha256, unknown.sha256}) == 3
+    assert attach(bound, required_modules=("smt_assembly", "pcb_fabrication")).sha256 == both.sha256
+    assert json.loads(pcb.attachment_bytes)["required_modules"] == ["pcb_fabrication"]
+    with pytest.raises(fd.DFMError, match="required analysis"):
+        fd.verify_dfm_attachment(
+            pcb, SAMPLE_REPORT, required_modules=("pcb_fabrication", "smt_assembly")
+        )
+    with pytest.raises(fd.DFMError, match="required analysis"):
+        fd.verify_dfm_attachment(unknown, SAMPLE_REPORT, required_modules=("pcb_fabrication",))
+    assert pcb.report_sha256 == both.report_sha256 == digest(SAMPLE_REPORT)
+
+
+@pytest.mark.parametrize(
+    "required", ["pcb_fabrication", ("unknown",), ("pcb_fabrication", "pcb_fabrication"), (True,)]
+)
+def test_invalid_required_analysis_context_rejected(bound, required):
+    with pytest.raises(fd.DFMError, match="required analysis"):
+        attach(bound, required_modules=required)
+
+
+def test_omitted_request_context_does_not_infer_scope(synthetic_factory_receipt):
+    handoff = synthetic_factory_receipt
+    result = fd.attach_dfm_report(
+        report_bytes=SAMPLE_REPORT,
+        report_revision="v27",
+        checker_time="2026-01-03T00:00:00Z",
+        gerber_sha256=digest(handoff["gerber"]),
+        app_identity=FAKE_APP_ID,
+        endpoint="https://open.jlcpcb.com" + ju.UPLOAD_GERBER_PATH,
+        transcription=good_transcription(),
+        ledger=handoff["ledger"],
+        plan=handoff["plan"],
+        review=handoff["record"],
+    )
+    assert result.required_modules is None
+    assert result.dfm_status == "pass" and result.upload_binding == "bound"
+    assert not result.readiness_eligible
+
+
+@pytest.mark.parametrize(
+    "modules",
+    [
+        (),
+        (fd.ModuleCoverage("pcb_fabrication", None), fd.ModuleCoverage("smt_assembly", None)),
+        (fd.ModuleCoverage("pcb_fabrication", False), fd.ModuleCoverage("smt_assembly", False)),
+    ],
+)
+def test_absent_or_negative_report_scope_never_readies(synthetic_factory_receipt, modules):
+    handoff = synthetic_factory_receipt
+    result = attach(
+        handoff,
+        ledger=handoff["ledger"],
+        plan=handoff["plan"],
+        review=handoff["record"],
+        transcription=good_transcription(modules=modules),
+    )
+    assert result.dfm_status == "pass"
+    assert not result.readiness_eligible
+
+
+def test_readiness_rechecks_normalized_report_coverage(synthetic_factory_receipt):
+    from dataclasses import replace
+
+    handoff = synthetic_factory_receipt
+    result = attach(
+        handoff, ledger=handoff["ledger"], plan=handoff["plan"], review=handoff["record"]
+    )
+    assert result.readiness_eligible
+    changed = replace(result, transcription=good_transcription(modules=()))
+    assert not changed.readiness_eligible
+
+
+@pytest.mark.parametrize("smt_covered", [None, False])
+def test_explicit_pcb_only_does_not_require_smt(synthetic_factory_receipt, smt_covered):
+    handoff = synthetic_factory_receipt
+    result = attach(
+        handoff,
+        ledger=handoff["ledger"],
+        plan=handoff["plan"],
+        review=handoff["record"],
+        required_modules=("pcb_fabrication",),
+        transcription=good_transcription(
+            modules=(
+                fd.ModuleCoverage("pcb_fabrication", True),
+                fd.ModuleCoverage("smt_assembly", smt_covered),
+            )
+        ),
+    )
+    assert result.readiness_eligible
+    assert {m.module: m.covered for m in result.modules}["smt_assembly"] is smt_covered

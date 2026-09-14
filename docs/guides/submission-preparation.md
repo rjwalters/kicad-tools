@@ -583,6 +583,7 @@ transcription = TranscriptionEvidence(
     ),
 )
 
+required_modules = ("pcb_fabrication", "smt_assembly")  # explicitly requested analyses
 attachment = attach_dfm_report(
     report_bytes=report_pdf_bytes,  # never edited or re-encoded
     report_revision="v27",
@@ -591,11 +592,14 @@ attachment = attach_dfm_report(
     app_identity=receipt.app_identity,
     endpoint=receipt.endpoint,
     transcription=transcription,
+    required_modules=required_modules,
     ledger=ledger,  # optional; omit for an attachment with unknown binding
     plan=plan,  # published handoff, including its current source_root
     review=review_record,  # reverified before readiness can be true
 )
-verify_dfm_attachment(attachment, report_pdf_bytes)  # raises on any byte drift
+verify_dfm_attachment(
+    attachment, report_pdf_bytes, required_modules=required_modules
+)  # raises on byte drift or changed requested analysis scope
 ```
 
 `report_bytes` is never edited, re-encoded, or "cleaned up" -- only its own
@@ -646,7 +650,25 @@ mentions -- coverage is recorded exactly as transcribed, never inferred from
 `factory_selection.py`'s component-selection comparison (that module has no
 concept of DFM analysis-module coverage).
 
-`attachment.readiness_eligible` requires passing DFM evidence, a matching
+`required_modules` records the explicitly established analysis request,
+independently of the report's coverage. Pass `("pcb_fabrication",)` for a
+PCB-only request, or both module names when both analyses are required. Every
+required module must have report-declared `covered=True` before readiness can
+be true. Unknown, false, and omitted coverage block a required module. A
+nonrequired module remains recorded as unknown or false without blocking a
+legitimate PCB-only request. An omitted/`None` or empty requirement tuple
+preserves offline attachment but never grants readiness. Invalid names and
+duplicate requirements are rejected; neither report contents, component
+selections, nor BOM/CPL presence establish the requested scope implicitly.
+
+The sorted requirement tuple is included in `attachment.attachment_bytes`
+and its SHA-256. Changing from PCB-only to PCB+SMT therefore produces a new
+attachment identity even when the original report bytes are identical. Pass
+the current request's `required_modules` to `verify_dfm_attachment` to reject
+reuse under a different scope. Without this argument, verification checks
+report-byte identity only and does not grant readiness.
+
+`attachment.readiness_eligible` requires the coverage above, passing DFM evidence, a matching
 `live-factory-response` receipt, and a valid current human review. Every query
 rechecks receipt identity, published handoff bytes, and reviewed source bytes.
 Provide both `plan` (with `source_root`) and `review` to enable that check;
