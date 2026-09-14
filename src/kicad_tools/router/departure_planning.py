@@ -38,6 +38,62 @@ DIRECTION_TOWARD_GOAL = "toward_goal"
 DIRECTION_AWAY_FROM_GOAL = "away_from_goal"
 
 
+#: Issue #5333 (follow-up): the natural next step from the note above --
+#: "widen the escape depth further, since +0..+8 wasn't enough" -- was
+#: measured directly against Board07 (native-validating hand-built
+#: departure prefixes, escape depth swept 0..+35 cells with the SAME
+#: bend/spread geometry ``departure_proposals`` itself uses) and is a DEAD
+#: END, not merely an unexplored parameter.  It is not a scarcity-of-sites
+#: problem either: an independent grid-legality sweep
+#: (``_is_via_blocked`` across a wide x/y window) found real, fully-clear
+#: paired via sites in both directions -- roughly 13-31 cells straight out,
+#: or >=26 cells laterally, past J1's own through-hole GND mechanical pads
+#: (footprint pads ``M1``/``M2``, layers ``*.Cu`` -- i.e. copper on EVERY
+#: layer, not a plane/pour antipad gap, ruling out that half of the
+#: originally-filed hypothesis) and MIPI_CLK_N's already-committed copper.
+#:
+#: The reason NEITHER a deeper nor a wider fan can reach those otherwise-
+#: legal sites: ``route_coupled``'s native search only relaxes its
+#: symmetric-move spacing tolerance (``target_spacing`` +/- 1 cell,
+#: otherwise) within ``effective_departure_radius`` Manhattan cells of the
+#: start pads (diffpair_routing.py, ``effective_departure_radius = max(
+#: effective_target_spacing, 6, start_spacing_delta * 2 + 4,
+#: via_spread_delta * 2 + 4)``) -- measured at exactly 14 cells for
+#: MIPI_DAT1 (``effective_target_spacing=3``, pad pitch 8 cells, so
+#: ``start_spacing_delta=5`` dominates: ``5*2+4=14``).  Every departure
+#: proposal ``departure_proposals`` builds is a SYMMETRIC straight run (P
+#: and N move by the identical delta every step, holding the full pad
+#: pitch) until its one narrowing point -- ``spread``, sized only for
+#: via-hole legality -- immediately before the final via.  For MIPI_DAT1
+#: that ``spread`` is 0 (via-pitch is already satisfied at pad pitch), so
+#: the escape never narrows at all.  Once a forced symmetric step crosses
+#: the 14-cell departure radius still holding the full 8-cell pitch against
+#: a 3-cell target, the native search's own ``sym_spacing`` tolerance check
+#: rejects it outright (measured directly: native-validated hand-built
+#: prefixes reproducing ``departure_proposals``'s exact geometry, escape
+#: depth swept 0/4/8/11/13/16/20 cells past baseline in +y and
+#: 0/8/16/24/27/29/32/35 in -y, ALL fail identically once the forced escape
+#: step first exceeds distance 14 from the start pad -- both directions
+#: plateau at the SAME relative step regardless of how much further budget
+#: or depth is granted, which is the fingerprint of a fixed-radius search
+#: policy, not a foreign-copper collision).  Since the real legal via sites
+#: sit well outside that 14-cell radius in every direction tried, no
+#: geometric widening of the CURRENT (symmetric, non-narrowing) escape leg
+#: -- deeper, wider, or both -- can ever reach them.
+#:
+#: Next step (not yet attempted): a departure candidate whose escape leg
+#: narrows the P/N separation gradually (asymmetric per-step moves, the
+#: same mechanism the free/unconstrained search already uses elsewhere)
+#: toward ``effective_target_spacing`` as it travels outward, so the pitch
+#: is already within native tolerance by the time it crosses the 14-cell
+#: departure radius -- rather than staying at full pad pitch the whole way
+#: and asking the native search to relax a boundary it does not relax past.
+#: This changes proposal GEOMETRY, not any search/iteration budget or
+#: legality/clearance check -- every existing native guard (copper,
+#: clearance, trail, via-pitch) still applies to each step exactly as
+#: before.
+
+
 @dataclass
 class DepartureBudget:
     """The caller's shared search allowance, charged across every proposal.
