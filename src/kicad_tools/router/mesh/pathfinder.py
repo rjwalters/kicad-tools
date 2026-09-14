@@ -84,6 +84,9 @@ class MeshPathfinder:
         pours: list[list[Pt]] | None = None,
         layer_stack: LayerStack | None = None,
     ) -> None:
+        from ..fixed_copper import FixedFillObstacles
+
+        self.fixed_fills = FixedFillObstacles()
         self.outline = outline
         self.pads = pads
         self.rules = rules or DesignRules()
@@ -155,6 +158,26 @@ class MeshPathfinder:
         import kicad_tools.router.router_cpp as router_cpp  # type: ignore[import-not-found]
 
         steiner = [(p.x, p.y) for p in self.pads]
+        if self.fixed_fills:
+            # Insert true buffered-ring vertices as navigation hints, not
+            # all-layer holes. Physical legality remains layer-specific and
+            # hole-aware in every search edge and emitted fit below.
+            from shapely.geometry import Point, Polygon  # type: ignore[import-untyped]
+
+            board = Polygon(self.outline)
+            for fill in self.fixed_fills.fills:
+                grown = fill.geometry.buffer(
+                    self.rules.trace_width / 2
+                    + max(self.rules.trace_clearance, fill.clearance)
+                    + 1e-4
+                )
+                polys = grown.geoms if grown.geom_type == "MultiPolygon" else (grown,)
+                for poly in polys:
+                    for ring in (poly.exterior, *poly.interiors):
+                        steiner.extend(
+                            (x, y) for x, y in ring.coords if board.contains(Point(x, y))
+                        )
+            steiner = list(dict.fromkeys(steiner))
         holes = self._pour_holes()
         self.triangulation_calls += 1
         verts, tris = router_cpp.constrained_delaunay(self.outline, holes, steiner)
@@ -256,7 +279,7 @@ class MeshPathfinder:
             return None
 
         trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
-        clearance = self.rules.trace_clearance
+        clearance = getattr(net_class, "clearance", None) or self.rules.trace_clearance
         agent_radius = trace_w / 2.0 + clearance
 
         net = start.net
@@ -270,7 +293,15 @@ class MeshPathfinder:
         # clear it is declined (None).
         keepouts = self._keepouts(net, agent_radius)
         pour_obstacles = self.pours + (committed or [])
-        obstacles = ObstacleModel(self.outline, keepouts, pour_obstacles)
+        obstacles = ObstacleModel(
+            self.outline,
+            keepouts,
+            pour_obstacles,
+            fixed_fills=self.fixed_fills,
+            layer=self._layer_index(start.layer) or 0,
+            half=trace_w / 2,
+            clearance=clearance,
+        )
 
         cost_congestion = self.rules.cost_congestion if negotiated_mode else 0.0
         congestion_threshold = self.rules.congestion_threshold
@@ -282,6 +313,7 @@ class MeshPathfinder:
             present_cost_factor=pcf,
             cost_congestion=cost_congestion,
             congestion_threshold=congestion_threshold,
+            edge_clear=obstacles.is_clear if self.fixed_fills else None,
         )
         if corridor is None:
             return None
@@ -620,6 +652,13 @@ class MeshPathfinder:
                         return False
                 else:
                     return False
+        if not self.fixed_fills.via_clear(
+            site,
+            tuple(range(self.layer_stack.num_layers)),
+            max(0.0, via_radius - self.rules.trace_clearance),
+            self.rules.trace_clearance,
+        ):
+            return False
         # A through-via spans every copper layer, so its body must clear
         # committed cross-net copper on ALL layers -- not just the two the A*
         # hop nominally joins.  Check every layer with committed copper.
@@ -660,7 +699,7 @@ class MeshPathfinder:
             return None
 
         trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
-        clearance = self.rules.trace_clearance
+        clearance = getattr(net_class, "clearance", None) or self.rules.trace_clearance
         agent_radius = trace_w / 2.0 + clearance
         via_radius = self.rules.via_diameter / 2.0 + clearance
         net = start.net
@@ -672,7 +711,15 @@ class MeshPathfinder:
         for lidx in range(num_layers):
             keepouts = self._keepouts_layer(net, agent_radius, lidx)
             pour_obstacles = self.pours + committed_by_layer.get(lidx, [])
-            obstacles_by_layer[lidx] = ObstacleModel(self.outline, keepouts, pour_obstacles)
+            obstacles_by_layer[lidx] = ObstacleModel(
+                self.outline,
+                keepouts,
+                pour_obstacles,
+                fixed_fills=self.fixed_fills,
+                layer=lidx,
+                half=trace_w / 2,
+                clearance=clearance,
+            )
 
         # Per-layer portal blocking (issue #4276 section 3): a portal is blocked
         # on a layer when a trace cannot thread it there -- tested with the SAME

@@ -1532,6 +1532,20 @@ class Router:
 
         return (gx1, gy1, gx2, gy2)
 
+    def _fixed_step_clear(self, current, nx, ny, layer, net_name):
+        if not self.grid.fixed_fills:
+            return True
+        net_class = self._get_net_class(net_name)
+        half = (net_class.trace_width if net_class else self.rules.trace_width) / 2
+        clearance = net_class.clearance if net_class else self.rules.trace_clearance
+        return self.grid.fixed_fills.segment_clear(
+            self.grid.grid_to_world(current.x, current.y),
+            self.grid.grid_to_world(nx, ny),
+            layer,
+            half,
+            clearance,
+        )
+
     def _is_trace_blocked(
         self,
         gx: int,
@@ -1913,6 +1927,20 @@ class Router:
             radius: Override the via half-width in grid cells. When None,
                     uses the pre-computed ``_via_half_cells`` (Issue #1692).
         """
+        if self.grid.fixed_fills:
+            name = next(
+                (name for name, number in self._net_name_to_id.items() if number == net), ""
+            )
+            net_class = self._get_net_class(name)
+            half = (net_class.via_size if net_class else self.rules.via_diameter) / 2
+            if not self.grid.fixed_fills.via_clear(
+                self.grid.grid_to_world(gx, gy),
+                tuple(range(self.grid.num_layers)),
+                half,
+                self.rules.via_clearance,
+            ):
+                return True
+
         # Issue #1692: Support per-net-class via radius override.
         # When a custom radius is provided, compute offsets on the fly
         # rather than using the pre-computed arrays (which use the global
@@ -3795,6 +3823,8 @@ class Router:
             for neighbor_idx, (dx, dy, _dlayer, neighbor_cost_mult) in enumerate(self.neighbors_2d):
                 nx, ny = current.x + dx, current.y + dy
                 nlayer = current.layer
+                if not self._fixed_step_clear(current, nx, ny, nlayer, start.net_name):
+                    continue
 
                 # Check bounds and obstacles - account for trace width
                 # A trace with width W extends W/2 on each side of centerline
@@ -5450,6 +5480,8 @@ class Router:
         for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
             nx, ny = current.x + dx, current.y + dy
             nlayer = current.layer
+            if not self._fixed_step_clear(current, nx, ny, nlayer, source_pad.net_name):
+                continue
 
             # Check bounds
             if not (0 <= nx < self.grid.cols and 0 <= ny < self.grid.rows):
