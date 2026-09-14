@@ -73,26 +73,11 @@ Updating this test:
 
 from __future__ import annotations
 
-import json
-import subprocess
-import sys
-from pathlib import Path
-
 import pytest
 
-# Issue #4160: CI runs the suite with `-n auto --timeout=60`. These DRC
-# subprocess tests average ~19s unloaded but comfortably exceed 60s under
-# full-suite xdist CPU contention (concurrent routing-regression jobs share
-# the runner pool). The timeout marker overrides the CLI default with a
-# contention-tolerant budget; it does NOT slow the happy path. 180 stays
-# above the inner `subprocess.run(..., timeout=120)` cap so a genuinely
-# hung `kct check` still trips `TimeoutExpired` first (a clear tool-level
-# signal) rather than the bare outer pytest-timeout reaper.
-pytestmark = pytest.mark.timeout(180)
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-BOARD_DIR = REPO_ROOT / "boards" / "05-bldc-motor-controller"
-ROUTED_PCB = BOARD_DIR / "output" / "bldc_controller_routed.kicad_pcb"
+# The committed-board integration runs once in test_board_05_drc_allowlist.
+# These assertions consume that same immutable report; tests below exercise
+# each guard independently with explicit regression witnesses.
 
 # Maximum allowed ``clearance_pad_segment`` violations on the committed
 # routed PCB.  History: 6 (Issue #3251, 2026-06-06, 2L python recipe at
@@ -188,61 +173,6 @@ ABSENT_RULES_ON_COMMITTED_PCB: frozenset[str] = frozenset(
 )
 
 
-@pytest.fixture(scope="module")
-def routed_pcb_path() -> Path:
-    """Resolve the committed routed PCB or skip if absent."""
-    if not ROUTED_PCB.exists():
-        pytest.skip(
-            f"Board 05 routed PCB not found at {ROUTED_PCB!s}; "
-            "regenerate via "
-            "`uv run python boards/05-bldc-motor-controller/design.py`"
-        )
-    return ROUTED_PCB
-
-
-def _kct_check_violations(pcb_path: Path) -> list[dict]:
-    """Run ``kct check --format json`` and return the violations list."""
-    cmd = [
-        sys.executable,
-        "-m",
-        "kicad_tools.cli",
-        "check",
-        str(pcb_path),
-        # Issue #3425: board 05 routes + DRC-gates against jlcpcb-tier1
-        # (Capability-Plus legalizes the DRV8301 in-pad rescue vias).
-        # Matches design.py route_pcb() and the manufacturers: override
-        # in .github/routed-drc-tolerance.yml.
-        "--mfr",
-        "jlcpcb-tier1",
-        "--errors-only",
-        "--format",
-        "json",
-    ]
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    # Exit 0 = no errors; 2 = errors found; 1 = tool failure.
-    if proc.returncode == 1:
-        raise RuntimeError(
-            f"kct check failed on {pcb_path} (exit 1).\nstderr:\n{proc.stderr.strip()}"
-        )
-    if proc.returncode not in (0, 2):
-        raise RuntimeError(
-            f"kct check unexpected exit code {proc.returncode}.\nstderr:\n{proc.stderr.strip()}"
-        )
-    try:
-        data = json.loads(proc.stdout)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"kct check produced invalid JSON: {e}\nstdout (first 500): {proc.stdout[:500]}"
-        ) from e
-    return data.get("violations", [])
-
-
 def _extract_ref_from_items(items: list[str]) -> str | None:
     """Pull a component ref like 'U3' out of an item entry like 'U3-30'.
 
@@ -256,12 +186,12 @@ def _extract_ref_from_items(items: list[str]) -> str | None:
     return None
 
 
-class TestBoard05DRCHotspotRegression:
+class Board05DRCHotspotAssertions:
     """Pin the *shape* of board-05's residual ``clearance_pad_segment``."""
 
-    def test_pad_segment_count_at_or_below_documented_floor(
+    def assert_pad_segment_count_at_or_below_documented_floor(
         self,
-        routed_pcb_path: Path,
+        viols: list[dict],
     ) -> None:
         """Count of ``clearance_pad_segment`` is bounded by ``MAX_PAD_SEGMENT``.
 
@@ -271,7 +201,6 @@ class TestBoard05DRCHotspotRegression:
         A regression in any of those mechanisms typically increases this
         rule's count specifically.
         """
-        viols = _kct_check_violations(routed_pcb_path)
         pad_seg = [v for v in viols if v.get("rule_id") == "clearance_pad_segment"]
         assert len(pad_seg) <= MAX_PAD_SEGMENT, (
             f"Board 05 routed PCB reports {len(pad_seg)} "
@@ -283,9 +212,9 @@ class TestBoard05DRCHotspotRegression:
             f"#3118).  Investigate before raising the floor."
         )
 
-    def test_pad_segment_violations_at_known_hotspots_only(
+    def assert_pad_segment_violations_at_known_hotspots_only(
         self,
-        routed_pcb_path: Path,
+        viols: list[dict],
     ) -> None:
         """Every ``clearance_pad_segment`` is at a known hot-spot ref.
 
@@ -295,7 +224,6 @@ class TestBoard05DRCHotspotRegression:
         R10-R12 current-sense 0402 resistors that the python-backend
         escape clips against.
         """
-        viols = _kct_check_violations(routed_pcb_path)
         pad_seg = [v for v in viols if v.get("rule_id") == "clearance_pad_segment"]
         offenders: list[tuple[str, list[str]]] = []
         for v in pad_seg:
@@ -311,9 +239,9 @@ class TestBoard05DRCHotspotRegression:
             f"spot) before raising the hot-spot allowlist."
         )
 
-    def test_pad_segment_shortfalls_within_documented_band(
+    def assert_pad_segment_shortfalls_within_documented_band(
         self,
-        routed_pcb_path: Path,
+        viols: list[dict],
     ) -> None:
         """All ``clearance_pad_segment`` shortfalls are ≤ ``MAX_SHORTFALL_UM``.
 
@@ -324,7 +252,6 @@ class TestBoard05DRCHotspotRegression:
         than the historical 13-27um grid-quantization band.  Catch it
         loudly if it appears.
         """
-        viols = _kct_check_violations(routed_pcb_path)
         for v in viols:
             if v.get("rule_id") != "clearance_pad_segment":
                 continue
@@ -342,9 +269,9 @@ class TestBoard05DRCHotspotRegression:
                 f"investigate before merge (Issue #3251 hot-spot table)."
             )
 
-    def test_committed_pcb_absent_rule_families(
+    def assert_committed_pcb_absent_rule_families(
         self,
-        routed_pcb_path: Path,
+        viols: list[dict],
     ) -> None:
         """Rule families in ``ABSENT_RULES_ON_COMMITTED_PCB`` stay absent.
 
@@ -371,7 +298,6 @@ class TestBoard05DRCHotspotRegression:
         the committed snapshot's rule mix, re-route AND re-derive
         :data:`ABSENT_RULES_ON_COMMITTED_PCB` in the same PR.
         """
-        viols = _kct_check_violations(routed_pcb_path)
         offenders: dict[str, int] = {}
         for v in viols:
             rid = v.get("rule_id")
@@ -387,3 +313,28 @@ class TestBoard05DRCHotspotRegression:
             f"intentional and strictly better, re-derive "
             f"ABSENT_RULES_ON_COMMITTED_PCB in the same PR."
         )
+
+
+@pytest.mark.parametrize(
+    "method,violations",
+    [
+        (
+            "assert_pad_segment_count_at_or_below_documented_floor",
+            [{"rule_id": "clearance_pad_segment"}],
+        ),
+        (
+            "assert_pad_segment_violations_at_known_hotspots_only",
+            [{"rule_id": "clearance_pad_segment", "items": ["UNEXPECTED-1"]}],
+        ),
+        (
+            "assert_pad_segment_shortfalls_within_documented_band",
+            [{"rule_id": "clearance_pad_segment", "actual_value": 0.0, "required_value": 1.0}],
+        ),
+        ("assert_committed_pcb_absent_rule_families", [{"rule_id": "clearance_pad_via"}]),
+    ],
+)
+def test_hotspot_assertion_accepts_clean_report_and_rejects_regression(method, violations):
+    assertion = getattr(Board05DRCHotspotAssertions(), method)
+    assertion([])
+    with pytest.raises(AssertionError):
+        assertion(violations)

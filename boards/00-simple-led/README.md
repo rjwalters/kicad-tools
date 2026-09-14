@@ -69,9 +69,9 @@ rationale is recorded in `generate_design.py`'s module docstring and under
 
 | Reference | Description | Value | Footprint | Part | LCSC |
 |-----------|-------------|-------|-----------|------|------|
-| J1 | Power input header (VCC, GND) | — | `PinHeader_1x02_P2.54mm_Vertical` | B-2100S02P-A110 | C49257 |
+| J1 | Power input header (VCC, GND) | — | `PinHeader_1x02_P2.54mm_Vertical` | ZX-PZ2.54-1-2PZZ | C7501260 |
 | R1 | Current-limiting resistor | 330 Ω | `R_0805_2012Metric` | 0805W8F3300T5E | C17630 |
-| D1 | Indicator LED | Vf ≈ 2 V | `LED_D5.0mm` | C503B-RCN-CW0Z0AA1 | C84256 |
+| D1 | Indicator LED | Vf ≈ 2 V | `LED_D5.0mm` | 333-2SURD/S530-A3 | C87271 |
 
 The 5 mm through-hole LED plus the 0805 SMD resistor make this a deliberately
 mixed THT/SMD board — see the `decisions:` block in `project.kct`.

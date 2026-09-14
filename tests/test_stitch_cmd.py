@@ -519,7 +519,7 @@ class TestRunStitch:
 
         assert len(result.vias_added) > 0
         for via in result.vias_added:
-            assert via.layers == ("F.Cu", "In1.Cu")
+            assert via.layers == ("F.Cu", "B.Cu")
 
 
 class TestPadToViaTraces:
@@ -1305,10 +1305,10 @@ class TestZoneAutoDetection:
         assert result.detected_layers["GND"] == "In1.Cu"
         assert len(result.fallback_nets) == 0
 
-        # Vias should target In1.Cu
+        # Through barrels cross the detected inner plane and reach both surfaces
         assert len(result.vias_added) > 0
         for via in result.vias_added:
-            assert via.layers[1] == "In1.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
     def test_auto_detect_multiple_nets(self, stitch_zone_pcb: Path):
         """Should auto-detect target layers for multiple nets with zones."""
@@ -1329,9 +1329,9 @@ class TestZoneAutoDetection:
         v33_vias = [v for v in result.vias_added if v.pad.net_name == "+3.3V"]
 
         for via in gnd_vias:
-            assert via.layers[1] == "In1.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
         for via in v33_vias:
-            assert via.layers[1] == "In2.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
     def test_no_zone_infers_inner_layer_for_power_net(self, stitch_zone_pcb: Path):
         """Should infer inner layer from stackup when no zone found for net on 4-layer board."""
@@ -1348,10 +1348,10 @@ class TestZoneAutoDetection:
         assert "VCC" in result.stackup_inferred_nets
         assert len(result.fallback_nets) == 0
 
-        # VCC vias should target In2.Cu
+        # VCC through vias must cross the In2.Cu contact target
         vcc_vias = [v for v in result.vias_added if v.pad.net_name == "VCC"]
         for via in vcc_vias:
-            assert via.layers[1] == "In2.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
     def test_mixed_zone_and_no_zone_nets(self, stitch_zone_pcb: Path):
         """Should handle mix of nets with zones and nets inferred from stackup."""
@@ -1375,9 +1375,9 @@ class TestZoneAutoDetection:
         vcc_vias = [v for v in result.vias_added if v.pad.net_name == "VCC"]
 
         for via in gnd_vias:
-            assert via.layers[1] == "In1.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
         for via in vcc_vias:
-            assert via.layers[1] == "In2.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
     def test_explicit_target_overrides_zone(self, stitch_zone_pcb: Path):
         """Explicit target layer should override zone auto-detection."""
@@ -1392,9 +1392,9 @@ class TestZoneAutoDetection:
         assert len(result.detected_layers) == 0
         assert len(result.fallback_nets) == 0
 
-        # All vias should use the explicit layer
+        # The explicit plane remains the contact target, but barrels are through
         for via in result.vias_added:
-            assert via.layers[1] == "In2.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
     def test_no_zone_infers_inner_layer_on_4layer_board(self, stitch_test_pcb: Path):
         """4-layer PCB without zones should infer inner layer from stackup."""
@@ -1411,9 +1411,9 @@ class TestZoneAutoDetection:
         assert "GND" in result.stackup_inferred_nets
         assert len(result.fallback_nets) == 0
 
-        # Vias should target In1.Cu
+        # Through barrels cross the detected inner plane and reach both surfaces
         for via in result.vias_added:
-            assert via.layers[1] == "In1.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
 
 class TestCLIOutputWithZones:
@@ -1634,9 +1634,9 @@ class TestStackupAwareFallback:
         v33_vias = [v for v in result.vias_added if v.pad.net_name == "+3.3V"]
 
         for via in gnd_vias:
-            assert via.layers[1] == "In1.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
         for via in v33_vias:
-            assert via.layers[1] == "In2.Cu"
+            assert via.layers == ("F.Cu", "B.Cu")
 
     def test_inner_zone_not_overridden(self, stitch_zone_pcb: Path):
         """Zones on inner layers should be used directly, not overridden by stackup."""
@@ -2924,7 +2924,7 @@ class TestPostStitchDRC:
         from unittest.mock import patch
 
         # Mock find_kicad_cli to return None so DRC is skipped gracefully
-        with patch("kicad_tools.cli.stitch_cmd.run_post_stitch_drc", return_value=0):
+        with patch("kicad_tools.cli.stitch_cmd.run_post_stitch_drc", return_value={"passed": True}):
             exit_code = main([str(stitch_test_pcb), "--net", "GND", "--drc"])
 
         assert exit_code == 0
@@ -2940,7 +2940,7 @@ class TestPostStitchDRC:
         assert "Run DRC to verify" in captured.out
 
     def test_run_post_stitch_drc_no_kicad_cli(self, tmp_path, capsys):
-        """run_post_stitch_drc should warn and return 1 when kicad-cli is not found."""
+        """run_post_stitch_drc should report not_run when kicad-cli is not found."""
         from unittest.mock import patch
 
         pcb_path = tmp_path / "test.kicad_pcb"
@@ -2949,7 +2949,8 @@ class TestPostStitchDRC:
         with patch("kicad_tools.cli.runner.find_kicad_cli", return_value=None):
             result = run_post_stitch_drc(pcb_path)
 
-        assert result == 1
+        assert result["ran"] is False
+        assert result["passed"] is None
         captured = capsys.readouterr()
         assert "kicad-cli not found" in captured.err
 
@@ -2999,7 +3000,7 @@ class TestPostStitchDRC:
         ):
             result = run_post_stitch_drc(pcb_path)
 
-        assert result == 0
+        assert result["ran"] is True
         captured = capsys.readouterr()
         assert "POST-STITCH DRC RESULTS" in captured.out
 
@@ -3048,7 +3049,8 @@ class TestPostStitchDRC:
         ):
             result = run_post_stitch_drc(pcb_path)
 
-        assert result == 0  # DRC ran successfully, even though there are errors
+        assert result["ran"] is True
+        assert result["passed"] is False
         captured = capsys.readouterr()
         assert "DRC FAILED" in captured.out
         assert "ERRORS (must fix)" in captured.out
@@ -3091,13 +3093,13 @@ class TestPostStitchDRC:
         ):
             result = run_post_stitch_drc(pcb_path)
 
-        assert result == 0
+        assert result["ran"] is True
         captured = capsys.readouterr()
         assert "DRC PASSED" in captured.out
         assert "Errors:   0" in captured.out
 
     def test_run_post_stitch_drc_failure(self, tmp_path, capsys):
-        """run_post_stitch_drc should return 1 when DRC fails to run."""
+        """run_post_stitch_drc should report not_run when DRC fails to run."""
         from unittest.mock import patch
 
         from kicad_tools.cli.runner import KiCadCLIResult
@@ -3123,7 +3125,8 @@ class TestPostStitchDRC:
         ):
             result = run_post_stitch_drc(pcb_path)
 
-        assert result == 1
+        assert result["ran"] is False
+        assert result["passed"] is None
         captured = capsys.readouterr()
         assert "DRC failed to run" in captured.err
 
@@ -8260,3 +8263,130 @@ class TestBlanketFillContainmentGate:
         )
         # Outline spans x 100-130; grid should reach beyond x=115 (no fill gate).
         assert any(v.via_x > 115 for v in result.vias_added)
+
+
+@pytest.mark.parametrize("surface,target", [("F.Cu", "In1.Cu"), ("B.Cu", "In2.Cu")])
+def test_standard_via_serialization_crosses_full_stack(surface, target):
+    """An inner-plane target must not silently request a blind drill span."""
+    from kicad_tools.cli.stitch_cmd import add_via_to_pcb
+    from kicad_tools.sexp import SExp
+
+    pad = PadInfo("C1", "1", 1, "GND", 10, 10, surface, 0.9, 0.95)
+    placement = ViaPlacement(pad, 11, 10, 0.45, 0.2, (surface, target))
+    pcb = SExp("kicad_pcb")
+    add_via_to_pcb(pcb, placement)
+    assert placement.layers == ("F.Cu", "B.Cu")
+    assert pcb.get("via").get("layers").get_atoms() == ["F.Cu", "B.Cu"]
+
+
+def test_explicit_micro_via_preserves_adjacent_span():
+    """Through-via normalization must not turn an HDI micro-via into a PTH."""
+    from kicad_tools.cli.stitch_cmd import add_via_to_pcb
+    from kicad_tools.sexp import SExp
+
+    pad = PadInfo("U1", "1", 1, "GND", 10, 10, "F.Cu", 0.2, 0.2)
+    placement = ViaPlacement(pad, 10, 10, 0.2, 0.1, ("F.Cu", "In1.Cu"), "micro")
+    pcb = SExp("kicad_pcb")
+    add_via_to_pcb(pcb, placement)
+    assert pcb.get("via").get("layers").get_atoms() == ["F.Cu", "In1.Cu"]
+    assert "micro" in pcb.get("via").get_atoms()
+
+
+class TestStrictDrcContract:
+    @pytest.mark.parametrize("strict", [False, True])
+    @pytest.mark.parametrize(
+        "finding", ["clean", "error", "warning", "unconnected", "missing", "crash", "malformed"]
+    )
+    def test_json_no_change_native_report(self, tmp_path, monkeypatch, capsys, strict, finding):
+        import json
+
+        from kicad_tools.cli import runner, stitch_cmd
+
+        pcb = tmp_path / "unchanged.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        monkeypatch.setattr(
+            stitch_cmd,
+            "run_stitch",
+            lambda **kw: stitch_cmd.StitchResult(
+                pcb_name=pcb.name, target_nets=["GND"], already_connected=2
+            ),
+        )
+        monkeypatch.setattr(
+            runner, "find_kicad_cli", lambda: None if finding == "missing" else Path("kicad-cli")
+        )
+        calls = []
+        report = tmp_path / "report.json"
+
+        def native(*args, **kwargs):
+            calls.append(args[0])
+            entry = {
+                "type": "clearance",
+                "severity": finding,
+                "description": "native finding",
+                "items": [],
+            }
+            report.write_text(
+                "invalid JSON"
+                if finding == "malformed"
+                else json.dumps(
+                    {
+                        "violations": [entry] if finding in {"error", "warning"} else [],
+                        "unconnected_items": [
+                            {**entry, "type": "unconnected_items", "severity": "error"}
+                        ]
+                        if finding == "unconnected"
+                        else [],
+                        "schematic_parity": [],
+                    }
+                )
+            )
+            return runner.KiCadCLIResult(
+                success=True,
+                output_path=report,
+                return_code=1 if finding == "crash" else 0,
+                stderr="crashed" if finding == "crash" else "",
+            )
+
+        monkeypatch.setattr(runner, "run_drc", native)
+        rc = main(
+            [str(pcb), "--net", "GND", "--format", "json", "--drc-strict" if strict else "--drc"]
+        )
+        doc = json.loads(capsys.readouterr().out)
+        assert rc == doc["exit_code"] == (1 if strict and finding != "clean" else 0)
+        assert doc["success"] is True and doc["success_scope"] == "geometry"
+        assert doc["vias_added_count"] == 0 and doc["saved"] is False
+        assert pcb.read_text() == "(kicad_pcb)"
+        assert len(calls) == (0 if finding == "missing" else 1)
+        assert not report.exists()
+        drc = doc["drc"]
+        assert drc["requested"] and drc["strict"] == strict
+        if finding in {"missing", "crash", "malformed"}:
+            assert drc["status"] == "not_run" and drc["ran"] is False
+            assert drc["passed"] is None and drc["reason"]
+            assert all(
+                drc[k] is None for k in ("error_count", "warning_count", "unconnected_item_count")
+            )
+        else:
+            assert drc["ran"] is True
+            assert drc["passed"] == (finding == "clean")
+            assert drc["status"] == ("passed" if finding == "clean" else "failed")
+            assert drc["error_count"] == (finding == "error")
+            assert drc["warning_count"] == (finding == "warning")
+            assert drc["unconnected_item_count"] == (finding == "unconnected")
+
+    def test_strict_dry_run_cannot_pass(self, stitch_test_pcb, monkeypatch, capsys):
+        import json
+
+        from kicad_tools.cli import stitch_cmd
+
+        monkeypatch.setattr(
+            stitch_cmd, "run_post_stitch_drc", lambda *a: pytest.fail("dry run invoked DRC")
+        )
+        rc = main(
+            [str(stitch_test_pcb), "--net", "GND", "--dry-run", "--drc-strict", "--format", "json"]
+        )
+        doc = json.loads(capsys.readouterr().out)
+        assert rc == doc["exit_code"] == 1
+        assert doc["success"] is True
+        assert doc["drc"]["reason"] == "dry run"
+        assert doc["drc"]["passed"] is None

@@ -273,26 +273,24 @@ section for the full carve-out list).
 
 **Before either command below, run the Verdict-Time CAS Recheck** (see "Verdict-Time CAS Recheck" under Evaluation Process) — abort instead of writing if the recheck finds your claim lost, another Judge's verdict already landed, or the head SHA moved out from under your review. That recheck also hands you `$VERDICT_SHA`, the head SHA every verdict comment below **must** be stamped with.
 
+**Post every verdict comment through `./.loom/scripts/post-verdict.sh`, never a bare `gh pr comment` (#6382).** It takes `$VERDICT_SHA` as an argument and appends the `<!-- loom:verdict-sha ... -->` marker itself, so the marker cannot be typed-and-forgotten the way it can in a hand-written heredoc — the same reasoning behind `create-pr.sh` / `merge-pr.sh` existing instead of raw `gh` calls in this prompt. See "Verdict SHA Marker" under Evaluation Process for why the marker matters; it applies to **every** verdict-label write in this document, not just the two below.
+
 **After approval (green → blue) — BOTH commands are REQUIRED:**
 ```bash
-gh pr comment <number> --body "LGTM! Code quality is excellent, tests pass, implementation is solid.
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=approved -->" && \
+./.loom/scripts/post-verdict.sh <number> approved "$VERDICT_SHA" \
+    --body "LGTM! Code quality is excellent, tests pass, implementation is solid." && \
   gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"
 ```
 
 **If changes needed (green → amber) — BOTH commands are REQUIRED:**
 ```bash
-gh pr comment <number> --body "Issues found that need addressing before approval...
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=changes-requested -->" && \
+./.loom/scripts/post-verdict.sh <number> changes-requested "$VERDICT_SHA" \
+    --body "Issues found that need addressing before approval..." && \
   gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested"
 # Doctor will address feedback and change back to loom:review-requested
 ```
 
 **CRITICAL: The `gh pr edit` label command is the PRIMARY deliverable of evaluation.** The comment alone is NOT sufficient — the sweep orchestrator validates outcomes by checking labels, not comments. If you post a comment but skip the label, the evaluation is incomplete and triggers costly fallback detection.
-
-**CRITICAL: The `<!-- loom:verdict-sha ... -->` marker is what binds that label to a tree.** A verdict label with no marker cannot be invalidated when the branch moves — it is the label, not the code, that Champion and Doctor read. See "Verdict SHA Marker" under Evaluation Process for the full convention; it applies to **every** verdict-label write in this document, not just the two above.
 
 **Label transitions:**
 - `loom:review-requested` (green) → `loom:pr` (blue) [approved, ready for Champion auto-merge]
@@ -346,12 +344,11 @@ fi
 # ... run tests, evaluate code ...
 
 # Complete normally with approval or changes requested (chain with &&).
-# VERDICT_SHA comes from the Verdict-Time CAS Recheck; the marker is mandatory
-# on every verdict comment (see "Verdict SHA Marker").
+# VERDICT_SHA comes from the Verdict-Time CAS Recheck; post-verdict.sh stamps
+# the mandatory marker itself (see "Verdict SHA Marker").
 VERDICT_SHA=$(gh pr view 599 --json headRefOid --jq '.headRefOid')
-gh pr comment 599 --body "LGTM! Code quality is excellent.
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=approved -->" && \
+./.loom/scripts/post-verdict.sh 599 approved "$VERDICT_SHA" \
+    --body "LGTM! Code quality is excellent." && \
   gh pr edit 599 --remove-label "loom:reviewing" --add-label "loom:pr"
 ```
 
@@ -448,17 +445,18 @@ if [[ -x "$_ghc" ]] && "$_ghc" --version >/dev/null 2>&1; then GH_READ="$_ghc"; 
 - The fallback queue's unlabeled-PR listing (`gh pr list --state=open …`).
 - `gh issue list --search …` when repairing a PR description.
 
-**Writes stay literal `gh` — then clear the cache.** Never wrap
-`gh pr comment` / `gh pr edit` in `"$GH_READ"`: the destructive-command guard
-hooks pattern-match the *literal* command text (e.g. the hard deny on
-`gh pr comment --body @path`, added after that shape destroyed an entire Judge
-review on PR #4457), and a wrapped form slips past them. Instead, drop the cache right after your own mutation so your
-next cached read cannot return your own pre-write state:
+**Writes stay literal `gh` (or `post-verdict.sh`, which calls it) — then clear
+the cache.** Never wrap `gh pr comment` / `gh pr edit` / `post-verdict.sh` in
+`"$GH_READ"`: the destructive-command guard hooks pattern-match the *literal*
+command text (e.g. the hard deny on `gh pr comment --body @path`, added after
+that shape destroyed an entire Judge review on PR #4457 — `post-verdict.sh`
+carries the identical `--body @path` refusal itself, see its own usage
+comment), and a wrapped form slips past them. Instead, drop the cache right
+after your own mutation so your next cached read cannot return your own
+pre-write state:
 
 ```bash
-gh pr comment "$N" --body "…
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=approved -->" \
+./.loom/scripts/post-verdict.sh "$N" approved "$VERDICT_SHA" --body "…" \
   && gh pr edit "$N" --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"
 "$GH_READ" --clear-cache   # local /tmp sweep — zero API cost
 ```
@@ -468,7 +466,7 @@ gh pr comment "$N" --body "…
 | Read | Why it must be live |
 |---|---|
 | Pre-Iteration Environment Check (`gh repo view`) | Liveness probe — a cached success hides a broken environment |
-| Stale `loom:reviewing` Claim Check (claim timeline + comment counts) | Claim arbitration — 30s of staleness is exactly the window a competing claim lands in |
+| Stale `loom:reviewing` Claim Check (`claim-staleness.sh`: claim timeline + comment reads) | Claim arbitration — 30s of staleness is exactly the window a competing claim lands in (the script makes these reads itself; never re-issue them through the cache) |
 | **Verdict-Time CAS Recheck** (`gh pr view $N --json labels`) | The entire mechanism is "observe writes that landed *during* my review"; a cached label set defeats it |
 | `gh pr checks` + `gh pr view --json mergeStateStatus` before a verdict | Verdict gating — never approve on a stale green |
 
@@ -508,10 +506,10 @@ Full policy, TTL/invalidation semantics, and the manual verification steps:
     Smell".
 8. **Verify CI status**: Check GitHub CI passes before approving (see CI Status Check below)
 9. **Evaluate changes**: Examine diff, look for issues, suggest improvements
-10. **Provide feedback**: Use `gh pr comment` to provide evaluation feedback
-11. **Update labels** (⚠️ NEVER use `gh pr review` - see warning at top of file). **Run the Verdict-Time CAS Recheck (see below) immediately before this step** — abort instead of writing if it finds your claim lost, another Judge's verdict already landed, or the head SHA moved off `REVIEW_HEAD_SHA`. It yields `$VERDICT_SHA`, which the comment's `<!-- loom:verdict-sha ... -->` marker MUST carry (see "Verdict SHA Marker"). **The label update is the PRIMARY deliverable — always run it immediately after the comment using `&&`:**
-   - If approved: `gh pr comment ... && gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"` (blue badge - ready for Champion auto-merge)
-   - If changes needed: `gh pr comment ... && gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested"` (amber badge - Doctor will address)
+10. **Provide feedback**: Use `./.loom/scripts/post-verdict.sh` to provide evaluation feedback
+11. **Update labels** (⚠️ NEVER use `gh pr review` - see warning at top of file). **Run the Verdict-Time CAS Recheck (see below) immediately before this step** — abort instead of writing if it finds your claim lost, another Judge's verdict already landed, or the head SHA moved off `REVIEW_HEAD_SHA`. It yields `$VERDICT_SHA`, which `post-verdict.sh` MUST be given (see "Verdict SHA Marker") — the script stamps the `<!-- loom:verdict-sha ... -->` marker itself. **The label update is the PRIMARY deliverable — always run it immediately after the comment using `&&`:**
+   - If approved: `post-verdict.sh <number> approved "$VERDICT_SHA" --body ... && gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"` (blue badge - ready for Champion auto-merge)
+   - If changes needed: `post-verdict.sh <number> changes-requested "$VERDICT_SHA" --body ... && gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested"` (amber badge - Doctor will address)
 
 ### Stale `loom:reviewing` Claim Check (Step 2)
 
@@ -528,117 +526,123 @@ practice, not hours, so the grace period is minutes, not hours.
 **If the PR does NOT carry `loom:reviewing`:** proceed to claim as today — no
 behavior change: `gh pr edit <number> --add-label "loom:reviewing"`.
 
-**If the PR DOES carry `loom:reviewing`:** determine the claim's age and
-whether anyone has *genuinely* commented since the claim was made — see
-"Stand-down marker convention" below for why the comment count excludes
-stand-down comments:
+**If the PR DOES carry `loom:reviewing`:** evaluate the claim with the shared
+staleness evaluator. **Do not hand-roll the timeline/comment arithmetic** —
+`judge.md`, `doctor.md` and `curator.md` all drive the same script so the three
+lanes cannot drift apart, and it is unit-tested
+(`.loom/scripts/tests/test-claim-staleness.sh`, #6514):
 
 ```bash
 N=<pr-number>
-# All reads in this block are plain `gh` — NEVER "$GH_READ". This is claim
-# arbitration: a 30s-stale timeline or comment list is exactly the window in
-# which a competing Judge's claim (or its stand-down) lands, and answering from
-# cache would reintroduce the double-claim this check exists to prevent.
-# `--paginate` re-invokes `--jq` once per response page and concatenates the
-# per-page results rather than applying the filter across the combined
-# timeline (#4637) — a timeline spanning more than one page (>100 events)
-# would otherwise yield a multi-line CLAIMED_AT that corrupts MARKER and
-# every comparison below. `// empty` drops the no-match-on-this-page line
-# entirely (not a literal "null"), and `sort | tail -n 1` collapses the
-# remaining per-page timestamps to the single latest one — RFC3339 UTC
-# timestamps (the `Z`-suffixed form the GitHub API returns) sort correctly
-# as plain strings, so this needs no minimum `gh` version.
-CLAIMED_AT=$(gh api "repos/{owner}/{repo}/issues/$N/timeline" --paginate \
-  --jq '[.[] | select(.event=="labeled" and .label.name=="loom:reviewing")] | last | .created_at // empty' \
-  | sort | tail -n 1)
-MARKER="<!-- loom:standdown claim=$CLAIMED_AT -->"
-COMMENTS_JSON=$(gh api "repos/{owner}/{repo}/issues/$N/comments" \
-  | jq --arg t "$CLAIMED_AT" '[.[] | select(.created_at > $t)]')
-# printf, not echo: zsh's echo interprets \n escapes inside the JSON, corrupting it
-COMMENTS_AFTER=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$MARKER" '[.[] | select(.body | contains($m) | not)] | length')
-STANDDOWN_COUNT=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$MARKER" '[.[] | select(.body | contains($m))] | length')
+# Every read the script makes is a live `gh api` call, never "$GH_READ": this is
+# claim arbitration, and a 30s-stale timeline or comment list is exactly the
+# window in which a competing Judge's claim (or its stand-down) lands.
+eval "$(./.loom/scripts/claim-staleness.sh check --number "$N" --label loom:reviewing)"
+echo "$CLAIM_STATE — claim age ${CLAIM_AGE_MINUTES}m, idle ${IDLE_MINUTES}m, stand-down streak ${STANDDOWN_COUNT}"
 ```
 
-Then decide:
+`eval` is safe here: the script emits only `KEY=VALUE` lines built from a fixed
+enum, validated RFC3339 timestamps and integers — never forge text — so no
+comment body can reach your shell. Use `--json` instead if you prefer `jq`.
 
-| Condition | Verdict | Action |
-|-----------|---------|--------|
-| `STANDDOWN_COUNT >= LOOM_MAX_STANDDOWN_STREAK` (default **3**) AND claim age ≥ `LOOM_STALE_REVIEWING_MINUTES` (default **30**) | **Stale — bounded fallback** (see below) | Force-reclaim regardless of `COMMENTS_AFTER`. Breaks the livelock even if the marker/exclusion logic above is somehow bypassed — but the streak alone is never enough (#4790): it also requires the claim to have aged past the normal staleness threshold, so a high *peer arrival rate* (several concurrent Judges each standing down within minutes) cannot force-reclaim a claim that is still genuinely fresh. |
-| Claim age < `LOOM_STALE_REVIEWING_MINUTES` (default **30**), OR `COMMENTS_AFTER > 0` | **Fresh** — a Judge is actively working this PR | **Do not stomp the claim.** Post a marked stand-down comment **unless the latest comment on the PR already carries an identical marker for this exact `$CLAIMED_AT`** (see "Duplicate stand-down suppression" below — then skip silently instead), then skip this PR and continue the batch to the next candidate PR. |
-| Claim age ≥ `LOOM_STALE_REVIEWING_MINUTES` AND `COMMENTS_AFTER == 0` | **Stale** — the claiming Judge's process almost certainly died mid-review | Reclaim (see below), then proceed with the normal review from step 3. |
-| Timeline API call fails or returns empty (`CLAIMED_AT` unset) | **Unknown — fail safe** | Treat as **fresh**. Never stomp a claim on API failure or missing data. |
+Then decide on `$CLAIM_STATE`:
+
+| `$CLAIM_STATE` | Meaning | Action |
+|---|---|---|
+| `unclaimed` | the PR does not actually carry `loom:reviewing` right now | Claim it normally: `gh pr edit $N --add-label "loom:reviewing"` |
+| `fresh` | a Judge is plausibly still working this PR | **Do not stomp the claim.** Record a stand-down (see below), then skip this PR and continue the batch to the next candidate PR. |
+| `stale` | no *claimant* activity for ≥ `LOOM_STALE_REVIEWING_MINUTES` (default **30**) — the claiming Judge's process almost certainly died mid-review | Reclaim (see below), then proceed with the normal review from step 3. |
+| `stale-bounded-fallback` | the stand-down streak reached `LOOM_MAX_STANDDOWN_STREAK` (default **3**) **and** the claim's own age is ≥ `LOOM_STALE_REVIEWING_MINUTES` | Force-reclaim (see below) — the livelock breaker. |
+| `unknown` | the timeline/label read failed or returned nothing | **Fail safe: treat exactly like `fresh`.** Never stomp a claim on API failure or missing data. |
+
+**What counts as claimant activity (#6514)**: only a comment carrying *this
+claim's* activity marker —
+
+```
+<!-- loom:claim-activity claim=$CLAIMED_AT -->
+```
+
+Every other comment is ignored: it neither pins nor extends the claim. This is
+the fix for the PR #6513 livelock. The old rule counted **any** non-stand-down
+comment posted after the claim (`COMMENTS_AFTER > 0`) as proof the claimant was
+alive, so a single routine Builder post-push status note — a different author,
+saying nothing about the review — pinned that claim "fresh" for the rest of its
+life, because `CLAIMED_AT` never moves. And claimant activity now only **resets
+the idle clock** rather than pinning the claim, so even a genuine heartbeat buys
+only another `LOOM_STALE_REVIEWING_MINUTES`.
+
+**If your own review legitimately runs long**, post a progress comment ending
+with that marker so the next pass can see you are alive. The script prints the
+marker for the live claim, so you never hand-assemble it:
+
+```bash
+gh pr comment $N --body "Judge: still running the test suite (step 7) — review in progress.
+$(./.loom/scripts/claim-staleness.sh marker --number "$N" --label loom:reviewing)"
+```
 
 **Stand-down marker convention (#4618 — breaks the livelock)**: a "standing
 down, not stomping" comment is evidence of **no activity**, not activity — it
-means a *later* Judge pass declined to touch the claim, not that the
-*original* claimant is still working. Before #4618, `COMMENTS_AFTER` counted
-every comment after the claim indiscriminately, so each stand-down comment
-satisfied the very freshness test the next pass ran, making the claim look
-eternally fresh even though nothing was actually happening (PR #4614: 3
-consecutive stand-down comments over 30+ minutes, never reclaimed). Every
-stand-down comment you post in the "Fresh" row above MUST end with the
-`<!-- loom:standdown claim=$CLAIMED_AT -->` marker so it is excluded from
-`COMMENTS_AFTER` on every subsequent pass, and counted in `STANDDOWN_COUNT`
-instead:
+means a *later* Judge pass declined to touch the claim, not that the *original*
+claimant is still working. Before #4618, every comment after the claim counted
+indiscriminately, so each stand-down comment satisfied the very freshness test
+the next pass ran, making the claim look eternally fresh even though nothing was
+happening (PR #4614: 3 consecutive stand-down comments over 30+ minutes, never
+reclaimed). Stand-down comments therefore carry their own marker and are counted
+into the streak, never into liveness.
+
+**Recording a stand-down** (the `fresh` and `unknown` rows):
 
 ```bash
-gh pr comment $N --body "Judge pass: PR still carries a fresh \`loom:reviewing\` claim (claimed $CLAIMED_AT) — standing down without reclaiming. Not stomping.
-<!-- loom:standdown claim=$CLAIMED_AT -->"
+./.loom/scripts/claim-staleness.sh standdown --number "$N" --label loom:reviewing
+# then skip this PR and continue the batch
 ```
 
-**Duplicate stand-down suppression (#5123)**: the marker convention above stops
-a stand-down from ever looking like live activity, but it does not by itself
-stop a *pile of identical stand-downs* from accumulating — every "Fresh" pass
-still posted a new marked comment unconditionally, so a claim sitting just
-inside the TTL produced one near-identical comment per Judge pass (observed
-live on PR #5115: 3 stand-downs in 85 seconds). Re-verification of staleness
-still runs on **every** pass — only the redundant comment is skipped. Before
-posting the stand-down comment above, check whether the *latest* comment on
-the PR already carries the identical marker for this exact `$CLAIMED_AT`
-(`COMMENTS_JSON` was already fetched above — no extra API call needed):
+It posts the marked stand-down comment the first time, and on every later pass
+**edits that same comment in place**, bumping `seq=` in its marker:
 
-```bash
-LATEST_COMMENT_BODY=$(printf '%s\n' "$COMMENTS_JSON" | jq -r 'sort_by(.created_at) | last | .body // empty')
-if printf '%s' "$LATEST_COMMENT_BODY" | grep -qF -- "$MARKER"; then
-  echo "Latest comment already carries the stand-down marker for claim $CLAIMED_AT — skipping duplicate comment (still standing down, not reclaiming)."
-else
-  gh pr comment $N --body "Judge pass: PR still carries a fresh \`loom:reviewing\` claim (claimed $CLAIMED_AT) — standing down without reclaiming. Not stomping.
-<!-- loom:standdown claim=$CLAIMED_AT -->"
-fi
+```
+<!-- loom:standdown claim=$CLAIMED_AT seq=2 -->
 ```
 
-**Bounded fallback (AC3, #4618; age-floor join added by #4798)**:
-`STANDDOWN_COUNT` is a hard cap independent of the marker-exclusion logic
-working correctly — it counts how many stand-down comments have accumulated
-against *this exact* `$CLAIMED_AT` (the marker embeds it, so a genuine
-reclaim — which changes `CLAIMED_AT` — resets the count to zero
-automatically). But the streak count by itself measures **peer arrival
-rate** (how many other Judges happened to revisit this exact PR), not claim
-liveness — a claim only minutes old can accumulate `LOOM_MAX_STANDDOWN_STREAK`
-stand-downs from that many concurrent Judges without ever coming close to
-stale in the age sense (#4790: a claim 17m36s old, well under the 30-minute
-default `LOOM_STALE_REVIEWING_MINUTES`, was force-reclaimed after 3 Judges
-each stood down within that same ~17m36s window). So the fallback fires only
-once **both** hold: `LOOM_MAX_STANDDOWN_STREAK` marked comments have piled up
-against the same claim with no reclaim, **and** the claim's own age is ≥
-`LOOM_STALE_REVIEWING_MINUTES` — reusing the same age floor the ordinary
-staleness row below already applies. This still force-reclaims regardless of
-`COMMENTS_AFTER` (the whole reason this fallback exists independent of the
-marker-exclusion logic), it just no longer overrides the age check too. Use
-this reclaim comment:
+**This is what keeps the bounded fallback reachable (#6514).** Duplicate
+stand-down suppression (#5123) previously skipped the pass entirely, so
+`STANDDOWN_COUNT` froze at 1 and `LOOM_MAX_STANDDOWN_STREAK` was never reached —
+the second half of the PR #6513 livelock, in which the claim could escape
+neither through the ordinary staleness row nor through the fallback. Bumping in
+place keeps the forge free of near-identical comments (the #5123 goal) while the
+streak still accumulates (the #4618 AC3 goal). A legacy marker with no `seq=`
+counts as `seq=1`. Re-verification of staleness still runs on **every** pass —
+only the redundant *comment* is avoided, never the check.
+
+**Bounded fallback (AC3, #4618; age-floor join added by #4798; unstarved by
+#6514)**: the streak is a hard cap independent of the activity/marker logic
+working correctly — it counts how many stand-down passes have accumulated
+against *this exact* `$CLAIMED_AT` (the marker embeds it, so a genuine reclaim —
+which changes `CLAIMED_AT` — resets the count to zero automatically). But the
+streak by itself measures **peer arrival rate** (how many other Judges happened
+to revisit this PR), not claim liveness — a claim only minutes old can
+accumulate `LOOM_MAX_STANDDOWN_STREAK` stand-downs from that many concurrent
+Judges without coming close to stale in the age sense (#4790: a claim 17m36s
+old, well under the 30-minute default, was force-reclaimed after 3 Judges each
+stood down within that same window). So the fallback fires only once **both**
+hold: `LOOM_MAX_STANDDOWN_STREAK` passes have piled up against the same claim
+with no reclaim, **and** the claim's own age is ≥
+`LOOM_STALE_REVIEWING_MINUTES`. Note that this row is keyed on the **claim's**
+age, not on the idle clock, precisely so a claimant stuck in a loop emitting
+activity markers still cannot hold the claim forever. Use this reclaim comment:
 
 ```bash
 gh pr edit $N --remove-label "loom:reviewing"
-gh pr comment $N --body "Reclaiming loom:reviewing claim: $STANDDOWN_COUNT consecutive stand-down comments have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_REVIEWING_MINUTES:-30}m) with no actual review progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
+gh pr comment $N --body "Reclaiming loom:reviewing claim: $STANDDOWN_COUNT consecutive stand-down passes have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_REVIEWING_MINUTES:-30}m) with no actual review progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
 gh pr edit $N --add-label "loom:reviewing"
 # Continue to step 3 (Check merge state) and evaluate normally
 ```
 
-**Reclaiming a stale claim** (the ordinary claim-age path):
+**Reclaiming a stale claim** (the ordinary idle-clock path):
 
 ```bash
 gh pr edit $N --remove-label "loom:reviewing"
-gh pr comment $N --body "Reclaiming stale loom:reviewing claim (age > ${LOOM_STALE_REVIEWING_MINUTES:-30}m, no follow-up comment) — a prior Judge's parent sweep likely died mid-review."
+gh pr comment $N --body "Reclaiming stale loom:reviewing claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_REVIEWING_MINUTES:-30}m with no claimant activity) — a prior Judge's parent sweep likely died mid-review."
 gh pr edit $N --add-label "loom:reviewing"
 # Continue to step 3 (Check merge state) and evaluate normally
 ```
@@ -648,7 +652,16 @@ mirror `LOOM_STALE_BUILDING_HOURS` (`loom-daemon/src/claim_reconciliation.rs`,
 the analogous no-record staleness threshold for `loom:building` claims), but
 on a **minutes**, not hours, scale, since review turnaround (5–15 minutes) is
 two orders of magnitude faster than a build. `LOOM_MAX_STANDDOWN_STREAK`
-(default **3**) — the AC3 bounded-fallback cap described above.
+(default **3**) — the AC3 bounded-fallback cap described above. The script
+reads both itself; `--stale-minutes` / `--max-standdown-streak` override them.
+
+**If `.loom/scripts/claim-staleness.sh` is missing** (an older install that has
+not been resynced yet): fall back to the **age-only** rule — read the latest
+`labeled` event for `loom:reviewing` from
+`repos/{owner}/{repo}/issues/$N/timeline`, reclaim when it is older than
+`LOOM_STALE_REVIEWING_MINUTES`, and treat a failed or empty read as fresh. Do
+**not** reintroduce a "any comment after the claim means fresh" test — that is
+precisely the defect this section exists to fix.
 
 **Daemon backstop (#4367, freshness signal fixed by #4618)**: this check is
 the fast path — it only fires when another Judge happens to revisit the same
@@ -745,24 +758,27 @@ analogous recheck (label state, not just head SHA) immediately before its own
 completion write — see `doctor.md`'s "Verdict-Time CAS Recheck".
 
 **Pre-approval checklist** (verify before executing approval commands):
-- [ ] I am using `gh pr comment`, NOT `gh pr review`
+- [ ] I am posting my verdict through `./.loom/scripts/post-verdict.sh`, NOT a
+      bare `gh pr comment` and NOT `gh pr review`
 - [ ] I am using `gh pr edit` for label changes
 - [ ] I understand `gh pr review --approve` WILL fail with "cannot approve your own PR"
 - [ ] All CI checks pass (verified via `gh pr checks`)
 - [ ] Merge state is CLEAN (verified via `gh pr view --json mergeStateStatus`)
 - [ ] I will NEVER call `gh pr review` in any form
-- [ ] I will run `gh pr comment` AND `gh pr edit` atomically (chained with `&&`)
+- [ ] I will run `post-verdict.sh` AND `gh pr edit` atomically (chained with `&&`)
 - [ ] If my review body came from a scratch file, the filename is namespaced by
       the PR/issue number (`review-<N>.md`, never a fixed name like
       `review.md` — wave subagents share one scratchpad, #6381), I passed it
-      via `--body-file <path>` (or `gh api -F body=@<path>`) — NEVER `--body
-      @<path>` (see the `--body @path` anti-pattern warning above) — and I
-      re-fetched the posted comment (`gh pr view <number> --comments` or `gh
-      api .../issues/<number>/comments`) to verify it renders my actual review
-      prose, not a literal path string
-- [ ] My verdict comment ends with the `<!-- loom:verdict-sha sha=$VERDICT_SHA
-      verdict=approved|changes-requested -->` marker, using the SHA from the
-      recheck above (see "Verdict SHA Marker" below)
+      via `--body-file <path>` (`post-verdict.sh` also accepts `-` for stdin) —
+      NEVER `--body @<path>` (see the `--body @path` anti-pattern warning
+      above — `post-verdict.sh` refuses this itself, but do not rely on that
+      as the review step) — and I re-fetched the posted comment (`gh pr view
+      <number> --comments` or `gh api .../issues/<number>/comments`) to verify
+      it renders my actual review prose, not a literal path string
+- [ ] I passed the SHA from the Verdict-Time CAS Recheck above as
+      `post-verdict.sh`'s third argument — the script stamps the
+      `<!-- loom:verdict-sha ... -->` marker itself (see "Verdict SHA Marker"
+      below); I do not need to (and should not) type the marker by hand
 
 ### Verdict SHA Marker (MANDATORY on every verdict comment)
 
@@ -780,19 +796,27 @@ Judge reclaimed it, and an operator had to clear the label by hand. The
 inverse is worse and is the direction to fear: a `loom:pr` approval that
 survives a force-push lets Champion auto-merge a tree **nobody approved**.
 
-**The rule**: every comment that accompanies a verdict-label write in this
-document MUST end with
+**The rule**: every verdict-label write in this document is posted through
+
+```bash
+./.loom/scripts/post-verdict.sh <number> approved|changes-requested "$VERDICT_SHA" \
+    --body "..." | --body-file <path>
+```
+
+never a bare `gh pr comment` (#6382). `$VERDICT_SHA` is the `headRefOid` read
+in the Verdict-Time CAS Recheck immediately above the write; `post-verdict.sh`
+appends the marker itself —
 
 ```
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=approved -->
+<!-- loom:verdict-sha sha=<sha> verdict=approved -->
 ```
 
-or `verdict=changes-requested`, where `$VERDICT_SHA` is the `headRefOid` read
-in the Verdict-Time CAS Recheck immediately above the write. This is the same
-HTML-comment marker convention as `<!-- loom:standdown claim=... -->` (claim
-freshness) and `<!-- loom:fallback-evaluated sha=... -->` (fallback dedup);
-it answers a third question — **which tree does this verdict describe** — and
-is what makes the verdict invalidatable later.
+(or `verdict=changes-requested`) — so it is never typed as prose and cannot be
+dropped from a heredoc by mistake. This is the same HTML-comment marker
+convention as `<!-- loom:standdown claim=... -->` (claim freshness) and
+`<!-- loom:fallback-evaluated sha=... -->` (fallback dedup); it answers a
+third question — **which tree does this verdict describe** — and is what
+makes the verdict invalidatable later.
 
 **This applies to EVERY verdict-label write in this file**, not just the two
 in Label Workflow: the DIRTY/merge-conflict rejection, the CI-failure
@@ -800,23 +824,29 @@ rejection, the fast-track approval, the minor-PR-description-fix approval,
 and the trivial-fix approval. A verdict written without a marker is
 `UNVERIFIABLE` to every consumer below — it fails **safe** (the verdict is
 kept, never force-cleared), which means an unmarked stale approval keeps
-exactly the pre-#5686 danger. Do not skip the marker.
+exactly the pre-#5686 danger. Route every one of them through
+`post-verdict.sh` — do not hand-write the comment for "just this one" site.
 
-**This instruction is not the enforcement mechanism, and it never was
-(#6319).** Measured in production, the marker was dropped on roughly one
-verdict in four — by the same judge identity, in the same 90-minute window,
-so it is a compliance rate, not a stale prompt. In the observed case an
-unmarked approval was auto-merged 24 seconds later; a force-push in that
-window would have gone undetected. Two mechanical backstops now cover the
-omission: the stale-verdict sweep below runs the guard with `--anchor`, and
-`loom-daemon`'s `reconcile_pr_verdicts` anchors on its periodic tick. Both
-post the missing marker at whatever the head is *when they run*.
+**Routing through `post-verdict.sh` closes the *typo/omission* failure mode,
+not the *bypass* one (#6382).** Before this script existed, the marker was
+compliance-by-memory end to end: measured in production, it was dropped on
+roughly one verdict in four (#6319) — by the same judge identity, in the same
+90-minute window, so it was a compliance *rate*, not a stale prompt. Once a
+verdict is posted through `post-verdict.sh`, that specific failure mode is
+gone — the marker is an argument, not prose, so there is no "forgot to append
+it" outcome for that call. What remains possible is a model deviating from
+this document and calling raw `gh pr comment` instead; the pre-approval
+checklist above exists to catch that. Two mechanical backstops also cover
+whatever gets through anyway: the stale-verdict sweep below runs the guard
+with `--anchor`, and `loom-daemon`'s `reconcile_pr_verdicts` anchors on its
+periodic tick. Both post the missing marker at whatever the head is *when they
+run*.
 
 **That is a bound on future exposure, not a repair.** Neither backstop knows
 which tree you actually reviewed — if the head moved between your verdict and
 the anchor, they anchor an approval to a tree nobody read, and it will then
-read as `FRESH`. Only the marker *you* write at verdict time records the truth.
-Stamp it.
+read as `FRESH`. Only the marker `post-verdict.sh` writes at verdict time
+records the truth. Use it.
 
 **Only stamp genuine verdicts.** Stand-down notes, progress comments,
 fallback-queue notes, and the stale-verdict notice itself are not verdicts and
@@ -1208,7 +1238,7 @@ This catches merge conflicts early in the evaluation cycle, preventing wasted ef
 > - **`git commit-tree`** piped from a `read-tree`-populated index.
 > - **`git reset`**, **`git rm --cached`**, **`git add`**, or **`git checkout .`** used "just to simulate" a merge or a conflicting state.
 > - **A throwaway test-merge branch** (`git checkout -b tmp-test && git merge <pr-branch>`, or the reverse — merging the PR branch into main on a scratch branch) created **in the main checkout** to eyeball how a merge resolves. There is no such thing as a disposable branch in shared state: the checkout, the index, and the stash stack it touches are all live for every other role.
-> - **Any stash-stack mutation** (`git stash pop` / `git stash drop` / `git stash clear`) run **in the main checkout** for any reason, including "just to get a clean tree for a test-merge." The main checkout's stash stack is **operator-owned** — it may hold deliberately preserved diagnostic state (e.g. sweep-contamination evidence parked for investigation) with no marker distinguishing "safe to pop" from "evidence, do not touch." The 2026-07-28 incident this rule exists for: a Judge's throwaway main-checkout test-merge inadvertently `git stash pop`'d a preserved stash entry; the pop happened to conflict, so nothing was lost that time, but a clean pop would have silently destroyed it with no recovery path. (`git stash push` / `apply` / `list` are non-destructive and are not the concern here — the danger is specifically `pop`/`drop`/`clear`.) The destructive-command guard asks for confirmation on these three subcommands when the cwd resolves to the main checkout (`guards.stashScope` / `LOOM_GUARD_STASH_SCOPE`, see `defaults/docs/guard-hooks.md`) — but do not rely on the guard catching it; the rule is to never issue the command there in the first place.
+> - **Any stash-stack mutation** (`git stash pop` / `git stash drop` / `git stash clear`) run **in the main checkout** for any reason, including "just to get a clean tree for a test-merge." The main checkout's stash stack is **operator-owned** — it may hold deliberately preserved diagnostic state (e.g. sweep-contamination evidence parked for investigation) with no marker distinguishing "safe to pop" from "evidence, do not touch." The 2026-07-28 incident this rule exists for: a Judge's throwaway main-checkout test-merge inadvertently `git stash pop`'d a preserved stash entry; the pop happened to conflict, so nothing was lost that time, but a clean pop would have silently destroyed it with no recovery path. (`git stash push` / `apply` / `list` are non-destructive and are not the concern here — the danger is specifically `pop`/`drop`/`clear`.) The destructive-command guard asks for confirmation on these three subcommands when the cwd resolves to the main checkout (`guards.stashScope` / `LOOM_GUARD_STASH_SCOPE`, see `defaults/docs/guard-hooks.md`) — but do not rely on the guard catching it; the rule is to never issue the command there in the first place. **In a headless run that ask has nobody to answer it, so it stalls exactly like a deny** — which is why "don't do it" now comes with a replacement rather than only a prohibition: when you genuinely need a clean tree in the primary clone (a baseline `shellcheck`/`cargo clippy`/test run to diff against), use `./.loom/scripts/worktree.sh stash-push main` … `./.loom/scripts/worktree.sh stash-pop main` (#6076). It anchors to `refs/loom/stash-baseline/main` instead of `refs/stash`, so the operator's stack is untouched and nothing asks. To reconcile a quarantined `loom-quarantine:` entry, **replay, don't pop**: `git stash show -p <ref> | git -C .loom/worktrees/issue-<N> apply -`.
 >
 > **Instead, use the index-free approach** (the same one `doctor.md` uses — see `doctor.md`'s merge-conflict check, `git merge-tree origin/main | grep -q "^+<<<<<<<"`):
 >
@@ -1293,8 +1323,24 @@ if [ "$MERGE_STATE" = "DIRTY" ]; then
 
     # Attempt rebase
     if git rebase origin/main; then
+        # Version-bearing-file sync gate (#7168, extended #7341): this
+        # auto-rebase pushes directly, exactly like Doctor's rebase-conflict
+        # recipes (#7171) and never routes through create-pr.sh -- a rebase
+        # silently absorbs whatever version-bearing values origin/main
+        # already had, and a file the branch's own commits never touched (in
+        # practice .loom/install-metadata.json) never raises a git conflict,
+        # so it can end up stale relative to VERSION/the files that WERE
+        # part of the rebase, invisible until CI's "Installer Integration
+        # Tests" fails. Gate BEFORE the push below, folded into the same
+        # push condition so a mismatch is treated exactly like a push
+        # failure (never hand-patch the version-bearing files yourself).
+        GATE_OK=true
+        if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+            echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - falling back to change request"
+            GATE_OK=false
+        fi
         # Rebase succeeded - push changes
-        if git push --force-with-lease; then
+        if [ "$GATE_OK" = true ] && git push --force-with-lease; then
             echo "Rebase successful - proceeding with evaluation"
             gh pr comment $PR_NUMBER --body "🔀 Automatically rebased branch to resolve merge conflicts. Proceeding with code evaluation."
             # Continue with normal evaluation
@@ -1302,7 +1348,7 @@ if [ "$MERGE_STATE" = "DIRTY" ]; then
             echo "Push failed - falling back to change request"
             git rebase --abort 2>/dev/null || true
             # Fall back: apply loom:merge-conflict + loom:changes-requested
-            gh pr comment $PR_NUMBER --body "$(cat <<'EOF'
+            ./.loom/scripts/post-verdict.sh $PR_NUMBER changes-requested "$VERDICT_SHA" --body "$(cat <<'EOF'
 ❌ **Changes Requested - Merge Conflict**
 
 Automated rebase succeeded but push failed (possibly due to branch protection or concurrent changes).
@@ -1316,9 +1362,7 @@ git push --force-with-lease
 
 I'll evaluate again once conflicts are resolved.
 EOF
-)
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=changes-requested -->" && \
+)" && \
             gh pr edit $PR_NUMBER --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested" --add-label "loom:merge-conflict"
         fi
     else
@@ -1326,7 +1370,7 @@ EOF
         git rebase --abort
 
         # Fall back: apply loom:merge-conflict + loom:changes-requested
-        gh pr comment $PR_NUMBER --body "$(cat <<'EOF'
+        ./.loom/scripts/post-verdict.sh $PR_NUMBER changes-requested "$VERDICT_SHA" --body "$(cat <<'EOF'
 ❌ **Changes Requested - Merge Conflict**
 
 This PR has merge conflicts that could not be automatically resolved.
@@ -1341,9 +1385,7 @@ git push --force-with-lease
 
 I'll re-evaluate once conflicts are resolved, or the Doctor role will handle this.
 EOF
-)
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=changes-requested -->" && \
+)" && \
         gh pr edit $PR_NUMBER --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested" --add-label "loom:merge-conflict"
     fi
 fi
@@ -1364,6 +1406,15 @@ fi
 # Fetch and rebase
 git fetch origin main
 git rebase origin/main
+
+# Version-bearing-file sync gate (#7168, extended #7341): this push goes
+# directly, never through create-pr.sh -- gate before it, same as the DIRTY
+# path above. Never hand-patch VERSION/CLAUDE.md/etc. yourself on a mismatch;
+# run the printed `./scripts/version.sh bump patch` fix instead.
+if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+  echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - aborting push"
+  exit 1
+fi
 
 # If rebase succeeds (no conflicts)
 git push --force-with-lease
@@ -1389,6 +1440,14 @@ echo "Branch rebased successfully, continuing evaluation"
 # Resolve the conflict (e.g., keep both additions)
 # git add <resolved-files>
 git rebase --continue
+
+# Version-bearing-file sync gate (#7168, extended #7341): same reasoning as
+# the DIRTY/BEHIND paths above -- gate before this direct push too.
+if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+  echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - aborting push"
+  exit 1
+fi
+
 git push --force-with-lease
 gh pr comment <number> --body "🔀 Rebased branch and resolved merge conflict (both sides added entries to config)"
 ```
@@ -1399,7 +1458,7 @@ Run the Verdict-Time CAS Recheck immediately before the `gh pr edit` below.
 
 ```bash
 git rebase --abort
-gh pr comment <number> --body "$(cat <<'FEEDBACK'
+./.loom/scripts/post-verdict.sh <number> changes-requested "$VERDICT_SHA" --body "$(cat <<'FEEDBACK'
 ❌ **Changes Requested - Merge Conflict**
 
 This PR has merge conflicts with main that require manual resolution:
@@ -1411,9 +1470,7 @@ Please rebase your branch and resolve conflicts, or the Doctor role will handle 
 
 I'll evaluate the code once conflicts are resolved.
 FEEDBACK
-)
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=changes-requested -->" && \
+)" && \
   gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested"
 ```
 
@@ -1487,7 +1544,7 @@ gh pr view <PR_NUMBER> --json mergeStateStatus --jq '.mergeStateStatus'
 If CI checks are failing, **do NOT approve**. Instead, apply `loom:ci-failure` for visibility. Run the Verdict-Time CAS Recheck immediately before the `gh pr edit` below.
 
 ```bash
-gh pr comment <number> --body "$(cat <<'EOF'
+./.loom/scripts/post-verdict.sh <number> changes-requested "$VERDICT_SHA" --body "$(cat <<'EOF'
 ❌ **Changes Requested - CI Failing**
 
 The following CI checks are failing:
@@ -1502,9 +1559,7 @@ Please fix these issues before the PR can be approved. Common causes:
 
 I'll evaluate again once CI passes.
 EOF
-)
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=changes-requested -->" && \
+)" && \
   gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested" --add-label "loom:ci-failure"
 ```
 
@@ -1530,9 +1585,37 @@ If checks are still running, **do not block on them and do not approve on a gues
 2. **Release your claim** — remove `loom:reviewing` so a later pass picks it up cleanly.
 3. **Skip and continue the batch** — move on to the next PR. The next cron tick re-evaluates this PR once CI has settled.
 
+**Trap: empty `gh pr checks` output is NOT proof nothing is pending.** `gh pr
+checks` is GraphQL-backed and can return completely empty output (zero rows)
+during a transient forge failure (e.g. an intermittent TLS handshake error) —
+that empty state is indistinguishable from "nothing pending" to a naive `grep
+-q pending`, and this has already happened in production: on kicad-tools PR
+#4792 (2026-08-13) a Judge poller read one empty response and declared CI
+"settled" 6 minutes into a ~40-minute board-test run (#6169). Guard against it
+by requiring at least one row back before trusting the absence of "pending" —
+retry once on a zero-row read before concluding there is genuinely nothing to
+wait for:
+
 ```bash
+# ci_still_pending: true (pending) if any row shows pending/queued/in_progress.
+# A ZERO-ROW read is retried once before being trusted — on a real forge blip
+# the retry almost always returns real rows; only a read that is STILL empty
+# after the retry is treated as "genuinely no checks reported" (not pending).
+ci_still_pending() {
+  local pr="$1" out rows
+  out="$(gh pr checks "$pr" 2>/dev/null)"
+  rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+  if [[ "$rows" -eq 0 ]]; then
+    sleep 3
+    out="$(gh pr checks "$pr" 2>/dev/null)"
+    rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+    [[ "$rows" -eq 0 ]] && return 1   # confirmed empty on retry -- not pending
+  fi
+  printf '%s\n' "$out" | grep -qE "(pending|queued|in_progress)"
+}
+
 # Check if any checks are still pending; if so, release the claim and skip (no end-state label)
-if gh pr checks <PR_NUMBER> | grep -qE "(pending|queued|in_progress)"; then
+if ci_still_pending <PR_NUMBER>; then
     gh pr comment <number> --body "Code evaluation looks good; CI is still running. Releasing the claim and skipping — a later tick will re-evaluate once CI settles."
     # Release the claim WITHOUT applying an end-state label — PR stays loom:review-requested
     gh pr edit <number> --remove-label "loom:reviewing"
@@ -1554,10 +1637,25 @@ This mirrors the orchestrator-level guardrail already documented in `sweep.md` (
 ```bash
 # Foreground block-poll — single-PR Judge invocation, no batch to fall back to.
 # Bounded: MAX_WAIT caps total wait time; never loop unboundedly.
+# ci_still_pending guards against the empty-output false-settle trap (#6169) —
+# see "When CI is Pending" above for the full rationale.
+ci_still_pending() {
+  local pr="$1" out rows
+  out="$(gh pr checks "$pr" 2>/dev/null)"
+  rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+  if [[ "$rows" -eq 0 ]]; then
+    sleep 3
+    out="$(gh pr checks "$pr" 2>/dev/null)"
+    rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+    [[ "$rows" -eq 0 ]] && return 1   # confirmed empty on retry -- not pending
+  fi
+  printf '%s\n' "$out" | grep -qE "(pending|queued|in_progress)"
+}
+
 MAX_WAIT=1800   # 30 min cap — tune to the repo's typical CI duration
 INTERVAL=60
 ELAPSED=0
-while gh pr checks <PR_NUMBER> | grep -qE "(pending|queued|in_progress)"; do
+while ci_still_pending <PR_NUMBER>; do
   if [[ "$ELAPSED" -ge "$MAX_WAIT" ]]; then
     echo "CI still pending after ${MAX_WAIT}s — falling back to a conditional verdict."
     break
@@ -1587,9 +1685,8 @@ gh pr view 42 --json mergeStateStatus --jq '.mergeStateStatus'
 
 # 3. Run the Verdict-Time CAS Recheck, then approve (BOTH commands in one chain)
 VERDICT_SHA=$(gh pr view 42 --json headRefOid --jq '.headRefOid')
-gh pr comment 42 --body "✅ **Approved!** All CI checks pass, code looks great.
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=approved -->" && \
+./.loom/scripts/post-verdict.sh 42 approved "$VERDICT_SHA" \
+    --body "✅ **Approved!** All CI checks pass, code looks great." && \
   gh pr edit 42 --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"
 ```
 
@@ -1659,7 +1756,7 @@ gh pr view <PR_NUMBER> --json mergeStateStatus --jq '.mergeStateStatus'
 **4. Approve with fast-track audit trail** (run the Verdict-Time CAS Recheck immediately before the `gh pr edit` below):
 
 ```bash
-gh pr comment <PR_NUMBER> --body "$(cat <<'EOF'
+./.loom/scripts/post-verdict.sh <PR_NUMBER> approved "$VERDICT_SHA" --body "$(cat <<'EOF'
 ✅ **Approved (Fast-Track Evaluation)**
 
 This re-evaluation used the abbreviated fast-track process because:
@@ -1670,9 +1767,7 @@ This re-evaluation used the abbreviated fast-track process because:
 
 <!-- loom:fast-track-evaluation -->
 EOF
-)
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=approved -->" && \
+)" && \
   gh pr edit <PR_NUMBER> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"
 ```
 
@@ -1813,7 +1908,7 @@ the normal flow — this fast path shortcuts code review, not CI verification.
 immediately before the `gh pr edit` below):
 
 ```bash
-gh pr comment <PR_NUMBER> --body "$(cat <<EOF
+./.loom/scripts/post-verdict.sh <PR_NUMBER> approved "$VERDICT_SHA" --body "$(cat <<EOF
 ✅ **Approved (Docs-Only Fast Path)**
 
 This PR's entire changed-file list was verified — via the paginated files
@@ -1825,9 +1920,7 @@ type-check, tests, or functional review apply). All CI checks pass.
 
 <!-- loom:docs-fast-path-evaluation -->
 EOF
-)
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=approved -->" && \
+)" && \
   gh pr edit <PR_NUMBER> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"
 ```
 
@@ -1898,7 +1991,7 @@ If EITHER is true, the PR is a **partial increment** of a larger tracked body of
 2. **Explain the problem** in your comment:
 
 ```bash
-gh pr comment <number> --body "$(cat <<'EOF'
+./.loom/scripts/post-verdict.sh <number> changes-requested "$VERDICT_SHA" --body "$(cat <<'EOF'
 ⚠️ **PR description must use GitHub auto-close syntax**
 
 This PR references the issue but doesn't use the magic keyword syntax that triggers GitHub's auto-close feature.
@@ -1918,9 +2011,7 @@ See Builder role docs for PR creation best practices.
 
 I'll evaluate the code changes once the PR description is fixed.
 EOF
-)
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=changes-requested -->" && \
+)" && \
   gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested"
 ```
 
@@ -2005,14 +2096,12 @@ gh pr edit <number> --body-file /tmp/pr-body-<number>.txt
 
 ```bash
 # Comment with approval note about the fix
-gh pr comment <number> --body "$(cat <<'EOF'
+./.loom/scripts/post-verdict.sh <number> approved "$VERDICT_SHA" --body "$(cat <<'EOF'
 ✅ **Approved!** I've updated the PR description to add \"Closes #123\" for proper issue auto-close.
 
 Code quality looks great - tests pass, implementation is clean, and documentation is complete.
 EOF
-)
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=approved -->" && \
+)" && \
   gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"
 ```
 
@@ -2089,7 +2178,7 @@ git push
 **Step 5: Note the fix in your approval comment** (run the Verdict-Time CAS Recheck immediately before the `gh pr edit` below)
 
 ```bash
-gh pr comment <number> --body "$(cat <<'EOF'
+./.loom/scripts/post-verdict.sh <number> approved "$VERDICT_SHA" --body "$(cat <<'EOF'
 ✅ **Approved!**
 
 Fixed during evaluation:
@@ -2097,9 +2186,7 @@ Fixed during evaluation:
 
 Code quality is excellent, tests pass, implementation is solid.
 EOF
-)
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=approved -->" && \
+)" && \
   gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"
 ```
 
@@ -2553,9 +2640,8 @@ EOF
 )"
 
 # Then approve with reference to the issue (VERDICT_SHA from the CAS recheck)
-gh pr comment 557 --body "✅ **Approved!** Created #XXX to track documentation update. Code quality is excellent.
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=approved -->" && \
+./.loom/scripts/post-verdict.sh 557 approved "$VERDICT_SHA" \
+    --body "✅ **Approved!** Created #XXX to track documentation update. Code quality is excellent." && \
   gh pr edit 557 --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"
 ```
 
@@ -2652,10 +2738,10 @@ VERDICT_SHA=$(printf '%s\n' "$CURRENT" | jq -r '.headRefOid')
 
 # Request changes (green → amber - Doctor will address)
 # IMPORTANT: Chain comment AND label update with && to ensure both execute
-# IMPORTANT: `cat <<EOF` (unquoted heredoc), not `<<'EOF'` — $VERDICT_SHA in
-# the marker MUST expand; a quoted heredoc would post the literal text and
-# leave the verdict unbindable to any tree.
-gh pr comment 42 --body "$(cat <<EOF
+# post-verdict.sh takes $VERDICT_SHA as its own argument and stamps the
+# marker itself, so the heredoc below can ALWAYS be quoted (`<<'EOF'`) —
+# there is no "must be unquoted so the marker expands" footgun here anymore.
+./.loom/scripts/post-verdict.sh 42 changes-requested "$VERDICT_SHA" --body "$(cat <<'EOF'
 ❌ **Changes Requested**
 
 Found a few issues that need addressing:
@@ -2665,8 +2751,6 @@ Found a few issues that need addressing:
 3. **README.md** - Docs need updating to reflect new API
 
 Please address these and I'll take another look!
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=changes-requested -->
 EOF
 )" && \
   gh pr edit 42 --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested"
@@ -2674,17 +2758,15 @@ EOF
 
 # Approve PR (green → blue)
 # IMPORTANT: Chain comment AND label update with && to ensure both execute
-gh pr comment 42 --body "$(cat <<EOF
+./.loom/scripts/post-verdict.sh 42 approved "$VERDICT_SHA" --body "$(cat <<'EOF'
 ✅ **Approved!** Great work on this feature. Tests look comprehensive and the code is clean.
 
 ## Test Execution
 
 **Test plan from PR description:**
-1. Run \`pnpm test:unit\` — ✅ Executed: All 42 tests pass
+1. Run `pnpm test:unit` — ✅ Executed: All 42 tests pass
 2. Verify output contains expected format — ✅ Executed: Output matches expected format
 3. Start daemon and observe behavior — ⚠️ Skipped: requires manual observation
-
-<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=approved -->
 EOF
 )" && \
   gh pr edit 42 --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"

@@ -83,8 +83,8 @@ class ZoneFillRule(DRCRule):
     Both are reported as warnings because they indicate a design intent
     mismatch rather than a hard manufacturing error.
 
-    Keepout zones (rule areas) are already excluded by the PCB parser --
-    only ``(zone ...)`` S-expression nodes are parsed into ``pcb.zones``.
+    Keepout zones (rule areas) share the ``(zone ...)`` syntax with pours,
+    but intentionally have neither a net nor copper fill and are excluded.
 
     Zones with ``net_number=0`` and an empty ``net_name`` are flagged as
     having an unassigned net, which indicates an incomplete zone definition.
@@ -113,6 +113,8 @@ class ZoneFillRule(DRCRule):
         results.rules_checked = 1
 
         for zone in pcb.zones:
+            if getattr(zone, "keepout", None) is not None:
+                continue
             net_label = zone.net_name if zone.net_name else "unassigned"
             layer = zone.layer or "unknown"
             bbox = _zone_bounding_box(zone)

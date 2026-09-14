@@ -24,6 +24,7 @@ from .rules.diffpair_routing_continuity import DiffPairRoutingContinuityRule
 from .rules.edge import EdgeClearanceRule
 from .rules.impedance import ImpedanceRule
 from .rules.match_group_length_skew import MatchGroupLengthSkewRule
+from .rules.path_ampacity import PathAmpacityRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.silkscreen import check_all_silkscreen
 from .rules.via_in_pad import ViaInPadRule
@@ -31,9 +32,13 @@ from .rules.zone_fill import IsolatedCopperRule, ZoneFillRule
 from .violations import DRCResults, DRCViolation
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from kicad_tools.router.current_paths import CurrentPathSpec
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.filters import ViolationFilter
+    from kicad_tools.validate.mask_copper import MaskCopperRequest
     from kicad_tools.validate.rules.courtyard_waivers import CourtyardWaivers
 
 
@@ -79,6 +84,9 @@ class DRCChecker:
         strict_connectivity: bool = True,
         copper_oz_outer: float | None = None,
         copper_oz_inner: float | None = None,
+        current_path_specs: Sequence[CurrentPathSpec] | None = None,
+        mask_copper_request: MaskCopperRequest | None = None,
+        physical_copper_gap_mm: float | None = None,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -156,10 +164,22 @@ class DRCChecker:
                 inner-layer (In*.Cu) copper weight in oz (Issue #4326).
                 Same semantics as ``copper_oz_outer`` for
                 ``design_rules.inner_copper_oz``.
+            current_path_specs: Optional declared branch-specific
+                current-path intents (Issue #4980,
+                :class:`~kicad_tools.router.current_paths.CurrentPathSpec`).
+                When provided, :meth:`check_path_ampacity` wires
+                :class:`~kicad_tools.validate.rules.path_ampacity
+                .PathAmpacityRule` to verify each declared branch resolves,
+                is unambiguous, and meets IPC-2221 width for its OWN
+                declared current -- independent of :attr:`net_class_map`'s
+                whole-net ``target_ampacity``. ``None`` (the default)
+                degrades to a clean no-op, matching every other
+                sidecar-optional rule in this class.
 
         Raises:
             ValueError: If manufacturer ID is not recognized
         """
+        self.mask_copper_request = mask_copper_request
         self.pcb = pcb
         self.manufacturer = manufacturer
         self.layers = layers
@@ -167,6 +187,13 @@ class DRCChecker:
         self.suppress_library = suppress_library
         self.net_class_map = net_class_map
         self.courtyard_waivers = courtyard_waivers
+        # Issue #4980: declared branch-specific current-path intents, kept
+        # as a plain list so ``check_path_ampacity`` degrades to an empty
+        # no-op when omitted (mirrors PathAmpacityRule's own ``None``/empty
+        # contract).
+        self.current_path_specs: list[CurrentPathSpec] = (
+            list(current_path_specs) if current_path_specs else []
+        )
         # Issue #4176: when True, the connectivity rule decides segment /
         # pad / via unions by real geometric copper contact (shapely polygon
         # intersection) instead of the legacy 0.01mm endpoint-proximity
@@ -176,6 +203,12 @@ class DRCChecker:
         self.strict_connectivity = strict_connectivity
         self.warn_on_inactive_skew_rules = warn_on_inactive_skew_rules
         self.verbose = verbose
+        if physical_copper_gap_mm is not None:
+            import math
+
+            if not math.isfinite(physical_copper_gap_mm) or physical_copper_gap_mm <= 0:
+                raise ValueError("Physical copper gap must be finite and positive")
+        self.physical_copper_gap_mm = physical_copper_gap_mm
         self.emit_measurements = emit_measurements
         # The skew / continuity rules surface their measured info findings
         # when either the user asked for --verbose OR a caller wants the
@@ -228,7 +261,9 @@ class DRCChecker:
     # ``tests/test_check_cmd_coverage.py`` enforces the second half.
     CHECK_ALL_METHODS: tuple[str, ...] = (
         "check_ampacity",
+        "check_path_ampacity",
         "check_clearances",
+        "check_physical_copper_gap",
         "check_connectivity",
         "check_connector_access",
         "check_segment_zone_clearances",
@@ -246,6 +281,7 @@ class DRCChecker:
         "check_match_group_length_skew",
         "check_silkscreen",
         "check_solder_mask_pads",
+        "check_mask_to_copper",
         "check_footprint_placement",
         "check_netlist",
         "check_single_pad_nets",
@@ -322,6 +358,13 @@ class DRCChecker:
         # ---- Advisory / quality: routing-intent & non-fab-blocking. ----
         "connectivity": CATEGORY_ADVISORY,
         "ampacity": CATEGORY_ADVISORY,
+        # Branch-specific current-path ampacity (Issue #4980/#5124): same
+        # presentation bucket as its whole-net sibling "ampacity" above --
+        # a routing-intent finding, not a fab-blocking copper/clearance
+        # defect. Deliberately NOT in ADVISORY_RULE_IDS (see below): an
+        # under-width declared branch is a real thermal/fire hazard and
+        # MUST still block gating consumers.
+        "path_ampacity": CATEGORY_ADVISORY,
         # Connector mating / edge-access (Issue #4613): mechanical
         # accessibility advisories, not fab-blocking copper defects.
         # Explicit entries are REQUIRED -- category_for_rule defaults
@@ -526,6 +569,8 @@ class DRCChecker:
 
         # Run each category of checks (order matches CHECK_ALL_METHODS).
         for method_name in self.CHECK_ALL_METHODS:
+            if method_name == "check_mask_to_copper" and self.mask_copper_request is None:
+                continue
             method = getattr(self, method_name)
             if method_name == "check_pad_grid_alignment":
                 results.merge(method(auto_derive_threshold=pad_grid_auto_derive))
@@ -542,6 +587,14 @@ class DRCChecker:
             results.violations = filter_result.kept
 
         return results
+
+    def check_physical_copper_gap(self) -> DRCResults:
+        """Opt-in net-independent slit preflight on unioned copper geometry."""
+        if self.physical_copper_gap_mm is None:
+            return DRCResults()
+        from .rules.physical_gap import check_physical_copper_gap
+
+        return check_physical_copper_gap(self.pcb, self.physical_copper_gap_mm)
 
     def check_clearances(self) -> DRCResults:
         """Check clearance rules (trace-to-trace, trace-to-pad, etc.).
@@ -921,6 +974,43 @@ class DRCChecker:
         rule = AmpacityRule(specs=specs)
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
+    def check_path_ampacity(self) -> DRCResults:
+        """Check declared branch-specific current paths (Issue #4980/#5124).
+
+        Wires :class:`~kicad_tools.validate.rules.path_ampacity
+        .PathAmpacityRule` into the standalone DRC pipeline. Unlike
+        :meth:`check_ampacity` (one ``target_ampacity`` scalar per whole
+        net), each declared
+        :class:`~kicad_tools.router.current_paths.CurrentPathSpec` is a
+        physical copper *branch* identified by stable ``RefDes.pad``
+        endpoints, checked against its OWN declared current -- this is
+        what makes a net with a 15 A trunk and a milliamp Kelvin sense tap
+        checkable at all without either starving the trunk or forcing the
+        sense tap's fine-pitch pad to the trunk's width.
+
+        Branch-specific current paths are **declarative** (the ``kct
+        check --current-paths`` sidecar, auto-discovered next to the board
+        mirroring ``--net-class-map``'s convention -- see
+        :func:`kicad_tools.router.current_paths.discover_current_paths_sidecar`).
+        When :attr:`current_path_specs` is empty (no sidecar), the rule is
+        a clean no-op, matching :meth:`check_ampacity`'s graceful
+        degradation contract.
+
+        This rule is intentionally NOT in :attr:`ADVISORY_RULE_IDS`: an
+        under-width or unresolved (fails-closed) high-current trunk branch
+        is a real thermal/fire hazard and MUST block gating consumers,
+        exactly like :meth:`check_ampacity`.
+
+        Returns:
+            DRCResults with an ``error`` per under-width segment on a
+            resolved path, an ``error`` per unresolved/ambiguous
+            (fail-closed) declared path, and a ``warning`` per segment of
+            a declared net not covered by any resolved path. Empty when no
+            path is declared.
+        """
+        rule = PathAmpacityRule(specs=self.current_path_specs)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
     def check_impedance(self) -> DRCResults:
         """Check trace widths against target impedance specifications.
 
@@ -1075,6 +1165,47 @@ class DRCChecker:
                 self.pcb, self.design_rules, suppress_library=self.suppress_library
             )
         )
+
+    def check_mask_to_copper(self) -> DRCResults:
+        """Run the explicitly requested native, immutable-source exposure check."""
+
+        import hashlib
+
+        from .mask_copper import (
+            MaskCopperAssessment,
+            MaskCopperRequest,
+            assessment_results,
+            check_mask_to_copper,
+        )
+
+        request = self.mask_copper_request or MaskCopperRequest()
+        try:
+            if self.pcb.path is None:
+                assessment = MaskCopperAssessment(
+                    reasons=["Mask geometry requires a saved source PCB"]
+                )
+            else:
+                from kicad_tools.sexp import parse_string
+
+                raw = self.pcb.path.read_bytes()
+                if self.pcb._sexp.to_string() != parse_string(raw.decode()).to_string():
+                    assessment = MaskCopperAssessment(
+                        coverage="incomplete",
+                        reasons=["PCB object differs from current source bytes"],
+                    )
+                else:
+                    assessment = check_mask_to_copper(
+                        self.pcb.path, request.policy, request.intents, **request.native_options
+                    )
+                    if (
+                        assessment.binding
+                        and assessment.binding.source_sha256 != hashlib.sha256(raw).hexdigest()
+                    ):
+                        assessment.coverage = "incomplete"
+                        assessment.reasons.append("Source changed after checker object validation")
+        except (OSError, ValueError) as exc:
+            assessment = MaskCopperAssessment(coverage="incomplete", reasons=[str(exc)])
+        return assessment_results(assessment)
 
     def check_solder_mask_pads(self) -> DRCResults:
         """Check solder mask and pad dimension rules.

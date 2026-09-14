@@ -623,8 +623,8 @@ def test_micro_vertex_beside_tip_matches_native_count(kink: str, label: str, tmp
         # Board 06 previously over-reported two false positives vs kicad-cli's
         # zero (issue #4521): a union-seam acute tip on In1.Cu and a keyhole
         # pinch on B.Cu.  Both must now agree at 0/0.
-        "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb",
-        "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb",
+        "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb",
+        "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb",
     ],
 )
 def test_repository_board_count_matches_native(board: str):

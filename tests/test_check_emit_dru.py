@@ -358,3 +358,39 @@ def test_emit_dru_preserves_existing_creepage_and_user_rules(board_copy: Path) -
     assert DRU_FLOORS_BLOCK_BEGIN in merged
     assert '(rule "Trace Width - jlcpcb"' in merged
     assert merged.count("(version 1)") == 1
+
+
+def test_emit_dru_preserves_reviewed_project_without_mutating_it(tmp_path: Path):
+    """DRU-only emission cannot bypass reviewed native floors (#5023)."""
+    import json
+    from types import SimpleNamespace
+
+    from kicad_tools.manufacturers import write_drc_constraints
+
+    board = tmp_path / "reviewed.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    pro = board.with_suffix(".kicad_pro")
+    pro.write_text(
+        json.dumps(
+            {
+                "text_variables": {"KCT_PRESERVE_BOARD_RULES": "1"},
+                "board": {"design_settings": {"rules": {"min_clearance": 0.15}}},
+                "net_settings": {"classes": [{"name": "Default", "clearance": 0.15}]},
+            }
+        )
+    )
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=6)
+    write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=6)
+    before_pro = pro.read_bytes()
+    before_dru = board.with_suffix(".kicad_dru").read_bytes()
+    _emit_drc_sidecars(
+        board,
+        SimpleNamespace(design_rules=rules),
+        manufacturer_id="jlcpcb-tier1",
+        layers=6,
+        copper_oz=1,
+        net_class_map=None,
+        emit_both=False,
+    )
+    assert pro.read_bytes() == before_pro
+    assert board.with_suffix(".kicad_dru").read_bytes() == before_dru

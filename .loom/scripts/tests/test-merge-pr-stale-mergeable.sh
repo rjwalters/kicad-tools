@@ -43,6 +43,13 @@
 #      three-way decision, and the two refusal messages are textually
 #      distinct (stale/unknown vs genuinely conflicts) per acceptance
 #      criterion 3.
+#   3. Durable telemetry (#6978, follow-up from #6156): the mergeability gate
+#      calls merge-admission-telemetry.sh's `record` subcommand once per
+#      invocation, BEFORE branching into info/error (error exits the script),
+#      and the recheck function sets the `_RECHECK_ATTEMPTS_USED` global to
+#      the number of backoff attempts actually consumed for each of the (a)-
+#      (f) decision cases above -- purely additive instrumentation, no change
+#      to the decision itself.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-merge-pr-stale-mergeable.sh
@@ -114,6 +121,39 @@ if [[ -n "$_def_line" ]] && [[ -n "$_call_line" ]] && [[ "$_def_line" -lt "$_cal
     pass "_recheck_mergeable_before_refusal is defined before its callsite"
 else
     fail "definition/callsite ordering wrong (def=$_def_line call=$_call_line)"
+fi
+
+echo ""
+echo "Test 1b: durable telemetry wiring (#6978, follow-up from #6156)"
+
+assert_grep 'merge-admission-telemetry\.sh" record' "$MERGE_PR" \
+    "the mergeability gate calls merge-admission-telemetry.sh record"
+assert_grep 'action "\$_MSM_ACTION" --reason "\$_MSM_REASON"' "$MERGE_PR" \
+    "the telemetry call carries the computed action and reason"
+assert_grep 'retries-used "\$_MSM_RETRIES_USED" --backoff-delay-sec "\$_MSM_DELAY"' "$MERGE_PR" \
+    "the telemetry call carries retries_used and backoff_delay_sec"
+assert_grep '>/dev/null 2>&1 \|\| true' "$MERGE_PR" \
+    "the telemetry call is isolated with || true (must never abort the merge path)"
+# retries_used is derived from the decision's OWN reason text (no change to
+# _recheck_mergeable_before_refusal itself -- see Test 2's function-body
+# extraction below, which is byte-for-byte the same function pre- and
+# post-#6978): "recheck #N" when the recheck resolved true mid-loop,
+# otherwise the configured retry count (every other path exhausts all
+# retries before returning).
+assert_grep '_MSM_REASON" =~ recheck' "$MERGE_PR" \
+    "retries_used is parsed from the reason string's 'recheck #N' pattern when present"
+assert_grep '_MSM_RETRIES_USED="\$_MSM_RETRIES"' "$MERGE_PR" \
+    "retries_used defaults to the configured retry count otherwise"
+
+# The telemetry emission must happen BEFORE the case/error branch below it --
+# `error()` calls `exit 1`, so if telemetry were emitted only inside (or
+# after) the case statement, it would never fire on a refusal.
+_telemetry_line=$(grep -n 'merge-admission-telemetry\.sh" record' "$MERGE_PR" | head -1 | cut -d: -f1)
+_case_line=$(grep -n 'case "\$_MSM_ACTION" in' "$MERGE_PR" | head -1 | cut -d: -f1)
+if [[ -n "$_telemetry_line" ]] && [[ -n "$_case_line" ]] && [[ "$_telemetry_line" -lt "$_case_line" ]]; then
+    pass "telemetry is emitted BEFORE the info/error branch (line $_telemetry_line < $_case_line)"
+else
+    fail "expected the telemetry call (line ${_telemetry_line:-?}) before the case statement (line ${_case_line:-?})"
 fi
 
 # --- Extract the ACTUAL function body from the live source (no drift) ---
@@ -262,6 +302,66 @@ if [[ "$out_f" == merge:* ]] && [[ "$out_f" == *"git merge-tree"* ]]; then
     pass "(f) persistent mergeable=null (still computing) still corroborates via git merge-tree and proceeds"
 else
     fail "(f) expected a merge:*git merge-tree* decision; got: $out_f"
+fi
+
+echo ""
+echo "Test 3: telemetry retries_used derivation (#6978) against the real decisions above"
+
+# Mirrors the exact call-site logic added in merge-pr.sh: retries_used is the
+# configured retry count UNLESS the reason string embeds "recheck #N" (the
+# recheck resolved true mid-loop), in which case that specific attempt number
+# wins. This is applied here to the REAL decision strings produced by the
+# unmodified _recheck_mergeable_before_refusal calls above (a)-(f) -- proof
+# the derivation is correct against live output, not a hand-crafted fixture.
+_derive_retries_used() {
+    local reason="$1" configured="$2"
+    if [[ "$reason" =~ recheck\ \#([0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    else
+        echo "$configured"
+    fi
+}
+
+_reason_a="${out_a#*:}"
+if [[ "$(_derive_retries_used "$_reason_a" 3)" == "2" ]]; then
+    pass "(a) retries_used derives to 2 (the mid-loop attempt that resolved true), not the configured 3"
+else
+    fail "(a) expected retries_used=2, got: $(_derive_retries_used "$_reason_a" 3)"
+fi
+
+_reason_b="${out_b#*:}"
+if [[ "$(_derive_retries_used "$_reason_b" 2)" == "2" ]]; then
+    pass "(b) retries_used derives to the configured 2 (all retries exhausted before merge-tree corroboration)"
+else
+    fail "(b) expected retries_used=2, got: $(_derive_retries_used "$_reason_b" 2)"
+fi
+
+_reason_c="${out_c#*:}"
+if [[ "$(_derive_retries_used "$_reason_c" 2)" == "2" ]]; then
+    pass "(c) retries_used derives to the configured 2 on a genuine-conflict refusal"
+else
+    fail "(c) expected retries_used=2, got: $(_derive_retries_used "$_reason_c" 2)"
+fi
+
+_reason_d="${out_d#*:}"
+if [[ "$(_derive_retries_used "$_reason_d" 1)" == "1" ]]; then
+    pass "(d) retries_used derives to the configured 1 on a ref-unavailable refusal"
+else
+    fail "(d) expected retries_used=1, got: $(_derive_retries_used "$_reason_d" 1)"
+fi
+
+_reason_e="${out_e#*:}"
+if [[ "$(_derive_retries_used "$_reason_e" 1)" == "1" ]]; then
+    pass "(e) retries_used derives to the configured 1 on a fetch-failure refusal"
+else
+    fail "(e) expected retries_used=1, got: $(_derive_retries_used "$_reason_e" 1)"
+fi
+
+_reason_f="${out_f#*:}"
+if [[ "$(_derive_retries_used "$_reason_f" 2)" == "2" ]]; then
+    pass "(f) retries_used derives to the configured 2 when every recheck returns null"
+else
+    fail "(f) expected retries_used=2, got: $(_derive_retries_used "$_reason_f" 2)"
 fi
 
 # --- Summary ---

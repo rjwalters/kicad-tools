@@ -364,6 +364,22 @@ class TestSExpHelpers:
         assert end.get_value(0) == pytest.approx(35.0)
         assert end.get_value(1) == pytest.approx(50.0)
 
+    def test_modern_reference_precedes_legacy_text(self):
+        fp = SExp.list(
+            "footprint",
+            SExp.list("fp_text", "reference", "OLD1"),
+            SExp.list("property", "Reference", "R1"),
+            SExp.list("fp_text", "value", "10k"),
+            SExp.list("fp_text", "user", "R1 label"),
+        )
+        _remap_reference(fp, 2)
+        assert fp.find_child("property").get_string(1) == "B2_R1"
+        assert [c.get_string(1) for c in fp.children if c.name == "fp_text"] == [
+            "OLD1",
+            "10k",
+            "R1 label",
+        ]
+
     def test_remap_reference(self):
         """Reference designator gets board index prefix."""
         fp = SExp.list(

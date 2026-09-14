@@ -694,6 +694,33 @@ only an explicit non-empty regular file, installs it atomically with mode
 targeting the profile's `CODEX_HOME`—never put a secret in argv or registry
 metadata.
 
+**Session-managed profiles (issue #6925, Epic #6896 Phase 2):**
+`loom-daemon accounts session start|stop|status|attach <name>` layers a
+per-account `loom-worker-session` container (`docker/session/README.md`) on
+top of a profile this same CLI creates — the container owns the profile's
+`CODEX_HOME` volume as the single serializing writer of its `auth.json`
+refresh chain. Once `session start` has adopted a profile, `reauth` and the
+`status`/`list` login probe above both refuse it (`login_state:
+session_managed`) — re-authenticate via `session attach <name>` (an
+interactive `codex login` inside the container) instead of a host-direct
+`reauth`. `session stop` never SIGKILLs an in-flight `docker exec` (the
+#5119 restart-safety contract) unless `--force` is passed.
+
+**Session-exec dispatch (issue #6926):** `spawn-codex.sh` detects an adopted
+profile via the same `.session-managed.json` sentinel and, when present,
+routes headless dispatch through `docker exec <container> codex exec ...`
+instead of a bare-metal `codex exec` — never `tmux send-keys` (that
+TUI-driving path is `session attach`'s alone, operator-only). This keeps the
+ownership rule intact end to end: once a profile is adopted, no ambient
+host-direct process — including a Loom-dispatched worker — touches its
+`CODEX_HOME` volume. Gated by `LOOM_CODEX_SESSION_EXEC` (`auto` default, `0`/
+`1` to override); a non-adopted profile is completely unaffected. An
+interactive (no-prompt) invocation against an adopted profile is refused
+(exit 78) rather than run bare-metal — use `session attach` instead. The
+managed `pre_tool_use` hook readiness preflight above runs identically in
+both modes, since it inspects the same profile directory the container
+mounts.
+
 Every lifecycle command is all-or-nothing over the (profile, registry) pair. A
 failed `add` or `import` removes the profile it created, so the name stays
 reusable; concurrent creations of the same name are serialized by an exclusive

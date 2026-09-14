@@ -36,6 +36,13 @@ set -euo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 RSC_SRC="$HELPERS_DIR/rebase-stacked-children.sh"
+# The extracted function span (see the awk capture below) starts at `run() {`,
+# AFTER the real script's own `SCRIPT_DIR="$(cd "$(dirname ...)" && pwd)"`
+# assignment -- so the extracted _process_one_stacked_child's reference to
+# $SCRIPT_DIR (the #7168 version-check-gate.sh call site) needs it set here
+# too. HELPERS_DIR already resolves to the identical directory the real
+# script's own SCRIPT_DIR would.
+SCRIPT_DIR="$HELPERS_DIR"
 
 # Colors (YELLOW/BLUE are referenced by the extracted run()/info shims under set -u).
 RED='\033[0;31m'
@@ -280,6 +287,45 @@ assert_not_contains "$(read_gh)" "pr edit" "(c) Safe stale child -> PR base NOT 
 assert_eq "" "$(read_gh)" "(c) Safe stale child -> no deferred comment"
 assert_eq "0" "$RSC_FAILURE" "(c) Safe stale child -> RSC_FAILURE stays 0"
 
+# (c2) Same as (c), but version-check-gate.sh (real script, #7168) reports a
+#      mismatch via LOOM_VERSION_CHECK_SCRIPT -> rebase runs, but the push is
+#      NEVER attempted and RSC_FAILURE=2 (mirrors the rebase-conflict path).
+reset_state
+cat > "$STUB_DIR/version-mismatch.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "MISMATCH  .loom/install-metadata.json: 0.18.130 (expected 0.18.131)"
+exit 1
+STUB
+chmod +x "$STUB_DIR/version-mismatch.sh"
+export LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-mismatch.sh"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+OUT_C2_FILE="$(mktemp)"
+_rebase_stacked_children "feature/issue-100" >"$OUT_C2_FILE" 2>&1
+OUT_C2="$(cat "$OUT_C2_FILE")"
+rm -f "$OUT_C2_FILE"
+assert_contains "$(read_git)" "git rebase origin/feature/issue-100 feature/issue-201" \
+  "(c2) Version mismatch after rebase -> rebase still ran"
+assert_not_contains "$(read_git)" "git push --force-with-lease" \
+  "(c2) Version mismatch after rebase -> push NEVER attempted"
+assert_eq "2" "$RSC_FAILURE" "(c2) Version mismatch after rebase -> RSC_FAILURE=2"
+assert_contains "$OUT_C2" "MISMATCH" "(c2) Underlying MISMATCH line is surfaced"
+assert_contains "$OUT_C2" "out of sync" "(c2) Failure is reported against the child branch"
+unset LOOM_VERSION_CHECK_SCRIPT
+
+# (c3) --dry-run with a stale safe child AND a mismatching version-check-gate
+#      stub -> the gate is skipped entirely (no rebase actually ran, so there
+#      is nothing real to check yet) — dry-run behavior is unaffected by #7168.
+reset_state
+DRY_RUN=true
+export LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-mismatch.sh"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_uptodate "feature/issue-201"   # stale
+_rebase_stacked_children "feature/issue-100"
+assert_eq "0" "$RSC_FAILURE" "(c3) Dry-run -> version-check-gate skipped, RSC_FAILURE stays 0"
+unset LOOM_VERSION_CHECK_SCRIPT
+DRY_RUN=false
+
 # (d) One stale, unsafe child (issue 202 loom:building) -> deferred comment, no rebase.
 reset_state
 write_prlist "feature/issue-100" '[{"number":502,"headRefName":"feature/issue-202"}]'
@@ -394,6 +440,8 @@ assert_contains "$src" "PUSH-LEASE-RACE-DETECTED" \
   "script logs a greppable marker when a reported rejection is actually landed"
 assert_contains "$src" 'source "$SCRIPT_DIR/lib/push-lease-verify.sh"' \
   "script sources the shared push-lease-verify helper"
+assert_contains "$src" '"$SCRIPT_DIR/version-check-gate.sh"' \
+  "safe path runs the shared version-check-gate.sh after rebase, before push (#7168)"
 
 # --- Summary ---
 echo ""

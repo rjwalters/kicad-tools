@@ -11,7 +11,7 @@ This script demonstrates the complete PCB design workflow:
 6. Run DRC validation
 
 The design is a USB game controller with:
-- 32-pin QFP microcontroller
+- 44-pin ATmega32U4 microcontroller
 - USB Type-C connector
 - 2-axis analog joystick
 - 4 tactile buttons
@@ -56,7 +56,7 @@ def create_usb_joystick_schematic(output_dir: Path) -> Path:
     Mirroring the way :func:`create_usb_joystick_pcb` already delegates to
     ``generate_pcb.py``, the schematic step now delegates to
     ``generate_schematic.py`` so there is exactly ONE schematic generator.
-    The PCB's 16-net model is the source of truth and the shared schematic
+    The shared revision-B pin/net model is the source of truth and the shared schematic
     generator is aligned to it pad-for-pad.
 
     Returns the path to the generated schematic file.
@@ -91,7 +91,7 @@ def create_usb_joystick_schematic(output_dir: Path) -> Path:
 # recipe consolidation, the PCB step now DELEGATES to ``generate_pcb.py``
 # so there is exactly one copy of the layout.
 #
-# Copper pours (GND/VCC/VBUS) are likewise emitted by ``generate_pcb.py:
+# Copper pours (GND and VCC) are likewise emitted by ``generate_pcb.py:
 # generate_power_pours()`` -- see ``create_zones_for_pcb`` below.
 
 
@@ -110,6 +110,7 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     pcb_path = output_dir / "usb_joystick.kicad_pcb"
     output_dir.mkdir(parents=True, exist_ok=True)
     pcb_path.write_text(_pcb_gen.generate_pcb())
+    _pcb_gen.stage_local_footprints(output_dir)
     print(f"   PCB: {pcb_path}")
     print(f"\n   Board size: {_pcb_gen.BOARD_WIDTH}mm x {_pcb_gen.BOARD_HEIGHT}mm")
     return pcb_path
@@ -130,6 +131,9 @@ def create_project(output_dir: Path, project_name: str) -> Path:
 
     filename = f"{project_name}.kicad_pro"
     project_data = create_minimal_project(filename)
+    project_data.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rules", {})[
+        "min_hole_to_hole"
+    ] = 0.45
 
     project_path = output_dir / filename
     save_project(project_data, project_path)
@@ -213,16 +217,77 @@ def create_zones_for_pcb(pcb_path: Path) -> int:
 
     text = pcb_path.read_text()
     zone_count = text.count("(zone")
-    required = ("GND", "VCC", "VBUS")
+    required = ("GND", "VCC")
     missing = [n for n in required if f'(net_name "{n}")' not in text]
     if missing:
         raise RuntimeError(
             f"Generated PCB {pcb_path} is missing pour zone(s) for "
             f"{', '.join(missing)} -- generate_pcb.py:generate_power_pours() "
-            "must emit GND/VCC/VBUS zones (issue #3410)."
+            "must emit the revision-B ground planes."
         )
-    print(f"\n   {zone_count} zone(s) present (GND/VCC/VBUS pours OK)")
+    print(f"\n   {zone_count} zone(s) present (GND/VCC pours OK; VBUS is explicitly routed)")
     return zone_count
+
+
+def apply_manufacturing_profile(routed_path: Path, *, manufacturer: str = "jlcpcb-tier1") -> None:
+    """Persist the manufacturer profile's design-rule floors BEFORE any fill.
+
+    Issue #5326: ``apply_plan()`` (the reviewed-plan replay ``route_pcb()``
+    uses by default) only ever touches the routed ``.kicad_pcb`` copper --
+    it never writes the sibling ``.kicad_pro``/``.kicad_dru`` -- so those
+    sidecars carry whatever :func:`create_project` wrote at Step 1 (stock
+    KiCad defaults, e.g. the stock ``Default`` netclass clearance) until
+    :func:`run_drc` calls ``kct check --emit-drc-constraints`` at Step 6.
+    If the one fill downstream DRC/LVS/CI/net-status all consume (Step 5.5)
+    runs BEFORE that emission, KiCad's native fill engine computes copper
+    against the wrong (stock, generally wider) clearance instead of the
+    ``manufacturer`` profile's actual floor -- carving pads that were laid
+    out and reviewed under the tighter tier-1 clearance off the pour
+    entirely, a real (not phantom) floating-pad defect in the saved bytes.
+
+    Calling this BEFORE :func:`fill_zones_in_routed_pcb` makes the fill --
+    and therefore the persisted ``routed_path`` bytes every downstream step
+    consumes -- reflect the SAME profile-aware rules :func:`run_drc` and
+    :func:`export_manufacturing_bundle` check/export against.  ``run_drc``
+    still re-emits the identical sidecars afterward (via
+    ``--emit-drc-constraints`` and :func:`routing_plan.apply_native_fab_floor`)
+    for its own report generation; that re-emission is idempotent given the
+    same profile/overrides and is left in place as a safety net.
+    """
+    from kicad_tools.manufacturers import (
+        get_profile,
+        resolve_pcb_fabrication_overrides,
+        write_drc_constraints,
+    )
+    from kicad_tools.schema.pcb import PCB
+
+    print("\n" + "=" * 60)
+    print(f"Applying {manufacturer} design-rule floors (pre-fill)...")
+    print("=" * 60)
+
+    try:
+        layers = len(PCB.load(str(routed_path)).copper_layers) or 4
+    except Exception:
+        layers = 4
+
+    profile = get_profile(manufacturer)
+    rules = profile.get_design_rules(layers=layers, copper_oz=1.0)
+    rules, fab_override_msg = resolve_pcb_fabrication_overrides(
+        routed_path, rules, manufacturer_id=profile.id
+    )
+    if fab_override_msg is not None:
+        prefix = "   WARNING: " if fab_override_msg.startswith("ignoring") else "   [INFO] "
+        print(prefix + fab_override_msg)
+
+    written = write_drc_constraints(
+        routed_path,
+        rules,
+        manufacturer_id=profile.id,
+        layers=layers,
+        copper_oz=1.0,
+    )
+    if written:
+        print("   DRC-constraint sidecars: " + ", ".join(str(p) for p in written))
 
 
 def fill_zones_in_routed_pcb(routed_path: Path) -> int:
@@ -490,32 +555,13 @@ def add_gnd_stitching_vias(routed_path: Path) -> int:
     return len(vias)
 
 
-def route_pcb(input_path: Path, output_path: Path) -> bool:
-    """Route the PCB with the production ``kct route`` recipe.
+def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = True) -> bool:
+    """Apply the reviewed revision-B routing, or explicitly explore autorouting.
 
-    Issue #3410 (recipe consolidation, round 2): the previous version of
-    this function carried an in-process ``Autorouter.route_all()`` recipe
-    (0.05mm grid, in-pad rescues on U1, CoupledPathfinder disabled).
-    That simple per-net strategy tops out at 11-12/13 on this board: the
-    USB-C escape belt packs four signal columns into 3.5mm, and without
-    the negotiated two-phase strategy's rip-up/retry and fine-pitch
-    escape regions, whichever USB net routes last is left stranded
-    (USB_CC2 under current HEAD).
-
-    The production ``kct route`` invocation -- the SAME one pinned by
-    ``tests/router/test_board03_routing_baseline.py`` and used by the
-    fleet (board-05 precedent: "bake proven kct route flag recipe into
-    design.py", PR #2981) -- reaches 13/13 at 2 layers on the
-    regenerated board.  Delegating to it means the demo, the build
-    pipeline, and the reach-floor CI tests all measure ONE code path.
-
-    The function also emits the ``net_class_map.json`` sidecar next to
-    the routed PCB so the validate-side diff-pair rules
-    (``routing_continuity`` / ``length_skew``) can engage from
-    ``kct check --net-class-map`` (Issue #2684).
-
-    Returns True when every signal net is fully routed (the DRC gate is
-    reported separately by the caller via ``run_drc``).
+    The saved design includes manual completion and USB-pair repairs. A strict
+    physical fingerprint rejects changed footprints, pin nets, placement,
+    layers, pours or fabrication stack. Native DRC and copper LVS still gate
+    each rebuilt board; applying saved copper is not an autorouter result.
     """
     import json as _json
     import re as _re
@@ -526,7 +572,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     from kicad_tools.router.rules import net_class_map_to_dict
 
     print("\n" + "=" * 60)
-    print("Routing PCB (production `kct route` recipe)...")
+    print("Applying reviewed routing plan..." if use_saved_plan else "Exploring autorouting...")
     print("=" * 60)
 
     # ------------------------------------------------------------------
@@ -537,23 +583,56 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # ------------------------------------------------------------------
     net_class_map = create_net_class_map(
         power_nets=["VCC", "VBUS", "GND"],
-        high_speed_nets=["USB_D+", "USB_D-"],
+        high_speed_nets=["USB_D+", "USB_D-", "USB_MCU_D+", "USB_MCU_D-"],
         clock_nets=["XTAL1", "XTAL2"],
     )
-    if "USB_D+" in net_class_map and "USB_D-" in net_class_map:
-        net_class_map["USB_D+"] = _dc_replace(
-            net_class_map["USB_D+"],
-            diffpair_partner="USB_D-",
-            intra_pair_clearance=0.15,
+    # Short escapes from the MCU's 0.45 mm supply lands use 0.20 mm
+    # copper; distribution tracks retain the 0.50 mm power width.
+    for net in ["VCC", "VBUS", "GND"]:
+        net_class_map[net] = _dc_replace(net_class_map[net], neck_trace_width=0.2)
+    for net in ["VBUS"]:
+        net_class_map[net] = _dc_replace(
+            net_class_map[net], is_pour_net=False, route_via="pathfinder"
         )
-        net_class_map["USB_D-"] = _dc_replace(
-            net_class_map["USB_D-"],
-            diffpair_partner="USB_D+",
-            intra_pair_clearance=0.15,
-        )
+    for prefix in ["USB_D", "USB_MCU_D"]:
+        for polarity, partner in [("+", "-"), ("-", "+")]:
+            net = prefix + polarity
+            net_class_map[net] = _dc_replace(
+                net_class_map[net],
+                diffpair_partner=prefix + partner,
+                intra_pair_clearance=0.15,
+            )
+    for net in ["USB_D+", "USB_D-"]:
+        # Short USB-C/ESD branches: routing_plan.usb_geometry separately
+        # requires >=4 mm common run, <=16 mm copper, <=0.5 mm skew.
+        net_class_map[net] = _dc_replace(net_class_map[net], coupled_continuity_threshold=0.25)
     sidecar_path = output_path.parent / "net_class_map.json"
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
     print(f"   Wrote net-class-map sidecar: {sidecar_path}")
+
+    # ------------------------------------------------------------------
+    # Fabrication-overrides sidecar (Issue #5006): stage the board's
+    # reviewed, cited floors next to the generated board so a copy produced
+    # outside ``boards/03-usb-joystick/output/`` is self-describing --
+    # ``kct check --emit-drc-constraints`` and every other
+    # ``resolve_pcb_fabrication_overrides`` call site discover it there and
+    # emit the same narrowed floor the native project carries.
+    # ------------------------------------------------------------------
+    from routing_plan import COMMITTED_FABRICATION_OVERRIDES
+
+    overrides_sidecar = output_path.parent / COMMITTED_FABRICATION_OVERRIDES.name
+    # read-then-write is a no-op (not a SameFileError) when regenerating in place
+    overrides_sidecar.write_text(COMMITTED_FABRICATION_OVERRIDES.read_text())
+    print(f"   Wrote fabrication-overrides sidecar: {overrides_sidecar}")
+    if use_saved_plan:
+        from routing_plan import PLAN, apply_plan
+
+        apply_plan(input_path, output_path)
+        plan = _json.loads(PLAN.read_text())
+        (output_path.parent / "manufacturing-requirements.json").write_text(
+            _json.dumps(plan["required_factory_options"], indent=2) + "\n"
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Production routing recipe.  EXACTLY the invocation pinned by
@@ -563,13 +642,23 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     cmd = [
         sys.executable,
         "-m",
-        "kicad_tools.cli",
-        "route",
+        "kicad_tools.cli.route_cmd",
         str(input_path),
+        "--no-auto-pour",
+        "--layers",
+        "4",
+        "--starting-layers",
+        "4",
+        "--max-layers",
+        "4",
         "--output",
         str(output_path),
         "--seed",
         "42",
+        "--skip-nets",
+        "GND,VCC",
+        "--grid",
+        "0.05",
         "--manufacturer",
         "jlcpcb-tier1",
         "--backend",
@@ -588,46 +677,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--deterministic-budget",
         "--timeout",
         "600",
-        # Issue #3922 REGRESSION FIX: the #3308/#3410 recipe consolidation
-        # silently dropped ``--differential-pairs``, so the recipe no longer
-        # even *requested* diff-pair routing and the boards/README claim went
-        # false.  Restore the flag (and forward the sidecar via
-        # ``--net-class-map`` so the USB D+/D- ``diffpair_partner`` /
-        # ``intra_pair_clearance`` (0.15mm, #3095) metadata engages the
-        # validate-side diff-pair DRC rules).  The sidecar is written above.
-        #
-        # IMPORTANT (scope note for #3922): on THIS board the flag is
-        # currently inert at routing time.  Board 03 has dense fine-pitch
-        # packages (U1 QFP-32, J1 USB-C), so the CLI takes the escape-routing
-        # dispatch, and route_cmd's escape / auto-layers-escalation paths do
-        # not consult ``args.differential_pairs`` -- the CoupledPathfinder
-        # pre-pass is only wired into the (escape-less) adaptive path.  So we
-        # deliberately keep ``--auto-layers`` (the default): it preserves the
-        # escape pre-phase that board 03 needs for 13/13 + 0 native-DRC.
-        # Forcing the diff-pair path via ``--no-auto-layers`` DOES invoke
-        # Phase A, but loses escape routing and reintroduces a native
-        # ``kicad-cli`` clearance violation -- unacceptable for a
-        # manufacturing-clean board.  Making Phase A run WITH escape routing
-        # is a route_cmd dispatch fix tracked in #3952 (adjacent to the
-        # CoupledPathfinder convergence work in #3921); once it lands, the
-        # xfail in tests/router/test_board03_routing_baseline.py
-        # (test_coupled_pathfinder_phase_a_invoked) will flip to XPASS.
-        # KEEP IN SYNC with tests/router/test_board03_routing_baseline.py.
+        # Request coupled USB routing and validate its declared pair constraints.
+        # Readiness is decided by fresh native DRC and sidecar-aware checks.
         "--differential-pairs",
         "--net-class-map",
         str(sidecar_path),
-        # Issues #3507/#3454: ``--raw`` (skip TraceOptimizer) was
-        # LOAD-BEARING for the 0-DRC acceptance until the grid-staleness
-        # fix.  The optimize pass used to replace Route objects without
-        # re-marking the routing grid, so the optimizer's collision
-        # checking ran against pre-optimization copper and the
-        # segment-merge pass deterministically re-introduced one
-        # ``clearance_segment_via`` violation (XTAL1's merged B.Cu run
-        # vs XTAL2's via, 0.006mm gap, seeds 42/43).  With the
-        # grid-transactional optimize (``optimize_routes_grid_synced``)
-        # the optimizer is safe here: 13/13 nets, 0 DRC errors at
-        # jlcpcb-tier1 WITH optimization ON (verified seed 42 against
-        # the sidecar-aware ``kct check``).
     ]
     print(f"   $ {' '.join(cmd[1:])}")
     # Issue #3799: pin PYTHONHASHSEED for the route subprocess so any
@@ -671,20 +725,35 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
 
 def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
-    """Export the manufacturing bundle (gerbers, BOM, CPL, report).
+    """Export with physical/fabrication safeguards and normal preflight checks.
 
-    Issue #3095: AC requires the routed PCB to produce a manufacturing
-    bundle (`fleet status` checks for ``manufacturing/`` directory with
-    ``manifest.json``).  ``kct export`` runs the standard JLCPCB recipe
-    (gerbers + drill + BOM + CPL + report.{md,pdf} + manifest.json) but
-    skips the strict pre-flight DRC/ERC gate so the bundle can be
-    produced even with the small allowlisted USB-C tolerance errors.
+    The package requires the reviewed four-layer stack and filled/capped vias.
+    Exact MPN supplier fields come from the schematic procurement review.
     """
     print("\n" + "=" * 60)
     print("Exporting manufacturing bundle...")
     print("=" * 60)
 
     mfg_dir = output_dir / "manufacturing"
+    # The Gerber exporter cannot infer a paid POFV order from copper alone.
+    # Require the reviewed fabrication intent before exporting any package.
+    import json
+    import shutil
+
+    from routing_plan import PLAN, fingerprint, usb_geometry
+
+    plan = json.loads(PLAN.read_text())
+    requirements = output_dir / "manufacturing-requirements.json"
+    if fingerprint(routed_path) != plan["physical_sha256"]:
+        raise ValueError("Manufacturing export requires the reviewed physical circuit")
+    if json.loads(requirements.read_text()) != plan["required_factory_options"]:
+        raise ValueError("Manufacturing options must include the reviewed stack and POFV process")
+    native_project = json.loads(routed_path.with_suffix(".kicad_pro").read_text())
+    if native_project["board"]["design_settings"]["rules"]["min_hole_to_hole"] != 0.45:
+        raise ValueError("Native project must use the reviewed 0.45 mm pad-hole floor")
+    usb_geometry(routed_path)
+    mfg_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(requirements, mfg_dir / requirements.name)
     # Issue #3150: board 03 is ROUTED/DRC-gated against jlcpcb-tier1
     # (Capability-Plus permits the standard via-in-pad on U1-28 / USB_D-
     # that tier-0 forbids; see the manufacturers: override in
@@ -694,28 +763,80 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
     # routed/checked at -- the old route-at-tier-1 / export-at-jlcpcb
     # split (#3033/#3038 era) produced a report.md that falsely flagged
     # the tier-1-legal via-in-pad as 4x via_in_pad errors.
-    cmd = [
-        sys.executable,
-        "-m",
-        "kicad_tools.cli",
-        "export",
-        str(routed_path),
-        "--output",
-        str(mfg_dir),
-        "--mfr",
-        "jlcpcb-tier1",
-        "--skip-preflight",
-    ]
-    print(f"\n   Command: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.stdout:
-        for line in result.stdout.strip().split("\n")[-15:]:
-            print(f"   {line}")
-    if result.returncode != 0:
-        if result.stderr:
-            print(f"\n   Error: {result.stderr}")
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+
+    # Preserve the reviewed 0.45 mm native hole floor throughout preflight,
+    # Gerber export, and the project ZIP; generic emission resets it to 0.50.
+    package = ManufacturingPackage(
+        pcb_path=routed_path,
+        schematic_path=output_dir / "usb_joystick.kicad_sch",
+        manufacturer="jlcpcb-tier1",
+        config=ManufacturingConfig(
+            output_dir=mfg_dir,
+            auto_lcsc=False,
+            emit_drc_constraints=False,
+        ),
+    )
+    result = package.export(mfg_dir)
+    for warning in result.warnings:
+        print(f"   Warning: {warning}")
+    if not result.success:
+        for error in result.errors:
+            print(f"   Export error: {error}")
         return False
+    # Keep the separate manual assembly leg explicit in the supplier files.
+    import csv
+    import hashlib
+    import zipfile
+
+    bom = mfg_dir / "bom_jlcpcb.csv"
+    with bom.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        columns = reader.fieldnames
+        rows = list(reader)
+    manual = [row for row in rows if row["Designator"] == "J1"]
+    if len(manual) != 1:
+        raise ValueError("Expected exactly one USB-C J1 manual assembly BOM row")
+    for target, entries in [
+        (bom, [row for row in rows if row not in manual]),
+        (mfg_dir / "manual-assembly-bom.csv", manual),
+    ]:
+        with target.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=columns)
+            writer.writeheader()
+            writer.writerows(entries)
+
+    (mfg_dir / "README.txt").write_text(
+        "USB joystick revision B — fabrication and assembly package\n"
+        "\n"
+        "Order the exact four-layer stackup and Epoxy-filled & Capped POFV/VIPPO process in manufacturing-requirements.json. Do not use ordinary open or merely tented vias.\n"
+        "\n"
+        "Use bom_jlcpcb.csv and cpl_jlcpcb.csv for SMT assembly. J1 USB4085-GF-A is a separate manual through-hole assembly operation listed in manual-assembly-bom.csv. Use exact reviewed supplier parts; no automatic substitutions.\n"
+        "\n"
+        "After inspection, program the supplied 8 MHz firmware and fuses through J3 as described in firmware/README.md. Power the programmer/board from one regulated 5 V source with USB disconnected. No bootloader is required.\n"
+        "\n"
+        "Gerbers are in gerbers/gerbers.zip; editable KiCad files are in kicad_project.zip. DESIGN_REVIEW.md documents electrical and layout review. Physical bring-up and USB qualification remain to be performed on assembled hardware.\n"
+    )
+
+    # The editable project must resolve its custom ISP footprint and rules
+    # after extraction, without relying on this checkout's library table.
+    with zipfile.ZipFile(mfg_dir / "kicad_project.zip", "a", zipfile.ZIP_DEFLATED) as archive:
+        additions = [routed_path.with_suffix(".kicad_dru"), output_dir / "fp-lib-table"]
+        additions.extend(sorted((output_dir / "footprints").rglob("*.kicad_mod")))
+        for path in additions:
+            archive.write(path, path.relative_to(output_dir).as_posix())
+
     manifest = mfg_dir / "manifest.json"
+    data = json.loads(manifest.read_text())
+    data["files"] = {
+        path.relative_to(mfg_dir).as_posix(): {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "size": path.stat().st_size,
+        }
+        for path in sorted(mfg_dir.rglob("*"))
+        if path.is_file() and path != manifest
+    }
+    manifest.write_text(json.dumps(data, indent=2) + "\n")
     if manifest.exists():
         print(f"\n   Manifest: {manifest}")
         return True
@@ -760,12 +881,19 @@ def run_drc(pcb_path: Path) -> bool:
                 "--mfr",
                 "jlcpcb-tier1",
                 "--drc-only",
+                "--emit-drc-constraints",
+                "--net-class-map",
+                str(pcb_path.parent / "net_class_map.json"),
                 "--output",
                 str(report_path),
             ],
             capture_output=True,
             text=True,
         )
+
+        from routing_plan import apply_native_fab_floor
+
+        apply_native_fab_floor(pcb_path)
 
         if result.stdout:
             for line in result.stdout.strip().split("\n"):
@@ -820,7 +948,7 @@ def main() -> int:
         # Step 4: Create PCB
         pcb_path = create_usb_joystick_pcb(output_dir)
 
-        # Step 4.5: Create copper-pour zones for GND/VCC/VBUS so the
+        # Step 4.5: Create copper-pour zones for GND and VCC so the
         # power-net pads land on filled copper instead of being stranded
         # by the router's ``skip_nets`` list (#3095).
         create_zones_for_pcb(pcb_path)
@@ -866,10 +994,20 @@ def main() -> int:
         # the new vias into both GND planes.
         add_gnd_stitching_vias(routed_path)
 
+        # Step 5.45: Persist the jlcpcb-tier1 manufacturing profile's
+        # design-rule floors to routed_path's .kicad_pro/.kicad_dru BEFORE
+        # the fill below (#5326).  Without this, the one fill downstream
+        # DRC/LVS/CI/net-status all consume runs against stock KiCad
+        # defaults instead of the profile the board is reviewed/routed/
+        # exported against, producing real (not phantom) floating pads.
+        apply_manufacturing_profile(routed_path)
+
         # Step 5.5: Fill the zone polygons in the routed PCB so DRC's
         # ``connectivity`` rule sees the power-net pads as connected.  This
-        # MUST run after Step 5.4 so the fill engine recomputes copper that
-        # bonds through the freshly-added GND stitching vias.
+        # MUST run after Step 5.4 (new GND stitching vias) and Step 5.45
+        # (manufacturing-profile floors) so the fill engine both bonds the
+        # freshly-added vias and computes copper under the SAME rules
+        # downstream DRC/LVS/CI/net-status check the saved bytes against.
         fill_zones_in_routed_pcb(routed_path)
 
         # Step 6: Run DRC
@@ -901,7 +1039,7 @@ def main() -> int:
             output_dir,
             require_clean=True,
             run_copper=True,
-            run_label=False,
+            run_label=True,
         )
 
         # Step 7: Export manufacturing bundle (gerbers, BOM, CPL,
@@ -954,7 +1092,7 @@ def main() -> int:
         print(f"  MFG bundle: {'WRITTEN' if mfg_success else 'FAILED'}")
         print("\nBoard description:")
         print("  - USB game controller with analog joystick")
-        print("  - 32-pin QFP MCU")
+        print("  - ATmega32U4-AU TQFP-44 MCU")
         print("  - USB Type-C connector")
         print("  - 4 tactile buttons")
 

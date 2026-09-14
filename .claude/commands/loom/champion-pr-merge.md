@@ -89,7 +89,7 @@ Full policy, TTL/invalidation semantics, and manual verification steps:
 the 6 safety criteria below are evaluated.** Part 1 resolves a *contradictory*
 verdict state; Part 2 resolves an *out-of-date* one.
 
-### Part 1: Contradictory verdict labels (#4570)
+### Part 1: Contradictory verdict labels (#4570, generalized #7018)
 
 It is a fail-safe against a real race
 (#4570, PR #4560 incident, 2026-07-30): two Judges reviewing the same PR
@@ -103,6 +103,16 @@ slips through (a pre-existing contradictory state from before this fix
 shipped, a manual label edit, or a bug elsewhere) — mechanizing exactly the
 manual correction the incident required a human-in-the-loop Judge to perform.
 
+**Also catches `loom:pr` + `loom:review-requested`** (#7018, twelve open PRs
+observed carrying one of these contradictory pairs on 2026-08-28): `loom:pr`
+here is stray debris left behind by an operator-ruling label swap, or by the
+staleness guard's own clear step which (before #7018) only stripped the ONE
+verdict label it detected as stale, never a second, already-stray one. Either
+co-occurring label means `loom:pr` does not currently describe reality:
+something is either actively re-requesting review or already rejected the
+tree. Whichever one is present, the resolution is the same — remove `loom:pr`
+and let a fresh Judge pass decide again.
+
 **Verification / resolution command** (run once per candidate `loom:pr` PR,
 before Step 1 of the 6 criteria below):
 
@@ -112,7 +122,17 @@ PR_NUMBER=<number>
 # eligible to merge, so it must be live (see "Cached forge reads").
 LABELS=$(gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | join(",")')
 
+# Whichever OTHER verdict-class label (if any) is standing beside loom:pr —
+# loom:changes-requested (a terminal rejection) or loom:review-requested (an
+# active or pending re-review) both mean loom:pr no longer describes reality.
+OTHER_VERDICT_LABEL=""
 if echo "$LABELS" | grep -qw "loom:changes-requested"; then
+  OTHER_VERDICT_LABEL="loom:changes-requested"
+elif echo "$LABELS" | grep -qw "loom:review-requested"; then
+  OTHER_VERDICT_LABEL="loom:review-requested"
+fi
+
+if [ -n "$OTHER_VERDICT_LABEL" ]; then
   JANITOR_MARKER="<!-- champion:verdict-janitor-notice -->"
   # Idempotency guard — mirrors the stale-PR notice pattern below: only
   # comment + relabel once per contradictory episode, so a 10-minute cron
@@ -129,15 +149,15 @@ if echo "$LABELS" | grep -qw "loom:changes-requested"; then
     gh pr comment "$PR_NUMBER" --body "$JANITOR_MARKER
 **Champion: Verdict-State Janitor**
 
-This PR carries both \`loom:pr\` and \`loom:changes-requested\` simultaneously — a contradictory verdict state that should never coexist (see the mutual-exclusion invariant in \`.github/labels.yml\`). This usually means two Judges reviewed the PR concurrently and their verdicts raced.
+This PR carries both \`loom:pr\` and \`$OTHER_VERDICT_LABEL\` simultaneously — a contradictory verdict state that should never coexist (see the mutual-exclusion invariant in \`.github/labels.yml\`). This usually means either two Judges reviewed the PR concurrently and their verdicts raced, or \`loom:pr\` is stray debris a label-transition step failed to strip (#7018).
 
-Resolving fail-safe: \`loom:changes-requested\` wins. Removing \`loom:pr\` so this PR is not auto-merged. Doctor will address the outstanding rejection; re-request Judge review once addressed.
+Resolving fail-safe: \`$OTHER_VERDICT_LABEL\` wins. Removing \`loom:pr\` so this PR is not auto-merged. $( [ "$OTHER_VERDICT_LABEL" = "loom:changes-requested" ] && echo "Doctor will address the outstanding rejection; re-request Judge review once addressed." || echo "Judge will pick this PR back up from the review queue." )
 
 ---
 *Automated by Champion role*"
     gh pr edit "$PR_NUMBER" --remove-label "loom:pr"
     "$GH_READ" --clear-cache   # your own write must not be masked by your own cache
-    echo "Resolved contradictory verdict state on #$PR_NUMBER (loom:pr removed) — skipping merge"
+    echo "Resolved contradictory verdict state on #$PR_NUMBER (loom:pr removed, $OTHER_VERDICT_LABEL kept) — skipping merge"
   fi
   # Skip this PR entirely for this pass — do not proceed to the 6 safety
   # criteria and do not merge. In a batch loop: `continue`. In a single-PR
@@ -611,6 +631,7 @@ HOLD_BODY=$(jq -r --arg m "$HOLD_MARKER" \
 if [ -z "$HOLD_BODY" ]; then
   PRIOR_HOLD=false          # never held — today's behavior, unchanged
   HOLD_AT=""; HOLD_HEAD=""; RELEASE_REASON=""; HOLD_OVERRIDE=false
+  MANUAL_RELEASE_SINCE_HOLD=false   # no prior episode, so nothing to release (#7048)
 else
   PRIOR_HOLD=true
   HOLD_OVERRIDE=false
@@ -698,6 +719,23 @@ else
       RELEASE_REASON="new Judge review after the hold — $NEW_REVIEW"
     fi
   fi
+
+  # Manual-release detection (#7048, recurrence of #6720): none of (a)-(d)
+  # above recognize a bare `--remove-label loom:operator` (no qualifying
+  # comment) as a release signal, so RELEASE_REASON is untouched by it — that
+  # part is correct, a label removal alone must not skip re-judging the axes.
+  # But "Hold behavior" below also needs to know it happened, because
+  # silently reasserting `loom:operator` for the SAME concern a human just
+  # hand-removed is the defect this issue reports. `loom:operator` is the
+  # only piece of state the bot ever removes and re-adds outside an actual
+  # merge (never on the sticky/re-hold path), so "a hold marker already
+  # exists on this still-open PR AND the label is not currently on it" can
+  # only mean a human removed it by hand since the marker was posted.
+  OPERATOR_LABEL_NOW=$(jq -r '[.labels[].name] | any(. == "loom:operator")' <<<"$PR_JSON")
+  MANUAL_RELEASE_SINCE_HOLD=false
+  if [ "$OPERATOR_LABEL_NOW" = false ]; then
+    MANUAL_RELEASE_SINCE_HOLD=true
+  fi
 fi
 
 if [ "$PRIOR_HOLD" = true ] && [ -z "$RELEASE_REASON" ]; then
@@ -721,7 +759,7 @@ fi
 | `PRIOR_HOLD=false` | Judge the four axes normally. No behavior change from before #4742. |
 | `PRIOR_HOLD=true`, no `RELEASE_REASON` | **HOLD the merge, silently.** The PR is not merged this pass regardless of how the axes read this tick, and no comment is posted (anti-spam guard already covers it). It is **not** skipped, though: `MERGE_BLOCKED_BY_HOLD=true` routes it to the **Held-PR Health Pass** (#6720), which still evaluates criteria #4/#5/#6. |
 | `PRIOR_HOLD=true`, released by `loom:auto-merge-ok` (`HOLD_OVERRIDE=true`) | Criterion #2 **PASS** by override — the axes are not re-scored. Continue to #3. Step 2's reversal block is **mandatory**. |
-| `PRIOR_HOLD=true`, released by (b), (c), or (d) | Re-judge the four axes normally. Still red -> the hold persists: the re-hold is silent (the notice's idempotency guard already covers it), `MERGE_BLOCKED_BY_HOLD=true`, and the **Held-PR Health Pass** runs. Now green -> **PASS**, continue to #3, and Step 2's reversal block is **mandatory**. |
+| `PRIOR_HOLD=true`, released by (b), (c), or (d) | Re-judge the four axes normally. Still red -> the hold persists: the re-hold is silent (the notice's idempotency guard already covers it), `MERGE_BLOCKED_BY_HOLD=true`, and the **Held-PR Health Pass** runs — **unless** `MANUAL_RELEASE_SINCE_HOLD=true` and the freshly-derived concern is byte-identical to the prior hold's own bullet, in which case `loom:operator` is **not** reasserted (#7048 — see "Hold behavior"). Now green -> **PASS**, continue to #3, and Step 2's reversal block is **mandatory**. |
 
 **Once released, stays released.** A release signal is consumed by the change
 itself, not by a counter: after a new commit lands, later ticks keep seeing
@@ -752,6 +790,13 @@ tripping release path (b) or (d).
   question lead-in (which must precede the phrase) fails the anchor. The
   conservative direction is preserved: an unrecognized phrasing leaves the hold in
   force, which costs one human merge; a false release costs a bad auto-merge.
+- **A bare `--remove-label loom:operator`, with no qualifying comment, is
+  deliberately NOT a release signal here either** — it does not touch
+  `RELEASE_REASON`, so the axes still get re-judged fresh exactly as before
+  (#7048 does not weaken criterion #2's judgment). What it *does* set is
+  `MANUAL_RELEASE_SINCE_HOLD`, consumed only by "Hold behavior" below: if the
+  axes are still red for the identical, already-recorded reason, the label is
+  not silently reasserted over that human decision (see "Hold behavior").
 
 **Reversal is one mandatory comment, and the idempotency guard must not eat it.**
 Whenever `PRIOR_HOLD=true` and this PR proceeds to merge, Step 2's pre-merge
@@ -799,29 +844,84 @@ HOLD_MARKER="<!-- champion:merge-risk-hold -->"
 # sticky-hold precheck's single live read.
 HEAD_SHA=$(jq -r '.headRefOid' <<<"$PR_JSON")
 
-# Idempotency guard (same pattern as the stale-PR and verdict-janitor notices):
-# a judgment hold does not clear on its own, so comment ONCE per hold episode
-# instead of re-posting every 10-minute cron tick. The label stays, so the PR
-# keeps its place in the queue — but the hold now BINDS later ticks (see
-# "Sticky holds" above): it is released by `loom:auto-merge-ok`, an explicit
-# operator clearing comment, a new push, or a new Judge review — never by a
-# fresh re-read of the same diff.
-# Cached ("$GH_READ") — idempotency-marker grep; see "Cached forge reads".
-# `startswith`, not a bare substring match — same rationale as the
-# sticky-hold precheck above (#5371): a later comment quoting this marker
-# in prose must never be mistaken for the hold notice's own comment, or
-# the real notice silently never gets posted.
-if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$HOLD_MARKER\"))")" = "true" ]; then
-  echo "Merge-risk hold already posted for #$PR_NUMBER — hold stands, no comment"
+# The exact "- **<AXIS>**: <SPECIFIC_CONCERN>" bullet you are about to write
+# below — compute it FIRST (before either branch) so the #7048 comparison
+# against the prior hold's own bullet can run before deciding whether to post
+# anything at all.
+CONCERN_BULLET="- **<AXIS>**: <SPECIFIC_CONCERN — name the file/function and what could break>"
+PRIOR_CONCERN_BULLET=$(printf '%s\n' "$HOLD_BODY" | grep -m1 -E '^- \*\*.+\*\*:')
+
+# #7048 (recurrence of #6720): a manual `--remove-label loom:operator` is not
+# one of the four durable release signals (see "Sticky holds" edge cases
+# above) — the axes above were still re-judged fresh, unweakened. But
+# silently reasserting the label for a concern that reads byte-for-byte the
+# same as the one already on record is exactly the observed defect: the
+# operator's decision gets overridden within hours with no new information.
+# Only skip the reapply when the concern is UNCHANGED; anything the operator
+# has not already seen (a new/different bullet) still re-holds normally below.
+SKIP_REAPPLY=false
+if [ "$MANUAL_RELEASE_SINCE_HOLD" = true ] && [ "$CONCERN_BULLET" = "$PRIOR_CONCERN_BULLET" ]; then
+  SKIP_REAPPLY=true
+fi
+
+if [ "$SKIP_REAPPLY" = true ]; then
+  # Respect the human decision instead of overriding it: do NOT reassert
+  # `loom:operator` — that label is what excludes a PR from Doctor's
+  # Priority-1 CONFLICTING queue (#5978), so reasserting it here is exactly
+  # what re-creates the all-held deadlock. The ORIGINAL hold notice/marker is
+  # left untouched (never re-posted, never edited — same rule as always).
+  # One transparency comment per distinct head SHA, so a rebase that lands
+  # but changes nothing about the concern does not go completely silent.
+  RESPECT_MARKER="<!-- champion:hold-release-respected:$HEAD_SHA -->"
+  if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$RESPECT_MARKER\"))")" = "true" ]; then
+    echo "Manual release already acknowledged at this head for #$PR_NUMBER — no comment"
+  else
+    gh pr comment "$PR_NUMBER" --body "$RESPECT_MARKER
+**Champion: Respecting a Manual Release (#7048)**
+
+\`loom:operator\` was removed by hand since the merge-risk hold posted at
+\`$HOLD_AT\`, and re-reading this PR's diff finds the same concern already on
+record:
+
+$PRIOR_CONCERN_BULLET
+
+That is not a release signal (see \"Sticky holds\") — the hold itself still
+stands, and this PR is still not auto-merged — but I am not silently
+reasserting \`loom:operator\` over a decision a human already made for this
+same, unchanged reason. It is treated like any other unheld \`CONFLICTING\`
+PR for Doctor routing purposes. If the concern above is stale, clear the hold
+explicitly (see the original hold notice for the phrasing); if a genuinely
+new problem shows up on a later read, the next hold notice will name it and
+\`loom:operator\` returns.
+
+---
+*Automated by Champion role*"
+  fi
+  echo "Manual release respected for #$PR_NUMBER — not reapplying loom:operator (#7048)"
 else
-  gh pr comment "$PR_NUMBER" --body "$HOLD_MARKER
+  # Idempotency guard (same pattern as the stale-PR and verdict-janitor notices):
+  # a judgment hold does not clear on its own, so comment ONCE per hold episode
+  # instead of re-posting every 10-minute cron tick. The label stays, so the PR
+  # keeps its place in the queue — but the hold now BINDS later ticks (see
+  # "Sticky holds" above): it is released by `loom:auto-merge-ok`, an explicit
+  # operator clearing comment, a new push, or a new Judge review — never by a
+  # fresh re-read of the same diff.
+  # Cached ("$GH_READ") — idempotency-marker grep; see "Cached forge reads".
+  # `startswith`, not a bare substring match — same rationale as the
+  # sticky-hold precheck above (#5371): a later comment quoting this marker
+  # in prose must never be mistaken for the hold notice's own comment, or
+  # the real notice silently never gets posted.
+  if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$HOLD_MARKER\"))")" = "true" ]; then
+    echo "Merge-risk hold already posted for #$PR_NUMBER — hold stands, no comment"
+  else
+    gh pr comment "$PR_NUMBER" --body "$HOLD_MARKER
 <!-- champion:hold-state head=$HEAD_SHA -->
 **Champion: Holding for Human Merge**
 
 This PR is Judge-approved and passes the mechanical safety criteria, but I am not
 merging it automatically:
 
-- **<AXIS>**: <SPECIFIC_CONCERN — name the file/function and what could break>
+$CONCERN_BULLET
 
 **Next steps** — this hold stays in force until one of these happens; Champion re-reading the same diff will **not** clear it:
 - A human merges it directly with \`./.loom/scripts/merge-pr.sh $PR_NUMBER\`
@@ -835,18 +935,23 @@ Keeping \`loom:pr\`. This PR stays in the queue and is re-checked each tick agai
 
 ---
 *Automated by Champion role*"
-fi
+  fi
 
-# loom:operator (#5502): the first-class "engine will not act further, a
-# human is the only transition out" pipeline state, applied alongside the
-# marker above (whether freshly posted this tick or already standing from an
-# earlier one — `--add-label` is idempotent, so it is safe to reassert every
-# tick the hold binds). UNLIKE loom:operator-only, this must NOT make
-# sweep/shepherd skip the PR — loom:pr is kept (see above) and the PR stays
-# in the normal re-evaluation queue precisely so the release precheck
-# (loom:auto-merge-ok / operator comment / new push / new Judge review, all
-# above) can still fire and clear it. Never applied in place of loom:pr.
-gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true
+  # loom:operator (#5502): the first-class "engine will not act further, a
+  # human is the only transition out" pipeline state, applied alongside the
+  # marker above (whether freshly posted this tick or already standing from an
+  # earlier one — `--add-label` is idempotent, so it is safe to reassert every
+  # tick the hold binds). UNLIKE loom:operator-only, this must NOT make
+  # sweep/shepherd skip the PR — loom:pr is kept (see above) and the PR stays
+  # in the normal re-evaluation queue precisely so the release precheck
+  # (loom:auto-merge-ok / operator comment / new push / new Judge review, all
+  # above) can still fire and clear it. Never applied in place of loom:pr.
+  #
+  # This is the branch that DOES run when a manual release preceded this tick
+  # but the concern is genuinely new/different from the one on record (#7048)
+  # — the operator has not seen this reason, so it is fair to re-flag it.
+  gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true
+fi
 
 # Do NOT merge this PR this pass. But do NOT drop it from the pass either
 # (#6720): a hold blocks the merge, it does not suspend the mechanical health
@@ -1539,6 +1644,16 @@ the critical-file hold and is kept as-is for continuity with existing dashboards
 and transcripts; read it as "Champion-held PRs" (any `loom:operator` hold Champion
 itself applied), not literally "held on criterion #2 alone".
 
+**Undercounts a manually-released, still-open hold by design (#7048).** A PR
+whose `loom:operator` was hand-removed and, per "Hold behavior" above, is
+being deliberately not reasserted (same concern, no new information) drops
+out of this count — it is no longer a Champion-applied hold label. That is
+the intended trade-off: the census is a *label* census, and the point of
+#7048 is exactly that this label must stop tracking an operator's own
+decision. The `champion:merge-risk-hold` marker itself is never removed, so
+the PR is still findable by searching PR comments for that marker if a full
+audit is ever needed.
+
 ```bash
 # Cached ("$GH_READ") — an observation scan, never a merge gate.
 # `loom:operator` is Champion's hold label and, per the decision above, it is
@@ -1596,20 +1711,63 @@ convention already used for `champion:merge-risk-hold` /
 single pinned tracking issue this pass **edits in place**, never a fresh
 comment or issue every tick.
 
-**Step 1 — per-PR hold reason.** `$HELD_JSON` already carries `mergeable` and
-whether the PR is `loom:changes-requested` (out at Doctor); it does not carry
-*why* the PR was held. Read that from the PR's own hold comment — the same
-markers the sticky-hold precheck (criterion #2) and the durable critical-file
-hold (criterion #3, #6879) each read — one cached read per held PR, never a
-second bulk `gh pr list`. `loom:operator` is common to both hold kinds (this
-is why the aggregate `$HELD_JSON` query above already counts a critical-file
-hold for free), but each kind writes its reason under its own marker, so both
-are checked:
+**Step 0 — locate the existing digest issue and read its current body
+(#7020).** Step 1 below needs the *previous* pass's digest body to carry a
+per-PR conflict-duration clock forward across ticks — `gh pr view` only ever
+reports the *current* `mergeable` value, never how long it has read
+`CONFLICTING`, so the only durable place to keep "since when" is the digest
+issue Champion already overwrites every pass. Moved here, ahead of Step 1,
+so the lookup that used to live in Step 2 runs first:
+
+```bash
+DIGEST_TITLE="Champion: Merge-Risk Hold Digest"
+DIGEST_MARKER="<!-- champion:merge-risk-hold-digest -->"
+
+# Cached ("$GH_READ") — locating the pinned issue is itself an observation,
+# same rule as the follow-on-issue duplicate search elsewhere in this role.
+#
+# Marker-tagged matches always win over marker-less ones, regardless of
+# issue-number ordering (a marker-tagged issue is always this convention's
+# own digest issue). When NO title match carries the marker — e.g. a digest
+# issue created before the marker convention shipped — fall back to the
+# oldest (lowest-numbered) open title match instead of returning empty and
+# letting a duplicate get created (#7338).
+DIGEST_ISSUE=$("$GH_READ" issue list --search "\"$DIGEST_TITLE\" in:title" \
+  --state open --json number,body --limit 10 \
+  --jq "([.[] | select(.body | startswith(\"$DIGEST_MARKER\"))] as \$tagged | if (\$tagged | length) > 0 then (\$tagged | min_by(.number)) else min_by(.number) end) | .number // empty")
+
+if [ -n "$DIGEST_ISSUE" ]; then
+  OLD_DIGEST_BODY=$("$GH_READ" issue view "$DIGEST_ISSUE" --json body --jq '.body')
+else
+  OLD_DIGEST_BODY=""
+fi
+```
+
+**Step 1 — per-PR hold reason, and conflict-duration tracking (#7020).**
+`$HELD_JSON` already carries `mergeable` and whether the PR is
+`loom:changes-requested` (out at Doctor); it does not carry *why* the PR was
+held, nor *how long* it has been `CONFLICTING`. Read the reason from the PR's
+own hold comment — the same markers the sticky-hold precheck (criterion #2)
+and the durable critical-file hold (criterion #3, #6879) each read — one
+cached read per held PR, never a second bulk `gh pr list`. `loom:operator` is
+common to both hold kinds (this is why the aggregate `$HELD_JSON` query above
+already counts a critical-file hold for free), but each kind writes its
+reason under its own marker, so both are checked. Track conflict duration by
+carrying a per-PR `<!-- champion:conflict-since:PR=<n> TS=<iso> -->` marker
+forward from `$OLD_DIGEST_BODY` (Step 0) — present only when that PR was
+*already* `CONFLICTING` in the immediately-prior pass, so it is naturally
+absent (and the clock resets to "now") the first time a PR turns
+`CONFLICTING` **and** after any `MERGEABLE` tick in between two conflict
+episodes, since a `MERGEABLE` pass never writes the marker for that PR:
 
 ```bash
 HOLD_MARKER="<!-- champion:merge-risk-hold -->"
 CRITICAL_FILE_HOLD_MARKER="<!-- champion:critical-file-hold -->"
+CONFLICT_SINCE_PREFIX="<!-- champion:conflict-since:PR="
+ROT_THRESHOLD_DAYS=3   # continuously CONFLICTING at least this long -> "rotting"
 DIGEST_ROWS=""
+CONFLICT_SINCE_MARKERS=""
+HELD_ROTTING=0
 for PR_NUM in $(printf '%s\n' "$HELD_JSON" | jq -r '.[].number'); do
   ROW=$(printf '%s\n' "$HELD_JSON" | jq -c --argjson n "$PR_NUM" '.[] | select(.number == $n)')
   PR_MERGEABLE=$(jq -r '.mergeable' <<<"$ROW")
@@ -1635,45 +1793,71 @@ for PR_NUM in $(printf '%s\n' "$HELD_JSON" | jq -r '.[].number'); do
   fi
 
   STATUS="$PR_MERGEABLE"
+  if [ "$PR_MERGEABLE" = "CONFLICTING" ]; then
+    # Reuse the prior pass's since-timestamp for THIS PR if one exists in
+    # $OLD_DIGEST_BODY (Step 0); otherwise this is a fresh conflict episode
+    # and the clock starts now. Never accumulates rot time across a
+    # MERGEABLE gap (#7020) — see the note above.
+    PRIOR_SINCE=$(printf '%s\n' "$OLD_DIGEST_BODY" | grep -o "${CONFLICT_SINCE_PREFIX}${PR_NUM} TS=[0-9TZ:-]*" | head -1 | sed -E 's/.*TS=//')
+    if [ -n "$PRIOR_SINCE" ]; then
+      CONFLICT_SINCE="$PRIOR_SINCE"
+    else
+      CONFLICT_SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    fi
+    SINCE_TS=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$CONFLICT_SINCE" +%s 2>/dev/null || \
+               date -d "$CONFLICT_SINCE" +%s 2>/dev/null)
+    CONFLICT_DAYS=$(( ($(date +%s) - SINCE_TS) / 86400 ))
+    STATUS="${STATUS} since ${CONFLICT_SINCE}, ${CONFLICT_DAYS}d"
+    [ "$CONFLICT_DAYS" -ge "$ROT_THRESHOLD_DAYS" ] && HELD_ROTTING=$((HELD_ROTTING + 1))
+    CONFLICT_SINCE_MARKERS="${CONFLICT_SINCE_MARKERS}${CONFLICT_SINCE_PREFIX}${PR_NUM} TS=${CONFLICT_SINCE} -->
+"
+  fi
   [ "$AT_DOCTOR" = true ] && STATUS="$STATUS, out at Doctor"
   DIGEST_ROWS="${DIGEST_ROWS}| #$PR_NUM | $REASON | $STATUS |
 "
 done
+HELD_CONFLICTING_CLEAN=$((HELD_CONFLICTING - HELD_ROTTING))
 ```
+
+**`ROT_THRESHOLD_DAYS=3` is deliberately short of the 24h staleness window
+criterion #5 already routes on.** It answers a different question: staleness
+(criterion #5, and #6852's hold-only suspension above) is about *how long
+since the PR was last touched at all*; rotting is about *how long a specific
+conflict has sat unresolved*, and only the digest tracks it — nothing routes
+or force-pushes on it. Three days is long enough that a conflict Champion's
+very next tick would still be reporting on doesn't immediately read as
+"rotting", and short enough to flag real multi-day drift (the 1–3 week piles
+this section exists to make visible) well before it compounds into the
+crisis-sized pile #6720/#6848 both describe. This distinguishes "held,
+clean" (`$HELD_CONFLICTING_CLEAN`, a conflict younger than the threshold)
+from "held, rotting" (`$HELD_ROTTING`, at or past it) in the aggregate line
+below.
 
 **Step 2 — write the digest to a durable, pinned tracking issue.** Champion
 edits this issue's **body** in place every pass (not a comment thread) — the
 current pile belongs at the top of the issue, not buried at the bottom of a
-scrollback with one comment per 10-minute tick. Find it by a fixed title plus
-a body marker, mirroring the marker-comment convention used everywhere else in
-this role:
+scrollback with one comment per 10-minute tick. `$DIGEST_ISSUE` was already
+located in Step 0 above; this step only builds the new body (including the
+hidden `champion:conflict-since` markers Step 1 collected, which is how the
+clock survives into the *next* pass) and writes it:
 
 ```bash
-DIGEST_TITLE="Champion: Merge-Risk Hold Digest"
-DIGEST_MARKER="<!-- champion:merge-risk-hold-digest -->"
-
-# Cached ("$GH_READ") — locating the pinned issue is itself an observation,
-# same rule as the follow-on-issue duplicate search elsewhere in this role.
-DIGEST_ISSUE=$("$GH_READ" issue list --search "\"$DIGEST_TITLE\" in:title" \
-  --state open --json number,body --limit 10 \
-  --jq "[.[] | select(.body | startswith(\"$DIGEST_MARKER\"))] | first | .number // empty")
-
 DIGEST_TABLE="${DIGEST_ROWS:-| _none_ | _none_ | _none_ |
 }"
 DIGEST_BODY="$DIGEST_MARKER
 # Merge-Risk Hold Digest
 
-Auto-maintained by Champion's Held-PR Census (#6720, #6851). This issue's body
-is **overwritten in place every pass** — it is never appended to, and it is
-**not a work item**: do not curate, build, or promote it.
+Auto-maintained by Champion's Held-PR Census (#6720, #6851, #7020). This
+issue's body is **overwritten in place every pass** — it is never appended
+to, and it is **not a work item**: do not curate, build, or promote it.
 
 **Last updated**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-**Aggregate**: Merge-risk holds: $HELD_COUNT open PR(s) — $HELD_CONFLICTING conflicting, $HELD_AT_DOCTOR out at Doctor, oldest ${OLDEST_DAYS}d
+**Aggregate**: Merge-risk holds: $HELD_COUNT open PR(s) — $HELD_CONFLICTING conflicting ($HELD_ROTTING rotting >=${ROT_THRESHOLD_DAYS}d, $HELD_CONFLICTING_CLEAN clean), $HELD_AT_DOCTOR out at Doctor, oldest ${OLDEST_DAYS}d
 
 | PR | Hold reason | Status |
 |---|---|---|
 $DIGEST_TABLE
----
+$CONFLICT_SINCE_MARKERS---
 *Automated by Champion role*"
 
 if [ -z "$DIGEST_ISSUE" ]; then

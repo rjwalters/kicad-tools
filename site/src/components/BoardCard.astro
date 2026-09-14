@@ -11,6 +11,7 @@
  * The whole card links to `/<slug>` — the per-board detail route built in
  * issue #3681. Until that page exists the link 404s, which is expected.
  */
+import ReadinessProgress from "./ReadinessProgress.astro";
 import type { Board } from "../data/types.ts";
 import { displayStatus, displayStatusLabel } from "../data/boardStatus.ts";
 
@@ -73,6 +74,7 @@ const statusLabel = displayStatusLabel(board);
   <div class="body">
     <h2 class="name">{displayName}</h2>
     {board.description && <p class="desc">{board.description}</p>}
+    <ReadinessProgress board={board} compact />
 
     <ul class="badges">
       {
@@ -93,7 +95,7 @@ const statusLabel = displayStatusLabel(board);
       {
         board.nets_routed_pct !== undefined && (
           <li class="badge">
-            <span class="badge-label">Nets</span>
+            <span class="badge-label">{board.readiness?.metrics?.nets_routed_pct !== undefined ? "Nets" : "Export nets"}</span>
             <span class="badge-value">{board.nets_routed_pct.toFixed(1)}%</span>
           </li>
         )
@@ -101,7 +103,7 @@ const statusLabel = displayStatusLabel(board);
       {
         board.drc_violations !== undefined && (
           <li class:list={["badge", { "badge-warn": board.drc_violations > 0 }]}>
-            <span class="badge-label">DRC</span>
+            <span class="badge-label">{board.readiness?.metrics?.drc_violations !== undefined ? "DRC" : "Export DRC"}</span>
             <span class="badge-value">
               {board.drc_violations} violation{board.drc_violations === 1 ? "" : "s"}
             </span>
@@ -197,7 +199,7 @@ const statusLabel = displayStatusLabel(board);
 
   /* DRC-violation chip (#3717): a distinct red warn tone so a violating board
      is never confused with the amber "Partial" or green "Ready" states. */
-  .chip-drc {
+  .chip-drc, .chip-blocked {
     background: rgba(214, 84, 79, 0.92);
     color: #1c0605;
   }
@@ -218,13 +220,15 @@ const statusLabel = displayStatusLabel(board);
   /* LVS-not-run chip (#3749): neutral gray for "unknown" — visually similar
      to no_artifacts so the message is "we have not verified" rather than "we
      verified and it is a problem". Never reads as Ready. */
+  .chip-development,
+  .chip-blocked,
   .chip-unverified {
-    background: rgba(120, 134, 148, 0.85);
+    background: rgb(120, 134, 148);
     color: #0c1116;
   }
 
   .chip-no_artifacts {
-    background: rgba(120, 134, 148, 0.85);
+    background: rgb(120, 134, 148);
     color: #0c1116;
   }
 

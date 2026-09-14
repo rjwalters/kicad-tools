@@ -20,7 +20,13 @@ from kicad_tools.router.io import load_pads_for_analysis
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODERN_BOARD = (
-    REPO_ROOT / "boards" / "02-charlieplex-led" / "output" / "charlieplex_3x3_routed.kicad_pcb"
+    REPO_ROOT
+    / "tests"
+    / "fixtures"
+    / "historical_demo_boards"
+    / "02-charlieplex-led"
+    / "output"
+    / "charlieplex_3x3_routed.kicad_pcb"
 )
 
 

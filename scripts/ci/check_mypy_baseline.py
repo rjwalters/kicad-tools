@@ -18,8 +18,8 @@ useless.  Instead we normalize each error to a stable *signature*:
 
     <path>\t<error-code>\t<normalized-message>
 
-The line number is dropped, and volatile substrings in the message (numbers,
-quoted identifiers, temp module paths) are masked so a signature stays stable
+The line number is dropped, and bare integers in the message are masked
+while equivalent diagnostic templates are canonicalized so a signature stays stable
 across unrelated edits.  We then compare *multisets* of signatures: the
 current run may contain each baseline signature at most as many times as the
 baseline does.  Any signature that appears more often than the baseline (or
@@ -93,6 +93,15 @@ _ERROR_LINE_RE = re.compile(
 # and must be masked so a signature stays stable.
 _NUMBER_RE = re.compile(r"\b\d+\b")
 
+# Mypy 2.x renamed these templates without changing the underlying errors.
+# Match whole templates and retain their quoted payloads verbatim; replacing
+# argument/parameter globally would erase meaningful identifiers and types.
+_DEFAULT_PARAMETER_RE = re.compile(
+    r'^Incompatible default for parameter ("[^"\n]+") '
+    r'\(default has type ("[^"\n]+"), parameter has type ("[^"\n]+")\)$'
+)
+_GENERIC_ARGUMENTS_RE = re.compile(r'^Missing type arguments for generic type ("[^"\n]+")$')
+
 
 def normalize_message(message: str) -> str:
     """Mask volatile substrings in a mypy error message.
@@ -106,7 +115,18 @@ def normalize_message(message: str) -> str:
     collapse distinct errors into one signature, letting genuinely new errors
     hide behind an existing baseline entry.
     """
-    return _NUMBER_RE.sub("N", message).strip()
+    message = message.strip()
+    if match := _DEFAULT_PARAMETER_RE.fullmatch(message):
+        name, default_type, parameter_type = match.groups()
+        message = (
+            f"Incompatible default for argument {name} "
+            f"(default has type {default_type}, argument has type {parameter_type})"
+        )
+    elif match := _GENERIC_ARGUMENTS_RE.fullmatch(message):
+        message = f"Missing type parameters for generic type {match.group(1)}"
+    elif message == "Function is missing a type annotation for one or more parameters":
+        message = "Function is missing a type annotation for one or more arguments"
+    return _NUMBER_RE.sub("N", message)
 
 
 def signature(path: str, message: str, code: str) -> str:
@@ -290,6 +310,10 @@ def load_baseline(baseline_path: Path) -> Counter[str]:
         line = raw_line.rstrip("\n")
         if not line or line.lstrip().startswith("#"):
             continue
+        parts = line.split("\t", 2)
+        if len(parts) == 3:
+            path, code, message = parts
+            line = signature(path, message, code)
         counts[line] += 1
     return counts
 

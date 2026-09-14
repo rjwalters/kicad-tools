@@ -7,6 +7,8 @@
  *
  * Design notes (see `docs/board-json-schema.md` and issue #3679):
  *   - Runs at build time only (Node `fs`). Not bundled into client output.
+ *   - Revalidates readiness.json content hashes, overriding saved readiness
+ *     and current metrics even when board.json predates the latest checks.
  *   - Resilient to missing files: NO `board.json` files exist on a fresh
  *     checkout — they are generated at runtime via `kct board-metrics --all`.
  *     A board directory with no `board.json` yields a stub record with
@@ -25,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import { SCHEMA_VERSION } from "./types.ts";
 import type { Board, BoardCategory, BoardStatus } from "./types.ts";
 import { EXCLUDED_SLUGS } from "./galleryConfig.mjs";
+import { loadReadiness } from "./readiness.ts";
 
 /** True if a discovered board path lives under `boards/external/`. */
 function categoryForPath(boardPath: string): BoardCategory {
@@ -104,7 +107,7 @@ export function discoverBoardDirs(root: string): string[] {
 }
 
 /** Construct a `no_artifacts` stub for a board with no parsable `board.json`. */
-function makeStub(slug: string, category: BoardCategory): Board {
+function makeStub(slug: string, category: BoardCategory, boardPath: string): Board {
   return {
     $schema: "https://kicad-tools.org/schemas/board/v1.json",
     schema_version: SCHEMA_VERSION,
@@ -112,6 +115,7 @@ function makeStub(slug: string, category: BoardCategory): Board {
     slug,
     status: "no_artifacts",
     category,
+    readiness: loadReadiness(boardPath),
   };
 }
 
@@ -165,7 +169,7 @@ export function loadBoard(boardPath: string): Board {
   const jsonPath = join(boardPath, "output", "board.json");
 
   if (!existsSync(jsonPath)) {
-    return makeStub(slug, category);
+    return makeStub(slug, category, boardPath);
   }
 
   let raw: string;
@@ -173,7 +177,7 @@ export function loadBoard(boardPath: string): Board {
     raw = readFileSync(jsonPath, "utf8");
   } catch (err) {
     console.warn(`[loadBoards] ${slug}: failed to read board.json (${String(err)}); using stub`);
-    return makeStub(slug, category);
+    return makeStub(slug, category, boardPath);
   }
 
   let parsed: unknown;
@@ -181,13 +185,27 @@ export function loadBoard(boardPath: string): Board {
     parsed = JSON.parse(raw);
   } catch (err) {
     console.warn(`[loadBoards] ${slug}: board.json is not valid JSON (${String(err)}); using stub`);
-    return makeStub(slug, category);
+    return makeStub(slug, category, boardPath);
   }
 
   const board = validateBoard(parsed, slug);
-  if (!board) return makeStub(slug, category);
+  if (!board) return makeStub(slug, category, boardPath);
   // `category` is loader-assigned (not part of board.json); always set it.
   board.category = category;
+  // Always revalidate the current report: board.json itself may be months old.
+  board.readiness = loadReadiness(boardPath);
+  if (["ready", "blocked"].includes(board.readiness.status)) {
+    const current = board.readiness.metrics;
+    if (current?.drc_violations !== undefined) board.drc_violations = current.drc_violations;
+    if (current?.nets_routed_pct !== undefined) board.nets_routed_pct = current.nets_routed_pct;
+    if (current?.lvs_clean !== undefined) board.lvs_clean = current.lvs_clean;
+    if (current?.lvs_mismatches !== undefined) board.lvs_mismatches = current.lvs_mismatches;
+  }
+  // The saved status describes an earlier export; a current complete verdict
+  // must also refresh it, or old "partial" records incorrectly hide Ready.
+  if (board.readiness.status === "ready" && board.drc_violations === 0 && board.lvs_clean === true) {
+    board.status = "ok";
+  }
   return board;
 }
 

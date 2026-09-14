@@ -1,0 +1,63 @@
+{
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5044/boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
+  "manufacturer": "jlcpcb-tier1",
+  "layers": 0,
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "infos": 0,
+    "waived": 0,
+    "rules_checked": 43,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "copper_sliver": 1,
+      "track_dangling": 1,
+      "via_dangling": 1,
+      "doc_drift_stale_pin": 1,
+      "doc_drift_unresolvable_pin": 1,
+      "isolated_copper": 1,
+      "sch_field_offset": 1,
+      "sch_field_overlap": 1
+    },
+    "passed": true
+  },
+  "violations": [],
+  "meta_checks": {
+    "drc": {
+      "status": "PASSED",
+      "detail": "0 errors, 0 warnings"
+    },
+    "erc": {
+      "status": "PASSED",
+      "detail": "0 error(s), 0 warning(s)"
+    },
+    "lvs": {
+      "status": "PASSED",
+      "detail": "label + copper: 0 mismatch(es)",
+      "mismatches": [],
+      "copper_mismatches": [],
+      "copper_vacuous": false,
+      "copper_bound_pad_count": 54,
+      "netlist_vacuous": false
+    },
+    "manifest": {
+      "status": "PASSED",
+      "detail": "manifest.json mtime within tolerance of routed PCB mtime"
+    },
+    "overall": "PASSED",
+    "schematic_missing": false
+  },
+  "fabrication_overrides": {
+    "layers": 2,
+    "via_type": "through",
+    "minimum_via_drill_mm": 0.15,
+    "minimum_via_diameter_mm": 0.3,
+    "minimum_via_annular_ring_mm": 0.075,
+    "via_covering": "Tented",
+    "paid_factory_option": "0.15 mm minimum via hole size",
+    "via_in_pad": false,
+    "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
+    "suppressed_findings": 0,
+    "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5009"
+  }
+}

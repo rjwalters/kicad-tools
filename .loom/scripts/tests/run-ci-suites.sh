@@ -132,11 +132,54 @@ LIVE_DAEMON_GUARDED_SUITES="test-loom-daemon-start.sh test-loom-daemon-stop.sh t
 #     rules out simple CPU-contention slowness and points at cross-suite
 #     interference not yet root-caused). Tracked for a real fix rather than
 #     left as a permanent pin.
+#   test-loom-daemon-start.sh (#7391) — the "autonomy downgrade (plist): marker
+#     present + no readable prior value still warns" case (AD7) failed
+#     intermittently on main and on unrelated PRs (a docs-only commit, a
+#     Rust-only PR touching no shell scripts), always with the SAME truncated
+#     captured output: the invocation's stderr ends right after the
+#     unconditional "Reliability daemon: work_finder=off main_health_gate=off"
+#     line, with NEITHER `check_autonomy_downgrade_key()` WARNING ever printed
+#     for either autonomy key. Investigation ruled out every candidate IN this
+#     script:
+#       - guard_session_context_start() (#6568) does not fire here at all —
+#         AD7 sets LOOM_LAUNCHD_LABEL explicitly, which trips that guard's own
+#         `[[ -n "${LOOM_LAUNCHD_LABEL:-}" ]] && return 0` exemption before it
+#         reaches any warning/refusal branch (confirmed by reading the guard's
+#         mechanism-detection + exemption checks directly).
+#       - check_autonomy_downgrade_key()'s own logic is fully deterministic
+#         and side-effect-free for this case: the marker path is set via an
+#         explicit `LOOM_AUTONOMY_MARKER=` override (never the SOCKET_PATH-
+#         derived fallback), the prior-plist path never exists (a fresh
+#         mktemp HOME), and neither `--from-config` nor a pre-exported
+#         WORK_FINDER/HEALTH_GATE value is in play — every branch that could
+#         suppress the warning requires a flag/env this case does not set.
+#       - Reproduction attempts failed to trip it under real stress: 480+
+#         concurrent invocations of the isolated check (8-way parallel on this
+#         host), 150 further invocations inside a CPU-throttled
+#         (`--cpus=1`) Ubuntu container, 8 consecutive full-suite runs inside a
+#         `--cpus=2` Ubuntu container (which DID reproduce two OTHER,
+#         environment-specific flakes every single time — a missing
+#         `systemd-inhibit` binary and a background-fork timing case — but
+#         never AD7), and 20 consecutive full standalone suite runs on this
+#         host (AC2). This is the same "passes locally both standalone and
+#         pinned to oversubscribed cores" signature the update.sh entry above
+#         documents.
+#     Conclusion: not a logic defect in this suite's own autonomy-downgrade
+#     detection or in the #6568 guard — the failure requires the real CI
+#     job's full concurrent-suite load (this suite is itself one of five
+#     LIVE_DAEMON_GUARDED_SUITES, several of which fork many short-lived
+#     subprocesses of their own) to manifest, consistent with the same
+#     unresolved cross-suite interference class as test-loom-daemon-update.sh
+#     above rather than a second, independent bug. Tracked for a real fix
+#     (most likely: capture and assert the exit status of AD7's `$(...)`
+#     invocation, so a subprocess that is killed/starved under load fails
+#     loudly as "subprocess did not complete" instead of silently as a
+#     content mismatch) rather than left as a permanent pin.
 #
 # LOOM_CI_SERIAL_SUITES overrides the list (space-separated basenames); an
 # empty value disables the lane entirely. It exists as a test seam for
 # test-run-ci-suites-serial-lane.sh and as an operator escape hatch.
-SERIAL_LANE_SUITES="${LOOM_CI_SERIAL_SUITES-test-loom-daemon-update.sh}"
+SERIAL_LANE_SUITES="${LOOM_CI_SERIAL_SUITES-test-loom-daemon-update.sh test-loom-daemon-start.sh}"
 
 # guard_repo_root_from / live_daemon_pidfile_candidates / live_daemon_pidfiles_present
 # — extracted to a shared lib (#6528) so nextest-daemon-guard.sh (the

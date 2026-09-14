@@ -11,6 +11,7 @@ __all__ = [
     "run_fix_footprints_command",
     "run_fix_vias_command",
     "run_fix_silkscreen_command",
+    "run_place_silk_refs_command",
     "run_repair_clearance_command",
     "run_fix_drc_command",
     "run_constraints_command",
@@ -89,6 +90,8 @@ def run_fix_vias_command(args) -> int:
         sub_argv.append("--skip-if-clearance-violation")
     if getattr(args, "relocate_in_pad", False):
         sub_argv.append("--relocate-in-pad")
+    if getattr(args, "search_alternatives", False):
+        sub_argv.append("--search-alternatives")
     for net in getattr(args, "nets", None) or []:
         sub_argv.extend(["--net", net])
     return fix_vias_main(sub_argv)
@@ -117,6 +120,43 @@ def run_fix_silkscreen_command(args) -> int:
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
     return fix_silkscreen_main(sub_argv)
+
+
+def run_place_silk_refs_command(args) -> int:
+    """Handle place-silk-refs command."""
+    from ..place_silk_refs_cmd import main as place_silk_refs_main
+
+    sub_argv = [args.pcb]
+    if getattr(args, "mfr", None):
+        sub_argv.extend(["--mfr", args.mfr])
+    if getattr(args, "layers", 2) != 2:
+        sub_argv.extend(["--layers", str(args.layers)])
+    if getattr(args, "copper", 1.0) != 1.0:
+        sub_argv.extend(["--copper", str(args.copper)])
+    if getattr(args, "clearance", None) is not None:
+        sub_argv.extend(["--clearance", str(args.clearance)])
+    if getattr(args, "edge_clearance", None) is not None:
+        sub_argv.extend(["--edge-clearance", str(args.edge_clearance)])
+    if getattr(args, "max_offset", None) is not None:
+        sub_argv.extend(["--max-offset", str(args.max_offset)])
+    if getattr(args, "step", None) is not None:
+        sub_argv.extend(["--step", str(args.step)])
+    if getattr(args, "allow_rotate", False):
+        sub_argv.append("--allow-rotate")
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    if getattr(args, "verify_drc", False):
+        sub_argv.append("--verify-drc")
+    if getattr(args, "render", None):
+        sub_argv.extend(["--render", args.render])
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return place_silk_refs_main(sub_argv)
 
 
 def run_repair_clearance_command(args) -> int:
@@ -211,6 +251,10 @@ def run_check_command(args) -> int:
     from ..check_cmd import main as check_main
 
     sub_argv = [args.pcb]
+    if getattr(args, "mask_copper_config", None) is not None:
+        sub_argv.extend(["--mask-copper-config", str(args.mask_copper_config)])
+    if getattr(args, "physical_copper_gap", None) is not None:
+        sub_argv.extend(["--physical-copper-gap", str(args.physical_copper_gap)])
     if args.format != "table":
         sub_argv.extend(["--format", args.format])
     if args.errors_only:
@@ -269,6 +313,13 @@ def run_check_command(args) -> int:
     # Issue #4601: forward the sidecar auto-discovery opt-out.
     if getattr(args, "no_net_class_map", False):
         sub_argv.append("--no-net-class-map")
+    # Issue #4980/#5124: forward the declared branch-specific current-path
+    # sidecar and its auto-discovery opt-out, mirroring --net-class-map /
+    # --no-net-class-map immediately above.
+    if getattr(args, "current_paths", None):
+        sub_argv.extend(["--current-paths", args.current_paths])
+    if getattr(args, "no_current_paths", False):
+        sub_argv.append("--no-current-paths")
     # Issue #4633: forward the zone-refill opt-in (#4096/#4113) and the two
     # waiver-sidecar path overrides (#4137 / #4417).  All three were declared
     # on the inner check_cmd parser only, so `kct check --refill-zones` (and

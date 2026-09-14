@@ -24,6 +24,7 @@ Two layers of guard, mirroring ``tests/test_migrated_boards_gate_3912.py``:
 
 from __future__ import annotations
 
+import ast
 import os
 import sys
 from pathlib import Path
@@ -124,9 +125,27 @@ class TestRecipeWiring:
         assert "from kicad_tools.recipes.precondition import require_spec" in recipe_source
 
     def test_calls_helper_anchored_on_dunder_file(self, recipe_source: str) -> None:
-        # Exactly one call, and it MUST be anchored on ``__file__``.
-        assert recipe_source.count("require_spec(") == 1
-        assert "require_spec(__file__)" in recipe_source
+        # Board 05 retains a separately callable legacy recipe. Both entry
+        # points must check their own precondition, exactly once.
+        tree = ast.parse(recipe_source)
+        entries = [
+            n
+            for n in tree.body
+            if isinstance(n, ast.FunctionDef) and n.name in {"main", "legacy_main"}
+        ]
+        assert entries
+        for entry in entries:
+            calls = [
+                n
+                for n in ast.walk(entry)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "require_spec"
+            ]
+            assert len(calls) == 1
+            assert len(calls[0].args) == 1
+            assert isinstance(calls[0].args[0], ast.Name)
+            assert calls[0].args[0].id == "__file__"
 
     def test_does_not_anchor_on_cwd_or_argv(self, recipe_source: str) -> None:
         # CI runs recipes from the repo root with an out-of-tree output dir;
@@ -141,21 +160,25 @@ class TestRecipeWiring:
 
     def test_precedes_first_mutating_step(self, recipe_source: str) -> None:
         """The call must come before the recipe's first ``create_*`` step."""
-        call_at = recipe_source.index("require_spec(__file__)")
-        first_write = min(
-            idx
-            for idx in (
-                recipe_source.find("create_project("),
-                recipe_source.find("output_dir.mkdir"),
+        tree = ast.parse(recipe_source)
+        entries = [
+            n
+            for n in tree.body
+            if isinstance(n, ast.FunctionDef) and n.name in {"main", "legacy_main"}
+        ]
+        for entry in entries:
+            calls = [n for n in ast.walk(entry) if isinstance(n, ast.Call)]
+            gate = next(
+                n for n in calls if isinstance(n.func, ast.Name) and n.func.id == "require_spec"
             )
-            if idx != -1
-        )
-        # ``create_project`` is also *defined* above ``main()``; what matters is
-        # that the call site precedes the invocation inside ``main()``.
-        main_at = recipe_source.index("def main()")
-        invocation = recipe_source.index("create_project(", main_at)
-        assert call_at < invocation, "require_spec() must run before create_project()"
-        assert first_write >= 0
+            mutations = [
+                n
+                for n in calls
+                if (isinstance(n.func, ast.Name) and n.func.id == "create_project")
+                or (isinstance(n.func, ast.Attribute) and n.func.attr in {"mkdir", "call"})
+            ]
+            assert mutations, f"{entry.name} has no recognized mutating step"
+            assert all(gate.lineno < n.lineno for n in mutations)
 
 
 class TestFleetSpecsExistAndParse:
@@ -273,11 +296,12 @@ class TestLadderLevels:
         err = capsys.readouterr().err
         assert "not found in phases" in err
 
-    def test_board_01_is_the_real_l2_offender(self) -> None:
-        """Pins the measured fleet split: 8/8 at L1, 7/8 at L2.
+    def test_known_specs_still_fail_strict_phase_validation(self) -> None:
+        """All recipe specs parse; three retain phases outside their phase lists.
 
-        If board-01's spec is repaired later (explicitly out of scope for
-        #4539), this test tells you exactly which assertion to update.
+        Board01 says complete and boards02/05 say manufacturing. Keep strict
+        rejection until those source specs are deliberately repaired and
+        their hash-bound readiness evidence regenerated.
         """
         l1_pass = [
             rel for rel in RECIPE_ENTRY_POINTS if require_spec(REPO_ROOT / rel, strict=False).ok
@@ -290,7 +314,11 @@ class TestLadderLevels:
                 require_spec(REPO_ROOT / rel, strict=True)
             except SystemExit:
                 l2_fail.append(rel)
-        assert l2_fail == ["boards/01-voltage-divider/generate_design.py"]
+        assert l2_fail == [
+            "boards/01-voltage-divider/generate_design.py",
+            "boards/02-charlieplex-led/generate_design.py",
+            "boards/05-bldc-motor-controller/design.py",
+        ]
 
 
 class TestDiscoveryAnchor:

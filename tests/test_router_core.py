@@ -190,10 +190,9 @@ class TestPadBlockedByAdjacentNetZero:
     def test_route_to_pad_adjacent_to_net0_pad(self):
         """Route to a signal pad whose metal area overlaps with a net=0 pad's cells.
 
-        This is the exact scenario from issue #1764: an LED component where pad 2
-        (net=0/GND) is so close to pad 1 (signal net) that when grid.add_pad() marks
-        net=0 cells as blocked, those cells overlap with pad 1's metal area on the
-        grid. The pathfinder must still be able to reach pad 1's metal area.
+        Preserve #1764's adjacent unassigned-pad scenario with physically
+        separate copper. Grid halo overlap must not make a legal target
+        unreachable, and the emitted trace must retain real pad clearance.
         """
         # Use 0.1mm grid resolution (default)
         router = Autorouter(width=20.0, height=20.0)
@@ -214,8 +213,10 @@ class TestPadBlockedByAdjacentNetZero:
 
         # Target LED component: pad 1 is signal (net=1), pad 2 is net=0
         # Pad 2 is placed so its clearance zone overlaps pad 1's metal area.
-        # At 0.1mm grid, a 0.6mm pad spans 6 cells. With 0.2mm spacing between
-        # pad centers (0.2mm = 2 grid cells), clearance zones will heavily overlap.
+        # Keep actual pad copper separate: the old 0.2 mm centre spacing
+        # overlapped the two 0.6 mm pads by 0.4 mm and silently relied on
+        # the fine-pitch waiver. A 0.8 mm pitch leaves a legal 0.2 mm gap
+        # while discretized clearance halos can still overlap.
         led_pads = [
             {
                 "number": "1",
@@ -228,7 +229,7 @@ class TestPadBlockedByAdjacentNetZero:
             },
             {
                 "number": "2",
-                "x": 10.2,
+                "x": 10.8,
                 "y": 10.0,
                 "width": 0.6,
                 "height": 0.6,
@@ -242,6 +243,18 @@ class TestPadBlockedByAdjacentNetZero:
         routes = router.route_net(1)
         assert len(routes) > 0, "Routing net 1 failed - target pad blocked by adjacent net=0 pad"
         assert routes[0].segments, "Route should have segments"
+
+        from shapely.geometry import box
+
+        from kicad_tools.geometry.copper import segment_copper_polygon
+
+        foreign_copper = box(10.5, 9.7, 11.1, 10.3)
+        for route in routes:
+            for segment in route.segments:
+                copper = segment_copper_polygon(
+                    (segment.x1, segment.y1), (segment.x2, segment.y2), segment.width
+                )
+                assert copper.distance(foreign_copper) >= router.rules.trace_clearance - 1e-9
 
     def test_net0_pad_on_different_component_still_blocks(self):
         """Ensure net=0 pads on OTHER components still affect routing.

@@ -80,6 +80,9 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from board_recipe_artifacts import recipe_baseline_key, recipe_output_dir  # noqa: E402
+
 # --- shared with check_routed_drc.py ------------------------------------------
 
 DEFAULT_ALLOWLIST = Path(".github/routed-drc-tolerance.yml")
@@ -124,40 +127,22 @@ DIFFPAIR_RULE_IDS: tuple[str, ...] = (
 #
 # !!! RE-ROUTE vs COMMITTED (Issue #3828 doctor pass, June 21 2026) !!!
 # This baseline is the DIFF-PAIR-ONLY slice and is INDEPENDENT of the total
-# error-count allowlist floor (.github/routed-drc-tolerance.yml).  The binding
-# CI gate (``Diff-Pair Routing Regression``) RE-ROUTES board 06 from scratch
-# (no ``--skip-route``) and measures the re-routed PCB.  That re-route is
-# DETERMINISTIC but does NOT byte-reproduce the committed artifact (the
-# reproducibility gap tracked in #3829): the re-route's TOTAL error count is
-# 33 (= these 18 diff-pair errors + 5 extra non-diff-pair ``clearance_*``
-# errors from the imperfect coupled fan-out + pour-repair vias + 6
-# pre-existing sub-0.5 mm ``hole_to_hole_clearance`` true-positives newly
-# surfaced by Issue #3842's corrected ``min_hole_to_hole_mm`` gate -- board
-# layout fix tracked in #3847), whereas the committed artifact totals 24.
-# The total-count floor was re-baselined to the re-route's 33 in
-# routed-drc-tolerance.yml (was 25 before #3842 surfaced the drills); THIS
-# baseline stays at the true diff-pair-only count
-# (18 = 9 length_skew + 9 routing_continuity), which is IDENTICAL on the
-# committed artifact and the re-route.  ``check_zero_violations`` sums only
-# the DIFFPAIR_RULE_IDS slice, so neither the 5 extra ``clearance_*`` errors
-# NOR the 6 ``hole_to_hole_clearance`` drills leak into this assertion --
-# a 19th diff-pair violation still fails the gate even though the total floor
-# has 0 headroom over the re-route's 33.
-#
-# Keyed by repo-relative routed-PCB path (same key shape as the allowlist).
+# error-count allowlist floor (.github/routed-drc-tolerance.yml).
+# The final pre-redesign floor was ratcheted to 18 by #4019, verified on
+# runs 29075253404/29072031350/29070816533: 9 skew + 9 continuity, no other errors.
+# Historical larger floors are not applicable. The active LVDS release has
+# no allowance; only the isolated synthetic witness retains this baseline.
 DIFFPAIR_VIOLATION_BASELINE: dict[str, int] = {
-    # Coupled diff-pair convergence is 0/9 on BOTH the committed artifact and
-    # the deterministic seed-42 re-route; 9 diffpair_length_skew +
-    # 9 diffpair_routing_continuity = 18.  The re-route's extra errors are
-    # ``clearance_*`` (5) and ``hole_to_hole_clearance`` (6, the sub-0.5mm
-    # drill true-positives surfaced by Issue #3842's min_hole_to_hole gate;
-    # board-layout fix tracked in #3847) -- NONE are diffpair_*, so they are
-    # all excluded from this slice and the baseline stays 18.
-    # Tracked: #3540-#3544 (coupled upgrade-in-place re-opens the route fix);
-    # #3829 (re-route vs committed-artifact reproducibility gap);
-    # #3847 (sub-0.5mm drill re-spacing, #3842 rule surfaced these).
-    "boards/06-diffpair-test/output/diffpair_test_routed.kicad_pcb": 18,
+    "boards/06-diffpair-test/regression-fixture/diffpair_test_routed.kicad_pcb": 18,
 }
+
+
+def unexpected_baseline_errors(key: str, errors: dict[str, int]) -> dict[str, int]:
+    """Pair improvements cannot hide a new physical error within the total 18."""
+    if key not in DIFFPAIR_VIOLATION_BASELINE:
+        return {}
+    expected = {"diffpair_length_skew", "diffpair_routing_continuity"}
+    return {rule: count for rule, count in errors.items() if count and rule not in expected}
 
 
 def check_zero_violations(
@@ -266,6 +251,7 @@ def re_route_board(board_dir: Path, seed: int) -> bool:
     cmd = [
         sys.executable,
         str(script),
+        str(recipe_output_dir(board_dir, prepare=True)),
         "--step",
         "route",
         "--seed",
@@ -285,11 +271,11 @@ def re_route_board(board_dir: Path, seed: int) -> bool:
 def find_routed_pcb(board_dir: Path) -> Path | None:
     """Locate the board's freshly-routed PCB.
 
-    Walks ``board_dir/output`` looking for the canonical
+    Walks the isolated recipe output (or legacy fixture) looking for the canonical
     ``*_routed.kicad_pcb`` artifact emitted by ``generate_design.py``.
     Returns ``None`` if not found (caller emits the error).
     """
-    out = board_dir / "output"
+    out = recipe_output_dir(board_dir)
     if not out.is_dir():
         return None
     candidates = list(out.glob("*_routed.kicad_pcb"))
@@ -723,11 +709,7 @@ def check_board(
 
     # Compute the allowlist key in the same way check_routed_drc.py does:
     # repo-relative path string.
-    try:
-        rel = routed_pcb.resolve().relative_to(Path.cwd())
-        lookup_key = str(rel)
-    except ValueError:
-        lookup_key = str(routed_pcb)
+    lookup_key = recipe_baseline_key(routed_pcb)
     allowed = allowlist.get(lookup_key, 0)
 
     # Two-pass strategy (see docstrings on count_errors_via_kct_check
@@ -776,6 +758,7 @@ def check_board(
     print(f"\n[diffpair-coverage] Board: {board_dir.name}")
     print(f"[diffpair-coverage] Routed PCB: {routed_pcb}")
     print(f"[diffpair-coverage] DRC error count: {error_count} (allowed: {allowed})")
+    print(f"[diffpair-coverage] All error rules: {per_rule_errors}")
     print(f"[diffpair-coverage] rules_checked_by_rule: {rules_by_rule}")
     print(
         f"[diffpair-coverage] diff-pair error violations: "
@@ -895,6 +878,11 @@ def check_board(
                 f"[diffpair-coverage] OK: {total} diff-pair error violation(s) "
                 f"within documented baseline {baseline}."
             )
+
+    unexpected = unexpected_baseline_errors(lookup_key, per_rule_errors)
+    if unexpected:
+        annotate_error(str(routed_pcb), f"Errors outside historical pair baseline: {unexpected}")
+        failed = True
 
     # AC #1 (allowlist semantic): error count must be <= allowed.
     if error_count > allowed:

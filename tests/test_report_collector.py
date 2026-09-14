@@ -1436,6 +1436,13 @@ class TestCollectNarrative:
         assert "+5V" in rails
         assert "GND" in rails
 
+    def test_power_architecture_excludes_flags_and_keeps_synthesized_rails(self, tmp_path):
+        collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")
+        sch = _make_mock_schematic_with_power_symbols(["PWR_FLAG", "+3.3V", "GND"], [])
+        sch.symbols[1].lib_id = "kicad_tools_pwr:+3.3V"
+        result = collector._extract_power_architecture(sch, tmp_path / "test.kicad_sch")
+        assert {r["rail"] for r in result if r["type"] == "power_symbol"} == {"+3.3V", "GND"}
+
     def test_power_architecture_finds_regulators(self, tmp_path):
         """Power architecture detects voltage regulators."""
         collector = ReportDataCollector(tmp_path / "dummy.kicad_pcb")

@@ -206,3 +206,28 @@ class TestZoneFillRule:
         unfilled = [v for v in results.violations if v.rule_id == "zone_unfilled"]
         assert len(unfilled) == 1
         assert "net:+3.3V" in unfilled[0].items
+
+
+def test_parsed_rule_area_is_not_an_unfinished_copper_pour():
+    """A pour-only keepout must not hide a neighboring genuinely unfinished pour."""
+    from kicad_tools.schema.pcb import Zone
+    from kicad_tools.sexp import parse_string
+
+    boundary = "(polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)))"
+    keepout = Zone.from_sexp(
+        parse_string(
+            '(zone (net 0) (net_name "") (layers "F.Cu" "B.Cu") '
+            "(keepout (tracks allowed) (vias allowed) (pads allowed) "
+            "(copperpour not_allowed) (footprints allowed)) " + boundary + ")"
+        )
+    )
+    unfinished = Zone.from_sexp(
+        parse_string('(zone (net 0) (net_name "") (layer "F.Cu") ' + boundary + ")")
+    )
+    assert keepout.keepout is not None
+    assert not keepout.keepout.copperpour_allowed
+    assert unfinished.keepout is None
+    rule = ZoneFillRule()
+    assert not rule.check(_make_pcb([keepout]), _make_design_rules()).violations
+    result = rule.check(_make_pcb([keepout, unfinished]), _make_design_rules())
+    assert sorted(v.rule_id for v in result.violations) == ["zone_fill_disabled", "zone_no_net"]

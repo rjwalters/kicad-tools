@@ -16,15 +16,11 @@
 (rule "Copper to Edge - FlashPCB"
   (constraint edge_clearance (min 1.0mm)))
 (rule "Hole to Edge - FlashPCB"
-  (condition "A.Type == 'via' || A.Type == 'pad'")
-  (constraint hole_clearance (min 1.0mm)))
+  (condition "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'")
+  (constraint physical_hole_clearance (min 1.0mm)))
 (rule "Silkscreen Width - FlashPCB"
   (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
   (constraint text_thickness (min 0.08mm)))
 (rule "Silkscreen Height - FlashPCB"
   (condition "A.Type == 'text' && A.Layer == 'F.Silkscreen'")
   (constraint text_height (min 0.8mm)))
-(rule "Solder Mask Clearance - FlashPCB"
-  (constraint solder_mask_margin (min 0.05mm)))
-(rule "Solder Mask Dam - FlashPCB"
-  (constraint physical_hole_clearance (min 0.13mm)))

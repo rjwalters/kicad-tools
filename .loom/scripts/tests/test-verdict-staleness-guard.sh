@@ -424,6 +424,22 @@ run_guard 212
 assert_eq "loom:pr" "$(get_field "$OUT" VERDICT_LABEL)" "(i) Approving label takes precedence in a contradictory state"
 assert_eq "12" "$RC" "(i) Stale approval detected despite the contradictory state"
 
+# (i2) #7018: the SAME contradictory state, but with --clear. Only the
+#      DETECTED label (loom:pr) must not be the only one removed — the stray
+#      loom:changes-requested standing alongside it must be stripped too, or
+#      it would be left behind next to the freshly re-added
+#      loom:review-requested, reproducing the exact mutual-exclusion
+#      violation this guard exists to prevent (PR #6817 incident).
+reset_state
+pr_json 239 "$SHA_C" "loom:pr" "loom:changes-requested"
+{ echo "["; verdict_comment "2026-08-08T03:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-239.json"
+run_guard 239 --clear
+assert_eq "12" "$RC" "(i2) Stale approval detected despite the contradictory state"
+assert_eq "1" "$(get_field "$OUT" CLEARED)" "(i2) CLEARED=1"
+assert_contains "$WRITES" "--remove-label loom:pr" "(i2) Detected stale loom:pr removed"
+assert_contains "$WRITES" "--remove-label loom:changes-requested" "(i2) Stray loom:changes-requested ALSO removed, not left behind (#7018)"
+assert_contains "$WRITES" "--add-label loom:review-requested" "(i2) PR returned to the review queue"
+
 # (j) Bad args: non-numeric PR number -> usage error, exit 1.
 reset_state
 run_guard not-a-number

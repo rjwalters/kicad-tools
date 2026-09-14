@@ -31,6 +31,7 @@ path can fail loud rather than silently degrade.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from kicad_tools._shapely import has_shapely as _has_shapely
@@ -83,3 +84,110 @@ def segment_copper_polygon(
     if width <= 0:
         return line
     return line.buffer(width / 2)
+
+
+def point_segment_distance(
+    point: tuple[float, float],
+    seg_start: tuple[float, float],
+    seg_end: tuple[float, float],
+) -> float:
+    """Shortest distance from ``point`` to the closed segment ``start-end``."""
+    px, py = point
+    ax, ay = seg_start
+    bx, by = seg_end
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy
+    if length_sq <= 0.0:
+        return math.hypot(px - ax, py - ay)
+    t = ((px - ax) * dx + (py - ay) * dy) / length_sq
+    t = max(0.0, min(1.0, t))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _orientation(p: tuple[float, float], q: tuple[float, float], r: tuple[float, float]) -> float:
+    """Signed area of the triangle ``p, q, r`` (positive = counter-clockwise)."""
+    return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+
+def segment_centerline_distance(
+    a_start: tuple[float, float],
+    a_end: tuple[float, float],
+    b_start: tuple[float, float],
+    b_end: tuple[float, float],
+) -> float:
+    """Exact minimum distance between two closed 2-D segments.
+
+    Segments that cross (or touch) return ``0.0``; otherwise the minimum is
+    always attained at one of the four endpoint-to-segment distances, which
+    is the standard closed-form result for convex sets.
+
+    This is the analytic equivalent of
+    ``LineString(a).distance(LineString(b))``, evaluated without constructing
+    shapely objects — the connectivity extractor calls it on every segment
+    pair, and it is also exact for the degenerate zero-length case (where a
+    "segment" is a point).
+    """
+    # A *proper* crossing (each segment strictly straddles the other's
+    # supporting line) is the one configuration whose minimum distance is
+    # NOT attained at an endpoint, so it needs its own test.  Every
+    # improper contact — touching, T-shaped, collinear overlap — puts an
+    # endpoint of one segment on the other, which the endpoint minimum
+    # below already reports as 0.
+    o1 = _orientation(a_start, a_end, b_start)
+    o2 = _orientation(a_start, a_end, b_end)
+    o3 = _orientation(b_start, b_end, a_start)
+    o4 = _orientation(b_start, b_end, a_end)
+    if o1 * o2 < 0 and o3 * o4 < 0:
+        return 0.0
+    return min(
+        point_segment_distance(b_start, a_start, a_end),
+        point_segment_distance(b_end, a_start, a_end),
+        point_segment_distance(a_start, b_start, b_end),
+        point_segment_distance(a_end, b_start, b_end),
+    )
+
+
+def segments_copper_touch(
+    a_start: tuple[float, float],
+    a_end: tuple[float, float],
+    a_width: float,
+    b_start: tuple[float, float],
+    b_end: tuple[float, float],
+    b_width: float,
+) -> bool:
+    """True iff two same-layer trace segments' swept copper touches.
+
+    A trace's copper is its centerline buffered by ``width / 2`` (see
+    :func:`segment_copper_polygon`), i.e. a capsule.  Two capsules intersect
+    **iff** the distance between their centerlines is at most the sum of
+    their radii — so this is exactly
+    ``segment_copper_polygon(a...).intersects(segment_copper_polygon(b...))``
+    but exact (shapely's ``buffer`` approximates the round caps with a
+    finite-resolution polygon, which *under*-covers the true copper) and far
+    cheaper.
+
+    Two consequences matter for connectivity (issue #5060):
+
+    * contact is decided over the **full** swept copper, so a T-junction
+      landing on a track's interior — or a side-on width overlap with no
+      shared endpoint at all — is contact, exactly as KiCad's own
+      connectivity engine sees it; and
+    * the predicate is **invariant** under splitting a segment into
+      collinear subsegments with the same copper union: the centerline
+      distance minimum is attained at some point of the centerline, which
+      lies on one of the subsegments, and no subsegment centerline reaches
+      anywhere the whole centerline did not.
+
+    Widths are clamped at zero, so a width-less segment contributes only its
+    bare centerline (never negative reach).
+    """
+    reach = max(a_width or 0.0, 0.0) / 2.0 + max(b_width or 0.0, 0.0) / 2.0
+    # Cheap axis-aligned reject before the exact test: the connectivity
+    # extractor evaluates this over every segment pair on the board.
+    for axis in (0, 1):
+        if (
+            min(a_start[axis], a_end[axis]) > max(b_start[axis], b_end[axis]) + reach
+            or min(b_start[axis], b_end[axis]) > max(a_start[axis], a_end[axis]) + reach
+        ):
+            return False
+    return segment_centerline_distance(a_start, a_end, b_start, b_end) <= reach

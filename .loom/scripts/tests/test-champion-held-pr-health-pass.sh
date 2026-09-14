@@ -90,6 +90,31 @@
 # a drift guard pinning the pinned-tracking-issue mechanism (title/marker,
 # `loom:blocked` exclusion, edit-in-place vs. create) in the shipped markdown.
 #
+# Recurrence incident (#7048): #6720's own fix is what made this possible —
+# 2026-08-28 ~16:31Z the operator batch-removed `loom:operator` from 22
+# CONFLICTING held PRs so Doctor could rebase them (the release terms were
+# journaled in the operator's own incident tracking, outside this repo).
+# Doctor's rebases worked, but a bare
+# `--remove-label loom:operator` is not one of the four durable release
+# signals "Sticky holds" (#4742) recognizes, so the hold MARKER survived and
+# re-derived on the next read. When the axes were still red for the SAME
+# reason (a structurally-red blast-radius axis does not change just because
+# `main` moved), "Hold behavior" silently reasserted `loom:operator` —
+# overriding the operator's own recent, explicit decision within hours.
+# Because `loom:operator` is exactly what excludes a PR from Doctor's
+# Priority-1 CONFLICTING queue (#5978), the relabeled PRs could never be
+# rebased again: 17 of the 22 released PRs were re-held within ~29 hours, and
+# the merge pace (recovered to ~15/day) dropped back to zero. #7048 narrows
+# "Hold behavior": a manual release is still not a release SIGNAL (the axes
+# are still re-judged fresh, unweakened) — but when the freshly-derived
+# concern is byte-identical to the one already on record AND `loom:operator`
+# was hand-removed since that record was written, the label is not silently
+# reasserted. A genuinely new/different concern still re-holds normally.
+# This file's Test 14/14B/15/15B cover the per-PR decision; Test 16
+# simulates the actual merge-wave shape (N held PRs, each rebase re-
+# conflicting the remainder) and asserts convergence to zero open conflicts
+# rather than the observed stable all-held deadlock.
+#
 # Usage:
 #   ./.loom/scripts/tests/test-champion-held-pr-health-pass.sh
 
@@ -249,6 +274,11 @@ state_labels() {
 champion_pr_pass() {
     local state="$1" prior_hold="$2" release_reason="$3" axes_red="$4"
     local mergeable="$5" hours_ago="$6" ci="$7" last_activity="${8:-2026-08-01T00:00:00Z}"
+    # reason_changed (#7048): whether THIS tick's freshly-derived concern is a
+    # NEW/different one from whatever the prior hold episode had on record.
+    # Only meaningful when a manual release is also in force (see below);
+    # defaults to false so every pre-#7048 call site is unaffected.
+    local reason_changed="${9:-false}"
 
     local MERGE_BLOCKED_BY_HOLD=false
 
@@ -263,16 +293,41 @@ champion_pr_pass() {
     else
         # Never held, or held-and-released: the four axes are judged normally.
         if [ "$axes_red" = true ]; then
-            # "Hold behavior" — idempotent notice + loom:operator, no merge.
-            if state_has "marker:champion:merge-risk-hold" "$state"; then
-                echo "HOLD_NOTICE:suppressed"
-            else
-                state_add "marker:champion:merge-risk-hold" "$state"
-                echo "COMMENT:champion:merge-risk-hold"
+            # Manual-release detection (#7048): the bot never removes
+            # loom:operator on this path (only a real merge or the unheld-
+            # stale route do that), so "a prior hold episode existed AND the
+            # label is not currently on the PR" can only mean a human removed
+            # it by hand since that episode's marker was posted.
+            local manual_release_since_hold=false
+            if [ "$prior_hold" = true ] && ! state_has "label:loom:operator" "$state"; then
+                manual_release_since_hold=true
             fi
-            state_add "label:loom:operator" "$state"
+
+            if [ "$manual_release_since_hold" = true ] && [ "$reason_changed" != true ]; then
+                # #7048: respect the manual release — do NOT silently
+                # reassert loom:operator for a concern that reads the same as
+                # the one already on record. The ORIGINAL hold marker/notice
+                # is left untouched; one transparency comment per episode.
+                if state_has "marker:champion:hold-release-respected" "$state"; then
+                    echo "RESPECT_NOTICE:suppressed"
+                else
+                    state_add "marker:champion:hold-release-respected" "$state"
+                    echo "COMMENT:champion:hold-release-respected"
+                fi
+                echo "HOLD:manual-release-respected"
+                # loom:operator is deliberately NOT reapplied here.
+            else
+                # "Hold behavior" — idempotent notice + loom:operator, no merge.
+                if state_has "marker:champion:merge-risk-hold" "$state"; then
+                    echo "HOLD_NOTICE:suppressed"
+                else
+                    state_add "marker:champion:merge-risk-hold" "$state"
+                    echo "COMMENT:champion:merge-risk-hold"
+                fi
+                state_add "label:loom:operator" "$state"
+                echo "HOLD:fresh"
+            fi
             MERGE_BLOCKED_BY_HOLD=true
-            echo "HOLD:fresh"
         fi
     fi
 
@@ -409,6 +464,82 @@ digest_row() {
     local status="$mergeable"
     [[ "$at_doctor" == true ]] && status="$status, out at Doctor"
     echo "| #$pr_num | $reason | $status |"
+}
+
+# =====================================================================
+# Per-PR conflict-duration tracking (#7020), mirrored from
+# champion-pr-merge.md's "Held-PR Census -> Per-PR Digest" Step 0 / Step 1:
+#   - conflict_since_for: carry the first-seen-CONFLICTING timestamp forward
+#     from the PREVIOUS pass's digest body (a `champion:conflict-since:PR=<n>
+#     TS=<iso>` marker) if this PR was already CONFLICTING there; otherwise
+#     this is a fresh conflict episode and the clock starts at "now". A PR
+#     that went MERGEABLE for even one intervening pass has no marker in
+#     that pass's body, so the very next CONFLICTING pass naturally resets
+#     rather than resuming the original "since" — the load-bearing edge case
+#     from the issue's own Test Plan (no rot-time accumulation across a
+#     MERGEABLE gap).
+#   - conflict_days: whole days elapsed between a since-timestamp and "now"
+#     (both ISO-8601 UTC), cross-platform (GNU `date -d`, BSD `date -j -f`).
+#   - digest_status: formats the Status cell exactly as champion-pr-merge.md's
+#     STATUS variable does — "<mergeable>[ since <ts>, <n>d][, out at Doctor]".
+#   - digest_aggregate_line: formats the digest issue's "**Aggregate**: ..."
+#     line, split into held-clean vs. held-rotting counts.
+# =====================================================================
+CONFLICT_SINCE_PREFIX="<!-- champion:conflict-since:PR="
+ROT_THRESHOLD_DAYS=3
+
+conflict_since_for() {
+    local pr_num="$1" mergeable="$2" old_body="$3" now_iso="$4"
+    if [[ "$mergeable" != "CONFLICTING" ]]; then
+        echo ""
+        return
+    fi
+    local prior
+    prior=$(printf '%s\n' "$old_body" | grep -o "${CONFLICT_SINCE_PREFIX}${pr_num} TS=[0-9TZ:-]*" | head -1 | sed -E 's/.*TS=//')
+    if [[ -n "$prior" ]]; then
+        echo "$prior"
+    else
+        echo "$now_iso"
+    fi
+}
+
+_iso_to_epoch() {
+    date -d "$1" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s
+}
+
+conflict_days() {
+    local since_iso="$1" now_iso="$2"
+    echo $(( ( $(_iso_to_epoch "$now_iso") - $(_iso_to_epoch "$since_iso") ) / 86400 ))
+}
+
+digest_status() {
+    local mergeable="$1" since="$2" days="$3" at_doctor="$4"
+    local status="$mergeable"
+    if [[ "$mergeable" == "CONFLICTING" ]]; then
+        status="${status} since ${since}, ${days}d"
+    fi
+    [[ "$at_doctor" == true ]] && status="$status, out at Doctor"
+    echo "$status"
+}
+
+digest_aggregate_line() {
+    local held="$1" conflicting="$2" rotting="$3" at_doctor="$4" oldest="$5"
+    local clean=$((conflicting - rotting))
+    echo "Merge-risk holds: $held open PR(s) — $conflicting conflicting ($rotting rotting >=${ROT_THRESHOLD_DAYS}d, $clean clean), $at_doctor out at Doctor, oldest ${oldest}d"
+}
+
+# =====================================================================
+# Digest-issue lookup (#7338), mirrored from champion-pr-merge.md's Step 0
+# `DIGEST_ISSUE=...` jq pipeline: given the `gh issue list --json
+# number,body` payload for every open issue whose title matches, prefer a
+# marker-tagged match (lowest number among ties, though there should only
+# ever be one); when NO match carries the marker, fall back to the oldest
+# (lowest-numbered) open title match instead of returning empty and letting
+# Step 4b create a duplicate digest issue.
+# =====================================================================
+digest_issue_lookup() {
+    local json="$1" marker="$2"
+    printf '%s\n' "$json" | jq "([.[] | select(.body | startswith(\"$marker\"))] as \$tagged | if (\$tagged | length) > 0 then (\$tagged | min_by(.number)) else min_by(.number) end) | .number // empty"
 }
 
 echo "=== test-champion-held-pr-health-pass.sh ==="
@@ -784,7 +915,147 @@ assert_eq "| #6621 | override: loom:auto-merge-ok applied | MERGEABLE |" \
 echo
 
 # ---------------------------------------------------------------------
-echo "Test 11: the shipped markdown matches this mirror (drift guard)"
+echo "Test 11: per-PR digest — conflict-duration tracking distinguishes fresh vs. rotting conflicts (#7020)"
+
+NOW_T0="2026-08-20T00:00:00Z"
+NOW_T1="2026-08-23T00:00:00Z"  # +3 days, still conflicting
+NOW_T2="2026-08-24T00:00:00Z"  # PR cleared to MERGEABLE this tick
+NOW_T3="2026-08-25T00:00:00Z"  # PR is CONFLICTING again, after the gap
+
+# Tick 1: brand-new conflict, no prior digest body at all (first-run case,
+# also covers "the digest issue itself does not exist yet" from the issue's
+# own Test Plan).
+SINCE_T1=$(conflict_since_for 9001 CONFLICTING "" "$NOW_T0")
+assert_eq "$NOW_T0" "$SINCE_T1" \
+    "tick 1: a first-seen conflict with no prior digest body starts the clock at 'now'"
+assert_eq "0" "$(conflict_days "$SINCE_T1" "$NOW_T0")" \
+    "tick 1: a conflict that started this same instant is 0 days old"
+
+BODY_T1="<!-- champion:conflict-since:PR=9001 TS=${SINCE_T1} -->"
+
+# Tick 2 (+3d): still conflicting — the digest carries the SAME since-
+# timestamp forward from the prior pass's body, so duration accumulates
+# rather than resetting on every tick.
+SINCE_T2=$(conflict_since_for 9001 CONFLICTING "$BODY_T1" "$NOW_T1")
+assert_eq "$NOW_T0" "$SINCE_T2" \
+    "tick 2: an ongoing conflict reuses the ORIGINAL since-timestamp carried in the prior digest body"
+DAYS_T2=$(conflict_days "$SINCE_T2" "$NOW_T1")
+assert_eq "3" "$DAYS_T2" "tick 2: 3 continuous days of conflict is computed correctly"
+assert_eq "true" "$([[ "$DAYS_T2" -ge "$ROT_THRESHOLD_DAYS" ]] && echo true || echo false)" \
+    "tick 2: 3 days at the ROT_THRESHOLD_DAYS=3 boundary already counts as rotting (>=, not >)"
+assert_eq "CONFLICTING since ${SINCE_T2}, 3d" \
+    "$(digest_status CONFLICTING "$SINCE_T2" "$DAYS_T2" false)" \
+    "tick 2: the digest row's Status cell reads 'CONFLICTING since <date>, Nd', matching the issue's own example format"
+
+BODY_T2="<!-- champion:conflict-since:PR=9001 TS=${SINCE_T2} -->"
+
+# Tick 3: the PR cleared (MERGEABLE) this pass — conflict_since_for returns
+# empty, so NO conflict-since marker is written for it into this pass's
+# digest body (mirroring champion-pr-merge.md's `if [ "$PR_MERGEABLE" =
+# "CONFLICTING" ]` guard around the marker-emitting block).
+SINCE_T3_CLEAR=$(conflict_since_for 9001 MERGEABLE "$BODY_T2" "$NOW_T2")
+assert_eq "" "$SINCE_T3_CLEAR" "tick 3: a cleared (MERGEABLE) PR gets no conflict-since marker"
+BODY_T3=""   # PR 9001's marker is genuinely absent from this pass's body
+
+# Tick 4: CONFLICTING again. The prior body (BODY_T3) carries no marker for
+# this PR — it was MERGEABLE last pass — so the clock RESETS to "now" rather
+# than resuming the T0 origin. This is the exact edge case named in the
+# issue body: "a held PR that flips CONFLICTING -> MERGEABLE -> CONFLICTING
+# again ... should not accumulate rot time across the MERGEABLE gap."
+SINCE_T4=$(conflict_since_for 9001 CONFLICTING "$BODY_T3" "$NOW_T3")
+assert_eq "$NOW_T3" "$SINCE_T4" \
+    "tick 4: re-conflicting after a MERGEABLE gap RESETS the since-timestamp to 'now'"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$SINCE_T4" != "$NOW_T0" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: tick 4 does NOT resume the original T0 origin — no rot-time accumulates across the MERGEABLE gap"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: tick 4 resumed the pre-gap origin — rot time would wrongly accumulate across a MERGEABLE gap"
+fi
+echo
+
+# ---------------------------------------------------------------------
+echo "Test 12: digest Status formatting and the aggregate held-clean/held-rotting split (#7020)"
+
+assert_eq "MERGEABLE" "$(digest_status MERGEABLE "" "" false)" \
+    "a MERGEABLE PR's Status cell carries no since/duration figure at all"
+assert_eq "MERGEABLE, out at Doctor" "$(digest_status MERGEABLE "" "" true)" \
+    "a MERGEABLE-but-out-at-Doctor PR keeps the existing Doctor suffix, unaffected by #7020"
+assert_eq "CONFLICTING since 2026-08-20T00:00:00Z, 8d" \
+    "$(digest_status CONFLICTING "2026-08-20T00:00:00Z" 8 false)" \
+    "a rotting CONFLICTING PR's Status cell matches the issue's example format verbatim"
+assert_eq "CONFLICTING since 2026-08-20T00:00:00Z, 8d, out at Doctor" \
+    "$(digest_status CONFLICTING "2026-08-20T00:00:00Z" 8 true)" \
+    "the since/duration figure and the Doctor suffix compose without clobbering each other"
+
+# Aggregate line: 5 held, 3 conflicting (2 rotting >=3d, 1 still fresh/clean),
+# 1 out at Doctor, oldest 12d.
+assert_eq "Merge-risk holds: 5 open PR(s) — 3 conflicting (2 rotting >=3d, 1 clean), 1 out at Doctor, oldest 12d" \
+    "$(digest_aggregate_line 5 3 2 1 12)" \
+    "the aggregate line distinguishes held-clean from held-rotting counts (AC #2), additive to the existing N/C/D/A fields"
+
+# A fully clean pile (every conflict younger than the threshold) still
+# reports both counts explicitly rather than omitting the rotting figure.
+assert_eq "Merge-risk holds: 2 open PR(s) — 2 conflicting (0 rotting >=3d, 2 clean), 0 out at Doctor, oldest 1d" \
+    "$(digest_aggregate_line 2 2 0 0 1)" \
+    "an all-clean pile reports '0 rotting' explicitly, not a silently-omitted figure"
+echo
+
+# ---------------------------------------------------------------------
+echo "Test 12B: digest-issue lookup falls back to a pre-marker digest issue instead of orphaning it (#7338)"
+
+MARKER='<!-- champion:merge-risk-hold-digest -->'
+
+# (a) A single, marker-less digest issue (created before the marker
+# convention shipped) — no marker-tagged issue exists at all. Pre-#7338 this
+# returned empty, and Step 4b would create a duplicate; the fallback must
+# adopt it instead.
+PRE_MARKER_ONLY='[
+  {"number": 6851, "body": "Champion Merge-Risk Hold Digest\n\n| PR | Reason | Status |"}
+]'
+assert_eq "6851" "$(digest_issue_lookup "$PRE_MARKER_ONLY" "$MARKER")" \
+    "(a) a marker-less digest issue is adopted when no marker-tagged issue exists (#7338)"
+
+# (a2) Two marker-less title matches, neither carrying the marker — the
+# OLDEST (lowest-numbered) one is selected, not whichever the forge happens
+# to list first.
+PRE_MARKER_TWO='[
+  {"number": 7100, "body": "a newer marker-less duplicate, filed by mistake"},
+  {"number": 6851, "body": "the original pre-marker digest issue"}
+]'
+assert_eq "6851" "$(digest_issue_lookup "$PRE_MARKER_TWO" "$MARKER")" \
+    "(a2) with multiple marker-less title matches, the oldest (lowest-numbered) one is selected"
+
+# (b) A marker-tagged issue exists ALONGSIDE an older marker-less title
+# match — the marker-tagged issue must always win, regardless of issue-number
+# ordering (the marker-less one is a stale/pre-convention leftover, not the
+# live digest).
+TAGGED_AND_OLDER_UNTAGGED="[
+  {\"number\": 6851, \"body\": \"an older marker-less title match, not the live digest\"},
+  {\"number\": 7050, \"body\": \"${MARKER}\\nthe current, marker-tagged digest issue\"}
+]"
+assert_eq "7050" "$(digest_issue_lookup "$TAGGED_AND_OLDER_UNTAGGED" "$MARKER")" \
+    "(b) a marker-tagged issue wins over an OLDER marker-less title match, regardless of numbering (#7338)"
+
+# (b2) Same as (b) but with the numbering reversed, to confirm the win is not
+# an accident of "highest number wins" — it must be the marker, not the
+# ordering, that decides.
+TAGGED_LOWER_NUMBER="[
+  {\"number\": 7050, \"body\": \"${MARKER}\\nthe current, marker-tagged digest issue\"},
+  {\"number\": 9999, \"body\": \"a newer marker-less title match\"}
+]"
+assert_eq "7050" "$(digest_issue_lookup "$TAGGED_LOWER_NUMBER" "$MARKER")" \
+    "(b2) the marker-tagged issue still wins even when it has the LOWER number — the marker decides, not the ordering"
+
+# (c) No title match at all — the lookup returns empty, exactly as before
+# (Step 4b's create-a-new-issue path still applies when nothing exists).
+assert_eq "" "$(digest_issue_lookup '[]' "$MARKER")" \
+    "(c) no title match at all still returns empty, unaffected by the fallback (#7338)"
+echo
+
+# ---------------------------------------------------------------------
+echo "Test 13: the shipped markdown matches this mirror (drift guard)"
 
 assert_doc_contains "$CHAMPION_MD" \
     "## Held-PR Health Pass (#6720)" \
@@ -953,6 +1224,267 @@ assert_doc_contains "$CHAMPION_MD" \
 assert_doc_lacks "$CHAMPION_MD" \
     "### #5 under a hold — route to Doctor, keep the hold" \
     "the pre-#6852 unconditional held-route heading is gone (superseded, not just supplemented)"
+
+# --- #7020: per-PR conflict-duration tracking, and the held-clean/
+# held-rotting split in the digest's aggregate line ---
+assert_doc_contains "$CHAMPION_MD" \
+    "**Step 0 — locate the existing digest issue and read its current body" \
+    "the digest gained a Step 0 that reads its OWN previous body, ahead of Step 1 (#7020)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'OLD_DIGEST_BODY=$("$GH_READ" issue view "$DIGEST_ISSUE" --json body --jq '"'"'.body'"'"')' \
+    "Step 0 reads the pinned digest issue's own body so Step 1 can carry the conflict-since clock forward across passes (#7020)"
+
+# --- #7338: digest-issue lookup falls back to the oldest marker-less title
+# match instead of orphaning a pre-marker digest issue ---
+assert_doc_contains "$CHAMPION_MD" \
+    'as \$tagged | if (\$tagged | length) > 0 then (\$tagged | min_by(.number)) else min_by(.number) end' \
+    "Step 0's DIGEST_ISSUE lookup prefers a marker-tagged match, falling back to the oldest marker-less title match otherwise (#7338)"
+
+assert_doc_lacks "$CHAMPION_MD" \
+    '] | first | .number // empty")' \
+    "the old no-fallback lookup (empty when nothing carries the marker) is gone (#7338)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "oldest (lowest-numbered) open title match instead of returning empty" \
+    "the doc explains the fallback rationale: adopt a pre-marker digest issue rather than duplicate it (#7338)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'CONFLICT_SINCE_PREFIX="<!-- champion:conflict-since:PR="' \
+    "each held PR's first-seen-CONFLICTING timestamp is persisted under its own durable marker (#7020 AC #1)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "ROT_THRESHOLD_DAYS=3" \
+    "a rot threshold distinguishes a fresh conflict from a rotting one (#7020 AC #1/#2)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'PRIOR_SINCE=$(printf '"'"'%s\n'"'"' "$OLD_DIGEST_BODY" | grep -o "${CONFLICT_SINCE_PREFIX}${PR_NUM} TS=[0-9TZ:-]*" | head -1 | sed -E '"'"'s/.*TS=//'"'"')' \
+    "the since-timestamp is carried forward from the PREVIOUS pass's digest body, not re-derived from a fresh 'now' every tick (#7020)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'STATUS="${STATUS} since ${CONFLICT_SINCE}, ${CONFLICT_DAYS}d"' \
+    "a CONFLICTING held PR's digest row shows 'CONFLICTING since <date>, Nd', matching the issue's own example format (#7020 AC #1)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    '$HELD_ROTTING rotting >=${ROT_THRESHOLD_DAYS}d, $HELD_CONFLICTING_CLEAN clean' \
+    "the digest's aggregate line distinguishes held-clean from held-rotting counts (#7020 AC #2)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    '$CONFLICT_SINCE_MARKERS---' \
+    "the per-PR conflict-since markers are written back into the digest body so the NEXT pass's Step 0 can read them (#7020)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "a \`MERGEABLE\` pass never writes the marker for that PR" \
+    "the doc names the CONFLICTING -> MERGEABLE -> CONFLICTING reset edge case explicitly (#7020 Test Plan)"
+
+# --- #7048: manual-release-respecting sticky hold ---
+assert_doc_contains "$CHAMPION_MD" \
+    "MANUAL_RELEASE_SINCE_HOLD=false" \
+    "the sticky-hold precheck computes MANUAL_RELEASE_SINCE_HOLD (#7048)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'OPERATOR_LABEL_NOW=$(jq -r '"'"'[.labels[].name] | any(. == "loom:operator")'"'"' <<<"$PR_JSON")' \
+    "manual release is detected from the SAME already-fetched PR_JSON, no extra forge call (#7048)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'if [ "$MANUAL_RELEASE_SINCE_HOLD" = true ] && [ "$CONCERN_BULLET" = "$PRIOR_CONCERN_BULLET" ]; then' \
+    "Hold behavior only skips the reapply when the concern is BYTE-IDENTICAL to the prior hold's own bullet (#7048)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'RESPECT_MARKER="<!-- champion:hold-release-respected:$HEAD_SHA -->"' \
+    "a manually-released, same-reason PR gets a distinct, per-head-SHA transparency notice instead of a silent relabel (#7048)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "**Champion: Respecting a Manual Release (#7048)**" \
+    "the respecting-manual-release notice names itself and the issue (#7048)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true' \
+    "loom:operator is still reapplied on the genuinely-new-reason branch — #7048 narrows, does not remove, the reapply (AC #1)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "That is not a release signal" \
+    "the notice is explicit that respecting the label removal does not clear the hold itself — merge safety is unweakened (AC #1)"
+
+echo
+echo "Test 14: manual release, SAME reason — loom:operator is NOT silently reapplied (#7048)"
+# Models the observed incident directly: a PR was held, the operator batch-
+# removed loom:operator (no qualifying release comment — the label is simply
+# absent from the state below), and Doctor's rebase (a new commit,
+# release_reason set) re-derives the SAME structurally-red concern (blast
+# radius on a guard-hook file never stops being red just because main moved).
+S=$(state_new)
+state_add "marker:champion:merge-risk-hold" "$S"
+# loom:operator deliberately NOT added — models the hand removal.
+OUT=$(champion_pr_pass "$S" true "new head commit abc1234" true MERGEABLE 2 pass 2026-08-01T00:00:00Z false)
+assert_contains "$OUT" "HOLD:manual-release-respected" "the manual release is recognized and respected (AC #1)"
+assert_contains "$OUT" "COMMENT:champion:hold-release-respected" "a one-time transparency comment is posted"
+assert_lacks "$OUT" "COMMENT:champion:merge-risk-hold" "the ORIGINAL hold notice is not reposted — it is left untouched"
+assert_lacks "$OUT" "HOLD:fresh" "this is not treated as an ordinary silent re-hold"
+assert_contains "$OUT" "NO_MERGE:hold" "the hold itself still stands — respecting the label removal never weakens merge safety (AC #1)"
+assert_lacks "$(state_labels "$S")" "loom:operator" \
+    "loom:operator is NOT reapplied — this is what keeps the PR visible to Doctor's Priority-1 CONFLICTING queue (#5978, AC #1)"
+rm -f "$S"
+echo
+
+echo "Test 14B: manual release respected — transparency notice is idempotent per head SHA, not per tick (#7048)"
+S=$(state_new)
+state_add "marker:champion:merge-risk-hold" "$S"
+TICK1=$(champion_pr_pass "$S" true "new head commit abc1234" true MERGEABLE 2 pass)
+TICK2=$(champion_pr_pass "$S" true "new head commit abc1234" true MERGEABLE 3 pass)
+assert_contains "$TICK1" "COMMENT:champion:hold-release-respected" "tick 1 posts the transparency notice"
+assert_contains "$TICK2" "RESPECT_NOTICE:suppressed" "tick 2 suppresses the duplicate notice (still the same episode)"
+assert_lacks "$TICK2" "loom:operator" "loom:operator is still never reapplied on the repeat tick"
+rm -f "$S"
+echo
+
+echo "Test 15: manual release, but a NEW/different reason — loom:operator IS reapplied (#7048)"
+# The operator has not seen THIS concern before, so re-flagging it is fair —
+# #7048 narrows the silent-reapply case, it does not disable holds entirely.
+S=$(state_new)
+state_add "marker:champion:merge-risk-hold" "$S"
+OUT=$(champion_pr_pass "$S" true "new head commit abc1234" true MERGEABLE 2 pass 2026-08-01T00:00:00Z true)
+assert_contains "$OUT" "HOLD:fresh" "a genuinely new/different concern re-holds normally, even after a manual release (AC #1)"
+assert_lacks "$OUT" "HOLD:manual-release-respected" "this is not the same-reason respected path"
+assert_contains "$(state_labels "$S")" "loom:operator" "loom:operator is reapplied — the operator has not seen this NEW reason yet"
+rm -f "$S"
+echo
+
+echo "Test 15B: manual release detection requires a PRIOR hold episode — a PR's very first hold is unaffected (#7048)"
+# prior_hold=false (never held before): MANUAL_RELEASE_SINCE_HOLD is
+# trivially false regardless of whether loom:operator happens to be absent
+# (it always is, on a first-ever hold) — this must behave exactly like the
+# pre-#7048 "fresh hold" path (Test 6/6B above), not the respected path.
+S=$(state_new)
+OUT=$(champion_pr_pass "$S" false "" true MERGEABLE 2 pass)
+assert_contains "$OUT" "HOLD:fresh" "a PR's first-ever hold always reapplies loom:operator, never the respected path"
+assert_lacks "$OUT" "HOLD:manual-release-respected" "no prior episode exists to have been manually released from"
+assert_contains "$(state_labels "$S")" "loom:operator" "loom:operator is applied on the ordinary first-ever hold"
+rm -f "$S"
+echo
+
+# ---------------------------------------------------------------------
+echo "Test 16: MERGE-WAVE REGRESSION (#7048) — N previously-held, manually-released PRs must drain to zero open conflicts, not restabilize into an all-held deadlock"
+# This is the exact incident shape from the issue: 2026-08-28->08-29,
+# rjwalters batch-released loom:operator from 22 CONFLICTING held PRs so
+# Doctor could rebase them; the bot re-applied loom:operator to 17 of them
+# within ~29 hours as each rebase re-derived the same still-red concern,
+# and the merge pace dropped back to zero. Doctor's Priority-1 queue only
+# ever touches a CONFLICTING PR that does NOT carry loom:operator (#5978) —
+# so once the bot relabels a PR, Doctor can never rebase it again, and it
+# stays CONFLICTING forever. This wave models that queue directly: PRE-#7048
+# reapply logic always reasserts the label (axes never actually go green in
+# this fixture — the concern is structural, e.g. "touches guard hooks"),
+# POST-#7048 logic does not, because the reason never changes.
+
+# Isolated "Hold behavior" reapply decision — the single boolean this whole
+# incident turns on — mirrored in both its pre- and post-#7048 shapes.
+hold_reapply_decision_PRE7048() {
+    local axes_red="$1"
+    [[ "$axes_red" == true ]] && echo true || echo false
+}
+
+hold_reapply_decision_POST7048() {
+    local axes_red="$1" manual_release_since_hold="$2" reason_changed="$3"
+    if [[ "$axes_red" != true ]]; then
+        echo false
+        return
+    fi
+    if [[ "$manual_release_since_hold" == true && "$reason_changed" != true ]]; then
+        echo false
+    else
+        echo true
+    fi
+}
+
+# Simulate a merge wave over $n PRs, all previously held for the SAME
+# structurally-red concern and all manually released (loom:operator absent,
+# hold marker still present) right before the wave starts. Each tick, Doctor
+# rebases exactly one CONFLICTING, non-excluded PR (its Priority-1 queue):
+# the rebase mechanically clears THAT PR's own conflict, then Champion
+# re-judges it (axes still red, same reason, manual release in force). If
+# $decision_fn says "reapply" the PR becomes EXCLUDED — stuck CONFLICTING
+# forever, since Doctor's queue will never touch a loom:operator PR again. If
+# it says "do not reapply", the PR is free to proceed (modeled here as
+# merging, since nothing further blocks it once Doctor+the label are out of
+# the way) — and per the issue's own observed shape, merging one PR moves
+# `main`, conflicting every other still-open PR.
+run_merge_wave() {
+    local n="$1" decision_fn="$2"
+    local -a conflicting gone
+    local i
+    for ((i = 0; i < n; i++)); do
+        conflicting[i]=true
+        gone[i]=false
+    done
+    local merged=0 waves=0
+    local max_waves=$((n * 2 + 5))   # generous cap; a converging system finishes in <= n waves
+
+    while ((waves < max_waves)); do
+        local target=-1
+        for ((i = 0; i < n; i++)); do
+            if [[ "${conflicting[i]}" == true && "${gone[i]}" == false ]]; then
+                target=$i
+                break
+            fi
+        done
+        ((target == -1)) && break   # nothing left for Doctor to touch
+        waves=$((waves + 1))
+
+        # Doctor rebases $target: mechanically clears ITS OWN conflict.
+        conflicting[target]=false
+
+        local reapply
+        reapply=$("$decision_fn" true true false)
+        if [[ "$reapply" == true ]]; then
+            # Bug shape: relabeled -> excluded from Doctor's queue forever,
+            # and since nothing else will ever touch it, it stays conflicting.
+            gone[target]=true
+            conflicting[target]=true
+        else
+            # Fix shape: not excluded, so it proceeds — merges, moving main
+            # and re-conflicting every other still-open PR (the issue's own
+            # "each merge conflicts the remainder" wave shape).
+            merged=$((merged + 1))
+            gone[target]=true
+            for ((i = 0; i < n; i++)); do
+                if [[ "$i" != "$target" && "${gone[i]}" == false ]]; then
+                    conflicting[i]=true
+                fi
+            done
+        fi
+    done
+
+    local still_conflicting=0
+    for ((i = 0; i < n; i++)); do
+        [[ "${conflicting[i]}" == true ]] && still_conflicting=$((still_conflicting + 1))
+    done
+    echo "$still_conflicting $merged $waves"
+}
+
+N=6
+read -r OLD_CONFLICTING OLD_MERGED OLD_WAVES <<<"$(run_merge_wave "$N" hold_reapply_decision_PRE7048)"
+read -r NEW_CONFLICTING NEW_MERGED NEW_WAVES <<<"$(run_merge_wave "$N" hold_reapply_decision_POST7048)"
+
+assert_eq "$N" "$OLD_WAVES" \
+    "control: pre-#7048 logic touches each PR exactly once before the whole wave stalls (relabeled on first touch)"
+assert_eq "$N" "$OLD_CONFLICTING" \
+    "control: pre-#7048 logic reproduces the incident shape — the wave stabilizes with ALL $N PRs stuck CONFLICTING"
+assert_eq "0" "$OLD_MERGED" \
+    "control: pre-#7048 logic merges NOTHING — matches the observed '0 merges since 06:37Z' stall"
+assert_eq "0" "$NEW_CONFLICTING" \
+    "fix: post-#7048 logic drains the SAME wave to ZERO open conflicts, never restabilizing into an all-held deadlock (AC #2/#3)"
+assert_eq "$N" "$NEW_MERGED" \
+    "fix: post-#7048 logic lets every PR through instead of relabeling it out of Doctor's reach (AC #2)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$NEW_WAVES" -le "$N" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: the fix converges in at most $N waves (one Doctor touch per PR), not an unbounded/non-converging loop"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: expected convergence within $N waves, took $NEW_WAVES"
+fi
+echo
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

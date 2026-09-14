@@ -1,0 +1,81 @@
+{
+  "VIN": {
+    "name": "Motor power",
+    "priority": 1,
+    "trace_width": 0.5,
+    "neck_trace_width": 0.2,
+    "clearance": 0.127,
+    "via_size": 0.65,
+    "route_via": "pathfinder",
+    "is_pour_net": false
+  },
+  "FUSED": {
+    "name": "Motor power",
+    "priority": 1,
+    "trace_width": 0.5,
+    "neck_trace_width": 0.2,
+    "clearance": 0.127,
+    "via_size": 0.65,
+    "route_via": "pathfinder",
+    "is_pour_net": false
+  },
+  "VM": {
+    "name": "Motor power",
+    "priority": 1,
+    "trace_width": 0.5,
+    "neck_trace_width": 0.2,
+    "clearance": 0.127,
+    "via_size": 0.65,
+    "route_via": "pathfinder",
+    "is_pour_net": false
+  },
+  "PHASE_A": {
+    "name": "Motor power",
+    "priority": 1,
+    "trace_width": 0.5,
+    "neck_trace_width": 0.2,
+    "clearance": 0.127,
+    "via_size": 0.65,
+    "route_via": "pathfinder",
+    "is_pour_net": false
+  },
+  "PHASE_B": {
+    "name": "Motor power",
+    "priority": 1,
+    "trace_width": 0.5,
+    "neck_trace_width": 0.2,
+    "clearance": 0.127,
+    "via_size": 0.65,
+    "route_via": "pathfinder",
+    "is_pour_net": false
+  },
+  "PHASE_C": {
+    "name": "Motor power",
+    "priority": 1,
+    "trace_width": 0.5,
+    "neck_trace_width": 0.2,
+    "clearance": 0.127,
+    "via_size": 0.65,
+    "route_via": "pathfinder",
+    "is_pour_net": false
+  },
+  "GND_SENSE": {
+    "name": "Motor power",
+    "priority": 1,
+    "trace_width": 0.5,
+    "neck_trace_width": 0.2,
+    "clearance": 0.127,
+    "via_size": 0.65,
+    "route_via": "pathfinder",
+    "is_pour_net": false
+  },
+  "GND": {
+    "name": "Ground plane",
+    "priority": 1,
+    "trace_width": 0.5,
+    "clearance": 0.127,
+    "is_pour_net": true,
+    "route_via": "pour",
+    "zone_connection": "solid"
+  }
+}

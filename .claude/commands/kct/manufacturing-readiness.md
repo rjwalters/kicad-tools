@@ -128,6 +128,20 @@ Sign off **only if all applicable gates** hold:
 
 If any applicable gate fails or could not run, report **NOT signed off**, name the failing gate, and quote the specific violation(s). Never mark a board fab-ready on a partial run.
 
+## Scripted equivalent: `kct readiness`
+
+These gates are also available non-interactively as `kct readiness <board-path>
+[--mfr <tier>] [--assembly | --pcb-only]` (issue #4977). The command runs the
+same ritual — refill + save the canonical PCB, `kct check` at the resolved tier,
+the mandatory `kicad-cli pcb drc --refill-zones` cross-gate, the per-rule
+warning review, export/packaging — and additionally emits the hash-bound
+`output/readiness.json` evidence documented in `docs/board-json-schema.md`. It
+exits non-zero for anything other than a `ready` verdict and has no bypass flag.
+
+Use the command for CI and batch sign-off. Use this skill when a human-in-the-loop
+judgment is needed (an ambiguous BOM candidate, an accepted-risk warning decision)
+— the command refuses those rather than adjudicating them.
+
 ## What this skill does NOT do
 
 - It does not route copper, place parts, or edit the `.kicad_pcb`.

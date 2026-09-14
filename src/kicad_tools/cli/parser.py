@@ -166,6 +166,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_fix_footprints_parser(subparsers)
     _add_fix_vias_parser(subparsers)
     _add_fix_silkscreen_parser(subparsers)
+    _add_place_silk_refs_parser(subparsers)
     _add_repair_clearance_parser(subparsers)
     _add_fix_drc_parser(subparsers)
     _add_fix_erc_parser(subparsers)
@@ -186,6 +187,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_fleet_parser(subparsers)
     _add_render_parser(subparsers)
     _add_board_metrics_parser(subparsers)
+    _add_readiness_parser(subparsers)
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
@@ -685,6 +687,11 @@ def _add_check_parser(subparsers) -> None:
     """Add check subcommand parser (pure Python DRC)."""
     check_parser = subparsers.add_parser("check", help="Pure Python DRC (no kicad-cli)")
     check_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    check_parser.add_argument("--physical-copper-gap", type=float, default=None, metavar="MM")
+    check_parser.add_argument(
+        "--mask-copper-config",
+        help="Path to explicit mask-to-copper process policy and native runtime JSON",
+    )
     check_parser.add_argument("--format", choices=["table", "json", "summary"], default="table")
     check_parser.add_argument("--errors-only", action="store_true")
     check_parser.add_argument("--strict", action="store_true", help="Exit with code 2 on warnings")
@@ -858,6 +865,33 @@ def _add_check_parser(subparsers) -> None:
             "no-sidecar behaviour (the diff-pair / match-group skew rules "
             "stay inactive).  Cannot be combined with --net-class-map "
             "(Issue #4601)."
+        ),
+    )
+    check_parser.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        help=(
+            "Path to a JSON sidecar declaring branch-specific current-path "
+            "intent (stable RefDes.pad source/sink endpoints with their own "
+            "declared current, Issue #4980).  When supplied, enables the "
+            "path_ampacity DRC rule to check each declared branch "
+            "independently of --net-class-map's whole-net target_ampacity.  "
+            "Auto-discovered next to the board when this flag is omitted -- "
+            "as <board-stem>.current_paths.json or current_paths.json, in "
+            "the board dir then output/ then ../output/ (mirrors "
+            "--net-class-map, Issue #5124).  Use --no-current-paths to "
+            "suppress that auto-discovery."
+        ),
+    )
+    check_parser.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help=(
+            "Suppress current-paths sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (path_ampacity stays inactive).  Cannot "
+            "be combined with --current-paths."
         ),
     )
     check_parser.add_argument(
@@ -1754,6 +1788,13 @@ def _add_sch_parser(subparsers) -> None:
     )
     add_format_flag(sch_disconnect)
 
+    sch_fix_wire_stubs = sch_subparsers.add_parser(
+        "fix-wire-stubs", help="Safely extend exact-grid wire stubs to pins"
+    )
+    sch_fix_wire_stubs.add_argument("schematic", help="Root .kicad_sch file")
+    sch_fix_wire_stubs.add_argument("--dry-run", "-n", action="store_true")
+    add_format_flag(sch_fix_wire_stubs)
+
     # sch reconnect-pin
     sch_reconnect_pin = sch_subparsers.add_parser(
         "reconnect-pin", help="Reconnect a pin from one net to another"
@@ -2140,6 +2181,18 @@ def _add_pcb_parser(subparsers) -> None:
         "reported but not anchored. Composes with --all-runs.",
     )
     pcb_reinforce.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        help="Path to a JSON sidecar declaring branch-specific current-path "
+        "intent (Issue #4980; see kicad_tools.router.current_paths."
+        "CurrentPathSpec). When any declared path targets --net, reinforcement "
+        "gates to an allow-list: only runs fully covered by a resolved, "
+        "reinforcement-eligible path are anchored -- a declared sense/Kelvin "
+        "branch (reinforcement_eligible=false) is never anchored or bridged, "
+        "even with --all-runs.",
+    )
+    pcb_reinforce.add_argument(
         "-o",
         "--output",
         dest="output",
@@ -2155,6 +2208,32 @@ def _add_pcb_parser(subparsers) -> None:
         "--dry-run",
         action="store_true",
         help="Report anchors that would be placed/refused without writing files",
+    )
+
+    # pcb current-paths-audit (issue #4980)
+    pcb_current_paths_audit = pcb_subparsers.add_parser(
+        "current-paths-audit",
+        help="Audit declared branch-specific current-path intent against routed copper",
+        description="Independent post-write audit (Issue #4980): resolves every "
+        "declared current-path (kicad_tools.router.current_paths.CurrentPathSpec) "
+        "against the routed board and reports which physical copper each branch "
+        "covers, which paths failed to resolve (moved/removed pad, off-net, no "
+        "continuous copper) or are ambiguous (a loop/parallel return reachable "
+        "from the endpoints), and which routed copper on a declared net no "
+        "resolved path covers. Read-only -- never mutates or saves the board.",
+    )
+    pcb_current_paths_audit.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_current_paths_audit.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        required=True,
+        help="Path to a JSON sidecar declaring branch-specific current-path intent",
+    )
+    pcb_current_paths_audit.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
     )
 
     # pcb dedupe (issue #4175)
@@ -3552,6 +3631,11 @@ def _add_route_parser(subparsers) -> None:
     )
     route_parser.add_argument("--clearance", type=float, default=0.15, help="Clearance in mm")
     route_parser.add_argument(
+        "--strict-pad-clearance",
+        action="store_true",
+        help="Enforce authored clearance against all foreign pads, including fine-pitch and NC pads.",
+    )
+    route_parser.add_argument(
         "--fine-pitch-clearance",
         type=float,
         default=None,
@@ -3757,7 +3841,21 @@ def _add_route_parser(subparsers) -> None:
         "--timeout",
         type=float,
         default=None,
-        help="Timeout in seconds for routing (default: no timeout). Returns best partial result if reached.",
+        help="HARD TOTAL routing invocation budget in seconds (default: unbounded). Nothing escapes it -- escalation, placement feedback, placement-delta probes and auto-fix all share it. Includes cleanup/native work; allows up to 5 extra seconds for raw partial serialization, then terminates the process group and exits 124. Use --search-timeout to bound an individual search stage inside it.",
+    )
+    route_parser.add_argument(
+        "--search-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Per-search-stage wall-clock allocation in seconds (default: the "
+            "value of --timeout). Caps the initial routing pass, each "
+            "escalation attempt and each placement-feedback iteration "
+            "individually, INSIDE the hard total --timeout -- never an escape "
+            "from it. Set below --timeout to reserve budget for later stages "
+            "and postprocessing. Issue #5266."
+        ),
     )
     route_parser.add_argument(
         "--per-net-timeout",
@@ -3890,6 +3988,15 @@ def _add_route_parser(subparsers) -> None:
             "Print advisory routing-quality metrics per post-route stage "
             "(pre-optimize / post-optimize / post-nudge / post-consolidate / "
             "post-finalize). Read-only diagnostic -- never changes routed copper"
+        ),
+    )
+    route_parser.add_argument(
+        "--auto-pour",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Automatically add missing power copper zones (enabled by default). "
+            "Use --no-auto-pour to preserve the authored plane configuration."
         ),
     )
     # Issue #4502: tri-state default.  ``BooleanOptionalAction`` with
@@ -4193,6 +4300,25 @@ def _add_route_parser(subparsers) -> None:
             "avoided layer must never carry a given net."
         ),
     )
+    # Issue #5014: opt-in HARD signal-layer eligibility for controlled-impedance
+    # plane assignments.  Mirror of the inner route_cmd.py flag; both sites
+    # must stay in sync per ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--reserve-plane-layers",
+        action="store_true",
+        default=False,
+        help=(
+            "Hard-restrict signal routing to the resolved layer stack's "
+            "non-PLANE layers (e.g. with --layers 4, only F.Cu/B.Cu stay "
+            "routable -- In1.Cu/In2.Cu are reserved for the GND/PWR "
+            "reference planes). By default LayerDefinition.is_routable "
+            "treats every copper layer -- including declared reference "
+            "planes -- as signal-eligible, so a controlled-impedance recipe "
+            "can silently lose its continuous reference construction to "
+            "ordinary signal. A no-op on a stack with no PLANE layers "
+            "(--layers 2, 4-all, or an all-signal auto-detected board)."
+        ),
+    )
     route_parser.add_argument(
         "--auto-fix",
         action="store_true",
@@ -4343,10 +4469,12 @@ def _add_route_parser(subparsers) -> None:
         metavar="SECONDS",
         help=(
             "Per-iteration wall-clock budget for the placement-delta feedback "
-            "loop's re-routes, in seconds. The loop's own allocation: it "
-            "survives an already-exhausted --timeout and gives each delta's "
-            "re-route the same budget the initial pass got. Default: share "
-            "whatever remains of --timeout. Issue #4468."
+            "loop's re-routes, in seconds. The loop's own allocation, "
+            "independent of the per-stage --search-timeout, so an exhausted "
+            "initial search stage no longer starves the probes. It does NOT "
+            "escape the hard total --timeout: it is clamped to what that "
+            "deadline has left. Default: share whatever remains of --timeout. "
+            "Issues #4468, #5266."
         ),
     )
     route_parser.add_argument(
@@ -4625,6 +4753,37 @@ def _add_route_parser(subparsers) -> None:
             "segment after the last '/'), so a bare key FUSED_LINE matches "
             "KiCad's '/'-prefixed label net /FUSED_LINE while global power "
             "nets (GND, +3.3V) stay bare (Issue #4149)."
+        ),
+    )
+    route_parser.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a JSON sidecar declaring branch-specific current-path "
+            "intent (Issue #4980): stable RefDes.pad source/sink endpoints, "
+            "a continuous current, and reinforcement eligibility, per "
+            "physical branch. Lets a net that carries BOTH a high-current "
+            "trunk and low-current sense taps (a Kelvin shunt, an INA181 "
+            "input) be checked per branch instead of at one whole-net "
+            "target_ampacity. The post-route DRC runs the path_ampacity "
+            "rule against each declared branch's OWN current, and the "
+            "declarations are re-emitted as current_paths.json next to the "
+            "routed board so a later kct check audits the finished copper "
+            "against identical intent. Auto-discovered next to the input "
+            "board when omitted (mirrors --net-class-map); use "
+            "--no-current-paths to suppress that."
+        ),
+    )
+    route_parser.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help=(
+            "Suppress current-paths sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (path_ampacity stays inactive in the "
+            "post-route DRC). Cannot be combined with --current-paths."
         ),
     )
     route_parser.add_argument(
@@ -5004,6 +5163,11 @@ def _add_fix_vias_parser(subparsers) -> None:
     )
     fix_vias_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_vias_parser.add_argument(
+        "--search-alternatives",
+        action="store_true",
+        help="With --relocate-in-pad, search safe alternate escapes if the preferred slide is blocked",
+    )
+    fix_vias_parser.add_argument(
         "--mfr",
         choices=get_all_manufacturer_names(),
         default="jlcpcb",
@@ -5116,6 +5280,85 @@ def _add_fix_silkscreen_parser(subparsers) -> None:
         help="Preview changes without modifying files",
     )
     fix_silk_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_place_silk_refs_parser(subparsers) -> None:
+    """Add place-silk-refs subcommand parser (issue #5030)."""
+    from kicad_tools.silkscreen.place_refs import (
+        DEFAULT_CLEARANCE_MM,
+        DEFAULT_MAX_OFFSET_MM,
+        DEFAULT_STEP_MM,
+        SILK_EDGE_CLEARANCE_MM,
+    )
+
+    place_refs_parser = subparsers.add_parser(
+        "place-silk-refs",
+        help="Move readable silkscreen reference designators to clear collisions",
+    )
+    place_refs_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    place_refs_parser.add_argument(
+        "--mfr",
+        choices=get_all_manufacturer_names(),
+        default=None,
+        help="Manufacturer to source solder-mask clearance from (default: built-in 0.05mm)",
+    )
+    place_refs_parser.add_argument(
+        "--layers", type=int, default=2, help="Number of PCB layers (default: 2)"
+    )
+    place_refs_parser.add_argument(
+        "--copper", type=float, default=1.0, help="Outer copper weight in oz (default: 1.0)"
+    )
+    place_refs_parser.add_argument(
+        "--clearance",
+        type=float,
+        default=DEFAULT_CLEARANCE_MM,
+        help=f"Required silk-to-pad/silk-to-silk clearance in mm (default: {DEFAULT_CLEARANCE_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--edge-clearance",
+        type=float,
+        default=SILK_EDGE_CLEARANCE_MM,
+        help=f"Required silk-to-board-edge clearance in mm (default: {SILK_EDGE_CLEARANCE_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--max-offset",
+        type=float,
+        default=DEFAULT_MAX_OFFSET_MM,
+        help=f"Maximum search distance from the component body in mm (default: {DEFAULT_MAX_OFFSET_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--step",
+        type=float,
+        default=DEFAULT_STEP_MM,
+        help=f"Positive search ring spacing in mm; at most 4096 rings (default: {DEFAULT_STEP_MM})",
+    )
+    place_refs_parser.add_argument(
+        "--allow-rotate",
+        action="store_true",
+        help="Also try a 90-degree rotated orientation when the original does not fit",
+    )
+    place_refs_parser.add_argument(
+        "-o", "--output", help="Output file path (default: overwrite input)"
+    )
+    place_refs_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview the move plan without modifying files"
+    )
+    place_refs_parser.add_argument(
+        "--verify-drc",
+        action="store_true",
+        help="After applying, run native DRC; fail on silk findings or unavailable/failed verification",
+    )
+    place_refs_parser.add_argument(
+        "--render",
+        metavar="SVG_PATH",
+        help="Write a rendered review artifact (SVG) of old/new reference positions",
+    )
+    place_refs_parser.add_argument(
         "--format",
         choices=["text", "json", "summary"],
         default="text",
@@ -6505,6 +6748,54 @@ def _add_analyze_parser(subparsers) -> None:
         ),
     )
 
+    # analyze component-stress (operates on a schematic, not a PCB)
+    stress_parser = analyze_subparsers.add_parser(
+        "component-stress",
+        help="Check MOSFET VDS/VGS against declared operating states (advisory)",
+        description=(
+            "Evaluate each MOSFET's terminal-to-terminal stress (VDS = V(D)-V(S), "
+            "VGS = V(G)-V(S)) in every state of an explicit, reviewed "
+            "operating-state manifest, against Vds_max/Vgs_max symbol fields. "
+            "No circuit-state inference is performed: a missing state, pin role, "
+            "node potential or source-backed rating is reported UNRESOLVED -- "
+            "never a silent pass."
+        ),
+    )
+    stress_parser.add_argument("schematic", help="Schematic file to analyze (.kicad_sch)")
+    stress_parser.add_argument(
+        "--states",
+        dest="analyze_states",
+        required=True,
+        metavar="MANIFEST",
+        help="Operating-state manifest (.yaml/.yml/.json) declaring per-net node potentials",
+    )
+    stress_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    stress_parser.add_argument(
+        "--allow-unresolved",
+        dest="analyze_allow_unresolved",
+        action="store_true",
+        help=(
+            "Do not gate on UNRESOLVED rows (default: an unresolved state, pin "
+            "role or rating is a release blocker and exits non-zero)"
+        ),
+    )
+    stress_parser.add_argument(
+        "--allow-uncited-ratings",
+        dest="analyze_allow_uncited_ratings",
+        action="store_true",
+        help=(
+            "Accept Vds_max/Vgs_max fields without a Rating_Source/Datasheet "
+            "citation (default: an uncited rating is UNRESOLVED)"
+        ),
+    )
+
 
 def _add_constraints_parser(subparsers) -> None:
     """Add constraints subcommand parser with its subcommands."""
@@ -6886,6 +7177,126 @@ def _add_board_metrics_parser(subparsers) -> None:
     add_format_flag(bm_parser)
 
 
+def _add_readiness_parser(subparsers) -> None:
+    """Add the ``readiness`` parser (scriptable manufacturing sign-off, #4977).
+
+    Implements the ``/kct:manufacturing-readiness`` + ``/kct:tapeout`` skill
+    contracts as an orchestrated command and writes the hash-bound
+    ``output/readiness.json`` evidence the demo gallery validates.
+    """
+    rd_parser = subparsers.add_parser(
+        "readiness",
+        help="Run the manufacturing-readiness gates and write output/readiness.json",
+        description=(
+            "Refill and save the canonical PCB, run kct check at the resolved "
+            "fab tier, run the mandatory independent kicad-cli pcb drc "
+            "--refill-zones cross-gate, review LVS and per-rule warnings, export "
+            "and package the manufacturing bundle, then emit hash-bound "
+            "readiness-v1 evidence. Exits non-zero unless every applicable gate "
+            "passes; there is no flag that produces Ready on a partial run."
+        ),
+    )
+    rd_parser.add_argument(
+        "readiness_board",
+        metavar="board",
+        help="Board directory or routed .kicad_pcb to sign off",
+    )
+    rd_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="readiness_manufacturer",
+        metavar="TIER",
+        default=None,
+        help="Fabrication tier (default: discovered from the board's recipe/manifest)",
+    )
+    rd_mode = rd_parser.add_mutually_exclusive_group()
+    rd_mode.add_argument(
+        "--assembly",
+        dest="readiness_assembly",
+        action="store_true",
+        help="Full assembly package including BOM/CPL procurement identities (default)",
+    )
+    rd_mode.add_argument(
+        "--pcb-only",
+        dest="readiness_pcb_only",
+        action="store_true",
+        help="Bare-board package; makes no component procurement or assembly claim",
+    )
+    rd_parser.add_argument(
+        "--output",
+        "-o",
+        dest="readiness_output",
+        metavar="DIR",
+        default=None,
+        help="Manufacturing bundle directory (default: <pcb-dir>/manufacturing/)",
+    )
+    rd_parser.add_argument(
+        "--sch",
+        dest="readiness_schematic",
+        metavar="PATH",
+        default=None,
+        help="Path to the .kicad_sch (auto-detected by default)",
+    )
+    rd_parser.add_argument(
+        "--net-class-map",
+        dest="readiness_net_class_map",
+        metavar="PATH",
+        default=None,
+        help="Net-class map sidecar (auto-discovered by default)",
+    )
+    rd_parser.add_argument(
+        "--ack-warnings",
+        dest="readiness_ack_warnings",
+        metavar="RULES",
+        default="",
+        help=(
+            "Comma-separated rule_ids whose assembly-affecting warnings are "
+            "explicitly accepted; each becomes an accepted-risk line in README.txt"
+        ),
+    )
+    rd_parser.add_argument(
+        "--include-tht",
+        dest="readiness_include_tht",
+        action="store_true",
+        help="Accept through-hole parts in the CPL (excluded by default)",
+    )
+    rd_parser.add_argument(
+        "--no-archive",
+        dest="readiness_no_archive",
+        action="store_true",
+        help="Skip building output/manufacturing.zip",
+    )
+    rd_parser.add_argument(
+        "--hv-net-class",
+        dest="readiness_hv_net_class",
+        metavar="NAME",
+        default="HV",
+        help="Net-class name identifying high-voltage nets (default: HV)",
+    )
+    rd_parser.add_argument(
+        "--hv-requirement",
+        dest="readiness_hv_requirement",
+        metavar="TEXT",
+        default=None,
+        help=(
+            "Record the isolation requirement an HV board was gated against. "
+            "Required when HV nets are present; otherwise the HV gate is not run."
+        ),
+    )
+    rd_parser.add_argument(
+        "--fill-tolerance",
+        dest="readiness_fill_tolerance",
+        metavar="MM2",
+        type=float,
+        default=None,
+        help=(
+            "Per-layer filled-copper area tolerance in mm^2 for the "
+            "saved-vs-refilled equivalence check"
+        ),
+    )
+    add_format_flag(rd_parser)
+
+
 def _add_fleet_parser(subparsers) -> None:
     """Add fleet parent-subaction parser (fleet status; future fleet route-all)."""
     fleet_parser = subparsers.add_parser(
@@ -7125,7 +7536,16 @@ def _add_impedance_parser(subparsers) -> None:
             "--preset",
             "-p",
             dest="impedance_preset",
-            choices=["jlcpcb-4", "oshpark-4", "generic-2", "generic-4", "generic-6"],
+            choices=[
+                "jlcpcb-4",
+                "jlcpcb-4-legacy",
+                "jlcpcb-3313",
+                "jlcpcb-7628",
+                "oshpark-4",
+                "generic-2",
+                "generic-4",
+                "generic-6",
+            ],
             help="Use a preset stackup instead of reading from PCB",
         )
         parser.add_argument(
@@ -8843,6 +9263,8 @@ def _add_detect_mistakes_parser(subparsers) -> None:
             "grounding",
             "via_placement",
             "manufacturability",
+            "connectivity",
+            "bom_health",
         ],
         help="Only check specific category",
     )

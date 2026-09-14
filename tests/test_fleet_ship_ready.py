@@ -15,6 +15,7 @@ The fake-board builder reuses the synthetic PCB fixtures from
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -714,13 +715,8 @@ class TestBoardRecipeExportWiring:
         # is not a kicad-tools fleet recipe.
     ]
 
-    def test_every_recipe_invokes_kct_export(self):
-        """Each recipe source must contain a ``kct export`` invocation.
-
-        We assert on the ``"export"`` CLI argument appearing alongside the
-        ``kicad_tools.cli`` module path -- the shape every recipe uses to
-        shell out to ``python -m kicad_tools.cli export ...``.
-        """
+    def test_every_recipe_invokes_manufacturing_export(self):
+        """Recipes invoke CLI export or a reachable ManufacturingPackage export."""
         missing: list[str] = []
         for board_subpath, filename in self.RECIPES:
             recipe = REPO_ROOT / "boards" / board_subpath / filename
@@ -728,7 +724,8 @@ class TestBoardRecipeExportWiring:
             text = recipe.read_text()
             has_module = "kicad_tools.cli" in text
             has_export_arg = '"export"' in text
-            if not (has_module and has_export_arg):
+            has_api_export = self._has_reachable_package_export(ast.parse(text))
+            if not ((has_module and has_export_arg) or has_api_export):
                 missing.append(board_subpath)
         assert not missing, (
             "These board recipes are missing a `kct export` invocation "
@@ -736,6 +733,52 @@ class TestBoardRecipeExportWiring:
             "regenerate the manufacturing bundle after routing so "
             "`kct fleet status` does not report a false `artifacts stale` "
             "blocker."
+        )
+
+    @staticmethod
+    def _has_reachable_package_export(tree):
+        functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+        pending = ["main"]
+        visited = set()
+        while pending:
+            name = pending.pop()
+            if name in visited or name not in functions:
+                continue
+            visited.add(name)
+            nodes = list(ast.walk(functions[name]))
+            calls = [node for node in nodes if isinstance(node, ast.Call)]
+            pending.extend(call.func.id for call in calls if isinstance(call.func, ast.Name))
+            packages = {
+                target.id
+                for node in nodes
+                if isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "ManufacturingPackage"
+                and any(k.arg == "pcb_path" for k in node.value.keywords)
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            }
+            if any(
+                isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id in packages
+                and call.func.attr == "export"
+                for call in calls
+            ):
+                return True
+        return False
+
+    def test_api_export_requires_reachable_call_on_constructed_package(self):
+        helper = "def export_board():\n    package = ManufacturingPackage(pcb_path=pcb)\n"
+        assert not self._has_reachable_package_export(
+            ast.parse(helper + "    package.export(out)\n")
+        )
+        assert not self._has_reachable_package_export(
+            ast.parse("def main():\n    export_board()\n" + helper)
+        )
+        assert self._has_reachable_package_export(
+            ast.parse("def main():\n    export_board()\n" + helper + "    package.export(out)\n")
         )
 
     def test_six_fixed_recipes_call_export_from_main(self):

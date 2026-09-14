@@ -116,7 +116,7 @@ RESISTOR_CONNECTIONS: tuple[ResistorConnection, ...] = tuple(
     for i, label in enumerate(CHARLIEPLEX_PIN_LABELS)
 )
 
-# Default resistor value (ohms) - calculated for ~10mA with typical LED
+# Two 330-ohm resistors are in series for each selected LED (~4.5mA at 5V).
 RESISTOR_VALUE = "330R"
 
 
@@ -127,14 +127,14 @@ RESISTOR_VALUE = "330R"
 # None indicates no-connect (NC) pins.
 
 MCU_PINS: dict[str, str | None] = {
-    "1": "LINE_A",
-    "2": "LINE_B",
-    "3": "LINE_C",
-    "4": "LINE_D",
-    "5": "GND",  # Unused input tied to GND
-    "6": "GND",  # Unused input tied to GND
-    "7": "VCC",
-    "8": "GND",
+    "1": "RESET",  # PB5 / RESET, kept available for ISP
+    "2": "LINE_A",  # PB3
+    "3": "LINE_B",  # PB4
+    "4": "GND",
+    "5": "LINE_C",  # PB0 / MOSI
+    "6": "LINE_D",  # PB1 / MISO
+    "7": "ISP_SCK",  # PB2 / SCK
+    "8": "VCC",
 }
 
 
@@ -165,6 +165,8 @@ _NETS: list[NetDefinition] = [
     NetDefinition("NODE_D", 8),
     NetDefinition("VCC", 9),
     NetDefinition("GND", 10),
+    NetDefinition("RESET", 11),
+    NetDefinition("ISP_SCK", 12),
 ]
 
 # Export as dict for easy lookup by name

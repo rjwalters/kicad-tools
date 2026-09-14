@@ -2295,7 +2295,7 @@ start_startup_monitor() {
                                 grep -oE 'MCP server "[^"]+"' | grep -oE '"[^"]+"' | \
                                 tr -d '"' | grep -v '^loom$' | sort -u | head -3 | \
                                 tr '\n' ',' | sed 's/,$//')
-                            _fail_detail=$(printf '%s\n' "${_mcp_fail_lines}" | head -1 | \
+                            _fail_detail=$(printf '%s\n' "${_mcp_fail_lines%%$'\n'*}" | \
                                 grep -oE 'Cannot find module[^;|]*|ENOENT[^;|]*|spawn ENOENT[^;|]*' | \
                                 head -1 | sed 's/[[:space:]]*$//' | cut -c1-80 || true)
                         fi

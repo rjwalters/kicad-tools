@@ -1,0 +1,4013 @@
+{
+  "file": "/Users/rwalters/GitHub/kicad-tools/boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb",
+  "manufacturer": "jlcpcb",
+  "layers": 4,
+  "summary": {
+    "errors": 51,
+    "warnings": 147,
+    "infos": 2,
+    "waived": 0,
+    "rules_checked": 47,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "copper_sliver": 1,
+      "track_dangling": 1,
+      "via_dangling": 1,
+      "diffpair_clearance_intra": 2,
+      "doc_drift_stale_pin": 1,
+      "doc_drift_unresolvable_pin": 1,
+      "isolated_copper": 1,
+      "sch_field_offset": 1,
+      "sch_field_overlap": 1
+    },
+    "passed": false
+  },
+  "violations": [
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.150mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        175.85,
+        104.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 1.366985265212914,
+      "items": [
+        "+5V_OUT"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.250mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        178.337,
+        92.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 1.366985265212914,
+      "items": [
+        "+5V_OUT"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.600mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        172.3,
+        92.068
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.6,
+      "required_value": 1.366985265212914,
+      "items": [
+        "+5V_OUT"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.600mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        170.7,
+        92.068
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.6,
+      "required_value": 1.366985265212914,
+      "items": [
+        "+5V_OUT"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.150mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        177.1,
+        104.55
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.15,
+      "required_value": 1.366985265212914,
+      "items": [
+        "+5V_OUT"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.250mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        183.288,
+        98.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 1.366985265212914,
+      "items": [
+        "+5V_OUT"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.600mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        171.5,
+        92.068
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.6,
+      "required_value": 1.366985265212914,
+      "items": [
+        "+5V_OUT"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 3.0A: width 0.250mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        174.3,
+        98.8
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.25,
+      "required_value": 1.366985265212914,
+      "items": [
+        "+5V_OUT"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 3.0A: width 0.250mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        181.45,
+        95.75
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.25,
+      "required_value": 1.366985265212914,
+      "items": [
+        "+5V_OUT"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 3.0A: width 0.250mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        178.975,
+        92.75
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.25,
+      "required_value": 1.366985265212914,
+      "items": [
+        "+5V_OUT"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        132.263,
+        101.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "PMOS_SOURCE"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        136.287,
+        101.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "PMOS_SOURCE"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        131.588,
+        96.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "PMOS_SOURCE"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        134.85,
+        100.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "PMOS_SOURCE"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        130.675,
+        98.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "PMOS_SOURCE"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        130.675,
+        100.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "PMOS_SOURCE"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.600mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        145.3,
+        103.275
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.6,
+      "required_value": 1.366985265212914,
+      "items": [
+        "SW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.600mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        146.1,
+        104.1
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.6,
+      "required_value": 1.366985265212914,
+      "items": [
+        "SW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.250mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        158.362,
+        95.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 1.366985265212914,
+      "items": [
+        "SW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.600mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        146.1,
+        103.275
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.6,
+      "required_value": 1.366985265212914,
+      "items": [
+        "SW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.600mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        146.9,
+        103.275
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.6,
+      "required_value": 1.366985265212914,
+      "items": [
+        "SW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.350mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        154.007,
+        101.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.35,
+      "required_value": 1.366985265212914,
+      "items": [
+        "SW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.600mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        151.85,
+        101.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.6,
+      "required_value": 1.366985265212914,
+      "items": [
+        "SW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 3.0A: width 0.250mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        155.325,
+        98.5
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.25,
+      "required_value": 1.366985265212914,
+      "items": [
+        "SW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        113.987,
+        91.763
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        115.25,
+        94.294
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        121.569,
+        94.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.400mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        110.612,
+        119.45
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.4,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.400mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        113.031,
+        118.95
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.4,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.400mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        110.95,
+        84.723
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.4,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.400mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        108.725,
+        118.275
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.4,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.400mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        108.725,
+        116.3
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.4,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.400mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        106.05,
+        84.723
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.4,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        112.262,
+        90.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 1.5A: width 0.400mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        111.375,
+        88.2
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.4,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 1.5A: width 0.400mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        120.862,
+        89.4
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.4,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 1.5A: width 0.400mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        106.05,
+        101.5
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.4,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 1.5A: width 0.400mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        107.387,
+        117.1
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.4,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VBUS_RAW"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        122.519,
+        98.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VIN"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        161.288,
+        107.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VIN"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 1.5A: width 0.450mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        154.507,
+        102.363
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.45,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VIN"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        138.3,
+        107.0
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VIN"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        122.0,
+        103.25
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VIN"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        130.15,
+        108.0
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VIN"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 1.5A: width 0.250mm, requires 0.525mm (IPC-2221, 1.0oz external)",
+      "location": [
+        155.7,
+        106.75
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.25,
+      "required_value": 0.525472564777347,
+      "items": [
+        "VIN"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.250mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        163.7,
+        96.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 1.366985265212914,
+      "items": [
+        "VOUT_PRE"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.250mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        164.632,
+        89.865
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 1.366985265212914,
+      "items": [
+        "VOUT_PRE"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 0.250mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        163.288,
+        97.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.25,
+      "required_value": 1.366985265212914,
+      "items": [
+        "VOUT_PRE"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 1.200mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        147.025,
+        87.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 1.2,
+      "required_value": 1.366985265212914,
+      "items": [
+        "VOUT_PRE"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on F.Cu too narrow for 3.0A: width 1.200mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        147.263,
+        89.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 1.2,
+      "required_value": 1.366985265212914,
+      "items": [
+        "VOUT_PRE"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "ampacity",
+      "type": "unknown",
+      "severity": "error",
+      "message": "Trace on B.Cu too narrow for 3.0A: width 0.250mm, requires 1.367mm (IPC-2221, 1.0oz external)",
+      "location": [
+        163.325,
+        93.682
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.25,
+      "required_value": 1.366985265212914,
+      "items": [
+        "VOUT_PRE"
+      ],
+      "nets": [],
+      "status": "error",
+      "waived": false
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12): 2.85mm from nearest board edge",
+      "location": [
+        108.5,
+        79.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 2.8499999999999988,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J3 (Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical): 8.53mm from nearest board edge",
+      "location": [
+        184.5,
+        114.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 8.530000000000001,
+      "required_value": null,
+      "items": [
+        "J3"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U1",
+      "location": [
+        116.5,
+        97.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U1",
+      "location": [
+        116.5,
+        97.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U1",
+      "location": [
+        116.5,
+        97.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U1",
+      "location": [
+        116.5,
+        97.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U1",
+      "location": [
+        116.5,
+        97.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U1",
+      "location": [
+        116.5,
+        97.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U1",
+      "location": [
+        116.5,
+        97.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U1",
+      "location": [
+        116.5,
+        97.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U1",
+      "location": [
+        116.5,
+        97.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U1",
+        "fp_poly"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R8",
+      "location": [
+        164.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R8",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R8",
+      "location": [
+        164.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R8",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C4",
+      "location": [
+        137.5,
+        103.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C4",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C4",
+      "location": [
+        137.5,
+        103.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C4",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C8",
+      "location": [
+        148.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C8",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C8",
+      "location": [
+        148.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C8",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C3",
+      "location": [
+        108.5,
+        95.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C3",
+      "location": [
+        108.5,
+        95.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R4",
+      "location": [
+        124.5,
+        98.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R4",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R4",
+      "location": [
+        124.5,
+        98.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R4",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R13",
+      "location": [
+        128.5,
+        120.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R13",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R13",
+      "location": [
+        128.5,
+        120.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R13",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C15",
+      "location": [
+        179.5,
+        92.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C15",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C15",
+      "location": [
+        179.5,
+        92.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C15",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q2",
+      "location": [
+        142.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q2",
+      "location": [
+        142.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q2",
+      "location": [
+        142.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q2",
+      "location": [
+        142.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q2",
+      "location": [
+        142.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q2",
+      "location": [
+        142.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q2",
+      "location": [
+        142.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q2",
+        "fp_poly"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R1",
+      "location": [
+        131.5,
+        99.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R1",
+      "location": [
+        131.5,
+        99.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R11",
+      "location": [
+        174.5,
+        98.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R11",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R11",
+      "location": [
+        174.5,
+        98.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R11",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C12",
+      "location": [
+        177.5,
+        106.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C12",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C12",
+      "location": [
+        177.5,
+        106.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C12",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R5",
+      "location": [
+        162.5,
+        107.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R5",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R5",
+      "location": [
+        162.5,
+        107.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R5",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q1",
+      "location": [
+        132.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q1",
+      "location": [
+        132.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q1",
+      "location": [
+        132.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q1",
+      "location": [
+        132.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q1",
+      "location": [
+        132.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q1",
+      "location": [
+        132.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on Q1",
+      "location": [
+        132.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "Q1",
+        "fp_poly"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on D1",
+      "location": [
+        137.5,
+        99.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "D1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on D1",
+      "location": [
+        137.5,
+        99.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "D1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on D1",
+      "location": [
+        137.5,
+        99.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "D1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on RSH1",
+      "location": [
+        168.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "RSH1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on RSH1",
+      "location": [
+        168.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "RSH1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C2",
+      "location": [
+        118.5,
+        91.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C2",
+      "location": [
+        118.5,
+        91.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J2",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J2",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J2",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J2",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J2",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J2",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J2",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J2",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J2",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J2",
+        "fp_poly"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R10",
+      "location": [
+        168.5,
+        98.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R10",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R10",
+      "location": [
+        168.5,
+        98.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R10",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on F1",
+      "location": [
+        122.5,
+        82.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "F1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on F1",
+      "location": [
+        122.5,
+        82.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "F1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R15",
+      "location": [
+        134.5,
+        120.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R15",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R15",
+      "location": [
+        134.5,
+        120.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R15",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C9",
+      "location": [
+        154.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C9",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C9",
+      "location": [
+        154.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C9",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R9",
+      "location": [
+        160.2,
+        99.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R9",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R9",
+      "location": [
+        160.2,
+        99.0
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R9",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U3",
+      "location": [
+        172.5,
+        104.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U3",
+      "location": [
+        172.5,
+        104.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U3",
+      "location": [
+        172.5,
+        104.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U3",
+      "location": [
+        172.5,
+        104.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U3",
+      "location": [
+        172.5,
+        104.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U3",
+      "location": [
+        172.5,
+        104.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U3",
+      "location": [
+        172.5,
+        104.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U3",
+        "fp_poly"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C6",
+      "location": [
+        153.65,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C6",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C6",
+      "location": [
+        153.65,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C6",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R16",
+      "location": [
+        184.5,
+        98.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R16",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R16",
+      "location": [
+        184.5,
+        98.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R16",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C10",
+      "location": [
+        164.5,
+        94.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C10",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C10",
+      "location": [
+        164.5,
+        94.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C10",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R3",
+      "location": [
+        123.5,
+        94.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R3",
+      "location": [
+        123.5,
+        94.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R18",
+      "location": [
+        128.5,
+        107.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R18",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R18",
+      "location": [
+        128.5,
+        107.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R18",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C13",
+      "location": [
+        109.5,
+        115.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C13",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C13",
+      "location": [
+        109.5,
+        115.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C13",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J1",
+      "location": [
+        108.5,
+        79.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J1",
+      "location": [
+        108.5,
+        79.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J1",
+      "location": [
+        108.5,
+        79.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J1",
+      "location": [
+        108.5,
+        79.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J1",
+      "location": [
+        108.5,
+        79.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C11",
+      "location": [
+        177.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C11",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C11",
+      "location": [
+        177.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C11",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C7",
+      "location": [
+        159.5,
+        95.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C7",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C7",
+      "location": [
+        159.5,
+        95.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C7",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R14",
+      "location": [
+        134.5,
+        116.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R14",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R14",
+      "location": [
+        134.5,
+        116.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R14",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R6",
+      "location": [
+        162.5,
+        111.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R6",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R6",
+      "location": [
+        162.5,
+        111.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R6",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C5",
+      "location": [
+        151.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C5",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C5",
+      "location": [
+        151.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C5",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J3",
+      "location": [
+        184.5,
+        114.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J3",
+      "location": [
+        184.5,
+        114.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J3",
+      "location": [
+        184.5,
+        114.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J3",
+      "location": [
+        184.5,
+        114.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J3",
+      "location": [
+        184.5,
+        114.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on J3",
+      "location": [
+        184.5,
+        114.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "J3",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U2",
+      "location": [
+        156.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U2",
+      "location": [
+        156.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U2",
+      "location": [
+        156.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U2",
+      "location": [
+        156.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U2",
+      "location": [
+        156.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U2",
+      "location": [
+        156.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U2",
+      "location": [
+        156.5,
+        101.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U2",
+        "fp_poly"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on D2",
+      "location": [
+        184.5,
+        102.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "D2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on D2",
+      "location": [
+        184.5,
+        102.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "D2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on D2",
+      "location": [
+        184.5,
+        102.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "D2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R7",
+      "location": [
+        164.5,
+        97.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R7",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R7",
+      "location": [
+        164.5,
+        97.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R7",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R17",
+      "location": [
+        122.5,
+        107.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R17",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R17",
+      "location": [
+        122.5,
+        107.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R17",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C1",
+      "location": [
+        113.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C1",
+      "location": [
+        113.5,
+        90.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C1",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U4",
+      "location": [
+        114.5,
+        117.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U4",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U4",
+      "location": [
+        114.5,
+        117.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U4",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U4",
+      "location": [
+        114.5,
+        117.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U4",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U4",
+      "location": [
+        114.5,
+        117.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U4",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U4",
+      "location": [
+        114.5,
+        117.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U4",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U4",
+      "location": [
+        114.5,
+        117.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U4",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U4",
+      "location": [
+        114.5,
+        117.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U4",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on U4",
+      "location": [
+        114.5,
+        117.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "U4",
+        "fp_poly"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R2",
+      "location": [
+        127.5,
+        102.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R2",
+      "location": [
+        127.5,
+        102.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R2",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R12",
+      "location": [
+        128.5,
+        116.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R12",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on R12",
+      "location": [
+        128.5,
+        116.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "R12",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C14",
+      "location": [
+        118.5,
+        115.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C14",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silkscreen_line_width",
+      "type": "silkscreen_line_width",
+      "severity": "warning",
+      "message": "Silkscreen line width 0.12mm < minimum 0.15mm on C14",
+      "location": [
+        118.5,
+        115.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": 0.12,
+      "required_value": 0.15,
+      "items": [
+        "C14",
+        "fp_line"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silk_overlap",
+      "type": "silk_overlap",
+      "severity": "warning",
+      "message": "Silkscreen J2 (fp_line) overlaps silkscreen J2 (fp_line)",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "J2 (fp_line)",
+        "J2 (fp_line)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silk_overlap",
+      "type": "silk_overlap",
+      "severity": "warning",
+      "message": "Silkscreen J2 (fp_line) overlaps silkscreen J2 (fp_line)",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "J2 (fp_line)",
+        "J2 (fp_line)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silk_overlap",
+      "type": "silk_overlap",
+      "severity": "warning",
+      "message": "Silkscreen J2 (fp_line) overlaps silkscreen J2 (fp_line)",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "J2 (fp_line)",
+        "J2 (fp_line)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silk_overlap",
+      "type": "silk_overlap",
+      "severity": "warning",
+      "message": "Silkscreen J2 (fp_line) overlaps silkscreen J2 (fp_line)",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "J2 (fp_line)",
+        "J2 (fp_line)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silk_overlap",
+      "type": "silk_overlap",
+      "severity": "warning",
+      "message": "Silkscreen J2 (fp_line) overlaps silkscreen J2 (fp_line)",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "J2 (fp_line)",
+        "J2 (fp_line)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    },
+    {
+      "rule_id": "silk_overlap",
+      "type": "silk_overlap",
+      "severity": "warning",
+      "message": "Silkscreen J2 (fp_line) overlaps silkscreen J2 (fp_line)",
+      "location": [
+        184.5,
+        88.5
+      ],
+      "layer": "F.SilkS",
+      "actual_value": null,
+      "required_value": null,
+      "items": [
+        "J2 (fp_line)",
+        "J2 (fp_line)"
+      ],
+      "nets": [],
+      "status": "warning",
+      "waived": false
+    }
+  ],
+  "meta_checks": {
+    "drc": {
+      "status": "FAILED",
+      "detail": "47 rules checked, 51 error(s), 147 warning(s)"
+    },
+    "erc": {
+      "status": "PASSED",
+      "detail": "0 error(s), 0 warning(s)"
+    },
+    "lvs": {
+      "status": "PASSED",
+      "detail": "label + copper: 0 mismatch(es)",
+      "mismatches": [],
+      "copper_mismatches": [],
+      "copper_vacuous": false,
+      "copper_bound_pad_count": 153,
+      "netlist_vacuous": false
+    },
+    "manifest": {
+      "status": "NOT RUN",
+      "detail": "no manufacturing bundle; run `kct export` first"
+    },
+    "overall": "FAILED",
+    "schematic_missing": false
+  },
+  "routing_quality": {
+    "total_segments": 318,
+    "nets_with_copper": 32,
+    "segments_per_net": 9.9375,
+    "zero_length_count": 0,
+    "median_length_mm": 1.9375,
+    "fragment_count": 3,
+    "fragment_fraction": 0.009433962264150943,
+    "orthogonal_count": 232,
+    "diagonal_45_count": 27,
+    "off_axis_count": 59,
+    "staircase_step_count": 0,
+    "staircase_fraction": 0.0
+  }
+}

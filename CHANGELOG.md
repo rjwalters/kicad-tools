@@ -7,8 +7,211 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Normalize legacy center/angle arcs in contour editing, board graphics, and placement linearization so rounded outlines remain connected and replacement preserves only actual mounting-hole contours (#4884).
+- Add read-only netclass diagnostics for undefined assignment targets, duplicate
+  declarations and KiCad 10.0.5-verified pattern membership against supplied
+  board nets, with explicit malformed/unsupported diagnostics (#5334).
+
+- Add a daily CI guard (`.github/workflows/assert-no-bot-external.yml`) that
+  fails if any open issue labeled `external` has a Bot-type author (#5310).
+  `external` is a hard-exclusion label that blocks Loom dispatch, and a
+  GitHub App installation actor (e.g. `loom-fleet-dispatch[bot]`) never
+  passes `repos.checkCollaborator`, so every issue it filed before PR #5233
+  got mislabeled `external` and silently stalled the pipeline; this catches
+  a recurrence of that regression class automatically instead of via a
+  stalled sweep. The already-mislabeled open issues were also cleaned up as
+  a one-time forge-state fix (label removed by author id, not a blanket
+  strip).
+- Fix Codex-only installer workflows to resolve generated sibling skills and namespace help, with runtime-appropriate invocation and optional metadata handling.
+- Use shared project drill-clearance checks for Board07 relocation and fallback stubs; reject archived moves into foreign zone fill without saving partial repairs.
+
+### Fixed
+
+- **Imported copper arcs no longer cause false opens or under-reported
+  wirelength** (#4937) — `PCB` parsed `(segment ...)` and `(via ...)` copper
+  but had no branch for `(arc ...)`, the curved-track element KiCad 7+ writes
+  for rounded copper; an externally-sourced board routed only with an arc
+  reported two disconnected islands and 0 mm of trace length. A new `Arc`
+  schema class exposes analytic swept length and geometric connectivity
+  (`pcb.arcs`, `arcs_on_layer()`, `arcs_in_net()`), threaded into
+  `NetStatusAnalyzer` (arc-bearing boards always use real copper geometry,
+  even under `strict=False`, since endpoint proximity cannot describe curved
+  contact), `routing_quality`, `trace_length`/diff-pair skew, and the
+  external-benchmark wirelength metric. PCB saves preserve untouched arc
+  source text byte-for-byte (numeric spelling, whitespace, CRLF), while
+  edits invalidate the retained text so page-fit/reimport keep working.
+  Invalid or nonfinite arc geometry now fails explicitly instead of
+  silently degrading to a chord.
+- Preserve authored pad shapes through router loading, workers, and native
+  conversion (#5229). Square pads no longer lose copper corners to a circular
+  approximation. Rotated search bounds enclose copper; unsupported custom or
+  layer-specific pad geometry stops routing explicitly.
+
 ### Added
 
+- **Declared current paths now fail closed on same-net routed arcs and
+  copper pours** (#5273) — `resolve_current_path()` previously built its
+  copper graph only from routed `Segment` tracks and via barrels, so a
+  same-net routed **arc** or a non-keepout **zone/pour** — either of which
+  can form a parallel return path around a declared branch (a plane is the
+  archetypal case) — was invisible to it and never affected the result. A
+  declared branch on such a net now resolves `"ambiguous"` instead of
+  `"resolved"`, naming the unmodeled copper in the reason (endpoint
+  resolution failures still take precedence and remain `"unresolved"`).
+  New `unmodeled_copper()` inventories same-net arcs and non-keepout
+  zones/pours (kind, layer, representative location); keepout rule areas
+  are excluded since they carry no copper. `CurrentPathAudit` gains an
+  `unmodeled` field, surfaced by `kct pcb current-paths-audit` in both JSON
+  and text output, and `kct check`'s `path_ampacity` rule emits a
+  `warning` per unmodeled-copper object found (the `ambiguous` status
+  already produces the `error`). No change was needed in
+  `pcb/reinforce.py`: its allow-list gate only admits copper from a
+  *resolved* path, so a net with unmodeled copper drops out of
+  reinforcement eligibility for free once `resolve_current_path()` stops
+  returning `resolved` for it.
+- **Pulsed / duty-cycled current on declared branch current paths** (#4980) —
+  `CurrentPathSpec` gains optional `duty_cycle` and `pulse_duration_s`
+  alongside the existing `pulsed_a`, which until now was parsed, serialized
+  and then ignored by every consumer. A pulsed branch is now checked two
+  ways, because a repetitive pulse can destroy copper by a mechanism the
+  steady-state width check cannot see:
+  - **Thermally**, at the waveform's RMS current
+    (`CurrentPathSpec.thermal_design_current()` →
+    `physics.ampacity.rms_current_for_duty_cycle()`), not its peak and not
+    its average. An 18 A pulse at 8 % duty over a 3 A baseline heats copper
+    like 5.85 A, so it no longer demands 8.1 mm of 2 oz copper to pass.
+  - **Adiabatically**, against the Onderdonk fusing current for the declared
+    pulse duration (`physics.ampacity.adiabatic_fusing_current()`). A trace
+    comfortably sized on RMS heating can still be melted by a single inrush
+    or fault pulse; that is now an `error` rather than an invisible risk.
+
+  Every assumption is declared, never inferred, and every gap is visible: a
+  pulse with no `duty_cycle` is sized at its peak **and says so** (an `info`
+  finding naming the missing field), and a pulse with no `pulse_duration_s`
+  leaves fusing explicitly unchecked (a `warning`) instead of passing
+  silently. Half-declared waveforms — a `duty_cycle` or `pulse_duration_s`
+  with no `pulsed_a`, or a `pulsed_a` below `continuous_a` — are rejected at
+  load time rather than guessed at. Continuous-only declarations are
+  unaffected: their findings are byte-identical to before. Flows through all
+  existing surfaces (`kct check`, `kct route`, `kct pcb
+  current-paths-audit`), which now also report each branch's thermal design
+  current and which waveform assumption produced it.
+- **Flat signal-clearance table builder for clock-to-signal spacing**
+  (#5021) — `build_signal_clearance_table()` in
+  `router/pairwise_clearance.py` generalises the HV pairwise-clearance
+  resolver (#4431) past voltage-derived requirements to a flat,
+  non-voltage signal-integrity spacing rule, e.g. ST AN4488 §8.4.2's SDRAM
+  clock-to-signal guideline (three trace widths, 0.54 mm edge-to-edge). It
+  populates the same `PairwiseClearanceTable` data carrier the HV epic
+  built, so every downstream consumer (`route_pairwise_violation`,
+  `find_pairwise_violations`, `PairwisePathChecker`, the C++ `Grid3D`
+  projection) gets identical route-time avoidance and post-route audit
+  coverage across tracks, pads and via spans — with no separate
+  implementation to keep in sync and no routing-order dependence (the
+  board07 "reciprocal clock guard" defect this issue tracks: a clock track
+  cleared a foreign net's tracks by the full requirement but passed a
+  foreign through-via at the ordinary fabrication clearance because the
+  via's copper was never widened). No automatic package-escape exemption
+  is applied; a genuine waiver must be an explicit, measured `AttachZone`.
+- **`kct route --current-paths` / `--no-current-paths`** (#4980) — the third
+  and final consumer of the declared branch-specific current-path model
+  (after `kct pcb reinforce`, #5125, and `kct check`, #5184). The route
+  command now loads the same `current_paths.json` sidecar (explicit path, or
+  auto-discovered next to the input board with the `--net-class-map` probe
+  order), runs the `path_ampacity` rule in the post-route DRC so each
+  declared branch is judged against its **own** current rather than one
+  whole-net `target_ampacity`, and re-emits the declarations as
+  `current_paths.json` next to the routed board. That re-emission is what
+  makes route-time intent and the later independent final-copper audit read
+  identical declarations — a bare `kct check` on the routed board
+  auto-discovers it instead of silently passing with `path_ampacity`
+  inactive. An explicit sidecar is strict (missing file / malformed JSON
+  exits 1 before any routing work); an auto-discovered one degrades to a
+  warning; the authored input file is never overwritten (a collision diverts
+  the derived sidecar to `current_paths.effective.json`, the #4428 rule).
+- **`kct analyze component-stress` — operating-state MOSFET VDS/VGS gate**
+  (#5039) — a new advisory analyzer
+  (`kicad_tools.analysis.component_stress.ComponentStressAnalyzer`) that asks
+  the question ERC, DRC, creepage and `analyze electrical-rating` all
+  structurally miss: *is the device itself rated for the potential difference
+  its own terminals will see?* Stress is computed as a terminal-to-terminal
+  differential (`VDS = V(D)-V(S)`, `VGS = V(G)-V(S)`) inside a **single** entry
+  of an explicit, reviewed operating-state manifest (`--states`, YAML or JSON),
+  so correlated nets are never combined across unrelated states and shifting a
+  floating gate-driver domain's reference leaves both differentials unchanged.
+  Ratings come only from sourced `Vds_max` / `Vgs_max` symbol fields (no
+  built-in defaults); an undeclared state from the required coverage checklist
+  (startup, precharge, both mains polarities, support, trip, loss-of-drive), an
+  unresolved D/G/S pin role, an unbound terminal or an uncited rating is
+  reported `UNRESOLVED` — a release blocker, never a silent pass. Pin-role
+  mappings are cached under a part identity that includes the MPN and
+  footprint, so a part swap cannot carry a stale pinout forward, and a
+  footprint creepage/spacing waiver can never suppress a device-stress finding
+  (the two read disjoint inputs). No automatic circuit-state inference is
+  performed in this pass.
+- **`kct place-silk-refs`: readable silkscreen reference placement** (#5030)
+  — a dry-run/apply solver that moves (and, optionally, rotates) visible
+  reference-designator text just far enough to clear real pad/via mask
+  apertures, other silk/text, and the board edge, while preserving
+  visibility, text height, and stroke width exactly (never hiding,
+  shrinking, or deleting a label to "clear" a DRC finding). References are
+  kept near their own component and never placed on top of a courtyard
+  (its own or a neighbor's); a reference with no collision-free candidate
+  in the search radius is left untouched and reported explicitly as
+  `unplaceable` or `under_component_fallback` (when it was already sitting
+  on its own body) rather than silently dropped. Only the reference text's
+  own `(at x y [angle])` node is ever written — footprint position, pads,
+  copper, and net bindings are untouched. Reads the same geometry helpers
+  `kct check`'s silk DRC rules use, so a clean plan reproduces a clean
+  native `kicad-cli pcb drc` (`--verify-drc`); `--render` writes an SVG
+  review artifact (old vs. new position, pad apertures, courtyards) since
+  a passing DRC run does not by itself prove the placement is readable.
+  Retires the need for the ad hoc
+  `hardware/chorus-test-revA/scripts/place_silk_refs.py` local helper.
+- **Installer: explicit Codex and Claude client targets** (#4905) —
+  `scripts/install-kct.sh` gains `--client claude|codex|both` (default
+  `claude`, fully backward-compatible). Codex selection generates one
+  `.agents/skills/kct-<name>/SKILL.md` per skill from the SAME source
+  `.claude/commands/kct/<name>.md` files Claude vendors — one maintained
+  source, not a hand-duplicated copy — with the `SKILL.md` frontmatter
+  carrying only `name`/`description` (Claude's `invocation`/`suggestedModel`
+  dispatch metadata is deliberately not copied), plus an additive guarded
+  `AGENTS.md` block pointing at the shared `.kct/CONVENTIONS.md`. The shared
+  uv dependency, `.kct/ci/` gates, and `.kct/CONVENTIONS.md` stay
+  client-independent. Selecting one client never overwrites, removes, or
+  duplicates the other client's files or a prior/switched install's valid
+  artifacts — `install-metadata.json`'s `clients_installed` /
+  `skills_selected` / `installed_files` fields accumulate (union) across
+  repeated or switched-client runs instead of being replaced.
+- **`kct route --reserve-plane-layers`: controlled-impedance signal-layer
+  reservation guardrail** (#5014) — `LayerDefinition.is_routable` treats
+  every copper layer as signal-eligible by design, including layers a
+  `--layers 4`-style stack designates as a GND/PWR reference plane, so
+  ordinary signal could silently consume the continuous plane a
+  controlled-impedance recipe depends on. `--reserve-plane-layers`
+  hard-restricts routing to the resolved stack's non-`PLANE` layers (via
+  `DesignRules.allowed_layers`, issue #715's pre-existing enforcement); a
+  new route-time advisory recommends the flag whenever a plane-bearing
+  stack is resolved without it, and a post-route audit reports any
+  committed signal segment that still landed on a declared plane layer. A
+  no-op on stacks with no `PLANE` layers (`--layers 2`, `4-all`, or an
+  all-signal `auto`-detected board). See
+  `kicad_tools.router.layer_advisories` for the full contract.
+- **Konnect item 8 audit: natural-language design-rule store** (#4902, Part
+  of #4880) — `docs/konnect-item8-design-rules-audit.md` decides **decline**
+  on adding a Konnect-style free-text design-rule store: the repo already
+  has five overlapping mechanisms in this space (`DesignIntent.constraints`,
+  the typed `kicad_tools.intent` package, manufacturer profiles,
+  recipe-embedded intent, and — not previously catalogued — `project.kct`'s
+  `decisions:` log written by `kct spec decide`), and
+  `.claude/commands/kct/board-recipe-scaffold.md` has already settled the
+  adjacent "how do we record project *why*" question on that same
+  `decisions:` surface with an explicit "do not invent a fifth artifact"
+  principle. Two follow-ups are recommended rather than bundled: registering
+  the fully-implemented-but-unwired `declare_interface`/`declare_power_rail`/
+  `list_intents`/`clear_intent` MCP tools, and surfacing
+  `intent.constraints`/`decisions` into MCP session context so an LLM agent
+  can see prior human-recorded guidance without a human re-pasting it.
 - **kicad-tools.org benchmarks section** (#4952, Epic #4932 Phase 3) — a new
   `/benchmarks` page on the demo-gallery site presenting Phase 2's committed
   results (PocketBeagle + BeagleConnect Freedom, #4942) side by side with
@@ -1171,6 +1374,232 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`clearance_pad_segment` reported false-positive DRC violations against
+  rotated `roundrect`/`oval` pads' rounded corners** (#4985) — the
+  segment-vs-pad clearance path (`_segment_circle_clearance` in
+  `validate/rules/clearance.py`) still measured distance to the pad's
+  axis-aligned bounding box even after #3826 fixed the analogous pad-vs-pad
+  and pad-vs-zone over-approximation. A rotated `roundrect`/`oval` pad's true
+  copper cuts back the AABB's corners, so a trace routed near a corner could
+  be reported tighter (even below the manufacturing clearance floor) than
+  the true rounded geometry allows — reproduced on `chorus-test-revA`'s C19
+  footprint, where the AABB path reported 0.0812 mm against a real 0.1846 mm
+  (per `pcbnew.PAD.GetEffectivePolygon`), a false violation at the board's
+  0.1016 mm floor. `_segment_circle_clearance` now routes `roundrect` and
+  non-square `oval`/`obround` pads through the same true-geometry shapely
+  polygon (`CopperElement.polygon`, from `_pad_polygon`) already used for
+  pad-pad/pad-zone clearance; plain `rect` pads and circular
+  pads/vias are unaffected. A genuine sub-clearance violation against the
+  true rounded geometry still fires — the fix narrows false positives
+  without masking real shorts.
+- **Noncardinal pad clearance geometry** (#5227) — orient rect, roundrect,
+  and oval copper polygons using KiCad's negative-angle board transform.
+  This removes mirrored false overlaps and missed physical overlaps while
+  preserving absolute pad angles, footprint-local centers, and clearance floors.
+- Grid routing acceptance now retains non-cardinal pad rotation in Python
+  segment/via backstops and the native validator, including late pad additions
+  (#5182). Native candidate vias now check foreign pad copper using the same
+  component clearance and exclusions as finalization. Requires native build v22.
+
+
+- **Declared current paths reported `unresolved` on real boards whenever a
+  trace did not land on the exact pad center** (#4980) — endpoint resolution
+  (`router/current_paths.py`) attached a `RefDes.pad` endpoint to the copper
+  graph only by an exact pad-center node match. A router may legitimately
+  terminate a trace anywhere inside a pad's copper, and a wide power pad is
+  routinely entered by several stubs at once (all shorted by the pad itself),
+  so ordinary boards failed to resolve: on board09 the `+5V_OUT` force path
+  enters the 2.29 × 2.03 mm shunt pad `RSH1.4` through three stubs 0.015,
+  0.785 and 0.815 mm off center, and every declaration on the net reported
+  "source pad has no routed copper touching it". Endpoints now bind by the
+  pad's real extent (exact rectangle/ellipse test in the pad's own rotated
+  frame), and all in-pad nodes are shorted through the pad. This is a *false*
+  fail-closed being removed, not a relaxation — copper outside the pad extent
+  still never attaches, so genuinely moved/removed pads still fail closed.
+- **Router emitted partial-stack via spans for ordinary multilayer
+  transitions, without an HDI process ever being selected** (#5013,
+  router counterpart of stitch issue #5001) — `CppPathfinder._convert_result_to_route`
+  and `Router._convert_path_to_route` (the C++ and Python A* pathfinders)
+  built a via's reported `layers` span directly from the LOGICAL
+  current/next search layer (e.g. `F.Cu`/`In2.Cu` on a 4-layer board)
+  instead of the via's physical drilled extent. No blind/buried via
+  process is ever selected by either pathfinder today (Issue #4007:
+  `blind_buried_supported` is False for every board — `hdi_4layer` via
+  rules are defined but never instantiated), so every via either
+  constructs is manufactured as an ordinary through-hole whose barrel
+  spans the full copper stack; under-reporting the span let DRC and
+  connectivity code (which trust `via.layers` as the physical barrel
+  extent — `validate/connectivity.py`, `validate/rules/clearance.py`,
+  `core/layers.py::via_spans_layer`) silently skip barrel-vs-foreign-
+  copper clearance checks on layers the via actually passes through but
+  did not name as an endpoint. The grid-side obstacle search already
+  treated every via as full-stack (`Grid3D::mark_via` /
+  `Pathfinder::is_via_blocked_diag` in C++; `RoutingGrid._mark_via` in
+  Python both block/check ALL layers unconditionally), so no route is
+  newly accepted against copper this fix "discovers" — only the
+  *reported* span was wrong. Both pathfinders, plus the shared
+  `Route.validate_layer_transitions` missing-via safety net, now
+  normalize an ordinary (non-micro) via's span to the full physical
+  stack at `Route` construction — upstream of acceptance and export —
+  so every downstream consumer of `route.vias` sees the correct span,
+  not just the final saved `.kicad_pcb`. Explicit micro-vias are
+  untouched. Regression coverage spans both backends, an inner-to-inner
+  (`In1.Cu` -> `In2.Cu`) transition, the `validate_layer_transitions`
+  fallback, and `via_spans_layer`'s foreign-copper-on-an-intermediate-
+  layer visibility.
+- **Fine-pitch same-component carve-out silently bypassed authored pad
+  clearance** (#5004) — the router's same-component clearance carve-out
+  (`RoutingGrid._same_component_carveout_active` /
+  `CppPathfinder._same_component_carveout_eligible`) used to exempt a
+  FOREIGN-net pad from clearance checks purely because its component's pin
+  pitch was below `fine_pitch_threshold` — even when `fine_pitch_clearance`
+  was left unset (the default) and no per-component relaxation was actually
+  configured. On board07 (STM32F429 + SDRAM, 0.5mm-pitch LQFP144, 0.15mm
+  authored clearance) this silently accepted 46 clearance defects (30
+  against NC pads, 16 against named signal pads) that the router's own
+  `clearance_viol=0` metric never surfaced, while a fresh native KiCad DRC
+  on the same routed project reported all 46. The pitch-only branch is now
+  gated behind a new opt-in `DesignRules.legacy_fine_pitch_carveout` flag
+  (default `False`): with it left unset, the carve-out only activates where
+  a relaxation was actually configured or applied for the component — an
+  explicit `component_clearances` override, a net-class `escape_clearance`
+  override, an applied `fine_pitch_clearance` shrink (narrow-channel guard
+  permitting), or a corridor already relaxed by
+  `_relax_same_component_clearance` (Issue #2452). Configured relaxations
+  retain their existing exclusion behavior; enforcing numerical per-ref
+  floors is tracked separately in #5166.
+  The gate is shared by the Python search-time validator (`grid.py`), the
+  C++ pathfinder's post-route acceptance check (`cpp_backend.py`, which
+  builds the `exclude_ref_hashes` list the C++ `Grid3D::validate_route`
+  carve-out consumes), and the `validate_routes()` / `drc_nudge`
+  "component-inherent" classification (`io.py`) so those paths use the
+  same opt-in policy. `CacheKey`/`SubProblemSignature` now key on the new flag so a cache
+  entry produced under one setting is never served to a run under the
+  other. Pad seeds retain trace-radius clearance, and negotiated routing
+  preserves complete physical tree connectivity and best-state geometry.
+  Board04 recognizes reviewed oscillator escape variants. Board06 can find
+  bounded pour/via escapes and restores impedance-sized connector widths
+  beyond a cumulative 0.75 mm pad neck-down. Finalization rolls back if
+  refill breaks pour connectivity or introduces a clearance violation.
+- **Declared current-path resolution reported `ambiguous` for an entire net
+  whenever a benign parallel via array was reachable from an endpoint**
+  (#5197) — `_component_has_cycle` (`router/current_paths.py`) flagged any
+  cycle reachable from a declared endpoint, including the standard
+  high-current practice of splitting a trunk across several parallel vias
+  that immediately recombine. On board09, `+5V_OUT`'s shunt pad `RSH1.4`
+  fans into three vias reunited by a wide `B.Cu` trace, and this one benign
+  array made *every* declaration on the net report ambiguous, including the
+  low-current LED and INA226-supply taps that never touch it. Cycle
+  detection now recognizes a hub whose legs are ALL via crossings, whose far
+  ends mutually tie back together, and contracts exactly that array before
+  checking for a genuine loop — a route that merely changes layer once, or
+  a hub whose legs leave a residual route uncontracted, still reports
+  ambiguous, matching the existing parallel-return-path regression tests.
+- **`kct route` accepted KiCad 10 name-only nets but wrote zero copper and
+  reported a vacuous "SUCCESS" (0/0 nets)** (#4983) — a PCB saved in KiCad
+  10's name-only net syntax (`(net "SIGNAL")` on pads, no numeric net table
+  entries at all) made the router's pad-extraction paths
+  (`load_pcb_for_routing`, `load_pads_for_analysis` in `router/io.py`)
+  resolve every name-only pad's net to `net_num=0` — the "no net" obstacle
+  sentinel — because their name-to-id map was built only from the
+  numeric-plus-name dialect's top-level `(net N "NAME")` table, which a
+  name-only board may not have at all. `--nets <NAME>` preflight is
+  schema-level and dialect-aware so it still accepted the request, but the
+  routing graph never received a bound pad pair for that net, and `kct
+  route` reported `Nets routed: 0/0` / "SUCCESS: All signal nets routed!"
+  and exited 0 while writing an unrouted output. A new shared
+  `_build_net_number_map()` normalizes both dialects (numeric-plus-name and
+  name-only, including synthesizing stable ids for name-only nets with no
+  header table) before the routing graph, net-class auto-classification, and
+  output connectivity verification are built, so a name-only board routes
+  identically to its numeric-dialect equivalent. A `--nets`-specific guard
+  (`_reject_lost_route_only_bindings`) now aborts with a non-zero exit
+  instead of reporting vacuous success if a requested net's pad bindings are
+  ever lost after preflight already confirmed the net exists with 2+ pads.
+- **`check_silk_overlap` falsely flagged legitimate footprint-outline
+  corner joins as `silk_overlap` violations** (#4987) — the same-footprint
+  shared-endpoint exemption matched candidate corners by **exact
+  floating-point tuple equality**, which silently stopped covering
+  real-world footprint outlines whose nominally-shared endpoints differ by
+  a few ULPs (independent rounding at export time). Reproduced against
+  chorus v25 (75 of 79 reported warnings were intentional joins, not real
+  collisions). The exemption now matches shared endpoints by **distance
+  within `_CLEARANCE_EPSILON_MM`** (0.1 micron, the same tolerance already
+  used by `check_silk_edge_clearance`), and duplicate-line pairs that
+  coincide at *both* endpoints still flag as a real overlap. `silk_overlap`
+  violation items now also carry each graphic's own UUID
+  (`"U1 (fp_line) {<uuid>}"`) so same-footprint sibling strokes are
+  individually addressable for a per-element waiver. The four unrelated
+  reference-bounding-box false positives noted in the issue are a separate,
+  already-documented AABB-approximation limitation and are out of scope
+  here.
+- **`PCBEditor.add_zone` silently bound an unknown net to net 0 instead of
+  rejecting it, and both `PCBEditor.add_zone` / `ZoneGenerator.add_zone`
+  accepted arbitrary/disabled layer strings** (#4907) — `PCBEditor.add_zone`
+  resolved `net_name` through `get_net_number`'s `dict.get(name, 0)`
+  fallback, so a typo'd or nonexistent net silently produced a zone bound to
+  net 0 (`net_name` still recorded the wrong string) rather than an error.
+  Both `PCBEditor.add_zone` and `ZoneGenerator.add_zone` (used by
+  `kct pcb add-zone` and `kct zones add`) also passed `layer` through
+  unchecked, so misspelled layers (`"DefinitelyNotALayer"`), real
+  non-copper layers (`"F.SilkS"`), and inner copper layers not declared on
+  the specific board (`"In1.Cu"` on a 2-layer board) were written straight
+  into the zone node. Both writers now validate the net against the board's
+  declared net table and the layer against a new shared
+  `core.layers.validate_copper_layer` helper (canonical spelling via the
+  existing `COPPER_LAYER_ORDER`, plus board-declared/enabled-copper-layer
+  membership) *before* any document mutation, so rejected calls leave the
+  PCB untouched; both CLI routes surface the resulting `ValueError` as a
+  nonzero exit with an actionable message in text and JSON modes. Valid
+  known nets and F.Cu/B.Cu/declared-inner-layer zones are unaffected.
+- **`--strict-layers` was silently inert on the lattice engine, which shipped
+  copper onto explicitly forbidden layers** (#4979) — `avoid_layers` is
+  promoted to a HARD no-go set by
+  `NetClassRouting.hard_avoided_layer_indices()` (`--strict-layers`, or
+  unconditionally for a class declaring `target_ampacity`), and both grid
+  backends have honoured that during search since #4433. The lattice engine —
+  the `--complete` default — had no `avoid_layers` plumbing at all, so a
+  4-layer softstart rev-C completion pass committed 29 × 2.6 mm `/PGND`
+  segments plus 8 thin ones onto the `In2.Cu` reference plane the routing map
+  forbade, and reported no layer-intent failure anywhere: not in the banner,
+  not in the exit code, not in the completion report. The lattice A* now
+  filters hard-avoided layers out of its pad-escape seeds/goals and its
+  via-hop landing layers, so no state it visits can carry a forbidden layer;
+  a connection with no legal route DECLINES with a layer-attributed reason
+  (`layer-constrained-start`/`-end`, `no-path-layer-constrained`) instead of
+  shipping forbidden copper as partial progress. A via may still *step over*
+  a forbidden layer to reach an allowed one — the emitted through via's
+  barrel is DRC's antipad concern and commits no copper there — which keeps
+  an F/B-only net able to cross F↔B on a 4-layer board exactly as the grid
+  backend already does. Blocking an **outer** layer is the opposite case and
+  drops vias from the search entirely: the lattice emits every layer change
+  as a through via spanning the whole stack, so its annular ring is real
+  copper on both outer layers, and such a net now routes planar or declines
+  rather than shipping an annulus onto a layer it forbade (the grid backend
+  needs no equivalent — its via spans only the two layers it hops between).
+  A `--complete` residual carries a machine-readable `layer_constrained`
+  flag in `--complete-report` JSON (and a named line in the printed report),
+  so a consumer can tell a deliberate layer-intent refusal from congestion
+  without string-matching the reason.
+- **No gate caught forbidden-layer copper after the fact** (#4979) — a new
+  post-route, engine-agnostic audit (`router/layer_intent.py`) checks the
+  copper the output board actually carries against each net's hard layer
+  intent, distinguishing violations this run CREATED from ones it INHERITED
+  from its input under `--preserve-existing` / `--complete`. Newly created
+  ones replace the SUCCESS banner and exit 3 (or 4 below
+  `--min-completion`) — checked before the `--complete` exit-8 branch, since
+  forbidden copper outranks an unclosed link; inherited ones are reported as
+  a NOTE and leave the exit code alone. Wired into `main()` and all three
+  escalation wrapper flows (`--auto-layers` is on by default, so gating only
+  `main()` would leave it dead on the default path). A strict no-op when no
+  net class carries a hard layer constraint.
+- **Matrix layer preferences could point a net at a hard-blocked layer**
+  (#4979) — `_inject_matrix_layer_preferences` (#2432) already preserved
+  `avoid_layers` through its `dataclasses.replace`, so the hard block itself
+  was never lost, but the injected `preferred_layers` could still name a
+  layer the class forbids. Assignments are now filtered against the net's
+  hard-avoided set, and a net whose entire assignment is hard-blocked keeps
+  its authored class untouched.
 - **`PCB.remove_segments()` silently left copper behind on boards with a
   non-zero `board_origin`** (#4933) — the coordinate-fallback match (for
   segments/vias with no UUID) rebuilt an in-memory removal key without
@@ -2097,6 +2526,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reworded to `(all pads connected)`. Exit codes for the normal status path
   are deliberately unchanged (board-wide even under `--net`, documented in
   the `--net` help text); `--incomplete` keeps its board-wide header.
+
+### Fixed
+
+- **Validated per-board fabrication-floor overrides for native DRC-constraint
+  emission** (#5006) — `kct check --mfr jlcpcb-tier1 --emit-drc-constraints`
+  (and the manufacturing export path, `kct route`'s sidecar emission, and
+  `kct mfr apply-rules`) previously overwrote a reviewed project's narrower,
+  actually-fab-verified `min_hole_to_hole` floor with the manufacturer
+  profile's conservative default, causing native KiCad DRC to report
+  spurious `hole_to_hole` warnings on a board that a native DRC pass with
+  the reviewed floor showed was clean. A new
+  `kicad_tools.manufacturers.fabrication_overrides` module defines a
+  validated, cited per-board override contract: a `fabrication_overrides.json`
+  sidecar next to the routed board declares a field, an overriding value, the
+  manufacturer it applies to, a mandatory `source` citation, a mandatory
+  `reason`, and a mandatory `tracking_issue` recording the review that
+  approved it — any of the three provenance fields missing fails closed; an
+  override is only retained if it names a manufacturer-verified capability
+  floor on record (e.g. JLCPCB's published pad-hole-spacing minimum) and does
+  not ask for anything looser than that floor — an unrecognized field,
+  missing provenance, manufacturer mismatch, unregistered field, or a value
+  below the verified floor is rejected and the emission falls back to the
+  profile's conservative default instead of silently applying an unsafe
+  override. All four native-constraint-emission call sites (`kct check
+  --emit-drc-constraints`, the manufacturing export path, `kct route`'s
+  sidecar emission, `kct mfr apply-rules`) resolve the same sidecar through
+  one shared entry point, `resolve_pcb_fabrication_overrides`, so the Python
+  `DRCChecker` and every native-emission surface agree on the identical
+  resolved floor for the same board.
+  `boards/03-usb-joystick/check_manufacturing.py`'s previously bespoke
+  `dataclasses.replace(checker.design_rules, min_hole_to_hole_mm=0.45)` patch
+  is migrated onto this shared contract, backed by a new
+  `boards/03-usb-joystick/output/fabrication_overrides.json` sidecar. The
+  board resolves that sidecar through the module's shared three-directory
+  probe (`discover_fabrication_overrides_sidecar`) with a fallback to its own
+  committed copy, and `route_pcb` now stages the sidecar next to every
+  generated board, so a board copy generated outside
+  `boards/03-usb-joystick/output/` still resolves the identical cited floor
+  instead of failing on a missing file. `routing_plan.apply_native_fab_floor`
+  reads the floor it writes into the `.kicad_pro` from that same sidecar
+  rather than restating the literal value.
 
 ## [0.20.0] - 2026-08-06
 

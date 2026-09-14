@@ -44,6 +44,18 @@ def _dispatch(argv):
         return args, mock_main.call_args[0][0]
 
 
+@pytest.mark.parametrize("flag", [None, "--auto-pour", "--no-auto-pour"])
+def test_auto_pour_control_survives_dispatch(pcb_file, flag):
+    """The main CLI must expose the plane control used by assembled demos (#4988)."""
+    argv = ["route", str(pcb_file), "--dry-run", "--quiet"]
+    if flag:
+        argv.append(flag)
+    _, forwarded = _dispatch(argv)
+    assert [x for x in forwarded if x in {"--auto-pour", "--no-auto-pour"}] == (
+        [flag] if flag else []
+    )
+
+
 class TestExplicitAutoLayersForwarding:
     """The outer parser's tri-state value reaches the inner argv intact."""
 

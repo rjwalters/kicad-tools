@@ -1,0 +1,1941 @@
+{
+  "pcb": "/Users/rwalters/GitHub/kicad-tools/boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb",
+  "connectivity_model": "strict",
+  "summary": {
+    "total_nets": 32,
+    "complete": 31,
+    "incomplete": 1,
+    "unrouted": 0,
+    "total_unconnected_pads": 4
+  },
+  "nets": [
+    {
+      "net_number": 3,
+      "net_name": "GND",
+      "net_class": "",
+      "status": "incomplete",
+      "net_type": "plane",
+      "total_pads": 35,
+      "connected_count": 31,
+      "unconnected_count": 4,
+      "connection_percentage": 88.6,
+      "island_count": 3,
+      "total_connections": 34,
+      "routed_connections": 32,
+      "open_connections": 2,
+      "is_plane_net": true,
+      "has_filled_zone": true,
+      "is_advisory_incomplete": true,
+      "plane_layer": "In1.Cu",
+      "plane_layers": [
+        "In1.Cu",
+        "In2.Cu"
+      ],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "kct stitch /Users/rwalters/GitHub/kicad-tools/boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb --net GND (zones on In1.Cu, In2.Cu)",
+      "connected_pads": [
+        {
+          "name": "U1.6",
+          "position": [
+            16.0625,
+            26.25
+          ]
+        },
+        {
+          "name": "U1.10",
+          "position": [
+            18.25,
+            26.9375
+          ]
+        },
+        {
+          "name": "U1.12",
+          "position": [
+            19.25,
+            26.9375
+          ]
+        },
+        {
+          "name": "U1.13",
+          "position": [
+            19.9375,
+            26.25
+          ]
+        },
+        {
+          "name": "U1.22",
+          "position": [
+            17.75,
+            23.0625
+          ]
+        },
+        {
+          "name": "U1.25",
+          "position": [
+            18.0,
+            25.0
+          ]
+        },
+        {
+          "name": "R8.2",
+          "position": [
+            66.825,
+            29.0
+          ]
+        },
+        {
+          "name": "C8.2",
+          "position": [
+            51.475,
+            16.0
+          ]
+        },
+        {
+          "name": "C3.2",
+          "position": [
+            10.775,
+            23.0
+          ]
+        },
+        {
+          "name": "C15.2",
+          "position": [
+            81.775,
+            20.0
+          ]
+        },
+        {
+          "name": "C12.2",
+          "position": [
+            79.775,
+            34.0
+          ]
+        },
+        {
+          "name": "C2.2",
+          "position": [
+            20.775,
+            19.0
+          ]
+        },
+        {
+          "name": "J2.2",
+          "position": [
+            91.08,
+            16.0
+          ]
+        },
+        {
+          "name": "C9.2",
+          "position": [
+            57.475,
+            16.0
+          ]
+        },
+        {
+          "name": "U3.1",
+          "position": [
+            71.9,
+            31.0
+          ]
+        },
+        {
+          "name": "U3.2",
+          "position": [
+            71.9,
+            31.5
+          ]
+        },
+        {
+          "name": "U3.7",
+          "position": [
+            76.1,
+            32.5
+          ]
+        },
+        {
+          "name": "C6.2",
+          "position": [
+            55.150000000000006,
+            28.225
+          ]
+        },
+        {
+          "name": "C13.2",
+          "position": [
+            11.775,
+            43.0
+          ]
+        },
+        {
+          "name": "J1.SH",
+          "position": [
+            14.32,
+            10.13
+          ]
+        },
+        {
+          "name": "J1.SH",
+          "position": [
+            14.32,
+            5.95
+          ]
+        },
+        {
+          "name": "J1.SH",
+          "position": [
+            5.68,
+            10.129999999999999
+          ]
+        },
+        {
+          "name": "J1.SH",
+          "position": [
+            5.68,
+            5.949999999999999
+          ]
+        },
+        {
+          "name": "R6.2",
+          "position": [
+            64.825,
+            39.0
+          ]
+        },
+        {
+          "name": "C5.2",
+          "position": [
+            53.0,
+            27.525
+          ]
+        },
+        {
+          "name": "J3.1",
+          "position": [
+            86.0,
+            42.0
+          ]
+        },
+        {
+          "name": "U2.1",
+          "position": [
+            56.8625,
+            28.05
+          ]
+        },
+        {
+          "name": "D2.1",
+          "position": [
+            85.2125,
+            30.0
+          ]
+        },
+        {
+          "name": "C1.2",
+          "position": [
+            15.775,
+            18.0
+          ]
+        },
+        {
+          "name": "U4.3",
+          "position": [
+            16.9375,
+            45.0
+          ]
+        },
+        {
+          "name": "C14.2",
+          "position": [
+            20.775,
+            43.0
+          ]
+        }
+      ],
+      "unconnected_pads": [
+        {
+          "name": "J1.A1",
+          "position": [
+            13.25,
+            11.045
+          ]
+        },
+        {
+          "name": "J1.A12",
+          "position": [
+            6.75,
+            11.045
+          ]
+        },
+        {
+          "name": "J1.B1",
+          "position": [
+            6.75,
+            11.045
+          ]
+        },
+        {
+          "name": "J1.B12",
+          "position": [
+            13.25,
+            11.045
+          ]
+        }
+      ]
+    },
+    {
+      "net_number": 20,
+      "net_name": "+3V3",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "power",
+      "total_pads": 11,
+      "connected_count": 11,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 10,
+      "routed_connections": 10,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "R13.1",
+          "position": [
+            29.175,
+            48.0
+          ]
+        },
+        {
+          "name": "C12.1",
+          "position": [
+            78.225,
+            34.0
+          ]
+        },
+        {
+          "name": "R15.1",
+          "position": [
+            35.175,
+            48.0
+          ]
+        },
+        {
+          "name": "U3.6",
+          "position": [
+            76.1,
+            33.0
+          ]
+        },
+        {
+          "name": "R18.1",
+          "position": [
+            29.175,
+            35.0
+          ]
+        },
+        {
+          "name": "R14.1",
+          "position": [
+            35.175,
+            44.0
+          ]
+        },
+        {
+          "name": "J3.4",
+          "position": [
+            86.0,
+            49.62
+          ]
+        },
+        {
+          "name": "R17.1",
+          "position": [
+            23.175,
+            35.0
+          ]
+        },
+        {
+          "name": "U4.1",
+          "position": [
+            15.0625,
+            44.05
+          ]
+        },
+        {
+          "name": "R12.1",
+          "position": [
+            29.175,
+            44.0
+          ]
+        },
+        {
+          "name": "C14.1",
+          "position": [
+            19.225,
+            43.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 21,
+      "net_name": "+5V_OUT",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "power",
+      "total_pads": 5,
+      "connected_count": 5,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 4,
+      "routed_connections": 4,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "C15.1",
+          "position": [
+            80.225,
+            20.0
+          ]
+        },
+        {
+          "name": "RSH1.4",
+          "position": [
+            72.985,
+            18.635
+          ]
+        },
+        {
+          "name": "J2.1",
+          "position": [
+            86.0,
+            16.0
+          ]
+        },
+        {
+          "name": "U3.8",
+          "position": [
+            76.1,
+            32.0
+          ]
+        },
+        {
+          "name": "R16.1",
+          "position": [
+            85.175,
+            26.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 29,
+      "net_name": "BOOT",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 2,
+      "connected_count": 2,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 1,
+      "routed_connections": 1,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "R9.1",
+          "position": [
+            60.874999999999986,
+            26.5
+          ]
+        },
+        {
+          "name": "U2.6",
+          "position": [
+            59.1375,
+            28.05
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 30,
+      "net_name": "BOOT_CAP",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 2,
+      "connected_count": 2,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 1,
+      "routed_connections": 1,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "R9.2",
+          "position": [
+            62.52499999999999,
+            26.5
+          ]
+        },
+        {
+          "name": "C7.1",
+          "position": [
+            61.775,
+            23.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 24,
+      "net_name": "BUCK_EN",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 3,
+      "connected_count": 3,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 2,
+      "routed_connections": 2,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "R5.2",
+          "position": [
+            64.825,
+            35.0
+          ]
+        },
+        {
+          "name": "R6.1",
+          "position": [
+            63.175,
+            39.0
+          ]
+        },
+        {
+          "name": "U2.5",
+          "position": [
+            59.1375,
+            29.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 1,
+      "net_name": "CC1",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 3,
+      "connected_count": 3,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 2,
+      "routed_connections": 2,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.1",
+          "position": [
+            16.0625,
+            23.75
+          ]
+        },
+        {
+          "name": "U1.2",
+          "position": [
+            16.0625,
+            24.25
+          ]
+        },
+        {
+          "name": "J1.A5",
+          "position": [
+            11.25,
+            11.045
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 2,
+      "net_name": "CC2",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 3,
+      "connected_count": 3,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 2,
+      "routed_connections": 2,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.4",
+          "position": [
+            16.0625,
+            25.25
+          ]
+        },
+        {
+          "name": "U1.5",
+          "position": [
+            16.0625,
+            25.75
+          ]
+        },
+        {
+          "name": "J1.B5",
+          "position": [
+            8.25,
+            11.045
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 6,
+      "net_name": "DISCHARGE",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 2,
+      "connected_count": 2,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 1,
+      "routed_connections": 1,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.9",
+          "position": [
+            17.75,
+            26.9375
+          ]
+        },
+        {
+          "name": "R4.2",
+          "position": [
+            27.4625,
+            26.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 15,
+      "net_name": "FB",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 4,
+      "connected_count": 4,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 3,
+      "routed_connections": 3,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "R8.1",
+          "position": [
+            65.175,
+            29.0
+          ]
+        },
+        {
+          "name": "C10.2",
+          "position": [
+            66.775,
+            22.0
+          ]
+        },
+        {
+          "name": "U2.4",
+          "position": [
+            59.1375,
+            29.95
+          ]
+        },
+        {
+          "name": "R7.2",
+          "position": [
+            66.825,
+            25.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 22,
+      "net_name": "KELVIN_N",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 2,
+      "connected_count": 2,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 1,
+      "routed_connections": 1,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "R11.1",
+          "position": [
+            75.175,
+            26.0
+          ]
+        },
+        {
+          "name": "RSH1.3",
+          "position": [
+            73.43,
+            16.73
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 26,
+      "net_name": "KELVIN_P",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 2,
+      "connected_count": 2,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 1,
+      "routed_connections": 1,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "RSH1.2",
+          "position": [
+            66.57,
+            19.27
+          ]
+        },
+        {
+          "name": "R10.1",
+          "position": [
+            69.175,
+            26.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 31,
+      "net_name": "LED_A",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 2,
+      "connected_count": 2,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 1,
+      "routed_connections": 1,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "R16.2",
+          "position": [
+            86.825,
+            26.0
+          ]
+        },
+        {
+          "name": "D2.2",
+          "position": [
+            86.7875,
+            30.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 28,
+      "net_name": "MON_ALERT",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 3,
+      "connected_count": 3,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 2,
+      "routed_connections": 2,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "R15.2",
+          "position": [
+            36.825,
+            48.0
+          ]
+        },
+        {
+          "name": "U3.3",
+          "position": [
+            71.9,
+            32.0
+          ]
+        },
+        {
+          "name": "J3.6",
+          "position": [
+            86.0,
+            54.7
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 10,
+      "net_name": "PD_ALERT",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 3,
+      "connected_count": 3,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 2,
+      "routed_connections": 2,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.19",
+          "position": [
+            19.25,
+            23.0625
+          ]
+        },
+        {
+          "name": "R14.2",
+          "position": [
+            36.825,
+            44.0
+          ]
+        },
+        {
+          "name": "J3.5",
+          "position": [
+            86.0,
+            52.16
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 11,
+      "net_name": "PD_OK2",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 2,
+      "connected_count": 2,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 1,
+      "routed_connections": 1,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.20",
+          "position": [
+            18.75,
+            23.0625
+          ]
+        },
+        {
+          "name": "R17.2",
+          "position": [
+            24.825,
+            35.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 7,
+      "net_name": "PD_OK3",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 2,
+      "connected_count": 2,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 1,
+      "routed_connections": 1,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.14",
+          "position": [
+            19.9375,
+            25.75
+          ]
+        },
+        {
+          "name": "R18.2",
+          "position": [
+            30.825,
+            35.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 17,
+      "net_name": "PMOS_GATE",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 6,
+      "connected_count": 6,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 5,
+      "routed_connections": 5,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "C4.2",
+          "position": [
+            39.775,
+            31.0
+          ]
+        },
+        {
+          "name": "Q2.4",
+          "position": [
+            46.475,
+            16.095
+          ]
+        },
+        {
+          "name": "R1.2",
+          "position": [
+            33.825,
+            27.0
+          ]
+        },
+        {
+          "name": "Q1.4",
+          "position": [
+            31.525,
+            19.905
+          ]
+        },
+        {
+          "name": "D1.2",
+          "position": [
+            40.65,
+            27.0
+          ]
+        },
+        {
+          "name": "R2.1",
+          "position": [
+            28.175,
+            30.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 16,
+      "net_name": "PMOS_SOURCE",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 9,
+      "connected_count": 9,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 8,
+      "routed_connections": 8,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "C4.1",
+          "position": [
+            38.225,
+            31.0
+          ]
+        },
+        {
+          "name": "Q2.1",
+          "position": [
+            46.475,
+            19.905
+          ]
+        },
+        {
+          "name": "Q2.2",
+          "position": [
+            46.475,
+            18.635
+          ]
+        },
+        {
+          "name": "Q2.3",
+          "position": [
+            46.475,
+            17.365000000000002
+          ]
+        },
+        {
+          "name": "R1.1",
+          "position": [
+            32.175,
+            27.0
+          ]
+        },
+        {
+          "name": "Q1.1",
+          "position": [
+            31.525,
+            16.095
+          ]
+        },
+        {
+          "name": "Q1.2",
+          "position": [
+            31.525,
+            17.365
+          ]
+        },
+        {
+          "name": "Q1.3",
+          "position": [
+            31.525,
+            18.635
+          ]
+        },
+        {
+          "name": "D1.1",
+          "position": [
+            37.35,
+            27.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 4,
+      "net_name": "SCL",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 4,
+      "connected_count": 4,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 3,
+      "routed_connections": 3,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.7",
+          "position": [
+            16.75,
+            26.9375
+          ]
+        },
+        {
+          "name": "U3.5",
+          "position": [
+            71.9,
+            33.0
+          ]
+        },
+        {
+          "name": "J3.2",
+          "position": [
+            86.0,
+            44.54
+          ]
+        },
+        {
+          "name": "R12.2",
+          "position": [
+            30.825,
+            44.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 5,
+      "net_name": "SDA",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 4,
+      "connected_count": 4,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 3,
+      "routed_connections": 3,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.8",
+          "position": [
+            17.25,
+            26.9375
+          ]
+        },
+        {
+          "name": "R13.2",
+          "position": [
+            30.825,
+            48.0
+          ]
+        },
+        {
+          "name": "U3.4",
+          "position": [
+            71.9,
+            32.5
+          ]
+        },
+        {
+          "name": "J3.3",
+          "position": [
+            86.0,
+            47.08
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 23,
+      "net_name": "SENSE_N",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 3,
+      "connected_count": 3,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 2,
+      "routed_connections": 2,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "R11.2",
+          "position": [
+            76.825,
+            26.0
+          ]
+        },
+        {
+          "name": "U3.9",
+          "position": [
+            76.1,
+            31.5
+          ]
+        },
+        {
+          "name": "C11.2",
+          "position": [
+            79.775,
+            29.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 27,
+      "net_name": "SENSE_P",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 3,
+      "connected_count": 3,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 2,
+      "routed_connections": 2,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "R10.2",
+          "position": [
+            70.825,
+            26.0
+          ]
+        },
+        {
+          "name": "U3.10",
+          "position": [
+            76.1,
+            31.0
+          ]
+        },
+        {
+          "name": "C11.1",
+          "position": [
+            78.225,
+            29.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 8,
+      "net_name": "SINK_GATE",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 2,
+      "connected_count": 2,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 1,
+      "routed_connections": 1,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.16",
+          "position": [
+            19.9375,
+            24.75
+          ]
+        },
+        {
+          "name": "R2.2",
+          "position": [
+            29.825,
+            30.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 32,
+      "net_name": "SW",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "signal",
+      "total_pads": 3,
+      "connected_count": 3,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 2,
+      "routed_connections": 2,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "L1.1",
+          "position": [
+            48.0,
+            29.95
+          ]
+        },
+        {
+          "name": "C7.2",
+          "position": [
+            60.225,
+            23.0
+          ]
+        },
+        {
+          "name": "U2.2",
+          "position": [
+            56.8625,
+            29.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 25,
+      "net_name": "VBUS_FUSED",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "power",
+      "total_pads": 5,
+      "connected_count": 5,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 4,
+      "routed_connections": 4,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "Q1.5",
+          "position": [
+            36.475,
+            19.905
+          ]
+        },
+        {
+          "name": "Q1.6",
+          "position": [
+            36.475,
+            18.635
+          ]
+        },
+        {
+          "name": "Q1.7",
+          "position": [
+            36.475,
+            17.365
+          ]
+        },
+        {
+          "name": "Q1.8",
+          "position": [
+            36.475,
+            16.095
+          ]
+        },
+        {
+          "name": "F1.2",
+          "position": [
+            25.4,
+            10.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 14,
+      "net_name": "VBUS_RAW",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "power",
+      "total_pads": 10,
+      "connected_count": 10,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 9,
+      "routed_connections": 9,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.24",
+          "position": [
+            16.75,
+            23.0625
+          ]
+        },
+        {
+          "name": "F1.1",
+          "position": [
+            22.6,
+            10.0
+          ]
+        },
+        {
+          "name": "R3.1",
+          "position": [
+            23.5375,
+            22.0
+          ]
+        },
+        {
+          "name": "C13.1",
+          "position": [
+            10.225,
+            43.0
+          ]
+        },
+        {
+          "name": "J1.A4",
+          "position": [
+            12.45,
+            11.045
+          ]
+        },
+        {
+          "name": "J1.A9",
+          "position": [
+            7.549999999999999,
+            11.045
+          ]
+        },
+        {
+          "name": "J1.B4",
+          "position": [
+            7.549999999999999,
+            11.045
+          ]
+        },
+        {
+          "name": "J1.B9",
+          "position": [
+            12.45,
+            11.045
+          ]
+        },
+        {
+          "name": "C1.1",
+          "position": [
+            14.225,
+            18.0
+          ]
+        },
+        {
+          "name": "U4.2",
+          "position": [
+            15.0625,
+            45.95
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 9,
+      "net_name": "VBUS_SENSE",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "power",
+      "total_pads": 2,
+      "connected_count": 2,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 1,
+      "routed_connections": 1,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.18",
+          "position": [
+            19.9375,
+            23.75
+          ]
+        },
+        {
+          "name": "R3.2",
+          "position": [
+            26.4625,
+            22.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 19,
+      "net_name": "VIN",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "power",
+      "total_pads": 9,
+      "connected_count": 9,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 8,
+      "routed_connections": 8,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "R4.1",
+          "position": [
+            24.5375,
+            26.0
+          ]
+        },
+        {
+          "name": "Q2.5",
+          "position": [
+            41.525,
+            16.095
+          ]
+        },
+        {
+          "name": "Q2.6",
+          "position": [
+            41.525,
+            17.365
+          ]
+        },
+        {
+          "name": "Q2.7",
+          "position": [
+            41.525,
+            18.634999999999998
+          ]
+        },
+        {
+          "name": "Q2.8",
+          "position": [
+            41.525,
+            19.905
+          ]
+        },
+        {
+          "name": "R5.1",
+          "position": [
+            63.175,
+            35.0
+          ]
+        },
+        {
+          "name": "C6.1",
+          "position": [
+            55.150000000000006,
+            29.775
+          ]
+        },
+        {
+          "name": "C5.1",
+          "position": [
+            53.0,
+            30.475
+          ]
+        },
+        {
+          "name": "U2.3",
+          "position": [
+            56.8625,
+            29.95
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 18,
+      "net_name": "VOUT_PRE",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "power",
+      "total_pads": 6,
+      "connected_count": 6,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 5,
+      "routed_connections": 5,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "C8.1",
+          "position": [
+            48.525,
+            16.0
+          ]
+        },
+        {
+          "name": "RSH1.1",
+          "position": [
+            67.015,
+            17.365
+          ]
+        },
+        {
+          "name": "C9.1",
+          "position": [
+            54.525,
+            16.0
+          ]
+        },
+        {
+          "name": "C10.1",
+          "position": [
+            65.225,
+            22.0
+          ]
+        },
+        {
+          "name": "L1.2",
+          "position": [
+            48.0,
+            24.05
+          ]
+        },
+        {
+          "name": "R7.1",
+          "position": [
+            65.175,
+            25.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 12,
+      "net_name": "VREG_1V2",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "power",
+      "total_pads": 2,
+      "connected_count": 2,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 1,
+      "routed_connections": 1,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": false,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.21",
+          "position": [
+            18.25,
+            23.0625
+          ]
+        },
+        {
+          "name": "C2.1",
+          "position": [
+            19.225,
+            19.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    },
+    {
+      "net_number": 13,
+      "net_name": "VREG_2V7",
+      "net_class": "",
+      "status": "complete",
+      "net_type": "power",
+      "total_pads": 2,
+      "connected_count": 2,
+      "unconnected_count": 0,
+      "connection_percentage": 100.0,
+      "island_count": 1,
+      "total_connections": 1,
+      "routed_connections": 1,
+      "open_connections": 0,
+      "is_plane_net": false,
+      "has_filled_zone": false,
+      "is_advisory_incomplete": false,
+      "plane_layer": "",
+      "plane_layers": [],
+      "has_routing": true,
+      "has_vias": true,
+      "suggested_fix": "",
+      "connected_pads": [
+        {
+          "name": "U1.23",
+          "position": [
+            17.25,
+            23.0625
+          ]
+        },
+        {
+          "name": "C3.1",
+          "position": [
+            9.225,
+            23.0
+          ]
+        }
+      ],
+      "unconnected_pads": []
+    }
+  ]
+}

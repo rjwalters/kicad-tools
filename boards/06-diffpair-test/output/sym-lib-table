@@ -1,0 +1,1 @@
+(sym_lib_table (version 7) (lib (name "lvds_demo") (type "KiCad") (uri "${KIPRJMOD}/lvds_demo.kicad_sym") (options "") (descr "TI SLLS373M reviewed pinouts")))

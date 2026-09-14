@@ -35,6 +35,46 @@ class TestPhysicalConstants:
         assert COPPER_CONDUCTIVITY == 5.8e7  # S/m
 
 
+def test_bottom_microstrip_uses_inward_substrate_on_asymmetric_board():
+    from kicad_tools.physics import TransmissionLine
+
+    stack = Stackup(
+        layers=[
+            StackupLayer("F.Cu", LayerType.COPPER, 0.035),
+            StackupLayer(
+                "top prepreg", LayerType.DIELECTRIC, 0.1, epsilon_r=4.1, loss_tangent=0.01
+            ),
+            StackupLayer("In1.Cu", LayerType.COPPER, 0.0175),
+            StackupLayer("core", LayerType.DIELECTRIC, 1.0, epsilon_r=4.5),
+            StackupLayer("In2.Cu", LayerType.COPPER, 0.0175),
+            StackupLayer(
+                "bottom prepreg", LayerType.DIELECTRIC, 0.2, epsilon_r=3.7, loss_tangent=0.005
+            ),
+            StackupLayer("B.Cu", LayerType.COPPER, 0.035),
+            StackupLayer("B.Mask", LayerType.SOLDER_MASK, 0.01, epsilon_r=3.3),
+            # KiCad's parsed paste entry must never become the substrate.
+            StackupLayer("B.Paste", LayerType.DIELECTRIC, 0.0),
+        ],
+        board_thickness_mm=1.4,
+    )
+    assert stack.get_dielectric_height("F.Cu") == pytest.approx(0.1)
+    assert stack.get_dielectric_height("B.Cu") == pytest.approx(0.2)
+    assert stack.get_dielectric_constant("B.Cu") == pytest.approx(3.7)
+    assert stack.get_loss_tangent("B.Cu") == pytest.approx(0.005)
+    # Mirroring the physical stack preserves impedance at the mirrored face.
+    mirrored = Stackup(layers=list(reversed(stack.layers)), board_thickness_mm=1.4)
+    assert TransmissionLine(stack).microstrip(0.2, "B.Cu").z0 == pytest.approx(
+        TransmissionLine(mirrored).microstrip(0.2, "B.Cu").z0
+    )
+
+
+def test_default_two_layer_has_equal_top_and_bottom_impedance():
+    from kicad_tools.physics import TransmissionLine
+
+    line = TransmissionLine(Stackup.default_2layer())
+    assert line.microstrip(0.3, "F.Cu").z0 == pytest.approx(line.microstrip(0.3, "B.Cu").z0)
+
+
 class TestCopperWeight:
     """Tests for copper weight calculations."""
 
@@ -331,6 +371,78 @@ class TestStackupFromPCB:
         repr_str = repr(stackup)
         assert "4L" in repr_str
         assert "1.6mm" in repr_str
+
+
+@pytest.fixture
+def composite_six_layer_pcb():
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
+
+    # Native KiCad syntax: addsublayer is a bare atom, not a child list.
+    return PCB(
+        parse_string("""(kicad_pcb (version 20260206)
+      (general (thickness 1.6))
+      (layers (0 "F.Cu" signal) (1 "In1.Cu" power)
+        (2 "In2.Cu" signal) (3 "In3.Cu" signal)
+        (4 "In4.Cu" power) (31 "B.Cu" signal))
+      (setup (stackup
+        (layer "F.Cu" (type "copper") (thickness .035))
+        (layer "dielectric 1" (type "prepreg") (thickness .1164) (epsilon_r 4.16))
+        (layer "In1.Cu" (type "copper") (thickness .0152))
+        (layer "dielectric 2" (type "core") (thickness .13) (epsilon_r 4.6))
+        (layer "In2.Cu" (type "copper") (thickness .0152))
+        (layer "dielectric 3" (type "prepreg")
+          (thickness .1164) (material "FR4 2116") (epsilon_r 4.16) (loss_tangent .02)
+          addsublayer
+          (thickness .7) (material "FR4 core") (epsilon_r 4.6) (loss_tangent .018)
+          addsublayer
+          (thickness .1164) (material "FR4 2116") (epsilon_r 4.16) (loss_tangent .02))
+        (layer "In3.Cu" (type "copper") (thickness .0152))
+        (layer "dielectric 4" (type "core") (thickness .13) (epsilon_r 4.6))
+        (layer "In4.Cu" (type "copper") (thickness .0152))
+        (layer "dielectric 5" (type "prepreg") (thickness .1164) (epsilon_r 4.16))
+        (layer "B.Cu" (type "copper") (thickness .035)))))""")
+    )
+
+
+def test_native_composite_dielectric_preserves_all_strata(composite_six_layer_pcb, tmp_path):
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = composite_six_layer_pcb
+    strata = [layer for layer in pcb.setup.stackup if layer.name.startswith("dielectric 3")]
+    assert [layer.thickness for layer in strata] == [0.1164, 0.7, 0.1164]
+    assert [layer.epsilon_r for layer in strata] == [4.16, 4.6, 4.16]
+    assert [layer.material for layer in strata] == ["FR4 2116", "FR4 core", "FR4 2116"]
+    stackup = Stackup.from_pcb(pcb)
+    assert stackup.board_thickness_mm == pytest.approx(1.5564)
+    assert stackup.get_layer("dielectric 3 (sublayer 2)").loss_tangent == 0.018
+    path = tmp_path / "roundtrip.kicad_pcb"
+    pcb.save(path)
+    assert len(PCB.load(path).setup.stackup) == len(pcb.setup.stackup)
+    assert path.read_text().count("addsublayer") == 2
+
+
+def test_stripline_uses_declared_planes_across_signal_copper(composite_six_layer_pcb):
+    stackup = Stackup.from_pcb(composite_six_layer_pcb)
+    assert not stackup.get_layer("In1.Cu").is_signal_layer
+    assert stackup.get_layer("In2.Cu").is_signal_layer
+    assert stackup.get_stripline_geometry("In2.Cu") == pytest.approx((0.13, 1.078))
+    assert stackup.get_stripline_geometry("In3.Cu") == pytest.approx((1.078, 0.13))
+    assert stackup.get_dielectric_height("In2.Cu") == pytest.approx(0.13)
+
+
+def test_legacy_roles_still_sum_composite_dielectric(composite_six_layer_pcb):
+    for layer in composite_six_layer_pcb.layers.values():
+        layer.type = "signal"
+    stackup = Stackup.from_pcb(composite_six_layer_pcb)
+    assert stackup.get_stripline_geometry("In2.Cu") == pytest.approx((0.13, 0.9328))
+
+
+def test_explicit_planes_do_not_fall_back_to_signal_when_missing(composite_six_layer_pcb):
+    composite_six_layer_pcb.layers[4].type = "signal"
+    stackup = Stackup.from_pcb(composite_six_layer_pcb)
+    with pytest.raises(ValueError, match="No declared reference plane"):
+        stackup.get_stripline_geometry("In2.Cu")
 
 
 class TestOuterInnerCopperOz:

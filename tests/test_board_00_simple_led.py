@@ -37,6 +37,7 @@ picks this up; PR-time CI excludes it.
 from __future__ import annotations
 
 import re
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -107,38 +108,26 @@ class TestBoard00D1Polarity:
     "GND")`` already binds pad 1 → GND and pad 2 → LED_ANODE (forward
     biased). The two halves of the recipe disagreed.
 
-    This test runs the generator end-to-end and asserts that:
+    This test runs the schematic and PCB generation phases and asserts that:
 
     - Schematic: D1 pin 1 (K) is on net ``GND``; pin 2 (A) is on net
       ``LED_ANODE``.
     - PCB: pad 1 is on net ``GND`` (net 3); pad 2 is on net ``LED_ANODE``
       (net 2).
 
-    Fails on ``origin/main`` at the pre-fix commit; passes after the fix
-    in ``boards/00-simple-led/generate_design.py``. Sub-second, no
-    ``@pytest.mark.slow`` -- runs in PR CI.
+    Routing and manufacturing export do not determine these source pin
+    bindings. The end-to-end routing tests below and the Board00 CI job
+    exercise those phases separately.
     """
 
     @pytest.fixture(scope="class")
     def generated_design(self, tmp_path_factory: pytest.TempPathFactory) -> Path:
-        """Run ``generate_design.py`` and return the output directory."""
+        """Generate the actual source artifacts whose pin bindings we check."""
         out_dir = tmp_path_factory.mktemp("board00_polarity")
-        proc = subprocess.run(
-            [sys.executable, str(GENERATOR), str(out_dir)],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
-        )
-        sch = out_dir / "simple_led.kicad_sch"
-        pcb = out_dir / "simple_led.kicad_pcb"
-        if not sch.exists() or not pcb.exists():
-            pytest.fail(
-                f"Generator did not produce expected artifacts "
-                f"(exit {proc.returncode}).\n"
-                f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}\n"
-                f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}"
-            )
+        generator = runpy.run_path(str(GENERATOR))
+        generator["create_project"](out_dir, "simple_led")
+        generator["create_led_schematic"](out_dir)
+        generator["create_led_pcb"](out_dir)
         return out_dir
 
     def test_schematic_d1_cathode_on_gnd(self, generated_design: Path) -> None:

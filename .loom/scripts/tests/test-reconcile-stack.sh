@@ -218,18 +218,23 @@ teardown_sandbox() {
 
 # Run reconcile-stack.sh from $1 (a cwd), capturing combined output + exit code.
 # Result in RUN_OUT / RUN_RC. gh stub + git file-protocol are made available.
+# Extra positional args (e.g. --dry-run) are forwarded to reconcile-stack.sh.
+# LOOM_VERSION_CHECK_SCRIPT, when set in the caller's environment, is
+# forwarded too (the #7341 version-check-gate.sh test seam).
 RUN_OUT=""
 RUN_RC=0
 run_reconcile() {
     local cwd="$1"
+    shift
     RUN_RC=0
     RUN_OUT="$(
         cd "$cwd" &&
         PATH="$GIT_STUB_DIR:$GH_STUB_DIR:$PATH" \
         LOOM_DEFAULT_BRANCH="main" \
         LOOM_TEST_FAKE_REJECT="${LOOM_TEST_FAKE_REJECT:-0}" \
+        LOOM_VERSION_CHECK_SCRIPT="${LOOM_VERSION_CHECK_SCRIPT:-}" \
         GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="protocol.file.allow" GIT_CONFIG_VALUE_0="always" \
-        bash "$RECONCILE" "$CHILD_PR" "$PARENT_BR" 2>&1
+        bash "$RECONCILE" "$CHILD_PR" "$PARENT_BR" "$@" 2>&1
     )" || RUN_RC=$?
 }
 
@@ -352,6 +357,52 @@ assert_eq "$CONFLICT_SHA" "$REMOTE_CHILD_SHA_D" \
 teardown_sandbox
 
 # ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario E: version-check-gate.sh (#7168, extended #7341) reports a mismatch after rebase --onto"
+setup_sandbox
+
+# `git rebase --onto` replays ONLY the child's own commits, silently
+# absorbing whatever version-bearing values the default branch already had
+# -- the exact drift that shipped as bef3e07a on feature/issue-6612 (#7341).
+# Stub LOOM_VERSION_CHECK_SCRIPT (the shared gate's own test seam) to report
+# a MISMATCH unconditionally, simulating that drift, and confirm
+# reconcile-stack.sh aborts BEFORE pushing or retargeting the child PR.
+STUB_MISMATCH="$SANDBOX/version-mismatch.sh"
+cat > "$STUB_MISMATCH" <<'STUB'
+#!/usr/bin/env bash
+echo "MISMATCH  .loom/install-metadata.json: 0.1.0 (expected 0.2.0)"
+exit 1
+STUB
+chmod +x "$STUB_MISMATCH"
+
+REMOTE_CHILD_SHA_BEFORE_E="$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")"
+LOOM_VERSION_CHECK_SCRIPT="$STUB_MISMATCH" run_reconcile "$MAIN"
+
+assert_eq "2" "$RUN_RC" "E: a version-bearing-file mismatch after rebase aborts with exit 2 (never pushed)"
+assert_contains "$RUN_OUT" "BLOCKER" "E: the shared gate's BLOCKER: message is surfaced"
+assert_contains "$RUN_OUT" "out of sync" "E: reconcile-stack.sh's own abort message names the mismatch"
+assert_not_contains "$RUN_OUT" "Step 2/3" "E: the push step never started"
+REMOTE_CHILD_SHA_AFTER_E="$(git_q -C "$REMOTE" rev-parse "$CHILD_BR")"
+assert_eq "$REMOTE_CHILD_SHA_BEFORE_E" "$REMOTE_CHILD_SHA_AFTER_E" \
+  "E: origin/$CHILD_BR is unchanged -- the rebased-but-ungated commit was never pushed"
+assert_eq "" "$(cat "$GH_EDIT_LOG")" "E: the child PR base was never retargeted"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario F: --dry-run skips the version-check-gate (nothing was actually rebased)"
+setup_sandbox
+
+LOOM_VERSION_CHECK_SCRIPT="$STUB_MISMATCH" run_reconcile "$MAIN" --dry-run
+
+assert_eq "0" "$RUN_RC" "F: --dry-run exits 0 even with a mismatching gate stub (no real rebase happened)"
+assert_not_contains "$RUN_OUT" "BLOCKER" "F: the gate never runs under --dry-run"
+assert_contains "$RUN_OUT" "Dry run complete" "F: dry-run still reports its own completion message"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Source guards: fail loudly if a refactor drops either fix.
 echo ""
 echo "Source guards on reconcile-stack.sh"
@@ -366,6 +417,10 @@ assert_contains "$src" "push_landed_despite_rejection" \
   "reconcile-stack.sh verifies the actual remote ref state after a rejected --force-with-lease push (#6695)"
 assert_contains "$src" "PUSH-LEASE-RACE-DETECTED" \
   "reconcile-stack.sh logs a greppable marker when a reported rejection is actually landed"
+assert_contains "$src" '"$SCRIPT_DIR/version-check-gate.sh"' \
+  "reconcile-stack.sh runs the shared version-check-gate.sh after rebase, before push (#7168, #7341)"
+assert_contains "$src" 'DRY_RUN' \
+  "reconcile-stack.sh's version-check-gate call is itself skipped under --dry-run"
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""

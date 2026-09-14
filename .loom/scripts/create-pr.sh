@@ -181,7 +181,7 @@ if [[ -z "$HEAD_BRANCH" || "$HEAD_BRANCH" == "HEAD" ]]; then
   exit 2
 fi
 
-# --- Version-bearing-file sync check (#6730) ---------------------------------
+# --- Version-bearing-file sync check (#6730, #7168) -------------------------
 #
 # Recurring failure mode: a Builder's version-bump commit hand-edits (or
 # mirrors via a partial script) the VERSION_FILES set in scripts/version.sh
@@ -192,43 +192,18 @@ fi
 # check` already catches this correctly; the gap was that nothing forced it
 # to run before a PR was opened -- builder-pr.md's "defaults/ VERSION-Bump
 # Gate" documented running it by hand, but a checklist step a Builder can
-# forget is not enforcement. Mirror that gate's message style
-# (BLOCKER:/Fix:) here so this becomes a real, unskippable pre-flight instead.
+# forget is not enforcement.
 #
-# Only fires when there is something to catch: `version.sh check` exits 0
-# (silently, matching this script's normal quiet-unless-error posture) when
-# every version-bearing file already agrees -- a PR that touches no
-# version-bearing file, or one produced correctly via `version.sh bump`/
-# `set`, is never blocked.
-#
-# `scripts/version.sh` is a Loom-repo-only dev script (never installed into a
-# consumer's .loom/ surface, same as .loom/install-metadata.json itself) --
-# absent entirely in a non-dogfooded checkout, so the check is skipped there
-# rather than failing on a missing script. Resolved from the current
-# worktree's OWN top-level (not forge-helpers.sh's `_forge_config_root`,
-# which deliberately points at the main checkout for config sharing) because
-# the version-bearing files being checked are worktree-local content, not
-# shared .git state. LOOM_VERSION_CHECK_SCRIPT overrides the resolved path
-# (same test-seam convention as LOOM_GITHUB_APP_SCRIPT in forge-helpers.sh)
-# so a test can stub deterministic pass/fail/missing-file behavior instead of
-# depending on this repo's own ambient version state.
-VERSION_CHECK_SCRIPT="${LOOM_VERSION_CHECK_SCRIPT:-}"
-if [[ -z "$VERSION_CHECK_SCRIPT" ]]; then
-  _worktree_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  if [[ -n "$_worktree_root" && -f "$_worktree_root/scripts/version.sh" ]]; then
-    VERSION_CHECK_SCRIPT="$_worktree_root/scripts/version.sh"
-  fi
-fi
-if [[ -n "$VERSION_CHECK_SCRIPT" ]]; then
-  VERSION_CHECK_OUTPUT="$(bash "$VERSION_CHECK_SCRIPT" check 2>&1)" || VERSION_CHECK_STATUS=$?
-  VERSION_CHECK_STATUS="${VERSION_CHECK_STATUS:-0}"
-  if [[ "$VERSION_CHECK_STATUS" -ne 0 ]]; then
-    echo "$VERSION_CHECK_OUTPUT" >&2
-    echo "create-pr.sh: BLOCKER: 'scripts/version.sh check' found a version mismatch -- see MISMATCH line(s) above." >&2
-    echo "create-pr.sh: Fix: ./scripts/version.sh bump patch   (re-syncs all version-bearing files, including .loom/install-metadata.json if present), then re-run create-pr.sh." >&2
+# The actual gate logic (resolution order, LOOM_VERSION_CHECK_SCRIPT test
+# seam, BLOCKER:/Fix: message style) lives in version-check-gate.sh, shared
+# with Doctor's merge-conflict rebase recipes (defaults/roles/doctor.md),
+# which push directly with `git push --force-with-lease` and never route
+# through this script -- see version-check-gate.sh's own header for why that
+# second call site exists (#7168).
+if [[ -x "$SCRIPT_DIR/version-check-gate.sh" ]]; then
+  if ! "$SCRIPT_DIR/version-check-gate.sh" --fix-hint "then re-run create-pr.sh."; then
     exit 1
   fi
-  unset VERSION_CHECK_STATUS
 fi
 
 # --- Adopt-first ------------------------------------------------------------

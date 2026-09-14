@@ -55,9 +55,12 @@ def voltage_divider_pcb(boards_dir: Path) -> Path:
 
 
 @pytest.fixture
-def charlieplex_pcb(boards_dir: Path) -> Path:
-    """Return path to dense topology test board (14 components, 8 nets)."""
-    return boards_dir / "02-charlieplex-led" / "output" / "charlieplex_3x3.kicad_pcb"
+def charlieplex_pcb() -> Path:
+    """Immutable 14-component algorithm witness; provenance lives beside it."""
+    return (
+        Path(__file__).parent
+        / "fixtures/historical_demo_boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"
+    )
 
 
 @pytest.fixture

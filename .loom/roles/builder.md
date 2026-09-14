@@ -157,12 +157,37 @@ tail -50 "$LOG"; cat "$LOG.rc" 2>/dev/null
 1. **Batch mode (you have more work to pick up, or the PR is already handed off): do not wait at all — hand off and continue.** Once the PR exists with `loom:review-requested`, verifying CI is **Judge's** gate, not yours. Push, create the PR, state in your final message that CI was still running at hand-off, and move to the next issue. This is the correct default, not a fallback: a later Judge pass re-evaluates once CI settles.
 2. **Single-invocation and a green-CI confirmation is expected before your turn ends: block-poll in the foreground.** Loop **inside this same turn** — `gh pr checks`, `sleep`, repeat — until the checks resolve or you hit an explicit, bounded cap. This is an ordinary shell loop that returns control to you before you write your final message; nothing about it depends on a future turn.
 
+**Empty `gh pr checks` output is NOT proof CI has settled.** `gh pr checks` is
+GraphQL-backed and can return completely empty output (zero rows) during a
+transient forge failure (e.g. an intermittent TLS handshake error) — a state
+indistinguishable from "nothing pending" if your loop condition only greps the
+output for the word "pending" (#6169: a Judge poller on kicad-tools PR #4792
+declared CI "settled" 6 minutes into a ~40-minute run this way). Guard against
+it by asserting a minimum row count before trusting an absence of "pending":
+
 ```bash
 # Foreground block-poll on your own PR's CI — bounded, in-turn.
+# ci_still_pending: true (pending) if any row shows pending/queued/in_progress.
+# A ZERO-ROW read is retried once before being trusted — on a real forge blip
+# the retry almost always returns real rows; only a read that is STILL empty
+# after the retry is treated as "genuinely no checks reported" (not pending).
+ci_still_pending() {
+  local pr="$1" out rows
+  out="$(gh pr checks "$pr" 2>/dev/null)"
+  rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+  if [[ "$rows" -eq 0 ]]; then
+    sleep 3
+    out="$(gh pr checks "$pr" 2>/dev/null)"
+    rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+    [[ "$rows" -eq 0 ]] && return 1   # confirmed empty on retry -- not pending
+  fi
+  printf '%s\n' "$out" | grep -qE "(pending|queued|in_progress)"
+}
+
 MAX_WAIT=1800   # 30 min cap
 INTERVAL=60
 ELAPSED=0
-while gh pr checks <PR_NUMBER> | grep -qE "(pending|queued|in_progress)"; do
+while ci_still_pending <PR_NUMBER>; do
   if [ "$ELAPSED" -ge "$MAX_WAIT" ]; then
     echo "CI still pending after ${MAX_WAIT}s — reporting as unsettled and handing off to Judge."
     break
@@ -292,11 +317,30 @@ PR LIFECYCLE (Builder only creates, Judge/Champion manage):
 
 ## Label Workflow
 
-**IMPORTANT: Ignore External Issues**
+**IMPORTANT: Ignore Hard-Excluded Issues**
 
-- **NEVER work on issues with the `external` label** - these are external suggestions for maintainers only
-- External issues are submitted by non-collaborators and require maintainer approval before being worked on
-- Focus only on issues labeled `loom:issue` without the `external` label
+A **hard exclusion** is a label that takes an issue out of the automated
+pipeline entirely — no role may curate it, build it, or promote it, and the
+daemon's work finder will not dispatch a sweep for it. `external` is the only
+one today: issues submitted by non-collaborators (or auto-labeled by an intake
+workflow) that require maintainer approval before being worked on.
+
+- **NEVER work on a hard-excluded issue** — not even when it also carries
+  `loom:issue`.
+- **The list is not hardcoded here.** Read it from the one shared source,
+  `./.loom/scripts/hard-exclusion-labels.sh` (Issue #7528) — the same list
+  `loom-daemon`'s work finder filters candidates on, so the daemon and this
+  prompt can never disagree about what is excluded:
+
+  ```bash
+  ./.loom/scripts/hard-exclusion-labels.sh            # one label per line
+  ./.loom/scripts/hard-exclusion-labels.sh --jq-not   # a jq select() fragment
+  ```
+
+- **If you find yourself dispatched onto one anyway** (a label added after
+  dispatch, an explicit operator dispatch), decline and exit — do not build it.
+  The daemon records the decline and holds the issue out of dispatch instead of
+  re-offering it next tick (#7528); you do not need to do anything else.
 
 **Workflow**:
 
@@ -411,11 +455,17 @@ back, so a deny there would strand work instead of protecting it.
 
 Neither of these applies to the `check-main-clean.sh --quarantine` recovery
 flow below (§"If it exits 3…") — that flow's use of `git stash` operates on
-the **main checkout** (where the create-side deny deliberately does not fire,
-since there is no per-issue equivalent to redirect to), is single-writer by
-construction (only one agent's mistaken edits land in main at a time), and is
-a distinct, legitimate use case (rescuing contamination, not shelving your own
-WIP).
+the **main checkout** (where the create-side deny deliberately does not fire),
+is single-writer by construction (only one agent's mistaken edits land in main
+at a time), and is a distinct, legitimate use case (rescuing contamination,
+not shelving your own WIP). **Recover a quarantined entry by replaying it into
+the owning issue worktree** — `git stash show -p <ref> | git -C
+.loom/worktrees/issue-<N> apply -` — never by `git stash pop`-ing it back into
+the primary clone: that pop is an unanswerable `stash-scope:main-checkout` ask
+in a headless run, and a successful one just re-contaminates main. If you
+need a *clean baseline* in the primary clone itself, the pair now has a main
+target too: `./.loom/scripts/worktree.sh stash-push main` …
+`stash-pop main` (#6076).
 
 ## CRITICAL: Never Work on Main Branch
 
@@ -1020,9 +1070,12 @@ gh issue list --label="loom:issue" --label="loom:curated" --state=open --limit=1
 **Step 3: If no curated, fall back to approved-only issues**
 
 ```bash
+# #7528: the hard-exclusion fragment comes from the shared source, never a
+# hardcoded `external` literal. Note the DOUBLE-quoted --jq so $EXCL expands.
+EXCL="$(./.loom/scripts/hard-exclusion-labels.sh --jq-not)"
 gh issue list --label="loom:issue" --state=open --json number,title,labels \
-  --jq '.[] | select(([.labels[].name] | contains(["loom:curated"]) | not) and ([.labels[].name] | contains(["external"]) | not)) |
-  "#\(.number): \(.title)"'
+  --jq ".[] | select(([.labels[].name] | contains([\"loom:curated\"]) | not) and $EXCL) |
+  \"#\(.number): \(.title)\""
 ```
 
 **Why allow this**: Work can proceed even if Curator hasn't run yet. Builder can implement based on human approval alone if needed.
@@ -1207,7 +1260,7 @@ merged by Champion using `./.loom/scripts/merge-pr.sh` — never use `gh pr merg
 
 Before claiming:
 - [ ] Issue has `loom:issue` label? (or explicit user override)
-- [ ] Issue does NOT have `external` label?
+- [ ] Issue does NOT carry a hard-exclusion label? (`./.loom/scripts/hard-exclusion-labels.sh` — #7528)
 
 When claiming:
 - [ ] Remove `loom:issue`

@@ -8,6 +8,7 @@
  * disclaimer, and a link to kicad.org. Styling reuses the global CSS custom
  * properties (`--muted`, `--border`, `--accent`) so it stays small + muted.
  */
+import { projectVersion, siteBuiltAt } from "../data/siteMetadata.ts";
 import { execSync } from "node:child_process";
 
 // Capture the short SHA at build time (this frontmatter runs in Node during
@@ -31,18 +32,19 @@ const commitUrl =
     : "https://github.com/rjwalters/kicad-tools";
 
 // Copyright year is captured at build time; edit the holder name below freely.
-const year = new Date().getFullYear();
+const year = new Date(siteBuiltAt).getUTCFullYear();
 ---
 
 <footer class="site-footer">
   <p class="line">
-    Build:
+    Site commit:
     <a href={commitUrl} target="_blank" rel="noopener noreferrer">
       <code>{sha}</code>
     </a>
     <span class="sep" aria-hidden="true">·</span>
-    Milestone: <code>v0.19.0</code>
+    Project version: <code>v{projectVersion}</code>
   </p>
+  <p class="line">Site built <time datetime={siteBuiltAt}>{siteBuiltAt.replace("T", " ").replace(/\.\d+Z$/, " UTC")}</time>. Board and benchmark evidence dates are shown separately.</p>
   <p class="line">© {year} Robb Walters / kicad-tools contributors</p>
   <p class="line disclaimer">
     KiCad is a registered trademark of its respective owners; this is an
@@ -91,7 +93,7 @@ const year = new Date().getFullYear();
   .site-footer a:hover,
   .site-footer a:focus-visible {
     text-decoration: underline;
-    outline: none;
+
   }
 
   .site-footer code {

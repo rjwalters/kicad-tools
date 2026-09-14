@@ -353,9 +353,10 @@ class TestDRUFiles:
             assert version is not None, f"{dru_file} missing version"
             assert version.values[0] == 1, f"{dru_file} has wrong version"
 
-            # Check for 11 rules (standard set with condition expressions)
+            # JLC has a separate plated-component-pad ring floor.
             rules = sexp.find_children("rule")
-            assert len(rules) == 11, f"{dru_file} should have 11 rules, has {len(rules)}"
+            expected = 10 if dru_file.startswith("jlcpcb-") else 9
+            assert len(rules) == expected
 
 
 class TestMfrCLICommands:
@@ -839,8 +840,8 @@ class TestDruGenerator:
         assert content.startswith("(version 1)")
         assert "(rule" in content
 
-    def test_generate_dru_has_11_rules(self):
-        """Test that generate_dru produces all 11 rules."""
+    def test_generate_dru_has_all_jlc_rules(self):
+        """JLC includes the base rules plus its separate PTH ring floor."""
         from kicad_tools.manufacturers.dru_generator import generate_dru
 
         profile = get_profile("jlcpcb")
@@ -848,7 +849,7 @@ class TestDruGenerator:
         content = generate_dru(rules, manufacturer_name="JLCPCB")
 
         rule_count = content.count("(rule ")
-        assert rule_count == 11, f"Expected 11 rules, got {rule_count}"
+        assert rule_count == 10, f"Expected 10 rules, got {rule_count}"
 
     def test_generate_dru_has_condition_expressions(self):
         """Test that generated DRU includes condition expressions."""
@@ -865,18 +866,17 @@ class TestDruGenerator:
         # Silkscreen rules should be scoped to silk layer
         assert "A.Layer == 'F.Silkscreen'" in content
 
-    def test_generate_dru_covers_solder_mask_rules(self):
-        """Test that solder mask dam and clearance rules are present."""
+    def test_generate_dru_omits_unsupported_mask_rules(self):
+        """Numeric mask floors have no native custom-rule equivalent."""
         from kicad_tools.manufacturers.dru_generator import generate_dru
 
         profile = get_profile("jlcpcb")
         rules = profile.get_design_rules(layers=2, copper_oz=1.0)
         content = generate_dru(rules, manufacturer_name="JLCPCB")
 
-        assert "solder_mask_margin" in content
-        assert "physical_hole_clearance" in content
-        assert f"{rules.min_solder_mask_clearance_mm}mm" in content
-        assert f"{rules.min_solder_mask_dam_mm}mm" in content
+        assert "solder_mask_margin" not in content
+        assert 'rule "Solder Mask Dam' not in content
+        assert "B.Layer == 'Edge.Cuts'" in content
 
     def test_generate_dru_covers_silkscreen_height(self):
         """Test that silkscreen height rule is present."""
@@ -941,7 +941,8 @@ class TestDruGenerator:
             rules = profile.get_design_rules(layers=2, copper_oz=1.0)
             content = generate_dru(rules, manufacturer_name=profile.name)
             assert "(version 1)" in content, f"Failed for {mfr_id}"
-            assert content.count("(rule ") == 11, f"Wrong rule count for {mfr_id}"
+            expected = 9 + (rules.min_pth_annular_ring_mm is not None)
+            assert content.count("(rule ") == expected, f"Wrong rule count for {mfr_id}"
 
     def test_static_dru_files_match_dynamic_generation(self):
         """Test that static .kicad_dru files match dynamic generation output."""
@@ -1078,6 +1079,7 @@ class TestDruGeneratorAmpacity:
         the generated .kicad_dru.  If kicad-cli is unavailable, falls back to
         asserting the DRU text is well-formed.
         """
+        import re
         import shutil
         import subprocess
 
@@ -1092,7 +1094,28 @@ class TestDruGeneratorAmpacity:
             # Fallback: assert the rule is well-formed KiCad DRU syntax.
             assert dru_content.startswith("(version 1)")
             assert "A.NetClass == 'FUSED_LINE'" in dru_content
-            assert dru_content.count("(rule ") >= 13
+            # Assert on the specific rule names this fixture must produce,
+            # rather than a bare count: a name-based check fails with a
+            # useful diff instead of a number drifting out of sync with the
+            # generator (e.g. solder-mask rules were intentionally dropped
+            # and "PTH Annular Ring" conditionally added in #4999/#5042-era
+            # changes -- see d95b6eff).
+            expected_rule_names = {
+                "Trace Width - JLCPCB",
+                "Clearance - JLCPCB",
+                "Via Drill - JLCPCB",
+                "Via Diameter - JLCPCB",
+                "Annular Ring - JLCPCB",
+                "PTH Annular Ring - JLCPCB",
+                "Copper to Edge - JLCPCB",
+                "Hole to Edge - JLCPCB",
+                "Silkscreen Width - JLCPCB",
+                "Silkscreen Height - JLCPCB",
+                "Ampacity Min Width (FUSED_LINE, external) - JLCPCB",
+                "Ampacity Min Width (FUSED_LINE, internal) - JLCPCB",
+            }
+            actual_rule_names = set(re.findall(r'\(rule "([^"]+)"', dru_content))
+            assert actual_rule_names == expected_rule_names
             # Balanced parentheses per rule line group.
             assert dru_content.count("(") == dru_content.count(")")
             pytest.skip("kicad-cli not available; asserted DRU text structure only")

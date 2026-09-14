@@ -295,7 +295,16 @@ def _analyze_ground_topology_impl(pcb: PCB) -> list[GroundTopologyResult]:
         # does not leak.
         validator._last_zone_connected_pads = set()
         try:
-            ground_graphs[net_number] = validator._build_connectivity_graph(net_number)
+            physical_graph = validator._build_connectivity_graph(net_number)
+            logical_graph: dict[str, set[str]] = {}
+            for node, neighbors in physical_graph.items():
+                # This consumer only asks whether a logical bridge pin has
+                # an external neighbor. Preserve every occurrence's edges;
+                # never feed this display projection back into copper LVS.
+                binding = validator.pad_bindings.get(node)
+                logical = ".".join(binding) if binding is not None else node
+                logical_graph.setdefault(logical, set()).update(neighbors)
+            ground_graphs[net_number] = logical_graph
         except Exception:  # noqa: BLE001
             # If a single ground net's graph build fails, treat it as
             # empty — bridges into that ground will be flagged unwired

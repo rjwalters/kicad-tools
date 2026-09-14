@@ -1,0 +1,75 @@
+{
+  "reviewed_at": "2026-09-10",
+  "scope": "Exact manufacturer part-number to supplier-catalog identity review; stock and assembly availability must be checked when ordering. No automatic substitutions.",
+  "parts": {
+    "ATMEGA32U4-AU": {
+      "lcsc": "C44854",
+      "source": "https://www.lcsc.com/product-detail/C44854.html"
+    },
+    "USB4085-GF-A": {
+      "lcsc": "C7095263",
+      "source": "https://www.lcsc.com/product-detail/C7095263.html"
+    },
+    "USBLC6-2SC6": {
+      "lcsc": "C7519",
+      "source": "https://www.lcsc.com/product-detail/C7519.html"
+    },
+    "S5B-PH-SM4-TB(LF)(SN)": {
+      "lcsc": "C265104",
+      "source": "https://www.lcsc.com/product-detail/C265104.html"
+    },
+    "TSM-103-01-T-DV-P-TR": {
+      "lcsc": "C21285200",
+      "source": "https://www.lcsc.com/product-detail/C21285200.html"
+    },
+    "RC0603FR-075K1L": {
+      "lcsc": "C105580",
+      "source": "https://www.lcsc.com/product-detail/C105580.html"
+    },
+    "RC0402FR-0722RL": {
+      "lcsc": "C114765",
+      "source": "https://www.lcsc.com/product-detail/C114765.html"
+    },
+    "RC0603FR-0710KL": {
+      "lcsc": "C98220",
+      "source": "https://www.lcsc.com/product-detail/C98220.html"
+    },
+    "RC0603FR-071KL": {
+      "lcsc": "C22548",
+      "source": "https://www.lcsc.com/product-detail/C22548.html"
+    },
+    "GRM188R71C104KA01D": {
+      "lcsc": "C45000",
+      "source": "https://www.lcsc.com/product-detail/C45000.html"
+    },
+    "GRM188R71A105KA61D": {
+      "lcsc": "C97888",
+      "source": "https://www.lcsc.com/product-detail/C97888.html"
+    },
+    "GRM188R71H103KA01D": {
+      "lcsc": "C77053",
+      "source": "https://www.lcsc.com/product-detail/C77053.html"
+    },
+    "GRM188R61A475KE15D": {
+      "lcsc": "C71633",
+      "source": "https://www.lcsc.com/product-detail/C71633.html"
+    },
+    "TL3342F160QG": {
+      "lcsc": "C2886898",
+      "source": "https://www.lcsc.com/product-detail/C2886898.html"
+    },
+    "ECS-80-12-33-JGN-TR": {
+      "lcsc": "C2442665",
+      "source": "https://www.lcsc.com/product-detail/C2442665.html"
+    },
+    "GRM1885C1H150JA01D": {
+      "lcsc": "C71651",
+      "source": "https://www.lcsc.com/product-detail/C71651.html"
+    },
+    "1206L035/16YR": {
+      "lcsc": "C126817",
+      "source": "https://www.lcsc.com/product-detail/C126817.html"
+    }
+  },
+  "pending": {}
+}

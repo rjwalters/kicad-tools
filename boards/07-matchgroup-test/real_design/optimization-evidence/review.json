@@ -1,0 +1,16 @@
+{
+  "source_pad_and_via_identity": "passed",
+  "reviewed_via_identity": "passed",
+  "layer_contract": "passed",
+  "timing_errors": [],
+  "source_clock_violations": 0,
+  "minimum_mixed_gap_mm": 0.32,
+  "max_escape_length_mm": 5.11989898732233,
+  "worst_assumed_005ns_fext_percent": 1.2150370323697135,
+  "source_tracks": 3742,
+  "routed_tracks": 8739,
+  "source_off_angle": 0,
+  "routed_off_angle": 0,
+  "fine_source_chords": 14,
+  "scope": "Native/source-clock/identity/timing/coupling checks only; fresh full electrical and manufacturing validation still required"
+}

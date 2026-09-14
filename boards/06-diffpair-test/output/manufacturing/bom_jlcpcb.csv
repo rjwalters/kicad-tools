@@ -1,8 +1,8 @@
 Comment,Designator,Footprint,LCSC Part #
-BGA49_USB3,U2,Package_BGA:BGA-49_5.0x5.0mm_Layout7x7_P0.5mm,generic
-FFC4,J4,Connector_FFC:FFC_4P_0.5mm,generic
-MiniPCIe,J3,Connector_PCIE:PCIE_Mini_Edge,generic
-QFN24_MIPI,U4,Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm,generic
-QFN32_USB2,U1,Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm,generic
-QFP48_PCIe,U3,Package_QFP:LQFP-48_7x7mm_P0.5mm,generic
-USB-C,J1,Connector_USB:USB_C_Receptacle_USB2.0,C165948
+100,"R1,R2,R3,R4",Resistor_SMD:R_0603_1608Metric,C22775
+100k,"R5,R6,R7,R8",Resistor_SMD:R_0603_1608Metric,C25803
+100nF,"C10,C12,C14,C16,C2,C4,C6,C8",Capacitor_SMD:C_0603_1608Metric,C14663
+10uF,C17,Capacitor_SMD:C_0805_2012Metric,C15850
+1nF,"C1,C11,C13,C15,C3,C5,C7,C9",Capacitor_SMD:C_0603_1608Metric,C1588
+SN65LVDS1DR,"U1,U3,U5,U7",Package_SO:SOIC-8_3.9x4.9mm_P1.27mm,C2671256
+SN65LVDS2DR,"U2,U4,U6,U8",Package_SO:SOIC-8_3.9x4.9mm_P1.27mm,C2671054

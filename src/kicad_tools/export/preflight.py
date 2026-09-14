@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from .pnp import is_through_hole_footprint
+
 logger = logging.getLogger(__name__)
 
 
@@ -617,8 +619,9 @@ class PreflightChecker:
         tht_refs = [
             fp.reference
             for fp in self._pcb.footprints
-            if getattr(fp, "attr", "") == "through_hole"
+            if is_through_hole_footprint(fp)
             and not getattr(fp, "exclude_from_pos_files", False)
+            and not getattr(fp, "dnp", False)
         ]
 
         if not tht_refs:
@@ -914,7 +917,7 @@ class PreflightChecker:
             if getattr(fp, "dnp", False):
                 dnp_excluded_refs.add(fp.reference)
                 continue
-            if self._exclude_tht and getattr(fp, "attr", "") == "through_hole":
+            if self._exclude_tht and is_through_hole_footprint(fp):
                 tht_excluded_refs.add(fp.reference)
                 continue
             cpl_refs.add(fp.reference)

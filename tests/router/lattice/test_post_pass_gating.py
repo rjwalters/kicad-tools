@@ -25,8 +25,14 @@ import pytest
 from kicad_tools.cli.route_cmd import _engine_post_passes_enabled
 
 _REPO = Path(__file__).resolve().parents[3]
-_CHARLIEPLEX = _REPO / "boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"
-_VOLTAGE_DIVIDER = _REPO / "boards/01-voltage-divider/output/voltage_divider.kicad_pcb"
+_CHARLIEPLEX = (
+    _REPO
+    / "tests/fixtures/historical_demo_boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"
+)
+_VOLTAGE_DIVIDER = (
+    _REPO
+    / "tests/fixtures/historical_demo_boards/01-voltage-divider/output/voltage_divider.kicad_pcb"
+)
 
 
 # ---------------------------------------------------------------------------

@@ -171,6 +171,34 @@ class DesignRules:
     # When set, components with pin pitch below fine_pitch_threshold automatically
     # use this clearance instead of trace_clearance
     fine_pitch_clearance: float | None = None
+    # Enforce the authored floor against every foreign pad, including
+    # same-component fine-pitch and NC pads (Issue #5004).
+    strict_pad_clearance: bool = False
+    # Issue #5004: the same-component clearance carve-out
+    # (``RoutingGrid._same_component_carveout_active`` /
+    # ``CppPathfinder._same_component_carveout_eligible``) used to exempt a
+    # FOREIGN pad from clearance checks purely because its component's pin
+    # pitch was below ``fine_pitch_threshold`` -- even when
+    # ``fine_pitch_clearance`` was left unset (the default) and no explicit
+    # per-component relaxation was requested. That silently accepted
+    # sub-clearance copper against NC pads and named signal pads alike; the
+    # router's own acceptance metrics then disagreed with native KiCad DRC.
+    #
+    # With this flag left at its default (``False``), the pitch-only branch
+    # is disabled: the carve-out now only activates where a relaxation was
+    # actually configured or in effect for the component -- an explicit
+    # ``component_clearances`` override, a net-class ``escape_clearance``
+    # override, an applied ``fine_pitch_clearance`` shrink (narrow-channel
+    # guard permitting), or a corridor already relaxed by
+    # ``_relax_same_component_clearance`` (Issue #2452). Those configured
+    # relaxation paths retain their existing exemption behavior. Enforcing
+    # their numerical per-component floors is tracked separately in #5166.
+    #
+    # Set ``True`` to restore the pre-#5004 behaviour (any fine-pitch
+    # component's foreign-net pads are unconditionally exempted) for boards
+    # that relied on the old, looser carve-out and cannot yet configure an
+    # explicit ``fine_pitch_clearance``/``component_clearances`` override.
+    legacy_fine_pitch_carveout: bool = False
     # mm -- components with pitch < this use fine_pitch_clearance
     #
     # Issue #3371 (P_FP1): Raised from 0.8mm -> 1.5mm so 1.27mm-pitch SOIC
@@ -561,6 +589,15 @@ class DesignRules:
             >>> rules.get_clearance_for_component("R1")  # Default
             0.15
         """
+        if self.strict_pad_clearance:
+            return max(
+                self.trace_clearance,
+                self.component_clearances.get(ref, self.trace_clearance),
+                (net_class.clearance or self.trace_clearance)
+                if net_class
+                else self.trace_clearance,
+            )
+
         # Check explicit per-component override first.  Explicit overrides
         # bypass the narrow-channel guard: the caller is asserting the
         # geometry is feasible for this specific component.

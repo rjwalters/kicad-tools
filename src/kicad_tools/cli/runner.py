@@ -4,15 +4,18 @@ Provides functions to locate and run kicad-cli commands for
 ERC validation, DRC validation, netlist export, and more.
 """
 
+import json
 import os
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from kicad_tools.schema.pcb import _is_footprint_tag
+from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
 
 
 def find_kicad_cli() -> Path | None:
@@ -1424,10 +1427,10 @@ def _restore_net_declarations(
             output_sexp.children.remove(node)
 
         # Find insertion point: nets go after ``setup`` / ``title_block`` and
-        # before ``footprint`` / ``segment`` / ``via`` / ``zone`` / ``gr_*``.
+        # before modern/legacy footprints, segments, vias, zones, or graphics.
         insert_index = len(output_sexp.children)
         content_tags = {
-            "footprint",
+            *FOOTPRINT_TAGS,
             "segment",
             "via",
             "zone",
@@ -1785,6 +1788,101 @@ def _render_env(kicad_cli: Path | None) -> dict[str, str] | None:
             env.setdefault(var, str(model_dir))
     env.setdefault(DEFAULT_CACHE_ENV_VAR, str(lcsc_dir))
     return env
+
+
+def _configured_model_variables(kicad_cli: Path | None) -> dict[str, str]:
+    """Read native Configure Paths values without changing KiCad settings.
+
+    KiCad stores these under environment.vars in the active minor version's
+    kicad_common.json. Process variables take precedence at the call site.
+    """
+    version = get_kicad_version(kicad_cli)
+    match = re.search(r"(\d+)\.(\d+)", version or "")
+    if match is None:
+        return {}
+    if override := os.environ.get("KICAD_CONFIG_HOME"):
+        root = Path(override)
+    elif sys.platform == "darwin":
+        root = Path.home() / "Library/Preferences/kicad"
+    elif sys.platform == "win32":
+        root = Path(os.environ.get("APPDATA", str(Path.home() / "AppData/Roaming"))) / "kicad"
+    else:
+        root = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "kicad"
+    config = root / f"{match[1]}.{match[2]}" / "kicad_common.json"
+    try:
+        data = json.loads(config.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or not isinstance(data.get("environment"), dict):
+        return {}
+    variables = data["environment"].get("vars", {})
+    if not isinstance(variables, dict):
+        return {}
+    return {key: value for key, value in variables.items() if isinstance(value, str)}
+
+
+def inspect_pcb_models(pcb_path: Path, kicad_cli: Path | None = None) -> dict:
+    """Inspect enabled model references with the same environment as rendering.
+
+    This verifies file resolution only, not model geometry or electrical rules.
+    It never rewrites the PCB, substitutes models, or fetches missing resources.
+    """
+    from kicad_tools.sexp import parse_file
+
+    doc = parse_file(pcb_path)
+    if doc.name != "kicad_pcb":
+        raise ValueError("Expected kicad_pcb root for model inspection")
+    env = _configured_model_variables(kicad_cli)
+    env.update(_render_env(kicad_cli) or os.environ)
+    env["KIPRJMOD"] = str(pcb_path.resolve().parent)
+    variable = re.compile(r"\$\{([^}]+)\}|\$\(([^)]+)\)")
+    unresolved: list[dict] = []
+    checked = 0
+    for footprint in doc.children:
+        if not _is_footprint_tag(footprint.name):
+            continue
+        reference = _get_fp_reference(footprint) or "<unknown>"
+        for model in footprint.find_all("model"):
+            hidden = model.get("hide")
+            if hidden is not None and hidden.get_first_atom() != "no":
+                continue
+            checked += 1
+            raw = str(model.get_first_atom() or "")
+            expanded = raw
+            # Bounded expansion permits nested configured variables without
+            # making cyclic/unknown variables look like resolved file paths.
+            for _ in range(8):
+                updated = variable.sub(
+                    lambda match: env.get(match.group(1) or match.group(2), match.group(0)),
+                    expanded,
+                )
+                if updated == expanded:
+                    break
+                expanded = updated
+            path = Path(expanded).expanduser()
+            if not path.is_absolute():
+                path = pcb_path.resolve().parent / path
+            reason = None
+            if not raw:
+                reason = "empty model path"
+            elif variable.search(expanded):
+                reason = "unresolved path variable"
+            elif not path.is_file():
+                reason = "model file not found"
+            if reason:
+                unresolved.append(
+                    {
+                        "reference": reference,
+                        "model": raw,
+                        "resolved_path": str(path) if not variable.search(expanded) else None,
+                        "reason": reason,
+                    }
+                )
+    return {
+        "status": "failed" if unresolved else "passed",
+        "checked_models": checked,
+        "unresolved_models": unresolved,
+    }
 
 
 def run_pcb_render(

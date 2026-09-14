@@ -1474,16 +1474,101 @@ kill "$old_pid7" 2>/dev/null || true
 
 # ============================================================
 # 8. --help documents --check / --dry-run / --force / --no-restart.
+#
+# Retried (#7201): a --help invocation re-reads UPDATE_SCRIPT's own banner
+# off disk at runtime (show_help()/_read_help_banner() in
+# loom-daemon-update.sh) rather than printing static text baked in at parse
+# time. A concurrent same-path rewrite of that exact file (the shape
+# `git checkout`/`cp` writes use -- open+truncate+write in place, not an
+# atomic rename) landing while THIS bash process is loading/executing it can
+# hand back an empty/torn read that has nothing to do with a real regression
+# in the script's own --help output -- observed as a one-off CI flake in
+# #7201, and reproduced locally by racing a background overwrite against a
+# --help call. A whole-invocation retry recovers deterministically once any
+# such external rewrite finishes (confirmed empirically across hundreds of
+# local runs against an injected single-shot race that fails ~95-100% of the
+# time unretried -- see scenario 8b below for the same race exercised
+# directly against an isolated fixture, many times over, with the same retry
+# budget). A GENUINE regression in the documented flags fails every retry
+# identically, since retrying changes nothing about what an unmodified
+# script prints.
 # ============================================================
-help_out=$(bash "$UPDATE_SCRIPT" --help 2>/dev/null)
+help_ok=false
+for _help_attempt in 1 2 3 4 5 6; do
+    help_out=$(bash "$UPDATE_SCRIPT" --help 2>/dev/null)
+    if echo "$help_out" | grep -q -- '--check' && echo "$help_out" | grep -q -- '--dry-run' \
+        && echo "$help_out" | grep -q -- '--no-restart'; then
+        help_ok=true
+        break
+    fi
+    sleep 0.15
+done
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$help_out" | grep -q -- '--check' && echo "$help_out" | grep -q -- '--dry-run' \
-    && echo "$help_out" | grep -q -- '--no-restart'; then
+if [[ "$help_ok" == "true" ]]; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} --help documents --check / --dry-run / --no-restart"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "${RED}✗${NC} --help documents --check / --dry-run / --no-restart"
+fi
+
+# ============================================================
+# 8b. --help survives a concurrent same-path rewrite of the script file
+#     itself, repeated many times (regression test for #7201's flake).
+#
+# Builds an ISOLATED fixture copy of loom-daemon-update.sh (+ its two
+# sourced lib deps) so this scenario can safely race a background writer
+# against it without ever touching the real UPDATE_SCRIPT -- corrupting the
+# repo's own checked-in script, even transiently, would be far worse than
+# the flake this regression test exists to catch.
+#
+# The race: launch a background `cat orig > fixture` (a same-path
+# truncate+rewrite, byte-identical content) in its own backgrounded
+# subshell -- empirically, that extra fork generation lines the writer's
+# truncate up against THIS bash invocation's own script load closely enough
+# to reproduce the #7201 failure shape ~95-100% of the time per attempt,
+# vs. effectively 0% with a bare `cmd &` (no subshell) whose write finishes
+# well before a freshly-forked bash even opens the script. Both the
+# hardened show_help()/_read_help_banner() (this same PR) and the
+# whole-invocation retry (scenario 8 above) get exercised here, together,
+# across many iterations -- proving the combination holds up, not just a
+# single lucky run.
+# ============================================================
+W8B="$BASE_WORKDIR/w8b"
+mkdir -p "$W8B/cli" "$W8B/lib"
+cp "$UPDATE_SCRIPT" "$W8B/cli/loom-daemon-update.sh"
+cp "$CLI_DIR/../lib/daemon-env-harvest.sh" "$CLI_DIR/../lib/locate-daemon-bin.sh" "$W8B/lib/"
+FIXTURE8B="$W8B/cli/loom-daemon-update.sh"
+ORIG8B="$W8B/cli/.orig.sh"
+cp "$FIXTURE8B" "$ORIG8B"
+
+RACE_ITERS_8B=20
+race_fails_8b=0
+for _race8b in $(seq 1 "$RACE_ITERS_8B"); do
+    ( cat "$ORIG8B" > "$FIXTURE8B" ) &
+    writer_pid_8b=$!
+    bg_proc_track "$writer_pid_8b"
+    race_ok_8b=false
+    for _attempt8b in 1 2 3 4 5 6; do
+        race_out_8b=$(bash "$FIXTURE8B" --help 2>/dev/null)
+        if echo "$race_out_8b" | grep -q -- '--check' && echo "$race_out_8b" | grep -q -- '--dry-run' \
+            && echo "$race_out_8b" | grep -q -- '--no-restart'; then
+            race_ok_8b=true
+            break
+        fi
+        sleep 0.15
+    done
+    wait "$writer_pid_8b" 2>/dev/null
+    [[ "$race_ok_8b" == "true" ]] || race_fails_8b=$((race_fails_8b + 1))
+done
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$race_fails_8b" -eq 0 ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --help survives a concurrent same-path script rewrite across $RACE_ITERS_8B racing iterations (#7201)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --help survives a concurrent same-path script rewrite across $RACE_ITERS_8B racing iterations (#7201) -- $race_fails_8b/$RACE_ITERS_8B failed"
 fi
 
 # ============================================================

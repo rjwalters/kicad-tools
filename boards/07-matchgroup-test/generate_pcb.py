@@ -254,24 +254,28 @@ def generate_board_outline() -> str:
 # group-skew differences post-route.
 
 
-def _emit_smd_pad(pin: str, x: float, y: float, w: float, h: float, net_name: str) -> str:
+def _emit_smd_pad(
+    pin: str, x: float, y: float, w: float, h: float, net_name: str, rotation: float = 0
+) -> str:
     """Emit a single SMD rectangle pad with the given net assignment."""
     net_num = NETS.get(net_name, 0)
     net_str = f'(net {net_num} "{net_name}")' if net_name else ""
+    angle = f" {rotation:g}" if rotation else ""
     return (
-        f'    (pad "{pin}" smd rect (at {x:.3f} {y:.3f}) '
+        f'    (pad "{pin}" smd rect (at {x:.3f} {y:.3f}{angle}) '
         f'(size {w:.3f} {h:.3f}) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
     )
 
 
 def _emit_through_hole_pad(
-    pin: str, x: float, y: float, size: float, drill: float, net_name: str
+    pin: str, x: float, y: float, size: float, drill: float, net_name: str, rotation: float = 0
 ) -> str:
     """Emit a single through-hole circular pad."""
     net_num = NETS.get(net_name, 0)
     net_str = f'(net {net_num} "{net_name}")' if net_name else ""
+    angle = f" {rotation:g}" if rotation else ""
     return (
-        f'    (pad "{pin}" thru_hole circle (at {x:.3f} {y:.3f}) '
+        f'    (pad "{pin}" thru_hole circle (at {x:.3f} {y:.3f}{angle}) '
         f"(size {size:.3f} {size:.3f}) (drill {drill:.3f}) "
         f'(layers "*.Cu" "*.Mask") {net_str})'
     )
@@ -419,7 +423,7 @@ def generate_qfn48_ddr_sink() -> str:
   )"""
 
 
-def generate_ffc_mipi_source() -> str:
+def generate_ffc_mipi_source(rotation: float = 0) -> str:
     """4-pin FFC connector source -- MIPI CSI source.
 
     Wider FFC than board 06 to accommodate 6 pins (3 pairs).  At 1.0mm
@@ -442,17 +446,17 @@ def generate_ffc_mipi_source() -> str:
     ]
 
     pads = [
-        _emit_smd_pad(pin, (i - 2.5) * pitch, 0.0, pad_w, pad_h, net)
+        _emit_smd_pad(pin, (i - 2.5) * pitch, 0.0, pad_w, pad_h, net, rotation=rotation)
         for i, (pin, net) in enumerate(pins)
     ]
-    pads.append(_emit_through_hole_pad("M1", -3.5, 1.5, 1.0, 0.6, "GND"))
-    pads.append(_emit_through_hole_pad("M2", 3.5, 1.5, 1.0, 0.6, "GND"))
+    pads.append(_emit_through_hole_pad("M1", -3.5, 1.5, 1.0, 0.6, "GND", rotation=rotation))
+    pads.append(_emit_through_hole_pad("M2", 3.5, 1.5, 1.0, 0.6, "GND", rotation=rotation))
 
     pads_str = "\n".join(pads)
     return f"""  (footprint "Connector_FFC:FFC_6P_1.0mm"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
-    (at {x} {y})
+    (at {x} {y}{f" {rotation:g}" if rotation else ""})
     (fp_text reference "J1" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 0.8 0.8) (thickness 0.12)))
     )
@@ -740,7 +744,7 @@ def generate_qfp48_addr_sink() -> str:
 # =============================================================================
 
 
-def generate_pcb() -> str:
+def generate_pcb(*, mipi_source_rotation: float = 0) -> str:
     """Generate the complete PCB file."""
     parts = [
         generate_header(),
@@ -750,7 +754,7 @@ def generate_pcb() -> str:
         generate_qfn48_ddr_controller(),
         generate_qfn48_ddr_sink(),
         # MIPI CSI
-        generate_ffc_mipi_source(),
+        generate_ffc_mipi_source(rotation=mipi_source_rotation),
         generate_qfn24_mipi_sink(),
         # HDMI TMDS
         generate_hdmi_connector(),

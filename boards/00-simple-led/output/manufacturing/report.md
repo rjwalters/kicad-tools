@@ -1,8 +1,8 @@
 ---
 title: "simple_led_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.14.0"
-date: "Rev 1 | 2026-07-09 | jlcpcb"
+author: "kicad-tools 0.20.0"
+date: "Rev 1 | 2026-09-10 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -43,6 +43,15 @@ Minimal LED circuit
 1 polarized component
 
 - **Polarized components**: 1 -- check orientation markings
+
+## Hand-Solder (THT) Components
+
+The following 2 through-hole components are **excluded from the SMT pick-and-place file** and must be hand-soldered (or wave/selective-soldered) after SMT assembly. They appear in the BOM for sourcing.
+
+| Value | Package | Qty | References |
+|-------|---------|-----|------------|
+| LED | LED_D5.0mm | 1 | D1 |
+| PWR | PinHeader_1x02_P2.54mm_Vertical | 1 | J1 |
 
 ## ERC Status
 
@@ -111,27 +120,21 @@ Minimal LED circuit
 | Metric | Count |
 |--------|-------|
 | Errors | 0 |
-| Warnings | 2 |
+| Warnings | 0 |
 | Blocking | 0 |
 
 **Status**: PASS
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| copper_sliver | 2 |
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: WARNING
+**Verdict**: READY
 
 ### Action Items
 
 - **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
-- **[OPTIONAL]** Review 2 DRC warnings
 
 
 \newpage

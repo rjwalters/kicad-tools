@@ -146,6 +146,39 @@
 #   worker cannot `git push` or call `gh`. `LOOM_CODEX_NETWORK=1` adds
 #   `-c sandbox_workspace_write.network_access=true` (workspace-write only).
 #
+# Session-exec mode (issue #6926, Epic #6896 Phase 2):
+#   A Codex profile ADOPTED by `loom-daemon accounts session start <name>`
+#   (issue #6925) is owned exclusively by that account's long-lived
+#   `loom-worker-session` container (ADR-0017 Decision 1's ownership rule) —
+#   no ambient host-direct process, including a bare-metal `codex exec`, may
+#   touch its CODEX_HOME volume once adopted. This adapter detects adoption
+#   via the SAME on-disk sentinel `loom-daemon` writes
+#   (`$CODEX_HOME/.session-managed.json`, `session_lifecycle.rs`'s
+#   `SESSION_MARKER_FILE`) and, when present, dispatches headlessly with
+#   `docker exec <container> codex exec ...` INSTEAD of running `codex`
+#   bare-metal — never `tmux send-keys` (that TUI-driving path is
+#   `session attach`'s alone, operator-only, per
+#   `docker/session/README.md`'s "Two ways to interact"). The container name
+#   follows the fixed `loom-codex-session-<name>` convention
+#   `session_lifecycle::container_name` owns. A non-adopted profile (the
+#   common case, and every bare-metal profile today) has no marker file, so
+#   this mode never engages and dispatch stays byte-for-byte unchanged —
+#   the regression-free default this issue's acceptance criteria require.
+#
+#   Gated by `LOOM_CODEX_SESSION_EXEC` (never a hardcoded default):
+#     auto (default) — engage only when the marker file is present.
+#     0               — force bare-metal even for an adopted profile (escape
+#                        hatch).
+#     1               — force session-exec even with no marker file (a test
+#                        double, or a profile adopted by other tooling).
+#   An adopted profile has NO interactive dispatch path here: this script
+#   exits 78 rather than running an interactive `codex` against a
+#   container-owned volume from the host. Use
+#   `loom-daemon accounts session attach <name>` for interactive/re-auth
+#   access instead. The session container must already be running (`session
+#   start <name>`); an adopted-but-stopped container exits 78 naming the fix
+#   rather than surfacing a raw `docker exec` error.
+#
 # Usage:
 #   .loom/scripts/spawn-codex.sh -p "your prompt"
 #   LOOM_RUNTIME=codex .loom/scripts/spawn-worker.sh -p "your prompt"
@@ -185,6 +218,8 @@
 #                        root (auth tier 3).
 #   LOOM_CODEX_PROFILE_ROOT  Profile root for LOOM_CODEX_PROFILE. Default
 #                        `~/.loom/codex-profiles`.
+#   LOOM_CODEX_SESSION_EXEC  auto (default) | 0 | 1 — session-exec mode gate
+#                        (issue #6926). See "Session-exec mode" above.
 #   LOOM_SPAWN_NO_EXPORT If set, skip ALL auth resolution (mirrors
 #                        spawn-claude.sh) — the caller already prepared the env.
 #   LOOM_WORKSPACE       Override repo-root detection (config lookups).
@@ -686,6 +721,52 @@ else
     fi
 fi
 
+# --- Session-exec mode detection (issue #6926, Epic #6896 Phase 2) ---
+# See the header's "Session-exec mode" section for the full contract. Only
+# meaningful when a Codex profile was actually resolved above (CODEX_HOME
+# set) — ambient auth (tier 4) is never adopted by `session start`, so it is
+# always bare-metal.
+CODEX_SESSION_EXEC=false
+CODEX_SESSION_CONTAINER=""
+if [[ -n "${CODEX_HOME:-}" ]]; then
+    _session_exec_pref="${LOOM_CODEX_SESSION_EXEC:-auto}"
+    case "$_session_exec_pref" in
+        auto|"") _session_exec_pref="auto" ;;
+        0) _session_exec_pref="off" ;;
+        1) _session_exec_pref="on" ;;
+        *)
+            log_error "Invalid LOOM_CODEX_SESSION_EXEC='$_session_exec_pref'. Valid values: auto (default), 0, 1."
+            exit 78  # EX_CONFIG
+            ;;
+    esac
+
+    # The exact sentinel `session_lifecycle::mark_session_managed` writes on
+    # first `loom-daemon accounts session start <name>` — reading the ACTUAL
+    # adoption fact recorded on disk, never guessed from a naming convention.
+    _session_marker="${CODEX_HOME}/.session-managed.json"
+    if [[ "$_session_exec_pref" == "off" ]]; then
+        if [[ -f "$_session_marker" ]]; then
+            log_warn "spawn-codex: profile '$CODEX_PROFILE_NAME' is session-managed but LOOM_CODEX_SESSION_EXEC=0 forces bare-metal dispatch — this can race a concurrently-running session container's own auth-refresh chain (ADR-0017 Decision 1)."
+        fi
+    elif [[ "$_session_exec_pref" == "on" || -f "$_session_marker" ]]; then
+        CODEX_SESSION_EXEC=true
+        # Fixed naming convention `session_lifecycle::container_name` owns —
+        # a pure string format with no other moving parts to keep in sync.
+        CODEX_SESSION_CONTAINER="loom-codex-session-${CODEX_PROFILE_NAME}"
+        if [[ "$_session_exec_pref" == "on" && ! -f "$_session_marker" ]]; then
+            log_warn "spawn-codex: LOOM_CODEX_SESSION_EXEC=1 forces session-exec mode though '$_session_marker' is absent (profile not adopted by \`loom-daemon accounts session start\`)"
+        fi
+        log_info "spawn-codex: profile '$CODEX_PROFILE_NAME' is session-managed — dispatching headlessly via docker exec $CODEX_SESSION_CONTAINER (issue #6926); never tmux send-keys"
+    fi
+fi
+
+if [[ "$CODEX_SESSION_EXEC" == "true" && "$HAS_PROMPT" != "true" ]]; then
+    log_error "Profile '$CODEX_PROFILE_NAME' is session-managed; an interactive host-direct Codex run is not permitted against an adopted profile (ADR-0017 Decision 1)."
+    log_error "For interactive access (e.g. re-authentication), use:"
+    log_error "  loom-daemon accounts session attach $CODEX_PROFILE_NAME"
+    exit 78  # EX_CONFIG
+fi
+
 # --- ChatGPT-plan auth-mode guard for a pinned model (issue #5499) ---
 # A Codex profile authenticated via a ChatGPT PLAN (interactive `codex login`)
 # restricts the CLI to the account's own default model — an EXPLICITLY pinned
@@ -863,12 +944,22 @@ if [[ "$HAS_PROMPT" == "true" ]]; then
     CODEX_ARGS+=("$PROMPT")
 fi
 
+# --- Session-exec invocation assembly (issue #6926) ---
+# Bare-metal: `codex <CODEX_ARGS...>`. Session-exec: `docker exec <container>
+# codex <CODEX_ARGS...>` — the exact shape docker/session/README.md's
+# "Headless dispatch" section documents, never `tmux send-keys`.
+if [[ "$CODEX_SESSION_EXEC" == "true" ]]; then
+    CODEX_INVOKE=(docker exec "$CODEX_SESSION_CONTAINER" codex ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"})
+else
+    CODEX_INVOKE=(codex ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"})
+fi
+
 # --- Test/CI hook: surface the resolved argv without touching the real CLI ---
 # Checked BEFORE the binary check so the mocked test can assert argv assembly on
-# a host with no `codex` installed at all.
+# a host with no `codex` (or `docker`) installed at all.
 if [[ -n "${LOOM_CODEX_NO_EXEC:-}" ]]; then
     echo "# LOOM_CLI_START runtime=codex" >&2
-    echo "spawn-codex would-exec: codex ${CODEX_ARGS[*]}"
+    echo "spawn-codex would-exec: ${CODEX_INVOKE[*]}"
     exit 0
 fi
 
@@ -877,7 +968,23 @@ fi
 # including spawn-worker.sh's unknown-runtime dispatch failure. A missing
 # runtime binary is the contract's "Runtime-missing" facet, which
 # spawn-claude.sh answers with 127.
-if ! command -v codex >/dev/null 2>&1; then
+if [[ "$CODEX_SESSION_EXEC" == "true" ]]; then
+    if ! command -v docker >/dev/null 2>&1; then
+        log_error "'docker' command not found in PATH."
+        log_error "Session-exec dispatch requires Docker to exec into the session container '$CODEX_SESSION_CONTAINER' (issue #6926)."
+        exit 127
+    fi
+    # Fail with a named, actionable error rather than a raw `docker exec`
+    # failure when the session container has not been started (or was
+    # stopped) — the contract's missing-credential-shaped facet, reused for
+    # "missing session container".
+    _session_running="$(docker inspect -f '{{.State.Running}}' "$CODEX_SESSION_CONTAINER" 2>/dev/null || true)"
+    if [[ "$_session_running" != "true" ]]; then
+        log_error "Session container '$CODEX_SESSION_CONTAINER' for profile '$CODEX_PROFILE_NAME' is not running."
+        log_error "Start it with: loom-daemon accounts session start $CODEX_PROFILE_NAME"
+        exit 78  # EX_CONFIG
+    fi
+elif ! command -v codex >/dev/null 2>&1; then
     log_error "'codex' command not found in PATH."
     log_error "Install the OpenAI Codex CLI (>= 0.146.0), e.g.:"
     log_error "  npm install -g @openai/codex     # or: brew install codex"
@@ -890,7 +997,7 @@ fi
 # case — an operator at the keyboard needs it.
 if [[ "$HAS_PROMPT" != "true" || -n "${LOOM_CODEX_NO_CAPTURE:-}" ]]; then
     echo "# LOOM_CLI_START runtime=codex" >&2
-    exec codex ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"}
+    exec "${CODEX_INVOKE[@]}"
 fi
 
 # Headless run. Two live-CLI behaviors force a child (not `exec`) here:
@@ -909,7 +1016,7 @@ trap "rm -f '$_stderr_file'" EXIT
 
 set +e
 echo "# LOOM_CLI_START runtime=codex" >&2
-{ codex ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} </dev/null 2>&1 1>&3 3>&- \
+{ "${CODEX_INVOKE[@]}" </dev/null 2>&1 1>&3 3>&- \
     | tee "$_stderr_file" >&2; } 3>&1
 _exit_code=${PIPESTATUS[0]}
 set -e

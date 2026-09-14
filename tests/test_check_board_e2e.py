@@ -501,3 +501,109 @@ def test_lvs_known_opens_mutually_exclusive_with_other_modes(tmp_path: Path) -> 
     board_dir = _stage_known_opens_board(tmp_path, "matchgroup_test")
     with pytest.raises(SystemExit):
         helper.main([str(board_dir), "--lvs-vacuous", "--lvs-known-opens", _B07_OPENS_ARG])
+
+
+# Routing checks do not substitute for a manufacturing-readiness audit.
+def _stage_unaudited_routed_board(root: Path, stem: str = "simple_led") -> Path:
+    from kicad_tools.cli.board_metrics_cmd import emit_board_json
+
+    board_dir = _stage_clean_board(root, stem)
+    mfg = board_dir / "output" / "manufacturing"
+    (mfg / "manifest.json").write_text(
+        json.dumps({"version": 1, "board": {"name": f"{stem}_routed"}})
+    )
+    (mfg / "report.md").write_text(
+        "## DRC Status\n\n| Metric | Count |\n|--------|-------|\n"
+        "| Errors | 0 |\n| Warnings | 0 |\n"
+    )
+    emit_board_json(board_dir)
+    return board_dir
+
+
+@pytest.mark.parametrize("stem", ["simple_led", "voltage_divider", "charlieplex_3x3"])
+def test_routing_only_accepts_emitted_unaudited_metrics(tmp_path: Path, stem: str) -> None:
+    helper = _load_helper()
+    board_dir = _stage_unaudited_routed_board(tmp_path, stem)
+    board_json = board_dir / "output" / "board.json"
+    original = board_json.read_bytes()
+    metrics = json.loads(original)
+    assert metrics["status"] == "partial"
+    assert metrics["readiness"]["status"] == "unverified"
+    assert metrics["drc_violations"] == 0
+    assert metrics["lvs_clean"] is True
+
+    assert helper.main([str(board_dir), "--stem", stem, "--routing-only"]) == 0
+    # Running the gate must neither promote the gallery status nor mutate evidence.
+    assert board_json.read_bytes() == original
+    assert helper.main([str(board_dir), "--stem", stem]) == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("drc_violations", 1),
+        ("drc_violations", None),
+        ("lvs_clean", False),
+        ("lvs_clean", None),
+        ("status", "ok"),
+        ("readiness", {"status": "ready"}),
+        ("readiness", {"status": "blocked"}),
+        ("readiness", {}),
+        ("readiness", []),
+        ("readiness", None),
+    ],
+)
+def test_routing_only_rejects_bad_or_missing_metrics(tmp_path: Path, field, value) -> None:
+    helper = _load_helper()
+    board_dir = _stage_unaudited_routed_board(tmp_path)
+    board_json = board_dir / "output" / "board.json"
+    metrics = json.loads(board_json.read_text())
+    if value is None:
+        metrics.pop(field)
+    else:
+        metrics[field] = value
+    board_json.write_text(json.dumps(metrics))
+
+    assert helper.main([str(board_dir), "--routing-only"]) == 2
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        "simple_led.kicad_sch",
+        "simple_led.kicad_pcb",
+        "simple_led_routed.kicad_pcb",
+        "lvs.json",
+        "manufacturing/manifest.json",
+        "board.json",
+    ],
+)
+def test_routing_only_rejects_missing_artifact(tmp_path: Path, artifact: str) -> None:
+    helper = _load_helper()
+    board_dir = _stage_unaudited_routed_board(tmp_path)
+    (board_dir / "output" / artifact).unlink()
+
+    assert helper.main([str(board_dir), "--routing-only"]) == 2
+
+
+@pytest.mark.parametrize(
+    "lvs",
+    [
+        {"clean": False, "mismatches": []},
+        {"clean": True, "copper_vacuous": True, "copper_bound_pad_count": 0},
+    ],
+)
+def test_routing_only_rejects_bad_lvs_despite_clean_metrics(tmp_path: Path, lvs) -> None:
+    helper = _load_helper()
+    board_dir = _stage_unaudited_routed_board(tmp_path)
+    (board_dir / "output" / "lvs.json").write_text(json.dumps(lvs))
+
+    assert helper.main([str(board_dir), "--routing-only"]) == 2
+
+
+def test_routing_only_cannot_be_combined_with_lvs_only(tmp_path: Path) -> None:
+    helper = _load_helper()
+    board_dir = _stage_unaudited_routed_board(tmp_path)
+    with pytest.raises(SystemExit) as error:
+        helper.main([str(board_dir), "--routing-only", "--lvs-only"])
+    assert error.value.code == 2

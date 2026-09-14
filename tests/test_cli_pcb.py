@@ -346,9 +346,7 @@ class TestPcbQuery:
 class TestPcbModify:
     """Tests for pcb_modify.py CLI.
 
-    Note: Some tests require PCBs with 'fp_text reference' format (older KiCad style).
-    The minimal_pcb fixture uses 'property "Reference"' format (KiCad 8 style),
-    which is not supported by the current pcb_modify implementation.
+    Covers both legacy fp_text references and modern Reference properties.
     """
 
     @pytest.fixture
@@ -564,24 +562,18 @@ class TestPcbModify:
         # VCC segment should still exist
         assert "(net 2)" in modified_content
 
-    def test_kicad8_pcb_footprint_not_found(self, minimal_pcb: Path, capsys, monkeypatch):
-        """Test that KiCad 8 PCBs with 'property' format report footprint not found.
-
-        This is a known limitation - the pcb_modify CLI expects 'fp_text reference'
-        but KiCad 8 uses 'property "Reference"' format.
-        """
+    def test_kicad8_reference_is_found(self, minimal_pcb: Path, capsys, monkeypatch):
+        """Modern Reference properties work for the shared lookup (#5019)."""
         from kicad_tools.cli.pcb_modify import main
 
         monkeypatch.setattr(
             "sys.argv",
             ["pcb-modify", str(minimal_pcb), "move", "R1", "100", "100", "--dry-run"],
         )
-        with pytest.raises(SystemExit) as exc_info:
-            main()
-
-        assert exc_info.value.code == 1
+        main()
         captured = capsys.readouterr()
-        assert "not found" in captured.err
+        assert "Moving R1" in captured.out
+        assert "not found" not in captured.err
 
 
 class TestPcbStrip:

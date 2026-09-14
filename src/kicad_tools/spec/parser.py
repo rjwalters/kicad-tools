@@ -285,24 +285,25 @@ def _splice_decision(text: str, entry: dict[str, Any]) -> str | None:
     if inline and not inline.startswith("#"):
         return None
 
-    # Block sequence: the block runs until the next column-0 non-blank line.
+    # YAML permits sequence dashes at column 0, even under a mapping key.
+    # Comments do not terminate a sequence and may separate existing items.
     end = len(lines)
     for j in range(dec_idx + 1, len(lines)):
         stripped = lines[j].strip()
-        if not stripped:
+        if not stripped or stripped.startswith("#"):
             continue
-        if not lines[j][0].isspace():
+        if not lines[j][0].isspace() and not (stripped == "-" or stripped.startswith("- ")):
             end = j
             break
 
-    # Do not swallow the blank-line separator before the next section.
-    while end > dec_idx + 1 and not lines[end - 1].strip():
+    # Leave separators and column-0 section comments after the new entry.
+    while end > dec_idx + 1 and (not lines[end - 1].strip() or lines[end - 1].startswith("#")):
         end -= 1
 
     indent = "  "
     for j in range(dec_idx + 1, end):
         stripped = lines[j].lstrip()
-        if stripped.startswith("- "):
+        if stripped == "-" or stripped.startswith("- "):
             indent = lines[j][: len(lines[j]) - len(stripped)]
             break
 

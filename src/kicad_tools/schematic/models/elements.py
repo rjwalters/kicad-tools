@@ -356,6 +356,16 @@ class PowerSymbol:
 
     _symbol_def: Optional["SymbolDef"] = field(default=None, repr=False)
 
+    @property
+    def is_power_flag(self) -> bool:
+        """Whether this symbol declares an external driver without naming a net."""
+        return self.lib_id in {"power:PWR_FLAG", "PWR_FLAG"}
+
+    @property
+    def net_name(self) -> str | None:
+        """Global rail name, absent for a PWR_FLAG driver declaration."""
+        return None if self.is_power_flag else self.lib_id.split(":", 1)[-1]
+
     def to_sexp_node(self, project_name: str, sheet_path: str) -> SExp:
         """Build S-expression tree for this power symbol."""
         value = self.lib_id.split(":")[1]

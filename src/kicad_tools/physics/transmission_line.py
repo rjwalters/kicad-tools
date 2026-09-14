@@ -1,7 +1,7 @@
 """Transmission line impedance calculations.
 
-Provides analytical calculations for microstrip, stripline, and CPWG impedance
-using the Hammerstad-Jensen equations and Ghione-Naldi analysis.
+Provides analytical microstrip/CPWG calculations and a quasi-static boundary-
+element stripline calculation with finite conductor thickness.
 
 Example::
 
@@ -39,6 +39,7 @@ from dataclasses import dataclass
 
 from .constants import COPPER_CONDUCTIVITY, SPEED_OF_LIGHT
 from .stackup import Stackup
+from .stripline import stripline_impedance
 
 
 def _elliptic_k(k: float, tolerance: float = 1e-12) -> float:
@@ -285,8 +286,8 @@ class TransmissionLine:
     ) -> ImpedanceResult:
         """Stripline impedance calculation.
 
-        Uses the IPC-2141 stripline formula with thickness correction.
-        For asymmetric stripline, uses an effective height.
+        Solves the finite conductor cross-section between both reference planes.
+        The homogeneous dielectric approximation uses the stackup's Er.
 
         Args:
             w: Trace width in mm
@@ -306,35 +307,7 @@ class TransmissionLine:
         # For stripline, epsilon_eff = er (fully embedded in dielectric)
         eps_eff = er
 
-        # Effective width with thickness correction
-        # From IPC-2141: w_eff = w + t/pi * (1 + ln(2*h/t))
-        # where h is the smaller of h1, h2
-        h_min = min(h1, h2)
-        if t > 0 and h_min > 0:
-            w_eff = w + (t / math.pi) * (1 + math.log(2 * h_min / t))
-        else:
-            w_eff = w
-
-        # Characteristic impedance using IPC-2141 formula
-        # Z0 = (60 / sqrt(er)) * ln(4*b / (0.67*pi*(0.8*w + t)))
-        # This is the classic stripline formula that works for most geometries
-        denominator = 0.67 * math.pi * (0.8 * w_eff + t)
-        if denominator > 0 and b > 0:
-            z0 = (60 / math.sqrt(er)) * math.log(4 * b / denominator)
-        else:
-            z0 = 50.0  # Default fallback
-
-        # For highly asymmetric stripline (h1 >> h2 or vice versa),
-        # apply correction factor toward microstrip behavior
-        asymmetry = abs(h1 - h2) / (h1 + h2) if (h1 + h2) > 0 else 0
-        if asymmetry > 0.5:
-            # High asymmetry - trace is closer to one plane
-            # Reduce impedance slightly as it behaves more like microstrip
-            correction = 1 - 0.2 * (asymmetry - 0.5)
-            z0 = z0 * correction
-
-        # Clamp to reasonable range
-        z0 = max(10, min(z0, 200))
+        z0 = stripline_impedance(w, h1, h2, t, er)
 
         # Phase velocity (in stripline, signal is fully in dielectric)
         v_p = SPEED_OF_LIGHT / math.sqrt(er)

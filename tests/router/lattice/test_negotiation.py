@@ -25,7 +25,10 @@ from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 
 _REPO = Path(__file__).resolve().parents[3]
-_CHARLIEPLEX = _REPO / "boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"
+_CHARLIEPLEX = (
+    _REPO
+    / "tests/fixtures/historical_demo_boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"
+)
 
 
 def _pads_by_net(pads: list[Pad]) -> dict[int, list[Pad]]:

@@ -107,7 +107,7 @@ class TestCheckZeroViolations:
         MIPI/HDMI/DDR are gated out by the unrouted-leg rule.  Neither count is
         silently absorbed by the large error-count allowlist floor."""
         mod = _load_helper_module()
-        key = "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb"
+        key = "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
         assert mod.MATCHGROUP_VIOLATION_BASELINE.get(key, 0) == 1
 
 

@@ -1,37 +1,15 @@
-"""Per-board ``starting_layers`` audit (Issue #3402).
+"""Layer-policy contracts for current demo designs and archived routers.
 
-PR #3405 (Issue #3400) added ``EscalationPolicy.starting_layers`` so a
-board can opt out of the 2L probe when 2L cannot meet the
-"manufacturable = 100% LVS + 0 DRC" bar (user direction 2026-06-09).
+Issue #3402's escalation audit applied to the historical routing fixtures.
+The real board-05/06/07 redesigns instead declare reviewed physical layer
+counts; board 07 is now six-layer SDRAM hardware. Boards 08/09 declare
+four-layer construction. A preferred fabrication layer count is not an
+``EscalationPolicy.starting_layers`` setting, and these tests keep that
+separation explicit rather than inventing an autorouter policy for them.
 
-Issue #3402 audited every demo board (``boards/00`` ... ``boards/07``)
-against that bar and set ``starting_layers`` per board:
-
-  - Boards 00, 01, 02 stay at the default (2L probe enabled): they
-    route 100% with 0 DRC on 2L in production.
-  - Boards 03 and 04 also stay at the default: their 2L reach gap is
-    a *placement / topology* gap, not a layer-count gap (4L doesn't
-    improve completion).  Residual gaps tracked as separate issues.
-  - Boards 05 and 07 set ``starting_layers: 4``: 07 is an inherent
-    4-layer PCB (inner GND / PWR planes), and 05 (DRV8301 +
-    STM32G431 + 3-phase power) shows a material reach gap at 2L vs
-    4L (46% vs 60%+) — probing 2L is a waste of routing budget.
-  - Board 06 was initially in the 4L-opt-in group but reverted after
-    Judge feedback on PR #3415: the field unexpectedly altered the
-    negotiator trajectory (skipped 2L probe, started 4L
-    SIG-GND-PWR-SIG, hit stagnation+timeout, DRC 21 -> 32, CI
-    failure on the diff-pair regression gate).  Tracked under
-    #3413 — whatever closes #3413 should re-evaluate whether
-    explicit ``starting_layers`` makes sense on this board.
-
-This regression test pins the audit decisions so a future spec edit
-that silently flips a board's starting layer (e.g., dropping ``05``
-back to the default 2L probe) is caught loudly.
-
-The test loads each board's ``project.kct`` through the spec parser
-and asserts the resolved ``EscalationPolicy.starting_layers`` value
-matches the audit table.  It does NOT re-route — that's covered by
-the per-board routing tests already in place.
+The archived board-06/07 specs retain the original default/4L escalation
+regressions. Schema coverage below preserves board 05's former 4L opt-in
+without tying it to the unrelated revision-B circuit.
 """
 
 from __future__ import annotations
@@ -45,80 +23,65 @@ from kicad_tools.spec.parser import load_spec
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARDS_DIR = REPO_ROOT / "boards"
 
+# Designs still using the original default 2L-probe policy.
+DEFAULT_PROBE_BOARDS = (
+    "00-simple-led",
+    "01-voltage-divider",
+    "02-charlieplex-led",
+    "03-usb-joystick",
+    "04-stm32-devboard",
+)
 
-# Audit table from Issue #3402 (2026-06-09).  ``None`` means no
-# ``escalation`` block (default 2L probe), an int means an explicit
-# ``starting_layers`` value in the spec.
-AUDIT_TABLE: dict[str, int | None] = {
-    "00-simple-led": None,
-    "01-voltage-divider": None,
-    "02-charlieplex-led": None,
-    "03-usb-joystick": None,
-    "04-stm32-devboard": None,
+# Reviewed real construction, not a claim about autorouter escalation.
+CONSTRUCTION_LAYERS = {
     "05-bldc-motor-controller": 4,
-    # 06-diffpair-test reverted to default — see module docstring + PR #3415.
-    "06-diffpair-test": None,
-    "07-matchgroup-test": 4,
+    "06-diffpair-test": 4,
+    "07-matchgroup-test": 6,
+    "08-precision-acquisition": 4,
+    "09-usbc-pd-power": 4,
 }
 
 
-@pytest.mark.parametrize("board,expected", sorted(AUDIT_TABLE.items()))
-def test_starting_layers_matches_audit(board: str, expected: int | None) -> None:
-    """``EscalationPolicy.starting_layers`` matches the Issue #3402 audit.
+@pytest.mark.parametrize("board", DEFAULT_PROBE_BOARDS)
+def test_default_probe_policy(board: str) -> None:
+    manufacturing = load_spec(BOARDS_DIR / board / "project.kct").requirements.manufacturing
+    escalation = manufacturing.escalation if manufacturing is not None else None
+    assert escalation is None or escalation.starting_layers == 2
 
-    For boards in the "stays at default" group the test asserts the
-    ``escalation`` block is absent (or its ``starting_layers`` field
-    is the schema default ``2``).  For the 4L-opt-in group it asserts
-    the explicit value is present.
-    """
-    spec_path = BOARDS_DIR / board / "project.kct"
-    assert spec_path.is_file(), f"Missing project.kct for {board}: {spec_path}"
 
-    spec = load_spec(spec_path)
-    requirements = getattr(spec, "requirements", None)
-    manufacturing = getattr(requirements, "manufacturing", None) if requirements else None
-    escalation = getattr(manufacturing, "escalation", None) if manufacturing else None
+@pytest.mark.parametrize("board,expected", sorted(CONSTRUCTION_LAYERS.items()))
+def test_reviewed_construction_layers(board: str, expected: int) -> None:
+    manufacturing = load_spec(BOARDS_DIR / board / "project.kct").requirements.manufacturing
+    assert manufacturing.layers["preferred"] == expected
+    # Fixed reviewed copper does not inherit the retired synthetic route policy.
+    assert manufacturing.escalation is None
 
-    if expected is None:
-        # Default group: either no escalation block, or escalation
-        # present but starting_layers at the schema default (2).
-        if escalation is None:
-            return
-        assert escalation.starting_layers == 2, (
-            f"{board}: per Issue #3402 audit this board should keep the "
-            f"default 2L probe, but its project.kct now sets "
-            f"starting_layers={escalation.starting_layers}.  If the audit "
-            f"decision changed, update AUDIT_TABLE in this test."
-        )
-    else:
-        assert escalation is not None, (
-            f"{board}: per Issue #3402 audit this board should declare "
-            f"starting_layers={expected}, but project.kct has no "
-            f"requirements.manufacturing.escalation block."
-        )
-        assert escalation.starting_layers == expected, (
-            f"{board}: per Issue #3402 audit starting_layers should be "
-            f"{expected}, got {escalation.starting_layers}.  If the audit "
-            f"decision changed, update AUDIT_TABLE in this test."
-        )
+
+@pytest.mark.parametrize("board,expected", [("06-diffpair-test", 2), ("07-matchgroup-test", 4)])
+def test_archived_fixture_retains_escalation_audit(board: str, expected: int) -> None:
+    path = BOARDS_DIR / board / "regression-fixture" / "project.kct"
+    escalation = load_spec(path).requirements.manufacturing.escalation
+    assert (escalation.starting_layers if escalation is not None else 2) == expected
+
+
+def test_explicit_four_layer_opt_in_is_preserved(tmp_path: Path) -> None:
+    path = tmp_path / "project.kct"
+    path.write_text(
+        'kct_version: "1.0"\nproject:\n  name: Four-layer route fixture\n'
+        "requirements:\n  manufacturing:\n    escalation:\n      starting_layers: 4\n"
+    )
+    assert load_spec(path).requirements.manufacturing.escalation.starting_layers == 4
 
 
 def test_all_demo_boards_present() -> None:
-    """Sanity: every demo board directory is covered by the audit.
-
-    Guards against a new ``boards/0N-...`` being added without the
-    Issue #3402 audit decision being recorded here.
-    """
-    on_disk = sorted(
+    """New numbered demos need an explicit policy or construction contract."""
+    on_disk = {
         p.name
         for p in BOARDS_DIR.iterdir()
         if p.is_dir() and p.name[:2].isdigit() and (p / "project.kct").is_file()
-    )
-    audited = sorted(AUDIT_TABLE.keys())
-    assert on_disk == audited, (
-        "Demo boards on disk diverge from the Issue #3402 audit table.\n"
-        f"  On disk:  {on_disk}\n"
-        f"  Audited:  {audited}\n"
-        "Add the new board to AUDIT_TABLE in this test (and pick a "
-        "starting_layers value per the methodology in Issue #3402)."
+    }
+    covered = set(DEFAULT_PROBE_BOARDS) | set(CONSTRUCTION_LAYERS)
+    assert on_disk == covered, (
+        "Demo board layer contracts need updating: "
+        f"uncovered={sorted(on_disk - covered)}, missing={sorted(covered - on_disk)}"
     )

@@ -1,0 +1,2 @@
+# KiCad writes local UI state during native regression checks.
+*.kicad_prl

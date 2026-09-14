@@ -1,0 +1,141 @@
+{
+  "researched_on": "2026-09-09",
+  "status": "selected; supplier assembly-stock reservation and final package review pending",
+  "supplier_note": "LCSC distributor stock is not JLCPCB assembly stock or a reservation. Headers require through-hole assembly. Never substitute pinouts without review.",
+  "parts": {
+    "U1": {
+      "manufacturer": "STMicroelectronics",
+      "mpn": "STM32F429ZIT6",
+      "lcsc": "C84808",
+      "package": "LQFP-144, 20x20mm, 0.5mm pitch",
+      "source": "https://www.lcsc.com/product-detail/C84808.html",
+      "datasheet": "https://www.st.com/resource/en/datasheet/stm32f429zi.pdf"
+    },
+    "U2": {
+      "manufacturer": "ISSI",
+      "mpn": "IS42S16400J-6TLI-TR",
+      "lcsc": "C17216754",
+      "package": "TSOP-II-54, 22.2x10.16mm, 0.8mm pitch",
+      "source": "https://www.lcsc.com/product-detail/C17216754.html",
+      "datasheet": "https://www.issi.com/WW/pdf/42-45S16400J.pdf",
+      "observed_distributor_stock": 17,
+      "observed_on": "2026-09-10 (web source cached last month; confirm at order)"
+    },
+    "U3": {
+      "manufacturer": "Diodes Incorporated",
+      "mpn": "AP2112K-3.3TRG1",
+      "lcsc": "C51118",
+      "package": "SOT-25",
+      "source": "https://www.lcsc.com/product-detail/C51118.html",
+      "datasheet": "https://www.diodes.com/datasheet/download/AP2112.pdf"
+    },
+    "J1": {
+      "manufacturer": "Ckmtw",
+      "mpn": "B-2100S02P-A110",
+      "lcsc": "C124375",
+      "package": "Through-hole, 1x2, 2.54mm pitch, vertical",
+      "source": "https://www.lcsc.com/product-detail/C124375.html"
+    },
+    "J2": {
+      "manufacturer": "BOOMELE",
+      "mpn": "2.54-1x6P",
+      "lcsc": "C37208",
+      "package": "Through-hole, 1x6, 2.54mm pitch, vertical",
+      "source": "https://www.lcsc.com/product-detail/C37208.html"
+    },
+    "J3": {
+      "manufacturer": "BOOMELE",
+      "mpn": "2.54-1*3P",
+      "lcsc": "C49257",
+      "package": "Through-hole, 1x3, 2.54mm pitch, vertical",
+      "source": "https://www.lcsc.com/product-detail/C49257.html"
+    },
+    "D1": {
+      "manufacturer": "LITEON",
+      "mpn": "LTST-C190KGKT",
+      "lcsc": "C125094",
+      "package": "0603 yellow-green LED, typical Vf 2V",
+      "source": "https://www.lcsc.com/product-detail/C125094.html",
+      "observed_distributor_stock": 245240
+    },
+    "D2": {
+      "manufacturer": "LITEON",
+      "mpn": "LTST-C190KRKT",
+      "lcsc": "C94869",
+      "package": "0603 red LED, typical Vf 2V",
+      "source": "https://www.lcsc.com/product-detail/C94869.html",
+      "observed_distributor_stock": 456140
+    },
+    "C:100nF": {
+      "manufacturer": "YAGEO",
+      "mpn": "CC0603KRX7R9BB104",
+      "lcsc": "C14663",
+      "package": "0603, 100nF, 50V, X7R, 10%",
+      "source": "https://www.lcsc.com/product-detail/C14663.html"
+    },
+    "C:10nF": {
+      "manufacturer": "Samsung Electro-Mechanics",
+      "mpn": "CL10B103KB8NNNC",
+      "lcsc": "C1589",
+      "package": "0603, 10nF, 50V, X7R, 10%",
+      "source": "https://www.lcsc.com/product-detail/C1589.html",
+      "datasheet": "https://product.samsungsem.com/mlcc/CL10B103KB8NNN.do",
+      "observed_distributor_stock": 2628400,
+      "observed_on": "2026-09-10"
+    },
+    "C:1uF": {
+      "manufacturer": "Samsung Electro-Mechanics",
+      "mpn": "CL10A105KB8NNNC",
+      "lcsc": "C15849",
+      "package": "0603, 1uF, 50V, X5R, 10%",
+      "source": "https://www.lcsc.com/product-detail/C15849.html",
+      "datasheet": "https://product.samsungsem.com/mlcc/CL10A105KB8NNN.do"
+    },
+    "C:2.2uF": {
+      "manufacturer": "Samsung Electro-Mechanics",
+      "mpn": "CL10A225KO8NNNC",
+      "lcsc": "C23630",
+      "package": "0603, 2.2uF, 16V, X5R, 10%",
+      "source": "https://www.lcsc.com/product-detail/C23630.html",
+      "datasheet": "https://product.samsungsem.com/mlcc/CL10A225KO8NNN.do"
+    },
+    "C:4.7uF": {
+      "manufacturer": "Samsung Electro-Mechanics",
+      "mpn": "CL10A475KP8NNNC",
+      "lcsc": "C1705",
+      "package": "0603, 4.7uF, 10V, X5R, 10%",
+      "source": "https://www.lcsc.com/product-detail/C1705.html",
+      "datasheet": "https://product.samsungsem.com/mlcc/CL10A475KP8NNN.do"
+    },
+    "C:10uF": {
+      "manufacturer": "Samsung Electro-Mechanics",
+      "mpn": "CL10A106KP8NNNC",
+      "lcsc": "C19702",
+      "package": "0603, 10uF, 10V, X5R, 10%",
+      "source": "https://www.lcsc.com/product-detail/C19702.html",
+      "datasheet": "https://product.samsungsem.com/mlcc/CL10A106KP8NNN.do"
+    },
+    "R:0R": {
+      "manufacturer": "UNI-ROYAL",
+      "mpn": "0603WAF0000T5E",
+      "lcsc": "C21189",
+      "package": "0603, 0ohm jumper",
+      "source": "https://www.lcsc.com/product-detail/C21189.html"
+    },
+    "R:10k": {
+      "manufacturer": "UNI-ROYAL",
+      "mpn": "0603WAF1002T5E",
+      "lcsc": "C25804",
+      "package": "0603, 10kohm, 1%, 0.1W",
+      "source": "https://www.lcsc.com/product-detail/C25804.html"
+    },
+    "R:1k": {
+      "manufacturer": "UNI-ROYAL",
+      "mpn": "0603WAF1001T5E",
+      "lcsc": "C21190",
+      "package": "0603, 1kohm, 1%, 0.1W",
+      "source": "https://www.lcsc.com/product-detail/C21190.html"
+    }
+  },
+  "additional_review_on": "2026-09-10"
+}

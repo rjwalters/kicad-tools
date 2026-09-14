@@ -17,6 +17,7 @@ The Router accepts a pluggable Heuristic for experimentation with
 different routing strategies. See heuristics.py for available options.
 """
 
+import contextlib
 import heapq
 import itertools
 import math
@@ -228,6 +229,16 @@ class Router:
         """
         self.grid = grid
         self.rules = rules
+        from .mfr_limits import get_mfr_limits
+
+        self._allow_smd_vias = True
+        if rules.manufacturer:
+            # Unknown manufacturer -> unspecified capability is retained
+            # (permissive), matching the fallback used elsewhere for
+            # unrecognized manufacturer ids (see
+            # Router._build_manufacturer_design_rules).
+            with contextlib.suppress(ValueError):
+                self._allow_smd_vias = bool(get_mfr_limits(rules.manufacturer).via_in_pad_supported)
         # Issue #3524: copy the default map instead of aliasing the
         # module-level singleton -- in-place writes must stay local.
         self.net_class_map = net_class_map or dict(DEFAULT_NET_CLASS_MAP)
@@ -351,6 +362,29 @@ class Router:
         # Cache is cleared when routes are modified (invalidates blocking state)
         self._via_cache: dict[tuple[int, int, int, int], bool] = {}
         self._via_cache_enabled: bool = True
+
+        # Issue #5240: vectorized geometry for the non-through-hole pad
+        # sweep in ``_check_via_placement_cached`` (the ``not
+        # self._allow_smd_vias`` branch -- the default for jlcpcb and any
+        # other manufacturer profile without via-in-pad support).  That
+        # sweep previously called ``pad_point_distance`` once per pad, in a
+        # plain Python loop, for EVERY via candidate the pure-Python A*
+        # fallback considers -- board 06's fallback path (triggered when the
+        # C++ search exhausts its resume budget) re-walks all ~200 board
+        # pads per candidate cell, recomputing each rotated pad's cos/sin
+        # from scratch every time.  ``_non_th_pad_geometry`` below caches
+        # the (x, y, half-width, half-height, cos, sin) arrays once and
+        # answers every subsequent query with one vectorized NumPy sweep --
+        # same ``pad_local_point``/``pad_point_distance`` math, evaluated in
+        # bulk instead of per-pad-per-call.  Invalidated by
+        # ``clear_via_cache`` (PR #5330 review) -- the SAME trigger the
+        # ``_via_cache`` above uses, i.e. the start of every route call and
+        # every foreign-context change -- plus the pad-count guard in
+        # ``_non_th_pad_geometry`` for pads appended mid-pass.  Pad count
+        # alone is NOT a sound key: pad geometry is mutated in place, on the
+        # same Pad objects and with no count change, by
+        # ``PlacementFeedbackLoop``.
+        self._non_th_pad_cache: tuple[int, tuple[np.ndarray, ...]] | None = None
 
         # Issue #2947: World-coord foreign-net clearance context for via
         # placement.  The coarse-grid obstacle map consulted by
@@ -617,7 +651,7 @@ class Router:
 
                 accessible = False
                 for li in check_layers:
-                    cell = self.grid.grid[li][gy][gx]
+                    cell = self.grid.cell_at(li, gy, gx)
                     # Inside pad metal — always accessible
                     if mgx1 <= gx <= mgx2 and mgy1 <= gy <= mgy2:
                         accessible = True
@@ -739,7 +773,7 @@ class Router:
                 cx, cy = gx + dx * step, gy + dy * step
                 if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
                     break
-                if self._cell_is_foreign_blocker(self.grid.grid[layer][cy][cx], pad.net):
+                if self._cell_is_foreign_blocker(self.grid.cell_at(layer, cy, cx), pad.net):
                     counts[d] += 1
 
         body_dir = max(counts, key=counts.get)
@@ -790,7 +824,7 @@ class Router:
 
             usable = False
             for layer in layers:
-                cell = self.grid.grid[layer][cy][cx]
+                cell = self.grid.cell_at(layer, cy, cx)
                 if self._cell_is_foreign_blocker(cell, net):
                     continue
                 # Skip routed cells from other nets (not obstacles, but
@@ -833,6 +867,9 @@ class Router:
         have been removed.
         """
         self._routed_segments.clear()
+        # Buckets hold indices into the cleared list; retaining them can
+        # miss relocated routes or dereference entries that no longer exist.
+        self._crossing_grid = None
 
     def get_via_diagnostics(self) -> dict[str, int]:
         """Return via placement diagnostic counters (Issue #2325).
@@ -1424,7 +1461,9 @@ class Router:
             return net_class.via_size
         return self.rules.via_diameter
 
-    def _get_pad_metal_bounds(self, pad: Pad) -> tuple[int, int, int, int]:
+    def _get_pad_metal_bounds(
+        self, pad: Pad, trace_width: float | None = None
+    ) -> tuple[int, int, int, int]:
         """Calculate the grid coordinate bounds of a pad's metal area.
 
         This is used to expand goal regions for off-grid pads, ensuring
@@ -1448,6 +1487,30 @@ class Router:
         else:
             effective_width = pad.width
             effective_height = pad.height
+
+        pitch = self.component_pitches.get(pad.ref)
+        required_clearance = self.rules.get_clearance_for_component(pad.ref, pitch)
+        # Dense fine-pitch pad-edge seeds can reconstruct a tail that grazes
+        # a foreign pad. Inset those unexempted seeds and all strict-mode pads;
+        # retain standard-pitch search freedom under the exact foreign-pad
+        # validator so unrelated negotiated route choices remain stable.
+        if (
+            trace_width is not None
+            and (
+                self.rules.strict_pad_clearance
+                or self.grid._component_is_fine_pitch(pad.ref, self.component_pitches)
+            )
+            and not self.grid._same_component_carveout_active(
+                pad.ref, required_clearance, self.rules.trace_clearance, self.component_pitches
+            )
+        ):
+            # Pad-center tails emit the configured local neck-down width.
+            # Eroding by the wider trunk can erase every legal narrow-pad seed.
+            seed_width = trace_width
+            if self.rules.should_apply_neck_down(pad.ref, pitch):
+                seed_width = self.rules.get_neck_down_width(0.0, pitch, base_width=trace_width)
+            effective_width = max(0.0, effective_width - seed_width)
+            effective_height = max(0.0, effective_height - seed_width)
 
         # Metal area bounds in world coordinates
         metal_x1 = pad.x - effective_width / 2
@@ -1782,7 +1845,7 @@ class Router:
             if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
                 return True  # Out of bounds = blocked
 
-            cell = self.grid.grid[layer][cy][cx]
+            cell = self.grid.cell_at(layer, cy, cx)
 
             if cell.blocked:
                 if allow_sharing and not cell.is_obstacle:
@@ -2687,6 +2750,69 @@ class Router:
         """Invalidate cached layer priority (call when congestion changes significantly)."""
         self._layer_priority = None
 
+    def _non_th_pad_geometry(self) -> tuple[np.ndarray, ...]:
+        """Vectorized (x, y, half_w, half_h, cos, sin) for non-through-hole pads.
+
+        Issue #5240: backs the ``not self._allow_smd_vias`` sweep in
+        :meth:`_check_via_placement_cached` with a single NumPy pass instead
+        of a per-pad Python loop that recomputed each rotated pad's
+        cos/sin (via ``pad_point_distance`` -> ``pad_local_point``) on every
+        call.
+
+        Invalidation (PR #5330 review): the cache is dropped by
+        :meth:`clear_via_cache`, i.e. on exactly the same trigger as the
+        sibling ``_via_cache`` -- at the start of every ``route_net`` /
+        ``_astar_search`` and whenever the foreign-net context changes,
+        because "grid state may have changed".  The pad-count check below
+        is only a cheap *additional* guard for freshly appended pads
+        (``RoutingGrid.add_pad``) within a single routing pass; it is NOT
+        the invalidation contract.  Pad *count* alone is insufficient
+        because pad geometry is mutated IN PLACE, on the same ``Pad``
+        objects, without changing the count --
+        ``PlacementFeedbackLoop._apply_delta_to_router_pads`` /
+        ``_restore_router_pads`` do exactly that for
+        ``translate``/``rotate_180``/``mirror`` deltas while reusing one
+        ``Router`` instance for the whole feedback loop.
+        """
+        pads = self.grid._pads
+        cached = self._non_th_pad_cache
+        if cached is not None and cached[0] == len(pads):
+            return cached[1]
+
+        xs: list[float] = []
+        ys: list[float] = []
+        half_w: list[float] = []
+        half_h: list[float] = []
+        cos_r: list[float] = []
+        sin_r: list[float] = []
+        for pad in pads:
+            if pad.through_hole:
+                continue
+            xs.append(pad.x)
+            ys.append(pad.y)
+            half_w.append(pad.width / 2.0)
+            half_h.append(pad.height / 2.0)
+            if pad.rotation:
+                angle = math.radians(pad.rotation)
+                cos_r.append(math.cos(angle))
+                sin_r.append(math.sin(angle))
+            else:
+                # Matches pad_local_point's rotation==0 fast path exactly
+                # (no trig call, identity transform).
+                cos_r.append(1.0)
+                sin_r.append(0.0)
+
+        arrays = (
+            np.array(xs, dtype=np.float64),
+            np.array(ys, dtype=np.float64),
+            np.array(half_w, dtype=np.float64),
+            np.array(half_h, dtype=np.float64),
+            np.array(cos_r, dtype=np.float64),
+            np.array(sin_r, dtype=np.float64),
+        )
+        self._non_th_pad_cache = (len(pads), arrays)
+        return arrays
+
     def _check_via_placement_cached(
         self,
         gx: int,
@@ -2718,6 +2844,30 @@ class Router:
             cache_key = (gx, gy, net, effective_radius)
             if cache_key in self._via_cache:
                 return self._via_cache[cache_key]
+
+        # Process restrictions also apply to own-net copper and plane layers.
+        if not self._allow_smd_vias:
+            wx, wy = self.grid.grid_to_world(gx, gy)
+            drill_radius = self.rules.via_drill / 2.0
+            # Issue #5240: vectorized replacement for the equivalent
+            # per-pad ``pad_point_distance(pad, wx, wy) < drill_radius``
+            # Python loop -- same pad_local_point/pad_point_distance math
+            # (rotate into the pad frame, clamp to the rectangle, hypot the
+            # residual), evaluated for every non-through-hole pad in one
+            # NumPy sweep instead of a per-pad function call + trig
+            # recompute.  This branch is hot: it is the default for jlcpcb
+            # (no via-in-pad support) and runs once per via candidate the
+            # pure-Python A* fallback considers.
+            pxs, pys, half_w, half_h, cos_r, sin_r = self._non_th_pad_geometry()
+            if pxs.size:
+                dx = wx - pxs
+                dy = wy - pys
+                lx = cos_r * dx - sin_r * dy
+                ly = sin_r * dx + cos_r * dy
+                ex = np.maximum(np.abs(lx) - half_w, 0.0)
+                ey = np.maximum(np.abs(ly) - half_h, 0.0)
+                if np.any(np.hypot(ex, ey) < drill_radius):
+                    return False
 
         # Check all layers using priority ordering.
         # Issue #2325: Skip plane layers when checking via blockage.  On plane
@@ -2781,8 +2931,31 @@ class Router:
 
         Call this when grid state changes (routes added/removed) to ensure
         cache doesn't return stale results.
+
+        PR #5330 review: this also drops the vectorized non-through-hole pad
+        geometry cache (:meth:`_non_th_pad_geometry`), so the two caches that
+        feed :meth:`_check_via_placement_cached` share one invalidation
+        contract.  Keying the pad geometry on pad count alone was unsound:
+        ``PlacementFeedbackLoop`` mutates ``Pad.x``/``Pad.y``/``Pad.rotation``
+        in place, on the same objects, without changing the count, while
+        reusing a single ``Router`` for the whole feedback loop.
         """
         self._via_cache.clear()
+        self.invalidate_pad_geometry_cache()
+
+    def invalidate_pad_geometry_cache(self) -> None:
+        """Drop the cached non-through-hole pad geometry arrays.
+
+        PR #5330 review: call this after mutating any ``Pad`` on
+        ``grid._pads`` in place (position, size, rotation, through-hole
+        flag).  :meth:`clear_via_cache` already calls it, so every
+        ``route_net`` / ``_astar_search`` start and every foreign-context
+        change is covered; this entry point exists for mutators that do not
+        (or may not) go through a route call before the next via check --
+        e.g. ``PlacementFeedbackLoop._apply_delta_to_router_pads`` and
+        ``_restore_router_pads``.
+        """
+        self._non_th_pad_cache = None
 
     def set_via_cache_enabled(self, enabled: bool) -> None:
         """Enable or disable via caching.
@@ -2803,11 +2976,21 @@ class Router:
             return self.rules.cost_congestion * (1.0 + excess * 2.0)
         return 0.0
 
-    def _batch_congestion_costs(self, current_x: int, current_y: int, layer: int) -> np.ndarray:
-        """Batch compute congestion costs for all 2D neighbors using vectorized NumPy.
+    def _batch_congestion_costs(self, current_x: int, current_y: int, layer: int) -> list[float]:
+        """Compute congestion costs for all 2D neighbors of the current cell.
 
-        Issue #963: Pre-compute congestion costs for all neighbors in a single
-        batch operation to reduce per-neighbor function call overhead.
+        Issue #963 originally vectorized this with NumPy to reduce
+        per-neighbor function call overhead. Issue #5240 (CI runtime
+        investigation): ``self.neighbors_2d`` only ever has 4-8 entries, so
+        the NumPy path paid for ~10 temporary array allocations (bounds
+        mask, congestion-grid coordinates, valid-index lookup, congestion
+        levels, threshold mask, excess, output) plus per-call ufunc
+        dispatch overhead on every single A* node expansion just to work on
+        a handful of scalars -- profiling the pure-Python router fallback
+        (which this method is only ever called from) showed it as the
+        single hottest function in that path. A plain Python loop over the
+        same fixed-size neighbor list produces bit-identical results with
+        none of that overhead.
 
         Args:
             current_x: Current grid x coordinate
@@ -2815,70 +2998,61 @@ class Router:
             layer: Current layer index
 
         Returns:
-            Array of congestion costs indexed by neighbor offset index.
+            List of congestion costs indexed by neighbor offset index.
             Out-of-bounds neighbors get cost 0 (will be filtered anyway).
         """
-        # Compute neighbor coordinates
-        nx_arr = current_x + self._neighbor_dx
-        ny_arr = current_y + self._neighbor_dy
-
-        # Bounds mask - identify valid neighbors
-        valid = (
-            (nx_arr >= 0) & (nx_arr < self.grid.cols) & (ny_arr >= 0) & (ny_arr < self.grid.rows)
-        )
-
-        # Convert to congestion grid coordinates
+        cols = self.grid.cols
+        rows = self.grid.rows
         congestion_size = self.grid.congestion_size
-        cx_arr = np.minimum(nx_arr // congestion_size, self.grid.congestion_cols - 1)
-        cy_arr = np.minimum(ny_arr // congestion_size, self.grid.congestion_rows - 1)
-
-        # Initialize costs array
-        costs = np.zeros(len(self.neighbors_2d), dtype=np.float64)
-
-        # Get valid indices
-        valid_indices = np.where(valid)[0]
-        if len(valid_indices) == 0:
-            return costs
-
-        # Batch lookup congestion counts using fancy indexing
+        congestion_cols = self.grid.congestion_cols
+        congestion_rows = self.grid.congestion_rows
+        congestion_arr = self.grid._congestion
         max_cells = congestion_size * congestion_size
-        congestion_counts = self.grid._congestion[
-            layer, cy_arr[valid_indices], cx_arr[valid_indices]
-        ]
-        congestion_levels = np.minimum(1.0, congestion_counts / max_cells)
-
-        # Compute costs where congestion exceeds threshold
         threshold = self.rules.congestion_threshold
-        exceeds = congestion_levels > threshold
-        excess = np.maximum(0, congestion_levels - threshold)
-        valid_costs = np.where(exceeds, self.rules.cost_congestion * (1.0 + excess * 2.0), 0.0)
-        costs[valid_indices] = valid_costs
+        cost_congestion = self.rules.cost_congestion
+
+        costs = [0.0] * len(self.neighbors_2d)
+        for i, (dx, dy, _dlayer, _cost_mult) in enumerate(self.neighbors_2d):
+            nx = current_x + dx
+            ny = current_y + dy
+            if not (0 <= nx < cols and 0 <= ny < rows):
+                continue
+
+            cx = min(nx // congestion_size, congestion_cols - 1)
+            cy = min(ny // congestion_size, congestion_rows - 1)
+            congestion_level = min(1.0, float(congestion_arr[layer, cy, cx]) / max_cells)
+            if congestion_level > threshold:
+                excess = congestion_level - threshold
+                costs[i] = cost_congestion * (1.0 + excess * 2.0)
 
         return costs
 
-    def _batch_turn_costs(self, current_direction: tuple[int, int]) -> np.ndarray:
-        """Batch compute turn costs for all 2D neighbors using vectorized NumPy.
+    def _batch_turn_costs(self, current_direction: tuple[int, int]) -> list[float]:
+        """Compute turn costs for all 2D neighbors of the current direction.
 
-        Issue #963: Pre-compute turn costs for all neighbors in a single
-        batch operation.
+        Issue #963 originally vectorized this with NumPy. Issue #5240: like
+        ``_batch_congestion_costs`` above, ``self.neighbors_2d`` is a
+        4-8-element fixed list, so a plain Python loop avoids the
+        per-call NumPy array allocation/comparison overhead while producing
+        identical results (see that method's docstring for the profiling
+        context).
 
         Args:
             current_direction: Current direction as (dx, dy) tuple
 
         Returns:
-            Array of turn costs indexed by neighbor offset index.
+            List of turn costs indexed by neighbor offset index.
         """
         if current_direction == (0, 0):
             # No current direction - no turn penalty
-            return np.zeros(len(self.neighbors_2d), dtype=np.float64)
+            return [0.0] * len(self.neighbors_2d)
 
-        # Check which neighbors match the current direction
-        dx_match = self._neighbor_dx == current_direction[0]
-        dy_match = self._neighbor_dy == current_direction[1]
-        matches = dx_match & dy_match
-
-        # Turn cost where direction doesn't match
-        return np.where(matches, 0.0, self.rules.cost_turn)
+        cost_turn = self.rules.cost_turn
+        dx0, dy0 = current_direction
+        return [
+            0.0 if (dx == dx0 and dy == dy0) else cost_turn
+            for dx, dy, _dlayer, _cost_mult in self.neighbors_2d
+        ]
 
     def _batch_negotiated_costs(
         self,
@@ -2945,13 +3119,13 @@ class Router:
         """Check if a cell is part of a zone (copper pour)."""
         if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
             return False
-        return self.grid.grid[layer][gy][gx].is_zone
+        return self.grid.cell_at(layer, gy, gx).is_zone
 
     def _get_zone_net(self, gx: int, gy: int, layer: int) -> int:
         """Get the net number of a zone cell, or 0 if not a zone."""
         if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
             return 0
-        cell = self.grid.grid[layer][gy][gx]
+        cell = self.grid.cell_at(layer, gy, gx)
         if cell.is_zone:
             return cell.net
         return 0
@@ -3302,9 +3476,11 @@ class Router:
         # Issue #977: Apply same expansion to START pad - if the grid-snapped center
         # falls on a cell blocked by another net's clearance, we need alternate entry points.
         start_metal_gx1, start_metal_gy1, start_metal_gx2, start_metal_gy2 = (
-            self._get_pad_metal_bounds(start)
+            self._get_pad_metal_bounds(start, net_trace_width)
         )
-        end_metal_gx1, end_metal_gy1, end_metal_gx2, end_metal_gy2 = self._get_pad_metal_bounds(end)
+        end_metal_gx1, end_metal_gy1, end_metal_gx2, end_metal_gy2 = self._get_pad_metal_bounds(
+            end, net_trace_width
+        )
 
         # Issue #1618: Precompute geometry-derived pad approach bounds.
         # The approach zone is the pad metal area expanded by a small escape margin
@@ -3685,7 +3861,7 @@ class Router:
                 # Check blocked cells carefully
                 # Allow routing through blocked cells that belong to OUR net
                 # This enables THT pads to be entered/exited on any layer
-                cell = self.grid.grid[nlayer][ny][nx]
+                cell = self.grid.cell_at(nlayer, ny, nx)
                 if cell.blocked:
                     # Issue #1764: Pad reachability - if the neighbor cell falls
                     # within either pad's metal area, allow entry regardless of blocked/net
@@ -4127,7 +4303,7 @@ class Router:
                 ):
                     cx, cy = gx + check_dx, gy + check_dy
                     if 0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows:
-                        cell = self.grid.grid[layer][cy][cx]
+                        cell = self.grid.cell_at(layer, cy, cx)
                         if (
                             cell.blocked
                             and cell.net != source_net
@@ -4394,9 +4570,27 @@ class Router:
             """
             if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
                 # Issue #1018: Calculate width with neck-down support
-                width = _calculate_segment_width(x1, y1, x2, y2)
-                points = dogleg_points(x1, y1, x2, y2)
+                from .neck_down import taper_points
+
+                centers = []
+                if start_needs_neckdown:
+                    centers.append((start_pad.x, start_pad.y))
+                if end_needs_neckdown:
+                    centers.append((end_pad.x, end_pad.y))
+                dogleg = dogleg_points(x1, y1, x2, y2)
+                points = [dogleg[0]]
+                for a, b in zip(dogleg, dogleg[1:], strict=False):
+                    points.extend(
+                        taper_points(
+                            a,
+                            b,
+                            centers,
+                            self.rules.neck_down_distance,
+                            self.rules.grid_resolution,
+                        )[1:]
+                    )
                 for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
+                    width = _calculate_segment_width(sx, sy, ex, ey)
                     if sx == ex and sy == ey:
                         continue
                     seg = Segment(
@@ -4411,21 +4605,41 @@ class Router:
                     )
                     route.segments.append(seg)
 
+        # Issue #5013: mirrors the C++ backend fix in
+        # ``CppPathfinder._convert_result_to_route`` (cpp_backend.py).
+        # ``current_layer_idx``/``layer_idx`` below are the LOGICAL search
+        # transition (e.g. F.Cu -> In2.Cu), not the via's physical drilled
+        # span.  This Python A* pathfinder has no blind/buried process
+        # selection either (Issue #4007: ``blind_buried_supported`` is
+        # False for every current board), so every via this loop
+        # constructs is an ordinary through-hole whose barrel contacts
+        # every copper layer from the top of the stack to the bottom.
+        # Reporting the logical pair verbatim under-reported the drilled
+        # span; DRC/connectivity code trusts ``via.layers`` as the
+        # physical barrel extent (``validate/connectivity.py``,
+        # ``validate/rules/clearance.py``).  The grid-side obstacle
+        # checks already block every layer for a placed via
+        # (``RoutingGrid._mark_via`` -- "Mark cells around a via as
+        # blocked on ALL layers"), so this normalization only corrects
+        # the reported span, not route acceptance.  Router counterpart of
+        # stitch issue #5001.
+        physical_top_layer = Layer(self.grid.index_to_layer(0))
+        physical_bottom_layer = Layer(self.grid.index_to_layer(self.grid.num_layers - 1))
+
         for _i, (wx, wy, layer_idx, is_via) in enumerate(path):
             if is_via:
                 # Emit pending segment before via
                 _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
 
-                # Add via - convert grid indices back to Layer enum values
+                # Add via - the physical span always covers the full stack
+                # (see the Issue #5013 note above); the logical
+                # current/next search layers are not the drilled extent.
                 via = Via(
                     x=current_x,
                     y=current_y,
                     drill=self.rules.via_drill,
                     diameter=net_via_diameter,
-                    layers=(
-                        Layer(self.grid.index_to_layer(current_layer_idx)),
-                        Layer(self.grid.index_to_layer(layer_idx)),
-                    ),
+                    layers=(physical_top_layer, physical_bottom_layer),
                     net=start_pad.net,
                     net_name=start_pad.net_name,
                 )
@@ -4477,19 +4691,8 @@ class Router:
                     # tolerance (~0.6 deg) would otherwise let a slightly
                     # skewed tail absorb the whole last segment.
                     # Issue #1018: Recalculate width for the extended segment
-                    extended_width = _calculate_segment_width(
-                        last_seg.x1, last_seg.y1, end_pad.x, end_pad.y
-                    )
-                    route.segments[-1] = Segment(
-                        x1=last_seg.x1,
-                        y1=last_seg.y1,
-                        x2=end_pad.x,
-                        y2=end_pad.y,
-                        width=extended_width,
-                        layer=last_seg.layer,
-                        net=start_pad.net,
-                        net_name=start_pad.net_name,
-                    )
+                    route.segments.pop()
+                    _emit_segment(last_seg.x1, last_seg.y1, end_pad.x, end_pad.y, current_layer_idx)
                 else:
                     _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
             else:
@@ -4902,8 +5105,8 @@ class Router:
                     return None
 
         # Get pad metal bounds for goal checking (Issue #956)
-        start_metal_bounds = self._get_pad_metal_bounds(start)
-        end_metal_bounds = self._get_pad_metal_bounds(end)
+        start_metal_bounds = self._get_pad_metal_bounds(start, net_trace_width)
+        end_metal_bounds = self._get_pad_metal_bounds(end, net_trace_width)
 
         # Heuristic contexts for both directions
         forward_context = HeuristicContext(
@@ -5287,7 +5490,7 @@ class Router:
             )
 
             # Check blocking
-            cell = self.grid.grid[nlayer][ny][nx]
+            cell = self.grid.cell_at(nlayer, ny, nx)
             if cell.blocked:
                 if cell.net == source_pad.net:
                     pass  # Same net - passable

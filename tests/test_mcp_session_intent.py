@@ -569,3 +569,111 @@ class TestSessionIntentPersistence:
         assert result_dict["interface"] == "usb2_high_speed"
         assert result_dict["nets"] == ["USB_DP", "USB_DM"]
         assert len(result_dict["constraints"]) > 0
+
+
+def test_intent_registry_json_rpc_lifecycle(intent_pcb_path):
+    """Discover and use all intent tools through the client dispatch surface."""
+    import json
+
+    from kicad_tools.mcp.server import MCPServer
+
+    server = MCPServer()
+
+    def call(name, **arguments):
+        response = server.handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }
+        )
+        assert "error" not in response, response
+        return json.loads(response["result"]["content"][0]["text"])
+
+    listed = server.handle_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    schemas = {tool["name"]: tool["inputSchema"] for tool in listed["result"]["tools"]}
+    for name, required in {
+        "declare_interface": {"session_id", "interface_type", "nets"},
+        "declare_power_rail": {"session_id", "net", "voltage"},
+        "list_intents": {"session_id"},
+        "clear_intent": {"session_id"},
+    }.items():
+        assert set(schemas[name]["required"]) == required
+    assert schemas["declare_interface"]["properties"]["nets"]["items"] == {"type": "string"}
+    assert schemas["declare_power_rail"]["properties"]["voltage"]["type"] == "number"
+    assert schemas["declare_power_rail"]["properties"]["max_current"]["default"] == 0.5
+    session = call("start_session", pcb_path=intent_pcb_path)
+    assert session["success"]
+    sid = session["session_id"]
+    try:
+        usb = call(
+            "declare_interface",
+            session_id=sid,
+            interface_type="usb2_high_speed",
+            nets=["USB_DP", "USB_DM"],
+        )
+        assert usb["success"] and usb["constraints"]
+        power = call("declare_power_rail", session_id=sid, net="VDD_3V3", voltage=3.3)
+        assert power["success"] and power["max_current"] == 0.5
+        intents = call("list_intents", session_id=sid)
+        assert {i["type"] for i in intents["intents"]} == {
+            "usb2_high_speed",
+            "power_rail",
+        }
+        assert intents["constraint_count"] > 0
+        cleared = call(
+            "clear_intent", session_id=sid, interface_type="usb2_high_speed", nets=["USB_DP"]
+        )
+        assert cleared["success"]
+        remaining = call("list_intents", session_id=sid)
+        assert [i["type"] for i in remaining["intents"]] == ["power_rail"]
+        assert call("clear_intent", session_id=sid)["success"]
+        assert call("list_intents", session_id=sid)["intents"] == []
+        explicit = call(
+            "declare_power_rail", session_id=sid, net="VDD_3V3", voltage=3.3, max_current=1.25
+        )
+        assert explicit["success"] and explicit["max_current"] == 1.25
+        invalid = call(
+            "declare_interface", session_id=sid, interface_type="not_an_interface", nets=["USB_DP"]
+        )
+        assert not invalid["success"] and "Unknown interface type" in invalid["error_message"]
+    finally:
+        assert call("rollback_session", session_id=sid)["success"]
+    for name, arguments in (
+        ("declare_interface", {"interface_type": "usb2_high_speed", "nets": ["USB_DP", "USB_DM"]}),
+        ("declare_power_rail", {"net": "VDD_3V3", "voltage": 3.3}),
+        ("list_intents", {}),
+        ("clear_intent", {}),
+    ):
+        result = call(name, session_id=sid, **arguments)
+        assert not result["success"] and "Session not found" in result["error_message"]
+
+
+def test_intent_registry_forwards_optional_parameters(monkeypatch):
+    from types import SimpleNamespace
+
+    from kicad_tools.mcp.tools import session
+    from kicad_tools.mcp.tools.registry import get_tool
+
+    for name, arguments in (
+        (
+            "declare_interface",
+            {
+                "session_id": "s",
+                "interface_type": "spi_standard",
+                "nets": ["SPI_CLK"],
+                "params": {"frequency_hz": 4e6},
+            },
+        ),
+        ("clear_intent", {"session_id": "s", "interface_type": None, "nets": ["SPI_CLK"]}),
+    ):
+        received = {}
+
+        def capture(**kwargs):
+            received.update(kwargs)
+            return SimpleNamespace(to_dict=lambda: {"success": True})
+
+        monkeypatch.setattr(session, name, capture)
+        assert get_tool(name).handler(arguments) == {"success": True}
+        assert received == arguments

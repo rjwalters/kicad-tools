@@ -76,6 +76,10 @@ def create_sot(
         attr="smd",
     )
 
+    # Coordinates are millimeters in both standard and custom layouts.
+    x: float
+    y: float
+
     # Add pads
     if pad_positions is not None:
         for i, (x, y) in enumerate(pad_positions):

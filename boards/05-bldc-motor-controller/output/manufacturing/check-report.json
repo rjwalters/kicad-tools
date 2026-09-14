@@ -1,0 +1,160 @@
+{
+  "file": "/private/tmp/loom-5044-board05-identity-release/bldc_controller_routed.kicad_pcb",
+  "manufacturer": "jlcpcb",
+  "layers": 4,
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "infos": 5,
+    "waived": 0,
+    "rules_checked": 47,
+    "rules_checked_by_rule": {
+      "connectivity": 1,
+      "copper_sliver": 1,
+      "track_dangling": 1,
+      "via_dangling": 1,
+      "doc_drift_stale_pin": 1,
+      "doc_drift_unresolvable_pin": 1,
+      "isolated_copper": 1,
+      "sch_field_offset": 1,
+      "sch_field_overlap": 1
+    },
+    "passed": true
+  },
+  "violations": [
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J2 (Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical): 4.23mm from nearest board edge",
+      "location": [
+        119.5,
+        97.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 4.23,
+      "required_value": null,
+      "items": [
+        "J2"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J4 (Connector_PinHeader_2.54mm:PinHeader_2x03_P2.54mm_Vertical): 8.68mm from nearest board edge",
+      "location": [
+        170.5,
+        116.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 8.679999999999998,
+      "required_value": null,
+      "items": [
+        "J4"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 6.23mm from nearest board edge",
+      "location": [
+        121.5,
+        68.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 6.23,
+      "required_value": null,
+      "items": [
+        "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J3 (Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "location": [
+        178.5,
+        90.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 3.230000000000004,
+      "required_value": null,
+      "items": [
+        "J3"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J5 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 17.68mm from nearest board edge",
+      "location": [
+        157.5,
+        128.0
+      ],
+      "layer": "F.Cu",
+      "actual_value": 17.680000000000007,
+      "required_value": null,
+      "items": [
+        "J5"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    }
+  ],
+  "meta_checks": {
+    "drc": {
+      "status": "PASSED",
+      "detail": "47 rules checked, 0 error(s), 0 warning(s)"
+    },
+    "erc": {
+      "status": "PASSED",
+      "detail": "0 error(s), 0 warning(s)"
+    },
+    "lvs": {
+      "status": "PASSED",
+      "detail": "label + copper: 0 mismatch(es)",
+      "mismatches": [],
+      "copper_mismatches": [],
+      "copper_vacuous": false,
+      "copper_bound_pad_count": 149,
+      "netlist_vacuous": false
+    },
+    "manifest": {
+      "status": "PASSED",
+      "detail": "manifest.json mtime within tolerance of routed PCB mtime"
+    },
+    "overall": "PASSED",
+    "schematic_missing": false
+  },
+  "routing_quality": {
+    "total_segments": 8114,
+    "nets_with_copper": 37,
+    "segments_per_net": 219.2972972972973,
+    "zero_length_count": 0,
+    "median_length_mm": 0.10000000000000853,
+    "fragment_count": 7724,
+    "fragment_fraction": 0.951934927286172,
+    "orthogonal_count": 5104,
+    "diagonal_45_count": 3010,
+    "off_axis_count": 0,
+    "staircase_step_count": 25,
+    "staircase_fraction": 0.003081094404732561
+  }
+}

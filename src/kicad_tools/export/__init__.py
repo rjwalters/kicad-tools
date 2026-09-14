@@ -61,6 +61,7 @@ from .bom_spec_overlay import (
     apply_spec_overlay,
     expand_ref_range,
     find_spec_file,
+    resolved_refs,
 )
 from .gerber import (
     MANUFACTURER_PRESETS,
@@ -117,6 +118,7 @@ __all__ = [
     "SpecOverlayEntry",
     "expand_ref_range",
     "find_spec_file",
+    "resolved_refs",
     # Manufacturing package
     "ManufacturingPackage",
     "ManufacturingConfig",

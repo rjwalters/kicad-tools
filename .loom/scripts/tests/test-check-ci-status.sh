@@ -290,6 +290,31 @@ assert_contains "$OUT" "PENDING" "(f) Human-readable output shows overall PENDIN
 assert_contains "$OUT" "CI: queued (workflow run)" "(f) Human-readable pending list includes the queued workflow run"
 
 echo ""
+echo "Testing check-ci-status.sh empty-output false-settle guard (#6169)..."
+
+# (n) The #6169 trap, reproduced at the forge-helper layer: ALL THREE
+# underlying API calls (check-runs, commit-status, workflow-runs) return
+# their genuinely-empty shape -- e.g. what a transient forge failure (an
+# intermittent TLS error, a GraphQL hiccup) can produce. A naive settle-poll
+# that only checks "is anything marked pending" would treat this as
+# "nothing pending -> settled/success". check-ci-status.sh must NOT do that:
+# zero rows everywhere must fall through to "unknown" (exit 3), never
+# "success" (exit 0) -- there is nothing here to positively confirm CI green.
+reset_state
+cat > "$STUB_DIR/check-runs.json" <<'EOF'
+{"total_count": 0, "check_runs": []}
+EOF
+cat > "$STUB_DIR/commit-status.json" <<'EOF'
+{"state": "unknown", "statuses": []}
+EOF
+cat > "$STUB_DIR/workflow-runs.json" <<'EOF'
+{"workflow_runs": []}
+EOF
+run_ccs --commit "$SHA" --quiet
+assert_eq "unknown" "$OUT" "(n) Zero rows across check-runs/commit-status/workflow-runs -> quiet output 'unknown', NOT 'success' (#6169 false-settle guard)"
+assert_eq "3" "$RC" "(n) Exit code 3 (unknown) -- not the success exit code"
+
+echo ""
 echo "Testing check-ci-status.sh --job per-job status filter (#5748)..."
 
 JOB="loom-worker Image Smoke Test"

@@ -21,6 +21,24 @@
 # It MUST NOT block — even if git fails, it returns 0. It is strictly
 # read-only: it never pops, drops, or applies a stash.
 #
+# It must also never RECOMMEND one (#6076). Until #6076 the reconciliation
+# hint printed `git stash apply <ref>   # or: git stash pop <ref>`, which
+# contradicted the "Replay, don't pop" rule in
+# defaults/docs/troubleshooting.md and handed every agent that read this
+# advisory an ask-tier command: a bare `git stash pop` in the primary clone
+# trips guard-destructive-generic.sh's `stash-scope:main-checkout` ask, which
+# in a headless run has nobody to answer it and therefore stalls exactly like
+# a deny. Because this advisory runs at sweep pre-flight (sweep.md
+# "Quarantine Stash Check") on every run while any quarantine is outstanding,
+# a single bad hint recurs daily — it accounted for the `git stash pop
+# stash@{0} && git status --short` shape logged repeatedly in
+# .loom/logs/guard-decisions.log over 2026-08-09..13.
+#
+# The hint therefore names only guard-transparent commands: `git stash show`
+# (read-only), a replay into the OWNING issue worktree, and `loom-daemon
+# stashes retire`. test-check-quarantine-stashes.sh asserts this mechanically
+# so the regression cannot come back silently.
+#
 # Usage:
 #   ./.loom/scripts/check-quarantine-stashes.sh          # print warning (or nothing) and exit 0
 #   ./.loom/scripts/check-quarantine-stashes.sh --quiet   # suppress the stdout one-liner
@@ -56,7 +74,9 @@ for arg in "$@"; do
             QUIET=1
             ;;
         --help|-h)
-            sed -n '2,29p' "$0" | sed 's/^# //; s/^#//'
+            # Keep this range in sync with the header block above (it must end
+            # at the last "Exit codes:" line, currently line 48).
+            sed -n '2,48p' "$0" | sed 's/^# //; s/^#//'
             exit 0
             ;;
         *)
@@ -137,8 +157,10 @@ done <<< "$QUARANTINE_LINES"
 warn ""
 warn "${BOLD}To inspect a quarantine's contents:${NC}"
 warn "      ${BOLD}git stash show -p <ref>${NC}"
-warn "${BOLD}To reconcile it into the issue worktree it belongs to, then drop it:${NC}"
-warn "      ${BOLD}git stash apply <ref>${NC}   # or: git stash pop <ref>"
+warn "${BOLD}To reconcile it — REPLAY into the owning issue worktree, never pop into main:${NC}"
+warn "      ${BOLD}git stash show -p <ref> | git -C .loom/worktrees/issue-<N> apply -${NC}"
+warn "${BOLD}Then retire the entry (classifies first; only --execute drops anything):${NC}"
+warn "      ${BOLD}loom-daemon stashes retire --issue <N> --execute${NC}"
 warn "${BOLD}Structured records (label, paths, stash sha) for every quarantine:${NC}"
 warn "      ${BOLD}.loom/logs/main-quarantine.log${NC}"
 warn ""

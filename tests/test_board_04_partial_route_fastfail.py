@@ -71,6 +71,7 @@ class TestBoard04PartialRouteFastFail:
             module, "relocate_drill_clearance_step", _boom("relocate_drill_clearance_step")
         )
         monkeypatch.setattr(module, "quantize_escapes", _boom("quantize_escapes"))
+        monkeypatch.setattr(module.runpy, "run_path", _boom("manufacturing repair"))
         monkeypatch.setattr(module, "fill_zones", _boom("fill_zones"))
         monkeypatch.setattr(module, "run_drc", _boom("run_drc"))
         monkeypatch.setattr(module, "write_lvs_report", _boom("write_lvs_report"))
@@ -110,6 +111,11 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(module, "fill_zones", lambda *a, **k: True)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
         monkeypatch.setattr(module, "generate_manufacturing", lambda *a, **k: True)
+        monkeypatch.setattr(
+            module.runpy,
+            "run_path",
+            lambda *a, **k: {"repair": lambda *a: None, "apply_native_floors": lambda *a: None},
+        )
 
         lvs_called: list[bool] = []
 

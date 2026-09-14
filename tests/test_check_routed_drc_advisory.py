@@ -254,7 +254,7 @@ class TestCheckFileAdvisoryFiltering:
         ]
         with self._stub_kct(_make_kct_json(violations)):
             passed, msg, errors = self.helper.check_file(
-                Path("boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb"),
+                Path("synthetic-board04.kicad_pcb"),
                 allowed=4,
                 mfr="jlcpcb-tier1",
             )
@@ -279,7 +279,7 @@ class TestCheckFileAdvisoryFiltering:
         ]
         with self._stub_kct(_make_kct_json(violations)):
             passed, msg, errors = self.helper.check_file(
-                Path("boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb"),
+                Path("synthetic-board04.kicad_pcb"),
                 allowed=4,
                 mfr="jlcpcb-tier1",
             )
@@ -315,7 +315,7 @@ class TestCheckFileAdvisoryFiltering:
         violations = [_make_violation("clearance_segment_via")]
         with self._stub_kct(_make_kct_json(violations)):
             passed, msg, errors = self.helper.check_file(
-                Path("boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb"),
+                Path("synthetic-board04.kicad_pcb"),
                 allowed=4,
                 mfr="jlcpcb",
             )
@@ -552,3 +552,39 @@ class TestMfrCliOverride:
         out = buf.getvalue()
         assert "--mfr" in out
         assert "jlcpcb-tier1" in out
+
+
+@pytest.mark.parametrize("meta_status", ["PASSED", "FAILED"])
+def test_reviewed_paid_drill_gate_requires_complete_meta_checks(monkeypatch, meta_status):
+    module = _load_helper_module()
+
+    def run(cmd, **kwargs):
+        assert cmd[0] == sys.executable
+        assert Path(cmd[1]).name == "check_manufacturing.py"
+        assert Path(cmd[2]) == module.PAID_DRILL_BOARD
+        data = json.loads(_make_kct_json([]))
+        data["meta_checks"] = {"overall": meta_status}
+        Path(cmd[-1]).write_text(json.dumps(data))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    if meta_status == "PASSED":
+        assert module.count_errors(module.PAID_DRILL_BOARD, "jlcpcb-tier1") == (0, {})
+    else:
+        with pytest.raises(RuntimeError, match="meta-checks"):
+            module.count_errors(module.PAID_DRILL_BOARD, "jlcpcb-tier1")
+
+
+def test_reviewed_paid_drill_gate_rejects_wrong_process():
+    module = _load_helper_module()
+    with pytest.raises(RuntimeError, match="requires its reviewed"):
+        module.count_errors(module.PAID_DRILL_BOARD, "jlcpcb")
+
+
+def test_reviewed_paid_drill_gate_rejects_missing_report(monkeypatch):
+    module = _load_helper_module()
+    monkeypatch.setattr(
+        module.subprocess, "run", lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, "", "")
+    )
+    with pytest.raises(RuntimeError, match="validation failed"):
+        module.count_errors(module.PAID_DRILL_BOARD, "jlcpcb-tier1")

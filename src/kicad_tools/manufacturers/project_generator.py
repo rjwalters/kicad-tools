@@ -39,6 +39,9 @@ Usage::
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
@@ -240,8 +243,12 @@ def merge_project_rules(
 ) -> dict:
     """Apply DRC constraints + severities onto an existing project dict.
 
-    Preserves any unrelated keys already present in the project file and
-    only overwrites the constraint/severity entries this module owns.
+    Preserves unrelated keys. By default, applies the profile's owned entries
+    (including legacy stock-default relaxation). A native project text variable
+    ``KCT_PRESERVE_BOARD_RULES=1`` retains stricter authored minima, Default
+    netclass dimensions, and explicit severities. Factory minima may still
+    tighten a lower authored value. The text variable survives native project
+    editing and makes this policy part of the reviewed source (#5023).
 
     Args:
         project_data: Parsed ``.kicad_pro`` data (mutated in place).
@@ -253,16 +260,36 @@ def merge_project_rules(
     board = project_data.setdefault("board", {})
     settings = board.setdefault("design_settings", {})
 
-    settings.setdefault("rules", {}).update(build_project_rules(rules))
+    preserve = str(
+        project_data.get("text_variables", {}).get("KCT_PRESERVE_BOARD_RULES", "0")
+    ).lower() in {"1", "true"}
+
+    def apply_minima(target: dict, values: dict) -> None:
+        for key, value in values.items():
+            previous = target.get(key)
+            target[key] = (
+                max(previous, value) if preserve and isinstance(previous, (int, float)) else value
+            )
+
+    apply_minima(settings.setdefault("rules", {}), build_project_rules(rules))
 
     severities = settings.setdefault("rule_severities", {})
-    severities.update(_NON_BLOCKING_SEVERITIES)
+    for key, value in _NON_BLOCKING_SEVERITIES.items():
+        if preserve:
+            severities.setdefault(key, value)
+        else:
+            severities[key] = value
 
     defaults = settings.setdefault("defaults", {})
-    defaults["track_min_width"] = rules.min_trace_width_mm
-    defaults["clearance_min"] = rules.min_clearance_mm
-    defaults["via_min_diameter"] = rules.min_via_diameter_mm
-    defaults["via_min_drill"] = rules.min_via_drill_mm
+    apply_minima(
+        defaults,
+        {
+            "track_min_width": rules.min_trace_width_mm,
+            "clearance_min": rules.min_clearance_mm,
+            "via_min_diameter": rules.min_via_diameter_mm,
+            "via_min_drill": rules.min_via_drill_mm,
+        },
+    )
 
     # Relax the applied Default-netclass clearance/track/via to the profile
     # so the kicad-cli ``clearance`` test (which reads the applied netclass
@@ -273,12 +300,70 @@ def merge_project_rules(
     if default_cls is None:
         classes.insert(0, build_default_netclass(rules))
     else:
-        default_cls["clearance"] = rules.min_clearance_mm
-        default_cls["track_width"] = rules.min_trace_width_mm
-        default_cls["via_diameter"] = rules.min_via_diameter_mm
-        default_cls["via_drill"] = rules.min_via_drill_mm
+        apply_minima(
+            default_cls,
+            {
+                "clearance": rules.min_clearance_mm,
+                "track_width": rules.min_trace_width_mm,
+                "via_diameter": rules.min_via_diameter_mm,
+                "via_drill": rules.min_via_drill_mm,
+            },
+        )
 
     return project_data
+
+
+def generate_project_dru(
+    rules: DesignRules,
+    project_data: dict,
+    *,
+    manufacturer_id: str = "",
+    net_classes: Sequence[NetClassRouting] | None = None,
+) -> str:
+    """Render factory rules while honoring opt-in reviewed project floors."""
+    from .dru_generator import generate_dru
+
+    dru_rules = rules
+    preserved_clearances = ""
+    if str(project_data.get("text_variables", {}).get("KCT_PRESERVE_BOARD_RULES", "0")).lower() in {
+        "1",
+        "true",
+    }:
+        # Custom DRU constraints override project minima during native zone
+        # fill. Preserve those minima in BOTH representations (#5023).
+        native = project_data.get("board", {}).get("design_settings", {}).get("rules", {})
+        mapping = {
+            "min_trace_width_mm": "min_track_width",
+            "min_clearance_mm": "min_clearance",
+            "min_via_drill_mm": "min_via_hole",
+            "min_via_diameter_mm": "min_via_diameter",
+            "min_annular_ring_mm": "min_via_annular_width",
+            "min_copper_to_edge_mm": "min_copper_edge_clearance",
+        }
+        dru_rules = replace(
+            rules,
+            **{
+                field: max(getattr(rules, field), native.get(key, 0))
+                for field, key in mapping.items()
+            },
+        )
+        # Later matching rules win in KiCad. Ascending order preserves
+        # the stricter class when two differently classified nets meet.
+        classes = project_data.get("net_settings", {}).get("classes", [])
+        for cls in sorted(classes, key=lambda c: c.get("clearance", 0)):
+            clearance = max(dru_rules.min_clearance_mm, cls.get("clearance", 0))
+            name = cls["name"].replace("\\", "\\\\").replace("'", "\\'")
+            condition = f"A.NetClass == '{name}' || B.NetClass == '{name}'"
+            preserved_clearances += (
+                f"\n(rule {json.dumps('Reviewed clearance - ' + cls['name'])}\n"
+                f"  (condition {json.dumps(condition)})\n"
+                f"  (constraint clearance (min {clearance}mm)))\n"
+            )
+
+    return (
+        generate_dru(dru_rules, manufacturer_name=manufacturer_id, net_classes=net_classes)
+        + preserved_clearances
+    )
 
 
 def write_drc_constraints(
@@ -290,6 +375,7 @@ def write_drc_constraints(
     copper_oz: float | None = None,
     write_dru: bool = True,
     net_classes: Sequence[NetClassRouting] | None = None,
+    source_pcb_path: str | Path | None = None,
 ) -> list[Path]:
     """Emit DRC-constraint sources next to a routed ``.kicad_pcb``.
 
@@ -310,6 +396,9 @@ def write_drc_constraints(
 
     Args:
         pcb_path: Path to the routed board.
+        source_pcb_path: Original board when routing to a renamed destination.
+            Copy authored project/DRU before merging floors; reject conflicting
+            destination files before writing either sidecar. Source is read-only.
         rules: Manufacturer design rules to translate.
         manufacturer_id: Optional manufacturer id (for ``.kicad_pro`` meta
             and ``.kicad_dru`` labels).
@@ -328,6 +417,53 @@ def write_drc_constraints(
         List of paths written.
     """
     pcb_path = Path(pcb_path)
+    if source_pcb_path is not None and Path(source_pcb_path).resolve() != pcb_path.resolve():
+        # Render from authored source in isolation, then validate BOTH destination
+        # sidecars before changing either. Existing source copies and identical
+        # prior outputs are accepted; unrelated destination content is a conflict.
+        source = Path(source_pcb_path)
+        suffixes = [".kicad_pro", ".kicad_dru"] if write_dru else [".kicad_pro"]
+        with tempfile.TemporaryDirectory(prefix="kct-route-rules-") as temporary:
+            staged = Path(temporary) / pcb_path.name
+            for suffix in suffixes:
+                authored, destination = source.with_suffix(suffix), pcb_path.with_suffix(suffix)
+                if authored.exists():
+                    if destination.exists() and destination.samefile(authored):
+                        raise ValueError(
+                            f"DRC sidecar conflict: {destination} aliases source {authored}"
+                        )
+                    if suffix == ".kicad_pro":
+                        data = json.loads(authored.read_text(encoding="utf-8"))
+                        if not isinstance(data, dict):
+                            raise ValueError(f"Invalid source project: {authored}")
+                    shutil.copyfile(authored, staged.with_suffix(suffix))
+                elif destination.exists():
+                    shutil.copyfile(destination, staged.with_suffix(suffix))
+            rendered = write_drc_constraints(
+                staged,
+                rules,
+                manufacturer_id=manufacturer_id,
+                layers=layers,
+                copper_oz=copper_oz,
+                write_dru=write_dru,
+                net_classes=net_classes,
+            )
+            for result in rendered:
+                authored = source.with_suffix(result.suffix)
+                destination = pcb_path.with_suffix(result.suffix)
+                if authored.exists() and destination.exists():
+                    read = (
+                        (lambda p: json.loads(p.read_text(encoding="utf-8")))
+                        if result.suffix == ".kicad_pro"
+                        else (lambda p: p.read_bytes())
+                    )
+                    if read(destination) not in (read(authored), read(result)):
+                        raise ValueError(
+                            f"DRC sidecar conflict: {destination} differs from source {authored} and its merged rules"
+                        )
+            for result in rendered:
+                shutil.copyfile(result, pcb_path.with_suffix(result.suffix))
+            return [pcb_path.with_suffix(result.suffix) for result in rendered]
     project_name = pcb_path.stem
     pro_path = pcb_path.with_suffix(".kicad_pro")
     written: list[Path] = []
@@ -360,7 +496,7 @@ def write_drc_constraints(
     written.append(pro_path)
 
     if write_dru:
-        from .dru_generator import generate_dru, merge_dru_floors
+        from .dru_generator import merge_dru_floors
 
         dru_path = pcb_path.with_suffix(".kicad_dru")
         try:
@@ -374,7 +510,9 @@ def write_drc_constraints(
         dru_path.write_text(
             merge_dru_floors(
                 existing_dru,
-                generate_dru(rules, manufacturer_name=manufacturer_id, net_classes=net_classes),
+                generate_project_dru(
+                    rules, project_data, manufacturer_id=manufacturer_id, net_classes=net_classes
+                ),
                 path=dru_path,
             ),
             encoding="utf-8",

@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..layers import LayerStack
-from ..primitives import Pad, Route, Segment, Via
+from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
 from ..rules import DesignRules
 from .coupled import CoupledConnection
@@ -405,8 +405,9 @@ class LatticePathfinder:
                 if not math.isfinite(nn)
                 else min(self.fine, max(nn / 2.0, self.fine / 2.0))
             )
-            hx = pad.width / 2.0 + self.margin
-            hy = pad.height / 2.0 + self.margin
+            half_w, half_h = pad_half_extents(pad)
+            hx = half_w + self.margin
+            hy = half_h + self.margin
             regions.append(RefineRegion((pad.x - hx, pad.y - hy, pad.x + hx, pad.y + hy), fine_i))
         return regions
 
@@ -537,6 +538,37 @@ class LatticePathfinder:
         tw = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clr = getattr(net_class, "clearance", None) or 0.0
         return tw / 2.0, max(clr, self.rules.trace_clearance)
+
+    def _hard_avoided_layers(self, net_class: object | None) -> frozenset[int]:
+        """Grid-layer indices to HARD-block for this connection (issue #4979).
+
+        Mirrors the grid pathfinder's ``_hard_avoided_layers``
+        (``router/pathfinder.py``) and the C++ backend's identical gate
+        (``router/cpp_backend.py``): both drive
+        :meth:`NetClassRouting.hard_avoided_layer_indices` off
+        ``DesignRules.strict_layers`` / ``target_ampacity``, so a net whose
+        class declares ``avoid_layers`` is hard-blocked from those layers
+        under ``--strict-layers`` (or unconditionally when the class also
+        declares ``target_ampacity``) on every engine -- not just grid/cpp.
+
+        Before issue #4979 the lattice engine (``--route-engine lattice``,
+        the ``--complete`` default) never called this accessor at all: the
+        A* search here only ever read ``net_class.trace_width`` /
+        ``.clearance`` (issue #4271) for copper geometry, so ``avoid_layers``
+        was silently inert regardless of ``--strict-layers`` -- the search
+        could (and did) land a hard-current net on an explicitly forbidden
+        inner plane with no failure reported.
+
+        Returns an empty set when ``net_class`` is ``None`` or declares no
+        hard-avoided layers, preserving byte-identical routing for every
+        connection that does not opt in.
+        """
+        if net_class is None:
+            return frozenset()
+        hard_avoided = getattr(net_class, "hard_avoided_layer_indices", None)
+        if hard_avoided is None:
+            return frozenset()
+        return frozenset(hard_avoided(self.rules.strict_layers))
 
     # -- pad stubs ------------------------------------------------------------
 
@@ -928,21 +960,25 @@ class LatticePathfinder:
                 min_cc = self.rules.via_drill / 2.0 + pad.drill / 2.0 + self.rules.min_hole_to_hole
                 if dist(point, (pad.x, pad.y)) < min_cc - 1e-9:
                     return False
-            elif (
-                abs(point[0] - pad.x) <= pad.width / 2.0 + via_radius
-                and abs(point[1] - pad.y) <= pad.height / 2.0 + via_radius
-            ):
-                # Via barrel intersects an SMD pad rect (#4284).  Same-net is
-                # via-in-pad: legal only on fab tiers that fill/cap the via
-                # (jlcpcb-tier1, pcbway); the default tier rejects so the
-                # layer change moves off the pad onto the escape stub.
-                # Other-net falls through to the unconditional grown-rect
-                # veto below.
-                allow_via_in_pad = (
-                    self._via_in_pad_allowed if via_in_pad_override is None else via_in_pad_override
-                )
-                if pad.net == net and not allow_via_in_pad:
-                    return False
+            else:
+                half_w, half_h = pad_half_extents(pad)
+                if (
+                    abs(point[0] - pad.x) <= half_w + via_radius
+                    and abs(point[1] - pad.y) <= half_h + via_radius
+                ):
+                    # Via barrel intersects an SMD pad rect (#4284).  Same-net
+                    # is via-in-pad: legal only on fab tiers that fill/cap the
+                    # via (jlcpcb-tier1, pcbway); the default tier rejects so
+                    # the layer change moves off the pad onto the escape stub.
+                    # Other-net falls through to the unconditional grown-rect
+                    # veto below.
+                    allow_via_in_pad = (
+                        self._via_in_pad_allowed
+                        if via_in_pad_override is None
+                        else via_in_pad_override
+                    )
+                    if pad.net == net and not allow_via_in_pad:
+                        return False
             if pad.net == net:
                 continue
             rect = obstacles.pad_rects[idx]
@@ -1121,6 +1157,24 @@ class LatticePathfinder:
         half, clr = self._conn_geometry(net_class)
         extra = max(0.0, half + clr - self._agent_radius)
 
+        # Issue #4979: hard-block layers the net's class declares off-limits
+        # under ``--strict-layers`` (or unconditionally under
+        # ``target_ampacity``) -- see ``_hard_avoided_layers``.  Filtering
+        # the pad-escape seed/goal layers below AND the via-hop landing layer
+        # further down means no A* state this search ever visits can carry
+        # a hard-avoided layer index, so the lattice can only decline a
+        # connection that has no legal route -- it can never ship copper on
+        # the forbidden layer as partial progress.  A via may still STEP OVER
+        # a forbidden layer to reach an allowed one (the emitted through via's
+        # barrel crossing a plane is DRC's antipad concern, and no copper is
+        # committed there) -- without that, a hard block on both inner layers
+        # of a 4-layer board would strand an F/B-only net on whichever outer
+        # layer its pads escaped onto, which the grid backend never does.
+        # Blocking an outer layer is the opposite case and is handled by the
+        # via-span guard further down: the emitted via TERMINATES there, so
+        # its annulus is real copper on a forbidden layer.
+        hard_avoided = self._hard_avoided_layers(net_class)
+
         fat = extra_clearance > 0.0 or partner_net is not None
         # Issue #4602: per-PAIR HV pad keep-outs for the non-fat search (the
         # fat coupled path is excluded from pairwise widening in this slice).
@@ -1134,6 +1188,11 @@ class LatticePathfinder:
         # re-verified in ``_route_pair_impl``'s finish gate.
         ko = None if fat else self._keepouts
         ko_pruned = False
+        # Issue #4979: set when a via-hop was skipped because its target
+        # layer is hard-avoided for this net -- lets the final "no-path"
+        # decline distinguish a layer-constrained shortfall (see the
+        # ``end_state is None`` branch below).
+        layer_pruned = False
         if fat:
             # v1 coupled runs are planar; there is no fat via legality.
             allow_vias = False
@@ -1145,6 +1204,23 @@ class LatticePathfinder:
             )
 
             pair_nets = {net} if partner_net is None else {net, partner_net}
+
+        # Issue #4979: this engine emits EVERY layer change as a through via
+        # spanning the whole stack (``_emit``: ``layers=(index 0, index
+        # num_layers - 1)``), so the via's own annular ring lands copper on
+        # both outer layers no matter which layers the path uses.  The grid
+        # backend has no such problem -- its via spans only the two layers it
+        # actually hops between -- so the lattice needs an extra guard: when
+        # either span endpoint is hard-avoided for this net, NO via this
+        # engine can emit is legal, and vias are dropped from the search
+        # entirely.  Without it the search would honour the constraint while
+        # its own emission broke it, and the post-route layer-intent gate
+        # would (correctly) fail the run on copper the router had just
+        # decided was legal.  The connection routes planar or declines as
+        # layer-constrained -- it never ships the forbidden annulus.
+        if allow_vias and hard_avoided and hard_avoided & {0, self.num_layers - 1}:
+            allow_vias = False
+            layer_pruned = True
 
         # The lattice body is emitted (and spaced) at the full class width;
         # the pad-escape legs may taper to a narrower neck (issue #4293).
@@ -1176,12 +1252,30 @@ class LatticePathfinder:
                 exempt_pads=exempt_pads,
                 net_class=net_class,
             )
+        # Issue #4979: drop any escape stub that lands on a hard-avoided
+        # layer BEFORE the empty-stub decline check, so a pad whose only
+        # legal escape is on a forbidden inner plane declines honestly
+        # (reported as a layer-constrained residual) instead of routing.
+        if hard_avoided:
+            had_stubs_a, had_stubs_b = bool(stubs_a), bool(stubs_b)
+            kept_a = [s for s in stubs_a if s[1] not in hard_avoided]
+            kept_b = [s for s in stubs_b if s[1] not in hard_avoided]
+            # A dropped-but-not-emptied stub set still narrowed the search.
+            if len(kept_a) != len(stubs_a) or len(kept_b) != len(stubs_b):
+                layer_pruned = True
+            stubs_a, stubs_b = kept_a, kept_b
+        else:
+            had_stubs_a = had_stubs_b = False
         if not stubs_a:
+            if hard_avoided and had_stubs_a:
+                return None, "layer-constrained-start"
             reason = "pad-escape-start"
             if not fat:
                 reason = self._keepout_escape_reason(start, net, stub_layers, half, reason)
             return None, reason
         if not stubs_b:
+            if hard_avoided and had_stubs_b:
+                return None, "layer-constrained-end"
             reason = "pad-escape-end"
             if not fat:
                 reason = self._keepout_escape_reason(end, net, stub_layers, half, reason)
@@ -1316,8 +1410,34 @@ class LatticePathfinder:
                     # Via edges join matching nodes on ADJACENT layers only
                     # (issue #4278 acceptance 6).  The emitted via is still a
                     # through-via; a multi-layer dip pays via_cost per hop.
-                    for nl in (layer - 1, layer + 1):
+                    for direction in (-1, 1):
+                        nl = layer + direction
+                        # Issue #4979: never LAND on a layer this net's class
+                        # hard-blocks -- but do not let the block wall the net
+                        # in either.  Step over any run of forbidden layers to
+                        # the first allowed one: the emitted copper is a single
+                        # through via (see ``_emit``), whose barrel crossing a
+                        # forbidden plane is an antipad/clearance matter for
+                        # DRC, not a layer-intent violation -- no copper is
+                        # committed on the layers stepped over.  This keeps the
+                        # lattice's adjacent-hop via model behaviourally equal
+                        # to the grid backend's (``router/pathfinder.py``),
+                        # whose via loop already offers every routable layer
+                        # directly, so an F/B-only net can still cross F<->B on
+                        # a 4-layer board instead of being stranded on the one
+                        # outer layer its pads escaped onto.
+                        while 0 <= nl < self.num_layers and nl in hard_avoided:
+                            nl += direction
+                            # The hard constraint removed a candidate landing
+                            # layer from this search -- recorded so a later
+                            # decline can name the layer constraint rather
+                            # than reporting a bare "no-path" (same honesty
+                            # contract as ``ko_pruned`` above: CONSTRAINED the
+                            # search, not necessarily the sole cause).
+                            layer_pruned = True
                         if nl < 0 or nl >= self.num_layers:
+                            # Ran off the stack: this direction exists only
+                            # through forbidden layers.
                             continue
                         nstate = (key, nl)
                         nok = node_ok.get(nstate)
@@ -1357,7 +1477,19 @@ class LatticePathfinder:
             # for this search, say so -- the area CONSTRAINED the search (it
             # pruned candidates), which is honest without claiming it was the
             # sole cause of the shortfall.
-            return None, "no-path-keepout-constrained" if ko_pruned else "no-path"
+            if ko_pruned:
+                return None, "no-path-keepout-constrained"
+            # Issue #4979: same honesty contract for a hard layer constraint.
+            # ``layer_pruned`` is set when the net's hard-avoided set actually
+            # removed something from this search -- an escape stub, or a
+            # candidate via landing layer -- so the decline names the layer
+            # constraint as a CONTRIBUTING cause instead of reporting a bare
+            # "no-path".  It is deliberately not a claim of sole causation
+            # (the keepout wording above), and it is never a licence to ship
+            # the forbidden copper: this branch returns no route at all.
+            if layer_pruned:
+                return None, "no-path-layer-constrained"
+            return None, "no-path"
 
         # -- reconstruct ---------------------------------------------------
         chain: list[_State] = [end_state]
@@ -1814,11 +1946,12 @@ class LatticePathfinder:
                         continue
                     if layer not in self.obstacles.pad_layer_indices[idx]:
                         continue
+                    half_w, half_h = pad_half_extents(pad)
                     rect = (
-                        pad.x - pad.width / 2.0,
-                        pad.y - pad.height / 2.0,
-                        pad.x + pad.width / 2.0,
-                        pad.y + pad.height / 2.0,
+                        pad.x - half_w,
+                        pad.y - half_h,
+                        pad.x + half_w,
+                        pad.y + half_h,
                     )
                     for a, b in zip(full, full[1:], strict=False):
                         if dist(a, b) <= 1e-9:

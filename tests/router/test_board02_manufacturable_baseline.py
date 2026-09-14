@@ -148,7 +148,7 @@ pytestmark = pytest.mark.timeout(900)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BOARD_DIR = REPO_ROOT / "boards" / "02-charlieplex-led"
+BOARD_DIR = REPO_ROOT / "tests" / "fixtures" / "historical_demo_boards" / "02-charlieplex-led"
 UNROUTED_PCB = BOARD_DIR / "output" / "charlieplex_3x3.kicad_pcb"
 
 # Acceptance criteria for the post-Wave-3 baseline.

@@ -38,6 +38,7 @@ HV/creepage model (Unit F).
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from kicad_tools.core.types import CopperLayer
@@ -47,6 +48,7 @@ from kicad_tools.physics.wire_gauge import (
     anchor_drill_for_awg,
     anchor_pad_for_drill,
 )
+from kicad_tools.router.current_paths import CurrentPathSpec, reinforcement_eligible_segment_ids
 from kicad_tools.router.optimizer.algorithms import merge_collinear
 from kicad_tools.router.optimizer.chain import sort_into_chains
 from kicad_tools.router.optimizer.config import OptimizationConfig
@@ -132,6 +134,15 @@ class RunSummary:
     anchors_placed: int
     #: Anchor positions on this run that were hard-refused (no clear nudge).
     anchors_refused: int
+    #: Set (Issue #4980) to a human-readable reason when a ``current_paths``
+    #: declaration excluded this run from anchoring -- it was not fully
+    #: covered by a resolved, reinforcement-eligible ``CurrentPathSpec``
+    #: (e.g. a Kelvin sense tap, an unresolved trunk declaration, or copper
+    #: no declared path covers at all). ``None`` when the run was not
+    #: excluded -- either no ``current_paths`` were supplied to
+    #: :func:`reinforce_net` at all (legacy, ungated behavior), or the run
+    #: passed the gate.
+    path_excluded_reason: str | None = None
 
     @property
     def fully_reinforced(self) -> bool:
@@ -226,12 +237,15 @@ def _to_router_segment(seg: Segment) -> RouterSegment:
     )
 
 
-def _chain_polylines(segments: list[Segment]) -> list[list[Segment]]:
+def _chain_polylines(
+    segments: list[Segment], *, original_ids: dict[int, int] | None = None
+) -> list[list[Segment]]:
     """Chain schema segments into ordered, junction-split polylines.
 
-    Returns a list of runs, each an ordered list of the *original* schema
-    ``Segment`` objects walked endpoint-to-endpoint. Junctions (degree>=3)
-    split runs so branched nets are not silently merged.
+    Returns ordered schema segments walked endpoint-to-endpoint, copying
+    segments that need reversing. When supplied, ``original_ids`` maps each
+    returned object's id to its original PCB object's id. Junctions
+    (degree>=3) split runs so branched nets are not silently merged.
     """
     if not segments:
         return []
@@ -300,6 +314,8 @@ def _chain_polylines(segments: list[Segment]) -> list[list[Segment]]:
                         uuid=orig.uuid,
                     )
                 )
+            if original_ids is not None:
+                original_ids[id(run[-1])] = id(orig)
         if run:
             result.append(run)
     return result
@@ -550,6 +566,7 @@ def reinforce_net(
     dry_run: bool = False,
     all_runs: bool = False,
     min_run_length_mm: float | None = None,
+    current_paths: Sequence[CurrentPathSpec] | None = None,
 ) -> ReinforceResult:
     """Emit a spaced same-net PTH anchor row along a routed net's trace.
 
@@ -585,6 +602,19 @@ def reinforce_net(
             anchored; shorter runs are still reported (never silently
             dropped). Composes with ``all_runs`` -- filter first, then anchor
             all that survive.
+        current_paths: Optional declared branch-specific current-path
+            intent (Issue #4980; see
+            :mod:`kicad_tools.router.current_paths`). Specs not on
+            ``net_name`` are ignored. When at least one spec targets
+            ``net_name``, reinforcement gates to an **allow-list**: only
+            runs fully covered by a resolved, reinforcement-eligible
+            ``CurrentPathSpec`` may be anchored -- a declared sense/
+            measurement/Kelvin branch (``reinforcement_eligible=False``),
+            copper an ineligible-or-unresolved declaration cannot verify,
+            and copper no declared path covers at all are all excluded and
+            reported via :attr:`RunSummary.path_excluded_reason`, never
+            silently anchored. ``None`` (the default) preserves the
+            pre-#4980 ungated behavior.
 
     Returns:
         A :class:`ReinforceResult` summarising placed/refused anchors, the
@@ -643,25 +673,50 @@ def reinforce_net(
         target_layer = max(by_layer, key=lambda lay: sum(_seg_length(s) for s in by_layer[lay]))
     result.layer = target_layer
 
-    runs = _chain_polylines(by_layer[target_layer])
-    if not runs:
+    # Chaining can reverse a segment by copying it. Carry its original PCB
+    # identity through the walk so path eligibility remains physical.
+    original_ids: dict[int, int] = {}
+    runs = _chain_polylines(by_layer[target_layer], original_ids=original_ids)
+    net_path_specs = [spec for spec in (current_paths or ()) if spec.net_name == net_name]
+    classified_runs: list[tuple[list[Segment], str | None]] = []
+    if net_path_specs:
+        allowed_ids = reinforcement_eligible_segment_ids(pcb, net_path_specs)
+        excluded_reason = (
+            "excluded by declared current-path intent (Issue #4980): not fully "
+            "covered by a resolved, reinforcement-eligible CurrentPathSpec for "
+            f"net {net_name!r}"
+        )
+        for run in runs:
+            parts: list[tuple[list[Segment], str | None]] = []
+            for seg in run:
+                reason = None if original_ids[id(seg)] in allowed_ids else excluded_reason
+                # A degree-two force pad can continue into a sense stub.
+                # Split that eligibility boundary while retaining all of the
+                # chainer's existing physical-junction boundaries.
+                if not parts or parts[-1][1] != reason:
+                    parts.append(([], reason))
+                parts[-1][0].append(seg)
+            classified_runs.extend(parts)
+    else:
+        classified_runs = [(run, None) for run in runs]
+    if not classified_runs:
         raise ReinforceError(f"net {net_name!r} produced no walkable polyline")
 
-    # Longest-first so the "primary" run (default mode) is runs[0] and the
-    # per-run summary is stably ordered.
-    runs.sort(key=_run_length, reverse=True)
-
-    # Tier 3: coalesce contiguous collinear fragments within each run so the
-    # reported segment count reflects true geometric runs (anchor positions
-    # unchanged -- merge only removes collinear interior vertices).
+    classified_runs.sort(key=lambda item: _run_length(item[0]), reverse=True)
+    runs = [run for run, _ in classified_runs]
     geoms = [_run_geometry(run) for run in runs]
+    path_excluded_reasons = {
+        index: reason for index, (_, reason) in enumerate(classified_runs) if reason is not None
+    }
 
     # Selection: filter by min length (report -- do not drop -- shorter runs),
+    # then by the current-path gate (report -- do not drop -- excluded runs),
     # then anchor either all survivors (all_runs) or just the longest.
     if min_run_length_mm is not None:
         eligible = [i for i, g in enumerate(geoms) if g.length_mm >= min_run_length_mm]
     else:
         eligible = list(range(len(geoms)))
+    eligible = [i for i in eligible if i not in path_excluded_reasons]
     anchored_idx: set[int] = set(eligible if all_runs else eligible[:1])
 
     # Backward-compat whole-net fields describe the primary (longest anchored)
@@ -741,6 +796,7 @@ def reinforce_net(
                 anchors_needed=len(targets),
                 anchors_placed=run_placed,
                 anchors_refused=run_refused,
+                path_excluded_reason=path_excluded_reasons.get(i),
             )
         )
 

@@ -27,6 +27,7 @@ import pytest
 
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate import DRCChecker
+from kicad_tools.validate.rules.clearance import ClearanceRule
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -213,8 +214,17 @@ class TestNet0BridgeBoardRegression:
         # 4-layer profile covers the 4-layer boards; 2-layer boards ignore
         # the extra copper layers harmlessly.
         checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4, copper_oz=1.0)
-        results = checker.check_clearances()
-        bridges = [v for v in results.violations if v.rule_id == "clearance_net0_bridge"]
+        # Exercise the actual bridge detector on every copper element and
+        # layer. Other clearance families have their own board gates;
+        # running all pairwise checks here dominated this focused witness.
+        rule = ClearanceRule()
+        bridges = [
+            violation
+            for layer in pcb.copper_layers
+            for violation in rule._check_net0_bridges(
+                pcb, layer.name, checker.design_rules.min_clearance_mm
+            )
+        ]
         assert bridges == [], (
             f"{board_dir}: unexpected net-0 bridge violations: {[v.message for v in bridges]}"
         )

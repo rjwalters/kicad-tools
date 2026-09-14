@@ -40,7 +40,9 @@ def _design_tree() -> ast.Module:
 
 def _main_fn(tree: ast.Module) -> ast.FunctionDef:
     return next(
-        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "main"
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "legacy_main"
     )
 
 

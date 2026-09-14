@@ -46,9 +46,14 @@ def add_format_flag(
     choices: tuple[str, ...] = (FORMAT_TEXT, FORMAT_JSON),
     default: str = FORMAT_TEXT,
     dest: str = "format",
-    help_text: str = "Output format (default: %(default)s)",
+    help_text: str | None = None,
 ) -> argparse.Action:
     """Add the canonical ``--format`` choice flag to *parser*."""
+    if help_text is None:
+        # argparse removes suppressed defaults before interpolating help.
+        help_text = "Output format"
+        if default != argparse.SUPPRESS:
+            help_text += " (default: %(default)s)"
     return parser.add_argument(
         "--format",
         choices=list(choices),

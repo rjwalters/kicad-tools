@@ -96,6 +96,41 @@ PLACEMENT_DELTA_FEEDBACK = True
 PLACEMENT_DELTA_FEEDBACK_BUDGET = 2
 PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S = 600
 
+# Issue #5266: this board's route step is a STAGED budget contract, and the
+# two halves of it have to be stated separately.
+#
+#   * ``--search-timeout`` bounds ONE search stage.  600 s is the measured
+#     ceiling of the initial negotiated pass here (607-630 s of work that the
+#     iteration budget, not the clock, actually terminates).
+#   * ``--timeout`` is the HARD TOTAL deadline.  ``route_deadline._supervise``
+#     runs the whole invocation under it out-of-process and terminates the
+#     process group when it fires -- so it must cover every stage that is
+#     allowed to run, not just the first one.  Before #5266 the two were the
+#     same number: ``--timeout 600`` meant the initial pass consumed the whole
+#     invocation budget and the supervisor killed the run during the FIRST
+#     delta probe, leaving only ``*_partial`` / ``*_timeout_unverified_*``
+#     artifacts and no routed PCB at all.
+#
+# The total is therefore derived, not hand-tuned: one initial search stage,
+# one full probe allocation per delta-feedback budget unit, plus a reserve for
+# the required postprocessing (optimize, DRC nudge, length-match tuning,
+# consolidation, native zone fill, serialization).  With the loop on that is
+# 600 + 2x600 + 600 = 2400 s, comfortably inside the 90-minute CI allowance
+# these jobs already carry, and comfortably above the ~27-minute measured
+# full-route wall clock.
+ROUTE_SEARCH_TIMEOUT_S = 600
+ROUTE_POSTPROCESS_RESERVE_S = 600
+
+
+def _route_total_timeout_s() -> int:
+    """Hard total ``--timeout`` covering every stage the recipe permits."""
+    probes = (
+        PLACEMENT_DELTA_FEEDBACK_BUDGET * PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S
+        if PLACEMENT_DELTA_FEEDBACK
+        else 0
+    )
+    return ROUTE_SEARCH_TIMEOUT_S + probes + ROUTE_POSTPROCESS_RESERVE_S
+
 
 # =============================================================================
 # Per-Group Net Class Declarations
@@ -237,7 +272,43 @@ def addr_bus_net_class() -> NetClassRouting:
     )
 
 
-def build_net_class_map() -> dict[str, NetClassRouting]:
+def _size_tightly_coupled_class(net_class: NetClassRouting) -> NetClassRouting:
+    """Size an impedance-constrained pair without changing its authored gap.
+
+    The unconstrained impedance resolver can choose an approximately 8 mm
+    gap, which defeats the compact coupled routing this testbench exercises.
+    As on board 06, solve width at the declared gap on the JLCPCB stackup.
+    Classes without an explicit impedance target keep their declared width.
+    """
+    from dataclasses import replace
+
+    from kicad_tools.physics import CoupledLines
+    from kicad_tools.physics.stackup import Stackup
+
+    target = net_class.target_diff_impedance
+    gap = net_class.intra_pair_clearance
+    if target is None or gap is None:
+        return net_class
+
+    coupled_lines = CoupledLines(Stackup.jlcpcb_4layer())
+    lo, hi = 0.15, 1.0  # Board specification's minimum trace width.
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if coupled_lines.edge_coupled_microstrip(mid, gap, "F.Cu").zdiff > target:
+            lo = mid
+        else:
+            hi = mid
+    width = round(round(((lo + hi) / 2) / 0.025) * 0.025, 4)
+    actual = coupled_lines.edge_coupled_microstrip(width, gap, "F.Cu").zdiff
+    if abs(actual - target) > target * net_class.impedance_tolerance_percent / 100:
+        raise ValueError(
+            f"{net_class.name}: cannot meet {target:g} ohm at authored gap {gap:g} mm "
+            f"with a manufacturable width (resolved {actual:.3f} ohm at {width:g} mm)"
+        )
+    return replace(net_class, trace_width=width)
+
+
+def build_net_class_map(*, preserve_authored_gap: bool = True) -> dict[str, NetClassRouting]:
     """Build the canonical net-name -> NetClassRouting mapping.
 
     This is the single source of truth for both the router (consumed
@@ -246,11 +317,30 @@ def build_net_class_map() -> dict[str, NetClassRouting]:
     (``tests/test_board_07_matchgroup_test.py::test_phase_features_exercised``).
     Importing this function from the test guarantees test/implementation
     parity --- the test cannot drift from the routing config.
+
+    ``preserve_authored_gap`` opts into the fixed-gap width sizing measured
+    by ``repair_mipi.py`` (Issue #4969): resolve ``trace_width`` for the
+    impedance-constrained MIPI/HDMI classes at their authored 0.10mm
+    ``intra_pair_clearance`` gap via the JLCPCB four-layer coupled-
+    microstrip model, instead of leaving them at the raw declared width
+    (0.15mm, which models to ~127.6 ohm -- outside the classes' 10%
+    tolerance of the 100 ohm target).  Defaults to
+    ``True`` so the router (``route_pcb`` below), the committed JSON
+    sidecar, and every validation script that imports this function via
+    ``build_net_class_map_for_board`` (``scripts/ci/net_class_map_resolver.py``,
+    ``check_diffpair_coverage.py``, ``check_matchgroup_coverage.py``) all
+    derive the SAME geometry -- the generator and the committed sidecar
+    must never disagree about pair sizing again (#4969).  Kept as an
+    explicit opt-out (rather than removed outright) only so a future
+    diagnostic run can still request the raw, un-widened declaration.
     """
     ddr = ddr_data_byte_0_net_class()
     dqs = ddr_dqs_pair_net_class()
     mipi = mipi_csi_net_class()
     hdmi = hdmi_tmds_net_class()
+    if preserve_authored_gap:
+        mipi = _size_tightly_coupled_class(mipi)
+        hdmi = _size_tightly_coupled_class(hdmi)
     addr = addr_bus_net_class()
 
     return {
@@ -537,6 +627,102 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
             "zero_fill_zones": zero_fill_zones[net],
         }
     return results
+
+
+def _relocate_pad_drills(pcb_path: Path) -> int:
+    """Clear partial pad/drill overlaps before repairing plane connectivity."""
+    from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    pcb = PCB.load(pcb_path)
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    # The shared relocation API enforces the source project drill floor
+    # independently of manufacturer copper clearance.
+    result = relocate_in_pad_vias(pcb, rules)
+    extended = _extend_blocked_power_stubs(pcb, rules, result)
+    remaining = ViaInPadRule().check(pcb, rules).violations
+    if result.skipped or result.unresolvable or remaining:
+        raise RuntimeError(f"Unresolved pad/drill overlaps: {result}; findings: {remaining}")
+    if result.changed or extended:
+        pcb.save(pcb_path)
+    return len(result.moved) + extended
+
+
+def _extend_blocked_power_stubs(pcb, rules, result) -> int:
+    """Try a straight continuation when sliding back along a stitch stub is blocked.
+
+    The U4 power-pad escape can point toward a crowded drill cluster. A short
+    extension in the opposite direction preserves its existing copper. Use
+    the production candidate's drill/copper checks and additionally check the
+    entire new stub against foreign copper before accepting the extension.
+    """
+
+    from kicad_tools.cli import relocate_in_pad_vias as relocation
+
+    fixed = 0
+    pads = relocation._collect_smd_pads_by_net(pcb)
+    tht = relocation._collect_tht_pads(pcb)
+    for skipped in list(result.skipped):
+        if skipped.net_name not in POUR_NETS:
+            continue
+        via = next(v for v in pcb.vias if v.uuid == skipped.uuid)
+        attached = [
+            s
+            for s in pcb.segments_in_net(via.net_number)
+            if relocation._endpoint_at(s, *via.position) is not None
+        ]
+        if len(attached) != 1 or attached[0].layer != "F.Cu":
+            continue
+        segment = attached[0]
+        far = relocation._endpoint_at(segment, *via.position)
+        containing = next(
+            (
+                (f, p, b)
+                for f, p, b in pads[via.net_number]
+                if relocation.via_inside_pad(via, b, p, f)
+            ),
+            None,
+        )
+        if containing is None:
+            continue
+        target = relocation._first_offpad_signal_candidate(
+            pcb,
+            via,
+            containing[2],
+            pads,
+            tht,
+            rules.min_clearance_mm,
+            rules.min_hole_to_hole_mm,
+        )
+        if target is None:
+            continue
+        vx, vy = via.position
+        dx, dy = vx - far[0], vy - far[1]
+        tx, ty = target[0] - vx, target[1] - vy
+        # Restrict this fallback to an exact axis-aligned continuation.
+        if (
+            not ((abs(dx) < 1e-6 and abs(tx) < 1e-6) or (abs(dy) < 1e-6 and abs(ty) < 1e-6))
+            or dx * tx + dy * ty <= 0
+        ):
+            continue
+        if not all(
+            via.size / 2 <= x <= limit - via.size / 2
+            for x, limit in zip(target, pcb.board_size, strict=True)
+        ):
+            continue
+        if relocation._check_stub_clearance(
+            pcb, via, target, [segment.layer], segment.width, rules.min_clearance_mm
+        ):
+            continue
+        old = via.position
+        if not pcb.relocate_via(via, target):
+            continue
+        pcb.add_trace(old, target, width=segment.width, layer=segment.layer, net=skipped.net_name)
+        result.skipped.remove(skipped)
+        fixed += 1
+    return fixed
 
 
 def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int, int]:
@@ -1212,7 +1398,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     invocation of the ``kct route`` CLI:
 
         --manufacturer jlcpcb --strategy negotiated --no-auto-layers
-        --layers 4 --seed 42 --timeout 600
+        --layers 4 --seed 42 --search-timeout 600 --timeout <derived total>
 
     Recipe-vs-AC deviation (Issue #2991, builder empirical validation
     2026-05-17):
@@ -1283,10 +1469,18 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
       seeding the global ``random`` module (the ``random.seed(args.seed)``
       call in ``route_cmd.py``).
       This is the issue's stated HARD LIMIT and is preserved.
-    - ``--timeout 600``: outer wall-clock budget; per-net timeout
-      defaults to 30 s.  600 s gives the pure-Python fallback path on
-      CI runners (no native router_cpp.*.so) enough budget for 31
-      nets while remaining under the GitHub Actions 10-min ceiling.
+    - ``--search-timeout 600``: per-SEARCH-STAGE wall-clock allocation;
+      per-net timeout defaults to 30 s.  600 s gives the pure-Python
+      fallback path on CI runners (no native router_cpp.*.so) enough
+      budget for 31 nets.  This is the number that used to be spelled
+      ``--timeout 600`` (issue #5266).
+    - ``--timeout <derived>``: the HARD TOTAL invocation deadline,
+      derived by ``_route_total_timeout_s()`` as one search stage plus
+      one probe allocation per placement-delta budget unit plus a
+      postprocessing reserve (2400 s with the delta loop on).  The
+      out-of-process supervisor terminates the whole process group when
+      it fires, so it must cover every stage this recipe permits -- not
+      just the initial pass.
 
     Skip nets ``GND``, ``+1V2``, ``+1V8`` remain handled via copper
     pours on inner planes (In1.Cu / In2.Cu) emitted post-route by
@@ -1627,16 +1821,26 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "4",
         "--seed",
         "42",
+        # Issue #5266: the HARD TOTAL invocation deadline (see
+        # ``_route_total_timeout_s`` above) -- it must cover the initial search
+        # stage, every placement-delta probe, and postprocessing, because the
+        # out-of-process supervisor terminates the run when it fires.
         "--timeout",
-        "600",
+        str(_route_total_timeout_s()),
+        # Issue #5266: the per-SEARCH-STAGE allocation.  This is the 600 s the
+        # initial negotiated pass used to get from ``--timeout 600``; splitting
+        # it out is what lets the total above grow to cover the later stages
+        # without handing the enlarged budget to the first pass.
+        "--search-timeout",
+        str(ROUTE_SEARCH_TIMEOUT_S),
         # Issue #3538: bound the per-net A* search by an ITERATION budget
         # (fixed node-expansion count) instead of the per-net wall-clock
         # cutoff, so the seed-42 re-route lands the SAME copper -- and the
         # SAME DRC count -- regardless of runner speed/load.  This is the
         # fix for the "#3466 wall-clock-budget cliff" that forced the
         # board-07 floor in .github/routed-drc-tolerance.yml to absorb a
-        # machine-variance band (21 -> 28 -> 34 -> ...).  --timeout 600
-        # above is now a SAFETY backstop only; the iteration budget is the
+        # machine-variance band (21 -> 28 -> 34 -> ...).  The two budgets
+        # above are SAFETY backstops only; the iteration budget is the
         # binding constraint.  Combined with --seed 42 + PYTHONHASHSEED=42
         # the re-route is reproducible across CI ubuntu-latest and local
         # macOS arm64.
@@ -1714,13 +1918,16 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             "--placement-delta-feedback",
             "--placement-delta-feedback-budget",
             str(PLACEMENT_DELTA_FEEDBACK_BUDGET),
-            # The initial negotiated pass CONSUMES the whole ``--timeout 600``
-            # budget on this board (measured 607-630 s), so without an explicit
-            # allocation the loop is skipped before it starts.  Granting each
-            # delta's re-route the SAME 600 s the initial pass got is also what
-            # makes the keep/revert decision meaningful: a re-route on a smaller
-            # budget would under-route for budget reasons and revert every delta
-            # regardless of whether the placement change helped.
+            # The initial negotiated pass CONSUMES its whole 600 s search-stage
+            # allocation on this board (measured 607-630 s), so without an
+            # explicit allocation the loop is skipped before it starts.
+            # Granting each delta's re-route the SAME 600 s the initial pass
+            # got is also what makes the keep/revert decision meaningful: a
+            # re-route on a smaller budget would under-route for budget reasons
+            # and revert every delta regardless of whether the placement change
+            # helped.  Issue #5266: this allocation no longer has to "survive"
+            # an exhausted ``--timeout`` -- the total above is sized to contain
+            # both probes, which is what the hard supervisor requires.
             "--placement-delta-feedback-timeout",
             str(PLACEMENT_DELTA_FEEDBACK_TIMEOUT_S),
         ]
@@ -1878,6 +2085,13 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
                 print(f"   stderr: {stitch_result.stderr.strip()}")
     except Exception as exc:  # pragma: no cover - degrade gracefully
         print(f"   Stitch step skipped: {exc}")
+
+    # Both routed signal escapes and stitched power vias can partially cut an
+    # SMT land. The shared drill-overlap detector includes these edge cuts.
+    # Relocate now so the following pour repair/re-fill rechecks moved plane
+    # vias; the existing final quantizer also handles the new signal stubs.
+    moved = _relocate_pad_drills(output_path)
+    print(f"\n6b. Relocated {moved} via drill(s) clear of SMT lands.")
 
     # Issue #3617: repair the stitcher's residual then iterate repair <->
     # re-fill (max ``MAX_POUR_REPAIR_ROUNDS``).  ``_repair_pour_connectivity``
@@ -2122,7 +2336,7 @@ def main() -> int:
 
     .. code-block:: bash
 
-        # Default: run all steps (schematic + PCB + route + DRC) into ./output/
+        # Default: run synthetic regression steps into ./regression-output/
         python generate_design.py
 
         # Custom output dir (positional, backwards compatible)
@@ -2142,7 +2356,7 @@ def main() -> int:
         "output_dir",
         nargs="?",
         default=None,
-        help="Output directory (default: ./output relative to this script).",
+        help="Synthetic regression output directory (default: ./regression-output).",
     )
     parser.add_argument(
         "--step",
@@ -2180,7 +2394,7 @@ def main() -> int:
     if args.output_dir is not None:
         output_dir = Path(args.output_dir)
     else:
-        output_dir = Path(__file__).parent / "output"
+        output_dir = Path(__file__).parent / "regression-output"
 
     output_dir = output_dir.resolve()
 

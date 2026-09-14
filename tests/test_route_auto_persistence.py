@@ -183,7 +183,7 @@ class TestAllStrategiesPopulateSegmentsOrFail:
 class TestRouteAutoPersistsToPCB:
     """End-to-end: ``route_net_auto`` writes segments to the saved PCB."""
 
-    BOARD_07 = Path("boards/07-matchgroup-test/output/matchgroup_test.kicad_pcb")
+    BOARD_07 = Path("boards/07-matchgroup-test/regression-fixture/matchgroup_test.kicad_pcb")
 
     @pytest.mark.skipif(
         not BOARD_07.exists(),

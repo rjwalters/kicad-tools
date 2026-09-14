@@ -24,11 +24,19 @@
 #      two files is separately enforced by check-labels-drift.sh).
 #   5. (#5686) The SHA-scoped verdict lifetime survives: the guard script
 #      exists, judge.md still carries the Verdict SHA Marker + Stale-Verdict
-#      Sweep sections AND still stamps the marker in its canonical
-#      approve/request-changes commands, and doctor.md/champion-pr-merge.md
-#      still call the guard. A verdict with no marker is UNVERIFIABLE and
-#      fails safe (kept, never cleared), so stripping the stamping alone
-#      would silently restore pre-#5686 behavior with nothing else failing.
+#      Sweep sections, and doctor.md/champion-pr-merge.md still call the
+#      guard. A verdict with no marker is UNVERIFIABLE and fails safe (kept,
+#      never cleared), so a regression here would silently restore pre-#5686
+#      behavior with nothing else failing.
+#   5b. (#6382) judge.md's canonical Label Workflow approve/request-changes
+#      commands still route through post-verdict.sh (which exists and is
+#      executable) instead of hand-typing the `<!-- loom:verdict-sha ... -->`
+#      marker as prose — the marker was measured dropped on roughly one
+#      verdict in four before this script existed (#6319), a compliance rate
+#      no amount of prose fixed. This does NOT re-check the marker's exact
+#      format — that is pinned by test-post-verdict.sh's own regex
+#      cross-check against verdict-staleness-guard.sh, so it stays
+#      single-sourced there rather than duplicated here.
 #
 # Usage:
 #   check-cas-recheck-consistency.sh [ROOT]
@@ -140,6 +148,7 @@ fi
 # cleared) — i.e. a silent regression restores the exact pre-#5686 behavior
 # with every check still green. These greps are the tie that makes it loud.
 VERDICT_GUARD="$ROOT/defaults/scripts/verdict-staleness-guard.sh"
+POST_VERDICT="$ROOT/defaults/scripts/post-verdict.sh"
 
 if [[ ! -x "$VERDICT_GUARD" ]]; then
   fail "defaults/scripts/verdict-staleness-guard.sh is missing or not executable (#5686)"
@@ -153,17 +162,29 @@ if ! grep -q "### Stale-Verdict Sweep" "$JUDGE_MD"; then
   fail "judge.md is missing the 'Stale-Verdict Sweep' section (#5686) — nothing would re-queue a PR whose verdict went stale"
 fi
 
-# The canonical approve / request-changes commands in judge.md's Label Workflow
-# must actually carry the marker — the section existing while the commands
-# agents copy do not stamp it is the regression that matters most.
-# shellcheck disable=SC2016  # $VERDICT_SHA is the literal text to find in judge.md, not a shell expansion
-if ! grep -qF '<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=approved -->' "$JUDGE_MD"; then
-  fail "judge.md's approval command no longer stamps the loom:verdict-sha marker (#5686)"
+# --- 5b: verdicts are posted through post-verdict.sh, not typed as prose
+# (#6382). Before #6382, the canonical commands stamped the marker as literal
+# text in a `gh pr comment` heredoc — compliance-by-memory, dropped on roughly
+# one verdict in four in production (#6319). post-verdict.sh takes the SHA as
+# an argument and appends the marker itself, so it structurally cannot be
+# omitted by whichever call site posts through it. This check makes sure that
+# script keeps existing AND that judge.md's canonical Label Workflow commands
+# keep routing through it, rather than silently reverting to a hand-typed
+# marker (which the pre-#6382 version of this very check used to look for).
+if [[ ! -x "$POST_VERDICT" ]]; then
+  fail "defaults/scripts/post-verdict.sh is missing or not executable (#6382) — verdict comments would go back to hand-typing the loom:verdict-sha marker"
 fi
 
-# shellcheck disable=SC2016  # ditto — literal marker text, not an expansion
-if ! grep -qF '<!-- loom:verdict-sha sha=$VERDICT_SHA verdict=changes-requested -->' "$JUDGE_MD"; then
-  fail "judge.md's changes-requested command no longer stamps the loom:verdict-sha marker (#5686)"
+# The canonical approve / request-changes commands in judge.md's Label Workflow
+# must actually route through post-verdict.sh with the right verdict token —
+# the section existing while the commands agents copy do not is the
+# regression that matters most.
+if ! grep -qF 'post-verdict.sh <number> approved' "$JUDGE_MD"; then
+  fail "judge.md's approval command in Label Workflow no longer posts through post-verdict.sh (#6382) — the loom:verdict-sha marker could be typed as prose again, and dropped"
+fi
+
+if ! grep -qF 'post-verdict.sh <number> changes-requested' "$JUDGE_MD"; then
+  fail "judge.md's changes-requested command in Label Workflow no longer posts through post-verdict.sh (#6382) — the loom:verdict-sha marker could be typed as prose again, and dropped"
 fi
 
 if ! grep -q "verdict-staleness-guard.sh" "$CHAMPION_MERGE_MD"; then

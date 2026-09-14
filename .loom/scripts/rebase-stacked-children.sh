@@ -208,6 +208,24 @@ Parent branch \`$parent_branch\` advanced (amended/pushed) after this child bran
         RSC_FAILURE=2
         return 0
     fi
+
+    # Version-bearing-file sync gate (#7168): a rebase silently absorbs
+    # whatever version-bearing values origin/$parent_branch already had. A
+    # file the child's own commits never touched (in practice
+    # .loom/install-metadata.json) never raises a git conflict, so it can
+    # end up stale relative to VERSION/the files that WERE part of the
+    # conflict-free merge -- invisible until CI's "Installer Integration
+    # Tests" fails. `git rebase <upstream> <branch>` (used above) checks out
+    # $child_branch first, so the working tree here already reflects the
+    # rebased child -- skipped under --dry-run since no rebase actually ran.
+    if [[ "$DRY_RUN" != "true" ]] && [[ -x "$SCRIPT_DIR/version-check-gate.sh" ]]; then
+        if ! "$SCRIPT_DIR/version-check-gate.sh" --fix-hint "then push."; then
+            err "Version-bearing files are out of sync for '$child_branch' after rebase onto '$parent_branch' (see BLOCKER:/Fix: above)."
+            RSC_FAILURE=2
+            return 0
+        fi
+    fi
+
     if ! run git push --force-with-lease; then
         # A reported rejection is not always a real one (#6695): Git LFS's
         # pre-push hook can race the lease re-check on a branch with pending

@@ -71,11 +71,28 @@ Three things can add `loom:issue` to a `loom:curated` issue. **The Curator is ne
 
 A Curator subagent that finds `loom:curated` with no `loom:issue` should do exactly what the rest of this file says elsewhere: leave the label alone and move on — including when the Curator is itself running inside a `/loom:sweep` invocation. Promoting is never the Curator's call, under any of the three paths above.
 
-**IMPORTANT: Ignore External Issues**
+**IMPORTANT: Ignore Hard-Excluded Issues**
 
-- **NEVER enhance or mark issues with the `external` label as ready** - these are external suggestions for maintainers only
-- External issues are submitted by non-collaborators and require maintainer approval (removal of `external` label) before being curated
-- Only work on issues that do NOT have the `external` label
+A **hard exclusion** is a label that takes an issue out of the automated
+pipeline entirely — no role may curate it, build it, or promote it, and the
+daemon's work finder will not dispatch a sweep for it. `external` is the only
+one today: issues filed by non-collaborators (or auto-labeled by an intake
+workflow) that require maintainer approval (removal of the label) before any
+agent touches them.
+
+- **NEVER enhance or mark a hard-excluded issue as ready.**
+- **The list is not hardcoded here.** Read it from the one shared source,
+  `./.loom/scripts/hard-exclusion-labels.sh` (Issue #7528) — the same list
+  `loom-daemon`'s work finder filters candidates on, so the daemon and this
+  prompt can never disagree about what is excluded:
+
+  ```bash
+  ./.loom/scripts/hard-exclusion-labels.sh            # one label per line
+  ./.loom/scripts/hard-exclusion-labels.sh --jq-not   # a jq select() fragment
+  ```
+
+  Every `gh issue list` query below composes the `--jq-not` fragment rather
+  than spelling `external` out again.
 
 ## Exception: Explicit User Instructions
 
@@ -155,9 +172,12 @@ Use a **priority-based search** to find the highest-value curation opportunity:
 Issues with `loom:issue` (human-approved) but missing `loom:curated`:
 
 ```bash
+# #7528: the hard-exclusion fragment comes from the shared source, never a
+# hardcoded `external` literal. Note the DOUBLE-quoted --jq so $EXCL expands.
+EXCL="$(./.loom/scripts/hard-exclusion-labels.sh --jq-not)"
 gh issue list --label="loom:issue" --state=open --limit 500 --json number,title,labels,createdAt \
-  --jq 'sort_by(.createdAt) | .[] | select(([.labels[].name] | contains(["loom:curated"]) | not) and ([.labels[].name] | contains(["external"]) | not)) |
-  "#\(.number): \(.title)"'
+  --jq "sort_by(.createdAt) | .[] | select(([.labels[].name] | contains([\"loom:curated\"]) | not) and $EXCL) |
+  \"#\(.number): \(.title)\""
 ```
 
 **Why prioritize these**: Human already approved the concept, Curator adds technical detail before Builder starts. The query is sorted oldest-first (`sort_by(.createdAt)`) so the first result is always the oldest un-curated approved issue — no separate age computation needed.
@@ -294,9 +314,9 @@ enhancement") is the entry point, so **target it first**:
 
 ```bash
 # Newly filed issues awaiting Curator enhancement
+EXCL="$(./.loom/scripts/hard-exclusion-labels.sh --jq-not)"   # #7528 shared source
 gh issue list --label="loom:triage" --state=open --limit 500 --json number,title,labels,createdAt \
-  --jq 'sort_by(.createdAt) | .[] | select(([.labels[].name] | contains(["external"]) | not)) |
-  "#\(.number) \(.title)"'
+  --jq "sort_by(.createdAt) | .[] | select($EXCL) | \"#\(.number) \(.title)\""
 ```
 
 If nothing carries `loom:triage`, fall back to any issue that is not already
@@ -305,20 +325,21 @@ reserved for a human operator, so an autonomous Curator never "curates" an
 issue being built, awaiting evaluation, or outside its authority entirely:
 
 ```bash
+EXCL="$(./.loom/scripts/hard-exclusion-labels.sh --jq-not)"   # #7528 shared source
 gh issue list --state=open --limit 500 --json number,title,labels,createdAt \
-  --jq 'sort_by(.createdAt) | .[] | select(
-    ([.labels[].name] | contains(["loom:curated"]) | not) and
-    ([.labels[].name] | contains(["loom:curating"]) | not) and
-    ([.labels[].name] | contains(["loom:issue"]) | not) and
-    ([.labels[].name] | contains(["loom:building"]) | not) and
-    ([.labels[].name] | contains(["loom:architect"]) | not) and
-    ([.labels[].name] | contains(["loom:hermit"]) | not) and
-    ([.labels[].name] | contains(["loom:auditor"]) | not) and
-    ([.labels[].name] | contains(["loom:epic"]) | not) and
-    ([.labels[].name] | contains(["loom:blocked"]) | not) and
-    ([.labels[].name] | contains(["loom:operator-only"]) | not) and
-    ([.labels[].name] | contains(["external"]) | not)
-  ) | "#\(.number) \(.title)"'
+  --jq "sort_by(.createdAt) | .[] | select(
+    ([.labels[].name] | contains([\"loom:curated\"]) | not) and
+    ([.labels[].name] | contains([\"loom:curating\"]) | not) and
+    ([.labels[].name] | contains([\"loom:issue\"]) | not) and
+    ([.labels[].name] | contains([\"loom:building\"]) | not) and
+    ([.labels[].name] | contains([\"loom:architect\"]) | not) and
+    ([.labels[].name] | contains([\"loom:hermit\"]) | not) and
+    ([.labels[].name] | contains([\"loom:auditor\"]) | not) and
+    ([.labels[].name] | contains([\"loom:epic\"]) | not) and
+    ([.labels[].name] | contains([\"loom:blocked\"]) | not) and
+    ([.labels[].name] | contains([\"loom:operator-only\"]) | not) and
+    $EXCL
+  ) | \"#\(.number) \(.title)\""
 ```
 
 Note: `loom:blocked` and `loom:operator-only` both stay excluded from this
@@ -380,88 +401,121 @@ mirrors "Stale `loom:reviewing` Claim Check" in `judge.md` structurally, with
 **If the issue does NOT carry `loom:curating`:** proceed to claim as today —
 no behavior change: `gh issue edit <number> --add-label "loom:curating"`.
 
-**If the issue DOES carry `loom:curating`:** determine the claim's age and
-whether anyone has *genuinely* commented since the claim was made — see
-"Stand-down marker convention" below for why the comment count excludes
-stand-down comments:
+**If the issue DOES carry `loom:curating`:** evaluate the claim with the shared
+staleness evaluator. **Do not hand-roll the timeline/comment arithmetic** —
+`judge.md`, `doctor.md` and `curator.md` all drive the same script so the three
+lanes cannot drift apart, and it is unit-tested
+(`.loom/scripts/tests/test-claim-staleness.sh`, #6514):
 
 ```bash
 N=<issue-number>
-# All reads in this block must be live `gh`/`gh api` calls — this is claim
+# Every read the script makes is a live `gh api` call — this is claim
 # arbitration, and a stale cache read would reintroduce the double-claim this
-# check exists to prevent. `--paginate` re-invokes `--jq` once per response
-# page and concatenates the per-page results rather than applying the filter
-# across the combined timeline (#4637) — `sort | tail -n 1` collapses the
-# resulting per-page timestamps to the single latest one; RFC3339 UTC
-# timestamps sort correctly as plain strings.
-CLAIMED_AT=$(gh api "repos/{owner}/{repo}/issues/$N/timeline" --paginate \
-  --jq '[.[] | select(.event=="labeled" and .label.name=="loom:curating")] | last | .created_at // empty' \
-  | sort | tail -n 1)
-MARKER="<!-- loom:standdown claim=$CLAIMED_AT -->"
-COMMENTS_JSON=$(gh api "repos/{owner}/{repo}/issues/$N/comments" \
-  | jq --arg t "$CLAIMED_AT" '[.[] | select(.created_at > $t)]')
-# printf, not echo: zsh's echo interprets \n escapes inside the JSON, corrupting it
-COMMENTS_AFTER=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$MARKER" '[.[] | select(.body | contains($m) | not)] | length')
-STANDDOWN_COUNT=$(printf '%s\n' "$COMMENTS_JSON" | jq --arg m "$MARKER" '[.[] | select(.body | contains($m))] | length')
+# check exists to prevent.
+eval "$(./.loom/scripts/claim-staleness.sh check --number "$N" --label loom:curating)"
+echo "$CLAIM_STATE — claim age ${CLAIM_AGE_MINUTES}m, idle ${IDLE_MINUTES}m, stand-down streak ${STANDDOWN_COUNT}"
 ```
 
-Then decide:
+`eval` is safe here: the script emits only `KEY=VALUE` lines built from a fixed
+enum, validated RFC3339 timestamps and integers — never forge text — so no
+comment body can reach your shell. Use `--json` instead if you prefer `jq`.
 
-| Condition | Verdict | Action |
-|-----------|---------|--------|
-| `STANDDOWN_COUNT >= LOOM_MAX_STANDDOWN_STREAK` (default **3**) AND claim age ≥ `LOOM_STALE_CURATING_MINUTES` (default **30**) | **Stale — bounded fallback** (see below) | Force-reclaim regardless of `COMMENTS_AFTER`. Breaks the livelock even if the marker/exclusion logic above is somehow bypassed — mirrors the age-floor join `judge.md`/`doctor.md` already apply (#4790): the streak alone is never enough, it also requires the claim to have aged past the normal staleness threshold. |
-| Claim age < `LOOM_STALE_CURATING_MINUTES` (default **30**), OR `COMMENTS_AFTER > 0` | **Fresh** — a Curator is actively enhancing this issue | **Do not stomp the claim.** Post a marked stand-down comment **unless the latest comment already carries an identical marker for this exact `$CLAIMED_AT`** (see "Duplicate stand-down suppression" below — then skip silently instead), then skip this issue and continue to the next candidate. |
-| Claim age ≥ `LOOM_STALE_CURATING_MINUTES` AND `COMMENTS_AFTER == 0` | **Stale** — the claiming Curator's process almost certainly died mid-enhancement | Reclaim (see below), then proceed with normal curation. |
-| Timeline API call fails or returns empty (`CLAIMED_AT` unset) | **Unknown — fail safe** | Treat as **fresh**. Never stomp a claim on API failure or missing data. |
+Then decide on `$CLAIM_STATE`:
+
+| `$CLAIM_STATE` | Meaning | Action |
+|---|---|---|
+| `unclaimed` | the issue does not actually carry `loom:curating` right now | Claim it normally: `gh issue edit $N --add-label "loom:curating"` |
+| `fresh` | a Curator is plausibly still enhancing this issue | **Do not stomp the claim.** Record a stand-down (see below), then skip this issue and continue to the next candidate. |
+| `stale` | no *claimant* activity for ≥ `LOOM_STALE_CURATING_MINUTES` (default **30**) — the claiming Curator's process almost certainly died mid-enhancement | Reclaim (see below), then proceed with normal curation. |
+| `stale-bounded-fallback` | the stand-down streak reached `LOOM_MAX_STANDDOWN_STREAK` (default **3**) **and** the claim's own age is ≥ `LOOM_STALE_CURATING_MINUTES` | Force-reclaim (see below) — the livelock breaker. |
+| `unknown` | the timeline/label read failed or returned nothing | **Fail safe: treat exactly like `fresh`.** Never stomp a claim on API failure or missing data. |
+
+**What counts as claimant activity (#6514)**: only a comment carrying *this
+claim's* activity marker —
+
+```
+<!-- loom:claim-activity claim=$CLAIMED_AT -->
+```
+
+Every other comment is ignored: it neither pins nor extends the claim. This is
+the fix for the PR #6513 livelock (found on the Judge lane, identical in shape
+here). The old rule counted **any** non-stand-down comment posted after the
+claim (`COMMENTS_AFTER > 0`) as proof the claimant was alive, so a single
+unrelated comment from another actor pinned that claim "fresh" for the rest of
+its life, because `CLAIMED_AT` never moves. Claimant activity now only **resets
+the idle clock** rather than pinning the claim, so even a genuine heartbeat buys
+only another `LOOM_STALE_CURATING_MINUTES`. **Your own curation enhancement
+comment counts as activity only if it carries the marker** — the script prints
+the marker for the live claim, so append it to any mid-curation progress note
+when a pass runs long (e.g. heavy use of the reproduction playbook above):
+
+```bash
+gh issue comment $N --body "Curator: still researching the codebase for this enhancement.
+$(./.loom/scripts/claim-staleness.sh marker --number "$N" --label loom:curating)"
+```
 
 **Stand-down marker convention (mirrors #4618)**: a "standing down, not
 stomping" comment is evidence of **no activity**, not activity — it means a
 *later* Curator pass declined to touch the claim, not that the *original*
-claimant is still working. Every stand-down comment you post in the "Fresh"
-row above MUST end with the `<!-- loom:standdown claim=$CLAIMED_AT -->` marker
-so it is excluded from `COMMENTS_AFTER` on every subsequent pass, and counted
-in `STANDDOWN_COUNT` instead. **Duplicate stand-down suppression (#5123)**:
-re-verification of staleness still runs on every pass — only the redundant
-*comment* is skipped, by checking whether the *latest* comment already carries
-the identical marker (`COMMENTS_JSON` was already fetched above — no extra API
-call needed):
+claimant is still working. Stand-down comments therefore carry their own marker
+and are counted into the streak, never into liveness.
+
+**Recording a stand-down** (the `fresh` and `unknown` rows):
 
 ```bash
-LATEST_COMMENT_BODY=$(printf '%s\n' "$COMMENTS_JSON" | jq -r 'sort_by(.created_at) | last | .body // empty')
-if printf '%s' "$LATEST_COMMENT_BODY" | grep -qF -- "$MARKER"; then
-  echo "Latest comment already carries the stand-down marker for claim $CLAIMED_AT — skipping duplicate comment (still standing down, not reclaiming)."
-else
-  gh issue comment $N --body "Curator pass: issue still carries a fresh \`loom:curating\` claim (claimed $CLAIMED_AT) — standing down without reclaiming. Not stomping.
-<!-- loom:standdown claim=$CLAIMED_AT -->"
-fi
+./.loom/scripts/claim-staleness.sh standdown --number "$N" --label loom:curating
+# then skip this issue and continue to the next candidate
 ```
 
-**Bounded fallback** (mirrors AC3, #4618; age-floor join added by #4798):
-`STANDDOWN_COUNT` is a hard cap independent of the marker-exclusion logic
-working correctly — it counts how many stand-down comments have accumulated
-against *this exact* `$CLAIMED_AT` (the marker embeds it, so a genuine
-reclaim — which changes `CLAIMED_AT` — resets the count to zero
+It posts the marked stand-down comment the first time, and on every later pass
+**edits that same comment in place**, bumping `seq=` in its marker
+(`<!-- loom:standdown claim=$CLAIMED_AT seq=2 -->`). **This is what keeps the
+bounded fallback reachable (#6514)**: duplicate stand-down suppression (#5123)
+previously skipped the pass entirely, so `STANDDOWN_COUNT` froze at 1 and
+`LOOM_MAX_STANDDOWN_STREAK` was never reached — the second half of the PR #6513
+livelock. Bumping in place keeps the forge free of near-identical comments (the
+#5123 goal) while the streak still accumulates (the #4618 AC3 goal). A legacy
+marker with no `seq=` counts as `seq=1`. Re-verification of staleness still runs
+on **every** pass — only the redundant *comment* is avoided, never the check.
+
+**Bounded fallback** (mirrors AC3, #4618; age-floor join added by #4798;
+unstarved by #6514): the streak is a hard cap independent of the
+activity/marker logic working correctly — it counts how many stand-down passes
+have accumulated against *this exact* `$CLAIMED_AT` (the marker embeds it, so a
+genuine reclaim — which changes `CLAIMED_AT` — resets the count to zero
 automatically). The fallback fires only once **both** hold:
-`LOOM_MAX_STANDDOWN_STREAK` marked comments have piled up against the same
-claim with no reclaim, **and** the claim's own age is ≥
-`LOOM_STALE_CURATING_MINUTES` — reusing the same age floor the ordinary
-staleness row above already applies. Use this reclaim comment:
+`LOOM_MAX_STANDDOWN_STREAK` passes have piled up against the same claim with no
+reclaim, **and** the claim's own age is ≥ `LOOM_STALE_CURATING_MINUTES` —
+reusing the same age floor the ordinary staleness row above already applies
+(#4790: the streak alone measures *peer arrival rate*, not claim liveness, so it
+must never force-reclaim a claim that is still genuinely young), and
+keyed on the **claim's** age rather than the idle clock precisely so a claimant
+stuck in a loop emitting activity markers cannot hold the claim forever. Use
+this reclaim comment:
 
 ```bash
 gh issue edit $N --remove-label "loom:curating"
-gh issue comment $N --body "Reclaiming loom:curating claim: $STANDDOWN_COUNT consecutive stand-down comments have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_CURATING_MINUTES:-30}m) with no actual curation progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
+gh issue comment $N --body "Reclaiming loom:curating claim: $STANDDOWN_COUNT consecutive stand-down passes have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_CURATING_MINUTES:-30}m) with no actual curation progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
 gh issue edit $N --add-label "loom:curating"
 # Continue with normal curation
 ```
 
-**Reclaiming a stale claim** (the ordinary claim-age path):
+**Reclaiming a stale claim** (the ordinary idle-clock path):
 
 ```bash
 gh issue edit $N --remove-label "loom:curating"
-gh issue comment $N --body "Reclaiming stale loom:curating claim (age > ${LOOM_STALE_CURATING_MINUTES:-30}m, no follow-up comment) — a prior Curator's parent sweep likely died mid-enhancement."
+gh issue comment $N --body "Reclaiming stale loom:curating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_CURATING_MINUTES:-30}m with no claimant activity) — a prior Curator's parent sweep likely died mid-enhancement."
 gh issue edit $N --add-label "loom:curating"
 # Continue with normal curation
 ```
+
+**If `.loom/scripts/claim-staleness.sh` is missing** (an older install that has
+not been resynced yet): fall back to the **age-only** rule — read the latest
+`labeled` event for `loom:curating` from
+`repos/{owner}/{repo}/issues/$N/timeline`, reclaim when it is older than
+`LOOM_STALE_CURATING_MINUTES`, and treat a failed or empty read as fresh. Do
+**not** reintroduce a "any comment after the claim means fresh" test — that is
+precisely the defect this section exists to fix.
 
 **Env vars**: `LOOM_STALE_CURATING_MINUTES` (default **30**) — named to mirror
 `LOOM_STALE_REVIEWING_MINUTES`/`LOOM_STALE_TREATING_MINUTES` (`judge.md` /
@@ -1260,6 +1314,18 @@ implementing/closing PR(s)** — the PR(s) GitHub will merge to close *this*
 issue. It is unrelated to a prerequisite PR belonging to a *different* issue
 named in this issue's own Dependencies checklist — that is a separate case,
 outside the scope of this primary check, and is unaffected by anything below.
+**For that separate case** (a checklist item naming a different, non-closing
+issue/PR — confirmed live on #6335, blocked on #6333, which does not carry
+`Closes #6335`), drive the same shared script's `named-dependency` subcommand
+instead (#7314): `./.loom/scripts/dep-recheck-fingerprint.sh named-dependency
+--number "$ISSUE_NUMBER"` parses this issue's own body `## Dependencies`
+checklist and reports `VERDICT=blocked` while any unchecked item is still
+open, `VERDICT=clear` once every one of them has merged or closed — reading
+each reference's own `state`, never its labels, so a referenced PR's
+review-cycle label churn (`loom:pr`, `loom:review-requested`,
+`loom:changes-requested`, `loom:merge-conflict`, `loom:operator`, …) cannot
+flip this verdict on its own. Fold its `CONCLUSION_HASH` into the "Re-check
+Idempotency" marker below exactly like the primary check's own output.
 Evaluate each returned still-OPEN PR against both sub-checks, in order —
 **this is unambiguous and covers every case, including this issue's own
 implementing PR**:
@@ -1297,6 +1363,11 @@ re-blocking") and confirm that specific condition has since cleared — not
 just that the body's stated dependency closed. When in doubt, leave
 `loom:blocked` in place.
 
+**If either check tells you the tracked dependency is done but something else is
+holding the issue open, stop before writing "no action needed"** — that is the
+diagnosed-but-orthogonal case, and it escalates rather than settling. See
+"Diagnosed-but-orthogonal blockers" below.
+
 **Only once the superseding-block check clears**, proceed:
 1. Claim the issue if not already claimed: `gh issue edit <number> --add-label "loom:curating"`
 2. Remove `loom:blocked` label and add `loom:curated`: `gh issue edit <number> --remove-label "loom:blocked" --remove-label "loom:curating" --remove-label "loom:triage" --add-label "loom:curated"`
@@ -1316,53 +1387,83 @@ information.
 *conclusion* differs from the conclusion you last reported on that issue.
 Re-verifying is cheap and always required; **commenting** is not.
 
+**Claim discipline (#7617): compute the fingerprint before claiming, not
+after.** A `loom:blocked` issue is already excluded from Priority 1/2
+discovery (see "Finding Work" above), so re-checking it is never "starting
+enhancement work" in the sense "Claiming Work"/"Before Starting Curation"
+means — do **not** apply that general claim-before-you-touch-it rule to this
+pass. Everything through computing `CONCLUSION_HASH` and consulting
+`PRIOR_HASH`/`PRIOR_AGE_H` (below) is a read: no claim needed, and none
+should be taken. Only the two-way split at the end of "Four-way decision"
+below decides whether to claim at all:
+
+- **Skip silently** → never claim `loom:curating`. This is the fix: the old
+  shape claimed *then* discovered there was nothing to do, released the
+  claim again, and repeated that churn on every re-check pass with zero work
+  performed. The new shape never claims in the first place.
+- **Comment, heartbeat, or escalate** (anything that posts or changes a
+  label) → claim `loom:curating` immediately before that action, exactly as
+  "Claiming Work" describes for ordinary curation, then release it again
+  once the comment is posted — unless the same pass also transitions the
+  issue to `loom:curated` (its own label edit already drops `loom:curating`
+  in the same command, so there is nothing extra to release). This is
+  unchanged from today: a pass that does real work still claims normally.
+
 **Conclusion fingerprint** — what the re-check concluded, not how it was worded:
 
 - the verdict (`blocked` vs `clear`), and
-- the identity + status of every current blocker: each linked PR/issue number
-  with its state and its block-bearing labels, plus the block reason when the
-  block came from the secondary heuristic rather than a linked PR.
+- the identity + status of every current blocker: each linked PR/issue number,
+  its state, **whether it carries a superseding-block label**
+  (`loom:changes-requested` or `loom:blocked` — presence/absence only, not the
+  full label set) and its merge-state bucket (mergeable vs conflicting), plus
+  the block reason when the block came from the secondary heuristic rather
+  than a linked PR.
 
 Two passes have the *same* conclusion only when both parts match exactly. A
-different blocking number, a blocker that closed or merged, a label that
-appeared or cleared, or a flip between `blocked` and `clear` is a **changed**
-conclusion.
+different blocking number, a blocker that closed or merged, a superseding-block
+label appearing or clearing, a merge state crossing the
+mergeable/conflicting boundary, or a flip between `blocked` and `clear` is a
+**changed** conclusion. A PR's *other* label churn — `loom:pr` /
+`loom:review-requested` / `loom:reviewing` / `loom:treating` / `loom:operator`
+transitioning among themselves, with no superseding-block label and no
+merge-state change — is **not** a changed conclusion (#7362): none of those
+transitions individually flips whether this issue's Dependencies checklist
+item can be checked, so folding them into the fingerprint only produced
+comment spam on actively-reviewed PRs (28+ near-duplicate re-check comments on
+#6805 in 36 hours) without ever changing the substantive answer.
 
 Embed the fingerprint as a marker in every re-check comment you post, so the
-next pass can compare mechanically instead of re-reading prose:
+next pass can compare mechanically instead of re-reading prose. **Do not
+hand-roll the VERDICT/BLOCKERS/CONCLUSION_HASH computation** — every Curator
+pass re-deriving it independently from prose is exactly what let the hash
+churn across dozens of distinct values on #6335/#6805 despite an unchanged
+blocking condition, defeating this whole section (#7281). Drive the shared,
+unit-tested script instead
+(`.loom/scripts/tests/test-dep-recheck-fingerprint.sh`), mirroring how
+"Stale `loom:curating` Claim Check" above drives `claim-staleness.sh` (#6514):
 
 ```bash
 ISSUE_NUMBER=<number>
-ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" --json comments,closedByPullRequestsReferences)
+ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" --json comments)
 
-_sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum
-  elif command -v shasum >/dev/null 2>&1; then shasum -a 256
-  else cksum; fi
-}
+# Mechanical half: fetches the issue's own closedByPullRequestsReferences PRs
+# and computes VERDICT/BLOCKERS itself — including the #7281 fix that fails
+# safe (treats as still-blocking, never as newly-cleared) when a PR's
+# mergeable/mergeStateStatus is transiently UNKNOWN rather than a real value.
+eval "$(./.loom/scripts/dep-recheck-fingerprint.sh dep-recheck --number "$ISSUE_NUMBER")"
+# When there is no linked PR and the block came from the secondary heuristic
+# instead, override the mechanical (empty-BLOCKERS -> clear) default and fold
+# in the cited justification, so a *changed* reason ("doctor cycle exhausted"
+# → "Sweep coordination: blocking") still reads as a changed conclusion:
+#   eval "$(./.loom/scripts/dep-recheck-fingerprint.sh dep-recheck --number "$ISSUE_NUMBER" \
+#     --verdict blocked --block-reason "doctor cycle exhausted")"
+RECHECK_MARKER="<!-- curator:dep-recheck:$CONCLUSION_HASH -->"
 
-# One "<pr#>:<state>:<sorted block labels>" line per current blocker, sorted so
-# ordering churn from the API never looks like a changed conclusion. Prefix with
-# the verdict so blocked→clear can never collide with clear→blocked.
+# Most recent prior Curator re-check comment, of ANY conclusion.
 # NOTE: `printf '%s\n' "$VAR" | jq`, never `echo "$VAR" | jq` — zsh's `echo`
 # builtin reinterprets `\n`/`\t` escapes by default, corrupting captured
 # `gh --json` output (a literal `\n` inside a body/comment string becomes a
 # raw newline) before jq ever parses it (#5094).
-BLOCKERS=$(for PR in $(printf '%s\n' "$ISSUE_JSON" | jq -r '.closedByPullRequestsReferences[].number'); do
-  gh pr view "$PR" --json number,state,labels --jq \
-    '"\(.number):\(.state):\([.labels[].name | select(startswith("loom:"))] | sort | join(","))"'
-done | sort)
-VERDICT=blocked   # or "clear" once the superseding-block check passes
-# When there is no linked PR and the block came from the secondary heuristic,
-# BLOCKERS is empty — fold the cited justification in so a *changed* reason
-# ("doctor cycle exhausted" → "Sweep coordination: blocking") still reads as a
-# changed conclusion. Leave empty when the primary check supplied the blockers.
-BLOCK_REASON=""
-CONCLUSION_HASH=$(printf '%s\n%s\n%s' "$VERDICT" "$BLOCKERS" "$BLOCK_REASON" \
-  | _sha256 | awk '{print substr($1, 1, 16)}')
-RECHECK_MARKER="<!-- curator:dep-recheck:$CONCLUSION_HASH -->"
-
-# Most recent prior Curator re-check comment, of ANY conclusion.
 PRIOR=$(printf '%s\n' "$ISSUE_JSON" | jq -c '[.comments[] | select(.body | test("<!-- curator:dep-recheck:"))] | last // {}')
 PRIOR_HASH=$(printf '%s\n' "$PRIOR" | jq -r '.body // ""' \
   | sed -n 's|.*<!-- curator:dep-recheck:\([0-9a-f]\{1,\}\) -->.*|\1|p' | tail -n 1)
@@ -1375,17 +1476,39 @@ if [ -n "$PRIOR_AT" ]; then
 else
   PRIOR_AGE_H=""   # no prior re-check comment at all
 fi
+
+# The "Four-way decision" itself (#7617) — still entirely read-only, no claim
+# yet. Emits ACTION (none|skip|comment|heartbeat) and CLAIM (true|false).
+if [ -n "$PRIOR_HASH" ]; then
+  eval "$(./.loom/scripts/dep-recheck-fingerprint.sh decide --hash "$CONCLUSION_HASH" \
+    --prior-hash "$PRIOR_HASH" --prior-age-hours "$PRIOR_AGE_H")"
+else
+  eval "$(./.loom/scripts/dep-recheck-fingerprint.sh decide --hash "$CONCLUSION_HASH")"
+fi
 ```
 
-**Three-way decision** (run it *before* posting, and before any `loom:curating`
-claim you would only take in order to comment):
+`eval` is safe here exactly as it is for `claim-staleness.sh`: the script
+emits only `KEY=VALUE` lines built from a fixed enum, pre-sorted plain-text
+blocker lines and a hex hash — never raw forge text. **If
+`.loom/scripts/dep-recheck-fingerprint.sh` is missing** (an older install
+that has not been resynced yet): fall back to computing `VERDICT`/`BLOCKERS`
+inline exactly as this section did before #7281, but apply the same UNKNOWN
+fail-safe by hand — never let a PR's `mergeable`/`mergeStateStatus` reading
+`UNKNOWN` (rather than a confirmed value) flip `VERDICT` from `blocked` to
+`clear` on its own. Fall back the same way for `decide` if it is also missing:
+compare `$CONCLUSION_HASH`/`$PRIOR_HASH`/`$PRIOR_AGE_H` by hand using the table
+below, but the claim-discipline rule it encodes does not change.
 
-| Prior re-check comment | Action |
-|---|---|
-| **None** (first-ever check on this issue) | **Comment.** Always report the first conclusion — never skip a first pass. |
-| Present, **different** `CONCLUSION_HASH` | **Comment.** A changed conclusion always gets a comment — no exception, no window, no budget. |
-| Present, **same** hash, newer than the staleness window | **Skip silently.** No comment, no label change, no claim. Leave the issue exactly as found. |
-| Present, **same** hash, older than the staleness window | **Comment once** (heartbeat). Posting refreshes the marker's timestamp, so the next window starts over. |
+**Four-way decision** — `$ACTION`/`$CLAIM` above already computed this; the
+table just names each row. Nothing above this point has claimed anything:
+
+| Prior re-check comment | `$ACTION` | `$CLAIM` |
+|---|---|---|
+| Any, when the tracked blocker is stale but a **different** condition is live | **Escalate** — see "Diagnosed-but-orthogonal blockers" below. This row is checked first, is never suppressed by the rows beneath it, and is not something `decide` computes directly — folding `--orthogonal` into `$CONCLUSION_HASH` before calling `decide` makes it surface as an ordinary changed-hash `comment` row. | `true` |
+| **None** (first-ever check on this issue) | **Comment.** Always report the first conclusion — never skip a first pass. | `true` |
+| Present, **different** `CONCLUSION_HASH` | **Comment.** A changed conclusion always gets a comment — no exception, no window, no budget. | `true` |
+| Present, **same** hash, newer than the staleness window | **Skip silently.** No comment, no label change, **no claim** (#7617 — this is the fixed no-op path). Leave the issue exactly as found. | `false` |
+| Present, **same** hash, older than the staleness window | **Comment once** (heartbeat). Posting refreshes the marker's timestamp, so the next window starts over. | `true` |
 
 Pre-existing "still blocked" comments written before this section landed carry
 no marker, so `PRIOR_HASH` is empty and the first pass after them counts as
@@ -1396,9 +1519,20 @@ That one-time re-post is expected; do not try to parse legacy prose to avoid it.
 exists so a genuinely long-stalled issue still shows periodic proof-of-life
 rather than going silent forever; it is *not* a licence to re-confirm hourly.
 
-A silent skip is a complete outcome, not a deferral: do **not** also strip or
-add labels, and do **not** hand the issue to another role "because nothing was
-said". The issue stays `loom:blocked` with its existing justification intact.
+**When `$CLAIM=true`** (every row except silent skip): claim immediately
+before posting, exactly as "Claiming Work" describes —
+`gh issue edit "$ISSUE_NUMBER" --add-label "loom:curating"` — post the
+comment (and any label change), then `gh issue edit "$ISSUE_NUMBER"
+--remove-label "loom:curating"` afterward **unless** this same pass also adds
+`loom:curated` (that label edit already removes `loom:curating` in the same
+command — do not issue a second, redundant remove).
+
+**When `$CLAIM=false`** (silent skip, or `$ACTION=none` when there was
+nothing to report at all): take no `gh issue edit` action whatsoever. A silent
+skip is a complete outcome, not a deferral: do **not** also strip or add
+labels, do **not** claim and release `loom:curating` "just to be safe", and do
+**not** hand the issue to another role "because nothing was said". The issue
+stays `loom:blocked` with its existing justification intact.
 
 **Leaving room for a future escalation counter (#4967)**: if this re-check ever
 grows an "escalate to a human after N unchanged confirmations" step, that count
@@ -1412,6 +1546,114 @@ allow that: it is a durable, addressable comment carrying the conclusion
 identity, not a bare "did we comment?" boolean. Do not add the escalation step
 speculatively — just do not build the suppression in a way that makes it
 unreachable.
+
+### Diagnosed-but-orthogonal blockers: escalate, never "no action needed" (#6516)
+
+**Problem this section fixes**: the re-check above has exactly two outcomes for a
+still-blocked issue — leave `loom:blocked`, or clear it — and both end in "no
+action needed" once the *tracked* blocker (the body's Dependencies entry, or a
+linked PR) looks resolved. That is right when the tracked blocker is simply still
+active. It is badly wrong when the re-check's **own analysis** concludes the
+tracked blocker is substantively done and identifies a *different, currently
+active* condition as the real reason the issue cannot proceed: the system has
+then diagnosed its own deadlock and filed the diagnosis as a comment nobody
+reads.
+
+Observed verbatim on a downstream repo (2026-08-18): "the prior comment's blocker
+description is now stale… the substance #14 tracks is done… #14 itself remains
+open, but for an unrelated reason: a Champion objection about epic process
+structure" — followed by "No action needed until both clear." Two buildable
+issues sat blocked for days behind an epic that was finished, in a fleet starved
+for work.
+
+**Trigger — all three, and nothing weaker:**
+
+1. Your re-check concluded the **tracked** blocker is substantively cleared
+   (merged / closed / superseded), not merely quiet.
+2. You identified a **specific, currently active** condition that is *not* the
+   tracked blocker and *not* in the body's Dependencies section — a process or
+   format objection, a label state, an unrelated hold.
+3. That condition is not something you can clear yourself in this pass.
+
+If the tracked blocker is genuinely still active, none of this applies and the
+ordinary suppression rules above stand unchanged. This branch is not a licence to
+escalate every heartbeat; it fires on the *transition* into "the tracked reason
+is stale and the real reason is elsewhere".
+
+**Mechanism (this is what makes it unsuppressible, not the prose):** fold the
+orthogonal condition's identity into the conclusion fingerprint. The linked-PR
+blocker set is what stayed constant while the truth moved, so a hash built only
+from it re-suppresses the very pass that discovered the problem.
+
+```bash
+# Stable identity of the orthogonal condition — the thing an operator must act
+# on, not your wording of it. e.g. "epic-open-but-complete:owner/repo#14",
+# "champion-format-objection:#14", "label-hold:loom:operator-only".
+eval "$(./.loom/scripts/dep-recheck-fingerprint.sh dep-recheck --number "$ISSUE_NUMBER" \
+  --orthogonal "epic-open-but-complete:owner/repo#14")"
+```
+
+`ORTHOGONAL` is empty on an ordinary re-check, so every existing fingerprint is
+unchanged and no existing suppression behavior moves. When it is non-empty the
+hash necessarily differs from the pass that preceded the discovery — the
+"changed conclusion always comments" row fires by construction.
+
+**Then escalate, in one pass:**
+
+1. **Retrack the real blocker.** Edit the body's Dependencies section so it names
+   the currently active condition, striking or annotating the stale entry — the
+   next pass must re-check the true blocker, not the dead one.
+2. **Comment** the finding (never suppressed — the hash changed), stating what
+   cleared, what is actually blocking, and what would unblock it.
+3. **Route to the operator**, keeping `loom:blocked` in place. Pick the sub-kind
+   from the *condition*, per "Applying `loom:operator-only`" above:
+
+| Orthogonal condition | Sub-kind |
+|---|---|
+| A finished-but-open epic / a stale process or format objection an operator can just close or withdraw | `loom:operator-mechanical` — confirmation, no judgement |
+| A **named** open issue/PR that will genuinely deliver something first | `loom:operator-blocked` — include the literal `Blocked by #N` line |
+| A real preference/authority call about how to proceed | `loom:operator-decision` — name the disagreement axis |
+
+```bash
+# Terminal check first: a human already owns it — say nothing, change nothing.
+gh issue view <number> --json labels --jq '.labels[].name' | grep -q '^loom:operator-only$' \
+  && echo "already routed — skip silently" \
+  || {
+    # $CLAIM=true here (escalation is a changed-hash "comment" row) — claim
+    # immediately before mutating, per "Claim discipline (#7617)" above.
+    gh issue edit <number> --add-label "loom:curating"
+    gh issue comment <number> --body "<!-- curator:dep-recheck:$CONCLUSION_HASH -->
+<!-- curator:orthogonal-block:$ORTHOGONAL -->
+**Curator: tracked blocker is stale — the real block is elsewhere**
+
+The Dependencies entry (\`<tracked blocker>\`) is substantively resolved: <evidence>.
+This issue is still blocked, but by an unrelated active condition: <the orthogonal
+condition, and what would clear it>.
+
+Routing to the operator rather than re-confirming a stale blocker (#6516)."
+    gh issue edit <number> --add-label "loom:operator-only,loom:operator-mechanical" --remove-label "loom:curating"
+  }
+```
+
+The `curator:orthogonal-block:$ORTHOGONAL` marker plus the terminal
+`loom:operator-only` check bound this to **one** escalation per distinct
+condition — a second pass finding the same condition sees the label and skips
+silently.
+
+**Behavioral checks** (what a change here must still produce):
+
+| Re-check situation | Required outcome |
+|---|---|
+| Tracked blocker (an epic) is substantively done but formally open for an unrelated reason — the #20/#22 shape | Escalation: body retracked, comment posted, `loom:operator-only` + sub-kind applied. **Never** "no action needed" |
+| Tracked blocker genuinely still active, nothing else changed | Ordinary suppression, unchanged — silent skip inside the window, heartbeat outside it. **No** escalation |
+| Same orthogonal condition, second pass | Silent skip via the `loom:operator-only` terminal check — exactly one escalation per condition |
+| Orthogonal condition clears, tracked blocker still stale | `ORTHOGONAL` empties, the hash changes again, the ordinary "changed conclusion" comment fires |
+
+**This does not consume the reserved #4967 counter above.** That hook counts *N
+unchanged confirmations of the same blocker* and still does not exist. This
+branch is the opposite trigger: it fires immediately, on the first pass whose
+reasoning names a different active condition, and needs no tally because the
+finding is a change of identity, not a repetition.
 
 ## Checking Operator-Only Premises (#6849)
 
@@ -1430,6 +1672,18 @@ auto-releases the issue — see the note above the Priority 2 query in "Finding
 Work" for the "doing the work" vs. "re-checking the premise" distinction this
 rests on.
 
+**Claim discipline (#7617): same rule as "Checking Dependencies" above.**
+`loom:operator-only` is likewise excluded from Priority 1/2 discovery, so this
+is never "starting enhancement work" either — extracting the reference and
+computing the fingerprint (below) is a read, no claim needed. Only claim
+`loom:curating` immediately before the one action this section ever takes
+(posting the "premise possibly stale" comment in "Reporting a closed
+reference" below), and release it again right after — this section never
+adds `loom:curated`, so unlike "Checking Dependencies" there is no
+label-edit-that-already-removes-it shortcut here; the release is always its
+own explicit step. When there is nothing to report (no reference found, or
+every reference still open), never claim at all.
+
 ### Finding candidates
 
 ```bash
@@ -1443,36 +1697,72 @@ Priority 1/2 discovery and does not change what gets curated this pass.
 
 ### Extracting the stated reference
 
-Reuse the exact machine-readable phrasings this file and
-`detect-dependency-cycle.sh` / `warn-operator-gated.sh` already parse, rather
-than inventing a new pattern — a bare prose mention (e.g. a backtick-quoted
-`` `owner/repo#123` ``) does not count:
+Use the shared script's `extract-refs` subcommand — never re-derive this
+extraction inline. It reuses the exact machine-readable phrasings this file
+and `detect-dependency-cycle.sh` / `warn-operator-gated.sh` already parse (a
+bare prose mention, e.g. a backtick-quoted `` `owner/repo#123` ``, does not
+count):
 
 ```bash
 ISSUE_NUMBER=<number>
-ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" --json body,comments)
-# NOTE: printf '%s\n' "$VAR" | jq, never echo "$VAR" | jq (#5094).
-TEXT=$(printf '%s\n' "$ISSUE_JSON" | jq -r '[.body] + [.comments[].body] | join("\n")')
-
-REFS=$(printf '%s\n' "$TEXT" \
-  | grep -oE '(Blocked by|Depends on|Requires|\*\*Epic\*\*)[*_:[:space:]]*#[0-9]+' \
-  | grep -oE '#[0-9]+' | tr -d '#' | sort -un)
+eval "$(./.loom/scripts/dep-recheck-fingerprint.sh extract-refs --number "$ISSUE_NUMBER")"
+# REFS is now a space-separated (possibly empty) list of referenced numbers.
+# The helper shell-quotes the assignment so multiple refs remain one value.
 ```
 
-- **No reference found** → no-op. Most `loom:operator-mechanical` /
+**Why not just scan `[.body] + [.comments[].body]` directly (#4963):** an
+earlier version of this section did exactly that, and it self-perpetuates.
+The report comment below quotes the matched phrase back into the thread
+verbatim (`` the reference this issue is parked on, #4510 ("Depends on
+#4510"), is now closed ``) — so the *next* pass's extraction, scanning the
+same unconditional comment history, re-matches its own prior report as if it
+were new evidence. On kicad-tools#4507 this produced 13 near-identical
+heartbeat comments over 10 days, and survived a body-only fix (rewording away
+the matched phrase) because the comment history is immutable — the phrase
+lived on forever in a past comment. `extract-refs` closes the loop instead of
+papering over it: it scans the **body** unconditionally, but a **comment**
+only when it is neither authored by the automation identity (`--bot-login`,
+default `loom-fleet-dispatch`) nor itself carrying a
+`curator:dep-recheck:`/`curator:operator-premise-recheck:` marker — so the
+bot's own historical heartbeat comments are never treated as new evidence,
+while a genuine NEW human-authored "Blocked by #N" comment still is.
+
+- **No reference found** (`REFS` empty) → no-op. Most `loom:operator-mechanical` /
   `loom:operator-decision` / `loom:operator-objective` issues have nothing
   checkable — leave them exactly as found, silently.
-- **One or more references found** → for each, check its current state with
-  `gh issue view <ref> --json state,title` (fall back to `gh pr view <ref>
-  --json state,title` if the reference turns out to be a PR, not an issue).
+- **One or more references found** → compute the fingerprint with the same
+  shared script "Re-check Idempotency" above uses (a distinct `operator-premise`
+  subcommand — this check's inputs, a set of issue/PR *references* with only a
+  state each, are not the PR-blocker shape `dep-recheck` computes over, so it
+  is not force-unified with that computation):
+
+```bash
+eval "$(./.loom/scripts/dep-recheck-fingerprint.sh operator-premise --refs "$REFS")"
+# VERDICT=stale-premise (>=1 reference closed) or VERDICT=open (all still open).
+# REFS is now overwritten with the operator-premise subcommand's own REFS
+# output (one `<ref>:<state>` line per reference checked, in both verdicts);
+# only CONCLUSION_HASH is empty when VERDICT=open — see "Idempotency" below
+# for why that means nothing is posted or compared.
+```
+
+Internally this fetches each reference's current state via `gh issue view
+<ref> --json state` (falling back to `gh pr view <ref> --json state` if the
+reference turns out to be a PR, not an issue) — you do not need to fetch
+those yourself.
 
 ### Reporting a closed reference
 
-If **any** referenced number is closed, post a comment naming it — do not
-silently absorb the finding, and do not touch any label:
+If **any** referenced number is closed (`VERDICT=stale-premise`), post a
+comment naming it — do not silently absorb the finding, and do not touch the
+`loom:operator-only`/sub-kind label. Run "Idempotency" below first: only reach
+this step at all when it says `$CLAIM=true` (i.e. `$ACTION` is `comment` or
+`heartbeat`, never `skip`), and claim/release `loom:curating` around the post
+exactly as "Claim discipline" above describes:
 
 ```bash
+gh issue edit "$ISSUE_NUMBER" --add-label "loom:curating"
 gh issue comment "$ISSUE_NUMBER" --body "**Operator-parked, premise possibly stale**: the reference this issue is parked on, #<ref>, is now **closed**. Worth an operator taking another look — not auto-releasing; \`loom:operator-only\` and its sub-kind label are left untouched. <!-- curator:operator-premise-recheck:$CONCLUSION_HASH -->"
+gh issue edit "$ISSUE_NUMBER" --remove-label "loom:curating"
 ```
 
 The bolded **Operator-parked, premise possibly stale** phrasing is the
@@ -1489,15 +1779,41 @@ conclusion is not newsworthy in the `loom:blocked` re-check above.
 
 ### Idempotency
 
-Apply the same three-way decision and 24h staleness window as "Re-check
+Apply the same `decide` call and 24h staleness window as "Re-check
 Idempotency" above, with two differences: use the marker prefix
 `curator:operator-premise-recheck:` (never `curator:dep-recheck:` — the two
 markers must stay distinguishable so a later pass can tell which check
-produced which comment), and fold the closed-reference list into
-`CONCLUSION_HASH` the same way `BLOCKERS` does above — one `"<ref>:<state>"`
-line per referenced number, sorted, plus the verdict (`stale-premise` when
-any reference is closed; nothing is posted at all, and no hash is computed
-or compared, when every reference is still open).
+produced which comment), and compare against `CONCLUSION_HASH` as emitted by
+the `operator-premise` subcommand above — one `"<ref>:<state>"` line per
+referenced number, sorted, folded in under the verdict (`stale-premise` when
+any reference is closed). When `VERDICT=open` (every reference still open),
+`CONCLUSION_HASH` is empty by design: nothing is posted at all, and there is
+nothing to compare against a prior marker either — feed that empty hash into
+`decide --hash ""` exactly as-is; it reports `ACTION=none`/`CLAIM=false`
+without even needing `PRIOR_HASH`, matching "no comment this pass" above.
+
+```bash
+PRIOR=$(gh issue view "$ISSUE_NUMBER" --json comments \
+  --jq '[.comments[] | select(.body | test("<!-- curator:operator-premise-recheck:"))] | last // {}')
+PRIOR_HASH=$(printf '%s\n' "$PRIOR" | jq -r '.body // ""' \
+  | sed -n 's|.*<!-- curator:operator-premise-recheck:\([0-9a-f]\{1,\}\) -->.*|\1|p' | tail -n 1)
+PRIOR_AT=$(printf '%s\n' "$PRIOR" | jq -r '.createdAt // empty')
+_epoch() { date -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null || date -d "$1" +%s; }
+if [ -n "$PRIOR_AT" ]; then
+  PRIOR_AGE_H=$(( ( $(date +%s) - $(_epoch "$PRIOR_AT") ) / 3600 ))
+else
+  PRIOR_AGE_H=""
+fi
+
+if [ -n "$PRIOR_HASH" ]; then
+  eval "$(./.loom/scripts/dep-recheck-fingerprint.sh decide --hash "$CONCLUSION_HASH" \
+    --prior-hash "$PRIOR_HASH" --prior-age-hours "$PRIOR_AGE_H")"
+else
+  eval "$(./.loom/scripts/dep-recheck-fingerprint.sh decide --hash "$CONCLUSION_HASH")"
+fi
+# ACTION=none|skip|comment|heartbeat, CLAIM=true|false — same rule as
+# "Checking Dependencies" above: only claim loom:curating when CLAIM=true.
+```
 
 ### What this section never does
 
@@ -1507,6 +1823,11 @@ or compared, when every reference is still open).
 - Never auto-releases the issue — a closed reference is grounds for an
   operator to look again, not authorization to promote or unblock (explicit
   non-goal of issue #6849).
+- Never claims `loom:curating` on a pass whose `decide` result is
+  `CLAIM=false` (no reference found, every reference still open, or the same
+  stale-premise conclusion inside the heartbeat window) — see "Claim
+  discipline (#7617)" above. `loom:curating` is only ever taken transiently,
+  around posting the one comment this section can produce, never left behind.
 
 ## Issue Quality Checklist
 
@@ -1814,6 +2135,10 @@ Why this pattern matters:
 - Re-verification still happens every pass; only the redundant *comment* is suppressed
 - Real state changes are never suppressed — a changed conclusion always comments
 - Long-stalled issues keep periodic visibility instead of going silent forever
+- Pass 2's skip never claims `loom:curating` at all — only Pass 1 and Pass 3
+  (both `$CLAIM=true` from `decide`) claim, act, and release (#7617). The old
+  shape claimed on every pass, including Pass 2, and released again once the
+  fingerprint came back unchanged — pure churn with no work performed.
 
 ### Verified Corrections Survive Re-Curation → Append, Never Overwrite
 

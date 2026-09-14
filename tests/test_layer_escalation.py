@@ -329,6 +329,10 @@ class TestLayerEscalationValidation:
   (net 0 "")
 )"""
         test_pcb = tmp_path / "test.kicad_pcb"
+        pcb_content = (
+            pcb_content.rstrip()[:-1]
+            + '(gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts") (width 0.05)))'
+        )
         test_pcb.write_text(pcb_content)
 
         # --auto-layers without explicit --layers should work

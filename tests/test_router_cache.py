@@ -27,6 +27,42 @@ from kicad_tools.router.primitives import Pad
 class TestCacheKey:
     """Tests for cache key computation."""
 
+    def test_recipe_and_resolved_classes_invalidate_cached_copper(self, tmp_path):
+        """A sidecar edit or coupled-routing request must not replay old traces."""
+        from kicad_tools.router.cache import routing_cache_context
+        from kicad_tools.router.rules import NetClassRouting
+
+        rules = DesignRules()
+        options = {"net_class_map": "same.json", "differential_pairs": False, "seed": 42}
+        classes = {"MIPI_P": NetClassRouting(name="MIPI", trace_width=0.375)}
+
+        def key(opts, mapping):
+            return CacheKey.compute(
+                "same PCB",
+                rules,
+                0.1,
+                routing_context=routing_cache_context(opts, mapping),
+            )
+
+        original = key(options, classes)
+        assert key({**options, "differential_pairs": True}, classes) != original
+        assert key({**options, "seed": 43}, classes) != original
+        classes["MIPI_P"].trace_width = 0.225
+        assert key(options, classes) != original
+        # Filename identity cannot stand in for the data loaded from that file.
+        assert key(options, classes) == key(dict(reversed(list(options.items()))), classes)
+
+    def test_output_and_display_options_do_not_change_routing_identity(self):
+        from kicad_tools.router.cache import routing_cache_context
+
+        first = routing_cache_context({"seed": 42, "output": "a.pcb", "quiet": True}, {})
+        second = routing_cache_context({"seed": 42, "output": "b.pcb", "quiet": False}, {})
+        assert first == second
+        # The CLI's enriched identity must never hit a pre-fix entry.
+        assert CacheKey.compute("pcb", DesignRules(), 0.1, routing_context=first) != (
+            CacheKey.compute("pcb", DesignRules(), 0.1)
+        )
+
     def test_compute_from_string(self):
         """Test computing cache key from string content."""
         pcb_content = "(kicad_pcb (test content))"
@@ -314,6 +350,11 @@ class TestRoutingCache:
         assert routes[1].net == 2
         assert len(routes[1].vias) == 1
         assert routes[1].vias[0].drill == 0.3
+
+    def test_cache_round_trip_preserves_escape_route_identity(self, temp_cache, sample_routes):
+        sample_routes[0].is_escape = True
+        restored = temp_cache.deserialize_routes(temp_cache.serialize_routes(sample_routes))
+        assert restored == sample_routes
 
     def test_serialize_preserves_data(self, temp_cache, sample_routes):
         """Test that serialization preserves all route data."""
@@ -1156,3 +1197,52 @@ class TestSchemaMigrationV2toV3:
         version = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
         conn.close()
         assert version == "3"
+
+
+@pytest.mark.parametrize("scope", ["board", "subproblem"])
+def test_manufacturer_process_policy_changes_cache_identity(scope):
+    """Issue #5274: a tier that forbids SMD vias must not replay a tier that allows one.
+
+    ``rules.manufacturer`` gates ``MfrLimits.via_in_pad_supported`` -> the grid
+    pathfinders' ``_allow_smd_vias`` guard (and the C++ backend's
+    ``allow_smd_vias``), so it changes which routes are generated.  The CLI's
+    ``routing_context`` binds ``--manufacturer`` for ``kct route``, but callers
+    that build ``DesignRules`` and use these APIs directly had no such
+    protection: all three values below hashed identically.
+    """
+    pads = [
+        Pad(x=0, y=0, width=0.6, height=0.6, net=1, net_name="N", layer=Layer.F_CU),
+        Pad(x=10, y=0, width=0.6, height=0.6, net=1, net_name="N", layer=Layer.F_CU),
+    ]
+    identities = []
+    for manufacturer in (None, "jlcpcb", "jlcpcb-tier1"):
+        rules = DesignRules(manufacturer=manufacturer)
+        if scope == "board":
+            identities.append(CacheKey.compute(b"same board", rules, 0.1).rules_hash)
+        else:
+            identities.append(SubProblemSignature.compute(pads, rules).rules_hash)
+    assert len(set(identities)) == 3, (
+        f"manufacturer/process tier is not part of the {scope} cache identity: {identities}"
+    )
+
+
+def test_manufacturer_free_rules_keep_their_historic_identity():
+    """The #5274 addition is keyed only when set, so old keys survive untouched."""
+    rules = DesignRules(manufacturer=None)
+    import hashlib
+    import json
+
+    baseline = {
+        "trace_width": rules.trace_width,
+        "trace_clearance": rules.trace_clearance,
+        "via_drill": rules.via_drill,
+        "via_diameter": rules.via_diameter,
+        "via_clearance": rules.via_clearance,
+        "grid_resolution": 0.1,
+        "preferred_layer": rules.preferred_layer.value,
+        "alternate_layer": rules.alternate_layer.value,
+    }
+    expected = hashlib.sha256(
+        json.dumps(baseline, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    assert CacheKey.compute(b"board", rules, 0.1).rules_hash == expected

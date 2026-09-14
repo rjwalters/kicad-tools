@@ -38,6 +38,7 @@ import logging
 import math
 import re
 import warnings
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -45,9 +46,10 @@ from typing import TYPE_CHECKING
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
     from kicad_tools.progress import ProgressCallback
 
-    from .primitives import Pad
+    from .primitives import Pad, Segment
     from .stub_terminals import StubTerminal
 
 from .core import Autorouter
@@ -58,6 +60,7 @@ from .geometry import (
     segment_to_segment_distance as _geom_seg_to_seg_dist,
 )
 from .layers import Layer, LayerDefinition, LayerStack, LayerType
+from .pad_geometry import pad_local_point, pad_point_distance
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 
 # Floating-point tolerance for clearance comparisons in validate_routes
@@ -1038,8 +1041,8 @@ def _compute_zone_resolution_and_offset(
     Args:
         comp_pads: List of Pad objects belonging to the component.
         coarse_resolution: The coarse global grid resolution in mm.  The
-            chosen fine resolution will be strictly finer than this (a
-            fine zone at the coarse resolution would be redundant).
+            chosen resolution can equal this when a different origin offset
+            aligns the component; a shifted zone is not redundant.
         min_fine_resolution: Floor for the fine grid resolution (mm).
             Below this, the candidate is rejected as impractical.
 
@@ -1054,17 +1057,16 @@ def _compute_zone_resolution_and_offset(
     # Build candidate resolutions: fixed grid-fraction values plus
     # GCD-derived candidates from this component's pad spacings.  Coarsest
     # values come first so we prefer the cheapest fine zone that works.
-    fixed_candidates = [0.1, 0.05, 0.04, 0.025, 0.02, 0.0125, 0.01]
+    fixed_candidates = [coarse_resolution, 0.1, 0.0635, 0.05, 0.04, 0.025, 0.02, 0.0125, 0.01]
     gcd_candidates = _compute_gcd_grid_candidates(comp_pads, min_grid=min_fine_resolution)
     raw_candidates = sorted(
         {round(c, 6) for c in (fixed_candidates + gcd_candidates)},
         reverse=True,
     )
 
-    # Keep only candidates strictly finer than the coarse grid and at or
-    # above the minimum floor.  A fine zone at >= coarse_resolution would
-    # not refine anything (the coarse grid would suffice).
-    candidates = [c for c in raw_candidates if c < coarse_resolution and c >= min_fine_resolution]
+    # A phase-shifted zone can use the same spacing as the coarse grid.
+    # Keep the existing minimum floor and never choose a coarser spacing.
+    candidates = [c for c in raw_candidates if c <= coarse_resolution and c >= min_fine_resolution]
 
     if not candidates:
         # Fall back to half the coarse grid floored at the minimum.  This
@@ -1115,7 +1117,7 @@ def auto_select_grid_resolution(
         board_height: Board height in mm (for memory constraint check)
         max_cells: Maximum grid cells to allow (default: 500k for performance)
         candidates: Optional list of candidate resolutions to try.
-                   Default: [0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508]
+                   Default: [0.5, 0.25, 0.127, 0.1, 0.065, 0.0635, 0.05, 0.0508]
                    plus GCD-derived candidates from pad spacings.
                    When candidates is None, GCD-based candidates are
                    automatically computed from pad positions and added
@@ -1163,12 +1165,13 @@ def auto_select_grid_resolution(
     #             imperial THT (2.54mm / 0.127 = 20, 5.08mm / 0.127 = 40)
     #   - 0.1mm: Metric footprints, QFP (0.5mm / 0.1 = 5)
     #   - 0.065mm: TSSOP (0.65mm / 0.065 = 10 exact)
+    #   - 0.0635mm (2.5 mil): half the 5-mil lattice, with tighter clearance
     #   - 0.05mm: Good metric alignment but NOT imperial-compatible
     #             (2.54 / 0.05 = 50.8, off-grid by 0.04mm)
     #   - 0.0508mm (2 mil): Imperial-compatible for tight DRC constraints
     #             (2.54 / 0.0508 = 50 exact, 5.08 / 0.0508 = 100 exact)
     if candidates is None:
-        candidates = [0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508]
+        candidates = [0.5, 0.25, 0.127, 0.1, 0.065, 0.0635, 0.05, 0.0508]
 
         # Add GCD-derived candidates from pad spacings.  This handles
         # packages like SSOP/TSSOP whose 0.65mm pitch doesn't align to
@@ -1450,6 +1453,17 @@ def auto_select_grid_resolution(
         min_spacing = _min_pad_center_spacing(pad_list)
         has_fine_pitch = min_spacing is not None and min_spacing <= FINE_PITCH_SPACING_MM
     memory_forced_unsafe_grid = grid_unsafe_by_memory_cap and not lattice_rescued and has_fine_pitch
+    if memory_forced_unsafe_grid:
+        # Pad alignment must not make us reject an otherwise usable safe grid.
+        # The memory filter has already bounded these candidates. Prefer the
+        # best aligned clearance-safe survivor before invoking the hard gate.
+        safe_candidates = [c for c in valid_candidates if c <= recommended_max]
+        if safe_candidates:
+            best_resolution = min(safe_candidates, key=lambda c: (_off_grid_for(c)[0], -c))
+            best_off_grid, best_offset = _off_grid_for(best_resolution)
+            off_grid_pct = best_off_grid / total_pads * 100 if total_pads else 0.0
+            grid_unsafe_by_memory_cap = False
+            memory_forced_unsafe_grid = False
     if grid_unsafe_by_memory_cap:
         if lattice_rescued:
             # Issue #3441: the lattice rescue *chose* this grid because it
@@ -1900,121 +1914,32 @@ class PadPosition:
     y: float
 
 
-def extract_board_dimensions(pcb_path_or_text: str | Path) -> tuple[float, float] | None:
-    """Extract board width and height from a KiCad PCB file.
+def _read_outline_bounds(pcb_path_or_text: str | Path) -> tuple[float, float, float, float] | None:
+    from kicad_tools.core.board_outline import board_outline_bounds
+    from kicad_tools.sexp import parse_string
 
-    Parses the Edge.Cuts outline (``gr_rect`` or four ``gr_line`` segments)
-    to determine board dimensions. This is a lightweight extraction that
-    avoids full PCB parsing.
-
-    Args:
-        pcb_path_or_text: Path to .kicad_pcb file or PCB file contents
-
-    Returns:
-        Tuple of (width_mm, height_mm) or None if no board outline found.
-
-    Example:
-        >>> dims = extract_board_dimensions("board.kicad_pcb")
-        >>> if dims:
-        ...     width, height = dims
-        ...     print(f"Board: {width}mm x {height}mm")
-    """
-    # Read file if path provided
-    if isinstance(pcb_path_or_text, Path):
-        pcb_text = pcb_path_or_text.read_text()
-    elif not pcb_path_or_text.startswith("("):
-        # Looks like a path string
-        pcb_text = Path(pcb_path_or_text).read_text()
+    if isinstance(pcb_path_or_text, str) and pcb_path_or_text.lstrip().startswith("("):
+        text = pcb_path_or_text
     else:
-        pcb_text = pcb_path_or_text
-
-    edge_match = re.search(
-        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)",
-        pcb_text,
-    )
-    if edge_match:
-        x1, y1, x2, y2 = map(float, edge_match.groups())
-        return (abs(x2 - x1), abs(y2 - y1))
-
-    # Fallback: board outlines emitted as four gr_line Edge.Cuts segments
-    # (PCB.create / replace_outline; issue #3805).  Derive the size from the
-    # bounding box of all Edge.Cuts gr_line endpoints.
-    bbox = _edge_cuts_gr_line_bbox(pcb_text)
-    if bbox is not None:
-        min_x, min_y, max_x, max_y = bbox
-        return (max_x - min_x, max_y - min_y)
-    return None
+        text = Path(pcb_path_or_text).read_text()
+    return board_outline_bounds(parse_string(text))
 
 
-def _edge_cuts_gr_line_bbox(pcb_text: str) -> tuple[float, float, float, float] | None:
-    """Bounding box (min_x, min_y, max_x, max_y) of Edge.Cuts gr_line endpoints.
+def extract_board_dimensions(pcb_path_or_text: str | Path) -> tuple[float, float] | None:
+    """Read outline dimensions using the same bounds as schema and routing.
 
-    Lightweight regex scan used by :func:`extract_board_dimensions` and
-    :func:`extract_board_origin` to support board outlines written as four
-    ``gr_line`` segments (issue #3805) rather than a single ``gr_rect``.
-    Returns ``None`` when no Edge.Cuts gr_line geometry is present.
+    Returns None for missing geometry; malformed/unsupported outlines raise ValueError.
     """
-    xs: list[float] = []
-    ys: list[float] = []
-    # Split on the gr_line opener; each chunk holds one gr_line's body up to
-    # the next graphic element.  Only consider chunks on the Edge.Cuts layer.
-    chunks = pcb_text.split("(gr_line")
-    for chunk in chunks[1:]:
-        # Bound the chunk at the next graphic opener so a later element's
-        # layer/coords cannot leak in.
-        next_gr = re.search(r"\(gr_", chunk)
-        body = chunk[: next_gr.start()] if next_gr else chunk
-        if "Edge.Cuts" not in body:
-            continue
-        for cx, cy in re.findall(r"\((?:start|end)\s+(-?[\d.]+)\s+(-?[\d.]+)\)", body):
-            xs.append(float(cx))
-            ys.append(float(cy))
-    if xs and ys:
-        return (min(xs), min(ys), max(xs), max(ys))
-    return None
+    bounds = _read_outline_bounds(pcb_path_or_text)
+    if bounds is None:
+        return None
+    return bounds[2] - bounds[0], bounds[3] - bounds[1]
 
 
 def extract_board_origin(pcb_path_or_text: str | Path) -> tuple[float, float] | None:
-    """Extract board outline origin (bottom-left corner) from a KiCad PCB file.
-
-    Issue #3352 (P_AS4): companion to :func:`extract_board_dimensions`.
-    Used by the auto-pcb-size escalation loop to normalise a recipe's
-    mounting-hole-group anchor against the board outline origin -- KiCad's
-    default origin is ``(100, 100)``, but a hole group declared at
-    ``anchor=(5, 5)`` in the spec typically means "5 mm in from the
-    envelope's bottom-left corner", not "absolute board coord (5, 5)".
-
-    Parses the Edge.Cuts gr_rect to find the start coordinate, then
-    returns ``(min_x, min_y)`` -- the bottom-left corner of the outline.
-
-    Args:
-        pcb_path_or_text: Path to .kicad_pcb file or PCB file contents.
-
-    Returns:
-        ``(origin_x, origin_y)`` in mm, or ``None`` if no board outline
-        gr_rect is detected.
-    """
-    if isinstance(pcb_path_or_text, Path):
-        pcb_text = pcb_path_or_text.read_text()
-    elif not pcb_path_or_text.startswith("("):
-        pcb_text = Path(pcb_path_or_text).read_text()
-    else:
-        pcb_text = pcb_path_or_text
-
-    edge_match = re.search(
-        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)",
-        pcb_text,
-    )
-    if edge_match:
-        x1, y1, x2, y2 = map(float, edge_match.groups())
-        return (min(x1, x2), min(y1, y2))
-
-    # Fallback: four gr_line Edge.Cuts segments (issue #3805).
-    bbox = _edge_cuts_gr_line_bbox(pcb_text)
-    if bbox is not None:
-        min_x, min_y, _max_x, _max_y = bbox
-        return (min_x, min_y)
-    return None
+    """Return the sheet-absolute minimum outline corner, or None if missing."""
+    bounds = _read_outline_bounds(pcb_path_or_text)
+    return bounds[:2] if bounds is not None else None
 
 
 def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
@@ -2086,6 +2011,96 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
     return positions
 
 
+# Tokenize whole atoms before considering the next comment boundary. In the
+# project parser, SPI;SELECT and SPI#SELECT are atoms; # and ; start comments
+# only when encountered where a new token would begin.
+_NET_TOKEN = re.compile(r'(?P<comment>[#;][^\n]*)|"(?:\\.|[^"\\])*"|[()]|[^\s()]+')
+
+
+def _iter_net_references(text: str) -> Iterator[tuple[int | None, str]]:
+    """Read numeric/name, name-only and numeric-only references consistently."""
+    from kicad_tools.sexp import parse_string
+
+    tokens = (match.group() for match in _NET_TOKEN.finditer(text) if not match.group("comment"))
+    for token in tokens:
+        if token != "(":
+            continue
+        if next(tokens, None) != "net":
+            continue
+        values: list[str] = []
+        for token in tokens:
+            if token == ")":
+                break
+            values.append(token)
+        if not 1 <= len(values) <= 2 or "(" in values:
+            continue
+        first = values[0]
+        second = values[1] if len(values) == 2 else None
+        numeric = first.isdecimal()
+        if second is not None and not numeric:
+            continue
+        net_num = int(first) if numeric else None
+        name = second if second is not None else ("" if numeric else first)
+        if name.startswith('"'):
+            # Use the project's string decoder, including escaped quotes/backslashes.
+            name = str(parse_string(f"(name {name})").children[0].value)
+        yield net_num, name
+
+
+def _resolve_pad_net(text: str, net_map: dict[str, int]) -> tuple[int, str]:
+    net_num, name = next(_iter_net_references(text), (None, ""))
+    if net_num is None:
+        return net_map.get(name, 0), name
+    if not name:
+        name = next((key for key, value in net_map.items() if value == net_num), "")
+    return net_num, name
+
+
+def _build_net_number_map(pcb_text: str) -> dict[str, int]:
+    """Resolve net name -> net number for BOTH KiCad net-reference dialects.
+
+    KiCad 7/8 write inline pad/segment/via/zone net references as
+    ``(net N "NAME")`` (numeric id + name) and emit a top-level
+    ``(net N "NAME")`` declaration table.  KiCad 9/10 may instead emit
+    name-only inline references -- ``(net "NAME")`` with no numeric id at
+    all -- and a board can lose its top-level table entirely (e.g.
+    ``kicad-cli --save-board``), leaving NO numeric net ids anywhere in the
+    file. Issue #4983: a router pad-extraction path that only understood
+    the numeric-plus-name dialect resolved every name-only pad to
+    ``net_num=0`` (the "no net" sentinel / obstacle id), silently dropping
+    the net from the routing graph -- ``kct route --nets <name>`` then
+    reported a vacuous "0/0 nets" SUCCESS instead of routing or failing
+    loudly.
+
+    This mirrors :meth:`kicad_tools.schema.pcb.PCB._synthesize_net_table`:
+    any ``(net N "NAME")`` declaration found anywhere in the file is
+    honored verbatim (numeric-dialect boards keep their authored ids
+    byte-for-byte); any net name that never appears with a numeric id is
+    assigned a synthetic id -- the lowest unused positive integer, in
+    first-seen order -- so name-only nets get a stable, routable id
+    instead of collapsing to ``net_num=0``.
+    """
+    references = list(_iter_net_references(pcb_text))
+    net_map: dict[str, int] = {}
+    for net_num, net_name in references:
+        if net_num is not None and net_num > 0 and net_name and net_name not in net_map:
+            net_map[net_name] = net_num
+
+    # Reserve numeric-only references too, so synthesis never aliases authored IDs.
+    used_ids = {number for number, _ in references if number is not None and number > 0}
+    next_id = 1
+    for net_num, net_name in references:
+        if net_num is not None or not net_name or net_name in net_map:
+            continue
+        while next_id in used_ids:
+            next_id += 1
+        net_map[net_name] = next_id
+        used_ids.add(next_id)
+        next_id += 1
+
+    return net_map
+
+
 def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
     """Extract pad objects with ref/pin info for grid analysis.
 
@@ -2110,6 +2125,10 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
         pcb_text = pcb_path_or_text
 
     pads: list[Pad] = []
+
+    # Resolve net name <-> number for both KiCad net-reference dialects
+    # (numeric-plus-name and KiCad 9/10 name-only) -- issue #4983.
+    net_name_to_num = _build_net_number_map(pcb_text)
 
     # Split by footprint for easier parsing
     footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
@@ -2152,6 +2171,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             # Extract pad number/pin
             pin_match = re.search(r'\(pad\s+"?([^"\s)]+)"?', pad_block)
             pin = pin_match.group(1) if pin_match else ""
+            pad_shape = _pad_shape_from_block(pad_block, ref, pin)
 
             # Extract pad type for through_hole detection
             is_thru = "thru_hole" in pad_block
@@ -2179,17 +2199,9 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
             # do NOT add fp_rot on top of it (same fix as load_pcb_for_routing).
             pad_rot_match = re.search(r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block)
             pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
-            total_rot = pad_rot % 360
-            if abs(total_rot - 90) < 1 or abs(total_rot - 270) < 1:
-                width, height = height, width
+            width, height, pad_rotation = _resolve_pad_dims_and_rotation(pad_rot, width, height)
 
-            # Extract net
-            net_match = re.search(r"\(net\s+(\d+)", pad_block)
-            net_num = int(net_match.group(1)) if net_match else 0
-
-            # Extract net name
-            net_name_match = re.search(r'\(net\s+\d+\s+"?([^"\)]+)"?\)', pad_block)
-            net_name = net_name_match.group(1).strip() if net_name_match else ""
+            net_num, net_name = _resolve_pad_net(pad_block, net_name_to_num)
 
             # Determine layer
             layer = Layer.F_CU
@@ -2209,6 +2221,8 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                     layer=layer,
                     through_hole=is_thru,
                     footprint_name=footprint_name,
+                    rotation=pad_rotation,
+                    shape=pad_shape,
                 )
             )
 
@@ -2273,6 +2287,50 @@ def validate_routes(
     def _resolve_net_name(net_id: int) -> str:
         return net_names.get(net_id, f"Net {net_id}")
 
+    # Issue #5240: cheap circle-based lower-bound rejection.  Both loops
+    # below are O(segments x pads) / O(segments^2) with no spatial
+    # pruning, so this function dominates the "Re-route + check
+    # coverage" / DRC-nudge repair loop's CI time on boards with a few
+    # hundred segments.  A segment's centerline is fully contained in a
+    # circle at its midpoint with radius = half its length; a pad's
+    # rectangle (at any rotation) is fully contained in a circle at its
+    # center with radius = its half-diagonal.  Center-to-center distance
+    # minus both radii (and both trace half-widths, where applicable) is
+    # therefore a mathematically guaranteed LOWER BOUND on the true
+    # copper-to-copper gap -- when that bound already meets the required
+    # clearance, the expensive exact rectangle/segment distance call
+    # below is provably >= the clearance and would never register a
+    # violation, so it is skipped.  This changes no violation, no
+    # ordering, and no distance value ever reported; it only elides
+    # geometry calls whose outcome is already decided.  Results are
+    # cached by object identity since the same Segment/Pad is compared
+    # against many partners within one ``validate_routes`` call.
+    _seg_reach_cache: dict[int, tuple[float, float, float]] = {}
+    _pad_radius_cache: dict[int, float] = {}
+
+    def _seg_reach(seg: Segment) -> tuple[float, float, float]:
+        """Return (mid_x, mid_y, half_length) for ``seg``'s centerline."""
+        key = id(seg)
+        cached = _seg_reach_cache.get(key)
+        if cached is not None:
+            return cached
+        mid_x = (seg.x1 + seg.x2) / 2.0
+        mid_y = (seg.y1 + seg.y2) / 2.0
+        half_len = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1) / 2.0
+        result = (mid_x, mid_y, half_len)
+        _seg_reach_cache[key] = result
+        return result
+
+    def _pad_radius(pad: Pad) -> float:
+        """Return the pad's bounding half-diagonal (its worst-case reach)."""
+        key = id(pad)
+        cached = _pad_radius_cache.get(key)
+        if cached is not None:
+            return cached
+        radius = math.hypot(pad.width / 2.0, pad.height / 2.0)
+        _pad_radius_cache[key] = radius
+        return radius
+
     # Issue #3545: NET-AWARE component_inherent classification.  A
     # same-component FOREIGN-net pad violation is only "inherent" (and
     # thus filtered from ``drc_verify_and_nudge`` repair) when a
@@ -2294,12 +2352,19 @@ def validate_routes(
         pitch = _pitches.get(ref)
         if rules.get_clearance_for_component(ref, pitch) < clearance:
             return True
-        # Fine-pitch leg: boards routed with ``fine_pitch_clearance``
-        # unset (the default) get no per-component relaxation signal,
-        # but sub-clearance proximity on a fine-pitch footprint is
-        # still forced by the component geometry -- inherent, not a
-        # repairable routing defect.  Mirrors
-        # ``RoutingGrid._same_component_carveout_active``.
+        # Issue #5004: a pitch-only leg used to classify ANY fine-pitch
+        # component's foreign-net pad violation as "inherent" (component
+        # geometry forces it, filtered from the ``drc_verify_and_nudge``
+        # repair pass and reported only informationally) even when
+        # ``fine_pitch_clearance`` was unset (the default) and no
+        # relaxation was actually configured for the component.  That
+        # under-reported real, repairable sub-clearance defects -- the
+        # router's own violation counts then disagreed with native KiCad
+        # DRC.  Pitch alone no longer classifies a violation as inherent;
+        # ``rules.legacy_fine_pitch_carveout`` restores the old pitch-only
+        # leg.  Mirrors ``RoutingGrid._same_component_carveout_active``.
+        if not getattr(rules, "legacy_fine_pitch_carveout", False):
+            return False
         threshold = getattr(rules, "fine_pitch_threshold", None)
         return pitch is not None and threshold is not None and pitch < threshold
 
@@ -2344,30 +2409,6 @@ def validate_routes(
                 if not pad.through_hole and pad.layer != segment.layer:
                     continue
 
-                # Calculate minimum distance from the segment to the
-                # pad's true axis-aligned rectangle.  Issue #3592: the
-                # previous model treated every pad as a circle of radius
-                # ``max(width, height) / 2``, which over-estimated the
-                # extent of long, thin SMD pads (e.g. an LQFP land at
-                # 1.475 x 0.3 mm) along their short axis by ~0.6 mm and
-                # produced false-positive ``[pad]`` clearance violations
-                # for traces that legally clear the rectangular copper.
-                # Pad ``width``/``height`` are already rotated into PCB
-                # space at load time, so the bounding box is correct.
-                effective_dist = (
-                    _segment_to_aabb_distance(
-                        segment.x1,
-                        segment.y1,
-                        segment.x2,
-                        segment.y2,
-                        pad.x,
-                        pad.y,
-                        pad.width / 2,
-                        pad.height / 2,
-                    )
-                    - seg_half_width
-                )
-
                 # For skipped-pour-net pads, look up the clearance under the
                 # named net (GND, +3V3, ...) rather than net 0, so the
                 # per-class clearance map is honoured.  Falls through to
@@ -2380,6 +2421,38 @@ def validate_routes(
                 pair_clear = max(
                     _get_pair_clearance(route_net, pad.net, clearance, net_names, ncm),
                     pad_class_clear,
+                )
+
+                # Cheap lower-bound rejection (Issue #5240): see the
+                # module-level comment above ``_seg_reach``/``_pad_radius``.
+                # Skips the exact rectangle/segment distance below only
+                # when it is mathematically guaranteed to clear.
+                seg_mid_x, seg_mid_y, seg_half_len = _seg_reach(segment)
+                center_dist = math.hypot(pad.x - seg_mid_x, pad.y - seg_mid_y)
+                gap_lower_bound = center_dist - seg_half_len - _pad_radius(pad) - seg_half_width
+                if gap_lower_bound >= pair_clear - _CLEARANCE_EPSILON_MM:
+                    continue
+
+                # Calculate minimum distance from the segment to the
+                # pad's true axis-aligned rectangle.  Issue #3592: the
+                # previous model treated every pad as a circle of radius
+                # ``max(width, height) / 2``, which over-estimated the
+                # extent of long, thin SMD pads (e.g. an LQFP land at
+                # 1.475 x 0.3 mm) along their short axis by ~0.6 mm and
+                # produced false-positive ``[pad]`` clearance violations
+                # for traces that legally clear the rectangular copper.
+                # Transform to the residual-angle local pad frame so the
+                # rectangle represents rotated copper, not its enlarged AABB.
+                effective_dist = (
+                    _segment_to_aabb_distance(
+                        *pad_local_point(pad, segment.x1, segment.y1),
+                        *pad_local_point(pad, segment.x2, segment.y2),
+                        0.0,
+                        0.0,
+                        pad.width / 2,
+                        pad.height / 2,
+                    )
+                    - seg_half_width
                 )
 
                 if effective_dist < pair_clear - _CLEARANCE_EPSILON_MM:
@@ -2439,6 +2512,34 @@ def validate_routes(
                     if other_seg.layer != segment.layer:
                         continue
 
+                    # Edge-to-edge clearance (both segment half-widths)
+                    other_half_width = other_seg.width / 2
+
+                    pair_clear = _get_pair_clearance(
+                        route_net, other_route.net, clearance, net_names, ncm
+                    )
+
+                    # Cheap lower-bound rejection (Issue #5240): see the
+                    # module-level comment above ``_seg_reach``.  Both
+                    # centerlines are contained in their midpoint +
+                    # half-length circles, so center-to-center distance
+                    # minus both radii and both half-widths is a
+                    # guaranteed lower bound on the true gap -- skip the
+                    # exact (and much costlier) segment-to-segment
+                    # distance call only when that bound already clears.
+                    seg_mid_x, seg_mid_y, seg_half_len = _seg_reach(segment)
+                    other_mid_x, other_mid_y, other_half_len = _seg_reach(other_seg)
+                    center_dist = math.hypot(other_mid_x - seg_mid_x, other_mid_y - seg_mid_y)
+                    gap_lower_bound = (
+                        center_dist
+                        - seg_half_len
+                        - other_half_len
+                        - seg_half_width
+                        - other_half_width
+                    )
+                    if gap_lower_bound >= pair_clear - _CLEARANCE_EPSILON_MM:
+                        continue
+
                     dist = _segment_to_segment_distance(
                         segment.x1,
                         segment.y1,
@@ -2450,13 +2551,7 @@ def validate_routes(
                         other_seg.y2,
                     )
 
-                    # Edge-to-edge clearance (both segment half-widths)
-                    other_half_width = other_seg.width / 2
                     effective_dist = dist - seg_half_width - other_half_width
-
-                    pair_clear = _get_pair_clearance(
-                        route_net, other_route.net, clearance, net_names, ncm
-                    )
 
                     if effective_dist < pair_clear - _CLEARANCE_EPSILON_MM:
                         # Approximate violation location at midpoint of closest approach
@@ -2547,12 +2642,7 @@ def validate_routes(
                 # rectangle rather than a bounding circle so anisotropic
                 # SMD lands do not produce false-positive via-clearance
                 # violations along their short axis.
-                effective_dist = (
-                    _point_to_aabb_distance(
-                        via.x, via.y, pad.x, pad.y, pad.width / 2, pad.height / 2
-                    )
-                    - via_radius
-                )
+                effective_dist = pad_point_distance(pad, via.x, via.y) - via_radius
 
                 if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
                     # Issue #2757: cross-net pad on the same component is
@@ -3174,6 +3264,7 @@ def route_pcb(
                     "x": cx + rx,
                     "y": cy + ry,
                     "width": pad.get("width", 0.5),
+                    "shape": pad.get("shape", "rect"),
                     "height": pad.get("height", 0.5),
                     "net": net_num,
                     "net_name": net_name,
@@ -3207,6 +3298,82 @@ def route_pcb(
     )
 
     return sexp, stats
+
+
+def _routing_pad_shape(shape: str, *, ref: str, pin: str, has_padstack: bool = False) -> str:
+    """Validate physical metadata before reducing a source pad to router geometry.
+
+    Oval and roundrect copper fits inside the rotated nominal rectangle.
+    Custom primitives and layer-specific padstacks can extend beyond that box;
+    routing must stop until their actual copper bounds are supported.
+    """
+    if has_padstack or shape not in {"circle", "rect", "oval", "roundrect"}:
+        geometry = "layer-specific padstack" if has_padstack else repr(shape)
+        raise ValueError(
+            f"Unsupported routing geometry {geometry} for pad {ref}.{pin}; "
+            "use circle, rect, oval, or roundrect pads without a padstack, "
+            "or route this board with a router supporting its full copper geometry."
+        )
+    return shape
+
+
+def _pad_shape_from_block(pad_block: str, ref: str, pin: str) -> str:
+    """Read the physical shape token, including empty or unquoted pad numbers."""
+    match = re.match(r'\(pad\s+(?:"[^\"]*"|[^\s()]+)\s+\w+\s+([^\s()]+)', pad_block)
+    return _routing_pad_shape(
+        match.group(1) if match else "",
+        ref=ref,
+        pin=pin,
+        has_padstack=re.search(r"\(padstack(?:\s|\))", pad_block) is not None,
+    )
+
+
+def _schema_pad_shape(pad, ref: str) -> str:
+    """Preserve schema shape while rejecting unsupported layer-specific copper."""
+    node = getattr(pad, "_sexp_node", None)
+    return _routing_pad_shape(
+        pad.shape,
+        ref=ref,
+        pin=pad.number,
+        has_padstack=node is not None and node.find("padstack") is not None,
+    )
+
+
+def _resolve_pad_dims_and_rotation(
+    pad_rot: float, width: float, height: float
+) -> tuple[float, float, float]:
+    """Board-space ``(width, height, rotation)`` for a pad angle (issue #4910).
+
+    ``pad_rot`` is the pad's ABSOLUTE board-frame angle in degrees (already
+    includes the parent footprint rotation -- issue #3902). At a pad angle
+    within 1 degree of 90/270 the pad's local width/height axes are swapped
+    (this predates #4910 and is unchanged here, so every existing cardinal
+    -rotated pad's ``width``/``height`` stay byte-identical). The returned
+    ``rotation`` is the RESIDUAL angle that swap does not already absorb --
+    ``pad_rot - 90``/``pad_rot - 270`` immediately after a swap fires (a
+    small residual, since the swap only fires near those angles), or
+    ``total_rot`` unchanged when it does not (every non-cardinal angle, e.g.
+    30 or 45 degrees, where width/height are the untouched local dims).
+    An angle within 1 degree of 180 is likewise reduced to ``total_rot -
+    180`` WITHOUT a swap: an axis-aligned bounding box is invariant under a
+    half-turn, so this is exactly equivalent and keeps the extremely common
+    exactly-180-degree pad on :func:`pad_half_extents`' zero-rotation
+    fast path (no trig, hence not even a 1-ulp shift from pre-#4910 values).
+
+    Feeding ``(width, height, rotation)`` to
+    :func:`kicad_tools.router.primitives.pad_half_extents` reproduces the
+    exact true board-space AABB for ANY ``pad_rot`` -- see that function's
+    docstring and :class:`~kicad_tools.router.primitives.Pad`'s ``rotation``
+    field docstring for the algebraic identity this relies on.
+    """
+    total_rot = pad_rot % 360
+    if abs(total_rot - 90) < 1:
+        return height, width, total_rot - 90.0
+    if abs(total_rot - 270) < 1:
+        return height, width, total_rot - 270.0
+    if abs(total_rot - 180) < 1:
+        return width, height, total_rot - 180.0
+    return width, height, total_rot
 
 
 def _extract_pad_blocks(section: str) -> list[str]:
@@ -3245,7 +3412,10 @@ def _extract_pad_blocks(section: str) -> list[str]:
         while i < len(section):
             char = section[i]
 
-            if char == '"' and (i == 0 or section[i - 1] != "\\"):
+            if in_string and char == "\\":
+                i += 2
+                continue
+            if char == '"':
                 in_string = not in_string
             elif not in_string:
                 if char == "(":
@@ -3266,66 +3436,11 @@ def _extract_pad_blocks(section: str) -> list[str]:
 def _extract_edge_segments(
     pcb_text: str,
 ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
-    """Extract board edge segments from Edge.Cuts layer.
+    """Read layer-qualified straight outline edges without crossing S-expression nodes."""
+    from kicad_tools.core.board_outline import board_outline_segments
+    from kicad_tools.sexp import parse_string
 
-    Parses gr_rect and gr_line elements on the Edge.Cuts layer to build
-    a list of line segments defining the board outline.
-
-    Args:
-        pcb_text: Contents of a .kicad_pcb file
-
-    Returns:
-        List of ((x1, y1), (x2, y2)) tuples for each edge segment.
-    """
-    segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
-
-    # Look for gr_rect on Edge.Cuts (simple rectangular boards)
-    # Use .*? with re.DOTALL to match nested parentheses in stroke/fill attributes
-    for rect_match in re.finditer(
-        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)"
-        r'.*?\(layer\s+"Edge\.Cuts"\)',
-        pcb_text,
-        re.DOTALL,
-    ):
-        x1, y1, x2, y2 = map(float, rect_match.groups())
-        # Convert rectangle to 4 line segments
-        segments.extend(
-            [
-                ((x1, y1), (x2, y1)),  # Top
-                ((x2, y1), (x2, y2)),  # Right
-                ((x2, y2), (x1, y2)),  # Bottom
-                ((x1, y2), (x1, y1)),  # Left
-            ]
-        )
-
-    # Also handle gr_rect where layer comes before coordinates
-    for rect_match in re.finditer(
-        r'\(gr_rect.*?\(layer\s+"Edge\.Cuts"\).*?'
-        r"\(start\s+([\d.]+)\s+([\d.]+)\)\s*\(end\s+([\d.]+)\s+([\d.]+)\)",
-        pcb_text,
-        re.DOTALL,
-    ):
-        x1, y1, x2, y2 = map(float, rect_match.groups())
-        segments.extend(
-            [
-                ((x1, y1), (x2, y1)),
-                ((x2, y1), (x2, y2)),
-                ((x2, y2), (x1, y2)),
-                ((x1, y2), (x1, y1)),
-            ]
-        )
-
-    # Look for gr_line elements on Edge.Cuts (complex board outlines)
-    for line_match in re.finditer(
-        r"\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+"
-        r'\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)',
-        pcb_text,
-        re.DOTALL,
-    ):
-        x1, y1, x2, y2 = map(float, line_match.groups())
-        segments.append(((x1, y1), (x2, y2)))
-
-    return segments
+    return board_outline_segments(parse_string(pcb_text))
 
 
 def _install_fine_pitch_regions_from_components(
@@ -3402,6 +3517,8 @@ def _install_fine_pitch_regions_from_components(
                         pin=str(pad_info.get("number", "")),
                         through_hole=bool(pad_info.get("through_hole", False)),
                         drill=float(pad_info.get("drill", 0.0)),
+                        rotation=float(pad_info.get("rotation", 0.0)),
+                        shape=pad_info.get("shape", "rect"),
                     )
                 )
             except (TypeError, ValueError, KeyError):
@@ -3457,12 +3574,20 @@ def load_pcb_for_routing(
     lattice_link_budget_s: float | None = None,
     lattice_deadline: float | None = None,
     min_trace_width_floor: float | None = None,
+    placement_disposition: RoutingPlacementDisposition | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
 
     Args:
         pcb_path: Path to .kicad_pcb file
+        placement_disposition: Optional precomputed placement exclusion. Only
+            its invalid nets are removed from targets (selection remains the
+            caller's responsibility). Excluded pads and authored copper remain
+            neutral obstacles even without load_existing_routes. Exporters MUST
+            retain router.placement_preserved_copper exactly once when replacing
+            copper; placement_preserved_routes carries original net identities.
+            This is distinct from skip_nets and never forces power/pour intent.
         skip_nets: Net names to skip (e.g., ["GND", "+3.3V"] for plane nets)
         netlist: Optional dict mapping "REF.PIN" to net name (e.g., {"U1.1": "+3.3V"})
                  If provided, overrides any net assignments in the PCB file.
@@ -3606,39 +3731,38 @@ def load_pcb_for_routing(
     """
     pcb_text = Path(pcb_path).read_text()
     skip_nets = skip_nets or []
+    placement_invalid = (
+        placement_disposition.invalid_nets if placement_disposition is not None else frozenset()
+    )
+    preserve_placement = (
+        placement_disposition.preserve_copper_nets
+        if placement_disposition is not None
+        else frozenset()
+    )
 
     # Parse PCB design rules if needed
     pcb_rules: PCBDesignRules | None = None
     if rules is None and use_pcb_rules:
         pcb_rules = parse_pcb_design_rules(pcb_text)
 
-    # Parse board dimensions from Edge.Cuts gr_rect
-    edge_match = re.search(
-        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)",
-        pcb_text,
-    )
-    if edge_match:
-        x1, y1, x2, y2 = map(float, edge_match.groups())
-        board_width = x2 - x1
-        board_height = y2 - y1
-        origin_x = x1
-        origin_y = y1
-    else:
-        # Default HAT dimensions
-        board_width = 65.0
-        board_height = 56.0
-        origin_x = 115.0
-        origin_y = 75.0
+    bounds = _read_outline_bounds(pcb_text)
+    if bounds is None:
+        raise ValueError("Cannot route PCB: missing supported Edge.Cuts outline")
+    origin_x, origin_y, max_x, max_y = bounds
+    board_width, board_height = max_x - origin_x, max_y - origin_y
+    if board_width <= 0 or board_height <= 0:
+        raise ValueError("Cannot route PCB: Edge.Cuts outline has zero width or height")
 
-    # Parse nets
-    net_map: dict[str, int] = {}
-    for match in re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text):
-        net_num, net_name = int(match.group(1)), match.group(2)
-        if net_num > 0:
-            net_map[net_name] = net_num
+    edge_segments = _extract_edge_segments(pcb_text)
+
+    # Parse nets. Resolves both the numeric-plus-name dialect (top-level
+    # ``(net N "NAME")`` table) and the KiCad 9/10 name-only dialect, where
+    # a board may carry no numeric net ids anywhere -- issue #4983.
+    net_map: dict[str, int] = _build_net_number_map(pcb_text)
 
     # Parse footprints and their pads
     components: list[dict] = []
+    placement_pad_nets: list[tuple[str, str, str, str]] = []
 
     # Split by footprint for easier parsing
     footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
@@ -3688,6 +3812,7 @@ def load_pcb_for_routing(
                 continue
             pad_num = pad_start.group(1) or pad_start.group(2)
             pad_type = pad_start.group(3)  # smd or thru_hole
+            pad_shape = _pad_shape_from_block(pad_block, ref, pad_num)
 
             # Extract at position (now searches entire multi-line block)
             at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", pad_block)
@@ -3703,21 +3828,8 @@ def load_pcb_for_routing(
             pad_w = float(size_match.group(1))
             pad_h = float(size_match.group(2))
 
-            # Extract net (if present)
-            # KiCad 7/8: (net <number> "name"), KiCad 9+: (net "name")
-            net_match = re.search(r'\(net\s+(\d+)\s+"([^"]+)"\)', pad_block)
-            if net_match:
-                net_num = int(net_match.group(1))
-                net_name = net_match.group(2)
-            else:
-                # KiCad 9 name-only format
-                net_name_match = re.search(r'\(net\s+"([^"]+)"\)', pad_block)
-                if net_name_match:
-                    net_name = net_name_match.group(1)
-                    net_num = net_map.get(net_name, 0)
-                else:
-                    net_num = 0
-                    net_name = ""
+            net_num, net_name = _resolve_pad_net(pad_block, net_map)
+            authored_net_name = net_name
 
             # Extract drill size if present
             drill_match = re.search(r"\(drill\s+([\d.]+)", pad_block)
@@ -3751,9 +3863,12 @@ def load_pcb_for_routing(
                         net_num = max(net_map.values(), default=0) + 1
                         net_map[net_name] = net_num
 
+            if placement_disposition is not None:
+                placement_pad_nets.append((ref, pad_num, authored_net_name, net_name))
+
             # For skipped nets (power/ground planes), still add pad as obstacle
             # but use net=0 so it blocks routing without being a routeable net
-            if net_name in skip_nets:
+            if net_name in skip_nets or net_name in placement_invalid:
                 net_num = 0  # Treat as obstacle, not a routable net
 
             # Transform pad position by footprint rotation.
@@ -3772,11 +3887,11 @@ def load_pcb_for_routing(
             # Rotate pad dimensions to PCB space. The pad's angle is stored
             # ABSOLUTE in the file (KiCad already folds the footprint rotation
             # into it -- issue #3902), so it IS the board-frame orientation;
-            # do NOT add fp_rot on top of it.
-            total_rot = pad_rot % 360
-            # At 90° or 270° the pad's width and height axes swap
-            if abs(total_rot - 90) < 1 or abs(total_rot - 270) < 1:
-                pad_w, pad_h = pad_h, pad_w
+            # do NOT add fp_rot on top of it. At 90/270 degrees the pad's
+            # width/height axes swap; ``pad_rotation`` is the RESIDUAL angle
+            # that swap does not already absorb (issue #4910) -- see
+            # ``_resolve_pad_dims_and_rotation`` for the full convention.
+            pad_w, pad_h, pad_rotation = _resolve_pad_dims_and_rotation(pad_rot, pad_w, pad_h)
 
             pads.append(
                 {
@@ -3790,6 +3905,8 @@ def load_pcb_for_routing(
                     "through_hole": pad_type == "thru_hole",
                     "drill": drill_size,
                     "layer": pad_layer,
+                    "rotation": pad_rotation,
+                    "shape": pad_shape,
                 }
             )
 
@@ -3855,6 +3972,15 @@ def load_pcb_for_routing(
             strict=strict_drc,
         )
 
+    if (
+        placement_disposition is not None
+        and tuple(sorted(placement_pad_nets)) != placement_disposition.pad_net_identities
+    ):
+        raise ValueError(
+            "Placement disposition pad/net identities do not match this board and netlist; "
+            "recompute analyze_routing_placement with the loader's effective netlist"
+        )
+
     # Auto-detect layer stack from PCB if not provided (Issue #949)
     # This ensures pad layers match the available routing layers
     if layer_stack is None:
@@ -3878,11 +4004,10 @@ def load_pcb_for_routing(
     try:
         from .net_class import classify_and_apply_rules as _classify_rules
 
-        _net_names_for_class: dict[int, str] = {}
-        for _m in re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text):
-            _nid, _nm = int(_m.group(1)), _m.group(2)
-            if _nid > 0:
-                _net_names_for_class[_nid] = _nm
+        # Reuse the dialect-normalized net_map (issue #4983) so name-only
+        # boards get auto-classified nets too, instead of every net falling
+        # back to DEFAULT_NET_CLASS_MAP's generic DIGITAL class.
+        _net_names_for_class: dict[int, str] = {v: k for k, v in net_map.items()}
         if _net_names_for_class:
             _auto_rules = _classify_rules(_net_names_for_class)
             for _name, _routing in _auto_rules.items():
@@ -3938,10 +4063,15 @@ def load_pcb_for_routing(
         strategy=strategy,
     )
 
+    router.placement_disposition = placement_disposition
+
     # Issue #4506: retain the source path so the voltage-map activation helper
     # can build attach regions from the canonical board model.  Do not parse it
     # here: absent --voltage-map the loading path remains byte-for-byte inert.
     router._pairwise_attach_zone_pcb_path = str(pcb_path)
+    # Keep impedance synthesis lazy, but use authored dielectric geometry
+    # when it activates instead of silently substituting a generic stackup.
+    router._impedance_source_pcb_path = str(pcb_path)
 
     # Issue #3371 / P_FP3 -- fine-pitch escape region detection.  Must run
     # BEFORE pads land on the grid so the per-pad halos
@@ -3964,7 +4094,6 @@ def load_pcb_for_routing(
     # Extract edge segments for board bbox and optional edge clearance
     # (Issue #2039).  The bbox derived from actual edge cuts is more
     # accurate than grid origin/dimensions for OOB filtering.
-    edge_segments = _extract_edge_segments(pcb_text)
     if edge_segments:
         all_xs = [p[0] for seg in edge_segments for p in seg]
         all_ys = [p[1] for seg in edge_segments for p in seg]
@@ -4013,18 +4142,69 @@ def load_pcb_for_routing(
                 print(f"  Edge clearance: {edge_clearance}mm, {blocked_cells} cells blocked")
 
     # Load existing routes as obstacles for multi-pass routing
-    if load_existing_routes:
-        from .optimizer.pcb import parse_segments, parse_vias
+    if load_existing_routes or preserve_placement:
+        from .optimizer.pcb import (
+            _extract_balanced_blocks,
+            parse_segments,
+            parse_vias,
+            resolve_block_net,
+        )
         from .primitives import Route
 
+        # Keep exact authored blocks for the exporter: reserializing Route
+        # alone loses UUIDs/locked flags and can renumber name-only copper.
+        id_to_name = {number: name for name, number in net_map.items()}
+        preserved_blocks: list[tuple[int, str]] = []
+        expected_geometry: dict[tuple[str, str], int] = {}
+        zone_blocks = _extract_balanced_blocks(pcb_text, "zone") if preserve_placement else []
+        for _start, _end, zone in zone_blocks:
+            identity = resolve_block_net(zone, id_to_name, net_map)
+            if (
+                identity is not None
+                and identity[1] in preserve_placement
+                and re.search(r"\((?:filled_polygon|fill_segments)\b", zone)
+            ):
+                raise ValueError(
+                    f"Cannot preserve placement-invalid net {identity[1]!r}: "
+                    "filled zone copper is not supported as a routing obstacle"
+                )
+        for kind in ("segment", "via", "arc") if preserve_placement else ():
+            for start, _end, block in _extract_balanced_blocks(pcb_text, kind):
+                identity = resolve_block_net(block, id_to_name, net_map)
+                if identity is None or identity[1] not in preserve_placement:
+                    continue
+                if kind == "arc":
+                    raise ValueError(
+                        f"Cannot preserve placement-invalid net {identity[1]!r}: "
+                        "arc copper is not supported as a routing obstacle"
+                    )
+                preserved_blocks.append((start, block))
+                key = (kind, identity[1])
+                expected_geometry[key] = expected_geometry.get(key, 0) + 1
+        router.placement_preserved_copper = "\n".join(
+            block for _, block in sorted(preserved_blocks)
+        )
         existing_segments = parse_segments(pcb_text)
         existing_vias = parse_vias(pcb_text)
+        for (kind, name), count in expected_geometry.items():
+            parsed_count = (
+                len(existing_segments.get(name, []))
+                if kind == "segment"
+                else len(existing_vias.get(name, []))
+            )
+            if parsed_count != count:
+                raise ValueError(
+                    f"Cannot preserve placement-invalid net {name!r}: "
+                    f"unsupported or malformed {kind} copper"
+                )
 
         # Collect all net names across segments and vias
         all_net_names = set(existing_segments.keys()) | set(existing_vias.keys())
 
         route_count = 0
-        for net_name in all_net_names:
+        for net_name in sorted(all_net_names) if preserve_placement else all_net_names:
+            if not load_existing_routes and net_name not in preserve_placement:
+                continue
             segs = existing_segments.get(net_name, [])
             vias = existing_vias.get(net_name, [])
             if not segs and not vias:
@@ -4042,6 +4222,28 @@ def load_pcb_for_routing(
             # Mark on grid as obstacles (blocked cells) but do NOT add to
             # router.routes — these are fixed geometry, not re-routable nets.
             # Store in router.existing_routes so DRC and via-merge can see them.
+            if net_name in preserve_placement:
+                # The optimizer parser assigns net 0 to name-only copper
+                # without a numeric header; align its geometry with the same
+                # dialect-normalized identities used for pads and net_map.
+                source_id = net_map[net_name]
+                route = replace(
+                    route,
+                    net=source_id,
+                    segments=[replace(seg, net=source_id) for seg in route.segments],
+                    vias=[replace(via, net=source_id) for via in route.vias],
+                )
+                router.placement_preserved_routes += (route,)
+                # Source copper may use a net that a netlist override split
+                # into valid and invalid effective nets. Neutral ownership is
+                # essential: no currently routable net may reuse that copper.
+                route = replace(
+                    route,
+                    net=0,
+                    net_name="",
+                    segments=[replace(seg, net=0, net_name="") for seg in route.segments],
+                    vias=[replace(via, net=0, net_name="") for via in route.vias],
+                )
             router.grid.mark_route(route)
             router.existing_routes.append(route)
             route_count += 1
@@ -4511,10 +4713,22 @@ def verify_output_connectivity(
     net_ref_re = re.compile(r'\(net\s+(?:(\d+)|"((?:[^"\\]|\\.)*)")\s*\)')
     # Header net table, used to resolve a name-only reference back to its id
     # so both dialects key ``segments_by_net`` identically.
-    name_to_id = {
-        m.group(2): int(m.group(1))
-        for m in re.finditer(r'\(net\s+(\d+)\s+"([^"]*)"\)', pcb_content)
-    }
+    #
+    # Issue #4983: a KiCad-10 name-only board can have NO top-level
+    # ``(net N "NAME")`` table anywhere in the OUTPUT file either (the
+    # writer preserves the input's dialect), so scanning ``pcb_content``
+    # alone left ``name_to_id`` empty and every ``(net "NAME")`` segment/via
+    # resolved to ``net_id=None`` -- silently dropping all copper from
+    # ``segments_by_net``/``vias_by_net`` and producing a false
+    # "0 pads connected" report for a net the router actually routed.
+    # ``net_names`` (id -> name) is the SAME map ``load_pcb_for_routing``
+    # built to key ``net_pads`` in the first place (including any
+    # synthetic ids assigned to name-only nets), so reversing it here is
+    # authoritative; any additional header-table entries found in the
+    # output text are merged in without overriding it.
+    name_to_id: dict[str, int] = {name: nid for nid, name in (net_names or {}).items() if name}
+    for m in re.finditer(r'\(net\s+(\d+)\s+"([^"]*)"\)', pcb_content):
+        name_to_id.setdefault(m.group(2), int(m.group(1)))
 
     def _block_net_id(block: str) -> int | None:
         m = net_ref_re.search(block)

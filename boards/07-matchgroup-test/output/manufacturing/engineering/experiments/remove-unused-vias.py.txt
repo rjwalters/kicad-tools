@@ -1,0 +1,16 @@
+import json,shutil
+from pathlib import Path
+from shapely.geometry import Point
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.geometry.copper import segment_copper_polygon
+src=Path('/tmp/board07-sdram/a10-detour-68');out=Path('/tmp/board07-sdram/clean-final');out.mkdir(exist_ok=True)
+b=PCB.load(src/'sdram_demo.kicad_pcb');native=json.load(open(src/'native.json'));ids={item['uuid'] for v in native['violations'] if v['type']=='via_dangling' for item in v['items']};removed=[]
+for via in b.vias:
+ if via.uuid not in ids:continue
+ layers={s.layer for s in b.segments if s.net_name==via.net_name and Point(via.position).buffer(via.size/2).intersects(segment_copper_polygon(s.start,s.end,s.width))}
+ assert len(layers)==1,(via.net_name,via.position,layers)
+ removed.append({'uuid':via.uuid,'net':via.net_name,'position':via.position,'only_connected_layer':next(iter(layers))})
+assert len(removed)==len(ids)==18
+for node in list(b._sexp.find_all('via')):
+ if node.find('uuid').get_string(0) in ids:b._sexp.remove(node)
+b.save(out/'sdram_demo.kicad_pcb');shutil.copy2(src/'sdram_demo.kicad_pro',out/'sdram_demo.kicad_pro');(out/'removed-unused-vias.json').write_text(json.dumps(removed,indent=2));print('Removed18 single-layer-only fanout barrels; freshnative/strict checks required')

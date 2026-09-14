@@ -192,6 +192,26 @@ if ! run "${GIT_C[@]}" rebase --onto "$DEFAULT_BRANCH" "$PARENT_BRANCH" "$CHILD_
     exit 2
 fi
 
+# Version-bearing-file sync gate (#7168, extended #7341): `rebase --onto`
+# replays ONLY the child's own commits, so it silently absorbs whatever
+# version-bearing values $DEFAULT_BRANCH already had. A file the child's own
+# commits never touched (in practice .loom/install-metadata.json) never
+# raises a git conflict, so it can end up stale relative to VERSION/the files
+# that WERE part of the rebase -- invisible until CI's "Installer Integration
+# Tests" fails. This script had the identical gap rebase-stacked-children.sh
+# was fixed for in #7168/#7171 (both rebase + force-push directly, never
+# through create-pr.sh) -- run the same shared gate here too, in whichever
+# directory the rebase actually ran (the child worktree when one holds the
+# branch, else the current directory). Skipped under --dry-run: no rebase
+# actually happened, so there is nothing new to check.
+if [[ "$DRY_RUN" != "true" ]] && [[ -x "$SCRIPT_DIR/version-check-gate.sh" ]]; then
+    GATE_CWD="${CHILD_WORKTREE:-.}"
+    if ! (cd "$GATE_CWD" && "$SCRIPT_DIR/version-check-gate.sh" --fix-hint "then push."); then
+        err "Version-bearing files are out of sync for '$CHILD_BRANCH' after rebase onto '$DEFAULT_BRANCH' (see BLOCKER:/Fix: above)."
+        exit 2
+    fi
+fi
+
 # 2. Publish the rewritten child branch. --force-with-lease (never bare --force)
 #    so a concurrent push aborts rather than clobbers. Pushed from the same
 #    worktree the rebase ran in, so the current branch there is the child branch.

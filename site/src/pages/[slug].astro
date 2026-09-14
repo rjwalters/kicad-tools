@@ -20,6 +20,7 @@ import { loadBoards, boardsDir, discoverBoardDirs } from "../data/loadBoards.ts"
 import { displayStatus, displayStatusLabel } from "../data/boardStatus.ts";
 import type { Board } from "../data/types.ts";
 import RenderGallery from "../components/RenderGallery.astro";
+import ReadinessProgress from "../components/ReadinessProgress.astro";
 import SiteHeader from "../components/Header.astro";
 import SiteFooter from "../components/Footer.astro";
 
@@ -30,7 +31,7 @@ import SiteFooter from "../components/Footer.astro";
  * passed through as the `extras` prop. All are staged by `copy-renders` into
  * `public/boards/<slug>/manufacturing/` when present in the source tree.
  */
-const PRIMARY_MFG = { file: "kicad_project.zip", label: "Manufacturing package (ZIP)" };
+const PRIMARY_MFG = { file: "kicad_project.zip", label: "KiCad project (ZIP)" };
 
 export async function getStaticPaths() {
   const boards = loadBoards();
@@ -62,9 +63,19 @@ export async function getStaticPaths() {
     // consts) because Astro bundles `getStaticPaths` separately.
     const primaryFile = "kicad_project.zip";
     const extraFiles = [
+      { file: "gerbers/gerbers.zip", label: "Gerber fabrication files (ZIP)" },
       { file: "report.pdf", label: "Fabrication report (PDF)" },
       { file: "bom_jlcpcb.csv", label: "Bill of materials (CSV)" },
+      { file: "manual-assembly-bom.csv", label: "Manual assembly parts (CSV)" },
       { file: "cpl_jlcpcb.csv", label: "Component placement (CSV)" },
+      { file: "schematic.pdf", label: "Schematic (PDF)" },
+      { file: "assembly-front.pdf", label: "Front assembly drawing (PDF)" },
+      { file: "assembly-back.pdf", label: "Back assembly drawing (PDF)" },
+      { file: "README.txt", label: "Manufacturing instructions (TXT)" },
+      { file: "procurement-review.md", label: "Procurement review (Markdown)" },
+      { file: "manifest.json", label: "Artifact manifest (JSON)" },
+      { file: "check-report.json", label: "Electrical and manufacturing checks (JSON)" },
+      { file: "native-drc.json", label: "KiCad DRC report (JSON)" },
     ];
 
     const hasPrimary =
@@ -75,6 +86,7 @@ export async function getStaticPaths() {
     const extras = mfgDir
       ? extraFiles.filter((e) => existsSync(join(mfgDir, e.file)))
       : [];
+    const hasFullPackage = dir !== undefined && existsSync(join(dir, "output", "manufacturing.zip"));
 
     // Build-time signal for the interactive viewer: the prebuild `copy-renders`
     // step stages each board's `.kicad_pcb` (routed preferred) as
@@ -88,7 +100,7 @@ export async function getStaticPaths() {
 
     return {
       params: { slug: board.slug },
-      props: { board, hasPrimary, extras, hasPcb },
+      props: { board, hasPrimary, hasFullPackage, extras, hasPcb },
     };
   });
 }
@@ -96,11 +108,12 @@ export async function getStaticPaths() {
 interface DetailProps {
   board: Board;
   hasPrimary: boolean;
+  hasFullPackage: boolean;
   extras: Array<{ file: string; label: string }>;
   hasPcb: boolean;
 }
 
-const { board, hasPrimary, extras, hasPcb } = Astro.props as DetailProps;
+const { board, hasPrimary, hasFullPackage, extras, hasPcb } = Astro.props as DetailProps;
 
 // Same-origin URL of the staged PCB (see `copy-renders.mjs`). KiCanvas fetches
 // this at runtime; served from `public/`, there are no CORS concerns on the
@@ -116,7 +129,7 @@ const statusVariant = displayStatus(board);
 const statusLabel = displayStatusLabel(board);
 
 const mfgBase = `/boards/${board.slug}/manufacturing`;
-const hasDownloads = hasPrimary || extras.length > 0;
+const hasDownloads = hasFullPackage || hasPrimary || extras.length > 0;
 
 /**
  * Metrics rows, built in display order. Each entry is pushed only when its
@@ -127,11 +140,11 @@ type Row = { label: string; value: string; warn?: boolean };
 const rows: Row[] = [];
 rows.push({ label: "Build Status", value: statusLabel, warn: statusVariant === "drc" });
 if (board.nets_routed_pct !== undefined) {
-  rows.push({ label: "Nets Routed", value: `${board.nets_routed_pct.toFixed(1)}%` });
+  rows.push({ label: board.readiness?.metrics?.nets_routed_pct !== undefined ? "Nets routed" : "Export report nets routed", value: `${board.nets_routed_pct.toFixed(1)}%` });
 }
 if (board.drc_violations !== undefined) {
   rows.push({
-    label: "DRC Violations",
+    label: board.readiness?.metrics?.drc_violations !== undefined ? "DRC violations" : "Export report DRC violations",
     value: `${board.drc_violations}`,
     warn: board.drc_violations > 0,
   });
@@ -186,7 +199,7 @@ if (board.manifest_generated_at !== undefined) {
   </head>
   <body>
     <SiteHeader />
-    <main>
+    <main id="main-content" tabindex="-1">
       <p class="back-top">
         <a href="/">← Back to gallery</a>
       </p>
@@ -200,13 +213,22 @@ if (board.manifest_generated_at !== undefined) {
         {board.slug !== displayName && <p class="slug">{board.slug}</p>}
       </header>
 
+      <section aria-label="Manufacturing readiness">
+        <h2>Manufacturing readiness</h2>
+        {board.readiness?.checked_at && <p>Checked <time datetime={board.readiness.checked_at}>{board.readiness.checked_at}</time>.</p>}
+        {board.readiness?.mode === "pcb_only" && <p>Scope: bare PCB fabrication. Component procurement and assembly are not included.</p>}
+        {board.readiness?.mode === "assembly" && <p>Scope: PCB fabrication and assembly files.</p>}
+        {board.readiness?.blockers.length ? <ul>{board.readiness.blockers.map(reason => <li>{reason}</li>)}</ul> : null}
+        <ReadinessProgress board={board} />
+        {statusVariant !== "ready" && <p>Downloads are design artifacts and are not verified for ordering.</p>}
+      </section>
+
       {
         !isBuilt && (
           <p class="not-built">
-            This board has not been built yet — no renders, metrics, or
-            manufacturing package are available. Run <code>uv run kct
-            board-metrics --all</code> (and the render / manufacture steps) to
-            populate its data.
+            Complete design artifacts are not published here. Any verified
+            development checks are listed above; they do not establish a
+            manufacturing package or tested hardware.
           </p>
         )
       }
@@ -407,6 +429,9 @@ if (board.manifest_generated_at !== undefined) {
         {
           hasDownloads ? (
             <ul class="download-list">
+              {hasFullPackage && (
+                <li><a href={`/boards/${board.slug}/manufacturing.zip`} download>Full manufacturing package (ZIP)</a></li>
+              )}
               {hasPrimary && (
                 <li>
                   <a
@@ -439,42 +464,7 @@ if (board.manifest_generated_at !== undefined) {
   </body>
 </html>
 
-<style is:global>
-  :root {
-    color-scheme: dark;
-    --bg: #0a0e12;
-    --text: #e6edf3;
-    --muted: #9aa7b2;
-    --accent: #3fae7a;
-    --border: #25303a;
-    --card-bg: #11171d;
-    --badge-bg: #1b2530;
-  }
 
-  * {
-    box-sizing: border-box;
-  }
-
-  html,
-  body {
-    margin: 0;
-    padding: 0;
-  }
-
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family:
-      system-ui,
-      -apple-system,
-      "Segoe UI",
-      Roboto,
-      Helvetica,
-      Arial,
-      sans-serif;
-    line-height: 1.5;
-  }
-</style>
 
 <style>
   main {
@@ -539,7 +529,7 @@ if (board.manifest_generated_at !== undefined) {
 
   /* DRC-violation chip (#3717): a distinct red warn tone so a violating board
      is never confused with the amber "Partial" or green "Ready" states. */
-  .chip-drc {
+  .chip-drc, .chip-blocked {
     background: rgba(214, 84, 79, 0.92);
     color: #1c0605;
   }
@@ -549,8 +539,10 @@ if (board.manifest_generated_at !== undefined) {
     color: #1a1300;
   }
 
+  .chip-development,
+  .chip-blocked,
   .chip-no_artifacts {
-    background: rgba(120, 134, 148, 0.85);
+    background: rgb(120, 134, 148);
     color: #0c1116;
   }
 

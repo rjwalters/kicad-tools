@@ -17,6 +17,16 @@
 # mirroring `has_open_pr_labeled_loom_pr()`'s existing shape) and wires it
 # into all four call sites.
 #
+# #7071 EXTENSION: the SAME four call sites never excluded `loom:blocked`
+# either — only `loom:operator-only` was fixed above. `loom:blocked` means
+# exactly the same thing for a Builder ("can never act on this right now"),
+# and a curated issue can carry both `loom:issue` and `loom:blocked`
+# simultaneously. The fix mirrors #6941's shape again: a `has_blocked()`
+# helper, wired into the same four call sites alongside `has_operator_only()`.
+# This suite is extended with a parallel set of assertions (Tests 1b-8b)
+# covering `has_blocked()` at each site, without touching the existing
+# `has_operator_only()` assertions above (no regression, per #7071 AC5).
+#
 # Verifies that:
 #   1. guide.md defines `has_operator_only()` immediately after
 #      `has_open_pr_labeled_loom_pr()`, in the same shape.
@@ -103,13 +113,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Test 2: the "Finding Work" ready-queue query excludes loom:operator-only
+# Test 1b (#7071): has_blocked() is defined, mirroring has_operator_only()
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 2: the ready-queue query excludes loom:operator-only"
+echo "Test 1b: guide.md defines has_blocked()"
 
-assert_grep '\-label:loom:building \-label:loom:operator-only' "$GUIDE_MD" \
-    "the ready-queue search term excludes both loom:building and loom:operator-only"
+assert_grep '^has_blocked\(\) \{' "$GUIDE_MD" \
+    "has_blocked() is defined"
+assert_grep 'loom:blocked,\*\) echo "true"; return' "$GUIDE_MD" \
+    "has_blocked() matches the loom:blocked label"
+
+DEF_BLOCKED="$(grep -n '^has_blocked() {' "$GUIDE_MD" | head -1 | cut -d: -f1)"
+if [[ -n "$DEF_OPERATOR_ONLY" && -n "$DEF_BLOCKED" && "$DEF_BLOCKED" -gt "$DEF_OPERATOR_ONLY" ]]; then
+    pass "has_blocked() is defined after has_operator_only() (same neighborhood)"
+else
+    fail "expected has_blocked() to follow has_operator_only() (operator_only=$DEF_OPERATOR_ONLY blocked=$DEF_BLOCKED)"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 2: the "Finding Work" ready-queue query excludes loom:operator-only
+# (and, #7071, loom:blocked)
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 2: the ready-queue query excludes loom:operator-only and loom:blocked"
+
+assert_grep '\-label:loom:building \-label:loom:operator-only \-label:loom:blocked' "$GUIDE_MD" \
+    "the ready-queue search term excludes loom:building, loom:operator-only, and loom:blocked"
 
 # ---------------------------------------------------------------------------
 # Test 3: "Evict ineligible holders" names loom:operator-only, without a
@@ -144,6 +173,12 @@ else
     pass "eviction step does not gate on urgent-flip-guard.sh (evicts the same tick it's noticed)"
 fi
 
+if grep -q 'has_blocked' <<<"$EVICT_BLOCK"; then
+    pass "the eviction step references has_blocked() (#7071)"
+else
+    fail "expected 'has_blocked' inside the 'Evict ineligible holders' step"
+fi
+
 # ---------------------------------------------------------------------------
 # Test 4: "Fill free slots" excludes has_operator_only() candidates
 # ---------------------------------------------------------------------------
@@ -161,6 +196,12 @@ if grep -q 'has_operator_only' <<<"$FILL_BLOCK"; then
     pass "the 'Fill free slots' step references has_operator_only()"
 else
     fail "expected 'has_operator_only' inside the 'Fill free slots' step"
+fi
+
+if grep -q 'has_blocked' <<<"$FILL_BLOCK"; then
+    pass "the 'Fill free slots' step references has_blocked() (#7071)"
+else
+    fail "expected 'has_blocked' inside the 'Fill free slots' step"
 fi
 
 # ---------------------------------------------------------------------------
@@ -183,14 +224,21 @@ else
     fail "expected a 'has_operator_only <number>' call inside the Safety Check section"
 fi
 
+if grep -q 'has_blocked <number>' <<<"$SAFETY_BLOCK"; then
+    pass "the Safety Check section calls has_blocked() before the urgent-flip-guard write (#7071)"
+else
+    fail "expected a 'has_blocked <number>' call inside the Safety Check section"
+fi
+
 HAS_BUILDING_LINE="$(grep -n 'grep -q "loom:building"' <<<"$SAFETY_BLOCK" | head -1 | cut -d: -f1)"
 HAS_OPERATOR_ONLY_LINE="$(grep -n 'has_operator_only <number>' <<<"$SAFETY_BLOCK" | head -1 | cut -d: -f1)"
+HAS_BLOCKED_LINE="$(grep -n 'has_blocked <number>' <<<"$SAFETY_BLOCK" | head -1 | cut -d: -f1)"
 HAS_OPEN_PR_LINE="$(grep -n 'has_open_pr_labeled_loom_pr <number>' <<<"$SAFETY_BLOCK" | head -1 | cut -d: -f1)"
-if [[ -n "$HAS_BUILDING_LINE" && -n "$HAS_OPERATOR_ONLY_LINE" && -n "$HAS_OPEN_PR_LINE" ]] \
-    && (( HAS_BUILDING_LINE < HAS_OPERATOR_ONLY_LINE && HAS_OPERATOR_ONLY_LINE < HAS_OPEN_PR_LINE )); then
-    pass "the checks run in order: loom:building, then has_operator_only(), then has_open_pr_labeled_loom_pr()"
+if [[ -n "$HAS_BUILDING_LINE" && -n "$HAS_OPERATOR_ONLY_LINE" && -n "$HAS_BLOCKED_LINE" && -n "$HAS_OPEN_PR_LINE" ]] \
+    && (( HAS_BUILDING_LINE < HAS_OPERATOR_ONLY_LINE && HAS_OPERATOR_ONLY_LINE < HAS_BLOCKED_LINE && HAS_BLOCKED_LINE < HAS_OPEN_PR_LINE )); then
+    pass "the checks run in order: loom:building, then has_operator_only(), then has_blocked(), then has_open_pr_labeled_loom_pr()"
 else
-    fail "expected loom:building < has_operator_only < has_open_pr_labeled_loom_pr (got building=$HAS_BUILDING_LINE operator_only=$HAS_OPERATOR_ONLY_LINE open_pr=$HAS_OPEN_PR_LINE)"
+    fail "expected loom:building < has_operator_only < has_blocked < has_open_pr_labeled_loom_pr (got building=$HAS_BUILDING_LINE operator_only=$HAS_OPERATOR_ONLY_LINE blocked=$HAS_BLOCKED_LINE open_pr=$HAS_OPEN_PR_LINE)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -207,6 +255,16 @@ if [[ -z "$FUNC_BODY" ]]; then
 fi
 pass "extracted has_operator_only() verbatim from guide.md"
 
+BLOCKED_FUNC_BODY="$(sed -n '/^has_blocked() {/,/^}/p' "$GUIDE_MD")"
+
+if [[ -z "$BLOCKED_FUNC_BODY" ]]; then
+    echo -e "${RED}FATAL${NC}: could not extract has_blocked() from guide.md"
+    echo "================================"
+    echo "Tests run:    $TESTS_RUN"
+    exit 1
+fi
+pass "extracted has_blocked() verbatim from guide.md (#7071)"
+
 if ! command -v jq >/dev/null 2>&1; then
     echo ""
     echo "SKIP: jq not available, skipping the executable has_operator_only()/eviction/fill tests"
@@ -221,8 +279,9 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 0
 fi
 
-# Load the extracted function into THIS shell.
+# Load the extracted functions into THIS shell.
 eval "$FUNC_BODY"
+eval "$BLOCKED_FUNC_BODY"
 
 # ---------------------------------------------------------------------------
 # Fixture: a stub `gh` returning canned `issue view --json labels` output for
@@ -231,6 +290,9 @@ eval "$FUNC_BODY"
 # sub-kind, mirroring how the label always ships alongside a sub-kind, #5671);
 # #300 is a plain ready loom:issue candidate (lower tier); #400 is a
 # loom:operator-only + loom:issue candidate that outranks #300 on tier alone.
+# #7071: #250 mirrors #200 but for loom:blocked (an incumbent that has since
+# GAINED loom:blocked); #450 mirrors #400 but for loom:blocked (a
+# loom:blocked + loom:issue candidate that outranks #300 on tier alone).
 # ---------------------------------------------------------------------------
 gh() {
     if [[ "$1" == "issue" && "$2" == "view" ]]; then
@@ -238,8 +300,10 @@ gh() {
         case "$number" in
             100) labels_csv="loom:issue,loom:urgent" ;;
             200) labels_csv="loom:issue,loom:urgent,loom:operator-only,loom:operator-blocked" ;;
+            250) labels_csv="loom:issue,loom:urgent,loom:blocked" ;;
             300) labels_csv="loom:issue,tier:goal-supporting" ;;
             400) labels_csv="loom:issue,tier:goal-advancing,loom:operator-only,loom:operator-decision" ;;
+            450) labels_csv="loom:issue,tier:goal-advancing,loom:blocked" ;;
             *) labels_csv="" ;;
         esac
         label_json="$(IFS=,; for n in $labels_csv; do printf '{"name":"%s"},' "$n"; done)"
@@ -273,6 +337,17 @@ assert_eq "$(has_operator_only 100)" "false" "#100 (plain loom:urgent incumbent)
 assert_eq "$(has_operator_only 200)" "true" "#200 (gained loom:operator-only + operator-blocked) is operator-only"
 assert_eq "$(has_operator_only 300)" "false" "#300 (plain loom:issue candidate) is not operator-only"
 assert_eq "$(has_operator_only 400)" "true" "#400 (loom:issue + loom:operator-only + operator-decision) is operator-only"
+
+# ---------------------------------------------------------------------------
+# Test 6b (#7071): has_blocked() itself, against the fixtures above
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 6b: has_blocked() (executed, against fixture gh output)"
+
+assert_eq "$(has_blocked 100)" "false" "#100 (plain loom:urgent incumbent) is not blocked"
+assert_eq "$(has_blocked 250)" "true" "#250 (gained loom:blocked) is blocked"
+assert_eq "$(has_blocked 300)" "false" "#300 (plain loom:issue candidate) is not blocked"
+assert_eq "$(has_blocked 450)" "true" "#450 (loom:issue + loom:blocked) is blocked"
 
 # ---------------------------------------------------------------------------
 # Test 7 (AC): an incumbent that gains loom:operator-only is evicted the
@@ -312,6 +387,37 @@ fi
 # so the eviction happens the same tick it's noticed, with no cooldown wait.
 
 # ---------------------------------------------------------------------------
+# Test 7b (AC, #7071): an incumbent that gains loom:blocked is evicted the
+# SAME tick, mirroring Test 7 but for has_blocked().
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 7b: incumbent eviction — gaining loom:blocked evicts immediately"
+
+evict_ineligible_blocked() {
+    # Mirrors "Evict ineligible holders" for the has_blocked() condition only.
+    local number="$1"
+    if [[ "$(has_blocked "$number")" == "true" ]]; then
+        echo "true"
+        return
+    fi
+    echo "false"
+}
+
+INCUMBENTS_BLOCKED=(100 250)
+SURVIVORS_BLOCKED=()
+for n in "${INCUMBENTS_BLOCKED[@]}"; do
+    if [[ "$(evict_ineligible_blocked "$n")" == "false" ]]; then
+        SURVIVORS_BLOCKED+=("$n")
+    fi
+done
+
+if [[ "${#SURVIVORS_BLOCKED[@]}" -eq 1 && "${SURVIVORS_BLOCKED[0]}" == "100" ]]; then
+    pass "incumbent #250 (gained loom:blocked) is evicted; #100 stays"
+else
+    fail "expected only #100 to survive eviction, got: ${SURVIVORS_BLOCKED[*]:-<none>}"
+fi
+
+# ---------------------------------------------------------------------------
 # Test 8 (AC): a loom:operator-only + loom:issue candidate is never selected
 # to fill a free slot, even when it strictly outranks the only other
 # eligible candidate on tier.
@@ -345,6 +451,39 @@ assert_eq "$SELECTED" "300" \
 SELECTED_NONE="$(fill_free_slot 400)"
 assert_eq "$SELECTED_NONE" "" \
     "a free slot with only a loom:operator-only candidate available is left unfilled"
+
+# ---------------------------------------------------------------------------
+# Test 8b (AC, #7071): a loom:blocked + loom:issue candidate is never
+# selected to fill a free slot, mirroring Test 8 but for has_blocked().
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 8b: 'Fill free slots' never selects a loom:blocked candidate"
+
+fill_free_slot_blocked() {
+    # Mirrors "Fill free slots" for the has_blocked() condition only.
+    local candidates=("$@")
+    for n in "${candidates[@]}"; do
+        if [[ "$(has_blocked "$n")" == "true" ]]; then
+            continue
+        fi
+        echo "$n"
+        return
+    done
+    echo ""
+}
+
+# #450 (tier:goal-advancing, rank 3) would out-rank #300 (tier:goal-supporting,
+# rank 4) on urgency_rank() alone -- listed FIRST to prove has_blocked() is
+# what excludes it, not candidate ordering.
+SELECTED_BLOCKED="$(fill_free_slot_blocked 450 300)"
+assert_eq "$SELECTED_BLOCKED" "300" \
+    "the loom:blocked candidate (#450) is skipped even though it outranks #300 on tier"
+
+# A slot with ONLY a blocked candidate available stays unfilled rather than
+# promoting it.
+SELECTED_BLOCKED_NONE="$(fill_free_slot_blocked 450)"
+assert_eq "$SELECTED_BLOCKED_NONE" "" \
+    "a free slot with only a loom:blocked candidate available is left unfilled"
 
 # ---------------------------------------------------------------------------
 echo ""

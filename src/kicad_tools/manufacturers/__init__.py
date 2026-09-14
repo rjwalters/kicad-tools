@@ -35,6 +35,14 @@ from .base import (
     match_rotation_correction,
 )
 from .dru_generator import generate_dru, merge_dru_floors
+from .fabrication_overrides import (
+    FabricationOverride,
+    UnsafeFabricationOverrideError,
+    apply_fabrication_overrides,
+    discover_fabrication_overrides_sidecar,
+    load_fabrication_overrides,
+    resolve_pcb_fabrication_overrides,
+)
 from .flashpcb import FLASHPCB_PROFILE
 from .jlcpcb import JLCPCB_PROFILE
 from .jlcpcb_tier1 import JLCPCB_TIER1_PROFILE
@@ -70,6 +78,13 @@ __all__ = [
     "build_project_data",
     "build_project_rules",
     "write_drc_constraints",
+    # Per-board fabrication overrides (#5006)
+    "FabricationOverride",
+    "UnsafeFabricationOverrideError",
+    "apply_fabrication_overrides",
+    "discover_fabrication_overrides_sidecar",
+    "load_fabrication_overrides",
+    "resolve_pcb_fabrication_overrides",
     # Profiles (for direct access)
     "FLASHPCB_PROFILE",
     "JLCPCB_PROFILE",

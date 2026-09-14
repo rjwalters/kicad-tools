@@ -22,10 +22,9 @@
  *                  →  served at `/boards/<slug>/renders/<file>`
  *   - Manufacturing:  the downloadable files under
  *                     `boards/<id>/output/manufacturing/` that the detail page
- *                     links (the kicad_project.zip plus optional report.pdf /
- *                     BOM / CPL). Only an allow-list of known download files is
- *                     copied — gerbers/, images/, and other intermediate
- *                     directories are intentionally NOT staged.
+ *                     links (KiCad project ZIP, Gerber ZIP, report.pdf, BOM and CPL).
+ *                     Only an allow-list of download files is copied; images
+ *                     and other intermediate artifacts are not staged.
  *                  →  `site/public/boards/<slug>/manufacturing/<file>`
  *                  →  served at `/boards/<slug>/manufacturing/<file>`
  *   - PCB file:       the board's routed `.kicad_pcb` (preferred) or a
@@ -67,17 +66,25 @@ const SITE_DIR = resolve(SCRIPT_DIR, "..");
 /**
  * Allow-list of manufacturing download files staged for the detail page.
  *
- * Only these named files are copied (not the whole `manufacturing/` tree) so we
- * never publish multi-megabyte gerber/image intermediates. `kicad_project.zip`
- * is the primary package (also referenced by `board.json`'s
- * `manufacturing_package`); the rest are optional supplementary downloads that
- * the detail page links only when present.
+ * Only these named files are copied (not the whole `manufacturing/` tree).
+ * The Gerber archive is the fabrication download; kicad_project.zip contains
+ * editable KiCad sources. Supplementary files are linked only when present.
  */
 const MANUFACTURING_FILES = [
   "kicad_project.zip",
   "report.pdf",
   "bom_jlcpcb.csv",
+  "manual-assembly-bom.csv",
   "cpl_jlcpcb.csv",
+  "gerbers/gerbers.zip",
+  "schematic.pdf",
+  "assembly-front.pdf",
+  "assembly-back.pdf",
+  "README.txt",
+  "manifest.json",
+  "check-report.json",
+  "native-drc.json",
+  "procurement-review.md",
 ];
 
 /** True if `path` exists and is a directory. */
@@ -187,11 +194,21 @@ function main() {
         const destMfg = join(destRoot, slug, "manufacturing");
         mkdirSync(destMfg, { recursive: true });
         for (const file of present) {
+          mkdirSync(dirname(join(destMfg, file)), { recursive: true });
           copyFileSync(join(srcMfg, file), join(destMfg, file));
           mfgCopied += 1;
         }
         boardsWithMfg += 1;
       }
+    }
+
+    // The complete archive lives outside manufacturing/ to avoid a manifest cycle.
+    const fullPackage = join(dir, "output", "manufacturing.zip");
+    if (isFile(fullPackage)) {
+      const destBoard = join(destRoot, slug);
+      mkdirSync(destBoard, { recursive: true });
+      copyFileSync(fullPackage, join(destBoard, "manufacturing.zip"));
+      mfgCopied += 1;
     }
 
     // --- PCB file (for the interactive viewer) ---

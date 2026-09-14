@@ -100,8 +100,6 @@ INNER_ONLY_ALLOWLIST: frozenset[str] = frozenset(
         # Internal routing-algorithm toggles exposed through the
         # ``route_cmd.py`` parser for development experimentation.
         # Promote to the outer parser when ready to support officially.
-        "--auto-pour",
-        "--no-auto-pour",
         "--batch-routing",
         "--bus-min-width",
         "--bus-mode",

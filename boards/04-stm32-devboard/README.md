@@ -2,6 +2,14 @@
 
 This example demonstrates the complete workflow for creating a PCB design programmatically using kicad-tools.
 
+The reviewed assembled design uses **MCP1825S-3302E/DB (C148031)**; do not
+substitute AMS1117, whose pinout differs. Order two layers with the **paid
+0.15mm mechanical drilling option** and tented through vias. Eight drill
+positions were moved clear of SMT lands. See [DESIGN_REVIEW.md](DESIGN_REVIEW.md)
+for the manufacturer evidence, power limits, and first-article checks.
+Current fabrication/assembly evidence is hash-bound in `output/readiness.json`;
+the full reviewed package is `output/manufacturing.zip`.
+
 ## Quick Start
 
 ```bash
@@ -20,7 +28,7 @@ kct build boards/04-stm32-devboard --dry-run
 We create a simple **STM32 Development Board** (Blue Pill style) with both
 schematic and a fully-placed PCB:
 
-- 5V → 3.3V LDO voltage regulator (AMS1117-3.3) with input/output decoupling
+- 5V → 3.3V LDO voltage regulator (MCP1825S-3302E/DB) with input/output decoupling
 - **STM32F103C8T6 MCU** (LQFP-48, 0.5mm pitch) -- placed and wired:
   - PA13/PA14 → SWDIO/SWCLK
   - PB3       → SWO
@@ -164,7 +172,7 @@ ldo = LDOBlock(
     x=80,
     y=100,
     ref="U1",
-    value="AMS1117-3.3",
+    value="MCP1825S-3302E/DB",
     input_cap="10uF",
     output_caps=["10uF", "100nF"],
 )
@@ -260,28 +268,28 @@ auto-router.  After generating, you can:
 4. **Re-route** - `kct route boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb -o ./routed.kicad_pcb --timeout 240`
 5. **Export Files** - generate Gerbers, BOM, and CPL via `kct export`
 
-## Future API Features
+## Project API
 
-The kicad-tools API is evolving to support the complete workflow:
+The `Project` API supports routing and manufacturing exports for an existing
+project (see `src/kicad_tools/project.py`):
 
 ```python
-# Planned API (not yet implemented)
-project = Project.create("stm32_devboard")
+from kicad_tools import Project
 
-# Sync schematic to PCB
-project.sync_to_pcb()
+project = Project.load("output/stm32_devboard.kicad_pro")
 
-# Auto-route with manufacturer rules
-project.route(strategy="negotiated", manufacturer="jlcpcb")
+# Auto-route with the default routing rules.
+project.route()
 
-# Validate
-result = project.check_drc(manufacturer="jlcpcb", layers=2)
-
-# Export manufacturing files
-project.export_gerbers("output/manufacturing/")
-project.export_bom("output/manufacturing/bom.csv")
-project.export_positions("output/manufacturing/positions.csv")
+# Export Gerbers and the assembly package (including BOM and positions).
+project.export_gerbers("output/manufacturing/", manufacturer="jlcpcb")
+project.export_assembly("output/manufacturing/", manufacturer="jlcpcb")
 ```
+
+`project.check_drc(manufacturer="jlcpcb", layers=2, report_path=...)`
+checks an existing native KiCad DRC report; generate that report first.
+Schematic-to-PCB synchronization still uses the CLI workflow above;
+`project.sync_to_pcb()` is not implemented.
 
 ## Related Examples
 

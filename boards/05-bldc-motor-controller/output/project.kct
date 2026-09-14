@@ -1,0 +1,188 @@
+kct_version: '1.0'
+project:
+  name: Sensored BLDC Controller
+  revision: B
+  author: kicad-tools
+  description: 'Small sensored BLDC motor controller: ATmega328P-AU, DRV8313PWPR and
+    TPS7A1650DGNR, complete ISP/power/current-monitor circuit.'
+  artifacts:
+    schematic: bldc_controller.kicad_sch
+    pcb: bldc_controller.kicad_pcb
+    routed: bldc_controller_routed.kicad_pcb
+intent:
+  summary: Demonstrate real motor commutation, power routing, thermal ground and complete
+    manufacturing artifacts.
+requirements:
+  electrical:
+    input_voltage:
+      min: 12
+      max: 24
+      unit: V
+    motor_current:
+      continuous: 0.5
+      peak: 1.0
+      unit: A
+    notes: Initial bench target, pending physical motor/thermal validation. Current-limited
+      regulated supply, 30mA maximum total 5V load; 20mA Hall allocation. Firmware
+      25% duty cap.
+  mechanical:
+    board_size:
+      width: 70
+      height: 90
+      unit: mm
+  manufacturing:
+    layers:
+      preferred: 4
+    min_trace: 0.15mm
+    min_space: 0.127mm
+    min_drill: 0.2mm
+    copper_weight: 1oz
+    target_fab: jlcpcb
+bom_entries:
+- ref: U1
+  part: ATMEGA328P-AU
+  lcsc: C14877
+- ref: U2
+  part: DRV8313PWPR
+  lcsc: C92482
+- ref: U3
+  part: TPS7A1650DGNR
+  lcsc: C468238
+- ref: J1
+  part: ZX-PZ2.54-1-2PZZ
+  lcsc: C7501260
+- ref: J2
+  part: 2.54-1*3P
+  lcsc: C49257
+- ref: J3
+  part: 2.54-1*6P
+  lcsc: C37208
+- ref: J4
+  part: 2.54-2*3P
+  lcsc: C65114
+- ref: J5
+  part: ZX-PZ2.54-1-2PZZ
+  lcsc: C7501260
+- ref: RV1
+  part: 3296W-1-103LF
+  lcsc: C34846
+- ref: F1
+  part: SF-1206S100-2
+  lcsc: C3167176
+- ref: D1
+  part: SS36
+  lcsc: C16015
+- ref: D2
+  part: SMBJ24A
+  lcsc: C224017
+- ref: D3
+  part: 17-21SURC/S530-A2/TR8
+  lcsc: C131244
+- ref: C1
+  part: EEEFT1H221AP
+  lcsc: C178594
+- ref: C2
+  part: CC0805KRX7R9BB104
+  lcsc: C49678
+- ref: C3
+  part: CC0805KRX7R9BB104
+  lcsc: C49678
+- ref: C4
+  part: CL21B103KBANNNC
+  lcsc: C1710
+- ref: C5
+  part: CC0805KRX7R9BB104
+  lcsc: C49678
+- ref: C6
+  part: CL21B474KBFNNNE
+  lcsc: C13967
+- ref: C7
+  part: CL21B105KBFNNNE
+  lcsc: C28323
+- ref: C8
+  part: CL21A106KAYNNNE
+  lcsc: C15850
+- ref: C9
+  part: CC0805KRX7R9BB104
+  lcsc: C49678
+- ref: C10
+  part: CC0805KRX7R9BB104
+  lcsc: C49678
+- ref: C11
+  part: CC0805KRX7R9BB104
+  lcsc: C49678
+- ref: C12
+  part: CC0805KRX7R9BB104
+  lcsc: C49678
+- ref: C13
+  part: CL21B103KBANNNC
+  lcsc: C1710
+- ref: C14
+  part: CC0805KRX7R9BB104
+  lcsc: C49678
+- ref: C15
+  part: CC0805KRX7R9BB104
+  lcsc: C49678
+- ref: C16
+  part: CC0805KRX7R9BB104
+  lcsc: C49678
+- ref: R1
+  part: WSL2512R5000FEA
+  lcsc: C511023
+- ref: R2
+  part: 0805W8F5602T5E
+  lcsc: C17756
+- ref: R3
+  part: 0805W8F1002T5E
+  lcsc: C17414
+- ref: R4
+  part: 0805W8F1001T5E
+  lcsc: C17513
+- ref: R5
+  part: 0805W8F1002T5E
+  lcsc: C17414
+- ref: R6
+  part: 0805W8F1002T5E
+  lcsc: C17414
+- ref: R7
+  part: 0805W8F1002T5E
+  lcsc: C17414
+- ref: R8
+  part: 0805W8F1002T5E
+  lcsc: C17414
+- ref: R9
+  part: 0805W8F1002T5E
+  lcsc: C17414
+- ref: R10
+  part: 0805W8F1002T5E
+  lcsc: C17414
+- ref: R11
+  part: 0805W8F1002T5E
+  lcsc: C17414
+- ref: R12
+  part: 0805W8F1002T5E
+  lcsc: C17414
+- ref: R13
+  part: 0805W8F1001T5E
+  lcsc: C17513
+decisions:
+- date: '2026-09-09'
+  phase: schematic
+  topic: Repair invalid original motor-control circuit
+  choice: Real integrated DRV8313 triple bridge, ATmega328P, TPS7A1650; conservative
+    small-motor demonstrator
+  rationale: Original DRV8301 regulator/charge-pump/buck pins and procurement invalid,
+    issue4993. Datasheet pin maps and native or TI-derived physical land patterns.
+progress:
+  phase: manufacturing
+  phases:
+    schematic:
+      status: completed
+      checklist:
+      - '[x] Native ERC and label LVS clean'
+      - '[x] Verified component identities and support circuit'
+    layout:
+      status: completed
+      checklist:
+      - '[x] Physical component placement'
+      - '[x] Native copper/DRC/manufacturing verification'

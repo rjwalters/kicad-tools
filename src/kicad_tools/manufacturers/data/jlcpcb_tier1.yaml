@@ -28,6 +28,7 @@ design_rules:
     min_via_drill_mm: 0.3
     min_via_diameter_mm: 0.6
     min_annular_ring_mm: 0.15
+    min_pth_annular_ring_mm: 0.18  # JLC rigid PCB capabilities, PTH ring, verified 2026-09-09
     min_hole_diameter_mm: 0.3
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.3
@@ -49,6 +50,7 @@ design_rules:
     min_via_drill_mm: 0.3
     min_via_diameter_mm: 0.6
     min_annular_ring_mm: 0.15
+    min_pth_annular_ring_mm: 0.254  # JLC rigid PCB capabilities, PTH ring, verified 2026-09-09
     min_hole_diameter_mm: 0.3
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.3
@@ -70,6 +72,7 @@ design_rules:
     min_via_drill_mm: 0.2
     min_via_diameter_mm: 0.45
     min_annular_ring_mm: 0.10       # 4 mil (JLCPCB advanced PCB capability for 4+ layers)
+    min_pth_annular_ring_mm: 0.15  # JLC rigid PCB capabilities, PTH ring, verified 2026-09-09
     min_hole_diameter_mm: 0.2
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.3
@@ -91,6 +94,7 @@ design_rules:
     min_via_drill_mm: 0.2
     min_via_diameter_mm: 0.45
     min_annular_ring_mm: 0.10       # 4 mil (JLCPCB advanced PCB capability for 4+ layers)
+    min_pth_annular_ring_mm: 0.254  # JLC rigid PCB capabilities, PTH ring, verified 2026-09-09
     min_hole_diameter_mm: 0.2
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.3
@@ -112,6 +116,7 @@ design_rules:
     min_via_drill_mm: 0.2
     min_via_diameter_mm: 0.45
     min_annular_ring_mm: 0.15       # 6 mil (per JLCPCB specs)
+    min_pth_annular_ring_mm: 0.15  # JLC rigid PCB capabilities, PTH ring, verified 2026-09-09
     min_hole_diameter_mm: 0.2
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.3

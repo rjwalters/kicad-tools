@@ -6,7 +6,13 @@ are complete, incomplete, or unrouted, with details on what's missing.
 Connectivity is decided by real geometric copper contact (shapely polygon
 intersection, matching ``kicad-cli pcb drc`` semantics) by default; pass
 ``strict=False`` to opt into the legacy 0.01mm endpoint-proximity model
-(see ``NetStatusAnalyzer.POSITION_TOLERANCE`` for the trade-offs).
+(see ``NetStatusAnalyzer.POSITION_TOLERANCE`` for the trade-offs). Boards with
+copper arcs always use geometric contact: endpoint proximity cannot describe
+interior arc contact and must not substitute a chord for the curved copper.
+
+Strict graphs retain each physical pad occurrence, including duplicate pad
+numbers. Reports keep logical ``REF.PAD`` names and board positions. Duplicate
+numbers never imply an internal component jumper in this copper model.
 
 Example:
     >>> from kicad_tools.schema.pcb import PCB
@@ -43,6 +49,13 @@ class PadInfo:
     position: tuple[float, float]  # Board coordinates (x, y)
     is_connected: bool  # Whether pad is connected to main routing
     layers: list[str] = field(default_factory=list)  # Layers pad exists on
+
+    # Internal graph identity; display names deliberately remain REF.PAD.
+    node_id: str = field(default="", repr=False)
+
+    @property
+    def connectivity_id(self) -> str:
+        return self.node_id or self.full_name
 
     @property
     def full_name(self) -> str:
@@ -505,7 +518,8 @@ class NetStatusAnalyzer:
                 reports open (#4176), and it reports false opens when a trace
                 endpoint lands inside pad copper but away from the pad center
                 (#4557).  Legitimate uses are perf-sensitive inner loops that
-                only consume before/after deltas.
+                only consume before/after deltas. Boards containing copper arcs
+                always use geometry, including when ``strict=False`` is requested.
         """
         from kicad_tools.schema.pcb import PCB as PCBClass
 
@@ -518,14 +532,16 @@ class NetStatusAnalyzer:
             self.pcb = pcb
             pcb_path = getattr(pcb, "path", None)
             self.source_file = str(pcb_path) if pcb_path else ""
-        self.strict = strict
+        # Endpoint heuristics cannot represent curved copper or interior contact.
+        # Arc-bearing boards therefore require real copper geometry in both modes.
+        self.strict = strict or bool(self.pcb.arcs)
         # Strict-mode geometry caches (Issue #4176), keyed by object id.
         self._segment_poly_cache: dict[int, Any] = {}
         self._via_geom_cache: dict[int, Any] = {}
-        # Per-analyzer pad copper polygon cache (keyed ``REF.PAD``); ``None``
+        # Per-analyzer pad copper polygon cache (keyed by physical occurrence); ``None``
         # until first built lazily in :meth:`_pad_polys`.
         self._pad_poly_cache: dict[str, Any] | None = None
-        if strict:
+        if self.strict:
             from kicad_tools._shapely import require_shapely
 
             require_shapely("net-status --strict real-geometry connectivity")
@@ -664,7 +680,7 @@ class NetStatusAnalyzer:
             )
 
         # Check for routing
-        segments = list(self.pcb.segments_in_net(net_number))
+        segments = [*self.pcb.segments_in_net(net_number), *self.pcb.arcs_in_net(net_number)]
         status.has_routing = len(segments) > 0
 
         # Check for vias
@@ -686,7 +702,7 @@ class NetStatusAnalyzer:
         graph = self._build_connectivity_graph(net_number, pad_infos)
 
         # Find connected components (islands)
-        islands = self._find_islands(graph, [p.full_name for p in pad_infos])
+        islands = self._find_islands(graph, [p.connectivity_id for p in pad_infos])
         # Issue #4934: the island COUNT (not just which pads sit in the
         # largest one) is what a ratsnest-style "remaining connections"
         # metric needs, so record it before the largest-island collapse.
@@ -701,7 +717,7 @@ class NetStatusAnalyzer:
 
         # Classify pads
         for pad_info in pad_infos:
-            pad_info.is_connected = pad_info.full_name in connected_names
+            pad_info.is_connected = pad_info.connectivity_id in connected_names
             if pad_info.is_connected:
                 status.connected_pads.append(pad_info)
             else:
@@ -711,6 +727,17 @@ class NetStatusAnalyzer:
         status.unconnected_pads.sort(key=lambda p: (p.reference, p.pad_number))
 
         return status
+
+    def _pad_node_id(self, fp_index: int, pad_index: int, fp: Any, pad: Any) -> str:
+        """Keep physical occurrences separate even with missing/duplicate UUIDs.
+
+        Indices are stable for this analyzer's immutable board snapshot. Legacy
+        mode retains its historical logical-name grouping; names in reports do
+        not change in either mode.
+        """
+        if self.strict:
+            return f"__pad:{fp_index}:{pad_index}"
+        return f"{fp.reference}.{pad.number}"
 
     def _get_net_pads_with_positions(self, net_number: int) -> list[PadInfo]:
         """Get all pads on a net with their board positions.
@@ -722,14 +749,14 @@ class NetStatusAnalyzer:
             List of PadInfo objects
         """
         pads = []
-        for fp in self.pcb.footprints:
+        for fp_index, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
 
             fp_x, fp_y = fp.position
             rotation = fp.rotation
 
-            for pad in fp.pads:
+            for pad_index, pad in enumerate(fp.pads):
                 if pad.net_number == net_number:
                     # Transform pad position to board coordinates
                     board_pos = self._transform_pad_position(pad.position, fp_x, fp_y, rotation)
@@ -740,6 +767,7 @@ class NetStatusAnalyzer:
                             position=board_pos,
                             is_connected=False,
                             layers=pad.layers,
+                            node_id=self._pad_node_id(fp_index, pad_index, fp, pad),
                         )
                     )
         return pads
@@ -789,11 +817,11 @@ class NetStatusAnalyzer:
             Adjacency list mapping pad names to connected pad names
         """
         graph: dict[str, set[str]] = defaultdict(set)
-        pad_positions = {p.full_name: p.position for p in pad_infos}
-        pad_layers = {p.full_name: p.layers for p in pad_infos}
+        pad_positions = {p.connectivity_id: p.position for p in pad_infos}
+        pad_layers = {p.connectivity_id: p.layers for p in pad_infos}
 
         # Get segments and vias for this net
-        segments = list(self.pcb.segments_in_net(net_number))
+        segments = [*self.pcb.segments_in_net(net_number), *self.pcb.arcs_in_net(net_number)]
         vias = list(self.pcb.vias_in_net(net_number))
 
         # Get zones for this net with their layers, filled polygons, and boundaries
@@ -1137,15 +1165,15 @@ class NetStatusAnalyzer:
         # reference validator's geometry so the model matches
         # ``extract_pad_partition`` exactly.
         pad_polys: dict[str, Any] = {}
-        for fp in self.pcb.footprints:
+        for fp_index, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
-            for pad in fp.pads:
+            for pad_index, pad in enumerate(fp.pads):
                 if pad.net_number != net_number:
                     continue
                 if pad.number is None or pad.number == "":
                     continue
-                pad_id = f"{fp.reference}.{pad.number}"
+                pad_id = self._pad_node_id(fp_index, pad_index, fp, pad)
                 if pad_id not in pad_positions:
                     continue
                 poly = cv._pad_copper_polygon(fp, pad)
@@ -1181,7 +1209,11 @@ class NetStatusAnalyzer:
         # are one electrical net.  Merging components that both touch the same
         # via recovers the cross-layer ``pad -> trace -> via -> trace -> pour``
         # path so a pad on one layer bonds to a pour on another.
-        extended_chains = self._merge_chains_via_vias(segments, segment_components, vias)
+        # In strict mode each via must physically reach both touching
+        # segments; a blind/buried via cannot bridge unrelated layers (#5198).
+        extended_chains = self._merge_chains_via_vias(
+            segments, segment_components, vias, require_layer_span=self.strict
+        )
 
         # Pre-compute, per extended chain, the pads it reaches and the copper
         # layers/geometry it presents to the pour tests.
@@ -1190,8 +1222,19 @@ class NetStatusAnalyzer:
         for chain in extended_chains:
             pads_in_chain: set[str] = set()
             for s in chain:
-                pads_in_chain.update(self._find_pads_at_point(segments[s].start, pad_positions))
-                pads_in_chain.update(self._find_pads_at_point(segments[s].end, pad_positions))
+                segment = segments[s]
+                if self.strict:
+                    pads_in_chain.update(
+                        self._find_pads_touching_geom(
+                            self._segment_poly(segment),
+                            pad_positions,
+                            layer=segment.layer,
+                            pad_layers=pad_layers,
+                        )
+                    )
+                else:
+                    pads_in_chain.update(self._find_pads_at_point(segment.start, pad_positions))
+                    pads_in_chain.update(self._find_pads_at_point(segment.end, pad_positions))
             chain_pads.append(pads_in_chain)
             chain_seg_indices.append(chain)
 
@@ -1234,7 +1277,12 @@ class NetStatusAnalyzer:
                                 bonded.add(pad_id)
                     for chain, pads_in_chain in zip(chain_seg_indices, chain_pads, strict=True):
                         touches = any(
-                            self._segment_touches_via(segments[s], via, via_geom) for s in chain
+                            self._segment_touches_via(segments[s], via, via_geom)
+                            and (
+                                not self.strict
+                                or self._via_spans_layer(via.layers, segments[s].layer)
+                            )
+                            for s in chain
                         )
                         if touches:
                             bonded.update(pads_in_chain)
@@ -1283,7 +1331,8 @@ class NetStatusAnalyzer:
         layer the via electrically spans (``_via_spans_layer``), so a
         blind/buried via does not fuse an inner-layer segment it cannot reach
         (Issue #4429).  The default (``False``) preserves the layer-agnostic
-        behaviour the zone/pour path (#4229) relies on.
+        behaviour for explicit legacy-mode pour analysis; strict pour analysis
+        requires physical layer spans (#5198).
         """
         n = len(segment_components)
         parent = list(range(n))
@@ -1331,7 +1380,11 @@ class NetStatusAnalyzer:
         via as joined to the segment when the via copper disc intersects the
         segment copper, which matches KiCad's connectivity.
         """
-        if self._points_close(seg.start, via.position) or self._points_close(seg.end, via.position):
+        from kicad_tools.schema.pcb import Arc
+
+        if not isinstance(seg, Arc) and (
+            self._points_close(seg.start, via.position) or self._points_close(seg.end, via.position)
+        ):
             return True
         if via_geom is None:
             return False
@@ -1556,8 +1609,21 @@ class NetStatusAnalyzer:
         poly = cache.get(key)
         if poly is None and key not in cache:
             from kicad_tools.geometry.copper import segment_copper_polygon
+            from kicad_tools.schema.pcb import Arc
 
-            poly = segment_copper_polygon(seg.start, seg.end, seg.width)
+            if isinstance(seg, Arc):
+                from shapely.geometry import LineString
+
+                # Bound both centerline sagitta and round-buffer approximation.
+                # Their combined absolute boundary error is <= 2 * error mm.
+                # Width scaling keeps even very thin copper well resolved.
+                error = min(0.00001, seg.width / 1000)
+                radius = seg.width / 2
+                step = 4 * math.asin(math.sqrt(min(error / (2 * radius), 0.5)))
+                quad_segs = max(16, math.ceil(math.pi / (2 * step)))
+                poly = LineString(seg.centerline_points(error)).buffer(radius, quad_segs=quad_segs)
+            else:
+                poly = segment_copper_polygon(seg.start, seg.end, seg.width)
             cache[key] = poly
         return poly
 
@@ -1578,7 +1644,7 @@ class NetStatusAnalyzer:
         return geom
 
     def _pad_polys(self) -> dict[str, Any]:
-        """Board-frame copper polygon per pad, keyed by ``REF.PAD`` (strict).
+        """Board-frame copper polygon per physical pad occurrence (strict).
 
         Built once per analyzer over every footprint pad, reusing
         :meth:`ConnectivityValidator._pad_copper_polygon` for shape/rotation
@@ -1589,13 +1655,15 @@ class NetStatusAnalyzer:
             return self._pad_poly_cache
         cache: dict[str, Any] = {}
         cv = self._connectivity_geometry()
-        for fp in self.pcb.footprints:
+        for fp_index, fp in enumerate(self.pcb.footprints):
             if not fp.reference or fp.reference.startswith("#"):
                 continue
-            for pad in fp.pads:
+            for pad_index, pad in enumerate(fp.pads):
                 if pad.number is None or pad.number == "":
                     continue
-                cache[f"{fp.reference}.{pad.number}"] = cv._pad_copper_polygon(fp, pad)
+                cache[self._pad_node_id(fp_index, pad_index, fp, pad)] = cv._pad_copper_polygon(
+                    fp, pad
+                )
         self._pad_poly_cache = cache
         return cache
 

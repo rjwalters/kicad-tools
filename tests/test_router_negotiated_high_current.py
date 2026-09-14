@@ -345,6 +345,158 @@ class TestGetPartiallyRoutedNets:
         assert 1 in partial
 
 
+def _full_route(net: int, net_name: str, y: float) -> Route:
+    """A route joining the Q?:1 pad at (5, y) to its J2 pad at (30, y)."""
+    seg = Segment(
+        x1=5.0,
+        y1=y,
+        x2=30.0,
+        y2=y,
+        width=0.2,
+        layer=Layer.F_CU,
+        net=net,
+        net_name=net_name,
+    )
+    return Route(net=net, net_name=net_name, segments=[seg], vias=[])
+
+
+def _partial_route(net: int, net_name: str, y: float) -> Route:
+    """A route leaving the J2 pad at (30, y) stranded (stops well short)."""
+    seg = Segment(
+        x1=5.0,
+        y1=y,
+        x2=15.0,
+        y2=y,
+        width=0.2,
+        layer=Layer.F_CU,
+        net=net,
+        net_name=net_name,
+    )
+    return Route(net=net, net_name=net_name, segments=[seg], vias=[])
+
+
+def _still_failed(
+    router: Autorouter,
+    net_routes: dict[int, list[Route]],
+    pads_by_net: dict[int, list],
+    net_order: list[int],
+) -> list[int]:
+    """Mirror of the negotiated loop's ``still_failed`` recovery expression."""
+    partial_failed = router._get_partially_routed_nets(net_routes, pads_by_net)
+    return [
+        n for n in net_order if (not net_routes.get(n) or n in partial_failed) and n in pads_by_net
+    ]
+
+
+class TestCountCompletedNets:
+    """Issue #4967: the progress count must match the recovery definition.
+
+    ``len(net_routes)`` counted dictionary keys, so empty-list entries (a net
+    ripped up and then failed to re-route, Issue #3448) and partially
+    connected nets (Issue #2475) both inflated the "N/N nets routed total"
+    progress line while the stall detector immediately below reported the
+    same nets as unrouted.
+    """
+
+    def _pads(self, router: Autorouter) -> dict[int, list]:
+        return {
+            1: [router.pads[("Q1", "1")], router.pads[("J2", "1")]],
+            2: [router.pads[("Q2", "1")], router.pads[("J2", "2")]],
+            3: [router.pads[("Q3", "1")], router.pads[("J2", "3")]],
+        }
+
+    def test_all_fully_routed_counts_every_net(self):
+        router = _make_autorouter_with_three_phase_nets()
+        net_routes = {
+            1: [_full_route(1, "PHASE_A", 5.0)],
+            2: [_full_route(2, "PHASE_B", 10.0)],
+            3: [_full_route(3, "PHASE_C", 15.0)],
+        }
+        assert router._count_completed_nets(net_routes, self._pads(router), [1, 2, 3]) == 3
+
+    def test_empty_route_list_is_not_counted(self):
+        """(a) Empty dict entries left behind by a failed reroute."""
+        router = _make_autorouter_with_three_phase_nets()
+        pads_by_net = self._pads(router)
+        # Nets 2 and 3 were ripped up, then failed to re-route: the keys
+        # survive with empty lists.  ``len(net_routes)`` would say 3/3.
+        net_routes: dict[int, list[Route]] = {
+            1: [_full_route(1, "PHASE_A", 5.0)],
+            2: [],
+            3: [],
+        }
+        assert len(net_routes) == 3  # the old, wrong count
+        assert router._count_completed_nets(net_routes, pads_by_net, [1, 2, 3]) == 1
+
+    def test_partially_connected_net_is_not_counted(self):
+        """(b) Entries whose route doesn't reach every pad of the net."""
+        router = _make_autorouter_with_three_phase_nets()
+        pads_by_net = self._pads(router)
+        net_routes = {
+            1: [_full_route(1, "PHASE_A", 5.0)],
+            2: [_partial_route(2, "PHASE_B", 10.0)],
+            3: [_full_route(3, "PHASE_C", 15.0)],
+        }
+        assert 2 in router._get_partially_routed_nets(net_routes, pads_by_net)
+        assert len(net_routes) == 3  # the old, wrong count
+        assert router._count_completed_nets(net_routes, pads_by_net, [1, 2, 3]) == 2
+
+    def test_never_reports_all_done_while_recovery_sees_failures(self):
+        """No state can print N/N while ``still_failed`` is non-empty."""
+        router = _make_autorouter_with_three_phase_nets()
+        pads_by_net = self._pads(router)
+        net_order = [1, 2, 3]
+        states: list[dict[int, list[Route]]] = [
+            # Nothing routed at all.
+            {},
+            # One empty-list entry (ripped up, reroute failed).
+            {1: [_full_route(1, "PHASE_A", 5.0)], 2: [], 3: [_full_route(3, "PHASE_C", 15.0)]},
+            # Every entry present but one is only partially connected.
+            {
+                1: [_full_route(1, "PHASE_A", 5.0)],
+                2: [_partial_route(2, "PHASE_B", 10.0)],
+                3: [_full_route(3, "PHASE_C", 15.0)],
+            },
+            # Both failure modes at once.
+            {1: [_partial_route(1, "PHASE_A", 5.0)], 2: [], 3: []},
+            # A net never attempted at all (absent key).
+            {1: [_full_route(1, "PHASE_A", 5.0)], 2: [_full_route(2, "PHASE_B", 10.0)]},
+        ]
+        for net_routes in states:
+            failed = _still_failed(router, net_routes, pads_by_net, net_order)
+            assert failed, "fixture state should have unrouted nets"
+            completed = router._count_completed_nets(net_routes, pads_by_net, net_order)
+            assert completed < len(net_order)
+            assert completed <= len(net_order) - len(failed)
+
+    def test_counts_only_selected_nets(self):
+        """Routes for nets outside ``net_order`` don't inflate the count."""
+        router = _make_autorouter_with_three_phase_nets()
+        pads_by_net = self._pads(router)
+        net_routes = {
+            1: [_full_route(1, "PHASE_A", 5.0)],
+            2: [_full_route(2, "PHASE_B", 10.0)],
+            3: [_full_route(3, "PHASE_C", 15.0)],
+        }
+        # Only nets 1 and 2 were selected for this run (e.g. ``--nets``).
+        assert router._count_completed_nets(net_routes, pads_by_net, [1, 2]) == 2
+
+    def test_duplicate_net_ids_counted_once(self):
+        router = _make_autorouter_with_three_phase_nets()
+        net_routes = {1: [_full_route(1, "PHASE_A", 5.0)]}
+        assert router._count_completed_nets(net_routes, self._pads(router), [1, 1, 1]) == 1
+
+    def test_precomputed_partial_set_is_reused(self):
+        """Callers may pass the partial set they already computed."""
+        router = _make_autorouter_with_three_phase_nets()
+        pads_by_net = self._pads(router)
+        net_routes = {
+            1: [_full_route(1, "PHASE_A", 5.0)],
+            2: [_full_route(2, "PHASE_B", 10.0)],
+        }
+        assert router._count_completed_nets(net_routes, pads_by_net, [1, 2], partial_nets={2}) == 1
+
+
 class TestHighCurrentSignalPriority:
     """Sanity: confirm HIGH_CURRENT_SIGNAL priority matches POWER tier (#2465)."""
 

@@ -100,6 +100,7 @@ marker appears (#4840): \`<!-- loom:complexity=<tier> -->\`.
 
 <!-- loom:complexity=mechanical -->
 " ;;
+        9008) echo "GraphQL: Could not resolve to a Repository with the name 'owner/repo'. (repository)" >&2; exit 1 ;;  # wrong-repo GH_CONFIG_DIR (#446) ...
         *) echo "" ;;
     esac
     exit 0
@@ -113,6 +114,7 @@ if [[ "$1" == "api" ]]; then
 <!-- loom:complexity=complex -->
 " ; exit 0 ;;
         9006) exit 1 ;;   # ... and REST fails too -> falls through to routine
+        9008) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;  # ... and REST 404s too (#446)
         *) exit 1 ;;
     esac
 fi
@@ -216,6 +218,20 @@ err="$(run_resolve 9007 2>&1 1>/dev/null)"
 assert_contains "tier=mechanical" "$err" "real marker (mechanical) is resolved despite preceding prose mentions"
 assert_not_contains "invalid complexity tier" "$err" "prose mention never triggers the invalid-tier warning"
 assert_not_contains "no complexity marker" "$err" "prose mention never triggers the absent-marker message"
+
+# -------- Test 10: a wrong-repo GH_CONFIG_DIR signature that survives BOTH
+# -------- attempts gets its own diagnostic, not the generic "likely API
+# -------- quota" guess (#446) --------
+# Distinguishes "the escalation ladder ran and still couldn't recover from a
+# confirmed wrong-repo signature" from the generic quota-exhaustion guess --
+# both still degrade to routine (non-breaking), but the message now names the
+# real cause instead of conflating the two.
+echo "Test 10: a wrong-repo GH_CONFIG_DIR signature gets its own diagnostic (#446)"
+err="$(run_resolve 9008 2>&1 1>/dev/null)"
+assert_contains "wrong-repo credential signature persisted through the escalation ladder" "$err" \
+    "wrong-repo signature is named explicitly, not conflated with quota exhaustion"
+assert_contains "-> routine" "$err" "wrong-repo signature still degrades to routine (non-breaking)"
+assert_not_contains "likely API quota" "$err" "wrong-repo signature does not also emit the generic quota message"
 
 # -------- Summary --------
 echo ""

@@ -53,6 +53,17 @@ START_SCRIPT="$(cd "$SCRIPT_DIR/../cli" && pwd)/loom-daemon-start.sh"
 unset LOOM_LAUNCHD_LABEL LOOM_WATCHDOG_LABEL LOOM_PID_FILE LOOM_SOCKET_PATH \
     LOOM_AUTONOMY_MARKER LOOM_SYSTEMD_UNIT LOOM_SYSTEMD_FORCE
 
+# #6568: the AGENT-SESSION keys are stripped here for the same reason as the
+# pointers above -- this suite is routinely RUN BY a daemon-dispatched sweep,
+# whose shell exports every one of them. Left inherited, they would make the
+# cases below non-deterministic (the session-isolation guard fires on a
+# dispatched run and not on a clean CI run, and the env-strip cases would pass
+# vacuously on a clean runner where the keys were never present). Every case
+# that needs them sets them EXPLICITLY, so unsetting here is what makes the
+# suite mean the same thing in both environments.
+unset LOOM_SWEEP_CLAIM_OWNED LOOM_SWEEP_CPU_BUDGET_CORES LOOM_SWEEP_NICED \
+    LOOM_TERMINAL_ID LOOM_ROLE LOOM_RUNTIME LOOM_ALLOW_SESSION_DAEMON_START
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
@@ -485,6 +496,163 @@ wait "$LIVE_PID" 2>/dev/null
 trap 'rm -rf "$WORKDIR"' EXIT
 trap 'rm -rf "$WORKDIR"; exit 1' INT TERM
 
+# ---------- #6568: agent-session isolation (render side) ----------
+# Root cause under test: a daemon-dispatched sweep invoked loom-daemon-start.sh
+# on 2026-08-17 to exercise the start path. Two independent properties combined
+# to overwrite the PRODUCTION LaunchAgent on BOTH operator Macs, silently, for
+# two days:
+#
+#   1. render_launchd_plist / render_systemd_unit harvest EVERY exported LOOM_*
+#      var into the durable env dict -- so LOOM_SWEEP_CLAIM_OWNED=6388,
+#      LOOM_TERMINAL_ID=..., LOOM_ROLE=sweep-lifecycle, LOOM_RUNTIME=claude all
+#      became production daemon config.
+#   2. resolve_launchd_label() returns the fixed production label whenever
+#      LOOM_LAUNCHD_LABEL is unset, so the write landed on the real job.
+#
+# Cases 21-24 cover the render/preview side (this suite's remit); the
+# REAL-START refusal is covered in test-loom-daemon-start.sh's "SI." section,
+# because it must drive the actual install path, not a preview.
+SESSION_TEST_LABEL="com.rjwalters.loom-daemon-session-test"
+SESSION_HOME="$WORKDIR/fakehome-session"
+mkdir -p "$SESSION_HOME/Library/LaunchAgents"
+
+# The four session-scoped families the incident laundered, exported exactly as
+# a dispatched sweep exports them.
+session_env=(
+    LOOM_SWEEP_CLAIM_OWNED=6388
+    LOOM_TERMINAL_ID=daemon-sweep-issue-6388-abcdef
+    LOOM_ROLE=sweep-lifecycle
+    LOOM_RUNTIME=claude
+)
+
+# 21. --print-plist from a session context with NO LOOM_LAUNCHD_LABEL: the
+#     guard WARNS (naming the detected keys and the production label it would
+#     have written) but does NOT refuse -- inspection semantics are unchanged
+#     (plist on stdout, exit 0, nothing written). This is the same
+#     warn-on-preview / refuse-on-real-start split warn_autonomy_downgrade
+#     already uses.
+sess_preview_out=$( cd "$WORKDIR" && HOME="$SESSION_HOME" \
+    env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE "${session_env[@]}" \
+    LOOM_DAEMON_BIN="$FAKE_BIN" bash "$START_SCRIPT" --print-plist 2>/dev/null )
+sess_preview_rc=$?
+sess_preview_err=$( cd "$WORKDIR" && HOME="$SESSION_HOME" \
+    env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE "${session_env[@]}" \
+    LOOM_DAEMON_BIN="$FAKE_BIN" bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
+assert_eq "0" "$sess_preview_rc" "#6568: --print-plist from a session context still exits 0 (read-only preview is never refused)"
+assert_contains "$sess_preview_out" '<plist version="1.0">' "#6568: --print-plist from a session context still prints the plist on stdout"
+assert_contains "$sess_preview_err" "agent-session context detected" "#6568: --print-plist warns that this shell carries agent-session context"
+assert_contains "$sess_preview_err" "LOOM_ROLE" "#6568: the warning NAMES the detected session keys"
+assert_contains "$sess_preview_err" "com.rjwalters.loom-daemon" "#6568: the warning names the production label a real start would have written"
+assert_contains "$sess_preview_err" "NOT refused" "#6568: the preview says explicitly that it is not refused (and a real start would be)"
+assert_not_contains "$sess_preview_err" "refusing to start" "#6568: a read-only preview never emits the refusal (AC5 — inspection semantics unaffected)"
+
+# 22. The session-scoped keys NEVER reach the rendered EnvironmentVariables --
+#     even here, where the label IS explicitly scoped (so the guard above is
+#     exempt and cannot be what produced the result). The autonomy keys are
+#     asserted PRESENT in the same render so this is not a vacuous pass on a
+#     render that dropped everything.
+sess_render_out=$( cd "$WORKDIR" && HOME="$SESSION_HOME" \
+    env -u LOOM_MAIN_HEALTH_GATE "${session_env[@]}" LOOM_WORK_FINDER=1 \
+    LOOM_LAUNCHD_LABEL="$SESSION_TEST_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    bash "$START_SCRIPT" --print-plist 2>/dev/null )
+assert_contains "$sess_render_out" $'<key>LOOM_WORK_FINDER</key>\n        <string>1</string>' "#6568 control: a legitimate exported LOOM_* var is still forwarded (strip is targeted, not a blanket drop)"
+assert_not_contains "$sess_render_out" "<key>LOOM_SWEEP_CLAIM_OWNED</key>" "#6568: LOOM_SWEEP_CLAIM_OWNED never reaches the rendered plist"
+assert_not_contains "$sess_render_out" "<key>LOOM_TERMINAL_ID</key>" "#6568: LOOM_TERMINAL_ID never reaches the rendered plist"
+assert_not_contains "$sess_render_out" "<key>LOOM_ROLE</key>" "#6568: LOOM_ROLE never reaches the rendered plist"
+assert_not_contains "$sess_render_out" "<key>LOOM_RUNTIME</key>" "#6568: LOOM_RUNTIME never reaches the rendered plist"
+assert_contains "$sess_render_out" "$SESSION_TEST_LABEL" "#6568: an explicit LOOM_LAUNCHD_LABEL still overrides the label from a session context (existing test-authoring pattern preserved)"
+
+# 22b. Identical strip on the systemd tier -- the incident's mechanism is
+#      per-platform but the laundering is not.
+sess_unit_out=$( cd "$WORKDIR" && HOME="$SESSION_HOME" \
+    env -u LOOM_MAIN_HEALTH_GATE "${session_env[@]}" LOOM_WORK_FINDER=1 \
+    LOOM_SYSTEMD_UNIT="loom-daemon-session-test.service" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    bash "$START_SCRIPT" --print-unit 2>/dev/null )
+assert_contains "$sess_unit_out" "Environment=LOOM_WORK_FINDER=1" "#6568 control: the systemd unit still forwards a legitimate exported LOOM_* var"
+assert_not_contains "$sess_unit_out" "Environment=LOOM_SWEEP_CLAIM_OWNED=" "#6568: LOOM_SWEEP_CLAIM_OWNED never reaches the rendered systemd unit"
+assert_not_contains "$sess_unit_out" "Environment=LOOM_TERMINAL_ID=" "#6568: LOOM_TERMINAL_ID never reaches the rendered systemd unit"
+assert_not_contains "$sess_unit_out" "Environment=LOOM_ROLE=" "#6568: LOOM_ROLE never reaches the rendered systemd unit"
+assert_not_contains "$sess_unit_out" "Environment=LOOM_RUNTIME=" "#6568: LOOM_RUNTIME never reaches the rendered systemd unit"
+
+# 23. An explicit LOOM_LAUNCHD_LABEL exempts the guard entirely -- no warning
+#     at all, so a test/sandbox invocation from a session context is not
+#     merely tolerated but silent (this is what keeps cases 14-19 above, all
+#     of which run from whatever shell launched this suite, unchanged).
+sess_labeled_err=$( cd "$WORKDIR" && HOME="$SESSION_HOME" \
+    env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE "${session_env[@]}" \
+    LOOM_LAUNCHD_LABEL="$SESSION_TEST_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
+assert_not_contains "$sess_labeled_err" "agent-session context detected" "#6568: an explicit LOOM_LAUNCHD_LABEL exempts the session-isolation guard (no warning)"
+
+# 24. An ALREADY-POISONED installed plist must not re-inject its session keys
+#     through the #5344 carry-forward merge. Without this, the fix would be
+#     self-defeating on exactly the hosts that suffered the incident: the
+#     renderer would strip the keys and the merge would put them straight back
+#     on every subsequent re-render. A legitimate operator key in the same
+#     installed plist IS still carried forward, so the purge is targeted.
+POISON_LABEL="com.rjwalters.loom-daemon-poisoned-test"
+cat > "$SESSION_HOME/Library/LaunchAgents/${POISON_LABEL}.plist" <<'PLISTEOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>EnvironmentVariables</key>
+<dict>
+        <key>LOOM_ROLE</key>
+        <string>sweep-lifecycle</string>
+        <key>LOOM_SWEEP_CLAIM_OWNED</key>
+        <string>6388</string>
+        <key>LOOM_TERMINAL_ID</key>
+        <string>daemon-sweep-issue-6388-abcdef</string>
+        <key>LOOM_RUNTIME</key>
+        <string>claude</string>
+        <key>LOOM_OPERATOR_ONLY_KEY</key>
+        <string>keepme</string>
+</dict>
+</dict></plist>
+PLISTEOF
+poison_out=$( cd "$WORKDIR" && HOME="$SESSION_HOME" \
+    env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_ROLE -u LOOM_RUNTIME \
+    -u LOOM_TERMINAL_ID -u LOOM_SWEEP_CLAIM_OWNED \
+    LOOM_LAUNCHD_LABEL="$POISON_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    bash "$START_SCRIPT" --print-plist 2>/dev/null )
+poison_err=$( cd "$WORKDIR" && HOME="$SESSION_HOME" \
+    env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u LOOM_ROLE -u LOOM_RUNTIME \
+    -u LOOM_TERMINAL_ID -u LOOM_SWEEP_CLAIM_OWNED \
+    LOOM_LAUNCHD_LABEL="$POISON_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
+assert_not_contains "$poison_out" "<key>LOOM_ROLE</key>" "#6568: a session key in the INSTALLED plist is not carried forward by the #5344 merge"
+assert_not_contains "$poison_out" "<key>LOOM_SWEEP_CLAIM_OWNED</key>" "#6568: LOOM_SWEEP_CLAIM_OWNED is purged from the carry-forward, not preserved"
+assert_not_contains "$poison_out" "<key>LOOM_TERMINAL_ID</key>" "#6568: LOOM_TERMINAL_ID is purged from the carry-forward, not preserved"
+assert_not_contains "$poison_out" "<key>LOOM_RUNTIME</key>" "#6568: LOOM_RUNTIME is purged from the carry-forward, not preserved"
+assert_contains "$poison_out" $'<key>LOOM_OPERATOR_ONLY_KEY</key>\n        <string>keepme</string>' "#6568 control: a NON-session key in the installed plist is still carried forward (#5344 intact)"
+assert_contains "$poison_err" "purging 4 AGENT-SESSION env key(s)" "#6568: the purge is reported, not silent"
+
+# 25. Scratch-workdir drift warning (#6568 ask 3): the incident's production
+#     daemons ran with WorkingDirectory/LOOM_WORKSPACE under /tmp for two days
+#     with nothing complaining. Advisory only -- it must never block a start.
+drift_scratch_err=$( cd "$WORKDIR" && HOME="$SESSION_HOME" \
+    env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    LOOM_WORKSPACE="/tmp/pr6416-checkout" \
+    LOOM_LAUNCHD_LABEL="$SESSION_TEST_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
+assert_contains "$drift_scratch_err" "SCRATCH / temporary directory" "#6568: a scratch-rooted daemon config is flagged loudly"
+assert_contains "$drift_scratch_err" "LOOM_WORKSPACE=/tmp/pr6416-checkout" "#6568: the drift warning names the offending LOOM_WORKSPACE (the incident's actual value)"
+
+drift_ok_err=$( cd "$WORKDIR" && HOME="$SESSION_HOME" \
+    env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    LOOM_WORKSPACE="/opt/loom/machine" \
+    LOOM_LAUNCHD_LABEL="$SESSION_TEST_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    bash "$START_SCRIPT" --print-plist 2>&1 >/dev/null )
+assert_not_contains "$drift_ok_err" "LOOM_WORKSPACE=/opt/loom/machine" "#6568 control: a durable LOOM_WORKSPACE is NOT reported as drift (the check discriminates)"
+
+drift_out=$( cd "$WORKDIR" && HOME="$SESSION_HOME" \
+    env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
+    LOOM_WORKSPACE="/tmp/pr6416-checkout" \
+    LOOM_LAUNCHD_LABEL="$SESSION_TEST_LABEL" LOOM_DAEMON_BIN="$FAKE_BIN" \
+    bash "$START_SCRIPT" --print-plist 2>/dev/null )
+drift_rc=$?
+assert_eq "0" "$drift_rc" "#6568: the drift warning is advisory — it never blocks (exit 0)"
+assert_contains "$drift_out" '<plist version="1.0">' "#6568: the drift warning goes to stderr only, leaving stdout a clean plist"
+
 # ---------- 20. post-suite: NO real supervisor job under any test label ----------
 # The stronger property test 1's before/after plist count structurally cannot
 # see: in the 2026-08-16 incident the plist landed in a scratch HOME while the
@@ -500,6 +668,8 @@ TEST_LABELS=(
     "com.rjwalters.loom-daemon-drift-test"
     "com.rjwalters.loom-daemon-livepid-test"
     "com.example.custom"
+    "com.rjwalters.loom-daemon-session-test"
+    "com.rjwalters.loom-daemon-poisoned-test"
 )
 supervisor_tool=""
 supervisor_listing=""

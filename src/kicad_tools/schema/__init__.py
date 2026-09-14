@@ -23,6 +23,7 @@ from .label import GlobalLabel, HierarchicalLabel, Label
 from .library import LibraryManager, LibraryPin, LibrarySymbol, SymbolLibrary
 from .pcb import (
     PCB,
+    Arc,
     BoardNetClass,
     Footprint,
     Layer,
@@ -66,6 +67,7 @@ __all__ = [
     "field_offset_mm",
     "placed_body_bbox",
     "PCB",
+    "Arc",
     "Layer",
     "Net",
     "Footprint",

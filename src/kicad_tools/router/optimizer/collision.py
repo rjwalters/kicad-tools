@@ -124,7 +124,11 @@ class GridCollisionChecker:
             if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
                 continue  # Out of bounds - skip but don't fail
 
-            cell = self.grid.grid[layer_idx][gy][gx]
+            # Issue #5240: ``cell_at`` is a documented drop-in for the
+            # legacy ``grid.grid[layer][y][x]`` chain (see
+            # ``RoutingGrid.cell_at``'s docstring) -- one allocation
+            # instead of three chained ``__getitem__`` calls.
+            cell = self.grid.cell_at(layer_idx, gy, gx)
 
             # Check if blocked by another net
             if cell.blocked:
@@ -515,7 +519,13 @@ class VectorCollisionChecker:
                     check_y = gy + cy
                     if not (0 <= check_x < self.grid.cols and 0 <= check_y < self.grid.rows):
                         continue
-                    cell = self.grid.grid[layer_idx][check_y][check_x]
+                    # Issue #5240: ``cell_at`` replaces the legacy
+                    # ``grid.grid[layer][y][x]`` chain (three allocations
+                    # per lookup) with a single ``_CellView`` allocation;
+                    # this nested clearance-cell loop is the hottest call
+                    # site of the pattern in ``validate_routes`` (Issue
+                    # #5240 profiling of a full board re-route).
+                    cell = self.grid.cell_at(layer_idx, check_y, check_x)
                     if cell.blocked and (cell.is_obstacle or cell.pad_blocked):
                         # Hard obstacle (cross-net pad) OR pad-copper cell
                         # (Issue #2757: pads on skipped pour nets have

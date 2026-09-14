@@ -348,7 +348,7 @@ _BOARD07_ARTIFACT = (
     Path(__file__).resolve().parents[2]
     / "boards"
     / "07-matchgroup-test"
-    / "output"
+    / "regression-fixture"
     / "matchgroup_test_routed.kicad_pcb"
 )
 

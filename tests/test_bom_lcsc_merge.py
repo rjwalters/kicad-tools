@@ -12,6 +12,8 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.export.bom_formats import read_existing_lcsc_assignments
 from kicad_tools.schema.bom import BOMItem
 
@@ -293,3 +295,60 @@ class TestNoMergeLcscCliFlag:
 
         args_default = parser.parse_args([])
         assert args_default.no_merge_lcsc is False
+
+
+@pytest.mark.parametrize("auto_lcsc", [True, False])
+def test_board06_default_repeat_export_preserves_non_lcsc_spec(tmp_path, auto_lcsc):
+    """Prior generic CSV IDs cannot supersede an explicit MPN-only selection."""
+    import csv
+    from unittest.mock import MagicMock, patch
+
+    from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+
+    board = Path(__file__).resolve().parents[1] / "boards/06-diffpair-test"
+    pcb = board / "output/diffpair_test_routed.kicad_pcb"
+    before = {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}
+    mock = MagicMock()
+    mock.__enter__.return_value = mock
+    mock._get_client.return_value = None
+    mock.suggest_for_component.side_effect = AssertionError("No catalog calls expected")
+    with (
+        patch("kicad_tools.export.bom_enrich.PartSuggester", return_value=mock),
+        patch("kicad_tools.parts.cache.PartsCache", return_value=None),
+    ):
+        config = AssemblyConfig(
+            include_bom=True, include_pnp=False, include_gerbers=False, auto_lcsc=auto_lcsc
+        )
+        assert config.merge_lcsc
+        package = AssemblyPackage(pcb_path=pcb, manufacturer="jlcpcb-tier1", config=config)
+        first = package.export(output_dir=tmp_path)
+        with first.bom_path.open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        target = next(row for row in rows if "J1" in row["Designator"].split(","))
+        assert target["LCSC Part #"] == ""
+        explicit_lcsc = {
+            row["Designator"]: row["LCSC Part #"] for row in rows if row["LCSC Part #"]
+        }
+        assert explicit_lcsc
+        target["LCSC Part #"] = "C404027"
+        with first.bom_path.open("w", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+        second = package.export(output_dir=tmp_path)
+        with second.bom_path.open(newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        target = next(row for row in rows if "J1" in row["Designator"].split(","))
+        assert target["LCSC Part #"] == ""
+        assert all(
+            row["LCSC Part #"] == explicit_lcsc[row["Designator"]]
+            for row in rows
+            if row["Designator"] in explicit_lcsc
+        )
+        if auto_lcsc:
+            entries = [e for e in second.lcsc_enrichment.entries if "J1" in e.references]
+            assert len(entries) == 1 and entries[0].source == "spec_unresolved"
+            assert entries[0].lcsc_part == ""
+        else:
+            assert second.lcsc_enrichment is None
+    assert before == {p: p.read_bytes() for p in board.rglob("*") if p.is_file()}

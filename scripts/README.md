@@ -12,10 +12,11 @@ Python helpers with `uv run python scripts/<name>.py`, from the repository root.
 |--------|---------|
 | `build-cpp.sh` | Build/install the nanobind C++ router extension (`clean`, `check` subcommands). Wrapped by `kct build-native`. Requires the `native` extra (`uv sync --extra native` / `pip install "kicad-tools[native]"`) so nanobind stays lockfile-tracked; the default dev group already composes it in. |
 | `deploy-site.sh` | Manual one-command deploy of the kicad-tools.org demo gallery to Cloudflare Pages (via a locally authenticated `wrangler`). |
-| `install-kct.sh` | Install kicad-tools into a consumer PCB-design repo (uv dependency + vendored `.claude/commands/kct/` skills and `ci/` gate scripts). |
+| `install-kct.sh` | Install kicad-tools into a consumer PCB-design repo: uv dependency + vendored `ci/` gate scripts + `.kct/CONVENTIONS.md`, plus per-client workflow content selected via `--client claude\|codex\|both` (default `claude`, backward-compatible) — Claude gets `.claude/commands/kct/` skills + a guarded `CLAUDE.md` block, Codex gets `.agents/skills/kct-<name>/SKILL.md` + a guarded `AGENTS.md` block, both generated from the same source `.md` files (#4905). Codex generation adapts sibling paths and skill invocations, and includes a namespace README beside `kct-help`. |
 | `audit_machine_output.py` | Audit the `--format json` machine-output idiom across every CLI leaf subcommand (walks the real argparse tree); the measurement tool behind `docs/reference/machine-output.md` (#4543) and the #4674 sweep backlog. `--markdown` emits the doc tables. |
 | `changelog_gap_report.py` | Release gate: list user-visible commits since a `v*` tag whose issue number is not cited in the CHANGELOG's `[Unreleased]` section; exits non-zero when the gap set is non-empty. Invoked by `RELEASING.md` step (0) (#4638). |
 | `check_trace_vs_zone_fills.py` | Verify track segments against foreign-net zone fill copper (clearance/short check DRC cannot yet do; #3527). |
+| `replay_pairwise_gate.py` | Replay the router's own pairwise (HV-isolation) gate over a routed board. |
 | `route_chorus.py` | Canonical chorus-test-revA routing recipe runner with partial-net rescue (#3474). |
 
 ## Subdirectories
@@ -31,7 +32,23 @@ end-to-end checks, the mypy baseline, and route determinism:
 `check_board_00_e2e.py`, `check_board_05_blocking.py`, `check_copper_lvs.py`,
 `check_diffpair_coverage.py`, `check_matchgroup_coverage.py`,
 `check_mypy_baseline.py`, `check_net_status.py`, `check_routed_drc.py`,
+`local-gate.sh` (local CI-equivalent gate, Actions-outage backstop),
 `net_class_map_resolver.py`.
+
+`check_mask_copper_native.py` is the repository's mandatory native mask-to-copper
+suite gate. It probes matching KiCad 10.0.5 CLI/pcbnew and Gerbonara >=1.6.3,
+runs every case in `tests/test_mask_copper_native.py`, and rejects failures,
+empty results, missing material witnesses, or any skips. For a local equivalent
+in a KiCad environment with shared scratch paths:
+
+```bash
+KCT_MASK_NATIVE_PYTHON='["/usr/bin/python3"]' uv run --frozen python scripts/ci/check_mask_copper_native.py --artifacts /tmp/mask-copper-native
+```
+
+Each invocation retains a new run directory containing prerequisite details,
+pytest output, JUnit, and generated native artifacts. Ordinary local pytest
+execution keeps its optional-prerequisite skips. CI runs this dedicated gate
+once and excludes the file from the later general suite.
 
 ### `corpus/`
 

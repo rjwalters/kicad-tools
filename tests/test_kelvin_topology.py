@@ -298,7 +298,9 @@ class TestSyntheticKelvinFixture:
 
 _BOARD05_PCB = (
     Path(__file__).resolve().parents[1]
-    / "boards"
+    / "tests"
+    / "fixtures"
+    / "historical_demo_boards"
     / "05-bldc-motor-controller"
     / "output"
     / "bldc_controller.kicad_pcb"

@@ -25,7 +25,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ..primitives import Pad
+from ..primitives import Pad, pad_half_extents
 from .geometry import (
     Pt,
     Rect,
@@ -101,8 +101,9 @@ class LatticeObstacleModel:
         # Inflated keep-out rectangle per pad (pad half-extent + agent radius).
         self.pad_rects: list[Rect] = []
         for pad in pads:
-            hx = pad.width / 2.0 + agent_radius
-            hy = pad.height / 2.0 + agent_radius
+            half_w, half_h = pad_half_extents(pad)
+            hx = half_w + agent_radius
+            hy = half_h + agent_radius
             self.pad_rects.append((pad.x - hx, pad.y - hy, pad.x + hx, pad.y + hy))
 
         # Pad-lookup buckets.

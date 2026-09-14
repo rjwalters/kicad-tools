@@ -336,6 +336,61 @@ lands between `git push` and PR creation costs one retry, not a full rebuild.
 If you find a `feature/issue-N` branch with no PR, re-run
 `./.loom/scripts/create-pr.sh` from it; do not rebuild.
 
+### Wrong-repo `GH_CONFIG_DIR`: `HTTP 404` / "could not resolve to a Repository" (2am#446)
+
+A **different** failure from the cached-permission window above: the
+credential isn't missing a scope, it's scoped to an entirely different
+repository. Observed live 2026-08-21 (a daemon-dispatched sweep on
+`loom-worker-2`): the dispatch environment's `GH_CONFIG_DIR` pointed at a
+different owner's flat `<workspace>/.loom/gh-config/` (a daemon workspace's
+own credential, minted for a different org), so every `gh` call against the
+target repo failed outright with one of:
+
+```
+GraphQL: Could not resolve to a Repository with the name '<owner>/<repo>'. (repository)
+gh: Not Found (HTTP 404)
+```
+
+`forge_gh_perm_safe`'s #6074 ladder above never fires for this signature — its
+classifier only matches the "not accessible by integration" wording, so rung 1
+(ambient) just fails outright. `sweep-lease-renew.sh`'s renewal loop failing
+on every cycle as a direct result was the incident's original symptom.
+
+`forge_gh_repo_safe` (also in `.loom/scripts/lib/forge-helpers.sh`) adds one
+more rung **on top of** — not instead of — the #6074 ladder: it tries
+`forge_gh_perm_safe` first (so a permission-scope 403 still recovers exactly
+as before), and only on a confirmed `is_repo_mismatch_error` signature
+escalates further:
+
+| Rung | Credential | Why |
+|---|---|---|
+| 1–3 | `forge_gh_perm_safe`'s own ladder (table above), tried first | an app-permission 403 recovers here, unrelated to this rung |
+| 4 | the **owner-partitioned** credential directory, `<daemon_workspace>/.loom/gh-config-by-owner/<owner>/` (owner parsed from `git remote get-url origin`, zero API calls) | a GitHub-App daemon workspace already maintains this directory *alongside* its flat `gh-config/` — see "Delivery mechanism (#4458)" above and FLEET.md's "Private-repo clones over ssh" contract — so the correctly scoped credential is usually already on disk right next to the wrong one that got exported |
+| 5 | `env -u GH_CONFIG_DIR` (drop it entirely) | when rung 4's directory doesn't exist, or also fails |
+
+Rung 4's directory is **derived from the current (wrong) `GH_CONFIG_DIR`
+itself** — no `hosts.yml` lookup, no hardcoded `loom` — by recognizing the
+flat `<X>/.loom/gh-config` shape and substituting
+`gh-config-by-owner/<owner>` for its final segment
+(`LOOM_GH_CONFIG_BY_OWNER_ROOT` overrides this for testing). The whole rung is
+**skipped** when `GH_CONFIG_DIR` was never set to begin with — there is
+nothing to escalate away from, and `env -u GH_CONFIG_DIR` would just replay
+rung 1 verbatim, the same "don't replay an identical attempt" rule rung 3 of
+the #6074 ladder already applies to itself.
+
+`is_repo_mismatch_error` is intentionally loose on the REST side (a plain
+`HTTP 404` on a genuinely missing issue/PR on a *correctly* scoped repo also
+matches) — safe here because `forge_gh_repo_safe` only ever retries the SAME
+call under a different credential and returns the last attempt's real error
+on failure, so an over-firing match costs one extra local `gh` call, never a
+wrong result.
+
+Wired call sites: `resolve-tier-model.sh` (issue-body fetch, both the GraphQL
+and REST-fallback attempts) — previously the one call site in this class that
+did not source `forge-helpers.sh` at all, so a wrong-repo 404 there silently
+fell through to the tier-3 default with a misleading "likely API quota"
+diagnostic instead of recovering or naming the real cause.
+
 ### Long-running sweep children and credential snapshots (#4458)
 
 The daemon's own forge calls (claim reconciliation, the main-health gate, the
