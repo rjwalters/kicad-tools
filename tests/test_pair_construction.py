@@ -126,7 +126,7 @@ def test_the_ledger_tallies_which_stage_spent_the_allowance(monkeypatch):
     assert budget.geometry_reasons == {"trace_clearance": 2}
     assert budget.stage_summary() == (
         "departures=2 landings=2 bodies=16 built=4 geom_rejected=2 completions=6 "
-        "geom_reasons={'trace_clearance': 2}"
+        "geom_reasons={'trace_clearance': 2} completion_reasons={}"
     )
 
 
@@ -135,10 +135,41 @@ def test_geometry_reasons_are_reported_most_frequent_first():
     budget.geometry_reasons.update(
         {"via_clearance": 3, "trace_clearance": 40, "pad_clearance": 3, "disconnected": 7}
     )
-    assert budget.stage_summary().endswith(
+    assert (
         "geom_reasons={'trace_clearance': 40, 'disconnected': 7, "
-        "'pad_clearance': 3, 'via_clearance': 3}"
+        "'pad_clearance': 3, 'via_clearance': 3} completion_reasons={}"
+    ) in budget.stage_summary()
+
+
+def test_completion_reasons_are_reported_most_frequent_first():
+    budget = ConstructionBudget(deadline=1, iterations_remaining=1, bodies_remaining=1)
+    budget.completion_reasons.update(
+        {"no_tail": 3, "skew_tolerance": 40, "coupling_threshold": 3, "post_tune_pad_clearance": 7}
     )
+    assert budget.stage_summary().endswith(
+        "completion_reasons={'skew_tolerance': 40, 'post_tune_pad_clearance': 7, "
+        "'coupling_threshold': 3, 'no_tail': 3}"
+    )
+
+
+def test_completion_reasons_propagate_from_the_body_stage(monkeypatch):
+    """#5333: a body that geometrically clears still has to name why it
+    never qualifies -- no legal tail, missed skew, missed coupling, or a
+    post-tune collision are different defects with different fixes."""
+
+    def fake_complete(router, finder, pair, pads, group, landing, budget, **kwargs):
+        budget.bodies_used = budget.bodies_remaining
+        budget.bodies_remaining = 0
+        budget.completions_tried += 2
+        budget.completion_reasons["skew_tolerance"] += 2
+        return None
+
+    _stub(monkeypatch, departures=[_departure((1, 0), 3)], landings=["a"], clock=[0])
+    monkeypatch.setattr(pair_construction, "complete_departures", fake_complete)
+    monkeypatch.setattr(pair_construction, "time", SimpleNamespace(monotonic=lambda: 0))
+    budget = ConstructionBudget(deadline=1, iterations_remaining=64, bodies_remaining=16)
+    assert _run(budget, max_landings=1, max_bodies_per_departure=8) is None
+    assert budget.completion_reasons == {"skew_tolerance": 2}
 
 
 def test_no_validated_departure_is_distinguishable_from_no_landing(monkeypatch):

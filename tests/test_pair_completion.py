@@ -1,5 +1,6 @@
 import copy
 import time
+from collections import Counter
 from types import SimpleNamespace
 
 import pytest
@@ -280,3 +281,82 @@ def test_tuning_sees_all_reservations_and_existing_copper_for_a_future_net(monke
     )
     assert calls and len(existing.segments) == 1 and not existing.vias
     assert auto.routes == [existing] and not auto.grid.routes
+
+
+def test_no_via_sites_are_tallied_as_no_tail_not_silence():
+    """An empty site plan is a distinct, nameable defect (#5333).
+
+    ``complete_pair_body`` returning ``None`` cannot say whether the layer
+    return search never offered a candidate or every candidate it offered
+    was rejected later -- the ``reasons`` tally is what makes that legible.
+    """
+    auto, finder, pair, pads, body, _sites = case()
+    reasons: Counter[str] = Counter()
+    assert (
+        complete_pair_body(
+            auto._diffpair,
+            finder,
+            pair,
+            pads,
+            body,
+            deadline=time.monotonic() + 5,
+            board_thickness_mm=1.6,
+            num_copper_layers=2,
+            allowed_via_sites=(frozenset(), frozenset()),
+            reasons=reasons,
+        )
+        is None
+    )
+    # Both approach orderings ((0, 1) and (1, 0)) find nothing to offer.
+    assert reasons == {"no_tail": 2}
+
+
+def test_successful_completion_leaves_the_reasons_tally_empty():
+    auto, finder, pair, pads, body, sites = case()
+    reasons: Counter[str] = Counter()
+    result = complete_pair_body(
+        auto._diffpair,
+        finder,
+        pair,
+        pads,
+        body,
+        deadline=time.monotonic() + 5,
+        board_thickness_mm=1.6,
+        num_copper_layers=2,
+        allowed_via_sites=sites,
+        reasons=reasons,
+    )
+    assert result is not None
+    assert reasons == {}
+
+
+def test_default_reasons_counter_is_fresh_per_call():
+    """The optional counter must never default to a shared mutable object."""
+    auto, finder, pair, pads, body, _sites = case()
+    # Two independent calls with no explicit ``reasons=`` must not leak state
+    # into each other via a shared default argument.
+    complete_pair_body(
+        auto._diffpair,
+        finder,
+        pair,
+        pads,
+        body,
+        deadline=time.monotonic() + 5,
+        board_thickness_mm=1.6,
+        num_copper_layers=2,
+        allowed_via_sites=(frozenset(), frozenset()),
+    )
+    reasons: Counter[str] = Counter()
+    complete_pair_body(
+        auto._diffpair,
+        finder,
+        pair,
+        pads,
+        body,
+        deadline=time.monotonic() + 5,
+        board_thickness_mm=1.6,
+        num_copper_layers=2,
+        allowed_via_sites=(frozenset(), frozenset()),
+        reasons=reasons,
+    )
+    assert reasons == {"no_tail": 2}

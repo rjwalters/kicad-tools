@@ -49,7 +49,11 @@ class ConstructionBudget:
     clear goal-barrel plans offered across those escape directions, and the
     three body counters split ``bodies_used`` into geometry that was built,
     geometry rejected against committed/reserved copper, and terminal
-    completions attempted.
+    completions attempted.  ``completion_reasons`` further splits those
+    attempted completions -- a pair that reaches ``geom_rejected=0`` with a
+    nonzero ``completions`` count still needs this to tell "no legal
+    layer-return tail exists" apart from "every tail passes the geometry
+    gate but misses the authored skew or coupling threshold" (#5333).
     """
 
     deadline: float
@@ -63,10 +67,14 @@ class ConstructionBudget:
     bodies_geometry_rejected: int = 0
     completions_tried: int = 0
     geometry_reasons: Counter[str] = field(default_factory=Counter)
+    completion_reasons: Counter[str] = field(default_factory=Counter)
 
     def stage_summary(self) -> str:
         """One-line tally of where this pair's construction allowance went."""
         reasons = dict(sorted(self.geometry_reasons.items(), key=lambda kv: (-kv[1], kv[0])))
+        completion_reasons = dict(
+            sorted(self.completion_reasons.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
         return (
             f"departures={self.departures_found} "
             f"landings={self.landings_found} "
@@ -74,7 +82,8 @@ class ConstructionBudget:
             f"built={self.bodies_built} "
             f"geom_rejected={self.bodies_geometry_rejected} "
             f"completions={self.completions_tried} "
-            f"geom_reasons={reasons}"
+            f"geom_reasons={reasons} "
+            f"completion_reasons={completion_reasons}"
         )
 
 
@@ -148,6 +157,7 @@ def construct_pair_routes(
                 budget.bodies_geometry_rejected += portion.bodies_geometry_rejected
                 budget.completions_tried += portion.completions_tried
                 budget.geometry_reasons.update(portion.geometry_reasons)
+                budget.completion_reasons.update(portion.completion_reasons)
             if result is not None:
                 return result
     return None

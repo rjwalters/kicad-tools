@@ -220,6 +220,7 @@ def test_stage_counters_propagate_to_the_parent_allowance(monkeypatch):
         budget.bodies_geometry_rejected += 1
         budget.completions_tried += 3
         budget.geometry_reasons["via_clearance"] += 1
+        budget.completion_reasons["skew_tolerance"] += 1
         return None
 
     monkeypatch.setattr(body_search, "complete_departure", consume)
@@ -244,6 +245,49 @@ def test_stage_counters_propagate_to_the_parent_allowance(monkeypatch):
     assert budget.bodies_geometry_rejected == 2
     assert budget.completions_tried == 6
     assert budget.geometry_reasons == {"via_clearance": 2}
+    assert budget.completion_reasons == {"skew_tolerance": 2}
+
+
+def test_complete_departure_forwards_the_shared_completion_counter_to_the_terminal_stage(
+    monkeypatch,
+):
+    """The same ``budget`` a caller inspects for ``geometry_reasons`` must
+    also carry the terminal-stage tally (#5333) -- a separate, silently
+    dropped counter would defeat the whole point of a shared ledger."""
+    finder, pads, departure = fixture()
+    body = SimpleNamespace(p_head=(0, 0), n_head=(0, 1), p_route=None, n_route=None)
+    router = SimpleNamespace(_virtual_pad_at=lambda *a, **k: None)
+    finder.grid = SimpleNamespace(resolution=0.127, grid_to_world=lambda *a: (0.0, 0.0))
+    finder.net_class_map = {"P": SimpleNamespace(effective_intra_pair_clearance=lambda: 0.15)}
+    departure.proposal = SimpleNamespace(across=(1, 0), layer=0)
+
+    monkeypatch.setattr(body_search, "construct_pair_body", lambda *a, **k: body)
+    monkeypatch.setattr(body_search, "constructed_pair_geometry_issue", lambda *a, **k: None)
+
+    def fake_complete_pair_body(*args, reasons=None, **kwargs):
+        reasons["no_tail"] += 1
+        return None
+
+    monkeypatch.setattr(body_search, "complete_pair_body", fake_complete_pair_body)
+    monkeypatch.setattr(body_search, "time", SimpleNamespace(monotonic=lambda: 0))
+    budget = BodySearchBudget(deadline=1, bodies_remaining=1)
+    assert (
+        complete_departure(
+            router,
+            finder,
+            None,
+            pads,
+            departure,
+            SimpleNamespace(allowed_sites=()),
+            budget,
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+        )
+        is None
+    )
+    # Both approach orderings inside complete_departure run to exhaustion,
+    # so a 1-body budget still tries both ``shortest`` values.
+    assert budget.completion_reasons == {"no_tail": 2}
 
 
 def test_failed_constructor_still_debits_attempts(monkeypatch):

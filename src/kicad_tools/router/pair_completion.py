@@ -6,6 +6,7 @@ import copy
 import itertools
 import math
 import time
+from collections import Counter
 from typing import TYPE_CHECKING
 
 from .construction_validation import constructed_pair_geometry_issue
@@ -32,6 +33,7 @@ def complete_pair_body(
     allowed_via_sites: tuple[frozenset[tuple[int, int]], frozenset[tuple[int, int]]] | None = None,
     prefer_shortest_approach: bool = False,
     reserved_routes: tuple[Route, ...] = (),
+    reasons: Counter[str] | None = None,
 ) -> tuple[Route, Route] | None:
     """Try at most ten tails per half in each order within the shared deadline.
 
@@ -40,7 +42,20 @@ def complete_pair_body(
     obstacles. Reservations are never added to either committed route list. Full geometry is
     checked before and after physical-length tuning; coupling and skew must
     meet the authored net class. This function never commits route occupancy.
+
+    ``reasons`` is an optional diagnostic tally, never an input: it
+    histograms why each attempted (tail, other_tail) candidate was rejected
+    -- ``no_tail`` when the layer-return search offered nothing for a side,
+    the ``constructed_pair_geometry_issue`` reason token for a colliding
+    candidate, ``skew_tolerance`` / ``coupling_threshold`` for a candidate
+    that qualifies geometrically but not physically, or the post-tune
+    geometry reason if tuning itself introduces a collision.  A caller that
+    reaches ``bodies=N geom_rejected=0`` with completions attempted still
+    needs this to tell "no legal tail exists" apart from "every tail passes
+    the pad-clearance gate but fails skew".
     """
+    if reasons is None:
+        reasons = Counter()
     if time.monotonic() >= deadline:
         return None
     nc = finder.net_class_map.get(pads[0].net_name)
@@ -76,9 +91,11 @@ def complete_pair_body(
                 if allowed_via_sites is not None
                 else None,
             )
+            found_first_tail = False
             for tail in itertools.islice(tails, 10):
                 if time.monotonic() >= deadline:
                     return None
+                found_first_tail = True
                 first_route = copy.deepcopy(originals[first])
                 first_route.segments.extend(tail.segments)
                 first_route.vias.extend(tail.vias)
@@ -98,26 +115,27 @@ def complete_pair_body(
                             allowed_via_sites[second] if allowed_via_sites is not None else None
                         ),
                     )
+                    found_other_tail = False
                     for other_tail in itertools.islice(other_tails, 10):
                         if time.monotonic() >= deadline:
                             return None
+                        found_other_tail = True
                         candidate = list(copy.deepcopy(originals))
                         candidate[first] = copy.deepcopy(first_route)
                         candidate[second].segments.extend(other_tail.segments)
                         candidate[second].vias.extend(other_tail.vias)
-                        if (
-                            constructed_pair_geometry_issue(
-                                router,
-                                finder,
-                                candidate[0],
-                                candidate[1],
-                                pads,
-                                intra_pair_clearance=intra,
-                                deadline=deadline,
-                                reserved_routes=reserved_routes,
-                            )
-                            is not None
-                        ):
+                        issue = constructed_pair_geometry_issue(
+                            router,
+                            finder,
+                            candidate[0],
+                            candidate[1],
+                            pads,
+                            intra_pair_clearance=intra,
+                            deadline=deadline,
+                            reserved_routes=reserved_routes,
+                        )
+                        if issue is not None:
+                            reasons[issue] += 1
                             continue
                         corpus = {r.net: r for r in [*grid.routes, *router.autorouter.routes]}
                         # Several reservations can belong to one future net
@@ -157,6 +175,7 @@ def complete_pair_body(
                             for r in (p, n)
                         ]
                         if abs(lengths[0] - lengths[1]) > nc.effective_skew_tolerance():
+                            reasons["skew_tolerance"] += 1
                             continue
                         if (
                             min(
@@ -165,19 +184,23 @@ def complete_pair_body(
                             )
                             < nc.effective_coupled_continuity_threshold()
                         ):
+                            reasons["coupling_threshold"] += 1
                             continue
-                        if (
-                            constructed_pair_geometry_issue(
-                                router,
-                                finder,
-                                p,
-                                n,
-                                pads,
-                                intra_pair_clearance=intra,
-                                deadline=deadline,
-                                reserved_routes=reserved_routes,
-                            )
-                            is None
-                        ):
+                        final_issue = constructed_pair_geometry_issue(
+                            router,
+                            finder,
+                            p,
+                            n,
+                            pads,
+                            intra_pair_clearance=intra,
+                            deadline=deadline,
+                            reserved_routes=reserved_routes,
+                        )
+                        if final_issue is None:
                             return p, n
+                        reasons[f"post_tune_{final_issue}"] += 1
+                    if not found_other_tail:
+                        reasons["no_tail"] += 1
+            if not found_first_tail:
+                reasons["no_tail"] += 1
     return None

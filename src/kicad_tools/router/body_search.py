@@ -36,6 +36,13 @@ class BodySearchBudget:
     ``geometry_reasons`` histograms the short reason token
     :func:`constructed_pair_geometry_issue` returns, which is what separates
     "this shape happens to collide" from "every shape fails the same check".
+
+    ``completion_reasons`` is the SAME kind of histogram for the terminal
+    stage (:func:`complete_pair_body`): a body can pass the pre-tuning
+    geometry gate every time and still never qualify, and ``completions_tried``
+    alone cannot say whether that is because no legal layer-return tail
+    exists (``no_tail``), physical skew/coupling missed the authored
+    threshold, or tuning itself reintroduced a collision.
     """
 
     deadline: float
@@ -45,6 +52,7 @@ class BodySearchBudget:
     bodies_geometry_rejected: int = 0
     completions_tried: int = 0
     geometry_reasons: Counter[str] = field(default_factory=Counter)
+    completion_reasons: Counter[str] = field(default_factory=Counter)
 
 
 def preference_ordered(*axes: Iterable[Any]) -> list[tuple[Any, ...]]:
@@ -175,6 +183,7 @@ def complete_departure(
                 allowed_via_sites=landing.allowed_sites,
                 prefer_shortest_approach=shortest,
                 reserved_routes=reserved_routes,
+                reasons=budget.completion_reasons,
             )
             if result is not None:
                 return result
@@ -230,6 +239,7 @@ def complete_departures(
             budget.bodies_geometry_rejected += portion.bodies_geometry_rejected
             budget.completions_tried += portion.completions_tried
             budget.geometry_reasons.update(portion.geometry_reasons)
+            budget.completion_reasons.update(portion.completion_reasons)
         if result is not None:
             return result
     return None
