@@ -41,6 +41,35 @@ if TYPE_CHECKING:
 # Diagnostic only -- never changes which route ships.
 _CORRIDOR_DEBUG: bool = os.environ.get("KCT_CORRIDOR_CONSTRUCTION_DEBUG", "0") == "1"
 
+# Issue #5333 (TMDS_D1): the fraction of the construction window that is held
+# back for :func:`_corridor_guided_departures` when a corridor is available.
+#
+# The two body-finding stages share ONE caller-supplied wall-clock window, and
+# before this reserve the FIRST of them (:func:`_geometric_body_search`) could
+# spend all of it.  Measured on real Board07 (seed 42, native ABI 31, the
+# regression fixture, ``--differential-pairs``): TMDS_D1 reported
+# ``landings=1 bodies=139 completions=146 completion_reasons={'no_tail': 277,
+# ...} widen_spent=40 corridor_attempts=0`` -- the lattice burned the pair's
+# whole 60 s window on full-lattice tail widening (its widen allowance is
+# exhausted, 40/40) and the corridor-guided native search, the stage that is
+# the ONLY reason MIPI_DAT0 resolves at all (``corridor_attempts=2
+# corridor_iters=181755``), never ran even once.  That is starvation, not a
+# verdict: the corridor stage has its own, entirely separate iteration ledger
+# (``corridor_iterations_remaining``) that was fully unspent.
+#
+# This is a max-min split of an UNCHANGED window, not a bigger budget: the
+# pair's deadline, native departure allowance, body-attempt allowance and
+# corridor-iteration allowance are all untouched, and a lattice that finishes
+# (or succeeds) early still leaves the whole remainder to the corridor stage.
+# It mirrors the split the top-level coupled search already applies between
+# its own corridor and open phases (#3473, ``per_pair_max_iterations // 2``).
+# When no corridor is supplied -- every pre-#5333 caller, and every board that
+# does not run the escape-aware path -- the lattice keeps the entire window
+# exactly as before.
+CORRIDOR_WALL_RESERVE_FRACTION: float = float(
+    os.environ.get("KCT_CONSTRUCTION_CORRIDOR_WALL_RESERVE", "0.5")
+)
+
 
 @dataclass
 class ConstructionBudget:
@@ -190,6 +219,13 @@ def construct_pair_routes(
     already succeeds through the geometric lattice never reaches it, so
     supplying a corridor cannot change the outcome for a pair that already
     routes.
+
+    When a corridor IS supplied, the lattice is additionally bounded by a
+    SUB-deadline -- see :data:`CORRIDOR_WALL_RESERVE_FRACTION` -- so that a
+    lattice which is already failing cannot spend the whole window and starve
+    the corridor stage of its turn (#5333, TMDS_D1).  Nothing about the pair's
+    own deadline or any of the three allowances changes; only the point at
+    which the FIRST of two body-finding stages must hand over.
     """
     if (
         time.monotonic() >= budget.deadline
@@ -215,6 +251,7 @@ def construct_pair_routes(
         reserved_routes=reserved_routes,
         max_landings=max_landings,
         max_bodies_per_departure=max_bodies_per_departure,
+        deadline=_lattice_deadline(budget, corridor),
     )
     if result is not None:
         return result
@@ -247,20 +284,29 @@ def _geometric_body_search(
     reserved_routes: tuple[Route, ...],
     max_landings: int,
     max_bodies_per_departure: int,
+    deadline: float | None = None,
 ) -> tuple[Route, Route] | None:
-    """The pre-existing fixed synthetic depth/retreat/offset/loop lattice."""
+    """The pre-existing fixed synthetic depth/retreat/offset/loop lattice.
+
+    ``deadline`` bounds THIS stage only and defaults to the pair's own
+    ``budget.deadline``.  A caller that still has a later stage to run (the
+    corridor-guided native search) passes an earlier sub-deadline so this
+    stage cannot consume the whole window -- see
+    :data:`CORRIDOR_WALL_RESERVE_FRACTION`.  It is only ever earlier than
+    ``budget.deadline``, never later, so this can never extend a budget.
+    """
+    if deadline is None or deadline > budget.deadline:
+        deadline = budget.deadline
     for outward, group in _by_escape_direction(departures):
-        if time.monotonic() >= budget.deadline or budget.bodies_remaining <= 0:
+        if time.monotonic() >= deadline or budget.bodies_remaining <= 0:
             return None
-        landings = landing_proposals(
-            router, finder, pads, outward=outward, deadline=budget.deadline
-        )
+        landings = landing_proposals(router, finder, pads, outward=outward, deadline=deadline)
         for landing in itertools.islice(landings, max_landings):
             budget.landings_found += 1
-            if time.monotonic() >= budget.deadline or budget.bodies_remaining <= 0:
+            if time.monotonic() >= deadline or budget.bodies_remaining <= 0:
                 return None
             portion = BodySearchBudget(
-                budget.deadline,
+                deadline,
                 min(max_bodies_per_departure * len(group), budget.bodies_remaining),
             )
             try:
@@ -456,6 +502,34 @@ def _corridor_guided_departures(
         if _CORRIDOR_DEBUG:
             print(f"    [corridor-construction-debug] {dict(finder.last_rejections)}", flush=True)
     return None
+
+
+def _lattice_deadline(
+    budget: ConstructionBudget, corridor: frozenset[tuple[int, int]] | None
+) -> float:
+    """The instant :func:`_geometric_body_search` must hand over by.
+
+    Returns ``budget.deadline`` unchanged unless a corridor-guided stage can
+    actually run afterwards -- i.e. a corridor was supplied AND its own
+    (separate) iteration allowance is nonzero.  Otherwise the lattice is the
+    last stage there is, and holding time back from it would waste the window
+    rather than share it.
+
+    The reserve is taken from the time REMAINING now, after departure
+    validation has already been charged, so the lattice always gets a real
+    share of whatever the earlier stages left rather than a share of a window
+    that is already gone.
+    """
+    if corridor is None or budget.corridor_iterations_remaining <= 0:
+        return budget.deadline
+    fraction = min(max(CORRIDOR_WALL_RESERVE_FRACTION, 0.0), 1.0)
+    if fraction <= 0.0:
+        return budget.deadline
+    now = time.monotonic()
+    remaining = budget.deadline - now
+    if remaining <= 0:
+        return budget.deadline
+    return now + remaining * (1.0 - fraction)
 
 
 def _corridor_stall_reason(finder: CoupledPathfinder) -> str:

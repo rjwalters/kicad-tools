@@ -632,6 +632,138 @@ def test_corridor_fallback_splits_its_allowance_fairly_across_departures(monkeyp
     assert budget.corridor_iterations_remaining == 75
 
 
+def _clock_burning_lattice(monkeypatch, clock):
+    """Stub a lattice body attempt that spends every second it is allowed.
+
+    It reads the deadline it was actually HANDED (the per-landing
+    ``BodySearchBudget``'s) and runs the clock right up to it -- exactly what
+    ``complete_departures``' real widen/tail search does on a structurally
+    blocked landing, and the behavior that makes the reserve observable.
+    """
+
+    def fake_complete(router, finder, pair, pads, group, landing, budget, **kwargs):
+        clock[0] = budget.deadline
+        budget.bodies_used = 1
+        budget.bodies_remaining -= 1
+        return None
+
+    monkeypatch.setattr(pair_construction, "complete_departures", fake_complete)
+
+
+def test_a_failing_lattice_cannot_spend_the_whole_window_before_the_corridor_runs(monkeypatch):
+    """#5333 (TMDS_D1): the corridor stage must get a turn, not just a ledger.
+
+    Measured on real Board07 (seed 42, native ABI 31, regression fixture,
+    ``--differential-pairs``), TMDS_D1 reported ``landings=1 bodies=139
+    completions=146 completion_reasons={'no_tail': 277, ...} widen_spent=40
+    corridor_attempts=0``: the geometric lattice spent the pair's ENTIRE 60 s
+    window on full-lattice tail widening and the corridor-guided native
+    search -- the stage that is the only reason MIPI_DAT0 resolves at all --
+    never ran once, with its whole separate iteration allowance unspent.
+
+    Against the OLD implementation the lattice was handed the pair's own
+    deadline, so it burns the clock to 1.0 and the corridor stage bails on
+    its first deadline check (``corridor_attempts=0``, result ``None``).
+    """
+    clock = [0.0]
+    _stub(monkeypatch, departures=[_departure((1, 0), 3)], landings=["a"], clock=clock)
+    _clock_burning_lattice(monkeypatch, clock)
+    finder = _FakeFinder(result=("p", "n"))
+    budget = ConstructionBudget(
+        deadline=1.0,
+        iterations_remaining=64,
+        bodies_remaining=16,
+        corridor_iterations_remaining=100,
+    )
+    result = construct_pair_routes(
+        None,
+        finder,
+        None,
+        (1, 2, 3, 4),
+        budget,
+        board_thickness_mm=1.6,
+        num_copper_layers=4,
+        corridor=frozenset({(0, 0)}),
+    )
+    # The lattice is cut off at the reserve boundary (0.5 of a 1.0 window),
+    # so the clock stands at 0.5 -- still inside the pair's own deadline --
+    # when the corridor stage is offered its turn, and it resolves the pair.
+    assert clock[0] == 0.5
+    assert result == ("p", "n")
+    assert budget.corridor_attempts == 1
+    assert finder.calls and finder.calls[0][2] == 100
+
+
+def test_without_a_corridor_the_lattice_still_owns_the_entire_window(monkeypatch):
+    """No later stage exists, so holding time back would only waste it.
+
+    Same clock-burning lattice as the test above, but with no corridor: the
+    lattice is handed the pair's own deadline exactly as before #5333's
+    reserve, so its first landing spends the clock all the way to 1.0.
+    """
+    clock = [0.0]
+    departures = [_departure((1, 0), 3), _departure((-1, 0), 3)]
+    _stub(monkeypatch, departures=departures, landings=["a"], clock=clock)
+    _clock_burning_lattice(monkeypatch, clock)
+    budget = ConstructionBudget(deadline=1.0, iterations_remaining=64, bodies_remaining=16)
+    assert (
+        construct_pair_routes(
+            None,
+            None,
+            None,
+            (1, 2, 3, 4),
+            budget,
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+        )
+        is None
+    )
+    assert clock[0] == 1.0
+
+
+def test_the_reserve_never_applies_when_the_corridor_allowance_is_zero(monkeypatch):
+    """A corridor with no iteration allowance cannot run, so it gets no reserve."""
+    clock = [0.0]
+    departures = [_departure((1, 0), 3), _departure((-1, 0), 3)]
+    _stub(monkeypatch, departures=departures, landings=["a"], clock=clock)
+    _clock_burning_lattice(monkeypatch, clock)
+    finder = _FakeFinder(result=("p", "n"))
+    budget = ConstructionBudget(deadline=1.0, iterations_remaining=64, bodies_remaining=16)
+    assert (
+        construct_pair_routes(
+            None,
+            finder,
+            None,
+            (1, 2, 3, 4),
+            budget,
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+            corridor=frozenset({(0, 0)}),
+        )
+        is None
+    )
+    assert clock[0] == 1.0
+    assert finder.calls == []
+
+
+def test_the_lattice_sub_deadline_can_never_exceed_the_pair_deadline(monkeypatch):
+    """A reserve fraction of zero (or a bad override) must not extend a budget."""
+    monkeypatch.setattr(pair_construction, "CORRIDOR_WALL_RESERVE_FRACTION", 0.0)
+    clock = [0.0]
+    _stub(monkeypatch, departures=[_departure((1, 0), 3)], landings=["a"], clock=clock)
+    budget = ConstructionBudget(
+        deadline=1.0,
+        iterations_remaining=64,
+        bodies_remaining=16,
+        corridor_iterations_remaining=100,
+    )
+    assert pair_construction._lattice_deadline(budget, frozenset({(0, 0)})) == 1.0
+    monkeypatch.setattr(pair_construction, "CORRIDOR_WALL_RESERVE_FRACTION", 5.0)
+    # Clamped to the whole window, and still never later than the deadline.
+    assert pair_construction._lattice_deadline(budget, frozenset({(0, 0)})) == 0.0
+    assert pair_construction._lattice_deadline(budget, None) == 1.0
+
+
 @pytest.mark.skipif(not is_cpp_available(), reason="requires matching native backend")
 def test_constructs_a_qualified_pair_where_the_joint_search_cannot():
     """End-to-end: the barrier control from #5333's root-cause measurement.
