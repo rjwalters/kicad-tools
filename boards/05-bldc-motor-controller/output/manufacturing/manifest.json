@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.20.0",
-  "generated_at": "2026-09-10T18:43:30.115725+00:00",
+  "generated_at": "2026-09-14T20:54:37.924258+00:00",
   "manufacturer": "jlcpcb",
   "files": {
     "HARDWARE.md": {
@@ -13,28 +13,28 @@
       "size": 1591
     },
     "assembly-back.pdf": {
-      "sha256": "6c789c9694950e35f4cd3b56ae58f5405aaac597d763936b0a0ffcd444da42f2",
-      "size": 110904
+      "sha256": "f18a403d7f0e5c6dfca090df59f076789d06b712f1d698f03d0c724531bdc2f3",
+      "size": 110912
     },
     "assembly-front.pdf": {
-      "sha256": "22d341c4dda875805f43c513836e4dfa0d89064fe981a4747622cfebc18bfd78",
-      "size": 167154
+      "sha256": "d9430611b0e50677ba6b913b7dfd87ed4983191a90b3aeeb3682f9b3fe1dddb9",
+      "size": 167155
     },
     "bom_jlcpcb.csv": {
       "sha256": "6e04b5c78e81ebd85f18e72142d21906dda4165d5ca9b7f7d6159729b54c5506",
       "size": 1442
     },
     "check-report.json": {
-      "sha256": "87281ec69cf28ab0258cd3c9983ba141644bc1601117acdd4b8a093bedc70ef3",
-      "size": 4050
+      "sha256": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
+      "size": 4103
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "c85a0c34cbdbf215a186e85d9ffc0bf4254e4ff7e8d8092b3454bcf831bd29d5",
-      "size": 2535
+      "sha256": "31bc6669b6c7e24cf777af71e201ce79a2da1104614874307fea7db25c738bf7",
+      "size": 2551
     },
     "design-source.zip": {
-      "sha256": "3f76ef32bd0ce9bfde29d8f2d641b52fb22c1149f274f42f098afab27d1abb2b",
-      "size": 363946
+      "sha256": "4ed8dbfbb8120439ae6f624c015c1e48a7f0b0915d98c3317ff6d0e934ae0d71",
+      "size": 364824
     },
     "firmware/Makefile": {
       "sha256": "f105bf145347705a625a825aad34614c3e4001c7260793991f68cca37587516c",
@@ -53,12 +53,12 @@
       "size": 3516
     },
     "gerbers/gerbers.zip": {
-      "sha256": "ac9b9015bd7a665ab210b266445b46a5f516a576fda786d678e43ed5f385a586",
-      "size": 294297
+      "sha256": "5199cc16a40dac7068ad05aad7afecd9d1854f7f0e25a46b319a68aea1eea996",
+      "size": 294370
     },
     "images/assembly.png": {
-      "sha256": "0cdf53f7c1b40c1dd39f42cd12d2e7d586388971d6565f5c70423daaba3e1659",
-      "size": 518596
+      "sha256": "56e07c74420ae321cbca7dd1e6b55dca323e3f65523ae66c82c27913820a3445",
+      "size": 518992
     },
     "images/layer_B_Cu.png": {
       "sha256": "f5cb2b6ec8483df1144eb974408d51eabdc77f296581c7133177ac433e378457",
@@ -73,8 +73,8 @@
       "size": 347446
     },
     "images/layer_In2_Cu.png": {
-      "sha256": "0e7319d75ed331c8ee8aa31d5a2ce9d661d5c8f94c8c1a5d58781602d0a4f277",
-      "size": 351481
+      "sha256": "8bd8b03b705c1e1cecf1b98852b9c083c2ca5d6574b039114933efc8b033f121",
+      "size": 352690
     },
     "images/pcb_back.png": {
       "sha256": "625008bbc8f68ac273b2fd7f7b037b35a77c16e90f92aa28faf27d1f455ec800",
@@ -85,31 +85,31 @@
       "size": 427212
     },
     "images/pcb_front.png": {
-      "sha256": "845fea3ecad83985a98a59c75382cd01e3f782dbabe4680b831cbbdabd062163",
-      "size": 580057
+      "sha256": "fd1d392fa778650f4667fc589a413c959d5fd474d3995eec8c8e8138691f6a34",
+      "size": 580497
     },
     "images/schematic_bldc_controller.png": {
       "sha256": "5c7e9f99485b1d6dac315ce5da1dc49c8d0e0478e6d187d1129e11b57be83495",
       "size": 443648
     },
     "kct-check.json": {
-      "sha256": "87281ec69cf28ab0258cd3c9983ba141644bc1601117acdd4b8a093bedc70ef3",
-      "size": 4050
+      "sha256": "50fd9a160510e11db6ba7fc902a087eea4087c960b03d9bfb70cd470249a3020",
+      "size": 4103
     },
     "kicad_project.zip": {
-      "sha256": "66994ada59ad5dbcd09a07585210aa679b4f9748c491dc867c57773e5053d247",
-      "size": 555755
+      "sha256": "48877f98b4bfed3b9f783b18635d5415e90a2213c686847f26ef73a4e43ae63d",
+      "size": 555799
     },
     "lvs.json": {
       "sha256": "52fed944df95bc4d3650b2774ce6b714e731e310d9d9a761553b25055b3e1a25",
       "size": 215
     },
     "native-drc.json": {
-      "sha256": "186154f204be2ada756d1b22e8a98a9c6543f54cbe9af36e7fb1873552e6aefd",
+      "sha256": "3ebacdeb5abaecf41f218fd65fb65a5d37857479245838e568d13a5f3f0bb541",
       "size": 1214
     },
     "native-erc.json": {
-      "sha256": "6e0681301ffa938598ed36e1e8e6ce00c8ea1b9eef79e941b07d5d3139d2383a",
+      "sha256": "413700ae1e92136ad5d319314d28bdc3624dfb25a55cbf8fffc6edbd43569891",
       "size": 988
     },
     "project.kct": {
@@ -117,31 +117,31 @@
       "size": 3930
     },
     "renders/3d-back.png": {
-      "sha256": "81d190b7c42dc062f5894707a6ad4c76cca19088bf5f98e0af5591c6615d13ec",
-      "size": 176040
+      "sha256": "ec0126e348b9f440792f9224a68b713dd86d59b15ad3c9c3b5a4de8de6fe1a8e",
+      "size": 175877
     },
     "renders/3d-front.png": {
-      "sha256": "8d4faf07a6e8e8fd3aa273e6a18007d0fae3969ecc9c8c896dae8d950d3e282c",
-      "size": 241843
+      "sha256": "8a5486120518e28a5126af21d961ea5966e0378c513930681473e4f4a7e9ff83",
+      "size": 241407
     },
     "renders/pcb-back.svg": {
-      "sha256": "090218d8a4ecfc6421f83a1fa9a918822e054294845de2e6fcba0ed67e9190ce",
-      "size": 316948
+      "sha256": "a868cf439771f7ab7198f0fb7ffe5599ec2e20254435bf3968b2c956aad4f27e",
+      "size": 316964
     },
     "renders/pcb-front.svg": {
-      "sha256": "d3013b92213ce3342c2b27de921df0eefd790f60dcb580503083edf8bb47c0ee",
+      "sha256": "713d267fa3c341b03ae57a3638e6dbf782f5c2c3767fceeac32ab58ff85c1794",
       "size": 563884
     },
     "report.md": {
-      "sha256": "95d55c8a571ede387a2c38c57594a640118a2dca4098baecd0e2d4e86d4353e7",
+      "sha256": "2a8be894b2281161fa0df2b4b92e44e3da615c5e908edd91f573c93e006d1774",
       "size": 5719
     },
     "report.pdf": {
-      "sha256": "9414300b6b98a8d38a5bff8bddac7ab1e9f6819360bc4d995e05a9f9ab883de4",
-      "size": 4020922
+      "sha256": "0ecfb21366b397388d2e6e91eced43a7ea180c6528d3ea596c91a375d4f64b31",
+      "size": 4023183
     },
     "schematic.pdf": {
-      "sha256": "d16180e1439f3e8e0a9dfb7d86c28d37638fb9715a175acdcbe2d2ab026fc38e",
+      "sha256": "3bb8564323757ed17fbffed573e01e456c851fbd84863ce978028e45f065e9b2",
       "size": 159209
     }
   },
