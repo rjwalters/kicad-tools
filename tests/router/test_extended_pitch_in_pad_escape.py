@@ -149,13 +149,18 @@ def _make_rules(manufacturer: str | None) -> DesignRules:
 
 
 def _make_grid(rules: DesignRules) -> RoutingGrid:
+    # Issue #5201: this fixture models board-03's U1 TQFP-32 (a REAL
+    # 4-layer board in production), and ``jlcpcb-tier1``'s via-in-pad
+    # POFV process requires >= 4 copper layers -- a 2-layer stack here
+    # would make every ``jlcpcb-tier1`` fixture in this file ineligible
+    # for via-in-pad, which does not match the board this suite models.
     return RoutingGrid(
         width=20.0,
         height=20.0,
         rules=rules,
         origin_x=-10.0,
         origin_y=-10.0,
-        layer_stack=LayerStack.two_layer(),
+        layer_stack=LayerStack.four_layer_sig_sig_gnd_pwr(),
     )
 
 

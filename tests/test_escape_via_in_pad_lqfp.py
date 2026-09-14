@@ -318,8 +318,15 @@ class TestLqfp48InPadEscape:
 
     def test_in_pad_escape_on_2layer_board(self):
         """On a 2-layer board with via-in-pad enabled, in-pad vias land on
-        B.Cu (the only available alternate signal layer)."""
-        rules = _make_rules(manufacturer="jlcpcb-tier1")
+        B.Cu (the only available alternate signal layer).
+
+        Issue #5201: ``jlcpcb-tier1``'s via-in-pad-specific POFV process
+        requires >= 4 copper layers, so a 2-layer board at that tier has
+        no eligible process.  ``pcbway`` publishes via-in-pad at any
+        layer count, so it keeps this specifically a 2-layer
+        via-in-pad-eligible fixture.
+        """
+        rules = _make_rules(manufacturer="pcbway")
         grid = _make_grid(rules, layer_stack=LayerStack.two_layer())
         escape_router = EscapeRouter(grid, rules)
         pads = _make_lqfp48_0p5mm()

@@ -36,6 +36,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+#: Numerical slack for eligibility comparisons below, in mm.  Matches
+#: ``kicad_tools.validate.rules.base.DRC_TOLERANCE`` (the constant the
+#: validate-side ``via_in_pad`` DRC rule uses for the identical checks) --
+#: duplicated as a literal here rather than imported to avoid a
+#: ``manufacturers`` -> ``validate`` package dependency; keep the two
+#: values in sync if either changes.
+_ELIGIBILITY_TOLERANCE_MM = 1e-4
+
 
 @dataclass(frozen=True)
 class FabricationProcess:
@@ -96,6 +104,87 @@ class FabricationProcess:
             "min_component_hole_distance_mm": self.min_component_hole_distance_mm,
             "source": self.source,
         }
+
+    def eligibility_reasons(
+        self,
+        *,
+        layer_count: int | None,
+        drill_mm: float,
+        annular_ring_mm: float | None = None,
+        nearest_other_hole_distance_mm: float | None = None,
+        tolerance_mm: float = _ELIGIBILITY_TOLERANCE_MM,
+    ) -> list[str]:
+        """Return human-readable reasons a candidate via fails this process.
+
+        Single source of truth for "does this via's geometry satisfy this
+        process's published envelope" -- shared by the validate-side
+        ``via_in_pad`` DRC rule
+        (:class:`~kicad_tools.validate.rules.via_in_pad.ViaInPadRule`) and
+        the router's escape/repair decisions
+        (:mod:`kicad_tools.router.via_in_pad_eligibility`), so the two
+        never disagree about which vias are legal (Issue #5201).
+
+        Each check is skipped (not a failure) when its input is ``None``
+        -- callers with partial context (e.g. a candidate via whose
+        neighboring PTH holes have not been enumerated yet) get a
+        best-effort answer instead of a spurious failure.
+
+        Args:
+            layer_count: The board's actual copper-layer count, or
+                ``None`` to skip the layer-count check (e.g. when the
+                caller has already folded a layer-count floor into
+                process *selection* and only wants the per-via geometry
+                checked -- see
+                :func:`kicad_tools.router.via_in_pad_eligibility.via_geometry_eligible`).
+            drill_mm: Candidate via drill diameter in mm.
+            annular_ring_mm: Candidate via annular ring width in mm, or
+                ``None`` to skip this check.
+            nearest_other_hole_distance_mm: Distance from the candidate
+                via to the nearest OTHER component's drilled hole, or
+                ``None`` to skip this check.
+            tolerance_mm: Numerical slack applied to every comparison.
+
+        Returns:
+            A list of reasons the via fails ``self``'s requirements. An
+            empty list means every checkable requirement is satisfied.
+        """
+        reasons: list[str] = []
+
+        if layer_count is not None and layer_count < self.min_layer_count:
+            reasons.append(
+                f"board has {layer_count} copper layer(s); process "
+                f"{self.process_id!r} requires >= {self.min_layer_count}"
+            )
+
+        if drill_mm < self.min_via_drill_mm - tolerance_mm:
+            reasons.append(
+                f"via drill {drill_mm:.3f}mm is below process minimum {self.min_via_drill_mm:.3f}mm"
+            )
+        elif drill_mm > self.max_via_drill_mm + tolerance_mm:
+            reasons.append(
+                f"via drill {drill_mm:.3f}mm exceeds process maximum {self.max_via_drill_mm:.3f}mm"
+            )
+
+        if (
+            annular_ring_mm is not None
+            and annular_ring_mm < self.min_annular_ring_mm - tolerance_mm
+        ):
+            reasons.append(
+                f"via annular ring {annular_ring_mm:.3f}mm is below process minimum "
+                f"{self.min_annular_ring_mm:.3f}mm"
+            )
+
+        if (
+            nearest_other_hole_distance_mm is not None
+            and nearest_other_hole_distance_mm < self.min_component_hole_distance_mm - tolerance_mm
+        ):
+            reasons.append(
+                f"via is {nearest_other_hole_distance_mm:.3f}mm from the nearest other "
+                f"component hole; process requires >= "
+                f"{self.min_component_hole_distance_mm:.3f}mm"
+            )
+
+        return reasons
 
     def ordering_instructions(self) -> str:
         """Human-readable factory ordering instructions derived from this process.

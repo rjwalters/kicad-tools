@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from kicad_tools.manufacturers.fabrication_process import FabricationProcess
+
     from .core import Autorouter
 
 from .geometry import (
@@ -57,6 +59,7 @@ from .via_clearance import (
     segment_clears_foreign_via,
     via_clears_foreign_segment,
 )
+from .via_in_pad_eligibility import via_geometry_eligible
 
 logger = logging.getLogger(__name__)
 
@@ -1255,6 +1258,39 @@ def _router_via_in_pad_supported(router: Autorouter) -> bool:
     return bool(getattr(limits, "via_in_pad_supported", False))
 
 
+def _resolve_router_via_in_pad_process(
+    router: Autorouter,
+) -> FabricationProcess | None:
+    """Resolve the eligible via-in-pad process for ``router``'s board, if any.
+
+    Issue #5009 / #5201: thin wrapper around
+    :func:`kicad_tools.router.via_in_pad_eligibility.resolve_process` that
+    reads ``router.rules.manufacturer`` and ``router.layer_stack.num_layers``
+    -- the router's actual board context, not a new hand-maintained
+    manufacturer/layer table.  Shared by :func:`_router_via_in_pad_process_eligible`
+    (the board-level gate) and :func:`_scan_and_repair_via_in_pad` (which
+    additionally validates each DETECTED in-pad via's own geometry against
+    the SAME resolved process, since board-level eligibility only proves a
+    real process exists -- not that every via satisfies it).
+
+    Fails closed (returns ``None``) whenever the manufacturer, profile,
+    layer count, or process cannot be resolved.
+    """
+    rules = getattr(router, "rules", None)
+    mfr_id = getattr(rules, "manufacturer", None) if rules is not None else None
+
+    layer_stack = getattr(router, "layer_stack", None)
+    raw_layers = getattr(layer_stack, "num_layers", None)
+    try:
+        num_layers = int(raw_layers) if raw_layers else None
+    except (TypeError, ValueError):
+        num_layers = None
+
+    from .via_in_pad_eligibility import resolve_process
+
+    return resolve_process(mfr_id, num_layers)
+
+
 def _router_via_in_pad_process_eligible(router: Autorouter) -> bool:
     """Return True when an in-pad via on THIS board has a real fab process.
 
@@ -1279,40 +1315,18 @@ def _router_via_in_pad_process_eligible(router: Autorouter) -> bool:
     the router relocate those vias off their SMT lands instead, using the
     existing connectivity-preserving chain-snap machinery (#3112/#4359).
 
+    Note: this is the BOARD-level gate only (layer count + a real
+    process attached).  It does NOT prove any specific via's geometry
+    satisfies that process's envelope -- see :func:`_scan_and_repair_via_in_pad`,
+    which additionally checks each detected in-pad via individually
+    (Issue #5201) rather than trusting this gate alone.
+
     Fails closed (returns False, i.e. "run the sweep") whenever the
-    manufacturer, profile, or process cannot be resolved -- relocating a
-    via off a pad is always manufacturable, while leaving it there may
-    not be.
+    manufacturer, profile, layer count, or process cannot be resolved --
+    relocating a via off a pad is always manufacturable, while leaving it
+    there may not be.
     """
-    if not _router_via_in_pad_supported(router):
-        return False
-
-    rules = getattr(router, "rules", None)
-    mfr_id = getattr(rules, "manufacturer", None) if rules is not None else None
-    if not mfr_id:
-        return False
-
-    layer_stack = getattr(router, "layer_stack", None)
-    raw_layers = getattr(layer_stack, "num_layers", None)
-    try:
-        num_layers = int(raw_layers) if raw_layers else None
-    except (TypeError, ValueError):
-        num_layers = None
-
-    try:
-        from kicad_tools.manufacturers import get_profile
-        from kicad_tools.manufacturers.fabrication_process import get_fabrication_process
-
-        design_rules = get_profile(mfr_id).get_design_rules(layers=num_layers or 2)
-    except (ValueError, KeyError, ImportError, IndexError):
-        return False
-
-    process = get_fabrication_process(getattr(design_rules, "via_in_pad_process_id", None))
-    if process is None:
-        return False
-    if num_layers is not None and num_layers < process.min_layer_count:
-        return False
-    return True
+    return _resolve_router_via_in_pad_process(router) is not None
 
 
 #: Numerical slack for the destination-validation comparisons below, in mm.
@@ -1742,15 +1756,20 @@ def _scan_and_repair_via_in_pad(
 
     Issue #3112: runs the explicit detection sweep that the
     :func:`validate_routes` stream cannot surface (it intentionally
-    skips same-net pads at ``router/io.py:1756``).  Gated on
-    :func:`_router_via_in_pad_process_eligible` -- when the profile
+    skips same-net pads at ``router/io.py:1756``).  Board-level gated on
+    :func:`_resolve_router_via_in_pad_process` -- when the profile
     supports via-in-pad AND declares a real fabrication process this
     board's layer count is eligible for (e.g. ``pcbway`` at any layer
-    count, ``jlcpcb-tier1`` at 4+ layers) this is a no-op.  Issue #5009
-    tightened this from the bare ``via_in_pad_supported`` capability
-    flag: a 2-layer ``jlcpcb-tier1`` board has no eligible POFV process,
-    so the sweep now runs there and relocates the vias instead of
-    leaving findings for DRC.
+    count, ``jlcpcb-tier1`` at 4+ layers), each DETECTED in-pad via is
+    still individually checked against that process's own geometric
+    envelope (drill range, annular ring, component-hole distance) before
+    being treated as a legal escape (Issue #5201) -- board-level
+    eligibility proves a real process exists, not that every via
+    satisfies it.  When no process is resolved at all, every detected
+    in-pad via is unconditionally a candidate for relocation, matching
+    Issue #5009's original tightening: a 2-layer ``jlcpcb-tier1`` board
+    has no eligible POFV process, so the sweep runs there and relocates
+    the vias instead of leaving findings for DRC.
 
     Note on the displacement budget: the via-in-pad sweep uses its own
     budget (``_VIA_IN_PAD_MAX_DISPLACEMENT``, default 2.0 mm) rather
@@ -1767,13 +1786,7 @@ def _scan_and_repair_via_in_pad(
         Number of vias successfully nudged.
     """
     via_pad_budget = max(max_displacement, _VIA_IN_PAD_MAX_DISPLACEMENT)
-    if _router_via_in_pad_process_eligible(router):
-        # Manufacturer supports via-in-pad AND declares a real, orderable
-        # process this board's layer count is eligible for (#5009) --
-        # nothing to do.  A bare capability flag is NOT enough: the DRC
-        # rule fails closed without a declared process, so the sweep must
-        # too, or the router leaves vias the next DRC pass rejects.
-        return 0
+    process = _resolve_router_via_in_pad_process(router)
 
     pads = getattr(router, "pads", None) or {}
     routes = getattr(router, "routes", None) or []
@@ -1791,6 +1804,19 @@ def _scan_and_repair_via_in_pad(
         if net == 0:
             continue
         pads_by_net.setdefault(net, []).append(pad)
+
+    # Issue #5201: PTH-hole registry for the resolved process's
+    # component-hole-distance check, mirroring
+    # :class:`~kicad_tools.validate.rules.via_in_pad.ViaInPadRule`'s
+    # ``pth_holes`` collection.  Only built when a process was resolved
+    # -- when there is none, the sweep never reaches the per-via
+    # geometry check below and this registry would go unused.
+    pth_holes: list[tuple[float, float, float]] = []
+    if process is not None:
+        for pad in pads.values():
+            pad_drill = float(getattr(pad, "drill", 0.0) or 0.0)
+            if getattr(pad, "through_hole", False) and pad_drill > 0.0:
+                pth_holes.append((pad.x, pad.y, pad_drill / 2.0))
 
     # Canonical processing order (#5009, third review pass).  Each
     # relocation commits copper that the NEXT relocation must clear
@@ -1829,6 +1855,34 @@ def _scan_and_repair_via_in_pad(
             # foreign-net short.
             if not _via_drill_overlaps_bbox(via, bbox):
                 continue
+            # Issue #5201: a board-level eligible process does NOT prove
+            # THIS via satisfies it -- check the specific candidate's
+            # drill/annular-ring/component-hole geometry against the
+            # resolved process's envelope before trusting it as a legal
+            # escape.  A via that fails this check is treated exactly
+            # like the "no process resolved" case below (falls through
+            # to the pad-anchor check and, if not anchored, a relocation
+            # attempt) -- it is not actually a legal in-pad via despite
+            # the board having SOME eligible process.
+            if process is not None:
+                annular_ring_mm = (via.diameter - via.drill) / 2.0
+                nearest_hole_mm: float | None = None
+                if pth_holes:
+                    via_r = via.drill / 2.0
+                    nearest_hole_mm = min(
+                        math.hypot(px - via.x, py - via.y) - via_r - hole_r
+                        for px, py, hole_r in pth_holes
+                    )
+                if via_geometry_eligible(
+                    process,
+                    drill_mm=via.drill,
+                    annular_ring_mm=annular_ring_mm,
+                    nearest_other_hole_distance_mm=nearest_hole_mm,
+                ):
+                    # Legal in-pad escape under the declared process --
+                    # leave it exactly where it is.
+                    result._bump_skipped("via_pad_process_eligible")
+                    break
             # Skip vias that sit DEAD-CENTRE on a pad of the same
             # net.  Such a via is a deliberate in-pad escape: the
             # via centre is the connection to the pad pin, and

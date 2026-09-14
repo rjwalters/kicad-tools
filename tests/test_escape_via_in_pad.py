@@ -196,8 +196,17 @@ class TestInPadEscapeStrategy:
 
     def test_in_pad_escape_on_2layer_board(self):
         """On a 2-layer board with via-in-pad enabled, the in-pad via lands
-        on B.Cu (the only available inner-or-back signal layer)."""
-        rules = _make_strict_rules(manufacturer="jlcpcb-tier1")
+        on B.Cu (the only available inner-or-back signal layer).
+
+        Issue #5201: ``jlcpcb-tier1``'s via-in-pad-specific POFV process
+        requires 4+ layers, so a 2-layer board at that tier has no
+        eligible process (see ``test_via_in_pad_available_on_tier1`` for
+        the tier1-at-4-layers case).  ``pcbway`` publishes via-in-pad as a
+        standard offering at every layer count, so it is the manufacturer
+        that keeps this specifically a 2-layer via-in-pad-eligible
+        fixture.
+        """
+        rules = _make_strict_rules(manufacturer="pcbway")
         grid = _make_grid(rules, layer_stack=LayerStack.two_layer())
         escape_router = EscapeRouter(grid, rules)
         pads = _make_dual_row_ssop(pin_count=28)
@@ -233,6 +242,46 @@ class TestInPadEscapeStrategy:
         in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
         assert in_pad_vias == [], (
             "In-pad escape should bail out gracefully when pads are too small."
+        )
+
+    def test_in_pad_skipped_when_via_drill_below_process_envelope(self):
+        """Issue #5201: board-level eligibility (jlcpcb-tier1 at 4+ layers,
+        a real POFV process attached) does not certify every candidate
+        via -- the escape router must also check the specific via's own
+        drill/annular-ring geometry against that process's published
+        envelope before placing it in-pad.
+
+        ``JLCPCB_TIER1_POFV_4L.min_via_drill_mm`` is 0.2mm.  This test
+        forces the escape router's via-geometry fallback path (which
+        otherwise prefers ``MfrLimits.min_via_drill`` -- JLCPCB's real
+        0.3mm minimum, comfortably inside the process envelope) down to
+        ``rules.via_drill`` by clearing the resolved manufacturer limits,
+        then sets a 0.15mm drill: below the process floor, so the escape
+        router must fall through to the pre-existing deferral fallback
+        instead of placing an unmanufacturable via.
+        """
+        rules = _make_strict_rules(manufacturer="jlcpcb-tier1")
+        rules.via_drill = 0.15
+        rules.via_diameter = 0.6
+        grid = _make_grid(rules)
+        escape_router = EscapeRouter(grid, rules)
+        # Force the drill/annular fallback onto ``rules`` (see docstring).
+        escape_router._mfr_limits = None
+        assert escape_router._via_in_pad_process is not None, (
+            "Board-level eligibility (jlcpcb-tier1, 4-layer) must still "
+            "resolve a real process -- this test isolates the per-via "
+            "geometry check, not the board-level gate."
+        )
+        pads = _make_dual_row_ssop(pin_count=28)
+
+        package_info = escape_router.analyze_package(pads)
+        escapes = escape_router.generate_escapes(package_info)
+
+        in_pad_vias = [e for e in escapes if e.via is not None and getattr(e.via, "in_pad", False)]
+        assert in_pad_vias == [], (
+            "A 0.15mm drill is below the resolved POFV process's 0.2mm "
+            "minimum -- the escape router must fall back to the "
+            "non-in-pad strategy rather than place an out-of-envelope via."
         )
 
     def test_in_pad_via_does_not_trigger_segment_clearance_warning(self, caplog):

@@ -101,13 +101,21 @@ def _make_tier0_rules() -> DesignRules:
 
 
 def _make_grid(rules: DesignRules) -> RoutingGrid:
+    # Issue #5201: ``jlcpcb-tier1``'s via-in-pad-specific POFV process
+    # requires >= 4 copper layers, so a 2-layer stack would make every
+    # ``jlcpcb-tier1`` fixture in this file ineligible for via-in-pad.
+    # Use a 4-layer stack so the SOP rescue gate/wiring tests below keep
+    # exercising a via-in-pad-eligible tier1 board (matching real
+    # tier1-at-4-layer boards); the tier-0 ``jlcpcb`` fixtures are
+    # unaffected either way (capability gate fails regardless of layer
+    # count).
     return RoutingGrid(
         width=40.0,
         height=40.0,
         rules=rules,
         origin_x=40.0,
         origin_y=40.0,
-        layer_stack=LayerStack.two_layer(),
+        layer_stack=LayerStack.four_layer_sig_sig_gnd_pwr(),
     )
 
 
