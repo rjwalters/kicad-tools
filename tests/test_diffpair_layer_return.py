@@ -421,3 +421,29 @@ def test_tiny_tail_preserves_virtual_head_and_goal():
     assert tail.segments[0].start == (head.x, head.y)
     assert tail.segments[-1].end == (goal.x, goal.y)
     assert all(a.end == b.start for a, b in zip(tail.segments[:-1], tail.segments[1:], strict=True))
+
+
+def test_planned_return_site_restricts_candidates_without_waiving_barrel_clearance():
+    router, finder, head, goal, partner, body = _case()
+    grid = finder.grid
+    first = next(router._layer_return_tails(finder, head, goal, partner, body)).vias[0]
+    site = grid.world_to_grid(first.x, first.y)
+    options = {"allowed_via_sites": frozenset({site})}
+    candidates = list(router._layer_return_tails(finder, head, goal, partner, body, **options))
+    assert len(candidates) == 1
+    assert grid.world_to_grid(candidates[0].vias[0].x, candidates[0].vias[0].y) == site
+    assert not list(
+        router._layer_return_tails(finder, head, goal, partner, body, allowed_via_sites=frozenset())
+    )
+    partner.vias.append(
+        Via(
+            x=first.x,
+            y=first.y,
+            diameter=0.6,
+            drill=0.3,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="N",
+        )
+    )
+    assert not list(router._layer_return_tails(finder, head, goal, partner, body, **options))

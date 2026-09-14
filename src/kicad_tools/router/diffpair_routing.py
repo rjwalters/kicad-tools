@@ -6195,6 +6195,7 @@ class DiffPairRouter:
         *,
         deadline: float | None = None,
         prefer_shortest_approach: bool = False,
+        allowed_via_sites: frozenset[tuple[int, int]] | None = None,
     ) -> Iterator[Route]:
         """Yield bounded, uncommitted one-through-via layer-return candidates.
 
@@ -6204,6 +6205,8 @@ class DiffPairRouter:
         The caller must still validate the assembled pair and its quality.
         ``prefer_shortest_approach`` changes only the approach-side candidate
         ordering; the pad-side tail keeps its coupling preference.
+        ``allowed_via_sites`` restricts the existing bounded search to planned
+        grid sites. It never bypasses geometry, hole or occupancy checks.
         """
         from .via_clearance import drill_hole_to_hole_clear
 
@@ -6246,6 +6249,8 @@ class DiffPairRouter:
                     if deadline is not None and time.monotonic() >= deadline:
                         return
                     gx, gy = grid.world_to_grid(anchor.x + dx * radius, anchor.y + dy * radius)
+                    if allowed_via_sites is not None and (gx, gy) not in allowed_via_sites:
+                        continue
                     if (gx, gy) in sites:
                         continue
                     sites.add((gx, gy))
