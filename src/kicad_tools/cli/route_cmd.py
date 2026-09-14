@@ -1308,6 +1308,62 @@ def _resolve_route_engine(args: argparse.Namespace) -> str:
     return getattr(args, "route_engine", "grid") or "grid"
 
 
+def _diffpair_optimizer_skip_nets(router: Any) -> set[int]:
+    """Net IDs of every declared differential-pair member (#5333).
+
+    ``optimize_routes_grid_synced`` has carried a ``skip_nets`` parameter
+    since #3508/#3546 specifically because its ``eliminate_zigzags`` /
+    ``compress_staircase`` / ``convert_45_corners`` sub-passes are NOT
+    length-preserving (only ``merge_collinear`` is) and are diff-pair-
+    agnostic: they can shorten one leg of a pair without knowing that leg
+    is part of a length-matched pair at all.  #3508's own measurement
+    (board 06, PCIE_RX) found exactly this -- skew 0.097 mm after a
+    length-matching serpentine went to 1.652 mm in the final artifact.
+
+    That parameter was never threaded through from any of this module's
+    four ``optimize_routes_grid_synced`` call sites, so the protection it
+    documents has never actually applied to a real ``kct route`` invocation
+    (#5333, board 07 re-measurement): a coupled MIPI_DAT0 pair qualified at
+    construction time with 0.045 mm skew (within the 0.05 mm authored
+    tolerance) had ONE leg silently shortened by 0.437 mm during this exact
+    optimize stage -- confirmed by direct before/after instrumentation of
+    ``optimize_routes_grid_synced`` in isolation, with the immediately
+    following (length-preserving) consolidation pass and DRC nudge shown to
+    make no further change -- landing the pair at 0.482 mm in the saved
+    PCB, a real, silent, authored-tolerance violation the match-group tuner
+    then failed to repair (its own trombone attempt collided with a
+    sibling pair's copper and rolled back, leaving the shortened geometry
+    unfixed with no distinct signal beyond a generic DRC failure).
+
+    Returns every net ID belonging to a declared pair (via
+    :meth:`Autorouter.get_diff_pair_map`, which detects pairs from
+    explicit ``NetClassRouting.diffpair_partner`` declarations, KiCad-group
+    declarations, and suffix inference alike) -- not just pairs the
+    ``CoupledPathfinder`` actually engaged.  A pair routed independently
+    (single-ended fallback) went through the SAME inline
+    ``match_pair_lengths`` / serpentine tuning
+    (:meth:`DiffPairRouter.route_differential_pair_independent`) and is
+    exactly as vulnerable to this optimizer stage silently undoing it.
+    Returns an empty set (no-op skip list, behaviourally identical to the
+    pre-fix call) when the router has no ``net_names`` populated or no
+    pairs are detected.
+    """
+    net_names = getattr(router, "net_names", None)
+    if not net_names:
+        return set()
+    try:
+        partner_by_name = router.get_diff_pair_map()
+    except Exception:
+        # Defensive, mirroring ``apply_match_group_tuning``'s own
+        # partner-map try/except: a detection failure must not block the
+        # optimize stage, only forfeit its diff-pair protection.
+        return set()
+    if not partner_by_name:
+        return set()
+    name_to_id = {name: net_id for net_id, name in net_names.items()}
+    return {name_to_id[name] for name in partner_by_name if name in name_to_id}
+
+
 def _run_consolidation_pass(
     router: Any,
     args: argparse.Namespace,
@@ -7462,7 +7518,14 @@ def route_with_layer_escalation(
             # Issue #3507: grid-transactional optimize -- each mutated
             # route's old copper is unmarked and the new copper marked so
             # the grid never goes stale across the pass.
-            optimize_routes_grid_synced(final_result.router, optimizer)
+            # Issue #5333: skip declared diff-pair nets -- see
+            # ``_diffpair_optimizer_skip_nets`` for why this call was
+            # silently undoing qualified pair-skew without it.
+            optimize_routes_grid_synced(
+                final_result.router,
+                optimizer,
+                skip_nets=_diffpair_optimizer_skip_nets(final_result.router),
+            )
 
         _enforce_connectivity_invariant_or_exit(
             final_result.router,
@@ -8308,7 +8371,11 @@ def route_with_rule_relaxation(
         with spinner("Optimizing traces...", quiet=quiet):
             # Issue #3507: grid-transactional optimize (see
             # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(final_result.router, optimizer)
+            optimize_routes_grid_synced(
+                final_result.router,
+                optimizer,
+                skip_nets=_diffpair_optimizer_skip_nets(final_result.router),
+            )
 
         _enforce_connectivity_invariant_or_exit(
             final_result.router,
@@ -10655,7 +10722,11 @@ def route_with_combined_escalation(
         with spinner("Optimizing traces...", quiet=quiet):
             # Issue #3507: grid-transactional optimize (see
             # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(final_result.router, optimizer)
+            optimize_routes_grid_synced(
+                final_result.router,
+                optimizer,
+                skip_nets=_diffpair_optimizer_skip_nets(final_result.router),
+            )
 
         _enforce_connectivity_invariant_or_exit(
             final_result.router,
@@ -16594,7 +16665,11 @@ def _main_impl(argv: list[str] | None = None) -> int:
         with spinner("Optimizing traces...", quiet=quiet):
             # Issue #3507: grid-transactional optimize (see
             # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(router, optimizer)
+            optimize_routes_grid_synced(
+                router,
+                optimizer,
+                skip_nets=_diffpair_optimizer_skip_nets(router),
+            )
 
         _enforce_connectivity_invariant_or_exit(
             router,
