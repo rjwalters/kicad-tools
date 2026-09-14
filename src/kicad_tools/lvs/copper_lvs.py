@@ -176,22 +176,15 @@ def compare_partitions(
             Without this mapping, legacy REF.PAD groups remain supported,
             including repeated logical membership in separate islands.
             ``bound_pad_count`` continues to count distinct logical pins.
-        advisory_net_names: nets whose completeness is satisfied by copper
-            pours rather than traces (Issue #3914).  Pour-routed power/ground
-            nets are stitched incrementally: pads not yet touched by a
-            stitching via or segment each land in their own copper island, so
-            a strict opens diff reports one advisory "open" per stranded pad
-            (88-105 of them on board 05), drowning any real signal opens in
-            noise.  ``open`` reporting is suppressed for these nets; ``short``
-            reporting is NOT (a pour net copper-fused to a foreign net is
-            still a hard defect).  Callers pass the set of nets that own a
-            copper zone (see :func:`compare_copper_netlist`).
+        advisory_net_names: deprecated compatibility argument, ignored.
+            Every disconnected schematic net reports opens, including nets
+            listed here. A net name or zone ownership cannot prove copper
+            continuity or turn an incomplete board into a clean result (#4982).
 
     Returns:
         :class:`CopperLVSResult`.  A short is reported once per offending
         net pair (the lexicographically smallest pad witnesses are used);
-        an open is reported once per pair of same-net copper islands, except
-        for nets in ``advisory_net_names`` (opens suppressed).
+        an open is reported once per pair of same-net copper islands.
 
         **Vacuity guard (#4005 review):** if zero pads end up bound (no
         schematic pin carries a real net AND matches a board pad), the
@@ -308,12 +301,6 @@ def compare_partitions(
         # unnamed nets — those are true positives, not a regression.
         if len(pads) < 2:
             continue
-        # Pour-routed nets (own a copper zone) are stitched incrementally;
-        # pads not yet bonded to the pour form advisory singleton islands that
-        # are not real opens (Issue #3914).  Suppress opens for these nets so
-        # genuine signal-net opens stay visible.  Shorts are still reported.
-        if net in advisory_net_names:
-            continue
         # Group these pads by copper component.
         comps: dict[int, list[str]] = {}
         for pad_id in sorted(pads):
@@ -363,11 +350,13 @@ def compare_copper_netlist(sch_path: str | Path, pcb_path: str | Path) -> Copper
 
     Returns:
         :class:`CopperLVSResult`.  Always returned — mismatches are data,
-        not exceptions.
+        not exceptions.  No net is exempted from ``open`` reporting solely
+        because it owns a copper zone (Issue #4982) — see
+        :func:`compare_partitions`' ``advisory_net_names`` docstring for
+        why the old net-wide waiver was removed.
     """
     # Import lazily: ConnectivityValidator pulls in the PCB schema stack and
     # we want ``import kicad_tools.lvs`` to stay cheap.
-    from kicad_tools.analysis.net_status import build_zone_net_map
     from kicad_tools.validate.connectivity import ConnectivityValidator
 
     sch_path = Path(sch_path)
@@ -377,23 +366,10 @@ def compare_copper_netlist(sch_path: str | Path, pcb_path: str | Path) -> Copper
     validator = ConnectivityValidator(pcb_path)
     copper_partition, pad_bindings = validator.extract_pad_occurrences()
 
-    # Nets that own a copper zone are pour-routed: their completeness comes
-    # from fill copper, not traces, so stitching residuals must not be
-    # reported as opens (Issue #3914).  ``build_zone_net_map`` returns the
-    # net numbers with zones; resolve them to names for the advisory filter.
-    pcb = validator.pcb
-    zone_net_numbers = build_zone_net_map(pcb)
-    advisory_net_names = frozenset(
-        pcb.nets[net_number].name
-        for net_number in zone_net_numbers
-        if net_number in pcb.nets and pcb.nets[net_number].name
-    )
-    return compare_partitions(
-        schematic_net_of_pad,
-        copper_partition,
-        advisory_net_names=advisory_net_names,
-        pad_bindings=pad_bindings,
-    )
+    # Compare actual copper components, without exemptions based on net
+    # names or zone ownership. Disconnected pad-bearing islands must remain
+    # visible even when their net owns a pour elsewhere on the board (#4982).
+    return compare_partitions(schematic_net_of_pad, copper_partition, pad_bindings=pad_bindings)
 
 
 def result_to_json(result: CopperLVSResult) -> dict:
