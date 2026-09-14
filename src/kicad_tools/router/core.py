@@ -16574,6 +16574,7 @@ class Autorouter:
                     num_copper_layers=num_layers,
                     blind_buried_supported=blind_buried_supported,
                     fixed_segment_ids=fixed_segment_ids,
+                    preserve_pair_spacing=bool(net_class is not None and net_class.coupled_routing),
                 )
             except ValueError as exc:
                 # Defensive: a malformed group (e.g. mixed pair/scalar

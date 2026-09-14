@@ -489,6 +489,7 @@ def tune_match_group_v2(
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
     fixed_segment_ids: set[int] | None = None,
+    preserve_pair_spacing: bool = False,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Tune the lengths of an N-trace match group to within tolerance.
 
@@ -557,6 +558,9 @@ def tune_match_group_v2(
             ``False`` every member is returned unchanged with
             ``reason="not_length_critical"`` (matches the pair tuner's
             gate at :func:`tune_diff_pair_skew`).
+        preserve_pair_spacing: Use a coordinated loop instead of opposite
+            mirrored bulges, retaining the host spacing. All candidate
+            clearance checks and insertion budgets still apply.
         grid_resolution_mm: Interior snapping resolution for reflected
             geometry that needs angle correction. Already legal reflected
             geometry stays exact so both halves gain the same length.
@@ -709,6 +713,7 @@ def tune_match_group_v2(
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            preserve_pair_spacing=preserve_pair_spacing,
         )
 
     return _tune_match_group_single_ended(
@@ -2651,6 +2656,7 @@ def _tune_match_group_of_pairs(
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
+    preserve_pair_spacing: bool = False,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Pair-aware Phase 2F path: mirrored serpentine geometry for pair members.
 
@@ -3063,6 +3069,45 @@ def _tune_match_group_of_pairs(
                 ny=hint[1],
                 grid_resolution_mm=grid_resolution_mm,
             )
+            if preserve_pair_spacing:
+                from dataclasses import replace
+
+                from .coordinated_tuning import coordinated_pair_loop
+
+                span = math.hypot(
+                    p_insertion_segment.x2 - p_insertion_segment.x1,
+                    p_insertion_segment.y2 - p_insertion_segment.y1,
+                )
+                window = min(4.0, span / 2)
+                coordinated = coordinated_pair_loop(
+                    p_insertion_segment,
+                    n_insertion_segment,
+                    added_length=length_needed,
+                    window_start=(span - window) / 2,
+                    window_end=(span + window) / 2,
+                )
+                if coordinated is None:
+                    for r in (per_pair_result_p, per_pair_result_n):
+                        r.reason = "no_suitable_segment"
+                        r.message = "No shared window for a spacing-preserving pair loop."
+                    current_p, current_n = original_p_route, original_n_route
+                    break
+                new_p_segments, new_n_segments = coordinated
+                p_serp_result = replace(
+                    p_serp_result,
+                    new_segments=new_p_segments,
+                    length_added=length_needed,
+                    num_loops=1,
+                    message="Added one coordinated pair loop",
+                )
+                per_pair_result_p.serpentine_results[-1] = p_serp_result
+                per_pair_result_n.serpentine_results[-1] = p_serp_result
+                candidate_p_route = replace(
+                    current_p,
+                    segments=current_p.segments[:_p_seg_idx]
+                    + new_p_segments
+                    + current_p.segments[_p_seg_idx + 1 :],
+                )
             candidate_n_route = _splice_mirrored_n_route(
                 current_n,
                 n_insertion_seg_index=n_insertion_seg_idx,

@@ -246,3 +246,27 @@ def test_pair_meanders_outward_despite_neighbor_on_p_side(reverse):
     assert LengthTracker.calculate_route_length(tuned_n) == pytest.approx(11.13, abs=1e-7)
     assert max(max(s.y1, s.y2) for s in tuned_p.segments) <= 10 + 1e-9
     assert min(min(s.y1, s.y2) for s in tuned_n.segments) >= 10.4 - 1e-9
+
+
+def test_coupled_net_class_automatically_selects_coordinated_group_loops():
+    from kicad_tools.router.rules import NetClassRouting
+
+    ar, group = setup_pair()
+    ar.net_class_map = {
+        name: NetClassRouting(
+            name="coupled",
+            coupled_routing=True,
+            length_critical=True,
+            length_match_tolerance_mm=0.05,
+            intra_pair_clearance=0.1,
+        )
+        for name in ar.net_names.values()
+    }
+    result = ar.apply_match_group_tuning([group], verbose=False)[group.name]
+    assert result[1][1].success and result[2][1].success
+    p, n = result[1][0], result[2][0]
+    # Both move toward P's outer side. An independently reflected bulge
+    # would move N in the opposite direction and lose pair spacing.
+    assert min(min(s.y1, s.y2) for s in p.segments) < 10
+    assert min(min(s.y1, s.y2) for s in n.segments) < 11
+    assert physical_length(ar, 1) == pytest.approx(physical_length(ar, 2), abs=1e-7)
