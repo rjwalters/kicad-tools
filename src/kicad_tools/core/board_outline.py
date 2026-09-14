@@ -13,33 +13,57 @@ Bounds = tuple[float, float, float, float]
 # Maximum chord (sagitta) deviation, in mm, allowed between a tessellated
 # ``gr_circle`` Edge.Cuts boundary and the true circle it approximates.
 #
-# ``board_outline_segments`` is the sole feed for router edge-keepout
-# painting (``RoutingGrid.add_edge_keepout``, which rounds its clearance
-# radius *up* by a whole extra grid cell -- ``int(clearance / resolution) +
-# 1`` -- dwarfing this bound) and for the post-route edge-clearance check
-# in ``router/io.py`` (``actual_clearance < edge_clearance -
-# _CLEARANCE_EPSILON_MM``, whose own floating-point epsilon is ``1e-4`` mm).
-# Keeping the tessellation error an order of magnitude below that existing
-# ``1e-4`` mm epsilon means no clearance verdict that would pass against
-# the tessellated chain can newly disagree with the verdict against the
-# true circle -- the discrepancy is already inside slack the comparisons
-# tolerate today, for both interior (outer-boundary) and exterior
-# (cutout/hole) points, independent of which side of the chord the true
-# arc falls on. See ``tests/test_routing_outline_bounds.py`` for the
-# numerically-tested bound.
+# **This is a bound, not an error budget.** The chords of an inscribed
+# polygon lie strictly *inside* the true circle, so replacing a circle with
+# its tessellation shifts measured distances in opposite directions
+# depending on which side of the boundary the copper is on:
+#
+# * outer boundary (copper *inside* the circle) -- the chord is nearer the
+#   copper than the true arc, so a clearance check is conservative;
+# * interior cutout (copper *outside* the circle, e.g. a round mounting
+#   hole) -- the chord is *farther* from the copper than the true arc, so
+#   a check against the raw chords would *under*-report the violation and
+#   could hide a real one.
+#
+# ``board_outline_segments`` has no notion of outline topology, so it
+# cannot pick a tessellation that is conservative for both roles (an
+# inscribed polygon is safe only for outer boundaries; a circumscribed one
+# only for cutouts). Instead it certifies the approximation error and hands
+# it to consumers as ``OutlineSegments.max_error_mm`` -- a Hausdorff bound
+# between the returned chain and the true outline (exactly ``0.0`` when
+# every element is straight). Distance consumers subtract it and keepout
+# consumers add it, which is conservative regardless of topology:
+#
+# * ``router/io.py`` ``validate_routes`` compares ``closest_dist -
+#   half_width - max_error_mm`` against ``edge_clearance -
+#   _CLEARANCE_EPSILON_MM``;
+# * ``RoutingGrid.add_edge_keepout`` paints ``clearance + max_error_mm``.
+#
+# The floating-point comparison epsilon (``1e-4`` mm) stays a *comparison*
+# tolerance and is never spent on tessellation error. Keeping the bound at
+# 1e-5 mm (10 nm) means the extra conservatism it buys is three orders of
+# magnitude below any manufacturable clearance, so it never turns a passing
+# design into a reported violation in practice. See
+# ``tests/test_routing_outline_bounds.py`` for the numerically-tested bound
+# and the cutout regression.
 _CIRCLE_TESSELLATION_MAX_ERROR_MM = 1e-5
 
 # Hard floor/ceiling on the number of chord segments used to approximate a
 # circle, regardless of radius. The floor keeps small circles visually and
 # numerically round; the ceiling bounds worst-case memory/compute for
-# pathological (very large or near-degenerate) radii while still keeping
-# the resulting error small in absolute terms. 20000 comfortably keeps the
-# sagitta within ``_CIRCLE_TESSELLATION_MAX_ERROR_MM`` for radii up to
-# ~500 mm (already far larger than any real PCB outline); beyond that the
-# sagitta grows slowly (roughly proportional to radius at a fixed segment
-# count) but stays microns, not millimeters.
+# pathological (very large or near-degenerate) radii.
+#
+# The ceiling is a *resource* limit, never a silent weakening of the error
+# bound: ``circle_segment_count`` raises ``ValueError`` when the requested
+# radius/``max_error`` pair would need more than ``_CIRCLE_MAX_SEGMENTS``
+# chords, rather than returning an under-tessellated chain whose real
+# sagitta exceeds the advertised bound.
+#
+# 25000 chords honour ``_CIRCLE_TESSELLATION_MAX_ERROR_MM`` up to a radius
+# of ~1265 mm -- a 2.5 m diameter circle, comfortably beyond KiCad's own
+# ~1 m usable design area and far beyond any real PCB outline.
 _CIRCLE_MIN_SEGMENTS = 12
-_CIRCLE_MAX_SEGMENTS = 20000
+_CIRCLE_MAX_SEGMENTS = 25000
 
 
 def _rotate_point(
@@ -150,6 +174,23 @@ def _curve_points(points: list[Point]) -> list[Point]:
     ]
 
 
+def circle_sagitta(radius: float, segments: int) -> float:
+    """Exact worst-case chord-to-arc gap for an inscribed ``segments``-gon.
+
+    Equals ``radius * (1 - cos(pi / segments))``, evaluated through the
+    half-angle identity ``1 - cos(x) == 2 * sin(x / 2) ** 2`` so it stays
+    accurate for the large segment counts (tiny angles) where the direct
+    form loses every significant digit to cancellation.
+
+    This is also the Hausdorff distance between the inscribed polygon and
+    the circle, so ``|distance(Q, polygon) - distance(Q, circle)| <=
+    circle_sagitta(...)`` for *any* point ``Q`` -- inside or outside.
+    """
+    if segments < 3:
+        raise ValueError("circle_sagitta: segments must be at least 3")
+    return 2.0 * radius * math.sin(math.pi / (2 * segments)) ** 2
+
+
 def circle_segment_count(
     radius: float,
     max_error: float = _CIRCLE_TESSELLATION_MAX_ERROR_MM,
@@ -158,29 +199,54 @@ def circle_segment_count(
 
     Uses the standard inscribed-regular-polygon sagitta bound: for ``n``
     equal chords on a circle of ``radius``, the maximum gap between a chord
-    and the arc it spans is ``radius * (1 - cos(pi / n))``. Solving for the
-    smallest ``n`` that keeps this at or below ``max_error`` gives a
-    tessellation whose Hausdorff distance to the true circle is bounded by
-    ``max_error`` (every polygon point lies on or inside the circle, and
-    every circle point lies within ``max_error`` of the polygon boundary).
-    That two-sided bound is what lets ``|distance(Q, polygon) -
-    distance(Q, circle)| <= max_error`` hold for *any* point ``Q``,
-    independent of whether the circle is an outer board boundary or an
-    interior cutout.
+    and the arc it spans is ``radius * (1 - cos(pi / n))`` (see
+    ``circle_sagitta``). Solving for the smallest ``n`` that keeps this at
+    or below ``max_error`` gives a tessellation whose Hausdorff distance to
+    the true circle is bounded by ``max_error``.
+
+    The bound is honoured or refused, never silently exceeded: if the
+    requested ``radius``/``max_error`` pair needs more than
+    ``_CIRCLE_MAX_SEGMENTS`` chords, this raises ``ValueError`` rather than
+    clamping to the ceiling and returning a chain whose real sagitta is
+    larger than advertised.
+
+    Note that the returned polygon is *inscribed* -- it lies inside the
+    circle -- so the bound alone does not make a clearance check safe.
+    Consumers must additionally widen their comparison by the certified
+    error (``OutlineSegments.max_error_mm``); see the module-level notes on
+    ``_CIRCLE_TESSELLATION_MAX_ERROR_MM``.
     """
     if radius <= 0 or not math.isfinite(radius):
         raise ValueError("Malformed Edge.Cuts gr_circle: radius must be finite and positive")
     if max_error <= 0 or not math.isfinite(max_error):
         raise ValueError("circle_segment_count: max_error must be finite and positive")
-    # cos(pi / n) = 1 - max_error / radius; solve for the half-chord angle.
-    ratio = max(-1.0, min(1.0, 1.0 - max_error / radius))
-    half_angle = math.acos(ratio)
-    if half_angle <= 0:
-        # max_error alone already exceeds the diameter -- any n keeps the
-        # bound; fall back to the resolution ceiling for stability.
-        return _CIRCLE_MAX_SEGMENTS
-    segments = math.ceil(math.pi / half_angle)
-    return max(_CIRCLE_MIN_SEGMENTS, min(_CIRCLE_MAX_SEGMENTS, segments))
+
+    # sagitta(n) = 2 * radius * sin(pi / 2n)^2 <= max_error
+    #   =>  sin(pi / 2n) <= sqrt(max_error / 2 radius)
+    #   =>  n >= pi / (2 * asin(sqrt(max_error / 2 radius)))
+    # Solving in this (asin of a small quantity) form rather than through
+    # ``acos(1 - max_error / radius)`` avoids the catastrophic cancellation
+    # that made the old formulation collapse to a zero half-angle -- and
+    # then silently return the ceiling -- once ``max_error / radius``
+    # rounded away entirely.
+    sin_half = math.sqrt(max_error / (2.0 * radius))
+    if sin_half >= 1.0:
+        # max_error already covers the whole diameter: any polygon is
+        # within the bound, so only the aesthetic floor governs.
+        return _CIRCLE_MIN_SEGMENTS
+    segments = max(_CIRCLE_MIN_SEGMENTS, math.ceil(math.pi / (2.0 * math.asin(sin_half))))
+    # Re-verify against the exact sagitta: the closed form is solved in
+    # floating point, so nudge up by the odd ulp rather than trusting it.
+    while segments <= _CIRCLE_MAX_SEGMENTS and circle_sagitta(radius, segments) > max_error:
+        segments += 1
+    if segments > _CIRCLE_MAX_SEGMENTS:
+        raise ValueError(
+            f"Edge.Cuts gr_circle radius {radius}mm needs more than "
+            f"{_CIRCLE_MAX_SEGMENTS} chords to stay within {max_error}mm of the "
+            f"true circle; refusing to tessellate rather than silently exceed "
+            f"the documented error bound"
+        )
+    return segments
 
 
 def circle_tessellation_points(
@@ -188,7 +254,11 @@ def circle_tessellation_points(
     radius: float,
     max_error: float = _CIRCLE_TESSELLATION_MAX_ERROR_MM,
 ) -> list[Point]:
-    """Ordered, on-circle vertices of a closed chord chain approximating a circle."""
+    """Ordered, on-circle vertices of a closed chord chain approximating a circle.
+
+    Raises ``ValueError`` when ``radius``/``max_error`` cannot be honoured
+    within ``_CIRCLE_MAX_SEGMENTS`` chords (see ``circle_segment_count``).
+    """
     n = circle_segment_count(radius, max_error)
     cx, cy = center
     return [
@@ -205,7 +275,42 @@ def outline_graphics(root: SExp) -> Iterator[SExp]:
             yield node
 
 
-def board_outline_segments(root: SExp) -> list[tuple[Point, Point]]:
+class OutlineSegments(list[tuple[Point, Point]]):
+    """A straight-edge outline chain plus its certified approximation error.
+
+    Behaves exactly like the ``list`` of ``((x1, y1), (x2, y2))`` tuples it
+    replaces -- every existing consumer keeps working unchanged -- while
+    carrying ``max_error_mm``: a Hausdorff bound between this chain and the
+    true board outline it stands for.
+
+    ``max_error_mm`` is ``0.0`` when every Edge.Cuts element was already
+    straight (``gr_line``/``gr_rect``/``gr_poly``), and the largest
+    per-element tessellation sagitta otherwise. It is a *geometry* bound and
+    must never be conflated with a consumer's floating-point comparison
+    epsilon.
+
+    Consumers that measure distances to the outline must widen their
+    comparison by this value in the conservative direction -- subtract it
+    from a measured clearance, add it to a painted keepout -- because the
+    chain may sit on either side of the true outline. Read it defensively
+    (``getattr(segments, "max_error_mm", 0.0)``) so a plain ``list`` from an
+    older caller, or a slice of this one, still type-checks; a plain list
+    means "no certified curve error", which is only true for exact
+    straight-edge geometry.
+    """
+
+    max_error_mm: float = 0.0
+
+    def __init__(
+        self,
+        segments: list[tuple[Point, Point]] | None = None,
+        max_error_mm: float = 0.0,
+    ) -> None:
+        super().__init__(segments or [])
+        self.max_error_mm = max_error_mm
+
+
+def board_outline_segments(root: SExp) -> OutlineSegments:
     """Exact straight edges for routing; reject unsupported curved boundaries.
 
     ``gr_circle`` is the one curved exception: it is tessellated into a
@@ -217,8 +322,14 @@ def board_outline_segments(root: SExp) -> list[tuple[Point, Point]]:
     tessellated the same way regardless of its role. Other curved
     geometry (``gr_arc``, ``gr_curve``) has no such treatment here and
     remains rejected.
+
+    Because the tessellation is topology-blind it cannot be conservative
+    for outer boundaries and cutouts at the same time, so the actual
+    worst-case sagitta of the returned chain is certified on the result as
+    ``OutlineSegments.max_error_mm`` (``0.0`` for all-straight outlines) for
+    consumers to fold into their own comparisons.
     """
-    segments: list[tuple[Point, Point]] = []
+    segments = OutlineSegments()
     for node in outline_graphics(root):
         if node.tag == "gr_line":
             segments.append((_point(node, "start"), _point(node, "end")))
@@ -236,9 +347,12 @@ def board_outline_segments(root: SExp) -> list[tuple[Point, Point]]:
             center, end = _point(node, "center"), _point(node, "end")
             radius = math.dist(center, end)
             if radius <= 0:
-                raise ValueError("Malformed Edge.Cuts gr_circle: zero-radius circle has no boundary")
+                raise ValueError(
+                    "Malformed Edge.Cuts gr_circle: zero-radius circle has no boundary"
+                )
             ring = circle_tessellation_points(center, radius)
             segments.extend(zip(ring, ring[1:] + ring[:1], strict=True))
+            segments.max_error_mm = max(segments.max_error_mm, circle_sagitta(radius, len(ring)))
         else:
             raise ValueError(
                 f"Unsupported routing Edge.Cuts geometry: {node.tag}; straight edges are required"

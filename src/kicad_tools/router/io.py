@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from kicad_tools.core.board_outline import OutlineSegments
     from kicad_tools.placement.routing import RoutingPlacementDisposition
     from kicad_tools.progress import ProgressCallback
 
@@ -2871,6 +2872,18 @@ def validate_routes(
     # them through the same dispatch path.
     edge_clearance = getattr(router, "_edge_clearance", None)
     edge_segments = getattr(router, "_edge_segments", None)
+    # Curved Edge.Cuts elements (``gr_circle``) reach us as a chord chain,
+    # which may sit on *either* side of the true boundary: inside it for an
+    # outer boundary (measured clearance too small -- conservative), outside
+    # it for an interior cutout such as a round mounting hole (measured
+    # clearance too *large*, which would hide a real violation).  The
+    # extractor certifies the worst-case gap as ``max_error_mm``; charge it
+    # against the measured clearance so the verdict is conservative for
+    # either topology.  Plain straight outlines certify ``0.0``, so this is
+    # an exact no-op for every board without curved Edge.Cuts geometry.
+    # This is geometry error, deliberately kept separate from
+    # ``_CLEARANCE_EPSILON_MM`` (a floating-point comparison tolerance).
+    edge_outline_error = float(getattr(edge_segments, "max_error_mm", 0.0) or 0.0)
     if edge_clearance is not None and edge_clearance > 0 and edge_segments:
         for route in router.routes:
             route_net = route.net
@@ -2929,8 +2942,10 @@ def validate_routes(
                                 best_pt = (cx, cy)
                         closest_pt = best_pt
 
-                # actual_clearance = distance_from_centerline - half_width
-                actual_clearance = closest_dist - seg_half_width
+                # actual_clearance = distance_from_centerline - half_width,
+                # minus the certified outline-approximation error (0 for
+                # exact straight edges).
+                actual_clearance = closest_dist - seg_half_width - edge_outline_error
                 if actual_clearance < edge_clearance - _CLEARANCE_EPSILON_MM:
                     violations.append(
                         ClearanceViolation(
@@ -3502,10 +3517,15 @@ def _extract_pad_blocks(section: str) -> list[str]:
     return pad_blocks
 
 
-def _extract_edge_segments(
-    pcb_text: str,
-) -> list[tuple[tuple[float, float], tuple[float, float]]]:
-    """Read layer-qualified straight outline edges without crossing S-expression nodes."""
+def _extract_edge_segments(pcb_text: str) -> OutlineSegments:
+    """Read layer-qualified straight outline edges without crossing S-expression nodes.
+
+    The result is list-compatible but also carries ``max_error_mm`` -- the
+    certified Hausdorff bound between the returned chain and the true
+    outline (``0.0`` unless a curved element such as ``gr_circle`` had to be
+    tessellated).  Edge-clearance consumers must widen their comparisons by
+    it; see ``core/board_outline.OutlineSegments``.
+    """
     from kicad_tools.core.board_outline import board_outline_segments
     from kicad_tools.sexp import parse_string
 
