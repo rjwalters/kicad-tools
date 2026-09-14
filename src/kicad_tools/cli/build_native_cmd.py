@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -531,10 +532,15 @@ def build_native(
             "-DCMAKE_BUILD_TYPE=Release",
         ]
 
-        # On Windows with MSVC the Visual Studio generator is selected
-        # automatically; request x64 explicitly so the output .pyd matches the
-        # (almost certainly 64-bit) Python interpreter.
-        if sys.platform == "win32" and _find_msvc():
+        # Visual Studio accepts an explicit target architecture; Ninja and
+        # Makefile generators do not. Honor an explicitly selected generator
+        # even when MSVC is also installed on the machine.
+        generator = os.environ.get("CMAKE_GENERATOR", "")
+        if (
+            sys.platform == "win32"
+            and (not generator or generator.startswith("Visual Studio "))
+            and _find_msvc()
+        ):
             cmake_args.extend(["-A", "x64"])
 
         configure_result = subprocess.run(
