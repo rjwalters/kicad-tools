@@ -295,6 +295,80 @@ class TestZoneGeneratorIntegration:
         with pytest.raises(ValueError, match="not found"):
             gen.add_zone(net="NONEXISTENT", layer="B.Cu")
 
+        # Rejected call queues no zone.
+        assert len(gen.zones) == 0
+
+    def test_add_zone_known_net_still_works(self, sample_pcb_path):
+        """A declared net still resolves correctly (no regression, #4907)."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        zone = gen.add_zone(net="GND", layer="B.Cu")
+
+        assert zone.net_number == 1
+        assert zone.config.net == "GND"
+
+    def test_add_zone_invalid_layer_spelling_raises(self, sample_pcb_path):
+        """Adding a zone with a misspelled layer name raises ValueError (#4907)."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        with pytest.raises(ValueError, match="DefinitelyNotALayer"):
+            gen.add_zone(net="GND", layer="DefinitelyNotALayer")
+
+        assert len(gen.zones) == 0
+
+    def test_add_zone_non_copper_layer_raises(self, sample_pcb_path):
+        """Adding a zone on a non-copper layer (e.g. silkscreen) raises ValueError."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        with pytest.raises(ValueError, match="copper"):
+            gen.add_zone(net="GND", layer="F.SilkS")
+
+        assert len(gen.zones) == 0
+
+    def test_add_zone_absent_inner_layer_on_2layer_board_raises(self, sample_pcb_path):
+        """An inner layer not declared on a 2-layer board is rejected (#4907)."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        with pytest.raises(ValueError, match="In1.Cu"):
+            gen.add_zone(net="GND", layer="In1.Cu")
+
+        assert len(gen.zones) == 0
+
+    def test_add_zone_valid_inner_layer_on_multilayer_board(self, tmp_path):
+        """A declared inner layer on a multilayer board is accepted."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (4 "In1.Cu" signal)
+    (6 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (gr_rect
+    (start 0 0)
+    (end 50 50)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+)
+"""
+        pcb_file = tmp_path / "four_layer.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        gen = ZoneGenerator.from_pcb(pcb_file)
+        zone = gen.add_zone(net="GND", layer="In1.Cu")
+
+        assert zone.config.layer == "In1.Cu"
+
     def test_add_ground_plane(self, sample_pcb_path):
         """Add ground plane with convenience method."""
         gen = ZoneGenerator.from_pcb(sample_pcb_path)

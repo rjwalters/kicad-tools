@@ -6,7 +6,9 @@ are complete, incomplete, or unrouted, with details on what's missing.
 Connectivity is decided by real geometric copper contact (shapely polygon
 intersection, matching ``kicad-cli pcb drc`` semantics) by default; pass
 ``strict=False`` to opt into the legacy 0.01mm endpoint-proximity model
-(see ``NetStatusAnalyzer.POSITION_TOLERANCE`` for the trade-offs).
+(see ``NetStatusAnalyzer.POSITION_TOLERANCE`` for the trade-offs). Boards with
+copper arcs always use geometric contact: endpoint proximity cannot describe
+interior arc contact and must not substitute a chord for the curved copper.
 
 Strict graphs retain each physical pad occurrence, including duplicate pad
 numbers. Reports keep logical ``REF.PAD`` names and board positions. Duplicate
@@ -516,7 +518,8 @@ class NetStatusAnalyzer:
                 reports open (#4176), and it reports false opens when a trace
                 endpoint lands inside pad copper but away from the pad center
                 (#4557).  Legitimate uses are perf-sensitive inner loops that
-                only consume before/after deltas.
+                only consume before/after deltas. Boards containing copper arcs
+                always use geometry, including when ``strict=False`` is requested.
         """
         from kicad_tools.schema.pcb import PCB as PCBClass
 
@@ -529,14 +532,16 @@ class NetStatusAnalyzer:
             self.pcb = pcb
             pcb_path = getattr(pcb, "path", None)
             self.source_file = str(pcb_path) if pcb_path else ""
-        self.strict = strict
+        # Endpoint heuristics cannot represent curved copper or interior contact.
+        # Arc-bearing boards therefore require real copper geometry in both modes.
+        self.strict = strict or bool(self.pcb.arcs)
         # Strict-mode geometry caches (Issue #4176), keyed by object id.
         self._segment_poly_cache: dict[int, Any] = {}
         self._via_geom_cache: dict[int, Any] = {}
         # Per-analyzer pad copper polygon cache (keyed by physical occurrence); ``None``
         # until first built lazily in :meth:`_pad_polys`.
         self._pad_poly_cache: dict[str, Any] | None = None
-        if strict:
+        if self.strict:
             from kicad_tools._shapely import require_shapely
 
             require_shapely("net-status --strict real-geometry connectivity")
@@ -675,7 +680,7 @@ class NetStatusAnalyzer:
             )
 
         # Check for routing
-        segments = list(self.pcb.segments_in_net(net_number))
+        segments = [*self.pcb.segments_in_net(net_number), *self.pcb.arcs_in_net(net_number)]
         status.has_routing = len(segments) > 0
 
         # Check for vias
@@ -816,7 +821,7 @@ class NetStatusAnalyzer:
         pad_layers = {p.connectivity_id: p.layers for p in pad_infos}
 
         # Get segments and vias for this net
-        segments = list(self.pcb.segments_in_net(net_number))
+        segments = [*self.pcb.segments_in_net(net_number), *self.pcb.arcs_in_net(net_number)]
         vias = list(self.pcb.vias_in_net(net_number))
 
         # Get zones for this net with their layers, filled polygons, and boundaries
@@ -1121,14 +1126,25 @@ class NetStatusAnalyzer:
         centre sits in the antipad moat but whose copper edge reaches the
         thermal spokes, still bonds.
 
-        A zone's fill fragments are unioned into a single group: KiCad
-        fragments one pour into many ``filled_polygon`` entries around thermal
-        reliefs, and all fragments of one ``zone`` object are the same net and
-        DRC-bonded (this avoids a false ``open`` for a pad alone in its own
-        thermal fragment).  Crucially the union is **per zone object**, not
-        global across all zones, so two pads covered by genuinely separate
-        pours (or separate zones) are only connected when a via / trace bridges
-        them.
+        A zone's fill fragments are unioned into a single group ONLY when real
+        copper actually ties them together (Issue #5031) -- never merely
+        because they share a ``zone``/net identity.  KiCad commonly fragments
+        one continuous pour into many ``filled_polygon`` entries around
+        thermal reliefs; those fragments still touch/overlap geometrically, so
+        they are merged (avoiding a false ``open`` for a pad alone in its own
+        thermal fragment).  But KiCad's native refill can also leave a zone
+        with two genuinely disjoint pad-bearing fill islands under the SAME
+        zone UUID once a stitching via is removed -- those islands share no
+        copper at all, and native ``kicad-cli pcb drc`` correctly reports the
+        open between them.  A prior version of this method unioned every
+        fragment of a zone unconditionally, which is exactly what missed that
+        case: same net/zone identity was mistaken for a physical bond.
+        Fragments are now merged via a union-find keyed on real copper contact
+        (geometric fragment-to-fragment overlap, or a single via/trace whose
+        copper penetrates more than one fragment) rather than the zone object
+        itself, so two pads covered by genuinely separate pours (whether from
+        different zones or different islands of the SAME zone) are only
+        connected when copper -- fill, via, or trace -- actually bridges them.
 
         Vias whose copper penetrates a fill island bond the pads reached
         through them (directly, or via a segment chain ending at the via) into
@@ -1204,7 +1220,11 @@ class NetStatusAnalyzer:
         # are one electrical net.  Merging components that both touch the same
         # via recovers the cross-layer ``pad -> trace -> via -> trace -> pour``
         # path so a pad on one layer bonds to a pour on another.
-        extended_chains = self._merge_chains_via_vias(segments, segment_components, vias)
+        # In strict mode each via must physically reach both touching
+        # segments; a blind/buried via cannot bridge unrelated layers (#5198).
+        extended_chains = self._merge_chains_via_vias(
+            segments, segment_components, vias, require_layer_span=self.strict
+        )
 
         # Pre-compute, per extended chain, the pads it reaches and the copper
         # layers/geometry it presents to the pour tests.
@@ -1233,12 +1253,110 @@ class NetStatusAnalyzer:
         for zone in self.pcb.zones:
             if zone.net_number != net_number or not zone.filled_polygons:
                 continue
-            bonded: set[str] = set()
+
+            n_fragments = len(zone.filled_polygons)
+            regions: list[Any | None] = []
+            fill_layers: list[str] = []
             for i, fill_pts in enumerate(zone.filled_polygons):
-                region = cv._fill_solid_region(fill_pts)
+                regions.append(cv._fill_solid_region(fill_pts))
+                fill_layers.append(zone.filled_polygon_layer(i))
+
+            # Union-find over this zone's fill fragments.  Every fragment
+            # starts in its own singleton cluster; two fragments are merged
+            # ONLY when real copper ties them together, never merely because
+            # they belong to the same ``zone`` object (Issue #5031).
+            parent = list(range(n_fragments))
+
+            def _find(x: int, _parent: list[int] = parent) -> int:
+                while _parent[x] != x:
+                    _parent[x] = _parent[_parent[x]]
+                    x = _parent[x]
+                return x
+
+            def _union(a: int, b: int, _parent: list[int] = parent) -> None:
+                ra, rb = _find(a), _find(b)
+                if ra != rb:
+                    _parent[ra] = rb
+
+            # 1. Fragments that are themselves geometrically continuous
+            #    (touching/overlapping solid regions on the SAME copper
+            #    layer) are one physical pour that KiCad happened to
+            #    fracture into multiple ``filled_polygon`` entries (thermal
+            #    relief spokes / clearance moats) -- merge them.
+            for i in range(n_fragments):
+                region_i = regions[i]
+                if region_i is None:
+                    continue
+                for j in range(i + 1, n_fragments):
+                    region_j = regions[j]
+                    if region_j is None or fill_layers[i] != fill_layers[j]:
+                        continue
+                    if region_i.intersects(region_j):
+                        _union(i, j)
+
+            # 2. A single via whose copper penetrates more than one fragment
+            #    of this zone is a REAL physical bridge between them (a
+            #    stitching via embedded across a fill discontinuity) --
+            #    merge those fragments too.  This is what keeps a clean,
+            #    fully-stitched board reading connected once the blanket
+            #    same-zone union above is removed.
+            for via, via_geom, _via_raw in via_geoms:
+                touched: list[int] = []
+                for i in range(n_fragments):
+                    region_i = regions[i]
+                    if (
+                        region_i is not None
+                        and self._via_spans_layer(via.layers, fill_layers[i])
+                        and region_i.intersects(via_geom)
+                    ):
+                        touched.append(i)
+                for other in touched[1:]:
+                    _union(touched[0], other)
+
+            # 3. A segment chain and the vias it physically contacts form
+            #    one bridge. Include the vias' fill contacts even when the
+            #    chain has no pads: fill -> via -> trace -> via -> fill is a
+            #    real connection between islands on the opposite layer.
+            for chain in chain_seg_indices:
+                chain_vias = [
+                    (via, via_geom)
+                    for via, via_geom, _via_raw in via_geoms
+                    if any(
+                        self._via_spans_layer(via.layers, segments[s].layer)
+                        and self._segment_touches_via(segments[s], via, via_geom)
+                        for s in chain
+                    )
+                ]
+                touched = []
+                for i in range(n_fragments):
+                    region_i = regions[i]
+                    if region_i is None:
+                        continue
+                    if any(
+                        self._via_spans_layer([segments[s].layer], fill_layers[i])
+                        and region_i.intersects(self._segment_poly(segments[s]))
+                        for s in chain
+                    ) or any(
+                        self._via_spans_layer(via.layers, fill_layers[i])
+                        and region_i.intersects(via_geom)
+                        for via, via_geom in chain_vias
+                    ):
+                        touched.append(i)
+                for other in touched[1:]:
+                    _union(touched[0], other)
+
+            # Compute the bonded pad set per PHYSICAL cluster (union-find
+            # root), not per zone -- this is the crux of the fix.  The
+            # bonding rules themselves (direct pad overlap / via penetration
+            # / chain-touches-fill) are unchanged; only the grouping key
+            # changes from "zone object" to "real copper cluster".
+            cluster_bonded: dict[int, set[str]] = {}
+            for i, fill_pts in enumerate(zone.filled_polygons):
+                region = regions[i]
                 if region is None:
                     continue
-                fill_layer = zone.filled_polygon_layer(i)
+                fill_layer = fill_layers[i]
+                bonded = cluster_bonded.setdefault(_find(i), set())
 
                 # Direct pad bonds: pad copper box overlaps the solid fill.
                 for pad_id, pad_geom in pad_polys.items():
@@ -1268,7 +1386,12 @@ class NetStatusAnalyzer:
                                 bonded.add(pad_id)
                     for chain, pads_in_chain in zip(chain_seg_indices, chain_pads, strict=True):
                         touches = any(
-                            self._segment_touches_via(segments[s], via, via_geom) for s in chain
+                            self._segment_touches_via(segments[s], via, via_geom)
+                            and (
+                                not self.strict
+                                or self._via_spans_layer(via.layers, segments[s].layer)
+                            )
+                            for s in chain
                         )
                         if touches:
                             bonded.update(pads_in_chain)
@@ -1289,8 +1412,9 @@ class NetStatusAnalyzer:
                     ):
                         bonded.update(pads_in_chain)
 
-            if bonded:
-                groups.append(bonded)
+            for bonded in cluster_bonded.values():
+                if bonded:
+                    groups.append(bonded)
         return groups
 
     def _merge_chains_via_vias(
@@ -1317,7 +1441,8 @@ class NetStatusAnalyzer:
         layer the via electrically spans (``_via_spans_layer``), so a
         blind/buried via does not fuse an inner-layer segment it cannot reach
         (Issue #4429).  The default (``False``) preserves the layer-agnostic
-        behaviour the zone/pour path (#4229) relies on.
+        behaviour for explicit legacy-mode pour analysis; strict pour analysis
+        requires physical layer spans (#5198).
         """
         n = len(segment_components)
         parent = list(range(n))
@@ -1365,7 +1490,11 @@ class NetStatusAnalyzer:
         via as joined to the segment when the via copper disc intersects the
         segment copper, which matches KiCad's connectivity.
         """
-        if self._points_close(seg.start, via.position) or self._points_close(seg.end, via.position):
+        from kicad_tools.schema.pcb import Arc
+
+        if not isinstance(seg, Arc) and (
+            self._points_close(seg.start, via.position) or self._points_close(seg.end, via.position)
+        ):
             return True
         if via_geom is None:
             return False
@@ -1590,8 +1719,21 @@ class NetStatusAnalyzer:
         poly = cache.get(key)
         if poly is None and key not in cache:
             from kicad_tools.geometry.copper import segment_copper_polygon
+            from kicad_tools.schema.pcb import Arc
 
-            poly = segment_copper_polygon(seg.start, seg.end, seg.width)
+            if isinstance(seg, Arc):
+                from shapely.geometry import LineString
+
+                # Bound both centerline sagitta and round-buffer approximation.
+                # Their combined absolute boundary error is <= 2 * error mm.
+                # Width scaling keeps even very thin copper well resolved.
+                error = min(0.00001, seg.width / 1000)
+                radius = seg.width / 2
+                step = 4 * math.asin(math.sqrt(min(error / (2 * radius), 0.5)))
+                quad_segs = max(16, math.ceil(math.pi / (2 * step)))
+                poly = LineString(seg.centerline_points(error)).buffer(radius, quad_segs=quad_segs)
+            else:
+                poly = segment_copper_polygon(seg.start, seg.end, seg.width)
             cache[key] = poly
         return poly
 

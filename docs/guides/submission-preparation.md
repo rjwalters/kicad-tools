@@ -7,16 +7,12 @@ means the supplied evidence matches the input bytes; it does **not** establish
 board readiness, human approval, factory matching, available inventory, reserved
 stock, or feeder/attrition requirements.
 
-Milestone B (exact-ID inventory observations) has a **narrow, partial** increment:
-`refresh_inventory` observes exact-ID stock through a caller-supplied adapter and
-preserves unknown-vs-zero evidence, but it targets only the current, pre-merge
-`kicad_tools.parts.jlcpcb_api` contract. Full milestone B depends on #5033/#5034
-(tracked by PRs #5115/#5090) landing their result/provenance/freshness contracts;
-until then this module does not claim source/observation-age provenance beyond a
-caller-supplied timestamp, and #5142 stays open. Preparation itself
-(`prepare_submission`) has no client, credential, or transport argument and does
-not read supplier environment variables — it never produces live availability
-evidence.
+Milestone B composes the landed official parts adapter and shared provenance
+contract. Explicit `refresh_inventory` calls preserve exact-ID outcomes and
+original observation times in separate snapshots. Preparation itself has no
+client, credential, or transport argument and never establishes live availability.
+Tests use synthetic responses; no current supplier availability or successful
+live signing is established by those tests.
 
 ## Python API
 
@@ -185,73 +181,87 @@ and removal, but not a successfully published partial handoff. The input roots a
 destination parent must remain controlled by the caller; this is not protection
 against an attacker renaming the filesystem namespace during publication.
 
-## Inventory refresh (narrow milestone B increment)
+## Inventory refresh and snapshot verification
 
 ```python
-from kicad_tools.export.submission_plan import refresh_inventory
+from kicad_tools.export.submission_plan import refresh_inventory, verify_inventory_snapshot
 from kicad_tools.parts import JLCCredentials, JLCOpenAPIClient
 
-creds = JLCCredentials.from_env()  # or construct explicitly; never silent-fallback
+creds = JLCCredentials.from_env()  # explicit caller action; no silent fallback
 assert creds is not None
 with JLCOpenAPIClient(creds) as client:
     snapshot = refresh_inventory(
         plan,
         source=client,
-        destination=Path("inventory/board-run-1-2026-01-01.json"),
-        observed_at="2026-01-01T00:00:00Z",  # caller-supplied clock, not module-generated
+        destination=Path("inventory/board-run-1.json"),
+        observed_at="2026-01-01T00:00:00Z",  # refresh/read time, NOT stock observation time
     )
-print(snapshot.sha256)
+verify_inventory_snapshot(snapshot.path, snapshot.sha256, plan)
 ```
 
-`refresh_inventory` never constructs a client, reads credentials, or falls back to
-an anonymous/offline source — it requires an already-built `source` object (the
-official `JLCOpenAPIClient`, or any object exposing a structurally compatible
-`get_component_detail_raw(codes) -> list[dict]`, per the `InventorySource`
-protocol). All local plan-shape validation (schema version, demand entries, bound
-BOM hash, explicit `observed_at`, destination outside the published handoff)
-happens **before** `source` is touched, so a malformed plan or destination never
-reaches the network.
+Refresh re-reads and verifies every handoff output, the closed frozen bundle
+file set and manifest, and the bound source PCB/schematic before calling the
+adapter. It checks them again after the response, rejecting concurrent changes
+without publishing a snapshot. The destination must be outside all three roots;
+it cannot already exist or be claimed by another refresh. These local failures
+cause zero adapter calls. Original root paths are nonserialized context on a
+prepared `SubmissionPlan`, so absolute paths do not alter deterministic identity.
+Plans loaded with `verify_submission` require explicit `bundle_root` and
+`source_root` arguments to refresh; moving files requires caller-supplied roots
+whose bytes still verify against the plan.
 
-The deduplicated, sorted approved-ID set from the plan's `demand` list is queried
-once. Each ID is classified independently:
+The injected `InventorySource` exposes `get_component_inventory(codes)` returning
+`ComponentInventory`: unfiltered rows, original observation timestamp, source,
+and cache flag. `JLCOpenAPIClient` implements this through its existing signed
+component-detail transport, with no parallel signer, search fallback, or client
+construction inside refresh. It queries only the sorted, deduplicated approved
+IDs; the already multiplied demand is copied without another multiplication.
 
 | status | meaning |
 |---|---|
-| `verified` | Adapter returned a genuine non-negative int `stockCount`; `raw_stock` holds it (0 is valid and distinct from unknown). |
-| `missing-field` | The matched component object had no `stockCount` key. |
-| `malformed` | `stockCount` was present but not a non-negative int (string, negative, bool, float, …). |
-| `not-returned` | No component with this exact code appeared in the adapter's response. |
-| `forbidden` | Auth, permission, or IP-whitelist failure for the whole batch. |
-| `quota-error` | Rate limit/quota failure for the whole batch. |
-| `transport-error` | Any other adapter/API failure for the whole batch. |
-| `dependency-error` | The adapter's transport dependency (e.g. `requests`) was unavailable. |
-| `incomplete-response` | The response envelope succeeded but its payload shape was unusable. |
+| `verified` | Genuine non-negative integer stock, including zero; numeric validity alone is not freshness. |
+| `missing-field` | Exact matched row lacks `stockCount`. |
+| `malformed` | Present stock is not a supported non-negative integer. |
+| `not-returned` | Requested exact ID is absent; this does not prove catalog absence. |
+| `incomplete-response` | Unusable response shape or duplicate rows for a requested ID. |
+| `forbidden` | Authentication, permission, or IP-whitelist failure. |
+| `quota-error` | Quota failure. |
+| `transport-error` | Other official API/transport failure. |
+| `dependency-error` | Missing transport dependency. |
 
-Only `verified` ever carries a non-`None` `raw_stock`; every other status leaves
-it `None` rather than defaulting to zero. A component the adapter returns for an
-ID that was never requested is read and discarded — it can never satisfy a
-different code's demand ("no automatic substitution").
+Useful rows survive partial coverage; duplicate IDs never use first-wins stock.
+`coverage` records safe unexpected IDs, duplicate IDs and invalid-row counts.
+Unexpected rows never satisfy demand. `stock_field_present` and
+`stock_field_value` distinguish missing fields from malformed values; duplicate
+row fields are retained in `stock_fields` (at most 100, with `returned_rows`
+reporting the total). Integers are bounded to 256 bits. Strings, collections,
+floats and oversized integers retain only a fixed type description because
+arbitrary server values may contain credentials. No response envelopes, exception
+messages, credentials, headers or signatures are serialized.
 
-The resulting `InventorySnapshot` is written once to an explicit `destination`
-**outside the published handoff directory** (which stays read-only) as a new,
-non-overwritable file, then bound to `plan_sha256`, the bound BOM output hash,
-`board_quantity`, and the exact `demand` mapping copied from the plan. Refreshing
-never mutates `plan.plan_bytes` or any file inside the handoff directory; calling
-it again with the same plan and `observed_at` reproduces byte-identical output,
-while a different `observed_at`, plan, or adapter response changes it. The
-snapshot's own `states` block never claims human review, factory matching, upload,
-reservation, or feeder/attrition evidence — those remain out of scope here as in
-milestone A.
+Snapshot schema version 2 retains original `provenance.observed_at` separately
+from caller `read_at`. It reuses `Part.inventory_provenance()` and its canonical
+24-hour policy: only live observations of nonfuture age up to 24 hours can have
+`stock_verified: true`; offline, unknown, stale or future observations cannot.
+Per-ID `stock_verified` additionally requires valid numeric stock. Re-reading or
+replaying cached evidence preserves its original timestamp. This is a freshness
+assessment at refresh time, not a reservation or ongoing guarantee.
 
-**What remains blocked on #5033/#5034/#5115/#5090:** those PRs add a
-`lookup_result()`/provenance contract (source identity, original observation
-time, snapshot revision/time, a documented freshness policy) to the shared parts
-layer. Until they land, `refresh_inventory` cannot safely surface that richer
-provenance without inventing it, so `observed_at` is caller-supplied and
-per-adapter source identity is not recorded beyond the coarse status above. This
-module also does not add a parallel signer/HTTP client, and does not confirm the
-live signing variant documented in `jlcpcb_api.py` actually works against the
-real API — no current supplier availability is claimed by any test in this repo.
+Snapshots are immutable, separately hashed files bound to plan digest, exact BOM
+hash, board quantity and complete demand mapping. Retain `snapshot.sha256`
+externally and use `verify_inventory_snapshot` before reuse: it verifies the
+saved bytes, current handoff and every binding. Changed settings, sources, BOM,
+quantity or mapping produce a different plan identity and invalidate reuse.
+Verification never rewrites timestamps or renews stock freshness. To assess
+freshness later, apply `Part.stock_verified` using retained source and original
+observation time, never the snapshot read time. Snapshot freshness is assessed against the current clock, so replaying
+the same evidence and read time across the 24-hour boundary can change its
+recorded freshness and snapshot digest; genuine new responses also carry new
+observation times. The deterministic version-1 plan and fabrication bytes remain untouched.
+
+All observed inventory states leave human approval, factory matching, upload,
+order, reservation and feeder/attrition evidence unestablished. Synthetic tests
+exercise the real adapter with mocked transport and do not claim live availability.
 
 ## Human review record and local review page (#5143)
 
@@ -349,3 +359,182 @@ no stage is ever inferred from an earlier or later stage's success, and this
 slice adds no upload, factory-matching, or order/purchase operation. Full
 factory-matching/upload/order tracking is left to later slices (#5145,
 #5146).
+
+## Gerber upload transport and durable upload state (#5145)
+
+`kicad_tools.manufacturers.jlc_upload` provides an offline protocol model and
+durable upload ledger for an already-prepared, already-reviewed Gerber bundle.
+**Live upload and preview are disabled** until the complete first-party wire
+contract is verified. This is partial progress on #5145, not completion of its
+live integration. It provides no order, payment, quote, fabrication-parameter,
+BOM/CPL or PCBA-submission operation; assembly remains an explicit manual
+website handoff through `jlc_upload.PCBA_WEBSITE_HANDOFF`.
+
+Call `upload_gerber` and `fetch_preview` only with an injected offline transport
+whose `TransportIdentity.live` is exactly `False`. The ledger and reconciliation
+APIs remain usable with mock protocol responses. A transport declaring live
+operation is rejected with `UploadGateError`, even if a matching receipt exists.
+Direct `RequestsUploadTransport` calls are also blocked, including with an
+injected session. No session is created and no live request is sent. There is
+no verification boolean or environment override to bypass the missing contract.
+
+`prepare_multipart_request(url, headers=..., fields=..., files=...)` uses
+requests' multipart encoder to inspect the provisional wire format without
+creating a session or sending anything. Its output is not proof that JLCPCB
+accepts the request. Offline tests use dummy credentials and injected responses;
+no real factory receipt is created by this workflow.
+
+### The pre-network gate
+
+Immediately before any request is built — never trusting a value computed in
+an earlier call or process — `upload_gerber`:
+
+1. re-verifies the published handoff with `verify_submission(plan.directory,
+   plan.sha256)` (every published output is re-read and re-hashed, and the
+   published file set is re-inventoried);
+2. re-verifies the human review with `verify_review(record, plan,
+   source_root=...)` — the fail-closed re-hash, not a "a review record
+   exists" check;
+3. re-reads the Gerber bytes and re-checks them against the plan's own bound
+   hash and size;
+4. consults the durable ledger for this exact `(file sha256, app identity,
+   endpoint)` binding.
+
+A failure at any of those steps raises `UploadGateError` and **nothing is
+sent**. The upload filename is the plan's own bound `artifacts["gerber"]
+["output_name"]`; nothing is guessed or globbed.
+
+### Protocol evidence and remaining gate
+
+First-party documentation retrieved on 2026-09-11 confirms:
+
+- [Basic rules](https://api.jlcpcb.com/docs/start): multipart uploads.
+- [Request signatures](https://api.jlcpcb.com/docs/api-request-signature): sign
+  metadata JSON for uploads, with five newline-terminated fields and Base64
+  HMAC-SHA256.
+- [API keys](https://api.jlcpcb.com/docs/configure-api-key) and
+  [applications](https://api.jlcpcb.com/docs/create-an-application): keys belong
+  to applications.
+- [API list](https://api.jlcpcb.com/docs/api-list): Gerber upload returns a file
+  ID and preview takes that ID and a language.
+
+The public pages were read through their documentation CMS reader; these were
+published-document retrievals, not operational factory requests. They resolved
+the earlier shell-only access limitation but did not establish exact endpoint
+paths, multipart part names, metadata fields or hexadecimal MD5 encoding.
+
+The offline fixture still models `POST /overseas/openapi/pcb/uploadGerber`,
+`meta` containing `{}`, a `file` part, lowercase-hex `Content-MD5`, and preview
+at `/overseas/openapi/pcb/audit/get`. Those details remain the parent issue's
+**user-reported SDK observations**, not verified endpoint requirements. The
+HTTP library generates the multipart boundary. Live enablement requires the
+missing authoritative contract and a separately reviewed implementation;
+a caller assertion cannot supply that evidence.
+
+### Durable state machine, not a retry flag
+
+Every attempt is appended to a JSONL `UploadLedger` (written outside the
+read-only handoff, and distinct from the plan and review records — this module
+reads those rather than duplicating their fields). The intent (bundle hash,
+app identity, endpoint, plan/review digests, caller timestamp) is appended and
+`fsync`-ed **before** the request is built or sent, so a crash mid-request
+always leaves evidence of exactly what was attempted.
+
+```text
+intent --success-------------------> succeeded
+       --failure-------------------> failed
+       --uncertain-----------------> uncertain --reconciliation--> succeeded|failed
+       --(no outcome ever written)-> uncertain --reconciliation--> succeeded|failed
+```
+
+| state | meaning |
+|---|---|
+| `not-attempted` | No intent exists for this exact binding. |
+| `succeeded` | A file key is bound to these exact bytes, app id and endpoint. |
+| `failed` | A definite failure (business error, or a request the transport proved was never sent). A fresh attempt is allowed. |
+| `uncertain` | The request may or may not have been received: a timeout, a dropped connection, an unclassified transport fault, malformed/contradictory response, unusable success receipt, unresolved identity, or an intent whose outcome was never written at all. |
+
+An attempt whose intent was persisted but whose outcome never was folds to
+`uncertain` **by construction** — there is no boolean "retry me" flag
+anywhere. For a binding, an unresolved `uncertain` attempt *dominates*: the
+next `upload_gerber` call raises `UploadBlockedError` and makes no network
+call. Nothing assumes, in either direction, whether the request reached the
+factory.
+
+Resolving it is an explicit, human act:
+
+```python
+for intent in pending_reconciliations(ledger):
+    print(intent["attempt_id"], intent["file"]["sha256"], intent["requested_at"])
+
+reconcile_upload(
+    ledger,
+    attempt_id=...,
+    resolution="succeeded",  # or "failed"
+    file_key="...",  # required iff resolution == "succeeded"
+    reconciled_by="alice@example.com",  # never synthesized here
+    reconciled_at="2026-01-09T00:00:00Z",
+    evidence="Checked the JLCPCB portal by hand; the file is present exactly once.",
+)
+```
+
+A successful file key is reused **only** for the exact same file hash, under
+the same app identity and the same endpoint — never selected by filename,
+upload order, or revision. Re-running `upload_gerber` for an unchanged bundle
+returns the prior receipt with `reused=True` and performs no request.
+
+### Receipts, evidence, and what is never claimed
+
+A receipt binds the file hash/MD5/size and upload name, the app identity, the
+plan and review digests, the request state, and the file key. `evidence` is
+one of:
+
+| evidence | `is_factory_receipt` | `states["upload"]` |
+|---|---|---|
+| `live-factory-response` | `True` | `uploaded` |
+| `mock-protocol-only` | `False` | `mock-protocol-only` |
+| `human-reconciliation` | `False` | `reconciled` |
+
+Live evidence values above remain readable for existing ledgers; current calls
+cannot create live evidence while the protocol gate is closed.
+
+The injected transport must declare a `TransportIdentity(name, live)`. A
+success produced by a transport that did not declare `live=True` is recorded
+and labeled `mock-protocol-only` — **a mocked protocol success is never
+logged or labeled as a real factory receipt** — and a human reconciliation is
+recorded as a human attestation, never as a protocol receipt.
+
+### Failure handling
+
+Success requires a JSON integer `code` of 200 and the exact boolean
+`success: true`, plus a usable receipt and matching identities. An explicit
+rejection requires an integer non-200 code with `success: false`. Strings,
+numeric booleans, missing fields, contradictory outcomes and truncated replies
+cannot establish a receipt. After an upload send, such outcomes and missing
+file keys are recorded as `uncertain`, blocking another send until explicit
+reconciliation. Valid business rejections remain `failed` and permit retry.
+Failures retain only a fixed
+classification word (`auth-failed`, `ip-not-whitelisted`, `permission-denied`,
+`quota-exceeded`, `incomplete-response`, `identity-mismatch`,
+`transport-unsent`, `transport-uncertain`, `request-failed`), a whitelisted
+plain-prose reason, the HTTP status, the business code, and a whitelisted
+`J-Trace-ID`. Credential material is redacted, and any reason that redaction
+touched — or that contains markup/raw-payload characters — is withheld
+entirely rather than surfaced or persisted. The raw response body is never
+logged, raised, or written to the ledger.
+
+A present app ID, file MD5 or SHA-256 must be a nonblank string matching the
+request binding; missing optional echo fields remain allowed. Malformed or
+mismatched echoes raise `UploadIdentityError`, a subclass of
+`UploadUncertainError`, and upload attempts are recorded as `uncertain`.
+Preview errors never create a preview result or change the upload receipt.
+
+### Preview retrieval is a separate call
+
+`fetch_preview(receipt, ...)` issues `POST /overseas/openapi/pcb/audit/get` as
+its **own** request — never issued by `upload_gerber`, and never inferred from
+an upload succeeding. It requires a receipt whose file key is actually
+recorded as successful in the ledger for the same app identity and file hash,
+and it persists its own record binding the attempt, file key, file hash and
+payload digest. Interpreting the preview/DFM payload is #5146's scope; nothing
+here derives a verdict from it.

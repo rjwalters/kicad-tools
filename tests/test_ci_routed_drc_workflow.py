@@ -85,21 +85,28 @@ class TestWorkflowYAML:
         )
 
     def test_job_runs_on_ubuntu(self, workflow: dict) -> None:
-        """Must use ubuntu-latest, NOT a kicad/kicad container -- the gate is
-        pure-Python and we don't want to pay the container-pull cost."""
+        """Must use ubuntu-latest, NOT a kicad/kicad *job-level* container --
+        the ordinary-board path is pure-Python and we don't want every PR to
+        pay the container-pull cost. Issue #5349: the native (Board04) path
+        instead spins up ``kicad/kicad:10.0`` via an in-step ``docker run``,
+        conditionally, so this job-level assertion still holds."""
         job = workflow["jobs"][JOB_NAME]
         assert job["runs-on"] == "ubuntu-latest"
-        # Defensive: a future refactor must not silently switch to a container.
+        # Defensive: a future refactor must not silently switch the whole job
+        # to a container (which would remove the cheap no-files short-circuit
+        # for the common case of a PR that touches no routed PCB at all).
         assert "container" not in job, (
-            "routed-pcb-drc-check should NOT run in a container -- "
-            "kct check is pure-Python and the job piggybacks on the cheap "
-            "ubuntu-latest + uv pattern."
+            "routed-pcb-drc-check should NOT set a job-level container -- "
+            "native (Board04) validation must use an in-step `docker run` "
+            "instead so ordinary-board PRs keep the cheap ubuntu-latest + "
+            "uv pattern."
         )
 
     def test_job_uses_fetch_depth_zero(self, workflow: dict) -> None:
-        """`git diff origin/main...HEAD` requires the merge-base, which is
-        only present with fetch-depth: 0. Default fetch-depth: 1 silently
-        breaks the diff with 'unknown revision'."""
+        """File-selection provenance (``scripts/ci/select_routed_pcbs.py``)
+        needs full history to resolve merge-commit parents and push
+        before/current pairs. Default fetch-depth: 1 silently breaks this
+        with 'unknown revision'."""
         steps = workflow["jobs"][JOB_NAME]["steps"]
         checkout = next(
             (
@@ -111,14 +118,29 @@ class TestWorkflowYAML:
         )
         assert checkout is not None, "routed-pcb-drc-check must use actions/checkout"
         assert checkout.get("with", {}).get("fetch-depth") == 0, (
-            "actions/checkout must use fetch-depth: 0 so `git diff "
-            "origin/main...HEAD` can resolve the merge-base."
+            "actions/checkout must use fetch-depth: 0 so the selection "
+            "helper can resolve merge-commit parents and before/current "
+            "push pairs."
         )
 
-    def test_job_invokes_helper_script(self, workflow: dict) -> None:
-        """Final step must invoke scripts/ci/check_routed_drc.py. Pinning
-        the call site prevents an inadvertent refactor (e.g., to inline
-        bash) from silently dropping the allowlist comparison."""
+    def test_job_invokes_selection_helper_script(self, workflow: dict) -> None:
+        """The file-selection step must invoke
+        scripts/ci/select_routed_pcbs.py -- pinning the call site prevents
+        an inadvertent refactor (e.g., reverting to inline bash `git diff`)
+        from silently reintroducing the stale-base-SHA bug (issue #5349)."""
+        steps = workflow["jobs"][JOB_NAME]["steps"]
+        run_blocks = [s.get("run", "") for s in steps if isinstance(s, dict) and "run" in s]
+        joined = "\n".join(run_blocks)
+        assert "scripts/ci/select_routed_pcbs.py" in joined, (
+            "routed-pcb-drc-check must invoke scripts/ci/select_routed_pcbs.py "
+            "for provenance-correct file selection."
+        )
+
+    def test_job_invokes_check_routed_drc_helper_script(self, workflow: dict) -> None:
+        """Both the ordinary and native paths must invoke
+        scripts/ci/check_routed_drc.py. Pinning the call sites prevents an
+        inadvertent refactor from silently dropping the allowlist
+        comparison."""
         steps = workflow["jobs"][JOB_NAME]["steps"]
         run_blocks = [s.get("run", "") for s in steps if isinstance(s, dict) and "run" in s]
         joined = "\n".join(run_blocks)
@@ -131,22 +153,70 @@ class TestWorkflowYAML:
     def test_job_has_short_circuit_on_no_files(self, workflow: dict) -> None:
         """Per the issue's acceptance criteria, the job must complete in
         <60s on PRs that don't touch routed PCBs. The implementation
-        achieves this via a step-level ``if: steps.changed.outputs.files != ''``
-        guard. Absence of that guard would cause every PR to pay the
-        ``uv sync`` + ``kct check`` cost unnecessarily."""
+        achieves this via step-level ``if: steps.changed.outputs.ordinary_files
+        != ''`` / ``native_files != ''`` guards. Absence of that guard would
+        cause every PR to pay the ``uv sync`` + ``kct check`` cost
+        unnecessarily."""
         steps = workflow["jobs"][JOB_NAME]["steps"]
         guarded = [
-            s for s in steps if isinstance(s, dict) and "if" in s and "files" in str(s["if"])
+            s
+            for s in steps
+            if isinstance(s, dict)
+            and "if" in s
+            and ("ordinary_files" in str(s["if"]) or "native_files" in str(s["if"]))
         ]
         assert guarded, (
             "Expected at least one step guarded by `if: "
-            "steps.changed.outputs.files != ''` so the job short-circuits "
-            "on PRs that don't touch routed PCBs."
+            "steps.changed.outputs.ordinary_files != ''` or "
+            "`native_files != ''` so the job short-circuits on PRs that "
+            "don't touch routed PCBs."
+        )
+
+    def test_native_step_is_conditionally_guarded(self, workflow: dict) -> None:
+        """The native (Board04) validation step must be gated on
+        ``native_files`` specifically -- it must NOT run unconditionally
+        (that would make every PR pay the container-pull cost) and must NOT
+        share the ``ordinary_files`` guard (that would never trigger it for
+        a Board04-only selection)."""
+        steps = workflow["jobs"][JOB_NAME]["steps"]
+        native_step = next(
+            (
+                s
+                for s in steps
+                if isinstance(s, dict) and "run_native_routed_drc.sh" in str(s.get("run", ""))
+            ),
+            None,
+        )
+        assert native_step is not None, (
+            "Expected a step invoking scripts/ci/run_native_routed_drc.sh"
+        )
+        assert "native_files" in str(native_step.get("if", "")), (
+            "The native-validation step must be guarded on "
+            "`steps.changed.outputs.native_files != ''`."
+        )
+
+    def test_native_step_uses_official_kicad_image(self, workflow: dict) -> None:
+        """The native step must reuse the SAME official ``kicad/kicad:10.0``
+        image the other jobs in this workflow already use, per the issue's
+        implementation guidance -- not a fresh apt/PPA install (which the
+        ``kicad-cli-smoke`` job's comment documents as unreliable)."""
+        steps = workflow["jobs"][JOB_NAME]["steps"]
+        native_step = next(
+            (
+                s
+                for s in steps
+                if isinstance(s, dict) and "run_native_routed_drc.sh" in str(s.get("run", ""))
+            ),
+            None,
+        )
+        assert native_step is not None
+        assert "kicad/kicad:10.0" in str(native_step.get("run", "")), (
+            "The native-validation step must run inside kicad/kicad:10.0."
         )
 
     def test_job_has_reasonable_timeout(self, workflow: dict) -> None:
-        """A timeout prevents a runaway DRC check from blocking the queue.
-        10 minutes is plenty for ~5 boards * <1min each."""
+        """A timeout prevents a runaway DRC check (or a stuck docker pull)
+        from blocking the queue."""
         job = workflow["jobs"][JOB_NAME]
         timeout = job.get("timeout-minutes")
         assert isinstance(timeout, int) and 1 <= timeout <= 30, (

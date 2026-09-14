@@ -29,6 +29,7 @@ from kicad_tools.mcp.tools.design import (
     validate_design,
     validate_move,
 )
+from kicad_tools.mcp.tools.design_intent import get_design_intent
 from kicad_tools.mcp.tools.explain import (
     explain_drc_violations,
     explain_net,
@@ -41,6 +42,7 @@ from kicad_tools.mcp.tools.mistakes import (
     detect_mistakes,
     list_mistake_categories,
 )
+from kicad_tools.mcp.tools.observability import get_recent_calls
 from kicad_tools.mcp.tools.patterns import (
     adapt_pattern,
     get_requirements,
@@ -87,7 +89,9 @@ __all__ = [
     "explain_rule",
     "export_gerbers",
     "get_decision_history",
+    "get_design_intent",
     "get_drc_violations",
+    "get_recent_calls",
     "get_requirements",
     "get_session_context",
     "get_session_summary",

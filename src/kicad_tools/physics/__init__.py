@@ -51,6 +51,8 @@ Note:
 """
 
 from .ampacity import (
+    adiabatic_fusing_current,
+    rms_current_for_duty_cycle,
     width_for_current,
 )
 from .constants import (
@@ -115,8 +117,10 @@ __all__ = [
     "COPPER_2OZ",
     "copper_thickness_from_oz",
     "copper_oz_from_thickness",
-    # Ampacity (IPC-2221)
+    # Ampacity (IPC-2221) + pulsed/duty-cycled current (#4980)
     "width_for_current",
+    "rms_current_for_duty_cycle",
+    "adiabatic_fusing_current",
     # Wire gauge (AWG) / buttress-wire reinforcement
     "DEFAULT_SLIP_FIT_CLEARANCE_MM",
     "DEFAULT_WIRE_GAUGE_AWG",

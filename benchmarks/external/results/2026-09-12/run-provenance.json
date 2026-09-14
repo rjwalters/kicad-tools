@@ -1,0 +1,581 @@
+{
+  "record_type": "external_benchmark_run_provenance",
+  "record_version": 1,
+  "run_date_utc": "2026-09-12",
+  "runtime": {
+    "started_at": "2026-09-12T10:24:50.854813+00:00",
+    "tool_commit": "696315f02c3f45c0f363e61fb5067a4f41721048",
+    "tracked_source_status": {
+      "command": [
+        "git",
+        "status",
+        "--porcelain",
+        "--untracked-files=no"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    "python": "3.12.14",
+    "platform": "Linux-7.0.12-linuxkit-x86_64-with-glibc2.41",
+    "machine": "x86_64",
+    "kicad": {
+      "command": [
+        "kicad-cli",
+        "--version"
+      ],
+      "returncode": 0,
+      "stdout": "10.0.5\n",
+      "stderr": ""
+    },
+    "native_check": {
+      "command": [
+        "uv",
+        "run",
+        "kct",
+        "build-native",
+        "--check"
+      ],
+      "returncode": 0,
+      "stdout": "C++ backend: available (version 1.0.0)\n  build version: 23 (required: 23)\n  extension: router_cpp.cpython-312-x86_64-linux-gnu.so\nPlacement backend: available (version 2.1.0)\nDRC backend: available (version 1.0.0)\n",
+      "stderr": ""
+    },
+    "cpu_limit": 4,
+    "memory_limit_gib": 12,
+    "seed": 42,
+    "image_id": "sha256:96b2e23399bfd0dce7e52973f072e99a8efe46b9ac8a9a2c727e5bae6b4cd738",
+    "case_deadline_seconds": 1800,
+    "interrupt_grace_seconds": 60,
+    "kicad_cli_drc_timeout_seconds": 300
+  },
+  "host_runtime_observation": {
+    "observed_at": "2026-09-12T10:30:39.954656+00:00",
+    "observations": [
+      {
+        "command": [
+          "uname",
+          "-m"
+        ],
+        "returncode": 0,
+        "stdout": "arm64\n",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "docker",
+          "info",
+          "--format",
+          "{{json .MemTotal}} {{json .NCPU}} {{json .Architecture}}"
+        ],
+        "returncode": 0,
+        "stdout": "8316473344 24 \"aarch64\"\n",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "docker",
+          "inspect",
+          "loom-5297-native",
+          "--format",
+          "{{json .HostConfig.Memory}} {{json .HostConfig.NanoCpus}}"
+        ],
+        "returncode": 0,
+        "stdout": "12884901888 4000000000\n",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "docker",
+          "exec",
+          "loom-5297-native",
+          "sh",
+          "-c",
+          "cat /sys/fs/cgroup/memory.max; cat /sys/fs/cgroup/cpu.max"
+        ],
+        "returncode": 0,
+        "stdout": "12884901888\n400000 100000\n",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "docker",
+          "top",
+          "loom-5297-native",
+          "-eo",
+          "pid,etime,pcpu,args"
+        ],
+        "returncode": 0,
+        "stdout": "PID                 ELAPSED             %CPU                COMMAND\n76379               06:27               0.0                 /run/rosetta/rosetta /usr/bin/bash bash /evidence/run.sh\n76795               05:50               0.0                 /run/rosetta/rosetta /root/.local/bin/uv uv run python /evidence/run_cases.py\n76798               05:50               0.3                 /run/rosetta/rosetta /evidence/source/.venv/bin/python3 /evidence/source/.venv/bin/python3 /evidence/run_cases.py\n77023               01:44               0.2                 /run/rosetta/rosetta /root/.local/bin/uv uv run kct bench external --board strf --cache-dir /evidence/cache --output-dir /evidence/cases/strf.zero-touch/output --seed 42 --mfr jlcpcb --layers 4 --kicad-cli-timeout 300 --format json\n77026               01:44               95.0                /run/rosetta/rosetta /evidence/source/.venv/bin/python /evidence/source/.venv/bin/python /evidence/source/.venv/bin/kct bench external --board strf --cache-dir /evidence/cache --output-dir /evidence/cases/strf.zero-touch/output --seed 42 --mfr jlcpcb --layers 4 --kicad-cli-timeout 300 --format json\n77152               00:05               162                 /run/rosetta/rosetta /usr/bin/kicad-cli /usr/bin/kicad-cli pcb drc --output /tmp/drc_fill_slhuh5jz.json --format json --refill-zones --save-board /evidence/cases/strf.zero-touch/output/routed/strf.zero-touch.kicad_pcb\n",
+        "stderr": ""
+      }
+    ]
+  },
+  "source_verification": {
+    "unchanged": true,
+    "tracked_paths": 3703
+  },
+  "native_binaries": {
+    "src/kicad_tools/drc/drc_cpp.cpython-312-x86_64-linux-gnu.so": {
+      "sha256": "17fa69d4537c5e73949005f6916c915ab6d0ecbaae5882fd5a7fd51daea7209a",
+      "bytes": 147856
+    },
+    "src/kicad_tools/placement/placement_cpp.cpython-312-x86_64-linux-gnu.so": {
+      "sha256": "f21fbd60f964dfa6411b14cc905f608750afe7b2c2a415a6c8d304b8bcbd11f1",
+      "bytes": 201328
+    },
+    "src/kicad_tools/router/router_cpp.cpython-312-x86_64-linux-gnu.so": {
+      "sha256": "f7c2930ff99872298a81e123fe3ffdaab890040318744320c1cd280ff8689a1d",
+      "bytes": 386032
+    }
+  },
+  "source_manifest_sha256": "c9d206d2140f1a5a6b4fae86781a2bf3c49986662023480ef2aac75bb66d6cb4",
+  "source_manifest_after_sha256": "c9d206d2140f1a5a6b4fae86781a2bf3c49986662023480ef2aac75bb66d6cb4",
+  "attempts": [
+    {
+      "board_id": "pocketbeagle",
+      "protocol": "zero-touch",
+      "command": [
+        "uv",
+        "run",
+        "kct",
+        "bench",
+        "external",
+        "--board",
+        "pocketbeagle",
+        "--cache-dir",
+        "/evidence/cache",
+        "--output-dir",
+        "/evidence/cases/pocketbeagle.zero-touch/output",
+        "--seed",
+        "42",
+        "--mfr",
+        "jlcpcb",
+        "--layers",
+        "4",
+        "--kicad-cli-timeout",
+        "300",
+        "--format",
+        "json"
+      ],
+      "cwd": "/evidence/source",
+      "started_at": "2026-09-12T10:24:54.019238+00:00",
+      "board_commit": "d793a63f48dd3041e333362d5ec870377d255f89",
+      "source_url": "https://github.com/beagleboard/pocketbeagle",
+      "source_board_path": "KiCAD/PocketBeagle.kicad_pcb",
+      "supervisor_timeout": false,
+      "forced_kill": false,
+      "returncode": 0,
+      "elapsed_seconds": 19.64550984199741,
+      "ended_at": "2026-09-12T10:25:13.666049+00:00",
+      "acquired_input_sha256": "3208e126a89e999404de619b72e22453a6f87b3621808b505c58708654cccb30",
+      "output_files": {
+        "output/normalized/pocketbeagle.baseline.json": {
+          "sha256": "187eb74aa203ae64de940e2d08deb3c654747d6c713a23bb153bc5106f5653ab",
+          "bytes": 128
+        },
+        "output/normalized/pocketbeagle.kicad_pcb": {
+          "sha256": "9e8f5bd70f3c8b00aa209da39f231d0634b7b8696c9417f72160d29ccc675487",
+          "bytes": 781969
+        },
+        "output/normalized/pocketbeagle.kicad_prl": {
+          "sha256": "e94dfd873a83c1fb84d4d045b2bfcc3fd103ede10a954f9c4340fe05dd6f8440",
+          "bytes": 2299
+        },
+        "output/pocketbeagle.zero-touch.json": {
+          "sha256": "797c4819ea1ea43a2b6710d4ba4ab16e30b45b85562f7d65ee5ae0f2d2097b2e",
+          "bytes": 2512
+        },
+        "output/report.zero-touch.md": {
+          "sha256": "959ff72b042eeebdb17fff6de2bf707c5e95f133301a65e706968cb148fffc9b",
+          "bytes": 1521
+        }
+      },
+      "report_available": true,
+      "completed_routing_performance_eligible": false,
+      "python_pathfinder_fallback_logged": false,
+      "measured_artifact": {
+        "source": "fallback_input",
+        "path": "output/normalized/pocketbeagle.kicad_pcb",
+        "sha256": "9e8f5bd70f3c8b00aa209da39f231d0634b7b8696c9417f72160d29ccc675487",
+        "bytes": 781969
+      },
+      "committed_report": "pocketbeagle.zero-touch.json",
+      "committed_diagnostics": "diagnostics/pocketbeagle.zero-touch.stderr.log"
+    },
+    {
+      "board_id": "beagleconnect_freedom",
+      "protocol": "zero-touch",
+      "command": [
+        "uv",
+        "run",
+        "kct",
+        "bench",
+        "external",
+        "--board",
+        "beagleconnect_freedom",
+        "--cache-dir",
+        "/evidence/cache",
+        "--output-dir",
+        "/evidence/cases/beagleconnect_freedom.zero-touch/output",
+        "--seed",
+        "42",
+        "--mfr",
+        "jlcpcb",
+        "--layers",
+        "4",
+        "--kicad-cli-timeout",
+        "300",
+        "--format",
+        "json"
+      ],
+      "cwd": "/evidence/source",
+      "started_at": "2026-09-12T10:25:13.676972+00:00",
+      "board_commit": "3f99c08de7d81991f95eb2c23f30798a129ffdcf",
+      "source_url": "https://git.beagleboard.org/beagleconnect/freedom",
+      "source_board_path": "hw/KICAD/BeagleConnect Freedom C7.kicad_pcb",
+      "supervisor_timeout": false,
+      "forced_kill": false,
+      "returncode": 0,
+      "elapsed_seconds": 221.6248694340029,
+      "ended_at": "2026-09-12T10:28:55.305205+00:00",
+      "acquired_input_sha256": "2783997982826648c60f83042c0dde423db467ff65175b0203505af31c2689a9",
+      "output_files": {
+        "output/beagleconnect_freedom.zero-touch.json": {
+          "sha256": "382b52c36f2e1911e52b7c61ac423078c9cde1d93e51e07337ef2498a16bf764",
+          "bytes": 3833
+        },
+        "output/normalized/beagleconnect_freedom.baseline.json": {
+          "sha256": "b45f4d7e3c001238c7375de01efa187f28a3863f75304f0cfdf860cdfcfdd07a",
+          "bytes": 128
+        },
+        "output/normalized/beagleconnect_freedom.kicad_pcb": {
+          "sha256": "9747958c13a5c625ddd15df7afb3a5a100b6877c134e63c861a2a4c351312d9d",
+          "bytes": 5513054
+        },
+        "output/normalized/beagleconnect_freedom.kicad_prl": {
+          "sha256": "bc59912f99ee6ae12393f615c7fded023360da54e3ed84ea45f1322975c10279",
+          "bytes": 2308
+        },
+        "output/report.zero-touch.md": {
+          "sha256": "5fda94cd3f45d0d72802007ff4ae765d7d5668c3b9996d4e98b4855d3280fc7e",
+          "bytes": 1592
+        }
+      },
+      "report_available": true,
+      "completed_routing_performance_eligible": false,
+      "python_pathfinder_fallback_logged": false,
+      "measured_artifact": {
+        "source": "fallback_input",
+        "path": "output/normalized/beagleconnect_freedom.kicad_pcb",
+        "sha256": "9747958c13a5c625ddd15df7afb3a5a100b6877c134e63c861a2a4c351312d9d",
+        "bytes": 5513054
+      },
+      "committed_report": "beagleconnect_freedom.zero-touch.json",
+      "committed_diagnostics": "diagnostics/beagleconnect_freedom.zero-touch.stderr.log"
+    },
+    {
+      "board_id": "strf",
+      "protocol": "zero-touch",
+      "command": [
+        "uv",
+        "run",
+        "kct",
+        "bench",
+        "external",
+        "--board",
+        "strf",
+        "--cache-dir",
+        "/evidence/cache",
+        "--output-dir",
+        "/evidence/cases/strf.zero-touch/output",
+        "--seed",
+        "42",
+        "--mfr",
+        "jlcpcb",
+        "--layers",
+        "4",
+        "--kicad-cli-timeout",
+        "300",
+        "--format",
+        "json"
+      ],
+      "cwd": "/evidence/source",
+      "started_at": "2026-09-12T10:28:55.338181+00:00",
+      "board_commit": "0525ef655e460ff6d91d770582b47925e7852e7a",
+      "source_url": "https://github.com/pms67/STRF-Kicad",
+      "source_board_path": "STRF.kicad_pcb",
+      "supervisor_timeout": false,
+      "forced_kill": false,
+      "returncode": 0,
+      "elapsed_seconds": 149.33402531799948,
+      "ended_at": "2026-09-12T10:31:24.674627+00:00",
+      "acquired_input_sha256": "efb570215bb4898f11ae67230067ff14e942cfc99e49c045416a43f66f1c3a3a",
+      "output_files": {
+        "output/normalized/strf.baseline.json": {
+          "sha256": "21808e8f273137994a498f9c50642837b101389c53f1d7a62e12e37015e246f9",
+          "bytes": 125
+        },
+        "output/normalized/strf.kicad_pcb": {
+          "sha256": "12d4e05ee37fa59c036cc4dea32d9e8ea3b84c28617b5be2da76322ca6998bca",
+          "bytes": 195979
+        },
+        "output/report.zero-touch.md": {
+          "sha256": "f535ff7c644a37ae30cc6865955a1a3642772c228447354e889ff6d91c11f20f",
+          "bytes": 876
+        },
+        "output/routed/fab_profile.json": {
+          "sha256": "99d1c11411aaa1f342444078ef2561f2b1d05f23d748ffd779edb75e53e2bdf1",
+          "bytes": 61
+        },
+        "output/routed/net_class_map.json": {
+          "sha256": "15aa11a54d9b80ce896dbea968c45a6ba6c31a5e3b38cffc3dff1299c9fdb7e8",
+          "bytes": 49209
+        },
+        "output/routed/strf.zero-touch.kicad_dru": {
+          "sha256": "b0114f2c6ea1bd5509ca3fa87ab7ce387c784bec7c3e95c1f83d3fac4a5d8801",
+          "bytes": 1250
+        },
+        "output/routed/strf.zero-touch.kicad_pcb": {
+          "sha256": "b4e49f8f5c0b9b7da1a5ad6fa1a39b29f795a62618fde998e6f31e52483b506d",
+          "bytes": 258056
+        },
+        "output/routed/strf.zero-touch.kicad_prl": {
+          "sha256": "48d694e0e17853eb9b4ca77179d4835755aa136b827f4ba3ca2315667cbcc996",
+          "bytes": 2250
+        },
+        "output/routed/strf.zero-touch.kicad_pro": {
+          "sha256": "64c835b99c531a7e9b6adff61eb36aa9fef80d0b035e1e0a091eddf9ed17a8fe",
+          "bytes": 1638
+        },
+        "output/strf.zero-touch.json": {
+          "sha256": "4bfa2e872bd8351915e266d21bf24f3de42d94c14512ce43542572cd39c19603",
+          "bytes": 2811
+        }
+      },
+      "report_available": true,
+      "completed_routing_performance_eligible": false,
+      "python_pathfinder_fallback_logged": false,
+      "measured_artifact": {
+        "source": "router_output",
+        "path": "output/routed/strf.zero-touch.kicad_pcb",
+        "sha256": "b4e49f8f5c0b9b7da1a5ad6fa1a39b29f795a62618fde998e6f31e52483b506d",
+        "bytes": 258056
+      },
+      "committed_report": "strf.zero-touch.json",
+      "committed_diagnostics": "diagnostics/strf.zero-touch.stderr.log"
+    },
+    {
+      "board_id": "strf",
+      "protocol": "tuned",
+      "command": [
+        "uv",
+        "run",
+        "kct",
+        "bench",
+        "external",
+        "--board",
+        "strf",
+        "--cache-dir",
+        "/evidence/cache",
+        "--output-dir",
+        "/evidence/cases/strf.tuned/output",
+        "--seed",
+        "42",
+        "--mfr",
+        "jlcpcb",
+        "--layers",
+        "4",
+        "--kicad-cli-timeout",
+        "300",
+        "--format",
+        "json",
+        "--tuned"
+      ],
+      "cwd": "/evidence/source",
+      "started_at": "2026-09-12T10:31:24.682972+00:00",
+      "board_commit": "0525ef655e460ff6d91d770582b47925e7852e7a",
+      "source_url": "https://github.com/pms67/STRF-Kicad",
+      "source_board_path": "STRF.kicad_pcb",
+      "supervisor_timeout": false,
+      "forced_kill": false,
+      "returncode": 0,
+      "elapsed_seconds": 1273.3169932460005,
+      "ended_at": "2026-09-12T10:52:37.998754+00:00",
+      "acquired_input_sha256": "efb570215bb4898f11ae67230067ff14e942cfc99e49c045416a43f66f1c3a3a",
+      "output_files": {
+        "output/normalized/strf.baseline.json": {
+          "sha256": "21808e8f273137994a498f9c50642837b101389c53f1d7a62e12e37015e246f9",
+          "bytes": 125
+        },
+        "output/normalized/strf.kicad_pcb": {
+          "sha256": "12d4e05ee37fa59c036cc4dea32d9e8ea3b84c28617b5be2da76322ca6998bca",
+          "bytes": 195979
+        },
+        "output/report.tuned.md": {
+          "sha256": "77ed4373dffbf83dfc67b35e75e34e5d78178daf991d6325e62d8cc64b8ca99d",
+          "bytes": 1104
+        },
+        "output/routed/strf.tuned.kicad_pcb": {
+          "sha256": "a778fb1a95c8e4b49dc22adc1b9d6feaacc31371e4ec2e5874e2f4e42bdaf122",
+          "bytes": 196157
+        },
+        "output/routed/strf.tuned.kicad_prl": {
+          "sha256": "764e175040b5dbbfc1cd4ada616203a488a8eb8d91979bcb8ffeecdec58510e6",
+          "bytes": 2245
+        },
+        "output/strf.tuned.json": {
+          "sha256": "2aac01c8809e03aeb6c0e7c3ccd88f6ccad01762d3d8b9519409a6951f806fd8",
+          "bytes": 3087
+        },
+        "output/tuned/strf.net_class_map.json": {
+          "sha256": "7190287275d9ed73ef4e9ee90f140272f4decec08ad7161aa03e162089ac1870",
+          "bytes": 897
+        }
+      },
+      "report_available": true,
+      "completed_routing_performance_eligible": false,
+      "python_pathfinder_fallback_logged": true,
+      "measured_artifact": {
+        "source": "router_output",
+        "path": "output/routed/strf.tuned.kicad_pcb",
+        "sha256": "a778fb1a95c8e4b49dc22adc1b9d6feaacc31371e4ec2e5874e2f4e42bdaf122",
+        "bytes": 196157
+      },
+      "committed_report": "strf.tuned.json",
+      "committed_diagnostics": "diagnostics/strf.tuned.stderr.log"
+    }
+  ],
+  "source_inputs": {
+    "uv.lock": {
+      "sha256": "4e65810ee8cc5edd7ba717899d2a9fa1408bc59cd5d76e85e4140893bc5d1c55"
+    },
+    "pyproject.toml": {
+      "sha256": "91ca5bacc9c380a31556f7d980710fe283f54d726af102befbd02e31132cc280"
+    },
+    "benchmarks/external/boards.toml": {
+      "sha256": "dcf7f3914e55c9612c11220fe28b41920d0779c8b1162e679933db126fdd21f2"
+    },
+    "benchmarks/external/fetch_boards.py": {
+      "sha256": "7bdb5c20d51b36db0d8e90e86a8646547b45fb57f8f2ff28b03f4e1e061e713c"
+    },
+    "benchmarks/external/normalize.py": {
+      "sha256": "45d0b4dfe4970ebdb483f8d0ed5863ea93ab0326f8e1fb1758b0da94d6b963f2"
+    },
+    "benchmarks/external/tuned_rules.py": {
+      "sha256": "3f4a31fbef7c6827195ec969aee350ead834587763160dc9de3dd7a4585b0409"
+    },
+    "src/kicad_tools/cli/commands/bench.py": {
+      "sha256": "d896baa382d2d94a8b9d5d367a236a092fe7db3fa639d8cf1163ad3d7bccb0bf"
+    },
+    "src/kicad_tools/benchmark/external/metrics.py": {
+      "sha256": "c563f2f7751fd6ede6db6797b6afa5bcc9e28ae12a247652433834b8ee9f05f2"
+    },
+    "src/kicad_tools/router/io.py": {
+      "sha256": "9fd763a8cd6f0727f7a205c55db7b34da34de8c5f91479f899192e1a273649e9"
+    }
+  },
+  "demonstrated_defects": [
+    {
+      "issue": 5302,
+      "affected_cases": [
+        "strf.zero-touch",
+        "strf.tuned"
+      ],
+      "observation": "Routing parser drops 21 of 49 valid named nets after normalization, including all eight tuned USB/SPI entries; intended tuning is not demonstrated."
+    }
+  ],
+  "limitations": [
+    "Reports retain raw harness outcomes and timings; no completed-routing performance claim.",
+    "Native C++ extension executes in an amd64 container under Rosetta on arm64.",
+    "Container requests 12 GiB, but Docker VM total memory is only 8316473344 bytes.",
+    "Tuned STRF stderr logs a pure-Python pathfinder fallback; backend availability is not proof of exclusively native execution.",
+    "Third-party source, normalized and routed PCB bytes are not vendored; hashes identify their runtime artifacts.",
+    "The 1800-second outer invocation budget includes acquisition and measurement; report timing measures the routing pass only."
+  ],
+  "committed_artifacts": {
+    "beagleconnect_freedom.zero-touch.json": {
+      "sha256": "382b52c36f2e1911e52b7c61ac423078c9cde1d93e51e07337ef2498a16bf764",
+      "bytes": 3833
+    },
+    "beagleconnect_freedom.zero-touch.md": {
+      "sha256": "5fda94cd3f45d0d72802007ff4ae765d7d5668c3b9996d4e98b4855d3280fc7e",
+      "bytes": 1592
+    },
+    "diagnostics/beagleconnect_freedom.zero-touch.stderr.log": {
+      "sha256": "de280f49d85801e63aa6e699dedf45767739fa234c06eebd8dfe0b0aba55da44",
+      "bytes": 2646
+    },
+    "diagnostics/beagleconnect_freedom.zero-touch.stdout.json": {
+      "sha256": "d02586e78aadacf8054f6a5b13284a1f1067992d7e1b7b841c40efe8cde94c99",
+      "bytes": 4565
+    },
+    "diagnostics/build.log": {
+      "sha256": "80d7088842a73032ae921e19257bd9101f62cdb7c78277c23b08f0a3bf59fb13",
+      "bytes": 306
+    },
+    "diagnostics/libraries.log": {
+      "sha256": "e5f1352969042932e4a87615c8064058939172f9e7f80f7c843688785d9d71ec",
+      "bytes": 119
+    },
+    "diagnostics/pocketbeagle.zero-touch.stderr.log": {
+      "sha256": "5d17388b05e637ce075810cd2bfcf0decae5ca09e76afe2ed9bcce69a93bcff7",
+      "bytes": 5558
+    },
+    "diagnostics/pocketbeagle.zero-touch.stdout.json": {
+      "sha256": "9d6e086e832473485432d94d8df7c57475a85791a5fa254635e44b6663e1d878",
+      "bytes": 3066
+    },
+    "diagnostics/setup.log": {
+      "sha256": "fe6c42fb79efd4202e1cb6bfd9cbc935937c8fb21b5b306e5aba1f73bd0672fd",
+      "bytes": 3557
+    },
+    "diagnostics/strf.tuned.stderr.log": {
+      "sha256": "aec2cd13099a68b5f6970c404012b88413688470b2e619eac8e8f3a2d47b5127",
+      "bytes": 28775
+    },
+    "diagnostics/strf.tuned.stdout.json": {
+      "sha256": "1efaeba68c0c7ec8e50c7bcfd697d70f124bc8f6ea8d52dc266f9a331de1d1cf",
+      "bytes": 3710
+    },
+    "diagnostics/strf.zero-touch.stderr.log": {
+      "sha256": "014ea3d4dc4e4377079ed9461fdb1d1b30e2ef880c4a08ecba8f00f31d203ee1",
+      "bytes": 42994
+    },
+    "diagnostics/strf.zero-touch.stdout.json": {
+      "sha256": "e16e4313e29e31313d961f091f4b98d3266d2771d9e8d7896ebceaf82ffd90c4",
+      "bytes": 3441
+    },
+    "pocketbeagle.zero-touch.json": {
+      "sha256": "797c4819ea1ea43a2b6710d4ba4ab16e30b45b85562f7d65ee5ae0f2d2097b2e",
+      "bytes": 2512
+    },
+    "pocketbeagle.zero-touch.md": {
+      "sha256": "959ff72b042eeebdb17fff6de2bf707c5e95f133301a65e706968cb148fffc9b",
+      "bytes": 1521
+    },
+    "run-cases.py.txt": {
+      "sha256": "3feb7c1aaec674377959a80a73bbf5612622f9967b6099c3a4fb317b36f49db1",
+      "bytes": 4596
+    },
+    "run.sh.txt": {
+      "sha256": "b42b943f766826c7885aba7154ddfcefa5e1171d737f81282509af738535d74c",
+      "bytes": 419
+    },
+    "strf.tuned.json": {
+      "sha256": "2aac01c8809e03aeb6c0e7c3ccd88f6ccad01762d3d8b9519409a6951f806fd8",
+      "bytes": 3087
+    },
+    "strf.tuned.md": {
+      "sha256": "77ed4373dffbf83dfc67b35e75e34e5d78178daf991d6325e62d8cc64b8ca99d",
+      "bytes": 1104
+    },
+    "strf.zero-touch.json": {
+      "sha256": "4bfa2e872bd8351915e266d21bf24f3de42d94c14512ce43542572cd39c19603",
+      "bytes": 2811
+    },
+    "strf.zero-touch.md": {
+      "sha256": "f535ff7c644a37ae30cc6865955a1a3642772c228447354e889ff6d91c11f20f",
+      "bytes": 876
+    }
+  }
+}

@@ -29,8 +29,9 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kicad_tools.manufacturers.fabrication_process import FabricationProcess
@@ -1139,17 +1140,10 @@ def _try_nudge_via_via(
 
 
 def _router_pad_bbox(pad: Pad) -> tuple[float, float, float, float]:
-    """Return the axis-aligned bounding box for a router primitive ``Pad``.
+    """Rotation-aware enclosing AABB, not proof of physical pad containment."""
+    from .primitives import pad_half_extents
 
-    The router pad already carries absolute coordinates and (for cardinal
-    footprint rotations) swapped ``width/height``, so the AABB is just
-    ``(x ± w/2, y ± h/2)``.  Non-cardinal rotations are conservatively
-    approximated by the same convention used elsewhere in this module --
-    matches :func:`kicad_tools.validate.rules.via_in_pad._pad_absolute_bbox`
-    for the cardinal cases which are the only ones the router emits.
-    """
-    half_w = pad.width / 2.0
-    half_h = pad.height / 2.0
+    half_w, half_h = pad_half_extents(pad)
     return (pad.x - half_w, pad.y - half_h, pad.x + half_w, pad.y + half_h)
 
 
@@ -1381,6 +1375,8 @@ class _ViaDestContext:
     drills: tuple[tuple[float, float, float], ...]
     #: Fab drill-pitch floor (mm) from ``rules.min_hole_to_hole``.
     min_hole_to_hole: float
+    #: False when a safe drill clearance cannot be established.
+    component_holes_known: bool = True
 
 
 def _build_via_dest_context(
@@ -1397,7 +1393,10 @@ def _build_via_dest_context(
     """
     rules = getattr(router, "rules", None)
     try:
-        min_hole_to_hole = float(getattr(rules, "min_hole_to_hole", DEFAULT_MIN_HOLE_TO_HOLE))
+        min_hole_to_hole = max(
+            float(getattr(rules, "min_hole_to_hole", DEFAULT_MIN_HOLE_TO_HOLE)),
+            float(getattr(rules, "min_drill_clearance", 0.0)),
+        )
     except (TypeError, ValueError):
         min_hole_to_hole = DEFAULT_MIN_HOLE_TO_HOLE
 
@@ -1406,6 +1405,13 @@ def _build_via_dest_context(
     same_net_pads: list[tuple[float, float, float, float]] = []
     foreign_vias: list[tuple[float, float, float]] = []
     drills: list[tuple[float, float, float]] = []
+
+    physical_holes = component_holes_for_router(router)
+    hole_context = resolve_component_hole_context(via.x, via.y, via.drill, all_pads=physical_holes)
+    if hole_context.known:
+        for hole in physical_holes or []:
+            if hole.through_hole:
+                drills.append((hole.x, hole.y, hole.drill))
 
     for pad in (getattr(router, "pads", None) or {}).values():
         pad_drill = float(getattr(pad, "drill", 0.0) or 0.0)
@@ -1443,6 +1449,7 @@ def _build_via_dest_context(
         foreign_segments=tuple(foreign_segments),
         drills=tuple(drills),
         min_hole_to_hole=min_hole_to_hole,
+        component_holes_known=hole_context.known,
     )
 
 
@@ -1505,6 +1512,8 @@ def _via_destination_blocked(
         skip-reason string suitable for
         :meth:`DRCNudgeResult._bump_skipped`.
     """
+    if not context.component_holes_known:
+        return "via_pad_dest_unknown_holes"
     copper_r = via.diameter / 2.0
     drill_r = via.drill / 2.0
 
@@ -1923,11 +1932,12 @@ def _scan_and_repair_via_in_pad(
             ):
                 result._bump_skipped("via_pad_centred_escape")
                 break
-            if _try_nudge_via_pad(
+            if _try_nudge_via_pad_transaction(
                 via,
                 bbox,
                 router,
                 via_pad_budget,
+                preserve_connectivity=True,
                 result=result,
             ):
                 nudged += 1
@@ -1938,6 +1948,341 @@ def _scan_and_repair_via_in_pad(
             break
 
     return nudged
+
+
+def _via_pad_copper(via: Via, router: Autorouter) -> list[tuple[int, set[Layer], Any, float]]:
+    """Represent this net's routed and preserved copper with physical layers."""
+    from shapely.affinity import rotate  # type: ignore[import-untyped]
+    from shapely.geometry import LineString, Point, box  # type: ignore[import-untyped]
+
+    copper: list[tuple[int, set[Layer], Any, float]] = []
+    all_layers = set(Layer)
+    for route in [*router.routes, *getattr(router, "existing_routes", [])]:
+        if route.net != via.net:
+            continue
+        for seg in route.segments:
+            line = LineString([(seg.x1, seg.y1), (seg.x2, seg.y2)])
+            copper.append((id(seg), {seg.layer}, line, seg.width / 2))
+        for other in route.vias:
+            lo, hi = sorted(layer.value for layer in other.layers)
+            layers = {layer for layer in Layer if lo <= layer.value <= hi}
+            copper.append((id(other), layers, Point(other.x, other.y), other.diameter / 2))
+    for pad in (getattr(router, "pads", None) or {}).values():
+        if pad.net != via.net:
+            continue
+        layers = all_layers if pad.through_hole else {pad.layer}
+        # A circle's bounding-box corners are not copper. Keep its radius
+        # analytic so a via exit cannot replace a real pad contact with a
+        # trace touching only an empty corner of the search bounds.
+        if pad.shape == "circle":
+            copper.append((id(pad), layers, Point(pad.x, pad.y), pad.width / 2))
+            continue
+        # Rectangular router envelopes retain their local dimensions and
+        # clockwise-positive KiCad rotation.
+        # Search bounds are already expanded for rotation. Contact geometry
+        # must start from the local rectangle and rotate exactly once.
+        shape = box(
+            pad.x - pad.width / 2,
+            pad.y - pad.height / 2,
+            pad.x + pad.width / 2,
+            pad.y + pad.height / 2,
+        )
+        angle = getattr(pad, "rotation", 0.0)
+        if angle:
+            shape = rotate(shape, -angle, origin=(pad.x, pad.y))
+        copper.append((id(pad), layers, shape, 0.0))
+    return copper
+
+
+def _via_pad_contacts(via: Via, router: Autorouter) -> set[tuple[int, int]]:
+    """Record same-net copper contacts that a via/chain move must retain.
+
+    IDs remain stable throughout the in-place transaction. Test copper
+    intersection, not endpoint proximity, so preserved track interiors and
+    off-centre pad contacts are protected too. Preserved routes are observed
+    only; this helper never moves them.
+    """
+    copper = _via_pad_copper(via, router)
+    moving = {id(via)} | {
+        id(seg) for route in router.routes if route.net == via.net for seg in route.segments
+    }
+    contacts: set[tuple[int, int]] = set()
+    for index, (first, layers, shape, radius) in enumerate(copper):
+        for second, other_layers, other_shape, other_radius in copper[index + 1 :]:
+            if first not in moving and second not in moving:
+                continue
+            if (
+                layers & other_layers
+                and shape.distance(other_shape) <= radius + other_radius + 1e-9
+            ):
+                contacts.add((min(first, second), max(first, second)))
+    return contacts
+
+
+def _via_pad_connectivity(via: Via, router: Autorouter) -> dict[int, int]:
+    """Map copper identities to physical same-net connected components.
+
+    A same-net exit intentionally removes direct via-to-pad contact. Its
+    replacement trace must preserve the original electrical component, on
+    actual common copper layers, including fixed tracks, pads and vias.
+    """
+    copper = _via_pad_copper(via, router)
+    parent = {identity: identity for identity, _, _, _ in copper}
+
+    def root(identity: int) -> int:
+        while parent[identity] != identity:
+            parent[identity] = parent[parent[identity]]
+            identity = parent[identity]
+        return identity
+
+    for index, (first, layers, shape, radius) in enumerate(copper):
+        for second, other_layers, other_shape, other_radius in copper[index + 1 :]:
+            if (
+                layers & other_layers
+                and shape.distance(other_shape) <= radius + other_radius + 1e-9
+            ):
+                parent[root(first)] = root(second)
+    return {identity: root(identity) for identity in parent}
+
+
+def _via_pad_process_findings(via: Via, router: Autorouter) -> set[tuple[str, int, float]]:
+    """Process constraints not included in the copper-only route validator.
+
+    Keep object identity and measured gap so an unrelated inherited finding
+    can remain, but a new or changed hole/unsupported in-pad finding cannot
+    be accepted by the foreign-pad repair transaction.
+    """
+    findings: set[tuple[str, int, float]] = set()
+    drill_clearance = max(router.rules.min_drill_clearance, router.rules.min_hole_to_hole)
+    for route in [*router.routes, *getattr(router, "existing_routes", [])]:
+        for other in route.vias:
+            if other is via:
+                continue
+            gap = math.hypot(via.x - other.x, via.y - other.y) - (via.drill + other.drill) / 2
+            if gap < drill_clearance - 1e-6:
+                findings.add(("hole", id(other), gap))
+    process = _resolve_router_via_in_pad_process(router)
+    hole_census = component_holes_for_router(router)
+    physical_context = resolve_component_hole_context(via.x, via.y, via.drill, all_pads=hole_census)
+    if not physical_context.known:
+        findings.add(("unknown_component_holes", 0, 0.0))
+    else:
+        for hole in hole_census or []:
+            if hole.through_hole:
+                gap = math.hypot(via.x - hole.x, via.y - hole.y) - (via.drill + hole.drill) / 2
+                if gap < drill_clearance - 1e-6:
+                    findings.add(("hole", id(hole), gap))
+    for pad in (getattr(router, "pads", None) or {}).values():
+        if pad.through_hole and pad.drill > 0:
+            gap = math.hypot(via.x - pad.x, via.y - pad.y) - (via.drill + pad.drill) / 2
+            if gap < drill_clearance - 1e-6:
+                findings.add(("hole", id(pad), gap))
+        elif not pad.through_hole and _via_drill_overlaps_bbox(via, _router_pad_bbox(pad)):
+            hole_context = resolve_component_hole_context(
+                via.x, via.y, via.drill, all_pads=hole_census, exclude=pad
+            )
+            if process is None or not via_in_pad_candidate_eligible(
+                process,
+                drill_mm=via.drill,
+                annular_ring_mm=(via.diameter - via.drill) / 2,
+                hole_context=hole_context,
+            ):
+                findings.add(("via_in_pad", id(pad), 0.0))
+    return findings
+
+
+def _try_nudge_via_pad_violation(
+    violation: ClearanceViolation,
+    router: Autorouter,
+    max_displacement: float,
+    result: DRCNudgeResult | None = None,
+) -> bool:
+    """Repair a via-vs-FOREIGN-pad clearance violation (Issue #4991).
+
+    :class:`ClearanceViolation`'s ``"pad"`` obstacle_type has a
+    documented dual shape (see its docstring): a genuine segment graze
+    (``segment_index >= 0``) or a via graze (``segment_index == -1``,
+    ``x1 == x2 == via.x`` / ``y1 == y2 == via.y``) -- the same
+    segment-vs-obstacle / obstacle-vs-obstacle split already handled for
+    the ``"via"`` obstacle_type just above in the dispatch loop. Before
+    this fix, EVERY ``"pad"`` violation was routed to
+    :func:`_try_nudge_seg_pad` regardless of shape. For the via shape,
+    that helper's :func:`_find_segment` lookup searches for a real route
+    segment matching the zero-length ``(via.x, via.y)-(via.x, via.y)``
+    coordinates -- which never exists -- so it silently returned
+    ``False`` every time. The result: an ordinary two-pad passive (0805
+    cap/resistor) whose escape via lands across an adjacent foreign pad
+    was reported by ``validate_routes`` and even counted in the nudge
+    pass's statistics, but the via itself was never actually moved,
+    leaving the invalid geometry in the saved PCB for native KiCad DRC
+    to catch after the fact.
+
+    This handler locates the offending via (:func:`_find_via_at`) and
+    the offending pad (matched by net + position from
+    ``violation.location``), then reuses :func:`_try_nudge_via_pad`'s
+    cardinal-exit slide -- the same geometry the same-net via-in-pad
+    sweep uses -- passing ``violation.required`` as the explicit
+    clearance so the exit offset matches the exact (possibly per-net-
+    class) clearance that was violated, rather than defaulting to the
+    global trace clearance. :func:`_try_nudge_via_pad` also snaps every
+    same-net segment endpoint anchored to the via's old position, so a
+    stub segment that grazed the same foreign pad (e.g. the escape
+    segment feeding the via) moves along with it and is repaired in the
+    same step.
+
+    Before attempting the move, this handler declines (structured skip
+    ``via_pad_anchored``) when the via is itself pad-anchored to its
+    OWN net (:func:`_via_is_pad_anchored`) -- the same chain-protection
+    contract :func:`_nudge_via_with_chain` enforces for the via-via
+    handler. Without this guard, a via that is also part of a via-via
+    clearance violation (e.g. two adjacent pad-anchored escape vias on
+    different nets, each within clearance of the other's pad) could be
+    silently relocated here first, moving it away from the coordinates
+    ``validate_routes`` recorded for the sibling via-via violation and
+    causing that violation's own :func:`_find_via_at` lookup to fail
+    (``via_via_not_found``) instead of correctly declining with
+    ``via_via_anchored``.
+
+    The proposal is transactional: revalidate the via and every snapped
+    segment against all existing copper, plus process hole spacing,
+    unsupported via-in-pad placement and board edges. Restore geometry in
+    place if any new finding appears. Unrelated pre-existing findings are
+    retained without vetoing a legal repair; a blocked proposal records
+    ``via_pad_destination_blocked``. Original same-net copper contacts are
+    checked separately, including fixed preserved-route interiors and pad
+    edges; a disconnect records ``via_pad_contact_blocked`` and restores the
+    move without modifying preserved copper.
+
+    Uses the same generous ``_VIA_IN_PAD_MAX_DISPLACEMENT`` budget as
+    the same-net via-in-pad sweep -- clearing a foreign SMD pad requires
+    roughly ``pad_half_width + via_radius + clearance`` of travel, well
+    above the ``0.2`` mm default used for ordinary segment nudges.
+
+    Returns:
+        True when the via was moved (and its chain snapped) within
+        budget; False when no matching via/pad was found, the via is
+        pad-anchored to its own net, or the move exceeded budget
+        (recorded as a structured skip by :func:`_try_nudge_via_pad`).
+    """
+    via_hit = _find_via_at(router, violation.net, violation.x1, violation.y1)
+    if via_hit is None:
+        return False
+    _route, via = via_hit
+
+    if _via_is_pad_anchored(via, via.net, router):
+        if result is not None:
+            result._bump_skipped("via_pad_anchored")
+        return False
+
+    if violation.location is None:
+        return False
+    pad_x, pad_y = violation.location
+
+    pads = getattr(router, "pads", None) or {}
+    offending_pad: Pad | None = None
+    for candidate in pads.values():
+        if candidate.net != violation.obstacle_net:
+            continue
+        if abs(candidate.x - pad_x) < 0.005 and abs(candidate.y - pad_y) < 0.005:
+            offending_pad = candidate
+            break
+    if offending_pad is None:
+        return False
+
+    return _try_nudge_via_pad_transaction(
+        via,
+        _router_pad_bbox(offending_pad),
+        router,
+        max(max_displacement, _VIA_IN_PAD_MAX_DISPLACEMENT),
+        required_clearance=violation.required,
+        result=result,
+    )
+
+
+def _try_nudge_via_pad_transaction(
+    via: Via,
+    pad_bbox: tuple[float, float, float, float],
+    router: Autorouter,
+    max_displacement: float,
+    *,
+    required_clearance: float | None = None,
+    preserve_connectivity: bool = False,
+    result: DRCNudgeResult | None = None,
+) -> bool:
+    """Validate a via/chain proposal and restore it in place on rejection.
+
+    Foreign-pad repairs retain their exact direct-contact contract. Same-net
+    exits may replace a direct contact with a copper path, but cannot split
+    any previously connected component. Both entry points share the existing
+    destination, process and edge guards.
+    """
+    # The cardinal exit helper only knows the offending pad. Treat its
+    # proposal as a transaction: include every snapped same-net endpoint,
+    # and reject NEW findings rather than requiring an otherwise clean board.
+    before = Counter(dataclasses.astuple(v) for v in validate_routes(router))
+    process_before = _via_pad_process_findings(via, router)
+    contacts_before = _via_pad_contacts(via, router) if not preserve_connectivity else set()
+    connectivity_before = _via_pad_connectivity(via, router) if preserve_connectivity else {}
+    old_x, old_y = via.x, via.y
+    chain = [
+        (seg, seg.x1, seg.y1, seg.x2, seg.y2)
+        for route in router.routes
+        if route.net == via.net
+        for seg in route.segments
+    ]
+    accepted = False
+    try:
+        if not _try_nudge_via_pad(
+            via,
+            pad_bbox,
+            router,
+            max_displacement,
+            required_clearance=required_clearance,
+            result=result,
+        ):
+            return False
+        after = Counter(dataclasses.astuple(v) for v in validate_routes(router))
+        edge_clearance = getattr(router, "_edge_clearance", None)
+        edge_blocked = False
+        if edge_clearance is not None and edge_clearance > 0:
+            for (x1, y1), (x2, y2) in getattr(router, "_edge_segments", []) or []:
+                old_gap = _point_to_segment_distance(old_x, old_y, x1, y1, x2, y2)
+                swept_gap = _segment_to_segment_distance(old_x, old_y, via.x, via.y, x1, y1, x2, y2)
+                required = via.diameter / 2 + edge_clearance
+                if swept_gap < min(required, old_gap) - 1e-6:
+                    edge_blocked = True
+                    break
+        if (
+            after - before
+            or _via_pad_process_findings(via, router) - process_before
+            or edge_blocked
+        ):
+            if result is not None:
+                result._bump_skipped("via_pad_destination_blocked")
+            return False
+        if preserve_connectivity:
+            connectivity_after = _via_pad_connectivity(via, router)
+            destinations: dict[int, set[int | None]] = {}
+            for identity, component in connectivity_before.items():
+                destinations.setdefault(component, set()).add(connectivity_after.get(identity))
+            contact_blocked = any(
+                len(components) != 1 or None in components for components in destinations.values()
+            )
+        else:
+            contact_blocked = bool(contacts_before - _via_pad_contacts(via, router))
+        if contact_blocked:
+            if result is not None:
+                result._bump_skipped("via_pad_contact_blocked")
+            return False
+        accepted = True
+        return True
+    finally:
+        if not accepted:
+            # Restore in place: other violations in this pass and callers
+            # may retain references to these exact Via/Segment objects.
+            via.x, via.y = old_x, old_y
+            for seg, x1, y1, x2, y2 in chain:
+                seg.x1, seg.y1, seg.x2, seg.y2 = x1, y1, x2, y2
 
 
 def _try_nudge_seg_edge(
@@ -2440,12 +2785,26 @@ def _drc_verify_and_nudge_impl(
                         result=result,
                     )
             elif v.obstacle_type == "pad":
-                success = _try_nudge_seg_pad(
-                    v,
-                    router,
-                    max_displacement,
-                    result=result,
-                )
+                # Issue #4991: ``"pad"`` shares the same dual-shape
+                # contract as ``"via"`` above -- ``segment_index == -1``
+                # marks a via-vs-pad violation (a zero-length
+                # "segment" at the via's centre) that ``_find_segment``
+                # can never match, so it must be dispatched to the
+                # via-aware handler instead of the segment handler.
+                if v.segment_index == -1:
+                    success = _try_nudge_via_pad_violation(
+                        v,
+                        router,
+                        max_displacement,
+                        result=result,
+                    )
+                else:
+                    success = _try_nudge_seg_pad(
+                        v,
+                        router,
+                        max_displacement,
+                        result=result,
+                    )
             elif v.obstacle_type == "edge":
                 # Issue #2743: trace-vs-board-edge violations now flow
                 # through the same dispatch path.

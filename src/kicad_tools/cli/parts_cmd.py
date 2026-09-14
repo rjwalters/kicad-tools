@@ -255,14 +255,35 @@ def _lookup(args) -> int:
         return 1
 
     client = LCSCClient()
-    part = client.lookup(args.part, bypass_cache=args.no_cache)
+    from ..parts.lcsc import LCSCDependencyMissingError
 
+    try:
+        lookup = client.lookup_result(args.part, bypass_cache=args.no_cache)
+    except LCSCDependencyMissingError as exc:
+        if args.format == "json":
+            print(json.dumps({"status": "unavailable", "error": str(exc)}))
+        else:
+            print(f"Parts lookup unavailable: {exc}", file=sys.stderr)
+        return 1
+    part = lookup.part
+    coverage = {"status": lookup.status, "source": lookup.source, "diagnostics": lookup.diagnostics}
     if part is None:
-        print(f"Part not found: {args.part}", file=sys.stderr)
+        if args.format == "json":
+            print(json.dumps({"lookup": coverage, "part": None}))
+        else:
+            label = (
+                "Verified live no-match"
+                if lookup.status == "not_found"
+                else "Lookup unavailable; catalog absence not verified"
+            )
+            print(f"{label}: {args.part}", file=sys.stderr)
+            for diagnostic in lookup.diagnostics:
+                print(diagnostic, file=sys.stderr)
         return 1
 
     if args.format == "json":
         data = {
+            "lookup": coverage,
             "lcsc_part": part.lcsc_part,
             "mfr_part": part.mfr_part,
             "manufacturer": part.manufacturer,
@@ -271,6 +292,7 @@ def _lookup(args) -> int:
             "package": part.package,
             "package_type": part.package_type.value,
             "stock": part.stock,
+            "inventory": part.inventory_provenance(),
             "is_basic": part.is_basic,
             "is_preferred": part.is_preferred,
             "prices": [{"quantity": p.quantity, "unit_price": p.unit_price} for p in part.prices],
@@ -279,6 +301,9 @@ def _lookup(args) -> int:
         }
         print(json.dumps(data, indent=2))
     else:
+        print(f"Lookup source: {lookup.source}")
+        for diagnostic in lookup.diagnostics:
+            print(diagnostic, file=sys.stderr)
         print(f"LCSC Part:    {part.lcsc_part}")
         print(f"MFR Part:     {part.mfr_part}")
         print(f"Manufacturer: {part.manufacturer}")
@@ -286,6 +311,10 @@ def _lookup(args) -> int:
         print(f"Category:     {part.category.value}")
         print(f"Package:      {part.package} ({part.package_type.value})")
         print(f"Stock:        {part.stock:,}")
+        if not part.stock_verified:
+            print(
+                "Stock unverified: catalog identity only; refresh live inventory before ordering."
+            )
         if part.is_basic:
             print("Type:         JLCPCB Basic (no extra fee)")
         elif part.is_preferred:
@@ -313,6 +342,8 @@ def _search(args) -> int:
         print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
         return 1
 
+    from ..parts.lcsc import LCSCUnavailableError
+
     client = LCSCClient()
     try:
         results = client.search(
@@ -321,19 +352,38 @@ def _search(args) -> int:
             in_stock=args.in_stock,
             basic_only=args.basic,
         )
-    except LCSCDependencyMissingError as e:
+    except (LCSCDependencyMissingError, LCSCUnavailableError) as e:
         # Backend genuinely unavailable (no ``requests`` extra AND no synced
         # offline catalog).  Surface this distinctly from a legitimate empty
         # result so the user isn't misled by a bare "No parts found" (#4296).
-        print(f"Error: parts search backend unavailable: {e}", file=sys.stderr)
+        if args.format == "json":
+            print(json.dumps({"status": "unavailable", "error": str(e)}))
+        else:
+            print(f"Error: parts search backend unavailable: {e}", file=sys.stderr)
         return 1
 
-    if not results.parts:
-        print(f"No parts found for: {args.query}", file=sys.stderr)
+    if not results.parts and args.format != "json":
+        label = (
+            "No parts found"
+            if results.coverage == "live"
+            else "No candidates in incomplete source coverage; catalog absence not verified"
+        )
+        print(f"{label} for: {args.query}", file=sys.stderr)
+        for diagnostic in results.diagnostics:
+            print(diagnostic, file=sys.stderr)
         return 1
+    if args.format != "json":
+        for diagnostic in results.diagnostics:
+            print(diagnostic, file=sys.stderr)
+
+    if args.format != "json" and any(not p.stock_verified for p in results.parts):
+        print("Warning: snapshot/unknown stock is unverified; matches establish identity only.")
 
     if args.format == "json":
         data = {
+            "source": results.source,
+            "coverage": results.coverage,
+            "diagnostics": results.diagnostics,
             "query": results.query,
             "total": results.total_count,
             "parts": [
@@ -343,6 +393,7 @@ def _search(args) -> int:
                     "description": p.description,
                     "package": p.package,
                     "stock": p.stock,
+                    "inventory": p.inventory_provenance(),
                     "is_basic": p.is_basic,
                     "best_price": p.best_price,
                 }
@@ -377,7 +428,7 @@ def _search(args) -> int:
                 f"{part.lcsc_part}: {part.mfr_part} - {part.package} - {part.stock:,} in stock - {price_str}{basic_str}"
             )
 
-    return 0
+    return 0 if results.parts else 1
 
 
 def _cache(args) -> int:
@@ -626,7 +677,7 @@ def _availability(args) -> int:
         _availability_table(result, items, schematic_path, args.quantity)
 
     # Return error code if issues found
-    if result.out_of_stock or result.missing:
+    if not result.all_available:
         return 1
     return 0
 
@@ -757,6 +808,7 @@ def _suggest_json(result, suggestions) -> None:
                 "description": s.best_suggestion.description,
                 "package": s.best_suggestion.package,
                 "stock": s.best_suggestion.stock,
+                "inventory": s.best_suggestion.inventory,
                 "is_basic": s.best_suggestion.is_basic,
                 "unit_price": s.best_suggestion.unit_price,
                 "confidence": s.best_suggestion.confidence,
@@ -770,6 +822,7 @@ def _suggest_json(result, suggestions) -> None:
                     "description": sug.description,
                     "package": sug.package,
                     "stock": sug.stock,
+                    "inventory": sug.inventory,
                     "is_basic": sug.is_basic,
                     "unit_price": sug.unit_price,
                     "confidence": sug.confidence,
@@ -783,6 +836,13 @@ def _suggest_json(result, suggestions) -> None:
 
 def _suggest_table(result, suggestions, schematic_path: Path) -> None:
     """Output suggestions as formatted table."""
+    if any(
+        s.best_suggestion and not s.best_suggestion.inventory.get("stock_verified", False)
+        for s in suggestions
+    ):
+        print(
+            "Warning: suggested part identities include unverified stock; refresh before ordering."
+        )
     print()
     print("=" * 90)
     print("LCSC PART SUGGESTIONS")
@@ -973,6 +1033,13 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
     missing = [
         i for i in items if i.status in (AvailabilityStatus.NO_LCSC, AvailabilityStatus.NOT_FOUND)
     ]
+    if any(
+        not alt.inventory.get("stock_verified", False)
+        for item in low_stock + out_of_stock
+        for alt in item.alternatives
+    ):
+        print("Stock unverified for alternatives: refresh live inventory before ordering.")
+        print()
 
     # Available parts (collapsed)
     if available:
@@ -995,7 +1062,14 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
                         elif alt.price_diff < 0:
                             price_info = f", -${abs(alt.price_diff):.4f}"
                     basic = " [Basic]" if alt.is_basic else ""
-                    print(f"      • {alt.lcsc_part}: {alt.stock:,} in stock{price_info}{basic}")
+                    stock_status = (
+                        "in stock"
+                        if alt.inventory.get("stock_verified", False)
+                        else "reported (stock unverified)"
+                    )
+                    print(
+                        f"      • {alt.lcsc_part}: {alt.stock:,} {stock_status}{price_info}{basic}"
+                    )
         print()
 
     # Out of stock parts
@@ -1015,9 +1089,23 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
                         elif alt.price_diff < 0:
                             price_info = f", -${abs(alt.price_diff):.4f}"
                     basic = " [Basic]" if alt.is_basic else ""
-                    print(f"      • {alt.lcsc_part}: {alt.stock:,} in stock{price_info}{basic}")
+                    stock_status = (
+                        "in stock"
+                        if alt.inventory.get("stock_verified", False)
+                        else "reported (stock unverified)"
+                    )
+                    print(
+                        f"      • {alt.lcsc_part}: {alt.stock:,} {stock_status}{price_info}{basic}"
+                    )
             else:
                 print("    No alternatives found")
+        print()
+
+    unavailable = [i for i in items if i.status == AvailabilityStatus.UNAVAILABLE]
+    if unavailable:
+        print(f"? LOOKUP UNAVAILABLE ({len(unavailable)} parts):")
+        for item in unavailable:
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part}): {item.error}")
         print()
 
     # Missing parts (no LCSC number or not found)
@@ -1047,6 +1135,8 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
     print()
     if summary["all_available"]:
         print("✓ All parts available for ordering")
+    elif summary.get("unverified", 0) > 0:
+        print("Stock unverified: refresh live inventory before ordering.")
     elif summary["out_of_stock"] > 0:
         print("✗ Some parts out of stock - check alternatives above")
     else:

@@ -752,6 +752,41 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
     out_world_x = 0.0f;
     out_world_y = 0.0f;
 
+    if (grid_.has_fixed_fills()) {
+        auto [wx, wy] = grid_.grid_to_world(x, y);
+        const double half = search_via_half_diam_mm_ > 0
+            ? search_via_half_diam_mm_ : rules_.via_diameter / 2.0;
+        const double reach = half + (search_fill_via_clearance_ >= 0
+            ? search_fill_via_clearance_ : rules_.via_clearance);
+        for (int layer = 0; layer < grid_.layers(); ++layer)
+            if (!grid_.fixed_fill_clear(wx, wy, wx, wy, layer, half, reach)) return true;
+    }
+
+    if (!rules_.allow_smd_vias) {
+        const auto [wx, wy] = grid_.grid_to_world(x, y);
+        const float drill_radius = rules_.via_drill / 2.0f;
+        for (const auto& pad : grid_.pads()) {
+            if (pad.layer_idx < 0) continue;  // Through-hole pad, not SMD.
+            float local_x = wx - pad.x, local_y = wy - pad.y;
+            if (pad.rotation != 0.0f) {
+                // Invert KiCad's clockwise residual rotation, as in grid.cpp.
+                const float angle = pad.rotation * 3.14159265358979323846f / 180.0f;
+                const float c = std::cos(angle), s = std::sin(angle);
+                const float rotated_x = c * local_x - s * local_y;
+                local_y = s * local_x + c * local_y;
+                local_x = rotated_x;
+            }
+            const float dx = std::max(std::abs(local_x) - pad.width / 2.0f, 0.0f);
+            const float dy = std::max(std::abs(local_y) - pad.height / 2.0f, 0.0f);
+            if (dx * dx + dy * dy < drill_radius * drill_radius) {
+                out_blocking_net = pad.net;
+                out_world_x = pad.x;
+                out_world_y = pad.y;
+                return true;
+            }
+        }
+    }
+
     int radius = (radius_override > 0) ? radius_override : via_half_cells_;
 
     // Issue #3234: Switch the via-clearance kernel from Chebyshev (square)
@@ -1274,6 +1309,16 @@ RouteResult Pathfinder::route(
             int nx = current.x + dx;
             int ny = current.y + dy;
             int nlayer = current.layer;
+
+            if (grid_.has_fixed_fills()) {
+                auto [ax, ay] = grid_.grid_to_world(current.x, current.y);
+                auto [bx, by] = grid_.grid_to_world(nx, ny);
+                const double half = search_trace_half_width_mm_ > 0
+                    ? search_trace_half_width_mm_ : rules_.trace_width / 2.0;
+                const double reach = half + (search_fill_trace_clearance_ >= 0
+                    ? search_fill_trace_clearance_ : rules_.trace_clearance);
+                if (!grid_.fixed_fill_clear(ax, ay, bx, by, nlayer, half, reach)) continue;
+            }
 
             if (!grid_.is_valid(nx, ny, nlayer)) {
                 if (astar_trace_enabled()) {
@@ -1863,6 +1908,16 @@ RouteResult Pathfinder::run_astar_loop() {
             int nx = current.x + dx;
             int ny = current.y + dy;
             int nlayer = current.layer;
+
+            if (grid_.has_fixed_fills()) {
+                auto [ax, ay] = grid_.grid_to_world(current.x, current.y);
+                auto [bx, by] = grid_.grid_to_world(nx, ny);
+                const double half = search_trace_half_width_mm_ > 0
+                    ? search_trace_half_width_mm_ : rules_.trace_width / 2.0;
+                const double reach = half + (search_fill_trace_clearance_ >= 0
+                    ? search_fill_trace_clearance_ : rules_.trace_clearance);
+                if (!grid_.fixed_fill_clear(ax, ay, bx, by, nlayer, half, reach)) continue;
+            }
 
             if (!grid_.is_valid(nx, ny, nlayer)) {
                 // Issue #3135: trace out-of-bounds rejections so future

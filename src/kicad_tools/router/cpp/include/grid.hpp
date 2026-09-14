@@ -12,6 +12,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <map>
 
 namespace router {
 
@@ -19,6 +20,25 @@ class Grid3D {
 public:
     Grid3D(int cols, int rows, int layers, float resolution,
            float origin_x, float origin_y);
+
+    using FillRing = std::vector<std::pair<double, double>>;
+    struct FillEdge { double ax, ay, bx, by; };
+    struct FixedFill {
+        int layer;
+        double clearance;
+        std::vector<FillRing> rings;
+        double minx, miny, maxx, maxy;
+        std::vector<FillEdge> edges;
+        // One-mm bins: horizontal rows accelerate even-odd containment;
+        // two-dimensional bins accelerate exact edge-distance queries.
+        std::map<int, std::vector<size_t>> rows;
+        std::map<std::pair<int, int>, std::vector<size_t>> bins;
+    };
+    void clear_fixed_fills() { fixed_fills_.clear(); }
+    void add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings);
+    bool fixed_fill_clear(double ax, double ay, double bx, double by,
+                          int layer, double half, double reach) const;
+    bool has_fixed_fills() const { return !fixed_fills_.empty(); }
 
     // Cell access - inline for performance
     inline GridCell& at(int x, int y, int layer) {
@@ -237,7 +257,10 @@ public:
     void add_pad(float x, float y, float width, float height,
                  int net, int layer_idx, uint32_t ref_hash,
                  float clearance_override,
-                 bool is_plane_net = false);
+                 bool is_plane_net = false, float rotation = 0.0f,
+                 bool is_circular = false);
+
+    void set_pad_via_policy(size_t index, float clearance, bool carveout_eligible);
 
     // Register a completed route's segments for clearance validation.
     void add_stored_segment(float x1, float y1, float x2, float y2,
@@ -269,8 +292,33 @@ public:
     //   - validate_same_net_drill_spacing (via vs stored vias, same net)
     //
     // exclude_net: net ID of the route being validated (same-net OK)
-    // exclude_ref_hashes: FNV-1a hashes of component refs to exclude
-    //                     (start/end pad components, Issue #1764)
+    // exclude_ref_hashes: FNV-1a hashes of component refs whose
+    //                     same-component carve-out FULLY SKIPS the
+    //                     positive-clearance check (start/end pad
+    //                     components, Issue #1764).  This is the
+    //                     ``_relax_same_component_clearance`` corridor-relief
+    //                     flavour (Issue #2452): the search physically
+    //                     unblocked the overlap corridor down to a
+    //                     ``trace_width / 2`` floor, which those blocked-cell
+    //                     constructions already enforce, and the pad's
+    //                     ``clearance_override`` was never shrunk -- so
+    //                     clamping here would reject the very routes #2452
+    //                     exists to permit.
+    // clamp_ref_hashes: Issue #5166 -- FNV-1a hashes of component refs whose
+    //                     same-component carve-out CLAMPS instead of skipping.
+    //                     A ref lands here when it reaches the carve-out only
+    //                     because a configured override (per-component
+    //                     ``component_clearances`` / ``fine_pitch_clearance``
+    //                     / net-class ``escape_clearance``) resolved SMALLER
+    //                     than the default ``trace_clearance``.  That smaller
+    //                     value is an authored design rule, so it is enforced
+    //                     as a hard floor (``pad.clearance_override`` /
+    //                     ``pad.via_clearance_override``) rather than meaning
+    //                     "clearance unchecked entirely" -- pre-#5166 the
+    //                     unconditional skip accepted ANY positive gap, e.g.
+    //                     0.02mm against a pad whose rules authored 0.10mm.
+    //                     Defaults to empty, which reproduces the pre-#5166
+    //                     behaviour exactly.
     // trace_clearance: default clearance for segments
     // via_clearance: default clearance for vias
     // min_drill_clearance: minimum drill-to-drill spacing (same-net)
@@ -301,7 +349,8 @@ public:
         float via_clearance,
         float min_drill_clearance,
         int partner_net = -1,
-        float intra_pair_clearance = 0.0f) const;
+        float intra_pair_clearance = 0.0f,
+        const std::vector<uint32_t>& clamp_ref_hashes = {}) const;
 
     // -----------------------------------------------------------------------
     // Pairwise (HV-isolation) domain clearance -- Issue #4510, Phase 2a of
@@ -374,6 +423,7 @@ public:
                              int layer = -1) const;
 
     // Accessors for validation data sizes (for testing/debugging)
+    const std::vector<PadInfo>& pads() const { return pads_; }
     size_t pad_count() const { return pads_.size(); }
     size_t stored_segment_count() const { return stored_segments_.size(); }
     size_t stored_via_count() const { return stored_vias_.size(); }
@@ -409,6 +459,7 @@ private:
     // Geometric validation storage (Issue #2439)
     std::vector<PadInfo> pads_;
     std::vector<StoredSegment> stored_segments_;
+    std::vector<FixedFill> fixed_fills_;
     std::vector<StoredVia> stored_vias_;
 
     // Pairwise (HV-isolation) domain clearance storage (Issue #4510).

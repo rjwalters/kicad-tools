@@ -312,8 +312,8 @@ class TestLoadPcbForRouting:
         has_through_hole = any(pad.through_hole for pad in router.pads.values())
         assert has_through_hole
 
-    def test_load_pcb_default_dimensions(self, tmp_path):
-        """Test default dimensions when no edge cuts present."""
+    def test_load_pcb_missing_outline_is_rejected(self, tmp_path):
+        """Missing outline must not silently select a HAT routing domain."""
         # Create a PCB without gr_rect
         pcb_content = """(kicad_pcb
   (version 20240108)
@@ -336,11 +336,8 @@ class TestLoadPcbForRouting:
         pcb_file = tmp_path / "no_edge.kicad_pcb"
         pcb_file.write_text(pcb_content)
 
-        router, net_map = load_pcb_for_routing(str(pcb_file))
-
-        # Should use default HAT dimensions
-        assert router.grid.width == 65.0
-        assert router.grid.height == 56.0
+        with pytest.raises(ValueError, match="missing supported Edge.Cuts"):
+            load_pcb_for_routing(str(pcb_file))
 
     def test_load_pcb_unquoted_pad_numbers(self, tmp_path):
         """Test parsing pads with unquoted numeric pad numbers (Issue #173).
@@ -1318,12 +1315,14 @@ class TestValidateRoutes:
         assert "GND" in result
         assert "15.00" in result
 
-    def test_same_component_pad_marked_component_inherent(self):
-        """Test that pad violations within the same component are marked component_inherent."""
+    @pytest.mark.parametrize("legacy_carveout", [False, True])
+    def test_same_component_pad_requires_opt_in_for_inherent_classification(self, legacy_carveout):
+        """Unconfigured fine pitch cannot classify a copper violation as inherent."""
         rules = DesignRules(
             trace_width=0.2,
             trace_clearance=0.15,
             grid_resolution=0.1,
+            legacy_fine_pitch_carveout=legacy_carveout,
         )
         router = Autorouter(width=50, height=50, rules=rules)
 
@@ -1351,11 +1350,11 @@ class TestValidateRoutes:
 
         violations = validate_routes(router)
 
-        # The pad-to-pad violation should be marked as component_inherent
+        # Preserve the legacy opt-in, while default mode reports a real violation.
         pad_violations = [v for v in violations if v.obstacle_type == "pad"]
         assert len(pad_violations) >= 1
         for v in pad_violations:
-            assert v.component_inherent is True
+            assert v.component_inherent is legacy_carveout
 
     def test_cross_component_pad_not_marked_component_inherent(self):
         """Test that pad violations between different components are NOT component_inherent."""
@@ -1991,6 +1990,163 @@ class TestValidateRoutes:
         assert len(pad_violations) >= 1
         assert all(v.obstacle_net != 0 for v in pad_violations)
         assert any(v.obstacle_net == 2 for v in pad_violations)
+
+
+class TestValidateRoutesLowerBoundRejection:
+    """Issue #5240: ``validate_routes`` skips its expensive exact
+    segment-to-pad / segment-to-segment distance calls when a cheap
+    circle-based lower bound already proves no violation is possible.
+
+    These tests assert the optimization is behaviorally transparent (a
+    far-apart pair is never exactly measured, yet a genuinely close pair
+    still is, and still produces the same violation) rather than
+    exercising it only through a timing benchmark.
+    """
+
+    def test_far_apart_pad_skips_exact_distance_but_close_pad_still_flagged(self, monkeypatch):
+        """A pad far from the route must never reach the exact distance
+        call; a pad genuinely close to the route must still reach it and
+        still be reported."""
+        import kicad_tools.router.io as io_mod
+
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.1)
+        router = Autorouter(width=200, height=200, rules=rules)
+        router.add_component(
+            "U1",
+            [
+                # Genuinely close: 0.5mm centerline separation with a 0.2mm
+                # trace half-width leaves 0.4mm edge-to-edge, under the
+                # 0.2mm... actually keep it a clear violation (near-zero gap).
+                {"number": "1", "x": 10, "y": 10, "width": 1.0, "height": 1.0, "net": 1},
+                {"number": "2", "x": 10.3, "y": 10, "width": 1.0, "height": 1.0, "net": 2},
+                # Far away: nowhere near the route, must be rejected by the
+                # cheap bound alone.
+                {"number": "3", "x": 190, "y": 190, "width": 1.0, "height": 1.0, "net": 3},
+            ],
+        )
+        segment = Segment(x1=5, y1=10, x2=10, y2=10, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="NET1", segments=[segment], vias=[])
+        router.routes.append(route)
+
+        checked_pads: list[tuple[object, ...]] = []
+        real_fn = io_mod._segment_to_aabb_distance
+
+        def _counting_segment_to_aabb_distance(*args, **kwargs):
+            checked_pads.append(args)
+            return real_fn(*args, **kwargs)
+
+        monkeypatch.setattr(io_mod, "_segment_to_aabb_distance", _counting_segment_to_aabb_distance)
+
+        violations = validate_routes(router)
+
+        # The exact geometry call must only have run for the close pad (net
+        # 2); the far pad (net 3, ~250mm away) is rejected by the circle
+        # lower bound before ever reaching it.
+        assert 0 < len(checked_pads) < 2, (
+            "Expected the exact pad-distance calculation to run exactly "
+            "once (for the close pad only); the far pad should have been "
+            "rejected by the cheap lower bound."
+        )
+        pad_violations = [v for v in violations if v.obstacle_type == "pad"]
+        assert any(v.obstacle_net == 2 for v in pad_violations)
+        assert all(v.obstacle_net != 3 for v in pad_violations)
+
+    def test_far_apart_segment_skips_exact_distance_but_close_segment_still_flagged(
+        self, monkeypatch
+    ):
+        """Same guarantee for the segment-to-segment loop."""
+        import kicad_tools.router.io as io_mod
+
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.1)
+        router = Autorouter(width=200, height=200, rules=rules)
+        router.net_names = {1: "NET1", 2: "NET2", 3: "NET3"}
+
+        segment = Segment(x1=10, y1=10, x2=15, y2=10, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="NET1", segments=[segment], vias=[])
+
+        # Close parallel segment on a different net: near-zero gap, a
+        # genuine violation.
+        close_seg = Segment(x1=10, y1=10.05, x2=15, y2=10.05, layer=Layer.F_CU, width=0.2)
+        close_route = Route(net=2, net_name="NET2", segments=[close_seg], vias=[])
+
+        # Far segment: nowhere near the route, must be rejected by the
+        # cheap bound alone.
+        far_seg = Segment(x1=190, y1=190, x2=195, y2=190, layer=Layer.F_CU, width=0.2)
+        far_route = Route(net=3, net_name="NET3", segments=[far_seg], vias=[])
+
+        router.routes = [route, close_route, far_route]
+
+        checked_pairs: list[tuple[object, ...]] = []
+        real_fn = io_mod._segment_to_segment_distance
+
+        def _counting_segment_to_segment_distance(*args, **kwargs):
+            checked_pairs.append(args)
+            return real_fn(*args, **kwargs)
+
+        monkeypatch.setattr(
+            io_mod, "_segment_to_segment_distance", _counting_segment_to_segment_distance
+        )
+
+        violations = validate_routes(router)
+
+        assert 0 < len(checked_pairs) < 2, (
+            "Expected the exact segment-to-segment distance calculation to "
+            "run exactly once (for the close segment only); the far "
+            "segment should have been rejected by the cheap lower bound."
+        )
+        seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+        assert any(v.obstacle_net == 2 for v in seg_violations)
+        assert all(v.obstacle_net != 3 for v in seg_violations)
+
+    def test_lower_bound_never_suppresses_a_real_violation(self):
+        """A mix of near and far pads/segments must still yield exactly
+        the near violations (and no far ones), and the result must be
+        stable across repeated calls (no state leaks between runs via the
+        per-call ``_seg_reach``/``_pad_radius`` id()-keyed caches)."""
+        import dataclasses
+
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.25, grid_resolution=0.1)
+
+        def build_router():
+            r = Autorouter(width=200, height=200, rules=rules)
+            r.net_names = {1: "NET1", 2: "NET2", 3: "NET3"}
+            r.add_component(
+                "U1",
+                [
+                    # Sits directly on route net1's centerline -- a genuine
+                    # pad violation.
+                    {"number": "1", "x": 20, "y": 20, "width": 1.0, "height": 1.0, "net": 2},
+                    # Far from every route -- must never register.
+                    {"number": "2", "x": 150, "y": 150, "width": 1.0, "height": 1.0, "net": 3},
+                ],
+            )
+            seg_a = Segment(x1=15, y1=20, x2=25, y2=20, layer=Layer.F_CU, width=0.2)
+            # Parallel to seg_a with only a 0.2mm centerline offset -- a
+            # genuine segment-to-segment violation.
+            seg_b = Segment(x1=15, y1=20.2, x2=25, y2=20.2, layer=Layer.F_CU, width=0.2)
+            # Far from every other route -- must never register.
+            seg_c = Segment(x1=140, y1=10, x2=145, y2=10, layer=Layer.F_CU, width=0.2)
+            r.routes = [
+                Route(net=1, net_name="NET1", segments=[seg_a], vias=[]),
+                Route(net=2, net_name="NET2", segments=[seg_b], vias=[]),
+                Route(net=3, net_name="NET3", segments=[seg_c], vias=[]),
+            ]
+            return r
+
+        first = validate_routes(build_router())
+        second = validate_routes(build_router())
+
+        def sig(vs):
+            return sorted(dataclasses.astuple(v) for v in vs)
+
+        assert sig(first) == sig(second), "validate_routes must be deterministic across calls"
+
+        pad_violations = [v for v in first if v.obstacle_type == "pad"]
+        seg_violations = [v for v in first if v.obstacle_type == "segment"]
+        assert any(v.obstacle_net == 2 for v in pad_violations)
+        assert any(v.obstacle_net == 2 for v in seg_violations)
+        assert all(v.obstacle_net != 3 for v in pad_violations)
+        assert all(v.obstacle_net != 3 for v in seg_violations)
 
 
 class TestLoadPcbForRoutingDrcCompliance:

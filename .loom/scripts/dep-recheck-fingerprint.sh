@@ -71,6 +71,10 @@
 #       [--json]
 #   dep-recheck-fingerprint.sh named-dependency (--number N [--repo OWNER/NAME] | --stdin)
 #       [--json]
+#   dep-recheck-fingerprint.sh extract-refs (--number N [--repo OWNER/NAME] | --stdin)
+#       [--bot-login LOGIN] [--json]
+#   dep-recheck-fingerprint.sh decide --hash HASH [--prior-hash HASH]
+#       [--prior-age-hours N] [--heartbeat-hours N] [--json]
 #
 # Subcommands:
 #   dep-recheck        The "Re-check Idempotency" fingerprint: VERDICT
@@ -92,13 +96,44 @@
 #                       CONCLUSION_HASH — left EMPTY when VERDICT=open, per
 #                       "no comment this pass" (nothing to report, nothing to
 #                       compare).
+#   extract-refs        The "Checking Operator-Only Premises" -> "Extracting
+#                       the stated reference" extraction (#4963). Emits REFS,
+#                       a space-separated (possibly empty) list of referenced
+#                       issue/PR numbers found via the fixed
+#                       `Blocked by|Depends on|Requires|**Epic**` phrasings.
+#                       References are extracted from the issue **body**
+#                       always, plus any **comment** that is (a) not authored
+#                       by the automation identity (`--bot-login`, default
+#                       `loom-fleet-dispatch`; matched case-insensitively
+#                       after stripping an `app/` prefix or `[bot]` suffix)
+#                       and (b) does not itself carry a
+#                       `<!-- curator:dep-recheck:...` or
+#                       `<!-- curator:operator-premise-recheck:...` marker.
+#                       This is what stops the self-perpetuating loop from
+#                       #4507: the bot's own historical "premise possibly
+#                       stale" comments quote the matched phrase back into the
+#                       thread, and a naive `[.body] + [.comments[].body]`
+#                       scan (the old inline curator.md shell) re-matches its
+#                       own prior report forever, even after the body itself
+#                       is fixed. Excluding the automation identity's own
+#                       comments (and, belt-and-suspenders, anything carrying
+#                       its own marker) breaks that loop while still catching
+#                       a genuine NEW human-authored "Blocked by #N" comment.
+#                       The output feeds directly into `operator-premise`'s
+#                       `--refs` argument.
 #   named-dependency   The `## Dependencies` checklist fingerprint (#7314):
 #                       covers the shape `dep-recheck` cannot — a checklist
 #                       item naming a *different*, non-closing issue/PR as a
 #                       prerequisite (e.g. #6335 blocked on #6333, which does
 #                       not carry `Closes #6335`). Parses `- [ ] #N: ...` /
-#                       `- [x] #N: ...` items out of the issue body's own
-#                       `## Dependencies` section (a checked box is treated as
+#                       `- [x] #N: ...` items — the canonical/preferred
+#                       format — out of the issue body's own `## Dependencies`
+#                       section, tolerating an optional case-insensitive
+#                       `PR `/`Issue ` token before the `#N` as best-effort
+#                       (e.g. `- [ ] PR #N: ...`, `- [ ] Issue #N: ...`,
+#                       #7501 — curator prose naturally varies, and silently
+#                       dropping such an item would produce a false
+#                       VERDICT=clear) (a checked box is treated as
 #                       already resolved, no live lookup needed) and, for
 #                       every unchecked item, looks up the referenced issue's
 #                       or PR's own `state` (never its labels — this is
@@ -111,6 +146,39 @@
 #                       CLOSED-without-merging both count as resolved, and an
 #                       issue body with no `## Dependencies` section (or an
 #                       empty one) is VERDICT=clear.
+#   decide              The "Four-way decision" (curator.md "Re-check
+#                       Idempotency" / "Idempotency" under "Checking
+#                       Operator-Only Premises") that turns a CONCLUSION_HASH
+#                       plus the most recent prior marker into an ACTION and
+#                       whether posting that ACTION requires claiming
+#                       `loom:curating` first (#7617). This is a pure string/
+#                       number comparison — it never calls `gh`, reads no
+#                       label state itself, and is always safe to run before
+#                       any claim. Emits ACTION (none|skip|comment|heartbeat)
+#                       and CLAIM (true|false):
+#                         - HASH empty (nothing to report this pass, e.g.
+#                           operator-premise VERDICT=open) -> ACTION=none,
+#                           CLAIM=false.
+#                         - PRIOR_HASH empty (no prior marker at all, the
+#                           first-ever check) -> ACTION=comment, CLAIM=true.
+#                         - HASH != PRIOR_HASH (a changed conclusion,
+#                           including the "diagnosed-but-orthogonal blocker"
+#                           escalation, which changes CONCLUSION_HASH by
+#                           construction) -> ACTION=comment, CLAIM=true.
+#                         - HASH == PRIOR_HASH and PRIOR_AGE_HOURS is within
+#                           the heartbeat window -> ACTION=skip, CLAIM=false.
+#                           This is the no-op path: nothing is posted, no
+#                           label changes, and — per #7617 — no `loom:curating`
+#                           claim is taken either.
+#                         - HASH == PRIOR_HASH but PRIOR_AGE_HOURS is at or
+#                           past the heartbeat window -> ACTION=heartbeat,
+#                           CLAIM=true (post exactly one refresh comment).
+#                       CLAIM=true means: claim `loom:curating` immediately
+#                       before posting, and release it again afterward unless
+#                       the same pass also transitions the issue to
+#                       `loom:curated` (whose own label edit already drops
+#                       `loom:curating` in the same command). CLAIM=false
+#                       means: do not touch `loom:curating` at all this pass.
 #
 # Input modes (either one, mutually exclusive):
 #   --number N [--repo OWNER/NAME]   Live mode: fetch current PR/ref state via
@@ -120,14 +188,14 @@
 #                                     `named-dependency` derives its own
 #                                     reference list by parsing the issue's own
 #                                     body `## Dependencies` section (see
-#                                     above); `operator-premise` requires the
-#                                     caller's already-extracted `--refs "N1
-#                                     N2 ..."` (that subcommand does not parse
-#                                     issue body text itself — that extraction
-#                                     stays in curator.md, tightly coupled to
-#                                     the free-form phrasings it recognizes,
-#                                     unlike `named-dependency`'s single fixed
-#                                     `## Dependencies` checklist format).
+#                                     above); `extract-refs` derives its own
+#                                     reference list by parsing the issue's
+#                                     body and (filtered) comments, per the
+#                                     `extract-refs` description above;
+#                                     `operator-premise` requires the caller's
+#                                     already-extracted `--refs "N1 N2 ..."`
+#                                     (typically `extract-refs`'s own REFS
+#                                     output — see curator.md).
 #   --stdin                          Offline mode: read a JSON document on
 #                                     stdin instead of calling `gh` (used by
 #                                     the test suite, and available to any
@@ -144,6 +212,13 @@
 #                                         (a checked entry may omit "state"
 #                                         entirely, or set it to null — it is
 #                                         never consulted).
+#                                       extract-refs:     {"body": "...",
+#                                         "comments": [{"author":
+#                                         {"login":"..."}, "body": "..."},
+#                                         ...]} — the same shape `gh issue view
+#                                         --json body,comments` returns, so a
+#                                         live-mode fixture can be captured
+#                                         verbatim.
 #
 # Options:
 #   --verdict blocked|clear   `dep-recheck` only: override the mechanically
@@ -162,8 +237,26 @@
 #                             CONCLUSION_HASH verbatim, empty by default (the
 #                             ordinary case — every existing fingerprint is
 #                             unaffected when this is empty).
+#   --bot-login LOGIN         `extract-refs` only: the automation identity
+#                             whose own comments are excluded from the
+#                             comment-scan fallback. Default `loom-fleet-dispatch`.
+#                             Matched case-insensitively, after stripping a
+#                             leading `app/` or trailing `[bot]` (so it matches
+#                             regardless of which `gh` view normalizes the
+#                             login to).
 #   --repo OWNER/NAME         Target repo for live mode (default: the cwd's
 #                             git remote).
+#   --hash HASH               `decide` only, required: this pass's own
+#                             CONCLUSION_HASH (may be empty — see above).
+#   --prior-hash HASH         `decide` only: the most recent prior marker's
+#                             CONCLUSION_HASH. Empty (the default) means no
+#                             prior re-check comment was found on the issue.
+#   --prior-age-hours N       `decide` only: age in hours of the prior marker
+#                             comment. Required whenever `--prior-hash` is
+#                             non-empty (there is nothing to age otherwise).
+#   --heartbeat-hours N       `decide` only: the staleness window. Defaults to
+#                             `$LOOM_DEP_RECHECK_HEARTBEAT_HOURS` if set, else
+#                             `24` — matching curator.md's documented default.
 #   --json                    Emit a JSON object instead of KEY=VALUE lines.
 #
 # Exit codes:
@@ -191,13 +284,13 @@ _die() {
 
 SUBCOMMAND="${1:-}"
 case "$SUBCOMMAND" in
-    dep-recheck | operator-premise | named-dependency) shift ;;
+    dep-recheck | operator-premise | named-dependency | extract-refs | decide) shift ;;
     -h | --help)
         _usage
         exit 0
         ;;
-    "") _die "missing subcommand (dep-recheck | operator-premise | named-dependency); see --help" ;;
-    *) _die "unknown subcommand '$SUBCOMMAND' (dep-recheck | operator-premise | named-dependency)" ;;
+    "") _die "missing subcommand (dep-recheck | operator-premise | named-dependency | extract-refs | decide); see --help" ;;
+    *) _die "unknown subcommand '$SUBCOMMAND' (dep-recheck | operator-premise | named-dependency | extract-refs | decide)" ;;
 esac
 
 NUMBER=""
@@ -207,7 +300,13 @@ USE_STDIN=false
 VERDICT_OVERRIDE=""
 BLOCK_REASON=""
 ORTHOGONAL=""
+BOT_LOGIN="loom-fleet-dispatch"
 JSON_OUTPUT=false
+HASH_ARG=""
+HASH_SET=false
+PRIOR_HASH_ARG=""
+PRIOR_AGE_HOURS_ARG=""
+HEARTBEAT_HOURS_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -239,6 +338,27 @@ while [[ $# -gt 0 ]]; do
             ORTHOGONAL="${2:-}"
             shift 2
             ;;
+        --bot-login)
+            BOT_LOGIN="${2:-}"
+            shift 2
+            ;;
+        --hash)
+            HASH_ARG="${2:-}"
+            HASH_SET=true
+            shift 2
+            ;;
+        --prior-hash)
+            PRIOR_HASH_ARG="${2:-}"
+            shift 2
+            ;;
+        --prior-age-hours)
+            PRIOR_AGE_HOURS_ARG="${2:-}"
+            shift 2
+            ;;
+        --heartbeat-hours)
+            HEARTBEAT_HOURS_ARG="${2:-}"
+            shift 2
+            ;;
         --json)
             JSON_OUTPUT=true
             shift
@@ -253,10 +373,23 @@ done
 
 command -v jq >/dev/null 2>&1 || _die "jq not found on PATH" 3
 
-if [[ "$USE_STDIN" == true ]]; then
+if [[ "$SUBCOMMAND" == "decide" ]]; then
+    # decide is a pure comparison — no --number/--stdin/--refs input mode, and
+    # (deliberately) no `gh` call: it must be safe to run before any claim.
+    [[ "$HASH_SET" == true ]] || _die "--hash is required for decide (pass --hash '' when there is nothing to report this pass)"
+    if [[ -n "$PRIOR_HASH_ARG" && -z "$PRIOR_AGE_HOURS_ARG" ]]; then
+        _die "--prior-age-hours is required when --prior-hash is non-empty"
+    fi
+    if [[ -n "$PRIOR_AGE_HOURS_ARG" && ! "$PRIOR_AGE_HOURS_ARG" =~ ^[0-9]+$ ]]; then
+        _die "--prior-age-hours must be a non-negative integer (got '$PRIOR_AGE_HOURS_ARG')"
+    fi
+    if [[ -n "$HEARTBEAT_HOURS_ARG" && ! "$HEARTBEAT_HOURS_ARG" =~ ^[0-9]+$ ]]; then
+        _die "--heartbeat-hours must be a non-negative integer (got '$HEARTBEAT_HOURS_ARG')"
+    fi
+elif [[ "$USE_STDIN" == true ]]; then
     [[ -z "$NUMBER" ]] || _die "--stdin and --number are mutually exclusive"
     [[ -z "$REFS_ARG" ]] || _die "--stdin and --refs are mutually exclusive"
-elif [[ "$SUBCOMMAND" == "dep-recheck" || "$SUBCOMMAND" == "named-dependency" ]]; then
+elif [[ "$SUBCOMMAND" == "dep-recheck" || "$SUBCOMMAND" == "named-dependency" || "$SUBCOMMAND" == "extract-refs" ]]; then
     [[ -n "$NUMBER" ]] || _die "one of --number or --stdin is required"
     [[ "$NUMBER" =~ ^[0-9]+$ ]] || _die "--number must be a positive integer (got '$NUMBER')"
     command -v gh >/dev/null 2>&1 || _die "gh CLI not found on PATH" 3
@@ -437,20 +570,94 @@ _run_operator_premise() {
             '{verdict: $verdict, refs: $refs, conclusion_hash: $hash}'
     else
         echo "VERDICT=$verdict"
-        echo "REFS=$refs"
+        # Consumers eval these assignments; lists may contain spaces/newlines.
+        printf 'REFS=%q\n' "$refs"
         echo "CONCLUSION_HASH=$hash"
+    fi
+}
+
+# --- extract-refs (#4963) ----------------------------------------------------
+
+# The exact machine-readable phrasings `detect-dependency-cycle.sh` /
+# `warn-operator-gated.sh` already parse — reused verbatim rather than
+# inventing a new pattern. A bare prose mention (e.g. a backtick-quoted
+# `owner/repo#123`) deliberately does not count.
+_extract_refs_pattern() {
+    # `|| true`: under `set -o pipefail` a `grep` stage matching nothing
+    # exits 1, which would otherwise propagate as this whole pipeline's
+    # status (even though `sort` itself succeeds) and trip `set -e` in every
+    # caller up the chain — "zero references found" is an expected, common
+    # outcome here, not a real failure.
+    grep -oE '(Blocked by|Depends on|Requires|\*\*Epic\*\*)[*_:[:space:]]*#[0-9]+' <<<"$1" \
+        | grep -oE '#[0-9]+' | tr -d '#' | sort -un || true
+}
+
+_fetch_extract_refs_json() {
+    gh issue view "$NUMBER" "${REPO_FLAG[@]}" --json body,comments ||
+        _die "gh issue view $NUMBER failed — cannot compute a fingerprint from a failed read (fail safe: never guess 'no refs' on missing data)" 1
+}
+
+# One reference number per line (sorted, unique) found in the body, plus any
+# comment that is NEITHER authored by the automation identity NOR itself
+# carrying a `curator:dep-recheck:` / `curator:operator-premise-recheck:`
+# marker (#4963 — see the header comment for why this is the fix, not just a
+# convenience). The login match is case-insensitive and tolerant of a leading
+# `app/` or trailing `[bot]`, since different `gh` views/API paths have been
+# observed to normalize a GitHub App's login differently (compare
+# `judge-fallback-guard.sh`'s `app/loom-fleet-dispatch` PR-author check with
+# the bare `loom-fleet-dispatch` this script observes from
+# `gh issue view --json comments`).
+_extract_refs() {
+    local input_json bot_login_lc body comments_text text
+    input_json="$1"
+    bot_login_lc="$(printf '%s' "$BOT_LOGIN" | tr '[:upper:]' '[:lower:]')"
+
+    body="$(jq -r '.body // ""' <<<"$input_json")"
+    comments_text="$(jq -r --arg bot "$bot_login_lc" '
+        .comments[]
+        | select(
+            (((.author.login // "") | ascii_downcase | sub("^app/"; "") | sub("\\[bot\\]$"; "")) != $bot)
+            and ((.body // "") | test("<!-- curator:(dep-recheck|operator-premise-recheck):") | not)
+          )
+        | .body
+    ' <<<"$input_json")"
+
+    text="$(printf '%s\n%s' "$body" "$comments_text")"
+    _extract_refs_pattern "$text" | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//'
+}
+
+_run_extract_refs() {
+    local input_json refs
+    if [[ "$USE_STDIN" == true ]]; then
+        input_json="$(cat)"
+    else
+        input_json="$(_fetch_extract_refs_json)"
+    fi
+    jq -e '(.body != null) and (.comments | type) == "array"' >/dev/null 2>&1 <<<"$input_json" ||
+        _die "input JSON must have top-level 'body' (string) and 'comments' (array) fields"
+
+    refs="$(_extract_refs "$input_json")"
+
+    if [[ "$JSON_OUTPUT" == true ]]; then
+        jq -n --arg refs "$refs" '{refs: $refs}'
+    else
+        # Consumers eval these assignments; lists may contain spaces/newlines.
+        printf 'REFS=%q\n' "$refs"
     fi
 }
 
 # --- named-dependency ---------------------------------------------------------
 
-# Extract only the `## Dependencies` section (up to the next level-2 heading
-# or end of body) so an unrelated `#N` mentioned anywhere else in the issue
-# body is never picked up as a named dependency.
+# Extract only the `## Dependencies` (or `### Dependencies`) section (up to
+# the next same-or-higher-level heading or end of body) so an unrelated `#N`
+# mentioned anywhere else in the issue body is never picked up as a named
+# dependency. Tolerant of H2 or H3 since Curators file both shapes in
+# practice (#7503) — false "clear" (silently skipping a real dependency) is
+# the worse failure direction than being slightly too permissive here.
 _extract_dependencies_section() {
     awk '
-        /^## Dependencies[[:space:]]*$/ { found = 1; next }
-        found && /^## / { found = 0 }
+        /^#{2,3}[[:space:]]+Dependencies[[:space:]]*$/ { found = 1; next }
+        found && /^#{1,3}[[:space:]]/ { found = 0 }
         found { print }
     ' <<<"$1"
 }
@@ -462,8 +669,13 @@ _extract_dependencies_section() {
 #   - [ ] #123: Prerequisite feature
 #   - [x] #456: Required infrastructure
 _extract_named_deps() {
+    # Matches the canonical bare form (`- [ ] #123: ...`) plus an optional
+    # case-insensitive `PR `/`Issue ` token before the `#N` (#7501) — curator
+    # prose naturally varies ("PR #N", "Issue #N"), and silently dropping such
+    # an item would produce a false VERDICT=clear (the worse failure
+    # direction: it can incorrectly unblock a Builder).
     local line num checked
-    grep -oE '^[[:space:]]*-[[:space:]]*\[[ xX]\][[:space:]]*#[0-9]+' <<<"$1" | while IFS= read -r line; do
+    grep -oiE '^[[:space:]]*-[[:space:]]*\[[ xX]\][[:space:]]*((pr|issue)[[:space:]]+)?#[0-9]+' <<<"$1" | while IFS= read -r line; do
         checked="false"
         [[ "$line" =~ \[[xX]\] ]] && checked="true"
         num="$(grep -oE '#[0-9]+' <<<"$line" | tr -d '#')"
@@ -552,8 +764,58 @@ _run_named_dependency() {
     fi
 }
 
+# --- decide (#7617) ----------------------------------------------------------
+
+# The "Four-way decision" from curator.md's "Re-check Idempotency" /
+# "Checking Operator-Only Premises" -> "Idempotency", extracted so the claim
+# discipline it implies (see the header comment above) is testable rather
+# than re-derived from prose on every Curator pass — exactly the rationale
+# `dep-recheck`/`operator-premise` were already extracted for (#7281). Pure
+# comparison, no `gh` call: safe to run before any `loom:curating` claim.
+_run_decide() {
+    local action claim heartbeat_hours
+
+    heartbeat_hours="${HEARTBEAT_HOURS_ARG:-${LOOM_DEP_RECHECK_HEARTBEAT_HOURS:-24}}"
+
+    if [[ -z "$HASH_ARG" ]]; then
+        # Nothing to report this pass (e.g. operator-premise VERDICT=open) —
+        # there is nothing to compare, so there is nothing to claim either.
+        action="none"
+        claim="false"
+    elif [[ -z "$PRIOR_HASH_ARG" ]]; then
+        # First-ever check on this issue: always report.
+        action="comment"
+        claim="true"
+    elif [[ "$HASH_ARG" != "$PRIOR_HASH_ARG" ]]; then
+        # A changed conclusion (including a diagnosed-but-orthogonal-blocker
+        # escalation, which changes CONCLUSION_HASH by construction) is never
+        # suppressed, window irrelevant.
+        action="comment"
+        claim="true"
+    elif (( PRIOR_AGE_HOURS_ARG < heartbeat_hours )); then
+        # Same conclusion, still inside the staleness window: the no-op path
+        # — no comment, no label change, no `loom:curating` claim (#7617).
+        action="skip"
+        claim="false"
+    else
+        # Same conclusion, but the prior marker is stale: post exactly one
+        # heartbeat, refreshing the marker's timestamp.
+        action="heartbeat"
+        claim="true"
+    fi
+
+    if [[ "$JSON_OUTPUT" == true ]]; then
+        jq -n --arg action "$action" --argjson claim "$claim" '{action: $action, claim: $claim}'
+    else
+        echo "ACTION=$action"
+        echo "CLAIM=$claim"
+    fi
+}
+
 case "$SUBCOMMAND" in
     dep-recheck) _run_dep_recheck ;;
     operator-premise) _run_operator_premise ;;
     named-dependency) _run_named_dependency ;;
+    extract-refs) _run_extract_refs ;;
+    decide) _run_decide ;;
 esac

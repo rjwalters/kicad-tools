@@ -391,6 +391,70 @@ correctness backstop (defends even if a future code path re-introduces a
 misdirected or intentionally-left-running renewal loop) and the renew-side
 fix addresses the actual mechanism observed in the incident.
 
+## Publish-side yield-exclusion (Loom #7639; kicad-tools #5331)
+
+Issue #6485 (above) gave `sweep-lease-fence.sh` and `sweep-lease-renew.sh`
+yield-exclusion — neither treats a lease comment as live evidence once its
+own `(host, sweep)` has posted a `loom:lease-yield` standdown record. Issue
+kicad-tools#5331 (a 36-hour, 4+-host claim/yield thrash on kicad-tools#5240, 137 of 160
+comments being lease/yield markers) found that `sweep-lease-publish.sh`'s
+own peer-scan — the in-session write path's gate against publishing over a
+live peer (#6320/#6333) — had **no equivalent exclusion**. A lease comment
+that was still nominally "fresh" (within the TTL window) but whose owner had
+already lost Issue #6287's dispatch-time claim-then-verify-order tie-break
+and posted its own yield record kept counting as a live peer, blocking
+every later in-session publisher's own claim attempt (`exit 4`, SKIP) in
+deference to a claim the tie-break machinery had already resolved away.
+
+This is a genuine, self-sustaining non-convergence mechanism distinct from
+#6470/#6485's: it does not require a misdirected renewal loop at all — a
+tie-break loser's lease comment is "fresh" by construction for a full TTL
+window (up to 15 minutes by default) purely from the moment it was posted,
+before it ever yields. Any THIRD host attempting to claim the same issue
+during that window — after the true winner's own claim has since gone
+silent (e.g. Issue #6783's "abandoned lease, dead renewal loop" shape) —
+reads the loser's still-fresh-but-already-yielded record as blocking
+evidence and stands down, even though nobody live actually holds the claim.
+Repeated across a fleet's normal polling cadence (tens of seconds to a few
+minutes per host), this produces exactly the incident's own shape: a steady
+stream of new claim attempts that each individually behave "correctly" by
+their own single-comment view, yet the issue as a whole never settles on
+one sustained worker.
+
+**Fix**: `sweep-lease-publish.sh`'s peer-scan now fetches lease-yield
+comments in the same request as lease comments (mirroring
+`sweep-lease-fence.sh`'s #6485 query shape) and excludes any lease comment
+whose own `(host, sweep)` has a matching yield record from ALL THREE of its
+candidate buckets — `own_fresh` (idempotency short-circuit), `peer_host`
+(the live-peer block), and `same_host_diff_fresh` (the informational
+same-host-different-sweep note) — before deciding whether to publish. A
+host whose prior claim yielded must use a **new sweep identity** on its next
+attempt. Reusing the yielded `(host, sweep)` returns exit 4 without a write
+(Loom #7643), even if only its yield record remains. This uses the existing
+claim-refusal status so callers skip rather than proceed without a lease.
+Yield is terminal for that identity in publisher, fence and renewal readers;
+a newer timestamp does not revive it. A new host or new sweep is not blocked
+by the dead, already-yielded claim.
+Regression coverage: `test-sweep-lease-publish.sh` cases (n)/(n2)/(n3)
+(single-comment unit coverage) and the dedicated
+`test-sweep-lease-convergence.sh` (a simulated 3+ host simultaneous-claim
+race, asserting the whole race settles on one live claimant in a bounded,
+single-digit number of publish attempts).
+
+**Scope note.** The dispatch-time tie-break DECISION itself
+(`SweepRegistry::resolve_lease_order`, `loom-daemon/src/sweep_registry/
+guards.rs`) and the periodic reclamation pass that flips an abandoned
+`loom:building` claim back to `loom:issue` (`claim_reconciliation.rs`) are
+Rust code in Loom's `loom-daemon` source, not part of these installed shell
+scripts, and out of scope for this fix. The kicad-tools#5240 incident's
+full 30–90-second, 4-host thrash cadence is consistent with that
+periodic-reclaim-and-re-dispatch loop repeatedly re-opening the issue to
+contention; this fix closes the shell publisher's contributing gap on the
+in-session write path, but does not by itself prove the daemon-dispatched
+path converges — that also requires the daemon read-failure fix (Loom #7597)
+and live-fleet confirmation after resync, since a race of this
+shape cannot be fully proven by a synthetic-fixture unit test alone.
+
 
 ## Reclaim instrumentation: absent vs. stale (#6320)
 

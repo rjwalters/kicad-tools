@@ -2325,8 +2325,18 @@ class TestViaPadDestinationValidation:
         via1 = Via(x=10.3, y=9.7, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
         via2 = Via(x=11.4, y=9.7, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=2)
         routes = [
-            Route(net=1, net_name="Net1", segments=[], vias=[via1]),
-            Route(net=2, net_name="Net2", segments=[], vias=[via2]),
+            Route(
+                net=1,
+                net_name="Net1",
+                segments=[Segment(via1.x, via1.y, pad1.x, pad1.y, 0.2, Layer.F_CU, net=1)],
+                vias=[via1],
+            ),
+            Route(
+                net=2,
+                net_name="Net2",
+                segments=[Segment(via2.x, via2.y, pad2.x, pad2.y, 0.2, Layer.F_CU, net=2)],
+                vias=[via2],
+            ),
         ]
         router = _StubAutorouter(
             routes=routes,
@@ -2421,7 +2431,9 @@ class TestViaInPadProcessEligibilityGate:
             layers=(Layer.F_CU, Layer.B_CU),
             net=1,
         )
-        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        # An escape must retain a real copper path to its host pad after moving.
+        connector = Segment(via.x, via.y, pad.x, pad.y, 0.2, Layer.F_CU, net=1)
+        route = Route(net=1, net_name="Net1", segments=[connector], vias=[via])
         router = _StubAutorouter(
             routes=[route],
             rules=DesignRules(manufacturer="jlcpcb-tier1", trace_clearance=0.2),
@@ -2472,7 +2484,9 @@ class TestViaInPadProcessEligibilityGate:
                 x=px, y=py, width=pw, height=ph, net=9, ref=key[0], pin=key[1]
             )
 
-        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        # An escape must retain a real copper path to its host pad after moving.
+        connector = Segment(via.x, via.y, pad.x, pad.y, 0.2, Layer.F_CU, net=1)
+        route = Route(net=1, net_name="Net1", segments=[connector], vias=[via])
         router = _StubAutorouter(
             routes=[route],
             rules=DesignRules(manufacturer="jlcpcb-tier1", trace_clearance=0.2),
@@ -2503,7 +2517,9 @@ class TestViaInPadProcessEligibilityGate:
             layers=(Layer.F_CU, Layer.B_CU),
             net=1,
         )
-        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        # An escape must retain a real copper path to its host pad after moving.
+        connector = Segment(via.x, via.y, pad.x, pad.y, 0.2, Layer.F_CU, net=1)
+        route = Route(net=1, net_name="Net1", segments=[connector], vias=[via])
         router = _StubAutorouter(
             routes=[route],
             rules=DesignRules(manufacturer="jlcpcb-tier1", trace_clearance=0.2),
@@ -2544,7 +2560,9 @@ class TestViaInPadProcessEligibilityGate:
             layers=(Layer.F_CU, Layer.B_CU),
             net=1,
         )
-        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        # An escape must retain a real copper path to its host pad after moving.
+        connector = Segment(via.x, via.y, pad.x, pad.y, 0.2, Layer.F_CU, net=1)
+        route = Route(net=1, net_name="Net1", segments=[connector], vias=[via])
         router = _StubAutorouter(
             routes=[route],
             rules=DesignRules(manufacturer="jlcpcb-tier1", trace_clearance=0.2),
@@ -2596,7 +2614,9 @@ class TestViaInPadComponentHoleCensus:
             layers=(Layer.F_CU, Layer.B_CU),
             net=1,
         )
-        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        # An escape must retain a real copper path to its host pad after moving.
+        connector = Segment(via.x, via.y, pad.x, pad.y, 0.2, Layer.F_CU, net=1)
+        route = Route(net=1, net_name="Net1", segments=[connector], vias=[via])
         router = _StubAutorouter(
             routes=[route],
             rules=DesignRules(manufacturer="jlcpcb-tier1", trace_clearance=0.2),
@@ -2609,15 +2629,16 @@ class TestViaInPadComponentHoleCensus:
 
     def test_unknown_census_refuses(self):
         """``all_pads=None`` (router exposes no complete census at all)
-        must REFUSE eligibility and relocate -- NOT default to eligible
+        must REFUSE eligibility and relocation -- NOT default to eligible
         the way a bare ``nearest_other_hole_distance_mm=None`` used to."""
         pad, via, router = self._make_fixture(all_pads=None)
 
         result = DRCNudgeResult()
         nudged = _scan_and_repair_via_in_pad(router, max_displacement=2.0, result=result)
 
-        assert nudged == 1
-        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
+        assert nudged == 0
+        assert (via.x, via.y) == (10.5, 9.7)
+        assert result.skipped.get("via_pad_dest_unknown_holes") == 1
         assert result.skipped.get("via_pad_process_eligible", 0) == 0
 
     def test_nearby_invalid_hole_refuses(self):
@@ -2670,8 +2691,9 @@ class TestViaInPadComponentHoleCensus:
         result = DRCNudgeResult()
         nudged = _scan_and_repair_via_in_pad(router, max_displacement=2.0, result=result)
 
-        assert nudged == 1
-        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
+        assert nudged == 0
+        assert (via.x, via.y) == (10.5, 9.7)
+        assert result.skipped.get("via_pad_dest_unknown_holes") == 1
 
     def test_verified_far_hole_retains_escape(self):
         """A verified census whose only other through-hole pad is far
@@ -2799,8 +2821,9 @@ class TestViaInPadComponentHoleCensus:
         result = DRCNudgeResult()
         nudged = _scan_and_repair_via_in_pad(router, max_displacement=2.0, result=result)
 
-        assert nudged == 1
-        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
+        assert nudged == 0
+        assert (via.x, via.y) == (10.5, 9.7)
+        assert result.skipped.get("via_pad_dest_unknown_holes") == 1
 
 
 class TestViaDrillOverlapsBbox:

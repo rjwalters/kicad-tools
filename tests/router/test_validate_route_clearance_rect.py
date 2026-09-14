@@ -493,36 +493,82 @@ class TestSameComponentPlaneNetCarveOut:
 
         assert is_valid is True
 
-    def test_signal_net_carve_out_still_applies(self) -> None:
-        """The reachability fix from Issue #1764: a foreign-net trace
-        running between two SIGNAL pads on the same component (e.g.
-        chip escape past the chip's own signal pin neighbour) is still
-        permitted.  The #2908 narrowing only re-engages the validator
-        for PLANE pads -- non-plane same-component pads continue to be
-        skipped *when the trace stays outside their metal* (#2933).
+    def test_signal_net_carve_out_requires_configured_relaxation_5004(self) -> None:
+        """Issue #5004: the pitch-only carve-out is no longer automatic.
 
-        The original version of this test put the segment INSIDE U2.2's
-        metal area (y in [119.75, 119.85] inside pad y-range [119.6, 119.9]),
-        which Issue #2933 correctly catches as a trace-through-pad defect.
-        The test now uses a segment that lies in U2.2's clearance envelope
-        but stays OUTSIDE its metal -- the regime the carve-out is
-        actually intended for.
+        Historically (Issue #1764) a foreign-net trace running between two
+        SIGNAL pads on the same component (e.g. chip escape past the
+        chip's own signal pin neighbour) was silently permitted purely
+        because the component's pin pitch (0.5mm here) was below
+        ``rules.fine_pitch_threshold`` -- even though this fixture's
+        ``_make_jlcpcb_tier1_rules`` never configures
+        ``fine_pitch_clearance`` and requests no relaxation at all for U2.
+        That is exactly the acceptance-metric blind spot #5004 reports:
+        the router accepted sub-clearance copper against a fine-pitch
+        pad that native KiCad DRC flags.
+
+        Post-#5004 the carve-out requires an EXPLICIT relaxation
+        (component override, net-class escape clearance, an applied
+        ``fine_pitch_clearance`` shrink, or a #2452-relaxed corridor) --
+        pitch alone no longer qualifies.  This fixture configures none of
+        those, so the below-clearance segment is now correctly rejected.
+        (Legitimate escape routing WITH an explicit relaxation is covered
+        by ``test_signal_net_carve_out_applies_with_explicit_override``
+        below; the pre-#5004 pitch-only behaviour remains reachable via
+        ``DesignRules.legacy_fine_pitch_carveout=True``.)
         """
         grid = _make_grid_with_lqfp48_west_edge()
 
         # Foreign-net (NRST = net 12) segment routing past U2.2
-        # (USART2_TX, a SIGNAL net on U2).  Pre-#2908 behaviour: skip
-        # U2.2 because ``pad.net != 0``.  Post-#2908: still skip
-        # because U2.2 is not a plane net.  Post-#2933: still skip
-        # because the segment stays outside U2.2's metal (clearance >= 0).
-        # U2.2 metal y-range is [119.6, 119.9]; segment centerline at
-        # y=120.05 is 0.15mm above the metal edge.  With trace half-width
-        # 0.1, the trace edge is at y=119.95 -- 0.05mm above the pad metal
-        # (positive clearance, but still inside the manufacturer's
-        # 0.127mm clearance envelope where the carve-out is engaged).
+        # (USART2_TX, a SIGNAL net on U2).  U2.2 metal y-range is
+        # [119.6, 119.9]; segment centerline at y=120.05 is 0.15mm above
+        # the metal edge.  With trace half-width 0.1, the trace edge is
+        # at y=119.95 -- 0.05mm above the pad metal (positive clearance,
+        # but still inside the manufacturer's 0.127mm clearance envelope).
         seg = Segment(
             x1=127.5,
             y1=120.05,  # 0.15mm above U2.2 metal top edge
+            x2=127.0,
+            y2=120.05,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=12,
+            net_name="NRST",
+        )
+
+        is_valid, clearance, _location = grid.validate_segment_clearance(
+            seg,
+            exclude_net=12,
+            exclude_refs={"U2", "Y1"},
+        )
+
+        # No relaxation is configured for U2, so the carve-out no longer
+        # engages and the sub-clearance gap (0.05mm actual vs 0.127mm
+        # required) is reported.
+        assert is_valid is False
+        assert clearance == pytest.approx(0.05, abs=1e-6)
+
+    def test_signal_net_carve_out_applies_with_explicit_override(self) -> None:
+        """Issue #5004: an EXPLICITLY configured smaller clearance for U2
+        keeps the Issue #1764 reachability carve-out working -- only the
+        automatic, unconfigured pitch-only exemption was removed.
+
+        Same geometry as
+        ``test_signal_net_carve_out_requires_configured_relaxation_5004``,
+        but with a ``component_clearances`` override for U2 at 0.05mm
+        (below the fixture's actual 0.05mm gap is infeasible, so use a
+        value the geometry can satisfy: 0.04mm).  Explicit per-component
+        overrides bypass the narrow-channel feasibility guard (the
+        caller is asserting the geometry is sound), so the smaller
+        clearance is honored at exactly that value -- not skipped
+        entirely.
+        """
+        grid = _make_grid_with_lqfp48_west_edge()
+        grid.rules.component_clearances["U2"] = 0.04
+
+        seg = Segment(
+            x1=127.5,
+            y1=120.05,
             x2=127.0,
             y2=120.05,
             width=0.2,
@@ -537,9 +583,10 @@ class TestSameComponentPlaneNetCarveOut:
             exclude_refs={"U2", "Y1"},
         )
 
-        # U2.2 is signal-net and the trace stays outside its metal,
-        # so the same-component-ref skip still applies and the segment
-        # passes (Issue #1764 reachability preserved).
+        # The explicit 0.04mm override is smaller than the actual 0.05mm
+        # gap, so the carve-out is honored AT that configured value (U2.2
+        # is skipped by the carve-out, leaving no other obstacle in this
+        # fixture to report a clearance against).
         assert is_valid is True
 
     def test_far_foreign_net_segment_passes_plane_pad_validator(self) -> None:
@@ -753,12 +800,13 @@ class TestIssue2933SameComponentSignalMetalOverlap:
         NET3-vs-J1.1 0.127mm defect).
 
         Post-#3545 the carve-out only engages where the component
-        geometry forces the proximity: fine-pitch components (pitch
-        below ``rules.fine_pitch_threshold``), explicit / fine-pitch
-        clearance relaxations, or #2452-relaxed corridors.  This 0805
-        at 2.0mm pitch matches none, so the sub-clearance segment is
-        now REJECTED.  (The fine-pitch regime keeping the carve-out is
-        pinned by ``test_signal_net_carve_out_still_applies`` on the
+        geometry forces the proximity: explicit / fine-pitch clearance
+        relaxations, or #2452-relaxed corridors.  This 0805 at 2.0mm
+        pitch matches none, so the sub-clearance segment is now
+        REJECTED.  (Issue #5004 subsequently removed the bare
+        "fine-pitch pitch alone" leg entirely -- see
+        ``test_signal_net_carve_out_applies_with_explicit_override`` for
+        the still-honored EXPLICITLY-configured-relaxation case on the
         0.5mm-pitch LQFP-48 fixture.)  Board 02 -- the #2933 origin --
         still routes 22/22 with 0 DRC at jlcpcb tier-1 under the new
         contract (re-measured for the #3545 re-baseline).

@@ -454,23 +454,22 @@ class PlacementOptimizer:
     ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
         """Approximate a ``gr_arc`` as a sequence of short line segments.
 
-        KiCad gr_arc is defined by *start* (arc start point), *mid*
+        Normalize legacy center/angle arcs through the shared schema parser.
+        Modern gr_arc is defined by *start* (arc start point), *mid*
         (midpoint on the arc), and *end* (arc end point).  We recover the
         centre and radius via the circumscribed-circle of these three points,
         then emit *num_segments* chords.
         """
-        start_node = arc_sexp.find("start")
-        mid_node = arc_sexp.find("mid")
-        end_node = arc_sexp.find("end")
-        if not (start_node and mid_node and end_node):
-            return []
+        from kicad_tools.schema.pcb import GraphicArc
 
-        sx = start_node.get_float(0) or 0.0
-        sy = start_node.get_float(1) or 0.0
-        mx = mid_node.get_float(0) or 0.0
-        my = mid_node.get_float(1) or 0.0
-        ex = end_node.get_float(0) or 0.0
-        ey = end_node.get_float(1) or 0.0
+        if not (arc_sexp.find("start") and arc_sexp.find("end")):
+            return []
+        if arc_sexp.find("mid") is None and arc_sexp.find("angle") is None:
+            return []
+        arc = GraphicArc.from_sexp(arc_sexp)
+        sx, sy = arc.start
+        mx, my = arc.mid
+        ex, ey = arc.end
 
         # Find circumscribed circle through (sx,sy), (mx,my), (ex,ey)
         ax, ay = sx, sy
@@ -1135,33 +1134,32 @@ class PlacementOptimizer:
         Returns:
             Force vector on the point
         """
-        edge = edge_end - edge_start
-        edge_len = edge.magnitude()
+        # Keep intermediate coordinates scalar: this hot path runs once per
+        # edge sample, so temporary Vector2D objects dominate the CPU fallback.
+        edge_x = edge_end.x - edge_start.x
+        edge_y = edge_end.y - edge_start.y
+        edge_len = math.sqrt(edge_x * edge_x + edge_y * edge_y)
         if edge_len < 1e-10:
             return Vector2D(0.0, 0.0)
 
-        # Vector from edge start to point
-        to_point = point - edge_start
-
-        # Project point onto edge line
-        t = to_point.dot(edge) / (edge_len * edge_len)
-        t = max(0.0, min(1.0, t))  # Clamp to edge
-
-        # Closest point on edge
-        closest = edge_start + edge * t
-
-        # Vector from closest point to test point
-        displacement = point - closest
-        distance = displacement.magnitude()
-
-        # Clamp minimum distance to prevent singularity
-        distance = max(distance, self.config.min_distance)
-
-        # Force magnitude: lambda * L / r^2 (1/r^2 falloff prevents divergence)
+        point_x = point.x - edge_start.x
+        point_y = point.y - edge_start.y
+        t = (point_x * edge_x + point_y * edge_y) / (edge_len * edge_len)
+        t = max(0.0, min(1.0, t))
+        displacement_x = point.x - (edge_start.x + edge_x * t)
+        displacement_y = point.y - (edge_start.y + edge_y * t)
+        magnitude = math.sqrt(displacement_x * displacement_x + displacement_y * displacement_y)
+        distance = max(magnitude, self.config.min_distance)
         force_mag = charge_density * edge_len / (distance * distance)
 
-        # Force direction: away from edge
-        return displacement.normalized() * force_mag
+        # Normalize using the actual displacement, independently of the force
+        # singularity clamp, exactly as Vector2D.normalized() does.
+        if magnitude < 1e-10:
+            return Vector2D(0.0 * force_mag, 0.0 * force_mag)
+        return Vector2D(
+            (displacement_x / magnitude) * force_mag,
+            (displacement_y / magnitude) * force_mag,
+        )
 
     def compute_edge_to_edge_force(
         self,

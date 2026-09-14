@@ -246,18 +246,18 @@ class BlockRouter:
             for gx in range(grid.cols):
                 # Top boundary (gy=0)
                 if (gx, 0) not in port_positions:
-                    grid.grid[layer_idx][0][gx].blocked = True
+                    grid.cell_at(layer_idx, 0, gx).blocked = True
                 # Bottom boundary (gy=rows-1)
                 if (gx, grid.rows - 1) not in port_positions:
-                    grid.grid[layer_idx][grid.rows - 1][gx].blocked = True
+                    grid.cell_at(layer_idx, grid.rows - 1, gx).blocked = True
 
             for gy in range(grid.rows):
                 # Left boundary (gx=0)
                 if (0, gy) not in port_positions:
-                    grid.grid[layer_idx][gy][0].blocked = True
+                    grid.cell_at(layer_idx, gy, 0).blocked = True
                 # Right boundary (gx=cols-1)
                 if (grid.cols - 1, gy) not in port_positions:
-                    grid.grid[layer_idx][gy][grid.cols - 1].blocked = True
+                    grid.cell_at(layer_idx, gy, grid.cols - 1).blocked = True
 
     def route_block(self) -> BlockRoutingResult:
         """Route all block-internal nets on the sub-grid.

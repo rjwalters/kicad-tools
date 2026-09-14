@@ -276,6 +276,53 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
         "append_decision",
         "src/kicad_tools/spec/parser.py",
     ),
+    # docs/konnect-item1-toolset-economy-audit.md — the token measurement
+    # and notification-capability gap the decline verdict rests on (#4896).
+    (
+        "docs/konnect-item1-toolset-economy-audit.md",
+        "ToolSpec",
+        "src/kicad_tools/mcp/tools/registry.py",
+    ),
+    (
+        "docs/konnect-item1-toolset-economy-audit.md",
+        "register_tool",
+        "src/kicad_tools/mcp/tools/registry.py",
+    ),
+    (
+        "docs/konnect-item1-toolset-economy-audit.md",
+        "TOOL_REGISTRY",
+        "src/kicad_tools/mcp/tools/registry.py",
+    ),
+    (
+        "docs/konnect-item1-toolset-economy-audit.md",
+        "get_tools_list",
+        "src/kicad_tools/mcp/server.py",
+    ),
+    (
+        "docs/konnect-item1-toolset-economy-audit.md",
+        "MCPServer",
+        "src/kicad_tools/mcp/server.py",
+    ),
+    (
+        "docs/konnect-item1-toolset-economy-audit.md",
+        "create_fastmcp_server",
+        "src/kicad_tools/mcp/server.py",
+    ),
+    (
+        "docs/konnect-item1-toolset-economy-audit.md",
+        "RegistryFastMCP",
+        "src/kicad_tools/mcp/server.py",
+    ),
+    (
+        "docs/konnect-item1-toolset-economy-audit.md",
+        "listChanged",
+        "src/kicad_tools/mcp/server.py",
+    ),
+    (
+        "docs/konnect-item1-toolset-economy-audit.md",
+        "fastmcp>=2.0,<4",
+        "pyproject.toml",
+    ),
 )
 
 

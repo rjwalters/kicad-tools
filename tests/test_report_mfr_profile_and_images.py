@@ -172,13 +172,20 @@ class TestProfileThreading:
         _, ca_kwargs = checker_instance.check_all.call_args
         assert ca_kwargs.get("pad_grid_auto_derive") is True
 
-    def test_check_all_forwards_pad_grid_auto_derive(self):
+    @pytest.mark.parametrize("mask_requested", [False, True])
+    def test_check_all_forwards_pad_grid_auto_derive(self, mask_requested):
         """DRCChecker.check_all must forward pad_grid_auto_derive to the
         pad_grid rule and leave other checks untouched."""
         from kicad_tools.validate import DRCChecker
+        from kicad_tools.validate.mask_copper import MaskCopperRequest
         from kicad_tools.validate.violations import DRCResults
 
-        checker = DRCChecker(MagicMock(), manufacturer="jlcpcb", layers=4)
+        checker = DRCChecker(
+            MagicMock(),
+            manufacturer="jlcpcb",
+            layers=4,
+            mask_copper_request=MaskCopperRequest() if mask_requested else None,
+        )
 
         mocks = {}
         for name in DRCChecker.CHECK_ALL_METHODS:
@@ -189,9 +196,11 @@ class TestProfileThreading:
         checker.check_all(pad_grid_auto_derive=True)
 
         mocks["check_pad_grid_alignment"].assert_called_once_with(auto_derive_threshold=True)
-        # All other methods called with no arguments
+        # Mask checking is opt-in; all other checks remain unconditional.
         for name, m in mocks.items():
-            if name != "check_pad_grid_alignment":
+            if name == "check_mask_to_copper" and not mask_requested:
+                m.assert_not_called()
+            elif name != "check_pad_grid_alignment":
                 m.assert_called_once_with()
 
     def test_check_all_default_preserves_fixed_tolerance(self):

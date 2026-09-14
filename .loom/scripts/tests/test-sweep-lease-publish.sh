@@ -45,6 +45,17 @@
 #       `updated_at` -- if that happened to be this host's own record under a
 #       different sweep-id, the same-host NOTE branch published without ever
 #       scanning for a genuinely different host's independently fresh lease.
+#   (n) regression (Issue #5331): a fresh PEER lease that has already been
+#       YIELDED (a matching `<!-- loom:lease-yield host=... sweep=...
+#       earliest_host=... -->` record posted for that peer's own (host,
+#       sweep) -- the daemon's dispatch-time claim-then-verify-order
+#       tie-break, #6287) no longer blocks publication. Before this fix, a
+#       still-"fresh" (within-TTL) but already-superseded lease kept forcing
+#       every later publisher on the same issue to SKIP (exit 4) in
+#       deference to a claim the tie-break machinery had already resolved
+#       away -- the phantom-block mechanism that lets a multi-host race
+#       churn indefinitely instead of converging. Mirrors sweep-lease-fence.
+#       sh's own #6485 yield-exclusion fix, applied here on the write side.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-sweep-lease-publish.sh
@@ -194,6 +205,15 @@ if [[ "$1" == "api" ]]; then
     echo "{\"id\": $((9000 + n))}"
     exit 0
   fi
+  if [[ "$method" == "PATCH" && "$path" == repos/*/issues/comments/* ]]; then
+    resolve_body > "$D/patch.body"
+    echo "${path##*/}" > "$D/patch-id"
+    jq --arg body "$(cat "$D/patch.body")" --argjson id "${path##*/}" \
+      'map(if .id == $id then .body = $body else . end)' "$D/comments.json" > "$D/patched.json"
+    mv "$D/patched.json" "$D/comments.json"
+    echo '{}'
+    exit 0
+  fi
   echo "stub gh: unhandled api args: method=$method path=$path" >&2
   exit 3
 fi
@@ -234,6 +254,14 @@ run_script() {
 lease_json() {
     jq -n --arg host "$1" --arg sweep "$2" --arg ts "$3" \
         '[{updated_at: $ts, body: ("<!-- loom:lease host=" + $host + " sweep=" + $sweep + " -->\nprose")}]'
+}
+
+# A lease-YIELD comment fixture (Issue #5331 / mirrors #6485): $1 = yielding
+# host, $2 = yielding sweep id, $3 = updated_at, $4 = earliest (winning) host,
+# $5 = earliest (winning) sweep id.
+lease_yield_json() {
+    jq -n --arg host "$1" --arg sweep "$2" --arg ts "$3" --arg eh "$4" --arg es "$5" \
+        '[{updated_at: $ts, body: ("<!-- loom:lease-yield host=" + $host + " sweep=" + $sweep + " earliest_host=" + $eh + " earliest_sweep=" + $es + " -->\nprose")}]'
 }
 
 NOW_ISO="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -313,6 +341,68 @@ run_script publish 6320 --sweep-id sweep-run-A
 assert_eq "4" "$RC" "(m) a peer's older-but-fresh lease still blocks publication even when this host's own newer lease sorts as the overall freshest"
 assert_eq "0" "$(post_count)" "(m) nothing is posted over the live peer's lease"
 assert_contains "$ERR" "different host" "(m) stderr names the peer-host condition"
+
+# --- (n) regression (#5331): a fresh but ALREADY-YIELDED peer lease no
+# longer blocks publication -----------------------------------------------
+reset_state
+jq -s 'add' <(lease_json "peer-host" "sweep-peer-1" "$FRESH_ISO") \
+    <(lease_yield_json "peer-host" "sweep-peer-1" "$FRESH_ISO" "$OPAQUE_HOST" "sweep-run-A") \
+    > "$STUB_DIR/comments.json"
+run_script publish 6320 --sweep-id sweep-run-A
+assert_eq "0" "$RC" "(n) a fresh peer lease that has already posted its own loom:lease-yield standdown no longer blocks publication"
+assert_eq "1" "$(post_count)" "(n) this host's own lease is published instead of skipping over a stood-down claim"
+
+# (n2) sanity: a fresh peer lease with NO matching yield record still blocks
+# (the yield-exclusion must be precise, not a blanket bypass).
+reset_state
+jq -s 'add' <(lease_json "peer-host" "sweep-peer-1" "$FRESH_ISO") \
+    <(lease_yield_json "some-other-host" "sweep-other-1" "$FRESH_ISO" "peer-host" "sweep-peer-1") \
+    > "$STUB_DIR/comments.json"
+run_script publish 6320 --sweep-id sweep-run-A
+assert_eq "4" "$RC" "(n2) a yield record for a DIFFERENT (host, sweep) does not excuse an unrelated live peer lease"
+assert_eq "0" "$(post_count)" "(n2) nothing is posted over the still-live peer's lease"
+
+# (n3) yield is terminal for an identity, including when its lease remains.
+reset_state
+jq -s 'add' <(lease_json "$OPAQUE_HOST" "sweep-run-A" "$FRESH_ISO") \
+    <(lease_yield_json "$OPAQUE_HOST" "sweep-run-A" "$FRESH_ISO" "peer-host" "sweep-peer-1") \
+    > "$STUB_DIR/comments.json"
+run_script publish 6320 --sweep-id sweep-run-A
+assert_eq "4" "$RC" "(n3) a yielded identity cannot publish a replacement invisible to readers"
+assert_eq "0" "$(post_count)" "(n3) rejected reuse performs no write"
+assert_contains "$ERR" "new sweep ID" "(n3) refusal explains how to start a legitimate new claim"
+
+# (n4) a yield record alone is sufficient; no old lease need survive.
+reset_state
+lease_yield_json "$OPAQUE_HOST" "sweep-run-A" "$STALE_ISO" "peer-host" "sweep-peer-1" > "$STUB_DIR/comments.json"
+run_script publish 6320 --sweep-id sweep-run-A
+assert_eq "4" "$RC" "(n4) a yield-only history still rejects reuse even after TTL"
+assert_eq "0" "$(post_count)" "(n4) yield-only refusal performs no write"
+
+# (n5) a new identity can claim, and reading its actual published body back
+# must block a later host. Do not substitute a hand-authored lease fixture.
+reset_state
+lease_yield_json "$OPAQUE_HOST" "sweep-run-A" "$STALE_ISO" "peer-host" "sweep-peer-1" > "$STUB_DIR/comments.json"
+run_script publish 6320 --sweep-id sweep-run-B
+assert_eq "0" "$RC" "(n5) the same host with a NEW sweep identity can publish"
+jq --arg body "$(cat "$STUB_DIR/post-1.body")" --arg stamp "$FRESH_ISO" \
+    '. + [{id:9001, body:$body, updated_at:$stamp}]' "$STUB_DIR/comments.json" > "$STUB_DIR/readback.json"
+mv "$STUB_DIR/readback.json" "$STUB_DIR/comments.json"
+"$SCRIPTS_DIR/sweep-lease-fence.sh" check 6320 > /dev/null 2> "$STUB_DIR/fence-stderr.log"
+assert_eq "0" "$?" "(n5) the real fence accepts the published new identity"
+assert_contains "$(cat "$STUB_DIR/fence-stderr.log")" "host matches this sweep" "(n5) fence recognizes ownership rather than failing open"
+"$SCRIPTS_DIR/sweep-lease-renew.sh" renew-once 6320 --host "$OPAQUE_HOST" --sweep-id sweep-run-B > /dev/null 2> "$STUB_DIR/renew-stderr.log"
+assert_eq "0" "$?" "(n5) the real renewer accepts the new identity after an old yield"
+assert_eq "9001" "$(cat "$STUB_DIR/patch-id" 2>/dev/null)" "(n5) renewal patches the actual published comment"
+assert_contains "$(cat "$STUB_DIR/patch.body" 2>/dev/null)" "sweep=sweep-run-B" "(n5) renewal preserves the new identity"
+run_script publish 6320 --host later-peer --sweep-id sweep-later
+assert_eq "4" "$RC" "(n5) a later peer is fenced by the actual new-identity lease"
+assert_eq "1" "$(post_count)" "(n5) the later peer does not publish a competing lease"
+
+# Requested yielded identity is refused even with a fresh own lease in history.
+run_script publish 6320 --sweep-id sweep-run-A
+assert_eq "4" "$RC" "(n6) the original yielded identity remains rejected"
+assert_contains "$ERR" "already yielded" "(n6) yield refusal takes precedence over candidate buckets"
 
 # --- (f) a `gh` READ failure fails open ----------------------------------
 reset_state

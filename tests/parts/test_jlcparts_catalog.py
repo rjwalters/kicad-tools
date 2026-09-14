@@ -28,7 +28,7 @@ from kicad_tools.parts.jlcparts_catalog import (
     get_catalog_path,
     sync_catalog,
 )
-from kicad_tools.parts.lcsc import LCSCClient, LCSCForbiddenError
+from kicad_tools.parts.lcsc import LCSCClient, LCSCForbiddenError, LCSCUnavailableError
 
 # --------------------------------------------------------------------------
 # Load the fixture builder (not an importable package -- load by path)
@@ -482,18 +482,17 @@ def test_lookup_no_requests_no_catalog_raises(tmp_path: Path, monkeypatch):
         client.lookup("C25804")
 
 
-def test_lookup_returns_none_when_catalog_absent_and_api_fails(
-    tmp_path: Path, force_requests_present
-):
+def test_lookup_raises_when_catalog_absent_and_api_fails(tmp_path: Path, force_requests_present):
     """No catalog + API down = existing 'not found' behavior (None)."""
     cache = PartsCache(db_path=tmp_path / "cache.db")
     client = LCSCClient(cache=cache, catalog_path=tmp_path / "missing.sqlite3")
 
     with mock.patch.object(client, "_fetch_part", side_effect=LCSCForbiddenError("403")):
-        assert client.lookup("C25804") is None
+        with pytest.raises(LCSCUnavailableError):
+            client.lookup("C25804")
 
 
-def test_lookup_missing_part_falls_through_to_none(
+def test_offline_miss_does_not_prove_catalog_absence(
     catalog_db: Path, tmp_path: Path, force_requests_present
 ):
     """Catalog present but part absent -> None."""
@@ -501,7 +500,8 @@ def test_lookup_missing_part_falls_through_to_none(
     client = LCSCClient(cache=cache, catalog_path=catalog_db)
 
     with mock.patch.object(client, "_fetch_part", side_effect=LCSCForbiddenError("403")):
-        assert client.lookup("C999999") is None
+        with pytest.raises(LCSCUnavailableError):
+            client.lookup("C999999")
 
 
 def test_live_api_success_bypasses_catalog(
@@ -529,7 +529,8 @@ def test_catalog_disabled_never_constructed(
     client = LCSCClient(cache=cache, use_local_catalog=False, catalog_path=catalog_db)
 
     with mock.patch.object(client, "_fetch_part", side_effect=LCSCForbiddenError("403")):
-        assert client.lookup("C25804") is None
+        with pytest.raises(LCSCUnavailableError):
+            client.lookup("C25804")
     assert client._get_catalog() is None
 
 
@@ -539,7 +540,10 @@ def test_lookup_many_fallback(catalog_db: Path, tmp_path: Path, force_requests_p
     client = LCSCClient(cache=cache, catalog_path=catalog_db)
 
     with mock.patch.object(client, "_fetch_part", side_effect=LCSCForbiddenError("403")):
-        got = client.lookup_many(["C25804", "C1525", "C999999"])
+        with pytest.raises(LCSCUnavailableError) as failure:
+            client.lookup_many(["C25804", "C1525", "C999999"])
+        got = failure.value.partial_results
+        assert failure.value.unavailable_parts == {"C999999"}
 
     assert set(got.keys()) == {"C25804", "C1525"}
     assert got["C25804"].mfr_part == "RC0402FR-0710KL"
@@ -559,7 +563,10 @@ def test_lookup_many_live_partial_then_catalog(
         raise LCSCForbiddenError("403")
 
     with mock.patch.object(client, "_fetch_part", side_effect=fake_fetch):
-        got = client.lookup_many(["C1525", "C25804", "C999999"])
+        with pytest.raises(LCSCUnavailableError) as failure:
+            client.lookup_many(["C1525", "C25804", "C999999"])
+        got = failure.value.partial_results
+        assert failure.value.unavailable_parts == {"C999999"}
 
     # C1525 from live API, C25804 from catalog, C999999 missing.
     assert got["C1525"].mfr_part == "LIVE-CAP"
@@ -638,17 +645,16 @@ def test_search_403_with_catalog_disabled_still_raises(
     assert client._get_catalog() is None
 
 
-def test_search_request_exception_without_catalog_returns_empty(
+def test_search_request_exception_without_catalog_is_unavailable(
     tmp_path: Path, force_requests_present
 ):
-    """Generic RequestException + no catalog -> empty SearchResult (unchanged)."""
+    """Generic RequestException + no catalog is unavailable, not an empty success."""
     cache = PartsCache(db_path=tmp_path / "cache.db")
     client = LCSCClient(cache=cache, catalog_path=tmp_path / "missing.sqlite3")
 
     with mock.patch.object(client, "_make_request", side_effect=_request_exception("boom")):
-        result = client.search("10k 0402")
-    assert result.parts == []
-    assert result.query == "10k 0402"
+        with pytest.raises(LCSCUnavailableError):
+            client.search("10k 0402")
 
 
 def test_search_live_success_bypasses_catalog(
@@ -1141,3 +1147,188 @@ def test_cli_surfaces_extraction_error(catalog_db: Path, tmp_path: Path, monkeyp
     assert "not deflate-compressed" in err
     # No partial catalog left behind.
     assert not dest.exists()
+
+
+def test_inventory_observation_and_snapshot_survive_all_reads(catalog_db, tmp_path):
+    from datetime import datetime
+
+    observed = datetime(2025, 1, 2)
+    snapshot = datetime(2025, 1, 3)
+    catalog = JlcpartsCatalog(
+        catalog_db, observed_at=observed, snapshot_at=snapshot, snapshot_revision="fixture-v1"
+    )
+    first = catalog.lookup("C25804")
+    second = catalog.lookup("C25804")
+    assert first and second
+    assert first.fetched_at == second.fetched_at == observed
+    assert first.read_at <= second.read_at
+    cache = PartsCache(tmp_path / "parts.db")
+    cache.put(first)
+    cache.put_many([second])
+    cached = cache.get_many(["C25804"])["C25804"]
+    assert cached.from_cache
+    for part in [
+        first,
+        second,
+        cached,
+        catalog.lookup_many(["C25804"])["C25804"],
+        *catalog.search("10k"),
+    ]:
+        assert part.stock_source == "offline_catalog"
+        assert part.fetched_at == observed
+        assert part.snapshot_at == snapshot
+        assert part.snapshot_revision == "fixture-v1"
+        assert not part.stock_verified
+
+
+def test_unknown_age_catalog_cannot_qualify_bom(catalog_db):
+    from types import SimpleNamespace
+
+    from kicad_tools.assembly.validation import (
+        AssemblyValidationResult,
+        AssemblyValidator,
+        ValidationStatus,
+    )
+    from kicad_tools.cost.availability import (
+        AvailabilityStatus,
+        BOMAvailabilityResult,
+        LCSCAvailabilityChecker,
+    )
+    from kicad_tools.parts.models import BOMAvailability, PartAvailability
+
+    part = JlcpartsCatalog(catalog_db).lookup("C25804")
+    assert part and part.stock > 0
+    assert part.fetched_at is None
+    assert part.snapshot_at is None
+    assert part.inventory_provenance()["observed_at"] is None
+    basic = PartAvailability(
+        "R1",
+        "10k",
+        "0402",
+        "C25804",
+        part=part,
+        matched=True,
+        in_stock=True,
+        quantity_needed=1,
+        quantity_available=part.stock,
+    )
+    assert not BOMAvailability([basic]).all_available
+    assert "unverified" in basic.status
+    checked = LCSCAvailabilityChecker(find_alternatives=False)._check_item(
+        "R1", "10k", "0402", None, "C25804", 1, {"C25804": part}
+    )
+    assert checked.status == AvailabilityStatus.UNKNOWN
+    assert not BOMAvailabilityResult([checked]).all_available
+    assert checked.to_dict()["inventory"]["source"] == "offline_catalog"
+    group = SimpleNamespace(
+        lcsc="C25804", quantity=1, references="R1", value="10k", footprint="0402"
+    )
+    assembly = AssemblyValidator()._validate_group(group, 1, {"C25804": part})
+    assert assembly.status == ValidationStatus.UNKNOWN
+    assert not AssemblyValidationResult([assembly]).assembly_ready
+
+
+def test_cached_legacy_source_is_unknown(catalog_db, tmp_path):
+    import sqlite3
+    from datetime import datetime
+
+    cache = PartsCache(tmp_path / "legacy.db")
+    live = Part(lcsc_part="C25804", stock=100, stock_source="live", fetched_at=datetime.now())
+    cache.put(live)
+    with sqlite3.connect(cache.db_path) as conn:
+        conn.execute("UPDATE parts SET inventory = NULL")
+    loaded = cache.get("C25804")
+    assert loaded and loaded.stock_source == "unknown"
+    assert not loaded.stock_verified
+    assert loaded.fetched_at == live.fetched_at
+
+
+def test_expired_live_cache_reinsertion_cannot_refresh_observation(tmp_path):
+    import sqlite3
+    from datetime import datetime, timedelta
+
+    original_time = datetime.now() - timedelta(days=10)
+    cache = PartsCache(tmp_path / "cache.db")
+    part = Part("C1", stock=100, stock_source="live", fetched_at=original_time)
+    cache.put(part)
+    with sqlite3.connect(cache.db_path) as conn:
+        conn.execute("UPDATE parts SET cached_at = ?", (original_time.isoformat(),))
+    assert cache.get("C1") is None
+    old = cache.get("C1", ignore_expiry=True)
+    assert old and not old.stock_verified
+    cache.put(old)
+    reread = cache.get("C1")
+    assert reread and reread.fetched_at == original_time
+    assert not reread.stock_verified
+    # Only an actual new live observation renews verification.
+    fresh = Part("C1", stock=200, stock_source="live", fetched_at=datetime.now())
+    cache.put(fresh)
+    assert cache.get("C1").stock_verified
+
+
+def test_inventory_cache_schema_migration_preserves_unknown_source(tmp_path):
+    import sqlite3
+    from datetime import datetime
+
+    path = tmp_path / "legacy.db"
+    cache = PartsCache(path)
+    cache.put(Part("C1", stock=100, fetched_at=datetime.now()))
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE parts DROP COLUMN inventory")
+        conn.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+    migrated = PartsCache(path).get("C1")
+    assert migrated and migrated.stock == 100
+    assert migrated.stock_source == "unknown" and not migrated.stock_verified
+
+
+def test_offline_fallback_cache_and_cli_json_keep_provenance(
+    catalog_db, tmp_path, monkeypatch, capsys
+):
+    import json
+    from types import SimpleNamespace
+
+    from kicad_tools.cli.parts_cmd import _lookup
+
+    client = LCSCClient(cache=PartsCache(tmp_path / "parts.db"), use_official_api=False)
+    monkeypatch.setattr(client, "_get_catalog", lambda: JlcpartsCatalog(catalog_db))
+    monkeypatch.setattr(client, "_fetch_part", lambda *args, **kwargs: None)
+    assert client.lookup("C25804").stock_source == "offline_catalog"
+    cached = client.lookup_many(["C25804"])["C25804"]
+    assert cached.fetched_at is None and not cached.stock_verified
+    monkeypatch.setattr("kicad_tools.parts.LCSCClient", lambda: client)
+    assert _lookup(SimpleNamespace(part="C25804", no_cache=False, format="json")) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["stock"] > 0
+    assert data["inventory"]["source"] == "offline_catalog"
+    assert data["inventory"]["observed_at"] is None
+    assert not data["inventory"]["stock_verified"]
+
+
+def test_suggestion_and_export_keep_offline_inventory(catalog_db, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from kicad_tools.cost.suggest import PartSuggester
+    from kicad_tools.export.bom_enrich import enrich_bom_lcsc
+    from kicad_tools.parts.models import SearchResult
+    from kicad_tools.schema.bom import BOMItem
+
+    part = JlcpartsCatalog(catalog_db).lookup("C25804")
+    client = SimpleNamespace(
+        cache=PartsCache(tmp_path / "parts.db"),
+        search=lambda *args, **kwargs: SearchResult("10k", parts=[part]),
+        close=lambda: None,
+    )
+    monkeypatch.setattr(PartSuggester, "_get_client", lambda self: client)
+    suggestion = PartSuggester().suggest_for_component(
+        "R1", "10k", "Resistor_SMD:R_0402_1005Metric"
+    )
+    assert suggestion.best_suggestion
+    assert suggestion.best_suggestion.inventory["source"] == "offline_catalog"
+    assert not suggestion.best_suggestion.inventory["stock_verified"]
+    item = BOMItem(
+        reference="R1", value="10k", footprint="Resistor_SMD:R_0402_1005Metric", lib_id="Device:R"
+    )
+    report = enrich_bom_lcsc([item])
+    assert item.lcsc == "C25804"  # Offline identity matching remains useful.
+    assert report.entries[0].inventory["source"] == "offline_catalog"
+    assert any("Stock unverified" in line for line in report.summary_lines())

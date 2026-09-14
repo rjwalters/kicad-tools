@@ -41,6 +41,40 @@ def sample_pcb(tmp_path):
     return pcb_file
 
 
+@pytest.fixture
+def four_layer_pcb(tmp_path):
+    """Create a 4-layer PCB file (declares In1.Cu/In2.Cu) for testing."""
+    pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (4 "In1.Cu" signal)
+    (6 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (gr_rect
+    (start 0 0)
+    (end 50 50)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+)
+"""
+    pcb_file = tmp_path / "test_4layer.kicad_pcb"
+    pcb_file.write_text(pcb_content)
+    return pcb_file
+
+
 def _make_args(pcb_path, **kwargs):
     """Build a namespace object mimicking argparse output for pcb add-zone."""
     from argparse import Namespace
@@ -288,6 +322,56 @@ class TestPcbAddZoneErrors:
         captured = capsys.readouterr()
         assert "Error" in captured.err
 
+    def test_unknown_net_no_mutation(self, sample_pcb):
+        """Unknown net does not create or mutate any file (#4907)."""
+        original_bytes = sample_pcb.read_bytes()
+        rc = run_pcb_command(_make_args(sample_pcb, net="NONEXISTENT"))
+        assert rc == 1
+        assert sample_pcb.read_bytes() == original_bytes
+        assert ("NONEXISTENT", "B.Cu") not in _zone_keys(sample_pcb)
+
+    def test_invalid_layer_spelling(self, sample_pcb, capsys):
+        """A misspelled/unrecognized layer name produces an error (#4907)."""
+        args = _make_args(sample_pcb, layer="DefinitelyNotALayer")
+        rc = run_pcb_command(args)
+        assert rc == 1
+
+        captured = capsys.readouterr()
+        assert "DefinitelyNotALayer" in captured.err
+
+    def test_invalid_layer_no_mutation(self, sample_pcb):
+        """A rejected layer does not create or mutate any file."""
+        original_bytes = sample_pcb.read_bytes()
+        rc = run_pcb_command(_make_args(sample_pcb, layer="DefinitelyNotALayer"))
+        assert rc == 1
+        assert sample_pcb.read_bytes() == original_bytes
+
+    def test_non_copper_layer(self, sample_pcb, capsys):
+        """A real but non-copper layer (e.g. silkscreen) is rejected (#4907)."""
+        args = _make_args(sample_pcb, layer="F.SilkS")
+        rc = run_pcb_command(args)
+        assert rc == 1
+
+        captured = capsys.readouterr()
+        assert "copper" in captured.err
+
+    def test_absent_inner_layer_on_2layer_board(self, sample_pcb, capsys):
+        """An inner layer not declared on a 2-layer board is rejected (#4907)."""
+        args = _make_args(sample_pcb, layer="In1.Cu")
+        rc = run_pcb_command(args)
+        assert rc == 1
+
+        captured = capsys.readouterr()
+        assert "In1.Cu" in captured.err
+
+    def test_dry_run_rejects_without_writing(self, sample_pcb, capsys):
+        """A validation failure in dry-run mode still exits nonzero and writes nothing."""
+        original_bytes = sample_pcb.read_bytes()
+        args = _make_args(sample_pcb, layer="In1.Cu", dry_run=True, format="json")
+        rc = run_pcb_command(args)
+        assert rc == 1
+        assert sample_pcb.read_bytes() == original_bytes
+
     def test_missing_pcb_file(self, tmp_path, capsys):
         """Missing PCB file produces error."""
         args = _make_args(tmp_path / "nonexistent.kicad_pcb")
@@ -370,3 +454,13 @@ class TestPcbAddZoneExplicitOutputUnaffected:
         assert sample_pcb.read_bytes() == original_bytes
         # Target got the new zone.
         assert ("GND", "B.Cu") in _zone_keys(out)
+
+
+class TestPcbAddZoneInnerLayerValid:
+    """A declared inner copper layer on a multilayer board is accepted (#4907)."""
+
+    def test_inner_layer_on_4layer_board_succeeds(self, four_layer_pcb):
+        rc = run_pcb_command(_make_args(four_layer_pcb, net="GND", layer="In1.Cu"))
+        assert rc == 0
+
+        assert ("GND", "In1.Cu") in _zone_keys(four_layer_pcb)

@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.validate.mask_copper import MaskCopperAssessment
+
 from .violation import DRCViolation, Location, Severity, ViolationType
 
 if TYPE_CHECKING:
@@ -41,6 +43,11 @@ class DRCReport:
     #: Connectivity relationships from KiCad's ``unconnected_items`` array.
     #: Deliberately NOT part of ``violations`` -- see the class docstring.
     unconnected_items: list[DRCViolation] = field(default_factory=list)
+    mask_copper_assessments: list[MaskCopperAssessment] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return self.error_count == 0 and all(a.passed for a in self.mask_copper_assessments)
 
     @property
     def violation_count(self) -> int:
@@ -141,6 +148,7 @@ class DRCReport:
             source_file=self.source_file,
             created_at=self.created_at,
             pcb_name=self.pcb_name,
+            mask_copper_assessments=list(self.mask_copper_assessments),
             violations=result.kept,
             footprint_errors=self.footprint_errors,
             # Connectivity relationships are not geometric violations and
@@ -176,6 +184,8 @@ class DRCReport:
             "warning_count": self.warning_count,
             "footprint_errors": self.footprint_errors,
             "violations": [v.to_dict() for v in self.violations],
+            "passed": self.passed,
+            "mask_copper_assessments": [a.to_dict() for a in self.mask_copper_assessments],
         }
 
     @classmethod
@@ -401,6 +411,9 @@ def _parse_kct_check_json(data: dict, source_file: str = "") -> DRCReport:
         created_at=None,
         pcb_name=pcb_name,
         violations=violations,
+        mask_copper_assessments=[
+            MaskCopperAssessment.from_dict(a) for a in data.get("mask_copper_assessments", [])
+        ],
         footprint_errors=0,
     )
 

@@ -427,7 +427,7 @@ cmd_renew_once() {
     # (possibly un-renewed) lease -- exactly the failure mode reported in
     # #6485. Refuse to PATCH in that case.
     local candidate_first_line candidate_parsed candidate_host candidate_sweep
-    candidate_first_line="$(printf '%s\n' "$old_body" | head -n1)"
+    candidate_first_line="${old_body%%$'\n'*}"
     candidate_parsed="$(parse_lease_marker_line "$candidate_first_line" || true)"
     if [[ -n "$candidate_parsed" ]]; then
         candidate_host="${candidate_parsed%%$'\t'*}"

@@ -11,7 +11,7 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 24 vias / 329.23mm total
+- **Deterministic output**: 22 routes / 24 vias / 328.80mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
   has fully converged.  (327.93mm before the 2026-09-10 #5009
   re-baseline: ``jlcpcb-tier1`` 2-layer declares no orderable via-in-pad
@@ -21,7 +21,12 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
   ``test_routing_output_deterministic_across_seeds`` for exactly which
   DRC engine and which manufacturer profile that measurement covers --
   the first revision of this note overstated it and CI refuted it.)
-  Segment count is 295 on macOS-arm64 as of that re-baseline
+  The 2026-09-14 integration with main measures 260 segments and
+  328.80mm on the historical fixture. Seeds 42/43/44 retain 8/8 reach
+  and pass native DRC with zero violations and unconnected items.
+  Restoring the pre-integration nudge module on the integrated source
+  gives the same metrics: this delta is outside the nudge repair.
+  Segment count was 295 on macOS-arm64 as of the earlier re-baseline
   (274 as of the 2026-08-11 #4732 measurement, down from 476;
   routes/vias/length/reach
   are byte-identical, only the collinear resplit count moved -- see the
@@ -674,7 +679,14 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     #   either as a blanket "the board is DRC-clean".
     EXPECTED_ROUTES = 22
     EXPECTED_VIAS = 24
-    EXPECTED_LENGTH = 329.24
+    # Re-measured after integrating main 3ca10b5944f1 (2026-09-14).
+    # The unchanged historical input yields (22, 260, 24, 328.80) on
+    # seeds 42/43/44; all three saved outputs pass native KiCad DRC
+    # with zero violations and unconnected items. Replacing only
+    # drc_nudge with the parent b70f58cb implementation gives the same
+    # tuple, locating this delta outside the transaction/hole repair.
+    # Keep the exact length and cross-seed guards; no tolerance changes.
+    EXPECTED_LENGTH = 328.80
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability

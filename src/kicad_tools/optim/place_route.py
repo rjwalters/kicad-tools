@@ -315,6 +315,8 @@ class PlaceRouteOptimizer:
                 # Determine if through-hole
                 is_pth = pad.type == "thru_hole"
 
+                from kicad_tools.router.io import _schema_pad_shape
+
                 pads.append(
                     {
                         "number": pad.number,
@@ -327,6 +329,13 @@ class PlaceRouteOptimizer:
                         "layer": Layer.F_CU,
                         "through_hole": is_pth,
                         "drill": pad.drill if is_pth else 0.0,
+                        # Issue #4910: absolute board-frame pad angle (it
+                        # already includes the footprint rotation).  No
+                        # width/height swap is applied here, so the full
+                        # angle is what the obstacle models need to build a
+                        # correct rotated-pad bounding box.
+                        "rotation": pad.rotation,
+                        "shape": _schema_pad_shape(pad, ref),
                     }
                 )
 

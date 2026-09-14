@@ -141,6 +141,8 @@ The scaffold ships the pipeline shape and the gating contract. The author fills 
 
 Mark each of these `# TODO(author): ...` in the emitted template so they cannot be mistaken for done.
 
+For common sub-circuits, start with the existing `kicad_tools.schematic.blocks` factories: `create_3v3_ldo` or `create_5v_buck` (power), `create_i2c_pullups` (interface), and `create_reset_button` (MCU support). See `src/kicad_tools/schematic/blocks/__init__.py` for the public factory exports. Reuse these blocks where their topology and defaults fit the board's requirements; the author still selects and verifies the component values, footprints, and wiring rather than treating a library default as a completed design decision.
+
 ## What this skill does NOT do
 
 - It does not choose or invent a specific circuit — only the pipeline scaffold + gating contract.
