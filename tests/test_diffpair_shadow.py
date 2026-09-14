@@ -4880,3 +4880,58 @@ def test_shortest_tail_policy_preserves_partner_clearance():
             dpr._min_distance_to_partner(seg.x1, seg.y1, seg.x2, seg.y2, partner, seg.layer)
             >= 0.5 - 1e-9
         )
+
+
+def test_crossing_tail_checks_aligned_inner_legs_against_partner():
+    from kicad_tools.router.quantize import is_45_aligned
+
+    dpr = _crossing_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 6.0))
+    grid = dpr.autorouter.grid
+    inner = Layer(grid.index_to_layer(next(li for li in grid.get_routable_indices() if li != 0)))
+    partner = Segment(
+        x1=6.0,
+        y1=5.9,
+        x2=6.0,
+        y2=6.1,
+        width=0.2,
+        layer=inner,
+        net=2,
+        net_name="N",
+    )
+    tail = dpr._synthesize_crossing_tail(_CrossingPathfinder(), head, goal, 0, [partner])
+    assert tail is not None
+    # Endpoint barrels clear the partner, but the diagonal-first crossing
+    # hits it. The alternate orientation must be checked and selected.
+    assert [(v.x, v.y) for v in tail.vias] == [(5.0, 5.0), (8.0, 6.0)]
+    assert tail.segments[0].end == (7.0, 5.0)
+    for seg in tail.segments:
+        assert is_45_aligned(seg.x2 - seg.x1, seg.y2 - seg.y1)
+        assert dpr._min_distance_to_partner(
+            seg.x1, seg.y1, seg.x2, seg.y2, [partner], seg.layer
+        ) >= dpr._pair_seg_clearance(_CrossingPathfinder(), head.net_name)
+
+
+def test_crossing_barrels_use_via_clearance_for_uncommitted_partner():
+    dpr = _crossing_router()
+    rules = dpr.autorouter.rules
+    rules.trace_clearance = 0.1
+    rules.via_clearance = 0.25
+    rules.via_diameter = 0.6
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = Segment(
+        x1=4.9,
+        y1=5.6,
+        x2=5.1,
+        y2=5.6,
+        width=0.2,
+        layer=Layer.F_CU,
+        net=2,
+        net_name="N",
+    )
+    tail = dpr._synthesize_crossing_tail(_CrossingPathfinder(), head, goal, 0, [partner])
+    assert tail is not None
+    assert (tail.vias[0].x, tail.vias[0].y) != (5.0, 5.0)
+    for via in tail.vias:
+        gap = dpr._min_distance_to_partner(via.x, via.y, via.x, via.y, [partner], None)
+        assert gap - (via.diameter + partner.width) / 2 >= rules.via_clearance - 1e-9
