@@ -138,6 +138,47 @@ def test_wide_pitch_proposals_keep_their_original_shape():
         assert math.isclose(before_via, math.hypot(px - nx, py - ny))
 
 
+def test_a_wide_pad_pitch_needing_no_via_fan_out_still_gets_narrowed():
+    """Issue #5333 (MIPI_DAT1): the exact signature this module's dated
+    narrative names -- pad pitch far wider than the coupled target, but
+    ALREADY wide enough that the via-pitch ``spread`` fan-out above never
+    fires (``spread == 0``). Before this change every offered proposal held
+    the full pad pitch the whole way to the via (see
+    ``test_wide_pitch_proposals_keep_their_original_shape`` immediately
+    above -- the exact defect this test targets), which the native search's
+    spacing tolerance rejects once the escape crosses
+    ``effective_departure_radius`` cells from the start pad. This asserts a
+    SECOND, additional shape now narrows toward the target early instead.
+    Fails against the pre-change enumerator: the only proposals it ever
+    yielded for this fixture keep ``before_via == pitch_cells`` exactly, so
+    the ``narrowed`` list below is empty and the ``assert narrowed`` fails.
+    """
+    finder = _finder()
+    required = finder._minimum_via_pitch_cells()
+    pitch_cells = finder.target_spacing_cells + 8
+    assert pitch_cells >= required  # confirms spread == 0 for every proposal
+    pads = _tight_pitch_pads(finder, pitch_cells)
+    proposals = list(departure_proposals(finder, pads))
+    assert proposals
+
+    def before_via_spacing(proposal):
+        px, py, _, nx, ny, _ = proposal.prefix[-2]
+        return math.hypot(px - nx, py - ny)
+
+    narrowed = [p for p in proposals if before_via_spacing(p) < pitch_cells - 1e-6]
+    assert narrowed, "expected at least one proposal that narrows before the via"
+    for p in narrowed:
+        assert math.isclose(before_via_spacing(p), finder.target_spacing_cells, abs_tol=1)
+        # Every step remains a single ordinary single-cell, single-leg move
+        # (or the final layer-change via step).
+        for before, after in zip(p.prefix[:-1], p.prefix[1:], strict=True):
+            moved = [abs(after[i] - before[i]) + abs(after[i + 1] - before[i + 1]) for i in (0, 3)]
+            assert max(moved) <= 1 or after[2] != before[2]
+    # The original un-narrowed shape (still holding the full pad pitch the
+    # whole way) is still offered too -- purely additive, not a replacement.
+    assert any(before_via_spacing(p) >= pitch_cells - 1 for p in proposals)
+
+
 @pytest.mark.skipif(not is_cpp_available(), reason="requires matching native backend")
 def test_native_validation_accepts_a_fanned_out_fine_pitch_escape():
     """The whole point of the fan-out: real, validated departures exist."""

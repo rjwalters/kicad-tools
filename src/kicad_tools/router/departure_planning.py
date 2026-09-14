@@ -235,6 +235,25 @@ def departure_proposals(
     pitch = abs(dx) + abs(dy)
     spread = max(0, math.ceil(finder._minimum_via_pitch_cells() - pitch))
     p_spread, n_spread = spread // 2, spread - spread // 2
+    # Issue #5333 (MIPI_DAT1): the straight run above holds the pads' RAW
+    # pitch all the way to the via -- correct when that pitch already sits
+    # near the coupled target, but a pair whose pad pitch is much WIDER than
+    # the target (and does not need the ``spread`` fan-out above because the
+    # raw pitch already satisfies the mutual via pitch) never narrows at
+    # all. Once such a straight run crosses ``effective_departure_radius``
+    # cells from the start pads, the native search's spacing tolerance snaps
+    # back to +-1 of the target and rejects it outright (see the
+    # ``departure_planning`` module docstring's dated note for the full
+    # measured mechanism). Offer an ADDITIONAL candidate below, per
+    # direction/layer/bend, that narrows P and N toward the target spacing
+    # right after any bend -- using the same one-cell-at-a-time asymmetric
+    # moves the ``spread`` fan-out above already uses, just applied early
+    # instead of only right before the via -- then continues the escape at
+    # the now within-tolerance spacing. This only offers a different SHAPE;
+    # every step, narrow or straight, is still checked against the same
+    # copper/clearance/trail/via-pitch guards as every other proposal.
+    narrow_target = max(finder.target_spacing_cells, finder.min_spacing_cells)
+    narrow_amount = max(0, pitch - narrow_target)
     targets = [layer for layer in reversed(grid.get_routable_indices()) if layer != start_layer]
     if not targets and reasons is not None:
         # Every proposal ends on a paired via to another layer; a stack that
@@ -305,6 +324,93 @@ def departure_proposals(
                 yield DepartureProposal(
                     tuple(prefix), across, outward, layer, bend_steps, direction
                 )
+
+                if narrow_amount > 0:
+                    # Reuse the already-built bend maneuver verbatim (it does
+                    # not depend on the escape/spread geometry below it) and
+                    # replace everything after it with a narrow-then-escape
+                    # shape instead of the straight-then-spread one above.
+                    bend_len = 3 * bend_steps if bend_steps else 0
+                    narrow_prefix = list(prefix[:bend_len])
+                    base_p = (px + ox * bend_steps, py + oy * bend_steps)
+                    base_n = (nx + ox * bend_steps, ny + oy * bend_steps)
+                    p_narrow, n_narrow = narrow_amount // 2, narrow_amount - narrow_amount // 2
+                    narrow_prefix.extend(
+                        (
+                            base_p[0] + across[0] * j,
+                            base_p[1] + across[1] * j,
+                            start_layer,
+                            *base_n,
+                            start_layer,
+                        )
+                        for j in range(1, p_narrow + 1)
+                    )
+                    p_narrowed = (
+                        base_p[0] + across[0] * p_narrow,
+                        base_p[1] + across[1] * p_narrow,
+                    )
+                    narrow_prefix.extend(
+                        (
+                            *p_narrowed,
+                            start_layer,
+                            base_n[0] - across[0] * j,
+                            base_n[1] - across[1] * j,
+                            start_layer,
+                        )
+                        for j in range(1, n_narrow + 1)
+                    )
+                    n_narrowed = (
+                        base_n[0] - across[0] * n_narrow,
+                        base_n[1] - across[1] * n_narrow,
+                    )
+                    remaining = escape - bend_steps
+                    narrow_prefix.extend(
+                        (
+                            p_narrowed[0] + ox * j,
+                            p_narrowed[1] + oy * j,
+                            start_layer,
+                            n_narrowed[0] + ox * j,
+                            n_narrowed[1] + oy * j,
+                            start_layer,
+                        )
+                        for j in range(1, remaining + 1)
+                    )
+                    p_esc_n = (p_narrowed[0] + ox * remaining, p_narrowed[1] + oy * remaining)
+                    n_esc_n = (n_narrowed[0] + ox * remaining, n_narrowed[1] + oy * remaining)
+                    spread_n = max(0, math.ceil(finder._minimum_via_pitch_cells() - narrow_target))
+                    p_spread_n, n_spread_n = spread_n // 2, spread_n - spread_n // 2
+                    narrow_prefix.extend(
+                        (
+                            p_esc_n[0] - across[0] * j,
+                            p_esc_n[1] - across[1] * j,
+                            start_layer,
+                            *n_esc_n,
+                            start_layer,
+                        )
+                        for j in range(1, p_spread_n + 1)
+                    )
+                    p_via_n = (
+                        p_esc_n[0] - across[0] * p_spread_n,
+                        p_esc_n[1] - across[1] * p_spread_n,
+                    )
+                    narrow_prefix.extend(
+                        (
+                            *p_via_n,
+                            start_layer,
+                            n_esc_n[0] + across[0] * j,
+                            n_esc_n[1] + across[1] * j,
+                            start_layer,
+                        )
+                        for j in range(1, n_spread_n + 1)
+                    )
+                    n_via_n = (
+                        n_esc_n[0] + across[0] * n_spread_n,
+                        n_esc_n[1] + across[1] * n_spread_n,
+                    )
+                    narrow_prefix.append((*p_via_n, layer, *n_via_n, layer))
+                    yield DepartureProposal(
+                        tuple(narrow_prefix), across, outward, layer, bend_steps, direction
+                    )
 
 
 def validated_departures(
