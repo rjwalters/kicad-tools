@@ -24,6 +24,10 @@ Step-by-step guides for common tasks:
 | [Query API](guides/query-api.md) | Fluent interface for finding components |
 | [Placement Optimization](guides/placement-optimization.md) | Optimize component placement |
 | [Routing](guides/routing.md) | Autoroute PCBs with the A* router |
+| [Differential Pairs](guides/diff-pairs/README.md) | Configure and route differential pairs per net class |
+| [Match Groups](guides/match-groups/README.md) | Length-match parallel-bus groups (DDR, MIPI, HDMI) |
+| [Hybrid Figure-of-Merit (FOM)](guides/fom.md) | Layered routability/quality scoring function |
+| [LCSC/EasyEDA 3D Models](guides/lcsc-3d-models.md) | Fetch-on-demand 3D models for LCSC parts |
 | [Routing Benchmark Suite](guides/benchmarking.md) | Measure router quality and detect regressions |
 | [MCP Server](mcp/README.md) | Enable AI agents to interact via Model Context Protocol |
 
@@ -48,6 +52,7 @@ Point-in-time working documents — dated entries describe the tree as of their 
 
 | Document | Description |
 |----------|-------------|
+| [Website Content Audit (2026-09)](website-content-audit-2026-09.md) | kicad-tools.org content/navigation/presentation audit vs. repository evidence (#5281, Epic #5278 Phase 1) |
 | [HV Pairwise Proof: softstart rev-C (2026-08)](hv-pairwise-softstart-proof.md) | #4507 T4 manual proof run on the local-only mains HV fixture |
 | [Placement Pad-Anchoring Audit (2026-08)](placement-pad-anchoring-audit.md) | Centre- vs pad-anchored placement objective terms (#4831) |
 | [OmniLayout / OmniRouting Recon (2026-08)](research/omnilayout-recon.md) | External LLM layout/routing benchmark (#4830); verdict: adapt the metric protocol, drop the data (no licence) |
@@ -55,6 +60,12 @@ Point-in-time working documents — dated entries describe the tree as of their 
 | [Board Fleet Parity Audit (2026-06)](board-fleet-parity-audit-2026-06.md) | Fleet-wide board status snapshot |
 | [Install Pilot: chorus](install-pilot-chorus.md) | Consumer-repo install pilot for Epic #4054 acceptance |
 | [Atopile Build System Research](research-atopile-build-system.md) | Survey of Atopile's build DAG and targets |
+| [Atopile Research Synthesis](research/atopile-research-synthesis.md) | Best Atopile ideas mapped onto kicad-tools |
+| [Faebryk Component Library](research/faebryk-component-library.md) | Atopile Faebryk component-library research (#307) |
+| [Diode `pcb` Comparison](research/diode-pcb-comparison.md) | Diode (Zener) vs kicad-tools feature comparison (2026-06) |
+| [copperhead Workflow Ideas](research/copperhead-workflow-ideas.md) | Adoptable workflow ideas from the copperhead PCB agent (#4520) |
+| [Placement GA Routability A/B](benchmarks/placement_ga_routability_ab.md) | Inner-loop routing quality vs spacing proxy in the placement GA (#2720) |
+| [Board 05 U10-17 Investigation (2026-06)](investigations/2026-06-board05-u10-17.md) | Negative-clearance pair root-cause investigation (#3236) |
 | [Placement Optimizer Agent Prompt](PLACEMENT-OPTIMIZER-AGENT-PROMPT.md) | Continuation prompt for the physics-based placement optimizer |
 
 ---

@@ -57,6 +57,9 @@ def _get_stackup(args: Namespace):
     elif preset:
         preset_map = {
             "jlcpcb-4": Stackup.jlcpcb_4layer,
+            "jlcpcb-4-legacy": Stackup.jlcpcb_4layer_legacy,
+            "jlcpcb-3313": lambda: Stackup.jlcpcb_named("JLC04161H-3313"),
+            "jlcpcb-7628": lambda: Stackup.jlcpcb_named("JLC04161H-7628"),
             "oshpark-4": Stackup.oshpark_4layer,
             "generic-2": Stackup.default_2layer,
             "generic-4": Stackup.jlcpcb_4layer,  # Use JLCPCB as generic 4-layer
@@ -86,6 +89,11 @@ def _run_stackup_command(args: Namespace) -> int:
         return 0
 
     console = Console()
+
+    if stackup.construction:
+        console.print(f"Construction: {stackup.construction['id']}")
+        if stackup.construction.get("compatibility_only"):
+            console.print("Legacy numerical model; no factory ordering identifier.")
 
     # Board summary
     console.print(f"\n[bold]Board Stackup ({stackup.board_thickness_mm:.2f}mm total):[/bold]\n")
@@ -178,6 +186,7 @@ def _run_width_command(args: Namespace) -> int:
                 "delay_ps_per_mm": round(result.propagation_delay_ps_per_mm, 2),
             },
         }
+        data["construction"] = stackup.construction
         print(json.dumps(data, indent=2))
         return 0
 
@@ -270,6 +279,7 @@ def _run_calculate_command(args: Namespace) -> int:
         }
         if gap_mm:
             data["gap_mm"] = gap_mm
+        data["construction"] = stackup.construction
         print(json.dumps(data, indent=2))
         return 0
 
@@ -346,6 +356,7 @@ def _run_diffpair_command(args: Namespace) -> int:
         if target_zdiff:
             data["target_zdiff_ohm"] = target_zdiff
             data["target_met"] = target_check[0] == "pass"
+        data["construction"] = stackup.construction
         print(json.dumps(data, indent=2))
         return 0
 
@@ -423,6 +434,7 @@ def _run_crosstalk_command(args: Namespace) -> int:
                     "minimum_spacing_mil": round(spacing / 0.0254, 1),
                 },
             }
+            data["construction"] = stackup.construction
             print(json.dumps(data, indent=2))
             return 0
 
@@ -474,6 +486,7 @@ def _run_crosstalk_command(args: Namespace) -> int:
             "severity": result.severity,
             "recommendation": result.recommendation,
         }
+        data["construction"] = stackup.construction
         print(json.dumps(data, indent=2))
         return 0
 

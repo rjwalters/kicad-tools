@@ -14,18 +14,23 @@ Usage:
     kicad-pcb-stitch board.kicad_pcb --net GND --dry-run
     kicad-pcb-stitch board.kicad_pcb --net GND --via-size 0.45 --drill 0.2
 
-    # Stitch and run DRC (fills zones automatically via kicad-cli)
+    # Stitch and report native DRC findings (diagnostic; geometry exit status)
     kicad-pcb-stitch board.kicad_pcb --drc
 
 Exit Codes:
-    0 - Success
-    1 - Error or no work to do
+    0 - Geometry success, and strict DRC passed if requested
+    1 - Error, no work to do, or strict DRC did not pass
+
+--drc-strict implies --drc and gates on zero errors, warnings and unconnected
+items. Both flags check unchanged boards too. Dry runs skip DRC, so a strict
+dry run exits nonzero. JSON success describes geometry only; exit_code also
+includes the strict gate. Native DRC is not a complete manufacturing signoff.
 
 Machine output (``--format json``, issue #4674): one document describing the
 run -- the resolved input/output paths, the resolved via geometry, and the
 full (untruncated) per-pad ledger of placed vias, skipped pads, connectivity
 fallbacks and pads needing a routed fanout -- or ``{"error": ..., "success":
-false}`` on failure.  Exit codes are unchanged.  See
+false}`` on failure. See
 ``docs/reference/machine-output.md``.
 """
 
@@ -5594,15 +5599,24 @@ def _carve_foreign_copper_after_stitch(pcb_path: Path) -> None:
         )
 
 
-def run_post_stitch_drc(pcb_path: Path) -> int:
+def _drc_not_run(reason: str) -> dict:
+    return {
+        "ran": False,
+        "status": "not_run",
+        "passed": None,
+        "error_count": None,
+        "warning_count": None,
+        "unconnected_item_count": None,
+        "reason": reason,
+    }
+
+
+def run_post_stitch_drc(pcb_path: Path) -> dict:
     """Run DRC on the PCB after stitching and display summary.
 
-    kicad-cli pcb drc automatically fills zones before checking,
-    so this handles both zone fill and DRC validation in one step.
-
-    Returns:
-        0 if DRC ran successfully (regardless of violations),
-        1 if DRC could not be run.
+    ``ran`` means a native report was successfully parsed, independently of
+    findings. ``passed`` requires zero errors, warnings and unconnected items.
+    Unavailable/failed checks have null counts, never invented zero counts.
     """
     from .runner import find_kicad_cli, run_drc
 
@@ -5620,24 +5634,39 @@ def run_post_stitch_drc(pcb_path: Path) -> int:
             f"\nRun DRC manually: kicad-cli pcb drc {pcb_path}",
             file=sys.stderr,
         )
-        return 1
+        return _drc_not_run("kicad-cli not found")
 
-    print(f"\nRunning DRC on {pcb_path.name} (zones will be filled automatically)...")
+    print(f"\nRunning DRC on {pcb_path.name}...")
 
     result = run_drc(pcb_path, format="json", kicad_cli=kicad_cli)
 
-    if not result.success:
+    if not result.success or result.return_code != 0:
         print(f"\nDRC failed to run: {result.stderr}", file=sys.stderr)
-        return 1
+        if result.output_path:
+            result.output_path.unlink(missing_ok=True)
+        return _drc_not_run(result.stderr or "DRC subprocess failed")
 
-    # Parse the report
-    from ..drc import DRCReport
+    # The subprocess was asked for JSON. Do not let auto-detection interpret
+    # an empty/error text response as a clean text-format report.
+    import json
+
+    from ..drc.report import parse_json_report
 
     try:
-        report = DRCReport.load(result.output_path)
+        if result.output_path is None:
+            raise ValueError("DRC produced no report")
+        content = result.output_path.read_text()
+        data = json.loads(content)
+        if not isinstance(data, dict) or any(
+            not isinstance(data.get(key), list) for key in ("violations", "unconnected_items")
+        ):
+            raise ValueError(
+                "Native DRC report must include violations and unconnected_items arrays"
+            )
+        report = parse_json_report(content, str(result.output_path))
     except Exception as e:
         print(f"\nError parsing DRC report: {e}", file=sys.stderr)
-        return 1
+        return _drc_not_run(f"Error parsing DRC report: {e}")
     finally:
         # Clean up temp file
         if result.output_path:
@@ -5646,6 +5675,8 @@ def run_post_stitch_drc(pcb_path: Path) -> int:
     # Display summary
     error_count = report.error_count
     warning_count = report.warning_count
+    unconnected_count = report.unconnected_item_count
+    passed = error_count == warning_count == unconnected_count == 0
 
     print(f"\n{'=' * 60}")
     print("POST-STITCH DRC RESULTS")
@@ -5653,7 +5684,9 @@ def run_post_stitch_drc(pcb_path: Path) -> int:
     print(f"  Errors:   {error_count}")
     print(f"  Warnings: {warning_count}")
 
-    if error_count == 0 and warning_count == 0:
+    print(f"  Unconnected items: {unconnected_count}")
+
+    if passed:
         print("\nDRC PASSED - No violations found")
     else:
         # Group by type
@@ -5679,14 +5712,19 @@ def run_post_stitch_drc(pcb_path: Path) -> int:
                 print(f"  ... and {error_count - 10} more errors")
 
         print(f"\n{'=' * 60}")
-        if error_count > 0:
-            print("DRC FAILED - Fix errors before manufacturing")
-        else:
-            print("DRC PASSED with warnings")
+        print("DRC FAILED - Findings remain (including warnings or unconnected items)")
 
         print(f"\nFor detailed results: kicad-drc {pcb_path}")
 
-    return 0
+    return {
+        "ran": True,
+        "status": "passed" if passed else "failed",
+        "passed": passed,
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "unconnected_item_count": unconnected_count,
+        "reason": None,
+    }
 
 
 def output_result(
@@ -5894,7 +5932,8 @@ def result_document(
     manufacturer: dict | None,
     dry_run: bool,
     drc_requested: bool,
-    drc_ran: bool,
+    drc: dict,
+    drc_strict: bool,
 ) -> dict:
     """Build the ``--format json`` document for one stitch run (issue #4674).
 
@@ -5965,18 +6004,16 @@ def result_document(
         # A producer says whether it produced (batch-5 convention): vias are
         # only on disk when the run was not a dry run AND placed something.
         "saved": bool(result.vias_added) and not dry_run,
-        # `--drc` is honoured only for a non-dry run that actually placed
-        # copper, and kicad-cli may be absent, so "requested" and "ran" are
-        # reported separately rather than collapsed into one boolean.
-        "drc": {"requested": drc_requested, "ran": drc_ran},
+        "drc": {"requested": drc_requested, "strict": drc_strict, **drc},
+        "success_scope": "geometry",
     }
     # Parity with the other two orchestrators (`build`, `pipeline`): the
     # document carries the process exit code so a machine caller reading a
     # captured document never has to correlate it with a separate `$?`.
-    # The caller's verdict is exactly this predicate -- vias placed, or the
-    # pads were already connected.
+    # Success remains the geometry predicate; the optional strict gate also
+    # participates in the process exit code.
     success = bool(result.vias_added) or bool(result.already_connected)
-    document["exit_code"] = 0 if success else 1
+    document["exit_code"] = 0 if success and (not drc_strict or drc["passed"] is True) else 1
     document["success"] = success
     return document
 
@@ -6150,7 +6187,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--drc",
         action="store_true",
-        help="Run DRC after stitching (fills zones automatically via kicad-cli)",
+        help="Report native DRC after stitching, including unchanged boards (diagnostic only)",
+    )
+    parser.add_argument(
+        "--drc-strict",
+        action="store_true",
+        help="Imply --drc; exit nonzero on errors, warnings, unconnected items or unavailable check",
     )
     parser.add_argument(
         "--mfr",
@@ -6178,6 +6220,7 @@ def main(argv: list[str] | None = None) -> int:
     add_format_flag(parser)
 
     args = parser.parse_args(argv)
+    args.drc = args.drc or args.drc_strict
     as_json = getattr(args, "format", FORMAT_TEXT) == FORMAT_JSON
 
     # JSON mode owns stdout: the stitch engine, the post-stitch carve and the
@@ -6355,10 +6398,11 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
         if not args.dry_run and result.vias_added:
             _carve_foreign_copper_after_stitch(pcb_path)
 
-        # Run DRC if requested (and not dry run, and vias were actually added)
-        drc_ran = False
-        if args.drc and not args.dry_run and result.vias_added:
-            drc_ran = run_post_stitch_drc(pcb_path) == 0
+        # Explicit checks also validate unchanged boards; dry runs never validate
+        # hypothetical geometry and therefore cannot pass the strict gate.
+        drc = _drc_not_run("dry run" if args.drc and args.dry_run else "not requested")
+        if args.drc and not args.dry_run:
+            drc = run_post_stitch_drc(pcb_path)
 
         document = (
             result_document(
@@ -6372,15 +6416,16 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 manufacturer=manufacturer,
                 dry_run=args.dry_run,
                 drc_requested=bool(args.drc),
-                drc_ran=drc_ran,
+                drc=drc,
+                drc_strict=args.drc_strict,
             )
             if as_json
             else None
         )
 
-        if result.vias_added:
-            return 0, document
-        return (0 if result.already_connected else 1), document
+        geometry_success = bool(result.vias_added) or bool(result.already_connected)
+        gate_passed = not args.drc_strict or drc["passed"] is True
+        return (0 if geometry_success and gate_passed else 1), document
 
     except Exception as e:
         return fail(str(e))

@@ -988,7 +988,7 @@ class ReportDataCollector:
     ) -> list[dict[str, str | None]] | None:
         """Enumerate power rails and regulators.
 
-        Finds symbols with ``power:`` library prefix and regulator
+        Finds named rails with ``power:`` / ``kicad_tools_pwr:`` prefixes and regulator
         components (``Regulator_Linear:`` or ``Regulator_Switching:``
         lib_id prefix).
 
@@ -1002,7 +1002,9 @@ class ReportDataCollector:
         def _scan_schematic(s: Any) -> None:
             for sym in s.symbols:
                 lib_id = sym.lib_id or ""
-                if lib_id.startswith("power:"):
+                if lib_id == "power:PWR_FLAG":
+                    continue  # A driver declaration does not publish a rail name.
+                if lib_id.startswith(("power:", "kicad_tools_pwr:")):
                     # Extract rail name from Value property
                     value = ""
                     if "Value" in sym.properties:

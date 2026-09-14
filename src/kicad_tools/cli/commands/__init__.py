@@ -43,6 +43,7 @@ from .pcb import run_pcb_command
 from .pipeline import run_pipeline_command
 from .placement import run_placement_command
 from .project import run_clean_command, run_init_command
+from .readiness import run_readiness_command
 from .reasoning import run_reason_command
 from .routing import (
     run_optimize_command,
@@ -64,6 +65,7 @@ from .validation import (
     run_fix_footprints_command,
     run_fix_silkscreen_command,
     run_fix_vias_command,
+    run_place_silk_refs_command,
     run_repair_clearance_command,
     run_validate_command,
     run_validate_footprints_command,
@@ -98,6 +100,7 @@ __all__ = [
     "run_fix_footprints_command",
     "run_fix_vias_command",
     "run_fix_silkscreen_command",
+    "run_place_silk_refs_command",
     "run_repair_clearance_command",
     "run_fix_drc_command",
     "run_fix_erc_command",
@@ -114,6 +117,8 @@ __all__ = [
     "run_fleet_command",
     # Board metrics
     "run_board_metrics_command",
+    # Readiness
+    "run_readiness_command",
     # Reasoning
     "run_reason_command",
     # Placement

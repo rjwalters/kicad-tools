@@ -21,16 +21,17 @@ copper defects, so they must not turn a previously-passing gate red.
 Detection model
 ---------------
 
-KiCad's connectivity engine is *geometric*: an endpoint anchor is
-connected when some other item's copper contains the anchor point
-(``BOARD_CONNECTED_ITEM::HitTest``).  This rule builds the same
-predicate on the repo's committed-copper source of truth:
+Termination is geometric: a track's endpoint copper cap must touch
+another item's copper. Checking only the centerline anchor rejects valid
+width-dependent contacts (issue #4986). This rule uses the repo's
+committed-copper source of truth:
 
 * **Track endpoints**: an endpoint is terminated when any other copper
   item on the segment's layer -- another segment's copper (endpoint cap
   or body), a track arc, a via barrel spanning the layer, a pad, or a
   **same-net** zone ``filled_polygon`` -- lies within
-  :data:`~kicad_tools.validate.rules.base.DRC_TOLERANCE` of the point.
+  the track's half-width plus
+  :data:`~kicad_tools.validate.rules.base.DRC_TOLERANCE` of the endpoint.
   One violation is emitted per dangling *track* (at the first dangling
   endpoint), matching kicad-cli's per-track reporting so counts agree.
 * **Vias**: for every copper layer the barrel spans
@@ -591,19 +592,21 @@ class DanglingCopperRule(DRCRule):
         net_number: int,
         net_name: str,
         index: _LayerIndex | None,
+        radius: float,
     ) -> bool:
-        """True when some *other* copper item contains ``point_xy``."""
+        """True when the endpoint cap touches some *other* copper item."""
         from shapely import box
         from shapely.geometry import Point
 
         if index is None:
             return False
         px, py = point_xy
+        reach = radius + _TOUCH_TOL_MM
         probe = box(
-            px - _TOUCH_TOL_MM,
-            py - _TOUCH_TOL_MM,
-            px + _TOUCH_TOL_MM,
-            py + _TOUCH_TOL_MM,
+            px - reach,
+            py - reach,
+            px + reach,
+            py + reach,
         )
         point = Point(px, py)
         for item in index.candidates(probe):
@@ -611,7 +614,7 @@ class DanglingCopperRule(DRCRule):
                 continue
             if item.kind == "fill" and not _fill_net_matches(net_number, net_name, item):
                 continue
-            if item.geom.distance(point) <= _TOUCH_TOL_MM:
+            if item.geom.distance(point) <= reach:
                 return True
         return False
 
@@ -639,13 +642,15 @@ class DanglingCopperRule(DRCRule):
                 point
                 for point in endpoints
                 if not self._point_terminated(
-                    point, id(segment), net_number, segment.net_name, index
+                    point, id(segment), net_number, segment.net_name, index, segment.width / 2.0
                 )
             ]
             if not dangling:
                 continue
             length = math.dist(segment.start, segment.end)
             net_label = segment.net_name or (f"net {net_number}" if net_number else "unassigned")
+            track_uuid = getattr(segment, "uuid", "")
+            items = (track_uuid, f"net:{net_label}") if track_uuid else (f"net:{net_label}",)
             both_ends = len(endpoints) == 2 and len(dangling) == 2
             suffix = " (both ends dangling)" if both_ends else ""
             results.add(
@@ -659,7 +664,7 @@ class DanglingCopperRule(DRCRule):
                     location=dangling[0],
                     layer=segment.layer,
                     actual_value=length,
-                    items=(f"net:{net_label}",),
+                    items=items,
                     nets=(net_label,),
                 )
             )

@@ -1,5 +1,11 @@
 """Board 03 (usb-joystick) routing baseline regression guard.
 
+Historical capability tests use the SHA-pinned 32-pad snapshot in
+``regression-fixture/``. Production DRC below still checks revision B in
+``output/``. CLI runs retain temporary PCB/log artifacts on timeout (900s
+process cap; 600s routing budget), and never regenerate or overwrite inputs.
+The June recipe described below is frozen, not the current hardware recipe.
+
 This test pins the **measured routing reach** of
 ``boards/03-usb-joystick/`` against the ``kct route`` CLI as of
 June 2026.
@@ -176,19 +182,21 @@ References:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BOARD_DIR = REPO_ROOT / "boards" / "03-usb-joystick"
-UNROUTED_PCB = BOARD_DIR / "output" / "usb_joystick.kicad_pcb"
+UNROUTED_PCB = BOARD_DIR / "regression-fixture" / "usb_joystick.kicad_pcb"
+HISTORICAL_SHA256 = "6c4292a95345a7670ebc3879262d192edf40c90335ba6bee83c3c88441d18c98"
+ROUTE_TIMEOUT = 900
 COMMITTED_ROUTED_PCB = BOARD_DIR / "output" / "usb_joystick_routed.kicad_pcb"
 
 # Acceptance criteria for the June 2026 baseline.
@@ -383,12 +391,11 @@ def _parse_per_net_status(stdout: str) -> dict[str, str]:
 def _write_diffpair_sidecar(dest_dir: Path) -> Path:
     """Write the board 03 net-class sidecar into ``dest_dir``.
 
-    Mirrors ``generate_design.py:route_pcb()`` exactly: annotate the USB
+    Replays the historical June recipe: annotate the USB
     D+/D- pair with ``diffpair_partner`` and a 0.15mm
     ``intra_pair_clearance`` (#3095) so the ``--net-class-map`` flag can
     hand the CoupledPathfinder the coupled-routing metadata.  Returns the
-    path to the written ``net_class_map.json``.  KEEP IN SYNC with
-    generate_design.py:route_pcb() (Issue #3922).
+    path to the written ``net_class_map.json`` (Issue #3922).
     """
     import json as _json
     from dataclasses import replace as _dc_replace
@@ -419,113 +426,120 @@ def _write_diffpair_sidecar(dest_dir: Path) -> Path:
 
 @pytest.fixture(scope="module")
 def unrouted_pcb_path() -> Path:
-    """Verify the committed unrouted board 03 PCB exists.
-
-    The PCB is committed under ``boards/03-usb-joystick/output/``.  If
-    the file is missing the test cannot run -- skip with a clear message.
-    """
-    if not UNROUTED_PCB.exists():
-        pytest.skip(
-            f"Board 03 unrouted PCB not found at {UNROUTED_PCB!s}; "
-            "regenerate via `uv run python boards/03-usb-joystick/generate_pcb.py`."
-        )
+    """Require the frozen synthetic fixture; never regenerate with revision B."""
+    assert UNROUTED_PCB.is_file(), "Historical board03 fixture missing; restore it from git"
+    assert hashlib.sha256(UNROUTED_PCB.read_bytes()).hexdigest() == HISTORICAL_SHA256
     return UNROUTED_PCB
 
 
-def _run_kct_route(unrouted: Path, seed: int) -> str:
+def _run_kct_route(unrouted: Path, seed: int, artifacts: Path) -> str:
     """Run ``kct route --backend cpp --seed N --auto-fix`` and capture stdout.
 
-    Mirrors the recipe in the parent issue (#3259) and the standard
-    fleet/build invocation.  Routes to a tmpdir so it never overwrites
-    the committed artifact.
+    Replays the historical June recipe independently of the revision-B
+    hardware replay. Inputs and any partial output remain in pytest artifacts.
     """
-    with tempfile.TemporaryDirectory() as td:
-        pcb_copy = Path(td) / "usb_joystick.kicad_pcb"
-        shutil.copy2(unrouted, pcb_copy)
-        output_path = Path(td) / "usb_joystick_routed.kicad_pcb"
-        # Issue #3922: mirror the production net-class sidecar so
-        # ``--net-class-map`` (below) reads the same USB D+/D-
-        # diffpair_partner / intra_pair_clearance metadata the recipe
-        # writes.  KEEP IN SYNC with generate_design.py:route_pcb().
-        sidecar_path = _write_diffpair_sidecar(output_path.parent)
-        cmd = [
-            sys.executable,
-            "-m",
-            "kicad_tools.cli",
-            "route",
-            str(pcb_copy),
-            "--output",
-            str(output_path),
-            "--seed",
-            str(seed),
-            "--manufacturer",
-            "jlcpcb-tier1",
-            "--backend",
-            "cpp",
-            # Issue #3799: kept in lock-step with the production recipe in
-            # ``generate_design.py:route_pcb()`` -- --deterministic-budget
-            # (#3538) routes under a fixed iteration backstop instead of the
-            # per-net wall-clock cutoff, so the seed-42 re-route is
-            # byte-identical (UUID-normalized) across machines.
-            "--deterministic-budget",
-            "--timeout",
-            "600",
-            # Issue #3922: --differential-pairs was silently dropped in the
-            # #3308/#3410 recipe consolidation, so USB_D+/USB_D- routed
-            # through the plain per-net A* loop and the CoupledPathfinder
-            # (Phase A) was never invoked.  Restored here in lock-step with
-            # generate_design.py:route_pcb().  --net-class-map forwards the
-            # sidecar so the router reads the diff-pair metadata.
-            "--differential-pairs",
-            "--net-class-map",
-            str(sidecar_path),
-            # Issue #3922: --auto-layers is kept (the default) so the escape
-            # pre-phase board 03's fine-pitch USB-C needs still runs (13/13 +
-            # 0 native DRC).  On this board --differential-pairs is inert at
-            # routing time because route_cmd's escape / escalation dispatch
-            # does not consult it (tracked in #3952); forcing the diff-pair
-            # path with --no-auto-layers would reintroduce a DRC clearance
-            # violation.  KEEP IN SYNC with generate_design.py:route_pcb().
-            # Issues #3507/#3454: ``--raw`` removed in lock-step with the
-            # production recipe in ``generate_design.py:route_pcb()`` --
-            # the grid-transactional optimize pass retired the
-            # deterministic clearance_segment_via merge violation that
-            # made it load-bearing.  Keep these flag lists in sync.
-        ]
-        # Issue #3799: pin PYTHONHASHSEED to match the production recipe so
-        # the baseline measured here is the SAME copper the recipe emits.
-        _route_env = os.environ.copy()
-        _route_env["PYTHONHASHSEED"] = "42"
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=900,
-            check=False,
-            env=_route_env,
-        )
-        # Exit codes from cli/route_cmd.py:
-        #   0 = full route + DRC clean
-        #   2 = partial routing below --min-completion
-        #   3 = >= min-completion but DRC violations remain
-        # Board 03 lands at 2 or 3 (partial + DRC).  Codes 1 and 5 are
-        # fatal (crash / SIGINT).
-        if proc.returncode in (1, 5):
-            pytest.fail(
-                f"kct route returned fatal exit code {proc.returncode}\n"
-                f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}\n"
-                f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    pcb_copy = artifacts / "usb_joystick.kicad_pcb"
+    shutil.copy2(unrouted, pcb_copy)
+    output_path = artifacts / "usb_joystick_routed.kicad_pcb"
+    # Issue #3922: preserve the historical net-class sidecar so
+    # ``--net-class-map`` (below) reads the same USB D+/D-
+    # diffpair_partner / intra_pair_clearance metadata the recipe
+    # writes.  Frozen with the historical June recipe.
+    sidecar_path = _write_diffpair_sidecar(output_path.parent)
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "route",
+        str(pcb_copy),
+        "--output",
+        str(output_path),
+        "--seed",
+        str(seed),
+        "--manufacturer",
+        "jlcpcb-tier1",
+        "--backend",
+        "cpp",
+        # Issue #3799: frozen from the historical recipe in
+        # ``generate_design.py:route_pcb()`` -- --deterministic-budget
+        # (#3538) routes under a fixed iteration backstop instead of the
+        # per-net wall-clock cutoff, so the seed-42 re-route is
+        # byte-identical (UUID-normalized) across machines.
+        "--deterministic-budget",
+        "--timeout",
+        "600",
+        # Issue #3922: --differential-pairs was silently dropped in the
+        # #3308/#3410 recipe consolidation, so USB_D+/USB_D- routed
+        # through the plain per-net A* loop and the CoupledPathfinder
+        # (Phase A) was never invoked.  Restored here in lock-step with
+        # the June recipe.  --net-class-map forwards the
+        # sidecar so the router reads the diff-pair metadata.
+        "--differential-pairs",
+        "--net-class-map",
+        str(sidecar_path),
+        # Issue #3922: --auto-layers is kept (the default) so the escape
+        # pre-phase board 03's fine-pitch USB-C needs still runs (13/13 +
+        # 0 native DRC).  On this board --differential-pairs is inert at
+        # routing time because route_cmd's escape / escalation dispatch
+        # does not consult it (tracked in #3952); forcing the diff-pair
+        # path with --no-auto-layers would reintroduce a DRC clearance
+        # violation.  Frozen with the historical June recipe.
+        # Issues #3507/#3454: ``--raw`` removed in lock-step with the
+        # production recipe in ``generate_design.py:route_pcb()`` --
+        # the grid-transactional optimize pass retired the
+        # deterministic clearance_segment_via merge violation that
+        # made it load-bearing.  Keep these historical flags pinned.
+    ]
+    # Issue #3799: retain the historical hash seed independently of the
+    # current real-hardware routing replay.
+    _route_env = os.environ.copy()
+    _route_env["PYTHONHASHSEED"] = "42"
+    _route_env["PYTHONUNBUFFERED"] = "1"
+    stdout_path, stderr_path = artifacts / "stdout.log", artifacts / "stderr.log"
+    with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=stdout,
+                stderr=stderr,
+                text=True,
+                timeout=ROUTE_TIMEOUT,
+                check=False,
+                env=_route_env,
             )
-        return proc.stdout
+        except subprocess.TimeoutExpired:
+            pytest.fail(
+                f"Historical board03 seed {seed} exceeded {ROUTE_TIMEOUT}s; "
+                f"partial PCB, stdout and stderr retained in {artifacts}"
+            )
+    proc.stdout = stdout_path.read_text()
+    proc.stderr = stderr_path.read_text()
+    # Exit codes from cli/route_cmd.py:
+    #   0 = full route + DRC clean
+    #   2 = partial routing below --min-completion
+    #   3 = >= min-completion but DRC violations remain
+    # Board 03 lands at 2 or 3 (partial + DRC).  Codes 1 and 5 are
+    # fatal (crash / SIGINT).
+    if proc.returncode in (1, 5):
+        pytest.fail(
+            f"kct route returned fatal exit code {proc.returncode}\n"
+            f"stderr (last 2000 chars):\n{proc.stderr[-2000:]}\n"
+            f"stdout (last 2000 chars):\n{proc.stdout[-2000:]}"
+        )
+    return proc.stdout
 
 
 @pytest.fixture(scope="module")
-def route_stdout(unrouted_pcb_path: Path) -> str:
-    """Run the canonical ``kct route`` invocation once per module."""
-    return _run_kct_route(unrouted_pcb_path, seed=42)
+def route_stdout(unrouted_pcb_path: Path, tmp_path_factory) -> str:
+    """Run the frozen historical ``kct route`` invocation once per module."""
+    return _run_kct_route(
+        unrouted_pcb_path, seed=42, artifacts=tmp_path_factory.mktemp("board03-seed42")
+    )
 
 
 @pytest.mark.slow
+@pytest.mark.timeout(960)
 class TestBoard03RoutingBaseline:
     """Pin the June 2026 routing reach baseline for board 03.
 
@@ -685,40 +699,41 @@ class TestBoard03RoutingBaseline:
         )
 
 
-def test_recipe_includes_differential_pairs_flag() -> None:
-    """Guard against recipe consolidations silently dropping --differential-pairs.
+def test_historical_route_timeout_retains_partial_diagnostics(monkeypatch, tmp_path):
+    """A terminated subprocess must leave its output and partial board inspectable."""
 
-    Issue #3922: the #3308/#3410 consolidation dropped ``--differential-pairs``
-    from ``generate_design.py:route_pcb()`` without any test detecting it, so
-    the recipe stopped even requesting diff-pair routing and the boards/README
-    claim went false.  This fast text-search guard makes the flag a contract:
-    if a future refactor drops it, this test goes red before the regression
-    can ship.  ``--net-class-map`` is checked too because it forwards the
-    diff-pair metadata (and engages the validate-side diff-pair DRC rules).
+    def timeout(cmd, **kwargs):
+        assert "--differential-pairs" in cmd and "--net-class-map" in cmd
+        assert kwargs["timeout"] == ROUTE_TIMEOUT
+        assert Path(cmd[cmd.index("--output") + 1]).parent == tmp_path
+        kwargs["stdout"].write("partial net USB_D+\n")
+        kwargs["stderr"].write("routing deadline\n")
+        Path(cmd[cmd.index("--output") + 1]).write_text("partial copper")
+        raise subprocess.TimeoutExpired(cmd, ROUTE_TIMEOUT)
 
-    NB: on board 03 the flag is currently inert at routing time -- route_cmd's
-    escape / escalation dispatch does not consult it (tracked in #3952).  This
-    guard therefore protects the recipe *contract*, not the runtime behavior;
-    the runtime behavior is documented by the xfail'd
-    ``test_coupled_pathfinder_phase_a_invoked`` above.
-    """
-    source = (BOARD_DIR / "generate_design.py").read_text()
-    assert "--differential-pairs" in source, (
-        "generate_design.py:route_pcb() must include '--differential-pairs' so "
-        "the recipe requests diff-pair-aware routing.  If you changed the "
-        "routing recipe, keep the flag and mirror it in _run_kct_route() "
-        "(Issue #3922)."
-    )
-    assert "--net-class-map" in source, (
-        "generate_design.py:route_pcb() must forward '--net-class-map' so the "
-        "router reads the USB D+/D- diffpair_partner / intra_pair_clearance "
-        "metadata from the sidecar; without it --differential-pairs falls back "
-        "to default spacing (Issue #3922)."
-    )
+    monkeypatch.setattr(subprocess, "run", timeout)
+    before = UNROUTED_PCB.read_bytes()
+    with pytest.raises(pytest.fail.Exception, match="partial PCB, stdout and stderr retained"):
+        _run_kct_route(UNROUTED_PCB, 42, tmp_path)
+    assert (tmp_path / "stdout.log").read_text() == "partial net USB_D+\n"
+    assert (tmp_path / "stderr.log").read_text() == "routing deadline\n"
+    assert (tmp_path / "usb_joystick_routed.kicad_pcb").read_text() == "partial copper"
+    assert UNROUTED_PCB.read_bytes() == before
+
+
+def test_historical_geometry_is_32_pad_and_release_is_separate(unrouted_pcb_path):
+    from kicad_tools.schema import PCB
+
+    board = PCB.load(unrouted_pcb_path)
+    u1 = next(fp for fp in board.footprints if fp.reference == "U1")
+    assert len(u1.pads) == 32
+    assert COMMITTED_ROUTED_PCB.parent == BOARD_DIR / "output"
+    assert REQUIRED_NETS_ROUTED == EXPECTED_TOTAL_NETS == 13
 
 
 @pytest.mark.slow
-def test_routing_reach_deterministic_across_seeds(unrouted_pcb_path: Path) -> None:
+@pytest.mark.timeout(2800)
+def test_routing_reach_deterministic_across_seeds(unrouted_pcb_path: Path, tmp_path: Path) -> None:
     """The same reach (13/13 post-#3410) is produced for seeds 1, 42, and 99.
 
     The negotiated A* router uses the global seed for tie-breaks during
@@ -733,7 +748,7 @@ def test_routing_reach_deterministic_across_seeds(unrouted_pcb_path: Path) -> No
     """
     counts = {}
     for seed in (1, 42, 99):
-        stdout = _run_kct_route(unrouted_pcb_path, seed=seed)
+        stdout = _run_kct_route(unrouted_pcb_path, seed=seed, artifacts=tmp_path / f"seed-{seed}")
         parsed = _parse_routed_net_count(stdout)
         assert parsed is not None, (
             f"Could not parse routed net count for seed {seed}; "

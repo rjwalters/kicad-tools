@@ -408,7 +408,19 @@ class TraceOptimizer:
             return []
 
         # Sort segments into connected chains to prevent cross-chain shortcuts
-        chains = self._sort_into_chains(segments)
+        from itertools import groupby
+
+        # Width transitions are electrical constraints (for example, a
+        # fine-pitch pad taper into a controlled-impedance trunk). Every
+        # geometric simplifier below assumes a uniform-width chain. Preserve
+        # transition endpoints, while still optimizing each uniform run.
+        # Compare authored widths exactly: a tolerance must not accumulate
+        # across successive taper steps and erase the entire profile.
+        chains = [
+            list(run)
+            for chain in self._sort_into_chains(segments)
+            for _, run in groupby(chain, key=lambda seg: (seg.width, seg.layer, seg.net))
+        ]
 
         # Optimize each chain independently
         all_optimized: list[Segment] = []

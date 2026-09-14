@@ -147,6 +147,90 @@ verification must check manifest hashes **and** source correspondence (for
 example, compare the project's archived PCB against the checked PCB); mtime
 or internal bundle consistency alone does not establish freshness.
 
+`kct check`'s Manifest subcheck verifies every bundle SHA-256 and compares
+its hashed `kicad_project.zip` source PCB member with the current PCB bytes.
+The source member must occur exactly once at the archive root; nested or
+ambiguous same-name members are not accepted. Missing/invalid hashes or
+mismatched content report STALE/unverified, regardless of file modification
+times. A missing manufacturing bundle remains NOT RUN. This subcheck binds
+the PCB only; readiness independently binds schematic, project, rules,
+sidecars and check results as described above. No readiness schema change
+or timestamp-based migration is required.
+
+### Producing the report: `kct readiness`
+
+`kct readiness <board-dir|board.kicad_pcb>` is the scripted producer for this
+sidecar (issue #4977). It implements the `/kct:manufacturing-readiness` and
+`/kct:tapeout` skill contracts as an orchestrated command over the engines that
+already exist — `kct check`, `kicad-cli pcb drc --refill-zones` and
+`kct export` — and writes `output/readiness.json` only after every hashed
+artifact is final:
+
+1. Refill the copper pours and **save the canonical PCB**, then confirm the
+   saved fill still matches a fresh refill per layer (evidence:
+   `output/readiness/fill-consistency.json`). This happens before **both** the
+   native check and the export, because a saved-vs-refilled divergence can
+   survive two zero-error reports.
+2. `kct check --mfr <tier>`, writing the machine-readable report the per-rule
+   warning review reuses (no second check run).
+3. The mandatory independent `kicad-cli pcb drc --refill-zones` cross-gate, on
+   the saved board, judged by its **violation counts** — `kicad-cli` exits 0
+   with errors, and "ran" is not "passed".
+4. LVS evidence (a vacuous comparison is `not_run`, never clean), the per-rule
+   assembly-affecting warning review, and — for boards carrying an `HV` net
+   class — an explicit isolation requirement.
+5. `kct export`, the schematic and assembly-view PDFs, a `README.txt`, and a
+   regenerated `manifest.json` that checksums the **entire** bundle; then
+   manifest integrity **and** archived-source provenance are verified.
+6. `--assembly` additionally requires real procurement identifiers on every BOM
+   line (a wholly empty part-number column is treated as a broken matcher, not
+   exotic parts) and that through-hole parts excluded from the CPL are named as
+   hand-solder items in the README.
+7. `output/manufacturing.zip` is built **outside** the checksummed directory.
+
+`ready` is emitted only when every applicable gate passed; otherwise the report
+is `blocked` (a gate failed) or `unverified` (a gate could not run), always with
+named `blockers`. The command exits non-zero for anything other than `ready`,
+and there is no flag that produces `ready` on a partial run.
+
+### Engine fingerprint
+
+`engine` is an additive optional object in schema v1 (no `schema_version` bump,
+per the additive-only policy below). It records the identity of the **checker**,
+not just the board, so a changed engine does not silently imply that old
+evidence is still qualified. A version string alone is insufficient: local rule
+corrections have changed sign-off outcomes with no board edit at all while every
+report still read `kicad-tools 0.20.0`.
+
+```json
+"engine": {
+  "kicad_tools_version": "0.20.0",
+  "commit": "47a53ea4...",
+  "dirty": false,
+  "source_digest": "<SHA256 over the installed package sources>",
+  "kicad_cli_version": "kicad-cli 9.0.1",
+  "manufacturer": "jlcpcb",
+  "rules_digest": "<SHA256 over the resolved project/rule/net-class inputs>"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `kicad_tools_version` | string | yes | Release string of the producing kicad-tools |
+| `dirty` | boolean | yes | `true` when the producing checkout had uncommitted changes |
+| `manufacturer` | string | yes | Resolved fabrication tier the gates ran against |
+| `commit` | string | no | Git commit of the producing checkout; omitted outside a checkout |
+| `source_digest` | string | no | SHA256 over the installed package's Python sources — distinguishes two runs from the same commit but different working trees |
+| `kicad_cli_version` | string | no | Native KiCad version used for the cross-gate; omitted when `kicad-cli` was unavailable |
+| `rules_digest` | string | no | SHA256 over the resolved `.kicad_pro` / `.kicad_dru` / net-class-map inputs — a rule change with no board edit is visible here |
+| `recipe` | string | no | Board recipe identity, when the board declares one |
+
+Consumers comparing two reports should treat any change in `source_digest`,
+`commit` (with `dirty: false`), `kicad_cli_version` or `rules_digest` as
+grounds to present the older report as **historical evidence from a different
+engine** rather than as a current qualification. The field is optional, so a
+report written before this addition simply omits it.
+
 An optional `evidence` object maps check names to board-relative report paths;
 these evidence files should also appear in `inputs`. The gallery presents
 check details and the verification timestamp. Missing, malformed, incomplete
@@ -273,3 +357,48 @@ Same rules as `board.json`: additive changes are allowed within v1; renames,
 type changes, or removed fields require bumping the version in the `$schema`
 URL. Consumers should reject documents whose `$schema` references a major
 version they do not understand.
+
+### Development boards without manufacturing export
+
+`board-metrics` also reads boards that have no `output/manufacturing/` directory.
+A usable PCB or schematic produces `status: partial`; no usable artifact produces
+`no_artifacts`. Project identity alone does not certify that artifacts exist.
+The original `readiness` verdict and blockers are retained, including stale or
+blocked evidence. Static geometry and renders never produce `ok`.
+
+Source selection uses explicit `project.artifacts.pcb` and `.schematic` paths,
+relative to the board directory. A missing/invalid explicit path is diagnosed;
+it is not replaced with another revision. Without an explicit path, exactly one
+matching file directly under `output/` is required. Ambiguous candidates are
+reported without choosing by name or modification time. Paths outside the board
+directory are rejected. Invalid project specifications prevent fallback.
+
+Additive development fields:
+
+| Field | Meaning |
+|---|---|
+| `sources` | Selected artifact paths relative to the board directory and SHA-256 hashes; PCB/schematic also record `selection` (`project.artifacts` or `unambiguous_output`). |
+| `diagnostics` | Explanations of missing, ambiguous, malformed or unsupported metadata/evidence. |
+| `native_drc_geometry_violations` | Count of all entries in the bound native `violations` array, including warnings. |
+| `native_drc_unconnected_items` | Separate count from the bound native `unconnected_items` array. |
+
+`part_count` counts PCB footprints (including non-BOM footprints), not unique
+BOM rows or schematic symbols. `layer_count` counts actual PCB copper layers.
+`board_size_mm` describes the Edge.Cuts bounding envelope for supported closed
+linear outlines (`gr_line`, `gr_rect`, and straight `gr_poly`). Every contributing
+contour must close, including cutouts and separate islands, regardless of file
+order. Endpoints must match exactly; this metadata check does not snap gaps
+closed. Missing/open, degenerate, crossing, malformed or curved/unsupported
+geometry omits dimensions with
+a diagnostic rather than supply an inaccurate or zero size. The project supplies
+name/description. Schematic-only boards identify their source but do not invent
+PCB counts or dimensions.
+
+Native measurements require fresh readiness hashing both the selected PCB and
+the report. `evidence.native_drc` selects the report when present; otherwise one
+hash-bound `native-drc.json` or `placement-drc.json` is required. Missing, stale,
+ambiguous or malformed reports omit measurements. `drc_violations` counts native
+error-severity geometry findings in this development path; opens are separate.
+Zero geometry errors with nonzero opens is not a clean connectivity result.
+Neither label LVS nor an unbound report supplies copper-LVS proof. This command
+does not reroute, refill, export manufacturing files or alter readiness evidence.

@@ -224,7 +224,17 @@ namespace router {
 // negotiated strategy fell through to blanket retry (the thrash Phase 2
 // exists to end).  New module constant + four ``Pathfinder`` accessors =
 // binding-surface change; route output is unchanged (diagnostics only).
-constexpr int ROUTER_CPP_BUILD_VERSION = 21;
+// v22: residual pad rotation and candidate via-pad acceptance/policy refresh.
+// v23: explicit pad shape for segment/via clearance (Issue #5229).
+// v24: combined pad-shape and allow_smd_vias process-policy bindings (#5216).
+// v25: ``validate_route`` gains a second, CLAMPING same-component exclusion
+// set (``clamp_ref_hashes``, Issue #5166).  Refs in the original
+// ``exclude_ref_hashes`` keep the full-skip carve-out (the #2452 corridor
+// relief, whose floor is the search's own ``trace_width / 2`` blocked-cell
+// construction); refs in the new set reach the carve-out only because a
+// CONFIGURED override resolved smaller than the default clearance, and
+// enforce that resolved value as a hard floor instead of skipping.
+constexpr int ROUTER_CPP_BUILD_VERSION = 25;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -354,7 +364,8 @@ struct Via {
 // When ``success == false`` the search was unable to produce a route.  The
 // numbering mirrors ``ValidationResult::violation_type`` so Python callers
 // can dispatch on the same vocabulary across both search-time failures and
-// post-route validator violations.
+// post-route validator violations. Validation-only code 8 is via-pad;
+// code 7 remains reserved for the search PAIRWISE_BLOCKED reason.
 //
 // FAILURE_VIA_VIA_BLOCKED is set when every via candidate considered during
 // the A* expansion was refused by the geometric via-vs-via clearance check
@@ -550,6 +561,7 @@ struct PadChannelBudget {
 struct DesignRules {
     float trace_width = 0.127f;
     float trace_clearance = 0.127f;
+    bool allow_smd_vias = true;
     float via_drill = 0.3f;
     float via_diameter = 0.6f;
     float via_clearance = 0.127f;
@@ -587,6 +599,10 @@ struct PadInfo {
     // by classifying ``pad.net_name`` (the C++ side has no string
     // table, so the boolean is computed in Python and passed in).
     bool is_plane_net = false;
+    float rotation = 0.0f;  // Residual KiCad board-space degrees (#5182)
+    float via_clearance_override = 0.0f; // Component trace floor (Python backstop)
+    bool via_carveout_eligible = false;
+    bool is_circular = false;  // Explicit circle shape; other pads use rectangles (#5229)
 };
 
 // Stored segment for validation (Issue #2439)
@@ -645,7 +661,7 @@ struct ValidationResult {
     float min_clearance = std::numeric_limits<float>::infinity();
     float violation_x = 0.0f;
     float violation_y = 0.0f;
-    int violation_type = 0;  // 0=none, 1=seg-pad, 2=seg-seg, 3=seg-via, 4=via-seg, 5=via-via, 6=drill
+    int violation_type = 0;  // 0=none, 1=seg-pad, 2=seg-seg, 3=seg-via, 4=via-seg, 5=via-via, 6=drill, 7=reserved, 8=via-pad
 };
 
 }  // namespace router

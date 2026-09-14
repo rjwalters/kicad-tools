@@ -63,6 +63,7 @@ References:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -134,7 +135,7 @@ def unrouted_pcb_path() -> Path:
 
 
 @pytest.fixture(scope="module")
-def routed_board_03(unrouted_pcb_path: Path):
+def routed_board_03(unrouted_pcb_path: Path, tmp_path_factory):
     """Route the frozen synthetic board03 geometry with ``route_all``.
 
     Revision B has a real 44-pin MCU and different connections. Applying
@@ -225,21 +226,52 @@ def routed_board_03(unrouted_pcb_path: Path):
     # pins reach the EscapeRouter's in-pad rescue path (#3183).
     _prior_extended = _os.environ.get("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK")
     _os.environ["KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK"] = "1"
+    diagnostics = tmp_path_factory.mktemp("board03-capability") / "routing-statistics.json"
     try:
         # Force lazy escape router re-init now that the env var is set.
         router._escape_router = None
         router.route_all(
             enable_in_pad_escape_rescues=True,
             in_pad_escape_rescue_pins={"U1": ["12", "13", "14", "15", "26", "27"]},
-            suppress_no_timeout_warning=True,
+            timeout=480,
         )
     finally:
         if _prior_extended is None:
             _os.environ.pop("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", None)
         else:
             _os.environ["KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK"] = _prior_extended
+        # route_all returns partial routes at its outer deadline; pytest
+        # enforces the 600s hard backstop for a single stuck A* search.
+        diagnostics.write_text(json.dumps(router.get_statistics(), indent=2, default=str))
+        print(f"Historical board03 partial routing statistics: {diagnostics}")
 
     return router, net_map
+
+
+def test_historical_route_interruption_preserves_statistics(monkeypatch, tmp_path_factory):
+    from types import SimpleNamespace
+
+    def interrupted_route(**kwargs):
+        assert kwargs["timeout"] == 480
+        raise TimeoutError("simulated interrupted A* search")
+
+    router = SimpleNamespace(
+        net_class_map={},
+        route_all=interrupted_route,
+        get_statistics=lambda: {"nets_routed": 3, "nets_failed": 10},
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__], "load_pcb_for_routing", lambda *a, **kw: (router, {})
+    )
+    monkeypatch.setenv("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", "original")
+    with pytest.raises(TimeoutError, match="simulated interrupted"):
+        routed_board_03.__wrapped__(UNROUTED_PCB, tmp_path_factory)
+    assert os.environ["KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK"] == "original"
+    diagnostics = list(
+        tmp_path_factory.getbasetemp().glob("board03-capability*/routing-statistics.json")
+    )
+    assert diagnostics
+    assert json.loads(diagnostics[-1].read_text()) == {"nets_routed": 3, "nets_failed": 10}
 
 
 @pytest.mark.slow
@@ -1000,7 +1032,7 @@ def test_fix_drc_preserves_safe_nudges_on_routed_board(tmp_path) -> None:
     least one nudge that did NOT touch a regressed net, so the post-fix
     summary reports ``Repaired K/N`` with K > 0.
 
-    This test loads the committed routed PCB and runs ``fix-drc``
+    This test loads the frozen historical routed PCB and runs ``fix-drc``
     in-process via the CLI module; no router invocation is required.
     The board 03 routed PCB has ~4 clearance violations clustered around
     the USB diff-pair flip-routing corridor; some of those nudges touch
@@ -1008,11 +1040,8 @@ def test_fix_drc_preserves_safe_nudges_on_routed_board(tmp_path) -> None:
     geometry) and some do not.  The granular rollback should preserve
     the latter group.
     """
-    if not ROUTED_PCB_FILE.exists():
-        pytest.skip(
-            f"Board 03 routed PCB not found at {ROUTED_PCB_FILE!s}; "
-            "regenerate via the board's generate/route demo scripts."
-        )
+    historical_routed = BOARD_DIR / "regression-fixture" / "usb_joystick_routed.kicad_pcb"
+    assert historical_routed.is_file(), "Historical routed board03 missing; restore it from git"
 
     output_file = tmp_path / "usb_joystick_repaired.kicad_pcb"
 
@@ -1022,7 +1051,7 @@ def test_fix_drc_preserves_safe_nudges_on_routed_board(tmp_path) -> None:
             "-m",
             "kicad_tools.cli",
             "fix-drc",
-            str(ROUTED_PCB_FILE),
+            str(historical_routed),
             "-o",
             str(output_file),
             "--format",

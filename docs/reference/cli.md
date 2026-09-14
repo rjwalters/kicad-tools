@@ -40,6 +40,7 @@ kct [--help] [--version] <command> [options]
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
 | | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs |
+| | `place-silk-refs` | Move readable reference designators to clear silk/pad/edge collisions |
 | | `fix-footprints` | Fix footprint pad spacing issues |
 | | `repair-clearance` | Repair clearance violations by nudging traces |
 | | `pipeline` | End-to-end repair pipeline for existing PCBs |
@@ -53,6 +54,7 @@ kct [--help] [--version] <command> [options]
 | | `impedance` | Transmission line impedance calculations |
 | | `ipc` | Interact with a running KiCad instance via IPC API (KiCad 9.0+) |
 | | `fleet` | Fleet-wide PCB status and operations |
+| | `readiness` | Run the manufacturing-readiness gates and write hash-bound `output/readiness.json` |
 | | `stitch` | Add via stitching to power planes |
 | | `build` | Build from spec to manufacturable design |
 | | `create-pcb` | Create a PCB from a KiCad schematic |
@@ -436,6 +438,71 @@ See also: [Manufacturing Export → ship-ready check](../guides/manufacturing-ex
 
 ---
 
+### `readiness`
+
+Run the full manufacturing-readiness / tapeout sign-off for one board and write
+the hash-bound `output/readiness.json` evidence the demo gallery validates.
+Implemented in
+[`src/kicad_tools/cli/readiness_cmd.py`](../../src/kicad_tools/cli/readiness_cmd.py).
+
+`kct fleet status` *reads* stored readiness reports; `kct readiness` is the
+command that *produces* one. It orchestrates the engines that already exist —
+`kct check`, `kicad-cli pcb drc --refill-zones`, `kct export` and
+`kicad-cli sch|pcb export pdf` — and is the scripted equivalent of the
+`/kct:manufacturing-readiness` and `/kct:tapeout` skills.
+
+```bash
+kct readiness <board-dir|board.kicad_pcb> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--mfr TIER`, `-m TIER` | Fabrication tier (default: discovered from the board's recipe/manifest; never guessed) |
+| `--assembly` | Full assembly package incl. BOM/CPL procurement identities (default) |
+| `--pcb-only` | Bare-board package; makes no component procurement or assembly claim |
+| `--output DIR`, `-o DIR` | Manufacturing bundle directory (default: `<pcb-dir>/manufacturing/`) |
+| `--sch PATH` | Path to the `.kicad_sch` (auto-detected by default) |
+| `--net-class-map PATH` | Net-class map sidecar (auto-discovered by default) |
+| `--ack-warnings RULES` | Comma-separated `rule_id`s whose assembly-affecting warnings are explicitly accepted |
+| `--include-tht` | Accept through-hole parts in the CPL (excluded by default) |
+| `--no-archive` | Skip building `output/manufacturing.zip` |
+| `--hv-net-class NAME` | Net-class name identifying high-voltage nets (default: `HV`) |
+| `--hv-requirement TEXT` | Isolation requirement an HV board was gated against (required when HV nets exist) |
+| `--fill-tolerance MM2` | Per-layer filled-copper tolerance for the saved-vs-refilled equivalence check |
+| `--format {text,json}` | Output format (default: `text`) |
+
+Gate order is load-bearing: the copper pours are refilled and **saved to the
+canonical PCB before both** the native cross-gate and the export, so the bytes
+the checkers judged are the bytes the Gerbers come from. Every gate is judged
+on the engine's actual findings, never on a subprocess exit code — `kicad-cli
+pcb drc` exits 0 with error-severity violations, and a "ran" flag is not a pass.
+
+`ready` is emitted only when every applicable gate passed; otherwise the report
+is `blocked` (a gate failed) or `unverified` (a gate could not run), always with
+named `blockers`. **The command exits non-zero for anything other than `ready`
+and has no flag that produces `ready` on a partial run** — a gate that cannot
+run is a blocker, not a waiver.
+
+**Examples:**
+```bash
+# Full assembly sign-off at the tier recorded in the board's own recipe
+kct readiness boards/00-demo
+
+# Bare-board order — no BOM/CPL, no procurement claim
+kct readiness boards/04-demo --pcb-only --mfr jlcpcb
+
+# CI use: machine output, non-zero exit unless the verdict is `ready`
+kct readiness boards/01-demo --format json > readiness.json
+
+# Accept reviewed silkscreen warnings as an explicit, recorded risk
+kct readiness boards/05-demo --ack-warnings silk_over_copper,silk_overlap
+```
+
+See also: [`docs/board-json-schema.md`](../board-json-schema.md) for the
+`readiness.json` schema and the engine-fingerprint fields this command records.
+
+---
+
 ### `stitch`
 
 Add via stitching to power-plane nets. Implemented in
@@ -734,10 +801,169 @@ Common flags (the full surface lives in `kct route --help`):
 | `--manufacturer NAME` (`--mfr`) | Manufacturer profile for DRC and adaptive rules |
 | `--layers {auto,2,4,4-sig,4-all,6}` | Layer stack configuration (default: `auto`) |
 | `--min-completion FLOAT` | Minimum completion ratio for success (default: 0.95) |
-| `--timeout SEC` / `--per-net-timeout SEC` | Global / per-net wall-clock caps |
+| `--timeout SEC` / `--per-net-timeout SEC` | Hard total invocation / per-net wall-clock caps |
+| `--search-timeout SEC` | Per-search-stage allocation inside `--timeout` (default: `--timeout`) |
 | `--seed N` | Seed Python `random` for reproducible routing (#2589) |
 | `--auto-fix` / `--auto-fix-passes N` | Run `kct fix-drc` after routing on DRC failure |
 | `--skip-drc` | Skip post-route DRC validation |
+
+#### Declared branch current paths (`--current-paths`)
+
+A net's copper is not always electrically homogeneous. `/AC_NEUTRAL` can
+carry a 15 A force trunk *and* a zero-cross / INA181 sense tap; a
+four-terminal shunt's force and sense pads sit on the **same** net. A single
+net-class `target_ampacity` / `trace_width` cannot represent both: sized for
+the trunk it obstructs the sense-pad escape, sized for the tap it declares
+the power path safe when it is not.
+
+`--current-paths` accepts a JSON sidecar declaring each physical branch by
+stable `RefDes.pad` endpoints, with its own continuous current and
+reinforcement eligibility (issue #4980):
+
+```json
+{
+  "paths": [
+    {"name": "AC_NEUTRAL_TRUNK", "net": "/AC_NEUTRAL",
+     "source": {"ref": "J1", "pad": "2"}, "sink": {"ref": "J2", "pad": "2"},
+     "continuous_a": 15.0, "reinforcement_eligible": true},
+    {"name": "AC_NEUTRAL_ZC_SENSE", "net": "/AC_NEUTRAL",
+     "source": {"ref": "J1", "pad": "2"}, "sink": {"ref": "U3", "pad": "3"},
+     "continuous_a": 0.01, "reinforcement_eligible": false}
+  ]
+}
+```
+
+##### Pulsed and duty-cycled branches
+
+A branch that carries a repetitive pulse (switching ripple, capacitor
+inrush, a strobed LED) can declare `pulsed_a` with an optional `duty_cycle`
+and `pulse_duration_s`:
+
+```json
+{"name": "VOUT_INRUSH", "net": "/VOUT_PRE",
+ "source": {"ref": "L1", "pad": "2"}, "sink": {"ref": "RSH1", "pad": "1"},
+ "continuous_a": 3.0, "pulsed_a": 18.0, "duty_cycle": 0.08,
+ "pulse_duration_s": 0.002, "reinforcement_eligible": true}
+```
+
+Two independent checks follow, because a pulse can destroy copper two ways:
+
+| Field | What it buys |
+|-------|--------------|
+| `pulsed_a` alone | The peak is sized **as if continuous** (conservative). An `info` finding says so, so a pessimistic width requirement is never mistaken for a duty-cycle-aware one. |
+| `+ duty_cycle` | The IPC-2221 width check runs at the waveform's **RMS** current (`sqrt(D*peak² + (1-D)*continuous²)`) — the correct equivalent for I² heating. 18 A at 8 % duty over 3 A heats like 5.85 A, not 18 A and not its 4.2 A average. |
+| `+ pulse_duration_s` | Each segment is additionally checked against its **Onderdonk adiabatic fusing current**. A trace comfortable on RMS heating can still be melted by one inrush pulse; that is an `error`. Without this field the fusing mode is reported as explicitly **unchecked** (a `warning`), never silently passed. |
+
+Declaring `duty_cycle` or `pulse_duration_s` without `pulsed_a`, or a
+`pulsed_a` below `continuous_a`, is rejected when the sidecar loads — a
+half-declared waveform reads like modeled intent while leaving the checker
+to guess. Omitting all three leaves a purely continuous declaration whose
+results are unchanged.
+
+| Option | Description |
+|--------|-------------|
+| `--current-paths PATH` | Declared branch current-path sidecar. Auto-discovered next to the board as `<board-stem>.current_paths.json` or `current_paths.json` (board dir, then `output/`, then `../output/`) when omitted. |
+| `--no-current-paths` | Suppress auto-discovery; `path_ampacity` stays inactive. Cannot be combined with `--current-paths`. |
+
+The same flags exist on `kct check` and `kct pcb reinforce`, so one sidecar
+drives all three consumers:
+
+- **`kct route`** runs the `path_ampacity` rule in the post-route DRC against
+  each declared branch's *own* current, then re-emits the declarations as
+  `current_paths.json` next to the routed board — so a later bare `kct check`
+  auto-discovers identical intent instead of silently passing.
+- **`kct check`** is the independent final-copper audit: it re-derives each
+  branch from the finished copper, so it is authoritative regardless of which
+  edges the router chose.
+- **`kct pcb reinforce --current-paths`** treats the declarations as an
+  *allow-list*: only copper covered by a resolved, reinforcement-eligible path
+  may be anchored, so a Kelvin sense tap is never bridged to its force path.
+
+Resolution **fails closed**. A declared pad that was moved, removed, or no
+longer resolves onto its declared net is reported as `unresolved`, and a net
+whose copper contains a loop reachable from the endpoints is reported as
+`ambiguous` — never as a silent fallback to whole-net ampacity. Copper on a
+declared net that no path covers is reported as uncovered rather than waived.
+Endpoints bind by the pad's real copper extent, not by an exact pad-center
+hit, so a trace terminating anywhere inside the pad attaches (and several
+stubs landing on one pad are shorted by it, as they are in reality).
+
+A same-net routed **arc** or a non-keepout same-net **zone/pour** is real
+copper the declared-path graph never builds from `Segment` tracks alone —
+either can form a parallel return path around a declared branch (a plane is
+the archetypal case), so a declared path on such a net resolves `ambiguous`
+too, naming the unmodeled copper in the reason (endpoint-resolution failures
+still take precedence and stay `unresolved`). `kct pcb current-paths-audit`
+surfaces the same inventory as an `unmodeled` block (kind, layer,
+representative location per object) in both JSON and text output, and
+`path_ampacity` emits a `warning` per object found — separate from the
+`ambiguous` status's own `error`. Keepout rule areas carry no copper and are
+excluded.
+
+A bounded endpoint via array is recognized only when parallel straight stubs
+land on the actual pad, real outer-layer barrels join one straight receiving
+trunk, and each exit leads through acyclic copper to real pad terminals.
+Dangling branches, unmodeled local contacts, and other cycles remain ambiguous.
+Stub length and via spread must fit within the endpoint pad diagonal. Every
+original array segment remains in the evidence and is checked at the full
+declared current; this does not assume equal current sharing or qualify the
+array by summed widths. Unsupported same-net arcs and custom pad stacks prevent
+array recognition.
+
+Route-time width selection itself stays governed by the net-class
+`trace_width` (the same declarative/checked-post-route split
+`NetClassRouting.target_ampacity` already uses); see the
+`kicad_tools.router.current_paths` module docstring for that decision's
+rationale. `kct pcb current-paths-audit` runs the audit standalone.
+
+A positive `--timeout` supervises the whole route in a separate process, including
+conflict processing, Python fallback, conversion, optimization, nudge, native
+validation and output work. Its monotonic deadline is also passed to the existing
+routing budget helpers. Zero or a negative value retains unbounded behavior.
+Both `kct route` and `python -m kicad_tools.cli.route_cmd` use this supervision.
+
+#### Staging search budgets inside the total deadline (`--search-timeout`, #5266)
+
+Because `--timeout` is a **hard total**, it cannot also serve as the per-stage
+budget: a recipe that wants "600 s for the initial search, then two 600 s
+placement-delta probes, then postprocessing" used to have no way to say so —
+raising `--timeout` just let the initial pass swallow the enlarged budget, and
+leaving it at 600 s meant the supervisor terminated the run during the first
+probe.
+
+`--search-timeout SECONDS` is the separate, explicitly-configurable allocation
+for an **individual** search stage: the initial routing pass, each layer/rule
+escalation attempt, and each placement-feedback iteration are capped at this
+value. `--timeout` keeps hard-capping the invocation as a whole, and every
+stage is still clamped to whatever the total deadline has left — a
+`--search-timeout` (or a `--placement-delta-feedback-timeout` probe allocation)
+larger than the remaining total can never escape it. Size the total as
+`search stage + probes x probe allocation + postprocessing reserve`; see
+`boards/07-matchgroup-test/generate_design.py` (`_route_total_timeout_s`) for a
+worked example.
+
+When the deadline does fire, `<output>.timeout.json` names the stage that was
+running. Best-so-far checkpoint writes restore the stage they interrupted, so a
+mid-search timeout is reported as `routing` (or `placement-delta-feedback`)
+rather than a stale `serialization` left behind by the last checkpoint.
+
+On timeout, routing stops and up to **five additional seconds** are allowed to
+serialize a raw `<output>_partial.kicad_pcb`. The process group is then terminated
+and the worker reaped, even if native code ignores the graceful request. Exit
+status is **124**, and `<output>.timeout.json` records `status: partial`, the last
+stage, the interrupted Python function when available, and whether a snapshot
+finished. A stalled native call or slow serialization may leave **no snapshot**;
+this is reported explicitly. Partial snapshots are atomically published and have
+not passed final cleanup/DRC, so they are not manufacturing-ready.
+
+Timed runs reject aliases between the input (including its project/rule sidecars)
+and every reserved derived output: canonical/partial PCB, temporary saves, timeout
+report, project/rule sidecars and escalation/placement artifacts. Symlinks and
+existing hardlinks are checked before launching. If a canonical output exists
+when timeout occurs (including an older successful result), it is preserved under
+an `_timeout_unverified_` name recorded in the report. It cannot be mistaken for
+this run's canonical output. The input remains untouched. Sidecar generation and
+validation still use the normal route pipeline; supervision does not bypass them.
 
 #### Targeted completion mode (`--complete`)
 
@@ -784,7 +1010,7 @@ footprints are auto-anchored, and the applied deltas are written to
 |--------|-------------|
 | `--placement-delta-feedback` / `--no-placement-delta-feedback` | Enable / explicitly disable the loop (default: disabled) |
 | `--placement-delta-feedback-budget N` | Maximum apply/keep-or-revert iterations (default: 3) |
-| `--placement-delta-feedback-timeout SECONDS` | Per-iteration wall-clock budget for the loop's re-routes; survives an already-exhausted `--timeout`. Default: share whatever remains of `--timeout`. |
+| `--placement-delta-feedback-timeout SECONDS` | Per-iteration wall-clock budget for the loop's re-routes. Independent of the per-stage `--search-timeout` (an exhausted initial search stage no longer starves the probes), but clamped to — never an escape from — the hard total `--timeout`. Default: share whatever remains of `--timeout`. |
 
 #### Feasibility / coupling flags (v0.15.0, all default off)
 
@@ -1430,3 +1656,26 @@ LCSC column (#4116); pass `--no-auto-lcsc` to export without enrichment.
 `kct mfr apply-rules` writes a sibling `.kicad_pro` (rules + Default netclass)
 so `kicad-cli pcb drc` uses the applied constraints instead of factory
 defaults (#4109).
+
+See [KiCad lock-marker advisories](kicad-lock-policy.md) for the covered write
+paths and `KCT_KICAD_LOCK_POLICY=warn|error|ignore` configuration.
+
+
+### Reference placement safety
+
+`kct place-silk-refs board.kicad_pcb --dry-run --render review.svg` previews
+reference moves without writing the board. Text envelopes must fit inside closed
+polygonal board material, outside cutouts and component courtyards, with the
+requested clearances. Line, rectangle, and polygon Edge.Cuts are supported;
+missing, malformed, curved, or footprint-local outlines produce explicit
+unplaceable results and leave those references unchanged. The SVG uses approximate
+text envelopes; review it and use native DRC before relying on the placement.
+
+Footprint references must be unique, including hidden references. Duplicate
+references are rejected before planning; assign unique references first.
+
+Search spacing must be finite and positive, distances finite and nonnegative,
+and the search is limited to 4096 rings. An explicit `--output` is written even
+when no reference needs to move. `--verify-drc` prints the native result (also
+included in JSON) and returns nonzero for remaining silk findings, unavailable
+KiCad, or failed verification. It runs after applying the move plan.

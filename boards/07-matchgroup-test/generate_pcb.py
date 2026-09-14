@@ -769,7 +769,9 @@ def generate_pcb(*, mipi_source_rotation: float = 0) -> str:
 
 def main() -> int:
     """Generate the PCB file."""
-    output_file = sys.argv[1] if len(sys.argv) > 1 else "output/matchgroup_test.kicad_pcb"
+    output_file = (
+        sys.argv[1] if len(sys.argv) > 1 else "regression-output/matchgroup_test.kicad_pcb"
+    )
     output_path = Path(output_file)
     if not output_path.is_absolute():
         output_path = Path(__file__).parent / output_file

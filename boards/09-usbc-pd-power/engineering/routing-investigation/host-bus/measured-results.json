@@ -1,0 +1,91 @@
+{
+  "environment": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "python": "3.12.13",
+    "kicad": "10.0.6"
+  },
+  "cases": [
+    {
+      "grid_mm": 0.1,
+      "router_returncode": 1,
+      "elapsed_seconds": 40.69055683282204,
+      "native_validation": {
+        "status": "failed",
+        "returncode": 0,
+        "violations": 0,
+        "opens": 9
+      },
+      "nets": {
+        "SCL": {
+          "status": "unrouted",
+          "total_pads": 4,
+          "largest_component_pads": 1
+        },
+        "SDA": {
+          "status": "unrouted",
+          "total_pads": 4,
+          "largest_component_pads": 1
+        },
+        "MON_ALERT": {
+          "status": "partial",
+          "total_pads": 3,
+          "largest_component_pads": 2
+        },
+        "PD_ALERT": {
+          "status": "unrouted",
+          "total_pads": 3,
+          "largest_component_pads": 1
+        }
+      },
+      "targets_preserved": true,
+      "existing_copper_preserved": true,
+      "placement_preserved": true,
+      "target_copper_outer_only": true,
+      "success": false,
+      "command_file": "numbered-command.json"
+    },
+    {
+      "grid_mm": 0.05,
+      "router_returncode": 1,
+      "elapsed_seconds": 82.42769845807925,
+      "native_validation": {
+        "status": "failed",
+        "returncode": 0,
+        "violations": 0,
+        "opens": 10
+      },
+      "nets": {
+        "SCL": {
+          "status": "unrouted",
+          "total_pads": 4,
+          "largest_component_pads": 1
+        },
+        "SDA": {
+          "status": "unrouted",
+          "total_pads": 4,
+          "largest_component_pads": 1
+        },
+        "MON_ALERT": {
+          "status": "unrouted",
+          "total_pads": 3,
+          "largest_component_pads": 1
+        },
+        "PD_ALERT": {
+          "status": "unrouted",
+          "total_pads": 3,
+          "largest_component_pads": 1
+        }
+      },
+      "targets_preserved": true,
+      "existing_copper_preserved": true,
+      "placement_preserved": true,
+      "target_copper_outer_only": true,
+      "success": false,
+      "command_file": "fine-command.json"
+    }
+  ],
+  "source_sha256": "0320aa5c8704ed3435b1fec23215ed45a37ab70c0562163f02467f7584b2a97e",
+  "source_revision": "8801f88c7111190aebbb61f032a334ac8c580411",
+  "measured_on": "2026-09-10",
+  "notes": "Concurrent sweep host; diagnostic runtimes, not a performance threshold. Native output inspected again with final preservation checks. No successful autoroute claimed."
+}

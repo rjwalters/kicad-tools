@@ -8,6 +8,7 @@ routing failures.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import math
@@ -1307,8 +1308,9 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
     and Phase-1's translator
     (:func:`~kicad_tools.router.placement_delta.deltas_from_result`).  That lets
     it execute the ``mirror`` (layer-flip the reversed facing QFN to un-reverse
-    its pad column, #4560) and ``rotate_180`` moves the classifier recommends --
-    moves the blocker-geometry loop cannot express.
+    its pad column, #4560), ``rotate_180``, and ``rotate_align`` (a bounded
+    +/-90 endpoint-orientation quarter turn, #4968) moves the classifier-driven
+    proposer emits -- moves the blocker-geometry loop cannot express.
 
     Relationship to the file-based, subprocess-driven
     :mod:`kicad_tools.router.placement_nudge` (#3865): both classify stuck nets
@@ -1433,7 +1435,10 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         if view is None:
             return []
         result = classify_stuck_nets_from_pcb(view, excluded_nets=self.excluded_nets)
-        return deltas_from_result(view, result)
+        # ``fixed_refs`` is forwarded so the #4968 endpoint-orientation search
+        # never spends a candidate slot on a part the caller anchored -- the
+        # loop would only skip it again at selection time.
+        return deltas_from_result(view, result, fixed_refs=self.fixed_refs)
 
     def _strategy_from_delta(self, delta: PlacementDelta) -> ResolutionStrategy | None:
         """Build a recovery ``ResolutionStrategy`` for an applyable delta.
@@ -1460,7 +1465,14 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 affected_components=[delta.target_ref],
                 affected_nets=[delta.net_name],
             )
-        if delta.kind == "rotate_180":
+        if delta.kind in ("rotate_180", "rotate_align"):
+            # Both rotation kinds go through the SAME applicator primitive
+            # (``StrategyApplicator._apply_rotate_component``), which bumps
+            # ``fp.rotation`` *and* every pad's ABSOLUTE ``(at x y ANGLE)``
+            # third token.  Issue #4968 deliberately reuses it rather than
+            # adding a second rotation path: a fresh one would be a third
+            # caller of the stale-pad-angle defect class (#3902 -> #4518 ->
+            # #4966) the moment it forgot the pad loop.
             return ResolutionStrategy(
                 type=StrategyType.ROTATE_COMPONENT,
                 difficulty=Difficulty.MEDIUM,
@@ -1515,6 +1527,14 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             if delta.target_ref in self.fixed_refs:
                 _skip(delta, f"target {delta.target_ref} is anchored (fixed_refs)")
                 continue
+            if delta.kind == "rotate_align" and self._target_is_locked(delta.target_ref):
+                # Defence in depth (#4968): the proposer already declines
+                # locked parts, but a ``rotate_align`` delta replayed from a
+                # committed ``*_placement_delta.json`` artifact carries no such
+                # guarantee -- the board may have been locked since.  An
+                # explicit board-level lock outranks a stale proposal.
+                _skip(delta, f"target {delta.target_ref} is locked on the board")
+                continue
             strategy = self._strategy_from_delta(delta)
             if strategy is None:
                 _skip(delta, f"no applyable strategy for kind={delta.kind!r}")
@@ -1533,6 +1553,90 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 continue
             return delta, strategy
         return None
+
+    def _target_is_locked(self, ref: str) -> bool:
+        """Whether the board marks ``ref`` as ``(locked yes)`` (issue #4968)."""
+        fp = self._find_footprint(ref)
+        return bool(getattr(fp, "locked", False)) if fp is not None else False
+
+    # --- zone-carried connectivity revalidation (issue #4968) ---------------
+
+    def _zone_connected_pad_count(self, ref: str) -> int | None:
+        """Pads of ``ref`` still landing inside a same-net copper pour.
+
+        Rotating a footprint moves power and mounting pads that are carried by
+        a **zone**, not by a routed trace, so the router's own reach count is
+        blind to breaking them: the router was told to skip those nets
+        (``excluded_nets``) precisely because copper fill serves them.  A
+        quarter turn that swings a mounting pad off its GND pour therefore
+        looks like a pure win to the reach test while silently disconnecting
+        the plane.
+
+        This counts, against the CURRENT fill geometry, how many of ``ref``'s
+        pads sit inside a filled polygon (falling back to the zone boundary for
+        an unfilled zone) of their own net on a compatible layer.  Comparing
+        the count before and after a rotation is the loop's in-process
+        revalidation; the authoritative refill remains the pipeline's
+        ``kicad-cli`` stage, which re-pours the zones around the new placement
+        before native DRC judges the board.  Returns ``None`` when the board
+        carries no copper zones at all (nothing to revalidate -> guard off).
+        """
+        if self.pcb is None:
+            return None
+        zones = [
+            z for z in getattr(self.pcb, "zones", []) or [] if getattr(z, "keepout", None) is None
+        ]
+        if not zones:
+            return None
+
+        from kicad_tools.router.mesh.geometry import point_in_polygon
+
+        fp = self._find_footprint(ref)
+        if fp is None:
+            return 0
+        fx, fy = fp.position[0], fp.position[1]
+        ang = math.radians(-float(getattr(fp, "rotation", 0.0) or 0.0))
+        cos_a, sin_a = math.cos(ang), math.sin(ang)
+
+        count = 0
+        for pad in getattr(fp, "pads", []) or []:
+            net_number = getattr(pad, "net_number", 0)
+            if not net_number:
+                continue
+            px, py = getattr(pad, "position", (0.0, 0.0))
+            point = (fx + px * cos_a - py * sin_a, fy + px * sin_a + py * cos_a)
+            pad_layers = [str(layer) for layer in (getattr(pad, "layers", []) or [])]
+            for zone in zones:
+                if getattr(zone, "net_number", 0) != net_number:
+                    continue
+                if not self._pad_layer_matches_zone(pad_layers, zone):
+                    continue
+                polys = list(getattr(zone, "filled_polygons", []) or []) or (
+                    [zone.polygon] if getattr(zone, "polygon", None) else []
+                )
+                if any(poly and point_in_polygon(point, list(poly)) for poly in polys):
+                    count += 1
+                    break
+        return count
+
+    @staticmethod
+    def _pad_layer_matches_zone(pad_layers: list[str], zone: Any) -> bool:
+        """Whether a pad's layer set overlaps ``zone``'s copper layer(s)."""
+        if not pad_layers:
+            return True
+        zone_layers = [str(layer) for layer in (getattr(zone, "layers", []) or [])]
+        if not zone_layers:
+            zone_layers = [str(getattr(zone, "layer", ""))]
+        for pad_layer in pad_layers:
+            # Through-hole pads spell their span as ``*.Cu`` (all copper).
+            if pad_layer in ("*.Cu", "*.Mask", "*"):
+                return True
+            for zone_layer in zone_layers:
+                if not zone_layer:
+                    continue
+                if zone_layer in ("*.Cu", "F&B.Cu") or pad_layer == zone_layer:
+                    return True
+        return False
 
     # --- router-pad synchronization ----------------------------------------
 
@@ -1553,6 +1657,30 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         """
         return [(pad, pad.x, pad.y, getattr(pad, "layer", None)) for pad in self._router_pads()]
 
+    def _invalidate_router_pad_geometry(self) -> None:
+        """Drop pathfinder caches derived from Pad geometry after an in-place edit.
+
+        PR #5330 review: :meth:`_apply_delta_to_router_pads` and
+        :meth:`_restore_router_pads` mutate ``Pad.x``/``Pad.y``/``layer`` on
+        the SAME ``Pad`` objects the pathfinder holds, without changing the
+        pad count, while ``run()`` reuses one ``Autorouter`` (and therefore
+        one pathfinder ``Router``) across every iteration.  Any pathfinder
+        cache keyed on pad geometry -- notably the vectorized
+        non-through-hole pad arrays behind ``_check_via_placement_cached``
+        -- is stale the instant we return, so tell the pathfinder
+        explicitly rather than relying on a subsequent route call to clear
+        it.  Best-effort by design: pathfinder backends without these hooks
+        (the C++ pathfinder, test doubles) simply have nothing to drop.
+        """
+        pathfinder = getattr(self.router, "router", None)
+        if pathfinder is None:
+            return
+        for hook in ("invalidate_pad_geometry_cache", "clear_via_cache"):
+            fn = getattr(pathfinder, hook, None)
+            if callable(fn):
+                with contextlib.suppress(Exception):  # pragma: no cover - defensive
+                    fn()
+
     def _restore_router_pads(self, snapshot: list[tuple[Any, float, float, Any]]) -> None:
         """Restore router Pad state captured by :meth:`_snapshot_router_pads`."""
         for pad, x, y, layer in snapshot:
@@ -1560,6 +1688,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             pad.y = y
             if layer is not None:
                 pad.layer = layer
+        self._invalidate_router_pad_geometry()
 
     def _clearance_violation_count(self) -> int | None:
         """Router-level clearance-violation count, or ``None`` when unavailable.
@@ -1591,46 +1720,79 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
           footprint origin (a 180-degree rotation about the origin is exactly a
           reflection through it), matching what the PCB-frame classifier sees
           after ``fp.rotation += 180``;
+        * ``rotate_align`` (#4968) -> the general form of the same thing: rotate
+          every pad of the target ref about the footprint anchor by
+          ``rotation_delta`` (always a bounded +/-90 quarter turn from the
+          endpoint-orientation proposer).  Board side and pad->net binding are
+          untouched -- a rotation moves pad *positions* only;
         * ``mirror`` (#4560) -> reflect every pad of the target ref across the
           VERTICAL axis through the footprint anchor (``x -> 2*cx - x``, ``y``
           unchanged -- the absolute-frame image of KiCad's left/right flip,
           pinned by the ``tests/fixtures/mirror_flip`` golden) and swap SMD pad
           routing layers ``F_CU <-> B_CU``.  Through-hole pads mirror position
           only (they span all layers).  Inner-layer SMD pads do not exist.
+
+        Every mutation here is IN PLACE on the pathfinder's own ``Pad``
+        objects and leaves the pad count unchanged, so
+        :meth:`_invalidate_router_pad_geometry` is called on the way out to
+        drop any pathfinder cache derived from that geometry (PR #5330
+        review).
         """
         pads = self._router_pads()
-        if delta.kind == "translate":
-            for pad in pads:
-                if getattr(pad, "ref", "") == delta.target_ref:
-                    pad.x += delta.dx
-                    pad.y += delta.dy
-        elif delta.kind == "rotate_180":
-            fp = self._find_footprint(delta.target_ref)
-            if fp is None:
-                return
-            cx, cy = fp.position[0], fp.position[1]
-            for pad in pads:
-                if getattr(pad, "ref", "") == delta.target_ref:
-                    pad.x = 2.0 * cx - pad.x
-                    pad.y = 2.0 * cy - pad.y
-        elif delta.kind == "mirror":
-            from kicad_tools.router.layers import Layer
+        try:
+            if delta.kind == "translate":
+                for pad in pads:
+                    if getattr(pad, "ref", "") == delta.target_ref:
+                        pad.x += delta.dx
+                        pad.y += delta.dy
+            elif delta.kind == "rotate_180":
+                fp = self._find_footprint(delta.target_ref)
+                if fp is None:
+                    return
+                cx, cy = fp.position[0], fp.position[1]
+                for pad in pads:
+                    if getattr(pad, "ref", "") == delta.target_ref:
+                        pad.x = 2.0 * cx - pad.x
+                        pad.y = 2.0 * cy - pad.y
+            elif delta.kind == "rotate_align":
+                fp = self._find_footprint(delta.target_ref)
+                if fp is None:
+                    return
+                cx, cy = fp.position[0], fp.position[1]
+                # KiCad negates the footprint orientation relative to standard
+                # CCW math (#3739), so a ``fp.rotation += d`` maps each pad's
+                # offset through ``R(-d)`` -- the same transform
+                # ``stuck_classifier._iter_board_pads`` and the #4968 proposer
+                # use.  At d == 180 this reduces exactly to the point
+                # reflection the ``rotate_180`` branch above performs.
+                ang = math.radians(-delta.rotation_delta)
+                cos_a, sin_a = math.cos(ang), math.sin(ang)
+                for pad in pads:
+                    if getattr(pad, "ref", "") != delta.target_ref:
+                        continue
+                    dx, dy = pad.x - cx, pad.y - cy
+                    pad.x = cx + dx * cos_a - dy * sin_a
+                    pad.y = cy + dx * sin_a + dy * cos_a
+            elif delta.kind == "mirror":
+                from kicad_tools.router.layers import Layer
 
-            fp = self._find_footprint(delta.target_ref)
-            if fp is None:
-                return
-            cx = fp.position[0]
-            for pad in pads:
-                if getattr(pad, "ref", "") != delta.target_ref:
-                    continue
-                pad.x = 2.0 * cx - pad.x
-                if getattr(pad, "through_hole", False):
-                    continue
-                layer = getattr(pad, "layer", None)
-                if layer == Layer.F_CU:
-                    pad.layer = Layer.B_CU
-                elif layer == Layer.B_CU:
-                    pad.layer = Layer.F_CU
+                fp = self._find_footprint(delta.target_ref)
+                if fp is None:
+                    return
+                cx = fp.position[0]
+                for pad in pads:
+                    if getattr(pad, "ref", "") != delta.target_ref:
+                        continue
+                    pad.x = 2.0 * cx - pad.x
+                    if getattr(pad, "through_hole", False):
+                        continue
+                    layer = getattr(pad, "layer", None)
+                    if layer == Layer.F_CU:
+                        pad.layer = Layer.B_CU
+                    elif layer == Layer.B_CU:
+                        pad.layer = Layer.F_CU
+        finally:
+            self._invalidate_router_pad_geometry()
 
     # --- driver ------------------------------------------------------------
 
@@ -1765,6 +1927,16 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             pre_routes = copy.deepcopy(list(self.router.routes))
             pre_count = _routed_count()
             pre_violations = self._clearance_violation_count()
+            # Issue #4968: a rotation swings power/mounting pads that are
+            # carried by copper pour rather than by routed traces, so the
+            # reach count cannot see them break.  Measured only for the
+            # rotation kinds -- a translate is already bounded to ~2 mm and
+            # the other kinds keep pad geometry inside the same pour.
+            pre_zone_pads = (
+                self._zone_connected_pad_count(delta.target_ref)
+                if delta.kind in ("rotate_180", "rotate_align")
+                else None
+            )
 
             # Record the pre-move position (once) for the placement diff.
             self._snapshot_positions([delta.target_ref])
@@ -1794,8 +1966,18 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 and post_violations is not None
                 and post_violations > pre_violations
             )
+            post_zone_pads = (
+                self._zone_connected_pad_count(delta.target_ref)
+                if pre_zone_pads is not None
+                else None
+            )
+            regressed_zone_pads = (
+                pre_zone_pads is not None
+                and post_zone_pads is not None
+                and post_zone_pads < pre_zone_pads
+            )
 
-            if new_count > pre_count and not regressed_drc:
+            if new_count > pre_count and not regressed_drc and not regressed_zone_pads:
                 applied.append(delta)
                 if self.verbose:
                     print(f"  Kept: routed {pre_count} -> {new_count} (strict improvement)")
@@ -1830,11 +2012,15 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 self._restore_placement(pre_placement)
                 self._restore_router_pads(pre_pads)
                 self._rebuild_grid_for_routes(pre_routes)
-                reason = (
-                    f"clearance violations {pre_violations} -> {post_violations}"
-                    if regressed_drc
-                    else "no strict routed-net increase"
-                )
+                if regressed_drc:
+                    reason = f"clearance violations {pre_violations} -> {post_violations}"
+                elif regressed_zone_pads:
+                    reason = (
+                        f"zone-carried pad connectivity {pre_zone_pads} -> {post_zone_pads} "
+                        f"on {delta.target_ref}"
+                    )
+                else:
+                    reason = "no strict routed-net increase"
                 reverted.append(delta)
                 reverted_counts.append((pre_count, new_count))
                 reverted_reasons.append(reason)

@@ -33,6 +33,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools net-status <pcb>       - Report net connectivity status
     kicad-tools pipeline <pcb>          - End-to-end repair pipeline for existing PCBs
     kicad-tools create-pcb <schematic>  - Create PCB from schematic
+    kicad-tools readiness <board>      - Manufacturing-readiness sign-off + readiness.json
     kicad-tools init <project>         - Initialize project with manufacturer rules
     kicad-tools run <script>           - Run Python script with kicad-tools interpreter
     kicad-tools bench external         - Zero-touch DeepPCB-comparable board benchmarks
@@ -82,6 +83,7 @@ from .commands import (
     run_pcb_command,
     run_pipeline_command,
     run_placement_command,
+    run_readiness_command,
     run_reason_command,
     run_route_auto_command,
     run_route_command,
@@ -365,6 +367,11 @@ def _dispatch_command(args) -> int:
 
         return run_fix_silkscreen_command(args)
 
+    elif args.command == "place-silk-refs":
+        from .commands import run_place_silk_refs_command
+
+        return run_place_silk_refs_command(args)
+
     elif args.command == "repair-clearance":
         from .commands import run_repair_clearance_command
 
@@ -415,6 +422,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "board-metrics":
         return run_board_metrics_command(args)
+
+    elif args.command == "readiness":
+        return run_readiness_command(args)
 
     elif args.command == "net-status":
         from .net_status_cmd import main as net_status_cmd

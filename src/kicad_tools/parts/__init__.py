@@ -71,13 +71,16 @@ from .jlcpcb_api import (
     JLCAPIError,
     JLCAuthError,
     JLCCredentials,
+    JLCIncompleteResponseError,
     JLCIPNotWhitelistedError,
     JLCOpenAPIClient,
+    JLCPermissionError,
     JLCQuotaError,
 )
-from .lcsc import LCSCClient, LCSCForbiddenError, RateLimiter
+from .lcsc import LCSCClient, LCSCForbiddenError, LCSCUnavailableError, RateLimiter
 from .models import (
     BOMAvailability,
+    LookupResult,
     PackageType,
     Part,
     PartAvailability,
@@ -90,6 +93,8 @@ __all__ = [
     # Client
     "LCSCClient",
     "LCSCForbiddenError",
+    "LCSCUnavailableError",
+    "LookupResult",
     "RateLimiter",
     # Importer
     "PartImporter",
@@ -110,7 +115,9 @@ __all__ = [
     "JLCAPIError",
     "JLCAuthError",
     "JLCIPNotWhitelistedError",
+    "JLCPermissionError",
     "JLCQuotaError",
+    "JLCIncompleteResponseError",
     # Composition
     "ComposedPart",
     "ComposedPartStore",

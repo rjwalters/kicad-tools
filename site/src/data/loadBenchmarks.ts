@@ -62,6 +62,13 @@ export function benchmarksResultsDir(): string {
 /**
  * Validate a parsed JSON value against the required-field shape of schema v1.
  * Returns the value typed as `BenchmarkReport` when valid, `null` otherwise.
+ *
+ * `route_outcome` / `pre_route_completion` / `newly_routed_connections`
+ * (issue #5280) are deliberately NOT in `required` -- they are purely
+ * additive to schema v1, so a report generated before this issue landed
+ * (e.g. the two committed 2026-08-25 records) is still a valid v1 report,
+ * just missing those keys. `benchmarkFormat.ts`'s `fmtOutcome` /
+ * `isLegacyOutcome` treat that absence as unknown, never as success.
  */
 function validateReport(data: unknown, file: string): BenchmarkReport | null {
   if (typeof data !== "object" || data === null) {

@@ -39,7 +39,17 @@ from kicad_tools.analysis.routing_quality import (
     routing_quality_gate_dict,
 )
 from kicad_tools.cli.copper_weight import parse_copper_weight_arg
-from kicad_tools.manufacturers import get_manufacturer_ids, get_profile
+from kicad_tools.manufacturers import (
+    get_manufacturer_ids,
+    get_profile,
+    resolve_pcb_fabrication_overrides,
+)
+from kicad_tools.router.current_paths import (
+    CurrentPathSpec,
+    current_paths_sidecar_candidates,
+    discover_current_paths_sidecar,
+    load_current_path_specs,
+)
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
 from kicad_tools.sync.discover import resolve_target_fab_for_pcb
@@ -861,19 +871,21 @@ def _refill_zones_in_place(pcb_path: Path) -> None:
 
 
 def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
-    """Compare ``output/manufacturing/manifest.json`` mtime against the PCB.
+    """Verify bundle integrity and its archived PCB against current bytes.
 
-    Resolution path (issue #3750):
-
-    * Look for ``<pcb-dir>/manufacturing/manifest.json`` first (recipes
-      that place the routed PCB next to a ``manufacturing/`` peer).
-    * Then ``<pcb-dir>/../manufacturing/manifest.json`` for layouts where
-      the PCB is one level deeper.
-
-    Returns ``NOT RUN`` when neither manifest is present, ``FAILED``
-    (rendered as ``STALE`` in human output) when the routed PCB is newer
-    than the manifest, and ``PASSED`` otherwise.
+    A missing bundle is NOT RUN. Existing bundles must carry SHA-256 hashes
+    and an unambiguous PCB in the hashed kicad_project.zip. Timestamps never
+    establish freshness. Broader check-input provenance (rules, sidecars,
+    schematic and results) remains the independent readiness.json contract.
     """
+    import hashlib
+    import lzma
+    import re
+    import zipfile
+    import zlib
+
+    from kicad_tools.export import verify_manifest
+
     candidates = [
         pcb_path.parent / "manufacturing" / "manifest.json",
         pcb_path.parent.parent / "manufacturing" / "manifest.json",
@@ -891,32 +903,52 @@ def _manifest_subcheck(pcb_path: Path) -> SubCheckResult:
         )
 
     try:
-        pcb_mtime = pcb_path.stat().st_mtime
-        manifest_mtime = manifest_path.stat().st_mtime
-    except OSError as e:
-        return SubCheckResult(
-            status="FAILED",
-            detail=f"failed to stat manifest or PCB: {e}",
-        )
-
-    # Allow a small mtime tolerance so a fresh ``git checkout`` (which
-    # writes files sequentially with sub-microsecond gaps) does not
-    # spuriously flag the manifest as stale: the PCB and manifest are
-    # written within milliseconds of each other by ``kct export``, while
-    # a *real* stale manifest lags by minutes or longer (any rebuild of
-    # the routed PCB that skipped ``kct export`` produces a multi-second
-    # gap).  ``MANIFEST_FRESHNESS_TOLERANCE_S`` carves that gap.
-    MANIFEST_FRESHNESS_TOLERANCE_S = 5.0
-    delta = pcb_mtime - manifest_mtime
-    if delta > MANIFEST_FRESHNESS_TOLERANCE_S:
-        return SubCheckResult(
-            status="FAILED",
-            detail=f"STALE: routed PCB is {delta:.1f}s newer than manifest.json",
-        )
+        manifest = json.loads(manifest_path.read_text())
+        files = manifest.get("files")
+        if not isinstance(files, dict) or "kicad_project.zip" not in files:
+            raise ValueError("missing hash-bound kicad_project.zip")
+        bundle = manifest_path.parent.resolve()
+        for name, info in files.items():
+            path = Path(name)
+            if path.is_absolute() or ".." in path.parts or "\\" in name:
+                raise ValueError(f"unsafe manifest path: {name}")
+            if not (bundle / path).resolve().is_relative_to(bundle):
+                raise ValueError(f"manifest path leaves bundle: {name}")
+            if name == "manifest.json":
+                continue
+            digest = info.get("sha256") if isinstance(info, dict) else None
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError(f"missing or invalid SHA-256: {name}")
+        archive_path = bundle / "kicad_project.zip"
+        if not archive_path.is_file():
+            raise ValueError("missing kicad_project.zip")
+        problems = verify_manifest(manifest_path)
+        if problems:
+            raise ValueError("; ".join(problems))
+        # The exporter stores the selected source PCB at the archive root.
+        # Do not accept a same-basename nested file or a duplicate ZIP member.
+        with zipfile.ZipFile(archive_path) as archive:
+            matches = [n for n in archive.namelist() if Path(n).name == pcb_path.name]
+            if matches != [pcb_path.name]:
+                raise ValueError("project archive must contain one exact source PCB member")
+            archived_digest = hashlib.sha256(archive.read(pcb_path.name)).hexdigest()
+        if archived_digest != hashlib.sha256(pcb_path.read_bytes()).hexdigest():
+            raise ValueError("routed PCB content differs from the manifest-bound project archive")
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        zipfile.BadZipFile,
+        RuntimeError,
+        zlib.error,
+        lzma.LZMAError,
+    ) as e:
+        return SubCheckResult(status="FAILED", detail=f"STALE/unverified: {e}")
 
     return SubCheckResult(
         status="PASSED",
-        detail="manifest.json mtime within tolerance of routed PCB mtime",
+        detail="bundle SHA-256 hashes verified; archived PCB matches current content",
     )
 
 
@@ -1108,7 +1140,9 @@ def print_routing_quality_stanza(metrics: RoutingQualityMetrics) -> None:
 
 
 CHECK_CATEGORIES = [
+    "physical_copper_gap",
     "ampacity",
+    "path_ampacity",
     "clearance",
     "connectivity",
     "connector_access",
@@ -1133,6 +1167,7 @@ CHECK_CATEGORIES = [
     "silkscreen",
     "single_pad_net",
     "solder_mask",
+    "mask_to_copper",
     "via_in_pad",
     "zero_length_segment",
     "zones",
@@ -1214,6 +1249,18 @@ def main(argv: list[str] | None = None) -> int:
         description="Pure Python DRC for PCBs (no kicad-cli required)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
+    )
+    parser.add_argument(
+        "--mask-copper-config",
+        type=Path,
+        help="Explicit process policy, source-bound escape intent and native runtime JSON (kct.mask-copper-request.v1); engages mask_to_copper",
+    )
+    parser.add_argument(
+        "--physical-copper-gap",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Opt-in physical copper slit minimum, independent of net identity (mm)",
     )
     parser.add_argument(
         "pcb",
@@ -1463,6 +1510,34 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--current-paths",
+        dest="current_paths",
+        default=None,
+        help=(
+            "Path to a JSON sidecar declaring branch-specific current-path "
+            "intent (see kicad_tools.router.current_paths.CurrentPathSpec, "
+            "Issue #4980). When supplied, enables the path_ampacity rule to "
+            "check each declared branch (stable RefDes.pad source/sink "
+            "endpoints) against its OWN declared current, independent of "
+            "--net-class-map's whole-net target_ampacity. Auto-discovered "
+            "next to the board when this flag is omitted -- as "
+            "<board-stem>.current_paths.json or current_paths.json, in the "
+            "board dir then output/ then ../output/ (mirrors --net-class-map, "
+            "Issue #5124). Use --no-current-paths to suppress that "
+            "auto-discovery."
+        ),
+    )
+    parser.add_argument(
+        "--no-current-paths",
+        dest="no_current_paths",
+        action="store_true",
+        help=(
+            "Suppress current-paths sidecar auto-discovery, restoring the "
+            "no-sidecar behaviour (path_ampacity stays inactive). Cannot be "
+            "combined with --current-paths."
+        ),
+    )
+    parser.add_argument(
         "--courtyard-waivers",
         dest="courtyard_waivers",
         default=None,
@@ -1594,6 +1669,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    # Issue #5124: --no-current-paths suppresses sidecar auto-discovery.
+    # Pairing it with an explicit --current-paths is a usage error, mirroring
+    # the --net-class-map / --no-net-class-map exclusivity check above.
+    if getattr(args, "no_current_paths", False) and args.current_paths is not None:
+        print(
+            "Error: --no-current-paths cannot be combined with "
+            f"--current-paths {args.current_paths!r}: one disables sidecar "
+            "auto-discovery, the other names a sidecar to load. Pass exactly "
+            "one of them.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Parse and validate filter options
     only_set: set[str] | None = None
     skip_set: set[str] = set()
@@ -1616,6 +1704,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Available: {', '.join(CHECK_CATEGORIES)}", file=sys.stderr)
                 return 1
             skip_set.add(cat)
+
+    if only_set and "physical_copper_gap" in only_set and args.physical_copper_gap is None:
+        print("Error: physical_copper_gap requires --physical-copper-gap MM", file=sys.stderr)
+        return 1
 
     # Load PCB - resolve to absolute path for reliable file access
     # Handles both file paths and directory paths (like kct build)
@@ -1885,6 +1977,60 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
 
+    # Load optional current-paths sidecar (Issue #4980/#5124).  When
+    # supplied, path_ampacity checks each declared branch-specific
+    # current-path against its OWN declared current.  Same
+    # explicit-wins / auto-discover / degrade-gracefully-on-auto-discovered-
+    # malformed-file contract as --net-class-map above.
+    current_path_specs: list[CurrentPathSpec] = []
+    cp_explicit = args.current_paths is not None
+    cp_suppressed = bool(getattr(args, "no_current_paths", False))
+    cp_candidates: list[Path] = []
+    if cp_explicit:
+        cp_path: Path | None = Path(args.current_paths).resolve()
+    elif cp_suppressed:
+        cp_path = None
+    else:
+        cp_candidates = current_paths_sidecar_candidates(pcb_path)
+        cp_path = discover_current_paths_sidecar(pcb_path)
+
+    if cp_path is not None:
+        if not cp_path.exists():
+            # Only reachable via an explicit flag (the auto-probe returns
+            # existing files only).
+            print(f"Error: current-paths file not found: {cp_path}", file=sys.stderr)
+            return 1
+        try:
+            current_path_specs = load_current_path_specs(cp_path)
+        except (OSError, ValueError) as e:
+            if cp_explicit:
+                print(f"Error: parsing current-paths JSON: {e}", file=sys.stderr)
+                return 1
+            print(
+                f"WARNING: ignoring malformed current-paths sidecar {cp_path}: {e}",
+                file=sys.stderr,
+            )
+            current_path_specs = []
+        else:
+            if not cp_explicit:
+                print(
+                    f"[INFO] auto-loaded current-paths sidecar: {cp_path}",
+                    file=sys.stderr,
+                )
+    elif not cp_suppressed and cp_candidates and (only_set is None or "path_ampacity" in only_set):
+        # No sidecar found anywhere probed -- name what was probed so a
+        # user who forgot to place one isn't left guessing (mirrors the
+        # --net-class-map "INACTIVE" warning below).
+        if "path_ampacity" not in skip_set:
+            _probed = "".join(f"\n  {candidate}" for candidate in cp_candidates)
+            print(
+                "WARNING: path_ampacity is INACTIVE without --current-paths "
+                f"and will silently pass. No sidecar was found at any of:{_probed}\n"
+                "Pass one explicitly with --current-paths, or place it at one "
+                "of the paths above, to validate declared branch current paths.",
+                file=sys.stderr,
+            )
+
     # Issue #4321 (Tier 1/2): resolve the loaded net-class-map's user keys
     # onto the board's actual net names *before* handing the map to
     # DRCChecker, mirroring ``route_cmd._apply_net_class_map_sidecar``.
@@ -1995,6 +2141,25 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
 
+    mask_copper_request = None
+    if getattr(args, "mask_copper_config", None):
+        from kicad_tools.validate.mask_copper import MaskCopperRequest
+
+        try:
+            mask_copper_request = MaskCopperRequest.from_file(args.mask_copper_config)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            print(f"Error: invalid mask-to-copper request: {exc}", file=sys.stderr)
+            return 1
+
+    if mask_copper_request is not None and (
+        "mask_to_copper" in skip_set or (only_set is not None and "mask_to_copper" not in only_set)
+    ):
+        print(
+            "Error: explicit mask-copper config conflicts with --only/--skip selection",
+            file=sys.stderr,
+        )
+        return 1
+
     # Create checker with manufacturer rules
     try:
         checker = DRCChecker(
@@ -2017,16 +2182,38 @@ def main(argv: list[str] | None = None) -> int:
             # sidecar the skew rules produce no info findings, so this is a
             # graceful no-op (AC5).
             emit_measurements=True,
+            physical_copper_gap_mm=getattr(args, "physical_copper_gap", None),
             courtyard_waivers=courtyard_waivers,
             # Issue #4673: strict (real-geometry) connectivity is the
             # default; --legacy-connectivity is the explicit opt-out and
             # takes precedence over --strict-connectivity, which is now a
             # compatibility no-op restating the default.
             strict_connectivity=not getattr(args, "legacy_connectivity", False),
+            # Issue #4980/#5124: declared branch-specific current-path
+            # intent (--current-paths sidecar, auto-discovered).
+            current_path_specs=current_path_specs,
+            mask_copper_request=mask_copper_request,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
+
+    # Issue #5006: apply a validated, cited per-board fabrication-floor
+    # override on top of the manufacturer profile's resolved DesignRules --
+    # BEFORE any check runs and BEFORE --emit-drc-constraints below reads
+    # ``checker.design_rules`` -- so Python DRC and any emitted native
+    # sidecars agree on the SAME reviewed floor (e.g. a board whose actual,
+    # cited geometry meets JLC's published 0.45mm pad-hole floor rather than
+    # the profile's conservative 0.5mm default). Auto-discovered only (no
+    # CLI flag): a missing sidecar is a no-op; a malformed or unsafe one
+    # degrades gracefully to the profile default rather than raising, since
+    # that fallback is always safe.
+    checker.design_rules, _fab_override_msg = resolve_pcb_fabrication_overrides(
+        pcb_path, checker.design_rules, manufacturer_id=effective_mfr
+    )
+    if _fab_override_msg is not None:
+        _prefix = "WARNING: " if _fab_override_msg.startswith("ignoring") else "[INFO] "
+        print(_prefix + _fab_override_msg, file=sys.stderr)
 
     # Resolve pad_grid tolerance policy (issue #3061).
     # Precedence: explicit value > strict mode > auto-derive (CLI default).
@@ -2202,7 +2389,11 @@ def main(argv: list[str] | None = None) -> int:
     # PASSED iff 0 errors and (0 warnings under --strict).
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = sum(1 for v in violations if v.is_warning)
-    drc_passed = error_count == 0 and not (warning_count > 0 and args.strict)
+    drc_passed = (
+        error_count == 0
+        and all(a.passed for a in results.mask_copper_assessments)
+        and not (warning_count > 0 and args.strict)
+    )
     drc_sub = SubCheckResult(
         status="PASSED" if drc_passed else "FAILED",
         detail=(
@@ -2224,6 +2415,12 @@ def main(argv: list[str] | None = None) -> int:
             schematic=getattr(args, "schematic", None),
             strict=args.strict,
         )
+
+    if results.mask_copper_assessments and args.format != "json":
+        for assessment in results.mask_copper_assessments:
+            print(f"Mask-to-copper: {assessment.coverage}; passed={assessment.passed}")
+            for reason in assessment.reasons:
+                print(f"  {reason}")
 
     # Output results
     if args.format == "json":
@@ -2280,6 +2477,9 @@ def main(argv: list[str] | None = None) -> int:
             net_class_map=net_class_map,
             emit_both=getattr(args, "emit_drc_constraints", False),
         )
+
+    if any(not a.passed for a in results.mask_copper_assessments):
+        return 2
 
     # Determine exit code
     # Exit 2 = check ran successfully but found issues (errors, or warnings+strict)
@@ -2503,7 +2703,9 @@ def run_selected_checks(
     # Issue #3046.
     check_methods = {
         "ampacity": checker.check_ampacity,
+        "path_ampacity": checker.check_path_ampacity,
         "clearance": checker.check_clearances,
+        "physical_copper_gap": checker.check_physical_copper_gap,
         "connectivity": checker.check_connectivity,
         "connector_access": checker.check_connector_access,
         "segment_zone": checker.check_segment_zone_clearances,
@@ -2527,12 +2729,20 @@ def run_selected_checks(
         "silkscreen": checker.check_silkscreen,
         "single_pad_net": checker.check_single_pad_nets,
         "solder_mask": checker.check_solder_mask_pads,
+        "mask_to_copper": checker.check_mask_to_copper,
         "via_in_pad": checker.check_via_in_pad,
         "zero_length_segment": checker.check_zero_length_segments,
         "zones": checker.check_zones,
     }
 
     for category, method in check_methods.items():
+        if (
+            category == "mask_to_copper"
+            and only_set is None
+            and checker.mask_copper_request is None
+        ):
+            continue
+
         # Skip if --only specified and this category not in it
         if only_set is not None and category not in only_set:
             continue
@@ -2721,7 +2931,11 @@ def output_table(
 
     if not violations:
         print(f"\n{'=' * 60}")
-        print("DRC PASSED - No violations found")
+        print(
+            "DRC PASSED - No violations found"
+            if all(a.passed for a in results.mask_copper_assessments)
+            else "DRC NOT QUALIFIED - Requested mask coverage incomplete or failing"
+        )
         return
 
     # Issue #3803: render the manufacturing-vs-advisory category buckets so
@@ -2869,7 +3083,11 @@ def output_table(
     elif warnings:
         print("DRC WARNING - Review warnings")
     else:
-        print("DRC PASSED - Advisory infos only")
+        print(
+            "DRC PASSED - Advisory infos only"
+            if all(a.passed for a in results.mask_copper_assessments)
+            else "DRC NOT QUALIFIED - Requested mask coverage incomplete or failing"
+        )
 
 
 def _print_violation(v: DRCViolation, verbose: bool, indent: str = "  ") -> None:
@@ -2959,7 +3177,7 @@ def output_json(
         # (even when empty) so downstream consumers can rely on the
         # field being present.
         "rules_checked_by_rule": dict(results.rules_checked_by_rule),
-        "passed": error_count == 0,
+        "passed": error_count == 0 and all(a.passed for a in results.mask_copper_assessments),
     }
     if results.suppressed_count > 0:
         summary_data["suppressed"] = results.suppressed_count
@@ -2970,6 +3188,7 @@ def output_json(
         "layers": layers,
         "summary": summary_data,
         "violations": [v.to_dict() for v in violations],
+        "mask_copper_assessments": [a.to_dict() for a in results.mask_copper_assessments],
     }
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
@@ -3014,7 +3233,7 @@ def write_json_report(
         # alongside the aggregate ``rules_checked`` integer.  Issue
         # #2660 / Epic #2556 Phase 4N.
         "rules_checked_by_rule": dict(results.rules_checked_by_rule),
-        "passed": error_count == 0,
+        "passed": error_count == 0 and all(a.passed for a in results.mask_copper_assessments),
     }
     if results.suppressed_count > 0:
         summary_data["suppressed"] = results.suppressed_count
@@ -3025,6 +3244,7 @@ def write_json_report(
         "layers": layers,
         "summary": summary_data,
         "violations": [v.to_dict() for v in violations],
+        "mask_copper_assessments": [a.to_dict() for a in results.mask_copper_assessments],
     }
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
@@ -3046,7 +3266,9 @@ def output_summary(
                 f"\n  ({results.suppressed_count} silkscreen warnings suppressed"
                 f" -- standard library footprints)"
             )
-        print(f"DRC PASSED: {pcb_path.name}")
+        print(
+            f"DRC {'PASSED' if all(a.passed for a in results.mask_copper_assessments) else 'NOT QUALIFIED'}: {pcb_path.name}"
+        )
         print(msg)
         return
 

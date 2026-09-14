@@ -1020,7 +1020,9 @@ class SchematicElementsMixin:
         for hl in self.hier_labels:  # type: ignore[attr-defined]
             named_points.append((hl.x, hl.y, hl.text))
         for pwr in self.power_symbols:  # type: ignore[attr-defined]
-            pwr_net = pwr.lib_id.split(":")[1] if ":" in pwr.lib_id else pwr.lib_id
+            pwr_net = pwr.net_name
+            if pwr_net is None:
+                continue
             named_points.append((pwr.x, pwr.y, pwr_net))
 
         for wire in self.wires:  # type: ignore[attr-defined]

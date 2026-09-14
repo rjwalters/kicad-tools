@@ -16,15 +16,22 @@ if TYPE_CHECKING:
     pass
 
 
+def _decode_net_string(token: str) -> str:
+    """Decode quoted KiCad names with the canonical S-expression decoder."""
+    from kicad_tools.sexp import parse_string
+
+    return str(parse_string(f"(name {token})").children[0].value)
+
+
 def parse_net_names(pcb_text: str) -> dict[int, str]:
     """Parse net ID to name mapping from PCB file."""
     net_names: dict[int, str] = {}
 
     # Match net declarations: (net N "name")
-    pattern = re.compile(r'\(net\s+(\d+)\s+"([^"]*)"\)')
+    pattern = re.compile(r'\(net\s+(\d+)\s+("(?:\\.|[^"\\])*")\)')
     for match in pattern.finditer(pcb_text):
         net_id = int(match.group(1))
-        net_name = match.group(2)
+        net_name = _decode_net_string(match.group(2))
         if net_name:  # Skip empty net names
             net_names[net_id] = net_name
 
@@ -43,32 +50,34 @@ def _extract_balanced_blocks(text: str, keyword: str) -> list[tuple[int, int, st
     """
     blocks: list[tuple[int, int, str]] = []
     opener = f"({keyword}"
-    opener_len = len(opener)
-    i = 0
-    while i < len(text):
-        pos = text.find(opener, i)
-        if pos == -1:
-            break
-        # Ensure the character after the keyword is whitespace or ')'
-        after = pos + opener_len
-        if after < len(text) and not text[after].isspace() and text[after] != ")":
-            i = after
-            continue
-        # Walk balanced parens
-        depth = 0
-        j = pos
-        while j < len(text):
-            if text[j] == "(":
-                depth += 1
-            elif text[j] == ")":
-                depth -= 1
-                if depth == 0:
-                    j += 1
-                    break
-            j += 1
-        block_text = text[pos:j]
-        blocks.append((pos, j, block_text))
-        i = j
+    start: int | None = None
+    depth = 0
+    # Consume complete strings/comments/atoms so neither quoted parentheses
+    # nor a literal "(segment ..." inside a property is treated as syntax.
+    tokens = re.finditer(r'[#;][^\n]*|"(?:\\.|[^"\\])*"|[()]|[^\s()]+', text)
+    for match in tokens:
+        token = match.group()
+        if start is None:
+            pos = match.start()
+            after = pos + len(opener)
+            if (
+                token == "("
+                and text.startswith(opener, pos)
+                and after < len(text)
+                and (text[after].isspace() or text[after] == ")")
+            ):
+                start = pos
+                depth = 1
+        elif token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+            if depth == 0:
+                end = match.end()
+                blocks.append((start, end, text[start:end]))
+                start = None
+    if start is not None:
+        raise ValueError(f"Unbalanced {keyword} S-expression")
     return blocks
 
 
@@ -88,7 +97,7 @@ _RE_NET = re.compile(r"\(net\s+(\d+)\)")
 # feed ``--preserve-existing`` / ``--nets``, an empty preserved set let
 # the dialect-blind strip pass delete all existing copper on save
 # (silent, catastrophic data loss).
-_RE_NET_NAME = re.compile(r'\(net\s+"([^"]*)"\)')
+_RE_NET_NAME = re.compile(r'\(net\s+("(?:\\.|[^"\\])*")\)')
 
 
 def _resolve_block_net(
@@ -118,7 +127,7 @@ def _resolve_block_net(
 
     m_name = _RE_NET_NAME.search(block)
     if m_name:
-        net_name = m_name.group(1)
+        net_name = _decode_net_string(m_name.group(1))
         # An empty inline name is the KiCad no-net (net 0) reference.
         if not net_name:
             return 0, "Net0"

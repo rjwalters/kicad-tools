@@ -29,10 +29,10 @@ kct build boards/07-matchgroup-test --step pcb
 kct build boards/07-matchgroup-test --step route
 kct build boards/07-matchgroup-test --step verify
 
-# Run DRC against the committed routed PCB
-kct check boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb \
+# Run DRC against the committed routed PCB (the fixture in this directory)
+kct check boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb \
   --mfr jlcpcb \
-  --net-class-map boards/07-matchgroup-test/output/net_class_map.json
+  --net-class-map boards/07-matchgroup-test/regression-fixture/net_class_map.json
 ```
 
 ## Stackup
@@ -94,32 +94,37 @@ The protocol-specific `NetClassRouting` instances live in
 
 `build_net_class_map()` assembles them into a `net_name -> NetClassRouting`
 dict that the autorouter (in `route_pcb()`), the JSON sidecar
-(`output/net_class_map.json`), AND the regression test
+(`regression-fixture/net_class_map.json`), AND the regression test
 (`tests/test_board_07_matchgroup_test.py::test_phase_features_exercised`)
 all import.  This ensures test/sidecar/implementation parity.
 
 ## Files
 
-| File                                           | Description                                           |
-|------------------------------------------------|-------------------------------------------------------|
-| `project.kct`                                  | KCT v1.0 spec (manufacturing/intent metadata)         |
-| `generate_schematic.py`                        | Emits the schematic (`output/matchgroup_test.kicad_sch`) |
-| `generate_pcb.py`                              | Emits the unrouted PCB + holds NETS / DIFFPAIRS / match-group dicts |
-| `generate_design.py`                           | End-to-end pipeline (schematic + PCB + route + sidecar + DRC) |
-| `output/matchgroup_test.kicad_sch`             | Generated schematic (committed)                       |
-| `output/matchgroup_test.kicad_pcb`             | Unrouted PCB (committed)                              |
-| `output/matchgroup_test_routed.kicad_pcb`      | Routed PCB (committed --- consumed by CI DRC gate)    |
-| `output/net_class_map.json`                    | Sidecar (Phase 3M) consumed by `kct check --net-class-map` |
+Paths below are relative to `boards/07-matchgroup-test/`.  The legacy
+generators live in that parent directory; the committed regression
+witnesses live here, in `regression-fixture/`.  (`output/` holds the
+unrelated real SDRAM-exerciser build --- see `../real_design/`.)
+
+| File                                                   | Description                                           |
+|--------------------------------------------------------|-------------------------------------------------------|
+| `regression-fixture/project.kct`                       | KCT v1.0 spec (manufacturing/intent metadata)         |
+| `generate_schematic.py`                                | Emits the schematic (`matchgroup_test.kicad_sch`)     |
+| `generate_pcb.py`                                      | Emits the unrouted PCB + holds NETS / DIFFPAIRS / match-group dicts |
+| `generate_design.py`                                   | End-to-end pipeline (schematic + PCB + route + sidecar + DRC); regenerates into `regression-output/` by default, never over the committed fixture |
+| `regression-fixture/matchgroup_test.kicad_sch`         | Generated schematic (committed)                       |
+| `regression-fixture/matchgroup_test.kicad_pcb`         | Unrouted PCB (committed)                              |
+| `regression-fixture/matchgroup_test_routed.kicad_pcb`  | Routed PCB (committed --- consumed by CI DRC gate)    |
+| `regression-fixture/net_class_map.json`                | Sidecar (Phase 3M) consumed by `kct check --net-class-map` |
 
 ## DRC Status
 
 The routed PCB is checked against JLCPCB tier-1 rules via:
 
 ```bash
-kct check output/matchgroup_test_routed.kicad_pcb \
+kct check boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb \
   --mfr jlcpcb \
   --errors-only \
-  --net-class-map output/net_class_map.json
+  --net-class-map boards/07-matchgroup-test/regression-fixture/net_class_map.json
 ```
 
 The `--net-class-map` flag is **mandatory** for the
@@ -201,7 +206,17 @@ pads).
 The route step runs `kct route --placement-delta-feedback
 --placement-delta-feedback-budget 2 --placement-delta-feedback-timeout
 600` (wired from the `PLACEMENT_DELTA_FEEDBACK*` constants at the top of
-`generate_design.py`).  Each iteration classifies the **routed** board,
+`generate_design.py`).  Since #5266 the surrounding budget contract is
+stated as two separate numbers: `--search-timeout 600` bounds each
+individual search stage (the initial negotiated pass), while `--timeout`
+carries the **hard total** invocation deadline, derived as
+`600 + 2x600 + 600 = 2400 s` (one search stage, one probe allocation per
+budget unit, and a postprocessing reserve).  The probe allocation does
+**not** escape the total deadline -- it is clamped to whatever the total
+has left -- so the total must be large enough to contain both probes or
+the out-of-process supervisor kills the run mid-probe and leaves only
+unverified partial artifacts.  Each iteration classifies the **routed**
+board,
 translates every `PLACEMENT_BOUND` / `CONGESTION_SATURATED` diagnosis into
 one concrete placement delta, applies the top unprobed one, re-routes, and
 keeps it only when the re-route **strictly increases the routed-net count
@@ -523,7 +538,7 @@ The gate is a sibling of the `diffpair-routing-regression` job (board
    ratcheted 35 -> 14 -> 9 -> 8 -- see the board-07 comment block in
    the yml.  Per the #4008 unified-counter change, both gate arms
    compare the identical advisory-filtered *blocking* count).
-   <!-- kct:doc-pin drc-tolerance boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb = 8 -->
+   <!-- kct:doc-pin drc-tolerance boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb = 8 -->
    The claim above is machine-checked by `kct check --only doc_drift`
    (issue #4540): ratcheting the yml without updating this README
    trips `doc_drift_stale_pin`.

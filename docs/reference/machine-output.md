@@ -342,10 +342,21 @@ orchestrators — the leaves that drive many other commands to completion:
 |---|---|
 | `build` | `{"command": "build", "spec", "project_dir", "output_dir", "mfr", "step", "dry_run", "force", "schematic", "pcb", "routed_pcb", "manufacturing_output", "steps": [{step, success, message, output_file, elapsed_s}], "counts": {total, succeeded, failed}, "wall_time_s", "exit_code", "success"}` |
 | `pipeline` | `{"command": "pipeline", "input", "pcb", "project", "schematic", "mfr", "layers", "layer_count", "step", "dry_run", "force", "best_effort", "steps": [{step, success, skipped, warning, message}], "counts": {total, succeeded, skipped, warnings}, "commit": {requested, created}, "exit_code", "success"}` |
-| `stitch` | `{"command": "stitch", "pcb", "output", "mode": "stitch"\|"blanket"\|"thermal", "target_nets", "nets_auto_detected", "manufacturer", "via_size_mm", "drill_mm", "detected_layers", "stackup_inferred_nets", "fallback_nets", "strict_model_error", "pads_found", "already_connected", "vias_added": [...], "vias_added_count", "micro_vias_placed", "traces_added": {total, straight, dogleg, extended_escape}, "via_in_pad_filtered", "hole_to_hole_rejected", "connectivity_fallback": [...], "needs_routed_fanout": [...], "pads_skipped": [...], "obstacle_breakdown", "dry_run", "saved", "drc": {requested, ran}, "exit_code", "success"}` |
+| `stitch` | `{"command": "stitch", "pcb", "output", "mode": "stitch"\|"blanket"\|"thermal", "target_nets", "nets_auto_detected", "manufacturer", "via_size_mm", "drill_mm", "detected_layers", "stackup_inferred_nets", "fallback_nets", "strict_model_error", "pads_found", "already_connected", "vias_added": [...], "vias_added_count", "micro_vias_placed", "traces_added": {total, straight, dogleg, extended_escape}, "via_in_pad_filtered", "hole_to_hole_rejected", "connectivity_fallback": [...], "needs_routed_fanout": [...], "pads_skipped": [...], "obstacle_breakdown", "dry_run", "saved", "drc": {requested, strict, ran, status, passed, error_count, warning_count, unconnected_item_count, reason}, "success_scope": "geometry", "exit_code", "success"}` |
 
 Three conventions this batch adds or reinforces:
 
+- **Stitch geometry and native DRC have separate verdicts.** `success` retains
+  its geometry meaning (vias placed or pads already connected), explicitly
+  identified by `success_scope: "geometry"`. `--drc` remains diagnostic and
+  does not change the geometry exit code. `--drc-strict` implies `--drc` and
+  exits nonzero unless native DRC has zero errors, warnings and unconnected
+  items. Both flags check unchanged boards. Dry runs skip DRC and cannot pass
+  the strict gate. The JSON `exit_code` always matches the process exit code.
+  `drc.ran` means execution and report parsing succeeded; `status` is `passed`,
+  `failed` (findings), or `not_run`. `passed` and all three counts are null when
+  no report was parsed, with `reason` explaining absence, execution/parsing
+  failure or dry-run skipping. A passed DRC is not full manufacturing signoff.
 - **The document is the complete ledger, not the prose's excerpt.** `stitch`'s
   text summary caps via lists at 10 entries and skipped-pad lists at 5 (`...
   (N more)`); the JSON document carries every entry, because a machine caller
@@ -379,6 +390,25 @@ exit code, so the verdict is hoisted out of the guard (prose unchanged).
 
 `tests/test_format_json_sweep_orchestrators.py` guards these 3 surfaces, the
 promoted helper, and the now-closed backlog.
+
+
+### Exact-grid wire-stub repair
+
+`kct sch fix-wire-stubs design.kicad_sch [--dry-run] [--format text|json]`
+repairs the root schematic and its child sheets. The default applies repairs;
+`--dry-run` previews them without writing. JSON uses the envelope above and
+adds `planned`, `applied`, and `skipped` arrays. Each action identifies the
+sheet, wire UUID, endpoint index (0=start, 1=end), original endpoints, target
+pin, target position, axis, and grid-step count. Skipped actions include a
+`reason`; a preview always has an empty `applied` array.
+
+Only existing exact-grid detector findings qualify. Repairs must extend a
+straight wire outward toward a uniquely nearest pin with no intervening
+connections or competing extensions. Ambiguous findings remain unchanged.
+Missing sheets, unresolved library definitions, and unsupported multi-unit or
+alternate-body pin geometry fail before any file is written. Repeated references
+to one child file are processed once, using that
+file's embedded library definitions. Unchanged files are never rewritten.
 
 
 ## Interop note (survey idea 7)

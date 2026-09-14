@@ -25,7 +25,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ..primitives import Pad
+from ..primitives import Pad, pad_half_extents
 from .geometry import (
     Pt,
     Rect,
@@ -101,8 +101,9 @@ class LatticeObstacleModel:
         # Inflated keep-out rectangle per pad (pad half-extent + agent radius).
         self.pad_rects: list[Rect] = []
         for pad in pads:
-            hx = pad.width / 2.0 + agent_radius
-            hy = pad.height / 2.0 + agent_radius
+            half_w, half_h = pad_half_extents(pad)
+            hx = half_w + agent_radius
+            hy = half_h + agent_radius
             self.pad_rects.append((pad.x - hx, pad.y - hy, pad.x + hx, pad.y + hy))
 
         # Pad-lookup buckets.
@@ -401,6 +402,10 @@ class CommittedCopper:
         self.via_via_gap = via_via_gap  # via centre to via centre (cross-net)
         self.same_net_via_gap = same_net_via_gap  # hole-to-hole floor
         self.pairwise = pairwise  # id-space HV pairwise projection (#4602)
+        from ..fixed_copper import FixedFillObstacles
+
+        self.fixed_fills = FixedFillObstacles()
+        self.fixed_fill_via_clearance = clearance
         self.copper: list[SegHash] = [SegHash() for _ in range(num_layers)]
         # ``(point, net, clearance)`` -- the stored clearance is the via's own
         # net-class clearance (issue #4597), defaulting to the board-global
@@ -476,6 +481,8 @@ class CommittedCopper:
     ) -> bool:
         """True if segment ``a-b`` on ``layer`` clears other-net copper + vias."""
         own_half, own_clr = self._own(half, clearance)
+        if not self.fixed_fills.segment_clear(a, b, layer, own_half, own_clr):
+            return False
         # Issue #4602: an active pairwise projection inflates the spatial query
         # window to the widest requirement THIS net participates in (the #4511
         # search-radius trap: a ~3 mm creepage requirement vastly exceeds the
@@ -544,6 +551,8 @@ class CommittedCopper:
     ) -> bool:
         """True if a node site on ``layer`` clears other-net copper + vias."""
         own_half, own_clr = self._own(half, clearance)
+        if not self.fixed_fills.segment_clear(point, point, layer, own_half, own_clr):
+            return False
         # Issue #4602: inflate the query window to the pairwise reach (see
         # ``seg_clear``); dormant/unmapped nets keep the scalar window.
         pw = self.pairwise
@@ -598,6 +607,13 @@ class CommittedCopper:
         # Issue #4602: a through-via is copper on EVERY layer, so its pair
         # requirement against foreign copper applies on all of them.  The
         # query window inflates by the net's pairwise reach (see ``seg_clear``).
+        if not self.fixed_fills.via_clear(
+            point,
+            tuple(range(self.num_layers)),
+            self.via_radius,
+            self.fixed_fill_via_clearance,
+        ):
+            return False
         pw = self.pairwise
         pw_reach = pw.max_required_for(net) if pw is not None else 0.0
         pad = self.via_radius + self.clearance + self.trace_half + 2.0 + pw_reach

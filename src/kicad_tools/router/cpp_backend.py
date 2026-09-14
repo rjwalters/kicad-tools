@@ -19,6 +19,7 @@ Or check its status with:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
@@ -31,7 +32,7 @@ from .resource_guard import reraise_if_resource_exhaustion
 if TYPE_CHECKING:
     import numpy as np
 
-    from .grid import RoutingGrid
+    from .grid import CarveoutMode, RoutingGrid
     from .pathfinder import Router
     from .primitives import Pad, Route
     from .rules import DesignRules, NetClassRouting
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 21
+_REQUIRED_CPP_BUILD_VERSION = 25
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -835,6 +836,15 @@ class CppGrid:
         # (Issue #2439: C++ geometric validation)
         self._synced_route_count: int = 0
 
+    def install_fixed_fills(self, fills) -> None:
+        if not hasattr(self._impl, "add_fixed_fill"):
+            if fills:
+                raise RuntimeError("Rebuild native router: fixed filled-copper support required")
+            return
+        self._impl.clear_fixed_fills()
+        for layer, clearance, rings in fills.native_polygons():
+            self._impl.add_fixed_fill(layer, clearance, rings)
+
     @classmethod
     def from_routing_grid(cls, grid: RoutingGrid) -> CppGrid:
         """Create a CppGrid from an existing RoutingGrid."""
@@ -849,6 +859,7 @@ class CppGrid:
 
         # Store reference to original Python grid for post-route validation
         cpp_grid._py_grid = grid
+        cpp_grid.install_fixed_fills(grid.fixed_fills)
 
         # Issue #2481: Establish the back-reference from the Python grid
         # to this CppGrid so ``RoutingGrid.unmark_route`` can invalidate
@@ -882,20 +893,71 @@ class CppGrid:
         # ``grid.py::_sync_pad_to_cpp_grid`` for pads added AFTER this
         # bulk-copy completes (the typical ``Autorouter.add_component``
         # flow).
-        py_pad_blocked = grid._pad_blocked
-        for layer in range(grid.num_layers):
-            for y in range(grid.rows):
-                for x in range(grid.cols):
-                    py_cell = grid.grid[layer][y][x]
-                    if py_cell.blocked:
-                        cpp_grid._impl.mark_blocked(
-                            x,
-                            y,
-                            layer,
-                            py_cell.net,
-                            py_cell.is_obstacle,
-                            bool(py_pad_blocked[layer, y, x]),
-                        )
+        # Issue #5240: visit only the BLOCKED cells, not every cell.
+        #
+        # The previous form walked ``layers * rows * cols`` in a triple Python
+        # loop, building a throwaway ``_CellView`` per cell (via ``cell_at``,
+        # itself the #5307 improvement over the three chained ``__getitem__``
+        # views) purely to read ``.blocked`` and discard the ~84% of cells that
+        # are free.  On board 06 that is 2001 x 1601 x 4 = 12.8M iterations,
+        # and an instrumented board-06 re-route measured a single
+        # ``from_routing_grid`` call at 19-23 s -- while the C++ coupled A*
+        # search it feeds completed its whole 1000-iteration budget in 0.03 s.
+        # Because ``CoupledPathfinder`` is constructed once per differential
+        # pair, that marshalling cost was paid nine times over in board 06's
+        # diff-pair pre-phase alone.
+        #
+        # ``_CellView.blocked`` / ``.net`` / ``.is_obstacle`` are thin readers
+        # over ``grid._blocked`` / ``grid._net`` / ``grid._is_obstacle``
+        # (grid.py ``_CellView``), so ``np.nonzero`` on the blocked plane
+        # selects exactly the cells the old loop's ``if py_cell.blocked``
+        # admitted.  ``np.nonzero`` returns indices in C order -- layer, then
+        # y, then x, ascending -- which is the identical visit order, so
+        # ``mark_blocked`` is called with the same arguments in the same
+        # sequence and the resulting C++ grid is unchanged.  ``to_numpy``
+        # keeps the GPU/MLX array backends (``RoutingGrid._backend``) working
+        # by materialising a host copy first.
+        #
+        # The rows are consumed in chunks so the temporary index / gathered
+        # value arrays stay bounded on very large boards instead of
+        # materialising one list per array over every blocked cell at once.
+        import numpy as np
+
+        from ..acceleration.backend import to_numpy
+
+        blocked_np = to_numpy(grid._blocked)
+        if blocked_np.size:
+            net_np = to_numpy(grid._net)
+            obstacle_np = to_numpy(grid._is_obstacle)
+            pad_blocked_np = to_numpy(grid._pad_blocked)
+            # Named ``blocked_layer_idx`` (not ``layer_idx``): the pad loop
+            # a little further down in this same function assigns a plain
+            # ``int`` to a variable of that name, and mypy infers a single
+            # type per function-scope variable across its first assignment
+            # -- reusing ``layer_idx`` here for this ndarray made that
+            # unrelated downstream ``int`` assignment a NEW mypy error
+            # (variable has type "ndarray", not "int").
+            blocked_layer_idx, y_idx, x_idx = np.nonzero(blocked_np)
+            mark_blocked = cpp_grid._impl.mark_blocked
+            chunk = 1 << 20
+            for lo in range(0, x_idx.shape[0], chunk):
+                hi = lo + chunk
+                ls = blocked_layer_idx[lo:hi]
+                ys = y_idx[lo:hi]
+                xs = x_idx[lo:hi]
+                # ``.tolist()`` converts each block to plain Python
+                # int/bool objects in one C-level pass, so the inner loop
+                # never pays per-element NumPy scalar boxing.
+                for x, y, layer, net, is_obstacle, pad_blocked in zip(
+                    xs.tolist(),
+                    ys.tolist(),
+                    ls.tolist(),
+                    net_np[ls, ys, xs].tolist(),
+                    obstacle_np[ls, ys, xs].tolist(),
+                    pad_blocked_np[ls, ys, xs].tolist(),
+                    strict=True,
+                ):
+                    mark_blocked(x, y, layer, net, is_obstacle, pad_blocked)
 
         # Issue #4071: marshal corridor reservations into the C++ grid.
         # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner
@@ -934,6 +996,7 @@ class CppGrid:
         from .grid import _is_plane_net_pad
 
         component_pitches = grid.compute_component_pitches()
+        grid._component_pitch_cache = component_pitches
 
         # Issue #3371 / P_FP2: Fine-pitch escape regions installed on the
         # grid (empty list when the detector has not run, which is the
@@ -1000,8 +1063,13 @@ class CppGrid:
                 ref_hash,
                 clearance_override,
                 is_plane_net,
+                pad.rotation,
+                pad.shape == "circle",
             )
 
+        from .grid import _sync_pad_via_policies
+
+        _sync_pad_via_policies(grid, cpp_grid)
         return cpp_grid
 
     def index_to_layer(self, index: int) -> int:
@@ -1171,6 +1239,16 @@ class CppPathfinder:
         cpp_rules = router_cpp.DesignRules()
         cpp_rules.trace_width = rules.trace_width
         cpp_rules.trace_clearance = rules.trace_clearance
+        from .mfr_limits import get_mfr_limits
+
+        cpp_rules.allow_smd_vias = True
+        if rules.manufacturer:
+            # Unknown manufacturer -> unspecified capability is retained
+            # (permissive), matching pathfinder.Router's fallback.
+            with contextlib.suppress(ValueError):
+                cpp_rules.allow_smd_vias = bool(
+                    get_mfr_limits(rules.manufacturer).via_in_pad_supported
+                )
         cpp_rules.via_drill = rules.via_drill
         cpp_rules.via_diameter = rules.via_diameter
         cpp_rules.via_clearance = rules.via_clearance
@@ -1748,12 +1826,28 @@ class CppPathfinder:
             effective_width = pad.width
             effective_height = pad.height
 
-        # Strict routing seeds the trace CENTER inside the pad by its radius.
-        # Seeding directly on a metal edge lets the reconstructed pad-center
-        # tail run closer to a neighboring pad than the authored clearance.
-        if self._rules.strict_pad_clearance and trace_width is not None:
-            effective_width = max(0.0, effective_width - trace_width)
-            effective_height = max(0.0, effective_height - trace_width)
+        # Match Python: inset unexempted fine-pitch seeds and all strict-mode
+        # pads to keep reconstructed tails clear of dense neighboring copper.
+        # Standard-pitch seeds retain their search freedom; the exact foreign-
+        # pad validator still enforces their authored clearance.
+        py_grid = getattr(self._grid, "_py_grid", None)
+        pitch = self._get_component_pitches().get(pad.ref)
+        threshold = self._rules.fine_pitch_threshold
+        if (
+            trace_width is not None
+            and (
+                self._rules.strict_pad_clearance
+                or (pitch is not None and threshold is not None and pitch < threshold)
+            )
+            and not self._same_component_carveout_eligible(py_grid, pad.ref)
+        ):
+            # Pad-center tails emit the configured local neck-down width.
+            # Eroding by the wider trunk can erase every legal narrow-pad seed.
+            seed_width = trace_width
+            if self._rules.should_apply_neck_down(pad.ref, pitch):
+                seed_width = self._rules.get_neck_down_width(0.0, pitch, base_width=trace_width)
+            effective_width = max(0.0, effective_width - seed_width)
+            effective_height = max(0.0, effective_height - seed_width)
 
         # Metal area bounds in world coordinates
         metal_x1 = pad.x - effective_width / 2
@@ -2116,6 +2210,8 @@ class CppPathfinder:
         # fallback on a stale .so without the #4511 setter).
         if hasattr(self._impl, "set_search_pair_widths"):
             self._impl.set_search_pair_widths(net_trace_width / 2.0, net_via_size / 2.0)
+        if hasattr(self._impl, "set_search_fill_clearances"):
+            self._impl.set_search_fill_clearances(net_trace_clearance, self._rules.via_clearance)
 
         try:
             result = self._impl.route_resumable(
@@ -2567,17 +2663,26 @@ class CppPathfinder:
                 float(cpp_seg.x2),
                 float(cpp_seg.y2),
             )
-            # Issue #1018: compute the (possibly necked-down) width once per
-            # C++ segment, BEFORE the dogleg split -- matching the Python
-            # backend, where ``_emit_segment`` computes the width on the
-            # merged segment endpoints and applies it to both dogleg legs.
-            seg_width = _segment_width(
-                float(cpp_seg.x1),
-                float(cpp_seg.y1),
-                float(cpp_seg.x2),
-                float(cpp_seg.y2),
-            )
-            for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
+            from .neck_down import taper_points
+
+            centers = []
+            if start_needs_neckdown:
+                centers.append((start.x, start.y))
+            if end_needs_neckdown:
+                centers.append((end.x, end.y))
+            split_points = [points[0]]
+            for a, b in zip(points, points[1:], strict=False):
+                split_points.extend(
+                    taper_points(
+                        a,
+                        b,
+                        centers,
+                        self._rules.neck_down_distance,
+                        self._rules.grid_resolution,
+                    )[1:]
+                )
+            for (sx, sy), (ex, ey) in zip(split_points, split_points[1:], strict=False):
+                seg_width = _segment_width(sx, sy, ex, ey)
                 if sx == ex and sy == ey:
                     continue
                 seg = Segment(
@@ -2606,15 +2711,44 @@ class CppPathfinder:
         via_diameter = float(net_class.via_size if net_class else self._rules.via_diameter)
         via_drill = float(self._rules.via_drill)
 
+        # Issue #5013: ``cpp_via.layer_from``/``layer_to`` are the LOGICAL
+        # search transition (e.g. F.Cu -> In2.Cu), not the via's physical
+        # drilled span.  The C++ pathfinder has no blind/buried process
+        # selection (Issue #4007: ``blind_buried_supported`` is False for
+        # every current board -- ``hdi_4layer`` via rules are defined but
+        # never instantiated), so every via this loop constructs is
+        # manufactured as an ordinary through-hole whose barrel contacts
+        # every copper layer from the top of the stack to the bottom,
+        # regardless of which two layers the search happened to bridge.
+        # Emitting the logical pair verbatim under-reported the drilled
+        # span (e.g. ``F.Cu``/``In2.Cu`` on a 4-layer board): DRC and
+        # connectivity code treat ``via.layers`` as the physical barrel
+        # extent (see ``validate/connectivity.py::_via_bridged_layers``,
+        # ``validate/rules/clearance.py``), so a truncated span silently
+        # skipped barrel-vs-foreign-copper clearance checks on the layers
+        # the via actually passes through.  Router counterpart of stitch
+        # issue #5001 (``ViaPlacement`` normalization in
+        # ``cli/stitch_cmd.py``).
+        #
+        # The search/obstacle-avoidance side already treats every via as
+        # full-stack -- ``Grid3D::mark_via`` / ``Pathfinder::is_via_blocked_diag``
+        # (cpp/src/grid.cpp, cpp/src/pathfinder.cpp) iterate ALL grid
+        # layers unconditionally -- so no route is newly accepted against
+        # copper this fix "discovers"; only the *reported* span was wrong.
+        # Normalize HERE, at ``Route`` construction (upstream of
+        # acceptance and export), so every downstream consumer of
+        # ``route.vias`` sees the correct physical span, not just the
+        # final saved ``.kicad_pcb``.
+        physical_top_layer = Layer(self._grid.index_to_layer(0))
+        physical_bottom_layer = Layer(self._grid.index_to_layer(self._grid.num_layers - 1))
+
         for cpp_via in result.vias:
-            layer_from_value = self._grid.index_to_layer(cpp_via.layer_from)
-            layer_to_value = self._grid.index_to_layer(cpp_via.layer_to)
             via = Via(
                 x=cpp_via.x,
                 y=cpp_via.y,
                 drill=via_drill,
                 diameter=via_diameter,
-                layers=(Layer(layer_from_value), Layer(layer_to_value)),
+                layers=(physical_top_layer, physical_bottom_layer),
                 net=cpp_via.net,
                 net_name=start.net_name,
             )
@@ -2637,28 +2771,71 @@ class CppPathfinder:
            ``_relax_same_component_clearance`` (Issue #2452), or
         2. A fine-pitch / explicit per-component clearance relaxation
            applies (``get_clearance_for_component`` returns less than
-           the default ``trace_clearance``, Issue #1764), or
-        3. The component is fine-pitch (min pin pitch below
-           ``rules.fine_pitch_threshold``) -- covers boards routed with
-           ``fine_pitch_clearance`` unset (the default), where the
-           clearance lookup cannot signal the relaxation.
+           the default ``trace_clearance``, Issue #1764).
 
-        Standard-pitch components return False, so their FOREIGN-net
-        pads stay in the C++ validator and sub-clearance copper is
-        rejected at route construction time.  Mirrors
+        Issue #5004: a third, pitch-only branch used to grant the
+        carve-out to ANY component below ``rules.fine_pitch_threshold``,
+        even when ``fine_pitch_clearance`` was unset (the default) and no
+        relaxation was actually requested for that component -- silently
+        exempting fine-pitch NC and signal pads alike from clearance
+        checks the authored board/net-class rules required.  That branch
+        is now gated behind ``rules.legacy_fine_pitch_carveout`` (default
+        ``False``); leave it unset to get full authored-clearance
+        enforcement for fine-pitch parts with no configured relaxation.
+
+        Standard-pitch components (and fine-pitch components with no
+        relaxation configured) return False, so their FOREIGN-net pads
+        stay in the C++ validator and sub-clearance copper is rejected at
+        route construction time.  Mirrors
         ``RoutingGrid._same_component_carveout_active``.
+
+        Issue #5166: this stays the "is the carve-out active at all"
+        question.  Callers that must distinguish the full-skip
+        corridor-relief flavour from the clamp-to-configured-override
+        flavour use :meth:`_same_component_carveout_mode` instead.
+        """
+        return self._same_component_carveout_mode(py_grid, ref) != "none"
+
+    def _same_component_carveout_mode(self, py_grid, ref: str) -> CarveoutMode:
+        """Return the same-component carve-out STRENGTH for ``ref`` (#5166).
+
+        C++-side mirror of ``RoutingGrid._same_component_carveout_mode``;
+        see that docstring for the full rationale.  Summary:
+
+        ``"skip"``
+            Corridor relief (``_relax_same_component_clearance``, #2452)
+            physically unblocked the same-component overlap corridor down
+            to a ``trace_width / 2`` floor without shrinking any
+            clearance value, so the pad check must be skipped outright --
+            the ref goes into ``exclude_ref_hashes``.  The opt-in legacy
+            pitch-only carve-out is also ``"skip"``.
+        ``"clamp"``
+            A configured override (``component_clearances`` /
+            ``fine_pitch_clearance`` / net-class ``escape_clearance``)
+            resolved smaller than the default ``trace_clearance``.  That
+            authored value is enforced as a hard floor, so the ref goes
+            into ``clamp_ref_hashes`` and ``Grid3D::validate_route``
+            compares against the pad's own resolved
+            ``clearance_override`` instead of skipping.
+        ``"none"``
+            No carve-out; the pad stays in the validator at full
+            clearance.
         """
         if self._rules.strict_pad_clearance:
-            return False
+            return "none"
         relaxed_refs = getattr(py_grid, "_relaxed_clearance_refs", None)
         if relaxed_refs and ref in relaxed_refs:
-            return True
+            return "skip"
         pitch = self._get_component_pitches().get(ref)
         required = self._rules.get_clearance_for_component(ref, pitch)
         if required < self._rules.trace_clearance:
-            return True
+            return "clamp"
+        if not self._rules.legacy_fine_pitch_carveout:
+            return "none"
         threshold = getattr(self._rules, "fine_pitch_threshold", None)
-        return pitch is not None and threshold is not None and pitch < threshold
+        if pitch is not None and threshold is not None and pitch < threshold:
+            return "skip"
+        return "none"
 
     def _validate_route_clearance(
         self,
@@ -2670,8 +2847,8 @@ class CppPathfinder:
     ) -> tuple[float, float] | None:
         """Validate post-route geometric clearance using C++ validation.
 
-        Issue #2439: Uses the C++ validate_route() call which runs all 4
-        validation checks (segment-pad, segment-segment, via-segment,
+        Issue #2439: Uses the C++ validate_route() call which runs
+        validation checks (segment-pad, segment-segment, via-pad, via-segment,
         via-via, same-net drill spacing) in a single C++ call, eliminating
         Python callback overhead.
 
@@ -2715,10 +2892,28 @@ class CppPathfinder:
         # in the exclusion set ONLY when one of those relaxations is
         # actually in effect for that component.  Mirrors the Python
         # validator gate in ``RoutingGrid.validate_segment_clearance``.
+        #
+        # Issue #5166: the exclusion set is now SPLIT by carve-out
+        # strength.  ``exclude_ref_hashes`` keeps the full-skip semantics
+        # for a ref relaxed by ``_relax_same_component_clearance`` (#2452
+        # corridor relief -- its real floor is the ``trace_width / 2``
+        # blocked-cell construction the search already applied, and no
+        # clearance value was ever shrunk).  ``clamp_ref_hashes`` carries
+        # refs eligible only because a CONFIGURED override resolved
+        # smaller than the default clearance: ``Grid3D::validate_route``
+        # enforces that resolved per-pad value as a hard floor there,
+        # instead of the pre-#5166 unconditional skip that accepted any
+        # positive gap (e.g. 0.02mm against an authored 0.10mm).
         exclude_ref_hashes: list[int] = []
+        clamp_ref_hashes: list[int] = []
         for pad in (start, end):
-            if pad.ref and self._same_component_carveout_eligible(py_grid, pad.ref):
+            if not pad.ref:
+                continue
+            mode = self._same_component_carveout_mode(py_grid, pad.ref)
+            if mode == "skip":
                 exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.ref))
+            elif mode == "clamp":
+                clamp_ref_hashes.append(router_cpp.fnv1a_hash(pad.ref))
 
         # Build C++ segment/via lists from route
         cpp_segs: list[router_cpp.Segment] = []
@@ -2762,6 +2957,25 @@ class CppPathfinder:
         # map.
         self._sync_pairwise_domains_to_cpp()
 
+        if route.vias and py_grid is not None:
+            from .grid import _sync_pad_via_policies
+
+            _sync_pad_via_policies(py_grid, self._grid)
+
+        if py_grid is not None and py_grid.fixed_fills:
+            fill_class = self._net_class_map.get(start.net_name)
+            fill_clearance = fill_class.clearance if fill_class else self._rules.trace_clearance
+            for segment in route.segments:
+                layer = py_grid.layer_to_index(segment.layer.value)
+                if not py_grid.fixed_fills.segment_clear(
+                    (segment.x1, segment.y1),
+                    (segment.x2, segment.y2),
+                    layer,
+                    segment.width / 2,
+                    fill_clearance,
+                ):
+                    return (segment.x1, segment.y1)
+
         vresult = self._grid._impl.validate_route(
             cpp_segs,
             cpp_vias,
@@ -2772,6 +2986,7 @@ class CppPathfinder:
             self._rules.min_drill_clearance,
             partner_net_id,
             intra_pair_clearance,
+            clamp_ref_hashes,
         )
 
         if not vresult.valid:

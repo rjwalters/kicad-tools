@@ -39,6 +39,8 @@ Usage::
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
@@ -373,6 +375,7 @@ def write_drc_constraints(
     copper_oz: float | None = None,
     write_dru: bool = True,
     net_classes: Sequence[NetClassRouting] | None = None,
+    source_pcb_path: str | Path | None = None,
 ) -> list[Path]:
     """Emit DRC-constraint sources next to a routed ``.kicad_pcb``.
 
@@ -393,6 +396,9 @@ def write_drc_constraints(
 
     Args:
         pcb_path: Path to the routed board.
+        source_pcb_path: Original board when routing to a renamed destination.
+            Copy authored project/DRU before merging floors; reject conflicting
+            destination files before writing either sidecar. Source is read-only.
         rules: Manufacturer design rules to translate.
         manufacturer_id: Optional manufacturer id (for ``.kicad_pro`` meta
             and ``.kicad_dru`` labels).
@@ -411,6 +417,53 @@ def write_drc_constraints(
         List of paths written.
     """
     pcb_path = Path(pcb_path)
+    if source_pcb_path is not None and Path(source_pcb_path).resolve() != pcb_path.resolve():
+        # Render from authored source in isolation, then validate BOTH destination
+        # sidecars before changing either. Existing source copies and identical
+        # prior outputs are accepted; unrelated destination content is a conflict.
+        source = Path(source_pcb_path)
+        suffixes = [".kicad_pro", ".kicad_dru"] if write_dru else [".kicad_pro"]
+        with tempfile.TemporaryDirectory(prefix="kct-route-rules-") as temporary:
+            staged = Path(temporary) / pcb_path.name
+            for suffix in suffixes:
+                authored, destination = source.with_suffix(suffix), pcb_path.with_suffix(suffix)
+                if authored.exists():
+                    if destination.exists() and destination.samefile(authored):
+                        raise ValueError(
+                            f"DRC sidecar conflict: {destination} aliases source {authored}"
+                        )
+                    if suffix == ".kicad_pro":
+                        data = json.loads(authored.read_text(encoding="utf-8"))
+                        if not isinstance(data, dict):
+                            raise ValueError(f"Invalid source project: {authored}")
+                    shutil.copyfile(authored, staged.with_suffix(suffix))
+                elif destination.exists():
+                    shutil.copyfile(destination, staged.with_suffix(suffix))
+            rendered = write_drc_constraints(
+                staged,
+                rules,
+                manufacturer_id=manufacturer_id,
+                layers=layers,
+                copper_oz=copper_oz,
+                write_dru=write_dru,
+                net_classes=net_classes,
+            )
+            for result in rendered:
+                authored = source.with_suffix(result.suffix)
+                destination = pcb_path.with_suffix(result.suffix)
+                if authored.exists() and destination.exists():
+                    read = (
+                        (lambda p: json.loads(p.read_text(encoding="utf-8")))
+                        if result.suffix == ".kicad_pro"
+                        else (lambda p: p.read_bytes())
+                    )
+                    if read(destination) not in (read(authored), read(result)):
+                        raise ValueError(
+                            f"DRC sidecar conflict: {destination} differs from source {authored} and its merged rules"
+                        )
+            for result in rendered:
+                shutil.copyfile(result, pcb_path.with_suffix(result.suffix))
+            return [pcb_path.with_suffix(result.suffix) for result in rendered]
     project_name = pcb_path.stem
     pro_path = pcb_path.with_suffix(".kicad_pro")
     written: list[Path] = []

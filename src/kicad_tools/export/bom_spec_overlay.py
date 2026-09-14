@@ -113,6 +113,26 @@ class SpecOverlayReport:
         return lines
 
 
+def resolved_refs(report: SpecOverlayReport) -> set[str]:
+    """Return references the spec overlay explicitly resolved.
+
+    A reference counts as resolved if a matching spec ``bom_entries`` entry
+    set either an LCSC part number directly, **or** an explicit manufacturer
+    part number (``mpn``) with no LCSC -- a deliberate non-LCSC supplier
+    selection (e.g. a Samtec/Digikey-only connector).
+
+    Both cases must be exempted from downstream generic (value, footprint)
+    LCSC auto-matching: an MPN-only match still represents explicit
+    sourcing intent that a generic catalog search cannot verify, and must
+    never be silently overridden by a guessed LCSC part (issue #4995).
+    Previously only entries with a non-empty ``lcsc`` were included here,
+    so an MPN-only spec entry (no LCSC) remained eligible for generic
+    auto-matching -- exactly the gap that let a Samtec header pick up an
+    unrelated JLCPCB catalog part.
+    """
+    return {e.reference for e in report.entries if e.matched and (e.mpn or e.lcsc)}
+
+
 # ---------------------------------------------------------------------------
 # Spec auto-detection
 # ---------------------------------------------------------------------------

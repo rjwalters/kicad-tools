@@ -907,3 +907,23 @@ downstream).
 - [Placement Optimization Guide](placement-optimization.md)
 - [DRC & Validation Guide](drc-and-validation.md)
 - [Example: Autorouter](https://github.com/rjwalters/kicad-tools/tree/main/examples/04-autorouter)
+
+### Project rules when changing the output name
+
+When post-route DRC writes a renamed PCB, it carries the source board's
+`.kicad_pro` and `.kicad_dru` into the destination before merging manufacturer
+floors. The source files remain unchanged. Authored project settings, netclass
+assignments, custom DRU text, and `KCT_PRESERVE_BOARD_RULES=1` follow the output;
+with that flag, stricter authored minima remain active while manufacturer
+limits can tighten weaker minima.
+
+An existing destination sidecar must match either the corresponding authored
+source or the result of applying the current manufacturer floors to it. JSON
+project formatting does not matter; custom DRU text must match exactly.
+Conflicting destination sidecars cause a visible error and exit code 1, even
+with `--quiet` or `--auto-fix`. Neither project nor DRU is replaced on a conflict.
+Choose a fresh output name or reconcile the authored files explicitly before
+retrying. Identical repeated exports are accepted. If a source sidecar is
+absent, an existing destination sidecar retains the usual preserve-and-merge
+behavior. This propagation belongs to post-route DRC; `--skip-drc` does not
+perform it.

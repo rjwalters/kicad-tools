@@ -94,3 +94,41 @@ class TestPanelizeLegacyModuleBoards:
         assert len(clones) == 1
         pads = clones[0].find_all("pad")
         assert len(pads) == 2
+
+
+@pytest.mark.parametrize(
+    "source", [_LEGACY_MODULE_BOARD, _MODERN_FOOTPRINT_BOARD], ids=["module", "footprint"]
+)
+@pytest.mark.parametrize("legacy_reference", [False, True])
+def test_panel_references_are_unique_across_copies(tmp_path, source, legacy_reference):
+    from kicad_tools.sexp import parse_string, serialize_sexp
+
+    reference = '(property "Reference" "R1" (at 0 -1.5) (layer "F.SilkS"))'
+    if legacy_reference:
+        source = source.replace(reference, '(fp_text reference "R1" (at 0 -1.5) (layer "F.SilkS"))')
+    source = source.replace(
+        "    (pad 1",
+        '    (fp_text value "10k" (at 0 1.5) (layer "F.Fab"))\n    (pad 1',
+    ).replace(
+        '    (pad "1"',
+        '    (fp_text value "10k" (at 0 1.5) (layer "F.Fab"))\n    (pad "1"',
+    )
+    board = tmp_path / "source.kicad_pcb"
+    board.write_text(source)
+    result = Panel().append_board(board, rows=1, cols=2, spacing=2.0).build()
+    restored = parse_string(serialize_sexp(result))
+    copies = _footprint_like_children(restored)
+    assert len(copies) == 2
+    references = []
+    for footprint in copies:
+        tag, kind = ("fp_text", "reference") if legacy_reference else ("property", "Reference")
+        reference_node = next(
+            c for c in footprint.children if c.name == tag and c.get_string(0) == kind
+        )
+        references.append(reference_node.get_string(1))
+        value = next(
+            c for c in footprint.children if c.name == "fp_text" and c.get_string(0) == "value"
+        )
+        assert value.get_string(1) == "10k"
+    assert references == ["B0_R1", "B1_R1"]
+    assert board.read_text() == source

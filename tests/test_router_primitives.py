@@ -241,7 +241,16 @@ class TestRouteValidateLayerTransitions:
         assert len(route.vias) == 2
 
     def test_inner_layer_transitions(self):
-        """Test transitions involving inner layers (4-layer board)."""
+        """Test transitions involving inner layers (4-layer board).
+
+        Issue #5013: a defensively-inserted via has no blind/buried
+        process selection, so it is always an ordinary through-hole whose
+        physical barrel spans the FULL copper stack (F.Cu/B.Cu),
+        regardless of which two logical layers the adjacent segments sit
+        on. Pre-fix, this inserted the bare logical ``seg1.layer``/
+        ``seg2.layer`` pair (e.g. ``F.Cu``/``In1.Cu``), under-reporting
+        the drilled span.
+        """
         route = Route(net=1, net_name="INNER")
         route.segments.extend(
             [
@@ -256,10 +265,9 @@ class TestRouteValidateLayerTransitions:
         inserted = route.validate_layer_transitions()
         assert inserted == 2
 
-        # Check layer pairs are correct
-        layers_pairs = sorted([v.layers for v in route.vias], key=lambda x: x[0].value)
-        assert layers_pairs[0] == (Layer.F_CU, Layer.IN1_CU)
-        assert layers_pairs[1] == (Layer.IN1_CU, Layer.B_CU)
+        # Both inserted vias report the full physical F.Cu/B.Cu span.
+        for via in route.vias:
+            assert via.layers == (Layer.F_CU, Layer.B_CU)
 
     def test_issue_713_scenario(self):
         """Test the exact scenario from issue #713.

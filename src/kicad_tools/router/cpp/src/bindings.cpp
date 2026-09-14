@@ -55,6 +55,7 @@ NB_MODULE(router_cpp, m) {
         .def(nb::init<>())
         .def_rw("trace_width", &DesignRules::trace_width)
         .def_rw("trace_clearance", &DesignRules::trace_clearance)
+        .def_rw("allow_smd_vias", &DesignRules::allow_smd_vias)
         .def_rw("via_drill", &DesignRules::via_drill)
         .def_rw("via_diameter", &DesignRules::via_diameter)
         .def_rw("via_clearance", &DesignRules::via_clearance)
@@ -207,6 +208,9 @@ NB_MODULE(router_cpp, m) {
         // foreign pad copper.  Defaults to ``false`` so existing callers
         // that mark obstacle cells (board outline, copper-pour clearance
         // halos) preserve their pre-#3224 behavior.
+        .def("clear_fixed_fills", &Grid3D::clear_fixed_fills)
+        .def("add_fixed_fill", &Grid3D::add_fixed_fill)
+        .def("fixed_fill_clear", &Grid3D::fixed_fill_clear)
         .def("mark_blocked", &Grid3D::mark_blocked,
              "x"_a, "y"_a, "layer"_a, "net"_a, "is_obstacle"_a = false,
              "pad_blocked"_a = false)
@@ -269,7 +273,10 @@ NB_MODULE(router_cpp, m) {
         .def("add_pad", &Grid3D::add_pad,
              "x"_a, "y"_a, "width"_a, "height"_a,
              "net"_a, "layer_idx"_a, "ref_hash"_a, "clearance_override"_a,
-             "is_plane_net"_a = false)
+             "is_plane_net"_a = false, "rotation"_a = 0.0f,
+             "is_circular"_a = false)
+        .def("set_pad_via_policy", &Grid3D::set_pad_via_policy,
+             "index"_a, "clearance"_a, "carveout_eligible"_a)
         .def("add_stored_segment", &Grid3D::add_stored_segment,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a,
              "width"_a, "layer_idx"_a, "net"_a)
@@ -286,10 +293,18 @@ NB_MODULE(router_cpp, m) {
              "via_clearance"_a, "min_drill_clearance"_a,
              "partner_net"_a = -1,
              "intra_pair_clearance"_a = 0.0f,
+             "clamp_ref_hashes"_a = std::vector<uint32_t>{},
              "Validate a candidate route against stored geometry.  Issue #2559 "
              "/ Phase 1C: when partner_net >= 0 and intra_pair_clearance >= 0, "
              "comparisons against partner_net use intra_pair_clearance instead "
-             "of trace_clearance (defaults preserve pre-#2559 behavior).")
+             "of trace_clearance (defaults preserve pre-#2559 behavior).  "
+             "Issue #5166: refs in exclude_ref_hashes keep the full-skip "
+             "same-component carve-out (#2452 corridor relief, whose floor is "
+             "the search's own trace_width/2 blocked-cell construction), while "
+             "refs in clamp_ref_hashes -- eligible only via a configured "
+             "override that resolved smaller than the default clearance -- "
+             "enforce that resolved per-pad value as a hard floor instead.  "
+             "An empty clamp_ref_hashes reproduces pre-#5166 behavior.")
         // Pairwise (HV-isolation) domain clearance -- Issue #4510 / #4431 Phase 2a
         .def("set_pairwise_domains", &Grid3D::set_pairwise_domains,
              "net_to_domain"_a, "matrix"_a,
@@ -518,6 +533,7 @@ NB_MODULE(router_cpp, m) {
              "zero-overflow hard failure can produce a min-conflict probe "
              "path whose crossed owner nets feed the targeted rip-up.")
         .def_prop_ro("relief_mode", &Pathfinder::relief_mode)
+        .def("set_search_fill_clearances", &Pathfinder::set_search_fill_clearances)
         .def("set_search_pair_widths", &Pathfinder::set_search_pair_widths,
              "trace_half_width_mm"_a, "via_half_diam_mm"_a,
              "Issue #4511 / Epic #4431 Phase 2b: set the routing net's copper "
@@ -602,6 +618,7 @@ NB_MODULE(router_cpp, m) {
     // the string-keyed rejection histogram out of the C++ search (previously
     // Python-only), surfaced on ``CoupledRouteResult::rejections``.
     nb::class_<CoupledPathfinder>(m, "CoupledPathfinder")
+        .def("set_fill_rail_dimensions", &CoupledPathfinder::set_fill_rail_dimensions)
         // Issue #4485: like ``Pathfinder``, ``CoupledPathfinder`` holds a bare
         // ``Grid3D& grid_`` reference, so the grid argument must outlive the
         // pathfinder.  ``keep_alive<1, 2>`` ties the grid (patient, arg index

@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..schema.pcb import _is_footprint_tag
+from ..schema.pcb import _find_all_footprints
 from ..sexp import SExp, parse_file
 from .net_compat import resolve_net_atom
 from .report import DRCReport
@@ -33,19 +33,6 @@ from .violation import DRCViolation, ViolationType, _extract_component_refs
 
 if TYPE_CHECKING:
     from .local_rerouter import LocalRerouter
-
-
-def _find_all_footprints(doc: SExp) -> list[SExp]:
-    """Return every footprint node in *doc*, in document order.
-
-    Matches both the modern ``(footprint ...)`` spelling and the legacy
-    pre-KiCad-6 ``(module ...)`` spelling (issue #4891).  Search semantics
-    match :meth:`SExp.find_all` -- descendants of the root, not the root
-    itself -- so this is a drop-in replacement for ``doc.find_all("footprint")``.
-    """
-    return [
-        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
-    ]
 
 
 @dataclass

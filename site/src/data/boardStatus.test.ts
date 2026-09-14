@@ -51,10 +51,10 @@ describe("displayStatus", () => {
     expect(displayStatusLabel(b)).toBe("Partial");
   });
 
-  it("returns 'no_artifacts' for a stub board", () => {
+  it("shows development progress rather than ready for a stub with verified evidence", () => {
     const b = makeBoard({ status: "no_artifacts" });
-    expect(displayStatus(b)).toBe("no_artifacts");
-    expect(displayStatusLabel(b)).toBe("No artifacts");
+    expect(displayStatus(b)).toBe("development");
+    expect(displayStatusLabel(b)).toBe("In development");
   });
 
   // ── LVS gates (#3749) ───────────────────────────────────────────────────

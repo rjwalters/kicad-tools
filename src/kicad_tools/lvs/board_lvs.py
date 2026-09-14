@@ -37,22 +37,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeGuard
 
-from kicad_tools.schema.pcb import _is_footprint_tag
+from kicad_tools.schema.pcb import _find_all_footprints
 from kicad_tools.sexp import SExp, parse_file
-
-
-def _find_all_footprints(doc: SExp) -> list[SExp]:
-    """Return every footprint node in *doc*, in document order.
-
-    Matches both the modern ``(footprint ...)`` spelling and the legacy
-    pre-KiCad-6 ``(module ...)`` spelling (issue #4891).  Search semantics
-    match :meth:`SExp.find_all` -- descendants of the root, not the root
-    itself -- so this is a drop-in replacement for ``doc.find_all("footprint")``.
-    """
-    return [
-        node for child in doc.children for node in child.iter_all() if _is_footprint_tag(node.name)
-    ]
-
 
 # An auto-generated ("placeholder") net name: the synthetic name a netlister
 # invents for a connected component that carries no label or power symbol.

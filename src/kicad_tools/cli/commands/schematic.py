@@ -28,7 +28,9 @@ def run_sch_command(args) -> int:
             "          add-wire, add-junction,"
             " add-label, cleanup-wires, remove-wire, insert-inline,"
         )
-        print("          disconnect, reconnect-pin, move-component, remove-component, re-annotate,")
+        print(
+            "          disconnect, reconnect-pin, fix-wire-stubs, move-component, remove-component, re-annotate,"
+        )
         print("          repair-instances, fix-annotation, tidy")
         return 1
 
@@ -576,6 +578,14 @@ def run_sch_command(args) -> int:
         if getattr(args, "format", "text") != "text":
             sub_argv.extend(["--format", args.format])
         return disconnect_main(sub_argv) or 0
+
+    elif args.sch_command == "fix-wire-stubs":
+        from ..sch_fix_wire_stubs import main as fix_wire_stubs_main
+
+        sub_argv = [args.schematic, "--format", args.format]
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        return fix_wire_stubs_main(sub_argv)
 
     elif args.sch_command == "reconnect-pin":
         from ..sch_reconnect_pin import main as reconnect_pin_main

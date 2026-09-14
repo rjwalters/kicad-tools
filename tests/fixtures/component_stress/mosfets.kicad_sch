@@ -1,0 +1,250 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(uuid "00000000-0000-0000-0000-000000000100")
+	(paper "A4")
+	(lib_symbols
+		(symbol "Device:Q_NMOS_GDS"
+			(pin_numbers hide)
+			(pin_names hide)
+			(symbol "Q_NMOS_GDS_1_1"
+				(pin input line (at -5.08 0 0) (length 2.54) (name "G") (number "1"))
+				(pin passive line (at 0 5.08 270) (length 2.54) (name "D") (number "2"))
+				(pin passive line (at 0 -5.08 90) (length 2.54) (name "S") (number "3"))
+			)
+		)
+		(symbol "Device:Q_NMOS_Generic"
+			(pin_numbers hide)
+			(pin_names hide)
+			(symbol "Q_NMOS_Generic_1_1"
+				(pin input line (at -5.08 0 0) (length 2.54) (name "~") (number "1"))
+				(pin passive line (at 0 5.08 270) (length 2.54) (name "~") (number "2"))
+				(pin passive line (at 0 -5.08 90) (length 2.54) (name "~") (number "3"))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:Q_NMOS_GDS")
+		(at 100 60 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000101")
+		(property "Reference" "Q1A"
+			(at 104 60 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "IRFB4110"
+			(at 104 62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "Package_TO_SOT_THT:TO-220-3_Vertical"
+			(at 104 64 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "https://www.infineon.com/assets/row/public/documents/24/49/infineon-irfb4110-datasheet-en.pdf"
+			(at 104 66 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "MPN" "IRFB4110PBF"
+			(at 104 68 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Vds_max" "100V"
+			(at 104 70 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Vgs_max" "20V"
+			(at 104 72 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Rating_Source" "Infineon IRFB4110 datasheet, absolute maximum ratings"
+			(at 104 74 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000102"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000103"))
+		(pin "3" (uuid "00000000-0000-0000-0000-000000000104"))
+	)
+	(label "GATE_A"
+		(at 94.92 60 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000105")
+	)
+	(label "BANK_POS"
+		(at 100 54.92 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000106")
+	)
+	(label "SRC_POS"
+		(at 100 65.08 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000107")
+	)
+	(symbol
+		(lib_id "Device:Q_NMOS_GDS")
+		(at 120 60 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000111")
+		(property "Reference" "Q2A"
+			(at 124 60 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "IXTH24N60P"
+			(at 124 62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "Package_TO_SOT_THT:TO-247-3_Vertical"
+			(at 124 64 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "https://example.invalid/ixth24n60p.pdf"
+			(at 124 66 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "MPN" "IXTH24N60P"
+			(at 124 68 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Vds_max" "600V"
+			(at 124 70 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Vgs_max" "30V"
+			(at 124 72 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Rating_Source" "IXYS IXTH24N60P datasheet, absolute maximum ratings"
+			(at 124 74 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Creepage_Waiver" "component-internal spacing waived per fab review"
+			(at 124 76 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000112"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000113"))
+		(pin "3" (uuid "00000000-0000-0000-0000-000000000114"))
+	)
+	(label "GATE_A"
+		(at 114.92 60 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000115")
+	)
+	(label "BANK_POS"
+		(at 120 54.92 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000116")
+	)
+	(label "SRC_POS"
+		(at 120 65.08 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000117")
+	)
+	(symbol
+		(lib_id "Device:Q_NMOS_Generic")
+		(at 140 60 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000121")
+		(property "Reference" "Q3A"
+			(at 144 60 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "UNKNOWN-FET"
+			(at 144 62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 144 64 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Datasheet" "https://example.invalid/unknown-fet.pdf"
+			(at 144 66 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Vds_max" "150V"
+			(at 144 68 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Vgs_max" "20V"
+			(at 144 70 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Rating_Source" "vendor datasheet"
+			(at 144 72 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000122"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000123"))
+		(pin "3" (uuid "00000000-0000-0000-0000-000000000124"))
+	)
+	(label "GATE_A"
+		(at 134.92 60 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000125")
+	)
+	(label "BANK_POS"
+		(at 140 54.92 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000126")
+	)
+	(label "SRC_POS"
+		(at 140 65.08 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000127")
+	)
+	(symbol
+		(lib_id "Device:Q_NMOS_GDS")
+		(at 160 60 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "00000000-0000-0000-0000-000000000131")
+		(property "Reference" "Q4A"
+			(at 164 60 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "UNCITED-FET"
+			(at 164 62 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 164 64 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Vds_max" "500V"
+			(at 164 66 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Vgs_max" "20V"
+			(at 164 68 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "00000000-0000-0000-0000-000000000132"))
+		(pin "2" (uuid "00000000-0000-0000-0000-000000000133"))
+		(pin "3" (uuid "00000000-0000-0000-0000-000000000134"))
+	)
+	(label "GATE_A"
+		(at 154.92 60 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000135")
+	)
+	(label "BANK_POS"
+		(at 160 54.92 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000136")
+	)
+	(label "SRC_POS"
+		(at 160 65.08 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "00000000-0000-0000-0000-000000000137")
+	)
+)

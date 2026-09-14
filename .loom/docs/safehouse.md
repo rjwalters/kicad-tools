@@ -1239,6 +1239,73 @@ same `task`-typed envelope, the same outbound `mpsc::Sender<ClaimAd>`, the same
   socket connecting, only on the synchronous, non-blocking bookkeeping that
   establishes the shared publisher/view pair.
 
+### Fleet-wide no-op cooldown / dispatch backoff: the same channel again (#7477)
+
+The per-issue **dispatch backoff** (#4485) and the **no-op re-dispatch
+cooldown** (#6670) both exist to stop a candidate that just bailed from being
+re-offered on the very next work-finder tick. Both were plain in-process
+`HashMap`s on `SweepRegistry` — **per host**, in memory, never shared. On a
+multi-dispatcher fleet that made them nearly useless against the symptom they
+were built for: host A dispatches, the sweep bails within seconds, A arms *its
+own* 60s window and stops offering the issue — but hosts B/C/D never saw that,
+so they each re-claim the same freshly-released `loom:issue` row and bail in
+turn. An N-host fleet round-robins the claim/release bail loop up to N× faster
+than a single-host brake was designed to prevent (evidence: loom #7466/#7468
+flapping `loom:issue` ↔ `loom:building` every 1-2 minutes for hours across four
+hosts on 2026-09-10, while each host's *local* backoff was correctly escalating
+60→120→240→480→900s; the actual per-attempt bail trigger was an insta-crash on
+the `rate-limited` account-exhaustion signature).
+
+The fix reuses the peer-claim channel exactly as #6352 and #6714 did — two more
+`ClaimKind`s on the same `task`-typed envelope, the same outbound
+`mpsc::Sender<ClaimAd>`, the same `run_coordination` connection and room:
+
+- **Publish.** `SweepRegistry::record_dispatch_failure` (#4485) and
+  `record_noop_release` (#6670) each broadcast the window they just armed
+  locally — `ClaimKind::DispatchBackoffArmed` / `NoopCooldownArmed`, carrying a
+  new `remaining_secs: Option<u64>` field — via the dedicated
+  `publish_peer_cooldown_claim` (a sibling of `publish_peer_claim`, needed
+  because the payload has a field that method's signature has no parameter
+  for). Fire-and-forget / fail-open, same as every other publish on this
+  channel: a dropped ad leaves the **local** window fully intact, so the worst
+  case is the pre-#7477 per-host behavior for one cycle, never a stall.
+- **One-shot, not heartbeated.** Unlike a live sweep's dispatch claim (which
+  `readvertise_peer_claims` refreshes every reaper tick), a cooldown window is
+  armed once per record call and the receiver derives its own expiry. A repeat
+  `record_dispatch_failure`/`record_noop_release` — each pass that bails again
+  — naturally re-broadcasts and refreshes every peer's clock, mirroring the
+  local re-arm semantics.
+- **Consume, in two more separate maps.** `PeerClaimSink` routes a
+  cooldown-lane ad (`ClaimKind::is_cooldown_lane`) into
+  `PeerClaimView::observe_noop_cooldown_at` / `observe_dispatch_backoff_at`,
+  each keyed `(repo slug, issue)` — never `observe_at`'s dispatch-claims map,
+  which answers the different question "is a sweep in flight". As with the
+  `Completed` and filing-lock lanes, observing one deliberately does **not**
+  touch the #6157 coordination-health bookkeeping.
+- **TTL measured against local receipt.** The expiry is computed once as
+  `received_at + remaining_secs`, never against the advertiser's wall clock —
+  the same discipline every other map in `peer_claims.rs` uses, so no clock
+  skew between hosts can extend or truncate a window. A missing/zero
+  `remaining_secs` (a pre-#7477 peer, or a malformed ad) degrades to "already
+  expired" rather than being rejected: worst case a peer's window is invisible
+  for one cycle, never a permanently wedged skip.
+- **Read at the existing skip-set seams.** `SweepRegistry::noop_cooldown_issues`
+  and `dispatch_backoff_issues` now **union** the local map with the peer view,
+  so the work finder's existing `noop_cooldown()` / `backed_off()` pre-filters
+  become fleet-wide with no change at the work-finder layer. Both still respect
+  their own `enabled` flag, and both return the local set unchanged when no
+  peer-claim view is attached (`safehouse.enabled` false) — a single-host
+  deployment is byte-for-byte the pre-#7477 behavior.
+- **The lease-reclaim path is untouched.** `claim_reconciliation` does not read
+  these maps (or any peer-claim state — see Epic #6165 Phase 4 / #6317, which
+  deliberately removed its last peer-claim dependency), so a genuinely orphaned
+  claim from a crashed sweep that never armed a window is still reclaimed
+  promptly by the lease-freshness gate. Suppression only ever follows an
+  *explicitly armed and broadcast* window, and every such window is
+  time-bounded (dispatch backoff caps at `maxSecs`, default 900s; the no-op
+  cooldown defaults to one hour) — well inside the 15-minute lease TTL's own
+  reclaim cadence for the backoff lane.
+
 # Phase 2 — worker-side `safehouse-mcp` injection (#3999)
 
 Phase 1 lets the daemon *narrate*. Phase 2 gives each **worker** session a

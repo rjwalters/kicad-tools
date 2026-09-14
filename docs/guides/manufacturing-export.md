@@ -13,6 +13,20 @@ To order assembled PCBs from JLCPCB, you need:
 
 kicad-tools can generate all of these in JLCPCB's required format.
 
+The manufacturing package's `kicad_project.zip` includes the selected PCB,
+adjacent schematic/project files, and the project-local `sym-lib-table` with
+its referenced KiCad symbol libraries. Relative paths and `${KIPRJMOD}/`
+paths retain their subdirectories after extraction. Repeated references
+to the same file produce one archive member.
+
+Project ZIP creation reports an export error for a malformed table, missing
+library, or nonportable table entry (absolute paths, parent traversal,
+host environment variables, non-KiCad libraries, or symlinks outside the
+project). Move those dependencies under the project and use project-relative
+URIs before exporting. Libraries supplied by KiCad's global installation
+are not copied; footprint libraries and 3D models are outside this symbol
+packaging support.
+
 ## Prerequisites
 
 ```bash
@@ -470,3 +484,35 @@ export_pnp(pcb, "cpl.csv", manufacturer="jlcpcb", config=config)
 
 - **[Query API](query-api.md)** - Advanced filtering for design analysis
 - **[Schematic Analysis](schematic-analysis.md)** - Deep dive into schematic parsing
+
+## Offline submission preparation
+
+For exact-byte, locally verified Gerber/BOM/CPL handoffs, see
+[Offline assembly submission preparation](submission-preparation.md). This Python
+API produces a deterministic plan and expected reference matching list without
+supplier access, uploads, approval, or orders. A narrow `refresh_inventory`
+increment can observe exact-ID stock through a caller-supplied official adapter,
+preserving unknown-vs-zero evidence; the full milestone B provenance/freshness
+contract remains blocked on #5033/#5034 (PRs #5115/#5090), so #5142 stays open.
+
+## Inventory provenance for parts and BOMs
+
+A catalog match establishes part identity; it does not prove current orderable
+stock. Lookup/search JSON, BOM availability, suggestions and enrichment records
+carry `inventory` metadata with `source` (`live`, `offline_catalog`, or
+`unknown`), the original `observed_at`, snapshot revision/time when known,
+local `read_at`, and `from_cache`. Cache reads and reinsertion preserve the
+original observation time. Older cache rows without provenance remain unknown.
+
+`stock_verified` requires a live observation no more than 24 hours old. This
+is a screening freshness limit, not a supplier reservation or order guarantee;
+refresh inventory before ordering. Offline snapshots never qualify as verified
+stock, even when their recorded count exceeds the requested quantity.
+Availability reports mark such matches unverified/unknown, while suggestions
+and BOM enrichment can still use them to identify parts. Export enrichment
+reports retain this provenance and warn when stock remains unverified.
+
+The offline dataset does not guarantee a stock-observation timestamp. Missing
+ages remain null; file modification time and download time are not substitutes.
+Callers with trusted snapshot metadata can provide `snapshot_revision`,
+`snapshot_at`, and `observed_at` to `JlcpartsCatalog` explicitly.

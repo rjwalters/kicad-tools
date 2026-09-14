@@ -229,6 +229,67 @@ def create_zones_for_pcb(pcb_path: Path) -> int:
     return zone_count
 
 
+def apply_manufacturing_profile(routed_path: Path, *, manufacturer: str = "jlcpcb-tier1") -> None:
+    """Persist the manufacturer profile's design-rule floors BEFORE any fill.
+
+    Issue #5326: ``apply_plan()`` (the reviewed-plan replay ``route_pcb()``
+    uses by default) only ever touches the routed ``.kicad_pcb`` copper --
+    it never writes the sibling ``.kicad_pro``/``.kicad_dru`` -- so those
+    sidecars carry whatever :func:`create_project` wrote at Step 1 (stock
+    KiCad defaults, e.g. the stock ``Default`` netclass clearance) until
+    :func:`run_drc` calls ``kct check --emit-drc-constraints`` at Step 6.
+    If the one fill downstream DRC/LVS/CI/net-status all consume (Step 5.5)
+    runs BEFORE that emission, KiCad's native fill engine computes copper
+    against the wrong (stock, generally wider) clearance instead of the
+    ``manufacturer`` profile's actual floor -- carving pads that were laid
+    out and reviewed under the tighter tier-1 clearance off the pour
+    entirely, a real (not phantom) floating-pad defect in the saved bytes.
+
+    Calling this BEFORE :func:`fill_zones_in_routed_pcb` makes the fill --
+    and therefore the persisted ``routed_path`` bytes every downstream step
+    consumes -- reflect the SAME profile-aware rules :func:`run_drc` and
+    :func:`export_manufacturing_bundle` check/export against.  ``run_drc``
+    still re-emits the identical sidecars afterward (via
+    ``--emit-drc-constraints`` and :func:`routing_plan.apply_native_fab_floor`)
+    for its own report generation; that re-emission is idempotent given the
+    same profile/overrides and is left in place as a safety net.
+    """
+    from kicad_tools.manufacturers import (
+        get_profile,
+        resolve_pcb_fabrication_overrides,
+        write_drc_constraints,
+    )
+    from kicad_tools.schema.pcb import PCB
+
+    print("\n" + "=" * 60)
+    print(f"Applying {manufacturer} design-rule floors (pre-fill)...")
+    print("=" * 60)
+
+    try:
+        layers = len(PCB.load(str(routed_path)).copper_layers) or 4
+    except Exception:
+        layers = 4
+
+    profile = get_profile(manufacturer)
+    rules = profile.get_design_rules(layers=layers, copper_oz=1.0)
+    rules, fab_override_msg = resolve_pcb_fabrication_overrides(
+        routed_path, rules, manufacturer_id=profile.id
+    )
+    if fab_override_msg is not None:
+        prefix = "   WARNING: " if fab_override_msg.startswith("ignoring") else "   [INFO] "
+        print(prefix + fab_override_msg)
+
+    written = write_drc_constraints(
+        routed_path,
+        rules,
+        manufacturer_id=profile.id,
+        layers=layers,
+        copper_oz=1.0,
+    )
+    if written:
+        print("   DRC-constraint sidecars: " + ", ".join(str(p) for p in written))
+
+
 def fill_zones_in_routed_pcb(routed_path: Path) -> int:
     """Fill copper zones in the routed PCB via ``kicad-cli``.
 
@@ -494,6 +555,35 @@ def add_gnd_stitching_vias(routed_path: Path) -> int:
     return len(vias)
 
 
+def require_saved_copper_connected(routed_path: Path) -> None:
+    """Gate Board03 on native connectivity of the exact saved copper (#5358).
+
+    The shared DRC policy treats unconnected items as advisory. This board's
+    completed design requires zero; do not refill or save during this check.
+    """
+    import json
+
+    from kicad_tools.cli.runner import run_drc as run_native_drc
+
+    report = routed_path.parent / "saved_copper_drc.json"
+    report.unlink(missing_ok=True)
+    before = routed_path.read_bytes()
+    result = run_native_drc(routed_path, report, schematic_parity=False)
+    if not result.success or result.return_code != 0 or not report.is_file():
+        raise RuntimeError(f"Native saved-copper connectivity check failed: {result.stderr}")
+    data = json.loads(report.read_text())
+    unconnected = data.get("unconnected_items")
+    if not isinstance(unconnected, list):
+        raise RuntimeError("Native DRC report is missing its unconnected_items result")
+    if routed_path.read_bytes() != before:
+        raise RuntimeError("Native connectivity check unexpectedly changed the saved PCB")
+    if unconnected:
+        raise RuntimeError(
+            f"Saved Board03 copper has {len(unconnected)} native unconnected item(s); see {report}"
+        )
+    print("   Saved-copper native connectivity: PASS (0 unconnected items)")
+
+
 def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = True) -> bool:
     """Apply the reviewed revision-B routing, or explicitly explore autorouting.
 
@@ -548,6 +638,21 @@ def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = Tru
     sidecar_path = output_path.parent / "net_class_map.json"
     sidecar_path.write_text(_json.dumps(net_class_map_to_dict(net_class_map), indent=2))
     print(f"   Wrote net-class-map sidecar: {sidecar_path}")
+
+    # ------------------------------------------------------------------
+    # Fabrication-overrides sidecar (Issue #5006): stage the board's
+    # reviewed, cited floors next to the generated board so a copy produced
+    # outside ``boards/03-usb-joystick/output/`` is self-describing --
+    # ``kct check --emit-drc-constraints`` and every other
+    # ``resolve_pcb_fabrication_overrides`` call site discover it there and
+    # emit the same narrowed floor the native project carries.
+    # ------------------------------------------------------------------
+    from routing_plan import COMMITTED_FABRICATION_OVERRIDES
+
+    overrides_sidecar = output_path.parent / COMMITTED_FABRICATION_OVERRIDES.name
+    # read-then-write is a no-op (not a SameFileError) when regenerating in place
+    overrides_sidecar.write_text(COMMITTED_FABRICATION_OVERRIDES.read_text())
+    print(f"   Wrote fabrication-overrides sidecar: {overrides_sidecar}")
     if use_saved_plan:
         from routing_plan import PLAN, apply_plan
 
@@ -918,10 +1023,20 @@ def main() -> int:
         # the new vias into both GND planes.
         add_gnd_stitching_vias(routed_path)
 
+        # Step 5.45: Persist the jlcpcb-tier1 manufacturing profile's
+        # design-rule floors to routed_path's .kicad_pro/.kicad_dru BEFORE
+        # the fill below (#5326).  Without this, the one fill downstream
+        # DRC/LVS/CI/net-status all consume runs against stock KiCad
+        # defaults instead of the profile the board is reviewed/routed/
+        # exported against, producing real (not phantom) floating pads.
+        apply_manufacturing_profile(routed_path)
+
         # Step 5.5: Fill the zone polygons in the routed PCB so DRC's
         # ``connectivity`` rule sees the power-net pads as connected.  This
-        # MUST run after Step 5.4 so the fill engine recomputes copper that
-        # bonds through the freshly-added GND stitching vias.
+        # MUST run after Step 5.4 (new GND stitching vias) and Step 5.45
+        # (manufacturing-profile floors) so the fill engine both bonds the
+        # freshly-added vias and computes copper under the SAME rules
+        # downstream DRC/LVS/CI/net-status check the saved bytes against.
         fill_zones_in_routed_pcb(routed_path)
 
         # Step 6: Run DRC
@@ -955,6 +1070,8 @@ def main() -> int:
             run_copper=True,
             run_label=True,
         )
+
+        require_saved_copper_connected(routed_path)
 
         # Step 7: Export manufacturing bundle (gerbers, BOM, CPL,
         # report).  Required by AC of #3095 so ``kct fleet status``

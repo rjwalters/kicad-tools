@@ -1760,7 +1760,11 @@ class CoupledPathfinder:
         if layer < 0 or layer >= self.grid.num_layers:
             return True
 
-        cell = self.grid.grid[layer][gy][gx]
+        # Issue #5240: ``cell_at`` is a documented drop-in for the legacy
+        # ``grid.grid[layer][y][x]`` chain (one allocation instead of
+        # three) -- this per-cell blocked check is on the coupled
+        # pathfinder's hot path.
+        cell = self.grid.cell_at(layer, gy, gx)
         if cell.blocked and cell.net != net:
             return True
         return False
@@ -1826,7 +1830,7 @@ class CoupledPathfinder:
                     cgx, cgy = gx + dx, gy + dy
                     if not (0 <= cgx < self.grid.cols and 0 <= cgy < self.grid.rows):
                         return True
-                    if self.grid.grid[layer][cgy][cgx].pad_blocked:
+                    if self.grid.cell_at(layer, cgy, cgx).pad_blocked:
                         return True
         return False
 
@@ -2615,6 +2619,8 @@ class CoupledPathfinder:
         end_layer: int,
         p_net: int,
         n_net: int,
+        p_net_name: str,
+        n_net_name: str,
         effective_target_spacing: int,
         effective_approach_radius: int,
         effective_departure_radius: int,
@@ -2636,6 +2642,18 @@ class CoupledPathfinder:
         impl = self._get_cpp_coupled_impl()
         if impl is None:
             return None
+
+        if self.grid.fixed_fills:
+            dimensions: list[float] = []
+            for name in (p_net_name, n_net_name):
+                klass = self.net_class_map.get(name)
+                dimensions.extend(
+                    (
+                        self._get_trace_width_for_net(name) / 2,
+                        klass.clearance if klass else self.rules.trace_clearance,
+                    )
+                )
+            impl._impl.set_fill_rail_dimensions(*dimensions)
 
         # Marshal the corridor frozenset -> flat cols*rows bitset for O(1)
         # C++ membership (diffpair_routing.py:446 build_corridor_mask churn
@@ -2928,6 +2946,8 @@ class CoupledPathfinder:
             end_layer=end_layer,
             p_net=p_start.net,
             n_net=n_start.net,
+            p_net_name=p_start.net_name,
+            n_net_name=n_start.net_name,
             effective_target_spacing=effective_target_spacing,
             effective_approach_radius=effective_approach_radius,
             effective_departure_radius=effective_departure_radius,
@@ -3180,6 +3200,33 @@ class CoupledPathfinder:
                 p_trail_buckets=p_trail_buckets,
                 n_trail_buckets=n_trail_buckets,
             ):
+                if self.grid.fixed_fills:
+                    valid = True
+                    for old, new, pad in (
+                        (current.state.p_pos, new_state.p_pos, p_start),
+                        (current.state.n_pos, new_state.n_pos, n_start),
+                    ):
+                        a = self.grid.grid_to_world(old.x, old.y)
+                        b = self.grid.grid_to_world(new.x, new.y)
+                        if is_via:
+                            valid = valid and self.grid.fixed_fills.via_clear(
+                                b,
+                                tuple(range(self.grid.num_layers)),
+                                self.rules.via_diameter / 2,
+                                self.rules.via_clearance,
+                            )
+                        else:
+                            valid = valid and self.grid.fixed_fills.segment_clear(
+                                a,
+                                b,
+                                new.layer,
+                                self._get_trace_width_for_net(pad.net_name) / 2,
+                                self.net_class_map[pad.net_name].clearance
+                                if pad.net_name in self.net_class_map
+                                else self.rules.trace_clearance,
+                            )
+                    if not valid:
+                        continue
                 # Issue #3439: corridor-bounded search.  Prune any
                 # state whose P or N head leaves the corridor mask
                 # (endpoint cells exempt).  Layer is intentionally
@@ -3626,7 +3673,10 @@ def create_serpentine(
                 gy = int(round(sgy1 + (sgy2 - sgy1) * t))
                 if not (0 <= gx < grid.cols and 0 <= gy < grid.rows):
                     return False
-                cell = grid.grid[li][gy][gx]
+                # Issue #5240: ``cell_at`` drop-in for the legacy
+                # ``grid.grid[layer][y][x]`` chain (see
+                # ``RoutingGrid.cell_at``'s docstring).
+                cell = grid.cell_at(li, gy, gx)
                 if cell.blocked and cell.net != route.net:
                     return False
 
@@ -4443,6 +4493,11 @@ class DiffPairRouter:
             layer=Layer(grid.index_to_layer(layer_idx)),
             ref=template.ref,
             pin=template.pin,
+            # The virtual pad copies the template's copper shape, so it must
+            # copy its rotation too or the shape is silently un-rotated
+            # (issue #4910).
+            rotation=template.rotation,
+            shape=template.shape,
         )
 
     def _segment_cells_clear(
@@ -10900,6 +10955,8 @@ class DiffPairRouter:
             resolution_override=fine_resolution,
         )
 
+        fine_grid.install_fixed_fills(main_grid.fixed_fills)
+
         # Mirror autorouter pads onto the fine grid so the coupled
         # search sees the same obstacle field.  This includes BOTH the
         # pair's own pads (their cells must be reachable for the same
@@ -10922,7 +10979,7 @@ class DiffPairRouter:
         # routes were already ripped up by the caller before invoking
         # this helper.
         pair_p_net, pair_n_net = pair.get_net_ids()
-        for route in self.autorouter.routes:
+        for route in [*self.autorouter.existing_routes, *self.autorouter.routes]:
             if route.net == pair_p_net or route.net == pair_n_net:
                 continue
             fine_grid.mark_route(route)

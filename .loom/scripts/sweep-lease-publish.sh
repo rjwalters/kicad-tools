@@ -354,7 +354,7 @@ cmd_publish() {
             c_updated_at="$(jq -r '.updated_at // empty' <<< "$comment_line" 2>/dev/null || true)"
             c_body="$(jq -r '.body // empty' <<< "$comment_line" 2>/dev/null || true)"
             [[ -z "$c_updated_at" || -z "$c_body" ]] && continue
-            c_first_line="$(printf '%s\n' "$c_body" | head -n1)"
+            c_first_line="${c_body%%$'\n'*}"
             c_parsed="$(parse_lease_marker_line "$c_first_line" || true)"
             [[ -z "$c_parsed" ]] && continue
             c_host="${c_parsed%%$'\t'*}"

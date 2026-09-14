@@ -554,3 +554,70 @@ def test_cold_run_ignores_a_poisoned_cache(mod, tmp_path: Path, monkeypatch) -> 
         f"cold run replayed the stale cached error -- the gate is still trapped:\n{cold}"
     )
     assert mod.parse_mypy_output(cold) == Counter(), cold
+
+
+# Captured diagnostic templates from the mypy 1.19.1 ledger and 2.3.1 CI.
+_DIAGNOSTIC_ALIASES = [
+    (
+        'Incompatible default for argument "name" (default has type "None", argument has type "str")',
+        'Incompatible default for parameter "name" (default has type "None", parameter has type "str")',
+    ),
+    (
+        'Missing type parameters for generic type "dict"',
+        'Missing type arguments for generic type "dict"',
+    ),
+    (
+        "Function is missing a type annotation for one or more arguments",
+        "Function is missing a type annotation for one or more parameters",
+    ),
+]
+
+
+@pytest.mark.parametrize("old,new", _DIAGNOSTIC_ALIASES)
+@pytest.mark.parametrize("reverse", [False, True])
+def test_diagnostic_aliases_compare_on_either_side(mod, tmp_path, old, new, reverse):
+    baseline_message, current_message = (new, old) if reverse else (old, new)
+    baseline = _write(tmp_path, "baseline.txt", f"src/a.py\tmisc\t{baseline_message}\n")
+    output = _write(tmp_path, "output.txt", f"src/a.py:10: error: {current_message}  [misc]\n")
+    assert mod.main(["--baseline", str(baseline), "--mypy-output", str(output)]) == 0
+    # Normalization cannot grant a second occurrence of the same debt.
+    output.write_text(output.read_text() * 2)
+    assert mod.main(["--baseline", str(baseline), "--mypy-output", str(output)]) == 2
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        ('"name"', '"other"'),
+        ('"str"', '"bytes"'),
+        ('"None"', '"int"'),
+        ("src/a.py", "src/b.py"),
+        ("[assignment]", "[arg-type]"),
+    ],
+)
+def test_diagnostic_aliases_preserve_semantic_differences(mod, tmp_path, replacement):
+    old, new = _DIAGNOSTIC_ALIASES[0]
+    baseline = _write(tmp_path, "baseline.txt", f"src/a.py\tassignment\t{old}\n")
+    raw = f"src/a.py:10: error: {new}  [assignment]\n"
+    output = _write(tmp_path, "output.txt", raw.replace(*replacement))
+    assert mod.main(["--baseline", str(baseline), "--mypy-output", str(output)]) == 2
+
+
+def test_aliases_preserve_quoted_template_words(mod):
+    message = (
+        'Incompatible default for parameter "parameter" '
+        '(default has type "None", parameter has type "Literal[\'argument\']")'
+    )
+    assert mod.normalize_message(message) == (
+        'Incompatible default for argument "parameter" '
+        '(default has type "None", argument has type "Literal[\'argument\']")'
+    )
+    unrelated = 'Unexpected parameter "argument", parameter has type "str"'
+    assert mod.normalize_message(unrelated) == unrelated
+
+
+def test_mixed_alias_baseline_keeps_total_allowance(mod, tmp_path):
+    old, new = _DIAGNOSTIC_ALIASES[1]
+    baseline = _write(tmp_path, "baseline.txt", f"src/a.py\tmisc\t{old}\nsrc/a.py\tmisc\t{new}\n")
+    loaded = mod.load_baseline(baseline)
+    assert loaded == Counter({mod.signature("src/a.py", old, "misc"): 2})
