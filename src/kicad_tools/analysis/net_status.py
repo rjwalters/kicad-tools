@@ -1284,14 +1284,16 @@ class NetStatusAnalyzer:
             #
             #    Whether two fragments are continuous depends on the fill
             #    ENCODING, not on whether their stored outlines touch (Issue
-            #    #5362).  Unless the zone carries ``(filled_areas_thickness
-            #    no)``, KiCad stores each outline as the centre-line of
-            #    ``min_thickness``-wide copper, so the real metal reaches
-            #    ``min_thickness / 2`` past the stored boundary and two
-            #    fragments within ``min_thickness`` of each other are
-            #    continuous (:meth:`Zone.fill_inflation`).  Under the ``no``
-            #    encoding the stored outline IS the copper and native KiCad
-            #    bonds no two fill outlines of one zone directly at all.
+            #    #5362).  On a STROKED fill (:meth:`Zone.is_stroked_fill` --
+            #    an explicit ``(filled_areas_thickness yes)``, or the token
+            #    absent on a file below KiCad's ``20250210`` boundary) each
+            #    outline is the centre-line of ``min_thickness``-wide copper,
+            #    so real metal reaches ``min_thickness / 2`` past the stored
+            #    boundary and fragments within ``min_thickness`` are
+            #    continuous.  On a SOLID fill -- an explicit ``no``, or the
+            #    token absent from ``20250210`` onward -- the stored outline
+            #    IS the copper and native KiCad bonds no two fill outlines of
+            #    one zone directly at all.
             #
             #    The previous ``region_i.intersects(region_j)`` test matched
             #    neither encoding: it split stroke-encoded fragments that

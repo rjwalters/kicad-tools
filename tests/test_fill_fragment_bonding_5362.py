@@ -23,35 +23,45 @@ Measured with ``kicad-cli pcb drc --format json`` under
 ``kicad/kicad:10.0`` digest ``sha256:182c8005cb77...`` (KiCad **10.0.5**, the
 image digest recorded in #5358/#5362), with **no** ``--refill-zones`` and no
 ``--save-board``; the board SHA256 was identical before and after every run.
-Two same-zone fill fragments carrying one pad each report:
+Two same-zone fill fragments carrying one pad each, ``min_thickness 0.25``:
 
-===============================  =====================  ==================
-zone encoding                    fragment gap (mm)      unconnected_items
-===============================  =====================  ==================
-``filled_areas_thickness`` absent  0.0 / 0.05 / 0.1 /
-(format default = ``yes``,         0.2 / 0.24 / 0.25    0
-``min_thickness 0.25``)            0.26 / 0.3 / 0.5 /
-                                   2.0                  1
-``(filled_areas_thickness no)``    every gap above,
-                                   including 0.0        1
-===============================  =====================  ==================
+=============================  ==============  ==================  =========
+``filled_areas_thickness``     ``(version N)``  fragment gap (mm)   unconn.
+=============================  ==============  ==================  =========
+absent                         <= 20250209     0.0 .. 0.25         0
+absent                         <= 20250209     0.26 .. 2.0         1
+absent                         >= 20250210     0.0 .. 2.0          1
+``no``                         any             0.0 .. 2.0          1
+=============================  ==============  ==================  =========
 
-i.e. the stored outlines are centre-lines of ``min_thickness``-wide copper
-unless ``filled_areas_thickness`` is explicitly ``no``, and two fragments are
-one piece of metal exactly when their stored outlines are within
-``min_thickness`` of each other.  With the ``no`` encoding the stored outline
-*is* the copper and native KiCad never bonds two fill outlines of one zone to
-each other -- not at a shared corner, not along a shared edge, and not across
-a genuinely overlapping band.  In every encoding a real conductor (a pad, a
-via or a track whose copper reaches into both fragments) does bond them.
+Two things decide it, in KiCad's own resolution order:
+
+1. **Is the fill stroked?**  The parser initialises ``isStrokedFill =
+   m_requiredVersion < 20250210`` and then overrides it from an explicit
+   token.  So an *absent* ``filled_areas_thickness`` is version-dependent,
+   while an explicit ``no`` is always solid.
+2. **If stroked**, the stored outline is the centre-line of
+   ``min_thickness``-wide copper, so two fragments are one piece of metal
+   exactly when their outlines are within ``min_thickness``.  If solid, the
+   stored outline *is* the copper and native KiCad bonds no two fill outlines
+   of one zone to each other -- not at a shared corner, not along a shared
+   edge, and not across a genuinely overlapping band.
+
+In every row a real conductor (a pad, via or track whose copper reaches into
+both fragments) does bond them; the version gates fill adjacency only.
+
+The retained #5362 witness is a ``(version 20260206)`` board whose zones omit
+the token -- row 3 -- which is why reading "absent" as unconditionally stroked
+kept it reporting false-clean.  It is pinned at the bottom of this module.
 
 The fixtures below are that measurement series, one board per row, asserted
-against both analyzers.  Each case's ``native`` field records the measured
-``unconnected_items`` count for the identical bytes this module generates.
+against both analyzers.  Each case's ``native_unconnected`` field records the
+measured count for the identical bytes this module generates.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -131,6 +141,10 @@ class Case:
     p1: tuple[float, float] = (12, 25)
     p2: tuple[float, float] = (28, 25)
     extra: str = ""
+    # ``(version N)``.  An omitted ``filled_areas_thickness`` means "stroked"
+    # only below KiCad's 20250210 boundary, so the version is part of the
+    # fixture's identity, not boilerplate (Issue #5362).
+    version: int = 20240108
 
     @property
     def connected(self) -> bool:
@@ -147,7 +161,7 @@ class Case:
             fat="" if self.stroke_encoded else _FAT_NO,
             fills=self.fills,
             extra=self.extra,
-        )
+        ).replace("(version 20240108)", f"(version {self.version})")
 
 
 _TWO_RECTS_GAP = {
@@ -215,6 +229,52 @@ CASES: list[Case] = [
             "  )\n"
         ),
     ),
+    # --- file-version boundary (Issue #5362) --------------------------------
+    # An omitted ``filled_areas_thickness`` is NOT unconditionally "stroked":
+    # KiCad's parser initialises ``isStrokedFill = m_requiredVersion <
+    # 20250210``.  Below the boundary the stored outline is a centre-line and
+    # adjacent fragments are continuous; at or above it the stored outline is
+    # already solid copper and they are not.  The #5362 witness is a
+    # ``(version 20260206)`` board with the token absent, which is exactly why
+    # a version-blind "absent means stroked" reading kept it false-clean.
+    # An EXPLICIT ``no`` is solid at every version (the rows above pin that).
+    *[
+        Case(f"absent_v{ver}_gap0.0", _TWO_RECTS_GAP[0.0], native, stroke_encoded=True, version=ver)
+        for ver, native in (
+            (20240108, 0),
+            (20250209, 0),
+            (20250210, 1),
+            (20260101, 1),
+            (20260206, 1),
+        )
+    ],
+    *[
+        Case(f"absent_v{ver}_gap0.2", _TWO_RECTS_GAP[0.2], native, stroke_encoded=True, version=ver)
+        for ver, native in (
+            (20240108, 0),
+            (20250209, 0),
+            (20250210, 1),
+            (20260101, 1),
+            (20260206, 1),
+        )
+    ],
+    # Control: a conductor bridge stays connected on both sides of the
+    # boundary -- the version gates fill-adjacency only, never real copper.
+    *[
+        Case(
+            f"bridged_by_track_v{ver}",
+            _fill(_rect(10, 18)) + _fill(_rect(20, 30)),
+            0,
+            p1=(14, 25),
+            p2=(26, 25),
+            version=ver,
+            extra=(
+                '  (segment (start 17 25) (end 21 25) (width 0.3) (layer "F.Cu") (net 1)\n'
+                '    (uuid "40000000-0000-0000-0000-000000000001"))\n'
+            ),
+        )
+        for ver in (20250209, 20260206)
+    ],
 ]
 
 
@@ -265,19 +325,145 @@ def test_pad_partition_matches_native_fill_fragment_bonding(
     )
 
 
-def test_zone_reports_stroke_inflation_from_filled_areas_thickness(
+@pytest.mark.parametrize(
+    ("stroke_encoded", "version", "token", "stroked", "inflation"),
+    [
+        # Explicit ``no``: solid at every version.
+        (False, 20240108, False, False, 0.0),
+        (False, 20260206, False, False, 0.0),
+        # Token absent: resolved by the 20250210 parser boundary.
+        (True, 20240108, None, True, 0.125),
+        (True, 20250209, None, True, 0.125),
+        (True, 20250210, None, False, 0.0),
+        (True, 20260206, None, False, 0.0),
+    ],
+)
+def test_zone_fill_encoding_follows_token_then_file_version(
     tmp_path: Path,
+    stroke_encoded: bool,
+    version: int,
+    token: bool | None,
+    stroked: bool,
+    inflation: float,
 ) -> None:
-    """``filled_areas_thickness`` drives ``Zone.fill_inflation`` (default yes)."""
-    solid = tmp_path / "solid.kicad_pcb"
-    solid.write_text(CASES[-1].board())  # carries (filled_areas_thickness no)
-    stroke = tmp_path / "stroke.kicad_pcb"
-    stroke.write_text(Case("stroke", _fill(_rect(10, 30)), 0, stroke_encoded=True).board())
+    """``Zone`` mirrors KiCad's ``isStrokedFill`` resolution order (#5362).
 
-    solid_zone = PCB.load(solid).zones[0]
-    assert solid_zone.filled_areas_thickness is False
-    assert solid_zone.fill_inflation() == 0.0
+    The parser initialises ``isStrokedFill = m_requiredVersion < 20250210``
+    and only then overrides it from an explicit
+    ``(filled_areas_thickness ...)`` token, so an absent token is
+    version-dependent while an explicit ``no`` is not.  Reading the absent
+    case as unconditionally stroked is what kept the #5362 witness -- a
+    ``(version 20260206)`` board with no token -- reporting false-clean.
+    """
+    path = tmp_path / f"zone_v{version}_{stroke_encoded}.kicad_pcb"
+    path.write_text(
+        Case(
+            "encoding",
+            _fill(_rect(10, 30)),
+            0,
+            stroke_encoded=stroke_encoded,
+            version=version,
+        ).board()
+    )
 
-    stroke_zone = PCB.load(stroke).zones[0]
-    assert stroke_zone.filled_areas_thickness is True
-    assert stroke_zone.fill_inflation() == pytest.approx(0.125)
+    zone = PCB.load(path).zones[0]
+    assert zone.file_version == version
+    assert zone.filled_areas_thickness is token
+    assert zone.is_stroked_fill() is stroked
+    assert zone.fill_inflation() == pytest.approx(inflation)
+
+
+# --- the retained #5362 witness ---------------------------------------------
+
+WITNESS_DIR = Path(__file__).resolve().parent / "fixtures" / "issue-5362-witness"
+WITNESS_PCB = WITNESS_DIR / "usb_joystick_routed.kicad_pcb"
+WITNESS_SCH = WITNESS_DIR / "usb_joystick.kicad_sch"
+WITNESS_PCB_SHA = "0141cb8e49f99aab13c005ca0b7431ca3e227bb934d7ed788b474b33578c6303"
+WITNESS_SCH_SHA = "c715b4bd587bc4a2c36f8d58e9f40f4999cff6ca4891faaab65000e7369088d8"
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.fixture(scope="module")
+def witness() -> tuple[Path, Path]:
+    """The retained #5362 witness, pinned by hash (see the fixture README)."""
+    assert _sha256(WITNESS_PCB) == WITNESS_PCB_SHA, (
+        "the #5362 witness PCB must be byte-identical to the board measured in "
+        "the issue; do not regenerate or reformat it"
+    )
+    assert _sha256(WITNESS_SCH) == WITNESS_SCH_SHA
+    return WITNESS_SCH, WITNESS_PCB
+
+
+def test_witness_zone_encoding_is_solid_despite_absent_token(
+    witness: tuple[Path, Path],
+) -> None:
+    """The witness is `(version 20260206)` with no `filled_areas_thickness`.
+
+    That combination is the whole defect: a version-blind "absent means
+    stroked" reading inflates these fills by ``min_thickness / 2`` and fuses
+    fragments native KiCad keeps apart.
+    """
+    _sch, pcb = witness
+    zones = ConnectivityValidator(pcb).pcb.zones
+    assert zones, "witness must carry pour zones"
+    assert all(zone.file_version == 20260206 for zone in zones)
+    assert all(zone.filled_areas_thickness is None for zone in zones)
+    assert all(not zone.is_stroked_fill() for zone in zones)
+    assert all(zone.fill_inflation() == 0.0 for zone in zones)
+
+
+def test_witness_strict_net_status_reports_the_native_open(
+    witness: tuple[Path, Path],
+) -> None:
+    """Strict net-status must find exactly the one open native DRC reports.
+
+    Native ``kicad-cli pcb drc`` 10.0.5 on these exact bytes (no
+    ``--refill-zones``, no ``--save-board``, hash unchanged) reports::
+
+        Found 1 unconnected items
+          Pad 1 [VCC] of R14 on F.Cu (155.675, 103.5)
+            <-> Track [VCC] on F.Cu, length 1.9700 mm (151.68, 103.5)
+
+    and native ``BuildConnectivity()`` places ``R13.1`` alone with that track
+    (PR #5381 review). Before #5362 this reported ``total_unconnected_pads=0``
+    -- the false negative the issue was filed for.
+    """
+    _sch, pcb = witness
+    before = _sha256(pcb)
+
+    report = NetStatusAnalyzer(pcb, strict=True).analyze()
+    assert sum(net.unconnected_count for net in report.nets) == 1
+
+    vcc = report.get_net("VCC")
+    assert vcc is not None
+    assert vcc.status != "complete"
+    assert vcc.island_count == 2
+    assert [f"{p.reference}.{p.pad_number}" for p in vcc.unconnected_pads] == ["R13.1"]
+
+    assert _sha256(pcb) == before, "analysis must not rewrite the witness"
+
+
+def test_witness_copper_lvs_reports_the_native_open(
+    witness: tuple[Path, Path],
+) -> None:
+    """Copper-LVS must report the same single VCC open, and no shorts.
+
+    Before #5362 this returned ``clean=True`` with ``bound_pad_count=129``
+    on the same bytes.
+    """
+    from kicad_tools.lvs.copper_lvs import compare_copper_netlist
+
+    sch, pcb = witness
+    before = _sha256(pcb)
+
+    result = compare_copper_netlist(sch, pcb)
+    assert not result.vacuous
+    assert result.bound_pad_count == 129
+    assert result.shorts == ()
+    assert [(m.net_a, m.pad_a, m.pad_b) for m in result.opens] == [("VCC", "C1.1", "R13.1")]
+    assert result.clean is False
+
+    assert _sha256(pcb) == before, "analysis must not rewrite the witness"

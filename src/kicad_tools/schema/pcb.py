@@ -1515,6 +1515,16 @@ class ZoneKeepout:
         return keepout
 
 
+# Last ``(version N)`` whose zones default to *stroked* fills when
+# ``filled_areas_thickness`` is absent.  KiCad's parser initialises
+# ``isStrokedFill = m_requiredVersion < 20250210``, so 20250209 is the last
+# legacy version and 20250210 is the first modern (solid-fill) one.  Verified
+# with native kicad-cli 10.0.5 on a version-only differential: the identical
+# two-fragment board with the token absent reports 0 unconnected items at
+# 20240108 / 20250209 and 1 at 20250210 / 20260101 / 20260206 (Issue #5362).
+STROKED_FILL_LAST_VERSION = 20250209
+
+
 @dataclass
 class Zone:
     """PCB copper pour zone.
@@ -1566,33 +1576,56 @@ class Zone:
     fill_type: str = "solid"
     # Whether zone is filled (has copper)
     is_filled: bool = False
-    # KiCad's ``(filled_areas_thickness yes|no)``.  ``True`` (the format
-    # default when the token is absent) means the stored ``filled_polygons``
-    # are *centre-lines* of copper ``min_thickness`` wide, so the real copper
-    # extends ``min_thickness / 2`` beyond each stored outline.  ``False``
-    # means the stored outlines already are the final copper.  See
-    # :meth:`fill_inflation` (Issue #5362).
-    filled_areas_thickness: bool = True
+    # KiCad's ``(filled_areas_thickness yes|no)``.  ``None`` means the token
+    # was absent, whose meaning is **file-version dependent** -- see
+    # :meth:`fill_inflation` and :data:`STROKED_FILL_LAST_VERSION`.
+    filled_areas_thickness: bool | None = None
+    # ``(version N)`` of the board file this zone came from, needed to resolve
+    # an absent ``filled_areas_thickness``.  ``0`` when unknown, which is
+    # treated as the modern (solid-fill) default (Issue #5362).
+    file_version: int = 0
+
+    def is_stroked_fill(self) -> bool:
+        """Whether ``filled_polygons`` are centre-lines rather than final copper.
+
+        Mirrors KiCad's own parser: ``pcb_io_kicad_sexpr_parser.cpp``
+        initialises ``isStrokedFill`` to ``m_requiredVersion < 20250210`` and
+        then overwrites it from an explicit ``(filled_areas_thickness ...)``
+        token, applying the stroke-to-solid conversion only when it ends up
+        true.  So an **absent** token means "stroked" on a legacy file and
+        "already solid" from ``20250210`` onward -- the distinction this
+        method exists to preserve (Issue #5362).
+        """
+        if self.filled_areas_thickness is not None:
+            return self.filled_areas_thickness
+        return 0 < self.file_version <= STROKED_FILL_LAST_VERSION
 
     def fill_inflation(self) -> float:
         """Half-width the stored fill outlines must grow by to be real copper.
 
-        KiCad's zone filler can store a fill either as the final copper
-        outline (``(filled_areas_thickness no)``) or as the centre-line of a
-        ``min_thickness``-wide stroke (``yes``, and the default when the token
-        is absent).  In the latter case the manufactured copper is the stored
-        polygon inflated by ``min_thickness / 2``, which is what makes two
-        adjacent fill fragments of one zone electrically continuous.
+        When the fill is stroked (:meth:`is_stroked_fill`) the manufactured
+        copper is the stored polygon inflated by ``min_thickness / 2``, which
+        is what makes two adjacent fill fragments of one zone electrically
+        continuous.  When it is solid the stored outline already *is* the
+        copper and no inflation applies, so two fill outlines of one zone are
+        never bonded to each other by adjacency alone.
 
         Measured against native ``kicad-cli pcb drc`` (KiCad 10.0.5, no
-        ``--refill-zones``): with the token absent and ``min_thickness 0.25``,
-        two same-zone fill fragments report ``connected`` for every gap up to
-        and including 0.25 mm and ``unconnected`` from 0.26 mm; with
-        ``(filled_areas_thickness no)`` they report ``unconnected`` at every
-        gap, including an exact zero-gap shared edge.  Both series are exactly
-        this inflation rule.
+        ``--refill-zones``, board hash unchanged), two same-zone fragments
+        carrying one pad each, ``min_thickness 0.25``:
+
+        =========================  ===============  ==================
+        ``filled_areas_thickness``  ``(version N)``  connected up to
+        =========================  ===============  ==================
+        absent                      <= 20250209      gap <= min_thickness
+        absent                      >= 20250210      never
+        ``no``                      any              never
+        =========================  ===============  ==================
+
+        A conductor (pad / via / track) reaching into both fragments bonds
+        them in every row; that path is handled by the callers, not here.
         """
-        if not self.filled_areas_thickness:
+        if not self.is_stroked_fill():
             return 0.0
         return max(self.min_thickness, 0.0) / 2.0
 
@@ -1655,7 +1688,9 @@ class Zone:
         if min_thickness := sexp.find("min_thickness"):
             zone.min_thickness = min_thickness.get_float(0) or 0.2
 
-        # ``(filled_areas_thickness no)`` -- absent means ``yes`` (#5362).
+        # ``(filled_areas_thickness yes|no)``.  Left as ``None`` when absent:
+        # the meaning depends on the file version, which the zone alone does
+        # not know -- ``PCB._parse`` supplies it (Issue #5362).
         if fat := sexp.find("filled_areas_thickness"):
             zone.filled_areas_thickness = fat.get_string(0) != "no"
 
@@ -2408,6 +2443,10 @@ class PCB:
                 self._vias.append(via)
             elif tag == "zone":
                 zone = Zone.from_sexp(child)
+                # An absent ``filled_areas_thickness`` means "stroked" only
+                # below KiCad's 20250210 boundary, so every zone needs the
+                # file version to resolve it (Issue #5362).
+                zone.file_version = self._file_version()
                 self._zones.append(zone)
             elif tag == "gr_line":
                 line = GraphicLine.from_sexp(child)
@@ -2490,6 +2529,26 @@ class PCB:
         )
         logger.warning("%s", message)
         self.parse_warnings.append(message)
+
+    def _file_version(self) -> int:
+        """The board's ``(version N)`` as an int, or ``0`` when unreadable.
+
+        Used to resolve an absent ``filled_areas_thickness`` on each zone
+        (:meth:`Zone.is_stroked_fill`, Issue #5362).  ``0`` is deliberately
+        *not* treated as legacy: an unknown version falls through to the
+        modern solid-fill reading, the conservative choice, since assuming a
+        stroke inflation that isn't there would fuse genuinely open copper.
+        """
+        version_node = self._sexp.find_child("version")
+        if version_node is None:
+            return 0
+        raw = version_node.get_string(0)
+        if raw is None:
+            return 0
+        try:
+            return int(raw)
+        except ValueError:
+            return 0
 
     def _parse_layers(self, sexp: SExp):
         """Parse layer definitions."""

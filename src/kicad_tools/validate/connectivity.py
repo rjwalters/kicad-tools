@@ -2094,22 +2094,27 @@ class ConnectivityValidator:
 
         Two fill fragments **of one zone** are a special case (Issue #5362):
         whether they are continuous depends on the fill *encoding*, not on
-        whether their stored outlines happen to touch.  Unless the zone
-        carries ``(filled_areas_thickness no)``, KiCad stores each outline as
-        the centre-line of ``min_thickness``-wide copper, so real metal
-        reaches ``min_thickness / 2`` past the stored boundary and fragments
-        within ``min_thickness`` are one piece (:meth:`Zone.fill_inflation`).
-        Under the ``no`` encoding the stored outline *is* the copper and
-        native KiCad bonds no two fill outlines of one zone directly.
+        whether their stored outlines happen to touch.  When the fill is
+        stroked (:meth:`Zone.is_stroked_fill` -- an explicit
+        ``(filled_areas_thickness yes)``, or the token absent on a file below
+        KiCad's ``20250210`` version boundary) each outline is the centre-line
+        of ``min_thickness``-wide copper, so real metal reaches
+        ``min_thickness / 2`` past the stored boundary and fragments within
+        ``min_thickness`` are one piece.  When it is solid -- an explicit
+        ``no``, or the token absent from ``20250210`` onward -- the stored
+        outline *is* the copper and native KiCad bonds no two fill outlines of
+        one zone directly.
 
         Measured with ``kicad-cli pcb drc`` 10.0.5 on identical saved bytes
         (no ``--refill-zones``, hash unchanged), a pad on each of two
         fragments reports ``connected`` for every gap up to and including
-        ``min_thickness`` under the default encoding and ``unconnected`` from
-        just past it; under ``(filled_areas_thickness no)`` it reports
-        ``unconnected`` at every gap, including fragments meeting at a point,
-        sharing an edge, or overlapping across a 2 mm band.  A bare
-        ``intersects`` test matches neither series.
+        ``min_thickness`` under the stroked encoding and ``unconnected`` from
+        just past it; under the solid encoding it reports ``unconnected`` at
+        every gap, including fragments meeting at a point, sharing an edge, or
+        overlapping across a 2 mm band.  A bare ``intersects`` test matches
+        neither series, and a version-blind "absent means stroked" reading
+        misses the solid case entirely -- which is what kept the #5362
+        ``(version 20260206)`` witness reporting false-clean.
 
         The rule is applied to same-zone pairs only, which is exactly what
         was measured; fills of *different* zone objects keep the existing
@@ -2232,12 +2237,12 @@ class ConnectivityValidator:
                 union(left, right)
 
         # Same-zone fill fragments: continuous iff their REAL copper meets.
-        # Unless the zone carries ``(filled_areas_thickness no)`` KiCad stores
-        # each outline as the centre-line of ``min_thickness``-wide copper, so
-        # fragments within ``min_thickness`` are one piece of metal; under the
-        # ``no`` encoding the stored outline IS the copper and native KiCad
-        # bonds no two fill outlines of one zone directly (Issue #5362,
-        # measured against kicad-cli 10.0.5 on identical saved bytes).
+        # ``fill_inflation`` is ``min_thickness / 2`` on a stroked fill and
+        # zero on a solid one, and which of those applies is decided by the
+        # ``filled_areas_thickness`` token when present and by KiCad's
+        # ``20250210`` file-version boundary when absent (Issue #5362,
+        # measured against kicad-cli 10.0.5 on identical saved bytes).  A zero
+        # inflation means no fill-adjacency bond at all.
         for inflation, zone_items, zone_item_layers in zone_fill_items:
             if inflation <= 0.0 or len(zone_items) < 2:
                 continue
