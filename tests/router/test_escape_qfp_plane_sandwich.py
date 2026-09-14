@@ -388,7 +388,7 @@ class TestPlaneSandwichPredicate:
     def test_predicate_fires_on_sandwiched_signal(self):
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_with_plane_sandwich()
         package = router.analyze_package(pads)
         assert package.package_type in (
@@ -411,7 +411,7 @@ class TestPlaneSandwichPredicate:
         rescue signal pads)."""
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_with_plane_sandwich()
         package = router.analyze_package(pads)
 
@@ -431,7 +431,7 @@ class TestPlaneSandwichPredicate:
         """
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_with_plane_sandwich()
         package = router.analyze_package(pads)
 
@@ -449,7 +449,7 @@ class TestPlaneSandwichPredicate:
         plane-sandwiched."""
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_with_plane_sandwich()
         package = router.analyze_package(pads)
 
@@ -465,7 +465,7 @@ class TestPlaneSandwichPredicate:
         """Mixed neighbour: one plane, one signal -> not sandwiched."""
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_with_plane_sandwich()
         package = router.analyze_package(pads)
 
@@ -509,7 +509,7 @@ class TestForcedInPadRescue:
         """
         rules = _make_rules(manufacturer="pcbway")
         grid = _make_grid(rules, layer_stack=LayerStack.two_layer())
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_along_edge_sandwich()
         package = router.analyze_package(pads)
 
@@ -559,7 +559,7 @@ class TestForcedInPadRescue:
         """
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_with_plane_sandwich()
         package = router.analyze_package(pads)
 
@@ -589,7 +589,7 @@ class TestForcedInPadRescue:
         along the west edge towards an adjacent plane pad."""
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_along_edge_sandwich()
         package = router.analyze_package(pads)
 
@@ -624,7 +624,7 @@ class TestNoViaInPadErrorPath:
         unfixable geometric constraint."""
         rules = _make_rules(manufacturer="jlcpcb")
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         assert not router.via_in_pad_supported, (
             "Fixture sanity: plain jlcpcb should not support via-in-pad"
         )
@@ -658,7 +658,7 @@ class TestNoViaInPadErrorPath:
         logs about plane-sandwich should appear."""
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_along_edge_sandwich()
         package = router.analyze_package(pads)
 
@@ -690,7 +690,7 @@ class TestAutoMfrTierLogSuppression:
         rules = _make_rules(manufacturer="jlcpcb")
         rules.auto_mfr_tier_in_progress = True
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         assert not router.via_in_pad_supported, (
             "Fixture sanity: plain jlcpcb should not support via-in-pad"
         )
@@ -730,7 +730,7 @@ class TestAutoMfrTierLogSuppression:
         # Explicitly cleared (matches the FINAL-tier code path).
         rules.auto_mfr_tier_in_progress = False
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         assert not router.via_in_pad_supported
         pads = _make_lqfp48_along_edge_sandwich()
         package = router.analyze_package(pads)
@@ -758,7 +758,7 @@ class TestAutoMfrTierLogSuppression:
         # are unaffected by #2891.
         assert rules.auto_mfr_tier_in_progress is False
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_along_edge_sandwich()
         package = router.analyze_package(pads)
 

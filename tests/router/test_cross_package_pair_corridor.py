@@ -236,6 +236,7 @@ def make_router(
         net_pad_positions=net_pad_positions,
         net_name_to_id=net_name_to_id,
         enable_cross_package_pair_corridor=enable_flag,
+        component_holes=(),
     )
     return er, info
 
@@ -445,6 +446,7 @@ class TestIntraPackageUnaffected:
             net_pad_positions=net_pad_positions,
             net_name_to_id=net_name_to_id,
             enable_cross_package_pair_corridor=True,
+            component_holes=(),
         )
         er.generate_escapes(info)
 

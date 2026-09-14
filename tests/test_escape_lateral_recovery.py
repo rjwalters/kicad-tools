@@ -133,7 +133,7 @@ def _build_router(strict: bool = True) -> EscapeRouter:
     """Build an EscapeRouter on the translated violating-pair geometry."""
     rules = make_rules(manufacturer="jlcpcb-tier1")
     grid = _make_grid_origin_zero(rules)
-    router = EscapeRouter(grid, rules)
+    router = EscapeRouter(grid, rules, component_holes=())
     router.strict_in_pad_clearance = strict
     return router
 
@@ -436,7 +436,7 @@ class TestLateralRecoveryFailsGracefully:
         """
         rules = make_rules(manufacturer="jlcpcb")  # no via-in-pad support
         grid = _make_grid_origin_zero(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         assert router.via_in_pad_supported is False
         router.strict_in_pad_clearance = True
 
@@ -637,7 +637,7 @@ class TestCanPlaceViaBoundsAreOriginAware:
             origin_y=100.0,
             layer_stack=LayerStack.four_layer_sig_sig_gnd_pwr(),
         )
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         # A point inside the grid in world coords (105, 105) -- the
         # pre-#3063 bounds check rejected this because 105 > grid.width
         # (=10).  The origin-aware check must accept it.
@@ -666,7 +666,7 @@ class TestCanPlaceViaBoundsAreOriginAware:
             origin_y=100.0,
             layer_stack=LayerStack.four_layer_sig_sig_gnd_pwr(),
         )
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         # Outside the [100, 110] extent.
         assert router._can_place_via(x=99.0, y=105.0, net=None) is False
         assert router._can_place_via(x=111.0, y=105.0, net=None) is False

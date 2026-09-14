@@ -2747,6 +2747,59 @@ class TestViaInPadComponentHoleCensus:
         assert nudged == 1
         assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
 
+    def test_duplicate_ref_pin_hole_is_not_excluded_by_logical_key(self):
+        """Regression: a physically DISTINCT through-hole pad that shares
+        the candidate SMD pad's ``(ref, pin)`` (``"U1", "1"``) -- a
+        duplicate-numbered pad, exactly the case ``all_pads`` exists to
+        preserve -- must still be scanned.  Excluding by logical
+        ``(ref, pin)`` match instead of object identity would silently
+        discard it and wrongly treat the via as eligible."""
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1)
+        duplicate_identity_near_hole = Pad(
+            x=10.9,
+            y=9.7,
+            width=0.3,
+            height=0.3,
+            net=0,
+            net_name="",
+            layer=Layer.F_CU,
+            ref="U1",
+            pin="1",
+            through_hole=True,
+            drill=0.3,
+        )
+        pad, via, router = self._make_fixture(all_pads=[pad, duplicate_identity_near_hole])
+
+        result = DRCNudgeResult()
+        nudged = _scan_and_repair_via_in_pad(router, max_displacement=2.0, result=result)
+
+        assert nudged == 1
+        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
+
+    def test_nan_drill_refuses(self):
+        """A ``NaN`` drill must not silently compare as "safely distant"."""
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1)
+        nan_hole = Pad(
+            x=50.0,
+            y=50.0,
+            width=0.3,
+            height=0.3,
+            net=0,
+            net_name="",
+            layer=Layer.F_CU,
+            ref="H1",
+            pin="1",
+            through_hole=True,
+            drill=float("nan"),
+        )
+        pad, via, router = self._make_fixture(all_pads=[pad, nan_hole])
+
+        result = DRCNudgeResult()
+        nudged = _scan_and_repair_via_in_pad(router, max_displacement=2.0, result=result)
+
+        assert nudged == 1
+        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
+
 
 class TestViaDrillOverlapsBbox:
     """``_via_drill_overlaps_bbox`` mirrors the DRC rule's overlap test."""

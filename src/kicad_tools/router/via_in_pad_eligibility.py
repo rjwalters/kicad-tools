@@ -180,8 +180,7 @@ def resolve_component_hole_context(
     via_drill_mm: float,
     *,
     all_pads: Sequence[Pad] | None,
-    exclude_ref: str | None = None,
-    exclude_pin: str | None = None,
+    exclude: object | None = None,
 ) -> ComponentHoleContext:
     """Resolve the nearest-other-component-hole distance for a candidate via.
 
@@ -202,17 +201,28 @@ def resolve_component_hole_context(
         all_pads: The complete physical pad list, or ``None`` when no
             census is available to the caller.  ``None`` fails closed
             (``known=False``).
-        exclude_ref: Reference designator of the pad hosting the
-            candidate via (excluded from the "other hole" scan -- its
-            own hole is the via's own landing, not a foreign hole).
-        exclude_pin: Pin number/name of the pad hosting the candidate
-            via, paired with ``exclude_ref``.
+        exclude: The EXACT pad object hosting the candidate via (excluded
+            from the "other hole" scan by OBJECT IDENTITY, not logical
+            ``(ref, pin)`` key).  Issue #5201's own duplicate-holes
+            requirement is the reason a footprint with repeated pad
+            numbers (thermal-via arrays / EP paddles) needs
+            ``all_pads`` in the first place -- excluding by a
+            ``(ref, pin)`` string match would silently discard every
+            OTHER physically distinct hole that happens to share that
+            same logical name, defeating the exact guarantee this
+            parameter exists to preserve.  The candidate pad supplied by
+            escape/repair callers is normally an SMD pad (``through_hole``
+            False), which the scan below already skips regardless -- this
+            identity check only matters for the rare case a through-hole
+            pad itself hosts the candidate via.
 
     Returns:
         A :class:`ComponentHoleContext`.  ``known=False`` when
-        ``all_pads`` is ``None`` OR any OTHER through-hole pad has a
-        missing/zero/unparseable drill diameter (its hole radius cannot
-        be computed, so its true clearance is unknown -- conservatively
+        ``all_pads`` is ``None``, the candidate via's own position/drill
+        is not a finite positive number, OR any OTHER through-hole pad
+        has a position or drill diameter that is missing, non-numeric,
+        non-finite, or non-positive (its hole radius/location cannot be
+        computed, so its true clearance is unknown -- conservatively
         treated as "could be anywhere").  Otherwise ``known=True`` with
         ``nearest_distance_mm`` set to the minimum edge-to-edge distance
         found, or ``math.inf`` when the census contains no other
@@ -220,29 +230,35 @@ def resolve_component_hole_context(
     """
     if all_pads is None:
         return ComponentHoleContext(known=False, nearest_distance_mm=None)
+    if (
+        not math.isfinite(via_x)
+        or not math.isfinite(via_y)
+        or not math.isfinite(via_drill_mm)
+        or via_drill_mm <= 0.0
+    ):
+        return ComponentHoleContext(known=False, nearest_distance_mm=None)
 
     via_r = via_drill_mm / 2.0
     nearest: float | None = None
     for other in all_pads:
         if not getattr(other, "through_hole", False):
             continue
-        if (
-            exclude_ref is not None
-            and getattr(other, "ref", None) == exclude_ref
-            and getattr(other, "pin", None) == exclude_pin
-        ):
+        if exclude is not None and other is exclude:
             continue
-        drill = float(getattr(other, "drill", 0.0) or 0.0)
-        if drill <= 0.0:
-            # Unparseable/zero/missing drill on a real through-hole pad:
-            # its position is known but its hole radius is not, so we
-            # cannot prove it is far enough away.  Fail closed for the
-            # WHOLE census rather than silently skip this one hole --
-            # Issue #5201's acceptance criterion treats this the same
-            # as a wholly-unknown census.
+        ox, oy, drill = _coerce_finite_hole_geometry(other)
+        if ox is None:
+            # Unparseable/non-finite/non-positive geometry on a real
+            # through-hole pad: its true position or hole radius cannot
+            # be computed, so we cannot prove it is far enough away.
+            # Fail closed for the WHOLE census rather than silently skip
+            # this one hole -- Issue #5201's acceptance criterion treats
+            # this the same as a wholly-unknown census.
             return ComponentHoleContext(known=False, nearest_distance_mm=None)
+        assert oy is not None and drill is not None
         hole_r = drill / 2.0
-        distance = math.hypot(other.x - via_x, other.y - via_y) - via_r - hole_r
+        distance = math.hypot(ox - via_x, oy - via_y) - via_r - hole_r
+        if not math.isfinite(distance):
+            return ComponentHoleContext(known=False, nearest_distance_mm=None)
         if nearest is None or distance < nearest:
             nearest = distance
 
@@ -252,6 +268,33 @@ def resolve_component_hole_context(
         # qualifying, not "unknown".
         return ComponentHoleContext(known=True, nearest_distance_mm=math.inf)
     return ComponentHoleContext(known=True, nearest_distance_mm=nearest)
+
+
+def _coerce_finite_hole_geometry(
+    pad: object,
+) -> tuple[float, float, float] | tuple[None, None, None]:
+    """Extract ``(x, y, drill)`` from a through-hole pad, validated finite.
+
+    Issue #5201 (reopened): a malformed/unparseable drill (a non-numeric
+    string) previously raised an uncaught ``ValueError``, and a ``NaN``
+    drill previously produced a ``ComponentHoleContext`` that silently
+    compared as eligible (every ``NaN`` comparison is ``False``, so the
+    ``min_component_hole_distance_mm`` floor check never fired).  Both
+    are "unparseable/unknown geometry" per the acceptance criterion, not
+    proof of a safely-distant hole -- returns ``(None, None, None)`` for
+    the caller to treat as fail-closed-unknown instead.
+    """
+    try:
+        x = float(getattr(pad, "x", 0.0))
+        y = float(getattr(pad, "y", 0.0))
+        drill = float(getattr(pad, "drill", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return (None, None, None)
+    if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(drill)):
+        return (None, None, None)
+    if drill <= 0.0:
+        return (None, None, None)
+    return (x, y, drill)
 
 
 def via_in_pad_candidate_eligible(

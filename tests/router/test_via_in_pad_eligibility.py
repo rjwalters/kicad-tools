@@ -207,15 +207,29 @@ class TestResolveComponentHoleContext:
         assert ctx.known is True
         assert ctx.nearest_distance_mm == math.inf
 
-    def test_own_pad_is_excluded(self):
-        """The candidate's own (ref, pin) never counts as a foreign hole,
-        even if it happens to carry ``through_hole=True``."""
+    def test_own_pad_is_excluded_by_identity(self):
+        """The candidate's own EXACT pad object never counts as a
+        foreign hole, even if it happens to carry ``through_hole=True``."""
         own = _HolePad(x=0.0, y=0.0, ref="U5", pin="7", through_hole=True, drill=0.3)
-        ctx = resolve_component_hole_context(
-            0.0, 0.0, 0.3, all_pads=[own], exclude_ref="U5", exclude_pin="7"
-        )
+        ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=[own], exclude=own)
         assert ctx.known is True
         assert ctx.nearest_distance_mm == math.inf
+
+    def test_duplicate_ref_pin_hole_is_not_excluded_by_logical_key(self):
+        """A DIFFERENT pad object that happens to share the excluded
+        pad's ``(ref, pin)`` (a duplicate-numbered pad -- the exact
+        physical-occurrence case ``all_pads`` exists to preserve) must
+        NOT be excluded -- only object identity exempts a hole."""
+        candidate_pad = _HolePad(x=0.0, y=0.0, ref="U5", pin="7", through_hole=False)
+        duplicate_identity_hole = _HolePad(
+            x=0.4, y=0.0, ref="U5", pin="7", through_hole=True, drill=0.3
+        )
+        ctx = resolve_component_hole_context(
+            0.0, 0.0, 0.3, all_pads=[duplicate_identity_hole], exclude=candidate_pad
+        )
+        assert ctx.known is True
+        assert ctx.nearest_distance_mm is not None
+        assert math.isclose(ctx.nearest_distance_mm, 0.1, abs_tol=1e-9)
 
     def test_nearest_distance_is_edge_to_edge(self):
         """0.4mm centre distance, 0.3mm via drill, 0.3mm hole drill ->
@@ -232,6 +246,29 @@ class TestResolveComponentHoleContext:
         far_unknown = _HolePad(x=500.0, y=500.0, drill=0.0)
         ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=[far_unknown])
         assert ctx == ComponentHoleContext(known=False, nearest_distance_mm=None)
+
+    def test_nan_drill_fails_closed(self):
+        """A ``NaN`` drill must not silently compare as "safely distant"
+        -- every ``NaN`` comparison is ``False``, so a naive floor check
+        would never fire and eligibility would wrongly stay True."""
+        nan_hole = _HolePad(x=0.4, y=0.0, drill=float("nan"))
+        ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=[nan_hole])
+        assert ctx == ComponentHoleContext(known=False, nearest_distance_mm=None)
+
+    def test_unparseable_string_drill_fails_closed_without_crashing(self):
+        """A non-numeric drill value must fail closed, not raise."""
+        bad_hole = _HolePad(x=0.4, y=0.0, drill=0.3)
+        bad_hole.drill = "bad"  # type: ignore[assignment]
+        ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=[bad_hole])
+        assert ctx == ComponentHoleContext(known=False, nearest_distance_mm=None)
+
+    def test_nonfinite_via_drill_fails_closed(self):
+        """The candidate VIA's own drill being non-finite/non-positive
+        must also fail closed, even against an otherwise-empty census."""
+        ctx = resolve_component_hole_context(0.0, 0.0, float("nan"), all_pads=[])
+        assert ctx == ComponentHoleContext(known=False, nearest_distance_mm=None)
+        ctx2 = resolve_component_hole_context(0.0, 0.0, 0.0, all_pads=[])
+        assert ctx2 == ComponentHoleContext(known=False, nearest_distance_mm=None)
 
     def test_picks_the_nearest_of_multiple_holes(self):
         near = _HolePad(x=0.4, y=0.0, ref="H1", drill=0.3)

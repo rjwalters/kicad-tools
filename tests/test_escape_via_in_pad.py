@@ -136,7 +136,7 @@ class TestInPadEscapeStrategy:
         to in-pad via escape and produce vias dead-centre on their pads."""
         rules = _make_strict_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_dual_row_ssop(pin_count=28)
 
         package_info = escape_router.analyze_package(pads)
@@ -169,7 +169,7 @@ class TestInPadEscapeStrategy:
         vias are produced."""
         rules = _make_strict_rules(manufacturer="jlcpcb")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_dual_row_ssop(pin_count=28)
 
         package_info = escape_router.analyze_package(pads)
@@ -185,7 +185,7 @@ class TestInPadEscapeStrategy:
         escapes are produced (byte-identical to pre-#2605 behavior)."""
         rules = _make_strict_rules(manufacturer=None)
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_dual_row_ssop(pin_count=28)
 
         package_info = escape_router.analyze_package(pads)
@@ -208,7 +208,7 @@ class TestInPadEscapeStrategy:
         """
         rules = _make_strict_rules(manufacturer="pcbway")
         grid = _make_grid(rules, layer_stack=LayerStack.two_layer())
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_dual_row_ssop(pin_count=28)
 
         package_info = escape_router.analyze_package(pads)
@@ -225,7 +225,7 @@ class TestInPadEscapeStrategy:
         gracefully bails out and the pin defers as before."""
         rules = _make_strict_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
 
         # Tiny pads: 0.25 x 0.4 cannot host a 0.6mm-diameter via.
         pads = _make_dual_row_ssop(
@@ -264,7 +264,7 @@ class TestInPadEscapeStrategy:
         rules.via_drill = 0.15
         rules.via_diameter = 0.6
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         # Force the drill/annular fallback onto ``rules`` (see docstring).
         escape_router._mfr_limits = None
         assert escape_router._via_in_pad_process is not None, (
@@ -293,7 +293,7 @@ class TestInPadEscapeStrategy:
 
         rules = _make_strict_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_dual_row_ssop(pin_count=28)
 
         package_info = escape_router.analyze_package(pads)
@@ -336,7 +336,7 @@ class TestInPadEscapeStrategy:
             manufacturer="jlcpcb-tier1",
         )
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         # PCM5122PW pads: 0.30mm x 1.45mm (datasheet-accurate)
         pads = _make_dual_row_ssop(
             pin_count=28,
@@ -402,7 +402,7 @@ class TestChorusTestU5Regression:
             manufacturer="jlcpcb-tier1",
         )
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         package_info = escape_router.analyze_package(u5_pads)
         escapes = escape_router.generate_escapes(package_info)
 

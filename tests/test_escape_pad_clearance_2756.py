@@ -178,7 +178,7 @@ def _make_router(rules: DesignRules | None = None) -> EscapeRouter:
         origin_x=-20.0,
         origin_y=-20.0,
     )
-    return EscapeRouter(grid, rules)
+    return EscapeRouter(grid, rules, component_holes=())
 
 
 # ----------------------------------------------------------------------------
@@ -670,7 +670,7 @@ class TestInPadFallbackPreserved:
             origin_y=-20.0,
             layer_stack=LayerStack.four_layer_sig_sig_gnd_pwr(),
         )
-        router = EscapeRouter(grid, rules, manufacturer="jlcpcb-tier1")
+        router = EscapeRouter(grid, rules, manufacturer="jlcpcb-tier1", component_holes=())
         assert router.via_in_pad_supported, (
             "Test precondition: jlcpcb-tier1 must report via-in-pad supported"
         )

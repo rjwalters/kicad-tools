@@ -121,7 +121,7 @@ class TestCanPlaceViaWorldCoord:
     def test_grid_only_passes_at_clear_position(self):
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         # Mid-grid with no obstacle markings: must pass.
         assert router._can_place_via(10.0, 10.0)
 
@@ -133,7 +133,7 @@ class TestCanPlaceViaWorldCoord:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Place a foreign-net pad at (10.4, 10.0) with radius 0.1mm.
         # Via at (10.0, 10.0) with diameter 0.6 -> radius 0.3.
@@ -163,7 +163,7 @@ class TestCanPlaceViaWorldCoord:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         same_net_pad = Pad(
             x=10.0,
@@ -190,7 +190,7 @@ class TestCanPlaceViaWorldCoord:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Horizontal foreign-net trace 0.4mm above the via.  Required
         # = 0.3 + 0.1 + 0.15 = 0.55mm.
@@ -223,7 +223,7 @@ class TestInPadEscapeClearance:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # LQFP-48 west edge: pads at x=0, y stepping by 0.5mm.
         pad5 = Pad(
@@ -273,7 +273,7 @@ class TestInPadEscapeClearance:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pad_a = Pad(
             x=0.0,
@@ -318,7 +318,7 @@ class TestInPadEscapeClearance:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         same_net_pad = Pad(
             x=0.0,
@@ -344,7 +344,7 @@ class TestInPadEscapeClearance:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         foreign_pad = Pad(
             x=0.0,
@@ -448,7 +448,7 @@ class TestRectAwareForeignPadClearance:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Same dichotomy geometry as above, but driven through the
         # ``_can_place_via`` entry point so the Pad -> 5-tuple
@@ -481,7 +481,7 @@ class TestRectAwareForeignPadClearance:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Same 0.3 x 1.4mm foreign pad; via this time at (10.0, 10.5)
         # i.e. centred on the pad short axis, 0.5mm from pad short

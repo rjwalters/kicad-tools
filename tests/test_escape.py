@@ -678,7 +678,7 @@ class TestEscapeRouter:
     def test_analyze_package(self, grid_and_rules):
         """Test package analysis."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_bga_pads(8, 8)
         info = router.analyze_package(pads)
@@ -690,7 +690,7 @@ class TestEscapeRouter:
     def test_generate_escapes_bga(self, grid_and_rules):
         """Test escape generation for BGA."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_bga_pads(4, 4, pitch=0.8)
         info = router.analyze_package(pads)
@@ -710,7 +710,7 @@ class TestEscapeRouter:
         from dataclasses import replace
 
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_bga_pads(4, 4, pitch=0.8)
         # Mark 5 of the 16 balls as plane-net pads (net=0).
@@ -748,7 +748,7 @@ class TestEscapeRouter:
         wrote violating segments unconditionally.
         """
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_qfp_pads(8, pitch=0.5)
         info = router.analyze_package(pads)
@@ -786,7 +786,7 @@ class TestEscapeRouter:
     def test_escape_directions_vary(self, grid_and_rules):
         """Test that escapes use different directions."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_qfp_pads(8, pitch=0.5)
         info = router.analyze_package(pads)
@@ -801,7 +801,7 @@ class TestEscapeRouter:
     def test_bga_ring_indices(self, grid_and_rules):
         """Test that BGA escapes have correct ring indices."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_bga_pads(4, 4, pitch=0.8)
         info = router.analyze_package(pads)
@@ -814,7 +814,7 @@ class TestEscapeRouter:
     def test_escape_layers_alternate(self, grid_and_rules):
         """Test that BGA escapes alternate layers by ring."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_bga_pads(6, 6, pitch=0.8)  # Larger for more rings
         info = router.analyze_package(pads)
@@ -854,7 +854,7 @@ class TestStaggeredViaFanout:
     def test_staggered_pattern(self, grid_and_rules):
         """Test that vias are placed in staggered pattern."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Create a simple 2x2 grid of pads
         pads = create_bga_pads(2, 2, pitch=0.8)
@@ -868,7 +868,7 @@ class TestStaggeredViaFanout:
     def test_via_positions_offset(self, grid_and_rules):
         """Test that via positions are offset from pad positions."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_bga_pads(3, 3, pitch=1.0)  # Larger pitch for clarity
         # Issue #2948: pass empty foreign-copper lists explicitly so the
@@ -896,7 +896,7 @@ class TestStaggeredViaFanout:
         (the pre-#2948 state) the same call would have emitted the via.
         """
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Single same-net pad; with stagger_distance=0 the candidate via
         # lands exactly on the pad.  Place a foreign-net pad at a
@@ -951,7 +951,7 @@ class TestStaggeredViaFanout:
         when supplied via ``foreign_tracks``.
         """
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         own_pad = Pad(
             x=10.0,
@@ -995,7 +995,7 @@ class TestStaggeredViaFanout:
         in-pad via.
         """
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         own_pad = Pad(
             x=10.0,
@@ -1075,7 +1075,7 @@ class TestCanPlaceViaOwnNetObstacle:
         whose ``is_obstacle=True`` belongs to ``pad.net`` (own net).
         """
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pad_net = 7
         pad_x, pad_y = 10.0, 10.0
@@ -1095,7 +1095,7 @@ class TestCanPlaceViaOwnNetObstacle:
         PR #2928 invariant.
         """
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         obstacle_net = 7
         probe_net = 99
@@ -1113,7 +1113,7 @@ class TestCanPlaceViaOwnNetObstacle:
         callers who lack net context cannot prove the cell is own-net.
         """
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         self._paint_obstacle_cell(grid, 10.0, 10.0, net=7)
 
@@ -1143,7 +1143,7 @@ class TestApplyEscapeRoutes:
     def test_apply_creates_routes(self, grid_and_rules):
         """Test that applying escapes creates Route objects."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_bga_pads(4, 4, pitch=0.8)
         info = router.analyze_package(pads)
@@ -1278,7 +1278,7 @@ class TestSOPStaggeredEscape:
     def test_sop_escapes_use_staggered_method(self, grid_and_rules):
         """Test that SOP packages use staggered escape routing."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Create SOP-16 pads with 0.75mm pitch (legacy dense dual-row band)
         # Note: 0.65mm pitch is now classified as SSOP with different routing.
@@ -1299,7 +1299,7 @@ class TestSOPStaggeredEscape:
     def test_sop_escapes_have_staggered_vias(self, grid_and_rules):
         """Test that SOP escapes place vias in staggered pattern."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Create SOP pads with 0.75mm pitch (legacy dense dual-row band)
         # Note: 0.65mm pitch is now classified as SSOP with different routing.
@@ -1319,7 +1319,7 @@ class TestSOPStaggeredEscape:
     def test_sop_via_positions_are_staggered(self, grid_and_rules):
         """Test that via positions alternate between odd and even pins."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Create horizontal SOP (rows at different Y positions) with 0.75mm pitch
         # Note: 0.65mm pitch is now classified as SSOP with different routing.
@@ -1367,7 +1367,7 @@ class TestSOPStaggeredEscape:
     def test_sop_escapes_alternate_layers(self, grid_and_rules):
         """Test that odd and even pin escapes use different layers."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_sop_pads(8, pitch=0.65)
         info = router.analyze_package(pads)
@@ -1386,7 +1386,7 @@ class TestSOPStaggeredEscape:
     def test_sop_escapes_perpendicular_to_rows(self, grid_and_rules):
         """Test that SOP packages escape perpendicular to their pin rows."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Use the standard SOP helper (vertical orientation - left/right columns)
         # create_sop_pads creates pads with X spread (row_spacing=4mm) < Y spread
@@ -1490,7 +1490,7 @@ class TestFinePitchEscapeClearance:
     @pytest.fixture
     def fine_pitch_router(self, fine_pitch_rules):
         grid = RoutingGrid(50, 50, fine_pitch_rules, origin_x=0, origin_y=0)
-        return EscapeRouter(grid, fine_pitch_rules)
+        return EscapeRouter(grid, fine_pitch_rules, component_holes=())
 
     def test_ssop_065mm_adjacent_clearance(self, fine_pitch_router, fine_pitch_rules):
         """SSOP-20 at 0.65mm pitch must maintain trace clearance between adjacent pins."""
@@ -1543,7 +1543,7 @@ class TestFinePitchEscapeClearance:
             min_trace_width=0.1,
         )
         grid = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_sop_pads(20, pitch=pitch)
         info = router.analyze_package(pads)
@@ -1586,7 +1586,7 @@ class TestFinePitchEscapeClearance:
             min_trace_width=0.1,
         )
         grid = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # 0.65mm pitch, escape_width=0.1 -> lateral_clearance=0.55 >> 0.1
         pads = create_sop_pads(8, pitch=0.65)
@@ -1648,7 +1648,7 @@ class TestInwardViaStrategy:
         odd-pad vias should have x > pad.x (closer to center at x=0).
         """
         grid = RoutingGrid(50, 50, fine_pitch_rules, origin_x=0, origin_y=0)
-        router = EscapeRouter(grid, fine_pitch_rules)
+        router = EscapeRouter(grid, fine_pitch_rules, component_holes=())
 
         pads = create_sop_pads(20, pitch=0.65)
         info = router.analyze_package(pads)
@@ -1668,7 +1668,7 @@ class TestInwardViaStrategy:
     def test_even_pad_escapes_stay_outward(self, fine_pitch_rules):
         """Even-pad surface escapes must still route outward."""
         grid = RoutingGrid(50, 50, fine_pitch_rules, origin_x=0, origin_y=0)
-        router = EscapeRouter(grid, fine_pitch_rules)
+        router = EscapeRouter(grid, fine_pitch_rules, component_holes=())
 
         pads = create_sop_pads(20, pitch=0.65)
         info = router.analyze_package(pads)
@@ -1696,7 +1696,7 @@ class TestInwardViaStrategy:
             origin_y=0,
             layer_stack=layer_stack,
         )
-        router = EscapeRouter(grid, fine_pitch_rules)
+        router = EscapeRouter(grid, fine_pitch_rules, component_holes=())
 
         pads = create_sop_pads(20, pitch=0.65)
         info = router.analyze_package(pads)
@@ -1722,7 +1722,7 @@ class TestInwardViaStrategy:
             origin_y=0,
             layer_stack=layer_stack,
         )
-        router = EscapeRouter(grid, fine_pitch_rules)
+        router = EscapeRouter(grid, fine_pitch_rules, component_holes=())
 
         pads = create_sop_pads(20, pitch=0.65)
         info = router.analyze_package(pads)
@@ -1748,7 +1748,7 @@ class TestInwardViaStrategy:
             origin_y=0,
             layer_stack=layer_stack,
         )
-        router = EscapeRouter(grid, fine_pitch_rules)
+        router = EscapeRouter(grid, fine_pitch_rules, component_holes=())
 
         pads = create_sop_pads(20, pitch=0.65)
         info = router.analyze_package(pads)
@@ -1763,7 +1763,7 @@ class TestInwardViaStrategy:
     def test_ssop28_inward_vias(self, fine_pitch_rules):
         """SSOP-28 at 0.65mm pitch also uses inward via strategy."""
         grid = RoutingGrid(50, 50, fine_pitch_rules, origin_x=0, origin_y=0)
-        router = EscapeRouter(grid, fine_pitch_rules)
+        router = EscapeRouter(grid, fine_pitch_rules, component_holes=())
 
         pads = create_sop_pads(28, pitch=0.65)
         info = router.analyze_package(pads)
@@ -1789,7 +1789,7 @@ class TestInwardViaStrategy:
         import logging.handlers
 
         grid = RoutingGrid(50, 50, fine_pitch_rules, origin_x=0, origin_y=0)
-        router = EscapeRouter(grid, fine_pitch_rules)
+        router = EscapeRouter(grid, fine_pitch_rules, component_holes=())
 
         pads = create_sop_pads(20, pitch=0.65)
         info = router.analyze_package(pads)
@@ -1916,7 +1916,7 @@ class TestConnectorEscapeRouting:
     def test_connector_escapes_all_pins(self, grid_and_rules):
         """Escape router must produce an escape for every connector pin."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_connector_pads(40)
         info = router.analyze_package(pads)
@@ -1928,7 +1928,7 @@ class TestConnectorEscapeRouting:
     def test_connector_inner_row_uses_via(self, grid_and_rules):
         """Inner-row pads must escape via layer change; outer row stays on surface."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_connector_pads(40)
         info = router.analyze_package(pads)
@@ -1944,7 +1944,7 @@ class TestConnectorEscapeRouting:
     def test_connector_via_escapes_use_alternate_layer(self, grid_and_rules):
         """Via escapes must route to an alternate layer (not F.Cu)."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_connector_pads(40)
         info = router.analyze_package(pads)
@@ -1958,7 +1958,7 @@ class TestConnectorEscapeRouting:
     def test_connector_escape_segments_valid(self, grid_and_rules):
         """Every escape must have at least one segment with valid coordinates."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_connector_pads(40)
         info = router.analyze_package(pads)
@@ -1973,7 +1973,7 @@ class TestConnectorEscapeRouting:
     def test_connector_outer_row_ring_index_zero(self, grid_and_rules):
         """Outer-row escapes must have ring_index 0."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_connector_pads(40)
         info = router.analyze_package(pads)
@@ -1986,7 +1986,7 @@ class TestConnectorEscapeRouting:
     def test_connector_inner_row_ring_index_nonzero(self, grid_and_rules):
         """Inner-row escapes must have ring_index >= 1."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_connector_pads(40)
         info = router.analyze_package(pads)
@@ -1999,7 +1999,7 @@ class TestConnectorEscapeRouting:
     def test_connector_via_stagger(self, grid_and_rules):
         """Via positions for adjacent inner-row pads must be staggered."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_connector_pads(40)
         info = router.analyze_package(pads)
@@ -2194,7 +2194,7 @@ class TestMultiRowEscapeGeneration:
     def test_2x10_produces_20_escapes(self, grid_and_rules):
         """A 2x10 connector must produce exactly 20 escape routes."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_connector_pads(20)
         info = router.analyze_package(pads)
@@ -2204,7 +2204,7 @@ class TestMultiRowEscapeGeneration:
     def test_2x10_outer_no_via_inner_via(self, grid_and_rules):
         """For 2x10 connector: outer row surface escape, inner row via escape."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_connector_pads(20)
         info = router.analyze_package(pads)
@@ -2219,7 +2219,7 @@ class TestMultiRowEscapeGeneration:
     def test_3x10_escape_counts(self, grid_and_rules):
         """For a 3x10 connector (30 pins), 1 outer row on surface, 2 inner rows via."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_multi_row_connector_pads(3, 10)
         info = router.analyze_package(pads)
@@ -2238,7 +2238,7 @@ class TestMultiRowEscapeGeneration:
     def test_inner_escape_layer_not_fcu(self, grid_and_rules):
         """Inner-row escapes must use _select_inner_escape_layer, not hardcoded F.Cu."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_connector_pads(40)
         info = router.analyze_package(pads)
@@ -2253,7 +2253,7 @@ class TestMultiRowEscapeGeneration:
     def test_escape_segments_have_two_for_via(self, grid_and_rules):
         """Via escapes must have 2 segments: pad-to-via and via-to-escape."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_connector_pads(40)
         info = router.analyze_package(pads)
@@ -2373,7 +2373,7 @@ class TestMultiRowEdgeAlignedEscape:
         destinations west, BOTH rows must escape WEST (not opposite
         directions as the original symmetric strategy did)."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = self._make_j2_like_connector(grid)
         info = router.analyze_package(pads)
@@ -2403,7 +2403,7 @@ class TestMultiRowEdgeAlignedEscape:
         The main router then reaches these endpoints by navigating
         around the connector ends on inner layers."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = self._make_j2_like_connector(grid)
         info = router.analyze_package(pads)
@@ -2434,7 +2434,7 @@ class TestMultiRowEdgeAlignedEscape:
         apply_escape_routes foreign-via gate -- regressing from 40
         escapes to 24."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = self._make_j2_like_connector(grid)
         info = router.analyze_package(pads)
@@ -2458,7 +2458,7 @@ class TestMultiRowEdgeAlignedEscape:
         two distinct perpendicular (X) positions to break up the via
         wall that previously blocked cross-traffic."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = self._make_j2_like_connector(grid)
         info = router.analyze_package(pads)
@@ -2477,7 +2477,7 @@ class TestMultiRowEdgeAlignedEscape:
         via-to-via clearance (via_diameter + via_clearance) so DRC stays
         clean."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = self._make_j2_like_connector(grid)
         info = router.analyze_package(pads)
@@ -2498,7 +2498,7 @@ class TestMultiRowEdgeAlignedEscape:
         sides), the detector should return 0 and the rows should escape
         in opposite directions (original behavior)."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Equal foreign pads on both sides.
         pads = self._make_j2_like_connector(grid, n_foreign_west=50, n_foreign_east=50)
@@ -2515,7 +2515,7 @@ class TestMultiRowEdgeAlignedEscape:
         scenarios), the detector should return 0 (fallback) and use the
         original center-based outer/inner classification."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # No foreign pads injected.
         pads = self._make_j2_like_connector(grid, n_foreign_west=0, n_foreign_east=0)
@@ -2615,7 +2615,7 @@ class TestSegmentToPadClearance:
         import logging.handlers
 
         grid = RoutingGrid(80, 80, ssop28_rules, origin_x=0, origin_y=0)
-        router = EscapeRouter(grid, ssop28_rules)
+        router = EscapeRouter(grid, ssop28_rules, component_holes=())
 
         pads = create_ssop28_pads(pad_width=0.42, pitch=0.65)
         info = router.analyze_package(pads)
@@ -2655,7 +2655,7 @@ class TestSegmentToPadClearance:
             grid_resolution=0.1,
         )
         grid = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # SOP-8 at 0.65mm pitch.  With row_spacing=4mm, x_spread > y_spread
         # so is_horizontal=True and rows are split by Y.  Pads from the same
@@ -2685,7 +2685,7 @@ class TestSegmentToPadClearance:
         from kicad_tools.router.primitives import Segment
 
         grid = RoutingGrid(80, 80, ssop28_rules, origin_x=0, origin_y=0)
-        router = EscapeRouter(grid, ssop28_rules)
+        router = EscapeRouter(grid, ssop28_rules, component_holes=())
 
         # Two pads at 0.65mm pitch
         pad0 = Pad(
@@ -2772,7 +2772,7 @@ class TestSegmentToPadClearance:
             fine_pitch_threshold=0.8,
         )
         grid = RoutingGrid(80, 80, rules, origin_x=0, origin_y=0)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_ssop28_pads(pad_width=0.42, pitch=0.65)
         info = router.analyze_package(pads)
@@ -2791,7 +2791,7 @@ class TestSegmentToPadClearance:
             min_trace_width=0.1,
         )
         grid_default = RoutingGrid(80, 80, rules_default, origin_x=0, origin_y=0)
-        router_default = EscapeRouter(grid_default, rules_default)
+        router_default = EscapeRouter(grid_default, rules_default, component_holes=())
         escapes_default = router_default.generate_escapes(info)
 
         # fine_pitch_clearance=0.1 is more relaxed, so at least as many escapes
@@ -2814,7 +2814,7 @@ class TestSegmentToPadClearance:
 
         rules = DesignRules()
         grid = RoutingGrid(10, 10, rules, origin_x=0, origin_y=0)
-        EscapeRouter(grid, rules)
+        EscapeRouter(grid, rules, component_holes=())
 
         # Pad centered at (0, 1.0) with height=0.42mm
         pad = Pad(
@@ -2955,7 +2955,7 @@ class TestSot235ColumnOrientation:
     def test_sot23_5_escape_stubs_do_not_cross_column_neighbours(self, grid_and_rules):
         """No escape stub may pass over another pad of the same package."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_sot23_5_pads()
         info = router.analyze_package(pads)
@@ -3000,7 +3000,7 @@ class TestSot235ColumnOrientation:
     def test_sot23_5_orientation_splits_into_columns(self, grid_and_rules):
         """Escape directions for a two-column package are EAST/WEST."""
         grid, rules = grid_and_rules
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         pads = create_sot23_5_pads()
         info = router.analyze_package(pads)

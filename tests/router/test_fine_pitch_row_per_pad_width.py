@@ -177,7 +177,7 @@ class TestPerPadEscapeWidth:
         grid = _make_grid(rules)
         net_class_map = _make_mixed_class_net_map()
 
-        router = EscapeRouter(grid, rules, net_class_map=net_class_map)
+        router = EscapeRouter(grid, rules, net_class_map=net_class_map, component_holes=())
         package_info = router.analyze_package(pads)
         assert package_info.package_type == PackageType.USB_C_CONNECTOR
 
@@ -209,7 +209,7 @@ class TestPerPadEscapeWidth:
         grid = _make_grid(rules)
         net_class_map = _make_mixed_class_net_map()
 
-        router = EscapeRouter(grid, rules, net_class_map=net_class_map)
+        router = EscapeRouter(grid, rules, net_class_map=net_class_map, component_holes=())
         package_info = router.analyze_package(pads)
         escapes = router.generate_escapes(package_info)
 
@@ -245,7 +245,9 @@ class TestPerPadEscapeWidth:
         grid = _make_grid(rules)
 
         # Mixed-class run (production behaviour after #3278).
-        mixed_router = EscapeRouter(grid, rules, net_class_map=_make_mixed_class_net_map())
+        mixed_router = EscapeRouter(
+            grid, rules, net_class_map=_make_mixed_class_net_map(), component_holes=()
+        )
         mixed_info = mixed_router.analyze_package(pads)
         mixed_escapes = mixed_router.generate_escapes(mixed_info)
 
@@ -253,7 +255,7 @@ class TestPerPadEscapeWidth:
         # Build a fresh grid because the router mutates grid obstacle state
         # during generation.
         fat_router = EscapeRouter(
-            _make_grid(rules), rules, net_class_map=_make_uniform_fat_net_map()
+            _make_grid(rules), rules, net_class_map=_make_uniform_fat_net_map(), component_holes=()
         )
         fat_info = fat_router.analyze_package(pads)
         fat_escapes = fat_router.generate_escapes(fat_info)
@@ -300,7 +302,7 @@ class TestPerPadEscapeWidth:
         grid = _make_grid(rules)
         net_class_map = _make_mixed_class_net_map()
 
-        router = EscapeRouter(grid, rules, net_class_map=net_class_map)
+        router = EscapeRouter(grid, rules, net_class_map=net_class_map, component_holes=())
         package_info = router.analyze_package(pads)
         escapes = router.generate_escapes(package_info)
 
@@ -331,7 +333,7 @@ class TestUniformNetClassUnchanged:
         # Every pad in the uniform-fat net map sees the same 0.5mm class.
         net_class_map = _make_uniform_fat_net_map()
 
-        router = EscapeRouter(grid, rules, net_class_map=net_class_map)
+        router = EscapeRouter(grid, rules, net_class_map=net_class_map, component_holes=())
         package_info = router.analyze_package(pads)
         escapes = router.generate_escapes(package_info)
 

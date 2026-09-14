@@ -1109,7 +1109,7 @@ class EscapeRouter:
         enable_slack_corridor_widening: bool = False,
         enable_escape_corridor_reservation: bool = False,
         escape_corridor_plans: list | None = None,
-        component_holes: Sequence[Pad] | None = (),
+        component_holes: Sequence[Pad] | None = None,
     ):
         """Initialize the escape router.
 
@@ -1214,19 +1214,13 @@ class EscapeRouter:
                 Callers should pass the SAME list object the router
                 mutates in place (rather than a snapshot copy) so pads
                 added after construction are visible here too.  Defaults
-                to ``()`` (an explicitly VERIFIED-EMPTY census), which
-                preserves the exact behaviour of every pre-#5201 call
-                site that never threaded any board-wide PTH registry at
-                all -- those synthetic/standalone constructions have no
-                other component holes in scope, so treating the omitted
-                argument as "verified empty" is both backwards compatible
-                and correct.  Pass ``None`` explicitly to signal a
-                genuinely UNKNOWN/unavailable census (e.g. a caller that
-                cannot enumerate the board's other drilled holes) -- this
-                now fails closed and refuses in-pad rescue for any board
-                with a real via-in-pad process attached, rather than
-                silently granting eligibility the way a bare
-                ``nearest_other_hole_distance_mm=None`` used to.
+                to ``None`` (an explicitly UNKNOWN census) per Issue
+                #5201's acceptance criterion -- missing caller context
+                must never silently grant eligibility.  A caller that
+                has established the board genuinely has no other
+                through-hole pads in scope (e.g. a standalone/synthetic
+                fixture) must say so explicitly with
+                ``component_holes=()``.
         """
         self.grid = grid
         self.rules = rules
@@ -1385,9 +1379,9 @@ class EscapeRouter:
         # component's drilled hole (see ``component_holes`` docstring
         # above).  Stored as the caller's own reference (not copied) so a
         # live, growing list (``Autorouter.all_pads``) is observed
-        # correctly; ``None`` is preserved as the explicit "unknown
-        # census" sentinel distinct from the default ``()`` "verified
-        # empty" sentinel.
+        # correctly.  ``None`` (the default) is the explicit "unknown
+        # census" sentinel -- distinct from an explicitly-passed ``()``
+        # "verified empty" census.
         self._component_holes: Sequence[Pad] | None = component_holes
 
         # Issue #3033 / #3062: When True, the in-pad rescue path
@@ -7952,8 +7946,7 @@ class EscapeRouter:
                 via_y,
                 via_drill,
                 all_pads=self._component_holes,
-                exclude_ref=pad.ref,
-                exclude_pin=pad.pin,
+                exclude=pad,
             )
             if not via_in_pad_candidate_eligible(
                 self._via_in_pad_process,

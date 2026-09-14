@@ -16,16 +16,22 @@ This file exercises the FULL production decision
 shapes on the same 4-layer ``jlcpcb-tier1`` SSOP fixture
 ``tests/test_escape_via_in_pad.py`` already establishes:
 
-* Unknown census (``component_holes=None``) -- REFUSE.
+* Unknown census (``component_holes=None``, ALSO the constructor's
+  default) -- REFUSE.
 * A verified nearby invalid hole (0.3mm PTH drill at 0.4mm centre
   distance; edge-to-edge clearance 0.1mm < the process's 0.5mm floor)
   -- REFUSE.
-* A through-hole pad with a missing/zero/unparseable drill anywhere on
-  the board -- REFUSE (fail closed; its true clearance cannot be
-  proven).
+* A through-hole pad with a missing/zero/unparseable/non-finite drill
+  anywhere on the board -- REFUSE (fail closed; its true clearance
+  cannot be proven, without crashing on malformed input).
 * A verified EMPTY census (no other through-hole pads at all) --
   RETAIN a connected same-net in-pad escape.
 * A verified FAR hole -- RETAIN.
+
+Plus a regression for the follow-up Judge finding on this PR: a
+physically DISTINCT through-hole pad that happens to share the
+candidate SMD pad's ``(ref, pin)`` (a duplicate-numbered pad) must
+still be scanned, not discarded by logical-key exclusion.
 
 See ``tests/test_drc_nudge.py::TestViaInPadComponentHoleCensus`` for the
 equivalent repair-sweep (``_scan_and_repair_via_in_pad``) coverage.
@@ -185,16 +191,32 @@ class TestTryInPadEscapeComponentHoleCensus:
         assert route.via.in_pad is True
         assert route.via.net == 5
 
-    def test_default_component_holes_preserves_legacy_permissive_behaviour(self):
-        """The DEFAULT (``component_holes`` omitted entirely) behaves
-        like a verified-empty census, NOT unknown -- this keeps every
-        pre-#5201 direct ``EscapeRouter(grid, rules)`` construction (the
-        bulk of the existing in-pad-escape test suite) byte-for-byte
-        unchanged.  Only an EXPLICIT ``component_holes=None`` opts into
-        the fail-closed unknown-census path."""
+    def test_default_component_holes_is_unknown_and_refuses(self):
+        """The DEFAULT (``component_holes`` omitted entirely) is the
+        UNKNOWN sentinel, per the acceptance criterion that missing
+        caller context must never silently grant eligibility -- the
+        constructor itself must fail closed.  A caller that has
+        established the board genuinely has no other through-hole pads
+        must say so explicitly with ``component_holes=()``."""
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)  # component_holes omitted
+        router = EscapeRouter(grid, rules)  # component_holes omitted -> None
+        pad = _make_pad()
+        route = router._try_in_pad_escape(
+            pad=pad,
+            direction=EscapeDirection.NORTH,
+            effective_clearance=0.2,
+            escape_width=0.2,
+        )
+        assert route is None
+
+    def test_explicit_empty_component_holes_retains_escape(self):
+        """An explicit ``component_holes=()`` at construction time is the
+        verified-empty declaration and behaves identically to passing it
+        per-call through ``_rescue``."""
+        rules = _make_rules()
+        grid = _make_grid(rules)
+        router = EscapeRouter(grid, rules, component_holes=())
         pad = _make_pad()
         route = router._try_in_pad_escape(
             pad=pad,
@@ -205,3 +227,30 @@ class TestTryInPadEscapeComponentHoleCensus:
         assert route is not None
         assert route.via is not None
         assert route.via.in_pad is True
+
+    def test_duplicate_ref_pin_hole_is_not_discarded(self):
+        """A physically DISTINCT through-hole pad that happens to share
+        the candidate SMD pad's ``(ref, pin)`` (a duplicate-numbered pad
+        -- exactly the case ``all_pads``, not the lossy ``pads`` dict,
+        exists to preserve) must still be scanned and still REFUSE when
+        it is too close.  Excluding by logical ``(ref, pin)`` identity
+        instead of object identity would silently discard it."""
+        duplicate_identity_near_hole = _pth_hole(0.4, 0.0, 0.3, ref="U5", pin="7")
+        route = _rescue(component_holes=[duplicate_identity_near_hole])
+        assert route is None
+
+    def test_nan_drill_refuses_without_silently_passing(self):
+        """A through-hole pad with a ``NaN`` drill must not silently
+        compare as "safely distant" (every ``NaN`` comparison is
+        ``False``, so a naive ``<`` floor check never fires) -- it fails
+        closed like any other unparseable geometry."""
+        nan_hole = _pth_hole(0.4, 0.0, float("nan"))
+        route = _rescue(component_holes=[nan_hole])
+        assert route is None
+
+    def test_unparseable_string_drill_refuses_without_crashing(self):
+        """A non-numeric drill value must fail closed, not raise."""
+        bad_hole = _pth_hole(0.4, 0.0, 0.3)
+        bad_hole.drill = "bad"  # type: ignore[assignment]
+        route = _rescue(component_holes=[bad_hole])
+        assert route is None

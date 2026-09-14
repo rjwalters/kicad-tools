@@ -323,7 +323,17 @@ class RoutingOrchestrator:
            dict-collapsing step), converted into lightweight router
            ``Pad`` records carrying just the fields
            :func:`~kicad_tools.router.via_in_pad_eligibility.resolve_component_hole_context`
-           needs (position, through-hole flag, drill).
+           needs (position, through-hole flag, drill).  UNLIKE
+           :meth:`_build_net_target_positions` (whose net-target purpose
+           legitimately skips footprints with an empty/``#``-prefixed
+           reference -- those are not real routing destinations), a
+           PHYSICAL hole census must not drop a drilled hole just
+           because its footprint carries a locked/placeholder reference
+           (KiCad still drills the hole).  Both ``thru_hole`` (plated)
+           AND ``np_thru_hole`` (non-plated, e.g. a bare mounting hole)
+           pad types count -- the manufacturer's
+           ``min_component_hole_distance_mm`` floor applies to any
+           drilled hole, plated or not.
 
         Returns ``None`` when neither shape is usable (e.g. mock PCBs in
         unit tests) so the census is UNKNOWN -- the in-pad rescue then
@@ -342,15 +352,21 @@ class RoutingOrchestrator:
                 census: list[Pad] = []
                 for fp in footprints:
                     ref = getattr(fp, "reference", "") or ""
-                    if not ref or ref.startswith("#"):
-                        continue
                     fp_x, fp_y = fp.position
                     rot_rad = math.radians(-(getattr(fp, "rotation", 0.0) or 0.0))
                     cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
                     for pad in fp.pads:
-                        if getattr(pad, "type", "smd") != "thru_hole":
+                        if getattr(pad, "type", "smd") not in ("thru_hole", "np_thru_hole"):
                             continue
                         px, py = pad.position
+                        try:
+                            drill = float(getattr(pad, "drill", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            # Unparseable drill: stored as 0.0, which
+                            # ``resolve_component_hole_context`` treats as
+                            # unknown geometry and fails the WHOLE census
+                            # closed -- correct, not a silent skip.
+                            drill = 0.0
                         census.append(
                             RouterPad(
                                 x=fp_x + px * cos_r - py * sin_r,
@@ -362,7 +378,7 @@ class RoutingOrchestrator:
                                 ref=ref,
                                 pin=str(getattr(pad, "number", "")),
                                 through_hole=True,
-                                drill=float(getattr(pad, "drill", 0.0) or 0.0),
+                                drill=drill,
                             )
                         )
                 return census

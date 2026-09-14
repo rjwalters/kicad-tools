@@ -1889,8 +1889,7 @@ def _scan_and_repair_via_in_pad(
                     via.y,
                     via.drill,
                     all_pads=all_pads_census,
-                    exclude_ref=getattr(pad, "ref", None),
-                    exclude_pin=getattr(pad, "pin", None),
+                    exclude=pad,
                 )
                 if via_in_pad_candidate_eligible(
                     process,

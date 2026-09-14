@@ -226,7 +226,9 @@ class TestEscapeClearanceForRef:
             regions = detect_fine_pitch_regions(pads, rules, mfr_limits=MFR_JLCPCB_TIER1)
             grid.set_fine_pitch_regions(regions)
 
-        escape_router = EscapeRouter(grid=grid, rules=rules, manufacturer="jlcpcb-tier1")
+        escape_router = EscapeRouter(
+            grid=grid, rules=rules, manufacturer="jlcpcb-tier1", component_holes=()
+        )
         return escape_router, pads
 
     def test_in_region_ref_returns_region_clearance(self) -> None:
