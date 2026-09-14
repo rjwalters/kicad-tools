@@ -98,7 +98,7 @@ def departure_proposals(
         for outward in directions:
             ox, oy = outward
             for bend_steps in bends:
-                prefix = []
+                prefix: list[tuple[int, int, int, int, int, int]] = []
                 if bend_steps:
                     prefix.extend(
                         (px, py, start_layer, nx - across[0] * j, ny - across[1] * j, start_layer)

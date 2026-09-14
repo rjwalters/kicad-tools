@@ -51,8 +51,8 @@ def recover_partial_pair(
     if tuple(path[0][:6]) != expected_root:
         return None
     intra = nc.effective_intra_pair_clearance()
-    tolerance = nc.skew_tolerance_mm
-    threshold = nc.coupled_continuity_threshold
+    tolerance = nc.effective_skew_tolerance()
+    threshold = nc.effective_coupled_continuity_threshold()
     original_pads = finder._cpp_reconstruct_pads
     finder._cpp_reconstruct_pads = pads
     try:
@@ -108,7 +108,8 @@ def recover_partial_pair(
                     if constructed_pair_geometry_issue(
                         router,
                         finder,
-                        *candidate,
+                        candidate[0],
+                        candidate[1],
                         pads,
                         intra_pair_clearance=intra,
                         deadline=deadline,

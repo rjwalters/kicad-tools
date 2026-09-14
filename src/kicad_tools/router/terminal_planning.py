@@ -52,7 +52,10 @@ def landing_proposals(
     if (abs(dx) < 1e-9) == (abs(dy) < 1e-9):
         return
     across = (int(math.copysign(1, dx)), 0) if abs(dx) >= 1e-9 else (0, int(math.copysign(1, dy)))
-    if sum(v * v for v in outward) != 1 or sum(a * b for a, b in zip(across, outward, strict=True)):
+    if (
+        sum(v * v for v in outward) != 1
+        or sum(a * b for a, b in zip(across, outward, strict=True)) != 0
+    ):
         return
     sign = 1 if (p_goal.x - p_start.x) * across[0] + (p_goal.y - p_start.y) * across[1] >= 0 else -1
     back = (-sign * across[0], -sign * across[1])
@@ -79,7 +82,7 @@ def landing_proposals(
             if sites in seen:
                 continue
             seen.add(sites)
-            reservations = []
+            reservations: list[Route] = []
             for goal, site in zip((p_goal, n_goal), sites, strict=True):
                 gx, gy = site
                 if finder._is_via_blocked(
@@ -112,7 +115,7 @@ def landing_proposals(
                     break
                 reservations.append(Route(net=goal.net, net_name=goal.net_name, vias=[via]))
             if len(reservations) == 2 and time.monotonic() < deadline:
-                yield PairLanding(*sites, *reservations)
+                yield PairLanding(sites[0], sites[1], reservations[0], reservations[1])
 
 
 def _barrel_clear(router, via, routes):
@@ -150,7 +153,7 @@ def select_landing_plan(
     The choice cap is shared across the entire search, including backtracking.
     """
     choices = 0
-    selected = []
+    selected: list[PairLanding] = []
 
     def search(index):
         nonlocal choices

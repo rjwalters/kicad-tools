@@ -2973,8 +2973,8 @@ class CoupledPathfinder:
         self.last_best_state: CoupledState | None = None
         self.last_best_node: CoupledNode | None = None
         # Native diagnostic geometry is a partial path, never a completed route.
-        self.last_best_cpp_path: list[tuple[int, int, int, int, int, int, bool]] = []
-        self.last_validated_departure_path: list[tuple[int, int, int, int, int, int, bool]] = []
+        self.last_best_cpp_path = []
+        self.last_validated_departure_path = []
         # Issue #4459: which backend served the most-recent search.  Defaults
         # to ``"python"`` here; ``_try_cpp_route_coupled`` overrides it to
         # ``"cpp"`` when the C++ joint-state search handles the pair.  The
@@ -5325,7 +5325,7 @@ class DiffPairRouter:
         seen_candidates = set()
         for candidate in candidates:
             for axis_first in (False, True):
-                aligned = []
+                aligned: list[tuple[float, float, float, float]] = []
                 for x1, y1, x2, y2 in candidate:
                     points = dogleg_points(x1, y1, x2, y2, axis_first=axis_first)
                     aligned.extend(
@@ -5417,8 +5417,8 @@ class DiffPairRouter:
                 ):
                     continue
                 if preceding_segments:
-                    from shapely.geometry import MultiLineString
-                    from shapely.ops import polygonize
+                    from shapely.geometry import MultiLineString  # type: ignore[import-untyped]
+                    from shapely.ops import polygonize  # type: ignore[import-untyped]
 
                     lines = [[s.start, s.end] for s in preceding_segments if s.layer == layer] + [
                         [(x1, y1), (x2, y2)]

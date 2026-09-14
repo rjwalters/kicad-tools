@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .coordinated_tuning import coordinated_pair_loop
 from .layers import Layer
@@ -124,7 +124,10 @@ def construct_pair_body(
     if added_coupled_length:
         if any(host is None for host in hosts):
             return None
-        p_host, n_host = (route.segments[host] for route, host in zip(routes, hosts, strict=True))
+        confirmed_hosts = cast("list[int]", hosts)
+        p_host, n_host = (
+            route.segments[host] for route, host in zip(routes, confirmed_hosts, strict=True)
+        )
         span = min(math.dist(p_host.start, p_host.end), math.dist(n_host.start, n_host.end))
         window = min(4.0, span / 3)
         loops = coordinated_pair_loop(
@@ -136,6 +139,6 @@ def construct_pair_body(
         )
         if loops is None:
             return None
-        for route, host, segments in zip(routes, hosts, loops, strict=True):
+        for route, host, segments in zip(routes, confirmed_hosts, loops, strict=True):
             route.segments[host : host + 1] = segments
     return PairBody(routes[0], routes[1], global_point(p_points[-1]), global_point(n_points[-1]))

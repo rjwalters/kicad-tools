@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import math
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from shapely.geometry import LineString, MultiLineString, Point
-from shapely.ops import polygonize
+from shapely.geometry import LineString, MultiLineString, Point  # type: ignore[import-untyped]
+from shapely.ops import polygonize  # type: ignore[import-untyped]
 
 from .primitives import Pad, Route
 from .quantize import is_45_aligned
@@ -22,7 +22,7 @@ def route_topology_issue(route: Route, start: Pad, end: Pad, *, deadline: float)
         return "deadline"
     if not route.segments or route.net != start.net or route.net != end.net:
         return "endpoints"
-    objects = []
+    objects: list[tuple[set[int] | None, Any]] = []
     for segment in route.segments:
         if (
             segment.net != route.net
@@ -164,7 +164,7 @@ def constructed_pair_geometry_issue(
         for token, ref in getattr(grid, "_route_geometry_sources", {}).items()
         if (route := ref()) is not None and id(route) in live
     }
-    pad_cells = getattr(grid, "_pad_geometry_cells", set())
+    pad_cells: set[tuple[int, int, int]] = getattr(grid, "_pad_geometry_cells", set())
     route_cells = getattr(grid, "_route_geometry_cells", {})
 
     def cell_known(layer: int, y: int, x: int) -> bool:

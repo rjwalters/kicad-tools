@@ -109,7 +109,8 @@ def complete_pair_body(
                             constructed_pair_geometry_issue(
                                 router,
                                 finder,
-                                *candidate,
+                                candidate[0],
+                                candidate[1],
                                 pads,
                                 intra_pair_clearance=intra,
                                 deadline=deadline,
@@ -137,7 +138,7 @@ def complete_pair_body(
                         p, n, _ = tune_diff_pair_skew(
                             DetectedPair(pair=pair, source=DetectionSource.EXPLICIT),
                             corpus,
-                            tolerance_mm=nc.skew_tolerance_mm,
+                            tolerance_mm=nc.effective_skew_tolerance(),
                             intra_pair_clearance_mm=intra,
                             grid=grid,
                             board_thickness_mm=board_thickness_mm,
@@ -155,14 +156,14 @@ def complete_pair_body(
                             )
                             for r in (p, n)
                         ]
-                        if abs(lengths[0] - lengths[1]) > nc.skew_tolerance_mm:
+                        if abs(lengths[0] - lengths[1]) > nc.effective_skew_tolerance():
                             continue
                         if (
                             min(
                                 router._tail_coupled_fraction(p, n.segments),
                                 router._tail_coupled_fraction(n, p.segments),
                             )
-                            < nc.coupled_continuity_threshold
+                            < nc.effective_coupled_continuity_threshold()
                         ):
                             continue
                         if (
