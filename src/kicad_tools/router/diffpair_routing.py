@@ -5133,6 +5133,8 @@ class DiffPairRouter:
         partner_vias: list[Via] | None = None,
         *,
         prefer_shortest: bool = False,
+        reserved_routes: tuple[Route, ...] = (),
+        preceding_segments: list[Segment] | None = None,
     ) -> Route | None:
         """Geometric head->pad tail on the head's layer (issue #3508).
 
@@ -5142,6 +5144,10 @@ class DiffPairRouter:
         directly with horizontal, vertical, and 45-degree legs,
         and validate every covered grid cell with
         :meth:`_segment_cells_clear`.
+
+        ``reserved_routes`` screens future foreign traces before candidate
+        selection. ``preceding_segments`` rejects intersections and cycles
+        with the existing body while alternative tails are still available.
 
         Issue #4460: when ``partner_segments`` is supplied the partner
         (diff-pair guide) copper is part of the CANDIDATE FILTER, not a
@@ -5335,6 +5341,32 @@ class DiffPairRouter:
                         <= layer.value
                         <= max(l.value for l in v.layers)
                         for x1, y1, x2, y2 in segs
+                    ):
+                        continue
+                # Planned foreign traces are not raster-marked. Screen each
+                # geometric candidate before selection so a blocked winner
+                # cannot hide a legal later detour.
+                if reserved_routes and any(
+                    _segment_to_segment_distance(x1, y1, x2, y2, *s.start, *s.end)
+                    < (width + s.width) / 2 + self.autorouter.rules.trace_clearance - 1e-9
+                    for r in reserved_routes
+                    if r.net != head.net
+                    for s in r.segments
+                    if s.layer == layer
+                    for x1, y1, x2, y2 in segs
+                ):
+                    continue
+                if preceding_segments:
+                    from shapely.geometry import MultiLineString
+                    from shapely.ops import polygonize
+
+                    lines = [[s.start, s.end] for s in preceding_segments if s.layer == layer] + [
+                        [(x1, y1), (x2, y2)]
+                        for x1, y1, x2, y2 in segs
+                        if math.hypot(x2 - x1, y2 - y1) > 1e-9
+                    ]
+                    if not MultiLineString(lines).is_simple or any(
+                        p.area > 1e-9 for p in polygonize(lines)
                     ):
                         continue
                 route = Route(net=head.net, net_name=head.net_name)
@@ -6196,6 +6228,7 @@ class DiffPairRouter:
         deadline: float | None = None,
         prefer_shortest_approach: bool = False,
         allowed_via_sites: frozenset[tuple[int, int]] | None = None,
+        reserved_routes: tuple[Route, ...] = (),
     ) -> Iterator[Route]:
         """Yield bounded, uncommitted one-through-via layer-return candidates.
 
@@ -6207,6 +6240,8 @@ class DiffPairRouter:
         ordering; the pad-side tail keeps its coupling preference.
         ``allowed_via_sites`` restricts the existing bounded search to planned
         grid sites. It never bypasses geometry, hole or occupancy checks.
+        ``reserved_routes`` adds future copper to exact trace, barrel and
+        drill checks without changing the grid or committed route lists.
         """
         from .via_clearance import drill_hole_to_hole_clear
 
@@ -6217,9 +6252,15 @@ class DiffPairRouter:
             li not in grid.get_routable_indices() for li in (start_layer, end_layer)
         ):
             return
-        foreign = [r for r in [*self.autorouter.routes, *grid.routes, partner] if r.net != head.net]
+        foreign = [
+            r
+            for r in [*self.autorouter.routes, *grid.routes, *reserved_routes, partner]
+            if r.net != head.net
+        ]
         drills = self._collect_existing_drills() + [
-            (v.x, v.y, v.drill) for r in (*grid.routes, partner, body) for v in r.vias
+            (v.x, v.y, v.drill)
+            for r in (*grid.routes, *reserved_routes, partner, body)
+            for v in r.vias
         ]
         pair_edge_clearance = self._pair_seg_clearance(
             pathfinder, head.net_name
@@ -6321,6 +6362,9 @@ class DiffPairRouter:
                             partner_clearance=partner_center_clearance,
                             partner_vias=partner.vias,
                             prefer_shortest=prefer_shortest_approach and li == start_layer,
+                            reserved_routes=reserved_routes,
+                            preceding_segments=body.segments
+                            + [s for p in pieces for s in p.segments],
                         )
                         if part is None:
                             break

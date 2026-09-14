@@ -31,11 +31,13 @@ def complete_pair_body(
     num_copper_layers: int,
     allowed_via_sites: tuple[frozenset[tuple[int, int]], frozenset[tuple[int, int]]] | None = None,
     prefer_shortest_approach: bool = False,
+    reserved_routes: tuple[Route, ...] = (),
 ) -> tuple[Route, Route] | None:
     """Try at most ten tails per half in each order within the shared deadline.
 
     Planned sites only restrict the ordinary layer-return search. All live
-    copper and the uncommitted partner remain obstacles. Full geometry is
+    copper, explicit future reservations and the uncommitted partner remain
+    obstacles. Reservations are never added to either committed route list. Full geometry is
     checked before and after physical-length tuning; coupling and skew must
     meet the authored net class. This function never commits route occupancy.
     """
@@ -45,6 +47,7 @@ def complete_pair_body(
     if nc is None or not math.isfinite(board_thickness_mm) or board_thickness_mm <= 0:
         return None
     grid = finder.grid
+    reserved_routes = tuple(r for r in reserved_routes if r.net not in (pads[0].net, pads[2].net))
     originals = (body.p_route, body.n_route)
     if any(not route.segments for route in originals):
         return None
@@ -59,7 +62,7 @@ def complete_pair_body(
     for first, second in ((0, 1), (1, 0)):
         if time.monotonic() >= deadline:
             return None
-        with router._shadow_foreign_copper(*originals):
+        with router._shadow_foreign_copper(*reserved_routes, *originals):
             tails = router._layer_return_tails(
                 finder,
                 heads[first],
@@ -68,6 +71,7 @@ def complete_pair_body(
                 originals[first],
                 deadline=deadline,
                 prefer_shortest_approach=prefer_shortest_approach,
+                reserved_routes=reserved_routes,
                 allowed_via_sites=allowed_via_sites[first]
                 if allowed_via_sites is not None
                 else None,
@@ -78,7 +82,9 @@ def complete_pair_body(
                 first_route = copy.deepcopy(originals[first])
                 first_route.segments.extend(tail.segments)
                 first_route.vias.extend(tail.vias)
-                with router._shadow_foreign_copper(first_route, originals[second]):
+                with router._shadow_foreign_copper(
+                    *reserved_routes, first_route, originals[second]
+                ):
                     other_tails = router._layer_return_tails(
                         finder,
                         heads[second],
@@ -87,6 +93,7 @@ def complete_pair_body(
                         originals[second],
                         deadline=deadline,
                         prefer_shortest_approach=prefer_shortest_approach,
+                        reserved_routes=reserved_routes,
                         allowed_via_sites=(
                             allowed_via_sites[second] if allowed_via_sites is not None else None
                         ),
@@ -106,11 +113,26 @@ def complete_pair_body(
                                 pads,
                                 intra_pair_clearance=intra,
                                 deadline=deadline,
+                                reserved_routes=reserved_routes,
                             )
                             is not None
                         ):
                             continue
                         corpus = {r.net: r for r in [*grid.routes, *router.autorouter.routes]}
+                        # Several reservations can belong to one future net
+                        # (departure copper and landing barrel). Keep all of
+                        # them in the tuner's per-net view without mutating
+                        # the caller's routes.
+                        reserved_nets = set()
+                        for reservation in reserved_routes:
+                            if reservation.net not in reserved_nets:
+                                reserved_nets.add(reservation.net)
+                                if reservation.net not in corpus:
+                                    corpus[reservation.net] = copy.deepcopy(reservation)
+                                    continue
+                                corpus[reservation.net] = copy.deepcopy(corpus[reservation.net])
+                            corpus[reservation.net].segments.extend(reservation.segments)
+                            corpus[reservation.net].vias.extend(reservation.vias)
                         corpus.update({r.net: r for r in candidate})
                         p, n, _ = tune_diff_pair_skew(
                             DetectedPair(pair=pair, source=DetectionSource.EXPLICIT),
@@ -152,6 +174,7 @@ def complete_pair_body(
                                 pads,
                                 intra_pair_clearance=intra,
                                 deadline=deadline,
+                                reserved_routes=reserved_routes,
                             )
                             is None
                         ):

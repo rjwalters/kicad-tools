@@ -447,3 +447,49 @@ def test_planned_return_site_restricts_candidates_without_waiving_barrel_clearan
         )
     )
     assert not list(router._layer_return_tails(finder, head, goal, partner, body, **options))
+
+
+def test_reserved_trace_filters_planar_candidates_before_selecting_a_tail():
+    from dataclasses import replace
+
+    router, finder, head, goal, _, _ = _case()
+    goal = replace(goal, layer=head.layer)
+    obstacle = Segment(x1=3.5, y1=2.8, x2=3.5, y2=3.2, width=0.2, layer=head.layer, net=3)
+    reservation = Route(net=3, net_name="future", segments=[obstacle])
+    tail = router._synthesize_tail(
+        finder,
+        head,
+        goal,
+        finder.grid.layer_to_index(head.layer.value),
+        reserved_routes=(reservation,),
+    )
+    assert tail is not None
+    barrier = LineString([obstacle.start, obstacle.end])
+    for segment in tail.segments:
+        assert (
+            LineString([segment.start, segment.end]).distance(barrier)
+            >= (segment.width + obstacle.width) / 2 + finder.rules.trace_clearance - 1e-9
+        )
+    assert not router.autorouter.routes and not finder.grid.routes
+
+
+def test_planar_tail_avoids_backtracking_through_its_preceding_body():
+    from dataclasses import replace
+
+    from shapely.geometry import MultiLineString
+
+    router, finder, head, goal, _, _ = _case()
+    goal = replace(goal, layer=head.layer)
+    body = Segment(x1=3, y1=3, x2=2, y2=3, width=0.2, layer=head.layer, net=head.net)
+    layer = finder.grid.layer_to_index(head.layer.value)
+    first = router._synthesize_tail(finder, head, goal, layer)
+    assert first is not None
+    assert not MultiLineString(
+        [[body.start, body.end]] + [[s.start, s.end] for s in first.segments]
+    ).is_simple
+    tail = router._synthesize_tail(finder, head, goal, layer, preceding_segments=[body])
+    assert tail is not None
+    assert MultiLineString(
+        [[body.start, body.end]] + [[s.start, s.end] for s in tail.segments]
+    ).is_simple
+    assert tail.segments[0].start == (head.x, head.y)

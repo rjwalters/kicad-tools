@@ -201,3 +201,82 @@ def test_expiry_during_tuning_cannot_accept_candidate(monkeypatch):
     )
     assert clock[0] == deadline
     assert auto._diffpair._shadow_foreign_universe is None
+
+
+def test_future_landing_barrel_is_an_obstacle_without_marking_occupancy():
+    auto, finder, pair, pads, body, sites = case()
+    reserved = Route(
+        net=3,
+        net_name="future",
+        vias=[
+            Via(
+                x=76.2,
+                y=2,
+                diameter=0.6,
+                drill=0.3,
+                layers=(Layer.F_CU, Layer.B_CU),
+                net=3,
+            )
+        ],
+    )
+    assert (
+        complete_pair_body(
+            auto._diffpair,
+            finder,
+            pair,
+            pads,
+            body,
+            deadline=time.monotonic() + 5,
+            board_thickness_mm=1.6,
+            num_copper_layers=2,
+            allowed_via_sites=sites,
+            reserved_routes=(reserved,),
+        )
+        is None
+    )
+    assert not auto.routes and not auto.grid.routes
+
+
+def test_tuning_sees_all_reservations_and_existing_copper_for_a_future_net(monkeypatch):
+    from dataclasses import replace
+
+    from kicad_tools.router import pair_completion
+
+    auto, finder, pair, pads, body, sites = case()
+    segment = replace(body.p_route.segments[0], x1=40, x2=41, y1=6, y2=6, net=3)
+    existing = Route(net=3, net_name="future", segments=[segment])
+    auto.routes.append(existing)
+    reservations = (
+        Route(net=3, net_name="future", segments=[replace(segment, x1=42, x2=43)]),
+        Route(
+            net=3,
+            net_name="future",
+            vias=[Via(x=45, y=6, diameter=0.6, drill=0.3, layers=(Layer.F_CU, Layer.B_CU), net=3)],
+        ),
+    )
+    tune = pair_completion.tune_diff_pair_skew
+    calls = []
+
+    def inspect(pair, corpus, **kwargs):
+        assert len(corpus[3].segments) == 2 and len(corpus[3].vias) == 1
+        calls.append(True)
+        return tune(pair, corpus, **kwargs)
+
+    monkeypatch.setattr(pair_completion, "tune_diff_pair_skew", inspect)
+    assert (
+        complete_pair_body(
+            auto._diffpair,
+            finder,
+            pair,
+            pads,
+            body,
+            deadline=time.monotonic() + 5,
+            board_thickness_mm=1.6,
+            num_copper_layers=2,
+            allowed_via_sites=sites,
+            reserved_routes=reservations,
+        )
+        is not None
+    )
+    assert calls and len(existing.segments) == 1 and not existing.vias
+    assert auto.routes == [existing] and not auto.grid.routes

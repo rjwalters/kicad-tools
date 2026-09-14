@@ -125,3 +125,34 @@ def test_via_keepout_on_another_layer_and_drill_spacing():
     auto.grid.cell_at(layer, y, x).blocked = False
     auto.routes.append(Route(net=9, net_name="OTHER", vias=[replace(via, net=9, y=1.6)]))
     assert check(auto, finder, routes, pads) == "drill_clearance"
+
+
+def test_reserved_future_trace_participates_without_occupancy_commit():
+    auto, finder, routes, pads = fixture()
+    reservation = Route(
+        net=3,
+        net_name="future",
+        segments=[
+            replace(
+                routes[0].segments[0],
+                net=3,
+                x1=3,
+                x2=3,
+                y1=1,
+                y2=3,
+            )
+        ],
+    )
+    assert (
+        constructed_pair_geometry_issue(
+            auto._diffpair,
+            finder,
+            *routes,
+            pads,
+            intra_pair_clearance=0.1,
+            deadline=time.monotonic() + 5,
+            reserved_routes=(reservation,),
+        )
+        == "trace_clearance"
+    )
+    assert not auto.routes and not auto.grid.routes

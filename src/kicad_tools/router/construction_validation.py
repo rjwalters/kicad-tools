@@ -126,12 +126,13 @@ def constructed_pair_geometry_issue(
     *,
     intra_pair_clearance: float,
     deadline: float,
+    reserved_routes: tuple[Route, ...] = (),
 ) -> str | None:
     """Validate geometry without committing it; length/coupling are caller gates.
 
     Known pad/live-route raster halos may be resolved with exact geometry.
     Unknown blocked cells fail closed. All existing routes, the uncommitted
-    pair, and drilled holes participate in the clearance checks.
+    pair, planned reservations, and drilled holes participate in clearance checks.
     """
     from .diffpair_routing import _segment_to_segment_distance
     from .via_clearance import drill_hole_to_hole_clear
@@ -148,7 +149,13 @@ def constructed_pair_geometry_issue(
             return issue
     universe = list(
         {
-            id(r): r for r in [*getattr(grid, "routes", []), *router.autorouter.routes, *pair]
+            id(r): r
+            for r in [
+                *getattr(grid, "routes", []),
+                *router.autorouter.routes,
+                *reserved_routes,
+                *pair,
+            ]
         }.values()
     )
     live = {id(r) for r in getattr(grid, "routes", [])}
