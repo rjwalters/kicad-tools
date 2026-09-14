@@ -15113,7 +15113,11 @@ class Autorouter:
             # ``_run_evolutionary_trial``) never reinstalls the board-edge
             # exclusion zone, so its A* search can route straight through
             # cells the parent process would have blocked.
-            "edge_segments": list(self._edge_segments) if self._edge_segments else [],
+            # Keep certified outline metadata (including approximation
+            # bounds) while isolating the snapshot from later parent edits.
+            "edge_segments": copy.deepcopy(self._edge_segments)
+            if self._edge_segments is not None
+            else [],
             "edge_clearance": self._edge_clearance,
         }
 

@@ -30,6 +30,7 @@ This suite pins:
 
 from __future__ import annotations
 
+import pickle
 from unittest.mock import patch
 
 import numpy as np
@@ -58,6 +59,49 @@ RECT_EDGE_SEGMENTS = [
     ((10.0, 10.0), (0.0, 10.0)),
     ((0.0, 10.0), (0.0, 0.0)),
 ]
+
+
+class CertifiedEdges(list):
+    """Pickleable outline contract without depending on pending curve support."""
+
+    def __init__(self, segments, max_error_mm):
+        super().__init__(segments)
+        self.max_error_mm = max_error_mm
+
+
+@pytest.mark.parametrize("worker", ["monte_carlo", "evolutionary"])
+@pytest.mark.parametrize("bound", [0.0, 0.00001])
+def test_certified_outline_survives_snapshot_pickle_and_worker(worker, bound):
+    router = Autorouter(10, 10, rules=DesignRules(grid_resolution=0.5), force_python=True)
+    router._edge_segments = CertifiedEdges(RECT_EDGE_SEGMENTS, bound)
+    router._edge_clearance = 0.5
+    snapshot = router._serialize_for_parallel()
+    # Neither a subsequent parent edit nor transport may alter the snapshot.
+    router._edge_segments.clear()
+    router._edge_segments.max_error_mm = 1.0
+    config = pickle.loads(pickle.dumps(snapshot))
+    assert config["edge_segments"] == RECT_EDGE_SEGMENTS
+    assert config["edge_segments"].max_error_mm == bound
+    config.update(
+        trial_num=0, chrom_idx=0, seed=42, base_order=[], net_order=[], use_negotiated=False
+    )
+    seen = []
+    original = RoutingGrid.add_edge_keepout
+
+    def observe(grid, segments, clearance):
+        seen.append((segments, clearance))
+        return original(grid, segments, clearance)
+
+    with patch.object(RoutingGrid, "add_edge_keepout", observe):
+        if worker == "monte_carlo":
+            _run_monte_carlo_trial(config)
+        else:
+            evolutionary_module._run_evolutionary_trial(config)
+    assert seen
+    for segments, clearance in seen:
+        assert segments == RECT_EDGE_SEGMENTS
+        assert segments.max_error_mm == bound
+        assert clearance == 0.5
 
 
 def _blocked_count(router: Autorouter) -> int:
