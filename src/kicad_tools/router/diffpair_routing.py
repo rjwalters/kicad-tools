@@ -10506,6 +10506,41 @@ class DiffPairRouter:
                     max_iterations_budget=remaining_iterations,
                 )
 
+            if (
+                result is None
+                and not shadow_fail_fast
+                and spec.polarity_swap
+                and per_pair_timeout is not None
+                and getattr(pathfinder, "last_coupled_backend", None) == "cpp"
+                and getattr(pathfinder, "last_best_cpp_path", None)
+            ):
+                # Complete the saved native geometry without another search.
+                # This deadline shares the original pair window; recovery
+                # cannot renew either the time or native iteration budget.
+                recovery_deadline = spec_t0 + per_pair_timeout + self._census_elapsed_s
+                if time.monotonic() < recovery_deadline:
+                    from .partial_recovery import recover_partial_pair
+
+                    manufacturer = self.autorouter._build_manufacturer_design_rules()
+                    thickness = getattr(manufacturer, "board_thickness_mm", None)
+                    via_rules = getattr(self.autorouter, "via_rules", None)
+                    partial_vias = bool(
+                        getattr(via_rules, "allow_blind", False)
+                        or getattr(via_rules, "allow_buried", False)
+                    )
+                    if thickness is not None and not partial_vias:
+                        result = recover_partial_pair(
+                            self,
+                            pathfinder,
+                            pair,
+                            (spec.p_start, spec.p_end, spec.n_start, spec.n_end),
+                            deadline=recovery_deadline,
+                            board_thickness_mm=thickness,
+                            num_copper_layers=self.autorouter.grid.num_layers,
+                        )
+                        if result is not None:
+                            coupled_phase = "partial-recovery"
+
             # Issue #4635: deliberately NOT census-adjusted.  The deadlines
             # above credit the census's cost back so census-on and census-off
             # runs are comparable; this is the pair's TRUE wall clock, and
