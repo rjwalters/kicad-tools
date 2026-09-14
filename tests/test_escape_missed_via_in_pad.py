@@ -22,7 +22,7 @@ class TestMissedViaInPadCounterInit:
 
         rules = DesignRules(grid_resolution=0.1, trace_width=0.2, trace_clearance=0.15)
         grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         assert router.missed_via_in_pad_rescues == 0
         assert router.missed_via_in_pad_components == set()
@@ -34,7 +34,7 @@ class TestMissedViaInPadCounterInit:
 
         rules = DesignRules(grid_resolution=0.1, trace_width=0.2, trace_clearance=0.15)
         grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
-        router = EscapeRouter(grid, rules, manufacturer="jlcpcb")
+        router = EscapeRouter(grid, rules, manufacturer="jlcpcb", component_holes=())
 
         assert router.via_in_pad_supported is False
         # Counter should still be zero (no routing attempted yet).
@@ -60,7 +60,7 @@ class TestMissedViaInPadCounterInit:
             rules=rules,
             layer_stack=LayerStack.four_layer_sig_sig_gnd_pwr(),
         )
-        router = EscapeRouter(grid, rules, manufacturer="jlcpcb-tier1")
+        router = EscapeRouter(grid, rules, manufacturer="jlcpcb-tier1", component_holes=())
 
         assert router.via_in_pad_supported is True
 
@@ -80,7 +80,7 @@ class TestMissedViaInPadCounterInit:
         rules = DesignRules(grid_resolution=0.1, trace_width=0.2, trace_clearance=0.15)
         # RoutingGrid defaults to a 2-layer stack when none is supplied.
         grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
-        router = EscapeRouter(grid, rules, manufacturer="jlcpcb-tier1")
+        router = EscapeRouter(grid, rules, manufacturer="jlcpcb-tier1", component_holes=())
 
         assert router.via_in_pad_supported is False
 
@@ -91,7 +91,7 @@ class TestMissedViaInPadCounterInit:
 
         rules = DesignRules(grid_resolution=0.1, trace_width=0.2, trace_clearance=0.15)
         grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
-        router = EscapeRouter(grid, rules, manufacturer="pcbway")
+        router = EscapeRouter(grid, rules, manufacturer="pcbway", component_holes=())
 
         assert router.via_in_pad_supported is True
 
@@ -103,5 +103,5 @@ class TestMissedViaInPadCounterInit:
         rules = DesignRules(grid_resolution=0.1, trace_width=0.2, trace_clearance=0.15)
         grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
         # Should not raise:
-        router = EscapeRouter(grid, rules, manufacturer="not-a-real-mfr")
+        router = EscapeRouter(grid, rules, manufacturer="not-a-real-mfr", component_holes=())
         assert router.via_in_pad_supported is False

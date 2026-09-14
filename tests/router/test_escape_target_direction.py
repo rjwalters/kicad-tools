@@ -96,7 +96,7 @@ def _make_router(
 ) -> EscapeRouter:
     rules = _make_rules(manufacturer=manufacturer)
     grid = _make_grid(rules)
-    return EscapeRouter(grid, rules, net_target_positions=net_target_positions)
+    return EscapeRouter(grid, rules, net_target_positions=net_target_positions, component_holes=())
 
 
 def _west_edge_pad(net: int = 7, x: float = ANCHOR_X, y: float = ANCHOR_Y) -> Pad:

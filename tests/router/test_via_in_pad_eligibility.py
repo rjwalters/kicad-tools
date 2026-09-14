@@ -12,18 +12,43 @@ geometric envelope. This file exercises the module directly (board-level
 integration paths are covered separately in ``tests/test_drc_nudge.py``
 (``TestViaInPadProcessEligibilityGate``) and
 ``tests/test_escape_missed_via_in_pad.py``.
+
+Issue #5201 (reopened): also exercises the component-hole-census helpers
+(``resolve_component_hole_context`` / ``via_in_pad_candidate_eligible``)
+directly -- the FULL production-decision integration for these is
+covered by ``tests/router/test_via_in_pad_component_hole_census.py``
+(escape) and ``tests/test_drc_nudge.py::TestViaInPadComponentHoleCensus``
+(repair sweep).
 """
 
 from __future__ import annotations
+
+import math
+from dataclasses import dataclass
 
 from kicad_tools.manufacturers.fabrication_process import (
     JLCPCB_TIER1_POFV_4L,
     PCBWAY_VIA_IN_PAD,
 )
 from kicad_tools.router.via_in_pad_eligibility import (
+    ComponentHoleContext,
+    resolve_component_hole_context,
     resolve_process,
     via_geometry_eligible,
+    via_in_pad_candidate_eligible,
 )
+
+
+@dataclass
+class _HolePad:
+    """Minimal duck-typed pad for ``resolve_component_hole_context``."""
+
+    x: float
+    y: float
+    ref: str = "H1"
+    pin: str = "1"
+    through_hole: bool = True
+    drill: float = 0.3
 
 
 class TestResolveProcess:
@@ -157,6 +182,148 @@ class TestViaGeometryEligible:
                 JLCPCB_TIER1_POFV_4L,
                 drill_mm=0.3,
                 annular_ring_mm=0.15,
+            )
+            is True
+        )
+
+
+class TestResolveComponentHoleContext:
+    """Issue #5201 (reopened): distinguishing unknown/incomplete census
+    from a verified (possibly empty) one."""
+
+    def test_none_all_pads_is_unknown(self):
+        ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=None)
+        assert ctx == ComponentHoleContext(known=False, nearest_distance_mm=None)
+
+    def test_empty_all_pads_is_verified_empty(self):
+        ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=[])
+        assert ctx.known is True
+        assert ctx.nearest_distance_mm == math.inf
+
+    def test_non_through_hole_pads_are_ignored(self):
+        """SMD pads never count as "other component holes"."""
+        smd = _HolePad(x=0.4, y=0.0, through_hole=False)
+        ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=[smd])
+        assert ctx.known is True
+        assert ctx.nearest_distance_mm == math.inf
+
+    def test_own_pad_is_excluded_by_identity(self):
+        """The candidate's own EXACT pad object never counts as a
+        foreign hole, even if it happens to carry ``through_hole=True``."""
+        own = _HolePad(x=0.0, y=0.0, ref="U5", pin="7", through_hole=True, drill=0.3)
+        ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=[own], exclude=own)
+        assert ctx.known is True
+        assert ctx.nearest_distance_mm == math.inf
+
+    def test_duplicate_ref_pin_hole_is_not_excluded_by_logical_key(self):
+        """A DIFFERENT pad object that happens to share the excluded
+        pad's ``(ref, pin)`` (a duplicate-numbered pad -- the exact
+        physical-occurrence case ``all_pads`` exists to preserve) must
+        NOT be excluded -- only object identity exempts a hole."""
+        candidate_pad = _HolePad(x=0.0, y=0.0, ref="U5", pin="7", through_hole=False)
+        duplicate_identity_hole = _HolePad(
+            x=0.4, y=0.0, ref="U5", pin="7", through_hole=True, drill=0.3
+        )
+        ctx = resolve_component_hole_context(
+            0.0, 0.0, 0.3, all_pads=[duplicate_identity_hole], exclude=candidate_pad
+        )
+        assert ctx.known is True
+        assert ctx.nearest_distance_mm is not None
+        assert math.isclose(ctx.nearest_distance_mm, 0.1, abs_tol=1e-9)
+
+    def test_nearest_distance_is_edge_to_edge(self):
+        """0.4mm centre distance, 0.3mm via drill, 0.3mm hole drill ->
+        0.4 - 0.15 - 0.15 = 0.1mm edge-to-edge."""
+        hole = _HolePad(x=0.4, y=0.0, drill=0.3)
+        ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=[hole])
+        assert ctx.known is True
+        assert ctx.nearest_distance_mm is not None
+        assert math.isclose(ctx.nearest_distance_mm, 0.1, abs_tol=1e-9)
+
+    def test_unknown_drill_fails_closed_even_when_far(self):
+        """A through-hole pad with drill<=0 makes the WHOLE census
+        unknown, regardless of how far away it physically sits."""
+        far_unknown = _HolePad(x=500.0, y=500.0, drill=0.0)
+        ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=[far_unknown])
+        assert ctx == ComponentHoleContext(known=False, nearest_distance_mm=None)
+
+    def test_nan_drill_fails_closed(self):
+        """A ``NaN`` drill must not silently compare as "safely distant"
+        -- every ``NaN`` comparison is ``False``, so a naive floor check
+        would never fire and eligibility would wrongly stay True."""
+        nan_hole = _HolePad(x=0.4, y=0.0, drill=float("nan"))
+        ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=[nan_hole])
+        assert ctx == ComponentHoleContext(known=False, nearest_distance_mm=None)
+
+    def test_unparseable_string_drill_fails_closed_without_crashing(self):
+        """A non-numeric drill value must fail closed, not raise."""
+        bad_hole = _HolePad(x=0.4, y=0.0, drill=0.3)
+        bad_hole.drill = "bad"  # type: ignore[assignment]
+        ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=[bad_hole])
+        assert ctx == ComponentHoleContext(known=False, nearest_distance_mm=None)
+
+    def test_nonfinite_via_drill_fails_closed(self):
+        """The candidate VIA's own drill being non-finite/non-positive
+        must also fail closed, even against an otherwise-empty census."""
+        ctx = resolve_component_hole_context(0.0, 0.0, float("nan"), all_pads=[])
+        assert ctx == ComponentHoleContext(known=False, nearest_distance_mm=None)
+        ctx2 = resolve_component_hole_context(0.0, 0.0, 0.0, all_pads=[])
+        assert ctx2 == ComponentHoleContext(known=False, nearest_distance_mm=None)
+
+    def test_picks_the_nearest_of_multiple_holes(self):
+        near = _HolePad(x=0.4, y=0.0, ref="H1", drill=0.3)
+        far = _HolePad(x=50.0, y=50.0, ref="H2", drill=0.3)
+        ctx = resolve_component_hole_context(0.0, 0.0, 0.3, all_pads=[far, near])
+        assert ctx.known is True
+        assert ctx.nearest_distance_mm is not None
+        assert math.isclose(ctx.nearest_distance_mm, 0.1, abs_tol=1e-9)
+
+
+class TestViaInPadCandidateEligible:
+    """Issue #5201 (reopened): the hole-context-aware wrapper must fail
+    closed on ``known=False`` rather than fall through to
+    ``via_geometry_eligible``'s "skip the check" behaviour."""
+
+    def test_unknown_context_refuses_even_with_in_envelope_geometry(self):
+        assert (
+            via_in_pad_candidate_eligible(
+                JLCPCB_TIER1_POFV_4L,
+                drill_mm=0.3,
+                annular_ring_mm=0.15,
+                hole_context=ComponentHoleContext(known=False, nearest_distance_mm=None),
+            )
+            is False
+        )
+
+    def test_verified_empty_context_is_eligible(self):
+        assert (
+            via_in_pad_candidate_eligible(
+                JLCPCB_TIER1_POFV_4L,
+                drill_mm=0.3,
+                annular_ring_mm=0.15,
+                hole_context=ComponentHoleContext(known=True, nearest_distance_mm=math.inf),
+            )
+            is True
+        )
+
+    def test_verified_near_context_is_ineligible(self):
+        assert (
+            via_in_pad_candidate_eligible(
+                JLCPCB_TIER1_POFV_4L,
+                drill_mm=0.3,
+                annular_ring_mm=0.15,
+                hole_context=ComponentHoleContext(known=True, nearest_distance_mm=0.1),
+            )
+            is False
+        )
+
+    def test_verified_far_context_is_eligible(self):
+        assert (
+            via_in_pad_candidate_eligible(
+                JLCPCB_TIER1_POFV_4L,
+                drill_mm=0.3,
+                annular_ring_mm=0.15,
+                hole_context=ComponentHoleContext(known=True, nearest_distance_mm=1.0),
             )
             is True
         )
