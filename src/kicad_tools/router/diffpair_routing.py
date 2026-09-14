@@ -164,17 +164,51 @@ CONSTRUCTION_BODY_ATTEMPTS: int = int(os.environ.get("KCT_CONSTRUCTION_BODY_ATTE
 # ``complete_pair_body`` already applied to the geometric lattice, but the
 # corridor path had been skipping).  Re-measured with that gate in place,
 # MIPI_DAT0's first departure's corridor result is found but reproducibly
-# rejected on the authored coupled-continuity threshold, and its remaining
-# departures exhaust the allowance without a second candidate -- so 150000
-# does NOT currently resolve MIPI_DAT0 either, despite reliably finding
-# legal copper fast.  The value is kept at 150000 (headroom over the
-# measured 116,027-iteration convergence-to-legal-copper point, TMDS_D1's
-# worst case 46s comfortably under the 120s per-pair wall clock) because
-# reaching legal copper fast is still a real, useful signal for a FUTURE
-# search that also biases toward a length-matched path -- this value is a
-# search-depth budget, not (yet) evidence of a resolved pair.
+# rejected on the authored coupled-continuity threshold at 150000 -- but
+# unlike the earlier ``exhausted_progress`` verdicts for TMDS_D1/D2 (a
+# search that has explored its ENTIRE frontier and found nothing), MIPI_DAT0's
+# SECOND validated departure was landing on ``iteration_limited_progress_0``:
+# a search that was STILL MAKING PROGRESS -- effectively at the goal -- when
+# its share of the allowance ran out.  That is a budget-too-small verdict,
+# not a hopeless-search one, and #5333's own "spend enough corridor-iteration
+# budget across enough departures to raise the odds of landing on one that
+# also happens to qualify" note (``_corridor_guided_departures``'s docstring)
+# named exactly this as the next lever to try.
+#
+# Re-measured on real Board07 (seed 42, native ABI 31) at 600000 (4x): with
+# ``pair_construction._corridor_guided_departures``'s fair (max-min) per-
+# departure share, MIPI_DAT0's second departure now converges and QUALIFIES
+# -- ``corridor_attempts=2 corridor_iters=181755 corridor_reasons={
+# 'iteration_limited_progress_0': 1}`` -- moving board-07's diffpair-pre-pass
+# reach from 3/7 to 4/7 for the first time in this issue's history.
+# Independently reproduced WITHOUT the fair-share change too (the greedy
+# "give every attempt the full remaining allowance" policy also resolves
+# MIPI_DAT0 at 600000, ``corridor_iters=197782``), confirming the fix is the
+# larger total allowance, not merely how it is split -- the fair-share
+# change (kept for its own, separately measured starvation fix: MIPI_DAT0's
+# other 4 validated departures, and TMDS_D1/TMDS_D2's other 5, were
+# PREVIOUSLY never tried at all) is additive, not load-bearing, for this
+# particular win.  250000 (a more conservative 1.67x) was tried and does NOT
+# resolve MIPI_DAT0 under fair-share -- every one of its 6 shares lands at
+# ``iteration_limited_progress_0``/``_1``, never finishing -- so 600000 is
+# the smallest of the three measured values that actually converges.
+#
+# TMDS_D1/TMDS_D2 remain unresolved at 600000 (``exhausted_progress_170``/
+# ``_168``-class verdicts, now confirmed across MULTIPLE validated
+# departures rather than just one -- a genuinely stronger signal that their
+# gap is real congestion, not an unlucky escape choice).  MIPI_DAT1 is
+# NEGATIVELY affected as a side effect: MIPI_DAT0 committing real copper for
+# the first time removes via sites MIPI_DAT1's own (already congested)
+# departure stage was relying on, reproducibly dropping it from 3 validated
+# departures to 0 -- the SAME order-dependent congestion mechanism a prior
+# session already identified for MIPI_CLK's effect on MIPI_DAT1, now also
+# triggered by MIPI_DAT0.  Net Board07 diffpair reach is still a genuine
+# improvement (+1 pair, 3/7 -> 4/7) and every existing skew/coupling/
+# clearance gate still applies unchanged to whichever route ships; the
+# MIPI_DAT1 regression is a pre-existing order-dependency, not a new
+# defect this change introduces, but it is real and not yet fixed.
 CONSTRUCTION_CORRIDOR_ITERATIONS: int = int(
-    os.environ.get("KCT_CONSTRUCTION_CORRIDOR_ITERS", "150000")
+    os.environ.get("KCT_CONSTRUCTION_CORRIDOR_ITERS", "600000")
 )
 
 # Issue #5333 (TMDS_D1): radii (mm, from each of the goal/head anchors)

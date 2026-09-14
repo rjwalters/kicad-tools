@@ -348,7 +348,7 @@ class _FakeFinder:
     def route_coupled(
         self, *pads, departure_prefix, timeout_seconds, max_iterations_budget, corridor
     ):
-        self.calls.append((departure_prefix, corridor))
+        self.calls.append((departure_prefix, corridor, max_iterations_budget))
         self.last_iterations = self._iterations
         return self.result
 
@@ -578,6 +578,58 @@ def test_corridor_fallback_names_why_each_attempt_failed(monkeypatch):
     assert result is None
     assert len(finder.calls) == 2
     assert budget.corridor_reasons == {"iteration_limited_progress_4": 2}
+
+
+def test_corridor_fallback_splits_its_allowance_fairly_across_departures(monkeypatch):
+    """#5333 (MIPI_DAT0/TMDS_D1/TMDS_D2 re-measurement): on real Board07,
+    handing every attempt the FULL remaining ``corridor_iterations_
+    remaining`` let the first (or first two) validated departures consume
+    the entire 150,000-iteration allowance by themselves -- MIPI_DAT0 (6
+    validated departures) only ever reached ``corridor_attempts=2``, and
+    TMDS_D1/TMDS_D2/MIPI_DAT1 each reached exactly 1, leaving every other
+    natively-validated escape direction completely untried.  Each attempt
+    must instead get a max-min FAIR share -- ``remaining // departures
+    still to try`` -- so a starved-out tail of validated departures
+    actually gets a turn."""
+    departures = [_departure((1, 0), i) for i in range(3)]
+    _stub(monkeypatch, departures=departures, landings=[], clock=[0])
+    # Always fails to converge (result=None) and reports using only 5
+    # iterations regardless of its offered share -- isolates the ALLOWANCE
+    # each attempt is offered (what this fix changes) from how much it
+    # actually spends (unaffected: the stub always "spends" 5).
+    finder = _FakeFinder(result=None, iterations=5, best_progress=4, iteration_limited=True)
+    budget = ConstructionBudget(
+        deadline=1,
+        iterations_remaining=64,
+        bodies_remaining=16,
+        corridor_iterations_remaining=90,
+    )
+    result = construct_pair_routes(
+        None,
+        finder,
+        None,
+        (1, 2, 3, 4),
+        budget,
+        board_thickness_mm=1.6,
+        num_copper_layers=4,
+        corridor=frozenset({(0, 0)}),
+    )
+    assert result is None
+    assert len(finder.calls) == 3
+    offered_allowances = [call[2] for call in finder.calls]
+    # NOT [90, 90, 90] (the pre-fix "full remaining every time" policy) and
+    # NOT front-loaded onto the first attempt alone: the first attempt gets
+    # only its fair 1/3 share (30, not the full 90), and because it only
+    # "spends" 5 of that, the surplus rolls forward -- each later attempt's
+    # share grows as the pool is re-split across fewer remaining departures.
+    assert offered_allowances == [30, 42, 80]
+    assert all(share < 90 for share in offered_allowances[:-1]), (
+        "an early attempt must never be offered the full remaining pool "
+        "when later validated departures still need a turn"
+    )
+    assert budget.corridor_attempts == 3
+    assert budget.corridor_iterations_used == 15
+    assert budget.corridor_iterations_remaining == 75
 
 
 @pytest.mark.skipif(not is_cpp_available(), reason="requires matching native backend")

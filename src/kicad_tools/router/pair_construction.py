@@ -332,6 +332,24 @@ def _corridor_guided_departures(
     ``max_departures``), stopping as soon as one succeeds or the deadline /
     allowance is exhausted.
 
+    Each attempt's OWN ``max_iterations_budget`` is a fair (max-min) share of
+    whatever remains -- ``corridor_iterations_remaining // departures still
+    to try`` -- not the full remaining allowance (#5333, MIPI_DAT0/TMDS_D1/
+    TMDS_D2 re-measurement).  Measured on real Board07 (seed 42, native ABI
+    31) with the prior "each attempt gets the full remaining allowance"
+    policy: MIPI_DAT0 (6 validated departures) reached only 2
+    ``corridor_attempts`` before the ledger emptied, and TMDS_D1/TMDS_D2/
+    MIPI_DAT1 each reached exactly 1 -- the first (or first two) departures
+    consumed the *entire* 150,000-iteration allowance on their own search,
+    leaving every other validated escape direction/shape completely
+    untried.  A departure that converges well under its share still lets its
+    UNUSED iterations roll forward (the divisor shrinks by one and the
+    remaining pool is re-split on every subsequent attempt), so a fast
+    departure costs the later ones nothing -- this is strictly a
+    starvation fix, not a smaller aggregate search: the total ledger spent
+    across all departures cannot exceed ``budget.corridor_iterations_
+    remaining`` either way.
+
     A route the native search finds is only "exactly as legal" as the
     top-level corridor search's own output at the copper/clearance/trail/via
     guard level -- it is NOT run through :func:`pair_completion.
@@ -393,11 +411,18 @@ def _corridor_guided_departures(
     # with no configured net class or invalid board thickness is rejected
     # there -- this function does not need its own copy of that check.
     reserved_routes = tuple(r for r in reserved_routes if r.net not in (pads[0].net, pads[2].net))
+    departures_remaining = len(departures)
     for departure in departures:
         if time.monotonic() >= budget.deadline or budget.corridor_iterations_remaining <= 0:
             return None
         remaining_time = budget.deadline - time.monotonic()
-        allowance = budget.corridor_iterations_remaining
+        # Max-min fair share of whatever is left, re-split on every attempt
+        # so a departure that converges under its share leaves the surplus
+        # for the ones still to come -- see the docstring's Board07
+        # measurement for why "give every attempt the full remaining
+        # allowance" starved every departure but the first one or two.
+        allowance = max(1, budget.corridor_iterations_remaining // departures_remaining)
+        departures_remaining -= 1
         result = finder.route_coupled(
             *pads,
             departure_prefix=list(departure.proposal.prefix),
