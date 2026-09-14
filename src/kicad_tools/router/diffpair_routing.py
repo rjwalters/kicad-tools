@@ -10957,6 +10957,19 @@ class DiffPairRouter:
 
         fine_grid.install_fixed_fills(main_grid.fixed_fills)
 
+        # Issue #5374: reinstall the board-edge keepout on this cropped,
+        # shifted-origin, finer-resolution fine grid.  ``add_edge_keepout``
+        # re-projects the board-frame segments through the fine grid's own
+        # ``world_to_grid`` (its own origin_x/origin_y/resolution), so the
+        # same coordinates are correct here even though this grid only
+        # covers the pair's local bounding box.  Without this, a coupled
+        # route computed near the board edge could cross the copper
+        # keepout the main grid would have refused.
+        main_edge_segments = getattr(self.autorouter, "_edge_segments", None)
+        main_edge_clearance = getattr(self.autorouter, "_edge_clearance", None)
+        if main_edge_segments and main_edge_clearance:
+            fine_grid.add_edge_keepout(main_edge_segments, main_edge_clearance)
+
         # Mirror autorouter pads onto the fine grid so the coupled
         # search sees the same obstacle field.  This includes BOTH the
         # pair's own pads (their cells must be reachable for the same
