@@ -814,11 +814,9 @@ class ConnectivityValidator:
         #     are flagged in ``synthetic_nodes`` and dropped from the returned
         #     partition (3); they only carry connectivity, they are not pads.
         #
-        #     This adds *real* copper paths (a via physically tying a trace to
-        #     a pour) and reuses the same ``_fill_solid_region`` / layer-match
-        #     / ``POUR_PAD_ERODE`` machinery, so it cannot manufacture a false
-        #     short: a via must land in the eroded solid pour to bond, exactly
-        #     as a pad must.
+        #     The #5133 pour graph tests actual via annuli against hole-aware
+        #     solids on spanned layers. A zone label or an XY-only match is
+        #     never a substitute for physical fill contact.
         synthetic_nodes: set[str] = set()
         for via_index, via in enumerate(self.pcb.vias):
             node_id = f"__via{via_index}"
@@ -962,74 +960,26 @@ class ConnectivityValidator:
                 for other in via_pads[i + 1 :]:
                     _connect(p, other)
 
-        # 2c2. Via-in-pad bonding (issue #3794).  A via whose position lands
-        #      inside a pad's copper box on a layer the via spans is
-        #      galvanically bonded to that pad — the via barrel pierces the
-        #      pad's copper.  Step 2c only fuses a via's *coincident* pads
-        #      (within ``POSITION_TOLERANCE`` of the via centre); a via placed
-        #      off-centre but still *under* a fine-pitch pad's copper (a
-        #      via-in-pad tie, e.g. board-04's congested LQFP GND pads where a
-        #      centred via cannot clear the neighbour escape) is missed.  We
-        #      bond the via's synthetic node (1b) to any pad whose eroded
-        #      copper box contains the via centre on a shared copper layer.
-        #      The erosion (``POUR_PAD_ERODE``) keeps a via merely grazing a
-        #      pad edge across a clearance moat from counting — only a via well
-        #      inside the pad copper bonds, so no false short is introduced on
-        #      a DRC-clean board (where a via never overlaps a *foreign* pad).
+        # 2c2. Raw annulus/pad overlap (#5133). The via centre can lie
+        # outside a pad while its ring overlaps that pad's physical edge.
+        # Supported pad shapes use their actual outline and layer span;
+        # unsupported geometry retains the earlier centre-only behavior.
         if _has_shapely():
             self._connect_via_in_pad(pad_positions, pad_layers, synthetic_nodes, _connect)
 
-        # 2d. Filled zones (copper pours) — LABEL-FREE (issue #3761).
-        #
-        #     SCOPE NOTE: the load-bearing soundness property of this
-        #     extractor is that copper connectivity is derived from *physical
-        #     geometry*, never from pad/zone net labels.  Steps 2a–2c trace
-        #     autorouter copper (segments + vias) independently of labels;
-        #     this step does the same for pours.
-        #
-        #     The previous model (the #3742 first slice) grouped pads by the
-        #     zone's *declared* net (``pad_declared_net[pad] == zone.net_name``).
-        #     That re-introduced a label dependency for the fill step and could
-        #     MASK a real defect on pour-routed nets: a pad whose copper is
-        #     physically bonded to the *wrong* pour island, but whose declared
-        #     net matches a different (correct) pour, was partitioned by its
-        #     label rather than by metal (issue #3761).
-        #
-        #     We now tie pads to pours purely geometrically.  Each
-        #     ``filled_polygon`` is one poured copper *island*.  A pad is
-        #     bonded to an island iff its copper geometry overlaps the
-        #     island's *solid* region on a matching copper layer — clearance
-        #     moats / thermal antipads carved out of the pour are real holes
-        #     that the pad must NOT be tied across.
-        #
-        #     KiCad encodes a fill island's holes inside a single flat
-        #     ``(pts ...)`` list: the outer hull and each carved-out loop are
-        #     joined by a narrow bridge, so the boundary dips *around* every
-        #     moat.  A ray-cast against that raw list mis-counts the bridge
-        #     crossings and reports a moated-out pad as "inside" (the exact
-        #     failure ``_point_in_polygon`` exhibits, verified on board 00).
-        #     ``shapely`` resolves the bridged representation correctly:
-        #     ``Polygon(pts).buffer(0)`` yields the true solid region with the
-        #     moats excluded, so a hole-aware ``contains`` test is sound.
-        #
-        #     Pad-shape approximation: we test the pad's *size box* (board
-        #     frame, footprint-rotated — see ``_pad_copper_polygon``) against
-        #     the hole-aware solid region, not just the pad center.  The box
-        #     is required, not a nicety: a thermally-relieved pad's center
-        #     sits in the antipad moat (a hole), yet its copper edge reaches
-        #     the thermal spokes / surrounding solid pour, so only the box
-        #     intersects the solid region.  A pad fully moated out (clearance
-        #     all around, no spoke) stays clear of the solid region and is
-        #     correctly left untied.  Corner rounding (roundrect/oval) and
-        #     per-pad rotation are ignored; an exact pad outline is a
-        #     documented follow-up.
-        #
-        #     ``shapely`` is an optional dependency; when it is absent we fall
-        #     back to the legacy declared-net pour grouping so core-only
-        #     installs keep working (the soundness upgrade simply requires the
-        #     ``geometry``/``dev`` extra to be installed).
+        # 2d. Label-free physical fill components (#5133). Trace copper and
+        # raw via annuli can bond a terminal into a pour away from its centre.
+        # Each disconnected solid is separate, even within one zone object;
+        # existing pad-to-fill erosion and terminal-contact policies remain.
         if _has_shapely():
-            self._connect_pour_pads_label_free(pad_positions, pad_layers, _connect, synthetic_nodes)
+            self._connect_pour_pads_label_free(
+                pad_positions,
+                pad_layers,
+                _connect,
+                synthetic_nodes,
+                graph=graph,
+                segment_extra_nodes=segment_extra_nodes,
+            )
         else:  # pragma: no cover - exercised only on core-only installs
             self._connect_pour_pads_by_declared_net(pad_positions, pad_layers, _connect)
 
@@ -1880,21 +1830,6 @@ class ConnectivityValidator:
             return None
         return poly
 
-    def _synthetic_via_radii(self, synthetic_nodes: set[str]) -> dict[str, float]:
-        """Map each ``__via{index}`` node to its copper radius (``size / 2``).
-
-        The synthetic via node ids created in :meth:`extract_pad_partition`
-        (step 1b) are ``f"__via{index}"`` in board via order, so we recover the
-        copper radius by re-enumerating ``self.pcb.vias``.  Only nodes present
-        in ``synthetic_nodes`` are returned.
-        """
-        radii: dict[str, float] = {}
-        for via_index, via in enumerate(self.pcb.vias):
-            node_id = f"__via{via_index}"
-            if node_id in synthetic_nodes:
-                radii[node_id] = max(getattr(via, "size", 0.0) or 0.0, 0.0) / 2.0
-        return radii
-
     def _via_copper_geom(self, pos: tuple[float, float], radius: float) -> Any:
         """Build a shapely geometry approximating a via's copper (issue #3909).
 
@@ -1919,22 +1854,15 @@ class ConnectivityValidator:
     def _eroded_pad_polygons(self, shape_aware: bool = False) -> dict[str, Any]:
         """Board-frame eroded copper polygon per physical pad node.
 
-        Shared geometry cache for the via-in-pad (2c2) and endpoint-in-pad
-        (2a3) bonding steps: each pad's :meth:`_pad_copper_polygon`
-        (footprint-rotated, ``POUR_PAD_ERODE`` inset).  Pads without a numeric
-        number / real reference are skipped, matching
-        :meth:`extract_pad_partition` step 1.  Requires shapely (returns
-        point geometries / ``None`` entries are filtered out).
+        Build :meth:`_pad_copper_polygon` geometry with the existing
+        ``POUR_PAD_ERODE`` inset, omitting pads without a reference or number.
+        ``None`` geometries are filtered out; degenerate pads may be points.
 
-        ``shape_aware`` is forwarded to :meth:`_pad_copper_polygon`: step 2a3
-        passes ``True`` (it measures *distance* to pad copper from arbitrary
-        trace-bend vertices, where the box's diagonal over-reach on round pads
-        is a real false-connect hazard); steps 2c2/2d keep the historical box
-        (``False``) — they test via centers / pour solid regions, whose
-        exposure to the corner zone is negligible, and the
-        :data:`POUR_PAD_ERODE` constant was empirically tuned against the box
-        on boards 00/03/05.  Keeping them on the box preserves the
-        zero-fixture-churn property of this change.
+        ``shape_aware`` is forwarded to :meth:`_pad_copper_polygon`. Trace
+        contact (2a3) and pad-to-fill contact (2d) request shape-aware geometry.
+        Via-to-pad contact (2c2) uses this mapping only as the legacy fallback
+        for unsupported shapes; supported shapes use raw pad outlines and
+        actual via annuli in :meth:`_connect_via_in_pad`.
         """
         pad_polygons: dict[str, Any] = {}
         for fi, fp in enumerate(self.pcb.footprints):
@@ -2077,6 +2005,16 @@ class ConnectivityValidator:
                 if dist == 0.0 or dist < cap_radius - 1e-3:
                     segment_extra_nodes.setdefault(seg_index, set()).add(pad_id)
 
+    def _physical_via_annulus(self, via: Any) -> Any:
+        """Raw annular copper, without eroding away a narrow plating ring."""
+        radius = max(via.size, 0.0) / 2.0
+        outer = _ShapelyPoint(via.position).buffer(radius, quad_segs=64)
+        if via.drill > 0:
+            outer = outer.difference(
+                _ShapelyPoint(via.position).buffer(via.drill / 2.0, quad_segs=64)
+            )
+        return outer
+
     def _connect_via_in_pad(
         self,
         pad_positions: dict[str, tuple[float, float]],
@@ -2084,53 +2022,57 @@ class ConnectivityValidator:
         synthetic_nodes: set[str],
         connect: Any,
     ) -> None:
-        """Bond each via node to any pad whose copper box contains it (#3794).
+        """Bond supported physical pad copper to overlapping via annuli.
 
-        A through-via whose centre sits inside a pad's copper, on a copper
-        layer the via spans, is galvanically tied to that pad — the via barrel
-        pierces the pad metal.  This complements the *coincident*-via union of
-        step 2c, which only fires when the via centre is within
-        ``POSITION_TOLERANCE`` of the pad centre; a via-in-pad tie placed
-        off-centre (to clear a neighbour escape on a fine-pitch package) is
-        still fully under the pad copper but is missed by the centre test.
-
-        The pad's *eroded* copper box (:meth:`_pad_copper_polygon`,
-        ``POUR_PAD_ERODE`` inset) is used so a via merely grazing the pad edge
-        across a clearance moat does not bond — only a via well inside the pad
-        copper counts.  On a DRC-clean board a via never overlaps a *foreign*
-        pad's copper (clearance forbids it), so this cannot manufacture a
-        false short; it only recovers a real via-in-pad bond the centre test
-        drops.  Requires ``shapely`` (guarded by the caller).
-
-        This step deliberately keeps the plain **box** approximation (it does
-        not pass ``shape_aware=True``, unlike step 2a3): it is a containment
-        test on a via *centre point*, not a distance measurement from an
-        arbitrary vertex, and a via centre landing in a round pad's phantom
-        corner zone would have to sit outside the pad's real copper entirely —
-        a DRC violation on a foreign net.  Staying on the box also preserves
-        the empirically-tuned :data:`POUR_PAD_ERODE` behaviour on boards
-        00/03/05.
+        A via centre need not enter a pad: Board06 U1.32 overlaps an off-centre
+        annulus by positive area. The former eroded-pad/centre test missed it.
+        Use raw supported shapes, not a widened box or proximity allowance;
+        unrelated pad/trace and pad/pour erosion policies remain unchanged.
         """
-        # Board-frame eroded copper box per pad.
-        pad_polygons = self._eroded_pad_polygons()
+        from kicad_tools.validate.rules.clearance import _pad_polygon
 
-        for node_id in synthetic_nodes:
-            pos = pad_positions.get(node_id)
-            if pos is None:
+        pads = self._eroded_pad_polygons()
+        raw_keys: set[str] = set()
+        for fi, fp in enumerate(self.pcb.footprints):
+            if not fp.reference or fp.reference.startswith("#"):
                 continue
-            via_layers = pad_layers.get(node_id, [])
-            via_point = _ShapelyPoint(pos)
-            for pad_id, pad_geom in pad_polygons.items():
-                # Require a shared copper layer: the via must span a layer the
-                # pad lives on for the barrel to pierce that pad's metal.
-                if not any(
-                    self._pad_layer_matches_zone(pad_layers.get(pad_id, []), via_layer)
-                    for via_layer in via_layers
-                    if via_layer.endswith(".Cu")
+            for pi, pad in enumerate(fp.pads):
+                if pad.number is None or pad.number == "":
+                    continue
+                if pad.shape not in {"rect", "roundrect", "circle", "oval", "obround"}:
+                    continue  # No new raw bounding-box fallback for custom copper.
+                key = self._pad_id(fi, pi)
+                if key not in pad_positions:
+                    continue
+                geom = _pad_polygon(pad, fp)
+                if geom is not None:
+                    if pad.drill > 0:
+                        geom = geom.difference(
+                            _ShapelyPoint(pad_positions[key]).buffer(pad.drill / 2, quad_segs=64)
+                        )
+                    pads[key] = geom
+                    raw_keys.add(key)
+
+        for index, via in enumerate(self.pcb.vias):
+            node = f"__via{index}"
+            if node not in synthetic_nodes:
+                continue
+            annulus = self._physical_via_annulus(via)
+            for key, geom in pads.items():
+                if not (
+                    self._copper_layers_of(pad_layers.get(key, []))
+                    & self._copper_layers_of(pad_layers.get(node, []))
                 ):
                     continue
-                if pad_geom.contains(via_point) or pad_geom.intersects(via_point):
-                    connect(node_id, pad_id)
+                # Positive area proves copper overlap without treating a gap
+                # or polygon approximation's tangent as a conductive bridge.
+                if key in raw_keys:
+                    touches = annulus.intersection(geom).area > 0
+                else:
+                    # Unsupported shapes retain their old centre-only policy.
+                    touches = geom.intersects(_ShapelyPoint(via.position))
+                if touches:
+                    connect(node, key)
 
     def _connect_pour_pads_label_free(
         self,
@@ -2138,134 +2080,117 @@ class ConnectivityValidator:
         pad_layers: dict[str, list[str]],
         connect: Any,
         synthetic_nodes: set[str] | None = None,
+        *,
+        graph: dict[str, set[str]] | None = None,
+        segment_extra_nodes: dict[int, set[str]] | None = None,
     ) -> None:
-        """Union pads bonded to the same poured copper island (label-free).
+        """Trace actual fill/track/via contacts, never zone ownership.
 
-        For every ``filled_polygon`` of every zone, build the hole-aware
-        solid region (:meth:`_fill_solid_region`) and collect all pads whose
-        *copper geometry* overlaps that region on a matching copper layer.  No
-        pad/zone ``net_name`` is consulted — pads are tied solely by shared
-        metal, so a pad moated out of a pour is left isolated and a
-        foreign-net pad whose copper bonds to the pour is fused into it.
-
-        Synthetic via nodes (issue #3794, listed in ``synthetic_nodes``) are
-        bonded the same way, but tested as the via's *copper circle* (radius
-        ``size / 2``, eroded by :data:`POUR_PAD_ERODE`) rather than a size box.
-        A via that lands inside the pour's solid region on a layer the via
-        spans is unioned into the island, so a pad reaching that via through a
-        trace (on the via's *other* layer) inherits the pour bond.  This is
-        what closes the ``pad -> trace -> stitch via -> opposite-layer pour``
-        path that pad-box-only testing misses; it adds only real copper (a via
-        tying a trace to a pour) and re-uses the same eroded-solid-region
-        guard, so it cannot fabricate a false short.
-
-        Testing the via *circle* (not a bare centre point) is also what lets
-        this method surface a **via-to-foreign-pour short** (issue #3909).
-        KiCad carves an antipad clearance hole centred on every foreign-net
-        via, so the via *centre* always sits inside that hole and a bare-point
-        test can never see the short.  When the antipad is marginal or absent
-        (the Python-fill-vs-kicad-cli-refill discrepancy), the via's copper
-        annular ring pokes past the too-small hole into the foreign fill's
-        solid region — the circle test catches that overlap and fuses the via
-        into the foreign island, so :func:`compare_partitions` reports the
-        short.  On a DRC-clean board the antipad hole is wider than the via
-        copper, so the eroded circle stays clear of the foreign solid region
-        and no false short is introduced (verified against boards 00-04).
-
-        Pads are approximated by their size box (:meth:`_pad_copper_polygon`)
-        rather than a bare center point: a thermally-relieved pad's center
-        sits in the antipad hole, but its copper edge reaches the thermal
-        spokes / solid pour, so the box intersects the solid region while the
-        center alone would (wrongly) read as moated-out.
-
-        Bonded pads are accumulated **per ``zone`` object across all of its
-        ``filled_polygon`` indices**, then unioned once per zone — not per
-        fill index.  KiCad stores a single poured zone as multiple
-        ``filled_polygon`` entries when thermal reliefs / clearance moats
-        fragment the copper (e.g. board 03's GND F.Cu zone is one main pour
-        plus a dozen tiny per-pad fragments).  All fragments of one ``zone``
-        are the same net by KiCad's data model — DRC guarantees retained
-        fragments are electrically bonded — so unioning across a zone's fill
-        islands cannot fuse two different nets (those are different ``zone``
-        objects).  Without this, a pad alone in its own thermal-relief
-        fragment would land in a singleton component and be reported as a
-        false ``open``.
+        Each solid fill component is a distinct node. Full-width trace copper
+        can enter a fill even when neither endpoint/via/pad lies in it (U1.17).
+        Existing terminal bonds and pad/trace tolerances are retained; raw via
+        annuli supply the physical layer bridges. Pad-to-fill geometry keeps
+        its existing erosion policy. No declared net is consulted.
         """
+        from shapely.strtree import STRtree  # type: ignore[import-untyped]
+
+        from kicad_tools.geometry.copper import segment_copper_polygon
+
+        # (terminal id or None, kind, copper layers, geometry)
+        items: list[tuple[str | None, str, frozenset[str], Any]] = []
+        terminal_index: dict[str, int] = {}
         synthetic_nodes = synthetic_nodes or set()
-
-        # Board-frame pad copper polygons, keyed by pad id.  Built once here
-        # so each fill island can be tested against every candidate pad.
-        # Synthetic via nodes (issue #3794) have no footprint pad, so they are
-        # represented by their copper *circle* (radius ``size / 2``, eroded by
-        # ``POUR_PAD_ERODE`` like a pad box): a via whose copper penetrates the
-        # solid pour region there is bonded.  The circle — not a bare centre
-        # point — is what surfaces a via-to-foreign-pour short (issue #3909):
-        # the foreign pour's antipad hole is centred on the via, so the centre
-        # is always moated out, but the copper ring pokes past a marginal hole
-        # into the foreign fill.
-        pad_polygons: dict[str, Any] = {}
-        for fi, fp in enumerate(self.pcb.footprints):
-            if not fp.reference or fp.reference.startswith("#"):
-                continue
-            for pi, pad in enumerate(fp.pads):
-                if pad.number is None or pad.number == "":
-                    continue
-                poly = self._pad_copper_polygon(fp, pad, shape_aware=True)
-                if poly is not None:
-                    pad_polygons[self._pad_id(fi, pi)] = poly
-        via_radius = self._synthetic_via_radii(synthetic_nodes)
-        for node_id in synthetic_nodes:
-            pos = pad_positions.get(node_id)
-            if pos is None:
-                continue
-            pad_polygons[node_id] = self._via_copper_geom(pos, via_radius.get(node_id, 0.0))
-
+        for key, geom in self._eroded_pad_polygons(shape_aware=True).items():
+            if key in pad_positions:
+                terminal_index[key] = len(items)
+                items.append((key, "pad", self._copper_layers_of(pad_layers[key]), geom))
+        for index, via in enumerate(self.pcb.vias):
+            key = f"__via{index}"
+            if key in synthetic_nodes:
+                terminal_index[key] = len(items)
+                items.append(
+                    (
+                        key,
+                        "via",
+                        self._via_bridged_layers(via.layers),
+                        self._physical_via_annulus(via),
+                    )
+                )
+        segment_indices: dict[int, int] = {}
+        for index, seg in enumerate(self.pcb.segments):
+            geom = segment_copper_polygon(seg.start, seg.end, seg.width)
+            if geom is not None:
+                segment_indices[index] = len(items)
+                items.append((None, "segment", frozenset({seg.layer}), geom))
         for zone in self.pcb.zones:
-            if not zone.filled_polygons:
-                continue
-            # Accumulate the bonded-pad set across ALL fill islands of this
-            # zone (see method docstring): the zone is one net, and KiCad may
-            # fragment its pour into many ``filled_polygon`` entries.  Order is
-            # preserved and duplicates are dropped before unioning so a pad
-            # bonded to several fragments is unioned exactly once.
-            zone_bonded: list[str] = []
-            for i, fill_pts in enumerate(zone.filled_polygons):
-                region = self._fill_solid_region(fill_pts)
+            for index, points in enumerate(zone.filled_polygons):
+                region = self._fill_solid_region(points)
                 if region is None:
                     continue
-                fill_layer = zone.filled_polygon_layer(i)
-                for pad_id in pad_positions:
-                    if not self._pad_layer_matches_zone(pad_layers.get(pad_id, []), fill_layer):
-                        continue
-                    pad_geom = pad_polygons.get(pad_id)
-                    if pad_geom is None:
-                        continue
-                    # ``intersects`` bonds a pad whose copper touches or
-                    # overlaps the solid pour; a pad sitting in a carved moat
-                    # (a hole), clear of every thermal spoke, does not
-                    # intersect and is correctly excluded.  The pad box is
-                    # eroded by ``_POUR_PAD_ERODE`` first so that a corner of
-                    # an oversized through-hole pad merely *grazing* across a
-                    # narrow clearance moat into a foreign pour does not count
-                    # as a bond — only copper that penetrates past the
-                    # clearance line (a real thermal spoke / solid tie) keeps
-                    # a non-empty eroded overlap.  Verified on board 05: this
-                    # removes all spurious multi-net bridges while preserving
-                    # board 00's genuine thermal-relief ties.
-                    if region.intersects(pad_geom):
-                        zone_bonded.append(pad_id)
-            # De-duplicate preserving first-seen order, then union the whole
-            # zone's bonded set so pads on disjoint fill fragments of one zone
-            # share a single component.
-            seen: set[str] = set()
-            bonded: list[str] = []
-            for pad_id in zone_bonded:
-                if pad_id not in seen:
-                    seen.add(pad_id)
-                    bonded.append(pad_id)
-            for a, p in enumerate(bonded):
-                for other in bonded[a + 1 :]:
-                    connect(p, other)
+                # A repaired flat contour can itself contain separate solids.
+                solids = region.geoms if region.geom_type == "MultiPolygon" else [region]
+                for solid in solids:
+                    items.append(
+                        (None, "fill", frozenset({zone.filled_polygon_layer(index)}), solid)
+                    )
+        if not items:
+            return
+        parent = list(range(len(items)))
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            parent[find(right)] = find(left)
+
+        # Carry the already-established pad/trace/via bonds into this graph.
+        for key, neighbors in (graph or {}).items():
+            if key in terminal_index:
+                for neighbor in neighbors:
+                    if neighbor in terminal_index:
+                        union(terminal_index[key], terminal_index[neighbor])
+        for index, seg in enumerate(self.pcb.segments):
+            if index not in segment_indices:
+                continue
+            terminals = set((segment_extra_nodes or {}).get(index, set()))
+            for point in (seg.start, seg.end):
+                terminals.update(
+                    self._find_pads_at_point(
+                        point, pad_positions, pad_layers=pad_layers, layer=seg.layer
+                    )
+                )
+            for terminal in terminals:
+                if terminal in terminal_index:
+                    union(segment_indices[index], terminal_index[terminal])
+
+        tree = STRtree([item[3] for item in items])
+        for left, (_, kind, layers, geom) in enumerate(items):
+            for candidate in tree.query(geom, predicate="intersects"):
+                right = int(candidate)
+                if right <= left or not layers.intersection(items[right][2]):
+                    continue
+                other_kind = items[right][1]
+                if "fill" not in (kind, other_kind) and (kind, other_kind) != (
+                    "segment",
+                    "segment",
+                ):
+                    # Via/trace and pad/conductor bonds came from existing
+                    # steps, including their contact-depth guards. Do not
+                    # bypass those guards with a new raw intersection edge.
+                    continue
+                union(left, right)
+        fill_components = {find(index) for index, item in enumerate(items) if item[1] == "fill"}
+        components: dict[int, list[str]] = defaultdict(list)
+        for key, index in terminal_index.items():
+            root = find(index)
+            if root in fill_components:
+                components[root].append(key)
+        for keys in components.values():
+            for key in keys[1:]:
+                connect(keys[0], key)
 
     def _connect_pour_pads_by_declared_net(
         self,
