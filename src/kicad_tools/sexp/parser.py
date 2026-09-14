@@ -68,6 +68,8 @@ class SExp:
         "value",
         "_inline",
         "_original_str",
+        "_source_text",
+        "_source_canonical",
         "_originally_quoted",
         "_originally_bare",
         "_line",
@@ -92,6 +94,8 @@ class SExp:
         self.children = children if children is not None else []
         self.value = value
         self._inline = _inline
+        self._source_text: str | None = None
+        self._source_canonical: str | None = None
         self._original_str = _original_str
         # Tracks whether a string atom was parsed from a quoted token. When True,
         # the serializer preserves the quoted form even if the textual value
@@ -337,14 +341,25 @@ class SExp:
                 atom_idx += 1
         raise IndexError(f"No atom at index {index}")
 
-    def to_string(self, indent: int = 0, compact: bool = False) -> str:
+    def to_string(
+        self, indent: int = 0, compact: bool = False, *, preserve_source: bool = False
+    ) -> str:
         """
         Serialize to S-expression string matching KiCad format.
 
         Args:
             indent: Current indentation level
             compact: If True, minimize whitespace
+            preserve_source: Retain untouched copper arc text for PCB saves.
+                Default serialization remains canonical for semantic comparisons.
         """
+        if (
+            preserve_source
+            and not compact
+            and self._source_text is not None
+            and self.to_string(compact=True) == self._source_canonical
+        ):
+            return "\t" * indent + self._source_text
         if self.is_atom:
             return self._format_atom()
 
@@ -399,7 +414,7 @@ class SExp:
                     lines[-1] += " " + child.to_string(compact=True)
             else:
                 # Complex children always on new lines
-                child_str = child.to_string(indent=indent + 1)
+                child_str = child.to_string(indent=indent + 1, preserve_source=preserve_source)
                 lines.append(child_str)
                 started_new_lines = True
 
@@ -1132,6 +1147,14 @@ class Parser:
         else:
             node = self._parse_atom()
 
+        # Copper arcs must survive analysis-only load/save byte-for-byte.
+        # Retain their lexical node text, including whitespace/comments; the
+        # canonical snapshot above the serializer guards against replaying stale
+        # text after a descendant is edited (e.g. PCB.page_fit()).
+        if node.name == "arc" and node.find("width") is not None and node.find("layer") is not None:
+            node._source_text = text[start_pos : self.pos]
+            node._source_canonical = node.to_string(compact=True)
+
         # Set position if tracking is enabled
         if self._track_positions:
             line, column = self._get_position(start_pos)
@@ -1441,19 +1464,20 @@ def parse_sexp(text: str, track_positions: bool = False) -> SExp:
     return parse_string(text, track_positions=track_positions)
 
 
-def serialize_sexp(sexp: SExp, indent: str = "  ") -> str:
+def serialize_sexp(sexp: SExp, indent: str = "  ", *, preserve_source: bool = False) -> str:
     """Serialize an SExp tree to text.
 
     Provides backward compatibility with core/sexp.py's serialize_sexp() function.
 
     Args:
+        preserve_source: Preserve untouched copper arc text instead of normalizing it.
         sexp: The SExp tree to serialize
         indent: String to use for each indentation level (ignored - uses KiCad format)
 
     Returns:
         Serialized S-expression string
     """
-    return sexp.to_string()
+    return sexp.to_string(preserve_source=preserve_source)
 
 
 # Pad chamfer corner tokens (issue #4393). KiCad emits these as bare symbols

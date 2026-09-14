@@ -494,3 +494,25 @@ supplier access, uploads, approval, or orders. A narrow `refresh_inventory`
 increment can observe exact-ID stock through a caller-supplied official adapter,
 preserving unknown-vs-zero evidence; the full milestone B provenance/freshness
 contract remains blocked on #5033/#5034 (PRs #5115/#5090), so #5142 stays open.
+
+## Inventory provenance for parts and BOMs
+
+A catalog match establishes part identity; it does not prove current orderable
+stock. Lookup/search JSON, BOM availability, suggestions and enrichment records
+carry `inventory` metadata with `source` (`live`, `offline_catalog`, or
+`unknown`), the original `observed_at`, snapshot revision/time when known,
+local `read_at`, and `from_cache`. Cache reads and reinsertion preserve the
+original observation time. Older cache rows without provenance remain unknown.
+
+`stock_verified` requires a live observation no more than 24 hours old. This
+is a screening freshness limit, not a supplier reservation or order guarantee;
+refresh inventory before ordering. Offline snapshots never qualify as verified
+stock, even when their recorded count exceeds the requested quantity.
+Availability reports mark such matches unverified/unknown, while suggestions
+and BOM enrichment can still use them to identify parts. Export enrichment
+reports retain this provenance and warn when stock remains unverified.
+
+The offline dataset does not guarantee a stock-observation timestamp. Missing
+ages remain null; file modification time and download time are not substitutes.
+Callers with trusted snapshot metadata can provide `snapshot_revision`,
+`snapshot_at`, and `observed_at` to `JlcpartsCatalog` explicitly.

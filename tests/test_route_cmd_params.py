@@ -367,6 +367,10 @@ class TestRouteCommandGridClearanceValidation:
         # Create a minimal test PCB file
         pcb_content = """(kicad_pcb (version 20240101) (generator "test"))"""
         test_pcb = tmp_path / "test.kicad_pcb"
+        pcb_content = (
+            pcb_content.rstrip()[:-1]
+            + '(gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts") (width 0.05)))'
+        )
         test_pcb.write_text(pcb_content)
 
         # grid=0.25, clearance=0.127 with --force → should continue
@@ -397,6 +401,10 @@ class TestRouteCommandGridClearanceValidation:
         # Create a minimal test PCB file
         pcb_content = """(kicad_pcb (version 20240101) (generator "test"))"""
         test_pcb = tmp_path / "test.kicad_pcb"
+        pcb_content = (
+            pcb_content.rstrip()[:-1]
+            + '(gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts") (width 0.05)))'
+        )
         test_pcb.write_text(pcb_content)
 
         # grid=0.1, clearance=0.15 → grid < clearance → should succeed

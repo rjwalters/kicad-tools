@@ -3,8 +3,8 @@
 `kicad_tools.validate.mask_geometry.inspect_mask_geometry(path)` reads a PCB
 and returns standard pad/via openings in board coordinates. This is a geometry
 inspection API, **not a clearance check or manufacturing approval**. The broader
-opening-to-copper checker is tracked in #5063; custom/export coverage is #5136
-and exposure intent and process-specific thresholds are #5137.
+opening-to-copper workflow is described in [mask-to-copper checks](mask-to-copper.md),
+including explicit process policy, connected-escape intent and coverage reporting.
 
 ```python
 from kicad_tools.validate.mask_geometry import inspect_mask_geometry
@@ -175,5 +175,6 @@ Python 3.12+ (its dependency's minimum). They must actually run to establish
 native equivalence. An explicit `native_command` may name a pinned container
 invocation; mount its scratch directory at the same absolute path and set
 `scratch_dir` if needed. Export commands have a finite configurable timeout.
-This completes geometry inputs only; #5063 and the downstream exposure/threshold
-checker #5137 still require their own end-to-end acceptance.
+These geometry APIs do not themselves make exposure decisions. Use the
+[mask-to-copper checker](mask-to-copper.md) for measured exposure, explicit
+process thresholds and source-bound connected-escape declarations.

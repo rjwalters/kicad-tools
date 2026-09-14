@@ -6866,7 +6866,7 @@ class EscapeRouter:
         gx, gy = self.grid.world_to_grid(x, y)
         if 0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows:
             for layer_idx in range(self.grid.num_layers):
-                cell = self.grid.grid[layer_idx][gy][gx]
+                cell = self.grid.cell_at(layer_idx, gy, gx)
                 if cell.blocked and cell.is_obstacle:
                     if net is None or cell.net != net:
                         return False

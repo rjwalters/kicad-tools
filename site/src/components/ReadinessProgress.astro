@@ -1,0 +1,35 @@
+---
+import type { Board } from "../data/types.ts";
+import { displayStatusExplanation } from "../data/boardStatus.ts";
+interface Props { board: Board; compact?: boolean }
+const { board, compact = false } = Astro.props;
+// Only the content-validated loader may supply publishable check results.
+const verified = ["ready", "blocked"].includes(board.readiness?.status ?? "");
+const checks = verified ? board.readiness?.checks ?? [] : [];
+const labels: Record<string, string> = {
+  native_erc_clean: "Electrical rules (ERC)", native_drc: "Native design rules (DRC)",
+  native_drc_geometry_clean: "Native geometry rules (DRC)",
+  label_lvs_clean: "Schematic labels (LVS)", copper_lvs_clean: "Copper connectivity (LVS)",
+  kct_check: "Connectivity and design checks", artifacts: "Manufacturing artifacts",
+  bom: "Bill of materials", manufacturing_export: "Manufacturing export", manufacturing_release: "Manufacturing release",
+  manufacturer_rules_passed: "Manufacturer rules", analytical_screen_passed: "Analytical screening",
+};
+const label = (name: string) => labels[name] ?? name.replaceAll("_", " ");
+---
+<div class="progress">
+  <p>{displayStatusExplanation(board)}</p>
+  {checks.length > 0 && (
+    <>
+      {compact && board.readiness?.checked_at && <p>Checked <time datetime={board.readiness.checked_at}>{board.readiness.checked_at.slice(0, 10)}</time></p>}
+      <ul aria-label="Verified check progress">
+        {checks.map(check => <li><strong>{label(check.name)}: {check.status === "not_run" ? "not run" : check.status}</strong>{!compact && check.detail ? ` — ${check.detail}` : ""}</li>)}
+      </ul>
+      <p>Passed: this check passed for the recorded files. Failed: this check found a problem. Not run: no result was established. Unlisted checks have no reported result.</p>
+    </>
+  )}
+</div>
+<style>
+  .progress { font-size: 0.85rem; line-height: 1.5; overflow-wrap: anywhere; }
+  p { margin: 0.4rem 0; color: var(--muted, #9aa7b2); }
+  ul { padding-left: 1.2rem; margin: 0.5rem 0; }
+</style>

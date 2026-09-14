@@ -237,6 +237,7 @@ class TestShortCircuitConsultsPlacement:
         _patch_router_available(monkeypatch, True)
         monkeypatch.setattr(bnc, "_is_so_stale", lambda _router_dir: False)
         monkeypatch.setattr(bnc, "_placement_backend_up_to_date", lambda: True)
+        monkeypatch.setattr(bnc, "_drc_backend_up_to_date", lambda: True)
         fake_router_so = Path("/fake/router/router_cpp.cpython-311.so")
         fake_placement_so = Path("/fake/placement/placement_cpp.cpython-311.so")
 

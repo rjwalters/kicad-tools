@@ -7,11 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Normalize legacy center/angle arcs in contour editing, board graphics, and placement linearization so rounded outlines remain connected and replacement preserves only actual mounting-hole contours (#4884).
+- Add read-only netclass diagnostics for undefined assignment targets, duplicate
+  declarations and KiCad 10.0.5-verified pattern membership against supplied
+  board nets, with explicit malformed/unsupported diagnostics (#5334).
+
+- Add a daily CI guard (`.github/workflows/assert-no-bot-external.yml`) that
+  fails if any open issue labeled `external` has a Bot-type author (#5310).
+  `external` is a hard-exclusion label that blocks Loom dispatch, and a
+  GitHub App installation actor (e.g. `loom-fleet-dispatch[bot]`) never
+  passes `repos.checkCollaborator`, so every issue it filed before PR #5233
+  got mislabeled `external` and silently stalled the pipeline; this catches
+  a recurrence of that regression class automatically instead of via a
+  stalled sweep. The already-mislabeled open issues were also cleaned up as
+  a one-time forge-state fix (label removed by author id, not a blanket
+  strip).
 - Fix Codex-only installer workflows to resolve generated sibling skills and namespace help, with runtime-appropriate invocation and optional metadata handling.
 - Use shared project drill-clearance checks for Board07 relocation and fallback stubs; reject archived moves into foreign zone fill without saving partial repairs.
 
 ### Fixed
 
+- **Imported copper arcs no longer cause false opens or under-reported
+  wirelength** (#4937) — `PCB` parsed `(segment ...)` and `(via ...)` copper
+  but had no branch for `(arc ...)`, the curved-track element KiCad 7+ writes
+  for rounded copper; an externally-sourced board routed only with an arc
+  reported two disconnected islands and 0 mm of trace length. A new `Arc`
+  schema class exposes analytic swept length and geometric connectivity
+  (`pcb.arcs`, `arcs_on_layer()`, `arcs_in_net()`), threaded into
+  `NetStatusAnalyzer` (arc-bearing boards always use real copper geometry,
+  even under `strict=False`, since endpoint proximity cannot describe curved
+  contact), `routing_quality`, `trace_length`/diff-pair skew, and the
+  external-benchmark wirelength metric. PCB saves preserve untouched arc
+  source text byte-for-byte (numeric spelling, whitespace, CRLF), while
+  edits invalidate the retained text so page-fit/reimport keep working.
+  Invalid or nonfinite arc geometry now fails explicitly instead of
+  silently degrading to a chord.
 - Preserve authored pad shapes through router loading, workers, and native
   conversion (#5229). Square pads no longer lose copper corners to a circular
   approximation. Rotated search bounds enclose copper; unsupported custom or
@@ -19,6 +49,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Declared current paths now fail closed on same-net routed arcs and
+  copper pours** (#5273) — `resolve_current_path()` previously built its
+  copper graph only from routed `Segment` tracks and via barrels, so a
+  same-net routed **arc** or a non-keepout **zone/pour** — either of which
+  can form a parallel return path around a declared branch (a plane is the
+  archetypal case) — was invisible to it and never affected the result. A
+  declared branch on such a net now resolves `"ambiguous"` instead of
+  `"resolved"`, naming the unmodeled copper in the reason (endpoint
+  resolution failures still take precedence and remain `"unresolved"`).
+  New `unmodeled_copper()` inventories same-net arcs and non-keepout
+  zones/pours (kind, layer, representative location); keepout rule areas
+  are excluded since they carry no copper. `CurrentPathAudit` gains an
+  `unmodeled` field, surfaced by `kct pcb current-paths-audit` in both JSON
+  and text output, and `kct check`'s `path_ampacity` rule emits a
+  `warning` per unmodeled-copper object found (the `ambiguous` status
+  already produces the `error`). No change was needed in
+  `pcb/reinforce.py`: its allow-list gate only admits copper from a
+  *resolved* path, so a net with unmodeled copper drops out of
+  reinforcement eligibility for free once `resolve_current_path()` stops
+  returning `resolved` for it.
+- **Pulsed / duty-cycled current on declared branch current paths** (#4980) —
+  `CurrentPathSpec` gains optional `duty_cycle` and `pulse_duration_s`
+  alongside the existing `pulsed_a`, which until now was parsed, serialized
+  and then ignored by every consumer. A pulsed branch is now checked two
+  ways, because a repetitive pulse can destroy copper by a mechanism the
+  steady-state width check cannot see:
+  - **Thermally**, at the waveform's RMS current
+    (`CurrentPathSpec.thermal_design_current()` →
+    `physics.ampacity.rms_current_for_duty_cycle()`), not its peak and not
+    its average. An 18 A pulse at 8 % duty over a 3 A baseline heats copper
+    like 5.85 A, so it no longer demands 8.1 mm of 2 oz copper to pass.
+  - **Adiabatically**, against the Onderdonk fusing current for the declared
+    pulse duration (`physics.ampacity.adiabatic_fusing_current()`). A trace
+    comfortably sized on RMS heating can still be melted by a single inrush
+    or fault pulse; that is now an `error` rather than an invisible risk.
+
+  Every assumption is declared, never inferred, and every gap is visible: a
+  pulse with no `duty_cycle` is sized at its peak **and says so** (an `info`
+  finding naming the missing field), and a pulse with no `pulse_duration_s`
+  leaves fusing explicitly unchecked (a `warning`) instead of passing
+  silently. Half-declared waveforms — a `duty_cycle` or `pulse_duration_s`
+  with no `pulsed_a`, or a `pulsed_a` below `continuous_a` — are rejected at
+  load time rather than guessed at. Continuous-only declarations are
+  unaffected: their findings are byte-identical to before. Flows through all
+  existing surfaces (`kct check`, `kct route`, `kct pcb
+  current-paths-audit`), which now also report each branch's thermal design
+  current and which waveform assumption produced it.
 - **Flat signal-clearance table builder for clock-to-signal spacing**
   (#5021) — `build_signal_clearance_table()` in
   `router/pairwise_clearance.py` generalises the HV pairwise-clearance
@@ -1339,6 +1416,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frame), and all in-pad nodes are shorted through the pad. This is a *false*
   fail-closed being removed, not a relaxation — copper outside the pad extent
   still never attaches, so genuinely moved/removed pads still fail closed.
+- **Router emitted partial-stack via spans for ordinary multilayer
+  transitions, without an HDI process ever being selected** (#5013,
+  router counterpart of stitch issue #5001) — `CppPathfinder._convert_result_to_route`
+  and `Router._convert_path_to_route` (the C++ and Python A* pathfinders)
+  built a via's reported `layers` span directly from the LOGICAL
+  current/next search layer (e.g. `F.Cu`/`In2.Cu` on a 4-layer board)
+  instead of the via's physical drilled extent. No blind/buried via
+  process is ever selected by either pathfinder today (Issue #4007:
+  `blind_buried_supported` is False for every board — `hdi_4layer` via
+  rules are defined but never instantiated), so every via either
+  constructs is manufactured as an ordinary through-hole whose barrel
+  spans the full copper stack; under-reporting the span let DRC and
+  connectivity code (which trust `via.layers` as the physical barrel
+  extent — `validate/connectivity.py`, `validate/rules/clearance.py`,
+  `core/layers.py::via_spans_layer`) silently skip barrel-vs-foreign-
+  copper clearance checks on layers the via actually passes through but
+  did not name as an endpoint. The grid-side obstacle search already
+  treated every via as full-stack (`Grid3D::mark_via` /
+  `Pathfinder::is_via_blocked_diag` in C++; `RoutingGrid._mark_via` in
+  Python both block/check ALL layers unconditionally), so no route is
+  newly accepted against copper this fix "discovers" — only the
+  *reported* span was wrong. Both pathfinders, plus the shared
+  `Route.validate_layer_transitions` missing-via safety net, now
+  normalize an ordinary (non-micro) via's span to the full physical
+  stack at `Route` construction — upstream of acceptance and export —
+  so every downstream consumer of `route.vias` sees the correct span,
+  not just the final saved `.kicad_pcb`. Explicit micro-vias are
+  untouched. Regression coverage spans both backends, an inner-to-inner
+  (`In1.Cu` -> `In2.Cu`) transition, the `validate_layer_transitions`
+  fallback, and `via_spans_layer`'s foreign-copper-on-an-intermediate-
+  layer visibility.
+- **Fine-pitch same-component carve-out silently bypassed authored pad
+  clearance** (#5004) — the router's same-component clearance carve-out
+  (`RoutingGrid._same_component_carveout_active` /
+  `CppPathfinder._same_component_carveout_eligible`) used to exempt a
+  FOREIGN-net pad from clearance checks purely because its component's pin
+  pitch was below `fine_pitch_threshold` — even when `fine_pitch_clearance`
+  was left unset (the default) and no per-component relaxation was actually
+  configured. On board07 (STM32F429 + SDRAM, 0.5mm-pitch LQFP144, 0.15mm
+  authored clearance) this silently accepted 46 clearance defects (30
+  against NC pads, 16 against named signal pads) that the router's own
+  `clearance_viol=0` metric never surfaced, while a fresh native KiCad DRC
+  on the same routed project reported all 46. The pitch-only branch is now
+  gated behind a new opt-in `DesignRules.legacy_fine_pitch_carveout` flag
+  (default `False`): with it left unset, the carve-out only activates where
+  a relaxation was actually configured or applied for the component — an
+  explicit `component_clearances` override, a net-class `escape_clearance`
+  override, an applied `fine_pitch_clearance` shrink (narrow-channel guard
+  permitting), or a corridor already relaxed by
+  `_relax_same_component_clearance` (Issue #2452). Configured relaxations
+  retain their existing exclusion behavior; enforcing numerical per-ref
+  floors is tracked separately in #5166.
+  The gate is shared by the Python search-time validator (`grid.py`), the
+  C++ pathfinder's post-route acceptance check (`cpp_backend.py`, which
+  builds the `exclude_ref_hashes` list the C++ `Grid3D::validate_route`
+  carve-out consumes), and the `validate_routes()` / `drc_nudge`
+  "component-inherent" classification (`io.py`) so those paths use the
+  same opt-in policy. `CacheKey`/`SubProblemSignature` now key on the new flag so a cache
+  entry produced under one setting is never served to a run under the
+  other. Pad seeds retain trace-radius clearance, and negotiated routing
+  preserves complete physical tree connectivity and best-state geometry.
+  Board04 recognizes reviewed oscillator escape variants. Board06 can find
+  bounded pour/via escapes and restores impedance-sized connector widths
+  beyond a cumulative 0.75 mm pad neck-down. Finalization rolls back if
+  refill breaks pour connectivity or introduces a clearance violation.
 - **Declared current-path resolution reported `ambiguous` for an entire net
   whenever a benign parallel via array was reachable from an endpoint**
   (#5197) — `_component_has_cycle` (`router/current_paths.py`) flagged any

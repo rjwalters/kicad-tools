@@ -35,6 +35,21 @@ end-to-end checks, the mypy baseline, and route determinism:
 `local-gate.sh` (local CI-equivalent gate, Actions-outage backstop),
 `net_class_map_resolver.py`.
 
+`check_mask_copper_native.py` is the repository's mandatory native mask-to-copper
+suite gate. It probes matching KiCad 10.0.5 CLI/pcbnew and Gerbonara >=1.6.3,
+runs every case in `tests/test_mask_copper_native.py`, and rejects failures,
+empty results, missing material witnesses, or any skips. For a local equivalent
+in a KiCad environment with shared scratch paths:
+
+```bash
+KCT_MASK_NATIVE_PYTHON='["/usr/bin/python3"]' uv run --frozen python scripts/ci/check_mask_copper_native.py --artifacts /tmp/mask-copper-native
+```
+
+Each invocation retains a new run directory containing prerequisite details,
+pytest output, JUnit, and generated native artifacts. Ordinary local pytest
+execution keeps its optional-prerequisite skips. CI runs this dedicated gate
+once and excludes the file from the later general suite.
+
 ### `corpus/`
 
 Opt-in, **local-only** tooling for external KiCad corpora (network I/O; never

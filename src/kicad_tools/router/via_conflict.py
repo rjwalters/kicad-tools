@@ -981,7 +981,7 @@ class ViaConflictManager:
                     nx, ny = gx + dx_offset, gy + dy_offset
                     if not (0 <= nx < self.grid.cols and 0 <= ny < self.grid.rows):
                         continue
-                    cell = self.grid.grid[layer_idx][ny][nx]
+                    cell = self.grid.cell_at(layer_idx, ny, nx)
                     if cell.blocked and cell.net != exclude_net and cell.net != 0:
                         return True
                     # Issue #2963: Post-PR #2928, pad-metal cells are

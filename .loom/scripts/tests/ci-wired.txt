@@ -46,6 +46,7 @@ test-check-ci-status.sh
 test-check-config-no-host-paths.sh
 test-check-duplicate.sh
 test-check-conflict-markers.sh
+test-check-dependabot-labels.sh
 test-check-evaluating-staleness.sh
 test-check-git-identity.sh
 test-check-host-sleep.sh
@@ -112,6 +113,7 @@ test-guide-work-plan-approved-review-label-fidelity.sh
 test-guide-work-plan-debounce.sh
 test-guide-work-plan-operator-only-exclude.sh
 test-guide-work-plan-ready-open-pr-exclude.sh
+test-hard-exclusion-labels.sh
 test-host-sleep-config.sh
 test-install-active-session.sh
 test-install-agents-md-reapply.sh

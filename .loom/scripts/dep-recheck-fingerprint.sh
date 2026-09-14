@@ -71,6 +71,8 @@
 #       [--json]
 #   dep-recheck-fingerprint.sh named-dependency (--number N [--repo OWNER/NAME] | --stdin)
 #       [--json]
+#   dep-recheck-fingerprint.sh extract-refs (--number N [--repo OWNER/NAME] | --stdin)
+#       [--bot-login LOGIN] [--json]
 #
 # Subcommands:
 #   dep-recheck        The "Re-check Idempotency" fingerprint: VERDICT
@@ -92,6 +94,31 @@
 #                       CONCLUSION_HASH — left EMPTY when VERDICT=open, per
 #                       "no comment this pass" (nothing to report, nothing to
 #                       compare).
+#   extract-refs        The "Checking Operator-Only Premises" -> "Extracting
+#                       the stated reference" extraction (#4963). Emits REFS,
+#                       a space-separated (possibly empty) list of referenced
+#                       issue/PR numbers found via the fixed
+#                       `Blocked by|Depends on|Requires|**Epic**` phrasings.
+#                       References are extracted from the issue **body**
+#                       always, plus any **comment** that is (a) not authored
+#                       by the automation identity (`--bot-login`, default
+#                       `loom-fleet-dispatch`; matched case-insensitively
+#                       after stripping an `app/` prefix or `[bot]` suffix)
+#                       and (b) does not itself carry a
+#                       `<!-- curator:dep-recheck:...` or
+#                       `<!-- curator:operator-premise-recheck:...` marker.
+#                       This is what stops the self-perpetuating loop from
+#                       #4507: the bot's own historical "premise possibly
+#                       stale" comments quote the matched phrase back into the
+#                       thread, and a naive `[.body] + [.comments[].body]`
+#                       scan (the old inline curator.md shell) re-matches its
+#                       own prior report forever, even after the body itself
+#                       is fixed. Excluding the automation identity's own
+#                       comments (and, belt-and-suspenders, anything carrying
+#                       its own marker) breaks that loop while still catching
+#                       a genuine NEW human-authored "Blocked by #N" comment.
+#                       The output feeds directly into `operator-premise`'s
+#                       `--refs` argument.
 #   named-dependency   The `## Dependencies` checklist fingerprint (#7314):
 #                       covers the shape `dep-recheck` cannot — a checklist
 #                       item naming a *different*, non-closing issue/PR as a
@@ -126,14 +153,14 @@
 #                                     `named-dependency` derives its own
 #                                     reference list by parsing the issue's own
 #                                     body `## Dependencies` section (see
-#                                     above); `operator-premise` requires the
-#                                     caller's already-extracted `--refs "N1
-#                                     N2 ..."` (that subcommand does not parse
-#                                     issue body text itself — that extraction
-#                                     stays in curator.md, tightly coupled to
-#                                     the free-form phrasings it recognizes,
-#                                     unlike `named-dependency`'s single fixed
-#                                     `## Dependencies` checklist format).
+#                                     above); `extract-refs` derives its own
+#                                     reference list by parsing the issue's
+#                                     body and (filtered) comments, per the
+#                                     `extract-refs` description above;
+#                                     `operator-premise` requires the caller's
+#                                     already-extracted `--refs "N1 N2 ..."`
+#                                     (typically `extract-refs`'s own REFS
+#                                     output — see curator.md).
 #   --stdin                          Offline mode: read a JSON document on
 #                                     stdin instead of calling `gh` (used by
 #                                     the test suite, and available to any
@@ -150,6 +177,13 @@
 #                                         (a checked entry may omit "state"
 #                                         entirely, or set it to null — it is
 #                                         never consulted).
+#                                       extract-refs:     {"body": "...",
+#                                         "comments": [{"author":
+#                                         {"login":"..."}, "body": "..."},
+#                                         ...]} — the same shape `gh issue view
+#                                         --json body,comments` returns, so a
+#                                         live-mode fixture can be captured
+#                                         verbatim.
 #
 # Options:
 #   --verdict blocked|clear   `dep-recheck` only: override the mechanically
@@ -168,6 +202,13 @@
 #                             CONCLUSION_HASH verbatim, empty by default (the
 #                             ordinary case — every existing fingerprint is
 #                             unaffected when this is empty).
+#   --bot-login LOGIN         `extract-refs` only: the automation identity
+#                             whose own comments are excluded from the
+#                             comment-scan fallback. Default `loom-fleet-dispatch`.
+#                             Matched case-insensitively, after stripping a
+#                             leading `app/` or trailing `[bot]` (so it matches
+#                             regardless of which `gh` view normalizes the
+#                             login to).
 #   --repo OWNER/NAME         Target repo for live mode (default: the cwd's
 #                             git remote).
 #   --json                    Emit a JSON object instead of KEY=VALUE lines.
@@ -197,13 +238,13 @@ _die() {
 
 SUBCOMMAND="${1:-}"
 case "$SUBCOMMAND" in
-    dep-recheck | operator-premise | named-dependency) shift ;;
+    dep-recheck | operator-premise | named-dependency | extract-refs) shift ;;
     -h | --help)
         _usage
         exit 0
         ;;
-    "") _die "missing subcommand (dep-recheck | operator-premise | named-dependency); see --help" ;;
-    *) _die "unknown subcommand '$SUBCOMMAND' (dep-recheck | operator-premise | named-dependency)" ;;
+    "") _die "missing subcommand (dep-recheck | operator-premise | named-dependency | extract-refs); see --help" ;;
+    *) _die "unknown subcommand '$SUBCOMMAND' (dep-recheck | operator-premise | named-dependency | extract-refs)" ;;
 esac
 
 NUMBER=""
@@ -213,6 +254,7 @@ USE_STDIN=false
 VERDICT_OVERRIDE=""
 BLOCK_REASON=""
 ORTHOGONAL=""
+BOT_LOGIN="loom-fleet-dispatch"
 JSON_OUTPUT=false
 
 while [[ $# -gt 0 ]]; do
@@ -245,6 +287,10 @@ while [[ $# -gt 0 ]]; do
             ORTHOGONAL="${2:-}"
             shift 2
             ;;
+        --bot-login)
+            BOT_LOGIN="${2:-}"
+            shift 2
+            ;;
         --json)
             JSON_OUTPUT=true
             shift
@@ -262,7 +308,7 @@ command -v jq >/dev/null 2>&1 || _die "jq not found on PATH" 3
 if [[ "$USE_STDIN" == true ]]; then
     [[ -z "$NUMBER" ]] || _die "--stdin and --number are mutually exclusive"
     [[ -z "$REFS_ARG" ]] || _die "--stdin and --refs are mutually exclusive"
-elif [[ "$SUBCOMMAND" == "dep-recheck" || "$SUBCOMMAND" == "named-dependency" ]]; then
+elif [[ "$SUBCOMMAND" == "dep-recheck" || "$SUBCOMMAND" == "named-dependency" || "$SUBCOMMAND" == "extract-refs" ]]; then
     [[ -n "$NUMBER" ]] || _die "one of --number or --stdin is required"
     [[ "$NUMBER" =~ ^[0-9]+$ ]] || _die "--number must be a positive integer (got '$NUMBER')"
     command -v gh >/dev/null 2>&1 || _die "gh CLI not found on PATH" 3
@@ -443,8 +489,79 @@ _run_operator_premise() {
             '{verdict: $verdict, refs: $refs, conclusion_hash: $hash}'
     else
         echo "VERDICT=$verdict"
-        echo "REFS=$refs"
+        # Consumers eval these assignments; lists may contain spaces/newlines.
+        printf 'REFS=%q\n' "$refs"
         echo "CONCLUSION_HASH=$hash"
+    fi
+}
+
+# --- extract-refs (#4963) ----------------------------------------------------
+
+# The exact machine-readable phrasings `detect-dependency-cycle.sh` /
+# `warn-operator-gated.sh` already parse — reused verbatim rather than
+# inventing a new pattern. A bare prose mention (e.g. a backtick-quoted
+# `owner/repo#123`) deliberately does not count.
+_extract_refs_pattern() {
+    # `|| true`: under `set -o pipefail` a `grep` stage matching nothing
+    # exits 1, which would otherwise propagate as this whole pipeline's
+    # status (even though `sort` itself succeeds) and trip `set -e` in every
+    # caller up the chain — "zero references found" is an expected, common
+    # outcome here, not a real failure.
+    grep -oE '(Blocked by|Depends on|Requires|\*\*Epic\*\*)[*_:[:space:]]*#[0-9]+' <<<"$1" \
+        | grep -oE '#[0-9]+' | tr -d '#' | sort -un || true
+}
+
+_fetch_extract_refs_json() {
+    gh issue view "$NUMBER" "${REPO_FLAG[@]}" --json body,comments ||
+        _die "gh issue view $NUMBER failed — cannot compute a fingerprint from a failed read (fail safe: never guess 'no refs' on missing data)" 1
+}
+
+# One reference number per line (sorted, unique) found in the body, plus any
+# comment that is NEITHER authored by the automation identity NOR itself
+# carrying a `curator:dep-recheck:` / `curator:operator-premise-recheck:`
+# marker (#4963 — see the header comment for why this is the fix, not just a
+# convenience). The login match is case-insensitive and tolerant of a leading
+# `app/` or trailing `[bot]`, since different `gh` views/API paths have been
+# observed to normalize a GitHub App's login differently (compare
+# `judge-fallback-guard.sh`'s `app/loom-fleet-dispatch` PR-author check with
+# the bare `loom-fleet-dispatch` this script observes from
+# `gh issue view --json comments`).
+_extract_refs() {
+    local input_json bot_login_lc body comments_text text
+    input_json="$1"
+    bot_login_lc="$(printf '%s' "$BOT_LOGIN" | tr '[:upper:]' '[:lower:]')"
+
+    body="$(jq -r '.body // ""' <<<"$input_json")"
+    comments_text="$(jq -r --arg bot "$bot_login_lc" '
+        .comments[]
+        | select(
+            (((.author.login // "") | ascii_downcase | sub("^app/"; "") | sub("\\[bot\\]$"; "")) != $bot)
+            and ((.body // "") | test("<!-- curator:(dep-recheck|operator-premise-recheck):") | not)
+          )
+        | .body
+    ' <<<"$input_json")"
+
+    text="$(printf '%s\n%s' "$body" "$comments_text")"
+    _extract_refs_pattern "$text" | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//'
+}
+
+_run_extract_refs() {
+    local input_json refs
+    if [[ "$USE_STDIN" == true ]]; then
+        input_json="$(cat)"
+    else
+        input_json="$(_fetch_extract_refs_json)"
+    fi
+    jq -e '(.body != null) and (.comments | type) == "array"' >/dev/null 2>&1 <<<"$input_json" ||
+        _die "input JSON must have top-level 'body' (string) and 'comments' (array) fields"
+
+    refs="$(_extract_refs "$input_json")"
+
+    if [[ "$JSON_OUTPUT" == true ]]; then
+        jq -n --arg refs "$refs" '{refs: $refs}'
+    else
+        # Consumers eval these assignments; lists may contain spaces/newlines.
+        printf 'REFS=%q\n' "$refs"
     fi
 }
 
@@ -570,4 +687,5 @@ case "$SUBCOMMAND" in
     dep-recheck) _run_dep_recheck ;;
     operator-premise) _run_operator_premise ;;
     named-dependency) _run_named_dependency ;;
+    extract-refs) _run_extract_refs ;;
 esac

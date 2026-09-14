@@ -559,7 +559,7 @@ class CongestionMap:
         for layer_idx in range(self.grid.num_layers):
             for gy in range(min_gy, max_gy + 1, step):
                 for gx in range(min_gx, max_gx + 1, step):
-                    cell = self.grid.grid[layer_idx][gy][gx]
+                    cell = self.grid.cell_at(layer_idx, gy, gx)
 
                     if not cell.blocked and cell.usage_count == 0:
                         continue
@@ -1090,7 +1090,7 @@ class RootCauseAnalyzer:
             for gx in range(min_gx, max_gx + 1, step):
                 if len(blocking) >= self.MAX_BLOCKING_ELEMENTS:
                     break
-                cell = grid.grid[layer][gy][gx]
+                cell = grid.cell_at(layer, gy, gx)
 
                 if not cell.blocked:
                     continue
@@ -1188,7 +1188,7 @@ class RootCauseAnalyzer:
 
             for gy in range(min_gy, max_gy + 1):
                 for gx in range(min_gx, max_gx + 1):
-                    cell = grid.grid[layer_idx][gy][gx]
+                    cell = grid.cell_at(layer_idx, gy, gx)
 
                     if not cell.blocked:
                         continue
@@ -1307,14 +1307,14 @@ class RootCauseAnalyzer:
         step = max(1, int(stride))
         for gy in range(min_gy, max_gy + 1, step):
             for gx in range(min_gx, max_gx + 1, step):
-                cell = grid.grid[layer][gy][gx]
+                cell = grid.cell_at(layer, gy, gx)
                 if not cell.blocked:
                     # Check distance to nearest blocked cell
                     for dy in range(-2, 3):
                         for dx in range(-2, 3):
                             nx, ny = gx + dx, gy + dy
                             if 0 <= nx < grid.cols and 0 <= ny < grid.rows:
-                                if grid.grid[layer][ny][nx].blocked:
+                                if grid.cell_at(layer, ny, nx).blocked:
                                     dist = math.sqrt(dx * dx + dy * dy) * resolution
                                     min_clearance = min(min_clearance, dist)
 
@@ -1771,7 +1771,7 @@ class RootCauseAnalyzer:
                 if not (0 <= gx < grid.cols and 0 <= gy < grid.rows):
                     continue
 
-                cell = grid.grid[layer][gy][gx]
+                cell = grid.cell_at(layer, gy, gx)
 
                 # Skip unblocked cells or cells belonging to the same net
                 if not cell.blocked:

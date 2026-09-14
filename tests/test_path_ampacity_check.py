@@ -187,6 +187,73 @@ class TestPathAmpacityRule:
             "not covered" in results.warnings[0].message.lower()
         )
 
+    def test_unmodeled_arc_is_warning_plus_ambiguous_error(self) -> None:
+        """A same-net routed arc (#5273) makes the declared trunk ambiguous
+        (error) AND is separately surfaced by name (warning) -- the warning
+        names the specific object responsible, on top of the status error."""
+        from kicad_tools.sexp import parse_string
+
+        pcb = _t_network_pcb(trunk_width=6.3, sense_width=0.2)
+        net = pcb.get_net_by_name("NET1")
+        assert net is not None
+        pcb._sexp.append(
+            parse_string(
+                f"(arc (start 20 50) (mid 70 20) (end 120 50) (width 0.2) "
+                f'(layer "F.Cu") (net {net.number}))'
+            )
+        )
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0), _sense_spec(0.01)])
+        results = rule.check(pcb, _design_rules_2oz())
+
+        ambiguous_errors = [v for v in results.errors if "ambiguous" in v.message]
+        assert len(ambiguous_errors) == 2  # both TRUNK and SENSE resolve ambiguous
+
+        unmodeled_warnings = [v for v in results.warnings if "arc" in v.message]
+        assert len(unmodeled_warnings) == 1
+        assert unmodeled_warnings[0].severity == "warning"
+
+    def test_unmodeled_pour_is_warning(self) -> None:
+        """A same-net non-keepout zone (#5273) is surfaced the same way."""
+        from kicad_tools.schema.pcb import Zone
+
+        pcb = _t_network_pcb(trunk_width=6.3, sense_width=0.2)
+        net = pcb.get_net_by_name("NET1")
+        assert net is not None
+        pcb._zones.append(
+            Zone(
+                net.number,
+                "NET1",
+                "F.Cu",
+                polygon=[(0, 0), (200, 0), (200, 120), (0, 120)],
+            )
+        )
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(pcb, _design_rules_2oz())
+
+        unmodeled_warnings = [v for v in results.warnings if "zone" in v.message]
+        assert len(unmodeled_warnings) == 1
+
+    def test_keepout_zone_is_not_flagged_as_unmodeled(self) -> None:
+        """A keepout rule area carries no copper -- excluded entirely."""
+        from kicad_tools.schema.pcb import Zone, ZoneKeepout
+
+        pcb = _t_network_pcb(trunk_width=6.3, sense_width=0.2)
+        net = pcb.get_net_by_name("NET1")
+        assert net is not None
+        pcb._zones.append(
+            Zone(
+                net.number,
+                "NET1",
+                "F.Cu",
+                polygon=[(0, 0), (200, 0), (200, 120), (0, 120)],
+                keepout=ZoneKeepout(),
+            )
+        )
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0), _sense_spec(0.01)])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert results.errors == []
+        assert results.warnings == []
+
     def test_kelvin_force_and_sense_declared_currents_independent(self) -> None:
         """A four-terminal-shunt-style fixture: a force path across the
         shunt and a Kelvin sense path sharing the electrical net, but
@@ -233,3 +300,133 @@ def test_layer_transition_is_audited_before_ampacity(bridge):
     else:
         assert result.errors
         assert any("unresolved" in error.message.lower() for error in result.errors)
+
+
+# --------------------------------------------------------------------------
+# Pulsed / duty-cycled branches (Issue #4980)
+# --------------------------------------------------------------------------
+
+
+def _pulsed_trunk_spec(**overrides) -> CurrentPathSpec:
+    kwargs = {
+        "name": "TRUNK",
+        "net_name": "NET1",
+        "source": PathEndpoint("J1", "1"),
+        "sink": PathEndpoint("J2", "1"),
+        "continuous_a": 3.0,
+        "pulsed_a": 18.0,
+        "duty_cycle": 0.08,
+        "pulse_duration_s": 0.002,
+        "reinforcement_eligible": True,
+    }
+    kwargs.update(overrides)
+    return CurrentPathSpec(**kwargs)
+
+
+class TestPulsedPathAmpacity:
+    """A declared pulse drives an RMS thermal width check plus an Onderdonk
+    fusing check -- neither of which the continuous-only check could see."""
+
+    def test_rms_width_governs_a_duty_cycled_branch(self) -> None:
+        """18A peak at 8% duty over 3A heats like ~5.85A RMS: a trace wide
+        enough for 5.85A passes, even though it is far too narrow for 18A
+        of *continuous* current."""
+        pcb = _t_network_pcb(trunk_width=1.8, sense_width=0.2)
+        rule = PathAmpacityRule(specs=[_pulsed_trunk_spec(), _sense_spec(0.01)])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert results.errors == []
+
+    def test_peak_as_continuous_would_have_failed_the_same_trace(self) -> None:
+        """Same board, same peak, duty cycle withheld: the peak is sized as
+        continuous, so the trace that passed above now fails. This is the
+        whole point of declaring a duty cycle."""
+        pcb = _t_network_pcb(trunk_width=1.8, sense_width=0.2)
+        rule = PathAmpacityRule(specs=[_pulsed_trunk_spec(duty_cycle=None)])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert [v for v in results.errors if "too narrow" in v.message]
+
+    def test_peak_as_continuous_assumption_is_disclosed(self) -> None:
+        """Sizing at the peak is conservative, so it is not an error -- but
+        it is never silent: an info finding names the missing duty cycle."""
+        pcb = _t_network_pcb(trunk_width=8.2, sense_width=0.2)
+        rule = PathAmpacityRule(specs=[_pulsed_trunk_spec(duty_cycle=None)])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert results.errors == []
+        notices = [v for v in results.infos if "duty_cycle" in v.message]
+        assert len(notices) == 1
+        assert notices[0].severity == "info"
+
+    def test_declared_duty_cycle_emits_no_assumption_notice(self) -> None:
+        pcb = _t_network_pcb(trunk_width=8.0, sense_width=0.2)
+        rule = PathAmpacityRule(specs=[_pulsed_trunk_spec()])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert results.infos == []
+
+    def test_underwidth_message_names_the_rms_basis(self) -> None:
+        pcb = _t_network_pcb(trunk_width=0.3, sense_width=0.2)
+        rule = PathAmpacityRule(specs=[_pulsed_trunk_spec()])
+        results = rule.check(pcb, _design_rules_2oz())
+        narrow = [v for v in results.errors if "too narrow" in v.message]
+        assert narrow
+        assert "RMS" in narrow[0].message
+        assert "18" in narrow[0].message  # the peak is named alongside the RMS
+
+    def test_fusing_failure_on_a_thermally_adequate_trace(self) -> None:
+        """A trace can be comfortable on RMS heating and still be melted by
+        a single pulse. 30A for 2s exceeds the ~25.7A Onderdonk limit of
+        1.8mm of 2oz copper, while the ~5.98A RMS needs only ~1.77mm -- so
+        the thermal check passes and only the fusing check fires."""
+        pcb = _t_network_pcb(trunk_width=1.8, sense_width=0.2)
+        spec = _pulsed_trunk_spec(pulsed_a=30.0, duty_cycle=0.03, pulse_duration_s=2.0)
+        rule = PathAmpacityRule(specs=[spec])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert not [v for v in results.errors if "too narrow" in v.message]
+        fusing = [v for v in results.errors if "fuse" in v.message]
+        assert fusing, [v.message for v in results.errors]
+        assert fusing[0].actual_value == pytest.approx(30.0)
+        assert fusing[0].required_value == pytest.approx(25.72, abs=0.1)
+
+    def test_short_enough_pulse_survives(self) -> None:
+        """The same 30A peak over a 100x shorter pulse does not fuse
+        (Onderdonk scales as 1/sqrt(t))."""
+        pcb = _t_network_pcb(trunk_width=1.8, sense_width=0.2)
+        spec = _pulsed_trunk_spec(pulsed_a=30.0, duty_cycle=0.03, pulse_duration_s=0.02)
+        rule = PathAmpacityRule(specs=[spec])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert not [v for v in results.errors if "fuse" in v.message]
+
+    def test_missing_pulse_duration_reports_the_unchecked_mode(self) -> None:
+        """No declared duration -> fusing cannot be evaluated. That is a
+        visible warning, never a silent pass."""
+        pcb = _t_network_pcb(trunk_width=8.0, sense_width=0.2)
+        rule = PathAmpacityRule(specs=[_pulsed_trunk_spec(pulse_duration_s=None)])
+        results = rule.check(pcb, _design_rules_2oz())
+        unchecked = [v for v in results.warnings if "fusing" in v.message]
+        assert len(unchecked) == 1
+        assert "NOT checked" in unchecked[0].message
+
+    def test_continuous_only_path_reports_nothing_about_pulses(self) -> None:
+        """Regression guard: a purely continuous declaration behaves exactly
+        as it did before pulsed support existed."""
+        pcb = _t_network_pcb(trunk_width=6.3, sense_width=0.2)
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0), _sense_spec(0.01)])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert results.errors == []
+        assert results.warnings == []
+        assert results.infos == []
+
+    def test_unresolved_pulsed_path_still_fails_closed_without_extra_noise(self) -> None:
+        """A broken endpoint mapping short-circuits to the unresolved error
+        -- no waveform findings are emitted for copper nobody could find."""
+        pcb = _t_network_pcb(trunk_width=1.6)
+        fp = pcb.get_footprint("J2")
+        assert fp is not None
+        other_net = pcb.add_net("OTHER")
+        fp.pads[0].net_number = other_net.number
+        fp.pads[0].net_name = "OTHER"
+
+        rule = PathAmpacityRule(specs=[_pulsed_trunk_spec(duty_cycle=None)])
+        results = rule.check(pcb, _design_rules_2oz())
+        assert len(results.errors) == 1
+        assert "unresolved" in results.errors[0].message
+        assert results.infos == []

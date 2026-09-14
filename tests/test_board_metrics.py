@@ -784,3 +784,47 @@ def test_development_any_malformed_contributing_geometry_is_unknown(development_
     assert "board_size_mm" not in result
     assert result["layer_count"] == 4
     assert any("outline" in d and "unknown" in d for d in result["diagnostics"])
+
+
+@pytest.mark.parametrize(
+    "layers,expected",
+    [
+        ('(layers (0 "F.Cu" signal) (31 "B.Cu" signal))', 2),
+        ("", None),
+        ('(layers (bad "F.Cu" signal) (31 "B.Cu" signal))', None),
+        ('(layers (0 "F.Cu" signal) (0 "B.Cu" signal))', None),
+        ('(layers (0 "F.Cu" signal) (00 "B.Cu" signal))', None),
+    ],
+)
+def test_development_bad_outline_uses_only_declared_layers(development_board, layers, expected):
+    from kicad_tools.sexp import parse_string, serialize_sexp
+
+    path = development_board / "output/actual.kicad_pcb"
+    pcb = parse_string(path.read_text())
+    for node in list(pcb.find_children("layers")):
+        pcb.remove(node)
+    text = serialize_sexp(pcb).rstrip()
+    path.write_text(text[:-1] + layers + '(gr_text "unsupported" (at 10 10) (layer "Edge.Cuts")))')
+    result = extract_board_metrics(development_board)
+    assert "board_size_mm" not in result
+    if expected is None:
+        assert "layer_count" not in result
+    else:
+        assert result["layer_count"] == expected
+    assert result["status"] != "ok"
+    assert result["diagnostics"]
+
+
+@pytest.mark.parametrize("tag", ["footprint", "module"])
+def test_development_invalid_outline_retains_declared_parts(development_board, tag):
+    path = development_board / "output/actual.kicad_pcb"
+    text = path.read_text().rstrip()
+    path.write_text(
+        text[:-1]
+        + f'({tag} "R" (layer "F.Cu") (at 10 10))'
+        + '(gr_text "unsupported" (at 10 10) (layer "Edge.Cuts")))'
+    )
+    result = extract_board_metrics(development_board)
+    assert result["part_count"] == 1
+    assert result["layer_count"] == 4
+    assert "board_size_mm" not in result

@@ -44,6 +44,7 @@ dependencies = [
     "pyyaml>=6.0",
     "numpy>=1.24",
     "pydantic>=2.0",
+    "jsonschema>=4.20",
     # shapely is load-bearing for the correctness-critical copper paths
     # (zone-fill clearance carving and the zone-vs-copper clearance DRC
     # rules), so it is a CORE dependency rather than an optional extra

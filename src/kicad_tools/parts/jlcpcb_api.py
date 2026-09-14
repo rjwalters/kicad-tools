@@ -76,7 +76,8 @@ import os
 import re
 import secrets
 import time
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
 from .lcsc import _categorize_part, _guess_package_type
@@ -166,6 +167,10 @@ class JLCQuotaError(JLCAPIError):
     Actionable: back off and retry later, or request a higher quota from the
     developer portal.
     """
+
+
+class JLCDependencyError(JLCAPIError):
+    """An optional transport dependency is unavailable (no request was sent)."""
 
 
 class JLCIncompleteResponseError(JLCAPIError):
@@ -281,6 +286,16 @@ def _compact_json(payload: dict) -> str:
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
+@dataclass(frozen=True)
+class ComponentInventory:
+    """Internal exact-code evidence; raw rows must never be serialized whole."""
+
+    rows: tuple[Any, ...]
+    observed_at: datetime | None
+    source: str = "live"
+    from_cache: bool = False
+
+
 class JLCOpenAPIClient:
     """Signed client for the official JLCPCB open-platform Parts surface.
 
@@ -374,6 +389,8 @@ class JLCOpenAPIClient:
                 headers=headers,
                 timeout=self.timeout,
             )
+        except ImportError:
+            raise JLCDependencyError("Optional requests dependency is unavailable") from None
         except request_exc as e:
             reason = _safe_error_reason(
                 str(e),
@@ -456,6 +473,18 @@ class JLCOpenAPIClient:
             if part.lcsc_part:
                 parts[part.lcsc_part.upper()] = part
         return parts
+
+    def get_component_inventory(self, codes: list[str]) -> ComponentInventory:
+        """Preserve row coverage and original fetch time using the signed client."""
+        cleaned = sorted({c.strip().upper() for c in codes if c and c.strip()})
+        if not cleaned:
+            return ComponentInventory((), None)
+        result = self._post_signed(COMPONENT_DETAIL_PATH, {"componentCodes": cleaned})
+        observed = datetime.now(timezone.utc)
+        data = result.get("data")
+        if not isinstance(data, list):
+            raise JLCIncompleteResponseError("Non-list component-detail payload")
+        return ComponentInventory(tuple(data), observed)
 
     def get_component_detail_raw(self, codes: list[str]) -> list[dict[str, Any]]:
         """Return raw per-code response objects, with no ``Part`` projection.
@@ -634,4 +663,5 @@ def _parse_official_component(data: dict) -> Part:
         datasheet_url=datasheet_url,
         product_url=f"https://jlcpcb.com/partdetail/{code}" if code else "",
         fetched_at=datetime.now(),
+        stock_source="live",
     )

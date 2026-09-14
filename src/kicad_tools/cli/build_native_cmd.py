@@ -3,8 +3,9 @@ Build native C++ router backend command.
 
 Provides a simple way to build and install the C++ router extension for
 10-100x faster routing performance. The same root CMake project also builds
-the ``placement_cpp`` extension (force-directed placement acceleration); this
-command installs both -- see Issue #5240.
+the ``placement_cpp`` extension (force-directed placement acceleration) and
+the ``drc_cpp`` extension (pad-to-pad clearance checking); this command
+installs all three -- see Issue #5240.
 """
 
 from __future__ import annotations
@@ -48,6 +49,15 @@ class BuildResult:
     # install (e.g. a source-less installed wheel, or an install failure --
     # see ``warnings``).
     placement_so_path: Path | None = None
+    # Issue #5240: the ``drc/cpp`` source tree (pad-to-pad clearance
+    # checking, added in #1719) was never added as a subdirectory of the
+    # root CMakeLists.txt, so the C++ DRC backend was never built OR
+    # installed by this command -- ``IncrementalDRC`` always ran its
+    # pure-Python clearance loop, in every worktree and CI job, for the
+    # extension's entire history. ``None`` when no DRC extension was found
+    # to install (e.g. a source-less installed wheel, or an install failure
+    # -- see ``warnings``).
+    drc_so_path: Path | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON output."""
@@ -56,6 +66,7 @@ class BuildResult:
             "backend_installed": self.backend_installed,
             "so_path": str(self.so_path) if self.so_path else None,
             "placement_so_path": str(self.placement_so_path) if self.placement_so_path else None,
+            "drc_so_path": str(self.drc_so_path) if self.drc_so_path else None,
             "error_message": self.error_message,
             "steps_completed": self.steps_completed,
             "warnings": self.warnings,
@@ -128,6 +139,25 @@ def _get_placement_cpp_source_dir() -> Path | None:
     step to compile or install, which is not staleness.
     """
     cpp_dir = _get_placement_dir() / "cpp"
+    if cpp_dir.exists():
+        return cpp_dir
+    return None
+
+
+def _get_drc_dir() -> Path:
+    """Get the installed ``drc/`` package directory."""
+    return _get_package_root() / "drc"
+
+
+def _get_drc_cpp_source_dir() -> Path | None:
+    """Get the DRC C++ source directory, if present in this checkout.
+
+    Absent for a source-less installed wheel (same convention as
+    :func:`_get_cpp_source_dir` / :func:`_get_placement_cpp_source_dir`) --
+    there is then nothing for this build step to compile or install, which
+    is not staleness.
+    """
+    cpp_dir = _get_drc_dir() / "cpp"
     if cpp_dir.exists():
         return cpp_dir
     return None
@@ -295,6 +325,37 @@ def _placement_backend_up_to_date() -> bool:
     )
 
 
+def _drc_backend_up_to_date() -> bool:
+    """True when the DRC C++ extension is installed and not stale.
+
+    Mirrors :func:`_placement_backend_up_to_date` (Issue #5240) -- the
+    extension ``build_native()`` used to never even compile (the source tree
+    was never wired into the root CMakeLists.txt), let alone install.
+
+    A checkout with no DRC C++ source tree at all (e.g. a source-less
+    installed wheel) has nothing for this build step to produce, so that is
+    reported as "up to date" rather than stale -- absence of a build target
+    is not staleness.
+    """
+    drc_source_dir = _get_drc_cpp_source_dir()
+    if drc_source_dir is None:
+        return True
+
+    try:
+        from kicad_tools.drc.cpp_backend import is_cpp_available
+    except ImportError:
+        return False
+
+    if not is_cpp_available():
+        return False
+
+    return not _is_so_stale(
+        _get_drc_dir(),
+        module_name="drc_cpp",
+        cpp_source_dir=drc_source_dir,
+    )
+
+
 def _install_extension_atomically(source: Path, target: Path) -> None:
     """Install ``source`` at ``target`` via a temp file + :func:`os.replace`.
 
@@ -455,12 +516,17 @@ def build_native(
             from kicad_tools.router.cpp_backend import is_cpp_available
 
             if is_cpp_available():
-                # Issue #5240: a stale/missing placement extension must also
-                # fall through to a real rebuild -- short-circuiting on the
-                # router's status alone is exactly how this command silently
-                # never installed placement_cpp in the first place.
+                # Issue #5240: a stale/missing placement OR drc extension
+                # must also fall through to a real rebuild -- short-
+                # circuiting on the router's status alone is exactly how
+                # this command silently never installed placement_cpp (and
+                # never even built drc_cpp) in the first place.
                 router_stale = _is_so_stale(router_dir)
-                if router_stale or not _placement_backend_up_to_date():
+                if (
+                    router_stale
+                    or not _placement_backend_up_to_date()
+                    or not _drc_backend_up_to_date()
+                ):
                     if verbose:
                         print("C++ source is newer than the installed extension -- rebuilding.")
                     result.steps_completed.append(
@@ -478,6 +544,7 @@ def build_native(
                     result.placement_so_path = _find_installed_so(
                         _get_placement_dir(), module_name="placement_cpp"
                     )
+                    result.drc_so_path = _find_installed_so(_get_drc_dir(), module_name="drc_cpp")
                     return result
         except ImportError:
             pass
@@ -657,6 +724,37 @@ def build_native(
                 f"{type(e).__name__}: {e}"
             )
 
+        # Step 6c: Find and install the drc_cpp extension too (Issue #5240).
+        # The root CMakeLists.txt now also configures ``drc/cpp`` as a
+        # subdirectory of the same CMake project (it never did before this
+        # fix -- the source tree existed since #1719 but was never wired
+        # in), so this build already compiles ``drc_cpp`` into ``build_dir``.
+        # Mirrors the placement install directly above. When ``source_dir``
+        # was instead the router-only ``cpp_dir`` fallback (pip-installed
+        # package without the drc subdirectory), the globs below simply find
+        # nothing -- not an error, nothing to install.
+        try:
+            drc_so_files = sorted(build_dir.glob("**/drc_cpp.*.so"))
+            if not drc_so_files:
+                drc_so_files = sorted(build_dir.glob("**/drc_cpp.*.pyd"))
+            if drc_so_files:
+                drc_so_file = drc_so_files[0]
+                drc_target = _get_drc_dir() / drc_so_file.name
+
+                if verbose:
+                    print(f"Installing DRC backend to {drc_target}...")
+
+                _install_extension_atomically(drc_so_file, drc_target)
+                result.drc_so_path = drc_target
+                result.steps_completed.append(f"Installed DRC backend: {drc_target}")
+        except OSError as e:
+            # Do not fail the whole build over the DRC extension: the router
+            # extension above is already installed and verified below.
+            # Surface it as a warning so it is visible, not silent.
+            result.warnings.append(
+                f"DRC C++ extension was built but could not be installed: {type(e).__name__}: {e}"
+            )
+
         # Verify the installation in a FRESH INTERPRETER (Issue #4589).
         #
         # The old code verified in-process with ``sys.modules.pop`` +
@@ -741,6 +839,8 @@ def format_result_text(result: BuildResult) -> str:
                 lines.append(f"  Extension: {result.so_path.name}")
             if result.placement_so_path:
                 lines.append(f"  Placement extension: {result.placement_so_path.name}")
+            if result.drc_so_path:
+                lines.append(f"  DRC extension: {result.drc_so_path.name}")
             lines.append("")
             lines.append("Run `kct route --backend cpp` to use the C++ backend.")
         elif result.backend_installed:
@@ -750,6 +850,8 @@ def format_result_text(result: BuildResult) -> str:
                 lines.append(f"  Extension: {result.so_path.name}")
             if result.placement_so_path:
                 lines.append(f"  Placement extension: {result.placement_so_path.name}")
+            if result.drc_so_path:
+                lines.append(f"  DRC extension: {result.drc_so_path.name}")
             lines.append("")
             lines.append("Run `kct route --backend cpp` to use the C++ backend.")
         else:
@@ -882,6 +984,23 @@ def main(argv: list[str] | None = None) -> int:
                             print(f"  reason: {placement_reason}")
                 except ImportError:
                     print("Placement backend: not installed")
+
+                # Issue #5240: report the DRC backend too. Same contract as
+                # the placement report above -- additive/informational only,
+                # does not affect the exit code.
+                try:
+                    from kicad_tools.drc.cpp_backend import get_backend_info as get_drc_info
+
+                    drc_info = get_drc_info()
+                    if drc_info.get("available"):
+                        print(f"DRC backend: available (version {drc_info.get('version')})")
+                    else:
+                        print("DRC backend: not installed")
+                        drc_reason = drc_info.get("unavailable_reason")
+                        if drc_reason:
+                            print(f"  reason: {drc_reason}")
+                except ImportError:
+                    print("DRC backend: not installed")
             return 0 if available else 1
         except ImportError:
             if args.format == "json":

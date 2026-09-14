@@ -1760,7 +1760,11 @@ class CoupledPathfinder:
         if layer < 0 or layer >= self.grid.num_layers:
             return True
 
-        cell = self.grid.grid[layer][gy][gx]
+        # Issue #5240: ``cell_at`` is a documented drop-in for the legacy
+        # ``grid.grid[layer][y][x]`` chain (one allocation instead of
+        # three) -- this per-cell blocked check is on the coupled
+        # pathfinder's hot path.
+        cell = self.grid.cell_at(layer, gy, gx)
         if cell.blocked and cell.net != net:
             return True
         return False
@@ -1826,7 +1830,7 @@ class CoupledPathfinder:
                     cgx, cgy = gx + dx, gy + dy
                     if not (0 <= cgx < self.grid.cols and 0 <= cgy < self.grid.rows):
                         return True
-                    if self.grid.grid[layer][cgy][cgx].pad_blocked:
+                    if self.grid.cell_at(layer, cgy, cgx).pad_blocked:
                         return True
         return False
 
@@ -3626,7 +3630,10 @@ def create_serpentine(
                 gy = int(round(sgy1 + (sgy2 - sgy1) * t))
                 if not (0 <= gx < grid.cols and 0 <= gy < grid.rows):
                     return False
-                cell = grid.grid[li][gy][gx]
+                # Issue #5240: ``cell_at`` drop-in for the legacy
+                # ``grid.grid[layer][y][x]`` chain (see
+                # ``RoutingGrid.cell_at``'s docstring).
+                cell = grid.cell_at(li, gy, gx)
                 if cell.blocked and cell.net != route.net:
                     return False
 

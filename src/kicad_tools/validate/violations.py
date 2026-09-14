@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .mask_copper import MaskCopperAssessment
+
 
 @dataclass(frozen=True)
 class DRCViolation:
@@ -152,6 +154,7 @@ class DRCResults:
     rules_checked: int = 0
     rules_checked_by_rule: dict[str, int] = field(default_factory=dict)
     suppressed_count: int = 0
+    mask_copper_assessments: list[MaskCopperAssessment] = field(default_factory=list)
 
     @property
     def error_count(self) -> int:
@@ -181,7 +184,7 @@ class DRCResults:
     @property
     def passed(self) -> bool:
         """True if no errors (warnings and infos are allowed)."""
-        return self.error_count == 0
+        return self.error_count == 0 and all(a.passed for a in self.mask_copper_assessments)
 
     @property
     def errors(self) -> list[DRCViolation]:
@@ -229,6 +232,7 @@ class DRCResults:
         per-rule result.
         """
         self.violations.extend(other.violations)
+        self.mask_copper_assessments.extend(other.mask_copper_assessments)
         self.rules_checked += other.rules_checked
         for rule_id, count in other.rules_checked_by_rule.items():
             self.rules_checked_by_rule[rule_id] = self.rules_checked_by_rule.get(rule_id, 0) + count
@@ -250,6 +254,7 @@ class DRCResults:
             "warning_count": self.warning_count,
             "info_count": self.info_count,
             "waived_count": self.waived_count,
+            "mask_copper_assessments": [a.to_dict() for a in self.mask_copper_assessments],
             "rules_checked": self.rules_checked,
             "rules_checked_by_rule": dict(self.rules_checked_by_rule),
             "violations": [v.to_dict() for v in self.violations],

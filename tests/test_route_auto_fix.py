@@ -468,7 +468,9 @@ class TestAutoFixViaCentralizedCLI:
         from kicad_tools.cli import main
 
         pcb_file = tmp_path / "board.kicad_pcb"
-        pcb_file.write_text("(kicad_pcb (version 20240101) (generator test))")
+        pcb_file.write_text(
+            '(kicad_pcb (version 20240101) (generator test) (gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts") (width 0.05)))'
+        )
 
         # Use --grid auto to avoid grid>clearance validation failure
         result = main(
@@ -482,7 +484,9 @@ class TestAutoFixViaCentralizedCLI:
         from kicad_tools.cli import main
 
         pcb_file = tmp_path / "board.kicad_pcb"
-        pcb_file.write_text("(kicad_pcb (version 20240101) (generator test))")
+        pcb_file.write_text(
+            '(kicad_pcb (version 20240101) (generator test) (gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts") (width 0.05)))'
+        )
 
         result = main(
             [
@@ -503,7 +507,9 @@ class TestAutoFixViaCentralizedCLI:
         from kicad_tools.cli import main
 
         pcb_file = tmp_path / "board.kicad_pcb"
-        pcb_file.write_text("(kicad_pcb (version 20240101) (generator test))")
+        pcb_file.write_text(
+            '(kicad_pcb (version 20240101) (generator test) (gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts") (width 0.05)))'
+        )
 
         result = main(
             ["route", str(pcb_file), "--skip-drc", "--dry-run", "--quiet", "--grid", "auto"]
@@ -537,7 +543,9 @@ class TestAutoFixViaCentralizedCLI:
         from kicad_tools.cli import main
 
         pcb_file = tmp_path / "board.kicad_pcb"
-        pcb_file.write_text("(kicad_pcb (version 20240101) (generator test))")
+        pcb_file.write_text(
+            '(kicad_pcb (version 20240101) (generator test) (gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts") (width 0.05)))'
+        )
 
         result = main(
             [
