@@ -92,6 +92,9 @@ def match_rotation_correction(
 
     Patterns are matched using :func:`fnmatch.fnmatch` so that entries
     like ``SOT-23*`` match ``SOT-23``, ``SOT-23-3``, etc.
+    Match the full identifier first so library-specific overrides retain
+    precedence. If none matches, try the package name after the library
+    separator, allowing the same preset to handle KiCad-qualified names.
 
     Args:
         footprint: Footprint name to match (e.g. ``SOT-23-3``)
@@ -103,6 +106,11 @@ def match_rotation_correction(
     for pattern, offset in corrections.items():
         if fnmatch.fnmatch(footprint, pattern):
             return float(offset)
+    if ":" in footprint:
+        package = footprint.split(":", 1)[1]
+        for pattern, offset in corrections.items():
+            if fnmatch.fnmatch(package, pattern):
+                return float(offset)
     return 0.0
 
 

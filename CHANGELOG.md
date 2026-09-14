@@ -1186,6 +1186,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Board 05 (`05-bldc-motor-controller`) silkscreen and inner-layer PTH
+  clearance repair** (#5204, Part of #5059) — the released jlcpcb-tier1
+  artifact violated two of the object-specific factory floors added for
+  #5059. (1) `R4`'s reference designator sat 0.0548 mm from `R1`'s pad-2
+  mask aperture, under the 0.15 mm silk-to-pad floor; `redesign/routing.py`
+  now mirrors the standard 0805 offset **below** the part (native KiCad
+  10.0.6 measures 0.8631 mm, and the tightest remaining silk-to-pad pair on
+  the board is a library-intrinsic 0.2073 mm). (2) 28 through-holes — U2's
+  24 and U3's 4 exposed-pad thermal vias — sat 0.2521 mm from the `+5V`
+  `In2.Cu` pour, under the 0.30 mm inner PTH-hole-to-copper floor. That gap
+  is the systemic `0.15 mm` minimum annular ring + `0.1016 mm` zone
+  clearance sum and needed **no layout change**: KiCad's zone filler honours
+  the emitted `Inner PTH Hole to Copper` `hole_clearance` rule, so a native
+  refill against the current `.kicad_dru` carves the pour to 0.3005 mm. The
+  committed release artifacts (routed PCB, `.kicad_dru`, gerbers, drawings,
+  renders, manifest and readiness evidence) are regenerated through the
+  recipe with native refill; the pad/placement/net fingerprint, track count
+  and all 8114 copper segments are unchanged. `kct check --mfr
+  jlcpcb-tier1 --errors-only` goes 28 blocking errors → 0 and native
+  `kicad-cli pcb drc --refill-zones` goes 1 violation → 0. Carried along:
+  the released `cpl_jlcpcb.csv` recorded `D1`/`D2` with a stale `180.0`
+  rotation and library-less footprint names, which the current exporter
+  regenerates as the board's actual `0.0` / `Diode_SMD:D_SMA`; and the
+  board's readiness evidence — stale since `redesign/build.py` changed
+  without a refresh — validates as `ready` again. This is a DRC/DFM repair,
+  not new physical qualification: motor and thermal bench validation remain
+  untested.
 - **`PCB.remove_segments()` silently left copper behind on boards with a
   non-zero `board_origin`** (#4933) — the coordinate-fallback match (for
   segments/vias with no UUID) rebuilt an in-memory removal key without

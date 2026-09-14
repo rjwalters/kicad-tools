@@ -2,7 +2,7 @@
 title: "bldc_controller_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.20.0"
-date: "Rev 1 | 2026-09-10 | jlcpcb"
+date: "Rev 1 | 2026-09-14 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true

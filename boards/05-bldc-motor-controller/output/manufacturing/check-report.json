@@ -1,5 +1,5 @@
 {
-  "file": "/private/tmp/loom-5044-board05-identity-release/bldc_controller_routed.kicad_pcb",
+  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5204/boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
   "layers": 4,
   "summary": {
@@ -7,7 +7,7 @@
     "warnings": 0,
     "infos": 5,
     "waived": 0,
-    "rules_checked": 47,
+    "rules_checked": 49,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -121,7 +121,7 @@
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "47 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "49 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
