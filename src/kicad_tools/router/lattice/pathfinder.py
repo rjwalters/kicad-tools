@@ -353,6 +353,15 @@ class LatticePathfinder:
 
         pads = load_pads_for_analysis(text)
         segments = _extract_edge_segments(text)
+        # This constructor still represents the board as a bounding box.
+        # A certified chord chain does not make that box equivalent to a
+        # curved outer boundary or an interior cutout. Keep the formerly
+        # unsupported geometry explicit rather than silently losing it.
+        if getattr(segments, "max_error_mm", 0.0) > 0:
+            raise ValueError(
+                "Unsupported curved Edge.Cuts in this bounding box constructor; "
+                "use the grid router to preserve the curved boundary"
+            )
         outline = _outline_from_edges(segments)
         return cls(outline, pads, rules, layer_stack, **knobs)
 
