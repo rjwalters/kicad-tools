@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add bounded +/-90-degree endpoint-orientation (`rotate_align`) placement-delta
+  candidates for a stuck net whose two endpoints present a pad-row/pad-column
+  mismatch, respecting fixed/locked placement and connector-access
+  constraints, reusing the corrected absolute-pad-rotation applicator (#4966)
+  and revalidating zone-carried power/mounting-pad connectivity after
+  rotation. Candidates carry auditable pad-alignment rationale and are never
+  a manufacturability verdict on their own (#4968).
 - Normalize legacy center/angle arcs in contour editing, board graphics, and placement linearization so rounded outlines remain connected and replacement preserves only actual mounting-hole contours (#4884).
 - Add read-only netclass diagnostics for undefined assignment targets, duplicate
   declarations and KiCad 10.0.5-verified pattern membership against supplied
