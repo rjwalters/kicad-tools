@@ -5338,7 +5338,7 @@ class DiffPairRouter:
                         continue
                 route = Route(net=head.net, net_name=head.net_name)
                 for x1, y1, x2, y2 in segs:
-                    if abs(x2 - x1) < 0.01 and abs(y2 - y1) < 0.01:
+                    if abs(x2 - x1) < 1e-9 and abs(y2 - y1) < 1e-9:
                         continue
                     route.segments.append(
                         Segment(
@@ -5352,14 +5352,9 @@ class DiffPairRouter:
                             net_name=head.net_name,
                         )
                     )
-                # Issue #4572: the sub-0.01 mm drop above is harmless at a PAD
-                # landing (the pad's own copper absorbs it) but leaves a real
-                # hole when the dropped span sat BETWEEN two kept ones -- and
-                # the follow path splices this route between a lead-in and an
-                # offset run, where such a hole strands the net outright.  The
-                # coupling-preference order makes more of these candidates
-                # reachable, so reject a broken one and let the next candidate
-                # compete instead of shipping a break.
+                # Preserve even tiny endpoint legs: virtual tail heads may
+                # be via centers, not pads whose copper covers a dropped span.
+                # Reject a broken candidate rather than shipping a gap.
                 if len(route.segments) > 1 and not self._route_is_chained(route):
                     continue
                 if route.segments:

@@ -409,3 +409,15 @@ def test_off_angle_tail_checks_doglegs_against_uncommitted_barrel():
         assert is_45_aligned(seg.x2 - seg.x1, seg.y2 - seg.y1)
         gap = LineString([seg.start, seg.end]).distance(Point(3, 3)) - (seg.width + 0.6) / 2
         assert gap >= finder.rules.via_clearance - 1e-9
+
+
+def test_tiny_tail_preserves_virtual_head_and_goal():
+    router, finder, head, goal, _, _ = _case()
+    li = finder.grid.layer_to_index(head.layer.value)
+    head = router._virtual_pad_at(head, 2.0, 2.0, li)
+    goal = router._virtual_pad_at(goal, 2.004, 2.007, li)
+    tail = router._synthesize_tail(finder, head, goal, li)
+    assert tail is not None
+    assert tail.segments[0].start == (head.x, head.y)
+    assert tail.segments[-1].end == (goal.x, goal.y)
+    assert all(a.end == b.start for a, b in zip(tail.segments[:-1], tail.segments[1:], strict=True))
