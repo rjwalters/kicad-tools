@@ -6330,6 +6330,9 @@ class DiffPairRouter:
         goal: Pad,
         layer_idx: int,
         partner_segments: list[Segment],
+        *,
+        body_segments: list[Segment] | None = None,
+        deadline: float | None = None,
     ) -> Route | None:
         """Two-via layer-change tail that may cross the partner guide.
 
@@ -6343,7 +6346,19 @@ class DiffPairRouter:
         partner segments is enforced: same-layer segment portions and
         via barrels keep ``via_diameter/2 + via_clearance +
         partner_width/2`` of centerline distance.
+
+        Supplying ``body_segments`` compares legal candidates by the minimum
+        coupling fraction of the assembled route and its partner. Ties retain
+        enumeration order. ``deadline`` is an absolute monotonic deadline;
+        expiry returns the best fully validated candidate seen so far. The
+        caller must still validate the assembled pair and its length limits.
         """
+        # Ranking is useful work, not observational census overhead: never
+        # credit it back to the caller's wall-clock budget.
+        best_route = None
+        best_score = -1.0
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
         grid = self.autorouter.grid
         rules = self.autorouter.rules
         goal_layer_idx = grid.layer_to_index(goal.layer.value)
@@ -6427,7 +6442,7 @@ class DiffPairRouter:
         # one in sorted order, i.e. exactly what the un-instrumented loop
         # returns -- and it costs a full 225-candidate sweep per crossover, so
         # it is opt-in and off in every normal run.
-        census_on = _CROSSTAIL_CENSUS
+        census_on = _CROSSTAIL_CENSUS and body_segments is None
         census_enum = {id(pair): i for i, pair in enumerate(candidate_pairs)}
         census_legal: list[tuple[int, int, float, _XY, _XY]] = []
         census_key: Callable[[tuple[_XY, _XY]], float] | None = None
@@ -6464,7 +6479,23 @@ class DiffPairRouter:
                 candidate_pairs.sort(key=_pair_penalty)
                 census_key = _pair_penalty
 
+        def coupling_score(candidate: Route) -> float:
+            assembled = [*(body_segments or []), *candidate.segments]
+            fractions = []
+            for segments, partner in ((assembled, partner_segments), (partner_segments, assembled)):
+                total = coupled = 0.0
+                for seg in segments:
+                    length = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
+                    total += length
+                    coupled += length * _spans_coupled_fraction(
+                        [(seg.x1, seg.y1, seg.x2, seg.y2)], seg.width, seg.layer, partner
+                    )
+                fractions.append(coupled / total if total else 0.0)
+            return min(fractions)
+
         for rank, (v1, v2) in enumerate(candidate_pairs):
+            if deadline is not None and time.monotonic() >= deadline:
+                return best_route
             # Issue #3855: replace the hardcoded 0.6mm center-to-center
             # via-to-via check with an edge-to-edge ``min_hole_to_hole``
             # check.  This single crossover's two vias must clear each
@@ -6506,6 +6537,8 @@ class DiffPairRouter:
                 # Check the actual emitted legs, including the inner-layer
                 # crossing, before accepting either bounded orientation.
                 for axis_first in (False, True):
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return best_route
                     candidate = Route(net=head.net, net_name=head.net_name)
                     for start, end, layer in (
                         ((head.x, head.y), v1, surface),
@@ -6562,6 +6595,13 @@ class DiffPairRouter:
                         continue
                     if not self._route_via_clear(candidate):
                         continue
+                    if body_segments is not None:
+                        if deadline is not None and time.monotonic() >= deadline:
+                            return best_route
+                        score = coupling_score(candidate)
+                        if score > best_score:
+                            best_score, best_route = score, candidate
+                        continue
                     route = candidate
                     break
                 if route is None:
@@ -6604,7 +6644,7 @@ class DiffPairRouter:
                 head, goal, census_legal, len(candidate_pairs), census_extra_s
             )
             return census_first  # observation only: the first legal candidate
-        return None
+        return best_route
 
     def _collect_crossing_tail_census(
         self,

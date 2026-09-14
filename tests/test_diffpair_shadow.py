@@ -4935,3 +4935,83 @@ def test_crossing_barrels_use_via_clearance_for_uncommitted_partner():
     for via in tail.vias:
         gap = dpr._min_distance_to_partner(via.x, via.y, via.x, via.y, [partner], None)
         assert gap - (via.diameter + partner.width) / 2 >= rules.via_clearance - 1e-9
+
+
+def test_crossing_ranking_improves_assembled_coupling():
+    import time
+
+    from kicad_tools.router.diffpair_routing import _spans_coupled_fraction
+
+    dpr = _crossing_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = Segment(x1=5, y1=5.6, x2=8, y2=5.6, width=0.2, layer=Layer.F_CU, net=2)
+    baseline = dpr._synthesize_crossing_tail(_CrossingPathfinder(), head, goal, 0, [partner])
+    ranked = dpr._synthesize_crossing_tail(
+        _CrossingPathfinder(),
+        head,
+        goal,
+        0,
+        [partner],
+        body_segments=[],
+        deadline=time.monotonic() + 5,
+    )
+    assert baseline is not None and ranked is not None
+
+    def score(route):
+        fractions = []
+        for segments, other in ((route.segments, [partner]), ([partner], route.segments)):
+            lengths = [math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segments]
+            fractions.append(
+                sum(
+                    length
+                    * _spans_coupled_fraction([(s.x1, s.y1, s.x2, s.y2)], s.width, s.layer, other)
+                    for s, length in zip(segments, lengths, strict=True)
+                )
+                / sum(lengths)
+            )
+        return min(fractions)
+
+    assert score(ranked) > score(baseline)
+    assert dpr._route_pad_violation(ranked)[0] <= 1e-9
+    assert dpr._route_via_clear(ranked)
+
+
+def test_crossing_ranking_deadline_returns_validated_best_without_census_credit(monkeypatch):
+    import kicad_tools.router.diffpair_routing as module
+
+    dpr = _crossing_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    now = [0.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(module, "_CROSSTAIL_CENSUS", True)
+    original = module._spans_coupled_fraction
+
+    def score(*args, **kwargs):
+        now[0] = 2.0
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_spans_coupled_fraction", score)
+    before = dpr._census_elapsed_s
+    tail = dpr._synthesize_crossing_tail(
+        _CrossingPathfinder(),
+        head,
+        goal,
+        0,
+        [],
+        body_segments=[],
+        deadline=1.0,
+    )
+    assert tail is not None and len(tail.vias) == 2
+    assert dpr._census_elapsed_s == before
+    assert (
+        dpr._synthesize_crossing_tail(
+            _CrossingPathfinder(),
+            head,
+            goal,
+            0,
+            [],
+            body_segments=[],
+            deadline=1.0,
+        )
+        is None
+    )
