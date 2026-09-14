@@ -292,6 +292,15 @@ def test_unsupported_fixed_geometry_is_refused(tmp_path, pad, message):
     assert path.read_bytes() == original
 
 
+@pytest.mark.parametrize("width", [-0.2, "nan", "inf", "-inf"])
+def test_nonzero_or_nonfinite_primitive_stroke_is_refused(tmp_path, width):
+    path = write_board(tmp_path, pad=custom_pad(primitives=(poly(UPPER_WALL, width=width),)))
+    original = path.read_bytes()
+    with pytest.raises(ValueError, match="stroke width"):
+        load_board(path)
+    assert path.read_bytes() == original
+
+
 def test_routable_custom_pad_and_missing_disposition_stay_strict(tmp_path):
     from kicad_tools.router.io import load_pcb_for_routing
 
@@ -320,7 +329,7 @@ PINNED_SHA256 = "9747958c13a5c625ddd15df7afb3a5a100b6877c134e63c861a2a4c351312d9
 
 @pytest.mark.slow
 @pytest.mark.skipif(not PINNED_BOARD.exists(), reason="pinned benchmark board not fetched")
-def test_pinned_board_custom_pad_is_fixed_copper(monkeypatch):
+def test_pinned_board_custom_pad_is_fixed_copper():
     """Acceptance for the pinned BeagleConnect input (issue #5357).
 
     Reproduce with::
@@ -328,12 +337,11 @@ def test_pinned_board_custom_pad_is_fixed_copper(monkeypatch):
         uv run python benchmarks/external/fetch_boards.py --board beagleconnect_freedom
         uv run python benchmarks/external/normalize.py --board beagleconnect_freedom
 
-    Two PRE-EXISTING limitations sit ahead of the pad stage on this board and
-    are neutralized here as diagnostics only -- neither is changed in the
-    shipped loader: circular Edge.Cuts geometry (#5367) and the empty
-    pad-number identity mismatch (#5368).
+    This is the actual loader acceptance gate: retain the full outline and
+    unmodified placement identities. Until #5367/#5372 support the pinned
+    outline, this test fails at that existing guard when the fixture is present.
+    That failure is an unresolved prerequisite, not custom-pad acceptance.
     """
-    import dataclasses
     import hashlib
     import math
 
@@ -349,16 +357,6 @@ def test_pinned_board_custom_pad_is_fixed_copper(monkeypatch):
     assert disposition.invalid_references == frozenset({"SH1"})
     assert disposition.invalid_nets == frozenset({"GND"})
 
-    monkeypatch.setattr(router_io, "_extract_edge_segments", lambda text: [])
-    disposition = dataclasses.replace(
-        disposition,
-        pad_net_identities=tuple(
-            sorted(
-                (ref, number or '""', authored, effective)
-                for ref, number, authored, effective in disposition.pad_net_identities
-            )
-        ),
-    )
     router, nets = router_io.load_pcb_for_routing(
         str(PINNED_BOARD), placement_disposition=disposition
     )

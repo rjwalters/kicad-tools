@@ -136,7 +136,7 @@ def _primitive_polygon(node, reference: str, pad_number: str):
     stroke = node.find_child("stroke")
     width_node = stroke.find_child("width") if stroke is not None else node.find_child("width")
     width = width_node.get_float(0) if width_node is not None else 0.0
-    if width is None or width > 0:
+    if width is None or not math.isfinite(width) or width != 0:
         raise _refuse(reference, pad_number, f"unsupported gr_poly stroke width {width}")
     fill = node.find_child("fill")
     token = ""
