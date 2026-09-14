@@ -521,7 +521,7 @@ def main() -> int:
         "output",
         nargs="?",
         default=None,
-        help="Output file path or directory (default: output/matchgroup_test.kicad_sch)",
+        help="Output file path or directory (default: regression-output/matchgroup_test.kicad_sch)",
     )
     args = parser.parse_args()
 
@@ -531,7 +531,7 @@ def main() -> int:
         if output_path.is_dir():
             output_path = output_path / default_filename
     else:
-        output_path = Path(__file__).parent / "output" / default_filename
+        output_path = Path(__file__).parent / "regression-output" / default_filename
 
     try:
         ok = create_matchgroup_schematic(output_path)
