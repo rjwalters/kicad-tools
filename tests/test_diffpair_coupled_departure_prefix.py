@@ -100,3 +100,54 @@ def test_completed_prefix_survives_failure_without_goal_progress():
     assert diagnostics["best_path"] != validated
     _, fresh = _route(finder, [], budget=2)
     assert fresh["validated_departure_path"] == []
+
+
+def _public_pads(finder):
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad
+
+    return tuple(
+        Pad(x=x, y=y, width=0.2, height=0.2, net=net, net_name=str(net), layer=layer)
+        for net, gx in ((1, 10), (2, 22))
+        for layer in (Layer.F_CU, Layer.B_CU)
+        for x, y in [finder.grid.grid_to_world(gx, 10)]
+    )
+
+
+def test_public_pathfinder_exposes_only_fully_validated_departure():
+    finder = _finder()
+    finder.rules.manufacturer = "jlcpcb"
+    pads = _public_pads(finder)
+    prefix = _prefix()
+    result = finder.route_coupled(
+        *pads, departure_prefix=prefix, max_iterations_budget=len(prefix) + 2, timeout_seconds=1
+    )
+    assert result is None
+    assert finder.last_iterations == len(prefix) + 2
+    assert [step[:6] for step in finder.last_validated_departure_path[1:]] == prefix
+    assert finder.last_validated_departure_path[0][:6] == (10, 10, 0, 22, 10, 0)
+    finder.route_coupled(*pads, departure_prefix=prefix, max_iterations_budget=4, timeout_seconds=1)
+    assert finder.last_validated_departure_path == []
+    assert finder.last_iteration_limited and finder.last_iterations == 4
+
+
+def test_public_departure_fails_closed_without_native_backend(monkeypatch):
+    finder = _finder()
+    finder.last_validated_departure_path = [(1, 2, 3, 4, 5, 6, False)]
+    monkeypatch.setattr(finder, "_cpp_coupled_available", lambda: False)
+    monkeypatch.setattr(
+        finder,
+        "_get_coupled_neighbors",
+        lambda *a, **kw: pytest.fail("unconstrained Python fallback"),
+    )
+    assert (
+        finder.route_coupled(
+            *_public_pads(finder),
+            departure_prefix=_prefix(),
+            max_iterations_budget=10,
+            timeout_seconds=1,
+        )
+        is None
+    )
+    assert finder.last_validated_departure_path == []
+    assert finder.last_rejections["departure_backend_unavailable"] == 1

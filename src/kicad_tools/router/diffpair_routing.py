@@ -2730,6 +2730,7 @@ class CoupledPathfinder:
         corridor: frozenset[tuple[int, int]] | None,
         timeout_seconds: float | None,
         max_iterations_budget: int | None,
+        departure_prefix: list[tuple[int, int, int, int, int, int]] | None = None,
     ) -> tuple[bool, tuple[Route, Route] | None] | None:
         """Attempt the coupled search via the C++ backend (Issue #4065).
 
@@ -2779,6 +2780,7 @@ class CoupledPathfinder:
                 if max_iterations_budget is not None and max_iterations_budget > 0
                 else 0
             ),
+            **({"departure_prefix": departure_prefix} if departure_prefix is not None else {}),
             timeout_seconds=(
                 float(timeout_seconds)
                 if timeout_seconds is not None and timeout_seconds > 0
@@ -2802,6 +2804,7 @@ class CoupledPathfinder:
         self.last_best_state = None
         self.last_best_node = None
         self.last_best_cpp_path = list(diagnostics.get("best_path", []))
+        self.last_validated_departure_path = list(diagnostics.get("validated_departure_path", []))
         self.last_coupled_backend = "cpp"
         self.last_timeout_exceeded = bool(diagnostics["timeout_exceeded"])
         self.last_iteration_limited = bool(diagnostics["iteration_limited"])
@@ -2867,6 +2870,7 @@ class CoupledPathfinder:
         timeout_seconds: float | None = None,
         max_iterations_budget: int | None = None,
         corridor: frozenset[tuple[int, int]] | None = None,
+        departure_prefix: list[tuple[int, int, int, int, int, int]] | None = None,
     ) -> tuple[Route, Route] | None:
         """Route a differential pair with coupled pathfinding.
 
@@ -2924,6 +2928,14 @@ class CoupledPathfinder:
                 landing cells.  ``None`` (default) preserves the
                 unconstrained legacy search.
 
+            departure_prefix: Required native joint steps, excluding the root,
+                as (p_x, p_y, p_layer, n_x, n_y, n_layer) grid tuples. Every
+                step uses the ordinary native clearance/history predicates.
+                A completed prefix is exposed in last_validated_departure_path
+                even when the full route fails. This request fails closed if
+                native validation is unavailable; it never falls back to an
+                unconstrained Python search. Existing search budgets apply.
+
         Returns:
             Tuple of (p_route, n_route) or None if routing failed (no
             path found, ``max_iterations`` exhausted,
@@ -2948,6 +2960,7 @@ class CoupledPathfinder:
         self.last_best_node: CoupledNode | None = None
         # Native diagnostic geometry is a partial path, never a completed route.
         self.last_best_cpp_path: list[tuple[int, int, int, int, int, int, bool]] = []
+        self.last_validated_departure_path: list[tuple[int, int, int, int, int, int, bool]] = []
         # Issue #4459: which backend served the most-recent search.  Defaults
         # to ``"python"`` here; ``_try_cpp_route_coupled`` overrides it to
         # ``"cpp"`` when the C++ joint-state search handles the pair.  The
@@ -3059,6 +3072,7 @@ class CoupledPathfinder:
             corridor=corridor,
             timeout_seconds=timeout_seconds,
             max_iterations_budget=max_iterations_budget,
+            **({"departure_prefix": departure_prefix} if departure_prefix is not None else {}),
         )
         if cpp_path is not None:
             handled, cpp_result = cpp_path
@@ -3069,6 +3083,13 @@ class CoupledPathfinder:
                 # exit); either way we do NOT run the Python A* -- the
                 # diagnostics on ``self`` were set by the wrapper.
                 return cpp_result
+
+        if departure_prefix is not None:
+            # A proposal must never silently degrade into an unconstrained
+            # Python search. Native validation is the proof consumed by the
+            # geometric constructor, and its iterations count normally.
+            self.last_rejections["departure_backend_unavailable"] += 1
+            return None
 
         start_state = CoupledState(p_start_pos, n_start_pos, (0, 0))
 
