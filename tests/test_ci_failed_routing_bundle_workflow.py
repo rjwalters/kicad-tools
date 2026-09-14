@@ -1,6 +1,6 @@
 """Structural tests for the failed-routing-bundle CI steps (Issue #5067).
 
-Four long-running CI jobs re-route/validate a board from scratch and
+Routing CI jobs re-route/validate a board from scratch and
 previously discarded the generated PCB/schematic/DRC output on failure,
 making failures hard to reproduce (#5044 / PR #5045: a Board07 failure
 needed a full ~30-minute reroute to diagnose because run 34524705221's
@@ -8,7 +8,7 @@ Actions artifacts API reported ``total_count: 0``).
 
 These tests pin the load-bearing structure of the fix:
 
-* Each of the four jobs gains a collection step + an
+* Each covered job has a collection step + an
   ``actions/upload-artifact`` step, both gated on ``if: failure()``.
 * The upload step has an explicit ``name`` (distinguishing board + job +
   commit + run), ``path`` (scoped to a staging dir, never repo-root or
@@ -31,6 +31,7 @@ CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 JOB_IDS = (
     "diffpair-routing-regression",
     "matchgroup-routing-regression",
+    "board-03-end-to-end",
     "board-06-end-to-end",
     "board-07-end-to-end",
 )
@@ -73,8 +74,8 @@ def _find_collection_step(steps: list[dict]) -> dict | None:
     )
 
 
-class TestFourJobsExist:
-    def test_all_four_target_jobs_are_present(self, workflow: dict) -> None:
+class TestBundleJobsExist:
+    def test_all_target_jobs_are_present(self, workflow: dict) -> None:
         missing = [j for j in JOB_IDS if j not in workflow["jobs"]]
         assert not missing, f"Expected jobs missing from ci.yml: {missing}"
 
@@ -106,7 +107,7 @@ class TestFailedBundleUploadStep:
         assert upload is not None, f"{job_id}: expected an actions/upload-artifact step"
 
     def test_upload_step_gated_on_failure_not_always(self, workflow: dict, job_id: str) -> None:
-        """These four jobs are hard gates (not warn-only), so the upload
+        """These jobs retain failed conclusions, so the upload
         step uses `if: failure()`, NOT `if: always()` -- uploading on
         every green run would be needless churn. (Contrast with
         nightly-ship-ready.yml, a warn-only job where `always()` is

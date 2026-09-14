@@ -1543,7 +1543,7 @@ jobs:
           rm -rf /tmp/board03-ci
           mkdir -p /tmp/board03-ci
           uv run python boards/03-usb-joystick/generate_design.py \
-            /tmp/board03-ci
+            /tmp/board03-ci 2>&1 | tee /tmp/board03-recipe.log
           test -f /tmp/board03-ci/lvs.json
           test -f /tmp/board03-ci/usb_joystick.kicad_sch
           test -f /tmp/board03-ci/usb_joystick_routed.kicad_pcb
@@ -1612,6 +1612,34 @@ jobs:
             --stem usb_joystick \
             --lvs-only \
             /tmp/board03-staging/03-usb-joystick
+
+      - name: Collect failed Board03 routing bundle (#5359)
+        if: failure()
+        run: |
+          set -euo pipefail
+          # The collector is stdlib-only: retain partial output even if uv
+          # dependency installation failed. Missing inputs are recorded.
+          python3 scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/board03-failed-bundle \
+            --source "board03-ci=/tmp/board03-ci" \
+            --source "recipe.log=/tmp/board03-recipe.log" \
+            --source "board03-copper.json=/tmp/board03-copper.json" \
+            --source "board.json=/tmp/board03-staging/03-usb-joystick/output/board.json" \
+            --job board-03-end-to-end \
+            --board boards/03-usb-joystick \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "uv run python boards/03-usb-joystick/generate_design.py /tmp/board03-ci" \
+            --python-version "$(.venv/bin/python --version 2>&1 || true)" \
+            --kicad-version "$(kicad-cli --version 2>&1 || true)"
+
+      - name: Upload failed Board03 routing bundle (#5359)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board03-end-to-end-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/board03-failed-bundle/
+          retention-days: 14
 
   board-06-end-to-end:
     # Issue #3779 (LVS re-enabled by #4012): end-to-end LVS gate for board
