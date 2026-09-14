@@ -451,9 +451,7 @@ class TestRotateAlignApplicator:
         pad = router.pads[("J1", "1")]
         assert (pad.x, pad.y) == pytest.approx((18.0, 50.0))
 
-    def test_rotate_align_syncs_absolute_pad_angles_and_keeps_net_mapping(
-        self, tmp_path: Path
-    ):
+    def test_rotate_align_syncs_absolute_pad_angles_and_keeps_net_mapping(self, tmp_path: Path):
         """#4966's defect class must not reappear via the new kind.
 
         A quarter turn advances every pad's ABSOLUTE ``(at x y ANGLE)`` third
@@ -486,9 +484,7 @@ class TestRotateAlignApplicator:
 
         out = tmp_path / "quarter_turn.kicad_pcb"
         pcb.save(str(out))
-        reloaded = next(
-            fp for fp in PCB.load(str(out)).footprints if fp.reference == "UB"
-        )
+        reloaded = next(fp for fp in PCB.load(str(out)).footprints if fp.reference == "UB")
         assert reloaded.rotation == 90.0
         assert [pad.rotation for pad in reloaded.pads] == [135.0, 135.0]
         assert reloaded.layer == before_layer

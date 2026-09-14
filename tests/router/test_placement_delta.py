@@ -346,8 +346,7 @@ def _pad_line(
     """
     pads = "".join(
         f'    (pad "{i + 1}" smd rect (at {ox:.2f} {oy:.2f}) (size 0.3 0.3) '
-        f'(layers "F.Cu") '
-        + (f'(net 1 "TGT"))\n' if i < net_pads else '(net 0 ""))\n')
+        f'(layers "F.Cu") ' + ('(net 1 "TGT"))\n' if i < net_pads else '(net 0 ""))\n')
         for i, (ox, oy) in enumerate(offsets)
     )
     lock = "    (locked yes)\n" if locked else ""
@@ -380,7 +379,7 @@ def _endpoint_board(
         + _pad_line("J1", sx, sy, source_offsets, net_pads=2, locked=source_locked)
         + _pad_line("U3", 80.0, 50.0, sink_offsets, net_pads=1)
         + _foreign_ring(80.0, 50.0, 1.5, count=10, gap=4)
-        + f'  (segment (start {sx:.2f} {sy:.2f}) (end {sx - 2:.2f} {sy:.2f}) '
+        + f"  (segment (start {sx:.2f} {sy:.2f}) (end {sx - 2:.2f} {sy:.2f}) "
         '(width 0.25) (layer "F.Cu") (net 1))\n'
         ")\n"
     )
@@ -432,9 +431,9 @@ class TestEndpointAlignment:
         assert "rotate_align" in kinds
         assert kinds.index("translate") < kinds.index("rotate_align")
         # Opting out restores the exact pre-#4968 output.
-        assert [d.kind for d in deltas_from_result(pcb, result, include_endpoint_alignment=False)] == [
-            "translate"
-        ]
+        assert [
+            d.kind for d in deltas_from_result(pcb, result, include_endpoint_alignment=False)
+        ] == ["translate"]
 
     def test_rotation_realigns_the_two_pad_axes(self, tmp_path: Path):
         """The proposed quarter turn actually makes the pad arrays parallel."""

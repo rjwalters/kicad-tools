@@ -1583,7 +1583,9 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         """
         if self.pcb is None:
             return None
-        zones = [z for z in getattr(self.pcb, "zones", []) or [] if getattr(z, "keepout", None) is None]
+        zones = [
+            z for z in getattr(self.pcb, "zones", []) or [] if getattr(z, "keepout", None) is None
+        ]
         if not zones:
             return None
 
