@@ -7,6 +7,8 @@ import pytest
 
 from kicad_tools.router.cpp_backend import is_cpp_available
 from kicad_tools.router.departure_planning import (
+    DIRECTION_AWAY_FROM_GOAL,
+    DIRECTION_TOWARD_GOAL,
     PREFIX_CONSTRAINT_REJECTION,
     DepartureBudget,
     departure_proposals,
@@ -170,7 +172,10 @@ def test_default_tallies_are_never_shared_between_budgets():
     second = DepartureBudget(1, 1)
     first.reasons["stalled_at_step_0_of_9"] += 1
     first.native_rejections["asym_blocked_p"] += 1
+    first.direction_seen[DIRECTION_TOWARD_GOAL] += 1
+    first.direction_validated[DIRECTION_AWAY_FROM_GOAL] += 1
     assert second.reasons == Counter() and second.native_rejections == Counter()
+    assert second.direction_seen == Counter() and second.direction_validated == Counter()
 
 
 def test_start_layer_mismatch_names_itself_instead_of_yielding_nothing():
@@ -251,6 +256,63 @@ def test_an_unblocked_escape_stalls_on_its_via_step_not_its_first():
     assert budget.native_rejections["via_blocked_p"] > 0
 
 
+def test_proposals_label_the_goal_preferred_direction_first():
+    """``departure_proposals`` sorts toward-goal first; the label must agree."""
+    finder = _finder()
+    proposals = list(departure_proposals(finder, _public_pads(finder)))
+    outward_by_direction = {p.direction: set() for p in proposals}
+    for p in proposals:
+        outward_by_direction[p.direction].add(p.outward)
+    assert set(outward_by_direction) == {DIRECTION_TOWARD_GOAL, DIRECTION_AWAY_FROM_GOAL}
+    # Each label names exactly one outward vector -- the frame never mixes
+    # directions under one label.
+    assert all(len(v) == 1 for v in outward_by_direction.values())
+    assert (
+        outward_by_direction[DIRECTION_TOWARD_GOAL]
+        != outward_by_direction[DIRECTION_AWAY_FROM_GOAL]
+    )
+
+
+@pytest.mark.skipif(not is_cpp_available(), reason="requires matching native backend")
+def test_one_blocked_direction_is_named_not_averaged_away():
+    """#5333: a sibling pair's signature -- one direction clean, one dead.
+
+    Foreign copper exactly at the toward-goal via sites (only) reproduces
+    what MIPI_CLK / MIPI_DAT0 / TMDS_D0-D2 actually measured on board 07:
+    every proposal in ONE direction validates, every proposal in the OTHER
+    does not.  The un-split ``proposals_validated`` count alone cannot tell
+    this apart from every proposal failing for unrelated reasons.
+    """
+    finder = _finder()
+    finder.rules.manufacturer = "jlcpcb"
+    _foreign_wall(finder, [(10, 2), (22, 2)])
+    budget = DepartureBudget(time.monotonic() + 60, 512)
+    departures = list(validated_departures(finder, _public_pads(finder), budget))
+    assert departures and all(d.proposal.direction == DIRECTION_AWAY_FROM_GOAL for d in departures)
+    assert budget.direction_seen == {DIRECTION_TOWARD_GOAL: 6, DIRECTION_AWAY_FROM_GOAL: 6}
+    assert budget.direction_validated == {DIRECTION_AWAY_FROM_GOAL: 6}
+
+
+@pytest.mark.skipif(not is_cpp_available(), reason="requires matching native backend")
+def test_both_blocked_directions_are_distinguishable_from_one():
+    """#5333: MIPI_DAT1's actual signature -- BOTH directions dead.
+
+    Re-measured on board 07 seed 42 (native build 31): fanning the escape
+    depth out to 8x the base distance with 4x the native allowance still
+    stalled every proposal, at every depth, on both escape directions --
+    ruling out "one via site is occupied" as the explanation.  This control
+    reproduces that signature in miniature and asserts the ledger states it
+    directly rather than requiring a manual replay to notice.
+    """
+    finder = _finder()
+    finder.rules.manufacturer = "jlcpcb"
+    _foreign_wall(finder, [(10, 2), (22, 2), (10, 18), (22, 18)])
+    budget = DepartureBudget(time.monotonic() + 60, 512)
+    assert list(validated_departures(finder, _public_pads(finder), budget)) == []
+    assert budget.direction_seen == {DIRECTION_TOWARD_GOAL: 6, DIRECTION_AWAY_FROM_GOAL: 6}
+    assert budget.direction_validated == Counter()
+
+
 @pytest.mark.skipif(not is_cpp_available(), reason="requires matching native backend")
 def test_a_starved_allowance_is_not_reported_as_a_blocked_escape():
     """An unfinished proof is not evidence the escape is illegal."""
@@ -288,5 +350,6 @@ def test_the_departure_summary_reports_most_frequent_first():
     assert budget.stage_summary() == (
         "proposals=12 validated=2 "
         "departure_reasons={'stalled_at_step_3_of_15': 6, 'stalled_at_step_0_of_9': 4} "
-        "departure_rejections={'via_blocked_p': 40, 'sym_blocked_p': 3}"
+        "departure_rejections={'via_blocked_p': 40, 'sym_blocked_p': 3} "
+        "departure_directions={}"
     )

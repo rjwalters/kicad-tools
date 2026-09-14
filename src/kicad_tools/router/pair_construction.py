@@ -63,6 +63,14 @@ class ConstructionBudget:
     enumerator itself declined (its reason token is in ``departure_reasons``);
     otherwise every offered shape carries a token naming the required step it
     never got past, plus the native guard histogram from that attempt.
+
+    ``departure_direction_seen`` / ``departure_direction_validated`` further
+    split those two counts by :data:`departure_planning.DIRECTION_TOWARD_GOAL`
+    / :data:`departure_planning.DIRECTION_AWAY_FROM_GOAL` (#5333, MIPI_DAT1
+    re-measurement): every sibling pair that resolves exactly half its
+    proposals resolves ALL of one direction and NONE of the other, while a
+    pair failing in both directions is stuck a different way that fanning
+    the escape depth does not reach.
     """
 
     deadline: float
@@ -80,6 +88,8 @@ class ConstructionBudget:
     completion_reasons: Counter[str] = field(default_factory=Counter)
     departure_reasons: Counter[str] = field(default_factory=Counter)
     departure_rejections: Counter[str] = field(default_factory=Counter)
+    departure_direction_seen: Counter[str] = field(default_factory=Counter)
+    departure_direction_validated: Counter[str] = field(default_factory=Counter)
 
     def stage_summary(self) -> str:
         """One-line tally of where this pair's construction allowance went."""
@@ -93,6 +103,10 @@ class ConstructionBudget:
         departure_rejections = dict(
             sorted(self.departure_rejections.items(), key=lambda kv: (-kv[1], kv[0]))
         )
+        departure_directions = {
+            direction: f"{self.departure_direction_validated[direction]}/{seen}"
+            for direction, seen in sorted(self.departure_direction_seen.items())
+        }
         return (
             f"proposals={self.departure_proposals_seen} "
             f"departures={self.departures_found} "
@@ -104,7 +118,8 @@ class ConstructionBudget:
             f"geom_reasons={reasons} "
             f"completion_reasons={completion_reasons} "
             f"departure_reasons={departure_reasons} "
-            f"departure_rejections={departure_rejections}"
+            f"departure_rejections={departure_rejections} "
+            f"departure_directions={departure_directions}"
         )
 
 
@@ -200,6 +215,8 @@ def _validated_departures(
         budget.departure_proposals_seen += portion.proposals_seen
         budget.departure_reasons.update(portion.reasons)
         budget.departure_rejections.update(portion.native_rejections)
+        budget.departure_direction_seen.update(portion.direction_seen)
+        budget.departure_direction_validated.update(portion.direction_validated)
 
 
 def _by_escape_direction(

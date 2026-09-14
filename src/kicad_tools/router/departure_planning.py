@@ -22,6 +22,22 @@ JointStep = tuple[int, int, int, int, int, int]
 PREFIX_CONSTRAINT_REJECTION = "departure_prefix"
 
 
+#: Issue #5333: MIPI_DAT1's departure gap turned out NOT to be a single via
+#: site the escape depth could dodge (a wider, budget-backed re-measurement
+#: -- up to 8x the escape distance and 4x the native allowance -- still
+#: stalled every proposal on its last step, at every depth, on every target
+#: layer, in BOTH escape directions).  What actually distinguishes it from
+#: its siblings (MIPI_CLK, MIPI_DAT0, TMDS_D0/D1/D2), which all resolve
+#: exactly 6 of their 10-12 proposals, is which HALF resolves: every sibling
+#: has one clean escape direction (the one ``departure_proposals`` sorts
+#: first, toward the pair's own goal) and one blocked one; MIPI_DAT1 has
+#: neither.  ``DIRECTION_TOWARD_GOAL`` / ``DIRECTION_AWAY_FROM_GOAL`` label
+#: that split so the ledger states it directly instead of requiring a
+#: one-off instrumented replay to notice it.
+DIRECTION_TOWARD_GOAL = "toward_goal"
+DIRECTION_AWAY_FROM_GOAL = "away_from_goal"
+
+
 @dataclass
 class DepartureBudget:
     """The caller's shared search allowance, charged across every proposal.
@@ -40,6 +56,14 @@ class DepartureBudget:
     (pad-adjacent copper) and "every shape was refused at its last step" (the
     paired via).  Those are three different defects with three different
     fixes and the total spend cannot tell them apart.
+
+    ``direction_seen`` / ``direction_validated`` further split ``proposals_seen``
+    / ``proposals_validated`` by :data:`DIRECTION_TOWARD_GOAL` /
+    :data:`DIRECTION_AWAY_FROM_GOAL` (see the constants' docstring): a pair
+    that clears every proposal in one direction and none in the other has a
+    directional obstruction the escape-depth axis cannot dodge; a pair that
+    clears zero in BOTH directions is starved a different way.  Written only;
+    no branch reads it, so it cannot change which departures are offered.
     """
 
     deadline: float
@@ -49,16 +73,23 @@ class DepartureBudget:
     proposals_validated: int = 0
     reasons: Counter[str] = field(default_factory=Counter)
     native_rejections: Counter[str] = field(default_factory=Counter)
+    direction_seen: Counter[str] = field(default_factory=Counter)
+    direction_validated: Counter[str] = field(default_factory=Counter)
 
     def stage_summary(self) -> str:
         """One-line tally of where this pair's departure allowance went."""
         reasons = dict(sorted(self.reasons.items(), key=lambda kv: (-kv[1], kv[0])))
         rejections = dict(sorted(self.native_rejections.items(), key=lambda kv: (-kv[1], kv[0])))
+        directions = {
+            direction: f"{self.direction_validated[direction]}/{seen}"
+            for direction, seen in sorted(self.direction_seen.items())
+        }
         return (
             f"proposals={self.proposals_seen} "
             f"validated={self.proposals_validated} "
             f"departure_reasons={reasons} "
-            f"departure_rejections={rejections}"
+            f"departure_rejections={rejections} "
+            f"departure_directions={directions}"
         )
 
 
@@ -69,6 +100,10 @@ class DepartureProposal:
     outward: tuple[int, int]
     layer: int
     bend_steps: int
+    #: :data:`DIRECTION_TOWARD_GOAL` if ``outward`` is the escape direction
+    #: ``departure_proposals`` sorted first (the one that travels toward the
+    #: pair's own goal); :data:`DIRECTION_AWAY_FROM_GOAL` otherwise.
+    direction: str = DIRECTION_TOWARD_GOAL
 
 
 @dataclass(frozen=True)
@@ -150,7 +185,8 @@ def departure_proposals(
         # offers none cannot be departed from by construction.
         reasons["no_target_layer"] += 1
     for layer in targets:
-        for outward in directions:
+        for direction_index, outward in enumerate(directions):
+            direction = DIRECTION_TOWARD_GOAL if direction_index == 0 else DIRECTION_AWAY_FROM_GOAL
             ox, oy = outward
             for bend_steps in bends:
                 prefix: list[tuple[int, int, int, int, int, int]] = []
@@ -210,7 +246,9 @@ def departure_proposals(
                 )
                 n_via = (n_esc[0] + across[0] * n_spread, n_esc[1] + across[1] * n_spread)
                 prefix.append((*p_via, layer, *n_via, layer))
-                yield DepartureProposal(tuple(prefix), across, outward, layer, bend_steps)
+                yield DepartureProposal(
+                    tuple(prefix), across, outward, layer, bend_steps, direction
+                )
 
 
 def validated_departures(
@@ -230,6 +268,7 @@ def validated_departures(
     """
     for proposal in departure_proposals(finder, pads, budget.reasons):
         budget.proposals_seen += 1
+        budget.direction_seen[proposal.direction] += 1
         steps = len(proposal.prefix)
         remaining_time = budget.deadline - time.monotonic()
         if remaining_time <= 0 or budget.iterations_remaining <= 0:
@@ -272,6 +311,7 @@ def validated_departures(
             budget.reasons["allowance_spent_during_attempt"] += 1
             return
         budget.proposals_validated += 1
+        budget.direction_validated[proposal.direction] += 1
         yield ValidatedDeparture(proposal, p_route, n_route, used)
 
 

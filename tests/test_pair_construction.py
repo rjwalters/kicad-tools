@@ -127,7 +127,43 @@ def test_the_ledger_tallies_which_stage_spent_the_allowance(monkeypatch):
     assert budget.stage_summary() == (
         "proposals=0 departures=2 landings=2 bodies=16 built=4 geom_rejected=2 completions=6 "
         "geom_reasons={'trace_clearance': 2} completion_reasons={} "
-        "departure_reasons={} departure_rejections={}"
+        "departure_reasons={} departure_rejections={} departure_directions={}"
+    )
+
+
+def test_direction_tallies_propagate_from_the_departure_stage(monkeypatch):
+    """#5333: MIPI_DAT1 re-measurement -- the split must reach the parent ledger.
+
+    Sibling pairs on board 07 (MIPI_CLK, MIPI_DAT0, TMDS_D0-D2) each clear
+    every proposal in ONE escape direction and none in the other; MIPI_DAT1
+    clears neither.  ``ConstructionBudget.stage_summary()`` has to state that
+    split directly (``departure_directions={...}``), not just the pooled
+    ``departures_found`` count that cannot tell the two failure modes apart.
+    """
+    from kicad_tools.router.departure_planning import (
+        DIRECTION_AWAY_FROM_GOAL,
+        DIRECTION_TOWARD_GOAL,
+    )
+
+    def fake_validated(finder, pads, portion):
+        portion.proposals_seen = 12
+        portion.direction_seen[DIRECTION_TOWARD_GOAL] = 6
+        portion.direction_seen[DIRECTION_AWAY_FROM_GOAL] = 6
+        portion.direction_validated[DIRECTION_AWAY_FROM_GOAL] = 6
+        portion.iterations_used = 40
+        yield from [_departure((1, 0), 3)] * 6
+
+    monkeypatch.setattr(pair_construction, "validated_departures", fake_validated)
+    budget = ConstructionBudget(deadline=1, iterations_remaining=64, bodies_remaining=16)
+    result = pair_construction._validated_departures(None, None, budget, limit=6)
+    assert len(result) == 6
+    assert budget.departure_direction_seen == {
+        DIRECTION_TOWARD_GOAL: 6,
+        DIRECTION_AWAY_FROM_GOAL: 6,
+    }
+    assert budget.departure_direction_validated == {DIRECTION_AWAY_FROM_GOAL: 6}
+    assert "departure_directions={'away_from_goal': '6/6', 'toward_goal': '0/6'}" in (
+        budget.stage_summary()
     )
 
 
@@ -159,7 +195,8 @@ def test_departure_reasons_are_reported_most_frequent_first():
     budget.departure_rejections.update({"sym_blocked_p": 60, "via_blocked_p": 9})
     assert budget.stage_summary().endswith(
         "departure_reasons={'stalled_at_step_3_of_15': 12, 'stalled_at_step_0_of_9': 6} "
-        "departure_rejections={'sym_blocked_p': 60, 'via_blocked_p': 9}"
+        "departure_rejections={'sym_blocked_p': 60, 'via_blocked_p': 9} "
+        "departure_directions={}"
     )
 
 
