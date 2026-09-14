@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from kicad_tools.explain.decisions import DecisionStore
     from kicad_tools.pcb.blocks.base import PCBBlock
     from kicad_tools.physics import Stackup, TransmissionLine
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
     from kicad_tools.progress import ProgressCallback
 
     from .io import FineZone
@@ -1462,6 +1463,9 @@ class Autorouter:
         # Pre-existing routes loaded as obstacles for DRC/merge but NOT
         # emitted by to_sexp() or subject to rip-up/reroute.
         self.existing_routes: list[Route] = []
+        self.placement_disposition: RoutingPlacementDisposition | None = None
+        self.placement_preserved_routes: tuple[Route, ...] = ()
+        self.placement_preserved_copper: str = ""
 
         # Physics integration
         self._stackup = stackup

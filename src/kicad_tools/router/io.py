@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
     from kicad_tools.progress import ProgressCallback
 
     from .primitives import Pad, Segment
@@ -3573,12 +3574,20 @@ def load_pcb_for_routing(
     lattice_link_budget_s: float | None = None,
     lattice_deadline: float | None = None,
     min_trace_width_floor: float | None = None,
+    placement_disposition: RoutingPlacementDisposition | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
 
     Args:
         pcb_path: Path to .kicad_pcb file
+        placement_disposition: Optional precomputed placement exclusion. Only
+            its invalid nets are removed from targets (selection remains the
+            caller's responsibility). Excluded pads and authored copper remain
+            neutral obstacles even without load_existing_routes. Exporters MUST
+            retain router.placement_preserved_copper exactly once when replacing
+            copper; placement_preserved_routes carries original net identities.
+            This is distinct from skip_nets and never forces power/pour intent.
         skip_nets: Net names to skip (e.g., ["GND", "+3.3V"] for plane nets)
         netlist: Optional dict mapping "REF.PIN" to net name (e.g., {"U1.1": "+3.3V"})
                  If provided, overrides any net assignments in the PCB file.
@@ -3722,6 +3731,14 @@ def load_pcb_for_routing(
     """
     pcb_text = Path(pcb_path).read_text()
     skip_nets = skip_nets or []
+    placement_invalid = (
+        placement_disposition.invalid_nets if placement_disposition is not None else frozenset()
+    )
+    preserve_placement = (
+        placement_disposition.preserve_copper_nets
+        if placement_disposition is not None
+        else frozenset()
+    )
 
     # Parse PCB design rules if needed
     pcb_rules: PCBDesignRules | None = None
@@ -3745,6 +3762,7 @@ def load_pcb_for_routing(
 
     # Parse footprints and their pads
     components: list[dict] = []
+    placement_pad_nets: list[tuple[str, str, str, str]] = []
 
     # Split by footprint for easier parsing
     footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
@@ -3811,6 +3829,7 @@ def load_pcb_for_routing(
             pad_h = float(size_match.group(2))
 
             net_num, net_name = _resolve_pad_net(pad_block, net_map)
+            authored_net_name = net_name
 
             # Extract drill size if present
             drill_match = re.search(r"\(drill\s+([\d.]+)", pad_block)
@@ -3844,9 +3863,12 @@ def load_pcb_for_routing(
                         net_num = max(net_map.values(), default=0) + 1
                         net_map[net_name] = net_num
 
+            if placement_disposition is not None:
+                placement_pad_nets.append((ref, pad_num, authored_net_name, net_name))
+
             # For skipped nets (power/ground planes), still add pad as obstacle
             # but use net=0 so it blocks routing without being a routeable net
-            if net_name in skip_nets:
+            if net_name in skip_nets or net_name in placement_invalid:
                 net_num = 0  # Treat as obstacle, not a routable net
 
             # Transform pad position by footprint rotation.
@@ -3950,6 +3972,15 @@ def load_pcb_for_routing(
             strict=strict_drc,
         )
 
+    if (
+        placement_disposition is not None
+        and tuple(sorted(placement_pad_nets)) != placement_disposition.pad_net_identities
+    ):
+        raise ValueError(
+            "Placement disposition pad/net identities do not match this board and netlist; "
+            "recompute analyze_routing_placement with the loader's effective netlist"
+        )
+
     # Auto-detect layer stack from PCB if not provided (Issue #949)
     # This ensures pad layers match the available routing layers
     if layer_stack is None:
@@ -4032,6 +4063,8 @@ def load_pcb_for_routing(
         strategy=strategy,
     )
 
+    router.placement_disposition = placement_disposition
+
     # Issue #4506: retain the source path so the voltage-map activation helper
     # can build attach regions from the canonical board model.  Do not parse it
     # here: absent --voltage-map the loading path remains byte-for-byte inert.
@@ -4109,18 +4142,69 @@ def load_pcb_for_routing(
                 print(f"  Edge clearance: {edge_clearance}mm, {blocked_cells} cells blocked")
 
     # Load existing routes as obstacles for multi-pass routing
-    if load_existing_routes:
-        from .optimizer.pcb import parse_segments, parse_vias
+    if load_existing_routes or preserve_placement:
+        from .optimizer.pcb import (
+            _extract_balanced_blocks,
+            parse_segments,
+            parse_vias,
+            resolve_block_net,
+        )
         from .primitives import Route
 
+        # Keep exact authored blocks for the exporter: reserializing Route
+        # alone loses UUIDs/locked flags and can renumber name-only copper.
+        id_to_name = {number: name for name, number in net_map.items()}
+        preserved_blocks: list[tuple[int, str]] = []
+        expected_geometry: dict[tuple[str, str], int] = {}
+        zone_blocks = _extract_balanced_blocks(pcb_text, "zone") if preserve_placement else []
+        for _start, _end, zone in zone_blocks:
+            identity = resolve_block_net(zone, id_to_name, net_map)
+            if (
+                identity is not None
+                and identity[1] in preserve_placement
+                and re.search(r"\((?:filled_polygon|fill_segments)\b", zone)
+            ):
+                raise ValueError(
+                    f"Cannot preserve placement-invalid net {identity[1]!r}: "
+                    "filled zone copper is not supported as a routing obstacle"
+                )
+        for kind in ("segment", "via", "arc") if preserve_placement else ():
+            for start, _end, block in _extract_balanced_blocks(pcb_text, kind):
+                identity = resolve_block_net(block, id_to_name, net_map)
+                if identity is None or identity[1] not in preserve_placement:
+                    continue
+                if kind == "arc":
+                    raise ValueError(
+                        f"Cannot preserve placement-invalid net {identity[1]!r}: "
+                        "arc copper is not supported as a routing obstacle"
+                    )
+                preserved_blocks.append((start, block))
+                key = (kind, identity[1])
+                expected_geometry[key] = expected_geometry.get(key, 0) + 1
+        router.placement_preserved_copper = "\n".join(
+            block for _, block in sorted(preserved_blocks)
+        )
         existing_segments = parse_segments(pcb_text)
         existing_vias = parse_vias(pcb_text)
+        for (kind, name), count in expected_geometry.items():
+            parsed_count = (
+                len(existing_segments.get(name, []))
+                if kind == "segment"
+                else len(existing_vias.get(name, []))
+            )
+            if parsed_count != count:
+                raise ValueError(
+                    f"Cannot preserve placement-invalid net {name!r}: "
+                    f"unsupported or malformed {kind} copper"
+                )
 
         # Collect all net names across segments and vias
         all_net_names = set(existing_segments.keys()) | set(existing_vias.keys())
 
         route_count = 0
-        for net_name in all_net_names:
+        for net_name in sorted(all_net_names) if preserve_placement else all_net_names:
+            if not load_existing_routes and net_name not in preserve_placement:
+                continue
             segs = existing_segments.get(net_name, [])
             vias = existing_vias.get(net_name, [])
             if not segs and not vias:
@@ -4138,6 +4222,28 @@ def load_pcb_for_routing(
             # Mark on grid as obstacles (blocked cells) but do NOT add to
             # router.routes — these are fixed geometry, not re-routable nets.
             # Store in router.existing_routes so DRC and via-merge can see them.
+            if net_name in preserve_placement:
+                # The optimizer parser assigns net 0 to name-only copper
+                # without a numeric header; align its geometry with the same
+                # dialect-normalized identities used for pads and net_map.
+                source_id = net_map[net_name]
+                route = replace(
+                    route,
+                    net=source_id,
+                    segments=[replace(seg, net=source_id) for seg in route.segments],
+                    vias=[replace(via, net=source_id) for via in route.vias],
+                )
+                router.placement_preserved_routes += (route,)
+                # Source copper may use a net that a netlist override split
+                # into valid and invalid effective nets. Neutral ownership is
+                # essential: no currently routable net may reuse that copper.
+                route = replace(
+                    route,
+                    net=0,
+                    net_name="",
+                    segments=[replace(seg, net=0, net_name="") for seg in route.segments],
+                    vias=[replace(via, net=0, net_name="") for via in route.vias],
+                )
             router.grid.mark_route(route)
             router.existing_routes.append(route)
             route_count += 1
