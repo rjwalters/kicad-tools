@@ -127,6 +127,7 @@
 set -euo pipefail
 
 LEASE_MARKER_PREFIX="<!-- loom:lease host="
+YIELD_MARKER_PREFIX="<!-- loom:lease-yield host="
 DEFAULT_TTL_MINUTES="${LOOM_LEASE_TTL_MINUTES:-15}"
 
 # --- Opaque host id (Issue #6322, ported from sweep-lease-fence.sh) --------
@@ -262,6 +263,31 @@ parse_lease_marker_line() {
     printf '%s\t%s' "$host" "$sweep_id"
 }
 
+# --- Parse `host=`/`sweep=` out of a lease-YIELD marker's literal first line
+# (Issue #5331, ported from sweep-lease-fence.sh's #6485 fix): "host=<H>
+# sweep=<S> earliest_host=<EH> earliest_sweep=<ES> -->". The earliest_host/
+# earliest_sweep fields identify who WON the tie-break, not who is yielding,
+# so they are parsed off and discarded here. Prints "host<TAB>sweep" on
+# success, nothing on a malformed marker.
+parse_lease_yield_marker_line() {
+    local first_line="$1" rest host sweep_id
+    rest="${first_line#"$YIELD_MARKER_PREFIX"}"
+    [[ "$rest" == "$first_line" ]] && return 1 # prefix did not match
+    case "$rest" in
+        *" sweep="*)
+            host="${rest%% sweep=*}"
+            sweep_id="${rest#* sweep=}"
+            sweep_id="${sweep_id%% earliest_host=*}"
+            sweep_id="${sweep_id% }"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    [[ -n "$host" && -n "$sweep_id" ]] || return 1
+    printf '%s\t%s' "$host" "$sweep_id"
+}
+
 gen_sweep_id() {
     printf 'sweep-insession-%s-%s' "$(date -u +%Y%m%dT%H%M%SZ)" "$$"
 }
@@ -319,12 +345,16 @@ cmd_publish() {
         [[ -n "$line" ]] && repo_args+=("$line")
     done < <(gh_repo_args)
 
-    # --- Read existing lease comments (NDJSON; see sweep-lease-fence.sh on
-    # why this is deliberately NOT an array literal under `--paginate`) -----
+    # --- Read existing lease AND lease-yield comments in ONE round trip
+    # (NDJSON; see sweep-lease-fence.sh on why this is deliberately NOT an
+    # array literal under `--paginate`). Fetching both marker shapes together
+    # mirrors sweep-lease-fence.sh's #6485 fix -- see the yield-exclusion
+    # scan below for why a publish-side peer check needs the yield records
+    # too (Issue #5331).
     local comments_ndjson read_ok=1
     if ! comments_ndjson="$(gh api "${repo_args[@]}" "repos/{owner}/{repo}/issues/${issue}/comments" \
         --paginate --jq \
-        ".[] | select(.body != null and (.body | startswith(\"${LEASE_MARKER_PREFIX}\"))) | {updated_at: .updated_at, body: .body}" \
+        ".[] | select(.body != null and ((.body | startswith(\"${LEASE_MARKER_PREFIX}\")) or (.body | startswith(\"${YIELD_MARKER_PREFIX}\")))) | {updated_at: .updated_at, body: .body}" \
         2>&1)"; then
         echo "WARN: could not read existing lease comments for issue #${issue} (${comments_ndjson}) -- publishing anyway (absence of evidence is not evidence of a peer)" >&2
         read_ok=0
@@ -332,15 +362,34 @@ cmd_publish() {
     fi
 
     if ((read_ok == 1)) && [[ -n "$(printf '%s' "$comments_ndjson" | tr -d '[:space:]')" ]]; then
-        # Scan EVERY fresh lease comment for a foreign host -- not just the
-        # single most-recently-updated one. Looking only at the overall
-        # freshest comment misses the case where THIS host also has its own
-        # more-recently-updated (but still merely fresh) lease from a
+        # Scan EVERY fresh, NON-YIELDED lease comment for a foreign host --
+        # not just the single most-recently-updated one. Looking only at the
+        # overall freshest comment misses the case where THIS host also has
+        # its own more-recently-updated (but still merely fresh) lease from a
         # restarted sweep-id: that comment sorts last, takes the same-host
         # "NOTE" branch, and an older-but-still-fresh PEER lease from a
         # genuinely different host is never inspected -- letting two hosts
         # hold simultaneously-fresh leases on the same issue, exactly the
         # double-claim state this script exists to prevent (#6333).
+        #
+        # Issue #5331: a lease comment whose own (host, sweep) has a LATER
+        # `<!-- loom:lease-yield host=... sweep=... earliest_host=... -->`
+        # record on this same issue (the daemon's dispatch-time
+        # claim-then-verify-order tie-break, #6287) has already stood down --
+        # its owner lost the race and is not a live peer. Without excluding
+        # it here, a still-"fresh" (within-TTL) but already-superseded lease
+        # keeps blocking every later publisher's own attempt (exit 4, SKIP)
+        # in deference to a claim the tie-break machinery has already
+        # resolved away, exactly the phantom-block mechanism that lets a
+        # multi-host race on one issue churn indefinitely instead of
+        # converging. This mirrors sweep-lease-fence.sh's own #6485
+        # yield-exclusion fix, applied here on the write side.
+        local yield_ndjson yield_first_lines=""
+        yield_ndjson="$(jq -c --arg p "$YIELD_MARKER_PREFIX" 'select(.body != null and (.body | startswith($p)))' <<< "$comments_ndjson" 2>/dev/null || true)"
+        if [[ -n "$(printf '%s' "$yield_ndjson" | tr -d '[:space:]')" ]]; then
+            yield_first_lines="$(jq -r '.body | split("\n")[0]' <<< "$yield_ndjson" 2>/dev/null || true)"
+        fi
+
         local now_epoch ttl_seconds
         now_epoch="${LOOM_LEASE_PUBLISH_NOW:-$(date -u +%s)}"
         ttl_seconds="$(awk -v m="$ttl_minutes" 'BEGIN { printf "%d", m * 60 }')"
@@ -359,6 +408,24 @@ cmd_publish() {
             [[ -z "$c_parsed" ]] && continue
             c_host="${c_parsed%%$'\t'*}"
             c_sweep="${c_parsed#*$'\t'}"
+
+            # Yield-exclusion (Issue #5331, mirrors #6485): a candidate lease
+            # whose own (host, sweep) has a matching loom:lease-yield record
+            # is never eligible to be counted as a live peer, own, or
+            # same-host-diff-sweep lease -- it has already stood down.
+            if [[ -n "$yield_first_lines" ]]; then
+                local c_yielded=0 y_first_line y_parsed
+                while IFS= read -r y_first_line; do
+                    [[ -z "$y_first_line" ]] && continue
+                    y_parsed="$(parse_lease_yield_marker_line "$y_first_line" || true)"
+                    [[ -z "$y_parsed" ]] && continue
+                    if [[ "${y_parsed%%$'\t'*}" == "$c_host" && "${y_parsed#*$'\t'}" == "$c_sweep" ]]; then
+                        c_yielded=1
+                        break
+                    fi
+                done <<< "$yield_first_lines"
+                ((c_yielded == 1)) && continue
+            fi
 
             local c_updated_epoch c_age_seconds c_is_fresh=0
             if c_updated_epoch="$(iso_to_epoch "$c_updated_at")"; then
