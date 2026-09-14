@@ -2832,7 +2832,7 @@ class CoupledPathfinder:
 
         Produces the exact same ``p_path`` / ``n_path`` world-coordinate
         lists that ``_reconstruct_coupled_routes`` builds from the Python
-        parent chain, then feeds them to the UNCHANGED
+        parent chain, then feeds them to the shared
         ``_build_route_from_path`` -- so C++ and Python routes are
         byte-identical for the same joint path (Issue #4065).  The Pad
         identity for width/net/name is recovered from the endpoint cells
@@ -3446,6 +3446,8 @@ class CoupledPathfinder:
         if len(path) < 2:
             return
 
+        segment_start = len(route.segments)
+
         # Issue #1543: Use net-class-aware trace width
         trace_width = self._get_trace_width_for_net(start_pad.net_name)
         current_x, current_y = start_pad.x, start_pad.y
@@ -3470,7 +3472,7 @@ class CoupledPathfinder:
                 current_layer_idx = layer_idx
             else:
                 # Add segment if we've moved
-                if abs(wx - current_x) > 0.01 or abs(wy - current_y) > 0.01:
+                if abs(wx - current_x) > 1e-9 or abs(wy - current_y) > 1e-9:
                     seg = Segment(
                         x1=current_x,
                         y1=current_y,
@@ -3486,7 +3488,7 @@ class CoupledPathfinder:
                     current_layer_idx = layer_idx
 
         # Final segment to end pad
-        if abs(end_pad.x - current_x) > 0.01 or abs(end_pad.y - current_y) > 0.01:
+        if abs(end_pad.x - current_x) > 1e-9 or abs(end_pad.y - current_y) > 1e-9:
             seg = Segment(
                 x1=current_x,
                 y1=current_y,
@@ -3498,6 +3500,41 @@ class CoupledPathfinder:
                 net_name=start_pad.net_name,
             )
             route.segments.append(seg)
+
+        # Native and Python search paths share this reconstruction. Align
+        # pad/grid attachments before length tuning and route validation,
+        # rather than letting serialization change their geometry later.
+        from .quantize import dogleg_points
+
+        protected = {(v.x, v.y) for v in route.vias}
+        protected.update(((start_pad.x, start_pad.y), (end_pad.x, end_pad.y)))
+        aligned: list[Segment] = []
+        for segment in route.segments[segment_start:]:
+            points = dogleg_points(segment.x1, segment.y1, segment.x2, segment.y2)
+            for start, end in zip(points[:-1], points[1:], strict=True):
+                leg = replace(segment, x1=start[0], y1=start[1], x2=end[0], y2=end[1])
+                # A rounded root can lie just beyond the first departure
+                # step. Remove only consecutive collinear backtracking in
+                # this newly constructed chain; via and pad vertices stay.
+                while aligned:
+                    previous = aligned[-1]
+                    if (
+                        previous.end != leg.start
+                        or previous.layer != leg.layer
+                        or previous.width != leg.width
+                        or previous.end in protected
+                    ):
+                        break
+                    ux, uy = previous.x2 - previous.x1, previous.y2 - previous.y1
+                    vx, vy = leg.x2 - leg.x1, leg.y2 - leg.y1
+                    scale = math.hypot(ux, uy) * math.hypot(vx, vy)
+                    if ux * vx + uy * vy >= 0 or abs(ux * vy - uy * vx) > 1e-12 * scale:
+                        break
+                    aligned.pop()
+                    leg = replace(leg, x1=previous.x1, y1=previous.y1)
+                if math.hypot(leg.x2 - leg.x1, leg.y2 - leg.y1) > 1e-9:
+                    aligned.append(leg)
+        route.segments[segment_start:] = aligned
 
 
 def create_serpentine(
