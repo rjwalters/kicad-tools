@@ -235,37 +235,72 @@ def test_export_reload_and_presave_validation(tmp_path, checkpoint):
     assert reloaded.placement_preserved_arcs == (arc,)
 
 
-@pytest.mark.parametrize("native", [False, True])
-def test_coupled_rails_respect_class_width_at_fixed_fill(tmp_path, native):
+def _coupled_fill_route(native, *, legacy_dimensions=False):
     from kicad_tools.router.diffpair_routing import CoupledPathfinder
-    from kicad_tools.router.rules import NetClassRouting
-    from tests.test_diffpair_coupled_cpp_parity import _make_grid, _make_simple_pair_pads
+    from kicad_tools.router.grid import RoutingGrid
+    from kicad_tools.router.layers import Layer, LayerDefinition, LayerStack, LayerType
+    from kicad_tools.router.primitives import Pad
+    from kicad_tools.router.rules import DesignRules, NetClassRouting
 
-    grid = _make_grid()
-    pads = _make_simple_pair_pads()
-    copper = Polygon([(4, 2), (8, 2), (8, 3.5), (4, 3.5)])
+    # Exact grid-aligned pitch avoids the large convergence search in the
+    # general coupled-parity fixture. One layer forces a physical detour.
+    rules = DesignRules(grid_resolution=0.2, trace_width=0.2, trace_clearance=0.2)
+    stack = LayerStack([LayerDefinition("F.Cu", 0, LayerType.SIGNAL, True)])
+    grid = RoutingGrid(5, 5, rules, layer_stack=stack)
+    pads = [
+        Pad(x=x, y=y, width=0.4, height=0.4, net=net, net_name=name, layer=Layer.F_CU)
+        for net, name, y in [(1, "D+", 2), (2, "D-", 3.2)]
+        for x in [1, 4]
+    ]
+    copper = Polygon([(2, 0), (3, 0), (3, 1.5), (2, 1.5)])
     grid.install_fixed_fills(FixedFillObstacles((FixedFill("BAD", 9, 0, 0.2, copper),)))
     klass = NetClassRouting(name="wide", trace_width=0.61, clearance=0.31)
+    classes = {"D+": klass, "D-": klass}
     pf = CoupledPathfinder(
         grid,
-        grid.rules,
-        target_spacing_cells=20,
-        min_spacing_cells=10,
-        net_class_map={"D+": klass, "D-": klass},
+        rules,
+        target_spacing_cells=6,
+        min_spacing_cells=5,
+        net_class_map={} if legacy_dimensions else classes,
     )
+    if legacy_dimensions:
+        # Counterfactual of the reviewed defect: global dimensions during
+        # search, but the real per-class width during route emission.
+        emit = pf._build_route_from_path
+
+        def emit_wide(*args):
+            saved = pf.net_class_map
+            pf.net_class_map = classes
+            try:
+                return emit(*args)
+            finally:
+                pf.net_class_map = saved
+
+        pf._build_route_from_path = emit_wide
     pf._use_cpp_coupled = native
-    result = pf.route_coupled(*pads, timeout_seconds=10)
-    assert result is not None
+    routes = pf.route_coupled(*pads, timeout_seconds=10, max_iterations_budget=2000)
+    assert routes is not None
     if native:
         assert pf._cpp_coupled_impl is not None
         assert pf._use_cpp_coupled
-    for route in result:
-        for seg in route.segments:
-            if seg.layer.value == 0:
-                assert (
-                    LineString(((seg.x1, seg.y1), (seg.x2, seg.y2))).distance(copper)
-                    >= 0.61 / 2 + 0.31 - 1e-4
-                )
+    assert all(route.segments and not route.vias for route in routes)
+    segments = [segment for route in routes for segment in route.segments]
+    assert all(segment.layer == Layer.F_CU and segment.width == 0.61 for segment in segments)
+    # Independent source-space oracle measures actual emitted copper.
+    return min(
+        LineString(((seg.x1, seg.y1), (seg.x2, seg.y2))).distance(copper) - seg.width / 2
+        for seg in segments
+    )
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_coupled_rails_respect_class_width_at_fixed_fill(native):
+    assert _coupled_fill_route(native) >= 0.31 - 1e-4
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_coupled_fill_fixture_detects_global_rule_search(native):
+    assert _coupled_fill_route(native, legacy_dimensions=True) < 0.31 - 1e-4
 
 
 @pytest.mark.parametrize("native", [False, True])
