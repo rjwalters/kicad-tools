@@ -396,3 +396,15 @@ existing permissive routing outcome policy while explicitly reporting unavailabl
 placement assurance (`clean_success: false`); it does not create a new routing
 failure. Timeout/preflight/exception classifications and backend timing eligibility
 remain unchanged. Purely additive fields retain schema version 1.
+
+For routing diagnostics with placement metadata, `nets_routed` retains its
+connected/completed-net meaning and agrees with `nets_completed` over the
+original requested population. Valid single-pad requests are trivially complete;
+retained existing copper can also complete a request without a newly created
+route. Such diagnostic entries have `status: "already_connected"` and zero new
+`length_mm`/vias, and `nets_completed_without_new_routes` counts them explicitly.
+`total_nets_on_board` is the distinct named board population, so single-pad
+requests already included in `nets_requested` are never added a second time.
+Requested placement-invalid single-pad/coupled nets remain blocked even though
+physical benchmark connectivity can report them trivially complete. Metadata-
+absent callers retain the historical multi-pad denominator and single-pad count.

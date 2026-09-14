@@ -285,7 +285,9 @@ class AdaptiveAutorouter:
                     router.placement_disposition,
                     frozenset(item["net_name"] for item in diagnostic["successful_routes"]),
                 )
-                converged = converged and placement_report.meets_completion()
+                # Placement-aware diagnostics validate the whole original
+                # population, including trivial and retained-copper completion.
+                converged = overflow == 0 and placement_report.meets_completion()
 
             # Build result
             self.result = RoutingResult(

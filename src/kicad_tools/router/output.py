@@ -649,8 +649,16 @@ def get_routing_diagnostics_json(
             if nets_to_route_ids is not None
             else net_pads_map
         )
-        connectivity = validate_net_connectivity(router.routes, target_pads)
+        connectivity_routes = list(router.routes)
+        if disposition is not None:
+            # Retained copper and trivial one-pad connectivity are evidence of
+            # completion, even when this invocation creates no new route.
+            connectivity_routes.extend(getattr(router, "existing_routes", []))
+        connectivity = validate_net_connectivity(connectivity_routes, target_pads)
         for nid, info in connectivity.items():
+            if disposition is not None and info["connected"]:
+                routed_net_ids.add(nid)
+                unrouted_ids.discard(nid)
             if info["total_pads"] >= 2 and not info["connected"]:
                 has_disconnected_islands = True
                 if nid in routed_net_ids:
@@ -672,7 +680,9 @@ def get_routing_diagnostics_json(
             {
                 "net_id": net_id,
                 "net_name": net_name,
-                "status": "routed",
+                "status": "already_connected"
+                if disposition is not None and net_id not in all_routed_net_ids
+                else "routed",
                 "length_mm": round(route_lengths_by_net.get(net_id, 0), 2),
                 "vias": route_vias_by_net.get(net_id, 0),
             }
@@ -869,6 +879,15 @@ def get_routing_diagnostics_json(
             nets_eligible=len(disposition.eligible_nets),
             nets_placement_blocked=len(blocked),
             nets_completed=len(placement.completed_nets),
+            nets_completed_without_new_routes=len(routed_net_ids - all_routed_net_ids),
+            total_nets_on_board=len(
+                disposition.all_nets
+                | disposition.requested_nets
+                | disposition.invalid_nets
+                | disposition.user_excluded_nets
+                | disposition.plane_excluded_nets
+                | disposition.unrequested_nets
+            ),
             nets_failed=unrouted_count + len(blocked),
             clean_success=disposition.check_available
             and placement.meets_completion(min_completion),
