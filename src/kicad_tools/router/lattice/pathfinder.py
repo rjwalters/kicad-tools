@@ -453,6 +453,7 @@ class LatticePathfinder:
         # so this is a no-op on the pre-#4355 paths.
         self._seed_fixed_copper(committed)
         committed.fixed_fills = self.fixed_fills
+        committed.fixed_fill_via_clearance = self.rules.via_clearance
         return committed
 
     def _seed_fixed_copper(self, committed: CommittedCopper) -> None:

@@ -655,8 +655,8 @@ class MeshPathfinder:
         if not self.fixed_fills.via_clear(
             site,
             tuple(range(self.layer_stack.num_layers)),
-            max(0.0, via_radius - self.rules.trace_clearance),
-            self.rules.trace_clearance,
+            self.rules.via_diameter / 2,
+            self.rules.via_clearance,
         ):
             return False
         # A through-via spans every copper layer, so its body must clear

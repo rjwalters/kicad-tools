@@ -405,6 +405,7 @@ class CommittedCopper:
         from ..fixed_copper import FixedFillObstacles
 
         self.fixed_fills = FixedFillObstacles()
+        self.fixed_fill_via_clearance = clearance
         self.copper: list[SegHash] = [SegHash() for _ in range(num_layers)]
         # ``(point, net, clearance)`` -- the stored clearance is the via's own
         # net-class clearance (issue #4597), defaulting to the board-global
@@ -610,7 +611,7 @@ class CommittedCopper:
             point,
             tuple(range(self.num_layers)),
             self.via_radius,
-            self.clearance,
+            self.fixed_fill_via_clearance,
         ):
             return False
         pw = self.pairwise

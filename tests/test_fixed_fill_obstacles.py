@@ -10,7 +10,13 @@ from kicad_tools.router.fixed_copper import FixedFill, FixedFillObstacles
 @pytest.fixture(autouse=True)
 def optional_native(request):
     params = getattr(getattr(request.node, "callspec", None), "params", {})
-    if (params.get("native") or params.get("strategy") == "mesh") and not is_cpp_available():
+    if (
+        params.get("native")
+        or (
+            params.get("strategy") == "mesh"
+            and request.node.originalname == "test_real_valid_route_avoids_fixed_fill"
+        )
+    ) and not is_cpp_available():
         pytest.skip("Native routing backend is optional")
 
 
@@ -375,3 +381,29 @@ def test_name_only_fill_keeps_source_identity_after_effective_split(tmp_path):
     assert router.grid.fixed_fills.fills[0].source_net == "BAD"
     assert not router.grid.fixed_fills.segment_clear((107.5, 107), (107.5, 107), 0, 0.1, 0.2)
     assert router.placement_preserved_zones == (raw,)
+
+
+@pytest.mark.parametrize("strategy", ["mesh", "lattice"])
+def test_engine_via_uses_physical_radius_and_via_gap(strategy):
+    from kicad_tools.router.lattice.pathfinder import LatticePathfinder
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.mesh.pathfinder import MeshPathfinder
+    from kicad_tools.router.rules import DesignRules
+
+    rules = DesignRules(trace_clearance=0.2, via_clearance=0.35, via_diameter=0.6)
+    outline = [(-2, -2), (3, -2), (3, 3), (-2, 3)]
+    cls = MeshPathfinder if strategy == "mesh" else LatticePathfinder
+    pf = cls(outline, [], rules, layer_stack=LayerStack.two_layer())
+    pf.fixed_fills = FixedFillObstacles(
+        (FixedFill("BAD", 1, 0, 0.3, Polygon([(1, 0), (2, 0), (2, 1), (1, 1)])),)
+    )
+
+    def clear(point):
+        if strategy == "mesh":
+            # Incoming envelope includes a .1 class gap; physical body remains .3.
+            return pf._via_allowed_at(point, 2, 0.4, (0, 1), {})
+        return pf._fresh_committed().via_clear(point, 2)
+
+    assert not clear((0.45, 0.5))  # .55 gap < .3 body + .35 via clearance
+    assert not clear((0.37, 0.5))  # .63 would clear the trace gap, but not via gap
+    assert clear((0.34, 0.5))
