@@ -555,6 +555,35 @@ def add_gnd_stitching_vias(routed_path: Path) -> int:
     return len(vias)
 
 
+def require_saved_copper_connected(routed_path: Path) -> None:
+    """Gate Board03 on native connectivity of the exact saved copper (#5358).
+
+    The shared DRC policy treats unconnected items as advisory. This board's
+    completed design requires zero; do not refill or save during this check.
+    """
+    import json
+
+    from kicad_tools.cli.runner import run_drc as run_native_drc
+
+    report = routed_path.parent / "saved_copper_drc.json"
+    report.unlink(missing_ok=True)
+    before = routed_path.read_bytes()
+    result = run_native_drc(routed_path, report, schematic_parity=False)
+    if not result.success or not report.is_file():
+        raise RuntimeError(f"Native saved-copper connectivity check failed: {result.stderr}")
+    data = json.loads(report.read_text())
+    unconnected = data.get("unconnected_items")
+    if not isinstance(unconnected, list):
+        raise RuntimeError("Native DRC report is missing its unconnected_items result")
+    if routed_path.read_bytes() != before:
+        raise RuntimeError("Native connectivity check unexpectedly changed the saved PCB")
+    if unconnected:
+        raise RuntimeError(
+            f"Saved Board03 copper has {len(unconnected)} native unconnected item(s); see {report}"
+        )
+    print("   Saved-copper native connectivity: PASS (0 unconnected items)")
+
+
 def route_pcb(input_path: Path, output_path: Path, *, use_saved_plan: bool = True) -> bool:
     """Apply the reviewed revision-B routing, or explicitly explore autorouting.
 
@@ -1041,6 +1070,8 @@ def main() -> int:
             run_copper=True,
             run_label=True,
         )
+
+        require_saved_copper_connected(routed_path)
 
         # Step 7: Export manufacturing bundle (gerbers, BOM, CPL,
         # report).  Required by AC of #3095 so ``kct fleet status``

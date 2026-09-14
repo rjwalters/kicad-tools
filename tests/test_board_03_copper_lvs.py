@@ -133,6 +133,29 @@ def _load_add_gnd_stitching_vias():
     return _load_board03_module().add_gnd_stitching_vias
 
 
+@pytest.mark.parametrize("unconnected", [[], [{"type": "unconnected_items"}], None])
+def test_saved_copper_gate_requires_explicit_zero(monkeypatch, tmp_path, unconnected):
+    import json
+    from types import SimpleNamespace
+
+    module = _load_board03_module()
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text("saved copper")
+
+    def native_check(path, report, *, schematic_parity):
+        assert path == pcb and schematic_parity is False
+        report.write_text(json.dumps({"unconnected_items": unconnected}))
+        return SimpleNamespace(success=True, stderr="")
+
+    monkeypatch.setattr("kicad_tools.cli.runner.run_drc", native_check)
+    if unconnected == []:
+        module.require_saved_copper_connected(pcb)
+    else:
+        with pytest.raises(RuntimeError, match="unconnected"):
+            module.require_saved_copper_connected(pcb)
+    assert pcb.read_text() == "saved copper"
+
+
 class TestBoard03UnconditionalUsbcStitch:
     """The USB-C F.Cu-only GND stitch is fill-independent + idempotent (#3841).
 
@@ -313,6 +336,7 @@ class TestBoard03PartialRouteFastFail:
         monkeypatch.setattr(module, "apply_manufacturing_profile", lambda *a, **k: None)
         monkeypatch.setattr(module, "fill_zones_in_routed_pcb", lambda *a, **k: None)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
+        monkeypatch.setattr(module, "require_saved_copper_connected", lambda *a, **k: None)
 
         lvs_called: list[bool] = []
 
@@ -421,3 +445,27 @@ class TestBoard03FreshRegenCopperLVSClean:
             f"({gnd_fb_vias}); the #3841 unconditional USB-C GND stitch pass "
             "should place one per J1 F.Cu-only shield pad."
         )
+
+        # The native saved-byte check must independently see a removed plane
+        # stitch. Keep the already-filled islands: this tests actual copper
+        # continuity, rather than merely checking the plan contains a via.
+        import shutil
+
+        from kicad_tools.sexp import parse_file, serialize_sexp
+
+        negative_dir = tmp_path / "missing-c10-stitch"
+        negative_dir.mkdir()
+        for artifact in out_dir.glob("*.kicad_*"):
+            shutil.copy2(artifact, negative_dir / artifact.name)
+        negative = negative_dir / pcb.name
+        doc = parse_file(negative)
+        removed = []
+        for via in doc.find_children("via"):
+            at = via.find_child("at")
+            if abs(at.get_float(0) - 131.275) < 0.001 and abs(at.get_float(1) - 89.5) < 0.001:
+                removed.append(via)
+        assert len(removed) == 1, "expected exactly one C10.2 plane stitch"
+        doc.children.remove(removed[0])
+        negative.write_text(serialize_sexp(doc))
+        with pytest.raises(RuntimeError, match="native unconnected"):
+            _load_board03_module().require_saved_copper_connected(negative)
