@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from .body_search import BodySearchBudget, complete_departures
 from .departure_planning import DepartureBudget, validated_departures
+from .pair_completion import WidenBudget
 from .terminal_planning import landing_proposals
 
 if TYPE_CHECKING:
@@ -90,6 +91,7 @@ class ConstructionBudget:
     departure_rejections: Counter[str] = field(default_factory=Counter)
     departure_direction_seen: Counter[str] = field(default_factory=Counter)
     departure_direction_validated: Counter[str] = field(default_factory=Counter)
+    widen_budget: WidenBudget = field(default_factory=WidenBudget)
 
     def stage_summary(self) -> str:
         """One-line tally of where this pair's construction allowance went."""
@@ -119,7 +121,8 @@ class ConstructionBudget:
             f"completion_reasons={completion_reasons} "
             f"departure_reasons={departure_reasons} "
             f"departure_rejections={departure_rejections} "
-            f"departure_directions={departure_directions}"
+            f"departure_directions={departure_directions} "
+            f"widen_spent={self.widen_budget.spent}"
         )
 
 
@@ -185,6 +188,7 @@ def construct_pair_routes(
                     num_copper_layers=num_copper_layers,
                     reserved_routes=reserved_routes,
                     max_bodies_per_departure=max_bodies_per_departure,
+                    widen_budget=budget.widen_budget,
                 )
             finally:
                 budget.bodies_remaining -= portion.bodies_used

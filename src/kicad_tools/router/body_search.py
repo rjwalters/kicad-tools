@@ -17,6 +17,7 @@ from .pair_completion import complete_pair_body
 if TYPE_CHECKING:
     from .departure_planning import ValidatedDeparture
     from .diffpair_routing import CoupledPathfinder, DiffPairRouter
+    from .pair_completion import WidenBudget
     from .primitives import Pad, Route
     from .terminal_planning import PairLanding
 
@@ -100,6 +101,7 @@ def complete_departure(
     board_thickness_mm: float,
     num_copper_layers: int,
     reserved_routes: tuple[Route, ...] = (),
+    widen_budget: WidenBudget | None = None,
 ) -> tuple[Route, Route] | None:
     """Try corner/turn/loop bodies under one caller-owned deadline and cap.
 
@@ -108,6 +110,12 @@ def complete_departure(
     Each body is checked against actual copper and future reservations before
     both terminal approach orderings are tried. Acceptance still requires
     complete geometry, physical skew and the authored coupling threshold.
+
+    ``widen_budget``, if supplied, is forwarded unchanged to every
+    :func:`pair_completion.complete_pair_body` call so a single
+    structurally-blocked landing's full-lattice retries (#5333) are counted
+    against the SAME pair-scoped cap as every other body/landing tried for
+    this pair, not reset per departure.
     """
     if time.monotonic() >= budget.deadline or budget.bodies_remaining <= 0:
         return None
@@ -184,6 +192,7 @@ def complete_departure(
                 prefer_shortest_approach=shortest,
                 reserved_routes=reserved_routes,
                 reasons=budget.completion_reasons,
+                widen_budget=widen_budget,
             )
             if result is not None:
                 return result
@@ -203,6 +212,7 @@ def complete_departures(
     num_copper_layers: int,
     reserved_routes: tuple[Route, ...] = (),
     max_bodies_per_departure: int = 32,
+    widen_budget: WidenBudget | None = None,
 ) -> tuple[Route, Route] | None:
     """Share a body/time allowance across already validated layers and escapes.
 
@@ -210,6 +220,7 @@ def complete_departures(
     consume every shape attempt before another layer is considered. Actual
     body charges are debited from the parent even if construction raises.
     Native departure validation has its own caller-owned iteration ledger.
+    ``widen_budget`` is forwarded unchanged to every departure (#5333).
     """
     if max_bodies_per_departure <= 0:
         return None
@@ -231,6 +242,7 @@ def complete_departures(
                 board_thickness_mm=board_thickness_mm,
                 num_copper_layers=num_copper_layers,
                 reserved_routes=reserved_routes,
+                widen_budget=widen_budget,
             )
         finally:
             budget.bodies_remaining -= portion.bodies_used

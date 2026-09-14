@@ -1,4 +1,5 @@
 import copy
+import math
 import time
 from collections import Counter
 from types import SimpleNamespace
@@ -205,6 +206,17 @@ def test_expiry_during_tuning_cannot_accept_candidate(monkeypatch):
 
 
 def test_future_landing_barrel_is_an_obstacle_without_marking_occupancy():
+    """A future landing reservation blocks its own site without being committed.
+
+    ``sites`` plans the P leg's ONLY candidate exactly where ``reserved``
+    places a future via, so the single-site search this plan offers cannot
+    land there. Issue #5333's widen-fallback (:func:`_tails_with_widen_fallback`
+    in ``pair_completion.py``) then retries the P leg unrestricted and finds
+    a different legal via nearby on this otherwise empty board -- so
+    completion now succeeds instead of failing outright. The regression this
+    test guards stays intact either way: the reservation is never silently
+    crossed, and it is never committed as real occupancy.
+    """
     auto, finder, pair, pads, body, sites = case()
     reserved = Route(
         net=3,
@@ -220,21 +232,27 @@ def test_future_landing_barrel_is_an_obstacle_without_marking_occupancy():
             )
         ],
     )
-    assert (
-        complete_pair_body(
-            auto._diffpair,
-            finder,
-            pair,
-            pads,
-            body,
-            deadline=time.monotonic() + 5,
-            board_thickness_mm=1.6,
-            num_copper_layers=2,
-            allowed_via_sites=sites,
-            reserved_routes=(reserved,),
-        )
-        is None
+    result = complete_pair_body(
+        auto._diffpair,
+        finder,
+        pair,
+        pads,
+        body,
+        deadline=time.monotonic() + 5,
+        board_thickness_mm=1.6,
+        num_copper_layers=2,
+        allowed_via_sites=sites,
+        reserved_routes=(reserved,),
     )
+    assert result is not None
+    rules = finder.rules
+    min_center_distance = (
+        reserved.vias[0].diameter / 2 + rules.via_diameter / 2 + rules.via_clearance
+    )
+    for route in result:
+        for via in route.vias:
+            distance = math.hypot(via.x - reserved.vias[0].x, via.y - reserved.vias[0].y)
+            assert distance >= min_center_distance - 1e-9
     assert not auto.routes and not auto.grid.routes
 
 

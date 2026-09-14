@@ -127,7 +127,7 @@ def test_the_ledger_tallies_which_stage_spent_the_allowance(monkeypatch):
     assert budget.stage_summary() == (
         "proposals=0 departures=2 landings=2 bodies=16 built=4 geom_rejected=2 completions=6 "
         "geom_reasons={'trace_clearance': 2} completion_reasons={} "
-        "departure_reasons={} departure_rejections={} departure_directions={}"
+        "departure_reasons={} departure_rejections={} departure_directions={} widen_spent=0"
     )
 
 
@@ -196,7 +196,7 @@ def test_departure_reasons_are_reported_most_frequent_first():
     assert budget.stage_summary().endswith(
         "departure_reasons={'stalled_at_step_3_of_15': 12, 'stalled_at_step_0_of_9': 6} "
         "departure_rejections={'sym_blocked_p': 60, 'via_blocked_p': 9} "
-        "departure_directions={}"
+        "departure_directions={} widen_spent=0"
     )
 
 
