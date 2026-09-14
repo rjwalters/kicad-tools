@@ -1206,11 +1206,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and all 8114 copper segments are unchanged. `kct check --mfr
   jlcpcb-tier1 --errors-only` goes 28 blocking errors → 0 and native
   `kicad-cli pcb drc --refill-zones` goes 1 violation → 0. Carried along:
-  the released `cpl_jlcpcb.csv` recorded `D1`/`D2` with a stale `180.0`
-  rotation and library-less footprint names, which the current exporter
-  regenerates as the board's actual `0.0` / `Diode_SMD:D_SMA`; and the
-  board's readiness evidence — stale since `redesign/build.py` changed
-  without a refresh — validates as `ready` again. This is a DRC/DFM repair,
+  `match_rotation_correction` only matched bare package names, so a
+  library-qualified footprint id (`Diode_SMD:D_SMA`) silently lost its
+  manufacturer rotation correction — regenerating the CPL dropped `D1`/`D2`
+  from `180.0` to `0.0`. The matcher now falls back to the package name
+  after the library separator (full-id patterns still win, so
+  library-specific overrides keep precedence), and
+  `tests/test_board_05_cpl_rotations.py` pins the released CPL's
+  corrections. Also carried along: the board's readiness evidence — stale
+  since `redesign/build.py` changed without a refresh, which made `kct board
+  readiness` report `unverified` — validates as `ready` again. This is a
+  DRC/DFM repair,
   not new physical qualification: motor and thermal bench validation remain
   untested.
 - **`PCB.remove_segments()` silently left copper behind on boards with a
