@@ -25,6 +25,25 @@ class FixedFill:
 
 
 @dataclass(frozen=True)
+class FixedPadCopper:
+    """Actual board-frame copper of one placement-excluded custom pad.
+
+    ``geometry`` is the union of the authored anchor and supported primitives
+    after the pad's own transform; ``layers`` holds the pad's copper layer
+    names (``*.Cu`` kept verbatim for later stack expansion). The source pad
+    block itself is never rewritten -- this record only feeds obstacles.
+    """
+
+    reference: str
+    pad_number: str
+    source_net: str
+    source_net_id: int
+    layers: tuple[str, ...]
+    local_clearance: float
+    geometry: Any
+
+
+@dataclass(frozen=True)
 class FixedFillObstacles:
     fills: tuple[FixedFill, ...] = ()
 
@@ -89,11 +108,178 @@ class FixedFillObstacles:
                 )
 
 
+# Outward rounding for polygonal circle approximations: a tessellated disc
+# is inscribed, so scale it by the sagitta bound to keep copper conservative.
+_ROUND_OUT = 1.0 / math.cos(math.pi / 256)
+# Forms whose actual copper this module reproduces exactly. Anything else is
+# refused rather than approximated -- a nominal or enclosing box would either
+# drop copper or seal a legal corridor.
+_FILLED_TOKENS = {"yes", "true", "solid"}
+_ANCHOR_SHAPES = {"rect", "circle"}
+
+
+def _refuse(reference: str, pad_number: str, detail: str) -> ValueError:
+    return ValueError(
+        f"Cannot preserve placement-excluded custom pad {reference}.{pad_number}: "
+        f"{detail}; only filled zero-width gr_poly primitives with a rect or circle "
+        "anchor are represented as fixed copper. Route this board with a router "
+        "supporting its full copper geometry."
+    )
+
+
+def _primitive_polygon(node, reference: str, pad_number: str):
+    """Actual copper of one supported primitive, in the pad's local frame."""
+    from shapely.geometry import Polygon
+
+    if node.name != "gr_poly":
+        raise _refuse(reference, pad_number, f"unsupported primitive {node.name!r}")
+    stroke = node.find_child("stroke")
+    width_node = stroke.find_child("width") if stroke is not None else node.find_child("width")
+    width = width_node.get_float(0) if width_node is not None else 0.0
+    if width is None or width > 0:
+        raise _refuse(reference, pad_number, f"unsupported gr_poly stroke width {width}")
+    fill = node.find_child("fill")
+    token = ""
+    if fill is not None:
+        nested = fill.find_child("type")
+        token = str((nested or fill).get_string(0) or "").lower()
+    if token not in _FILLED_TOKENS:
+        raise _refuse(reference, pad_number, f"unfilled or unrecognized gr_poly fill {token!r}")
+    pts = node.find_child("pts")
+    points = [(xy.get_float(0), xy.get_float(1)) for xy in (pts.find_children("xy") if pts else [])]
+    if len(points) < 3 or any(x is None or y is None for x, y in points):
+        raise _refuse(reference, pad_number, "gr_poly needs at least three complete points")
+    polygon = Polygon(points)
+    if not polygon.is_valid:
+        # KiCad simplifies self-intersecting primitive outlines before use.
+        polygon = polygon.buffer(0)
+    if polygon.is_empty or polygon.geom_type not in ("Polygon", "MultiPolygon"):
+        raise _refuse(reference, pad_number, "gr_poly encloses no copper")
+    return polygon
+
+
+def custom_pad_copper(
+    pad_block: str,
+    *,
+    reference: str,
+    pad_number: str,
+    x: float,
+    y: float,
+    rotation: float,
+    source_net: str,
+    source_net_id: int,
+) -> FixedPadCopper:
+    """Transformed copper of a custom pad, read from its canonical source block.
+
+    ``x``/``y`` are the pad's board position and ``rotation`` its ABSOLUTE
+    board-frame angle (KiCad folds the footprint orientation into the pad's
+    own ``(at ...)`` -- issue #3902), so the anchor and primitives are rotated
+    by the negated angle exactly once, matching KiCad's forward transform and
+    ``validate.rules.clearance._pad_polygon``. Nominal ``(size ...)`` is only
+    the anchor: primitives routinely reach past it, which is why this reads
+    the source S-expression instead of the schema's nominal dimensions.
+    """
+    from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
+    from shapely.geometry import Point, box
+    from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+    from kicad_tools.sexp import parse_string
+
+    node = parse_string(pad_block)
+    atoms = [str(atom) for atom in node.get_atoms()]
+    if node.name != "pad" or len(atoms) < 3 or atoms[2] != "custom":
+        raise _refuse(reference, pad_number, f"shape {(atoms[2:3] or [''])[0]!r} is not custom")
+    if node.find_child("padstack") is not None:
+        raise _refuse(reference, pad_number, "layer-specific padstack copper")
+    size = node.find_child("size")
+    width = size.get_float(0) if size is not None else None
+    height = size.get_float(1) if size is not None else None
+    if not width or not height or width <= 0 or height <= 0:
+        raise _refuse(reference, pad_number, f"missing or non-positive size ({width}, {height})")
+    layers_node = node.find_child("layers")
+    names = tuple(str(name) for name in (layers_node.get_atoms() if layers_node else ()))
+    copper_layers = tuple(name for name in names if name.endswith(".Cu"))
+    if not copper_layers:
+        raise _refuse(reference, pad_number, f"no copper layer in {list(names)}")
+    options = node.find_child("options")
+    anchor_node = options.find_child("anchor") if options is not None else None
+    anchor = str(anchor_node.get_string(0) or "" if anchor_node is not None else "circle").lower()
+    if anchor not in _ANCHOR_SHAPES:
+        raise _refuse(reference, pad_number, f"unsupported anchor {anchor!r}")
+    if anchor == "rect":
+        shapes = [box(-width / 2, -height / 2, width / 2, height / 2)]
+    else:
+        if abs(width - height) > 1e-9:
+            raise _refuse(reference, pad_number, f"circle anchor with unequal size {anchor!r}")
+        shapes = [Point(0, 0).buffer(width / 2 * _ROUND_OUT, quad_segs=64)]
+    primitives = node.find_child("primitives")
+    for child in primitives.children if primitives is not None else []:
+        if child.is_atom:
+            continue
+        shapes.append(_primitive_polygon(child, reference, pad_number))
+    local = unary_union(shapes)
+    if local.is_empty or local.geom_type not in ("Polygon", "MultiPolygon"):
+        raise _refuse(reference, pad_number, "primitives enclose no copper")
+    clearance_node = node.find_child("clearance")
+    local_clearance = clearance_node.get_float(0) if clearance_node is not None else None
+    return FixedPadCopper(
+        reference=reference,
+        pad_number=pad_number,
+        source_net=source_net,
+        source_net_id=source_net_id,
+        layers=copper_layers,
+        local_clearance=local_clearance or 0.0,
+        geometry=translate(rotate(local, -rotation, origin=(0, 0)), x, y),
+    )
+
+
+def pad_fixed_fills(pads, grid, net_class_map) -> tuple[FixedFill, ...]:
+    """One physical obstacle per copper layer the excluded pad actually covers.
+
+    Copper-layer expansion never includes paste/mask layers, and a named layer
+    outside the routing stack refuses rather than silently dropping copper.
+    """
+    from .layers import Layer
+
+    fills = []
+    for pad in pads:
+        net_class = net_class_map.get(pad.source_net)
+        clearance = max(
+            grid.rules.trace_clearance,
+            pad.local_clearance,
+            net_class.clearance if net_class is not None else 0.0,
+        )
+        indices: set[int] = set()
+        for name in pad.layers:
+            if name == "*.Cu":
+                indices.update(range(grid.num_layers))
+                continue
+            try:
+                indices.add(grid.layer_to_index(Layer.from_kicad_name(name).value))
+            except Exception as exc:
+                raise _refuse(
+                    pad.reference, pad.pad_number, f"copper layer {name!r} is not in the stack"
+                ) from exc
+        for index in sorted(indices):
+            fills.append(
+                FixedFill(
+                    source_net=pad.source_net,
+                    source_net_id=pad.source_net_id,
+                    layer=index,
+                    clearance=clearance,
+                    geometry=pad.geometry,
+                    source_kind="pad",
+                    source_object_id=f"{pad.reference}.{pad.pad_number}",
+                )
+            )
+    return tuple(fills)
+
+
 def load_fixed_fills(pcb_path, names, grid, net_class_map) -> FixedFillObstacles:
     """Reuse the DRC's actual-fill topology and convert to sheet coordinates."""
     if not names:
         return FixedFillObstacles()
-    from shapely.affinity import translate  # type: ignore[import-untyped]
+    from shapely.affinity import translate
 
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.rules.clearance import _collect_zone_fills
@@ -143,7 +329,7 @@ def load_fixed_fills(pcb_path, names, grid, net_class_map) -> FixedFillObstacles
     # The upstream parser prefers polygon fills when both legacy encodings
     # exist; segment-only fills are round strokes of min_thickness.
     from shapely.geometry import LineString
-    from shapely.ops import unary_union  # type: ignore[import-untyped]
+    from shapely.ops import unary_union
 
     for index, zone in enumerate(zones):
         name = zone.net_name or (

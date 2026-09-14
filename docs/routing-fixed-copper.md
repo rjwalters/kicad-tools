@@ -41,6 +41,48 @@ The export handoffs have distinct ownership:
 Consumers that refill zones must freeze the preserved source blocks or restore
 and verify their exact contents after refill. This prerequisite provides the
 handoff; default CLI activation and refill orchestration remain #5348 work.
-Unsupported custom-pad/padstack geometry continues to raise the existing loader
-error. In particular, the pinned BeagleConnect input still contains unsupported
-custom pad U6.9; placement exclusion does not waive that physical-geometry check.
+
+## Placement-excluded custom pads
+
+A custom pad whose **effective** net is placement-invalid contributes its actual
+copper as a fixed obstacle instead of refusing (issue #5357). Such a pad becomes
+no `Pad`, no routing target and carries no pour intent: it is only physical
+copper, entered in the same `fixed_fills` collection with `source_kind="pad"`
+and `source_object_id="<REF>.<PAD>"`. The authored net name/number are retained
+even when a netlist override splits the source net, and effective-net remapping
+never grants reuse. Clearance is the larger of the trace clearance, the pad's
+own `(clearance ...)` and the source net class. The source `(pad ...)` block is
+read but never rewritten.
+
+Copper is the union of the authored anchor and the pad's supported primitives,
+rotated once by the pad's absolute board-frame angle (KiCad folds the footprint
+orientation into `(at x y ANGLE)`) and translated to the pad's board position --
+the same forward transform as `validate.rules.clearance._pad_polygon`, so
+back-side and non-cardinal footprints resolve correctly. Concavity and every
+lobe survive; no nominal `(size ...)` box or enclosing box is ever substituted.
+Layer coverage uses the pad's copper layers only (`*.Cu` expands to the whole
+stack; paste/mask layers are not obstacles).
+
+The supported surface is deliberately narrow, and everything outside it refuses
+rather than approximating:
+
+- anchors: `rect`, or `circle` with equal size;
+- primitives: filled `gr_poly` with zero stroke width;
+- refused: any other primitive (`gr_circle`, `gr_line`, `gr_arc`, `gr_curve`,
+  `gr_rect`), unfilled or unrecognized fills, non-zero stroke widths,
+  layer-specific padstacks, non-positive sizes, pads with no copper layer, and a
+  copper layer absent from the routing stack.
+
+Routable (non-excluded) custom pads and every other caller of
+`_pad_shape_from_block` / `_schema_pad_shape` -- standalone pad parsing,
+`optim/place_route.py`, `mcp/tools/routing.py`, `cli/placement_cmd.py` -- keep
+rejecting custom geometry exactly as before. Support for fixed excluded copper
+is not custom-pad target routing.
+
+On the pinned BeagleConnect Freedom input, custom pad U6.9 (B.Cu, GND, rect
+anchor, 270-degree pad rotation, one filled zero-width `gr_poly`) is now
+preserved as its real transformed copper, 0.115 mm^2 of which lies outside the
+nominal `(size 0.2 1)` box. Two unrelated pre-existing limitations still sit
+ahead of the pad stage on that board: circular Edge.Cuts geometry (#5367) and
+the empty pad-number identity mismatch (#5368). Loading that board is therefore
+still blocked for reasons other than custom-pad geometry.
