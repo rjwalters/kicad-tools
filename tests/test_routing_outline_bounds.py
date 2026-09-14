@@ -189,11 +189,15 @@ def test_cubic_bounds_use_curve_extrema_not_control_polygon():
         '(gr_curve (pts (xy 0 0) (xy 0 10) (xy 10 10) (xy 10 0)) (layer "Edge.Cuts"))',
     ],
 )
-def test_routing_rejects_unsupported_curved_edge_obstacles(tmp_path, outline):
+def test_routing_preserves_supported_curved_edge_obstacles(tmp_path, outline):
     path = tmp_path / "curved.kicad_pcb"
     path.write_text(_board(outline))
-    with pytest.raises(ValueError, match="Unsupported routing Edge.Cuts"):
-        load_pcb_for_routing(path, validate_drc=False)
+    before = path.read_bytes()
+    router, _ = load_pcb_for_routing(path, edge_clearance=0.2, validate_drc=False)
+    assert len(router._edge_segments) > 2
+    assert 0 < router._edge_segments.max_error_mm <= 1e-4
+    assert router._edge_clearance == 0.2
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("sweep, expected", [(270, (-10, -10, 10, 10)), (-90, (0, -10, 10, 0))])
