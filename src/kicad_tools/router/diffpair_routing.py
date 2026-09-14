@@ -5101,7 +5101,7 @@ class DiffPairRouter:
         The per-net ``route()`` machinery declines sub-millimetre hops
         whose endpoints sit inside pad clearance halos (measured: every
         board 06 rescue tail it was offered), so we draw the tail
-        directly -- a straight segment, or an axis-aligned dogleg --
+        directly with horizontal, vertical, and 45-degree legs,
         and validate every covered grid cell with
         :meth:`_segment_cells_clear`.
 
@@ -5130,7 +5130,10 @@ class DiffPairRouter:
         fraction ``diffpair_routing_continuity`` would score.  The sort is
         STABLE and the legality gates below are untouched, so a tail region
         with no partner copper to follow (every score 0) keeps the historical
-        shape order byte-for-byte.
+        shape order for already-aligned candidates. Off-angle candidates
+        expand into two bounded dogleg orientations before scoring and
+        clearance validation, so later angle repair does not move an
+        accepted chord into foreign copper.
         """
         grid = self.autorouter.grid
         goal_layer_idx = grid.layer_to_index(goal.layer.value)
@@ -5209,6 +5212,28 @@ class DiffPairRouter:
                     head, goal, near_partner, width, partner_clearance
                 )
             )
+        # Validate the geometry that serialization will retain, rather than
+        # a chord that a later 45-degree repair may move into foreign copper.
+        # The two global dogleg orientations keep this expansion bounded.
+        from .quantize import dogleg_points
+
+        aligned_candidates = []
+        seen_candidates = set()
+        for candidate in candidates:
+            for axis_first in (False, True):
+                aligned = []
+                for x1, y1, x2, y2 in candidate:
+                    points = dogleg_points(x1, y1, x2, y2, axis_first=axis_first)
+                    aligned.extend(
+                        (a[0], a[1], b[0], b[1])
+                        for a, b in zip(points[:-1], points[1:], strict=True)
+                    )
+                key = tuple(aligned)
+                if key not in seen_candidates:
+                    seen_candidates.add(key)
+                    aligned_candidates.append(aligned)
+        candidates = aligned_candidates
+        if near_partner:
             scores = [_spans_coupled_fraction(c, width, layer, near_partner) for c in candidates]
             candidates = [
                 candidates[i] for i in sorted(range(len(candidates)), key=lambda i: (-scores[i], i))

@@ -386,3 +386,26 @@ def test_return_approach_policy_keeps_surface_coupling_policy(monkeypatch, prefe
     assert tail.segments
     assert (finder.grid.layer_to_index(head.layer.value), prefer_shortest) in seen
     assert (finder.grid.layer_to_index(goal.layer.value), False) in seen
+
+
+def test_off_angle_tail_checks_doglegs_against_uncommitted_barrel():
+    from kicad_tools.router.quantize import is_45_aligned
+
+    router, finder, head, goal, partner, body = _case()
+    li = finder.grid.layer_to_index(head.layer.value)
+    head = router._virtual_pad_at(head, 2, 2, li)
+    goal = router._virtual_pad_at(goal, 5, 3, li)
+    barrel = Via(
+        x=3, y=3, diameter=0.6, drill=0.3, layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="N"
+    )
+    # The straight chord clears this barrel, but its diagonal-first dogleg
+    # runs directly through the center. The other orientation is legal.
+    tail = router._synthesize_tail(finder, head, goal, li, partner_vias=[barrel])
+    assert tail is not None and len(tail.segments) >= 2
+    assert tail.segments[0].start == (2, 2) and tail.segments[-1].end == (5, 3)
+    from shapely.geometry import Point
+
+    for seg in tail.segments:
+        assert is_45_aligned(seg.x2 - seg.x1, seg.y2 - seg.y1)
+        gap = LineString([seg.start, seg.end]).distance(Point(3, 3)) - (seg.width + 0.6) / 2
+        assert gap >= finder.rules.via_clearance - 1e-9
