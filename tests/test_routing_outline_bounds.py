@@ -4,7 +4,13 @@ import math
 
 import pytest
 
-from kicad_tools.core.board_outline import board_outline_bounds
+from kicad_tools.core.board_outline import (
+    _CIRCLE_TESSELLATION_MAX_ERROR_MM,
+    board_outline_bounds,
+    board_outline_segments,
+    circle_segment_count,
+    circle_tessellation_points,
+)
 from kicad_tools.router import DesignRules
 from kicad_tools.router.io import (
     _extract_edge_segments,
@@ -170,7 +176,6 @@ def test_cubic_bounds_use_curve_extrema_not_control_polygon():
 @pytest.mark.parametrize(
     "outline",
     [
-        '(gr_circle (center 10 10) (end 15 10) (layer "Edge.Cuts"))',
         '(gr_arc (start 0 0) (mid 5 5) (end 10 0) (layer "Edge.Cuts"))',
         '(gr_arc (start 0 0) (end 10 0) (angle -90) (layer "Edge.Cuts"))',
         '(gr_curve (pts (xy 0 0) (xy 0 10) (xy 10 10) (xy 10 0)) (layer "Edge.Cuts"))',
@@ -196,3 +201,126 @@ def test_invalid_legacy_arc_is_rejected(angle):
     root = parse_string(f'(kicad_pcb (gr_arc (start 0 0) (end 10 0) {angle} (layer "Edge.Cuts")))')
     with pytest.raises(ValueError, match="Malformed Edge.Cuts"):
         board_outline_bounds(root)
+
+
+# ---------------------------------------------------------------------------
+# Issue #5367: gr_circle Edge.Cuts must reach the router pad stage.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("radius", [0.05, 1.0, 5.0, 50.0, 500.0])
+def test_circle_tessellation_chord_error_bounded(radius):
+    """Every chord's midpoint sagitta stays within the documented bound.
+
+    ``circle_tessellation_points`` returns vertices exactly on the circle
+    (radius unchanged), so the only approximation error is the gap between
+    each chord and the arc it replaces (maximal at the chord midpoint).
+    """
+    center = (3.0, -7.0)
+    ring = circle_tessellation_points(center, radius)
+    assert len(ring) >= 12
+    for a, b in zip(ring, ring[1:] + ring[:1], strict=True):
+        mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+        dist_to_center = math.hypot(mx - center[0], my - center[1])
+        sagitta = radius - dist_to_center
+        assert -1e-9 <= sagitta <= _CIRCLE_TESSELLATION_MAX_ERROR_MM + 1e-9
+
+
+def test_circle_segment_count_rejects_bad_radius():
+    with pytest.raises(ValueError, match="radius"):
+        circle_segment_count(0.0)
+    with pytest.raises(ValueError, match="radius"):
+        circle_segment_count(-5.0)
+    with pytest.raises(ValueError, match="radius"):
+        circle_segment_count(math.nan)
+
+
+def test_circle_segments_form_closed_chain_on_the_true_circle():
+    radius = 12.5
+    center = (2.0, 4.0)
+    root = parse_string(
+        f'(kicad_pcb (gr_circle (center {center[0]} {center[1]}) '
+        f'(end {center[0] + radius} {center[1]}) (layer "Edge.Cuts")))'
+    )
+    segments = board_outline_segments(root)
+    assert len(segments) >= 12
+    for (x1, y1), (x2, y2) in segments:
+        assert math.isclose(math.hypot(x1 - center[0], y1 - center[1]), radius, abs_tol=1e-9)
+        assert math.isclose(math.hypot(x2 - center[0], y2 - center[1]), radius, abs_tol=1e-9)
+    for (_, end), (start, _) in zip(segments, segments[1:] + segments[:1], strict=True):
+        assert end == start
+
+
+def test_circle_zero_radius_is_rejected():
+    root = parse_string('(kicad_pcb (gr_circle (center 5 5) (end 5 5) (layer "Edge.Cuts")))')
+    with pytest.raises(ValueError, match="zero-radius"):
+        board_outline_segments(root)
+
+
+@pytest.mark.parametrize(
+    "circle",
+    [
+        '(gr_circle (center 5 5) (layer "Edge.Cuts"))',
+        '(gr_circle (end 5 5) (layer "Edge.Cuts"))',
+        '(gr_circle (center nan 5) (end 10 5) (layer "Edge.Cuts"))',
+        '(gr_circle (center 5 5) (end nan 5) (layer "Edge.Cuts"))',
+    ],
+)
+def test_circle_missing_or_nonfinite_coordinate_is_rejected(circle):
+    root = parse_string(f"(kicad_pcb {circle})")
+    with pytest.raises(ValueError, match="Malformed Edge.Cuts"):
+        board_outline_segments(root)
+
+
+def test_circular_outline_reaches_pad_stage_via_load_pcb_for_routing(tmp_path):
+    """Issue #5367: the loader must not refuse a circular Edge.Cuts outline.
+
+    Regression for the reported failure: ``load_pcb_for_routing`` calls
+    ``_extract_edge_segments`` (-> ``board_outline_segments``) before any
+    footprint/pad parsing, so a ``gr_circle`` outline previously aborted
+    the whole load with ``ValueError`` before pads were ever reached.
+    """
+    cx, cy, radius = 60.0, 60.0, 50.0
+    text = f"""(kicad_pcb (version 20241229) (generator "test")
+    (layers (0 "F.Cu" signal) (31 "B.Cu" signal)) (net 1 "SIGNAL")
+    (gr_circle (center {cx} {cy}) (end {cx + radius} {cy}) (layer "Edge.Cuts"))
+    (footprint "R" (layer "F.Cu") (at {cx} {cy})
+      (property "Reference" "R1" (at 0 -2) (layer "F.SilkS"))
+      (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 1 "SIGNAL"))
+      (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 1 "SIGNAL"))))"""
+    path = tmp_path / "circle.kicad_pcb"
+    path.write_text(text)
+
+    edges = _extract_edge_segments(text)
+    assert len(edges) >= 12
+
+    router, _ = load_pcb_for_routing(
+        path, rules=DesignRules(grid_resolution=0.5, trace_clearance=0.5), validate_drc=False
+    )
+    assert len(router.pads) == 2
+
+
+def test_circular_cutout_alongside_rectangular_outer_boundary(tmp_path):
+    """A circular internal cutout (e.g. a round mounting hole) on Edge.Cuts
+    coexists with a straight outer boundary; both are tessellated/returned
+    without the loader treating outline topology specially (#5367).
+    """
+    text = """(kicad_pcb (version 20241229) (generator "test")
+    (layers (0 "F.Cu" signal) (31 "B.Cu" signal)) (net 1 "SIGNAL")
+    (gr_rect (start 0 0) (end 100 80) (layer "Edge.Cuts"))
+    (gr_circle (center 50 40) (end 55 40) (layer "Edge.Cuts"))
+    (footprint "R" (layer "F.Cu") (at 10 10)
+      (property "Reference" "R1" (at 0 -2) (layer "F.SilkS"))
+      (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net 1 "SIGNAL"))
+      (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net 1 "SIGNAL"))))"""
+    path = tmp_path / "cutout.kicad_pcb"
+    path.write_text(text)
+
+    edges = _extract_edge_segments(text)
+    # 4 from the rectangle plus >= 12 tessellated chords from the cutout.
+    assert len(edges) >= 16
+
+    router, _ = load_pcb_for_routing(
+        path, rules=DesignRules(grid_resolution=0.5, trace_clearance=0.5), validate_drc=False
+    )
+    assert len(router.pads) == 2
