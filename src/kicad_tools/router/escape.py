@@ -43,6 +43,7 @@ from kicad_tools.core.geometry import point_to_segment_distance
 from .layers import Layer, LayerType
 from .primitives import Pad, Route, Segment, Via
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
+from .via_in_pad_eligibility import resolve_process, via_geometry_eligible
 
 logger = logging.getLogger(__name__)
 
@@ -1320,9 +1321,28 @@ class EscapeRouter:
                 self._mfr_limits = get_mfr_limits(self.manufacturer)
             except (ValueError, ImportError):
                 self._mfr_limits = None
-        self.via_in_pad_supported: bool = bool(
-            self._mfr_limits is not None and self._mfr_limits.via_in_pad_supported
+        # Issue #5201: a bare ``MfrLimits.via_in_pad_supported`` capability
+        # boolean is NOT sufficient to legalize opportunistic in-pad via
+        # placement -- the manufacturer must also declare a real, orderable
+        # :class:`~kicad_tools.manufacturers.fabrication_process.FabricationProcess`
+        # whose layer-count floor THIS board's actual copper-layer count
+        # (``grid.num_layers``, the router's real board context -- never a
+        # new hand-maintained manufacturer/layer table) satisfies.  The
+        # canonical example is JLCPCB Capability Plus (``jlcpcb-tier1``):
+        # every layer configuration sets ``via_in_pad_supported: true``,
+        # but its via-in-pad-specific POFV process requires 4+ layers, so a
+        # 2-layer board at that tier has no eligible process and must fall
+        # back to the existing non-in-pad escape strategy instead of
+        # placing (and later stranding) an in-pad via.  Resolution fails
+        # closed -- an unresolvable manufacturer/profile/process never
+        # grants eligibility -- and mirrors the identical resolution the
+        # post-route auto-fix repair sweep uses
+        # (``kicad_tools.router.drc_nudge._resolve_router_via_in_pad_process``)
+        # so escape placement and repair never disagree.
+        self._via_in_pad_process = resolve_process(
+            self.manufacturer, getattr(grid, "num_layers", None)
         )
+        self.via_in_pad_supported: bool = self._via_in_pad_process is not None
 
         # Issue #3033 / #3062: When True, the in-pad rescue path
         # (``_try_in_pad_escape``) returns None instead of placing a
@@ -7632,6 +7652,26 @@ class EscapeRouter:
             via_drill = self.rules.via_drill
             via_diameter = self.rules.via_diameter
             min_annular = (via_diameter - via_drill) / 2
+
+        # Issue #5201: ``self.via_in_pad_supported`` already proved a real
+        # process is attached for this board's layer count -- but that is
+        # a BOARD-level fact, not proof this specific candidate's drill /
+        # annular-ring geometry falls inside the declared process's
+        # published envelope.  Check it here too so the escape router
+        # never places a via the downstream ``via_in_pad`` DRC rule would
+        # reject as ``via_in_pad_process_ineligible``.  Component-hole
+        # distance is intentionally not checked here (the escape router
+        # does not carry a board-wide PTH registry at this decision
+        # point) -- DRC remains the authoritative check for that
+        # dimension; the geometric envelope checked here (drill range,
+        # annular ring) is the one the router's own via construction
+        # controls directly.
+        if self._via_in_pad_process is not None and not via_geometry_eligible(
+            self._via_in_pad_process,
+            drill_mm=via_drill,
+            annular_ring_mm=min_annular,
+        ):
+            return None
 
         # Geometry check: the drill must fit inside the pad with an
         # annular ring of pad copper around it.  Typical fine-pitch SSOP

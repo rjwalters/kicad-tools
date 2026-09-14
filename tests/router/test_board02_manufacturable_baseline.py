@@ -674,7 +674,25 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     #   either as a blanket "the board is DRC-clean".
     EXPECTED_ROUTES = 22
     EXPECTED_VIAS = 24
-    EXPECTED_LENGTH = 329.23
+    EXPECTED_LENGTH = 329.24
+    # Re-baselined 2026-09-14 for Issue #5201: the escape router
+    # (``EscapeRouter.via_in_pad_supported``) previously resolved
+    # via-in-pad eligibility from the bare ``MfrLimits`` capability
+    # boolean, which is ``True`` on EVERY ``jlcpcb-tier1`` layer
+    # configuration -- including this 2-layer board, whose POFV process
+    # actually requires 4+ layers.  It now resolves through
+    # ``kicad_tools.router.via_in_pad_eligibility.resolve_process`` (the
+    # same board-context-aware predicate #5009 gave the drc_nudge repair
+    # sweep), so the escape router itself no longer believes in-pad
+    # placement is legal here and takes the correct non-in-pad escape
+    # path on its first pass instead of relying on the post-route repair
+    # sweep to relocate a via it should never have placed. Routes (22),
+    # vias (24) and reach (8/8) are UNCHANGED and the board is still
+    # DRC-clean at jlcpcb-tier1 with zero errors
+    # (``test_drc_clean_at_jlcpcb_tier1`` above, no new grandfathered
+    # allowance); total length moves +0.01mm (329.23 -> 329.24), still
+    # bit-perfect across seeds 42/43/44.  Prior pin (22, 274-segment-era,
+    # 24, 329.23).
     # Re-baselined 2026-07-14 for Issue #4196: the macOS-arm64 segment
     # count drifted from 393 to 476 (a +83 delta) while routes (22),
     # vias (24), total length (327.93mm) and reach (8/8) stayed

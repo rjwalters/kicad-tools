@@ -211,48 +211,32 @@ class ViaInPadRule(DRCRule):
         """Return a list of human-readable reasons ``via`` fails ``process``.
 
         An empty list means the via satisfies every checkable requirement
-        of the declared process.
+        of the declared process. Delegates to
+        :meth:`~kicad_tools.manufacturers.fabrication_process.FabricationProcess.eligibility_reasons`
+        -- the single source of truth for this predicate, also consumed by
+        the router's escape/repair decisions
+        (:mod:`kicad_tools.router.via_in_pad_eligibility`, Issue #5201) so
+        the two never disagree about which vias are legal.
         """
-        reasons: list[str] = []
-
-        if layer_count is not None and layer_count < process.min_layer_count:
-            reasons.append(
-                f"board has {layer_count} copper layer(s); process "
-                f"{process.process_id!r} requires >= {process.min_layer_count}"
-            )
-
         drill = getattr(via, "drill", 0.0)
-        if drill < process.min_via_drill_mm - DRC_TOLERANCE:
-            reasons.append(
-                f"via drill {drill:.3f}mm is below process minimum {process.min_via_drill_mm:.3f}mm"
-            )
-        elif drill > process.max_via_drill_mm + DRC_TOLERANCE:
-            reasons.append(
-                f"via drill {drill:.3f}mm exceeds process maximum {process.max_via_drill_mm:.3f}mm"
-            )
-
         size = getattr(via, "size", None)
-        if size is not None:
-            ring = (size - drill) / 2.0
-            if ring < process.min_annular_ring_mm - DRC_TOLERANCE:
-                reasons.append(
-                    f"via annular ring {ring:.3f}mm is below process minimum "
-                    f"{process.min_annular_ring_mm:.3f}mm"
-                )
+        annular_ring_mm = (size - drill) / 2.0 if size is not None else None
 
+        nearest_other_hole_distance_mm: float | None = None
         if pth_holes:
             vx, vy = via.position
             via_r = drill / 2.0
-            nearest = min(
+            nearest_other_hole_distance_mm = min(
                 math.hypot(px - vx, py - vy) - via_r - hole_r for px, py, hole_r in pth_holes
             )
-            if nearest < process.min_component_hole_distance_mm - DRC_TOLERANCE:
-                reasons.append(
-                    f"via is {nearest:.3f}mm from the nearest other component hole; "
-                    f"process requires >= {process.min_component_hole_distance_mm:.3f}mm"
-                )
 
-        return reasons
+        return process.eligibility_reasons(
+            layer_count=layer_count,
+            drill_mm=drill,
+            annular_ring_mm=annular_ring_mm,
+            nearest_other_hole_distance_mm=nearest_other_hole_distance_mm,
+            tolerance_mm=DRC_TOLERANCE,
+        )
 
     def _make_violation(
         self,

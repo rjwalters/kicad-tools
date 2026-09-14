@@ -360,13 +360,18 @@ def _make_rules(manufacturer: str | None = None) -> DesignRules:
 
 
 def _make_grid(rules: DesignRules, layer_stack: LayerStack | None = None) -> RoutingGrid:
+    # Issue #5201: this fixture models board-04's STM32 LQFP-48 (a REAL
+    # 4-layer board in production), and ``jlcpcb-tier1``'s via-in-pad POFV
+    # process requires >= 4 copper layers -- a 2-layer default here would
+    # make every ``jlcpcb-tier1`` fixture in this file ineligible for
+    # via-in-pad, which does not match the board this suite models.
     return RoutingGrid(
         width=30.0,
         height=30.0,
         rules=rules,
         origin_x=-15.0,
         origin_y=-15.0,
-        layer_stack=layer_stack or LayerStack.two_layer(),
+        layer_stack=layer_stack or LayerStack.four_layer_sig_sig_gnd_pwr(),
     )
 
 
@@ -493,9 +498,17 @@ class TestForcedInPadRescue:
     """
 
     def test_plane_sandwich_triggers_in_pad_rescue(self):
-        """Sandwich pin at along-edge filtered index gets force-rescued."""
-        rules = _make_rules(manufacturer="jlcpcb-tier1")
-        grid = _make_grid(rules)
+        """Sandwich pin at along-edge filtered index gets force-rescued.
+
+        Issue #5201: this test specifically pins the 2-layer inner-layer
+        selection (B.Cu), so it explicitly requests a 2-layer stack
+        rather than the file's 4-layer default.  ``pcbway`` (unlike
+        ``jlcpcb-tier1``, whose POFV process requires >= 4 layers)
+        publishes via-in-pad at any layer count, so it stays eligible
+        here.
+        """
+        rules = _make_rules(manufacturer="pcbway")
+        grid = _make_grid(rules, layer_stack=LayerStack.two_layer())
         router = EscapeRouter(grid, rules)
         pads = _make_lqfp48_along_edge_sandwich()
         package = router.analyze_package(pads)

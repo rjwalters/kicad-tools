@@ -1275,6 +1275,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full recipe regeneration at the plain `jlcpcb` profile is clean under
   the native `kicad-cli pcb drc` gate: 12/12 nets, 0 violations, 0
   unconnected items, label- and copper-LVS PASS.
+- **The escape router's opportunistic in-pad via placement still read only
+  the bare `MfrLimits.via_in_pad_supported` capability boolean, out of step
+  with the DRC-side process-eligibility model #5009 landed** (#5201) — the
+  auto-fix repair sweep (`drc_nudge.py::_scan_and_repair_via_in_pad`)
+  already resolved the board's actual layer count against the selected
+  fabrication process, but `EscapeRouter` (`router/escape.py`) still
+  routed a 2-layer `jlcpcb-tier1` board exactly like a 4-layer one and
+  deliberately drilled vias dead-centre into SMT lands that tier's POFV
+  process cannot legalize below 4 layers — the router placed the very
+  copper the next `kct check` pass would reject. Both decision points now
+  share `kicad_tools.router.via_in_pad_eligibility`
+  (`resolve_process`/`via_geometry_eligible`), which delegates to the same
+  `FabricationProcess.eligibility_reasons` predicate
+  `ViaInPadRule` applies, so router and validator can never disagree about
+  which vias are legal: `resolve_process` fails closed on any unresolved
+  manufacturer, profile, or board layer count (never silently eligible),
+  and `via_geometry_eligible` additionally checks each *specific* candidate
+  via's drill/annular-ring/component-hole geometry against the resolved
+  process's published envelope — board-level eligibility no longer
+  certifies every via that happens to sit on a pad. When no eligible
+  process is selected the escape router now falls back to its pre-existing
+  non-in-pad strategy for that pad/pitch (the pin stays deferred to the
+  main router) instead of placing an unmanufacturable via, and the repair
+  sweep individually re-validates every DETECTED in-pad via against the
+  same resolved process rather than trusting a board-level "process
+  exists" gate alone. Board 02 (`charlieplex_3x3`, 2-layer, `jlcpcb-tier1`)
+  stays DRC-clean with its `MAX_DRC_ERRORS` ceiling unchanged at 0 and no
+  new grandfathered allowance; boards 03/04 (both 4-layer) and the
+  fine-pitch SSOP/TSSOP in-pad escape regression fixtures (#2605) are
+  unaffected.
 - **`kct route` accepted KiCad 10 name-only nets but wrote zero copper and
   reported a vacuous "SUCCESS" (0/0 nets)** (#4983) — a PCB saved in KiCad
   10's name-only net syntax (`(net "SIGNAL")` on pads, no numeric net table

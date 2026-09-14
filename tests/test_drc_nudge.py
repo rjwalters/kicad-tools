@@ -2028,8 +2028,20 @@ class TestNudgeViaPad:
 
     def test_via_in_pad_supported_profile_skipped(self):
         """When the manufacturer supports via-in-pad (e.g. jlcpcb-tier1
-        or pcbway), the sweep is a no-op even if a via sits inside a
-        same-net pad."""
+        or pcbway) AND declares an eligible process for this board's
+        layer count, the sweep is a no-op even if a via sits inside a
+        same-net pad.
+
+        Issue #5201: the sweep's board-level gate now also checks each
+        DETECTED via's geometry against the resolved process's envelope,
+        so the layer count must be set explicitly here (previously
+        omitted -- ``layer_stack=None`` used to be treated as "eligible
+        regardless", which is exactly the silent-unknown-context grant
+        the acceptance criteria now forbid).  0.35mm drill / 0.7mm
+        diameter (0.175mm annular ring) comfortably satisfies PCBWay's
+        via-in-pad process envelope (drill 0.15-0.5mm, annular >= 0.15mm)
+        at any layer count, so this via is a legitimate in-pad escape.
+        """
         pad = _make_smd_pad(x=10.0, y=10.0, width=1.5, height=1.5, net=1)
         via = Via(
             x=10.0,
@@ -2045,7 +2057,7 @@ class TestNudgeViaPad:
             segments=[],
             vias=[via],
         )
-        # pcbway supports via-in-pad.
+        # pcbway supports via-in-pad at any layer count.
         rules = DesignRules(manufacturer="pcbway", trace_clearance=0.2)
         router = _StubAutorouter(
             routes=[route],
@@ -2053,6 +2065,7 @@ class TestNudgeViaPad:
             pads={("U1", "1"): pad},
             nets={1: [("U1", "1")]},
         )
+        router.layer_stack = _StubLayerStack(num_layers=2)  # type: ignore[attr-defined]
 
         nudged = _scan_and_repair_via_in_pad(
             router,
@@ -2495,6 +2508,53 @@ class TestViaInPadProcessEligibilityGate:
         )
         assert nudged == 0
         assert math.isclose(via.x, 10.5)
+
+    def test_sweep_relocates_out_of_envelope_via_despite_eligible_process(self):
+        """Issue #5201: board-level eligibility (4-layer tier1, a real
+        POFV process attached) does not certify every detected via -- the
+        sweep must check each candidate's own geometry against the
+        resolved process before treating it as a legal escape.
+
+        Same board/pad/via placement as ``test_sweep_no_ops_on_four_layer_tier1``
+        (which is genuinely eligible: 0.3mm drill / 0.15mm annular ring,
+        both within ``JLCPCB_TIER1_POFV_4L``'s envelope), except the
+        annular ring here (0.02mm, from a 0.4mm drill / 0.44mm diameter)
+        is below the process's 0.10mm floor -- this via is NOT a legal
+        in-pad escape despite the board having an eligible process, so
+        the sweep must relocate it exactly as it would on a board with no
+        process at all.
+        """
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1)
+        via = Via(
+            x=10.5,
+            y=9.7,
+            drill=0.4,
+            diameter=0.44,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+        )
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        router = _StubAutorouter(
+            routes=[route],
+            rules=DesignRules(manufacturer="jlcpcb-tier1", trace_clearance=0.2),
+            pads={("U1", "1"): pad},
+            nets={1: [("U1", "1")]},
+        )
+        router.layer_stack = _StubLayerStack(num_layers=4)  # type: ignore[attr-defined]
+
+        assert _router_via_in_pad_process_eligible(router) is True, (
+            "Board-level gate must still resolve an eligible process -- "
+            "this test isolates the per-via geometry check, not the "
+            "board-level gate."
+        )
+
+        nudged = _scan_and_repair_via_in_pad(
+            router,
+            max_displacement=2.0,
+            result=DRCNudgeResult(),
+        )
+        assert nudged == 1
+        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
 
 
 class TestViaDrillOverlapsBbox:
