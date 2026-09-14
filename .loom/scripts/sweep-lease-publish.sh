@@ -63,6 +63,8 @@
 #
 # ## Idempotency and peer safety
 #
+#   - A yielded host+sweep-id cannot be reused (exit 4). Start a new sweep
+#     identity: fence and renewal readers permanently exclude yielded IDs.
 #   - If THIS host+sweep-id already has a FRESH (within-TTL) lease comment on
 #     the issue, this is a no-op (exit 0) -- a resumed sweep re-running
 #     pre-flight never accumulates duplicate lease comments. This is
@@ -113,8 +115,8 @@
 #          Proceed.
 #       1  Usage error (bad issue number, unknown flag, bad --ttl-minutes).
 #       2  The publish `gh` call failed. Proceed WITHOUT a lease (best-effort).
-#       4  A DIFFERENT host holds a fresh lease -- nothing published. The
-#          caller should skip this issue rather than co-occupy the claim.
+#       4  A different host holds a fresh lease, or this identity yielded.
+#          Nothing published. Skip this claim; a yielded ID needs a new run.
 #
 #     On exit 0 (published or already-held), the resolved identity is printed
 #     to stdout as a single line: `<host> <sweep-id>` -- thread it into
@@ -389,6 +391,18 @@ cmd_publish() {
         if [[ -n "$(printf '%s' "$yield_ndjson" | tr -d '[:space:]')" ]]; then
             yield_first_lines="$(jq -r '.body | split("\n")[0]' <<< "$yield_ndjson" 2>/dev/null || true)"
         fi
+
+        # A successful write under a yielded identity would remain invisible
+        # to fence/renew and other publishers. Check the requested identity
+        # before scanning lease candidates, including yield-only histories.
+        local requested_yield_line requested_yield
+        while IFS= read -r requested_yield_line; do
+            requested_yield="$(parse_lease_yield_marker_line "$requested_yield_line" || true)"
+            if [[ "$requested_yield" == "$host"$'\t'"$sweep_id" ]]; then
+                echo "SKIP: issue #${issue}: host=${host} sweep=${sweep_id} already yielded; use a new sweep ID for a new claim. Nothing published." >&2
+                return 4
+            fi
+        done <<< "$yield_first_lines"
 
         local now_epoch ttl_seconds
         now_epoch="${LOOM_LEASE_PUBLISH_NOW:-$(date -u +%s)}"

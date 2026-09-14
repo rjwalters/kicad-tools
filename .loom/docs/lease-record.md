@@ -428,9 +428,13 @@ whose own `(host, sweep)` has a matching yield record from ALL THREE of its
 candidate buckets — `own_fresh` (idempotency short-circuit), `peer_host`
 (the live-peer block), and `same_host_diff_fresh` (the informational
 same-host-different-sweep note) — before deciding whether to publish. A
-host whose own prior claim was itself yielded therefore republishes a fresh
-record on its next attempt rather than trusting the stood-down one, and a
-new host is never phantom-blocked by a peer's dead, already-yielded claim.
+host whose prior claim yielded must use a **new sweep identity** on its next
+attempt. Reusing the yielded `(host, sweep)` returns exit 4 without a write
+(Loom #7643), even if only its yield record remains. This uses the existing
+claim-refusal status so callers skip rather than proceed without a lease.
+Yield is terminal for that identity in publisher, fence and renewal readers;
+a newer timestamp does not revive it. A new host or new sweep is not blocked
+by the dead, already-yielded claim.
 Regression coverage: `test-sweep-lease-publish.sh` cases (n)/(n2)/(n3)
 (single-comment unit coverage) and the dedicated
 `test-sweep-lease-convergence.sh` (a simulated 3+ host simultaneous-claim
