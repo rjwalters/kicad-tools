@@ -2327,6 +2327,83 @@ def _splice_mirrored_n_route(
     )
 
 
+def _shared_pair_window(
+    p_route: Route,
+    n_route: Route,
+    min_length: float,
+    fixed_segment_ids: set[int] | None = None,
+) -> tuple[Route, int, Route, int] | None:
+    """Split a common parallel span into equal hosts without changing copper.
+
+    The returned routes are proposals. Untouched segments retain identity,
+    and neither fixed segments nor either input route is modified.
+    """
+    import math
+    from dataclasses import replace
+
+    best = None
+    for pi, p in enumerate(p_route.segments):
+        if fixed_segment_ids and id(p) in fixed_segment_ids:
+            continue
+        dx, dy = p.x2 - p.x1, p.y2 - p.y1
+        length = math.hypot(dx, dy)
+        if length < max(min_length, 1e-9):
+            continue
+        ux, uy = dx / length, dy / length
+        for ni, n in enumerate(n_route.segments):
+            if n.layer != p.layer or (fixed_segment_ids and id(n) in fixed_segment_ids):
+                continue
+            ndx, ndy = n.x2 - n.x1, n.y2 - n.y1
+            nl = math.hypot(ndx, ndy)
+            if nl < max(min_length, 1e-9) or abs(ndx * uy - ndy * ux) > 1e-9 * nl:
+                continue
+            start = (n.x1 - p.x1) * ux + (n.y1 - p.y1) * uy
+            end = (n.x2 - p.x1) * ux + (n.y2 - p.y1) * uy
+            lo, hi = max(0.0, min(start, end)), min(length, max(start, end))
+            if hi - lo < min_length or hi - lo <= 1e-9:
+                continue
+            separation = abs((n.x1 - p.x1) * uy - (n.y1 - p.y1) * ux)
+            if separation <= 1e-9:
+                continue
+            score = (hi - lo, -separation)
+            if best is None or score > best[0]:
+                na, nb = sorted(((lo - start) / (end - start), (hi - start) / (end - start)))
+                best = (score, pi, ni, lo / length, hi / length, na, nb)
+    if best is None:
+        return None
+
+    def split(route: Route, index: int, lo: float, hi: float) -> tuple[Route, int]:
+        original = route.segments[index]
+        lo, hi = max(0.0, lo), min(1.0, hi)
+        if lo < 1e-10:
+            lo = 0.0
+        if hi > 1.0 - 1e-10:
+            hi = 1.0
+        cuts = sorted({0.0, lo, hi, 1.0})
+        pieces = []
+        host_index = index
+        for a, b in zip(cuts[:-1], cuts[1:], strict=True):
+            pieces.append(
+                replace(
+                    original,
+                    x1=original.x1 + a * (original.x2 - original.x1),
+                    y1=original.y1 + a * (original.y2 - original.y1),
+                    x2=original.x2 if b == 1.0 else original.x1 + b * (original.x2 - original.x1),
+                    y2=original.y2 if b == 1.0 else original.y1 + b * (original.y2 - original.y1),
+                )
+            )
+            if a == lo and b == hi:
+                host_index = index + len(pieces) - 1
+        return replace(
+            route, segments=route.segments[:index] + pieces + route.segments[index + 1 :]
+        ), host_index
+
+    _, pi, ni, pa, pb, na, nb = best
+    prepared_p, pi = split(p_route, pi, pa, pb)
+    prepared_n, ni = split(n_route, ni, na, nb)
+    return prepared_p, pi, prepared_n, ni
+
+
 def _find_corresponding_n_segment(
     n_route: Route,
     p_seg: Segment,
@@ -2586,7 +2663,9 @@ def _tune_match_group_of_pairs(
 
     1. Pick a candidate P-side segment (mirror the Phase 2E
        single-ended segment-selection heuristic).
-    2. Find the corresponding N-side segment by midpoint proximity.
+    2. Find the corresponding N-side segment; when full spans differ,
+       split a shared parallel window into equal mutable hosts without
+       changing copper or fixed segments.
     3. Compute the outer-normal at the pair centerline (one normal for
        both halves).
     4. Generate the P-side meander using the Phase 2E single-ended
@@ -2897,6 +2976,16 @@ def _tune_match_group_of_pairs(
             n_corr = _find_corresponding_n_segment(
                 current_n, p_insertion_segment, fixed_segment_ids=fixed_segment_ids
             )
+            prepared_window = False
+            if n_corr is None:
+                shared = _shared_pair_window(
+                    current_p, current_n, base_config.min_segment_length, fixed_segment_ids
+                )
+                if shared is not None:
+                    current_p, _p_seg_idx, current_n, n_insertion_seg_idx = shared
+                    p_insertion_segment = current_p.segments[_p_seg_idx]
+                    n_corr = (n_insertion_seg_idx, current_n.segments[n_insertion_seg_idx])
+                    prepared_window = True
             if n_corr is None:
                 for r in (per_pair_result_p, per_pair_result_n):
                     r.reason = "no_suitable_segment"
@@ -2927,7 +3016,7 @@ def _tune_match_group_of_pairs(
                 outer_normal_hint=hint,
             )
             attempt_generator = SerpentineGenerator(attempt_config)
-            if fixed_segment_ids:
+            if fixed_segment_ids or prepared_window:
                 # Honor the selected mutable host. add_serpentine would rank
                 # the full route again and could select a longer fixed escape.
                 p_serp_result = attempt_generator.generate_trombone(
