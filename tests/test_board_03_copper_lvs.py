@@ -134,7 +134,8 @@ def _load_add_gnd_stitching_vias():
 
 
 @pytest.mark.parametrize("unconnected", [[], [{"type": "unconnected_items"}], None])
-def test_saved_copper_gate_requires_explicit_zero(monkeypatch, tmp_path, unconnected):
+@pytest.mark.parametrize("return_code", [0, 1])
+def test_saved_copper_gate_requires_explicit_zero(monkeypatch, tmp_path, unconnected, return_code):
     import json
     from types import SimpleNamespace
 
@@ -145,13 +146,15 @@ def test_saved_copper_gate_requires_explicit_zero(monkeypatch, tmp_path, unconne
     def native_check(path, report, *, schematic_parity):
         assert path == pcb and schematic_parity is False
         report.write_text(json.dumps({"unconnected_items": unconnected}))
-        return SimpleNamespace(success=True, stderr="")
+        return SimpleNamespace(
+            success=True, stderr="native execution failed", return_code=return_code
+        )
 
     monkeypatch.setattr("kicad_tools.cli.runner.run_drc", native_check)
-    if unconnected == []:
+    if unconnected == [] and return_code == 0:
         module.require_saved_copper_connected(pcb)
     else:
-        with pytest.raises(RuntimeError, match="unconnected"):
+        with pytest.raises(RuntimeError, match="unconnected|connectivity check failed"):
             module.require_saved_copper_connected(pcb)
     assert pcb.read_text() == "saved copper"
 

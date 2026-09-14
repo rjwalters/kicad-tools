@@ -569,7 +569,7 @@ def require_saved_copper_connected(routed_path: Path) -> None:
     report.unlink(missing_ok=True)
     before = routed_path.read_bytes()
     result = run_native_drc(routed_path, report, schematic_parity=False)
-    if not result.success or not report.is_file():
+    if not result.success or result.return_code != 0 or not report.is_file():
         raise RuntimeError(f"Native saved-copper connectivity check failed: {result.stderr}")
     data = json.loads(report.read_text())
     unconnected = data.get("unconnected_items")
