@@ -69,16 +69,38 @@ discover_project_goals
 
 ### Backlog Balance Check
 
-Before promoting new issues, check the current backlog distribution:
+Before promoting new issues, check the current backlog distribution.
+
+**The Tier 3 count excludes `loom:operator-only` and `loom:blocked` occupants
+(#7613).** Both labels route an issue permanently outside the automation
+queue — `loom:operator-only` waits on a human decision, `loom:blocked` waits
+on an external/timing condition neither Champion nor a Builder can clear —
+mirroring the exact exclusion `champion.md`'s own Priority 2/3 discovery
+queries already apply. An issue in either state cannot free itself by being
+promoted or closed through the normal pipeline, so counting it against a cap
+that only ever clears via promotion-or-closure can pin the cap **indefinitely**:
+once enough operator-only/blocked issues accumulate under `tier:maintenance`,
+the raw open-issue count sits at or above the cap forever, silently blocking
+every future Tier 3 proposal regardless of how much *actually promotable*
+Tier 3 backlog exists. Live example: this repo's `tier:maintenance` set was
+`#7415, #6969, #6650, #5512, #4136` (raw count 5, at the cap) but 4 of those 5
+carried `loom:operator-only`/`loom:blocked` — the real occupant count was 1.
 
 ```bash
 check_backlog_balance() {
   echo "=== Backlog Tier Balance ==="
 
-  # Count issues by tier
+  # Count issues by tier. Tier 3 additionally excludes loom:operator-only and
+  # loom:blocked occupants (#7613) — see the note above this function.
   tier1=$(gh issue list --label="tier:goal-advancing" --state=open --json number --jq 'length')
   tier2=$(gh issue list --label="tier:goal-supporting" --state=open --json number --jq 'length')
-  tier3=$(gh issue list --label="tier:maintenance" --state=open --json number --jq 'length')
+  tier3_json=$(gh issue list --label="tier:maintenance" --state=open --json number,labels \
+    --jq '[.[] | select([.labels[].name] | contains(["loom:operator-only"]) | not) |
+    select([.labels[].name] | contains(["loom:blocked"]) | not)]')
+  tier3=$(printf '%s' "$tier3_json" | jq 'length')
+  # Sorted, comma-joined occupant list — feed this verbatim into Step 3c's
+  # classify-capacity-defer.sh --occupants argument as $OCCUPANTS.
+  tier3_occupants=$(printf '%s' "$tier3_json" | jq -r '[.[].number] | sort | map("#" + tostring) | join(",")')
   unlabeled=$(gh issue list --label="loom:issue" --state=open --json number,labels \
     --jq '[.[] | select([.labels[].name] | any(startswith("tier:")) | not)] | length')
 
@@ -86,7 +108,7 @@ check_backlog_balance() {
 
   echo "Tier 1 (goal-advancing): $tier1"
   echo "Tier 2 (goal-supporting): $tier2"
-  echo "Tier 3 (maintenance):     $tier3"
+  echo "Tier 3 (maintenance):     $tier3 (occupants: ${tier3_occupants:-none})"
   echo "Unlabeled:                $unlabeled"
   echo "Total ready issues:       $total"
 
@@ -118,7 +140,7 @@ When multiple proposals are available for promotion, prioritize by tier:
 **Rate Limiting by Tier**:
 - Tier 1: Promote all qualifying proposals (no limit)
 - Tier 2: Promote up to 2 per iteration
-- Tier 3: Promote only 1 per iteration, and only if fewer than 5 Tier 3 issues already in backlog
+- Tier 3: Promote only 1 per iteration, and only if fewer than 5 Tier 3 issues already in backlog (the `tier3` count from the Backlog Balance Check above, which already excludes `loom:operator-only`/`loom:blocked` occupants, #7613)
 
 ### Assigning Tier Labels During Promotion
 
@@ -1026,11 +1048,13 @@ verdict comment to piggyback its marker on:
 
 ```bash
 # OCCUPANTS: the same backlog occupant set already computed by
-# "Backlog Balance Check" / this tier's own gh issue list query above — pass
-# it through verbatim, comma- or whitespace-separated, `#` prefix optional.
+# "Backlog Balance Check" ($tier3_occupants, which already excludes
+# loom:operator-only/loom:blocked issues, #7613) — pass it through verbatim,
+# comma- or whitespace-separated, `#` prefix optional. The literal value below
+# is illustrative only.
 CAP_RC=0
 ./.loom/scripts/classify-capacity-defer.sh --issue "$ISSUE_NUMBER" \
-  --tier "tier:maintenance" --occupants "#6612,#6076,#6068,#5512,#4136" \
+  --tier "tier:maintenance" --occupants "$tier3_occupants" \
   --apply || CAP_RC=$?
 ```
 

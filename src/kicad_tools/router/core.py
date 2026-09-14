@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from kicad_tools.explain.decisions import DecisionStore
     from kicad_tools.pcb.blocks.base import PCBBlock
     from kicad_tools.physics import Stackup, TransmissionLine
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
     from kicad_tools.progress import ProgressCallback
 
     from .io import FineZone
@@ -1462,6 +1463,11 @@ class Autorouter:
         # Pre-existing routes loaded as obstacles for DRC/merge but NOT
         # emitted by to_sexp() or subject to rip-up/reroute.
         self.existing_routes: list[Route] = []
+        self.placement_disposition: RoutingPlacementDisposition | None = None
+        self.placement_preserved_routes: tuple[Route, ...] = ()
+        self.placement_preserved_copper: str = ""
+        self.placement_preserved_zones: tuple[str, ...] = ()
+        self.placement_preserved_arcs: tuple[str, ...] = ()
 
         # Physics integration
         self._stackup = stackup
@@ -2756,6 +2762,7 @@ class Autorouter:
                 self.rules,
                 layer_stack=self.layer_stack,
             )
+        self._mesh_pathfinder.fixed_fills = self.grid.fixed_fills
         return self._mesh_pathfinder
 
     def _negotiate_mesh_netset(self) -> dict[int, list[Route]]:
@@ -2878,6 +2885,7 @@ class Autorouter:
                 self.rules,
                 layer_stack=self.layer_stack,
             )
+        self._lattice_pathfinder.fixed_fills = self.grid.fixed_fills
         return self._lattice_pathfinder
 
     def _lattice_pairwise_projection(self) -> Any:
@@ -9641,6 +9649,7 @@ class Autorouter:
                     resolution_override=old_grid.resolution,
                     thread_safe=True,
                 )
+                self.grid.install_fixed_fills(old_grid.fixed_fills)
                 # Copy blocked cells and obstacles from old grid
                 self.grid._blocked = old_grid._blocked.copy()
                 self.grid._net = old_grid._net.copy()
@@ -14963,16 +14972,23 @@ class Autorouter:
         width, height = self.grid.width, self.grid.height
         origin_x, origin_y = self.grid.origin_x, self.grid.origin_y
 
+        fixed_fills = self.grid.fixed_fills
+
         # Recreate grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
         self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
             width, height, origin_x, origin_y
         )
 
+        self.grid.install_fixed_fills(fixed_fills)
+
         # Issue #1778: Pass component pitch so fine-pitch pads get reduced clearance
         pitches = self.component_pitches
         for pad in self.pads.values():
             self.grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
+        if self.placement_disposition is not None:
+            for route in self.existing_routes:
+                self.grid.mark_route(route)
         self.routes = []
 
     def _shuffle_within_tiers(self, net_order: list[int], promotion_rate: float = 0.0) -> list[int]:
@@ -19331,8 +19347,9 @@ class Autorouter:
             resolution_override=fine_resolution,
         )
 
-        # Mark already-routed traces as obstacles on fine grid
-        for route in self.routes:
+        fine_grid.install_fixed_fills(self.grid.fixed_fills)
+        # Mark already-routed and preserved copper as obstacles on fine grid
+        for route in [*self.existing_routes, *self.routes]:
             fine_grid.mark_route(route)
 
         # Add pads for the failed nets to the fine grid

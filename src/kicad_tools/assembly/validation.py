@@ -27,6 +27,7 @@ class PartTier(Enum):
 class ValidationStatus(Enum):
     """Validation status for a part."""
 
+    UNKNOWN = "unknown"
     AVAILABLE = "available"
     LOW_STOCK = "low_stock"
     OUT_OF_STOCK = "out_of_stock"
@@ -51,6 +52,7 @@ class PartValidationResult:
     tier: PartTier
 
     # Stock info
+    inventory: dict = field(default_factory=dict)
     stock: int = 0
     in_stock: bool = False
 
@@ -110,6 +112,7 @@ class PartValidationResult:
             "status": self.status.value,
             "tier": self.tier.value,
             "stock": self.stock,
+            "inventory": self.inventory,
             "in_stock": self.in_stock,
             "mfr_part": self.mfr_part,
             "description": self.description,
@@ -185,6 +188,7 @@ class AssemblyValidationResult:
     def assembly_ready(self) -> bool:
         """True if all parts are available for assembly."""
         problem_statuses = {
+            ValidationStatus.UNKNOWN,
             ValidationStatus.OUT_OF_STOCK,
             ValidationStatus.NOT_FOUND,
             ValidationStatus.NO_LCSC,
@@ -414,7 +418,9 @@ class AssemblyValidator:
             tier = PartTier.EXTENDED
 
         # Determine status
-        if part.stock == 0:
+        if not part.stock_verified:
+            status = ValidationStatus.UNKNOWN
+        elif part.stock == 0:
             status = ValidationStatus.OUT_OF_STOCK
         elif part.stock < max(qty_needed * 2, self.LOW_STOCK_THRESHOLD):
             status = ValidationStatus.LOW_STOCK
@@ -430,7 +436,9 @@ class AssemblyValidator:
             status=status,
             tier=tier,
             stock=part.stock,
-            in_stock=part.stock > 0,
+            in_stock=part.stock_verified and part.stock > 0,
+            inventory=part.inventory_provenance(),
+            error=None if part.stock_verified else "Stock unverified: refresh live inventory",
             mfr_part=part.mfr_part,
             description=part.description,
         )

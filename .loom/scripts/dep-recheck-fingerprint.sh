@@ -73,6 +73,8 @@
 #       [--json]
 #   dep-recheck-fingerprint.sh extract-refs (--number N [--repo OWNER/NAME] | --stdin)
 #       [--bot-login LOGIN] [--json]
+#   dep-recheck-fingerprint.sh decide --hash HASH [--prior-hash HASH]
+#       [--prior-age-hours N] [--heartbeat-hours N] [--json]
 #
 # Subcommands:
 #   dep-recheck        The "Re-check Idempotency" fingerprint: VERDICT
@@ -144,6 +146,39 @@
 #                       CLOSED-without-merging both count as resolved, and an
 #                       issue body with no `## Dependencies` section (or an
 #                       empty one) is VERDICT=clear.
+#   decide              The "Four-way decision" (curator.md "Re-check
+#                       Idempotency" / "Idempotency" under "Checking
+#                       Operator-Only Premises") that turns a CONCLUSION_HASH
+#                       plus the most recent prior marker into an ACTION and
+#                       whether posting that ACTION requires claiming
+#                       `loom:curating` first (#7617). This is a pure string/
+#                       number comparison — it never calls `gh`, reads no
+#                       label state itself, and is always safe to run before
+#                       any claim. Emits ACTION (none|skip|comment|heartbeat)
+#                       and CLAIM (true|false):
+#                         - HASH empty (nothing to report this pass, e.g.
+#                           operator-premise VERDICT=open) -> ACTION=none,
+#                           CLAIM=false.
+#                         - PRIOR_HASH empty (no prior marker at all, the
+#                           first-ever check) -> ACTION=comment, CLAIM=true.
+#                         - HASH != PRIOR_HASH (a changed conclusion,
+#                           including the "diagnosed-but-orthogonal blocker"
+#                           escalation, which changes CONCLUSION_HASH by
+#                           construction) -> ACTION=comment, CLAIM=true.
+#                         - HASH == PRIOR_HASH and PRIOR_AGE_HOURS is within
+#                           the heartbeat window -> ACTION=skip, CLAIM=false.
+#                           This is the no-op path: nothing is posted, no
+#                           label changes, and — per #7617 — no `loom:curating`
+#                           claim is taken either.
+#                         - HASH == PRIOR_HASH but PRIOR_AGE_HOURS is at or
+#                           past the heartbeat window -> ACTION=heartbeat,
+#                           CLAIM=true (post exactly one refresh comment).
+#                       CLAIM=true means: claim `loom:curating` immediately
+#                       before posting, and release it again afterward unless
+#                       the same pass also transitions the issue to
+#                       `loom:curated` (whose own label edit already drops
+#                       `loom:curating` in the same command). CLAIM=false
+#                       means: do not touch `loom:curating` at all this pass.
 #
 # Input modes (either one, mutually exclusive):
 #   --number N [--repo OWNER/NAME]   Live mode: fetch current PR/ref state via
@@ -211,6 +246,17 @@
 #                             login to).
 #   --repo OWNER/NAME         Target repo for live mode (default: the cwd's
 #                             git remote).
+#   --hash HASH               `decide` only, required: this pass's own
+#                             CONCLUSION_HASH (may be empty — see above).
+#   --prior-hash HASH         `decide` only: the most recent prior marker's
+#                             CONCLUSION_HASH. Empty (the default) means no
+#                             prior re-check comment was found on the issue.
+#   --prior-age-hours N       `decide` only: age in hours of the prior marker
+#                             comment. Required whenever `--prior-hash` is
+#                             non-empty (there is nothing to age otherwise).
+#   --heartbeat-hours N       `decide` only: the staleness window. Defaults to
+#                             `$LOOM_DEP_RECHECK_HEARTBEAT_HOURS` if set, else
+#                             `24` — matching curator.md's documented default.
 #   --json                    Emit a JSON object instead of KEY=VALUE lines.
 #
 # Exit codes:
@@ -238,13 +284,13 @@ _die() {
 
 SUBCOMMAND="${1:-}"
 case "$SUBCOMMAND" in
-    dep-recheck | operator-premise | named-dependency | extract-refs) shift ;;
+    dep-recheck | operator-premise | named-dependency | extract-refs | decide) shift ;;
     -h | --help)
         _usage
         exit 0
         ;;
-    "") _die "missing subcommand (dep-recheck | operator-premise | named-dependency | extract-refs); see --help" ;;
-    *) _die "unknown subcommand '$SUBCOMMAND' (dep-recheck | operator-premise | named-dependency | extract-refs)" ;;
+    "") _die "missing subcommand (dep-recheck | operator-premise | named-dependency | extract-refs | decide); see --help" ;;
+    *) _die "unknown subcommand '$SUBCOMMAND' (dep-recheck | operator-premise | named-dependency | extract-refs | decide)" ;;
 esac
 
 NUMBER=""
@@ -256,6 +302,11 @@ BLOCK_REASON=""
 ORTHOGONAL=""
 BOT_LOGIN="loom-fleet-dispatch"
 JSON_OUTPUT=false
+HASH_ARG=""
+HASH_SET=false
+PRIOR_HASH_ARG=""
+PRIOR_AGE_HOURS_ARG=""
+HEARTBEAT_HOURS_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -291,6 +342,23 @@ while [[ $# -gt 0 ]]; do
             BOT_LOGIN="${2:-}"
             shift 2
             ;;
+        --hash)
+            HASH_ARG="${2:-}"
+            HASH_SET=true
+            shift 2
+            ;;
+        --prior-hash)
+            PRIOR_HASH_ARG="${2:-}"
+            shift 2
+            ;;
+        --prior-age-hours)
+            PRIOR_AGE_HOURS_ARG="${2:-}"
+            shift 2
+            ;;
+        --heartbeat-hours)
+            HEARTBEAT_HOURS_ARG="${2:-}"
+            shift 2
+            ;;
         --json)
             JSON_OUTPUT=true
             shift
@@ -305,7 +373,20 @@ done
 
 command -v jq >/dev/null 2>&1 || _die "jq not found on PATH" 3
 
-if [[ "$USE_STDIN" == true ]]; then
+if [[ "$SUBCOMMAND" == "decide" ]]; then
+    # decide is a pure comparison — no --number/--stdin/--refs input mode, and
+    # (deliberately) no `gh` call: it must be safe to run before any claim.
+    [[ "$HASH_SET" == true ]] || _die "--hash is required for decide (pass --hash '' when there is nothing to report this pass)"
+    if [[ -n "$PRIOR_HASH_ARG" && -z "$PRIOR_AGE_HOURS_ARG" ]]; then
+        _die "--prior-age-hours is required when --prior-hash is non-empty"
+    fi
+    if [[ -n "$PRIOR_AGE_HOURS_ARG" && ! "$PRIOR_AGE_HOURS_ARG" =~ ^[0-9]+$ ]]; then
+        _die "--prior-age-hours must be a non-negative integer (got '$PRIOR_AGE_HOURS_ARG')"
+    fi
+    if [[ -n "$HEARTBEAT_HOURS_ARG" && ! "$HEARTBEAT_HOURS_ARG" =~ ^[0-9]+$ ]]; then
+        _die "--heartbeat-hours must be a non-negative integer (got '$HEARTBEAT_HOURS_ARG')"
+    fi
+elif [[ "$USE_STDIN" == true ]]; then
     [[ -z "$NUMBER" ]] || _die "--stdin and --number are mutually exclusive"
     [[ -z "$REFS_ARG" ]] || _die "--stdin and --refs are mutually exclusive"
 elif [[ "$SUBCOMMAND" == "dep-recheck" || "$SUBCOMMAND" == "named-dependency" || "$SUBCOMMAND" == "extract-refs" ]]; then
@@ -683,9 +764,58 @@ _run_named_dependency() {
     fi
 }
 
+# --- decide (#7617) ----------------------------------------------------------
+
+# The "Four-way decision" from curator.md's "Re-check Idempotency" /
+# "Checking Operator-Only Premises" -> "Idempotency", extracted so the claim
+# discipline it implies (see the header comment above) is testable rather
+# than re-derived from prose on every Curator pass — exactly the rationale
+# `dep-recheck`/`operator-premise` were already extracted for (#7281). Pure
+# comparison, no `gh` call: safe to run before any `loom:curating` claim.
+_run_decide() {
+    local action claim heartbeat_hours
+
+    heartbeat_hours="${HEARTBEAT_HOURS_ARG:-${LOOM_DEP_RECHECK_HEARTBEAT_HOURS:-24}}"
+
+    if [[ -z "$HASH_ARG" ]]; then
+        # Nothing to report this pass (e.g. operator-premise VERDICT=open) —
+        # there is nothing to compare, so there is nothing to claim either.
+        action="none"
+        claim="false"
+    elif [[ -z "$PRIOR_HASH_ARG" ]]; then
+        # First-ever check on this issue: always report.
+        action="comment"
+        claim="true"
+    elif [[ "$HASH_ARG" != "$PRIOR_HASH_ARG" ]]; then
+        # A changed conclusion (including a diagnosed-but-orthogonal-blocker
+        # escalation, which changes CONCLUSION_HASH by construction) is never
+        # suppressed, window irrelevant.
+        action="comment"
+        claim="true"
+    elif (( PRIOR_AGE_HOURS_ARG < heartbeat_hours )); then
+        # Same conclusion, still inside the staleness window: the no-op path
+        # — no comment, no label change, no `loom:curating` claim (#7617).
+        action="skip"
+        claim="false"
+    else
+        # Same conclusion, but the prior marker is stale: post exactly one
+        # heartbeat, refreshing the marker's timestamp.
+        action="heartbeat"
+        claim="true"
+    fi
+
+    if [[ "$JSON_OUTPUT" == true ]]; then
+        jq -n --arg action "$action" --argjson claim "$claim" '{action: $action, claim: $claim}'
+    else
+        echo "ACTION=$action"
+        echo "CLAIM=$claim"
+    fi
+}
+
 case "$SUBCOMMAND" in
     dep-recheck) _run_dep_recheck ;;
     operator-premise) _run_operator_premise ;;
     named-dependency) _run_named_dependency ;;
     extract-refs) _run_extract_refs ;;
+    decide) _run_decide ;;
 esac

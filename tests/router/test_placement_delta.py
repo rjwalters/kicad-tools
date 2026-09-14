@@ -18,10 +18,13 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.router.placement_delta import (
+    ENDPOINT_ALIGN_ROTATIONS,
+    ENDPOINT_ALIGN_SOURCE,
     MAX_TRANSLATE_MM,
     PlacementDelta,
     delta_from_diagnosis,
     deltas_from_result,
+    endpoint_align_deltas,
 )
 from kicad_tools.router.stuck_classifier import (
     BundleOrientation,
@@ -302,6 +305,229 @@ class TestSyntheticBoards:
         delta = delta_from_diagnosis(pcb, _diag(pcb, "TGT"))
         assert delta is not None
         assert math.hypot(delta.dx, delta.dy) <= MAX_TRANSLATE_MM + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Endpoint-orientation alignment candidates (issue #4968)
+# ---------------------------------------------------------------------------
+#
+# A deliberately tiny, fast geometric fixture: one stuck net whose two endpoint
+# footprints present a horizontal pad ROW (J1) against a vertical pad COLUMN
+# (U3), with a foreign cluster around the stranded pad so the ladder's top rung
+# is MOVE_PART.  Board-07 stays OPTIONAL integration evidence -- nothing here
+# routes anything.
+
+_ALIGN_HEADER = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (gr_rect (start 0 0) (end 100 100) (stroke (width 0.1) (type solid))
+    (layer "Edge.Cuts"))
+"""
+
+
+def _pad_line(
+    ref: str,
+    cx: float,
+    cy: float,
+    offsets: list[tuple[float, float]],
+    net_pads: int,
+    *,
+    locked: bool = False,
+) -> str:
+    """A footprint whose pads sit at ``offsets`` (local mm) around ``(cx, cy)``.
+
+    The first ``net_pads`` pads carry net 1 ("TGT"); the rest are unassigned so
+    they still shape the pad-array axis without joining the stuck net.
+    """
+    pads = "".join(
+        f'    (pad "{i + 1}" smd rect (at {ox:.2f} {oy:.2f}) (size 0.3 0.3) '
+        f'(layers "F.Cu") ' + ('(net 1 "TGT"))\n' if i < net_pads else '(net 0 ""))\n')
+        for i, (ox, oy) in enumerate(offsets)
+    )
+    lock = "    (locked yes)\n" if locked else ""
+    return (
+        f'  (footprint "fp_{ref}" (layer "F.Cu") (at {cx:.2f} {cy:.2f})\n'
+        f'    (property "Reference" "{ref}")\n' + lock + pads + "  )\n"
+    )
+
+
+# Pad-offset templates.  The FIRST entry is always the footprint anchor so the
+# net-carrying pads land at a predictable place (the sink's TGT pad has to sit
+# at the centre of the foreign ring for the ladder to read MOVE_PART).
+_ROW = [(0.0, 0.0), (-2.0, 0.0), (-1.0, 0.0), (1.0, 0.0), (2.0, 0.0)]
+_COLUMN = [(0.0, 0.0), (0.0, -2.0), (0.0, -1.0), (0.0, 1.0), (0.0, 2.0)]
+_SQUARE = [(0.0, 0.0), (-2.0, 0.0), (0.0, -2.0), (2.0, 0.0), (0.0, 2.0)]
+
+
+def _endpoint_board(
+    *,
+    source_offsets: list[tuple[float, float]] = _ROW,
+    sink_offsets: list[tuple[float, float]] = _COLUMN,
+    source_at: tuple[float, float] = (20.0, 50.0),
+    source_locked: bool = False,
+) -> str:
+    """TGT spans J1 (source) and U3 (sink); U3's pad is walled by foreign copper."""
+    sx, sy = source_at
+    return _ALIGN_HEADER + (
+        '  (net 0 "")\n'
+        '  (net 1 "TGT")\n'
+        + _pad_line("J1", sx, sy, source_offsets, net_pads=2, locked=source_locked)
+        + _pad_line("U3", 80.0, 50.0, sink_offsets, net_pads=1)
+        + _foreign_ring(80.0, 50.0, 1.5, count=10, gap=4)
+        + f"  (segment (start {sx:.2f} {sy:.2f}) (end {sx - 2:.2f} {sy:.2f}) "
+        '(width 0.25) (layer "F.Cu") (net 1))\n'
+        ")\n"
+    )
+
+
+class TestEndpointAlignment:
+    """AC: bounded +/-90 endpoint-orientation candidates for a row/column mismatch."""
+
+    def test_row_vs_column_mismatch_emits_bounded_quarter_turn(self, tmp_path: Path):
+        pcb = _load(tmp_path, _endpoint_board())
+        diag = _diag(pcb, "TGT")
+        assert diag.recommendation[0].action is RecommendedAction.MOVE_PART
+
+        deltas = endpoint_align_deltas(pcb, diag)
+        assert deltas, "expected an endpoint-orientation candidate for a row/column mismatch"
+        for delta in deltas:
+            assert delta.kind == "rotate_align"
+            # BOUNDED: exactly the two quarter turns, nothing else.
+            assert delta.rotation_delta in ENDPOINT_ALIGN_ROTATIONS
+            assert delta.dx == 0.0 and delta.dy == 0.0
+            assert delta.source_action == ENDPOINT_ALIGN_SOURCE
+            assert delta.net_name == "TGT"
+        # At most one candidate per endpoint, and never more than two.
+        assert len(deltas) <= 2
+        assert len({d.target_ref for d in deltas}) == len(deltas)
+        # The smaller-disturbance endpoint (tie -> reference ascending) leads.
+        assert deltas[0].target_ref == "J1"
+
+    def test_candidate_carries_auditable_pad_alignment_rationale(self, tmp_path: Path):
+        pcb = _load(tmp_path, _endpoint_board())
+        delta = endpoint_align_deltas(pcb, _diag(pcb, "TGT"))[0]
+        rationale = delta.rationale
+        assert "pad-row/column mismatch" in rationale
+        assert "J1 pad axis" in rationale and "U3 pad axis" in rationale
+        assert "move_part" in rationale  # the ladder rung that triggered the search
+        # Connectivity is explicitly NOT a manufacturability verdict (#4968).
+        assert "CONNECTIVITY candidate only" in rationale
+        assert "skew" in rationale and "coupling" in rationale
+        # Never graded "high" -- the proposer measures pad geometry only.
+        assert delta.confidence in ("low", "medium")
+
+    def test_candidates_are_appended_after_the_primary_delta(self, tmp_path: Path):
+        """The ladder's own proposal still comes first -- #4968 is additive."""
+        pcb = _load(tmp_path, _endpoint_board())
+        result = classify_stuck_nets_from_pcb(pcb)
+        deltas = deltas_from_result(pcb, result)
+        kinds = [d.kind for d in deltas]
+        assert kinds[0] == "translate"
+        assert "rotate_align" in kinds
+        assert kinds.index("translate") < kinds.index("rotate_align")
+        # Opting out restores the exact pre-#4968 output.
+        assert [
+            d.kind for d in deltas_from_result(pcb, result, include_endpoint_alignment=False)
+        ] == ["translate"]
+
+    def test_rotation_realigns_the_two_pad_axes(self, tmp_path: Path):
+        """The proposed quarter turn actually makes the pad arrays parallel."""
+        from kicad_tools.router.placement_delta import (
+            _axis_separation_deg,
+            _pad_axis,
+            _rotate_about,
+        )
+
+        pcb = _load(tmp_path, _endpoint_board())
+        delta = endpoint_align_deltas(pcb, _diag(pcb, "TGT"))[0]
+        pads = {ref: [] for ref in ("J1", "U3")}
+        from kicad_tools.router.stuck_classifier import _iter_board_pads
+
+        for ref, _net, point, _size in _iter_board_pads(pcb):
+            if ref in pads:
+                pads[ref].append(point)
+
+        before = _axis_separation_deg(
+            _pad_axis("J1", pads["J1"]).angle_deg, _pad_axis("U3", pads["U3"]).angle_deg
+        )
+        fp = next(f for f in pcb.footprints if f.reference == delta.target_ref)
+        moved = _rotate_about(
+            pads[delta.target_ref], fp.position[0], fp.position[1], delta.rotation_delta
+        )
+        other = "U3" if delta.target_ref == "J1" else "J1"
+        after = _axis_separation_deg(
+            _pad_axis(delta.target_ref, moved).angle_deg, _pad_axis(other, pads[other]).angle_deg
+        )
+        assert before == pytest.approx(90.0, abs=1.0)
+        assert after == pytest.approx(0.0, abs=1.0)
+
+    def test_matched_axes_emit_no_candidate(self, tmp_path: Path):
+        """Two parallel rows are already aligned -- nothing to propose."""
+        pcb = _load(tmp_path, _endpoint_board(sink_offsets=_ROW))
+        diag = _diag(pcb, "TGT")
+        # Non-vacuous: the ladder still says MOVE_PART; only the axes changed.
+        assert diag.recommendation[0].action is RecommendedAction.MOVE_PART
+        assert endpoint_align_deltas(pcb, diag) == []
+
+    def test_square_pad_array_emits_no_candidate(self, tmp_path: Path):
+        """A pad ring has no dominant axis, so a quarter turn aligns nothing."""
+        pcb = _load(tmp_path, _endpoint_board(source_offsets=_SQUARE))
+        diag = _diag(pcb, "TGT")
+        assert diag.recommendation[0].action is RecommendedAction.MOVE_PART
+        assert endpoint_align_deltas(pcb, diag) == []
+
+    def test_locked_endpoint_is_never_proposed(self, tmp_path: Path):
+        """``(locked yes)`` is an explicit fixed placement the proposer honours."""
+        pcb = _load(tmp_path, _endpoint_board(source_locked=True))
+        diag = _diag(pcb, "TGT")
+        assert diag.recommendation[0].action is RecommendedAction.MOVE_PART
+        targets = {d.target_ref for d in endpoint_align_deltas(pcb, diag)}
+        assert "J1" not in targets
+        # The unlocked endpoint is still offered -- the lock is scoped, not fatal.
+        assert targets == {"U3"}
+
+    def test_fixed_refs_endpoints_emit_no_candidate(self, tmp_path: Path):
+        """Both endpoints anchored -> no delta at all (not a malformed one)."""
+        pcb = _load(tmp_path, _endpoint_board())
+        diag = _diag(pcb, "TGT")
+        assert endpoint_align_deltas(pcb, diag)  # unanchored: candidates exist
+        assert endpoint_align_deltas(pcb, diag, fixed_refs={"J1", "U3"}) == []
+
+    def test_edge_mounted_connector_is_not_rotated(self, tmp_path: Path):
+        """Connector access: a part flush with the board outline keeps its facing."""
+        pcb = _load(tmp_path, _endpoint_board(source_at=(2.5, 50.0)))
+        diag = _diag(pcb, "TGT")
+        assert diag.recommendation[0].action is RecommendedAction.MOVE_PART
+        targets = {d.target_ref for d in endpoint_align_deltas(pcb, diag)}
+        assert "J1" not in targets
+
+    def test_non_move_part_ladder_emits_no_candidate(self, tmp_path: Path):
+        """A reversed bundle is a pad-ORDER defect; a rotation cannot fix it (#4560)."""
+        pcb = _load(tmp_path, _facing_rows_bundle_board(reversed_rows=True))
+        diag = _diag(pcb, "DQ2")
+        assert diag.recommendation[0].action is RecommendedAction.DE_REVERSE_BUNDLE
+        assert endpoint_align_deltas(pcb, diag) == []
+
+    def test_candidate_search_does_not_mutate_pcb(self, tmp_path: Path):
+        pcb = _load(tmp_path, _endpoint_board())
+        before = [(fp.reference, fp.position, fp.rotation, fp.layer) for fp in pcb.footprints]
+        endpoint_align_deltas(pcb, _diag(pcb, "TGT"))
+        after = [(fp.reference, fp.position, fp.rotation, fp.layer) for fp in pcb.footprints]
+        assert before == after
+
+    def test_candidate_round_trips_through_to_dict(self, tmp_path: Path):
+        pcb = _load(tmp_path, _endpoint_board())
+        delta = endpoint_align_deltas(pcb, _diag(pcb, "TGT"))[0]
+        restored = PlacementDelta.from_dict(json.loads(json.dumps(delta.to_dict())))
+        assert restored.kind == "rotate_align"
+        assert restored.rotation_delta == delta.rotation_delta
+        assert restored.target_ref == delta.target_ref
+        assert restored.rationale == delta.rationale
 
 
 # ---------------------------------------------------------------------------

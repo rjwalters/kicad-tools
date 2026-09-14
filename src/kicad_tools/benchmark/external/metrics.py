@@ -63,6 +63,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kicad_tools.placement.routing import RoutingPlacementDisposition
+from kicad_tools.router.reporting import RoutingPlacementReport
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.schema.pcb import PCB
 
@@ -449,6 +452,7 @@ def build_route_outcome(
     exception: BaseException | None = None,
     timed_out: bool = False,
     stopped_before_routing: bool = False,
+    placement_disposition: RoutingPlacementDisposition | None = None,
 ) -> RouteOutcome:
     """Classify a routing attempt from the evidence actually captured.
 
@@ -542,6 +546,13 @@ def build_route_outcome(
         is_complete = connections_total == 0 or (
             completion_pct is not None and completion_pct >= 100.0 - 1e-9
         )
+        if placement_disposition is not None and placement_disposition.requested_invalid_nets:
+            return RouteOutcome(
+                outcome=ROUTE_OUTCOME_PARTIAL,
+                artifact_source=artifact_source,
+                exit_code=exit_code,
+                reason="requested nets are placement-invalid, not attempted",
+            )
         if is_complete:
             return RouteOutcome(
                 outcome=ROUTE_OUTCOME_COMPLETED,
@@ -910,6 +921,10 @@ class BenchmarkReport:
             that was already present (or trivially satisfied) before this
             attempt ran. ``None`` when not measured -- never fabricated as
             zero.
+        placement_disposition: Optional public named routing populations for
+            this attempt. Requested blocked nets are never counted completed;
+            physical board metrics remain independent. ``None`` means absent
+            metadata, distinct from an explicitly unavailable placement check.
         notes: free-form annotations (e.g. "PocketBeagle: 3 nets left
             unrouted, see #NNNN"), rendered under the markdown table.
     """
@@ -931,6 +946,7 @@ class BenchmarkReport:
     route_outcome: RouteOutcome | None = None
     pre_route_completion: CompletionMetrics | None = None
     notes: list[str] = field(default_factory=list)
+    placement_disposition: RoutingPlacementReport | None = None
 
     @property
     def newly_routed_connections(self) -> int | None:
@@ -957,6 +973,9 @@ class BenchmarkReport:
             "protocol": self.protocol,
             "tool_commit": self.tool_commit,
             "route_outcome": (self.route_outcome.to_dict() if self.route_outcome else None),
+            "placement_disposition": (
+                self.placement_disposition.to_dict() if self.placement_disposition else None
+            ),
             "completion": self.completion.to_dict(),
             "pre_route_completion": (
                 self.pre_route_completion.to_dict() if self.pre_route_completion else None
@@ -1007,6 +1026,7 @@ def collect_report(
     route_timed_out: bool = False,
     route_stopped_before_routing: bool = False,
     pre_route_path: str | Path | None = None,
+    placement_disposition: RoutingPlacementDisposition | None = None,
 ) -> BenchmarkReport:
     """Measure a routed benchmark board and assemble the full report.
 
@@ -1046,6 +1066,9 @@ def collect_report(
         route_timed_out: Whether the attempt was abandoned for exceeding a
             time budget.
         route_stopped_before_routing: Explicit preflight refusal evidence.
+        placement_disposition: Typed metadata returned by this routing attempt,
+            even when it produced no output. Defaults to absent (legacy path).
+            Internal pad/copper bindings are excluded from the public report.
         pre_route_path: The pre-route (post rip-up) input board, used to
             populate :attr:`BenchmarkReport.pre_route_completion` -- the
             baseline this attempt started from. ``None`` when not supplied
@@ -1078,6 +1101,7 @@ def collect_report(
             exception=route_exception,
             timed_out=route_timed_out,
             stopped_before_routing=route_stopped_before_routing,
+            placement_disposition=placement_disposition,
         )
         if route_attempted
         else None
@@ -1087,6 +1111,19 @@ def collect_report(
         measure_completion(pre_route_path, strict=strict) if pre_route_path is not None else None
     )
 
+    placement_report = None
+    if placement_disposition is not None:
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        # Only actual output connectivity can establish completed requests.
+        # Fallback input remains measured above, but was not routed this attempt.
+        complete_names = (
+            frozenset(n.net_name for n in NetStatusAnalyzer(path, strict=strict).analyze().complete)
+            if route_output_exists
+            else frozenset()
+        )
+        placement_report = RoutingPlacementReport(placement_disposition, complete_names)
+
     return BenchmarkReport(
         board_id=board_id,
         protocol=protocol,
@@ -1094,6 +1131,7 @@ def collect_report(
         board_source=board_source,
         board_file=path.name,
         route_outcome=route_outcome,
+        placement_disposition=placement_report,
         completion=completion,
         pre_route_completion=pre_route_completion,
         copper=measure_copper(path),

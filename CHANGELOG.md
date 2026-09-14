@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add bounded +/-90-degree endpoint-orientation (`rotate_align`) placement-delta
+  candidates for a stuck net whose two endpoints present a pad-row/pad-column
+  mismatch, respecting fixed/locked placement and connector-access
+  constraints, reusing the corrected absolute-pad-rotation applicator (#4966)
+  and revalidating zone-carried power/mounting-pad connectivity after
+  rotation. Candidates carry auditable pad-alignment rationale and are never
+  a manufacturability verdict on their own (#4968).
+- Normalize legacy center/angle arcs in contour editing, board graphics, and placement linearization so rounded outlines remain connected and replacement preserves only actual mounting-hole contours (#4884).
+- Add read-only netclass diagnostics for undefined assignment targets, duplicate
+  declarations and KiCad 10.0.5-verified pattern membership against supplied
+  board nets, with explicit malformed/unsupported diagnostics (#5334).
+
 - Add a daily CI guard (`.github/workflows/assert-no-bot-external.yml`) that
   fails if any open issue labeled `external` has a Bot-type author (#5310).
   `external` is a hard-exclusion label that blocks Loom dispatch, and a
@@ -1411,6 +1423,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frame), and all in-pad nodes are shorted through the pad. This is a *false*
   fail-closed being removed, not a relaxation — copper outside the pad extent
   still never attaches, so genuinely moved/removed pads still fail closed.
+- **Router emitted partial-stack via spans for ordinary multilayer
+  transitions, without an HDI process ever being selected** (#5013,
+  router counterpart of stitch issue #5001) — `CppPathfinder._convert_result_to_route`
+  and `Router._convert_path_to_route` (the C++ and Python A* pathfinders)
+  built a via's reported `layers` span directly from the LOGICAL
+  current/next search layer (e.g. `F.Cu`/`In2.Cu` on a 4-layer board)
+  instead of the via's physical drilled extent. No blind/buried via
+  process is ever selected by either pathfinder today (Issue #4007:
+  `blind_buried_supported` is False for every board — `hdi_4layer` via
+  rules are defined but never instantiated), so every via either
+  constructs is manufactured as an ordinary through-hole whose barrel
+  spans the full copper stack; under-reporting the span let DRC and
+  connectivity code (which trust `via.layers` as the physical barrel
+  extent — `validate/connectivity.py`, `validate/rules/clearance.py`,
+  `core/layers.py::via_spans_layer`) silently skip barrel-vs-foreign-
+  copper clearance checks on layers the via actually passes through but
+  did not name as an endpoint. The grid-side obstacle search already
+  treated every via as full-stack (`Grid3D::mark_via` /
+  `Pathfinder::is_via_blocked_diag` in C++; `RoutingGrid._mark_via` in
+  Python both block/check ALL layers unconditionally), so no route is
+  newly accepted against copper this fix "discovers" — only the
+  *reported* span was wrong. Both pathfinders, plus the shared
+  `Route.validate_layer_transitions` missing-via safety net, now
+  normalize an ordinary (non-micro) via's span to the full physical
+  stack at `Route` construction — upstream of acceptance and export —
+  so every downstream consumer of `route.vias` sees the correct span,
+  not just the final saved `.kicad_pcb`. Explicit micro-vias are
+  untouched. Regression coverage spans both backends, an inner-to-inner
+  (`In1.Cu` -> `In2.Cu`) transition, the `validate_layer_transitions`
+  fallback, and `via_spans_layer`'s foreign-copper-on-an-intermediate-
+  layer visibility.
 - **Fine-pitch same-component carve-out silently bypassed authored pad
   clearance** (#5004) — the router's same-component clearance carve-out
   (`RoutingGrid._same_component_carveout_active` /

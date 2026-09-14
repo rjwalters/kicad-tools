@@ -1921,6 +1921,16 @@ success is **transient** (reported as a count only). Recording happens *before*
 the log-dedup decision, so #4349's DEBUG-downgraded repeat failures are still
 fully visible to a health check.
 
+A third, **disjoint** bucket exists: `pool_exhausted` (#7607). A tick whose
+latest record is a `RoleTickOutcome::PoolExhausted` skip — the token pool was
+present but had **zero spawnable accounts** — is neither persistent nor
+transient, and is never escalated. It renders as its own call-out, `pool
+exhausted (N role(s) held)`, so a fleet-wide dry pool stops reading as N broken
+roles (the incident behind #7607 saw 693 identical exit-78s masking every real
+role failure). The verdict is still `Degraded` — an exhausted pool is real,
+operator-actionable information — but the summary line never says "PERSISTENT
+failure(s)" for it.
+
 ### Role liveness: "is it ticking at all" (#6201)
 
 `roles` (above) classifies the *outcomes* of ticks that DID happen, inside a
@@ -1980,8 +1990,8 @@ an operator checks:
 
 `role_liveness` does not catch this shape either: the tick *is* recorded, so
 the last-tick timestamp stays fresh while the role does nothing. The fix is to
-make the artifact operators actually read honest — all four pre-spawn bail-outs
-(unresolvable spawn bin, `NoTokenPool`, `RuntimeRejected`,
+make the artifact operators actually read honest — all five pre-spawn bail-outs
+(unresolvable spawn bin, `NoTokenPool`, `PoolExhausted`, `RuntimeRejected`,
 `ModelRuntimeMismatch`) now append a dated line to `role-<role>.log`:
 
 ```
@@ -3831,8 +3841,8 @@ knobs not yet audited here.
 | `autonomous.workFinder.declineCooldown.warnThreshold` | `LOOM_WORK_FINDER_DECLINE_WARN_THRESHOLD` | `3` | Consecutive declines of one issue that emit a single WARN naming the issue and the rule it declined on. Matches `quarantine.threshold`. Zero/invalid → default |
 | `autonomous.workFinder.extraSkipLabels` | `LOOM_WORK_FINDER_EXTRA_SKIP_LABELS` (comma-separated) | `[]` | Per-workspace/per-repo **additional** label names (#6685) the work-finder treats as a skip/park signal, beyond the hardcoded `loom:blocked` / `loom:operator-only` (`PARK_LABELS`) — e.g. a repo-local `blocked-upstream` label that will never be renamed to a `loom:*` name. Purely additive to `SKIP_LABELS`' candidate-query filter (`WorkItem::is_skipped_with_extra`); it does **not** extend the separate dispatch()-level park-label guard (#4444) above, which stays keyed on `PARK_LABELS` only. Env replaces config entirely when set (even to an empty string); resolved once per workspace, live on the next tick (a cheap `.loom/config.json` read, no daemon restart needed). **`loom:building` can never be added to the resolved list** — filtered out defensively even if named explicitly in config/env, so a misconfiguration can never re-introduce the "an in-flight claim is treated as a park" regression `SKIP_LABELS`' own doc comment warns against |
 | *(env only)* | `LOOM_OPEN_PR_MEMO` | `true` | Verified-open-PR memo for the #4123 open-PR dispatch guard (#6788). Falsy (`0`/`false`/`no`/`off`) disables; anything else (including unset) enables. When on, the guard (a) reuses a verified "issue #N has open linked PR #M" answer for 15 minutes instead of re-running the closes-graph query on every work-finder tick, and (b) when **both** the GraphQL probe and its #5911 REST fallback fail, re-verifies that one known PR over a single `GET repos/{owner}/{repo}/pulls/{M}` before conceding. The documented fail-open contract is unchanged: with no memo, or if that recheck also cannot answer, the guard still proceeds. In-memory only — a daemon restart clears it. Disable only to restore the exact pre-#6788 probe |
-| *(env only)* | `LOOM_EMPTY_POOL_BREAKER_THRESHOLD` | `3` | How many **distinct** issues must die in `spawn-claude.sh`'s token-selection step (exit 78) inside the window below before new dispatch to that workspace is paused (#6614). Distinct *issues*, not raw failures: one issue cycling through its own `dispatchBackoff` can never trip it. Crossing it trips the existing pre-flight advisory (#4386) + half-open dispatch gate (#5030) — one loud `ERROR` plus a `daemon.preflight.advisory` event — and the first dispatch that gets past token selection clears it. Zero/invalid → default |
-| *(env only)* | `LOOM_EMPTY_POOL_BREAKER_WINDOW_SECS` | `1800` | Trailing window over which those distinct token-selection deaths are counted (#6614) — twice the `dispatchBackoff.maxSecs` plateau, so a systemic fault always accumulates while isolated failures spaced further apart never do. Zero/invalid → default |
+| *(env only)* | `LOOM_EMPTY_POOL_BREAKER_THRESHOLD` | `3` | How many **distinct** sources must hit an unsatisfiable token selection (exit 78) inside the window below before new dispatch to that workspace is paused (#6614). A source is an issue dispatch, or — since #7607 — a `(workspace, role)` role tick whose pre-spawn pool preflight found zero spawnable accounts. Distinct *sources*, not raw failures: one issue cycling through its own `dispatchBackoff`, or one role looping on one workspace, can never trip it. Crossing it trips the existing pre-flight advisory (#4386) + half-open dispatch gate (#5030) — one loud `ERROR` plus a `daemon.preflight.advisory` event — and the first dispatch that gets past token selection clears it. Zero/invalid → default |
+| *(env only)* | `LOOM_EMPTY_POOL_BREAKER_WINDOW_SECS` | `1800` | Trailing window over which those distinct sources are counted (#6614) — twice the `dispatchBackoff.maxSecs` plateau, so a systemic fault always accumulates while isolated failures spaced further apart never do. Zero/invalid → default |
 | `autonomous.hostBreaker.enabled` | `LOOM_HOST_BREAKER` | `true` | Host-distress circuit breaker on/off (#4235). A safety backstop — **defaults on**. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. **Restart required** — resolved once at startup and registered as a process-global handle (#5963). See [Host-distress circuit breaker](#host-distress-circuit-breaker-4235) below |
 | `autonomous.hostBreaker.loadPerCoreTrip` | `LOOM_HOST_BREAKER_LOAD_PER_CORE` | `2.5` | Load-per-core at/over which a tick counts toward tripping. `<= 0`/invalid → default |
 | `autonomous.hostBreaker.sustainTicks` | `LOOM_HOST_BREAKER_SUSTAIN_TICKS` | `3` | Consecutive over-threshold work-finder ticks required to trip (a single spike never trips). Zero/invalid → default |

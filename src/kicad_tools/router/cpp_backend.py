@@ -836,6 +836,15 @@ class CppGrid:
         # (Issue #2439: C++ geometric validation)
         self._synced_route_count: int = 0
 
+    def install_fixed_fills(self, fills) -> None:
+        if not hasattr(self._impl, "add_fixed_fill"):
+            if fills:
+                raise RuntimeError("Rebuild native router: fixed filled-copper support required")
+            return
+        self._impl.clear_fixed_fills()
+        for layer, clearance, rings in fills.native_polygons():
+            self._impl.add_fixed_fill(layer, clearance, rings)
+
     @classmethod
     def from_routing_grid(cls, grid: RoutingGrid) -> CppGrid:
         """Create a CppGrid from an existing RoutingGrid."""
@@ -850,6 +859,7 @@ class CppGrid:
 
         # Store reference to original Python grid for post-route validation
         cpp_grid._py_grid = grid
+        cpp_grid.install_fixed_fills(grid.fixed_fills)
 
         # Issue #2481: Establish the back-reference from the Python grid
         # to this CppGrid so ``RoutingGrid.unmark_route`` can invalidate
@@ -2200,6 +2210,8 @@ class CppPathfinder:
         # fallback on a stale .so without the #4511 setter).
         if hasattr(self._impl, "set_search_pair_widths"):
             self._impl.set_search_pair_widths(net_trace_width / 2.0, net_via_size / 2.0)
+        if hasattr(self._impl, "set_search_fill_clearances"):
+            self._impl.set_search_fill_clearances(net_trace_clearance, self._rules.via_clearance)
 
         try:
             result = self._impl.route_resumable(
@@ -2699,15 +2711,44 @@ class CppPathfinder:
         via_diameter = float(net_class.via_size if net_class else self._rules.via_diameter)
         via_drill = float(self._rules.via_drill)
 
+        # Issue #5013: ``cpp_via.layer_from``/``layer_to`` are the LOGICAL
+        # search transition (e.g. F.Cu -> In2.Cu), not the via's physical
+        # drilled span.  The C++ pathfinder has no blind/buried process
+        # selection (Issue #4007: ``blind_buried_supported`` is False for
+        # every current board -- ``hdi_4layer`` via rules are defined but
+        # never instantiated), so every via this loop constructs is
+        # manufactured as an ordinary through-hole whose barrel contacts
+        # every copper layer from the top of the stack to the bottom,
+        # regardless of which two layers the search happened to bridge.
+        # Emitting the logical pair verbatim under-reported the drilled
+        # span (e.g. ``F.Cu``/``In2.Cu`` on a 4-layer board): DRC and
+        # connectivity code treat ``via.layers`` as the physical barrel
+        # extent (see ``validate/connectivity.py::_via_bridged_layers``,
+        # ``validate/rules/clearance.py``), so a truncated span silently
+        # skipped barrel-vs-foreign-copper clearance checks on the layers
+        # the via actually passes through.  Router counterpart of stitch
+        # issue #5001 (``ViaPlacement`` normalization in
+        # ``cli/stitch_cmd.py``).
+        #
+        # The search/obstacle-avoidance side already treats every via as
+        # full-stack -- ``Grid3D::mark_via`` / ``Pathfinder::is_via_blocked_diag``
+        # (cpp/src/grid.cpp, cpp/src/pathfinder.cpp) iterate ALL grid
+        # layers unconditionally -- so no route is newly accepted against
+        # copper this fix "discovers"; only the *reported* span was wrong.
+        # Normalize HERE, at ``Route`` construction (upstream of
+        # acceptance and export), so every downstream consumer of
+        # ``route.vias`` sees the correct physical span, not just the
+        # final saved ``.kicad_pcb``.
+        physical_top_layer = Layer(self._grid.index_to_layer(0))
+        physical_bottom_layer = Layer(self._grid.index_to_layer(self._grid.num_layers - 1))
+
         for cpp_via in result.vias:
-            layer_from_value = self._grid.index_to_layer(cpp_via.layer_from)
-            layer_to_value = self._grid.index_to_layer(cpp_via.layer_to)
             via = Via(
                 x=cpp_via.x,
                 y=cpp_via.y,
                 drill=via_drill,
                 diameter=via_diameter,
-                layers=(Layer(layer_from_value), Layer(layer_to_value)),
+                layers=(physical_top_layer, physical_bottom_layer),
                 net=cpp_via.net,
                 net_name=start.net_name,
             )
@@ -2920,6 +2961,20 @@ class CppPathfinder:
             from .grid import _sync_pad_via_policies
 
             _sync_pad_via_policies(py_grid, self._grid)
+
+        if py_grid is not None and py_grid.fixed_fills:
+            fill_class = self._net_class_map.get(start.net_name)
+            fill_clearance = fill_class.clearance if fill_class else self._rules.trace_clearance
+            for segment in route.segments:
+                layer = py_grid.layer_to_index(segment.layer.value)
+                if not py_grid.fixed_fills.segment_clear(
+                    (segment.x1, segment.y1),
+                    (segment.x2, segment.y2),
+                    layer,
+                    segment.width / 2,
+                    fill_clearance,
+                ):
+                    return (segment.x1, segment.y1)
 
         vresult = self._grid._impl.validate_route(
             cpp_segs,

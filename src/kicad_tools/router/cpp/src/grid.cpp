@@ -11,6 +11,68 @@
 
 namespace router {
 
+void Grid3D::add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings) {
+    if (rings.empty() || rings.front().empty()) return;
+    FixedFill fill;
+    fill.layer = layer; fill.clearance = clearance; fill.rings = rings;
+    fill.minx = fill.maxx = rings.front().front().first;
+    fill.miny = fill.maxy = rings.front().front().second;
+    for (const auto& ring : rings) {
+        for (size_t i = 1; i < ring.size(); ++i) {
+            auto [ax, ay] = ring[i-1]; auto [bx, by] = ring[i];
+            fill.minx = std::min({fill.minx, ax, bx});
+            fill.miny = std::min({fill.miny, ay, by});
+            fill.maxx = std::max({fill.maxx, ax, bx});
+            fill.maxy = std::max({fill.maxy, ay, by});
+            size_t index = fill.edges.size();
+            fill.edges.push_back({ax, ay, bx, by});
+            for (int y = std::floor(std::min(ay, by)); y <= std::floor(std::max(ay, by)); ++y) {
+                fill.rows[y].push_back(index);
+                for (int x = std::floor(std::min(ax, bx)); x <= std::floor(std::max(ax, bx)); ++x)
+                    fill.bins[{x,y}].push_back(index);
+            }
+        }
+    }
+    fixed_fills_.push_back(std::move(fill));
+}
+
+// Exact physical predicates; bins only reject edges that cannot affect a
+// query. Even-odd containment includes holes without scanning every vertex.
+bool Grid3D::fixed_fill_clear(double ax, double ay, double bx, double by,
+                             int layer, double half, double reach) const {
+    for (const auto& fill : fixed_fills_) {
+        if (fill.layer != layer) continue;
+        const double required = std::max(reach, half + fill.clearance);
+        double x0 = std::min(ax,bx)-required, x1 = std::max(ax,bx)+required;
+        double y0 = std::min(ay,by)-required, y1 = std::max(ay,by)+required;
+        if (x1 < fill.minx || x0 > fill.maxx || y1 < fill.miny || y0 > fill.maxy) continue;
+        auto in_copper = [&](double x, double y) {
+            bool result = false;
+            auto row = fill.rows.find(static_cast<int>(std::floor(y)));
+            if (row == fill.rows.end()) return false;
+            for (size_t i : row->second) {
+                const auto& e = fill.edges[i];
+                if ((e.ay > y) != (e.by > y) && x < (e.bx-e.ax)*(y-e.ay)/(e.by-e.ay)+e.ax)
+                    result = !result;
+            }
+            return result;
+        };
+        if (in_copper(ax,ay) || in_copper(bx,by)) return false;
+        for (int y = std::floor(std::max(y0,fill.miny)); y <= std::floor(std::min(y1,fill.maxy)); ++y) {
+            for (int x = std::floor(std::max(x0,fill.minx)); x <= std::floor(std::min(x1,fill.maxx)); ++x) {
+                auto bin = fill.bins.find({x,y});
+                if (bin == fill.bins.end()) continue;
+                for (size_t i : bin->second) {
+                    const auto& e = fill.edges[i];
+                    double distance = segment_to_segment_distance(ax,ay,bx,by,e.ax,e.ay,e.bx,e.by);
+                    if (distance <= 1e-7 || distance < required - 1e-4) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // Floating-point tolerance for clearance comparisons (Issue #2465).
 // IEEE-754 rounding in radius/distance math can leave computed
 // clearances at values like 0.14999999... when the design intent is
@@ -691,6 +753,30 @@ ValidationResult Grid3D::validate_route(
     ValidationResult result;
     result.valid = true;
     result.min_clearance = std::numeric_limits<float>::infinity();
+
+    for (const auto& seg : segments) {
+        if (!fixed_fill_clear(seg.x1, seg.y1, seg.x2, seg.y2, seg.layer,
+                              seg.width / 2.0, seg.width / 2.0 + trace_clearance)) {
+            result.valid = false;
+            result.min_clearance = 0;
+            result.violation_x = seg.x1;
+            result.violation_y = seg.y1;
+            return result;
+        }
+    }
+    for (const auto& via : vias) {
+        for (int layer = std::min(via.layer_from, via.layer_to);
+             layer <= std::max(via.layer_from, via.layer_to); ++layer) {
+            if (!fixed_fill_clear(via.x, via.y, via.x, via.y, layer,
+                                  via.diameter / 2.0, via.diameter / 2.0 + via_clearance)) {
+                result.valid = false;
+                result.min_clearance = 0;
+                result.violation_x = via.x;
+                result.violation_y = via.y;
+                return result;
+            }
+        }
+    }
 
     // Issue #2559 / Epic #2556 Phase 1C: diff-pair within-pair clearance.
     // The partner branch is active when partner_net is a real net id (>= 0)

@@ -1399,6 +1399,9 @@ class _ZoneFill:
     net_name: str
     layer: str
     polygon: object  # shapely (Multi)Polygon
+    source_clearance: float = 0.0
+    source_zone_id: str = ""
+    source_zone_index: int = -1
 
 
 def _repair_fill_polygon(poly):
@@ -1468,7 +1471,7 @@ def _collect_zone_fills(pcb: PCB) -> dict[str, list[_ZoneFill]]:
     number_to_name = {net.number: net.name for net in pcb.nets.values()}
 
     fills_by_layer: dict[str, list[_ZoneFill]] = {}
-    for zone in pcb.zones:
+    for zone_index, zone in enumerate(pcb.zones):
         net_number = zone.net_number
         if net_number == 0 and zone.net_name:
             # KiCad 9 name-only ``(net "X")`` format -- resolve by name.
@@ -1495,6 +1498,9 @@ def _collect_zone_fills(pcb: PCB) -> dict[str, list[_ZoneFill]]:
                     net_name=net_name,
                     layer=layer,
                     polygon=poly,
+                    source_clearance=getattr(zone, "clearance", 0.0),
+                    source_zone_id=getattr(zone, "uuid", ""),
+                    source_zone_index=zone_index,
                 )
             )
     return fills_by_layer

@@ -454,23 +454,22 @@ class PlacementOptimizer:
     ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
         """Approximate a ``gr_arc`` as a sequence of short line segments.
 
-        KiCad gr_arc is defined by *start* (arc start point), *mid*
+        Normalize legacy center/angle arcs through the shared schema parser.
+        Modern gr_arc is defined by *start* (arc start point), *mid*
         (midpoint on the arc), and *end* (arc end point).  We recover the
         centre and radius via the circumscribed-circle of these three points,
         then emit *num_segments* chords.
         """
-        start_node = arc_sexp.find("start")
-        mid_node = arc_sexp.find("mid")
-        end_node = arc_sexp.find("end")
-        if not (start_node and mid_node and end_node):
-            return []
+        from kicad_tools.schema.pcb import GraphicArc
 
-        sx = start_node.get_float(0) or 0.0
-        sy = start_node.get_float(1) or 0.0
-        mx = mid_node.get_float(0) or 0.0
-        my = mid_node.get_float(1) or 0.0
-        ex = end_node.get_float(0) or 0.0
-        ey = end_node.get_float(1) or 0.0
+        if not (arc_sexp.find("start") and arc_sexp.find("end")):
+            return []
+        if arc_sexp.find("mid") is None and arc_sexp.find("angle") is None:
+            return []
+        arc = GraphicArc.from_sexp(arc_sexp)
+        sx, sy = arc.start
+        mx, my = arc.mid
+        ex, ey = arc.end
 
         # Find circumscribed circle through (sx,sy), (mx,my), (ex,ey)
         ax, ay = sx, sy

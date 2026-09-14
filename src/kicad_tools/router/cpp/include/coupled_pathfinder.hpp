@@ -90,6 +90,9 @@ struct CoupledNodeGreater {
 
 class CoupledPathfinder {
 public:
+    void set_fill_rail_dimensions(double ph, double pg, double nh, double ng) {
+        p_fill_half_ = ph; p_fill_gap_ = pg; n_fill_half_ = nh; n_fill_gap_ = ng;
+    }
     // All construction-time scalars mirror the Python
     // ``CoupledPathfinder.__init__`` derived radii and rule constants.  The
     // Python side pre-computes the trace/via clearance radii (identical
@@ -129,6 +132,7 @@ public:
         double timeout_seconds);
 
 private:
+    double p_fill_half_ = -1, p_fill_gap_ = -1, n_fill_half_ = -1, n_fill_gap_ = -1;
     Grid3D& grid_;
     DesignRules rules_;
     int target_spacing_cells_;

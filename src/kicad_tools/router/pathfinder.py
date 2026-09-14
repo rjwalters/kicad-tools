@@ -1532,6 +1532,20 @@ class Router:
 
         return (gx1, gy1, gx2, gy2)
 
+    def _fixed_step_clear(self, current, nx, ny, layer, net_name):
+        if not self.grid.fixed_fills:
+            return True
+        net_class = self._get_net_class(net_name)
+        half = (net_class.trace_width if net_class else self.rules.trace_width) / 2
+        clearance = net_class.clearance if net_class else self.rules.trace_clearance
+        return self.grid.fixed_fills.segment_clear(
+            self.grid.grid_to_world(current.x, current.y),
+            self.grid.grid_to_world(nx, ny),
+            layer,
+            half,
+            clearance,
+        )
+
     def _is_trace_blocked(
         self,
         gx: int,
@@ -1913,6 +1927,20 @@ class Router:
             radius: Override the via half-width in grid cells. When None,
                     uses the pre-computed ``_via_half_cells`` (Issue #1692).
         """
+        if self.grid.fixed_fills:
+            name = next(
+                (name for name, number in self._net_name_to_id.items() if number == net), ""
+            )
+            net_class = self._get_net_class(name)
+            half = (net_class.via_size if net_class else self.rules.via_diameter) / 2
+            if not self.grid.fixed_fills.via_clear(
+                self.grid.grid_to_world(gx, gy),
+                tuple(range(self.grid.num_layers)),
+                half,
+                self.rules.via_clearance,
+            ):
+                return True
+
         # Issue #1692: Support per-net-class via radius override.
         # When a custom radius is provided, compute offsets on the fly
         # rather than using the pre-computed arrays (which use the global
@@ -3795,6 +3823,8 @@ class Router:
             for neighbor_idx, (dx, dy, _dlayer, neighbor_cost_mult) in enumerate(self.neighbors_2d):
                 nx, ny = current.x + dx, current.y + dy
                 nlayer = current.layer
+                if not self._fixed_step_clear(current, nx, ny, nlayer, start.net_name):
+                    continue
 
                 # Check bounds and obstacles - account for trace width
                 # A trace with width W extends W/2 on each side of centerline
@@ -4605,21 +4635,41 @@ class Router:
                     )
                     route.segments.append(seg)
 
+        # Issue #5013: mirrors the C++ backend fix in
+        # ``CppPathfinder._convert_result_to_route`` (cpp_backend.py).
+        # ``current_layer_idx``/``layer_idx`` below are the LOGICAL search
+        # transition (e.g. F.Cu -> In2.Cu), not the via's physical drilled
+        # span.  This Python A* pathfinder has no blind/buried process
+        # selection either (Issue #4007: ``blind_buried_supported`` is
+        # False for every current board), so every via this loop
+        # constructs is an ordinary through-hole whose barrel contacts
+        # every copper layer from the top of the stack to the bottom.
+        # Reporting the logical pair verbatim under-reported the drilled
+        # span; DRC/connectivity code trusts ``via.layers`` as the
+        # physical barrel extent (``validate/connectivity.py``,
+        # ``validate/rules/clearance.py``).  The grid-side obstacle
+        # checks already block every layer for a placed via
+        # (``RoutingGrid._mark_via`` -- "Mark cells around a via as
+        # blocked on ALL layers"), so this normalization only corrects
+        # the reported span, not route acceptance.  Router counterpart of
+        # stitch issue #5001.
+        physical_top_layer = Layer(self.grid.index_to_layer(0))
+        physical_bottom_layer = Layer(self.grid.index_to_layer(self.grid.num_layers - 1))
+
         for _i, (wx, wy, layer_idx, is_via) in enumerate(path):
             if is_via:
                 # Emit pending segment before via
                 _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
 
-                # Add via - convert grid indices back to Layer enum values
+                # Add via - the physical span always covers the full stack
+                # (see the Issue #5013 note above); the logical
+                # current/next search layers are not the drilled extent.
                 via = Via(
                     x=current_x,
                     y=current_y,
                     drill=self.rules.via_drill,
                     diameter=net_via_diameter,
-                    layers=(
-                        Layer(self.grid.index_to_layer(current_layer_idx)),
-                        Layer(self.grid.index_to_layer(layer_idx)),
-                    ),
+                    layers=(physical_top_layer, physical_bottom_layer),
                     net=start_pad.net,
                     net_name=start_pad.net_name,
                 )
@@ -5430,6 +5480,8 @@ class Router:
         for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
             nx, ny = current.x + dx, current.y + dy
             nlayer = current.layer
+            if not self._fixed_step_clear(current, nx, ny, nlayer, source_pad.net_name):
+                continue
 
             # Check bounds
             if not (0 <= nx < self.grid.cols and 0 <= ny < self.grid.rows):

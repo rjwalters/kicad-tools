@@ -58,6 +58,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Callable
 
+from kicad_tools.router.reporting import RouteAttemptResult
+
 from ..format_options import emit_json, stdout_to_stderr_when, wants_json
 
 __all__ = ["run_bench_command"]
@@ -329,7 +331,7 @@ def _run_one_board(
     kicad_cli_timeout: int,
     backend: Any,
     verbose: bool,
-    route_fn: Callable[[list[str]], int] | None = None,
+    route_fn: Callable[[list[str]], int | RouteAttemptResult] | None = None,
     opener: Any = None,
     protocol: str = "zero-touch",
     net_class_map_path: Path | None = None,
@@ -343,10 +345,14 @@ def _run_one_board(
     as ``--net-class-map`` and engages ``--differential-pairs`` so the
     declared diff-pair classes are actually routed as coupled pairs rather
     than falling through to the default single-ended strategy.
+
+    ``route_fn`` may return a legacy integer or ``RouteAttemptResult`` with
+    explicit placement metadata for this invocation, including no-output
+    failures. Metadata is never recovered from old artifacts or global state.
     """
     from kicad_tools.benchmark.external import collect_report
 
-    route: Callable[[list[str]], int]
+    route: Callable[[list[str]], int | RouteAttemptResult]
     if route_fn is not None:
         route = route_fn
     else:
@@ -408,10 +414,16 @@ def _run_one_board(
     wall_clock_s: float | None = None
     route_rc: int | None
     route_exc: Exception | None = None
+    placement_disposition = None
     # Measure the whole attempt, including failures, only with a native backend.
     start = time.perf_counter() if backend.timing_valid else None
     try:
-        route_rc = route(route_argv)
+        result = route(route_argv)
+        if isinstance(result, RouteAttemptResult):
+            route_rc = result.exit_code
+            placement_disposition = result.placement_disposition
+        else:
+            route_rc = result
     except Exception as exc:  # defensive: a router crash must not abort the whole run
         route_rc = None
         route_exc = exc
@@ -480,6 +492,7 @@ def _run_one_board(
         notes=notes,
         backend=backend,
         route_exit_code=route_rc,
+        placement_disposition=placement_disposition,
         route_output_exists=output_exists,
         route_exception=route_exc,
         route_timed_out=route_timed_out,
