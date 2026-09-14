@@ -550,6 +550,7 @@ def get_routing_diagnostics_json(
     current_strategy: str = "basic",
     nets_to_route_ids: set[int] | None = None,
     single_pad_count: int = 0,
+    min_completion: float = 1.0,
 ) -> dict:
     """Get routing diagnostics as a JSON-serializable dictionary.
 
@@ -566,10 +567,27 @@ def get_routing_diagnostics_json(
             filtered to this set so numerator and denominator are consistent.
         single_pad_count: Number of single-pad nets excluded from routing.
             Shown in the summary for diagnostic clarity.
+        min_completion: Routing-population threshold for the additive
+            ``clean_success`` summary when placement metadata is present.
+            Requested placement errors always prevent success, even at zero.
 
     Returns:
         Dictionary with routing diagnostics in JSON-serializable format
     """
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+    from .reporting import RoutingPlacementReport
+
+    disposition = getattr(router, "placement_disposition", None)
+    if not isinstance(disposition, RoutingPlacementDisposition):
+        disposition = None
+    if disposition is not None:
+        # Original named requests survive loader exclusions and absent net IDs.
+        nets_to_route = len(disposition.requested_nets)
+        nets_to_route_ids = {
+            net_map[name] for name in disposition.eligible_nets if net_map.get(name, 0) > 0
+        }
+
     # Build reverse mapping for net names
     reverse_net = {v: k for k, v in net_map.items() if v > 0}
 
@@ -837,6 +855,40 @@ def get_routing_diagnostics_json(
         "failed_routes": failed_routes,
         "suggestions": suggestions,
     }
+    if disposition is not None:
+        placement = RoutingPlacementReport(
+            disposition, frozenset(reverse_net[nid] for nid in routed_net_ids if nid in reverse_net)
+        )
+        blocked = disposition.requested_invalid_nets
+        # Account for eligible names even when an early loader rejection or
+        # missing net ID left no router population. Partial nets are separate.
+        unrouted_count = len(disposition.eligible_nets - placement.completed_nets) - partial_count
+        summary_dict.update(
+            nets_unrouted=unrouted_count,
+            unrouted_rate=round(unrouted_count / nets_to_route * 100, 1) if nets_to_route else 0,
+            nets_eligible=len(disposition.eligible_nets),
+            nets_placement_blocked=len(blocked),
+            nets_completed=len(placement.completed_nets),
+            nets_failed=unrouted_count + len(blocked),
+            clean_success=disposition.check_available
+            and placement.meets_completion(min_completion),
+        )
+        result_dict["placement_disposition"] = placement.to_dict()
+        for name in sorted(blocked):
+            failed_routes.append(
+                {
+                    "net_id": net_map.get(name),
+                    "net_name": name,
+                    "status": "not_attempted",
+                    "failure_cause": "placement_invalid",
+                    "reason": "placement-invalid, not attempted",
+                    "attribution": "direct"
+                    if name in disposition.direct_invalid_nets
+                    else "coupled",
+                }
+            )
+        if blocked:
+            result_dict["failure_breakdown"]["placement_invalid"] = len(blocked)
     if partially_connected:
         result_dict["partially_connected"] = partially_connected
     return result_dict

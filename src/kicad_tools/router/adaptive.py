@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 from .layers import Layer, LayerStack
 from .primitives import Route
+from .reporting import RoutingPlacementReport
 from .rules import DesignRules
 
 
@@ -33,6 +34,25 @@ class RoutingResult:
     statistics: dict
     routing_failures: list[RoutingFailure] = field(default_factory=list)
     single_pad_count: int = 0
+    placement_report: RoutingPlacementReport | None = None
+
+    def __post_init__(self) -> None:
+        if self.placement_report is not None:
+            self.nets_requested = len(self.placement_report.disposition.requested_nets)
+            self.nets_routed = len(self.placement_report.completed_nets)
+            self.converged = self.converged and self.placement_report.meets_completion()
+
+    @property
+    def nets_eligible(self) -> int:
+        if self.placement_report is None:
+            return self.nets_requested
+        return len(self.placement_report.disposition.eligible_nets)
+
+    @property
+    def nets_placement_blocked(self) -> int:
+        if self.placement_report is None:
+            return 0
+        return len(self.placement_report.disposition.requested_invalid_nets)
 
     @property
     def success_rate(self) -> float:
@@ -256,6 +276,17 @@ class AdaptiveAutorouter:
             nets_routed = len({r.net for r in routes if r.net != 0})
             converged = self._check_convergence(router, overflow)
 
+            placement_report = None
+            if router.placement_disposition is not None:
+                from .output import get_routing_diagnostics_json
+
+                diagnostic = get_routing_diagnostics_json(router, self.net_map, nets_requested)
+                placement_report = RoutingPlacementReport(
+                    router.placement_disposition,
+                    frozenset(item["net_name"] for item in diagnostic["successful_routes"]),
+                )
+                converged = converged and placement_report.meets_completion()
+
             # Build result
             self.result = RoutingResult(
                 routes=routes,
@@ -269,6 +300,7 @@ class AdaptiveAutorouter:
                 statistics=router.get_statistics(),
                 routing_failures=getattr(router, "routing_failures", []),
                 single_pad_count=single_pad_count,
+                placement_report=placement_report,
             )
             self._autorouter = router
 

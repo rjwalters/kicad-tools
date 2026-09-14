@@ -669,6 +669,7 @@ class TestBenchmarkReport:
             "protocol",
             "tool_commit",
             "route_outcome",
+            "placement_disposition",
             "completion",
             "pre_route_completion",
             "newly_routed_connections",
@@ -943,3 +944,86 @@ class TestCommittedLegacyReports:
         expected_pct = f"{data['completion']['completion_pct']:.1f}%"
         assert expected_pct in text
         assert "| 0.0% |" not in text
+
+
+def test_placement_metadata_does_not_replace_measured_metrics(routed_board):
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+    baseline = _report(routed_board, route_exit_code=0, route_output_exists=True)
+    disposition = RoutingPlacementDisposition(
+        all_nets=frozenset({"SIG1", "SIG2", "SIG3"}),
+        invalid_references=frozenset({"R1"}),
+        direct_invalid_nets=frozenset({"SIG1"}),
+        coupled_invalid_nets=frozenset({"SIG3"}),
+        requested_nets=frozenset({"SIG1", "SIG2", "SIG3"}),
+        pad_net_identities=(("R1", "1", "SIG1", "SIG1"),),
+        preserve_copper_nets=frozenset({"SIG1"}),
+    )
+    report = _report(
+        routed_board,
+        route_exit_code=0,
+        route_output_exists=True,
+        placement_disposition=disposition,
+        pre_route_path=routed_board,
+    )
+    assert report.completion == baseline.completion
+    assert report.copper == baseline.copper
+    assert report.newly_routed_connections == 0
+    assert report.route_outcome.outcome == "partial"
+    data = report.to_dict()["placement_disposition"]
+    assert data["nets_requested"] == 3
+    assert data["nets_eligible"] == 1
+    assert data["nets_completed"] == 0  # SIG2 is physically only partially connected.
+    assert data["nets_placement_blocked"] == 2
+    assert data["direct_invalid_nets"] == ["SIG1"]
+    assert data["coupled_invalid_nets"] == ["SIG3"]
+    assert "pad_net_identities" not in data and "preserve_copper_nets" not in data
+    text = render_report_markdown(report)
+    assert "3 requested, 1 eligible, 0 completed, 2 requested placement-blocked" in text
+    assert "R1" in text and "Coupled: placement-invalid, not attempted" in text
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_collect_report_unrequested_invalid_and_unavailable(routed_board, available):
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+    disposition = RoutingPlacementDisposition(
+        invalid_references=frozenset({"R3"}),
+        direct_invalid_nets=frozenset({"SIG2"}),
+        requested_nets=frozenset({"SIG1"}),
+        unrequested_nets=frozenset({"SIG2"}),
+        check_available=available,
+    )
+    report = _report(
+        routed_board, route_exit_code=0, route_output_exists=True, placement_disposition=disposition
+    )
+    placement = report.to_dict()["placement_disposition"]
+    assert placement["nets_requested"] == placement["nets_completed"] == 1
+    assert placement["nets_placement_blocked"] == 0
+    assert placement["clean_success"] is available
+    if not available:
+        assert placement["status"] == "unavailable"
+        assert "unavailable" in render_report_markdown(report)
+    # Board-wide connection metric still includes the unrequested invalid net.
+    assert report.completion.connections_total == 3
+    assert report.completion.connections_routed == 2
+
+
+@pytest.mark.parametrize(
+    "signal,expected",
+    [("timeout", "timeout"), ("preflight", "stopped_before_routing"), ("failure", "failed")],
+)
+def test_disposition_preserves_failure_classifications(routed_board, signal, expected):
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+
+    report = _report(
+        routed_board,
+        route_exit_code=2,
+        route_output_exists=False,
+        route_timed_out=signal == "timeout",
+        route_stopped_before_routing=signal == "preflight",
+        placement_disposition=RoutingPlacementDisposition(check_available=False),
+    )
+    assert report.route_outcome.outcome == expected
+    assert report.timing.measured_phase == expected
+    assert report.placement_disposition.completed_nets == frozenset()

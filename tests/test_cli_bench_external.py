@@ -1187,3 +1187,97 @@ def test_runner_preserves_phase_evidence_and_attempt_time(
     )
     assert report.timing.wall_clock_s == 2.5
     assert report.timing.measured_phase == expected
+
+
+@pytest.mark.parametrize("write_output,exit_code", [(True, 2), (False, 2), (True, 0)])
+def test_attempt_local_placement_reporting(tmp_path, write_output, exit_code):
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+    from kicad_tools.router.reporting import RouteAttemptResult
+
+    fetch, normalize = bench_cmd._load_external_modules()[:2]
+    spec = _spec(fetch)
+    cache = tmp_path / "cache"
+    source = cache / spec.slug / Path(spec.board_path).name
+    source.parent.mkdir(parents=True)
+    source.write_text(SOURCE_FIXTURE)
+    disposition = RoutingPlacementDisposition(
+        all_nets=frozenset({"SIG1"}),
+        invalid_references=frozenset({"R1"}),
+        direct_invalid_nets=frozenset({"SIG1"}),
+        requested_nets=frozenset({"SIG1"}),
+    )
+
+    def route(argv):
+        if write_output:
+            Path(argv[argv.index("-o") + 1]).write_text(ROUTED_OUTPUT_FIXTURE)
+        return RouteAttemptResult(exit_code, disposition)
+
+    kwargs = {
+        "cache_dir": cache,
+        "output_dir": tmp_path / "out",
+        "seed": 0,
+        "manufacturer": "jlcpcb",
+        "layers": 2,
+        "skip_fetch": True,
+        "run_kicad_cli": False,
+        "kicad_cli_timeout": 10,
+        "backend": _cpp_backend(),
+        "verbose": False,
+    }
+    report = bench_cmd._run_one_board(spec, fetch, normalize, route_fn=route, **kwargs)
+    encoded = report.to_dict()
+    assert encoded["placement_disposition"]["requested_blocked_nets"] == ["SIG1"]
+    assert encoded["placement_disposition"]["completed_nets"] == []
+    assert encoded["placement_disposition"]["invalid_references"] == ["R1"]
+    assert report.route_outcome.outcome == ("partial" if write_output else "failed")
+    assert report.completion.connections_routed == (2 if write_output else 0)
+    assert report.newly_routed_connections == (2 if write_output else 0)
+    assert report.copper.segment_count == (2 if write_output else 0)
+    # Same paths reused with a legacy integer callback: neither artifact nor
+    # metadata from the prior attempt may survive.
+    legacy = bench_cmd._run_one_board(
+        spec, fetch, normalize, route_fn=_make_stub_route(write_output=False), **kwargs
+    )
+    assert legacy.to_dict()["placement_disposition"] is None
+    assert legacy.completion.connections_routed == 0
+
+
+def test_unavailable_placement_preserves_permissive_success(tmp_path):
+    from kicad_tools.placement.routing import RoutingPlacementDisposition
+    from kicad_tools.router.reporting import RouteAttemptResult
+
+    fetch, normalize = bench_cmd._load_external_modules()
+    cache = tmp_path / "cache"
+    (cache / "fixture").mkdir(parents=True)
+    (cache / "fixture" / "fixture.kicad_pcb").write_text(SOURCE_FIXTURE)
+    disposition = RoutingPlacementDisposition(
+        requested_nets=frozenset({"SIG1"}),
+        check_available=False,
+    )
+
+    def route(argv):
+        Path(argv[argv.index("-o") + 1]).write_text(ROUTED_OUTPUT_FIXTURE)
+        return RouteAttemptResult(0, disposition)
+
+    report = bench_cmd._run_one_board(
+        _spec(fetch),
+        fetch,
+        normalize,
+        cache_dir=cache,
+        output_dir=tmp_path / "out",
+        seed=0,
+        manufacturer="jlcpcb",
+        layers=2,
+        skip_fetch=True,
+        run_kicad_cli=False,
+        kicad_cli_timeout=10,
+        backend=_cpp_backend(),
+        verbose=False,
+        route_fn=route,
+    )
+    assert report.route_outcome.outcome == "completed"
+    assert report.timing.measured_phase == "completed"
+    data = report.to_dict()["placement_disposition"]
+    assert data["status"] == "unavailable"
+    assert data["completed_nets"] == ["SIG1"]
+    assert data["clean_success"] is False  # Unknown assurance, not a new route failure.
