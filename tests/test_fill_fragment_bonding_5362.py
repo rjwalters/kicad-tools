@@ -246,6 +246,43 @@ CASES: list[Case] = [
             "  )\n"
         ),
     ),
+    # Issue #5382: a valid same-layer THROUGH VIA bridge, verified against
+    # native kicad-cli 10.0.6 separately from the pre-existing track/pad
+    # bridge cases above -- rule 2 (via bridging) is untouched by #5362's
+    # fragment-adjacency fix, but wasn't previously exercised in this module.
+    Case(
+        "via_bridges_fragments",
+        _fill(_rect(10, 18)) + _fill(_rect(20, 30)),
+        0,
+        p1=(14, 25),
+        p2=(26, 25),
+        extra=(
+            # size 3.0 (radius 1.5) at x=19 reaches 0.5 mm into each fragment
+            # past ConnectivityValidator.POUR_PAD_ERODE's 0.1 mm inset -- a
+            # smaller via (radius 1.1, 0.1 mm raw overlap) measures
+            # native-connected too but is exactly erased by that erosion
+            # margin, so it isn't a safe fixture for this case.
+            '  (via (at 19 25) (size 3.0) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1)\n'
+            '    (uuid "40000000-0000-0000-0000-000000000002"))\n'
+        ),
+    ),
+    # Wrong-layer control (Issue #5382): the identical track geometry to
+    # ``bridged_by_track`` but on B.Cu instead of F.Cu.  Native kicad-cli
+    # reports R13.1 and R14.1 each unconnected against the floating B.Cu
+    # track (2 ratsnest edges, not the single direct edge the plain
+    # disconnected case reports) -- i.e. same-net copper on the wrong layer,
+    # with no via to cross layers, does not bridge the F.Cu fragments.
+    Case(
+        "wrong_layer_track_no_bridge",
+        _fill(_rect(10, 18)) + _fill(_rect(20, 30)),
+        2,
+        p1=(14, 25),
+        p2=(26, 25),
+        extra=(
+            '  (segment (start 17 25) (end 21 25) (width 0.3) (layer "B.Cu") (net 1)\n'
+            '    (uuid "40000000-0000-0000-0000-000000000003"))\n'
+        ),
+    ),
     # --- file-version boundary (Issue #5362) --------------------------------
     # An omitted ``filled_areas_thickness`` is NOT unconditionally "stroked":
     # KiCad's parser initialises ``isStrokedFill = m_requiredVersion <
