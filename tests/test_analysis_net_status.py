@@ -2155,6 +2155,122 @@ class TestDisjointZoneIslandConnectivity:
         )
         assert gnd.island_count == 1
 
+    @pytest.mark.parametrize(
+        ("satellite_pts", "connected"),
+        [
+            # Satellite island floats 4 mm clear of the main pour: reaching it
+            # through the via does NOT reach the pour.
+            ("(xy 24 14) (xy 26 14) (xy 26 16) (xy 24 16)", False),
+            # Control: the same satellite fragment extended left so it touches
+            # the main pour's x = 20 edge -- one physical piece of copper, so
+            # the chain's pads DO join the pour.
+            ("(xy 20 14) (xy 26 14) (xy 26 16) (xy 20 16)", True),
+        ],
+    )
+    def test_via_landing_on_satellite_island_does_not_reach_main_pour(
+        self, tmp_path: Path, satellite_pts: str, connected: bool
+    ):
+        """A via into a small same-zone island is not a bond to the main pour.
+
+        This is the board-03 ``VCC`` topology, measured natively inside the
+        pinned ``kicad/kicad:10.0`` CI image (``kicad-cli`` 10.0.5): the
+        ``C1.1``/``U1.2``/``U1.44`` trace component's only via penetrates an
+        In2.Cu fill island of 5.07 mm^2 that sits 0.705 mm clear of the zone's
+        3749 mm^2 main pour, and the via that *does* reach the main pour stops
+        0.2126 mm short of the trace.  ``kicad-cli pcb drc`` independently
+        reports that exact pair as ``unconnected_items`` ("Track [VCC] on F.Cu,
+        length 2.4625 mm" <-> "Via [VCC] on F.Cu - B.Cu"), so the strict
+        analyzer must agree.
+
+        The pre-#5031 blanket same-zone union merged the satellite island into
+        the main pour on zone identity alone and reported the net complete --
+        the false negative.  The parametrised control (satellite fragment
+        touching the pour edge) proves the fix still merges genuinely
+        continuous copper rather than refusing to cluster at all.
+        """
+        board = f"""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 12 15)
+    (property "Reference" "R1")
+    (pad "1" thru_hole rect (at 0 0) (size 1.2 1.2) (drill 0.6) (layers "*.Cu") (net 1 "VCC"))
+  )
+
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (at 16 15)
+    (property "Reference" "R2")
+    (pad "1" thru_hole rect (at 0 0) (size 1.2 1.2) (drill 0.6) (layers "*.Cu") (net 1 "VCC"))
+  )
+
+  (footprint "C_0402"
+    (layer "F.Cu")
+    (at 25 12)
+    (property "Reference" "C9")
+    (pad "1" smd rect (at 0 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+  )
+
+  (segment (start 25 12) (end 25 15) (width 0.3) (layer "F.Cu") (net 1))
+  (via (at 25 15) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+
+  (zone
+    (net 1)
+    (net_name "VCC")
+    (layer "In1.Cu")
+    (uuid "00000000-0000-0000-0000-000000000009")
+    (hatch edge 0.5)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.15)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.2))
+    (polygon
+      (pts
+        (xy 10 10)
+        (xy 30 10)
+        (xy 30 20)
+        (xy 10 20)
+      )
+    )
+    (filled_polygon
+      (layer "In1.Cu")
+      (pts
+        (xy 10 10)
+        (xy 20 10)
+        (xy 20 20)
+        (xy 10 20)
+      )
+    )
+    (filled_polygon
+      (layer "In1.Cu")
+      (pts
+        {satellite_pts}
+      )
+    )
+  )
+)
+"""
+        path = tmp_path / "satellite_island.kicad_pcb"
+        path.write_text(board)
+
+        vcc = NetStatusAnalyzer(path).analyze().get_net("VCC")
+        assert vcc is not None
+        assert vcc.island_count == (1 if connected else 2)
+        assert (vcc.status == "complete") == connected
+        if not connected:
+            assert [p.full_name for p in vcc.unconnected_pads] == ["C9.1"]
+
 
 # ---------------------------------------------------------------------------
 # Issue #4429 — through-via + inner-layer segment connectivity (no zone)
