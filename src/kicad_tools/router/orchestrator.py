@@ -304,87 +304,15 @@ class RoutingOrchestrator:
         return None
 
     def _build_component_hole_census(self) -> list[Pad] | None:
-        """Build the COMPLETE physical hole census for via-in-pad eligibility.
+        """Use the physical census before any routing-destination filtering."""
+        from .via_in_pad_eligibility import (
+            component_holes_for_router,
+            component_holes_from_document,
+        )
 
-        Issue #5201 (reopened): feeds the ``EscapeRouter``'s
-        ``component_holes`` parameter so the fine-pitch in-pad rescue's
-        process-eligibility check can resolve a real candidate-to-
-        nearest-other-hole distance instead of always treating it as
-        unknown.  Two PCB-like shapes are supported, both defensively --
-        mirroring :meth:`_build_net_target_positions`:
-
-        1. Autorouter-style ``self.pcb.all_pads`` -- the COMPLETE pad
-           list (duplicate ``(ref, pin)`` holes included).  Used
-           directly, and as the SAME live list object so pads appended
-           after this call are still observed (never the lossy
-           ``self.pcb.pads`` dict -- Issue #5201's reopened root cause).
-        2. Document-model ``self.pcb.footprints`` -- also inherently
-           complete (iterates every footprint's every pad with no
-           dict-collapsing step), converted into lightweight router
-           ``Pad`` records carrying just the fields
-           :func:`~kicad_tools.router.via_in_pad_eligibility.resolve_component_hole_context`
-           needs (position, through-hole flag, drill).  UNLIKE
-           :meth:`_build_net_target_positions` (whose net-target purpose
-           legitimately skips footprints with an empty/``#``-prefixed
-           reference -- those are not real routing destinations), a
-           PHYSICAL hole census must not drop a drilled hole just
-           because its footprint carries a locked/placeholder reference
-           (KiCad still drills the hole).  Both ``thru_hole`` (plated)
-           AND ``np_thru_hole`` (non-plated, e.g. a bare mounting hole)
-           pad types count -- the manufacturer's
-           ``min_component_hole_distance_mm`` floor applies to any
-           drilled hole, plated or not.
-
-        Returns ``None`` when neither shape is usable (e.g. mock PCBs in
-        unit tests) so the census is UNKNOWN -- the in-pad rescue then
-        fails closed per Issue #5201's acceptance criterion, rather than
-        silently granting eligibility.
-        """
-        try:
-            all_pads_attr = getattr(self.pcb, "all_pads", None)
-            if isinstance(all_pads_attr, list):
-                return all_pads_attr
-
-            footprints = getattr(self.pcb, "footprints", None)
-            if footprints:
-                from .primitives import Pad as RouterPad
-
-                census: list[Pad] = []
-                for fp in footprints:
-                    ref = getattr(fp, "reference", "") or ""
-                    fp_x, fp_y = fp.position
-                    rot_rad = math.radians(-(getattr(fp, "rotation", 0.0) or 0.0))
-                    cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
-                    for pad in fp.pads:
-                        if getattr(pad, "type", "smd") not in ("thru_hole", "np_thru_hole"):
-                            continue
-                        px, py = pad.position
-                        try:
-                            drill = float(getattr(pad, "drill", 0.0) or 0.0)
-                        except (TypeError, ValueError):
-                            # Unparseable drill: stored as 0.0, which
-                            # ``resolve_component_hole_context`` treats as
-                            # unknown geometry and fails the WHOLE census
-                            # closed -- correct, not a silent skip.
-                            drill = 0.0
-                        census.append(
-                            RouterPad(
-                                x=fp_x + px * cos_r - py * sin_r,
-                                y=fp_y + px * sin_r + py * cos_r,
-                                width=getattr(pad, "size", (0.0, 0.0))[0],
-                                height=getattr(pad, "size", (0.0, 0.0))[1],
-                                net=getattr(pad, "net_number", 0) or 0,
-                                net_name="",
-                                ref=ref,
-                                pin=str(getattr(pad, "number", "")),
-                                through_hole=True,
-                                drill=drill,
-                            )
-                        )
-                return census
-        except Exception:  # pragma: no cover - defensive against mock PCBs
-            return None
-        return None
+        if hasattr(self.pcb, "all_pads"):
+            return component_holes_for_router(self.pcb)
+        return component_holes_from_document(self.pcb)
 
     def route_net(
         self,

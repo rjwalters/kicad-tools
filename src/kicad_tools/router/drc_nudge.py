@@ -60,6 +60,7 @@ from .via_clearance import (
     via_clears_foreign_segment,
 )
 from .via_in_pad_eligibility import (
+    component_holes_for_router,
     resolve_component_hole_context,
     via_in_pad_candidate_eligible,
 )
@@ -1834,7 +1835,7 @@ def _scan_and_repair_via_in_pad(
     # no ``all_pads`` at all (e.g. a bare mock in a unit test); this
     # fails closed via ``resolve_component_hole_context`` rather than
     # silently treating an unbuildable census as empty.
-    all_pads_census = getattr(router, "all_pads", None)
+    all_pads_census = component_holes_for_router(router)
 
     # Canonical processing order (#5009, third review pass).  Each
     # relocation commits copper that the NEXT relocation must clear

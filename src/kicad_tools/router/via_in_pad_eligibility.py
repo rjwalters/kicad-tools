@@ -342,3 +342,67 @@ def via_in_pad_candidate_eligible(
         annular_ring_mm=annular_ring_mm,
         nearest_other_hole_distance_mm=hole_context.nearest_distance_mm,
     )
+
+
+def component_holes_for_router(router: object) -> list[Pad] | None:
+    """Combine the saved physical census with current, possibly newly added pads."""
+    pads = getattr(router, "all_pads", None)
+    if not hasattr(router, "_loaded_component_holes"):
+        return pads
+    loaded = router._loaded_component_holes
+    if loaded is None or pads is None:
+        return None
+    return [*loaded, *pads]
+
+
+def component_holes_from_document(
+    pcb: object, *, world_coordinates: bool = False
+) -> list[Pad] | None:
+    """Read every physical drill without applying routing-target filters.
+
+    These records describe holes only. They must never be installed as copper
+    pads on a routing grid. Unsupported drill geometry stays unknown.
+    """
+    try:
+        footprints = getattr(pcb, "footprints", None)
+        if footprints is not None:
+            from .primitives import Pad as RouterPad
+
+            origin = getattr(pcb, "board_origin", (0.0, 0.0)) if world_coordinates else (0.0, 0.0)
+            census: list[Pad] = []
+            for fp in footprints:
+                ref = getattr(fp, "reference", "") or ""
+                fp_x, fp_y = fp.position
+                fp_x, fp_y = fp_x + origin[0], fp_y + origin[1]
+                rot_rad = math.radians(-(getattr(fp, "rotation", 0.0) or 0.0))
+                cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+                for pad in fp.pads:
+                    if getattr(pad, "type", "smd") not in ("thru_hole", "np_thru_hole"):
+                        continue
+                    px, py = pad.position
+                    try:
+                        drill = float(getattr(pad, "drill", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        # Unparseable drill: stored as 0.0, which
+                        # ``resolve_component_hole_context`` treats as
+                        # unknown geometry and fails the WHOLE census
+                        # closed -- correct, not a silent skip.
+                        drill = 0.0
+                    census.append(
+                        RouterPad(
+                            x=fp_x + px * cos_r - py * sin_r,
+                            y=fp_y + px * sin_r + py * cos_r,
+                            width=getattr(pad, "size", (0.0, 0.0))[0],
+                            height=getattr(pad, "size", (0.0, 0.0))[1],
+                            net=getattr(pad, "net_number", 0) or 0,
+                            net_name="",
+                            ref=ref,
+                            pin=str(getattr(pad, "number", "")),
+                            through_hole=True,
+                            drill=drill,
+                        )
+                    )
+            return census
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+    return None

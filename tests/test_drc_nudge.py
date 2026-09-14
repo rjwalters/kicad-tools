@@ -6,6 +6,8 @@ import math
 from dataclasses import dataclass, field
 from unittest.mock import patch
 
+import pytest
+
 from kicad_tools.router.drc_nudge import (
     COINCIDENT_THRESHOLD,
     DRCNudgeResult,
@@ -2825,3 +2827,20 @@ class TestViaDrillOverlapsBbox:
         """Tangency within tolerance is excluded, matching the DRC rule."""
         via = Via(x=10.65, y=10.0, drill=0.3, diameter=0.6, layers=(), net=1)
         assert _via_drill_overlaps_bbox(via, self._BBOX) is False
+
+
+@pytest.mark.parametrize("kind", ["thru_hole", "np_thru_hole"])
+@pytest.mark.parametrize("ref", ["H1", "", "#H1"])
+@pytest.mark.parametrize("x,expected_nudges", [(10.9, 1), (15.0, 0)])
+def test_loaded_physical_holes_reach_repair_sweep(tmp_path, kind, ref, x, expected_nudges):
+    from tests.router.test_via_in_pad_component_hole_census import _loaded_holes
+
+    loaded = _loaded_holes(tmp_path, kind, ref, x=x, y=9.7)
+    pad, via, router = TestViaInPadComponentHoleCensus()._make_fixture(all_pads=[])
+    router._loaded_component_holes = loaded._loaded_component_holes
+    result = DRCNudgeResult()
+    nudged = _scan_and_repair_via_in_pad(router, max_displacement=2.0, result=result)
+    assert nudged == expected_nudges
+    assert bool(result.skipped.get("via_pad_process_eligible")) == (expected_nudges == 0)
+    if expected_nudges:
+        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))

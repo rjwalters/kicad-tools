@@ -235,6 +235,8 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
     )
 
     # Add pads from serialized data
+    router._loaded_component_holes = config.get("component_holes")
+
     for pad_data in config["pads_data"]:
         ref = pad_data["ref"]
         layer_data = pad_data["layer"]

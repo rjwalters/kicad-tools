@@ -254,3 +254,109 @@ class TestTryInPadEscapeComponentHoleCensus:
         bad_hole.drill = "bad"  # type: ignore[assignment]
         route = _rescue(component_holes=[bad_hole])
         assert route is None
+
+
+def _loaded_holes(tmp_path, kind="np_thru_hole", ref="", x=0.4, y=0):
+    from kicad_tools.router.io import load_pcb_for_routing
+
+    path = tmp_path / "holes.kicad_pcb"
+    hole = (
+        f'(footprint "Hole" (layer "F.Cu") (at {x} {y}) '
+        f'(property "Reference" "{ref}" (at 0 0) (layer "F.SilkS")) '
+        f'(pad "1" {kind} circle (at 0 0) (size .3 .3) '
+        '(drill .3) (layers "*.Cu" "*.Mask")))'
+        if kind
+        else ""
+    )
+    path.write_text(
+        "(kicad_pcb (version 20240108) (generator pcbnew) "
+        "(general (thickness 1.6)) "
+        '(layers (0 "F.Cu" signal) (1 "In1.Cu" signal) '
+        '(2 "In2.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user)) '
+        '(net 0 "") '
+        "(gr_rect (start -10 -10) (end 10 10) "
+        '(stroke (width .1) (type default)) (fill none) (layer "Edge.Cuts")) ' + hole + ")"
+    )
+    router, _ = load_pcb_for_routing(str(path), rules=_make_rules(), force_python=True)
+    return router
+
+
+def test_loader_retains_named_and_anonymous_plated_and_unplated_holes(tmp_path):
+    from kicad_tools.router.via_in_pad_eligibility import resolve_component_hole_context
+
+    for kind in ("thru_hole", "np_thru_hole"):
+        for ref in ("H1", "", "#H1"):
+            router = _loaded_holes(tmp_path, kind, ref)
+            census = router._escape._component_holes
+            context = resolve_component_hole_context(0, 0, 0.3, all_pads=census)
+            assert context.known
+            assert abs(context.nearest_distance_mm - 0.1) < 1e-9
+            assert _rescue(census) is None
+            # Physical-hole records must not become plated routing copper.
+            if kind == "np_thru_hole":
+                assert all(not pad.through_hole for pad in router.all_pads)
+
+
+def test_loader_keeps_far_and_empty_positive_controls(tmp_path):
+    for kind in ("thru_hole", "np_thru_hole", ""):
+        router = _loaded_holes(tmp_path, kind, "", x=5)
+        assert _rescue(router._escape._component_holes) is not None
+
+
+def test_loaded_census_observes_pads_added_after_escape_initialization(tmp_path):
+    router = _loaded_holes(tmp_path, "", "", x=5)
+    escape = router._escape
+    assert _rescue(escape._component_holes) is not None
+    router.add_component(
+        "LATE",
+        [
+            {
+                "number": "1",
+                "x": 0.4,
+                "y": 0,
+                "width": 0.3,
+                "height": 0.3,
+                "through_hole": True,
+                "drill": 0.3,
+            }
+        ],
+    )
+    assert router._escape is escape
+    assert _rescue(escape._component_holes) is None
+
+
+def test_hole_census_survives_both_worker_entry_points(tmp_path, monkeypatch):
+    import pickle
+
+    from kicad_tools.router.algorithms.evolutionary import _run_evolutionary_trial
+    from kicad_tools.router.core import Autorouter, _run_monte_carlo_trial
+
+    router = _loaded_holes(tmp_path)
+    payload = pickle.loads(pickle.dumps(router._serialize_for_parallel()))
+    payload.update(
+        trial_num=0, seed=1, base_order=[], use_negotiated=False, chrom_idx=0, net_order=[]
+    )
+    seen = []
+
+    def inspect_worker(worker, *_args, **_kwargs):
+        seen.append(_rescue(worker._escape._component_holes) is None)
+        return []
+
+    monkeypatch.setattr(Autorouter, "route_all", inspect_worker)
+    _run_monte_carlo_trial(payload)
+    _run_evolutionary_trial(payload)
+    assert seen == [True, True]
+
+    # Old/incomplete worker payloads must not turn missing census into empty.
+    del payload["component_holes"]
+    seen.clear()
+    _run_monte_carlo_trial(payload)
+    _run_evolutionary_trial(payload)
+    assert seen == [True, True]
+
+    # Explicitly verified empty remains distinct and permits the same escape.
+    payload["component_holes"] = []
+    seen.clear()
+    _run_monte_carlo_trial(payload)
+    _run_evolutionary_trial(payload)
+    assert seen == [False, False]
