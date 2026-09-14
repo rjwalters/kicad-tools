@@ -587,3 +587,22 @@ class TestParseVias:
         # be mistaken for via blocks.
         txt = '(kicad_pcb (net 1 "V") (setup (via_size 0.6) (via_drill 0.3)))'
         assert parse_vias(txt) == {}
+
+
+@pytest.mark.parametrize("name", ["SIG)", "SIG(", r"SIG\"(escaped)", "SIG(segment ", "SIG(via "])
+def test_block_scanner_ignores_quoted_syntax(name):
+    segment = f'(segment (start 1 2) (end 3 4) (width 0.2) (layer "F.Cu") (net "{name}"))'
+    text = '(property "note" "ignore (segment (net 99))")\n' + segment
+    blocks = _extract_balanced_blocks(text, "segment")
+    assert len(blocks) == 1
+    start, end, block = blocks[0]
+    assert block == segment == text[start:end]
+    parsed = parse_segments(text)
+    assert sum(len(segments) for segments in parsed.values()) == 1
+
+
+def test_block_scanner_ignores_comment_syntax():
+    text = "; (segment (net 99))\n(segment (net 1) # unmatched )\n)"
+    assert [block for _, _, block in _extract_balanced_blocks(text, "segment")] == [
+        "(segment (net 1) # unmatched )\n)"
+    ]
