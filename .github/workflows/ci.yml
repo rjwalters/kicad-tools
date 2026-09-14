@@ -26,10 +26,10 @@ jobs:
   # touched src/ or tests/ (measured 2026-09-11, 2AMLogic/2am#29), and every
   # board job legitimately depends on the router source, so this is NOT a
   # per-job path map -- it is a single "docs/site/agent-config only?" gate
-  # that spares the ~8% of PRs which change nothing under test the full
+  # that spares the ~8% of PRs which change only content the full
   # ~115 job-minutes. main pushes always run everything. If detection itself
   # fails, every job runs (fail-open), so a broken filter can only cost
-  # minutes, never a false green.
+  # minutes, never a false green. Content contracts still run in lint.
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
@@ -83,6 +83,9 @@ jobs:
 
       - name: Lint
         run: uv run ruff check .
+
+      - name: Check documentation and agent-content contracts
+        run: bash scripts/ci/check-content-contracts.sh
 
   typecheck:
     name: Type Check
