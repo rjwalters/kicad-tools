@@ -12,12 +12,21 @@ from kicad_tools.router.pair_construction import ConstructionBudget, construct_p
 from tests.test_coupled_layer_transition import fixture
 
 
-def _departure(outward, layer):
-    return SimpleNamespace(proposal=SimpleNamespace(outward=outward, layer=layer))
+def _departure(outward, layer, prefix=()):
+    return SimpleNamespace(proposal=SimpleNamespace(outward=outward, layer=layer, prefix=prefix))
 
 
-def _stub(monkeypatch, *, departures, landings, result=None, clock=None):
-    """Replace every stage with a recording stub around the real ledger."""
+def _stub(monkeypatch, *, departures, landings, result=None, clock=None, qualify=None):
+    """Replace every stage with a recording stub around the real ledger.
+
+    ``qualify``, if supplied, replaces ``qualify_constructed_pair`` -- the
+    authored skew/coupling/post-tune-geometry gate ``_corridor_guided_
+    departures`` runs every native result through (#5333).  Defaults to an
+    identity pass-through so tests that are only exercising ORCHESTRATION
+    (which stage ran, how the ledger was spent) are unaffected by the gate;
+    tests that specifically exercise the gate's reject-and-retry behavior
+    supply their own.
+    """
     calls = {"departures": [], "landings": [], "bodies": []}
 
     def fake_validated(finder, pads, budget):
@@ -36,9 +45,13 @@ def _stub(monkeypatch, *, departures, landings, result=None, clock=None):
         budget.bodies_remaining = 0
         return result
 
+    def fake_qualify(router, finder, pair, pads, candidate, **kwargs):
+        return candidate
+
     monkeypatch.setattr(pair_construction, "validated_departures", fake_validated)
     monkeypatch.setattr(pair_construction, "landing_proposals", fake_landings)
     monkeypatch.setattr(pair_construction, "complete_departures", fake_complete)
+    monkeypatch.setattr(pair_construction, "qualify_constructed_pair", qualify or fake_qualify)
     if clock is not None:
         monkeypatch.setattr(pair_construction, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     return calls
@@ -127,7 +140,8 @@ def test_the_ledger_tallies_which_stage_spent_the_allowance(monkeypatch):
     assert budget.stage_summary() == (
         "proposals=0 departures=2 landings=2 bodies=16 built=4 geom_rejected=2 completions=6 "
         "geom_reasons={'trace_clearance': 2} completion_reasons={} "
-        "departure_reasons={} departure_rejections={} departure_directions={} widen_spent=0"
+        "departure_reasons={} departure_rejections={} departure_directions={} "
+        "corridor_attempts=0 corridor_iters=0 corridor_reasons={} widen_spent=0"
     )
 
 
@@ -196,7 +210,8 @@ def test_departure_reasons_are_reported_most_frequent_first():
     assert budget.stage_summary().endswith(
         "departure_reasons={'stalled_at_step_3_of_15': 12, 'stalled_at_step_0_of_9': 6} "
         "departure_rejections={'sym_blocked_p': 60, 'via_blocked_p': 9} "
-        "departure_directions={} widen_spent=0"
+        "departure_directions={} "
+        "corridor_attempts=0 corridor_iters=0 corridor_reasons={} widen_spent=0"
     )
 
 
@@ -308,6 +323,261 @@ def test_body_charges_survive_a_raising_stage(monkeypatch):
     with pytest.raises(RuntimeError, match="body search failed"):
         _run(budget)
     assert budget.bodies_used == 5 and budget.bodies_remaining == 45
+
+
+class _FakeFinder:
+    """Stub finder for the corridor-guided fallback (#5333) -- no native call."""
+
+    def __init__(
+        self,
+        result,
+        *,
+        iterations=5,
+        best_progress=0.0,
+        iteration_limited=False,
+        timeout_exceeded=False,
+    ):
+        self.result = result
+        self.calls = []
+        self.last_iterations = 0
+        self.last_best_progress = best_progress
+        self.last_iteration_limited = iteration_limited
+        self.last_timeout_exceeded = timeout_exceeded
+        self._iterations = iterations
+
+    def route_coupled(
+        self, *pads, departure_prefix, timeout_seconds, max_iterations_budget, corridor
+    ):
+        self.calls.append((departure_prefix, corridor))
+        self.last_iterations = self._iterations
+        return self.result
+
+
+def test_corridor_fallback_runs_only_after_the_lattice_exhausts(monkeypatch):
+    """#5333: MIPI_DAT0/TMDS_D2's next step -- a native, corridor-bounded
+    search seeded past a validated departure, tried once the fixed shape
+    lattice comes back empty for every escape direction."""
+    departure = _departure((1, 0), 3)
+    _stub(monkeypatch, departures=[departure], landings=[], clock=[0])
+    finder = _FakeFinder(result=("p", "n"))
+    budget = ConstructionBudget(
+        deadline=1,
+        iterations_remaining=64,
+        bodies_remaining=16,
+        corridor_iterations_remaining=100,
+    )
+    result = construct_pair_routes(
+        None,
+        finder,
+        None,
+        (1, 2, 3, 4),
+        budget,
+        board_thickness_mm=1.6,
+        num_copper_layers=4,
+        corridor=frozenset({(0, 0)}),
+    )
+    assert result == ("p", "n")
+    assert len(finder.calls) == 1
+    assert finder.calls[0][0] == list(departure.proposal.prefix)
+    assert budget.corridor_attempts == 1
+    assert budget.corridor_iterations_used == 5
+    assert budget.corridor_iterations_remaining == 95
+
+
+def test_corridor_fallback_rejects_an_unqualified_native_result_and_tries_the_next_departure(
+    monkeypatch,
+):
+    """#5333 regression: a raw native corridor result is NOT length-matched
+    by construction -- measured on real Board07's MIPI_DAT0, an unqualified
+    corridor result was legal copper but 1.75mm out of skew against a
+    0.05mm authored tolerance. ``_corridor_guided_departures`` must run
+    every native result through the same authored skew/coupling gate
+    ``complete_pair_body`` applies (``qualify_constructed_pair``), reject
+    anything that fails it, and try the NEXT validated departure instead of
+    returning the unqualified pair."""
+    departures = [_departure((1, 0), 3), _departure((1, 0), 2)]
+
+    def reject_first_accept_second(router, finder, pair, pads, candidate, reasons=None, **kwargs):
+        if len(finder.calls) == 1:
+            if reasons is not None:
+                reasons["skew_tolerance"] += 1
+            return None
+        return candidate
+
+    _stub(
+        monkeypatch,
+        departures=departures,
+        landings=[],
+        clock=[0],
+        qualify=reject_first_accept_second,
+    )
+    finder = _FakeFinder(result=("p", "n"))
+    budget = ConstructionBudget(
+        deadline=1,
+        iterations_remaining=64,
+        bodies_remaining=16,
+        corridor_iterations_remaining=100,
+    )
+    result = construct_pair_routes(
+        None,
+        finder,
+        None,
+        (1, 2, 3, 4),
+        budget,
+        board_thickness_mm=1.6,
+        num_copper_layers=4,
+        corridor=frozenset({(0, 0)}),
+    )
+    assert result == ("p", "n")
+    assert len(finder.calls) == 2
+    assert budget.corridor_attempts == 2
+    assert budget.corridor_reasons == {"skew_tolerance": 1}
+
+
+def test_corridor_fallback_never_returns_an_unqualified_pair(monkeypatch):
+    """If NO validated departure's native result ever qualifies, the
+    corridor stage must return ``None`` -- never a raw, unqualified native
+    route -- and the failure reason must come from the qualification gate,
+    not be misreported as a native search stall."""
+
+    def always_reject(router, finder, pair, pads, candidate, reasons=None, **kwargs):
+        if reasons is not None:
+            reasons["coupling_threshold"] += 1
+        return None
+
+    _stub(
+        monkeypatch,
+        departures=[_departure((1, 0), 3)],
+        landings=[],
+        clock=[0],
+        qualify=always_reject,
+    )
+    finder = _FakeFinder(result=("p", "n"))
+    budget = ConstructionBudget(
+        deadline=1,
+        iterations_remaining=64,
+        bodies_remaining=16,
+        corridor_iterations_remaining=100,
+    )
+    result = construct_pair_routes(
+        None,
+        finder,
+        None,
+        (1, 2, 3, 4),
+        budget,
+        board_thickness_mm=1.6,
+        num_copper_layers=4,
+        corridor=frozenset({(0, 0)}),
+    )
+    assert result is None
+    assert budget.corridor_attempts == 1
+    assert budget.corridor_reasons == {"coupling_threshold": 1}
+
+
+def test_corridor_fallback_is_not_reached_when_the_lattice_already_succeeds(monkeypatch):
+    """A pair that already routes through the geometric lattice must never
+    change outcome just because a corridor was supplied (no regression risk
+    for DQS / MIPI_CLK / TMDS_D0)."""
+    routes = ("p", "n")
+    _stub(
+        monkeypatch,
+        departures=[_departure((1, 0), 3)],
+        landings=["a"],
+        result=routes,
+        clock=[0],
+    )
+    finder = _FakeFinder(result=("should", "not-be-used"))
+    budget = ConstructionBudget(
+        deadline=1,
+        iterations_remaining=64,
+        bodies_remaining=50,
+        corridor_iterations_remaining=100,
+    )
+    result = construct_pair_routes(
+        None,
+        finder,
+        None,
+        (1, 2, 3, 4),
+        budget,
+        board_thickness_mm=1.6,
+        num_copper_layers=4,
+        corridor=frozenset({(0, 0)}),
+    )
+    assert result == routes
+    assert finder.calls == []
+    assert budget.corridor_attempts == 0
+
+
+def test_corridor_fallback_is_skipped_without_a_corridor(monkeypatch):
+    _stub(monkeypatch, departures=[_departure((1, 0), 3)], landings=[], clock=[0])
+    finder = _FakeFinder(result=("p", "n"))
+    budget = ConstructionBudget(
+        deadline=1,
+        iterations_remaining=64,
+        bodies_remaining=16,
+        corridor_iterations_remaining=100,
+    )
+    result = construct_pair_routes(
+        None,
+        finder,
+        None,
+        (1, 2, 3, 4),
+        budget,
+        board_thickness_mm=1.6,
+        num_copper_layers=4,
+    )
+    assert result is None
+    assert finder.calls == []
+
+
+def test_corridor_fallback_is_skipped_when_its_own_allowance_is_zero(monkeypatch):
+    """Default ``corridor_iterations_remaining=0`` matches every pre-existing
+    test in this file -- the new stage is inert unless a caller explicitly
+    spends a separate allowance on it."""
+    _stub(monkeypatch, departures=[_departure((1, 0), 3)], landings=[], clock=[0])
+    finder = _FakeFinder(result=("p", "n"))
+    budget = ConstructionBudget(deadline=1, iterations_remaining=64, bodies_remaining=16)
+    result = construct_pair_routes(
+        None,
+        finder,
+        None,
+        (1, 2, 3, 4),
+        budget,
+        board_thickness_mm=1.6,
+        num_copper_layers=4,
+        corridor=frozenset({(0, 0)}),
+    )
+    assert result is None
+    assert finder.calls == []
+
+
+def test_corridor_fallback_names_why_each_attempt_failed(monkeypatch):
+    _stub(
+        monkeypatch,
+        departures=[_departure((1, 0), 3), _departure((1, 0), 2)],
+        landings=[],
+        clock=[0],
+    )
+    finder = _FakeFinder(result=None, iterations=10, best_progress=4, iteration_limited=True)
+    budget = ConstructionBudget(
+        deadline=1,
+        iterations_remaining=64,
+        bodies_remaining=16,
+        corridor_iterations_remaining=15,
+    )
+    result = construct_pair_routes(
+        None,
+        finder,
+        None,
+        (1, 2, 3, 4),
+        budget,
+        board_thickness_mm=1.6,
+        num_copper_layers=4,
+        corridor=frozenset({(0, 0)}),
+    )
+    assert result is None
+    assert len(finder.calls) == 2
+    assert budget.corridor_reasons == {"iteration_limited_progress_4": 2}
 
 
 @pytest.mark.skipif(not is_cpp_available(), reason="requires matching native backend")

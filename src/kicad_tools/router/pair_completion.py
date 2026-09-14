@@ -147,6 +147,132 @@ def _tails_with_widen_fallback(
     )
 
 
+def qualify_constructed_pair(
+    router: DiffPairRouter,
+    finder: CoupledPathfinder,
+    pair,
+    pads: tuple[Pad, Pad, Pad, Pad],
+    candidate: tuple[Route, Route],
+    *,
+    intra_pair_clearance: float | None = None,
+    board_thickness_mm: float,
+    num_copper_layers: int,
+    deadline: float,
+    reserved_routes: tuple[Route, ...] = (),
+    reasons: Counter[str] | None = None,
+) -> tuple[Route, Route] | None:
+    """Apply the physical-skew / authored-coupling / post-tune geometry gate
+    every constructed pair candidate must clear, or return ``None``.
+
+    Shared by :func:`complete_pair_body`'s tail-completion loop (a candidate
+    assembled from a departure body plus two synthesized layer-return tails)
+    and :func:`pair_construction._corridor_guided_departures`'s raw native
+    result (#5333: the corridor-guided search hands back a fully-assembled
+    pair straight from the native joint search, bypassing tail synthesis --
+    and therefore this gate -- entirely unless a caller applies it
+    explicitly). Unlike the geometric-shape lattice's symmetric moves, a
+    departure-prefix-seeded corridor search is NOT guaranteed to produce a
+    length-matched pair by construction: measured on Board07's MIPI_DAT0
+    (seed 42, native ABI 31), an unqualified raw corridor result differed in
+    P/N physical length by 1.75mm against the net class's 0.05mm authored
+    skew tolerance -- a real violation this function exists to catch before
+    a caller can label the pair ``coupled-ok``.
+
+    ``reasons``, if supplied, is the same diagnostic tally
+    :func:`complete_pair_body` uses -- ``constructed_pair_geometry_issue``'s
+    reason token for a colliding candidate, ``skew_tolerance`` /
+    ``coupling_threshold`` for one that clears geometry but misses the
+    authored net-class limit, or ``post_tune_<reason>`` if tuning itself
+    reintroduces a collision.
+
+    ``intra_pair_clearance``, if omitted, is derived from the net class's
+    own ``effective_intra_pair_clearance()`` -- callers that already have it
+    on hand (``complete_pair_body`` computes it once for its whole tail
+    loop) may pass it through instead of paying that lookup again per
+    candidate.
+    """
+    if reasons is None:
+        reasons = Counter()
+    grid = finder.grid
+    nc = finder.net_class_map.get(pads[0].net_name)
+    if nc is None or not math.isfinite(board_thickness_mm) or board_thickness_mm <= 0:
+        return None
+    if intra_pair_clearance is None:
+        intra_pair_clearance = nc.effective_intra_pair_clearance()
+    issue = constructed_pair_geometry_issue(
+        router,
+        finder,
+        candidate[0],
+        candidate[1],
+        pads,
+        intra_pair_clearance=intra_pair_clearance,
+        deadline=deadline,
+        reserved_routes=reserved_routes,
+    )
+    if issue is not None:
+        reasons[issue] += 1
+        return None
+    corpus = {r.net: r for r in [*grid.routes, *router.autorouter.routes]}
+    # Several reservations can belong to one future net (departure copper and
+    # landing barrel). Keep all of them in the tuner's per-net view without
+    # mutating the caller's routes.
+    reserved_nets: set[int] = set()
+    for reservation in reserved_routes:
+        if reservation.net not in reserved_nets:
+            reserved_nets.add(reservation.net)
+            if reservation.net not in corpus:
+                corpus[reservation.net] = copy.deepcopy(reservation)
+                continue
+            corpus[reservation.net] = copy.deepcopy(corpus[reservation.net])
+        corpus[reservation.net].segments.extend(reservation.segments)
+        corpus[reservation.net].vias.extend(reservation.vias)
+    corpus.update({r.net: r for r in candidate})
+    p, n, _ = tune_diff_pair_skew(
+        DetectedPair(pair=pair, source=DetectionSource.EXPLICIT),
+        corpus,
+        tolerance_mm=nc.effective_skew_tolerance(),
+        intra_pair_clearance_mm=intra_pair_clearance,
+        grid=grid,
+        board_thickness_mm=board_thickness_mm,
+        num_copper_layers=num_copper_layers,
+        blind_buried_supported=False,
+    )
+    if time.monotonic() >= deadline:
+        return None
+    lengths = [
+        MatchGroupTracker._measure_route_total(
+            r, board_thickness_mm, num_copper_layers, blind_buried_supported=False
+        )
+        for r in (p, n)
+    ]
+    if abs(lengths[0] - lengths[1]) > nc.effective_skew_tolerance():
+        reasons["skew_tolerance"] += 1
+        return None
+    if (
+        min(
+            router._tail_coupled_fraction(p, n.segments),
+            router._tail_coupled_fraction(n, p.segments),
+        )
+        < nc.effective_coupled_continuity_threshold()
+    ):
+        reasons["coupling_threshold"] += 1
+        return None
+    final_issue = constructed_pair_geometry_issue(
+        router,
+        finder,
+        p,
+        n,
+        pads,
+        intra_pair_clearance=intra_pair_clearance,
+        deadline=deadline,
+        reserved_routes=reserved_routes,
+    )
+    if final_issue is not None:
+        reasons[f"post_tune_{final_issue}"] += 1
+        return None
+    return p, n
+
+
 def complete_pair_body(
     router: DiffPairRouter,
     finder: CoupledPathfinder,
@@ -262,81 +388,23 @@ def complete_pair_body(
                         candidate[first] = copy.deepcopy(first_route)
                         candidate[second].segments.extend(other_tail.segments)
                         candidate[second].vias.extend(other_tail.vias)
-                        issue = constructed_pair_geometry_issue(
+                        qualified = qualify_constructed_pair(
                             router,
                             finder,
-                            candidate[0],
-                            candidate[1],
+                            pair,
                             pads,
+                            (candidate[0], candidate[1]),
                             intra_pair_clearance=intra,
-                            deadline=deadline,
-                            reserved_routes=reserved_routes,
-                        )
-                        if issue is not None:
-                            reasons[issue] += 1
-                            continue
-                        corpus = {r.net: r for r in [*grid.routes, *router.autorouter.routes]}
-                        # Several reservations can belong to one future net
-                        # (departure copper and landing barrel). Keep all of
-                        # them in the tuner's per-net view without mutating
-                        # the caller's routes.
-                        reserved_nets = set()
-                        for reservation in reserved_routes:
-                            if reservation.net not in reserved_nets:
-                                reserved_nets.add(reservation.net)
-                                if reservation.net not in corpus:
-                                    corpus[reservation.net] = copy.deepcopy(reservation)
-                                    continue
-                                corpus[reservation.net] = copy.deepcopy(corpus[reservation.net])
-                            corpus[reservation.net].segments.extend(reservation.segments)
-                            corpus[reservation.net].vias.extend(reservation.vias)
-                        corpus.update({r.net: r for r in candidate})
-                        p, n, _ = tune_diff_pair_skew(
-                            DetectedPair(pair=pair, source=DetectionSource.EXPLICIT),
-                            corpus,
-                            tolerance_mm=nc.effective_skew_tolerance(),
-                            intra_pair_clearance_mm=intra,
-                            grid=grid,
                             board_thickness_mm=board_thickness_mm,
                             num_copper_layers=num_copper_layers,
-                            blind_buried_supported=False,
-                        )
-                        if time.monotonic() >= deadline:
-                            return None
-                        lengths = [
-                            MatchGroupTracker._measure_route_total(
-                                r,
-                                board_thickness_mm,
-                                num_copper_layers,
-                                blind_buried_supported=False,
-                            )
-                            for r in (p, n)
-                        ]
-                        if abs(lengths[0] - lengths[1]) > nc.effective_skew_tolerance():
-                            reasons["skew_tolerance"] += 1
-                            continue
-                        if (
-                            min(
-                                router._tail_coupled_fraction(p, n.segments),
-                                router._tail_coupled_fraction(n, p.segments),
-                            )
-                            < nc.effective_coupled_continuity_threshold()
-                        ):
-                            reasons["coupling_threshold"] += 1
-                            continue
-                        final_issue = constructed_pair_geometry_issue(
-                            router,
-                            finder,
-                            p,
-                            n,
-                            pads,
-                            intra_pair_clearance=intra,
                             deadline=deadline,
                             reserved_routes=reserved_routes,
+                            reasons=reasons,
                         )
-                        if final_issue is None:
-                            return p, n
-                        reasons[f"post_tune_{final_issue}"] += 1
+                        if qualified is not None:
+                            return qualified
+                        if time.monotonic() >= deadline:
+                            return None
                     if not found_other_tail:
                         reasons["no_tail"] += 1
             if not found_first_tail:

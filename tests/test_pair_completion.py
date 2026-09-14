@@ -10,7 +10,7 @@ from kicad_tools.router.body_planning import PairBody
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair_routing import CoupledPathfinder
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.pair_completion import complete_pair_body
+from kicad_tools.router.pair_completion import complete_pair_body, qualify_constructed_pair
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
@@ -378,3 +378,102 @@ def test_default_reasons_counter_is_fresh_per_call():
         reasons=reasons,
     )
     assert reasons == {"no_tail": 2}
+
+
+def test_qualify_constructed_pair_accepts_an_already_qualified_candidate():
+    """#5333: ``qualify_constructed_pair`` is the gate factored out of
+    ``complete_pair_body``'s tail-completion loop so
+    ``pair_construction._corridor_guided_departures`` can apply it to a raw
+    native search result too. Calling it directly on a candidate that
+    already qualified (via ``complete_pair_body``) must accept it."""
+    auto, finder, pair, pads, body, sites = case()
+    good = complete_pair_body(
+        auto._diffpair,
+        finder,
+        pair,
+        pads,
+        body,
+        deadline=time.monotonic() + 5,
+        board_thickness_mm=1.6,
+        num_copper_layers=2,
+        allowed_via_sites=sites,
+    )
+    assert good is not None
+    reasons: Counter[str] = Counter()
+    result = qualify_constructed_pair(
+        auto._diffpair,
+        finder,
+        pair,
+        pads,
+        good,
+        board_thickness_mm=1.6,
+        num_copper_layers=2,
+        deadline=time.monotonic() + 5,
+        reasons=reasons,
+    )
+    assert result is not None
+    assert reasons == {}
+
+
+def test_qualify_constructed_pair_rejects_a_raw_result_that_misses_skew_tolerance(monkeypatch):
+    """#5333 regression: this is exactly the gap the corridor-guided
+    fallback (``pair_construction._corridor_guided_departures``) has --
+    it hands ``qualify_constructed_pair`` a route straight from the native
+    joint search, which is not guaranteed to be length-matched by
+    construction (measured on Board07's MIPI_DAT0: a legal but 1.75mm-skewed
+    route against a 0.05mm authored tolerance). The gate must independently
+    reject a candidate whose TUNED length still misses the authored skew
+    tolerance, never silently accept it.
+
+    ``tune_diff_pair_skew`` is stubbed to return the candidate unchanged (so
+    the already-legal geometry from ``complete_pair_body`` stays legal
+    before and after "tuning") and only the length MEASUREMENT is faked --
+    via a replacement bound to this module's own ``MatchGroupTracker`` name,
+    which does not touch the real class other callers (including the real
+    tuner) still use -- to land a deterministic 0.2mm mismatch, well over
+    the case's 0.05mm authored tolerance.
+    """
+    import kicad_tools.router.pair_completion as pc
+
+    auto, finder, pair, pads, body, sites = case()
+    good = complete_pair_body(
+        auto._diffpair,
+        finder,
+        pair,
+        pads,
+        body,
+        deadline=time.monotonic() + 5,
+        board_thickness_mm=1.6,
+        num_copper_layers=2,
+        allowed_via_sites=sites,
+    )
+    assert good is not None
+
+    def fake_tune(detected, corpus, **kwargs):
+        return good[0], good[1], False
+
+    monkeypatch.setattr(pc, "tune_diff_pair_skew", fake_tune)
+
+    lengths = iter([10.0, 10.2])
+
+    class _FakeTracker:
+        @staticmethod
+        def _measure_route_total(*args, **kwargs):
+            return next(lengths)
+
+    monkeypatch.setattr(pc, "MatchGroupTracker", _FakeTracker)
+
+    reasons: Counter[str] = Counter()
+    result = qualify_constructed_pair(
+        auto._diffpair,
+        finder,
+        pair,
+        pads,
+        good,
+        board_thickness_mm=1.6,
+        num_copper_layers=2,
+        deadline=time.monotonic() + 5,
+        reasons=reasons,
+    )
+    assert result is None
+    assert reasons == {"skew_tolerance": 1}

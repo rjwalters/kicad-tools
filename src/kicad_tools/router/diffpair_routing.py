@@ -132,6 +132,51 @@ CONSTRUCTION_DEPARTURE_ITERATIONS: int = int(
 )
 CONSTRUCTION_BODY_ATTEMPTS: int = int(os.environ.get("KCT_CONSTRUCTION_BODY_ATTEMPTS", "400"))
 
+# Issue #5333 (MIPI_DAT0/TMDS_D2): a SEPARATE native allowance for
+# ``pair_construction._corridor_guided_departures`` -- a corridor-bounded
+# joint search seeded past each validated departure escape, tried only once
+# the fixed geometric shape lattice above has been exhausted for every
+# escape direction and still found nothing.  Charged from its own ledger
+# field so it can never starve ``CONSTRUCTION_DEPARTURE_ITERATIONS`` or
+# ``CONSTRUCTION_BODY_ATTEMPTS``.
+#
+# Measured on real Board07 (seed 42, native ABI 31, ``--diffpair-per-pair-
+# timeout 120``): at the first value tried (8000, matched to the top-level
+# corridor attempt's own half-budget) the search plateaued far from the goal
+# for every affected pair -- MIPI_DAT0 stalled at best_progress=133 cells,
+# TMDS_D1/D2 similarly far out -- with ``corridor`` rejections a negligible
+# ~0.2% of the histogram (dominated instead by ``via_blocked_p``/``sym_trail``,
+# the SAME guards that dominate the unconstrained top-level "open" search).
+# That ruled out 8000 as merely too small a taste of the same wall, not
+# evidence the corridor-guided search itself was hopeless: widening the
+# budget alone (no other change) tracked best_progress steadily toward the
+# goal -- 133 at 8000, 1 at 20000, 0 (XY-aligned, blocked only on the final
+# via-drop layer transition) at 100000 -- and, before ``qualify_constructed_
+# pair`` existed, a raw MIPI_DAT0 native result reached the goal at 116,027
+# iterations (~10s; reproduced at both 150000 and 800000).  TMDS_D1/D2 do
+# NOT converge even at 800,000 iterations per departure (both exhaust their
+# own frontier, ``exhausted_progress_170`` / ``_168``, not merely the
+# budget).
+#
+# That raw MIPI_DAT0 result turned out NOT to be a resolved pair: it was
+# 1.75mm out of skew against a 0.05mm authored tolerance, caught only after
+# adding ``qualify_constructed_pair`` (the same authored skew/coupling gate
+# ``complete_pair_body`` already applied to the geometric lattice, but the
+# corridor path had been skipping).  Re-measured with that gate in place,
+# MIPI_DAT0's first departure's corridor result is found but reproducibly
+# rejected on the authored coupled-continuity threshold, and its remaining
+# departures exhaust the allowance without a second candidate -- so 150000
+# does NOT currently resolve MIPI_DAT0 either, despite reliably finding
+# legal copper fast.  The value is kept at 150000 (headroom over the
+# measured 116,027-iteration convergence-to-legal-copper point, TMDS_D1's
+# worst case 46s comfortably under the 120s per-pair wall clock) because
+# reaching legal copper fast is still a real, useful signal for a FUTURE
+# search that also biases toward a length-matched path -- this value is a
+# search-depth budget, not (yet) evidence of a resolved pair.
+CONSTRUCTION_CORRIDOR_ITERATIONS: int = int(
+    os.environ.get("KCT_CONSTRUCTION_CORRIDOR_ITERS", "150000")
+)
+
 # Issue #5333 (TMDS_D1): radii (mm, from each of the goal/head anchors)
 # ``_layer_return_tails`` samples when building its candidate via-site
 # lattice.  The historical set (0/0.6/1.2/1.8/2.4mm) was sized for the
@@ -10451,6 +10496,13 @@ class DiffPairRouter:
             # both normal attempts fail) without displacing a working attempt
             # or spending its per-pair budget.
             n_guide: Route | None = None
+            # Issue #5333: layer-agnostic corridor mask around the P guide,
+            # built below only when the corridor-search branch runs.  Kept
+            # in scope (rather than a local of that branch) so the
+            # construction stage further down can hand it to
+            # ``pair_construction``'s corridor-guided fallback (#5333,
+            # MIPI_DAT0/TMDS_D2) without rebuilding it.
+            corridor: frozenset[tuple[int, int]] | None = None
             p_overlap_sites: list[tuple[float, float]] = []
             n_overlap_sites: list[tuple[float, float]] = []
             if self.enable_shadow_construction and guide_route is not None and guide_route.segments:
@@ -10763,6 +10815,9 @@ class DiffPairRouter:
                         construction_deadline,
                         CONSTRUCTION_DEPARTURE_ITERATIONS,
                         CONSTRUCTION_BODY_ATTEMPTS,
+                        corridor_iterations_remaining=(
+                            CONSTRUCTION_CORRIDOR_ITERATIONS if corridor is not None else 0
+                        ),
                     )
                     result = construct_pair_routes(
                         self,
@@ -10772,6 +10827,7 @@ class DiffPairRouter:
                         budget,
                         board_thickness_mm=thickness,
                         num_copper_layers=self.autorouter.grid.num_layers,
+                        corridor=corridor,
                     )
                     # Issue #5333: report the STAGE tally, not just the total
                     # spend.  ``bodies=0`` alone cannot distinguish "no escape
