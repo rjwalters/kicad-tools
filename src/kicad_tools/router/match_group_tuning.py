@@ -2101,6 +2101,8 @@ def _mirror_segments_about_centerline(
     centerline axis (defined by point ``(cx, cy)`` and normal
     ``(nx, ny)``), snaps each reflected coordinate to the routing grid,
     and emits a new :class:`Segment` carrying the N-side net id / name.
+    The first and last reflected endpoints stay exact; interior snapping
+    uses the first reflected endpoint as its grid origin.
 
     The reflection preserves segment length (modulo grid snapping
     rounding within ``grid_resolution_mm / 2``) and segment direction
@@ -2115,8 +2117,8 @@ def _mirror_segments_about_centerline(
         n_net_name: Net name for the N half.
         cx, cy: Centerline midpoint anchor.
         nx, ny: Outer-normal unit vector.
-        grid_resolution_mm: Routing grid resolution; each reflected
-            endpoint is snapped to the nearest multiple.
+        grid_resolution_mm: Routing grid resolution for interior vertices,
+            relative to the first reflected endpoint. Host endpoints stay exact.
 
     Returns:
         A new list of :class:`Segment` instances ready to splice into
@@ -2126,14 +2128,28 @@ def _mirror_segments_about_centerline(
     from .quantize import dogleg_points, is_45_aligned
 
     _ = p_net_id  # caller-side clarity
+    if not new_p_segments:
+        return []
+    first = (new_p_segments[0].x1, new_p_segments[0].y1)
+    last = (new_p_segments[-1].x2, new_p_segments[-1].y2)
+    ox, oy = _reflect_point_about_axis(*first, cx, cy, nx, ny)
+
+    def reflected_point(x: float, y: float) -> tuple[float, float]:
+        rx, ry = _reflect_point_about_axis(x, y, cx, cy, nx, ny)
+        # Existing host endpoints are connection anchors, not new grid sites.
+        # Snap interior vertices relative to that host so translating a board
+        # cannot move the replacement away from its original copper.
+        if (x, y) in (first, last):
+            return rx, ry
+        return (
+            ox + _snap_to_grid(rx - ox, grid_resolution_mm),
+            oy + _snap_to_grid(ry - oy, grid_resolution_mm),
+        )
+
     mirrored: list[_Segment] = []
     for pseg in new_p_segments:
-        rx1, ry1 = _reflect_point_about_axis(pseg.x1, pseg.y1, cx, cy, nx, ny)
-        rx2, ry2 = _reflect_point_about_axis(pseg.x2, pseg.y2, cx, cy, nx, ny)
-        sx1 = _snap_to_grid(rx1, grid_resolution_mm)
-        sy1 = _snap_to_grid(ry1, grid_resolution_mm)
-        sx2 = _snap_to_grid(rx2, grid_resolution_mm)
-        sy2 = _snap_to_grid(ry2, grid_resolution_mm)
+        sx1, sy1 = reflected_point(pseg.x1, pseg.y1)
+        sx2, sy2 = reflected_point(pseg.x2, pseg.y2)
         # Issue #3535: even though the P-side meander is 45-aligned by
         # construction, reflecting it about the pair centerline (whose
         # normal is the arbitrary outer-normal hint, not necessarily a
@@ -2206,7 +2222,7 @@ def _splice_mirrored_n_route(
             ``mirrored_segments`` boundary point and the corresponding
             host endpoint for the two to be considered the same point.
             Kept tight by default (sub-micron) since both endpoints are
-            already grid-snapped upstream by
+            preserved exactly upstream by
             :func:`_mirror_segments_about_centerline`; this only absorbs
             floating-point rounding, not genuine geometric mismatch.
 
