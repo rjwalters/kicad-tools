@@ -80,7 +80,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.current_paths import CurrentPathSpec
     from kicad_tools.router.layer_intent import LayerIntentViolation
     from kicad_tools.router.net_names import NetClassMapResolution
-    from kicad_tools.router.pairwise_clearance import AttachZone, PairwiseViolation
+    from kicad_tools.router.pairwise_clearance import AttachZone, PadGeometry, PairwiseViolation
     from kicad_tools.router.primitives import Route
 
 # Issue #3035: ``_auto_skip_pour_nets`` was promoted to a public helper at
@@ -4993,6 +4993,58 @@ def _pairwise_attach_zones(router: "Autorouter") -> "tuple[AttachZone, ...]":
     return zones
 
 
+def _pairwise_pad_geometry(router: "Autorouter") -> "tuple[PadGeometry, ...]":
+    """Resolve (and memoise) the board's foreign PAD copper for the audit (#4507).
+
+    The pad-shaped companion to :func:`_pairwise_attach_zones`, resolved from
+    the SAME recorded source-board path (``_pairwise_attach_zone_pcb_path``) and
+    therefore in the same sheet-absolute frame -- see that function's
+    "Coordinate space" note, and
+    :func:`~kicad_tools.router.pairwise_clearance.board_pad_geometry`, which
+    applies the identical ``board_origin`` shift.
+
+    Why this exists: #4507 widened the shared pairwise kernel to trace-vs-pad
+    and via-vs-pad geometry, but the in-run #4588 audit could not USE that
+    widening because it had no pad polygons -- so the class of copper that
+    accounted for 13 of the 17 softstart rev-C T4 residuals (a routed trace or
+    via against a foreign pad) stayed visible only to an after-the-fact
+    ``scripts/replay_pairwise_gate.py`` replay a human had to remember to run.
+    Pads are static board copper the router never moves, so resolving them from
+    the input board is exact rather than an approximation: a shortfall reported
+    here is copper the search laid down beside a pad it should have kept away
+    from.
+
+    Returns an empty tuple when no source board path was recorded or when the
+    pad geometry cannot be read -- in either case the audit degrades to its
+    pre-#4507 trace/via-only scope rather than failing the run.
+    """
+    cached: tuple[PadGeometry, ...] | None = getattr(router, "_pairwise_pad_geometry_cache", None)
+    if cached is not None:
+        return cached
+
+    pcb_path = getattr(router, "_pairwise_attach_zone_pcb_path", None)
+    pads: tuple[PadGeometry, ...] = ()
+    if pcb_path is not None:
+        from kicad_tools.router.pairwise_clearance import board_pad_geometry
+
+        try:
+            pads = board_pad_geometry(pcb_path)
+        except Exception as exc:  # defensive: never fail the audit on a bad board
+            # Same discipline as ``_pairwise_attach_zones``: an empty tuple is
+            # indistinguishable from "this board has no connected pads", so a
+            # silent swallow would quietly un-widen the gate.  Say so on stderr.
+            print(
+                f"Warning: could not read pad geometry from {pcb_path} "
+                f"({type(exc).__name__}: {exc}); the HV pairwise audit will not "
+                f"check trace/via-vs-pad copper.",
+                file=sys.stderr,
+            )
+            pads = ()
+    with contextlib.suppress(AttributeError):  # exotic router stand-ins
+        router._pairwise_pad_geometry_cache = pads
+    return pads
+
+
 def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Route]":
     """Every trace route the output board carries -- fresh AND preserved (#4699).
 
@@ -5101,15 +5153,24 @@ def _audit_pairwise_clearance(
     scan) when ``--voltage-map`` was not supplied, so every pre-existing run is
     byte-identical.
 
-    Scope: trace-vs-trace (same layer), trace-vs-via and via-vs-via -- issue
-    #4507 widened ``find_pairwise_violations`` past its original trace-only
-    walk, using the via geometry every ``Route`` already carries, so this
-    in-run audit gained via coverage for free.  Foreign PAD copper is still
-    NOT checked here (that needs the board's pad geometry, which this
-    in-memory routing session does not resolve); the ``kct creepage`` census
-    remains the only pad-aware whole-board check, and the failure banner says
-    so.  A read-back replay of the WRITTEN board file (``board_pairwise_
-    violations``) does cover pads -- see ``scripts/replay_pairwise_gate.py``.
+    Scope: trace-vs-trace (same layer), trace-vs-via, via-vs-via AND
+    trace/via-vs-foreign-pad -- issue #4507 widened
+    ``find_pairwise_violations`` past its original trace-only walk, first to the
+    via geometry every ``Route`` already carries, then to pad copper resolved
+    from the source board by :func:`_pairwise_pad_geometry` (pads are static --
+    the router never moves them -- so reading them from the input board is
+    exact, in the same sheet-absolute frame the attach zones use).
+
+    That last widening is what closes the gap the #4507 T4 proof measured: 13
+    of the 17 residual softstart rev-C census fails were routed trace or via
+    copper against a foreign pad, a class this audit structurally could not see
+    even after the kernel learned to check it, because it was never handed any
+    pads.  Until now that copper was visible only to an after-the-fact
+    ``scripts/replay_pairwise_gate.py`` replay of the written file; the gate
+    that decides whether the run SUCCEEDS now sees it too.
+
+    Still out of scope here: pour/zone-fill copper (#3901), which the
+    ``kct creepage`` census scores and no engine's pairwise model represents.
     """
     if getattr(args, "_pairwise_required", None) is None:
         return []
@@ -5129,6 +5190,7 @@ def _audit_pairwise_clearance(
         id_to_name=id_to_name,
         dru=table.dru,
         attach_zones=_pairwise_attach_zones(router),
+        foreign_pads=_pairwise_pad_geometry(router),
     )
     # A single conflicting corridor is decomposed into many collinear segment
     # pairs that all report the SAME net pair, gap and location.  Collapse the
@@ -5160,8 +5222,9 @@ def _format_pairwise_violations(violations: "Sequence[PairwiseViolation]", limit
     an ``... and K more`` tail, so the output is diffable against
     ``kct creepage``.  Tagged generically (not ``[trace]``) since issue #4507
     widened the underlying scan past trace-vs-trace to also report
-    trace-vs-via and via-vs-via shortfalls, and a :class:`PairwiseViolation`
-    itself does not record which copper kind produced it.
+    trace-vs-via, via-vs-via and trace/via-vs-pad shortfalls, and a
+    :class:`PairwiseViolation` itself does not record which copper kind
+    produced it.
     """
     lines = [
         f"  [pairwise] {v.net_a} vs {v.net_b}: {v.actual_mm:.3f}mm "
@@ -5182,7 +5245,7 @@ def _print_pairwise_addendum(violations: "Sequence[PairwiseViolation]") -> None:
     """
     print(f"  Additionally, {len(violations)} HV pairwise clearance violation(s) detected:")
     print(_format_pairwise_violations(violations, limit=5))
-    print("  (trace/via, no pad geometry; run 'kct creepage' for the full census)")
+    print("  (trace/via/pad copper; run 'kct creepage' for the pour-aware full census)")
 
 
 def _pairwise_escalation_exit(rc: int, violations: "Sequence[PairwiseViolation]") -> int:
@@ -17285,7 +17348,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 print()
                 print(f"HV Pairwise Clearance ({pairwise_violation_count} violation(s)):")
                 print(_format_pairwise_violations(pairwise_violations))
-                print("  (trace/via, no pad geometry; run 'kct creepage' for the full census)")
+                print("  (trace/via/pad copper; run 'kct creepage' for the pour-aware full census)")
         else:
             print(
                 f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} signal nets{summary_suffix}"
