@@ -381,6 +381,120 @@ class TestApplicatorRotate:
 
 
 # --------------------------------------------------------------------------- #
+# Applicator: rotate_align / bounded quarter turn (#4968)                      #
+# --------------------------------------------------------------------------- #
+
+
+def _align_delta(ref: str = "J1", rotation: float = 90.0, net: str = "TGT") -> PlacementDelta:
+    return PlacementDelta(
+        net_name=net,
+        target_ref=ref,
+        kind="rotate_align",
+        rotation_delta=rotation,
+        source_action="endpoint_align",
+        rationale="pad-row/column mismatch ... CONNECTIVITY candidate only",
+        confidence="medium",
+    )
+
+
+class TestRotateAlignApplicator:
+    """The new kind reuses the rotation primitive rather than adding a path."""
+
+    def test_strategy_from_delta_builds_a_rotate_strategy(self):
+        loop, _router, _pcb = _make_loop(
+            footprint_refs=[("J1", 20.0, 50.0)],
+            pads=[FakePad(18.0, 50.0, "J1", "1")],
+            total_nets=2,
+            failed_predicate=_rotate_never_helps,
+            proposer=lambda _pcb: [],
+        )
+        strategy = loop._strategy_from_delta(_align_delta(rotation=-90.0))
+        assert strategy is not None
+        assert strategy.type == StrategyType.ROTATE_COMPONENT
+        assert strategy.actions[0].params == {"rotation_delta": -90.0}
+
+    @pytest.mark.parametrize(
+        ("rotation", "expected"),
+        [
+            # KiCad negates the footprint orientation vs standard CCW math
+            # (#3739): ``fp.rotation += d`` maps a pad offset through ``R(-d)``.
+            # Anchor (20, 50), pad at (18, 50) -> offset (-2, 0).
+            (90.0, (20.0, 52.0)),
+            (-90.0, (20.0, 48.0)),
+        ],
+    )
+    def test_router_pads_follow_the_quarter_turn(self, rotation, expected):
+        loop, router, _pcb = _make_loop(
+            footprint_refs=[("J1", 20.0, 50.0)],
+            pads=[FakePad(18.0, 50.0, "J1", "1"), FakePad(80.0, 50.0, "U3", "1")],
+            total_nets=2,
+            failed_predicate=_rotate_never_helps,
+            proposer=lambda _pcb: [],
+        )
+        loop._apply_delta_to_router_pads(_align_delta(rotation=rotation))
+        moved = router.pads[("J1", "1")]
+        assert (moved.x, moved.y) == pytest.approx(expected)
+        # Foreign pads are untouched.
+        other = router.pads[("U3", "1")]
+        assert (other.x, other.y) == pytest.approx((80.0, 50.0))
+
+    def test_quarter_turns_compose_back_to_the_identity(self):
+        loop, router, _pcb = _make_loop(
+            footprint_refs=[("J1", 20.0, 50.0)],
+            pads=[FakePad(18.0, 50.0, "J1", "1")],
+            total_nets=2,
+            failed_predicate=_rotate_never_helps,
+            proposer=lambda _pcb: [],
+        )
+        loop._apply_delta_to_router_pads(_align_delta(rotation=90.0))
+        loop._apply_delta_to_router_pads(_align_delta(rotation=-90.0))
+        pad = router.pads[("J1", "1")]
+        assert (pad.x, pad.y) == pytest.approx((18.0, 50.0))
+
+    def test_rotate_align_syncs_absolute_pad_angles_and_keeps_net_mapping(
+        self, tmp_path: Path
+    ):
+        """#4966's defect class must not reappear via the new kind.
+
+        A quarter turn advances every pad's ABSOLUTE ``(at x y ANGLE)`` third
+        token and the change survives save + reload -- while the board side and
+        the pad->net binding are byte-identical either side of the rotation.
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        applicator = StrategyApplicator()
+        pcb = _rotated_pad_board(tmp_path)
+        ub = next(fp for fp in pcb.footprints if fp.reference == "UB")
+        assert [pad.rotation for pad in ub.pads] == [45.0, 45.0]
+        before_layer = ub.layer
+        before_mapping = [(p.number, p.net_number, p.net_name, list(p.layers)) for p in ub.pads]
+
+        loop = PlacementDeltaFeedbackLoop(
+            router=FakeRouter([], 0, lambda _r: []), pcb=pcb, verbose=False
+        )
+        strategy = loop._strategy_from_delta(_align_delta(ref="UB", rotation=90.0))
+        assert strategy is not None
+        assert applicator.apply_strategy(pcb, strategy).success is True
+
+        assert ub.rotation == 90.0
+        assert [pad.rotation for pad in ub.pads] == [135.0, 135.0]
+        # Board side and logical pad/net mapping preserved by construction.
+        assert ub.layer == before_layer
+        assert [
+            (p.number, p.net_number, p.net_name, list(p.layers)) for p in ub.pads
+        ] == before_mapping
+
+        out = tmp_path / "quarter_turn.kicad_pcb"
+        pcb.save(str(out))
+        reloaded = next(
+            fp for fp in PCB.load(str(out)).footprints if fp.reference == "UB"
+        )
+        assert reloaded.rotation == 90.0
+        assert [pad.rotation for pad in reloaded.pads] == [135.0, 135.0]
+        assert reloaded.layer == before_layer
+
+
+# --------------------------------------------------------------------------- #
 # Applicator: mirror / layer-flip support (#4560)                              #
 # --------------------------------------------------------------------------- #
 
@@ -508,6 +622,12 @@ class TestPlacementDeltaRoundTrip:
             confidence="medium",
         )
         assert PlacementDelta.from_dict(d.to_dict()) == d
+
+    def test_rotate_align_delta_round_trips(self):
+        d = _align_delta(rotation=-90.0)
+        assert PlacementDelta.from_dict(d.to_dict()) == d
+        assert d.to_dict()["kind"] == "rotate_align"
+        assert d.to_dict()["rotation_delta"] == -90.0
 
     def test_from_dict_tolerates_missing_optional_keys(self):
         d = PlacementDelta.from_dict({"net_name": "N", "target_ref": "U1", "kind": "rotate_180"})
@@ -866,6 +986,25 @@ class TestDeltaFeedbackSkips:
         assert result.applied_deltas == []
         assert any("reorder_pins" in r for r in result.skip_reasons)
 
+    def test_locked_rotate_align_target_is_skipped_with_reason(self):
+        """#4968 defence in depth: a replayed artifact cannot rotate a locked part."""
+        fp = MockFootprint("J1", 20.0, 50.0)
+        fp.locked = True
+        pcb = MockPCB([fp])
+        router = FakeRouter([FakePad(18.0, 50.0, "J1", "1")], 2, _rotate_never_helps)
+        loop = PlacementDeltaFeedbackLoop(
+            router=router,
+            pcb=pcb,
+            verbose=False,
+            delta_proposer=lambda _pcb: [_align_delta()],
+        )
+        result = loop.run_delta(max_adjustments=3)
+        assert result.applied_deltas == []
+        assert result.exit_reason == "pd_no_delta"
+        assert any("locked" in r for r in result.skip_reasons)
+        assert fp.rotation == 0.0
+        assert router.pads[("J1", "1")].x == pytest.approx(18.0)
+
     def test_ladder_omission_no_delta_applies_nothing(self):
         # Classifier suppressed every move (empty proposal) -> driver is a no-op.
         loop, router, pcb = _make_loop(
@@ -880,6 +1019,91 @@ class TestDeltaFeedbackSkips:
         assert result.exit_reason == "pd_no_delta"
         assert pcb.footprints[0].rotation == 0.0
         assert _ub_pad(router).x == pytest.approx(12.0)
+
+
+# --------------------------------------------------------------------------- #
+# Zone-carried (power / mounting) pad revalidation after a rotation (#4968)    #
+# --------------------------------------------------------------------------- #
+
+
+class MockZone:
+    """Minimal filled copper pour for the zone-connectivity guard."""
+
+    def __init__(self, net_number: int, layer: str, polygon):
+        self.net_number = net_number
+        self.layer = layer
+        self.layers: list[str] = []
+        self.keepout = None
+        self.polygon = list(polygon)
+        self.filled_polygons = [list(polygon)]
+        self.filled_polygon_layers = [layer]
+
+
+_SMALL_POUR = [(17.0, 49.0), (19.0, 49.0), (19.0, 51.0), (17.0, 51.0)]
+_WIDE_POUR = [(15.0, 45.0), (25.0, 45.0), (25.0, 55.0), (15.0, 55.0)]
+
+
+def _zone_loop(pour_polygon, *, zones: bool = True):
+    """A loop whose J1 carries one GND(net 5) pad sitting inside ``pour_polygon``.
+
+    Rotating J1 by +90 swings that pad from (18, 50) to (20, 52) -- outside the
+    narrow pour, inside the wide one -- while the router's reach predicate
+    reports the rotation as an improvement either way.
+    """
+    pad = MockPad(rotation=0.0, position=(-2.0, 0.0), layers=["F.Cu"])
+    pad.net_number = 5
+    fp = MockFootprint("J1", 20.0, 50.0, pads=[pad])
+    pcb = MockPCB([fp])
+    if zones:
+        pcb.zones = [MockZone(5, "F.Cu", pour_polygon)]
+
+    def _rotation_improves(router):
+        return [2] if abs(router.pads[("J1", "1")].x - 18.0) < 1e-6 else []
+
+    router = FakeRouter([FakePad(18.0, 50.0, "J1", "1")], 2, _rotation_improves)
+    loop = PlacementDeltaFeedbackLoop(
+        router=router,
+        pcb=pcb,
+        verbose=False,
+        delta_proposer=lambda _pcb: [_align_delta()],
+    )
+    return loop, router, pcb, fp
+
+
+class TestZoneCarriedPadRevalidation:
+    def test_count_is_none_without_zones(self):
+        loop, _router, _pcb, _fp = _zone_loop(_SMALL_POUR, zones=False)
+        assert loop._zone_connected_pad_count("J1") is None
+
+    def test_count_tracks_the_rotation(self):
+        loop, _router, _pcb, fp = _zone_loop(_SMALL_POUR)
+        assert loop._zone_connected_pad_count("J1") == 1
+        fp.rotation = 90.0  # pad swings to (20, 52), off the pour
+        assert loop._zone_connected_pad_count("J1") == 0
+
+    def test_rotation_that_strands_a_pour_pad_is_reverted(self):
+        """Reach alone is the wrong acceptance test for a quarter turn.
+
+        The router never routes net 5 (copper fill carries it), so a rotation
+        that swings the GND pad off its pour looks like a free win to the
+        routed-net count.  The zone guard catches it and reverts.
+        """
+        loop, router, _pcb, fp = _zone_loop(_SMALL_POUR)
+        result = loop.run_delta(max_adjustments=1)
+        assert result.applied_deltas == []
+        assert result.exit_reason == "pd_reverted"
+        assert any("zone-carried pad connectivity 1 -> 0" in r for r in result.reverted_reasons)
+        # Reverted atomically: footprint and router pad both restored.
+        assert fp.rotation == 0.0
+        assert router.pads[("J1", "1")].x == pytest.approx(18.0)
+
+    def test_rotation_that_keeps_pour_coverage_is_kept(self):
+        """Positive control: the guard only fires on an actual loss."""
+        loop, router, _pcb, fp = _zone_loop(_WIDE_POUR)
+        result = loop.run_delta(max_adjustments=1)
+        assert [d.kind for d in result.applied_deltas] == ["rotate_align"]
+        assert fp.rotation == 90.0
+        assert router.pads[("J1", "1")].y == pytest.approx(52.0)
 
 
 # --------------------------------------------------------------------------- #

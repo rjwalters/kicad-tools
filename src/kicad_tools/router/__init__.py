@@ -230,6 +230,7 @@ from .placement_delta import (
     PlacementDelta,
     delta_from_diagnosis,
     deltas_from_result,
+    endpoint_align_deltas,
 )
 from .placement_feedback import (
     PlacementAdjustment,
@@ -510,6 +511,7 @@ __all__ = [
     "PlacementDelta",
     "delta_from_diagnosis",
     "deltas_from_result",
+    "endpoint_align_deltas",
     "write_placement_delta_json",
     # Escape Routing (dense packages)
     "EscapeRouter",
