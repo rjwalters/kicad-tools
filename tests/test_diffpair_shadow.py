@@ -4847,3 +4847,36 @@ def test_crossing_tail_census_announces_truncation_instead_of_hiding_it(capsys):
     assert f"legal={_CROSSTAIL_CENSUS_LIST + 5}/225" in lines[0]
     assert sum(1 for line in lines if "rank=" in line) == _CROSSTAIL_CENSUS_LIST
     assert any("5 further legal candidate(s) not listed" in line for line in lines)
+
+
+def test_shortest_tail_policy_preserves_partner_clearance():
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    direct = dpr._synthesize_tail(
+        _AllClearPathfinder(),
+        head,
+        goal,
+        0,
+        partner_segments=_horizontal_partner(6.0),
+        partner_clearance=0.4,
+        prefer_shortest=True,
+    )
+    assert direct is not None and len(direct.segments) == 1
+    assert direct.segments[0].start == (5.0, 5.0)
+    assert direct.segments[0].end == (8.0, 5.0)
+    partner = _crossing_partner()
+    detour = dpr._synthesize_tail(
+        _AllClearPathfinder(),
+        head,
+        goal,
+        0,
+        partner_segments=partner,
+        partner_clearance=0.5,
+        prefer_shortest=True,
+    )
+    assert detour is not None and len(detour.segments) > 1
+    for seg in detour.segments:
+        assert (
+            dpr._min_distance_to_partner(seg.x1, seg.y1, seg.x2, seg.y2, partner, seg.layer)
+            >= 0.5 - 1e-9
+        )

@@ -365,3 +365,24 @@ def test_raw_occupancy_write_loses_geometry_provenance_on_generation_bump():
     grid._blocked[0, gy, gx] = True
     grid.bump_occupancy_generation()
     assert not router._via_has_only_geometry_blockers(finder, gx, gy)
+
+
+@pytest.mark.parametrize("prefer_shortest", [False, True])
+def test_return_approach_policy_keeps_surface_coupling_policy(monkeypatch, prefer_shortest):
+    router, finder, head, goal, partner, body = _case()
+    seen = []
+    original = router._synthesize_tail
+
+    def record(*args, **kwargs):
+        seen.append((args[3], kwargs["prefer_shortest"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(router, "_synthesize_tail", record)
+    tail = next(
+        router._layer_return_tails(
+            finder, head, goal, partner, body, prefer_shortest_approach=prefer_shortest
+        )
+    )
+    assert tail.segments
+    assert (finder.grid.layer_to_index(head.layer.value), prefer_shortest) in seen
+    assert (finder.grid.layer_to_index(goal.layer.value), False) in seen

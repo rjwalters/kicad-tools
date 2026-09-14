@@ -5093,6 +5093,8 @@ class DiffPairRouter:
         partner_segments: list[Segment] | None = None,
         partner_clearance: float = 0.0,
         partner_vias: list[Via] | None = None,
+        *,
+        prefer_shortest: bool = False,
     ) -> Route | None:
         """Geometric head->pad tail on the head's layer (issue #3508).
 
@@ -5211,6 +5213,13 @@ class DiffPairRouter:
             candidates = [
                 candidates[i] for i in sorted(range(len(candidates)), key=lambda i: (-scores[i], i))
             ]
+        if prefer_shortest:
+            # A via approach may need a short legal continuation while its
+            # pad-side landing retains coupling-first selection. The caller
+            # must still validate quality on the assembled pair.
+            candidates.sort(
+                key=lambda spans: sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in spans)
+            )
         for segs in candidates:
             if all(
                 self._segment_cells_clear(pathfinder, x1, y1, x2, y2, layer_idx, head.net)
@@ -6127,6 +6136,7 @@ class DiffPairRouter:
         body: Route,
         *,
         deadline: float | None = None,
+        prefer_shortest_approach: bool = False,
     ) -> Iterator[Route]:
         """Yield bounded, uncommitted one-through-via layer-return candidates.
 
@@ -6134,6 +6144,8 @@ class DiffPairRouter:
         Exact final checks include every committed route and the uncommitted
         partner, including barrel copper on every layer and drilled holes.
         The caller must still validate the assembled pair and its quality.
+        ``prefer_shortest_approach`` changes only the approach-side candidate
+        ordering; the pad-side tail keeps its coupling preference.
         """
         from .via_clearance import drill_hole_to_hole_clear
 
@@ -6245,6 +6257,7 @@ class DiffPairRouter:
                             partner_segments=partner.segments,
                             partner_clearance=partner_center_clearance,
                             partner_vias=partner.vias,
+                            prefer_shortest=prefer_shortest_approach and li == start_layer,
                         )
                         if part is None:
                             break
