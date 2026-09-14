@@ -196,6 +196,9 @@ def test_late_pad_policy_refresh_reuses_pitch_cache(monkeypatch):
     from kicad_tools.router.primitives import Route
 
     grid, pad = setup(30)
+    # This cache test exercises the explicit legacy pitch-based policy.
+    # Default routing requires an authored clearance override (#5004).
+    grid.rules.legacy_fine_pitch_carveout = True
     cpp = CppGrid.from_routing_grid(grid)
     calls = []
     original = grid.compute_component_pitches

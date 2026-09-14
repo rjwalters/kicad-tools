@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 from kicad_tools.sexp import SExp
 
+from ..core.board_outline import board_outline_bounds, legacy_arc_points
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
 from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
 from ..footprints.library_path import (
@@ -504,6 +505,8 @@ class FootprintText:
     font_thickness: float  # stroke thickness in mm
     uuid: str = ""
     hidden: bool = False
+    # Serialized board-frame angle; position remains footprint-local for fp_text.
+    rotation: float = 0.0
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> FootprintText:
@@ -525,6 +528,7 @@ class FootprintText:
             x = at.get_float(0) or 0.0
             y = at.get_float(1) or 0.0
             fp_text.position = (x, y)
+            fp_text.rotation = at.get_float(2) or 0.0
 
         # Layer
         if layer := sexp.find("layer"):
@@ -571,6 +575,7 @@ class FootprintText:
             x = at.get_float(0) or 0.0
             y = at.get_float(1) or 0.0
             fp_text.position = (x, y)
+            fp_text.rotation = at.get_float(2) or 0.0
 
         # Layer
         if layer := sexp.find("layer"):
@@ -686,6 +691,8 @@ class GraphicText:
     font_thickness: float  # stroke thickness in mm
     uuid: str = ""
     hidden: bool = False
+    # Board text position and serialized angle are both board-frame.
+    rotation: float = 0.0
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> GraphicText:
@@ -703,6 +710,7 @@ class GraphicText:
         # Position
         if at := sexp.find("at"):
             gr_text.position = (at.get_float(0) or 0.0, at.get_float(1) or 0.0)
+            gr_text.rotation = at.get_float(2) or 0.0
 
         # Layer
         if layer := sexp.find("layer"):
@@ -746,6 +754,7 @@ class BoardGraphic:
     end: tuple[float, float] = (0.0, 0.0)
     center: tuple[float, float] | None = None
     uuid: str = ""
+    mid: tuple[float, float] | None = None  # Appended for positional compatibility
 
     @classmethod
     def from_sexp(cls, sexp: SExp, graphic_type: str) -> BoardGraphic:
@@ -770,6 +779,9 @@ class BoardGraphic:
             graphic.start = (start.get_float(0) or 0.0, start.get_float(1) or 0.0)
         if end := sexp.find("end"):
             graphic.end = (end.get_float(0) or 0.0, end.get_float(1) or 0.0)
+
+        if graphic_type == "arc":
+            graphic.start, graphic.mid, graphic.end = _arc_points_from_sexp(sexp)
 
         # Center (for circle/arc)
         if center := sexp.find("center"):
@@ -1231,6 +1243,98 @@ class Segment:
 
 
 @dataclass
+class Arc(Segment):
+    """Imported circular copper track, distinct from straight segments/graphics.
+
+    Coordinates use the same board-relative frame as ``Segment``. Length is
+    analytic; connectivity alone tessellates with a maximum 0.00001 mm sagitta.
+    Invalid circular geometry raises instead of silently becoming a chord.
+    """
+
+    mid: tuple[float, float] = (0.0, 0.0)
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> Arc:
+        arc = cast(Arc, super().from_sexp(sexp))
+        for tag in ("start", "mid", "end"):
+            node = sexp.find(tag)
+            if node is None or any(node.get_float(i) is None for i in (0, 1)):
+                raise ValueError(f"Copper arc is missing {tag} coordinates")
+            setattr(arc, tag, (node.get_float(0), node.get_float(1)))
+        arc.circular_geometry()  # Validate before exposing copper to consumers.
+        if not math.isfinite(arc.width) or arc.width <= 0:
+            raise ValueError("Copper arc width must be finite and positive")
+        if not arc.layer.endswith(".Cu"):
+            raise ValueError("Copper arc must be on a copper layer")
+        return arc
+
+    def circular_geometry(self) -> tuple[tuple[float, float], float, float, float]:
+        """Return center, radius, start angle and signed sweep through mid."""
+        if not all(math.isfinite(v) for p in (self.start, self.mid, self.end) for v in p):
+            raise ValueError("Copper arc coordinates must be finite")
+        # Translate first to avoid cancellation for boards far from the origin.
+        ax, ay = self.start
+        bx, by = self.mid[0] - ax, self.mid[1] - ay
+        cx, cy = self.end[0] - ax, self.end[1] - ay
+        determinant = 2 * (bx * cy - by * cx)
+        scale = max(bx * bx + by * by, cx * cx + cy * cy)
+        if scale == 0 or abs(determinant) <= 1e-14 * scale:
+            raise ValueError("Copper arc points must define a nondegenerate circle")
+        ux = ((bx * bx + by * by) * cy - (cx * cx + cy * cy) * by) / determinant
+        uy = (bx * (cx * cx + cy * cy) - cx * (bx * bx + by * by)) / determinant
+        radius = math.hypot(ux, uy)
+        start = math.atan2(-uy, -ux)
+        mid = (math.atan2(by - uy, bx - ux) - start) % math.tau
+        end = (math.atan2(cy - uy, cx - ux) - start) % math.tau
+        sweep = end if mid <= end else end - math.tau
+        if not all(math.isfinite(v) for v in (ux, uy, radius, sweep)) or radius <= 0:
+            raise ValueError("Copper arc geometry is not finite")
+        if not all(math.isfinite(v) for v in (ax + ux, ay + uy, radius * sweep)):
+            raise ValueError("Copper arc geometry is not finite")
+        return (ax + ux, ay + uy), radius, start, sweep
+
+    @property
+    def length(self) -> float:
+        """True swept centerline length in millimeters (never the chord)."""
+        _, radius, _, sweep = self.circular_geometry()
+        return radius * abs(sweep)
+
+    def centerline_points(self, max_error_mm: float = 0.00001) -> list[tuple[float, float]]:
+        """Polyline with sagitta <= max_error_mm; endpoints remain exact.
+
+        This is an analysis approximation, never routing output. The bound is
+        on centerline distance; buffered copper inherits that absolute bound.
+        Excessive geometry is rejected rather than silently relaxing the bound.
+        """
+        if not math.isfinite(max_error_mm) or max_error_mm <= 0:
+            raise ValueError("Arc approximation error must be finite and positive")
+        (cx, cy), radius, start, sweep = self.circular_geometry()
+        step = 4 * math.asin(math.sqrt(min(max_error_mm / (2 * radius), 0.5)))
+        if step == 0:
+            raise ValueError("Copper arc approximation exceeds floating-point resolution")
+        count = max(2, math.ceil(abs(sweep) / step))
+        if count > 100000:
+            raise ValueError("Copper arc requires more than 100000 approximation edges")
+        return (
+            [self.start]
+            + [
+                (
+                    cx + radius * math.cos(start + sweep * i / count),
+                    cy + radius * math.sin(start + sweep * i / count),
+                )
+                for i in range(1, count)
+            ]
+            + [self.end]
+        )
+
+    def to_sexp(self, offset: tuple[float, float] = (0.0, 0.0)) -> SExp:
+        node = super().to_sexp(offset)
+        node.name = "arc"
+        node.children.insert(1, SExp.list("mid", self.mid[0] + offset[0], self.mid[1] + offset[1]))
+        return node
+
+
+@dataclass
 class Via:
     """PCB via."""
 
@@ -1637,23 +1741,6 @@ class GraphicLine:
         return line
 
 
-def _rotate_point(
-    point: tuple[float, float], center: tuple[float, float], angle_deg: float
-) -> tuple[float, float]:
-    """Rotate ``point`` about ``center`` by ``angle_deg`` degrees (CCW-positive).
-
-    Used to normalize pre-KiCad-6 legacy ``gr_arc`` encodings (center + signed
-    sweep angle) into modern on-arc start/mid/end points.
-    """
-    theta = math.radians(angle_deg)
-    dx, dy = point[0] - center[0], point[1] - center[1]
-    cos_t, sin_t = math.cos(theta), math.sin(theta)
-    return (
-        center[0] + dx * cos_t - dy * sin_t,
-        center[1] + dx * sin_t + dy * cos_t,
-    )
-
-
 def _arc_points_from_sexp(
     sexp: SExp,
 ) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
@@ -1661,6 +1748,8 @@ def _arc_points_from_sexp(
 
     Preserve GraphicArc's tolerant defaults and explicit-mid precedence. Points
     stay in the input coordinate frame (footprint graphics use local space).
+    Legacy normalization is delegated to ``legacy_arc_points`` so schema
+    parsing and routing share the exact same arc math.
     """
     start = mid = end = (0.0, 0.0)
     if node := sexp.find("start"):
@@ -1673,9 +1762,7 @@ def _arc_points_from_sexp(
     if mid_node is None and (angle := sexp.find("angle")) is not None:
         angle_deg = angle.get_float(0) or 0.0
         center, on_arc_point = start, end
-        start = on_arc_point
-        mid = _rotate_point(on_arc_point, center, angle_deg / 2.0)
-        end = _rotate_point(on_arc_point, center, angle_deg)
+        start, mid, end = legacy_arc_points(on_arc_point, center, angle_deg)
     return start, mid, end
 
 
@@ -1883,6 +1970,7 @@ class PCB:
         self._nets: dict[int, Net] = {}
         self._footprints: list[Footprint] = []
         self._segments: list[Segment] = []
+        self._arcs: list[Arc] = []
         self._vias: list[Via] = []
         # Incrementally-maintained dedup key sets (issue #4175).  Built lazily
         # from _segments/_vias on first add_trace/add_via, then updated on each
@@ -1911,6 +1999,14 @@ class PCB:
         # (add_trace/add_via) emits name-based refs when this is True so a
         # name-based board stays name-based on save.
         self._net_name_only_dialect: bool = False
+        #: Non-empty when this board's ``Edge.Cuts`` geometry could not be read
+        #: well enough to prove a board origin (issue #5274).  ``PCB.load()``
+        #: deliberately tolerates such a board -- see
+        #: :meth:`_detect_board_origin` -- so consumers that *require* a proven
+        #: outline can fail closed on their own terms instead of every load
+        #: raising.  Empty on a board whose outline bounds were resolved (or
+        #: that has no outline geometry at all).
+        self.outline_error: str = ""
         #: Loud, human-readable signals raised while parsing this board -- used
         #: today for the "file has a component graph we could not read" guard
         #: (issue #4873).  Empty on a board the parser fully understands.
@@ -2272,6 +2368,8 @@ class PCB:
             elif tag == "segment":
                 seg = Segment.from_sexp(child)
                 self._segments.append(seg)
+            elif tag == "arc":
+                self._arcs.append(Arc.from_sexp(child))
             elif tag == "via":
                 via = Via.from_sexp(child)
                 self._vias.append(via)
@@ -2418,7 +2516,7 @@ class PCB:
         # NOT treat an empty ``self._nets`` alone as name-only, so a freshly
         # constructed board with no header table keeps numeric emission.
         self._net_name_only_dialect = (
-            any(seg.net_name_only for seg in self._segments)
+            any(seg.net_name_only for seg in [*self._segments, *self._arcs])
             or any(via.net_name_only for via in self._vias)
             or any(
                 pad.net_number == 0 and bool(pad.net_name)
@@ -2451,8 +2549,8 @@ class PCB:
                     if net:
                         pad.net_name = net.name
 
-        # Fix segments
-        for seg in self._segments:
+        # Fix straight and curved tracks
+        for seg in [*self._segments, *self._arcs]:
             if seg.net_number == 0 and seg.net_name:
                 seg.net_number = name_to_number.get(seg.net_name, 0)
             elif seg.net_number != 0 and not seg.net_name:
@@ -2532,7 +2630,7 @@ class PCB:
         for fp in self._footprints:
             for pad in fp.pads:
                 observe(pad.net_name, pad.net_number)
-        for seg in self._segments:
+        for seg in [*self._segments, *self._arcs]:
             observe(seg.net_name, seg.net_number)
         for via in self._vias:
             observe(via.net_name, via.net_number)
@@ -2709,8 +2807,8 @@ class PCB:
         detects that offset so footprint positions can be specified relative
         to the board corner.
 
-        Sets self._board_origin to the start position of the first gr_rect
-        found on Edge.Cuts, or (0, 0) if none found.
+        Uses the minimum corner of shared Edge.Cuts bounds, or (0, 0)
+        if no outline geometry is present.
 
         Coordinate-space invariant
         --------------------------
@@ -2736,22 +2834,40 @@ class PCB:
         :meth:`add_trace`, :meth:`add_via`, and :meth:`save` are responsible
         for adding ``self._board_origin`` back when writing new copper
         primitives to the tree.
-        """
-        origin = (0.0, 0.0)
 
-        # Look for gr_rect on Edge.Cuts layer - this is how PCB.create() makes outlines
-        for graphic in self._graphics:
-            if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
-                origin = graphic.start
-                break
-        else:
-            # Fallback: check for gr_line forming a rectangle on Edge.Cuts
-            # Find the minimum x, y coordinates from all Edge.Cuts lines
-            edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
-            if edge_lines:
-                min_x = min(min(line.start[0], line.end[0]) for line in edge_lines)
-                min_y = min(min(line.start[1], line.end[1]) for line in edge_lines)
-                origin = (min_x, min_y)
+        Malformed outlines are tolerated here (issue #5274)
+        ---------------------------------------------------
+        :func:`~kicad_tools.core.board_outline.board_outline_bounds` keeps its
+        fail-loud contract: malformed or unsupported ``Edge.Cuts`` geometry
+        raises ``ValueError`` for every caller that asks for bounds directly
+        (routing's outline reader, :pyattr:`board_size`,
+        :meth:`_edge_cuts_bbox_sexp`).  ``PCB.load()`` must *not* inherit that
+        contract.  Loading is the entry point for tools whose whole job is to
+        inspect or repair a board that a human already knows is imperfect --
+        ``fix-vias --relocate-in-pad --search-alternatives`` proves containment
+        itself and refuses atomically when it cannot
+        (``_alternative_board_region`` fails closed to an empty region), and
+        silkscreen placement reports the outline problem per-reference.  If the
+        load itself raised, those consumers would never get to make their own
+        proof-based decision and a repair tool would abort instead of reporting.
+
+        So an unreadable outline degrades to "no proven origin": the origin
+        stays ``(0.0, 0.0)``, no coordinates are rewritten, and the reason is
+        recorded on :pyattr:`outline_error` for consumers that want to fail
+        closed on it.  That matches the tolerant behaviour every ``PCB.load()``
+        had before the shared outline reader was introduced.
+        """
+        try:
+            bounds = board_outline_bounds(self._sexp)
+        except ValueError as exc:
+            # No proven origin: leave every coordinate in sheet-absolute space
+            # (identical to the no-outline case) and record why.
+            self.outline_error = str(exc)
+            self._board_origin = (0.0, 0.0)
+            return
+
+        self.outline_error = ""
+        origin = bounds[:2] if bounds is not None else (0.0, 0.0)
 
         self._board_origin = origin
 
@@ -2773,6 +2889,11 @@ class PCB:
                 ex, ey = seg.end
                 seg.start = (sx - ox, sy - oy)
                 seg.end = (ex - ox, ey - oy)
+
+            for arc in self._arcs:
+                arc.start = (arc.start[0] - ox, arc.start[1] - oy)
+                arc.mid = (arc.mid[0] - ox, arc.mid[1] - oy)
+                arc.end = (arc.end[0] - ox, arc.end[1] - oy)
 
             # Vias: convert position.
             for via in self._vias:
@@ -2905,81 +3026,27 @@ class PCB:
     def board_size(self) -> tuple[float, float]:
         """Board dimensions (width, height) in mm.
 
-        Computes the board size from the Edge.Cuts outline.  For a gr_rect
-        outline (as created by ``PCB.create()``), the size is derived from
-        the rectangle's start and end coordinates.  For outlines composed
-        of gr_line segments, the bounding box of all Edge.Cuts geometry is
-        used.
+        Uses the same layer-aware outline bounds as routing and planning,
+        including extrema of arcs, circles and cubic curves.
 
         Returns:
             Tuple (width, height) in mm.  Returns (0.0, 0.0) if no
             Edge.Cuts geometry is found.
+
+        Raises:
+            ValueError: If the Edge.Cuts geometry present is malformed or
+                unsupported -- this asks for bounds directly, so it keeps
+                the shared reader's fail-loud contract (issue #5274) rather
+                than :meth:`_detect_board_origin`'s load-time tolerance.
         """
-        # Try gr_rect first (standard board outline from PCB.create)
-        for graphic in self._graphics:
-            if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
-                width = abs(graphic.end[0] - graphic.start[0])
-                height = abs(graphic.end[1] - graphic.start[1])
-                return (width, height)
-
-        # Fallback: bounding box of all Edge.Cuts line segments
-        edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
-        if edge_lines:
-            xs = [coord for line in edge_lines for coord in (line.start[0], line.end[0])]
-            ys = [coord for line in edge_lines for coord in (line.start[1], line.end[1])]
-            return (max(xs) - min(xs), max(ys) - min(ys))
-
-        return (0.0, 0.0)
+        bounds = board_outline_bounds(self._sexp)
+        if bounds is None:
+            return (0.0, 0.0)
+        return bounds[2] - bounds[0], bounds[3] - bounds[1]
 
     def _edge_cuts_bbox_sexp(self) -> tuple[float, float, float, float] | None:
-        """Compute the Edge.Cuts bounding box in sheet-absolute coordinates.
-
-        Walks ``self._sexp`` directly (the source of truth that ``save()``
-        serialises) rather than the in-memory, board-relative collections,
-        so the returned box is in the same coordinate space as the values
-        :meth:`page_fit` rewrites.
-
-        Returns:
-            ``(min_x, min_y, max_x, max_y)`` of all graphics on the
-            ``Edge.Cuts`` layer, or ``None`` if no Edge.Cuts geometry is
-            found.
-        """
-        xs: list[float] = []
-        ys: list[float] = []
-
-        def _on_edge_cuts(node: SExp) -> bool:
-            layer_node = node.find_child("layer")
-            return bool(layer_node and layer_node.get_string(0) == "Edge.Cuts")
-
-        for child in self._sexp.iter_children():
-            if child.tag not in (
-                "gr_rect",
-                "gr_line",
-                "gr_arc",
-                "gr_circle",
-                "gr_poly",
-                "gr_curve",
-            ):
-                continue
-            if not _on_edge_cuts(child):
-                continue
-            for coord_tag in ("start", "end", "mid", "center"):
-                for n in child.find_children(coord_tag):
-                    x, y = n.get_float(0), n.get_float(1)
-                    if x is not None and y is not None:
-                        xs.append(x)
-                        ys.append(y)
-            # gr_poly / gr_curve carry a (pts (xy ...)) child.
-            for pts in child.find_all("pts"):
-                for xy in pts.find_children("xy"):
-                    x, y = xy.get_float(0), xy.get_float(1)
-                    if x is not None and y is not None:
-                        xs.append(x)
-                        ys.append(y)
-
-        if not xs or not ys:
-            return None
-        return (min(xs), min(ys), max(xs), max(ys))
+        """Return shared outline bounds in sheet-absolute coordinates."""
+        return board_outline_bounds(self._sexp)
 
     def _edge_cuts_poly_chains_sexp(self) -> list[list[tuple[float, float]]]:
         """Collect ``gr_poly``/``gr_curve`` Edge.Cuts vertex chains.
@@ -3184,6 +3251,7 @@ class PCB:
         self._nets = {}
         self._footprints = []
         self._segments = []
+        self._arcs = []
         self._vias = []
         self._invalidate_dedup_keys()
         self._zones = []
@@ -3737,6 +3805,17 @@ class PCB:
             "the file with merge_routes_into_pcb()."
         )
 
+    @property
+    def arcs(self) -> list[Arc]:
+        """Imported copper arcs; excluded from straight-segment angle statistics."""
+        return self._arcs
+
+    def arcs_on_layer(self, layer: str) -> Iterator[Arc]:
+        return (arc for arc in self._arcs if arc.layer == layer)
+
+    def arcs_in_net(self, net_number: int) -> Iterator[Arc]:
+        return (arc for arc in self._arcs if arc.net_number == net_number)
+
     def segments_on_layer(self, layer: str) -> Iterator[Segment]:
         """Get segments on a specific layer."""
         for seg in self._segments:
@@ -4179,7 +4258,10 @@ class PCB:
                 continue
 
             endpoints: list[tuple[float, float]] = []
-            if tag in ("gr_line", "gr_arc"):
+            if tag == "gr_arc":
+                start, _, end = _arc_points_from_sexp(child)
+                endpoints = [start, end]
+            elif tag == "gr_line":
                 s = child.find("start")
                 e = child.find("end")
                 if s and e:
@@ -4273,6 +4355,9 @@ class PCB:
         """Collect all coordinate points from a list of sexp graphic nodes."""
         points: list[tuple[float, float]] = []
         for node in nodes:
+            if node.tag == "gr_arc":
+                points.extend(_arc_points_from_sexp(node))
+                continue
             for attr in ("start", "end", "mid", "center"):
                 n = node.find(attr)
                 if n:
@@ -4434,6 +4519,11 @@ class PCB:
         )
 
     @property
+    def arc_count(self) -> int:
+        """Number of top-level copper arc nodes in the authoritative tree."""
+        return sum(1 for child in self._sexp.children if not child.is_atom and child.name == "arc")
+
+    @property
     def via_count(self) -> int:
         """Number of vias.
 
@@ -4483,6 +4573,7 @@ class PCB:
                 dx = seg.end[0] - seg.start[0]
                 dy = seg.end[1] - seg.start[1]
                 total += math.sqrt(dx * dx + dy * dy)
+        total += sum(arc.length for arc in self._arcs if layer is None or arc.layer == layer)
         return total
 
     def summary(self) -> dict:
@@ -4504,6 +4595,7 @@ class PCB:
             "footprints": self.footprint_count,
             "nets": self.net_count,
             "segments": self.segment_count,
+            "arcs": self.arc_count,
             "vias": self.via_count,
             "zones": self.zone_count,
             "trace_length_mm": round(self.total_trace_length(), 2),
@@ -6033,7 +6125,8 @@ class PCB:
 
         Returns:
             Dictionary with routing statistics:
-            - segments: Number of trace segments
+            - segments: Number of straight trace segments
+            - arcs: Number of curved copper tracks
             - vias: Number of vias
             - trace_length_mm: Total trace length in mm
             - nets_with_traces: Set of net numbers that have traces
@@ -6058,6 +6151,11 @@ class PCB:
             if seg.net_number > 0:
                 nets_with_traces.add(seg.net_number)
 
+        for arc in self._arcs:
+            total_length += arc.length
+            if arc.net_number > 0:
+                nets_with_traces.add(arc.net_number)
+
         # Add vias to nets with traces
         for via in self._vias:
             if via.net_number > 0:
@@ -6072,6 +6170,7 @@ class PCB:
 
         return {
             "segments": self.segment_count,
+            "arcs": self.arc_count,
             "vias": self.via_count,
             "trace_length_mm": total_length,
             "nets_with_traces": nets_with_traces,

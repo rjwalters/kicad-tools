@@ -3064,8 +3064,150 @@ function mask_comment(s,   out, n, i, c, prev, mode, SQ, DQ) {
 #   - a SINGLE-QUOTED `NAME='$(pwd)'` is excluded on purpose: single quotes
 #     suppress command substitution, so that RHS is a literal string the
 #     shell never evaluates, not a cwd capture.
+#
+# `NAME=$(cat <file>)` CAPTURE OF A PROVEN SAME-COMMAND `cd` (#7532):
+# guard-decision telemetry (#7419, dated AFTER the #6724 fix above already
+# merged) showed force-op:detached still firing at ASK for a DIFFERENT
+# cwd-capture shape #6724 does not cover — the cwd is round-tripped through a
+# FILE instead of a direct `$(pwd)` substitution, e.g.:
+#
+#   cd <worktree>
+#   WORKTREE_ABS=$(cat /tmp/worktree_abs.txt)
+#   git -C "$WORKTREE_ABS" reset --hard origin/main
+#
+# record_assign() stores the substitution TEXT `$(cat /tmp/worktree_abs.txt)`
+# verbatim, and resolve_var()'s chain-refusal guard (it starts with `$`) then
+# correctly refuses to touch it — so `$WORKTREE_ABS` reaches the `-C`/`cd`
+# capture points below unresolved, even when the file already holds exactly
+# the same-command `cd` target.
+#
+# This hook is a PreToolUse guard: it evaluates the WHOLE compound command
+# BEFORE any of it runs, so unlike the `$(pwd)` case above (which trusts a
+# same-command `cd` to predict a FUTURE `pwd` evaluation), a `$(cat <file>)`
+# capture cannot be proven by predicting a future write within the same
+# command — nothing has executed yet. What CAN be checked, safely and without
+# assuming anything about execution order, is <file>'s content RIGHT NOW: the
+# assignment scan below reads it directly off disk (`getline < path`, never a
+# write, never an exec) and compares it — verbatim, first line only — against
+# the SAME-COMMAND proven `curcwd` (`cd_proven`, exactly the #6724 trust
+# gate). Only an EXACT match resolves `varmap[NAME] = curcwd`; this covers a
+# file already sitting on disk with the right content (written moments
+# earlier by a prior, already-executed command, or via any other legitimate
+# means) — it does NOT require <file> to be created inside the guarded
+# command's own text, and it never depends on THIS command actually running.
+# Narrow scope, mirroring #6724's own narrow scope:
+#   - ONLY a literal `cat <file>` substitution (bare, double-quoted, or the
+#     `` `cat <file>` `` backtick spelling) — any other command (`$(head -1
+#     <file>)`, `$(cat <file1> <file2>)`, etc.) is left to fall through to
+#     record_assign() unresolved, same as before.
+#   - ONLY when a same-command `cd <path>` has already proven `curcwd`
+#     (`cd_proven`) — mirrors #6724 exactly; without a proven `cd` the
+#     assignment falls through to record_assign() unresolved.
+#   - ONLY an absolute `<file>` argument (`^/`) is read — a relative path is
+#     ambiguous (it would depend on the hook's own invocation cwd, not
+#     necessarily the command's), so it is left unresolved rather than
+#     guessed.
+#   - the file's content must match `curcwd` EXACTLY (first line only,
+#     trailing newline stripped by `getline`, no other trimming) — any
+#     mismatch, an unreadable/missing file, or extra content beyond the first
+#     line all fall through to record_assign() unresolved, same
+#     fail-toward-asking default as an unresolvable `$VAR` (#6152) or a
+#     non-`pwd`/non-`cat` command substitution.
+#   - a SINGLE-QUOTED `NAME='$(cat <file>)'` is excluded on purpose, same
+#     rationale as the single-quoted `$(pwd)` case above.
+#   - `getline < path` only ever READS <file> to compare its content; the
+#     guard never writes to it, executes it, or reports its content back to
+#     the caller — only the boolean "did it match curcwd" outcome feeds the
+#     resolution.
 parse_force_ops() {
     printf '%s' "$1" | awk -v startcwd="$2" -v home="$HOME" "$_QSPLIT_AWK""$_CDEXPAND_AWK""$_CDQUOTE_AWK""$_VARRESOLVE_AWK"'
+    # #7532: recognize a literal `$(cat <file>)` / `` `cat <file>` `` command
+    # substitution (bare or double-quoted as a whole) and return the <file>
+    # literal it names (unquoted), or "" if `v` is not that exact shape. Purely
+    # textual -- never opens/reads a real file itself (see read_cwd_capture_file
+    # below for the one place that does).
+    function extract_cat_file(v,   dq, inner) {
+        dq = sprintf("%c", 34)
+        if (length(v) >= 2 && substr(v, 1, 1) == dq && substr(v, length(v), 1) == dq) {
+            v = substr(v, 2, length(v) - 2)
+        }
+        if (v ~ /^\$\(cat[ \t]+[^)]+\)$/) {
+            inner = v
+            sub(/^\$\(cat[ \t]+/, "", inner)
+            sub(/\)$/, "", inner)
+        } else if (v ~ /^`cat[ \t]+[^`]+`$/) {
+            inner = v
+            sub(/^`cat[ \t]+/, "", inner)
+            sub(/`$/, "", inner)
+        } else {
+            return ""
+        }
+        sub(/^[ \t]+/, "", inner)
+        sub(/[ \t]+$/, "", inner)
+        return strip_cd_quoting(inner)   # unquote the file argument itself
+    }
+    # #7532: read <path> off disk (first line only, trailing newline stripped
+    # by getline) and return it, or "" if the file does not exist/cannot be
+    # opened/is empty. Read-only -- never writes, executes, or reports the
+    # content anywhere; the caller only ever compares it for exact equality
+    # against a proven curcwd (see the header comment above parse_force_ops()
+    # for the full rationale).
+    function read_cwd_capture_file(path,   line, rc) {
+        rc = (getline line < path)
+        close(path)
+        if (rc <= 0) return ""
+        return line
+    }
+    # #7532: match_assignword() (shared, #6953) deliberately stops an UNQUOTED
+    # assignment value at its first unquoted space/tab -- documented there as
+    # the same out-of-scope-for-this-file limitation #6949 owns for
+    # `NAME=$(mktemp -d)` and similar. `cat <file>` always has an internal
+    # unquoted space (between `cat` and `<file>`), so a bare, unquoted
+    # `NAME=$(cat <file>)` -- the exact real-world shape #7419'"'"'s telemetry
+    # and this issue'"'"'s own acceptance criteria use -- would otherwise be
+    # truncated to `NAME=$(cat` before extract_cat_file() ever saw it. This is
+    # a narrow, cat-specific carve-out tried BEFORE match_assignword() at each
+    # iteration of the assignment-scan loop below: it recognizes ONLY the
+    # literal, unquoted `NAME=$(cat <file>)` / `` NAME=`cat <file>` `` shape
+    # (anchored at the start of `seg`) and returns the length through the
+    # FIRST closing `)`/backtick plus any trailing whitespace -- mirroring
+    # match_assignword()'"'"'s own trailing-whitespace-consuming contract
+    # exactly, so it is a drop-in replacement for _alen at that call site.
+    # Returns 0 (never matches) for every other shape, including the
+    # already-handled double-quoted `NAME="$(cat <file>)"` form
+    # (match_assignword() already spans that correctly) and any non-cat
+    # command substitution (out of scope, same as everywhere else in this
+    # file -- this carve-out is `cat` only, never generalized).
+    function match_cat_assignword(seg,   n, rest, closeidx, spanlen) {
+        if (match(seg, /^[A-Za-z_][A-Za-z0-9_]*=\$\(cat[ \t]+/)) {
+            n = RSTART + RLENGTH
+            rest = substr(seg, n)
+            closeidx = index(rest, ")")
+            if (closeidx == 0) return 0
+            spanlen = (n - 1) + closeidx
+            while (spanlen < length(seg) && (substr(seg, spanlen + 1, 1) == " " || substr(seg, spanlen + 1, 1) == "\t")) spanlen++
+            return spanlen
+        }
+        if (match(seg, /^[A-Za-z_][A-Za-z0-9_]*=`cat[ \t]+/)) {
+            n = RSTART + RLENGTH
+            rest = substr(seg, n)
+            closeidx = index(rest, "`")
+            if (closeidx == 0) return 0
+            spanlen = (n - 1) + closeidx
+            while (spanlen < length(seg) && (substr(seg, spanlen + 1, 1) == " " || substr(seg, spanlen + 1, 1) == "\t")) spanlen++
+            return spanlen
+        }
+        return 0
+    }
+    # #7532: try the narrow cat-specific carve-out FIRST (it only ever matches
+    # the exact unquoted `NAME=$(cat <file>)`/`` NAME=`cat <file>` `` shape);
+    # fall back to the shared match_assignword() for every other assignment,
+    # completely unchanged from before this issue.
+    function next_assignword_len(seg,   l) {
+        l = match_cat_assignword(seg)
+        if (l == 0) l = match_assignword(seg)
+        return l
+    }
     BEGIN { SEP = sprintf("%c", 31); curcwd = startcwd; cd_proven = 0 }
                                        # SEP is non-whitespace so bash read
                                        # does not trim an empty cpath.
@@ -3100,7 +3242,7 @@ parse_force_ops() {
                     if (!sub(/^-[^ \t]*[ \t]*/, "", seg)) break
                 }
             }
-            while ((_alen = match_assignword(seg)) > 0) {
+            while ((_alen = next_assignword_len(seg)) > 0) {
                 assignword = substr(seg, 1, _alen)
                 seg = substr(seg, _alen + 1)
                 sub(/[ \t]+$/, "", assignword)
@@ -3115,6 +3257,14 @@ parse_force_ops() {
                 pwdname = substr(assignword, 1, pwdeq - 1)
                 pwdval = substr(assignword, pwdeq + 1)
                 if (cd_proven && curcwd != "" && (pwdval == "$(pwd)" || pwdval == "\"$(pwd)\"" || pwdval == "`pwd`" || pwdval == "\"`pwd`\"")) {
+                    varmap[pwdname] = curcwd
+                } else if (cd_proven && curcwd != "" && (catfile = extract_cat_file(pwdval)) != "" && catfile ~ /^\// && read_cwd_capture_file(catfile) == curcwd) {
+                    # #7532: NAME=$(cat <file>) / NAME=`cat <file>` -- <file>
+                    # is read off disk RIGHT NOW and its (first-line) content
+                    # compared verbatim against the same-command proven
+                    # curcwd; only an EXACT match resolves varmap[NAME] =
+                    # curcwd, see the header comment above parse_force_ops()
+                    # for the full rationale and narrow scope.
                     varmap[pwdname] = curcwd
                 } else {
                     record_assign(assignword)
@@ -3637,6 +3787,7 @@ mask_ask_positional_args() {
     BEGIN {
         SQ = sprintf("%c", 39)
         DQ = sprintf("%c", 34)
+        BS = sprintf("%c", 92)
         # Command-name allowlist: known non-executing commands/scripts whose
         # positional string arguments are search/dedup text, never live shell
         # syntax. grep/egrep/fgrep/rg are deliberately NOT here — see the
@@ -3669,8 +3820,26 @@ mask_ask_positional_args() {
                 qc = substr(rest, 1, 1)
                 if (qc != DQ && qc != SQ) break
                 endpos = 0
-                for (i = 2; i <= length(rest); i++) {
-                    if (substr(rest, i, 1) == qc) { endpos = i; break }
+                if (qc == DQ) {
+                    # Escape-aware: a backslash swallows the NEXT character as
+                    # one atomic unit, so an escaped `\"` can never be misread
+                    # as the closing quote (#7516, mirroring the #7363 fix to
+                    # mask_stash_scan_positional_args() below).
+                    i = 2
+                    rlen = length(rest)
+                    while (i <= rlen) {
+                        c = substr(rest, i, 1)
+                        if (c == BS) { i += 2; continue }
+                        if (c == DQ) { endpos = i; break }
+                        i++
+                    }
+                } else {
+                    # Single-quoted: bash gives backslash no special meaning
+                    # inside real single quotes, so a plain same-character
+                    # scan is correct here.
+                    for (i = 2; i <= length(rest); i++) {
+                        if (substr(rest, i, 1) == qc) { endpos = i; break }
+                    }
                 }
                 if (endpos == 0) break
                 inner = substr(rest, 2, endpos - 2)
@@ -3879,8 +4048,10 @@ mask_catastrophic_positional_args() {
 # #7363).
 #
 # ESCAPE-AWARE double-quote scanning (unlike mask_catastrophic_positional_args()
-# / mask_ask_positional_args() above, which close a double-quoted span on the
-# FIRST raw `"` regardless of a preceding backslash): the real false-positive
+# above, which — as of this writing, with PR #7519/#7515 still unmerged —
+# still closes a double-quoted span on the FIRST raw `"` regardless of a
+# preceding backslash; mask_ask_positional_args() above already carries this
+# same escape-aware fix, ported via #7516): the real false-positive
 # repro from #7363 is `grep -n "^assert_ask \"stash-scope: git stash pop in
 # main checkout asks" file` — a single double-quoted argument containing a
 # backslash-escaped `\"`. A naive same-character scan stops at that escaped

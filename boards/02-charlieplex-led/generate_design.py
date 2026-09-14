@@ -216,7 +216,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     from finalize_routing import finalize_routing
 
-    return finalize_routing(output_path)
+    return finalize_routing(output_path, input_path.with_suffix(".kicad_sch"))
 
 
 def run_drc(pcb_path: Path) -> bool:
@@ -352,30 +352,13 @@ def main() -> int:
         routed_path = output_dir / "charlieplex_3x3_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
 
-        # Step 5.5: route_success fast-fail gate (#4066, mirrors board 03's
-        # ``route_success`` gate after ``route_pcb`` in
-        # boards/03-usb-joystick/generate_design.py).  route_pcb
-        # runs under a wall-clock ``--timeout`` SAFETY backstop layered above
-        # the load-independent per-net ``--deterministic-budget`` iteration
-        # cap, so on a loaded machine that outer deadline can fire before every
-        # signal net lands and ``route_pcb`` returns ``False``.  If we fall
-        # through, the downstream ``write_lvs_report(require_clean=True)`` sees
-        # a genuinely unrouted signal net as a copper OPEN and raises
-        # ``BoardNetlistMismatch``, which the broad ``except`` below reports as
-        # exit 1 -- misdirecting the reviewer to the LVS subsystem when the
-        # true cause is upstream route truncation.  Raise a DISTINCT,
-        # clearly-worded error here instead.  The "PARTIAL: Routed N/M signal
-        # nets" line is already printed above by ``route_pcb``.
+        # Finalization can reject physical DRC failures as well as incomplete
+        # routing. Preserve the actual preceding diagnostic instead of assuming
+        # the router's wall-clock safety backstop caused the failure.
         if not route_success:
             raise RuntimeError(
-                "partial route -- likely wall-clock budget exhaustion under "
-                "load (the --timeout safety backstop fired before every "
-                "signal net landed; see the 'PARTIAL: Routed N/M signal nets' "
-                "line above for the exact count). This is NOT a copper-LVS / "
-                "GND-stitching failure -- the pipeline stopped before the LVS "
-                "gate. Re-run boards/02-charlieplex-led/generate_design.py in "
-                "isolation on a quiet machine, or raise the --timeout in "
-                "route_pcb() if this recurs on an unloaded host."
+                "Board02 routing/finalization failed; see the route and native DRC "
+                "diagnostics above. The PCB has not qualified for manufacturing export."
             )
 
         # Step 6: Run DRC

@@ -225,7 +225,16 @@ namespace router {
 // exists to end).  New module constant + four ``Pathfinder`` accessors =
 // binding-surface change; route output is unchanged (diagnostics only).
 // v22: residual pad rotation and candidate via-pad acceptance/policy refresh.
-constexpr int ROUTER_CPP_BUILD_VERSION = 22;
+// v23: explicit pad shape for segment/via clearance (Issue #5229).
+// v24: combined pad-shape and allow_smd_vias process-policy bindings (#5216).
+// v25: ``validate_route`` gains a second, CLAMPING same-component exclusion
+// set (``clamp_ref_hashes``, Issue #5166).  Refs in the original
+// ``exclude_ref_hashes`` keep the full-skip carve-out (the #2452 corridor
+// relief, whose floor is the search's own ``trace_width / 2`` blocked-cell
+// construction); refs in the new set reach the carve-out only because a
+// CONFIGURED override resolved smaller than the default clearance, and
+// enforce that resolved value as a hard floor instead of skipping.
+constexpr int ROUTER_CPP_BUILD_VERSION = 25;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -552,6 +561,7 @@ struct PadChannelBudget {
 struct DesignRules {
     float trace_width = 0.127f;
     float trace_clearance = 0.127f;
+    bool allow_smd_vias = true;
     float via_drill = 0.3f;
     float via_diameter = 0.6f;
     float via_clearance = 0.127f;
@@ -592,6 +602,7 @@ struct PadInfo {
     float rotation = 0.0f;  // Residual KiCad board-space degrees (#5182)
     float via_clearance_override = 0.0f; // Component trace floor (Python backstop)
     bool via_carveout_eligible = false;
+    bool is_circular = false;  // Explicit circle shape; other pads use rectangles (#5229)
 };
 
 // Stored segment for validation (Issue #2439)

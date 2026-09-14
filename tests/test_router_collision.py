@@ -94,6 +94,10 @@ def _make_mock_grid(
     mock_layer.__getitem__ = MagicMock(return_value=mock_row)
     grid.grid = MagicMock()
     grid.grid.__getitem__ = MagicMock(return_value=mock_layer)
+    # Issue #5240: production code now reads cells via ``grid.cell_at(layer,
+    # y, x)`` instead of the legacy ``grid.grid[layer][y][x]`` chain -- wire
+    # up the same non-blocking cell so this mock satisfies both call styles.
+    grid.cell_at = MagicMock(return_value=mock_cell)
 
     return grid
 
@@ -257,6 +261,10 @@ def _make_mock_grid_with_pad_cell(
     mock_layer.__getitem__ = MagicMock(return_value=mock_row)
     grid.grid = MagicMock()
     grid.grid.__getitem__ = MagicMock(return_value=mock_layer)
+    # Issue #5240: production code now reads cells via ``grid.cell_at(layer,
+    # y, x)`` instead of the legacy ``grid.grid[layer][y][x]`` chain -- wire
+    # up the same pad cell so this mock satisfies both call styles.
+    grid.cell_at = MagicMock(return_value=pad_cell)
 
     return grid
 

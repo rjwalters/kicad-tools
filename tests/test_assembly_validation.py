@@ -394,6 +394,8 @@ class TestAssemblyValidator:
             mock_client = MagicMock()
             mock_client.lookup_many.return_value = {
                 "C123456": Part(
+                    stock_source="live",
+                    fetched_at=datetime.now(),
                     lcsc_part="C123456",
                     mfr_part="RC0402",
                     stock=50000,
@@ -434,6 +436,8 @@ class TestAssemblyValidator:
             mock_client = MagicMock()
             mock_client.lookup_many.return_value = {
                 "C123456": Part(
+                    stock_source="live",
+                    fetched_at=datetime.now(),
                     lcsc_part="C123456",
                     mfr_part="RC0402",
                     stock=50000,
@@ -458,6 +462,8 @@ class TestAssemblyValidator:
             mock_client = MagicMock()
             mock_client.lookup_many.return_value = {
                 "C123456": Part(
+                    stock_source="live",
+                    fetched_at=datetime.now(),
                     lcsc_part="C123456",
                     mfr_part="RC0402",
                     stock=50,  # Low stock
@@ -481,6 +487,8 @@ class TestAssemblyValidator:
             mock_client = MagicMock()
             mock_client.lookup_many.return_value = {
                 "C123456": Part(
+                    stock_source="live",
+                    fetched_at=datetime.now(),
                     lcsc_part="C123456",
                     mfr_part="RC0402",
                     stock=0,  # Out of stock
@@ -504,6 +512,8 @@ class TestAssemblyValidator:
             mock_client = MagicMock()
             mock_client.lookup_many.return_value = {
                 "C123456": Part(
+                    stock_source="live",
+                    fetched_at=datetime.now(),
                     lcsc_part="C123456",
                     mfr_part="RC0402",
                     stock=50000,

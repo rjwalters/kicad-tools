@@ -621,6 +621,12 @@ def run_route_command(args) -> int:
     timeout_val = getattr(args, "timeout", None)
     if timeout_val is not None:
         sub_argv.extend(["--timeout", str(timeout_val)])
+    # Issue #5266: forward the per-search-stage allocation.  Both parsers
+    # default it to None (= "use --timeout as the per-stage cap"), so a run
+    # that never passed it stays byte-identical to the pre-#5266 sub-invocation.
+    search_timeout_val = getattr(args, "search_timeout", None)
+    if search_timeout_val is not None:
+        sub_argv.extend(["--search-timeout", str(search_timeout_val)])
     per_net_timeout_val = getattr(args, "per_net_timeout", 30.0)
     if per_net_timeout_val != 30.0:
         sub_argv.extend(["--per-net-timeout", str(per_net_timeout_val)])

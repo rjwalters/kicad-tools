@@ -618,10 +618,57 @@ clears it automatically — no operator action.
 | `LOOM_EMPTY_POOL_BREAKER_THRESHOLD` | `3` | Distinct issues that must die at token selection before dispatch is paused |
 | `LOOM_EMPTY_POOL_BREAKER_WINDOW_SECS` | `1800` | Trailing window over which those distinct issues are counted |
 
-**Distinct issues, not raw failures**, is load-bearing in both directions: one
+**Distinct sources, not raw failures**, is load-bearing in both directions: one
 unlucky issue cycling through its own backoff can never pause the fleet, and N
-*different* issues dying at the identical step cannot be explained by any one
-issue — only by the pool.
+*different* sources dying at the identical step cannot be explained by any one
+of them — only by the pool.
+
+Since #7607 the counter's key is a `TokenSelectionFailureSource`, not a bare
+issue number, and **role ticks feed it too**: a role tick that skips its spawn
+on an exhausted pool (below) records a `(workspace root, role)` source. The
+over-trigger guarantee is unchanged — one role looping on one workspace
+refreshes a single key forever and can no more trip the brake alone than one
+issue can. Without this feed the advisory depended entirely on which discovery
+path noticed first: on a host whose work finder is idle and whose role loops
+are the only traffic, it would simply never trip.
+
+## Role ticks pre-flight the pool instead of spawning into it (#7607)
+
+The role runner already skipped a tick when the workspace had **no** token pool
+at all (`RoleTickOutcome::NoTokenPool`, #4642). A pool that is *present but
+fully exhausted* — every account bad-marked in `.bad_tokens` or hard-excluded by
+`.ranking` (`exhausted`/`blocked`) — slipped past that check, so every tick still
+spawned `spawn-worker.sh`, burned ~10 s, and exited `78` at token selection:
+570–605 such ticks per host per day (~100 min/host/day) were observed on
+2026-09-13 across four fleet hosts.
+
+Each role tick now reads the pool it would resolve to (repo-local shadow pool if
+it holds `.token` files, else shared — the same precedence `spawn-claude.sh`
+performs) and counts **spawnable** accounts. When that count is zero and the pool
+is non-empty, the tick returns `RoleTickOutcome::PoolExhausted { total,
+next_clear_at }` and **spawns nothing**:
+
+- The skip is logged at `WARN` on the state **edge** for each `(workspace, role)`
+  and downgraded to `DEBUG` on every repeat, so a dry pool costs one line per
+  role per workspace, not one per tick. A dated line also lands in
+  `.loom/logs/role-<role>.log` (#6201), naming the spawnable count, the resolved
+  pool directory, and the remedy.
+- `next_clear_at` is the earliest of every blocking `.bad_tokens` cooldown clear
+  and every hard-excluded `.ranking` row's `limit_reset`, capped at 900 s. It is
+  **diagnostic only** — never a gate. The live pool is re-read on every tick, so a
+  readmission (`loom-daemon tokens unblock`, a rate-limit window rolling over,
+  the `.ranking` refresher observing a reset) resumes ticks on the **next** tick
+  with no daemon restart.
+- The skip feeds the #6614 brake above, and `loom-daemon health` reports it under
+  its own `pool exhausted (N role(s) held)` bucket rather than as N role
+  failures.
+
+The preflight is deliberately conservative in one direction only: it uses the
+same bad-marked/hard-excluded exclusions every selection tier (including the
+fail-safe retry, #5629) enforces, so `usable == 0` guarantees a real selection
+would have failed. It does not model the `index.json` non-Claude exclusion
+(#5609), which can only make the real count *lower* — so this can never block a
+spawn that would have succeeded.
 
 ## Worktree handling
 

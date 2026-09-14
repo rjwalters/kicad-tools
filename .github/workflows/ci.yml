@@ -16,7 +16,7 @@ permissions:
 # run per group, so the ~80 merges a day collapse to "one running, one
 # waiting" instead of the 13-deep queue of stale main runs that, together with
 # the superseded PR runs, held every job 70-100 min in queue against this
-# account's 20-job GitHub-hosted concurrency cap.
+# account's 40-job GitHub-hosted concurrency cap.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -26,10 +26,10 @@ jobs:
   # touched src/ or tests/ (measured 2026-09-11, 2AMLogic/2am#29), and every
   # board job legitimately depends on the router source, so this is NOT a
   # per-job path map -- it is a single "docs/site/agent-config only?" gate
-  # that spares the ~8% of PRs which change nothing under test the full
+  # that spares the ~8% of PRs which change only content the full
   # ~115 job-minutes. main pushes always run everything. If detection itself
   # fails, every job runs (fail-open), so a broken filter can only cost
-  # minutes, never a false green.
+  # minutes, never a false green. Content contracts still run in lint.
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
@@ -84,6 +84,9 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      - name: Check documentation and agent-content contracts
+        run: bash scripts/ci/check-content-contracts.sh
+
   typecheck:
     name: Type Check
     runs-on: ubuntu-latest
@@ -121,14 +124,13 @@ jobs:
     name: Test
     needs: changes
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
-    # main pushes run this on the fleet's dedicated CI runner (2AMLogic/2am#29;
-    # 2 slots for this repo); PR runs stay on GitHub-hosted. Push-only on
-    # purpose: PR volume alone (~200 runs/day) exceeds the whole box, while
-    # main is serialised by the concurrency group above, so at most one run's
-    # heavy jobs are ever on the box and they never queue behind each other.
-    # What it buys: the two ~30-min jobs of every main run leave the account's
-    # 20-job GitHub-hosted pool to PR runs.
-    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
+    # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
+    # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
+    # fork PRs route back to GitHub-hosted instead of being skipped, so no
+    # outside fork ever executes on our host and required checks never go
+    # missing. Measured here vs ubuntu-latest: Test 17 vs 40 min, Board 06
+    # 19 vs 27, Diff-Pair ~15 vs 25.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     env:
       # -n auto reads the container's 8-core cpuset on the runner; keep the
       # worker count at GitHub-hosted parity (4 vCPU) so memory stays bounded.
@@ -148,17 +150,15 @@ jobs:
     # step had continue-on-error.
     container:
       image: kicad/kicad:10.0
-      # Run as root so installs write system locations and actions/checkout
-      # can write $GITHUB_WORKSPACE (mirrors the smoke job).
       # On the runner this is a sibling container of the runner's own, created by
       # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
-      # to the two kicad slots' cores (24-31) and cap its memory. 12 GB, not
-      # the 6 GB first tried: at 6 GB four xdist workers each spawning
-      # kicad-cli DRC pushed the cgroup over its cap and the kernel SIGKILLed
-      # kicad-cli / crashed workers (31 failures, 2026-09-11 run 34645135306);
-      # a GitHub-hosted VM has 16 GB. GitHub-hosted runs get the plain
-      # --user 0:0 (nothing to contain).
-      options: ${{ github.event_name == 'push' && '--user 0:0 --cpuset-cpus 24-31 --memory 12g' || '--user 0:0' }}
+      # to the kicad slots' cores (24-63) and cap its memory at 12g (6 GB
+      # SIGKILLed kicad-cli under four xdist workers, 2026-09-11; a
+      # GitHub-hosted VM has 16 GB).
+      # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
+      # either way, so installs write system locations and actions/checkout can
+      # write $GITHUB_WORKSPACE (mirrors the smoke job).
+      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --cpuset-cpus 24-63 --memory 12g' || '--user 0:0' }}
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the smoke job).
@@ -210,6 +210,20 @@ jobs:
         # 120-second subprocess cap and every manufacturing assertion.
         run: uv run pytest tests/test_board_05_drc_allowlist.py -o addopts= --benchmark-disable --timeout=60 -m "not slow"
 
+      - name: Run native mask-to-copper gate
+        env:
+          KCT_MASK_NATIVE_PYTHON: '["/usr/bin/python3"]'
+        run: uv run --frozen python scripts/ci/check_mask_copper_native.py --artifacts "$RUNNER_TEMP/mask-copper-native"
+
+      - name: Retain native mask diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mask-copper-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mask-copper-native/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run tests
         # Issue #3436: continue-on-error was removed from this step. It
         # made the job green regardless of pytest's exit code, hiding 162
@@ -223,7 +237,7 @@ jobs:
         env:
           BOARD_07_CI_ENABLED: ${{ vars.BOARD_07_CI_ENABLED }}
         run: |
-          test_args=(--ignore=tests/test_board_05_drc_allowlist.py)
+          test_args=(--ignore=tests/test_board_05_drc_allowlist.py --ignore=tests/test_mask_copper_native.py)
           if [[ "$BOARD_07_CI_ENABLED" != "true" ]]; then
             test_args+=(--ignore=tests/test_board_07_matchgroup_test.py)
           fi
@@ -545,7 +559,13 @@ jobs:
     name: Diff-Pair Routing Regression
     needs: changes
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
-    runs-on: ubuntu-latest
+    # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
+    # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
+    # fork PRs route back to GitHub-hosted instead of being skipped, so no
+    # outside fork ever executes on our host and required checks never go
+    # missing. Measured here vs ubuntu-latest: Test 17 vs 40 min, Board 06
+    # 19 vs 27, Diff-Pair ~15 vs 25.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     # Issue #3509: run inside the official KiCad 10 container (same image
     # as the test + kicad-cli-smoke jobs).  The board 06 recipe's pour
     # pipeline (zone fill -> stitch -> pour-connectivity repair -> re-fill
@@ -563,9 +583,14 @@ jobs:
     # fails the job instead of rotting in the log.
     container:
       image: kicad/kicad:10.0
-      # Run as root so installs write system locations and actions/checkout
-      # can write $GITHUB_WORKSPACE (mirrors the test + smoke jobs).
-      options: --user 0:0
+      # On the runner this is a sibling container of the runner's own, created by
+      # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
+      # to the kicad slots' cores (24-63) and cap its memory at 8g (same shape as
+      # Board 06: one board, one router run, kicad-cli DRC).
+      # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
+      # either way, so installs write system locations and actions/checkout can
+      # write $GITHUB_WORKSPACE (mirrors the smoke job).
+      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --cpuset-cpus 24-63 --memory 8g' || '--user 0:0' }}
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the test job).
@@ -745,6 +770,44 @@ jobs:
           uv run python scripts/ci/check_diffpair_coverage.py \
             "${{ matrix.board }}" \
             --seed 42
+
+      - name: Collect failed routing bundle (diagnostic reproduction, #5067)
+        # Runs ONLY when the re-route/check step above failed.  The board's
+        # re-route output lives in a git-ignored `regression-output/`
+        # directory (see scripts/ci/board_recipe_artifacts.py
+        # recipe_output_dir) that is otherwise discarded when the job ends
+        # -- the motivating incident (#5044 / PR #5045) needed a full
+        # ~30-minute re-route to diagnose a Board07 failure because CI
+        # artifacts were unavailable (run 34524705221: total_count 0).
+        # `if: failure()` (not `always()`) is deliberate: this is a hard
+        # gate, not a warn-only job, so uploading on every green run is
+        # needless churn -- see nightly-ship-ready.yml for the `always()`
+        # counterpart pattern this mirrors for a warn-only job.
+        if: failure()
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/failed-bundle \
+            --source "regression-output=${{ matrix.board }}/regression-output" \
+            --job diffpair-routing-regression \
+            --board "${{ matrix.board }}" \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "python ${{ matrix.board }}/generate_design.py ${{ matrix.board }}/regression-output --step route --seed 42" \
+            --python-version "$(uv run python3 --version)" \
+            --kicad-version "$(kicad-cli --version)"
+
+      - name: Upload failed routing bundle (diagnostic reproduction, #5067)
+        # Bounded, explicit: only the staging dir this job's collection
+        # step just populated (never repo-root, `.venv`, or `.git`).  The
+        # name distinguishes board + job + commit + run so the four jobs'
+        # bundles never collide within one workflow run's Artifacts tab.
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board06-diffpair-routing-regression-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/failed-bundle/
+          retention-days: 14
 
   matchgroup-routing-regression:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
@@ -970,6 +1033,31 @@ jobs:
           uv run python scripts/ci/check_matchgroup_coverage.py \
             "${{ matrix.board }}" \
             --seed 42
+
+      - name: Collect failed routing bundle (diagnostic reproduction, #5067)
+        # Sibling of the diffpair-routing-regression collection step; see
+        # its comment for the #5044/#5045 rationale.
+        if: failure()
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/failed-bundle \
+            --source "regression-output=${{ matrix.board }}/regression-output" \
+            --job matchgroup-routing-regression \
+            --board "${{ matrix.board }}" \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "python ${{ matrix.board }}/generate_design.py ${{ matrix.board }}/regression-output --step route --seed 42" \
+            --python-version "$(uv run python3 --version)" \
+            --kicad-version "$(kicad-cli --version)"
+
+      - name: Upload failed routing bundle (diagnostic reproduction, #5067)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board07-matchgroup-routing-regression-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/failed-bundle/
+          retention-days: 14
 
   board-00-end-to-end:
     # Issue #3751: regenerate board 00 ("simple-led", the canonical
@@ -1526,14 +1614,13 @@ jobs:
     name: Board 06 End-to-End (LVS)
     needs: changes
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
-    # main pushes run this on the fleet's dedicated CI runner (2AMLogic/2am#29;
-    # 2 slots for this repo); PR runs stay on GitHub-hosted. Push-only on
-    # purpose: PR volume alone (~200 runs/day) exceeds the whole box, while
-    # main is serialised by the concurrency group above, so at most one run's
-    # heavy jobs are ever on the box and they never queue behind each other.
-    # What it buys: the two ~30-min jobs of every main run leave the account's
-    # 20-job GitHub-hosted pool to PR runs.
-    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
+    # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
+    # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
+    # fork PRs route back to GitHub-hosted instead of being skipped, so no
+    # outside fork ever executes on our host and required checks never go
+    # missing. Measured here vs ubuntu-latest: Test 17 vs 40 min, Board 06
+    # 19 vs 27, Diff-Pair ~15 vs 25.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     # The measured recipe takes 28m; allow the independent synthetic/LVS,
     # plane-net and artifact gates to finish within the whole-job deadline.
     # Internal routing budgets and all validation gates remain unchanged.
@@ -1542,10 +1629,12 @@ jobs:
       image: kicad/kicad:10.0
       # On the runner this is a sibling container of the runner's own, created by
       # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
-      # to the two kicad slots' cores (24-31) and 8 GB (it passed at 6 GB on
-      # 2026-09-11; headroom, since the cap SIGKILLs rather than swaps).
-      # GitHub-hosted runs get the plain --user 0:0 (nothing to contain).
-      options: ${{ github.event_name == 'push' && '--user 0:0 --cpuset-cpus 24-31 --memory 8g' || '--user 0:0' }}
+      # to the kicad slots' cores (24-63) and cap its memory at 8g (passed at 6 GB;
+      # headroom, since the cap SIGKILLs rather than swaps).
+      # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
+      # either way, so installs write system locations and actions/checkout can
+      # write $GITHUB_WORKSPACE (mirrors the smoke job).
+      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --cpuset-cpus 24-63 --memory 8g' || '--user 0:0' }}
     defaults:
       run:
         shell: bash
@@ -1649,6 +1738,38 @@ jobs:
             --stem diffpair_test \
             --lvs-only \
             /tmp/board06-staging/06-diffpair-test
+
+      - name: Collect failed routing bundle (diagnostic reproduction, #5067)
+        # Sibling of the diffpair-routing-regression collection step (see
+        # its comment for the #5044/#5045 rationale). Collects the
+        # regenerated schematic+PCB+lvs.json tree, the out-of-process
+        # copper-LVS re-check, and board.json -- but NOT the
+        # /tmp/board06-staging tree wholesale, since it is mostly a copy of
+        # board06-ci (board.json is the only addition), keeping the bundle
+        # bounded.
+        if: failure()
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/failed-bundle \
+            --source "board06-ci=/tmp/board06-ci" \
+            --source "board06-copper.json=/tmp/board06-copper.json" \
+            --source "board.json=/tmp/board06-staging/06-diffpair-test/output/board.json" \
+            --job board-06-end-to-end \
+            --board boards/06-diffpair-test \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "python boards/06-diffpair-test/generate_design.py /tmp/board06-ci --step all --seed 42" \
+            --python-version "$(uv run python3 --version)" \
+            --kicad-version "$(kicad-cli --version)"
+
+      - name: Upload failed routing bundle (diagnostic reproduction, #5067)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board06-end-to-end-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/failed-bundle/
+          retention-days: 14
 
   board-07-end-to-end:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
@@ -1822,6 +1943,34 @@ jobs:
             --stem matchgroup_test \
             --lvs-known-opens "DQ3,DQ4,MIPI_DAT0_N,TMDS_D0_N,TMDS_D1_N" \
             /tmp/board07-staging/07-matchgroup-test
+
+      - name: Collect failed routing bundle (diagnostic reproduction, #5067)
+        # Sibling of board-06-end-to-end's collection step; see its comment
+        # for the #5044/#5045 rationale and why /tmp/board07-staging is not
+        # collected wholesale.
+        if: failure()
+        run: |
+          set -euo pipefail
+          uv run python scripts/ci/collect_failed_routing_bundle.py \
+            /tmp/failed-bundle \
+            --source "board07-ci=/tmp/board07-ci" \
+            --source "board07-copper.json=/tmp/board07-copper.json" \
+            --source "board.json=/tmp/board07-staging/07-matchgroup-test/output/board.json" \
+            --job board-07-end-to-end \
+            --board boards/07-matchgroup-test \
+            --commit "${{ github.sha }}" \
+            --seed 42 \
+            --command "python boards/07-matchgroup-test/generate_design.py /tmp/board07-ci --step all --seed 42" \
+            --python-version "$(uv run python3 --version)" \
+            --kicad-version "$(kicad-cli --version)"
+
+      - name: Upload failed routing bundle (diagnostic reproduction, #5067)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: board07-end-to-end-${{ github.sha }}-${{ github.run_id }}
+          path: /tmp/failed-bundle/
+          retention-days: 14
 
   board-05-routing-regression:
     # Issue #3822: blocking-net baseline gate for board 05 ("bldc-motor-

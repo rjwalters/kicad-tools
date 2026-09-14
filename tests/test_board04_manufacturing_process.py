@@ -68,6 +68,44 @@ def test_repaired_process_is_idempotent_and_shared_profile_unchanged(process, re
     assert get_profile("jlcpcb-tier1").get_design_rules(2) == before
 
 
+def test_inset_route_c11_via_repair_clears_land_and_keeps_both_layer_tails(process, repaired):
+    import math
+
+    from kicad_tools.sexp import parse_string
+
+    doc = parse_file(repaired)
+    # Fresh inset-seed route: a 0.30 mm drill sits only 0.05 mm from C11.1.
+    # Coordinates are in the source sheet frame (board origin 118.5, 67.5).
+    doc.add(
+        parse_string(
+            '(via (at 143.2 83.25) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") '
+            '(tenting (front yes) (back yes)) (net "OSC_OUT"))'
+        )
+    )
+    for layer in ("F.Cu", "B.Cu"):
+        doc.add(
+            parse_string(
+                "(segment (start 143.2 83.25) (end 143.3 83.15) "
+                f'(width 0.2) (layer "{layer}") (net "OSC_OUT"))'
+            )
+        )
+    repaired.write_text(serialize_sexp(doc))
+    with pytest.raises(ValueError, match="Via drill too close"):
+        process.validate_process(repaired, check_native=False)
+
+    assert process.repair(repaired) == 1
+    pcb = process.validate_process(repaired, check_native=False)
+    assert any(math.dist(v.position, (24.8, 15.75)) < 1e-6 for v in pcb.vias)
+    tails = [
+        s
+        for s in pcb.segments
+        if math.dist(s.start, (24.7, 15.75)) < 1e-6 and math.dist(s.end, (24.8, 15.75)) < 1e-6
+    ]
+    assert {s.layer for s in tails} == {"F.Cu", "B.Cu"}
+    assert all(s.net_name == "OSC_OUT" for s in tails)
+    assert process.repair(repaired) == 0
+
+
 @pytest.mark.parametrize("change", ["micro", "partial_hole", "native_floor", "regulator"])
 def test_process_rejects_invalid_geometry_or_rules(process, repaired, change):
     doc = parse_file(repaired)

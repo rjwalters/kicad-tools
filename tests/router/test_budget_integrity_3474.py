@@ -232,6 +232,14 @@ class _CountingGrid:
         self._layer = _Layer()
         self.grid = [self._layer] * num_layers
 
+    def cell_at(self, layer, y, x):
+        """Issue #5240: ``CongestionMap`` now reads cells via ``cell_at``
+        instead of the legacy ``grid.grid[layer][y][x]`` chain -- count
+        visits here too so this stand-in stays a faithful budget probe.
+        """
+        self.visits += 1
+        return _FakeCell()
+
     def world_to_grid(self, x, y):
         return int(x / self.resolution), int(y / self.resolution)
 

@@ -266,6 +266,9 @@ class TestBoard03PartialRouteFastFail:
             return _raise
 
         monkeypatch.setattr(module, "add_gnd_stitching_vias", _boom("add_gnd_stitching_vias"))
+        monkeypatch.setattr(
+            module, "apply_manufacturing_profile", _boom("apply_manufacturing_profile")
+        )
         monkeypatch.setattr(module, "fill_zones_in_routed_pcb", _boom("fill_zones_in_routed_pcb"))
         monkeypatch.setattr(module, "run_drc", _boom("run_drc"))
         monkeypatch.setattr(module, "write_lvs_report", _boom("write_lvs_report"))
@@ -307,6 +310,7 @@ class TestBoard03PartialRouteFastFail:
         self._stub_pipeline_prefix(module, monkeypatch, tmp_path)
         monkeypatch.setattr(module, "route_pcb", lambda *a, **k: True)
         monkeypatch.setattr(module, "add_gnd_stitching_vias", lambda *a, **k: 0)
+        monkeypatch.setattr(module, "apply_manufacturing_profile", lambda *a, **k: None)
         monkeypatch.setattr(module, "fill_zones_in_routed_pcb", lambda *a, **k: None)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
 

@@ -438,13 +438,21 @@ class Route:
                 )
 
                 if not has_via:
-                    # Insert missing via
+                    # Issue #5013: a missing-via insertion here is always a
+                    # defensive, ordinary through-hole (no blind/buried
+                    # process selection exists in this codepath) -- mirror
+                    # the same-issue fix in ``CppPathfinder._convert_result_to_route``
+                    # and ``Router._convert_path_to_route`` and normalize
+                    # the physical span to the full copper stack instead
+                    # of the bare logical ``seg1.layer``/``seg2.layer``
+                    # transition, which would under-report the drilled
+                    # extent on a 4+ layer board.
                     new_via = Via(
                         x=transition_x,
                         y=transition_y,
                         drill=via_drill,
                         diameter=via_diameter,
-                        layers=(seg1.layer, seg2.layer),
+                        layers=(Layer.F_CU, Layer.B_CU),
                         net=self.net,
                         net_name=self.net_name,
                     )
@@ -499,6 +507,20 @@ class Pad:
     directly, so a non-cardinal rotation is never silently dropped again.
     """
 
+    shape: str = "rect"
+    """Authored shape; absent programmatic metadata uses a conservative rectangle.
+
+    Circles alone use a disc. Oval and roundrect use their enclosing rotated
+    rectangle until exact rounded geometry is supported. Custom/trapezoid
+    nominal dimensions do not bound their copper and are rejected explicitly.
+    """
+
+    def __post_init__(self) -> None:
+        if self.shape not in {"circle", "rect", "oval", "roundrect"}:
+            raise ValueError(
+                f"Unsupported routing pad shape {self.shape!r} for {self.ref}.{self.pin}"
+            )
+
 
 def pad_half_extents(pad: "Pad") -> tuple[float, float]:
     """Board-space ``(half_width, half_height)`` AABB extent of ``pad``.
@@ -524,6 +546,9 @@ def pad_half_extents(pad: "Pad") -> tuple[float, float]:
     byte-identical results.  Prefer this helper over reading ``pad.width`` /
     ``pad.height`` directly wherever a keep-out / clearance AABB is built.
     """
+    if pad.shape == "circle":
+        radius = max(pad.width, pad.height) / 2.0
+        return radius, radius
     if pad.rotation == 0.0:
         return pad.width / 2.0, pad.height / 2.0
     theta = math.radians(pad.rotation)

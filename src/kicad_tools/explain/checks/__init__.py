@@ -5,8 +5,11 @@ common PCB design mistakes.
 """
 
 from .acid_trap import AcidTrapCheck
+from .bom_health import BomFieldHealthCheck
 from .bypass import BypassCapDistanceCheck
+from .connectivity import LedSeriesResistorCheck, PullUpResistorCheck
 from .crystal import CrystalNoiseProximityCheck, CrystalTraceLengthCheck
+from .decoupling import MissingDecouplingCapCheck
 from .differential import DifferentialPairSkewCheck
 from .power import PowerTraceWidthCheck
 from .thermal import ThermalPadConnectionCheck
@@ -23,4 +26,8 @@ __all__ = [
     "ViaInPadCheck",
     "AcidTrapCheck",
     "TombstoningRiskCheck",
+    "MissingDecouplingCapCheck",
+    "PullUpResistorCheck",
+    "LedSeriesResistorCheck",
+    "BomFieldHealthCheck",
 ]

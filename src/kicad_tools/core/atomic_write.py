@@ -33,6 +33,7 @@ def atomic_write_text(
     content: str,
     *,
     encoding: str | None = "utf-8",
+    newline: str | None = None,
 ) -> None:
     """Atomically write ``content`` to ``path``.
 
@@ -57,6 +58,9 @@ def atomic_write_text(
             historical, unparameterized ``path.write_text(content)`` some
             callers relied on before this helper existed).
 
+        newline: Optional newline policy. ``""`` disables platform newline
+            translation for writers preserving exact source fragments.
+
     Raises:
         OSError: If the write, fsync, or replace fails. On failure the
             original ``path`` (if it existed) is left untouched.
@@ -64,7 +68,9 @@ def atomic_write_text(
     path = Path(path)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
 
-    if encoding is None:
+    if newline is not None:
+        tmp_path.write_text(content, encoding=encoding, newline=newline)
+    elif encoding is None:
         tmp_path.write_text(content)
     else:
         tmp_path.write_text(content, encoding=encoding)

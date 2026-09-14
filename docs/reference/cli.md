@@ -40,6 +40,7 @@ kct [--help] [--version] <command> [options]
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
 | | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs |
+| | `place-silk-refs` | Move readable reference designators to clear silk/pad/edge collisions |
 | | `fix-footprints` | Fix footprint pad spacing issues |
 | | `repair-clearance` | Repair clearance violations by nudging traces |
 | | `pipeline` | End-to-end repair pipeline for existing PCBs |
@@ -800,7 +801,8 @@ Common flags (the full surface lives in `kct route --help`):
 | `--manufacturer NAME` (`--mfr`) | Manufacturer profile for DRC and adaptive rules |
 | `--layers {auto,2,4,4-sig,4-all,6}` | Layer stack configuration (default: `auto`) |
 | `--min-completion FLOAT` | Minimum completion ratio for success (default: 0.95) |
-| `--timeout SEC` / `--per-net-timeout SEC` | Global / per-net wall-clock caps |
+| `--timeout SEC` / `--per-net-timeout SEC` | Hard total invocation / per-net wall-clock caps |
+| `--search-timeout SEC` | Per-search-stage allocation inside `--timeout` (default: `--timeout`) |
 | `--seed N` | Seed Python `random` for reproducible routing (#2589) |
 | `--auto-fix` / `--auto-fix-passes N` | Run `kct fix-drc` after routing on DRC failure |
 | `--skip-drc` | Skip post-route DRC validation |
@@ -831,6 +833,33 @@ reinforcement eligibility (issue #4980):
 }
 ```
 
+##### Pulsed and duty-cycled branches
+
+A branch that carries a repetitive pulse (switching ripple, capacitor
+inrush, a strobed LED) can declare `pulsed_a` with an optional `duty_cycle`
+and `pulse_duration_s`:
+
+```json
+{"name": "VOUT_INRUSH", "net": "/VOUT_PRE",
+ "source": {"ref": "L1", "pad": "2"}, "sink": {"ref": "RSH1", "pad": "1"},
+ "continuous_a": 3.0, "pulsed_a": 18.0, "duty_cycle": 0.08,
+ "pulse_duration_s": 0.002, "reinforcement_eligible": true}
+```
+
+Two independent checks follow, because a pulse can destroy copper two ways:
+
+| Field | What it buys |
+|-------|--------------|
+| `pulsed_a` alone | The peak is sized **as if continuous** (conservative). An `info` finding says so, so a pessimistic width requirement is never mistaken for a duty-cycle-aware one. |
+| `+ duty_cycle` | The IPC-2221 width check runs at the waveform's **RMS** current (`sqrt(D*peak² + (1-D)*continuous²)`) — the correct equivalent for I² heating. 18 A at 8 % duty over 3 A heats like 5.85 A, not 18 A and not its 4.2 A average. |
+| `+ pulse_duration_s` | Each segment is additionally checked against its **Onderdonk adiabatic fusing current**. A trace comfortable on RMS heating can still be melted by one inrush pulse; that is an `error`. Without this field the fusing mode is reported as explicitly **unchecked** (a `warning`), never silently passed. |
+
+Declaring `duty_cycle` or `pulse_duration_s` without `pulsed_a`, or a
+`pulsed_a` below `continuous_a`, is rejected when the sidecar loads — a
+half-declared waveform reads like modeled intent while leaving the checker
+to guess. Omitting all three leaves a purely continuous declaration whose
+results are unchanged.
+
 | Option | Description |
 |--------|-------------|
 | `--current-paths PATH` | Declared branch current-path sidecar. Auto-discovered next to the board as `<board-stem>.current_paths.json` or `current_paths.json` (board dir, then `output/`, then `../output/`) when omitted. |
@@ -859,11 +888,28 @@ Endpoints bind by the pad's real copper extent, not by an exact pad-center
 hit, so a trace terminating anywhere inside the pad attaches (and several
 stubs landing on one pad are shorted by it, as they are in reality).
 
-> **Known limitation (#5197):** the `ambiguous` test is whole-net, so a
-> benign parallel via array feeding a trunk from one pad makes *every*
-> declaration on that net ambiguous — including unrelated low-current taps.
-> Until that is scoped down, prefer declaring endpoints that do not sit on a
-> multi-via fan-out, or review the findings rather than waiving the rule.
+A same-net routed **arc** or a non-keepout same-net **zone/pour** is real
+copper the declared-path graph never builds from `Segment` tracks alone —
+either can form a parallel return path around a declared branch (a plane is
+the archetypal case), so a declared path on such a net resolves `ambiguous`
+too, naming the unmodeled copper in the reason (endpoint-resolution failures
+still take precedence and stay `unresolved`). `kct pcb current-paths-audit`
+surfaces the same inventory as an `unmodeled` block (kind, layer,
+representative location per object) in both JSON and text output, and
+`path_ampacity` emits a `warning` per object found — separate from the
+`ambiguous` status's own `error`. Keepout rule areas carry no copper and are
+excluded.
+
+A bounded endpoint via array is recognized only when parallel straight stubs
+land on the actual pad, real outer-layer barrels join one straight receiving
+trunk, and each exit leads through acyclic copper to real pad terminals.
+Dangling branches, unmodeled local contacts, and other cycles remain ambiguous.
+Stub length and via spread must fit within the endpoint pad diagonal. Every
+original array segment remains in the evidence and is checked at the full
+declared current; this does not assume equal current sharing or qualify the
+array by summed widths. Unsupported same-net arcs and custom pad stacks prevent
+array recognition.
+
 Route-time width selection itself stays governed by the net-class
 `trace_width` (the same declarative/checked-post-route split
 `NetClassRouting.target_ampacity` already uses); see the
@@ -875,6 +921,31 @@ conflict processing, Python fallback, conversion, optimization, nudge, native
 validation and output work. Its monotonic deadline is also passed to the existing
 routing budget helpers. Zero or a negative value retains unbounded behavior.
 Both `kct route` and `python -m kicad_tools.cli.route_cmd` use this supervision.
+
+#### Staging search budgets inside the total deadline (`--search-timeout`, #5266)
+
+Because `--timeout` is a **hard total**, it cannot also serve as the per-stage
+budget: a recipe that wants "600 s for the initial search, then two 600 s
+placement-delta probes, then postprocessing" used to have no way to say so —
+raising `--timeout` just let the initial pass swallow the enlarged budget, and
+leaving it at 600 s meant the supervisor terminated the run during the first
+probe.
+
+`--search-timeout SECONDS` is the separate, explicitly-configurable allocation
+for an **individual** search stage: the initial routing pass, each layer/rule
+escalation attempt, and each placement-feedback iteration are capped at this
+value. `--timeout` keeps hard-capping the invocation as a whole, and every
+stage is still clamped to whatever the total deadline has left — a
+`--search-timeout` (or a `--placement-delta-feedback-timeout` probe allocation)
+larger than the remaining total can never escape it. Size the total as
+`search stage + probes x probe allocation + postprocessing reserve`; see
+`boards/07-matchgroup-test/generate_design.py` (`_route_total_timeout_s`) for a
+worked example.
+
+When the deadline does fire, `<output>.timeout.json` names the stage that was
+running. Best-so-far checkpoint writes restore the stage they interrupted, so a
+mid-search timeout is reported as `routing` (or `placement-delta-feedback`)
+rather than a stale `serialization` left behind by the last checkpoint.
 
 On timeout, routing stops and up to **five additional seconds** are allowed to
 serialize a raw `<output>_partial.kicad_pcb`. The process group is then terminated
@@ -939,7 +1010,7 @@ footprints are auto-anchored, and the applied deltas are written to
 |--------|-------------|
 | `--placement-delta-feedback` / `--no-placement-delta-feedback` | Enable / explicitly disable the loop (default: disabled) |
 | `--placement-delta-feedback-budget N` | Maximum apply/keep-or-revert iterations (default: 3) |
-| `--placement-delta-feedback-timeout SECONDS` | Per-iteration wall-clock budget for the loop's re-routes; a positive total `--timeout` remains the outer ceiling. Default: share whatever remains of `--timeout`. |
+| `--placement-delta-feedback-timeout SECONDS` | Per-iteration wall-clock budget for the loop's re-routes. Independent of the per-stage `--search-timeout` (an exhausted initial search stage no longer starves the probes), but clamped to — never an escape from — the hard total `--timeout`. Default: share whatever remains of `--timeout`. |
 
 #### Feasibility / coupling flags (v0.15.0, all default off)
 
@@ -1588,3 +1659,23 @@ defaults (#4109).
 
 See [KiCad lock-marker advisories](kicad-lock-policy.md) for the covered write
 paths and `KCT_KICAD_LOCK_POLICY=warn|error|ignore` configuration.
+
+
+### Reference placement safety
+
+`kct place-silk-refs board.kicad_pcb --dry-run --render review.svg` previews
+reference moves without writing the board. Text envelopes must fit inside closed
+polygonal board material, outside cutouts and component courtyards, with the
+requested clearances. Line, rectangle, and polygon Edge.Cuts are supported;
+missing, malformed, curved, or footprint-local outlines produce explicit
+unplaceable results and leave those references unchanged. The SVG uses approximate
+text envelopes; review it and use native DRC before relying on the placement.
+
+Footprint references must be unique, including hidden references. Duplicate
+references are rejected before planning; assign unique references first.
+
+Search spacing must be finite and positive, distances finite and nonnegative,
+and the search is limited to 4096 rings. An explicit `--output` is written even
+when no reference needs to move. `--verify-drc` prints the native result (also
+included in JSON) and returns nonzero for remaining silk findings, unavailable
+KiCad, or failed verification. It runs after applying the move plan.

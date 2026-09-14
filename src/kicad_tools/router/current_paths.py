@@ -18,6 +18,27 @@ net: a :class:`CurrentPathSpec` names two stable ``RefDes.pad`` endpoints,
 a continuous (and optionally pulsed) current, and whether the branch is
 eligible for buttress-wire reinforcement.
 
+A pulsed branch is not just "a bigger number". A declared ``pulsed_a``
+(optionally with a ``duty_cycle`` and a ``pulse_duration_s``) drives two
+*different* checks, because a repetitive pulse can fail copper two ways:
+
+* **Thermally**, over many periods -- governed by the waveform's RMS
+  current, not its peak (I**2 heating), via
+  :meth:`CurrentPathSpec.thermal_design_current` ->
+  :func:`~kicad_tools.physics.ampacity.width_for_current`. A 30 A strobe
+  at 10% duty heats copper like ~9.5 A, so sizing it at 30 A wastes a
+  board and sizing it at its 1 A average burns one.
+* **Adiabatically**, within a single pulse -- governed by the peak and the
+  pulse duration, via
+  :func:`~kicad_tools.physics.ampacity.adiabatic_fusing_current`. An
+  inrush event far shorter than any thermal time constant can still melt
+  a trace the RMS check calls comfortable.
+
+Both assumptions are *declared*, never inferred, and both are reported
+when they cannot be applied: a pulse with no duty cycle is sized at its
+peak (conservative) **and says so**, and a pulse with no duration leaves
+the fusing mode explicitly unchecked rather than silently passing.
+
 Three things this module deliberately does NOT do, by design:
 
 * **Infer branch currents from net topology.** A path is only ever what a
@@ -54,14 +75,27 @@ plated multilayer pad copper establish layer changes. Via/track centerline
 contacts and same-layer endpoint/interior contacts split graph edges, while
 public evidence retains each original routed segment once (including its
 whole length and width). Pad-internal convex copper is normalized before
-whole-component cycle detection; physical via arrays remain ambiguous.
+whole-component cycle detection. A bounded endpoint-pad fanout can be contracted
+only after proving parallel straight stubs, actual same-net outer-layer via
+barrels, and one straight receiving trunk. Stub length and via span must not
+exceed the endpoint pad diagonal. Every original member remains in the resolved
+segment evidence and is checked at the declaration's full current; no I/N or
+summed-width assumption is made. The proof permits one or more receiving exits proved to terminate at real
+pads through acyclic copper. Other cycles and
+unproved endpoint via fanouts remain explicitly ambiguous.
 
 Unsupported custom/trapezoid pads, repeated physical pad numbers, and copper
 on absent stackup layers make the declaration unresolved. Supported pad
 extents are circles, rectangles, capsules (oval), and rounded rectangles.
-Width-only copper overlaps, arcs, zones, and pad-interior contacts without a
-track/via node are outside this bounded centerline model; a resolved result is not a native connectivity or ampacity
-claim. These contacts require a separate physical geometry model.
+Width-only copper overlaps and pad-interior contacts without a track/via
+node are outside this bounded centerline model; a resolved result is not a
+native connectivity or ampacity claim. These contacts require a separate
+physical geometry model. Routed arcs and non-keepout same-net zones/pours
+are not folded into the graph either, but they are not silently ignored:
+:func:`unmodeled_copper` inventories them, and :func:`resolve_current_path`
+reports ``"ambiguous"`` -- naming the copper -- for any declared branch
+whose net carries one, because either can form a parallel return path this
+bounded model cannot see and rule out.
 
 Consumers:
 
@@ -147,9 +181,29 @@ established for :class:`~kicad_tools.router.rules.NetClassRouting`)::
           "continuous_a": 0.01,
           "reinforcement_eligible": false,
           "notes": "INA181 sense input -- must not be reinforced"
+        },
+        {
+          "name": "VOUT_INRUSH",
+          "net": "/VOUT_PRE",
+          "source": {"ref": "L1", "pad": "2"},
+          "sink": {"ref": "RSH1", "pad": "1"},
+          "continuous_a": 3.0,
+          "pulsed_a": 18.0,
+          "duty_cycle": 0.08,
+          "pulse_duration_s": 0.002,
+          "reinforcement_eligible": true,
+          "notes": "3A steady output, 18A capacitor inrush at hot-plug"
         }
       ]
     }
+
+``pulsed_a`` / ``duty_cycle`` / ``pulse_duration_s`` are all optional and
+default to ``null``; omitting them leaves the branch a purely continuous
+declaration whose checks are byte-identical to before they existed.
+Declaring ``duty_cycle`` or ``pulse_duration_s`` *without* ``pulsed_a``,
+or a ``pulsed_a`` below ``continuous_a``, is rejected at load time -- a
+half-declared waveform reads like modeled intent while leaving the
+consumer to guess.
 
 A bare JSON list of path objects (no ``"paths"`` wrapper) is also
 accepted.
@@ -170,15 +224,21 @@ from kicad_tools.core.layers import COPPER_LAYER_ORDER, via_spans_layer
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from kicad_tools.schema.pcb import PCB, Segment
+    from kicad_tools.schema.pcb import PCB, Footprint, Net, Pad, Segment, Via, Zone
+    from kicad_tools.sexp.parser import SExp
 
 __all__ = [
     "CURRENT_PATHS_SIDECAR_BASENAME",
+    "THERMAL_BASIS_CONTINUOUS",
+    "THERMAL_BASIS_PEAK_AS_CONTINUOUS",
+    "THERMAL_BASIS_RMS",
     "CurrentPathAudit",
     "CurrentPathSpec",
     "PathEndpoint",
     "PathResolution",
     "ResolvedEndpoint",
+    "ThermalDesignCurrent",
+    "UnmodeledCopper",
     "audit_current_paths",
     "current_paths_sidecar_candidates",
     "discover_current_paths_sidecar",
@@ -187,6 +247,7 @@ __all__ = [
     "parse_current_path_specs",
     "reinforcement_eligible_segment_ids",
     "resolve_current_path",
+    "unmodeled_copper",
 ]
 
 # Coordinate rounding for graph-node identity. Matches the tolerance
@@ -199,6 +260,52 @@ _COORD_DECIMALS = 6
 # below any manufacturable feature, so it never turns "near the pad" into "on
 # the pad".
 _PAD_EPS = 1e-6
+
+
+# Which waveform assumption produced a path's thermal design current
+# (:meth:`CurrentPathSpec.thermal_design_current`). Reported verbatim in
+# audit output and DRC messages so the assumption is never invisible.
+THERMAL_BASIS_CONTINUOUS = "continuous"
+THERMAL_BASIS_RMS = "rms"
+THERMAL_BASIS_PEAK_AS_CONTINUOUS = "peak-as-continuous"
+
+
+def _optional_number(data: dict[str, object], key: str, spec_name: str) -> float | None:
+    """Read an optional numeric field, rejecting a non-numeric value.
+
+    ``None``/absent means "not declared"; anything present but non-numeric
+    is a declaration error rather than something to coerce or ignore.
+    """
+    value = data.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"current-path spec {spec_name!r} has non-numeric {key!r}")
+    return float(value)
+
+
+@dataclass(frozen=True)
+class ThermalDesignCurrent:
+    """The current a declared path's IPC-2221 width check is run at.
+
+    Attributes:
+        current_a: The current to size copper for, in amps.
+        basis: One of :data:`THERMAL_BASIS_CONTINUOUS`,
+            :data:`THERMAL_BASIS_RMS`, or
+            :data:`THERMAL_BASIS_PEAK_AS_CONTINUOUS` -- which waveform
+            treatment produced ``current_a``.
+        description: Human-readable rendering of ``current_a`` *and* how it
+            was derived, for DRC messages and audit output.
+        assumption: Non-empty only when the derivation rested on an
+            assumption the declaration did not supply (today: a pulsed
+            branch with no declared duty cycle). Consumers must surface
+            this rather than let a conservative default pass unremarked.
+    """
+
+    current_a: float
+    basis: str
+    description: str
+    assumption: str = ""
 
 
 @dataclass(frozen=True)
@@ -247,12 +354,29 @@ class CurrentPathSpec:
         continuous_a: Steady-state current this branch is declared to
             carry, in amps.
         pulsed_a: Optional peak/pulsed current, in amps, for branches with
-            a distinct transient rating (e.g. inrush or switching ripple).
-            Not yet consumed by :class:`~kicad_tools.validate.rules
-            .path_ampacity.PathAmpacityRule` (continuous-only check for
-            this increment) -- carried through so a later increment can
-            add a transient/duty-cycle-aware check without a schema
-            change.
+            a distinct transient rating (e.g. inrush, switching ripple, a
+            strobed LED). Must be >= :attr:`continuous_a` -- a declared
+            "peak" below the steady current is a declaration mistake, not
+            a relaxation, and is rejected at construction.
+            :meth:`thermal_design_current` turns this (plus
+            :attr:`duty_cycle`) into the current the IPC-2221 width check
+            actually uses.
+        duty_cycle: Optional fraction of each period spent at
+            :attr:`pulsed_a`, in ``(0, 1]``. Only meaningful alongside
+            ``pulsed_a`` (declaring it without one is rejected). When
+            present, the thermal check uses the waveform's RMS current
+            (``sqrt(D*peak**2 + (1-D)*continuous**2)``) rather than the
+            peak -- the physically correct equivalent for I**2 heating.
+            When absent, the peak is conservatively treated as continuous
+            and that assumption is reported, never silently applied.
+        pulse_duration_s: Optional duration of a single pulse, in seconds.
+            Only meaningful alongside ``pulsed_a``. When present, the
+            branch's copper is additionally checked against the Onderdonk
+            adiabatic fusing current for a pulse that long -- the
+            destruction backstop the RMS thermal check cannot see. When
+            absent, that check cannot be performed and its absence is
+            reported as an unmodeled failure mode rather than passing
+            silently.
         reinforcement_eligible: Whether :func:`kicad_tools.pcb.reinforce
             .reinforce_net` may anchor buttress-wire anchors along copper
             covered by this path. ``False`` for sense/measurement/Kelvin
@@ -267,8 +391,118 @@ class CurrentPathSpec:
     sink: PathEndpoint
     continuous_a: float
     pulsed_a: float | None = None
+    duty_cycle: float | None = None
+    pulse_duration_s: float | None = None
     reinforcement_eligible: bool = False
     notes: str = ""
+
+    def __post_init__(self) -> None:
+        """Reject incoherent declarations at construction (fail closed).
+
+        A half-declared waveform is worse than no waveform at all: it looks
+        like modeled intent while leaving the consumer to guess. Every
+        combination below is a *declaration* error the author can fix, not
+        a board condition, so it is raised rather than reported as a DRC
+        finding.
+        """
+        if self.continuous_a <= 0:
+            raise ValueError(
+                f"current-path spec {self.name!r}: 'continuous_a' must be positive, "
+                f"got {self.continuous_a}"
+            )
+        if self.pulsed_a is not None:
+            if self.pulsed_a <= 0:
+                raise ValueError(
+                    f"current-path spec {self.name!r}: 'pulsed_a' must be positive, "
+                    f"got {self.pulsed_a}"
+                )
+            if self.pulsed_a < self.continuous_a:
+                raise ValueError(
+                    f"current-path spec {self.name!r}: 'pulsed_a' ({self.pulsed_a}) is "
+                    f"below 'continuous_a' ({self.continuous_a}); a peak below the "
+                    f"steady current is a declaration mistake, not a relaxation"
+                )
+        if self.duty_cycle is not None:
+            if self.pulsed_a is None:
+                raise ValueError(
+                    f"current-path spec {self.name!r}: 'duty_cycle' declared without "
+                    f"'pulsed_a' -- a duty cycle describes a pulse that was never declared"
+                )
+            if not 0.0 < self.duty_cycle <= 1.0:
+                raise ValueError(
+                    f"current-path spec {self.name!r}: 'duty_cycle' must be in (0, 1], "
+                    f"got {self.duty_cycle}"
+                )
+        if self.pulse_duration_s is not None:
+            if self.pulsed_a is None:
+                raise ValueError(
+                    f"current-path spec {self.name!r}: 'pulse_duration_s' declared "
+                    f"without 'pulsed_a' -- a pulse duration describes a pulse that "
+                    f"was never declared"
+                )
+            if self.pulse_duration_s <= 0:
+                raise ValueError(
+                    f"current-path spec {self.name!r}: 'pulse_duration_s' must be "
+                    f"positive, got {self.pulse_duration_s}"
+                )
+
+    def thermal_design_current(self) -> ThermalDesignCurrent:
+        """The current the IPC-2221 continuous width check must be run at.
+
+        Three cases, and which one applied is always reported (never a
+        silent substitution):
+
+        * **No pulse declared** -> ``continuous_a`` itself.
+        * **Pulse + duty cycle** -> the waveform's RMS current
+          (:func:`~kicad_tools.physics.ampacity.rms_current_for_duty_cycle`
+          with ``continuous_a`` as the between-pulse baseline). Correct for
+          I**2 heating, and never below ``continuous_a`` because
+          ``pulsed_a >= continuous_a`` is enforced at construction.
+        * **Pulse, no duty cycle** -> the peak, treated as continuous. The
+          duty cycle is the only thing that could justify sizing below the
+          peak, so without it the conservative reading is the only honest
+          one -- and :attr:`ThermalDesignCurrent.assumption` says so, so a
+          reader can see that the branch is sized pessimistically rather
+          than wondering why a 30 A strobe demands 30 A of copper.
+
+        Returns:
+            A :class:`ThermalDesignCurrent`.
+        """
+        if self.pulsed_a is None:
+            return ThermalDesignCurrent(
+                current_a=self.continuous_a,
+                basis=THERMAL_BASIS_CONTINUOUS,
+                description=f"{self.continuous_a:.4g}A continuous",
+                assumption="",
+            )
+
+        from kicad_tools.physics.ampacity import rms_current_for_duty_cycle
+
+        if self.duty_cycle is not None:
+            rms_a = rms_current_for_duty_cycle(
+                self.pulsed_a, self.duty_cycle, baseline_a=self.continuous_a
+            )
+            return ThermalDesignCurrent(
+                current_a=max(rms_a, self.continuous_a),
+                basis=THERMAL_BASIS_RMS,
+                description=(
+                    f"{rms_a:.4g}A RMS ({self.pulsed_a:.4g}A peak at "
+                    f"{self.duty_cycle * 100:.4g}% duty over {self.continuous_a:.4g}A "
+                    f"continuous)"
+                ),
+                assumption="",
+            )
+
+        return ThermalDesignCurrent(
+            current_a=max(self.pulsed_a, self.continuous_a),
+            basis=THERMAL_BASIS_PEAK_AS_CONTINUOUS,
+            description=f"{self.pulsed_a:.4g}A peak treated as continuous",
+            assumption=(
+                "no 'duty_cycle' declared, so the pulsed current cannot be reduced to "
+                "an RMS equivalent; the peak is sized as if it were continuous "
+                "(conservative)"
+            ),
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -278,6 +512,8 @@ class CurrentPathSpec:
             "sink": self.sink.to_dict(),
             "continuous_a": self.continuous_a,
             "pulsed_a": self.pulsed_a,
+            "duty_cycle": self.duty_cycle,
+            "pulse_duration_s": self.pulse_duration_s,
             "reinforcement_eligible": self.reinforcement_eligible,
             "notes": self.notes,
         }
@@ -297,16 +533,18 @@ class CurrentPathSpec:
         continuous_a = data.get("continuous_a")
         if not isinstance(continuous_a, (int, float)):
             raise ValueError(f"current-path spec {name!r} missing numeric 'continuous_a'")
-        pulsed_a = data.get("pulsed_a")
-        if pulsed_a is not None and not isinstance(pulsed_a, (int, float)):
-            raise ValueError(f"current-path spec {name!r} has non-numeric 'pulsed_a'")
+        pulsed_a = _optional_number(data, "pulsed_a", name)
+        duty_cycle = _optional_number(data, "duty_cycle", name)
+        pulse_duration_s = _optional_number(data, "pulse_duration_s", name)
         return cls(
             name=name,
             net_name=net_name,
             source=PathEndpoint.from_dict(source_data),
             sink=PathEndpoint.from_dict(sink_data),
             continuous_a=float(continuous_a),
-            pulsed_a=float(pulsed_a) if pulsed_a is not None else None,
+            pulsed_a=pulsed_a,
+            duty_cycle=duty_cycle,
+            pulse_duration_s=pulse_duration_s,
             reinforcement_eligible=bool(data.get("reinforcement_eligible", False)),
             notes=str(data.get("notes", "")),
         )
@@ -421,6 +659,101 @@ class ResolvedEndpoint:
     position: tuple[float, float]
     net_number: int
     net_name: str
+
+
+@dataclass(frozen=True)
+class UnmodeledCopper:
+    """One piece of same-net copper :func:`resolve_current_path` cannot model.
+
+    :func:`_build_graph` builds its centerline graph from routed
+    :class:`~kicad_tools.schema.pcb.Segment` tracks and via barrels only.
+    A routed **arc** or a non-keepout same-net **zone/pour** is real
+    current-carrying copper the graph never sees, and either can form a
+    parallel return path around a declared linear branch -- see
+    :func:`unmodeled_copper`.
+
+    Attributes:
+        kind: ``"arc"`` or ``"zone"``.
+        layer: The copper layer this object occupies. Best-effort for a
+            multi-layer zone (the first entry of its ``layers`` list).
+        location: A representative ``(x, y)`` point in mm -- an arc's start
+            point, or a zone's first boundary-polygon vertex -- for
+            locating the object in audit/DRC output. Not a bounding shape.
+    """
+
+    kind: str
+    layer: str
+    location: tuple[float, float]
+
+
+def _sexp_matches_net(node: SExp, net: Net | None, net_name: str) -> bool:
+    """True if raw ``node``'s direct ``(net ...)`` child names ``net_name``.
+
+    Mirrors :func:`_matches_net` for raw :class:`~kicad_tools.sexp.parser
+    .SExp` nodes (e.g. routed arcs) that are never parsed into a dataclass
+    carrying ``net_name``/``net_number`` attributes.
+    """
+    net_child = node.find_child("net")
+    if net_child is None:
+        return False
+    return net_child.get_string(0) == net_name or (
+        net is not None and net_child.get_int(0) == net.number
+    )
+
+
+def _matches_net(obj: Pad | Via | Zone, net: Net | None, net_name: str) -> bool:
+    """True if a parsed ``Pad``/``Via``/``Zone`` object sits on ``net_name``."""
+    return obj.net_name == net_name or (net is not None and obj.net_number == net.number)
+
+
+def unmodeled_copper(pcb: PCB, net_name: str) -> list[UnmodeledCopper]:
+    """Inventory same-net copper :func:`resolve_current_path`'s graph cannot see.
+
+    Two kinds of real, current-carrying same-net copper are invisible to
+    the bounded centerline model :func:`_build_graph` builds:
+
+    * a routed track **arc** -- ``(arc ...)`` is never exposed as a
+      :class:`~kicad_tools.schema.pcb.Segment`; and
+    * a filled copper **pour** -- a non-keepout
+      :class:`~kicad_tools.schema.pcb.Zone` on the declared net. A keepout
+      rule area carries no copper and is excluded.
+
+    Either can form a parallel return path around a declared linear
+    branch, so a "resolved" single-path verdict is not evidence that the
+    declared branch is the only route between its endpoints when this
+    returns non-empty.
+
+    Args:
+        pcb: A loaded :class:`~kicad_tools.schema.pcb.PCB`.
+        net_name: The net to inventory.
+
+    Returns:
+        One :class:`UnmodeledCopper` per matching arc/zone (arcs first,
+        then zones, each in board order). Empty when the net carries none.
+    """
+    net = pcb.get_net_by_name(net_name)
+    found: list[UnmodeledCopper] = []
+
+    for arc in pcb._sexp.find_all("arc"):
+        if not _sexp_matches_net(arc, net, net_name):
+            continue
+        layer_node = arc.find_child("layer")
+        layer = (layer_node.get_string(0) if layer_node is not None else None) or ""
+        start_node = arc.find_child("start")
+        if start_node is not None:
+            location = (start_node.get_float(0) or 0.0, start_node.get_float(1) or 0.0)
+        else:
+            location = (0.0, 0.0)
+        found.append(UnmodeledCopper(kind="arc", layer=layer, location=location))
+
+    for zone in pcb.zones:
+        if zone.keepout is not None or not _matches_net(zone, net, net_name):
+            continue
+        layer = zone.layers[0] if zone.layers else zone.layer
+        location = zone.polygon[0] if zone.polygon else (0.0, 0.0)
+        found.append(UnmodeledCopper(kind="zone", layer=layer, location=location))
+
+    return found
 
 
 # Resolution status values. Each is reported explicitly -- there is no
@@ -675,23 +1008,352 @@ def _bfs_path(graph: _CopperGraph, start: _Node, goal: _Node) -> list[Segment] |
     return list({id(seg): seg for seg in reversed(evidence)}.values())
 
 
-def _component_has_cycle(graph: _CopperGraph, start: _Node) -> bool:
-    """Keep the conservative whole-component ambiguity policy.
+@dataclass
+class _ViaArray:
+    nodes: set[_Node]
+    edges: set[_GraphEdge]
+    members: list[Segment]
 
-    Distinct split edges count separately, even when they refer to the same
-    original routed segment. Real via edges count too; there is no via-array
-    or current-sharing exception.
+
+def _array_contacts_modeled(
+    pcb: PCB,
+    net_name: str,
+    fp: Footprint,
+    pad: Pad,
+    members: list[Segment],
+    far_nodes: list[_Node],
+    exits: list[tuple[_Node, _Node, _GraphEdge]],
+) -> bool:
+    """Reject unmodeled copper touching the local array, using copper extents.
+
+    Only the receiving segment's interval between barrels defines local scope;
+    evidence still retains that segment whole. A modeled outgoing track may
+    overlap a convex local copper piece containing its modeled graph port.
+    Unsupported same-net pad stacks and routed arcs conservatively disable this
+    recognition subset because their copper is not inventoried by this graph.
     """
-    visited = {start}
-    stack = [start]
+    from shapely.geometry import LineString, Point, Polygon  # type: ignore[import-untyped]
+
+    from kicad_tools.validate.rules.clearance import _pad_on_layer, _pad_polygon
+
+    net = pcb.get_net_by_name(net_name)
+
+    def same_net(obj: Pad | Via | Zone) -> bool:
+        return _matches_net(obj, net, net_name)
+
+    # Routed arcs are not exposed as Segment objects. Never silently omit them.
+    for arc in pcb._sexp.find_all("arc"):
+        if _sexp_matches_net(arc, net, net_name):
+            return False
+    for footprint in pcb.footprints:
+        for candidate in footprint.pads:
+            if same_net(candidate) and candidate._sexp_node is not None:
+                if candidate._sexp_node.find_child("padstack") is not None:
+                    return False
+
+    for raw_via in pcb._sexp.find_all("via"):
+        if _sexp_matches_net(raw_via, net, net_name) and raw_via.find_child("padstack") is not None:
+            return False
+
+    # Default circular buffers use 16 chords per quadrant. Circumscribe
+    # strokes, and expand existing pad polygons by their maximum chord error.
+    # These envelopes only reject contacts; they never prove connectivity.
+    scale = 1 / math.cos(math.pi / 64)
+
+    def outer_buffer(geometry, radius):
+        return geometry.buffer(radius * scale, quad_segs=16)
+
+    def pad_envelope(candidate, footprint):
+        polygon = _pad_polygon(candidate, footprint)
+        if polygon is None or candidate.shape == "rect":
+            return polygon
+        error = max(candidate.size) * (1 - 1 / scale)
+        return outer_buffer(polygon, error)
+
+    trunk = members[-1]
+    ordered = sorted(far_nodes, key=lambda n: math.dist(n[:2], trunk.start))
+    # Each piece retains its width for a bounded, modeled port join allowance.
+    pieces = []
+    for member in members:
+        ends = (ordered[0][:2], ordered[-1][:2]) if member is trunk else (member.start, member.end)
+        pieces.append(
+            (member.layer, outer_buffer(LineString(ends), member.width / 2), member.width / 2)
+        )
+    source = pad_envelope(pad, fp)
+    if source is None:
+        return False
+    pieces.append((members[0].layer, source, 0.0))
+    positions = {node[:2] for node in far_nodes}
+    member_vias = [v for v in pcb.vias if _node_key(v.position) in positions]
+    for via in member_vias:
+        for copper_layer in pcb.copper_layers:
+            if via_spans_layer(via.layers, copper_layer.name):
+                pieces.append(
+                    (
+                        copper_layer.name,
+                        outer_buffer(Point(via.position), via.size / 2),
+                        via.size / 2,
+                    )
+                )
+    member_ids = {id(s) for s in members}
+    for segment in _net_segments(pcb, net_name):
+        if id(segment) in member_ids:
+            continue
+        copper = outer_buffer(LineString((segment.start, segment.end)), segment.width / 2)
+        for layer, region, radius in pieces:
+            if layer != segment.layer:
+                continue
+            overlap = copper.intersection(region)
+            for node, _, edge in exits:
+                if edge.segment is segment and node[2] == layer:
+                    # Both pieces are convex straight strokes/discs. Their
+                    # intersection is connected to this proved port, including
+                    # oblique joins whose overlap exceeds the sum of radii.
+                    if region.covers(Point(node[:2])):
+                        overlap = Polygon()
+                    else:
+                        overlap = overlap.difference(
+                            Point(node[:2]).buffer(
+                                (radius + segment.width / 2) * scale * scale + _PAD_EPS
+                            )
+                        )
+            if not overlap.is_empty:
+                return False
+    for footprint in pcb.footprints:
+        for candidate in footprint.pads:
+            if candidate is pad or not same_net(candidate) or candidate.type == "np_thru_hole":
+                continue
+            copper = pad_envelope(candidate, footprint)
+            if copper is None:
+                return False
+            if any(
+                _pad_on_layer(candidate, layer) and copper.intersects(region)
+                for layer, region, _ in pieces
+            ):
+                return False
+    for via in pcb.vias:
+        if via in member_vias or not same_net(via):
+            continue
+        copper = outer_buffer(Point(via.position), via.size / 2)
+        if any(
+            via_spans_layer(via.layers, layer) and copper.intersects(region)
+            for layer, region, _ in pieces
+        ):
+            return False
+    for zone in pcb.zones:
+        if not same_net(zone) or zone.keepout is not None:
+            continue
+        # Boundary is a conservative envelope, independent of stale fill data.
+        if len(zone.polygon) < 3:
+            return False
+        envelope = Polygon(zone.polygon).envelope
+        layers = zone.layers or [zone.layer]
+        if any(
+            (layer in layers or "*.Cu" in layers) and envelope.intersects(region)
+            for layer, region, _ in pieces
+        ):
+            return False
+    return True
+
+
+def _proved_load_exits(
+    graph: _CopperGraph,
+    array_nodes: set[_Node],
+    exits: list[tuple[_Node, _Node, _GraphEdge]],
+) -> bool:
+    """Every outgoing tree must end at pads, with no loops or return to the array."""
+    if not exits:
+        return False
+    terminals = set(graph.pads.values()) - array_nodes
+    visited: set[_Node] = set()
+    for _, first, incoming in exits:
+        pending = [(first, incoming)]
+        while pending:
+            node, previous = pending.pop()
+            if node in array_nodes or node in visited:
+                return False
+            visited.add(node)
+            onward = [(n, e) for n, e in graph.adjacency[node] if e is not previous]
+            if not onward and node not in terminals:
+                return False
+            pending.extend(onward)
+    return True
+
+
+def _endpoint_via_array(
+    graph: _CopperGraph, pcb: PCB, endpoint: PathEndpoint, net_name: str
+) -> _ViaArray | None:
+    """Prove straight parallel pad stubs, real barrels and one receiving trunk.
+
+    Stub length and via span are bounded by the endpoint pad diagonal. This is
+    an explicit supported-subset limit, never a current-sharing assumption.
+    """
+    hub = graph.pads.get((endpoint.ref, endpoint.pad))
+    fp = pcb.get_footprint(endpoint.ref)
+    if hub is None or fp is None:
+        return None
+    pad = next((p for p in fp.pads if p.number == endpoint.pad), None)
+    if pad is None or pad.type != "smd" or hub[2] not in {"F.Cu", "B.Cu"}:
+        return None
+    if any(node == hub and key != (endpoint.ref, endpoint.pad) for key, node in graph.pads.items()):
+        return None
+    far_layer = "B.Cu" if hub[2] == "F.Cu" else "F.Cu"
+    arms = graph.adjacency.get(hub, [])
+    if len(arms) < 2:
+        return None
+    bound = math.hypot(*pad.size)
+    nodes = {hub}
+    edges: set[_GraphEdge] = set()
+    members: list[Segment] = list(graph.internal.get(hub, []))
+    far_nodes = []
+    direction = None
+    for top, edge in arms:
+        seg = edge.segment
+        if seg is None or seg.layer != hub[2] or top in nodes or len(graph.adjacency[top]) != 2:
+            return None
+        anchors = [
+            p for p in (seg.start, seg.end) if _pad_covers(pcb, endpoint.ref, endpoint.pad, p)
+        ]
+        if len(anchors) != 1:
+            return None
+        anchor = anchors[0]
+        tip = seg.end if anchor == seg.start else seg.start
+        if _node_key(tip) != top[:2] or _seg_length(seg) > bound + _PAD_EPS:
+            return None
+        delta = (tip[0] - anchor[0], tip[1] - anchor[1])
+        if direction is None:
+            direction = delta
+        elif (
+            abs(direction[0] * delta[1] - direction[1] * delta[0]) > _PAD_EPS
+            or direction[0] * delta[0] + direction[1] * delta[1] <= 0
+        ):
+            return None
+        matching = [v for v in pcb.vias if _node_key(v.position) == top[:2]]
+        if len(matching) != 1:
+            return None
+        via = matching[0]
+        net = pcb.get_net_by_name(net_name)
+        if set(via.layers) != {"F.Cu", "B.Cu"} or not (
+            via.net_name == net_name or (net is not None and via.net_number == net.number)
+        ):
+            return None
+        members.append(seg)
+        edges.add(edge)
+        previous, current = edge, top
+        while True:
+            if current in nodes:
+                return None
+            nodes.add(current)
+            onward = [(n, e) for n, e in graph.adjacency[current] if e is not previous]
+            if current[2] == far_layer:
+                far_nodes.append(current)
+                break
+            if len(onward) != 1 or onward[0][1].segment is not None:
+                return None
+            nxt, barrel = onward[0]
+            if nxt[:2] != top[:2]:
+                return None
+            edges.add(barrel)
+            previous, current = barrel, nxt
+    if max(math.dist(a[:2], b[:2]) for a in far_nodes for b in far_nodes) > bound + _PAD_EPS:
+        return None
+    candidates = [
+        e.segment
+        for _, e in graph.adjacency[far_nodes[0]]
+        if e.segment is not None
+        and e.segment.layer == far_layer
+        and all(
+            point_to_segment_distance(*n[:2], *e.segment.start, *e.segment.end) <= _PAD_EPS
+            for n in far_nodes
+        )
+    ]
+    candidates = list({id(seg): seg for seg in candidates}.values())
+    if len(candidates) != 1:
+        return None
+    trunk = candidates[0]
+    ordered = sorted(far_nodes, key=lambda n: math.dist(n[:2], trunk.start))
+    first, last = ordered[0], ordered[-1]
+    for node in graph.adjacency:
+        if (
+            node[2] == far_layer
+            and point_to_segment_distance(*node[:2], *first[:2], *last[:2]) <= _PAD_EPS
+        ):
+            nodes.add(node)
+    if any(node in nodes and node != hub for node in graph.pads.values()):
+        return None
+    trunk_edges = set()
+    for node in nodes:
+        for other, edge in graph.adjacency[node]:
+            if other in nodes and edge not in edges:
+                if edge.segment is not trunk:
+                    return None
+                trunk_edges.add(edge)
+    reached, pending = {first}, [first]
+    while pending:
+        for other, edge in graph.adjacency[pending.pop()]:
+            if edge in trunk_edges and other not in reached:
+                reached.add(other)
+                pending.append(other)
+    if not set(far_nodes) <= reached:
+        return None
+    edges.update(trunk_edges)
+    exits = [(n, other, e) for n in nodes for other, e in graph.adjacency[n] if other not in nodes]
+    if not _proved_load_exits(graph, nodes, exits):
+        return None
+    members.append(trunk)
+    if not _array_contacts_modeled(pcb, net_name, fp, pad, members, far_nodes, exits):
+        return None
+    return _ViaArray(nodes, edges, list({id(seg): seg for seg in members}.values()))
+
+
+def _candidate_via_array_leg_count(
+    graph: _CopperGraph, pcb: PCB, hub: _Node, pad: Pad, net_name: str
+) -> int:
+    """Count intact local via arms; fewer than two does not prove safe branching.
+
+    Ordinary single-via branches also require terminal proof for every exit.
+    Missing, wrong-net or distant vias must not erase damaged-array evidence.
+    """
+    bound = math.hypot(*pad.size)
+    net = pcb.get_net_by_name(net_name)
+    count = 0
+    for top, edge in graph.adjacency.get(hub, []):
+        seg = edge.segment
+        if seg is None or seg.layer != hub[2]:
+            continue
+        if _seg_length(seg) > bound + _PAD_EPS:
+            continue
+        matching = [v for v in pcb.vias if _node_key(v.position) == top[:2]]
+        if len(matching) != 1:
+            continue
+        via = matching[0]
+        if len(via.layers) < 2 or not (
+            via.net_name == net_name or (net is not None and via.net_number == net.number)
+        ):
+            continue
+        count += 1
+    return count
+
+
+def _component_has_cycle(
+    graph: _CopperGraph, start: _Node, arrays: Sequence[_ViaArray] = ()
+) -> bool:
+    """Contract only physically proved arrays; keep every other cycle visible."""
+    roots = {node: next(iter(array.nodes)) for array in arrays for node in array.nodes}
+    visited_nodes, visited_roots = {start}, {roots.get(start, start)}
     seen_edges: set[_GraphEdge] = set()
+    contracted = {edge for array in arrays for edge in array.edges}
+    stack = [start]
     while stack:
-        for nxt, edge in graph.adjacency.get(stack.pop(), []):
-            seen_edges.add(edge)
-            if nxt not in visited:
-                visited.add(nxt)
+        cur = stack.pop()
+        for nxt, edge in graph.adjacency.get(cur, []):
+            if edge not in contracted:
+                seen_edges.add(edge)
+            if nxt not in visited_nodes:
+                visited_nodes.add(nxt)
+                visited_roots.add(roots.get(nxt, nxt))
                 stack.append(nxt)
-    return len(seen_edges) > len(visited) - 1
+    return len(seen_edges) > len(visited_roots) - 1
 
 
 def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
@@ -913,7 +1575,50 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
             sink=sink,
         )
 
-    if _component_has_cycle(adjacency, start):
+    arrays: list[_ViaArray] = []
+    for endpoint in (spec.source, spec.sink):
+        array = _endpoint_via_array(adjacency, pcb, endpoint, spec.net_name)
+        if array is not None and not any(array.nodes & previous.nodes for previous in arrays):
+            arrays.append(array)
+        elif array is None:
+            hub = adjacency.pads.get((endpoint.ref, endpoint.pad))
+            endpoint_fp = pcb.get_footprint(endpoint.ref)
+            endpoint_pad = (
+                next((p for p in endpoint_fp.pads if p.number == endpoint.pad), None)
+                if endpoint_fp
+                else None
+            )
+            arms = adjacency.adjacency.get(hub, []) if hub is not None else []
+            # A single-via ordinary branch is supported only when all arms
+            # lead through acyclic copper to actual pad terminals. Counting
+            # surviving vias alone would accept a damaged array after missing
+            # barrels or receiving copper turn other arms into dangling ends.
+            if (
+                hub is not None
+                and endpoint_pad is not None
+                and endpoint_pad.type == "smd"
+                and len(arms) >= 2
+                and any(
+                    edge.segment is not None
+                    and any(_node_key(v.position) == node[:2] for v in pcb.vias)
+                    for node, edge in arms
+                )
+                and (
+                    _candidate_via_array_leg_count(adjacency, pcb, hub, endpoint_pad, spec.net_name)
+                    >= 2
+                    or not _proved_load_exits(
+                        adjacency, {hub}, [(hub, node, edge) for node, edge in arms]
+                    )
+                )
+            ):
+                return PathResolution(
+                    spec=spec,
+                    status=STATUS_AMBIGUOUS,
+                    source=source,
+                    sink=sink,
+                    reason="endpoint via fanout is outside the proved local pad-to-trunk motif",
+                )
+    if _component_has_cycle(adjacency, start, arrays):
         return PathResolution(
             spec=spec,
             status=STATUS_AMBIGUOUS,
@@ -921,6 +1626,38 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
                 "declared endpoints sit on a net whose routed copper contains a "
                 "loop/parallel return path reachable from them -- current split "
                 "between branches cannot be determined from a single resolved path"
+            ),
+            source=source,
+            sink=sink,
+        )
+
+    # Every member remains physical evidence checked at the full current.
+    path_segments = list(
+        {
+            id(seg): seg
+            for seg in [*path_segments, *(seg for array in arrays for seg in array.members)]
+        }.values()
+    )
+
+    # An otherwise-clean resolution can still be undermined by copper this
+    # bounded centerline model never puts in the graph at all: a routed arc
+    # or a non-keepout same-net pour can form a parallel return path around
+    # the declared branch. This deliberately runs last -- every other
+    # unresolved/ambiguous reason above (broken endpoints, no routed copper,
+    # unsupported shapes, unproved via fanout, a modeled cycle) still takes
+    # precedence, and the degenerate self-path short-circuit above never
+    # reaches here at all.
+    unmodeled = unmodeled_copper(pcb, spec.net_name)
+    if unmodeled:
+        kinds = "/".join(sorted({item.kind for item in unmodeled}))
+        return PathResolution(
+            spec=spec,
+            status=STATUS_AMBIGUOUS,
+            reason=(
+                f"net {spec.net_name!r} carries {len(unmodeled)} unmodeled same-net "
+                f"{kinds} object(s) (a routed arc or a copper pour) this bounded "
+                "centerline model cannot verify does not form a parallel return path "
+                "around the declared branch"
             ),
             source=source,
             sink=sink,
@@ -949,10 +1686,20 @@ class CurrentPathAudit:
             paths fully account for its routed copper. A net with zero
             declared paths is not reported here at all (it is entirely out
             of this audit's declared scope, not "clean").
+        unmodeled: ``{net_name: [UnmodeledCopper, ...]}`` -- for every net
+            that has at least one declared path, the same-net routed arcs
+            and non-keepout zones/pours :func:`resolve_current_path` cannot
+            fold into its graph (see :func:`unmodeled_copper`). Any entry
+            here means every declared path on that net was checked for
+            ``"ambiguous"``, since such copper can form a parallel return
+            around a declared branch. Reported unconditionally -- even for
+            a net whose declared paths all resolved cleanly before this
+            copper is accounted for -- rather than only implied by status.
     """
 
     resolutions: list[PathResolution] = field(default_factory=list)
     uncovered: dict[str, list[Segment]] = field(default_factory=dict)
+    unmodeled: dict[str, list[UnmodeledCopper]] = field(default_factory=dict)
 
     @property
     def all_resolved(self) -> bool:
@@ -1000,6 +1747,7 @@ def audit_current_paths(pcb: PCB, specs: Sequence[CurrentPathSpec]) -> CurrentPa
         bucket.update(id(seg) for seg in resolution.segments)
 
     uncovered: dict[str, list[Segment]] = {}
+    unmodeled: dict[str, list[UnmodeledCopper]] = {}
     nets_with_specs = {spec.net_name for spec in specs}
     for net_name in nets_with_specs:
         net_segments = _net_segments(pcb, net_name)
@@ -1008,7 +1756,11 @@ def audit_current_paths(pcb: PCB, specs: Sequence[CurrentPathSpec]) -> CurrentPa
         if missing:
             uncovered[net_name] = missing
 
-    return CurrentPathAudit(resolutions=resolutions, uncovered=uncovered)
+        found = unmodeled_copper(pcb, net_name)
+        if found:
+            unmodeled[net_name] = found
+
+    return CurrentPathAudit(resolutions=resolutions, uncovered=uncovered, unmodeled=unmodeled)
 
 
 def reinforcement_eligible_segment_ids(pcb: PCB, specs: Sequence[CurrentPathSpec]) -> set[int]:

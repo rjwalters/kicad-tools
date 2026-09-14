@@ -8,7 +8,6 @@ for design rule checking, and measure_clearance for clearance analysis.
 from __future__ import annotations
 
 import logging
-import math
 import re
 import uuid
 from collections import Counter, defaultdict
@@ -16,12 +15,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
-from kicad_tools.core.geometry import (
-    point_to_segment_distance as _point_to_segment_distance,
-)
-from kicad_tools.core.geometry import (
-    segment_to_segment_distance as _segment_to_segment_distance,
-)
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
 from kicad_tools.mcp.types import (
@@ -41,6 +34,8 @@ from kicad_tools.mcp.types import (
     ZoneInfo,
 )
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.validate.rules.clearance import CopperElement as _ValidatorCopperElement
+from kicad_tools.validate.rules.clearance import _calculate_clearance as _validator_clearance
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import Footprint, Pad, Segment, Via
@@ -946,7 +941,17 @@ class _CopperElement:
         geometry: tuple[float, ...],
         reference: str,
         net_name: str = "",
+        *,
+        copper: _ValidatorCopperElement | None = None,
     ):
+        self.copper = copper or _ValidatorCopperElement(
+            element_type="segment" if element_type == "track" else element_type,
+            layer=layer,
+            net_number=net_number,
+            geometry=geometry,
+            reference=reference,
+            net_name=net_name,
+        )
         self.element_type = element_type
         self.layer = layer
         self.net_number = net_number
@@ -956,39 +961,49 @@ class _CopperElement:
 
     @classmethod
     def from_segment(cls, seg: Segment) -> _CopperElement:
-        """Create from a PCB segment."""
+        """Adapt shared validator geometry without changing MCP track naming."""
+        copper = _ValidatorCopperElement.from_segment(seg)
         return cls(
             element_type="track",
             layer=seg.layer,
             net_number=seg.net_number,
-            geometry=(seg.start[0], seg.start[1], seg.end[0], seg.end[1], seg.width),
+            geometry=copper.geometry,
             reference=f"Track-{seg.uuid[:8]}" if seg.uuid else "Track",
             net_name=seg.net_name if hasattr(seg, "net_name") else "",
+            copper=copper,
         )
 
     @classmethod
     def from_pad(cls, pad: Pad, footprint: Footprint) -> _CopperElement:
         """Create from a PCB pad with footprint context."""
-        abs_x, abs_y = _transform_pad_position(pad, footprint)
+        copper = _ValidatorCopperElement.from_pad(pad, footprint)
+        if copper.polygon is None:
+            raise ValueError(
+                f"Copper polygon unavailable for {footprint.reference}-{pad.number}; "
+                "cannot measure pad clearance safely"
+            )
         return cls(
             element_type="pad",
             layer="*",
             net_number=pad.net_number,
-            geometry=(abs_x, abs_y, pad.size[0], pad.size[1]),
+            geometry=copper.geometry,
             reference=f"{footprint.reference}-{pad.number}",
             net_name=pad.net_name,
+            copper=copper,
         )
 
     @classmethod
     def from_via(cls, via: Via) -> _CopperElement:
-        """Create from a PCB via."""
+        """Create from a PCB via using shared validator geometry."""
+        copper = _ValidatorCopperElement.from_via(via)
         return cls(
             element_type="via",
             layer="*",
             net_number=via.net_number,
-            geometry=(via.position[0], via.position[1], via.size, via.size),
+            geometry=copper.geometry,
             reference=f"Via-{via.uuid[:8]}" if via.uuid else "Via",
             net_name=via.net_name if hasattr(via, "net_name") else "",
+            copper=copper,
         )
 
     def on_layer(self, layer: str) -> bool:
@@ -1015,93 +1030,16 @@ class _CopperElement:
         return False
 
 
-def _transform_pad_position(pad: Pad, footprint: Footprint) -> tuple[float, float]:
-    """Transform pad position from footprint-local to board coordinates.
-
-    Uses KiCad's negated-angle pad rotation convention (see
-    :func:`kicad_tools.core.geometry.rotate_pad_offset`).
-    """
-    from kicad_tools.core.geometry import rotate_pad_offset
-
-    local_x, local_y = pad.position
-    rotated_x, rotated_y = rotate_pad_offset(local_x, local_y, footprint.rotation)
-
-    abs_x = footprint.position[0] + rotated_x
-    abs_y = footprint.position[1] + rotated_y
-
-    return abs_x, abs_y
-
-
-# _point_to_segment_distance and _segment_to_segment_distance are imported
-# from kicad_tools.core.geometry (consolidated in #2349).
-
-
 def _clearance_calculate(
     elem1: _CopperElement, elem2: _CopperElement
 ) -> tuple[float, float, float]:
-    """Calculate the clearance between two copper elements.
+    """Delegate every pair to the shared validator's supported copper model.
 
-    Returns:
-        Tuple of (clearance_mm, location_x, location_y)
+    Reporting names, filtering and minimum selection remain MCP concerns.
+    Unsupported shapes retain the validator's documented approximations;
+    geometry dependency errors propagate rather than silently using discs.
     """
-    t1, t2 = elem1.element_type, elem2.element_type
-
-    if t1 == "track" and t2 == "track":
-        return _segment_segment_clearance(elem1, elem2)
-    elif t1 == "track" and t2 in ("pad", "via"):
-        return _segment_circle_clearance(elem1, elem2)
-    elif t1 in ("pad", "via") and t2 == "track":
-        clearance, x, y = _segment_circle_clearance(elem2, elem1)
-        return clearance, x, y
-    else:
-        return _circle_circle_clearance(elem1, elem2)
-
-
-def _segment_segment_clearance(
-    seg1: _CopperElement, seg2: _CopperElement
-) -> tuple[float, float, float]:
-    """Calculate clearance between two trace segments."""
-    x1, y1, x2, y2, w1 = seg1.geometry
-    x3, y3, x4, y4, w2 = seg2.geometry
-
-    center_dist = _segment_to_segment_distance(x1, y1, x2, y2, x3, y3, x4, y4)
-    clearance = center_dist - (w1 / 2) - (w2 / 2)
-
-    loc_x = (x1 + x2 + x3 + x4) / 4
-    loc_y = (y1 + y2 + y3 + y4) / 4
-
-    return clearance, loc_x, loc_y
-
-
-def _segment_circle_clearance(
-    seg: _CopperElement, circle: _CopperElement
-) -> tuple[float, float, float]:
-    """Calculate clearance between a segment and a circle (pad/via)."""
-    x1, y1, x2, y2, seg_width = seg.geometry
-    cx, cy, w, h = circle.geometry
-
-    radius = max(w, h) / 2
-    center_dist = _point_to_segment_distance(cx, cy, x1, y1, x2, y2)
-    clearance = center_dist - (seg_width / 2) - radius
-
-    return clearance, cx, cy
-
-
-def _circle_circle_clearance(c1: _CopperElement, c2: _CopperElement) -> tuple[float, float, float]:
-    """Calculate clearance between two circles (pad/via)."""
-    x1, y1, w1, h1 = c1.geometry
-    x2, y2, w2, h2 = c2.geometry
-
-    r1 = max(w1, h1) / 2
-    r2 = max(w2, h2) / 2
-
-    center_dist = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-    clearance = center_dist - r1 - r2
-
-    loc_x = (x1 + x2) / 2
-    loc_y = (y1 + y2) / 2
-
-    return clearance, loc_x, loc_y
+    return _validator_clearance(elem1.copper, elem2.copper)
 
 
 def _collect_elements(pcb: PCB, layer: str | None = None) -> list[_CopperElement]:

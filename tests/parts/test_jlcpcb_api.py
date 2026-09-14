@@ -640,3 +640,29 @@ def test_transport_error_redacts_credentials():
         client.get_component_detail_by_codes(["C1"])
     assert FAKE_SECRET_KEY not in str(exc.value)
     assert exc.value.__suppress_context__
+
+
+def test_component_inventory_retains_raw_coverage_and_original_time():
+    """Synthetic payload through the real official adapter; no live request."""
+    rows = [
+        {"componentCode": "C1", "stockCount": 0},
+        None,
+        {"componentCode": "C2"},
+        {"componentCode": "C3", "stockCount": "bad"},
+    ]
+    client = JLCOpenAPIClient(_fake_creds())
+    with mock.patch.object(client, "_post_signed", return_value={"data": rows}) as post:
+        result = client.get_component_inventory(["C2", "C1", "C1"])
+    post.assert_called_once_with(jlcpcb_api.COMPONENT_DETAIL_PATH, {"componentCodes": ["C1", "C2"]})
+    assert result.rows == tuple(rows)
+    assert result.observed_at.tzinfo is not None
+    assert result.source == "live"
+    assert result.from_cache is False
+
+
+def test_component_inventory_rejects_missing_payload_without_fallback():
+    client = JLCOpenAPIClient(_fake_creds())
+    with mock.patch.object(client, "_post_signed", return_value={"data": None}) as post:
+        with pytest.raises(jlcpcb_api.JLCIncompleteResponseError):
+            client.get_component_inventory(["C1"])
+    assert post.call_count == 1

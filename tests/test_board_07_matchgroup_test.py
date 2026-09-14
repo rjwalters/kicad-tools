@@ -798,8 +798,10 @@ class TestDefaultNetStatusGenuineOpens:
 
 
 @pytest.mark.parametrize("hole_clearance", [0.25, 0.3])
-def test_relocates_signal_and_stitch_pad_edge_drills(generate_design_mod, tmp_path, hole_clearance):
-    """Retain the archived witness; repair the seven observed CI overlaps in a copy."""
+def test_archived_pad_drill_repair_rejects_unsafe_filled_copper(
+    generate_design_mod, tmp_path, hole_clearance
+):
+    """Reject the archived moves into filled copper without publishing partial repair."""
     import shutil
 
     from kicad_tools.manufacturers import get_profile
@@ -827,38 +829,56 @@ def test_relocates_signal_and_stitch_pad_edge_drills(generate_design_mod, tmp_pa
     )
     rules = get_profile("jlcpcb").get_design_rules(layers=4)
     assert len(ViaInPadRule().check(pcb, rules).violations) == 7
+    # Five signal-via targets approach existing foreign zone fill within
+    # approximately 0.09-0.181 mm of their drills, below either project floor. The old
+    # seven-move expectation predated the generic filled-copper guard.
+    before = candidate.read_bytes()
+    with pytest.raises(RuntimeError, match="hole-to-copper to filled zone"):
+        generate_design_mod._relocate_pad_drills(candidate)
+    assert candidate.read_bytes() == before
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("hole_clearance", [0.25, 0.3])
+def test_pad_drill_wrapper_uses_shared_project_floor(generate_design_mod, tmp_path, hole_clearance):
+    """A legal compact relocation succeeds; the stricter project rejects atomically."""
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    source = REPO_ROOT / "tests/fixtures/via_relocation/hole_floor.kicad_pcb"
+    candidate = tmp_path / source.name
+    # Copper gap passes both manufacturer floors; drill gap is 0.27 mm.
+    candidate.write_text(source.read_text().replace("10.4421", "10.47"))
+    candidate.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {"board": {"design_settings": {"rules": {"min_hole_clearance": hole_clearance}}}}
+        )
+    )
+    before = candidate.read_bytes()
+    pcb = PCB.load(candidate)
+    identities = [(v.uuid, v.net_number, v.size, v.drill) for v in pcb.vias]
     if hole_clearance == 0.3:
-        # This tighter project cannot clear its crowded signal escapes.
-        # Reject atomically instead of silently falling back to 0.25 mm.
-        before = candidate.read_bytes()
-        with pytest.raises(RuntimeError, match="Unresolved pad/drill overlaps"):
+        with pytest.raises(RuntimeError, match="hole-to-copper"):
             generate_design_mod._relocate_pad_drills(candidate)
         assert candidate.read_bytes() == before
-        assert source.read_bytes() == original
         return
-    assert generate_design_mod._relocate_pad_drills(candidate) == 7
+    assert generate_design_mod._relocate_pad_drills(candidate) == 1
     after = PCB.load(candidate)
-    assert not ViaInPadRule().check(after, rules).violations
-    assert len(after.vias) == len(pcb.vias)
-    assert [(v.uuid, v.net_number, v.size, v.drill) for v in after.vias] == [
-        (v.uuid, v.net_number, v.size, v.drill) for v in pcb.vias
-    ]
+    assert [(v.uuid, v.net_number, v.size, v.drill) for v in after.vias] == identities
     from shapely.geometry import LineString, Point
 
-    for before, moved in zip(pcb.vias, after.vias, strict=True):
-        if before.position == moved.position:
-            continue
-        for segment in after.segments:
-            if segment.net_number == moved.net_number:
-                continue
-            hole_gap = (
-                Point(moved.position).distance(LineString([segment.start, segment.end]))
-                - moved.drill / 2
-                - segment.width / 2
-            )
-            assert hole_gap >= hole_clearance - 1e-6
+    via = after.vias[0]
+    foreign = [s for s in after.segments if s.net_number != via.net_number]
+    distance_to_copper = min(
+        Point(via.position).distance(LineString([s.start, s.end])) - s.width / 2 for s in foreign
+    )
+    assert distance_to_copper - via.drill / 2 == pytest.approx(0.27)
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    assert distance_to_copper - via.size / 2 >= rules.min_clearance_mm
+    assert not ViaInPadRule().check(after, rules).violations
+    assert any(s.end == after.vias[0].position for s in after.segments)
     assert generate_design_mod._relocate_pad_drills(candidate) == 0
-    assert source.read_bytes() == original
 
 
 @pytest.mark.parametrize("obstruct_extension", [False, True])
@@ -878,7 +898,7 @@ def test_power_stub_uses_safe_alternate_escape(generate_design_mod, tmp_path, ob
     pcb.add_trace((83.82, 56.27), original, width=0.2, layer="F.Cu", net="+1V8")
     blocker = pcb.add_via(84.52, 55.85, size=0.6, drill=0.2, net="+1V8")
     rules = get_profile("jlcpcb").get_design_rules(layers=4)
-    result = relocate_in_pad_vias(pcb, rules)
+    result = relocate_in_pad_vias(pcb, rules, nets={"+1V8"})
     assert len(result.skipped) == 1
     assert "hole-to-hole" in result.skipped[0].reason
     old_segments = [(s.uuid, s.start, s.end) for s in pcb.segments]
@@ -901,6 +921,6 @@ def test_power_stub_uses_safe_alternate_escape(generate_design_mod, tmp_path, ob
     stub = pcb.segments[-1]
     assert stub.start == original and stub.end == via.position
     assert stub.width == 0.2 and stub.layer == "F.Cu" and stub.net_number == via.net_number
-    assert not ViaInPadRule().check(pcb, rules).violations
+    assert not [v for v in ViaInPadRule().check(pcb, rules).violations if "+1V8" in v.nets]
     uuids = [v.uuid for v in pcb.vias] + [s.uuid for s in pcb.segments]
     assert len(set(uuids)) == len(uuids)

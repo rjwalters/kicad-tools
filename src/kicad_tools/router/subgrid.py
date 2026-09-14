@@ -487,7 +487,7 @@ class SubGridRouter:
 
             for layer_idx in layer_indices:
                 if 0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows:
-                    cell = self.grid.grid[layer_idx][gy][gx]
+                    cell = self.grid.cell_at(layer_idx, gy, gx)
                     # Unblock clearance-zone cells so the router can reach
                     # this grid point.  Clearance-zone cells (blocked but NOT
                     # pad_blocked) may belong to a neighboring pad's net at
@@ -742,7 +742,7 @@ class SubGridRouter:
 
                 accessible = False
                 for layer_idx in check_layers:
-                    cell = self.grid.grid[layer_idx][gy][gx]
+                    cell = self.grid.cell_at(layer_idx, gy, gx)
                     if not cell.blocked or not cell.pad_blocked:
                         accessible = True
                         break
@@ -848,7 +848,7 @@ class SubGridRouter:
                 # net) are also rejected -- cannot unblock real copper.
                 accessible = False
                 for layer_idx in check_layers:
-                    cell = self.grid.grid[layer_idx][gy][gx]
+                    cell = self.grid.cell_at(layer_idx, gy, gx)
                     if not cell.blocked:
                         # Free cell -- router can already reach it
                         accessible = True
@@ -1535,7 +1535,7 @@ class SubGridRouter:
                 pad.pin,
             )
             return None
-        landing_cell = self.grid.grid[landing_layer_idx][sgp.grid_y][sgp.grid_x]
+        landing_cell = self.grid.cell_at(landing_layer_idx, sgp.grid_y, sgp.grid_x)
         if landing_cell.blocked:
             # Even the inner layer is occupied -- decline.  At this point
             # the pad is geometrically infeasible at the configured
@@ -1726,7 +1726,7 @@ class SubGridRouter:
                 # The intermediate must be accessible (free or clearance-zone)
                 accessible = False
                 for layer_idx in check_layers:
-                    cell = self.grid.grid[layer_idx][mid_gy][mid_gx]
+                    cell = self.grid.cell_at(layer_idx, mid_gy, mid_gx)
                     if not cell.blocked or not cell.pad_blocked:
                         accessible = True
                         break
@@ -1768,7 +1768,7 @@ class SubGridRouter:
                         # Target must be a free cell (not blocked at all)
                         target_free = False
                         for layer_idx in check_layers:
-                            cell = self.grid.grid[layer_idx][tgt_gy][tgt_gx]
+                            cell = self.grid.cell_at(layer_idx, tgt_gy, tgt_gx)
                             if not cell.blocked:
                                 target_free = True
                                 break

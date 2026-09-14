@@ -73,6 +73,8 @@ from kicad_tools.validate.rules.via_pad_geometry import (
 )
 
 if TYPE_CHECKING:
+    from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
+
     from kicad_tools.manufacturers.base import DesignRules
     from kicad_tools.schema.pcb import PCB, Footprint, Pad, Segment, Via, Zone
 
@@ -324,6 +326,7 @@ def _first_offpad_plane_candidate(
     zone_polygons: list[list[tuple[float, float]]],
     pad: Pad,
     net_name: str,
+    min_hole_clearance: float | None = None,
 ) -> tuple[float, float] | None:
     """Find the first plane-legal, clearance-safe off-pad location for a via.
 
@@ -359,17 +362,106 @@ def _first_offpad_plane_candidate(
             # (c) must not violate other-net copper / hole-to-hole.
             if (
                 _check_clearance(
-                    pcb, via, nx, ny, pads_by_net, tht_pads, min_clearance, min_hole_to_hole
+                    pcb,
+                    via,
+                    nx,
+                    ny,
+                    pads_by_net,
+                    tht_pads,
+                    min_clearance,
+                    min_hole_to_hole,
+                    min_hole_clearance,
                 )
                 is not None
             ):
                 continue
             stub_layers = _plane_stub_layers(pcb, via, pad, (nx, ny), net_name)
-            if _check_stub_clearance(pcb, via, (nx, ny), stub_layers, via.size, min_clearance):
+            if _check_stub_clearance(
+                pcb, via, (nx, ny), stub_layers, via.size, min_clearance, min_hole_clearance
+            ):
                 continue
             return (nx, ny)
 
     return None
+
+
+def _alternative_board_region(pcb: PCB):
+    """Return actual straight Edge.Cuts area, including holes, or fail closed.
+
+    No outline is allowed for legacy outline-free fixtures. Unsupported curved
+    or footprint outlines and open contours cannot prove containment and yield
+    an empty region, refusing the optional search without changing the board.
+    """
+    from shapely.geometry import GeometryCollection, Polygon
+    from shapely.ops import polygonize_full, unary_union  # type: ignore[import-untyped]
+
+    lines = []
+    ox, oy = pcb.board_origin
+
+    def xy(node):
+        if node is None or len(node.get_atoms()) != 2:
+            return None
+        try:
+            x, y = (float(value) for value in node.get_atoms())
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(x) or not math.isfinite(y):
+            return None
+        return (x - ox, y - oy)
+
+    for node in pcb._sexp.children:
+        if node.is_atom:
+            continue
+        items = node.children if node.name in ("footprint", "module") else [node]
+        for item in items:
+            layer = item.find("layer")
+            if layer is None or layer.get_string(0) != "Edge.Cuts":
+                continue
+            if item is not node:
+                return GeometryCollection()
+            if item.name == "gr_line":
+                points = [xy(item.find("start")), xy(item.find("end"))]
+            elif item.name == "gr_rect":
+                start, end = xy(item.find("start")), xy(item.find("end"))
+                if start is None or end is None:
+                    return GeometryCollection()
+                x1, y1 = start
+                x2, y2 = end
+                points = [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)]
+            elif item.name == "gr_poly":
+                pts = item.find("pts")
+                if pts is None:
+                    return GeometryCollection()
+                points = [xy(pt) for pt in pts.children if pt.name == "xy"]
+                if len(points) < 3:
+                    return GeometryCollection()
+                points.append(points[0])
+            else:
+                return GeometryCollection()
+            if any(point is None for point in points):
+                return GeometryCollection()
+            lines.append(LineString(points))
+    if not lines:
+        return None
+    faces, cuts, dangles, invalid = polygonize_full(unary_union(lines))
+    if not cuts.is_empty or not dangles.is_empty or not invalid.is_empty:
+        return GeometryCollection()
+    # Polygonization includes each cutout as a face too. Combine the unique
+    # exterior rings by parity, retaining holes instead of union-filling them.
+    region = GeometryCollection()
+    for face in faces.geoms:
+        region = region.symmetric_difference(Polygon(face.exterior))
+    return region
+
+
+def _alternative_contained(region, via: Via, target, width: float) -> bool:
+    if region is None:
+        return True
+    path = LineString([via.position, target])
+    # Exact centerline distance avoids inscribed round-buffer approximations.
+    return bool(
+        region.covers(path) and path.distance(region.boundary) >= max(width, via.size) / 2 + 1e-6
+    )
 
 
 def _first_offpad_signal_candidate(
@@ -382,6 +474,9 @@ def _first_offpad_signal_candidate(
     min_hole_to_hole: float,
     stub_layers: list[str] | None = None,
     stub_width: float = 0.2,
+    min_hole_clearance: float | None = None,
+    *,
+    search_alternatives: bool = False,
 ) -> tuple[float, float] | None:
     """Find the first clearance-safe off-pad location for a **signal** via.
 
@@ -399,6 +494,11 @@ def _first_offpad_signal_candidate(
     """
     pad_cx = (bbox[0] + bbox[2]) / 2.0
     pad_cy = (bbox[1] + bbox[3]) / 2.0
+    region = _alternative_board_region(pcb) if search_alternatives else None
+    if search_alternatives:
+        # Cardinal/45-degree stubs originate at the existing via, even when
+        # its center is offset from the source pad.
+        pad_cx, pad_cy = via.position
     via_r = via.size / 2.0
     step = via.size + min_clearance
     extra_offsets = (0.0, step * 0.5, step)
@@ -410,20 +510,46 @@ def _first_offpad_signal_candidate(
             nx = pad_cx + dx * slide
             ny = pad_cy + dy * slide
 
+            if not _alternative_contained(region, via, (nx, ny), stub_width):
+                continue
+            if search_alternatives and any(
+                is_smd_pad(other_pad)
+                and _dist_point_to_aabb(nx, ny, pad_absolute_bbox(other_pad, fp))
+                < via.drill / 2.0 + min_clearance - 1e-6
+                for fp in pcb.footprints
+                for other_pad in fp.pads
+            ):
+                # Same-net pads still physically overlap a drilled hole. A
+                # fallback must not merely transfer via-in-pad to another pad.
+                continue
             # (a) via copper must clear the pad bbox edge by min_clearance.
             if _dist_point_to_aabb(nx, ny, bbox) - via_r < min_clearance - 1e-6:
                 continue
             # (b) must not violate other-net copper / hole-to-hole.
             if (
                 _check_clearance(
-                    pcb, via, nx, ny, pads_by_net, tht_pads, min_clearance, min_hole_to_hole
+                    pcb,
+                    via,
+                    nx,
+                    ny,
+                    pads_by_net,
+                    tht_pads,
+                    min_clearance,
+                    min_hole_to_hole,
+                    min_hole_clearance,
                 )
                 is not None
             ):
                 continue
             if (
                 _check_stub_clearance(
-                    pcb, via, (nx, ny), stub_layers or [], stub_width, min_clearance
+                    pcb,
+                    via,
+                    (nx, ny),
+                    stub_layers or [],
+                    stub_width,
+                    min_clearance,
+                    min_hole_clearance,
                 )
                 is not None
             ):
@@ -486,6 +612,272 @@ def _collect_tht_pads(pcb: PCB) -> list[ThtPad]:
     return tht
 
 
+def _resolve_hole_clearance(pcb: PCB, explicit: float | None = None) -> float:
+    """Resolve the native project drill-to-copper floor (default 0.25 mm).
+
+    Invalid project data raises before relocation mutates any geometry.
+    """
+    project = pcb.path.with_suffix(".kicad_pro") if pcb.path else None
+    value = 0.25
+    if project is not None and project.exists():
+        data = json.loads(project.read_text())
+        location = "project"
+        for key in ("board", "design_settings", "rules"):
+            if not isinstance(data, dict):
+                raise ValueError(f"{location} must be an object")
+            data = data.get(key, {})
+            location += f".{key}"
+        if not isinstance(data, dict):
+            raise ValueError(f"{location} must be an object")
+        value = data.get("min_hole_clearance", 0.25)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("min_hole_clearance must be finite and nonnegative")
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("min_hole_clearance must be finite and nonnegative")
+    if explicit is not None:
+        if (
+            isinstance(explicit, bool)
+            or not isinstance(explicit, (int, float))
+            or not math.isfinite(explicit)
+            or explicit < 0
+        ):
+            raise ValueError("min_hole_clearance must be finite and nonnegative")
+        value = max(value, explicit)
+    return float(value)
+
+
+def _has_unmodeled_drill(pad: Pad) -> bool:
+    """Scalar Pad.drill omits slots and offsets; never treat these as absent.
+
+    Until the schema exposes their transformed geometry, relevant foreign
+    pads with these drill forms conservatively block relocation and stubs.
+    """
+    node = pad._sexp_node
+    drill = node.find("drill") if node is not None else None
+    if drill is None:
+        return False
+    return (
+        len(drill.values) != 1
+        or not isinstance(drill.values[0], (int, float))
+        or drill.find("offset") is not None
+    )
+
+
+def _raw_copper_bounds(item, transform):
+    """Conservative stroke-inclusive bounds; None means geometry is unproven.
+
+    Arc bounds enclose the entire circumcircle, including major arcs. Polygon
+    and Bezier bounds enclose all vertices/control points. These envelopes
+    may reject a nearby legal candidate, but cannot miss copper between samples.
+    """
+
+    def point(node):
+        if node is None:
+            raise ValueError("missing point")
+        x, y = node.get_float(0), node.get_float(1)
+        if x is None or y is None or not math.isfinite(x) or not math.isfinite(y):
+            raise ValueError("invalid point")
+        return transform(x, y)
+
+    try:
+        width_node = item.find("width")
+        if width_node is None:
+            stroke = item.find("stroke")
+            width_node = stroke.find("width") if stroke is not None else None
+        width = width_node.get_float(0) if width_node is not None else None
+        if width is None or not math.isfinite(width) or width < 0:
+            return None
+        kind = (item.name or "").removeprefix("gr_").removeprefix("fp_")
+        if kind in ("line", "rect"):
+            # Rectangles rotate with their footprints: transform all corners.
+            a, b = item.find("start"), item.find("end")
+            points = [point(a), point(b)]
+            if kind == "rect":
+                points += [
+                    transform(a.get_float(0), b.get_float(1)),
+                    transform(b.get_float(0), a.get_float(1)),
+                ]
+        elif kind == "arc":
+            a, b, c = [point(item.find(key)) for key in ("start", "mid", "end")]
+            # Work relative to a to avoid cancellation on sheet coordinates.
+            bx, by, cx, cy = b[0] - a[0], b[1] - a[1], c[0] - a[0], c[1] - a[1]
+            determinant = 2 * (bx * cy - by * cx)
+            if abs(determinant) < 1e-10:
+                return None
+            b2, c2 = bx * bx + by * by, cx * cx + cy * cy
+            ux = (cy * b2 - by * c2) / determinant
+            uy = (bx * c2 - cx * b2) / determinant
+            radius = math.hypot(ux, uy)
+            center = (a[0] + ux, a[1] + uy)
+            points = [
+                (center[0] - radius, center[1] - radius),
+                (center[0] + radius, center[1] + radius),
+            ]
+        elif kind == "circle":
+            center, edge = point(item.find("center")), point(item.find("end"))
+            radius = math.dist(center, edge)
+            points = [
+                (center[0] - radius, center[1] - radius),
+                (center[0] + radius, center[1] + radius),
+            ]
+        elif kind in ("poly", "curve"):
+            pts = item.find("pts")
+            if pts is None or any(child.name != "xy" for child in pts.children):
+                return None
+            points = [point(child) for child in pts.children]
+            if len(points) < 3 or (kind == "curve" and len(points) != 4):
+                return None
+        else:
+            return None
+        if any(not math.isfinite(value) for p in points for value in p):
+            return None
+        # A small outward margin protects against floating point rounding.
+        margin = width / 2 + 1e-7
+        return box(
+            min(p[0] for p in points) - margin,
+            min(p[1] for p in points) - margin,
+            max(p[0] for p in points) + margin,
+            max(p[1] for p in points) + margin,
+        )
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _check_raw_copper(
+    pcb: PCB, via: Via, shape, radius: float, layers: set[str], clearance: float, label: str
+) -> str | None:
+    """Check source-only copper in the same board frame as vias and stubs."""
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    ox, oy = pcb.board_origin
+    for node in pcb._sexp.children:
+        if node.is_atom:
+            continue
+        footprint = node.name in ("footprint", "module")
+
+        def transform(x, y):
+            return x - ox, y - oy
+
+        if footprint:
+            # Native footprint geometry is already mirrored on back-layer
+            # footprints; only the footprint position/rotation remain to apply.
+            at = node.find("at")
+
+            def transform(x, y):
+                if at is None:
+                    raise ValueError("missing footprint position")
+                fx, fy = at.get_float(0), at.get_float(1)
+                if fx is None or fy is None:
+                    raise ValueError("invalid footprint position")
+                dx, dy = rotate_pad_offset(x, y, at.get_float(2) or 0.0)
+                return (fx + dx - ox, fy + dy - oy)
+
+        for item in node.children if footprint else [node]:
+            if item.is_atom or not (
+                item.name in ("arc", "property", "dimension")
+                or (item.name or "").startswith(("gr_", "fp_"))
+            ):
+                continue
+            layer_node = item.find("layer")
+            layer = layer_node.get_string(0) if layer_node is not None else ""
+            if layer not in layers:
+                continue
+            net = item.find("net")
+            # Only routed arcs have a schema-defined electrical net. Graphics
+            # remain unassigned copper even if malformed input adds a net node.
+            if item.name == "arc" and net is not None and via.net_number != 0:
+                atom = net.get_value(0)
+                # get_int() coerces quoted numeric names, which are distinct
+                # from numeric IDs in KiCad's name-only net dialect.
+                if type(atom) is int and atom == via.net_number:
+                    continue
+                if isinstance(atom, str) and via.net_name and atom == via.net_name:
+                    continue
+            bounds = _raw_copper_bounds(item, transform)
+            if bounds is None:
+                return f"{label} unproven for {item.name} on {layer}"
+            if shape.distance(bounds) - radius < clearance - 1e-6:
+                return f"{label} to {item.name} on {layer}"
+    return None
+
+
+def _check_hole_to_copper(
+    pcb: PCB, via: Via, x: float, y: float, floor: float, min_copper_clearance: float | None = None
+) -> str | None:
+    """Check both drill/copper directions independently of annulus width.
+
+    Ordinary pad bounding boxes conservatively enclose copper; custom pads
+    fail closed because their primitives can extend outside the nominal box.
+    """
+    copper = [layer.name for layer in pcb.copper_layers]
+
+    def span(endpoints):
+        if len(endpoints) >= 2 and all(layer in copper for layer in endpoints):
+            indices = [copper.index(layer) for layer in endpoints]
+            return set(copper[min(indices) : max(indices) + 1])
+        return set(endpoints)
+
+    layers = span(via.layers)
+
+    def overlaps(item_layers):
+        return (
+            bool(layers & set(item_layers))
+            or "*.Cu" in item_layers
+            or ("F&B.Cu" in item_layers and bool(layers & {"F.Cu", "B.Cu"}))
+        )
+
+    def foreign(net):
+        return net == 0 or net != via.net_number
+
+    point = Point(x, y)
+    hole_r = via.drill / 2
+    for seg in pcb.segments:
+        if seg.layer in layers and foreign(seg.net_number):
+            gap = _dist_point_to_segment(x, y, seg) - hole_r - seg.width / 2
+            if gap < floor - 1e-6:
+                return f"hole-to-copper {gap:.3f}mm to track on {seg.layer}"
+    for other in pcb.vias:
+        if other is via or not foreign(other.net_number) or not layers & span(other.layers):
+            continue
+        distance = point.distance(Point(other.position))
+        gap = min(distance - hole_r - other.size / 2, distance - via.size / 2 - other.drill / 2)
+        if gap < floor - 1e-6:
+            return f"hole-to-copper {gap:.3f}mm to via on net {other.net_number}"
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if not foreign(pad.net_number) or not overlaps(pad.layers):
+                continue
+            if _has_unmodeled_drill(pad):
+                return f"hole-to-copper unmodeled drill at pad {fp.reference}-{pad.number}"
+            if pad.shape == "custom":
+                return f"hole-to-copper unproven for custom pad {fp.reference}-{pad.number}"
+            bbox = pad_absolute_bbox(pad, fp)
+            gap = math.inf if pad.type == "np_thru_hole" else point.distance(box(*bbox)) - hole_r
+            if pad.drill > 0:
+                center = Point((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+                gap = min(gap, point.distance(center) - via.size / 2 - pad.drill / 2)
+            if gap < floor - 1e-6:
+                return f"hole-to-copper {gap:.3f}mm to pad {fp.reference}-{pad.number}"
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    for zone in pcb.zones:
+        if not foreign(zone.net_number):
+            continue
+        for index, points in enumerate(zone.filled_polygons):
+            if zone.filled_polygon_layer(index) not in layers:
+                continue
+            solid = ConnectivityValidator._fill_solid_region(points)
+            if solid is not None and point.distance(solid) - hole_r < floor - 1e-6:
+                return "hole-to-copper to filled zone"
+
+    reason = _check_raw_copper(pcb, via, point, hole_r, layers, floor, "hole-to-copper")
+    if reason is not None or min_copper_clearance is None:
+        return reason
+    return _check_raw_copper(
+        pcb, via, point, via.size / 2, layers, min_copper_clearance, "clearance"
+    )
+
+
 def _check_clearance(
     pcb: PCB,
     via: Via,
@@ -495,6 +887,7 @@ def _check_clearance(
     tht_pads: list[ThtPad],
     min_clearance: float,
     min_hole_to_hole: float,
+    min_hole_clearance: float | None = None,
 ) -> str | None:
     """Return a human reason string if placing ``via`` at ``(new_x, new_y)``
     would violate copper clearance or hole-to-hole; ``None`` when clear.
@@ -561,7 +954,9 @@ def _check_clearance(
         if cu_gap < min_clearance - 1e-6:
             return f"clearance {cu_gap:.3f}mm to track on net {seg.net_number}"
 
-    return None
+    return _check_hole_to_copper(
+        pcb, via, new_x, new_y, _resolve_hole_clearance(pcb, min_hole_clearance), min_clearance
+    )
 
 
 def _check_stub_clearance(
@@ -571,6 +966,7 @@ def _check_stub_clearance(
     stub_layers: list[str],
     stub_width: float,
     min_clearance: float,
+    min_hole_clearance: float | None = None,
 ) -> str | None:
     """Validate the entire swept copper of a proposed set of straight stubs.
 
@@ -580,11 +976,12 @@ def _check_stub_clearance(
     fills are checked on their actual layers; native DRC with refill remains
     required because an outline cannot predict future poured copper.
 
-    Copper drawings / arcs and custom-pad primitives are not modeled by this
-    relocator. Refuse moves on their layers rather than silently ignoring them.
+    Supported source-only arcs and graphics use conservative stroke bounds.
+    Unsupported copper and custom-pad primitives fail closed on relevant layers.
     """
     from kicad_tools.validate.connectivity import ConnectivityValidator
 
+    hole_floor = _resolve_hole_clearance(pcb, min_hole_clearance)
     path = LineString([via.position, target])
     radius = stub_width / 2.0
     layers = set(stub_layers)
@@ -597,7 +994,7 @@ def _check_stub_clearance(
     # envelope inscribed: approximation can only reject, never hide new copper.
     quadrants = 64
     circumscribe = 1.0 / math.cos(math.pi / (4 * quadrants))
-    new_keepout = None
+    keepouts: dict[float, BaseGeometry] = {}
 
     def overlaps(item_layers: list[str]) -> bool:
         return (
@@ -609,24 +1006,23 @@ def _check_stub_clearance(
     def foreign(net: int) -> bool:
         return net == 0 or net != via.net_number
 
-    def too_close(shape, other_radius: float = 0.0) -> bool:
-        nonlocal new_keepout
+    def too_close(shape, other_radius: float = 0.0, clearance: float = min_clearance) -> bool:
         # Exact analytic distance quickly accepts geometry outside the entire
         # candidate envelope, without polygon discretization error.
-        if path.distance(shape) - radius - other_radius >= min_clearance - 1e-6:
+        if path.distance(shape) - radius - other_radius >= clearance - 1e-6:
             return False
-        if new_keepout is None:
-            candidate = path.buffer((radius + min_clearance) * circumscribe, quad_segs=quadrants)
+        if clearance not in keepouts:
+            candidate = path.buffer((radius + clearance) * circumscribe, quad_segs=quadrants)
             old_keepout = Point(via.position).buffer(
-                via.size / 2.0 + min_clearance, quad_segs=quadrants
+                via.size / 2.0 + clearance, quad_segs=quadrants
             )
-            new_keepout = candidate.difference(old_keepout)
+            keepouts[clearance] = candidate.difference(old_keepout)
         copper = (
             shape.buffer(other_radius * circumscribe, quad_segs=quadrants)
             if other_radius > 0
             else shape
         )
-        return bool(new_keepout.intersects(copper))
+        return bool(keepouts[clearance].intersects(copper))
 
     for seg in pcb.segments:
         if seg.layer in layers and foreign(seg.net_number):
@@ -641,6 +1037,8 @@ def _check_stub_clearance(
         if len(span) >= 2 and all(layer in copper_layers for layer in span):
             indices = [copper_layers.index(layer) for layer in span]
             span = copper_layers[min(indices) : max(indices) + 1]
+        if overlaps(span) and too_close(Point(other.position), other.drill / 2, hole_floor):
+            return f"stub hole-to-copper to via on net {other.net_number}"
         if overlaps(span) and too_close(Point(other.position), other.size / 2.0):
             return f"stub clearance to via on net {other.net_number}"
 
@@ -648,8 +1046,15 @@ def _check_stub_clearance(
         for pad in fp.pads:
             if not foreign(pad.net_number) or not overlaps(pad.layers):
                 continue
+            if _has_unmodeled_drill(pad):
+                return f"hole-to-copper unmodeled drill at pad {fp.reference}-{pad.number}"
             if pad.shape == "custom":
                 return f"stub clearance unproven for custom pad {fp.reference}-{pad.number}"
+            if pad.drill > 0:
+                bbox = pad_absolute_bbox(pad, fp)
+                center = Point((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+                if too_close(center, pad.drill / 2, hole_floor):
+                    return f"stub hole-to-copper to pad {fp.reference}-{pad.number}"
             if too_close(box(*pad_absolute_bbox(pad, fp))):
                 return f"stub clearance to pad {fp.reference}-{pad.number}"
 
@@ -663,24 +1068,7 @@ def _check_stub_clearance(
             if solid is not None and too_close(solid):
                 return f"stub clearance to filled zone on {zone.filled_polygon_layer(index)}"
 
-    # Inspect source nodes too: routed arcs and copper text are not represented
-    # by pcb.segments. Unknown copper cannot be treated as empty space.
-    for node in pcb._sexp.children:
-        if node.is_atom:
-            continue
-        nodes = node.children if node.name in ("footprint", "module") else [node]
-        for item in nodes:
-            if item.is_atom or not (
-                item.name in ("arc", "property", "dimension")
-                or (item.name or "").startswith(("gr_", "fp_"))
-            ):
-                continue
-            layer_node = item.find("layer")
-            layer = layer_node.get_string(0) if layer_node is not None else ""
-            if layer in layers:
-                return f"stub clearance unproven for {item.name} on {layer}"
-
-    return None
+    return _check_raw_copper(pcb, via, path, radius, layers, min_clearance, "stub clearance")
 
 
 def _persist_via_with_stubs(
@@ -732,6 +1120,8 @@ def relocate_in_pad_vias(
     *,
     nets: set[str] | None = None,
     dry_run: bool = False,
+    min_hole_clearance_mm: float | None = None,
+    search_alternatives: bool = False,
 ) -> RelocationResult:
     """Slide signal in-pad vias off-pad, preserving connectivity (Phase 1).
 
@@ -740,9 +1130,17 @@ def relocate_in_pad_vias(
         design_rules: Active manufacturer rules.  A no-op when
             ``via_in_pad_supported`` is True.  ``min_clearance_mm`` and
             ``min_hole_to_hole_mm`` gate the off-pad placement.
+        search_alternatives: Opt in to a bounded 24-candidate cardinal/45-degree
+            search when the preferred single escape is blocked. Alternatives
+            preserve the full via land on every spanned layer and require full
+            stub containment in straight Edge.Cuts outlines (including cutouts).
+            Unsupported/open outlines conservatively refuse the alternative.
         nets: Optional set of net *names* to restrict the pass to.  ``None``
             means all nets.
         dry_run: When True, compute the report but do not mutate the board.
+        min_hole_clearance_mm: Additional native drill-to-copper floor; cannot lower the project.
+            Read the sibling project at ``pcb.path``; default to 0.25 mm. This
+            never reduces independent manufacturer copper or hole floors.
 
     Returns:
         A :class:`RelocationResult` with moved / skipped / unresolvable records.
@@ -751,12 +1149,19 @@ def relocate_in_pad_vias(
         as *skipped* and left untouched (an already-routed board is never made
         worse).
     """
+    min_hole_clearance = _resolve_hole_clearance(pcb, min_hole_clearance_mm)
     if dry_run:
         import copy
 
         # Later candidates must see earlier planned vias AND their stubs.
         # Simulating the normal mutation path also keeps reports equivalent.
-        return relocate_in_pad_vias(copy.deepcopy(pcb), design_rules, nets=nets)
+        return relocate_in_pad_vias(
+            copy.deepcopy(pcb),
+            design_rules,
+            nets=nets,
+            min_hole_clearance_mm=min_hole_clearance,
+            search_alternatives=search_alternatives,
+        )
 
     result = RelocationResult()
 
@@ -838,6 +1243,7 @@ def relocate_in_pad_vias(
                 zone_polygons,
                 pad,
                 net_name,
+                min_hole_clearance,
             )
             if target is None:
                 result.unresolvable.append(
@@ -935,6 +1341,7 @@ def relocate_in_pad_vias(
                 min_hole_to_hole,
                 stub_layers,
                 stub_width,
+                min_hole_clearance,
             )
             if target is None:
                 result.unresolvable.append(
@@ -986,8 +1393,64 @@ def relocate_in_pad_vias(
 
             # Clearance gate: never emit a worse board.
             reason = _check_clearance(
-                pcb, via, new_x, new_y, pads_by_net, tht_pads, min_clearance, min_hole_to_hole
+                pcb,
+                via,
+                new_x,
+                new_y,
+                pads_by_net,
+                tht_pads,
+                min_clearance,
+                min_hole_to_hole,
+                min_hole_clearance,
             )
+            if search_alternatives:
+                reason = reason or _check_stub_clearance(
+                    pcb,
+                    via,
+                    (new_x, new_y),
+                    stub_layers,
+                    stub_width,
+                    min_clearance,
+                    min_hole_clearance,
+                )
+                if reason is not None:
+                    # A via may touch pads, fills, or tracks anywhere on its
+                    # land, on any spanned layer. Retain that entire contact
+                    # area, including contacts not centered on its drill.
+                    all_layers = [layer.name for layer in pcb.copper_layers]
+                    indices = [
+                        all_layers.index(layer) for layer in via.layers if layer in all_layers
+                    ]
+                    alternative_layers = (
+                        all_layers[min(indices) : max(indices) + 1]
+                        if len(indices) == len(via.layers) and len(indices) >= 2
+                        else []
+                    )
+                    alternative_width = max(stub_width, via.size)
+                    target = (
+                        _first_offpad_signal_candidate(
+                            pcb,
+                            via,
+                            bbox,
+                            pads_by_net,
+                            tht_pads,
+                            min_clearance,
+                            min_hole_to_hole,
+                            alternative_layers,
+                            alternative_width,
+                            min_hole_clearance,
+                            search_alternatives=True,
+                        )
+                        if alternative_layers
+                        else None
+                    )
+                    if target is not None:
+                        new_x, new_y = target
+                        stub_layers = alternative_layers
+                        stub_width = alternative_width
+                        reason = None
+                    else:
+                        reason += "; no safe bounded alternative (clearance/board containment)"
             if reason is not None:
                 result.skipped.append(
                     ViaRelocationSkip(
@@ -1004,7 +1467,7 @@ def relocate_in_pad_vias(
                 continue
 
         reason = _check_stub_clearance(
-            pcb, via, (new_x, new_y), stub_layers, stub_width, min_clearance
+            pcb, via, (new_x, new_y), stub_layers, stub_width, min_clearance, min_hole_clearance
         )
         if reason is not None:
             result.unresolvable.append(
