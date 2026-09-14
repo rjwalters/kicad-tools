@@ -1214,8 +1214,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   library-specific overrides keep precedence), and
   `tests/test_board_05_cpl_rotations.py` pins the released CPL's
   corrections. Also carried along: the board's readiness evidence — stale
-  since `redesign/build.py` changed without a refresh, which made `kct board
-  readiness` report `unverified` — validates as `ready` again. This is a
+  since `redesign/build.py` changed without a refresh — validates as `ready`
+  again through the readiness reader. This is a
   DRC/DFM repair,
   not new physical qualification: motor and thermal bench validation remain
   untested.
