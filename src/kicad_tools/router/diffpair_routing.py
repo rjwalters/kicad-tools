@@ -118,6 +118,20 @@ COUPLED_FLAGOFF_MAX_ITERATIONS: int = int(os.environ.get("KCT_COUPLED_FLAGOFF_MA
 # so the coupled-length fraction stays >> every continuity threshold.
 NEAR_MISS_RESCUE_CELLS: int = int(os.environ.get("KCT_COUPLED_RESCUE_CELLS", "60"))
 
+# Issue #5333: ledger for the geometric pair construction that runs after a
+# joint search has already exited, INSIDE the same per-pair wall-clock window
+# (no budget is renewed or widened).  The native allowance pays only for
+# validating departure prefixes -- a measured ~15 iterations per proposal, at
+# most a dozen proposals -- so 256 bounds it with room to spare while staying
+# ~1% of the 20,000-iteration phase budget the searches themselves spend.
+# Body attempts are geometric, not native: 400 covers the shape lattice
+# (escape depth x retreat x goal offset x coupled loop) across every validated
+# layer, measured at ~0.05 s per attempt including terminal synthesis.
+CONSTRUCTION_DEPARTURE_ITERATIONS: int = int(
+    os.environ.get("KCT_CONSTRUCTION_DEPARTURE_ITERS", "256")
+)
+CONSTRUCTION_BODY_ATTEMPTS: int = int(os.environ.get("KCT_CONSTRUCTION_BODY_ATTEMPTS", "400"))
+
 # Issue #3508: maximum length (mm) the shadow constructor may trim from
 # EACH end of the offset polyline before tail-connecting to the pads.
 # Endpoint zones are always contested by neighbour-pad clearance halos
@@ -3037,8 +3051,33 @@ class CoupledPathfinder:
         # radius with the absolute spacing difference plus a small
         # buffer so each cell of the approach can change spacing by
         # at most one cell.
+        # Issue #5333: the endpoint phases must also absorb the pair's LAYER
+        # transition, not only its pitch transition.  A coupled via move
+        # places BOTH barrels at the pair's CURRENT separation, so it is legal
+        # only once that separation has reached the mutual barrel pitch
+        # (``_minimum_via_pitch_cells``: via copper or drill hole-to-hole,
+        # whichever dominates).  Every planar move -- symmetric and
+        # asymmetric alike -- pins the separation to the coupled target +-1
+        # OUTSIDE these radii, so a pair whose coupled target is narrower
+        # than that barrel pitch could not reach a via anywhere on the board
+        # and stayed confined to its start layer for the whole search.
+        # Measured on an empty four-layer board (0.4 mm coupled target,
+        # 0.8 mm mutual barrel pitch): 20,000 iterations, ``via_pair_pitch``
+        # dominant at 54,222 rejections, every state on the start layer, and
+        # the same landing stall the board-07 pairs report -- unchanged at
+        # 10x the budget, because the reachable state space, not the budget,
+        # is what excludes the layer change.  Size both radii so the fan-out
+        # to the barrel pitch fits at one cell of spacing change per step,
+        # exactly like the pitch transitions above.  This widens only the
+        # SPACING band near the endpoints: every copper, clearance, trail,
+        # barrel-history and mutual-pitch guard still applies to each step.
+        via_spread_delta = max(
+            0, math.ceil(self._minimum_via_pitch_cells() - effective_target_spacing)
+        )
         end_spacing_delta = int(round(abs(actual_end_spacing - effective_target_spacing)))
-        effective_approach_radius = max(effective_target_spacing, 6, end_spacing_delta * 2 + 4)
+        effective_approach_radius = max(
+            effective_target_spacing, 6, end_spacing_delta * 2 + 4, via_spread_delta * 2 + 4
+        )
 
         # Issue #3508: departure radius -- the mirror of the approach
         # radius, sized by the start-pitch transition.  Within this
@@ -3046,7 +3085,9 @@ class CoupledPathfinder:
         # the pair can converge from the physical pad pitch down to
         # the coupled target one cell per step.
         start_spacing_delta = int(round(abs(actual_start_spacing - effective_target_spacing)))
-        effective_departure_radius = max(effective_target_spacing, 6, start_spacing_delta * 2 + 4)
+        effective_departure_radius = max(
+            effective_target_spacing, 6, start_spacing_delta * 2 + 4, via_spread_delta * 2 + 4
+        )
 
         # Issue #4065: try the C++ coupled joint-state A* first.  The C++
         # search consumes the SAME Grid3D the single-ended C++ pathfinder
@@ -4638,6 +4679,25 @@ class DiffPairRouter:
             clearance_cells += 1
             grid._mark_segment(seg, clearance_cells=clearance_cells)
         self.autorouter._mark_route_on_cpp_grid(route)
+
+    def _through_via_board_thickness(self) -> float | None:
+        """Board thickness when ordinary through vias are the only via kind.
+
+        Issue #5333: geometric construction measures physical route length
+        including the drilled barrel, which is only well defined for the
+        ordinary through-via policy the length tuner and the match-group
+        checker already assume.  Return ``None`` when the manufacturer
+        publishes no thickness, or when blind/buried vias are enabled, so the
+        caller declines to construct rather than measuring the wrong span.
+        """
+        manufacturer = self.autorouter._build_manufacturer_design_rules()
+        thickness = getattr(manufacturer, "board_thickness_mm", None)
+        via_rules = getattr(self.autorouter, "via_rules", None)
+        if getattr(via_rules, "allow_blind", False) or getattr(via_rules, "allow_buried", False):
+            return None
+        if thickness is None or not math.isfinite(thickness) or thickness <= 0:
+            return None
+        return float(thickness)
 
     def _virtual_pad_at(self, template: Pad, wx: float, wy: float, layer_idx: int) -> Pad:
         """Virtual pad at an arbitrary board position (issue #3508).
@@ -10610,6 +10670,57 @@ class DiffPairRouter:
                         )
                         if result is not None:
                             coupled_phase = "partial-recovery"
+
+            if (
+                result is None
+                and not shadow_fail_fast
+                and per_pair_timeout is not None
+                and getattr(pathfinder, "last_coupled_backend", None) == "cpp"
+            ):
+                # Issue #5333: the joint search cannot change layers while the
+                # pair is narrower than the mutual barrel pitch -- a via move
+                # places BOTH barrels at the pair's current separation, and
+                # planar moves pin that separation to the coupled target +-1
+                # outside the endpoint relaxation radii.  Measured on an empty
+                # four-layer board with a single F.Cu barrier that makes a
+                # layer change mandatory: 20,000 iterations, every explored
+                # state on the start layer, ``via_pair_pitch`` dominant, no
+                # route -- unchanged at 10x the budget.  So when the searches
+                # have exited, construct the pair from pad geometry instead:
+                # a natively validated fan-out + paired via escape, a coupled
+                # body, and guarded terminal returns onto mutually clear
+                # barrels.  Every step passes the ordinary native guards and
+                # the assembled pair must still satisfy the authored skew and
+                # coupling gates, so this adds a construction path, not an
+                # exemption.  It runs INSIDE the pair's existing wall-clock
+                # window and spends its own small, explicit ledgers.
+                construction_deadline = spec_t0 + per_pair_timeout + self._census_elapsed_s
+                thickness = self._through_via_board_thickness()
+                if thickness is not None and time.monotonic() < construction_deadline:
+                    from .pair_construction import ConstructionBudget, construct_pair_routes
+
+                    budget = ConstructionBudget(
+                        construction_deadline,
+                        CONSTRUCTION_DEPARTURE_ITERATIONS,
+                        CONSTRUCTION_BODY_ATTEMPTS,
+                    )
+                    result = construct_pair_routes(
+                        self,
+                        pathfinder,
+                        pair,
+                        (spec.p_start, spec.p_end, spec.n_start, spec.n_end),
+                        budget,
+                        board_thickness_mm=thickness,
+                        num_copper_layers=self.autorouter.grid.num_layers,
+                    )
+                    print(
+                        "    [coupled-construction] "
+                        f"success={result is not None} "
+                        f"native_iters={budget.iterations_used} "
+                        f"bodies={budget.bodies_used}"
+                    )
+                    if result is not None:
+                        coupled_phase = "construction"
 
             # Issue #4635: deliberately NOT census-adjusted.  The deadlines
             # above credit the census's cost back so census-on and census-off

@@ -79,6 +79,19 @@ def departure_proposals(
         if bend < escape and abs(dx) + abs(dy) - bend >= finder.min_spacing_cells
         else (0,)
     )
+    # Issue #5333: a coupled via places BOTH barrels at the pair's current
+    # separation, so a pad pitch below the mutual barrel pitch (via copper or
+    # drill hole-to-hole, whichever dominates) cannot host the paired
+    # transition at all -- the native step is rejected as ``via_pair_pitch``,
+    # which is what confined every fine-pitch escape to its start layer.
+    # Fan out symmetrically, one cell per step, immediately before the via and
+    # after the escape has already cleared the pad row, exactly as a hand
+    # layout necks out of a fine-pitch field. Each spread step is an ordinary
+    # asymmetric move and is validated natively like every other step; the
+    # barrels themselves still face every copper, drill and history guard.
+    pitch = abs(dx) + abs(dy)
+    spread = max(0, math.ceil(finder._minimum_via_pitch_cells() - pitch))
+    p_spread, n_spread = spread // 2, spread - spread // 2
     for layer in reversed(grid.get_routable_indices()):
         if layer == start_layer:
             continue
@@ -117,16 +130,31 @@ def departure_proposals(
                     (px + ox * j, py + oy * j, start_layer, nx + ox * j, ny + oy * j, start_layer)
                     for j in range(bend_steps + 1, escape + 1)
                 )
-                prefix.append(
+                p_esc = (px + ox * escape, py + oy * escape)
+                n_esc = (nx + ox * escape, ny + oy * escape)
+                prefix.extend(
                     (
-                        px + ox * escape,
-                        py + oy * escape,
-                        layer,
-                        nx + ox * escape,
-                        ny + oy * escape,
-                        layer,
+                        p_esc[0] - across[0] * j,
+                        p_esc[1] - across[1] * j,
+                        start_layer,
+                        *n_esc,
+                        start_layer,
                     )
+                    for j in range(1, p_spread + 1)
                 )
+                p_via = (p_esc[0] - across[0] * p_spread, p_esc[1] - across[1] * p_spread)
+                prefix.extend(
+                    (
+                        *p_via,
+                        start_layer,
+                        n_esc[0] + across[0] * j,
+                        n_esc[1] + across[1] * j,
+                        start_layer,
+                    )
+                    for j in range(1, n_spread + 1)
+                )
+                n_via = (n_esc[0] + across[0] * n_spread, n_esc[1] + across[1] * n_spread)
+                prefix.append((*p_via, layer, *n_via, layer))
                 yield DepartureProposal(tuple(prefix), across, outward, layer, bend_steps)
 
 

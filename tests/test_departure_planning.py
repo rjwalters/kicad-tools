@@ -1,3 +1,4 @@
+import math
 import time
 from dataclasses import replace
 
@@ -84,3 +85,71 @@ def test_all_attempts_charge_one_iteration_budget(monkeypatch):
         for route in (departure.p_route, departure.n_route):
             assert route.segments and route.vias
         assert departure.iterations > 0
+
+
+def _tight_pitch_pads(finder, pitch_cells):
+    """Source pads closer together than the mutual barrel pitch."""
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad
+
+    return tuple(
+        Pad(x=x, y=y, width=0.2, height=0.2, net=net, net_name=str(net), layer=layer)
+        for net, gx in ((1, 10), (2, 10 + pitch_cells))
+        for layer in (Layer.F_CU, Layer.B_CU)
+        for x, y in [finder.grid.grid_to_world(gx, 10)]
+    )
+
+
+def test_tight_pitch_proposals_fan_out_to_the_mutual_barrel_pitch():
+    """Issue #5333: a paired via needs the mutual barrel pitch, not pad pitch.
+
+    Without the fan-out every one of these proposals ends in a via step the
+    native search rejects as ``via_pair_pitch``, which is what confined
+    fine-pitch escapes to their start layer.
+    """
+    finder = _finder()
+    required = finder._minimum_via_pitch_cells()
+    pads = _tight_pitch_pads(finder, 4)
+    assert required > 4
+    proposals = list(departure_proposals(finder, pads))
+    assert proposals
+    for proposal in proposals:
+        px, py, pl, nx, ny, nl = proposal.prefix[-1]
+        assert (pl, nl) == (proposal.layer, proposal.layer)
+        assert math.hypot(px - nx, py - ny) + 1e-9 >= required
+        # Every spread step is one ordinary single-cell, single-leg move.
+        for before, after in zip(proposal.prefix[:-1], proposal.prefix[1:], strict=True):
+            moved = [abs(after[i] - before[i]) + abs(after[i + 1] - before[i + 1]) for i in (0, 3)]
+            assert max(moved) <= 1 or after[2] != before[2]
+
+
+def test_wide_pitch_proposals_keep_their_original_shape():
+    """Pads already at or beyond the barrel pitch get no extra steps."""
+    finder = _finder()
+    pads = _tight_pitch_pads(finder, int(math.ceil(finder._minimum_via_pitch_cells())))
+    for proposal in departure_proposals(finder, pads):
+        px, py, _, nx, ny, _ = proposal.prefix[-2]
+        before_via = math.hypot(px - nx, py - ny)
+        px, py, _, nx, ny, _ = proposal.prefix[-1]
+        assert math.isclose(before_via, math.hypot(px - nx, py - ny))
+
+
+@pytest.mark.skipif(not is_cpp_available(), reason="requires matching native backend")
+def test_native_validation_accepts_a_fanned_out_fine_pitch_escape():
+    """The whole point of the fan-out: real, validated departures exist."""
+    from tests.test_coupled_layer_transition import fixture
+
+    _, finder, _, pads = fixture()
+    assert finder.target_spacing_cells < finder._minimum_via_pitch_cells()
+    budget = DepartureBudget(time.monotonic() + 60, 512)
+    departures = list(validated_departures(finder, pads, budget))
+    assert departures
+    for departure in departures:
+        assert departure.p_route.vias and departure.n_route.vias
+        via = (departure.p_route.vias[-1], departure.n_route.vias[-1])
+        distance = math.hypot(via[0].x - via[1].x, via[0].y - via[1].y)
+        assert distance + 1e-9 >= max(
+            finder.rules.via_diameter + finder.rules.via_clearance,
+            finder.rules.via_drill + finder.rules.min_hole_to_hole,
+        )
+    assert 0 < budget.iterations_used <= 512
