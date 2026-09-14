@@ -596,6 +596,78 @@ actual="$(printf '%s' '{"refs":[{"number":42,"state":"OPEN"},{"number":43,"state
 assert_eq "0" "$rc" "T29: operator-premise eval consumer retains multiline refs"
 assert_eq $'stale-premise\n42:OPEN\n43:CLOSED' "$actual" "T29: both reference states survive eval"
 
+# --- T30-T36: decide (#7617) - the "Four-way decision" that gates the
+# `loom:curating` claim on whether this pass will actually mutate anything.
+# THE #7617 REGRESSION: curator.md used to claim `loom:curating` before
+# comparing CONCLUSION_HASH against the prior marker, then release it again
+# once the comparison came back "unchanged" — claim/unclaim churn with zero
+# work performed on a long-blocked issue re-checked over and over. `decide`
+# is the shared, tested implementation of that comparison so the claim
+# decision is no longer hand-rolled in prose per Curator pass (mirrors why
+# `dep-recheck`/`operator-premise` themselves were extracted, #7281).
+# ------------------------------------------------------------------------
+
+# T30: THE #7617 REGRESSION ITSELF - same hash, well inside the heartbeat
+# window -> ACTION=skip, CLAIM=false. This is the exact "no claim/unclaim
+# label event" case the acceptance criteria calls for.
+out="$("$TARGET_SCRIPT" decide --hash abc123 --prior-hash abc123 --prior-age-hours 1)"
+assert_eq "skip" "$(field "$out" ACTION)" "T30a: same hash, inside the window -> ACTION=skip"
+assert_eq "false" "$(field "$out" CLAIM)" "T30b: same hash, inside the window -> CLAIM=false (no loom:curating claim/unclaim at all)"
+
+# T31: no prior marker at all (first-ever check) -> always report, and a
+# report needs the claim.
+out="$("$TARGET_SCRIPT" decide --hash abc123)"
+assert_eq "comment" "$(field "$out" ACTION)" "T31a: no prior marker -> ACTION=comment (first-ever check always reports)"
+assert_eq "true" "$(field "$out" CLAIM)" "T31b: no prior marker -> CLAIM=true"
+
+# T32: a changed conclusion (a real state change, e.g. the tracked PR merged,
+# or an escalation that folded a new orthogonal condition into the hash)
+# always comments, no matter how fresh the prior marker is.
+out="$("$TARGET_SCRIPT" decide --hash def456 --prior-hash abc123 --prior-age-hours 0)"
+assert_eq "comment" "$(field "$out" ACTION)" "T32a: a changed hash -> ACTION=comment even immediately after the prior marker"
+assert_eq "true" "$(field "$out" CLAIM)" "T32b: a changed hash -> CLAIM=true (this pass still claims normally before commenting, unchanged from today)"
+
+# T33: same hash, past the heartbeat window -> exactly one refresh comment,
+# which needs the claim.
+out="$("$TARGET_SCRIPT" decide --hash abc123 --prior-hash abc123 --prior-age-hours 25)"
+assert_eq "heartbeat" "$(field "$out" ACTION)" "T33a: same hash, past the 24h window -> ACTION=heartbeat"
+assert_eq "true" "$(field "$out" CLAIM)" "T33b: same hash, past the window -> CLAIM=true"
+
+# T33c: the window boundary itself (exactly the heartbeat threshold) counts
+# as past the window, not inside it -- mirrors "at or past" in the header doc.
+out="$("$TARGET_SCRIPT" decide --hash abc123 --prior-hash abc123 --prior-age-hours 24)"
+assert_eq "heartbeat" "$(field "$out" ACTION)" "T33c: age exactly equal to the heartbeat window -> ACTION=heartbeat, not skip"
+
+# T34: an empty --hash (nothing to report this pass, e.g. operator-premise's
+# VERDICT=open) is a pure no-op regardless of any prior marker -- there is
+# nothing to compare and therefore nothing to claim.
+out="$("$TARGET_SCRIPT" decide --hash "" --prior-hash abc123 --prior-age-hours 1)"
+assert_eq "none" "$(field "$out" ACTION)" "T34a: empty --hash -> ACTION=none"
+assert_eq "false" "$(field "$out" CLAIM)" "T34b: empty --hash -> CLAIM=false"
+
+# T35: --heartbeat-hours overrides the default window, and
+# LOOM_DEP_RECHECK_HEARTBEAT_HOURS is honored when --heartbeat-hours is not
+# passed explicitly.
+out="$("$TARGET_SCRIPT" decide --hash abc123 --prior-hash abc123 --prior-age-hours 5 --heartbeat-hours 4)"
+assert_eq "heartbeat" "$(field "$out" ACTION)" "T35a: --heartbeat-hours narrows the window (age 5h >= 4h -> heartbeat, not skip)"
+out="$(LOOM_DEP_RECHECK_HEARTBEAT_HOURS=4 "$TARGET_SCRIPT" decide --hash abc123 --prior-hash abc123 --prior-age-hours 5)"
+assert_eq "heartbeat" "$(field "$out" ACTION)" "T35b: LOOM_DEP_RECHECK_HEARTBEAT_HOURS is honored when --heartbeat-hours is omitted"
+
+# T36: usage errors -- --hash is mandatory (even if empty, it must be passed
+# explicitly), and --prior-age-hours is mandatory whenever --prior-hash is
+# non-empty (there is nothing to age otherwise).
+rc=0
+"$TARGET_SCRIPT" decide >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "T36a: decide without --hash is a usage error"
+rc=0
+"$TARGET_SCRIPT" decide --hash abc123 --prior-hash abc123 >/dev/null 2>&1 || rc=$?
+assert_eq "2" "$rc" "T36b: --prior-hash without --prior-age-hours is a usage error"
+
+# T37: --json output for decide.
+out="$("$TARGET_SCRIPT" decide --hash abc123 --prior-hash abc123 --prior-age-hours 1 --json)"
+assert_eq "skip" "$(jq -r '.action' <<<"$out")" "T37a: --json reports action"
+assert_eq "false" "$(jq -r '.claim' <<<"$out")" "T37b: --json reports claim as a JSON boolean"
+
 # --- Summary ---
 echo ""
 echo "────────────────────────────────"
