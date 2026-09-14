@@ -17349,6 +17349,15 @@ class Autorouter:
                 # derived along-edge direction (board 04 OSC_OUT stub
                 # blocking NRST's via slot, Issue #3411).
                 net_target_positions=self._build_net_target_positions(),
+                # Issue #5201 (reopened): the COMPLETE physical hole census
+                # (every pad, duplicate (ref, pin) holes included -- see
+                # ``self.all_pads``'s own docstring above) so the in-pad
+                # rescue's process-eligibility check can resolve a real
+                # candidate-to-nearest-other-hole distance instead of
+                # omitting the check entirely.  Passed as the SAME live
+                # list object ``self`` mutates in place, so pads loaded
+                # after this property first fires are still observed.
+                component_holes=self.all_pads,
             )
         return self._escape_router
 

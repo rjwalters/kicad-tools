@@ -38,10 +38,17 @@ silently grant eligibility").
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Sequence
+
 from kicad_tools.manufacturers.fabrication_process import (
     FabricationProcess,
     get_fabrication_process,
 )
+
+if TYPE_CHECKING:
+    from kicad_tools.router.primitives import Pad
 
 
 def resolve_process(
@@ -134,4 +141,161 @@ def via_geometry_eligible(
         drill_mm=drill_mm,
         annular_ring_mm=annular_ring_mm,
         nearest_other_hole_distance_mm=nearest_other_hole_distance_mm,
+    )
+
+
+@dataclass(frozen=True)
+class ComponentHoleContext:
+    """The resolved nearest-other-drilled-hole distance for a candidate via.
+
+    Reopened issue #5201: a bare ``nearest_other_hole_distance_mm=None``
+    is ambiguous -- it means "skip this check" to
+    :func:`via_geometry_eligible` (by design; see that function's
+    docstring), but callers that DO have a component-hole census must
+    distinguish two very different situations that both used to collapse
+    onto that same ``None``:
+
+    * The census is genuinely, verifiably EMPTY -- every other drilled
+      hole on the board is accounted for and none is nearby (or there
+      are none at all).  ``known=True``, ``nearest_distance_mm=math.inf``.
+    * The census is UNKNOWN or INCOMPLETE -- the caller could not
+      enumerate every other drilled hole (missing context), or the
+      enumeration hit a through-hole pad with a missing/zero/unparseable
+      drill diameter (its position is known but its hole radius is not,
+      so its true clearance to the candidate cannot be computed).
+      ``known=False``, ``nearest_distance_mm=None``.
+
+    Callers MUST fail closed on ``known=False`` (refuse eligibility)
+    rather than let it fall through to ``via_geometry_eligible``'s
+    "skip the check" behaviour -- see :func:`via_in_pad_candidate_eligible`.
+    """
+
+    known: bool
+    nearest_distance_mm: float | None
+
+
+def resolve_component_hole_context(
+    via_x: float,
+    via_y: float,
+    via_drill_mm: float,
+    *,
+    all_pads: Sequence[Pad] | None,
+    exclude_ref: str | None = None,
+    exclude_pin: str | None = None,
+) -> ComponentHoleContext:
+    """Resolve the nearest-other-component-hole distance for a candidate via.
+
+    Issue #5201 (reopened): scans ``all_pads`` -- the COMPLETE physical
+    hole census (``Autorouter.all_pads``, which preserves duplicate
+    ``(ref, pin)`` holes that the lossy ``Autorouter.pads`` dict and
+    net-target maps both drop) -- for through-hole pads other than the
+    candidate's own pad, and returns the edge-to-edge distance from the
+    candidate via's drill circle to the nearest one, using the same
+    ``hypot(...) - via_r - hole_r`` geometry as
+    :class:`~kicad_tools.validate.rules.via_in_pad.ViaInPadRule` so the
+    router's decision and the downstream DRC pass never disagree.
+
+    Args:
+        via_x: Candidate via X position (board mm).
+        via_y: Candidate via Y position (board mm).
+        via_drill_mm: Candidate via drill diameter in mm.
+        all_pads: The complete physical pad list, or ``None`` when no
+            census is available to the caller.  ``None`` fails closed
+            (``known=False``).
+        exclude_ref: Reference designator of the pad hosting the
+            candidate via (excluded from the "other hole" scan -- its
+            own hole is the via's own landing, not a foreign hole).
+        exclude_pin: Pin number/name of the pad hosting the candidate
+            via, paired with ``exclude_ref``.
+
+    Returns:
+        A :class:`ComponentHoleContext`.  ``known=False`` when
+        ``all_pads`` is ``None`` OR any OTHER through-hole pad has a
+        missing/zero/unparseable drill diameter (its hole radius cannot
+        be computed, so its true clearance is unknown -- conservatively
+        treated as "could be anywhere").  Otherwise ``known=True`` with
+        ``nearest_distance_mm`` set to the minimum edge-to-edge distance
+        found, or ``math.inf`` when the census contains no other
+        through-hole pads at all (a genuinely empty census).
+    """
+    if all_pads is None:
+        return ComponentHoleContext(known=False, nearest_distance_mm=None)
+
+    via_r = via_drill_mm / 2.0
+    nearest: float | None = None
+    for other in all_pads:
+        if not getattr(other, "through_hole", False):
+            continue
+        if (
+            exclude_ref is not None
+            and getattr(other, "ref", None) == exclude_ref
+            and getattr(other, "pin", None) == exclude_pin
+        ):
+            continue
+        drill = float(getattr(other, "drill", 0.0) or 0.0)
+        if drill <= 0.0:
+            # Unparseable/zero/missing drill on a real through-hole pad:
+            # its position is known but its hole radius is not, so we
+            # cannot prove it is far enough away.  Fail closed for the
+            # WHOLE census rather than silently skip this one hole --
+            # Issue #5201's acceptance criterion treats this the same
+            # as a wholly-unknown census.
+            return ComponentHoleContext(known=False, nearest_distance_mm=None)
+        hole_r = drill / 2.0
+        distance = math.hypot(other.x - via_x, other.y - via_y) - via_r - hole_r
+        if nearest is None or distance < nearest:
+            nearest = distance
+
+    if nearest is None:
+        # Verified: no other through-hole pads exist anywhere on the
+        # board.  A genuinely empty census is eligible-if-otherwise-
+        # qualifying, not "unknown".
+        return ComponentHoleContext(known=True, nearest_distance_mm=math.inf)
+    return ComponentHoleContext(known=True, nearest_distance_mm=nearest)
+
+
+def via_in_pad_candidate_eligible(
+    process: FabricationProcess,
+    *,
+    drill_mm: float,
+    annular_ring_mm: float | None,
+    hole_context: ComponentHoleContext,
+) -> bool:
+    """Return True when a candidate via is eligible, INCLUDING hole context.
+
+    Issue #5201 (reopened): the owner's acceptance criterion is that an
+    unknown/incomplete component-hole census must REFUSE eligibility
+    rather than default to "no constraint" the way a bare
+    ``nearest_other_hole_distance_mm=None`` does in
+    :func:`via_geometry_eligible` (that function's ``None`` skip-check
+    behaviour is intentional and stays pinned by
+    ``test_unknown_annular_ring_and_hole_distance_skip_those_checks`` --
+    it is the right contract for a caller that never carries hole
+    context at all, e.g. the escape router's early pre-rescue gate).
+    This wrapper is for callers that DO have a
+    :class:`ComponentHoleContext` and must fail closed when it is
+    unknown.
+
+    Args:
+        process: The resolved (board-level-eligible) fabrication process.
+        drill_mm: Candidate via drill diameter in mm.
+        annular_ring_mm: Candidate via annular ring width in mm, or
+            ``None`` to skip that check (unrelated to hole context).
+        hole_context: The resolved :class:`ComponentHoleContext` for this
+            candidate (see :func:`resolve_component_hole_context`).
+
+    Returns:
+        ``False`` immediately when ``hole_context.known`` is ``False``.
+        Otherwise, delegates to :func:`via_geometry_eligible` with the
+        resolved ``nearest_distance_mm`` (``math.inf`` for a verified
+        empty census correctly clears the process's
+        ``min_component_hole_distance_mm`` floor).
+    """
+    if not hole_context.known:
+        return False
+    return via_geometry_eligible(
+        process,
+        drill_mm=drill_mm,
+        annular_ring_mm=annular_ring_mm,
+        nearest_other_hole_distance_mm=hole_context.nearest_distance_mm,
     )

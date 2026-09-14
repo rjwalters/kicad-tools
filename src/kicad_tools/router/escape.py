@@ -35,6 +35,8 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from .grid import RoutingGrid
     from .rules import DesignRules, NetClassRouting
 
@@ -43,7 +45,12 @@ from kicad_tools.core.geometry import point_to_segment_distance
 from .layers import Layer, LayerType
 from .primitives import Pad, Route, Segment, Via
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
-from .via_in_pad_eligibility import resolve_process, via_geometry_eligible
+from .via_in_pad_eligibility import (
+    resolve_component_hole_context,
+    resolve_process,
+    via_geometry_eligible,
+    via_in_pad_candidate_eligible,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1102,6 +1109,7 @@ class EscapeRouter:
         enable_slack_corridor_widening: bool = False,
         enable_escape_corridor_reservation: bool = False,
         escape_corridor_plans: list | None = None,
+        component_holes: Sequence[Pad] | None = (),
     ):
         """Initialize the escape router.
 
@@ -1190,6 +1198,35 @@ class EscapeRouter:
                 width is byte-identical to today (the fixed
                 ``intra_pair_clearance + trace_width`` padding), so all
                 board 00-07 fixtures are unchanged.
+            component_holes: The COMPLETE physical hole census (Issue
+                #5201, reopened) -- normally ``Autorouter.all_pads``,
+                which preserves duplicate ``(ref, pin)`` holes the lossy
+                ``Autorouter.pads`` dict drops.  When supplied, the in-pad
+                rescue (``_try_in_pad_escape``) resolves the FINAL
+                candidate via's distance to the nearest other component's
+                drilled hole against the resolved via-in-pad process's
+                ``min_component_hole_distance_mm`` floor, distinguishing a
+                verified-empty census (eligible-if-otherwise-qualifying)
+                from an unknown/incomplete one (refused, fail closed --
+                see ``ComponentHoleContext`` /
+                ``via_in_pad_candidate_eligible`` in
+                :mod:`kicad_tools.router.via_in_pad_eligibility`).
+                Callers should pass the SAME list object the router
+                mutates in place (rather than a snapshot copy) so pads
+                added after construction are visible here too.  Defaults
+                to ``()`` (an explicitly VERIFIED-EMPTY census), which
+                preserves the exact behaviour of every pre-#5201 call
+                site that never threaded any board-wide PTH registry at
+                all -- those synthetic/standalone constructions have no
+                other component holes in scope, so treating the omitted
+                argument as "verified empty" is both backwards compatible
+                and correct.  Pass ``None`` explicitly to signal a
+                genuinely UNKNOWN/unavailable census (e.g. a caller that
+                cannot enumerate the board's other drilled holes) -- this
+                now fails closed and refuses in-pad rescue for any board
+                with a real via-in-pad process attached, rather than
+                silently granting eligibility the way a bare
+                ``nearest_other_hole_distance_mm=None`` used to.
         """
         self.grid = grid
         self.rules = rules
@@ -1343,6 +1380,15 @@ class EscapeRouter:
             self.manufacturer, getattr(grid, "num_layers", None)
         )
         self.via_in_pad_supported: bool = self._via_in_pad_process is not None
+        # Issue #5201 (reopened): the COMPLETE physical hole census used to
+        # resolve a specific candidate via's distance to the nearest OTHER
+        # component's drilled hole (see ``component_holes`` docstring
+        # above).  Stored as the caller's own reference (not copied) so a
+        # live, growing list (``Autorouter.all_pads``) is observed
+        # correctly; ``None`` is preserved as the explicit "unknown
+        # census" sentinel distinct from the default ``()`` "verified
+        # empty" sentinel.
+        self._component_holes: Sequence[Pad] | None = component_holes
 
         # Issue #3033 / #3062: When True, the in-pad rescue path
         # (``_try_in_pad_escape``) returns None instead of placing a
@@ -7882,6 +7928,82 @@ class EscapeRouter:
                 sibling_via.y,
             )
             return None
+
+        # Issue #5201 (reopened): re-check process eligibility against the
+        # FINAL candidate geometry -- the early check above (right after
+        # the ``via_in_pad_supported`` gate) only proved the STANDARD
+        # via's drill/annular ring satisfy the envelope; the nudge rescue
+        # (Issue #2946) can move ``via_x``/``via_y`` off dead-centre and
+        # the micro-via fallback (Issue #3118) can swap ``via_drill`` /
+        # ``via_diameter`` entirely.  A centre-only or pre-rescue check is
+        # insufficient to catch either.  This also folds in the
+        # component-hole-distance check the early gate deliberately
+        # omitted (it runs before ``self._component_holes`` is
+        # consulted): resolve the FINAL candidate's distance to the
+        # nearest OTHER component's drilled hole from the complete
+        # physical census and REFUSE (fail closed) when that census is
+        # unknown/incomplete, exactly mirroring the downstream
+        # ``via_in_pad_process_ineligible`` DRC rule so the router never
+        # places a via DRC then rejects.
+        if self._via_in_pad_process is not None:
+            final_annular_ring = (via_diameter - via_drill) / 2.0
+            hole_context = resolve_component_hole_context(
+                via_x,
+                via_y,
+                via_drill,
+                all_pads=self._component_holes,
+                exclude_ref=pad.ref,
+                exclude_pin=pad.pin,
+            )
+            if not via_in_pad_candidate_eligible(
+                self._via_in_pad_process,
+                drill_mm=via_drill,
+                annular_ring_mm=final_annular_ring,
+                hole_context=hole_context,
+            ):
+                if hole_context.known:
+                    logger.info(
+                        "In-pad rescue REFUSED for pad %s (ref=%s pin=%s) at "
+                        "(%.3f, %.3f): final candidate geometry (drill=%.3fmm, "
+                        "annular=%.3fmm, nearest other hole=%.3fmm%s) does not "
+                        "satisfy process %r's published envelope (Issue "
+                        "#5201).  Returning None so the dispatcher takes the "
+                        "lateral / surface escape path instead of committing "
+                        "a via DRC would then reject.",
+                        pad.net_name,
+                        pad.ref,
+                        pad.pin,
+                        via_x,
+                        via_y,
+                        via_drill,
+                        final_annular_ring,
+                        hole_context.nearest_distance_mm,
+                        " (micro-via)" if is_micro_via_used else "",
+                        self._via_in_pad_process.process_id,
+                    )
+                else:
+                    logger.info(
+                        "In-pad rescue REFUSED for pad %s (ref=%s pin=%s) at "
+                        "(%.3f, %.3f): the board's component-hole census is "
+                        "unknown/incomplete (no live ``all_pads`` registry "
+                        "was threaded to this EscapeRouter, or it contains a "
+                        "through-hole pad with a missing/zero/unparseable "
+                        "drill diameter) -- process %r requires >= %.3fmm "
+                        "clearance from any other component's drilled hole "
+                        "and this cannot be proven, so eligibility fails "
+                        "closed (Issue #5201).  Returning None so the "
+                        "dispatcher takes the lateral / surface escape path "
+                        "instead of committing a via that might violate the "
+                        "process's component-hole-distance floor.",
+                        pad.net_name,
+                        pad.ref,
+                        pad.pin,
+                        via_x,
+                        via_y,
+                        self._via_in_pad_process.process_id,
+                        self._via_in_pad_process.min_component_hole_distance_mm,
+                    )
+                return None
 
         # Select inner escape layer (In1.Cu on 4-layer, B.Cu on 2-layer).
         escape_layer = self._select_inner_escape_layer(pad.layer)

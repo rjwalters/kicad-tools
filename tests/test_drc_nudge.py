@@ -52,6 +52,15 @@ class _StubAutorouter:
     nets: dict = field(default_factory=dict)
     net_names: dict = field(default_factory=dict)
     net_class_map: dict | None = None
+    # Issue #5201 (reopened): the COMPLETE physical hole census
+    # (``Autorouter.all_pads``).  Defaults to ``[]`` -- a VERIFIED-EMPTY
+    # census, matching every pre-existing fixture in this file (none of
+    # them add through-hole pads), so the default keeps every prior
+    # ``TestViaInPadProcessEligibilityGate`` assertion unchanged.  Tests
+    # that want to exercise the unknown/incomplete-census paths pass
+    # ``all_pads=None`` or a list containing an ambiguous PTH pad
+    # explicitly.
+    all_pads: list | None = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -2553,6 +2562,188 @@ class TestViaInPadProcessEligibilityGate:
             max_displacement=2.0,
             result=DRCNudgeResult(),
         )
+        assert nudged == 1
+        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
+
+
+class TestViaInPadComponentHoleCensus:
+    """Issue #5201 (reopened): the component-hole-distance half of the
+    per-via geometry check must use the COMPLETE physical hole census
+    (``Autorouter.all_pads``) and distinguish a verified-empty census
+    from an unknown/incomplete one, rather than collapsing both onto
+    the bare ``nearest_other_hole_distance_mm=None`` that used to mean
+    "skip this check" regardless of which situation actually held.
+
+    All five fixtures share the same edge-clipping via geometry as
+    ``TestViaInPadProcessEligibilityGate.test_sweep_no_ops_on_four_layer_tier1``
+    (pad 1.0x1.3mm at (10, 10); via drill=0.3/diameter=0.6 at
+    (10.5, 9.7); ``jlcpcb-tier1`` at 4 layers -- ``JLCPCB_TIER1_POFV_4L``,
+    ``min_component_hole_distance_mm=0.5``).  That existing test already
+    covers the DEFAULT ``all_pads=[]`` verified-empty case (nudged == 0);
+    this class covers the remaining four census shapes plus a far-hole
+    control.
+    """
+
+    def _make_fixture(self, *, all_pads, pads=None):
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1)
+        via = Via(
+            x=10.5,
+            y=9.7,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+        )
+        route = Route(net=1, net_name="Net1", segments=[], vias=[via])
+        router = _StubAutorouter(
+            routes=[route],
+            rules=DesignRules(manufacturer="jlcpcb-tier1", trace_clearance=0.2),
+            pads=pads if pads is not None else {("U1", "1"): pad},
+            nets={1: [("U1", "1")]},
+            all_pads=all_pads,
+        )
+        router.layer_stack = _StubLayerStack(num_layers=4)  # type: ignore[attr-defined]
+        return pad, via, router
+
+    def test_unknown_census_refuses(self):
+        """``all_pads=None`` (router exposes no complete census at all)
+        must REFUSE eligibility and relocate -- NOT default to eligible
+        the way a bare ``nearest_other_hole_distance_mm=None`` used to."""
+        pad, via, router = self._make_fixture(all_pads=None)
+
+        result = DRCNudgeResult()
+        nudged = _scan_and_repair_via_in_pad(router, max_displacement=2.0, result=result)
+
+        assert nudged == 1
+        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
+        assert result.skipped.get("via_pad_process_eligible", 0) == 0
+
+    def test_nearby_invalid_hole_refuses(self):
+        """A verified 0.3mm PTH hole at 0.4mm centre distance -- edge-to-
+        edge clearance (0.4 - 0.15 via_r - 0.15 hole_r = 0.1mm) is below
+        the process's 0.5mm floor.  Must REFUSE and relocate."""
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1)
+        near_hole = Pad(
+            x=10.9,
+            y=9.7,
+            width=0.3,
+            height=0.3,
+            net=0,
+            net_name="",
+            layer=Layer.F_CU,
+            ref="H1",
+            pin="1",
+            through_hole=True,
+            drill=0.3,
+        )
+        pad, via, router = self._make_fixture(all_pads=[pad, near_hole])
+
+        result = DRCNudgeResult()
+        nudged = _scan_and_repair_via_in_pad(router, max_displacement=2.0, result=result)
+
+        assert nudged == 1
+        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
+
+    def test_unknown_pth_drill_refuses(self):
+        """A through-hole pad with a missing/zero drill is UNKNOWN, not
+        proof the board has no nearby hole -- even when it sits far from
+        the candidate via, its true clearance cannot be computed, so the
+        WHOLE census fails closed."""
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1)
+        unknown_hole = Pad(
+            x=50.0,
+            y=50.0,
+            width=0.3,
+            height=0.3,
+            net=0,
+            net_name="",
+            layer=Layer.F_CU,
+            ref="H1",
+            pin="1",
+            through_hole=True,
+            drill=0.0,
+        )
+        pad, via, router = self._make_fixture(all_pads=[pad, unknown_hole])
+
+        result = DRCNudgeResult()
+        nudged = _scan_and_repair_via_in_pad(router, max_displacement=2.0, result=result)
+
+        assert nudged == 1
+        assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
+
+    def test_verified_far_hole_retains_escape(self):
+        """A verified census whose only other through-hole pad is far
+        away clears the process's component-hole-distance floor --
+        RETAIN the connected same-net in-pad escape."""
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1)
+        far_hole = Pad(
+            x=50.0,
+            y=50.0,
+            width=0.3,
+            height=0.3,
+            net=0,
+            net_name="",
+            layer=Layer.F_CU,
+            ref="H1",
+            pin="1",
+            through_hole=True,
+            drill=0.3,
+        )
+        pad, via, router = self._make_fixture(all_pads=[pad, far_hole])
+
+        result = DRCNudgeResult()
+        nudged = _scan_and_repair_via_in_pad(router, max_displacement=2.0, result=result)
+
+        assert nudged == 0
+        assert math.isclose(via.x, 10.5)
+        assert math.isclose(via.y, 9.7)
+        assert result.skipped.get("via_pad_process_eligible", 0) == 1
+
+    def test_incomplete_pads_dict_duplicate_does_not_mask_near_hole(self):
+        """Regression guard: the census MUST come from ``all_pads``, not
+        the lossy ``pads`` dict.  Here ``pads[("H1", "1")]`` is
+        overwritten with a FAR duplicate (simulating exactly what a
+        (ref, pin)-keyed dict does to a footprint with duplicate-numbered
+        holes), while the TRUE near hole only exists in ``all_pads``.  A
+        sweep that (incorrectly) sourced its census from ``pads`` would
+        see only the far duplicate and wrongly treat the via as eligible;
+        the fixed sweep must still find the near hole via ``all_pads``
+        and REFUSE."""
+        pad = _make_smd_pad(x=10.0, y=10.0, width=1.0, height=1.3, net=1)
+        near_hole = Pad(
+            x=10.9,
+            y=9.7,
+            width=0.3,
+            height=0.3,
+            net=0,
+            net_name="",
+            layer=Layer.F_CU,
+            ref="H1",
+            pin="1",
+            through_hole=True,
+            drill=0.3,
+        )
+        far_duplicate = Pad(
+            x=50.0,
+            y=50.0,
+            width=0.3,
+            height=0.3,
+            net=0,
+            net_name="",
+            layer=Layer.F_CU,
+            ref="H1",
+            pin="1",
+            through_hole=True,
+            drill=0.3,
+        )
+        pad, via, router = self._make_fixture(
+            all_pads=[pad, near_hole],
+            pads={("U1", "1"): pad, ("H1", "1"): far_duplicate},
+        )
+
+        result = DRCNudgeResult()
+        nudged = _scan_and_repair_via_in_pad(router, max_displacement=2.0, result=result)
+
         assert nudged == 1
         assert not _via_drill_overlaps_bbox(via, _router_pad_bbox(pad))
 

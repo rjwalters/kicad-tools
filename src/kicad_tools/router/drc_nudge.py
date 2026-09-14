@@ -59,7 +59,10 @@ from .via_clearance import (
     segment_clears_foreign_via,
     via_clears_foreign_segment,
 )
-from .via_in_pad_eligibility import via_geometry_eligible
+from .via_in_pad_eligibility import (
+    resolve_component_hole_context,
+    via_in_pad_candidate_eligible,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1771,6 +1774,20 @@ def _scan_and_repair_via_in_pad(
     has no eligible POFV process, so the sweep runs there and relocates
     the vias instead of leaving findings for DRC.
 
+    Issue #5201 (reopened): the component-hole-distance half of that
+    per-via check uses ``router.all_pads`` -- the COMPLETE physical pad
+    list -- via :func:`~kicad_tools.router.via_in_pad_eligibility.resolve_component_hole_context`,
+    which distinguishes a verified-empty census (no other through-hole
+    pads anywhere: eligible-if-otherwise-qualifying) from an
+    unknown/incomplete one (``router`` exposes no ``all_pads`` at all,
+    or a through-hole pad's drill is missing/zero/unparseable: refused,
+    fail closed).  This replaced an earlier build that sourced the
+    census from the lossy ``router.pads`` dict (keyed ``(ref, pin)``,
+    which silently drops duplicate-numbered holes) and mapped a merely
+    empty-looking census onto the SAME bare ``None`` that means "skip
+    the check" -- the exact gap that regressed board 02 at
+    ``jlcpcb-tier1``.
+
     Note on the displacement budget: the via-in-pad sweep uses its own
     budget (``_VIA_IN_PAD_MAX_DISPLACEMENT``, default 2.0 mm) rather
     than the seg-side handlers' ``max_displacement`` (0.2 mm).  Sliding
@@ -1805,18 +1822,19 @@ def _scan_and_repair_via_in_pad(
             continue
         pads_by_net.setdefault(net, []).append(pad)
 
-    # Issue #5201: PTH-hole registry for the resolved process's
-    # component-hole-distance check, mirroring
+    # Issue #5201 (reopened): the COMPLETE physical hole census for the
+    # resolved process's component-hole-distance check, mirroring
     # :class:`~kicad_tools.validate.rules.via_in_pad.ViaInPadRule`'s
-    # ``pth_holes`` collection.  Only built when a process was resolved
-    # -- when there is none, the sweep never reaches the per-via
-    # geometry check below and this registry would go unused.
-    pth_holes: list[tuple[float, float, float]] = []
-    if process is not None:
-        for pad in pads.values():
-            pad_drill = float(getattr(pad, "drill", 0.0) or 0.0)
-            if getattr(pad, "through_hole", False) and pad_drill > 0.0:
-                pth_holes.append((pad.x, pad.y, pad_drill / 2.0))
+    # ``pth_holes`` collection.  Uses ``router.all_pads`` -- NOT the
+    # ``pads`` dict above (keyed ``(ref, pin)``, which collapses
+    # duplicate-numbered thermal-via-array / EP-paddle holes onto one
+    # entry and would silently under-count nearby PTH holes) -- so the
+    # per-via geometry check below sees every drilled hole on the board,
+    # not just one per (ref, pin) key.  ``None`` when the router exposes
+    # no ``all_pads`` at all (e.g. a bare mock in a unit test); this
+    # fails closed via ``resolve_component_hole_context`` rather than
+    # silently treating an unbuildable census as empty.
+    all_pads_census = getattr(router, "all_pads", None)
 
     # Canonical processing order (#5009, third review pass).  Each
     # relocation commits copper that the NEXT relocation must clear
@@ -1866,18 +1884,19 @@ def _scan_and_repair_via_in_pad(
             # the board having SOME eligible process.
             if process is not None:
                 annular_ring_mm = (via.diameter - via.drill) / 2.0
-                nearest_hole_mm: float | None = None
-                if pth_holes:
-                    via_r = via.drill / 2.0
-                    nearest_hole_mm = min(
-                        math.hypot(px - via.x, py - via.y) - via_r - hole_r
-                        for px, py, hole_r in pth_holes
-                    )
-                if via_geometry_eligible(
+                hole_context = resolve_component_hole_context(
+                    via.x,
+                    via.y,
+                    via.drill,
+                    all_pads=all_pads_census,
+                    exclude_ref=getattr(pad, "ref", None),
+                    exclude_pin=getattr(pad, "pin", None),
+                )
+                if via_in_pad_candidate_eligible(
                     process,
                     drill_mm=via.drill,
                     annular_ring_mm=annular_ring_mm,
-                    nearest_other_hole_distance_mm=nearest_hole_mm,
+                    hole_context=hole_context,
                 ):
                     # Legal in-pad escape under the declared process --
                     # leave it exactly where it is.

@@ -303,6 +303,73 @@ class RoutingOrchestrator:
             return None
         return None
 
+    def _build_component_hole_census(self) -> list[Pad] | None:
+        """Build the COMPLETE physical hole census for via-in-pad eligibility.
+
+        Issue #5201 (reopened): feeds the ``EscapeRouter``'s
+        ``component_holes`` parameter so the fine-pitch in-pad rescue's
+        process-eligibility check can resolve a real candidate-to-
+        nearest-other-hole distance instead of always treating it as
+        unknown.  Two PCB-like shapes are supported, both defensively --
+        mirroring :meth:`_build_net_target_positions`:
+
+        1. Autorouter-style ``self.pcb.all_pads`` -- the COMPLETE pad
+           list (duplicate ``(ref, pin)`` holes included).  Used
+           directly, and as the SAME live list object so pads appended
+           after this call are still observed (never the lossy
+           ``self.pcb.pads`` dict -- Issue #5201's reopened root cause).
+        2. Document-model ``self.pcb.footprints`` -- also inherently
+           complete (iterates every footprint's every pad with no
+           dict-collapsing step), converted into lightweight router
+           ``Pad`` records carrying just the fields
+           :func:`~kicad_tools.router.via_in_pad_eligibility.resolve_component_hole_context`
+           needs (position, through-hole flag, drill).
+
+        Returns ``None`` when neither shape is usable (e.g. mock PCBs in
+        unit tests) so the census is UNKNOWN -- the in-pad rescue then
+        fails closed per Issue #5201's acceptance criterion, rather than
+        silently granting eligibility.
+        """
+        try:
+            all_pads_attr = getattr(self.pcb, "all_pads", None)
+            if isinstance(all_pads_attr, list):
+                return all_pads_attr
+
+            footprints = getattr(self.pcb, "footprints", None)
+            if footprints:
+                from .primitives import Pad as RouterPad
+
+                census: list[Pad] = []
+                for fp in footprints:
+                    ref = getattr(fp, "reference", "") or ""
+                    if not ref or ref.startswith("#"):
+                        continue
+                    fp_x, fp_y = fp.position
+                    rot_rad = math.radians(-(getattr(fp, "rotation", 0.0) or 0.0))
+                    cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+                    for pad in fp.pads:
+                        if getattr(pad, "type", "smd") != "thru_hole":
+                            continue
+                        px, py = pad.position
+                        census.append(
+                            RouterPad(
+                                x=fp_x + px * cos_r - py * sin_r,
+                                y=fp_y + px * sin_r + py * cos_r,
+                                width=getattr(pad, "size", (0.0, 0.0))[0],
+                                height=getattr(pad, "size", (0.0, 0.0))[1],
+                                net=getattr(pad, "net_number", 0) or 0,
+                                net_name="",
+                                ref=ref,
+                                pin=str(getattr(pad, "number", "")),
+                                through_hole=True,
+                                drill=float(getattr(pad, "drill", 0.0) or 0.0),
+                            )
+                        )
+                return census
+        except Exception:  # pragma: no cover - defensive against mock PCBs
+            return None
+        return None
+
     def route_net(
         self,
         net: str | int,
@@ -970,6 +1037,13 @@ class RoutingOrchestrator:
                     # (``kct route-auto``) is an independent code path and
                     # fixing only one is a known foot-gun in this codebase.
                     net_target_positions=self._build_net_target_positions(),
+                    # Issue #5201 (reopened): the COMPLETE physical hole
+                    # census -- see ``_build_component_hole_census``.
+                    # ``None`` (neither PCB shape usable) fails closed:
+                    # the in-pad rescue refuses eligibility rather than
+                    # silently granting it, exactly like every other
+                    # missing-context path in this module.
+                    component_holes=self._build_component_hole_census(),
                 )
 
         if self._escape is not None:
@@ -1627,6 +1701,9 @@ class RoutingOrchestrator:
                     # Issue #3428: same target-aware in-pad stub wiring
                     # as the escape_then_global ctor site above.
                     net_target_positions=self._build_net_target_positions(),
+                    # Issue #5201 (reopened): same component-hole census
+                    # wiring as the escape_then_global ctor site above.
+                    component_holes=self._build_component_hole_census(),
                 )
         return self._escape
 
