@@ -9,6 +9,7 @@
 #pragma once
 
 #include "types.hpp"
+#include <array>
 #include <vector>
 #include <cmath>
 #include <algorithm>
