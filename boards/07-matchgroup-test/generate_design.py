@@ -595,6 +595,11 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
             for j in range(i + 1, len(elems)):
                 gj, lj = elems[j]
                 if (li & lj) and gi.intersects(gj):
+                    # Separate native filled regions can share a boundary
+                    # without being electrically connected. Require copper
+                    # area overlap before joining two fill elements.
+                    if i < n_fills and j < n_fills and gi.intersection(gj).area == 0:
+                        continue
                     parent[_find(i)] = _find(j)
 
         groups: dict[int, list[tuple[str, bool]]] = {}
@@ -629,7 +634,7 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     return results
 
 
-def _relocate_pad_drills(pcb_path: Path) -> int:
+def _relocate_pad_drills(pcb_path: Path, *, native_refill: bool = False) -> int:
     """Clear partial pad/drill overlaps before repairing plane connectivity."""
     from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias
     from kicad_tools.manufacturers import get_profile
@@ -638,94 +643,36 @@ def _relocate_pad_drills(pcb_path: Path) -> int:
 
     pcb = PCB.load(pcb_path)
     rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    if native_refill:
+        from kicad_tools.cli.relocate_with_refill import relocate_in_pad_vias_with_refill
+
+        return len(relocate_in_pad_vias_with_refill(pcb_path, rules).relocation.moved)
     # The shared relocation API enforces the source project drill floor
     # independently of manufacturer copper clearance.
     result = relocate_in_pad_vias(pcb, rules)
-    extended = _extend_blocked_power_stubs(pcb, rules, result)
+    _extend_blocked_power_stubs(pcb, rules, result)
     remaining = ViaInPadRule().check(pcb, rules).violations
     if result.skipped or result.unresolvable or remaining:
         raise RuntimeError(f"Unresolved pad/drill overlaps: {result}; findings: {remaining}")
-    if result.changed or extended:
+    if result.changed:
         pcb.save(pcb_path)
-    return len(result.moved) + extended
+    return len(result.moved)
 
 
 def _extend_blocked_power_stubs(pcb, rules, result) -> int:
-    """Try a straight continuation when sliding back along a stitch stub is blocked.
+    """Compatibility entry point for the shared direct-relocation guard."""
+    from kicad_tools.cli.relocate_in_pad_vias import extend_blocked_stubs
 
-    The U4 power-pad escape can point toward a crowded drill cluster. A short
-    extension in the opposite direction preserves its existing copper. Use
-    the production candidate's drill/copper checks and additionally check the
-    entire new stub against foreign copper before accepting the extension.
-    """
-
-    from kicad_tools.cli import relocate_in_pad_vias as relocation
-
-    fixed = 0
-    pads = relocation._collect_smd_pads_by_net(pcb)
-    tht = relocation._collect_tht_pads(pcb)
-    for skipped in list(result.skipped):
-        if skipped.net_name not in POUR_NETS:
-            continue
-        via = next(v for v in pcb.vias if v.uuid == skipped.uuid)
-        attached = [
-            s
-            for s in pcb.segments_in_net(via.net_number)
-            if relocation._endpoint_at(s, *via.position) is not None
-        ]
-        if len(attached) != 1 or attached[0].layer != "F.Cu":
-            continue
-        segment = attached[0]
-        far = relocation._endpoint_at(segment, *via.position)
-        containing = next(
-            (
-                (f, p, b)
-                for f, p, b in pads[via.net_number]
-                if relocation.via_inside_pad(via, b, p, f)
-            ),
-            None,
-        )
-        if containing is None:
-            continue
-        target = relocation._first_offpad_signal_candidate(
-            pcb,
-            via,
-            containing[2],
-            pads,
-            tht,
-            rules.min_clearance_mm,
-            rules.min_hole_to_hole_mm,
-        )
-        if target is None:
-            continue
-        vx, vy = via.position
-        dx, dy = vx - far[0], vy - far[1]
-        tx, ty = target[0] - vx, target[1] - vy
-        # Restrict this fallback to an exact axis-aligned continuation.
-        if (
-            not ((abs(dx) < 1e-6 and abs(tx) < 1e-6) or (abs(dy) < 1e-6 and abs(ty) < 1e-6))
-            or dx * tx + dy * ty <= 0
-        ):
-            continue
-        if not all(
-            via.size / 2 <= x <= limit - via.size / 2
-            for x, limit in zip(target, pcb.board_size, strict=True)
-        ):
-            continue
-        if relocation._check_stub_clearance(
-            pcb, via, target, [segment.layer], segment.width, rules.min_clearance_mm
-        ):
-            continue
-        old = via.position
-        if not pcb.relocate_via(via, target):
-            continue
-        pcb.add_trace(old, target, width=segment.width, layer=segment.layer, net=skipped.net_name)
-        result.skipped.remove(skipped)
-        fixed += 1
-    return fixed
+    return extend_blocked_stubs(pcb, rules, result, nets=set(POUR_NETS))
 
 
-def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int, int]:
+def _repair_pour_connectivity(
+    pcb_path: Path,
+    net_names: list[str],
+    *,
+    failed_escapes: list[dict] | None = None,
+    dry_run: bool = False,
+) -> tuple[int, int]:
     """Repair pour-net connectivity: offset vias + stubs + island bridges.
 
     Issue #3413 phase 4.  Three residual classes survive the zone fill +
@@ -951,14 +898,16 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     bridges_placed = 0
     failed: list[str] = []
 
-    def _emit_via(net: str, vx: float, vy: float) -> None:
+    def _emit_via(
+        net: str, vx: float, vy: float, diameter: float = 0.45, drill: float = 0.25
+    ) -> None:
         nonlocal vias_placed
         nid = net_id_by_name[net]
         via_lines.append(
-            f"  (via (at {vx:.3f} {vy:.3f}) (size 0.45) (drill 0.25) "
+            f"  (via (at {vx:.3f} {vy:.3f}) (size {diameter}) (drill {drill}) "
             f'(layers "F.Cu" "B.Cu") (net {nid}) (uuid "{_generate_uuid()}"))'
         )
-        via_index.append((Point(vx, vy), net, VIA_R, VIA_DRILL_R))
+        via_index.append((Point(vx, vy), net, diameter / 2, drill / 2))
         vias_placed += 1
 
     def _emit_seg(
@@ -1057,6 +1006,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             for j in range(i + 1, len(own)):
                 gj, lj, _ = own[j]
                 if (li & lj) and gi.intersects(gj):
+                    if own[i][2] == own[j][2] == "fill" and gi.intersection(gj).area == 0:
+                        continue
                     parent[_find(i)] = _find(j)
 
         def _append_own(elem: tuple) -> None:
@@ -1103,6 +1054,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             target = candidates[0]
 
             merged = False
+            pending_escapes: list[dict] = []
 
             # Sub-stage A: lone SMD pad (or pad cluster) with no via -- try
             # an offset via + stub whose barrel lands on PRIMARY copper.
@@ -1295,20 +1247,236 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                     if done:
                         break
 
+            # The fixed rays cannot follow a narrow corridor. A component
+            # that already has a via can still be stranded behind foreign
+            # copper, so also search from its existing barrel on each layer.
+            # Commit only a complete path under the same physical rules.
+            if not merged and comp_pads:
+                from kicad_tools.zones.pour_escape import EscapeRules, find_escape
+
+                project = pcb_path.with_suffix(".kicad_pro")
+                if not project.exists():
+                    project = pcb_path.parent / "matchgroup_test.kicad_pro"
+                escape_rules = EscapeRules.from_project(project)
+                starts = [(name, pad_center[name], "F.Cu") for name in comp_pads]
+                if comp_has_via:
+                    starts = [
+                        (
+                            "existing via",
+                            (own[i][0].centroid.x, own[i][0].centroid.y),
+                            layer,
+                        )
+                        for i in target
+                        if own[i][2] == "via"
+                        for layer in ("B.Cu", "F.Cu", "In1.Cu", "In2.Cu")
+                        if layer in own[i][1]
+                    ]
+                for start_name, start, layer in starts:
+                    context = {
+                        "start": start,
+                        "net": net,
+                        "layer": layer,
+                        "pads": list(pad_index),
+                        "segments": list(seg_index),
+                        "vias": [
+                            (pt, name, radius, drill_r * 2)
+                            for pt, name, radius, drill_r in via_index
+                        ],
+                        "primary": [own[i] for i in primary],
+                        "bounds": (min_x, min_y, max_x, max_y),
+                        "rules": escape_rules,
+                    }
+                    escape = find_escape(**context)
+                    if escape is None:
+                        pending_escapes.append(context)
+                        continue
+                    if escape.via:
+                        vx, vy = escape.points[-1]
+                        _emit_via(net, vx, vy, escape_rules.diameter, escape_rules.drill)
+                        _append_own(
+                            (Point(vx, vy).buffer(escape_rules.diameter / 2), all_layers, "via")
+                        )
+                    for p0, p1 in zip(escape.points, escape.points[1:], strict=False):
+                        _emit_seg(net, p0, p1, layer, escape_rules.width)
+                        _append_own(
+                            (
+                                LineString([p0, p1]).buffer(escape_rules.width / 2),
+                                frozenset({layer}),
+                                "seg",
+                            )
+                        )
+                    bridges_placed += 1
+                    merged = True
+                    print(
+                        f"   Grid escape: {net} {start_name}, {len(escape.points) - 1} segment(s)"
+                    )
+                    break
+
             if not merged:
+                if failed_escapes is not None:
+                    failed_escapes.extend(pending_escapes)
                 names = [own[i][2] for i in target if own[i][2].startswith("pad:")]
                 failed.append(
                     f"{net}: cannot reconnect component {[n[4:] for n in names] or '(fill island)'}"
                 )
                 skipped_roots.add(_find(target[0]))
 
-    if via_lines or seg_lines:
+    if (via_lines or seg_lines) and not dry_run:
         content = pcb_path.read_text().rstrip().rstrip(")")
         content += "\n" + "\n".join(via_lines + seg_lines) + "\n)\n"
         pcb_path.write_text(content)
     for msg in failed:
         print(f"   UNREPAIRED: {msg}")
     return vias_placed, bridges_placed
+
+
+def _try_local_pour_detour(pcb_path: Path, net_names: list[str]) -> bool:
+    """Try one fully validated detour after ordinary pour repair stalls."""
+    import hashlib
+    import math
+    from dataclasses import replace
+
+    from shapely.geometry import Point
+
+    from kicad_tools.router.diffpair import detect_differential_pairs
+    from kicad_tools.router.rules import net_class_map_from_path
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.zones.detour_transaction import publish_local_detour
+    from kicad_tools.zones.local_detour import Track, match_detour_pair, plan_local_detour
+
+    contexts: list[dict] = []
+    if any(_repair_pour_connectivity(pcb_path, net_names, failed_escapes=contexts, dry_run=True)):
+        return False  # Let the next ordinary repair/refill round do this work.
+    if not contexts:
+        return False
+    sidecar = pcb_path.parent / "net_class_map.json"
+    if not sidecar.exists():
+        return False
+    classes = net_class_map_from_path(sidecar, pcb_path=pcb_path)
+    board = PCB.load(pcb_path)
+    thickness_node = board._sexp.find("general").find("thickness")
+    if thickness_node is None:
+        return False
+    thickness = thickness_node.get_float(0)
+    if not math.isfinite(thickness) or thickness <= 0:
+        return False
+    source_hash = hashlib.sha256(pcb_path.read_bytes()).hexdigest()
+    ox, oy = board.board_origin
+    tracks = [
+        Track(
+            track.uuid,
+            board.nets[track.net_number].name,
+            track.layer,
+            tuple(round(x + offset, 6) for x, offset in zip(track.start, (ox, oy), strict=True)),
+            tuple(round(x + offset, 6) for x, offset in zip(track.end, (ox, oy), strict=True)),
+            track.width,
+        )
+        for track in board.segments
+    ]
+    vias = [
+        (
+            Point(v.position[0] + ox, v.position[1] + oy),
+            board.nets[v.net_number].name,
+            v.size / 2,
+            v.drill,
+        )
+        for v in board.vias
+    ]
+
+    def measured_lengths(pcb, names):
+        lengths = dict.fromkeys(names, 0.0)
+        for track in pcb.segments:
+            name = pcb.nets[track.net_number].name
+            if name in lengths:
+                lengths[name] += math.dist(track.start, track.end)
+        for via in pcb.vias:
+            name = pcb.nets[via.net_number].name
+            if name in lengths:
+                if via.via_type is not None or set(via.layers) != {"F.Cu", "B.Cu"}:
+                    raise RuntimeError("Local detour pair contains an unsupported via span")
+                lengths[name] += thickness
+        return lengths
+
+    # Consider at most three stalled pad escapes per invocation. Each planner
+    # separately caps candidate nets and shares a 200k-node per-net budget.
+    for context in contexts[:3]:
+        rules = context["rules"]
+        eligible = {}
+        partners = {}
+        tolerances = {}
+        for pair in detect_differential_pairs(
+            {key: value.name for key, value in board.nets.items()}
+        ):
+            names = (pair.positive.net_name, pair.negative.net_name)
+            if any(name not in classes or name in net_names for name in names):
+                continue
+            pair_classes = [classes[name] for name in names]
+            if any(not item.coupled_routing or item.avoid_layers for item in pair_classes):
+                continue
+            try:
+                measured_lengths(board, names)
+            except RuntimeError:
+                continue
+            pair_rules = replace(
+                rules,
+                width=max(rules.width, *(item.trace_width for item in pair_classes)),
+                clearance=max(rules.clearance, *(item.clearance for item in pair_classes)),
+                diameter=max(rules.diameter, *(item.via_size for item in pair_classes)),
+            )
+            for name, partner in (names, names[::-1]):
+                eligible[name] = pair_rules
+                partners[name] = partner
+                tolerances[name] = min(item.effective_skew_tolerance() for item in pair_classes)
+        plan = plan_local_detour(
+            start=context["start"],
+            net=context["net"],
+            layer=context["layer"],
+            pads=context["pads"],
+            tracks=tracks,
+            vias=vias,
+            primary=context["primary"],
+            bounds=context["bounds"],
+            rules=rules,
+            signal_rules=eligible,
+        )
+        if plan is None:
+            continue
+        names = (plan.signal_net, partners[plan.signal_net])
+        tolerance = tolerances[plan.signal_net]
+        match = match_detour_pair(
+            plan,
+            power_net=context["net"],
+            power_layer=context["layer"],
+            partner_net=names[1],
+            tracks=tracks,
+            pads=context["pads"],
+            vias=vias,
+            initial_lengths_mm=measured_lengths(board, names),
+            new_via_length_mm=thickness,
+            tolerance_mm=tolerance,
+            bounds=context["bounds"],
+            rules=eligible[plan.signal_net],
+        )
+        if match is None:
+            continue
+
+        def validate_pair(candidate):
+            lengths = measured_lengths(candidate, names)
+            if abs(lengths[names[0]] - lengths[names[1]]) > tolerance:
+                raise RuntimeError("Local detour exceeds the authored pair-skew tolerance")
+
+        publish_local_detour(
+            pcb_path,
+            plan,
+            match,
+            power_net=context["net"],
+            power_layer=context["layer"],
+            source_sha256=source_hash,
+            validate_pair=validate_pair,
+        )
+        print(f"   Validated local detour: {plan.signal_net} frees {context['net']}")
+        return True
+    return False
 
 
 # =============================================================================
@@ -2088,9 +2256,9 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     # Both routed signal escapes and stitched power vias can partially cut an
     # SMT land. The shared drill-overlap detector includes these edge cuts.
-    # Relocate now so the following pour repair/re-fill rechecks moved plane
-    # vias; the existing final quantizer also handles the new signal stubs.
-    moved = _relocate_pad_drills(output_path)
+    # Stage and natively refill the complete relocation before publication.
+    # The later pour-connectivity repairs still run their own final checks.
+    moved = _relocate_pad_drills(output_path, native_refill=True)
     print(f"\n6b. Relocated {moved} via drill(s) clear of SMT lands.")
 
     # Issue #3617: repair the stitcher's residual then iterate repair <->
@@ -2162,6 +2330,14 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         pour_ok = _run_pour_audit(f"[r{repair_round}]")
         if pour_ok:
             break
+        if refill_ok:
+            try:
+                if _try_local_pour_detour(output_path, skip_nets):
+                    pour_ok = _run_pour_audit("[detour]")
+                    if pour_ok:
+                        break
+            except Exception as exc:
+                print(f"   Local detour rejected: {exc}")
         # Issue #3617: short-circuit when the filler is structurally
         # unavailable (first pass AND this round's re-fill both failed).
         if not first_fill_ok and not refill_ok:
@@ -2417,22 +2593,23 @@ def main() -> int:
             # all 244 pins, PIN_NETS mirroring generate_pcb.py
             # pad-for-pad), so the copper comparator binds 244/244 pads
             # and carries real evidence.  Board 07 routes PARTIAL by
-            # design -- 5 seed-invariant unroutable nets (#3438: DQ3, DQ4,
-            # MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N) -- so copper-LVS reports
-            # exactly those 5 opens and ``lvs.json`` carries the honest
-            # ``clean=false`` verdict (label comparator: clean; it is run
-            # so the payload records both legs).  ``require_clean=False``
-            # (advisory) because the 5 opens are EXPECTED here: a hard
-            # gate would abort the recipe before the manufacturing-bundle
-            # export.  ``kct board-metrics`` renders lvs_clean=false /
-            # lvs_mismatches=5 and downgrades status to 'partial' -- that
-            # is the truthful gallery state.  The board-07-end-to-end CI
-            # job regenerates into a tmp dir and asserts exactly these 5
-            # named opens and nothing else (``check_copper_lvs.py
-            # --expect-opens`` + ``check_board_00_e2e.py
-            # --lvs-known-opens``), so a NEW open/short -- or one of the 5
-            # becoming routable -- fails the job and forces this comment
-            # to be updated.  This step only runs in ``--step all`` (the
+            # design -- issue #5286 (user-approved 2026-09-13) narrowed the
+            # historical 5-open plateau (#3438: DQ3, DQ4, MIPI_DAT0_N,
+            # TMDS_D0_N, TMDS_D1_N) to a single approved open, DQ3 -- so
+            # copper-LVS reports exactly that one open and ``lvs.json``
+            # carries the honest ``clean=false`` verdict (label comparator:
+            # clean; it is run so the payload records both legs).
+            # ``require_clean=False`` (advisory) because the DQ3 open is
+            # EXPECTED here: a hard gate would abort the recipe before the
+            # manufacturing-bundle export.  ``kct board-metrics`` renders
+            # lvs_clean=false / lvs_mismatches=1 and downgrades status to
+            # 'partial' -- that is the truthful gallery state.  The
+            # board-07-end-to-end CI job regenerates into a tmp dir and
+            # asserts exactly that named open and nothing else
+            # (``check_copper_lvs.py --expect-opens`` + ``check_board_00_e2e.py
+            # --lvs-known-opens``), so a NEW open/short -- or DQ3 becoming
+            # routable -- fails the job and forces this comment to be
+            # updated.  This step only runs in ``--step all`` (the
             # ``--step route`` CI branch has no schematic).
             copper_clean, _label_clean = write_lvs_report(
                 sch_path,
@@ -2445,13 +2622,13 @@ def main() -> int:
             if not copper_clean:
                 print(
                     "[lvs] copper-LVS is dirty -- EXPECTED on this "
-                    "partial-by-design board (#3438 known opens: DQ3, DQ4, "
-                    "MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N).  lvs.json carries "
-                    "the honest clean=false verdict; board-metrics "
-                    "downgrades status to 'partial'.  The CI e2e job "
-                    "asserts the mismatch set is EXACTLY those 5 opens and "
-                    "no shorts (check_copper_lvs.py --expect-opens); see "
-                    "the summary above for what this run actually produced."
+                    "partial board (#5286 approved known open: DQ3).  "
+                    "lvs.json carries the honest clean=false verdict; "
+                    "board-metrics downgrades status to 'partial'.  The CI "
+                    "e2e job asserts the mismatch set is EXACTLY the DQ3 "
+                    "open and no shorts (check_copper_lvs.py "
+                    "--expect-opens); see the summary above for what this "
+                    "run actually produced."
                 )
 
             # Export manufacturing bundle (#3147) so ``kct fleet status``
@@ -2468,20 +2645,20 @@ def main() -> int:
             # ``DRC:`` line -- exactly the exit-code-vs-SUMMARY drift this
             # issue eliminates.
             #
-            # Board 07 is PARTIAL BY DESIGN: 5 seed-invariant unroutable nets
-            # (#3438: DQ3, DQ4, MIPI_DAT0_N, TMDS_D0_N, TMDS_D1_N).  The gate
-            # reflects that PARTIAL state HONESTLY rather than papering over
-            # it:
+            # Board 07 is PARTIAL BY DESIGN: the #5286-approved DQ3 open
+            # (narrowed 2026-09-13 from the historical 5-open #3438
+            # plateau).  The gate reflects that PARTIAL state HONESTLY
+            # rather than papering over it:
             #   * ``route_ok=route_success`` -- ``kct route`` exits non-zero
             #     on a partial route, so ``route_success`` is False and the
             #     ``Routing:`` line honestly reads PARTIAL.  ``route_allowance``
             #     is left at 0 ON PURPOSE: inflating it to swallow the known
-            #     opens would flip the ``Routing:`` line to a FALSE "SUCCESS"
+            #     open would flip the ``Routing:`` line to a FALSE "SUCCESS"
             #     (route_status() reads SUCCESS whenever route_ok is True),
             #     which is the opposite of reflecting PARTIAL honestly.
-            #   * ``lvs_ok=None`` -- the 5 copper-LVS opens ARE the documented
-            #     #3438 plateau (``write_lvs_report(require_clean=False)``
-            #     above keeps them advisory); making them a gating leg would
+            #   * ``lvs_ok=None`` -- the DQ3 copper-LVS open IS the
+            #     documented #5286 plateau (``write_lvs_report(require_clean=False)``
+            #     above keeps it advisory); making it a gating leg would
             #     FALSELY FAIL the board for being exactly at its plateau.
             #   * ``supplemental_drc_ok=drc_ok`` -- ``run_drc``
             #     (``kct check --mfr jlcpcb``) is the only engine that sees

@@ -61,16 +61,17 @@ def _make_grid(seed: int = 20260912) -> RoutingGrid:
     grid._net = rng.integers(0, 25, size=shape, dtype=np.int32)
     grid._is_obstacle = rng.random(shape) < 0.4
     grid._pad_blocked = rng.random(shape) < 0.25
+    grid._pad_halo_cells = {(0, 0, 0), (0, 0, 1)}
     return grid
 
 
-def _reference_marks(grid: RoutingGrid) -> list[tuple[int, int, int, int, bool, bool]]:
+def _reference_marks(grid: RoutingGrid) -> list[tuple[int, int, int, int, bool, bool, bool]]:
     """Per-cell reference walk: what the pre-#5240 bulk copy would have emitted.
 
     Reads through ``cell_at`` (the public ``_CellView`` accessor), so this is
     an independent path from the vectorised NumPy gather under test.
     """
-    marks: list[tuple[int, int, int, int, bool, bool]] = []
+    marks: list[tuple[int, int, int, int, bool, bool, bool]] = []
     for layer in range(grid.num_layers):
         for y in range(grid.rows):
             for x in range(grid.cols):
@@ -84,21 +85,22 @@ def _reference_marks(grid: RoutingGrid) -> list[tuple[int, int, int, int, bool, 
                             int(cell.net),
                             bool(cell.is_obstacle),
                             bool(grid._pad_blocked[layer, y, x]),
+                            (layer, y, x) in grid._pad_halo_cells,
                         )
                     )
     return marks
 
 
-def _actual_marks(grid: RoutingGrid) -> list[tuple[int, int, int, int, bool, bool]]:
+def _actual_marks(grid: RoutingGrid) -> list[tuple[int, int, int, int, bool, bool, bool]]:
     """Recorded ``mark_blocked`` calls made by the real ``from_routing_grid``."""
-    recorded: list[tuple[int, int, int, int, bool, bool]] = []
+    recorded: list[tuple[int, int, int, int, bool, bool, bool]] = []
     real_ctor = CppGrid.__init__
 
     def recording_ctor(self, *args, **kwargs):
         real_ctor(self, *args, **kwargs)
         real_mark = self._impl.mark_blocked
 
-        def mark_blocked(x, y, layer, net, is_obstacle, pad_blocked):
+        def mark_blocked(x, y, layer, net, is_obstacle, pad_blocked, pad_halo_only):
             recorded.append(
                 (
                     int(x),
@@ -107,9 +109,10 @@ def _actual_marks(grid: RoutingGrid) -> list[tuple[int, int, int, int, bool, boo
                     int(net),
                     bool(is_obstacle),
                     bool(pad_blocked),
+                    bool(pad_halo_only),
                 )
             )
-            return real_mark(x, y, layer, net, is_obstacle, pad_blocked)
+            return real_mark(x, y, layer, net, is_obstacle, pad_blocked, pad_halo_only)
 
         # ``_impl`` is a nanobind object, so patch a Python-level shim onto
         # the CppGrid wrapper's captured reference instead of the C++ type.
@@ -149,11 +152,12 @@ def test_bulk_copy_marks_exactly_the_blocked_cells():
 def test_bulk_copy_payloads_match_grid_arrays():
     """Each marked cell's net/is_obstacle/pad_blocked come from its own cell."""
     grid = _make_grid()
-    for x, y, layer, net, is_obstacle, pad_blocked in _actual_marks(grid):
+    for x, y, layer, net, is_obstacle, pad_blocked, pad_halo_only in _actual_marks(grid):
         assert bool(grid._blocked[layer, y, x]) is True
         assert net == int(grid._net[layer, y, x])
         assert is_obstacle == bool(grid._is_obstacle[layer, y, x])
         assert pad_blocked == bool(grid._pad_blocked[layer, y, x])
+        assert pad_halo_only == ((layer, y, x) in grid._pad_halo_cells)
 
 
 def test_bulk_copy_reaches_the_cpp_grid():
@@ -170,6 +174,7 @@ def test_bulk_copy_reaches_the_cpp_grid():
         assert cell.net == int(grid._net[layer, y, x])
         assert cell.is_obstacle == bool(grid._is_obstacle[layer, y, x])
         assert cell.pad_blocked == bool(grid._pad_blocked[layer, y, x])
+        assert cell.pad_halo_only == ((layer, y, x) in grid._pad_halo_cells)
 
 
 def test_bulk_copy_with_no_blocked_cells_marks_nothing():
