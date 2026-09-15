@@ -3,6 +3,41 @@
 Running record of the #4507 T4 manual criterion, newest run first. Each section
 describes the tree as of its own date.
 
+## 2026-09-15 bounded follow-up: interior-pad wide escape
+
+This is a local geometry correction, **not a new T4 routing run**. The
+preserved terminal run remains incomplete at 72/78 requested nets; its loaded
+source was mutable and is not attributed to this follow-up.
+
+The initial R3.1 obstruction probe used a 0.2 mm trace and 1.6 mm clearance.
+Those parameters did not match the saved input: both original and effective
+`/AC_LINE` class maps declare 2.6 mm body width, 2.0 mm minimum neck, 0.4 mm
+clearance and a 15 A target. Effective map SHA256:
+`c9315891e0d6444a94769f0f3f5f9e98d5c356260cb2cee23357a54f76472d3f`.
+On saved PCB `e033d305f051a868a56de1c13a3187ffe964dcbba09bb2081b45e71f0f3e1bd7`,
+the actual centered neck leaves only 0.3125 mm to R3.2, so it still fails the
+0.4 mm floor. The correction is geometric, not a rated-waiver relaxation.
+
+After both full-width and authored-neck center launches fail, the generic
+lattice escape can try eight strictly interior SMD-pad attachment points.
+They lie within half the radius of the centered disc contained by every
+supported convex pad shape; the original pad remains the obstacle/identity
+source. Existing static, committed-copper, keepout, layer and pairwise-waiver
+checks validate each emitted leg at the unchanged neck width and clearance.
+No synthetic segment back to the obstructed pad center is added. Through-hole,
+virtual and coupled-pad paths retain their existing behavior.
+
+A small fixture using the R3 dimensions now emits a complete connected route
+at widths >=2.0 mm, with positive copper overlap on both pads and >=0.4 mm
+clearance to the sibling pad. The same geometry still refuses without its
+required pairwise waiver, with unrelated zone membership, or with foreign pads
+blocking both sides. Existing successful center escapes remain identical.
+These are Python geometry controls, not native DRC or current-source completion
+of the six remaining T4 nets. That source/input/native-bound manual proof and
+per-residual accounting remain open under #4507.
+
+### Previous full-run record
+
 > **Current record: [the 2026-09-14 sixth pass](#the-2026-09-14-sixth-pass-the-fixture-finally-runs-and-the-gate-was-never-handed-any-pads).**
 > The first pass since 2026-08-15 that could actually *run* the recipe (an
 > operator supplied a fresh rev-C fixture, clearing the gate-(2) block the

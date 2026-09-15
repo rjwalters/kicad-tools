@@ -43,7 +43,7 @@ from __future__ import annotations
 import heapq
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -864,6 +864,40 @@ class LatticePathfinder:
             layers=layers,
             exempt_pads=exempt_pads,
         )
+        if (
+            not neck_stubs
+            and not pad.through_hole
+            and not pad.steiner_point
+            and pad.shape in {"rect", "circle", "oval", "roundrect"}
+        ):
+            # A wide center-launch cap can approach a sibling pad more closely
+            # than the authored pad copper does. Try interior attachment sites
+            # without reducing the class neck width or clearance (#4507).
+            # Every supported convex pad shape contains the centered disc of
+            # radius min(width, height)/2, regardless of rotation/rounding.
+            # Half that radius keeps each attachment strictly inside copper.
+            radius = min(pad.width, pad.height) / 4.0
+            if math.isfinite(radius) and radius > 0.0:
+                for angle in range(0, 360, 45):
+                    theta = math.radians(angle)
+                    attachment = replace(
+                        pad,
+                        x=pad.x + radius * math.cos(theta),
+                        y=pad.y + radius * math.sin(theta),
+                    )
+                    neck_stubs = self._scan_stubs(
+                        attachment,
+                        net,
+                        committed,
+                        neck_half,
+                        clr,
+                        kmax=_OVERSIZE_STUB_KMAX,
+                        search_radius=grown_sr,
+                        layers=layers,
+                        exempt_pads=exempt_pads,
+                    )
+                    if neck_stubs:
+                        break
         return neck_stubs, neck_w
 
     def _keepout_escape_reason(
