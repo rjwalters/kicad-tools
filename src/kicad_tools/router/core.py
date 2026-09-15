@@ -1475,6 +1475,7 @@ class Autorouter:
         # dict above).  Obstacle input for the exact-geometry engines
         # (lattice/mesh); the grid marks pads directly and never reads this.
         self.all_pads: list[Pad] = []
+        self._explicit_component_ids: set[str] = set()
         self.nets: dict[int, list[tuple[str, str]]] = {}
         # Issue #4170 (Phase 2b-1): route-scoped bare boundary stub endpoints to
         # reconnect, keyed by net id.  Populated by ``set_stub_terminals`` from
@@ -2100,6 +2101,10 @@ class Autorouter:
     def add_component(self, ref: str, pads: list[dict], *, component_id: str | None = None):
         """Add a component's pads.
 
+        Legacy callers may register disjoint pins incrementally under one
+        reference. Explicit component IDs identify complete physical footprints
+        and reject a second, different registration.
+
         Computes the component's minimum pin pitch from pad positions and
         passes it to the grid so fine-pitch pads get reduced clearance
         envelopes (Issue #1778).
@@ -2141,11 +2146,21 @@ class Autorouter:
             if existing == prepared:
                 # Existing callers re-register exact components after trial
                 # reset. That is idempotent, not a second physical footprint.
+                if component_id is not None:
+                    self._explicit_component_ids.add(physical_id)
                 return
-            raise ValueError(
-                f"Component identity {physical_id!r} already exists; "
-                "distinct footprints require distinct component_id values"
+            legacy_extension = (
+                component_id is None
+                and physical_id not in self._explicit_component_ids
+                and {p.pin for p in existing}.isdisjoint(p.pin for p in prepared)
             )
+            if not legacy_extension:
+                raise ValueError(
+                    f"Component identity {physical_id!r} already exists; "
+                    "distinct footprints require distinct component_id values"
+                )
+        if component_id is not None:
+            self._explicit_component_ids.add(physical_id)
         for pad in prepared:
             key = pad.key
             # Issue #4271: ``self.pads`` is keyed (ref, pin), so a footprint

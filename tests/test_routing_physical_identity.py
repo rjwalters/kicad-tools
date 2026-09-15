@@ -294,3 +294,38 @@ def test_single_anonymous_component_retains_pitch_geometry():
         component_id="",
     )
     assert router.grid.compute_component_pitches()[""] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_component_registration_keeps_collision_guard(explicit):
+    from kicad_tools.router import Autorouter
+
+    router = Autorouter(10, 10, force_python=True, physics_enabled=False)
+    first = {"number": "1", "x": 3, "y": 3, "net": 1}
+    second = {"number": "2", "x": 3, "y": 4, "net": 2}
+    kwargs = {"component_id": "U1"} if explicit else {}
+    router.add_component("U1", [first], **kwargs)
+    router.add_component("U1", [first], **kwargs)
+    assert len(router.all_pads) == 1
+    if explicit:
+        for extension_kwargs in ({}, kwargs):
+            with pytest.raises(ValueError, match="already exists"):
+                router.add_component("U1", [second], **extension_kwargs)
+    else:
+        router.add_component("U1", [second])
+        assert len(router.all_pads) == 2
+        assert router.nets == {1: [("U1", "1")], 2: [("U1", "2")]}
+    with pytest.raises(ValueError, match="already exists"):
+        router.add_component("U1", [{**first, "net": 3}], **kwargs)
+
+
+def test_explicit_identity_promotes_legacy_registration():
+    from kicad_tools.router import Autorouter
+
+    router = Autorouter(10, 10, force_python=True, physics_enabled=False)
+    first = {"number": "1", "x": 3, "y": 3, "net": 1}
+    router.add_component("U1", [first])
+    router.add_component("U1", [first], component_id="U1")
+    with pytest.raises(ValueError, match="already exists"):
+        router.add_component("U1", [{"number": "2", "x": 3, "y": 4, "net": 2}])
+    assert len(router.all_pads) == 1
