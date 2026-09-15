@@ -51,3 +51,39 @@ without `/fixtures/native-escaped-root` so existing evidence is not overwritten.
 Run `/usr/bin/python3 /fixtures/audit_escaped_root.py`. This performs both saved
 and `--refill-zones --save-board` native audits and checks that producer inputs
 remain unchanged.
+
+## Isolated historical-board comparison
+
+`isolated-isense-evidence.tar.gz` retains a separate supported-CLI experiment
+using `--nets ISENSE_B-` on the historical 210-pad DRV8301 stress board. Its
+member hashes are in `isolated-isense-manifest.json`. The input, commands,
+source and native-extension hashes, logs, saved/refilled boards, project/rules
+files and all native findings are included.
+
+Baseline `58ee27d6` exits 1 and leaves target components of sizes 2, 1 and 1.
+Patched `1c7ab6da` exits 0; KiCad 10.0.5 finds all four target pads connected
+with zero DRC errors, both saved and refilled. Other nets remain incomplete:
+the patched saved board has 125 unconnected items and the refilled board 120.
+Warnings remain in the unfiltered reports. The failed baseline does not emit
+the project/rules files produced by the successful patched run, so the DRC
+contexts differ.
+
+`topology.py` unions full-width track and pad copper by layer, removes the
+actual rounded R11.2 shunt pad on F.Cu, and joins layers through physical vias.
+Both patched boards leave U3.31, U3.39 and U10.6 in three separate components.
+The negative control adds a bridge between U3.31 and U3.39 and correctly joins
+those two components. The checker asserts that this net has no zones or arcs
+and uses polygon approximations for circular edges. Run it from an installed
+checkout against `native2/patched/saved/routed.kicad_pcb` or the corresponding
+`refilled` path; add `--negative-control` to exercise the bridge control.
+
+This isolated command generates three escapes, whereas the full-board command
+generates 52. It does not establish full-board completion or phase acceptance.
+The historical design is an electrically unsuitable stress fixture (see #4993),
+not a manufacturing candidate. These results also predate the original-pad
+obstacle and sense-impedance corrections in later commits of this PR.
+
+The retained `audit2.py` audits disposable copies and verifies producer hashes
+afterward. An earlier discarded audit triggered its directory hash guard when
+KiCad created a `.kicad_prl` file; the source PCB was unchanged. The retained
+audit's `before.json` includes that auxiliary file and its guard passed.
