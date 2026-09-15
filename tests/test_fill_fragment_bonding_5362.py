@@ -257,11 +257,11 @@ CASES: list[Case] = [
         p1=(14, 25),
         p2=(26, 25),
         extra=(
-            # size 3.0 (radius 1.5) at x=19 reaches 0.5 mm into each fragment
-            # past ConnectivityValidator.POUR_PAD_ERODE's 0.1 mm inset -- a
-            # smaller via (radius 1.1, 0.1 mm raw overlap) measures
-            # native-connected too but is exactly erased by that erosion
-            # margin, so it isn't a safe fixture for this case.
+            # Size 3.0 is the passing bridge control. The valid 2.2 mm via
+            # also connects natively and in ConnectivityValidator, but strict
+            # NetStatusAnalyzer erodes away its 0.1 mm overlap and falsely
+            # reports an open. That inherited mismatch remains tracked in
+            # #5382; this larger control does not satisfy its acceptance.
             '  (via (at 19 25) (size 3.0) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1)\n'
             '    (uuid "40000000-0000-0000-0000-000000000002"))\n'
         ),
