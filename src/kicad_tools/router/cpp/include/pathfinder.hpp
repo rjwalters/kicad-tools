@@ -411,7 +411,6 @@ private:
     bool trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1,
                                int x2, int y2, int net, int partner = -1) const;
     bool via_route_geometry_clear(int x, int y, int net) const;
-    bool via_halo_cell_clear(int cx, int cy, int layer, int x, int y, int net) const;
     float search_trace_half_width_mm_ = 0.0f;
     float search_via_half_diam_mm_ = 0.0f;
     float search_fill_trace_clearance_ = -1.0f;

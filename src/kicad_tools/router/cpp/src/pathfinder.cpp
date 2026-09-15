@@ -202,10 +202,6 @@ bool Pathfinder::trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1
                                             physical_partner_net_, physical_partner_clearance_);
 }
 
-bool Pathfinder::via_halo_cell_clear(int cx, int cy, int layer, int x, int y, int net) const {
-    return grid_.route_cell_has_geometry(cx, cy, layer) && via_route_geometry_clear(x, y, net);
-}
-
 bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {
     const auto [wx, wy] = grid_.grid_to_world(x, y);
     Via via;
@@ -220,6 +216,17 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                                   bool allow_sharing, int radius_override,
                                   int partner_net, int partner_radius, int from_x, int from_y) const {
     int radius = (radius_override > 0) ? radius_override : trace_half_width_cells_;
+    // Every covered cell in this neighborhood asks about the same swept
+    // candidate. Compute its indexed physical clearance at most once.
+    int physical_clear = -1;
+    auto halo_clear = [&](int cx, int cy) {
+        if (!grid_.route_cell_has_geometry(cx, cy, layer)) return false;
+        if (physical_clear < 0)
+            physical_clear = trace_halo_cell_clear(cx, cy, layer,
+                from_x >= 0 ? from_x : x, from_y >= 0 ? from_y : y,
+                x, y, net, partner_net) ? 1 : 0;
+        return physical_clear != 0;
+    };
 
     // Issue #2559 / Epic #2556 Phase 1C: when the partner branch is active
     // (partner_net >= 0 && partner_radius > 0 && partner_radius < radius),
@@ -280,8 +287,7 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
             if (!cell.blocked) {
                 continue;
             }
-            if (cell.net != net && trace_halo_cell_clear(cx, cy, layer, from_x >= 0 ? from_x : x,
-                                                       from_y >= 0 ? from_y : y, x, y, net, partner_net)) {
+            if (cell.net != net && halo_clear(cx, cy)) {
                 continue;
             }
 
@@ -368,8 +374,7 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
             if (!cell.blocked) {
                 continue;
             }
-            if (cell.net != net && trace_halo_cell_clear(cx, cy, layer, from_x >= 0 ? from_x : x,
-                                                       from_y >= 0 ? from_y : y, x, y, net, partner_net)) {
+            if (cell.net != net && halo_clear(cx, cy)) {
                 continue;
             }
 
@@ -791,7 +796,8 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
     out_world_x = 0.0f;
     out_world_y = 0.0f;
 
-    if (grid_.route_geometry_complete() && !via_route_geometry_clear(x, y, net)) return true;
+    const bool geometry_complete = grid_.route_geometry_complete();
+    if (geometry_complete && !via_route_geometry_clear(x, y, net)) return true;
 
     if (grid_.has_fixed_fills()) {
         auto [wx, wy] = grid_.grid_to_world(x, y);
@@ -859,7 +865,7 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                 if (!cell.blocked) {
                     continue;
                 }
-                if (cell.net != net && via_halo_cell_clear(cx, cy, layer, x, y, net)) continue;
+                if (cell.net != net && geometry_complete && grid_.route_cell_has_geometry(cx, cy, layer)) continue;
 
                 if (allow_sharing) {
                     // Negotiated mode: mirror Python
@@ -926,7 +932,7 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                     if (!cell.blocked) {
                         continue;
                     }
-                    if (cell.net != net && via_halo_cell_clear(cx, cy, layer, x, y, net)) continue;
+                    if (cell.net != net && geometry_complete && grid_.route_cell_has_geometry(cx, cy, layer)) continue;
 
                     if (allow_sharing) {
                         if (cell.is_obstacle && cell.net != net) {
