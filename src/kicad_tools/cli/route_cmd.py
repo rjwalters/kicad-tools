@@ -80,7 +80,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.current_paths import CurrentPathSpec
     from kicad_tools.router.layer_intent import LayerIntentViolation
     from kicad_tools.router.net_names import NetClassMapResolution
-    from kicad_tools.router.pairwise_clearance import AttachZone, PairwiseViolation
+    from kicad_tools.router.pairwise_clearance import AttachZone, PadGeometry, PairwiseViolation
     from kicad_tools.router.primitives import Route
 
 # Issue #3035: ``_auto_skip_pour_nets`` was promoted to a public helper at
@@ -4993,6 +4993,111 @@ def _pairwise_attach_zones(router: "Autorouter") -> "tuple[AttachZone, ...]":
     return zones
 
 
+#: ``PairwiseViolation.net_a`` marker for the "HV audit could not run to
+#: completion" sentinel (#4507).  Not a net name -- no board net can collide
+#: with it, and every consumer that renders or counts violations keys off it to
+#: tell an unchecked audit from a clean one.
+PAD_AUDIT_INCOMPLETE = "<HV pairwise audit incomplete>"
+
+
+def _pad_audit_incomplete_violation(reason: str) -> "PairwiseViolation":
+    """The sentinel finding an unavailable-pad-geometry audit reports (#4507).
+
+    ``required_mm`` is infinite so the worst-shortfall-first sort always puts
+    it at the top of the banner, and no real measurement can outrank it.
+    """
+    from kicad_tools.router.pairwise_clearance import PairwiseViolation
+
+    return PairwiseViolation(
+        net_a=PAD_AUDIT_INCOMPLETE,
+        net_b=reason or "pad geometry unavailable",
+        actual_mm=0.0,
+        required_mm=float("inf"),
+        x=0.0,
+        y=0.0,
+    )
+
+
+def _pairwise_pad_geometry_reason(router: "Autorouter") -> str:
+    """The memoised reason :func:`_pairwise_pad_geometry` could not resolve pads."""
+    cached = getattr(router, "_pairwise_pad_geometry_cache", None)
+    return cached if isinstance(cached, str) else ""
+
+
+def _pairwise_pad_geometry(router: "Autorouter") -> "tuple[PadGeometry, ...] | None":
+    """Resolve (and memoise) the board's foreign PAD copper for the audit (#4507).
+
+    The pad-shaped companion to :func:`_pairwise_attach_zones`, resolved from
+    the SAME recorded source-board path (``_pairwise_attach_zone_pcb_path``) and
+    therefore in the same sheet-absolute frame -- see that function's
+    "Coordinate space" note, and
+    :func:`~kicad_tools.router.pairwise_clearance.board_pad_geometry`, which
+    applies the identical ``board_origin`` shift.
+
+    Why this exists: #4507 widened the shared pairwise kernel to trace-vs-pad
+    and via-vs-pad geometry, but the in-run #4588 audit could not USE that
+    widening because it had no pad polygons -- so the class of copper that
+    accounted for 13 of the 17 softstart rev-C T4 residuals (a routed trace or
+    via against a foreign pad) stayed visible only to an after-the-fact
+    ``scripts/replay_pairwise_gate.py`` replay a human had to remember to run.
+    Pads are static board copper the router never moves, so resolving them from
+    the input board is exact rather than an approximation: a shortfall reported
+    here is copper the search laid down beside a pad it should have kept away
+    from.
+
+    **Unavailable is NOT empty.**  ``()`` means "this board was read and has no
+    connected pads" -- a verified, complete answer.  ``None`` means the audit
+    could not obtain pad geometry at all (the read raised, or no source board
+    path was ever recorded), and the caller must NOT treat that as a clean
+    scan: silently degrading to the pre-#4507 trace/via scope would restore the
+    exact silent false pass this widening exists to remove -- the run would
+    print SUCCESS over copper it never checked, with only a stderr warning to
+    show for it.  :func:`_audit_pairwise_clearance` turns ``None`` into a
+    reported finding so every consumer (banner, exit code, escalation wrapper)
+    treats an incomplete HV audit as a failure without new plumbing.
+
+    ``_pairwise_attach_zones`` can safely return ``()`` in the same situation
+    because its degradation is *conservative* -- losing attach zones removes
+    waivers and makes the gate stricter.  Losing pad geometry removes checks
+    and makes it weaker, so the two helpers must not share that convention.
+
+    Returns:
+        The board's connected-pad copper, or ``None`` when it is unavailable.
+    """
+    cached: tuple[PadGeometry, ...] | str | None = getattr(
+        router, "_pairwise_pad_geometry_cache", None
+    )
+    if cached is not None:
+        # A cached ``str`` is a memoised unavailability reason (see below).
+        return None if isinstance(cached, str) else cached
+
+    pcb_path = getattr(router, "_pairwise_attach_zone_pcb_path", None)
+    pads: tuple[PadGeometry, ...] | None = None
+    reason = ""
+    if pcb_path is None:
+        # Every real ``kct route`` run records this in ``router/io.py``'s
+        # loader, so reaching here means an in-memory/stand-in router that
+        # never loaded a board -- there is no pad copper to check against and
+        # no way to know whether that is correct.
+        reason = "no source board path was recorded for this run"
+    else:
+        from kicad_tools.router.pairwise_clearance import board_pad_geometry
+
+        try:
+            pads = board_pad_geometry(pcb_path)
+        except Exception as exc:
+            reason = f"could not read pad geometry from {pcb_path} ({type(exc).__name__}: {exc})"
+    if pads is None:
+        print(
+            f"Warning: {reason}; the HV pairwise audit cannot check "
+            f"trace/via-vs-pad copper and will report itself incomplete.",
+            file=sys.stderr,
+        )
+    with contextlib.suppress(AttributeError):  # exotic router stand-ins
+        router._pairwise_pad_geometry_cache = reason if pads is None else pads
+    return pads
+
+
 def _audited_trace_copper(router: "Autorouter", *, id_to_name=None) -> "list[Route]":
     """Every trace route the output board carries -- fresh AND preserved (#4699).
 
@@ -5101,15 +5206,34 @@ def _audit_pairwise_clearance(
     scan) when ``--voltage-map`` was not supplied, so every pre-existing run is
     byte-identical.
 
-    Scope: trace-vs-trace (same layer), trace-vs-via and via-vs-via -- issue
-    #4507 widened ``find_pairwise_violations`` past its original trace-only
-    walk, using the via geometry every ``Route`` already carries, so this
-    in-run audit gained via coverage for free.  Foreign PAD copper is still
-    NOT checked here (that needs the board's pad geometry, which this
-    in-memory routing session does not resolve); the ``kct creepage`` census
-    remains the only pad-aware whole-board check, and the failure banner says
-    so.  A read-back replay of the WRITTEN board file (``board_pairwise_
-    violations``) does cover pads -- see ``scripts/replay_pairwise_gate.py``.
+    Scope: trace-vs-trace (same layer), trace-vs-via, via-vs-via AND
+    trace/via-vs-foreign-pad -- issue #4507 widened
+    ``find_pairwise_violations`` past its original trace-only walk, first to the
+    via geometry every ``Route`` already carries, then to pad copper resolved
+    from the source board by :func:`_pairwise_pad_geometry` (pads are static --
+    the router never moves them -- so reading them from the input board is
+    exact, in the same sheet-absolute frame the attach zones use).
+
+    That last widening is what closes the gap the #4507 T4 proof measured: 13
+    of the 17 residual softstart rev-C census fails were routed trace or via
+    copper against a foreign pad, a class this audit structurally could not see
+    even after the kernel learned to check it, because it was never handed any
+    pads.  Until now that copper was visible only to an after-the-fact
+    ``scripts/replay_pairwise_gate.py`` replay of the written file; the gate
+    that decides whether the run SUCCEEDS now sees it too.
+
+    When that pad geometry is *unavailable* rather than verified-empty (see
+    :func:`_pairwise_pad_geometry`), this returns a single sentinel finding
+    instead of a clean list: an HV audit that could not check pad copper has
+    not established the gate's contract, so it must not let the run report
+    SUCCESS.  Routing the signal through the normal return value is deliberate
+    -- every consumer (both banners, the exit-code block, the escalation
+    wrapper) already keys off "is this list non-empty", so no code path can
+    silently miss it, which is the same reasoning the #4588 comments give for
+    gating the escalation wrapper rather than only ``main()``.
+
+    Still out of scope here: pour/zone-fill copper (#3901), which the
+    ``kct creepage`` census scores and no engine's pairwise model represents.
     """
     if getattr(args, "_pairwise_required", None) is None:
         return []
@@ -5117,11 +5241,20 @@ def _audit_pairwise_clearance(
     table = getattr(rules, "pairwise_clearance", None) if rules is not None else None
     if table is None:
         return []
+    # No pair exceeds the scalar floor: no HV pad widening is enabled.
+    if table.max_required_clearance() <= table.dru:
+        return []
     routes = _audited_trace_copper(router, id_to_name=id_to_name)
     if not routes:
         return []
 
     from kicad_tools.router.pairwise_clearance import find_pairwise_violations
+
+    foreign_pads = _pairwise_pad_geometry(router)
+    if foreign_pads is None:
+        # Unavailable, not verified-empty: this audit cannot establish its own
+        # contract, so it reports itself incomplete rather than reporting clean.
+        return [_pad_audit_incomplete_violation(_pairwise_pad_geometry_reason(router))]
 
     violations = find_pairwise_violations(
         routes,
@@ -5129,6 +5262,7 @@ def _audit_pairwise_clearance(
         id_to_name=id_to_name,
         dru=table.dru,
         attach_zones=_pairwise_attach_zones(router),
+        foreign_pads=foreign_pads,
     )
     # A single conflicting corridor is decomposed into many collinear segment
     # pairs that all report the SAME net pair, gap and location.  Collapse the
@@ -5160,12 +5294,20 @@ def _format_pairwise_violations(violations: "Sequence[PairwiseViolation]", limit
     an ``... and K more`` tail, so the output is diffable against
     ``kct creepage``.  Tagged generically (not ``[trace]``) since issue #4507
     widened the underlying scan past trace-vs-trace to also report
-    trace-vs-via and via-vs-via shortfalls, and a :class:`PairwiseViolation`
-    itself does not record which copper kind produced it.
+    trace-vs-via, via-vs-via and trace/via-vs-pad shortfalls, and a
+    :class:`PairwiseViolation` itself does not record which copper kind
+    produced it.
     """
     lines = [
-        f"  [pairwise] {v.net_a} vs {v.net_b}: {v.actual_mm:.3f}mm "
-        f"(required {v.required_mm:.3f}mm) at ({v.x:.3f}, {v.y:.3f})"
+        # The #4507 "audit could not run" sentinel carries a reason string, not
+        # a measurement; printing it through the measurement format would be a
+        # fabricated 0.000mm reading.
+        f"  [pairwise] HV audit INCOMPLETE -- pad copper was NOT checked ({v.net_b})"
+        if v.net_a == PAD_AUDIT_INCOMPLETE
+        else (
+            f"  [pairwise] {v.net_a} vs {v.net_b}: {v.actual_mm:.3f}mm "
+            f"(required {v.required_mm:.3f}mm) at ({v.x:.3f}, {v.y:.3f})"
+        )
         for v in violations[:limit]
     ]
     remaining = len(violations) - limit
@@ -5182,7 +5324,7 @@ def _print_pairwise_addendum(violations: "Sequence[PairwiseViolation]") -> None:
     """
     print(f"  Additionally, {len(violations)} HV pairwise clearance violation(s) detected:")
     print(_format_pairwise_violations(violations, limit=5))
-    print("  (trace/via, no pad geometry; run 'kct creepage' for the full census)")
+    print("  (trace/via/pad copper; run 'kct creepage' for the pour-aware full census)")
 
 
 def _pairwise_escalation_exit(rc: int, violations: "Sequence[PairwiseViolation]") -> int:
@@ -5237,13 +5379,13 @@ def _print_pairwise_failure_banner(
     print("Routed copper is closer than the --voltage-map derived creepage")
     print("requirement for these net pairs. This board is NOT safe to manufacture.")
     print()
-    print("Scope of this gate: trace-vs-trace (same layer), trace-vs-via and")
-    print("via-vs-via, over ALL copper the output carries -- freshly routed")
-    print("AND preserved (#4699). A finding between preserved routes was")
-    print("inherited from the input board, not created by this run; re-route")
-    print("those nets (or fix the input) -- the written board is unsafe")
-    print("either way. Foreign PAD copper is not scanned here (issue #4507) --")
-    print("'kct creepage' is the authoritative full census:")
+    print("Scope of this gate: trace-vs-trace (same layer), trace-vs-via,")
+    print("via-vs-via and trace/via-vs-foreign-pad (#4507), over ALL copper the")
+    print("output carries -- freshly routed AND preserved (#4699). A finding")
+    print("between preserved routes was inherited from the input board, not")
+    print("created by this run; re-route those nets (or fix the input) -- the")
+    print("written board is unsafe either way. Pour/zone-fill copper (#3901) is")
+    print("not modelled here; 'kct creepage' is the authoritative full census:")
     vm = getattr(args, "voltage_map", None)
     print(
         f"  kct creepage {output_path} --voltage-map {vm} --standard "
@@ -17285,7 +17427,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 print()
                 print(f"HV Pairwise Clearance ({pairwise_violation_count} violation(s)):")
                 print(_format_pairwise_violations(pairwise_violations))
-                print("  (trace/via, no pad geometry; run 'kct creepage' for the full census)")
+                print("  (trace/via/pad copper; run 'kct creepage' for the pour-aware full census)")
         else:
             print(
                 f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} signal nets{summary_suffix}"

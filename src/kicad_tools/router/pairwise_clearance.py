@@ -995,6 +995,157 @@ def _shapely_gap_and_midpoint(poly_a: Any, poly_b: Any) -> tuple[float, float, f
     return gap, (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
 
+def _aabb_gap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    """Minimum distance between two axis-aligned bounding boxes (0 if they touch).
+
+    The cheap pre-filter in front of the pad walk (issue #4507): building a
+    trace segment's true copper polygon and asking shapely for its distance to
+    a pad polygon costs orders of magnitude more than this, and a pad whose
+    bbox is already farther away than the pair's requirement can never produce
+    a shortfall.  Conservative by construction -- a bbox gap is never larger
+    than the true copper gap, so this can only skip pairs that would have
+    passed anyway.
+    """
+    dx = max(b[0] - a[2], a[0] - b[2], 0.0)
+    dy = max(b[1] - a[3], a[1] - b[3], 0.0)
+    return math.hypot(dx, dy)
+
+
+def _segment_bounds(seg: Segment) -> tuple[float, float, float, float]:
+    """A trace segment's copper bbox (centreline box grown by its half-width)."""
+    half = seg.width / 2.0
+    return (
+        min(seg.x1, seg.x2) - half,
+        min(seg.y1, seg.y2) - half,
+        max(seg.x1, seg.x2) + half,
+        max(seg.y1, seg.y2) + half,
+    )
+
+
+def _via_bounds(via: Via) -> tuple[float, float, float, float]:
+    """A via's copper bbox (barrel disc, matching :func:`_via_copper_polygon`)."""
+    radius = via.diameter / 2.0
+    return (via.x - radius, via.y - radius, via.x + radius, via.y + radius)
+
+
+def _union_bounds(
+    boxes: Iterable[tuple[float, float, float, float]],
+) -> tuple[float, float, float, float] | None:
+    """Bounding box of a set of boxes; ``None`` when the set is empty."""
+    out: tuple[float, float, float, float] | None = None
+    for box in boxes:
+        if out is None:
+            out = box
+        else:
+            out = (
+                min(out[0], box[0]),
+                min(out[1], box[1]),
+                max(out[2], box[2]),
+                max(out[3], box[3]),
+            )
+    return out
+
+
+class _CopperPolygons(NamedTuple):
+    """Lazily-built copper polygons + bboxes for one route's own copper (#4507).
+
+    The pad walk compares EVERY piece of a route's copper against EVERY foreign
+    pad, so recomputing ``_segment_copper_polygon`` inside the pad loop is
+    quadratic in the most expensive operation available.  Building each polygon
+    once per route (and only for routes that have at least one widening pad
+    pair at all) keeps the widened audit affordable enough to run in-line, which
+    is what lets the #4588 post-route gate see pad copper rather than deferring
+    it to a manual replay.
+    """
+
+    segments: tuple[tuple[Segment, Any, tuple[float, float, float, float]], ...]
+    vias: tuple[tuple[Any, tuple[float, float, float, float]], ...]
+    bounds: tuple[float, float, float, float] | None
+
+
+def _copper_polygons(segments: Sequence[Segment], vias: Sequence[Via]) -> _CopperPolygons:
+    """Build the per-route polygon/bbox cache :class:`_CopperPolygons` describes."""
+    seg_rows = []
+    for seg in segments:
+        poly = _segment_copper_polygon(seg)
+        if poly is None:
+            continue
+        seg_rows.append((seg, poly, _segment_bounds(seg)))
+    via_rows = [(_via_copper_polygon(via), _via_bounds(via)) for via in vias]
+    bounds = _union_bounds([row[2] for row in seg_rows] + [row[1] for row in via_rows])
+    return _CopperPolygons(tuple(seg_rows), tuple(via_rows), bounds)
+
+
+def _copper_vs_pads_violation(
+    copper: _CopperPolygons,
+    moving_name: str,
+    foreign_pads: Sequence[PadGeometry],
+    table: PairwiseClearanceTable,
+    *,
+    floor: float,
+    attach_zones: Sequence[AttachZone],
+    tolerance: float,
+    collect: list[PairwiseViolation] | None = None,
+) -> PairwiseViolation | None:
+    """Walk one net's trace/via copper against every foreign pad (issue #4507).
+
+    ONE implementation backs both the early-exit consumers
+    (:func:`_segments_pairwise_violation`, which returns the first shortfall)
+    and the whole-board scan (:func:`find_pairwise_violations`, which passes a
+    ``collect`` list and takes them all), so the acceptance gate and the audit
+    cannot disagree about pad geometry.  Returns the first violation found, or
+    ``None``; when ``collect`` is supplied every violation is appended to it and
+    the walk always runs to completion.
+    """
+    if not foreign_pads or (not copper.segments and not copper.vias):
+        return None
+    first: PairwiseViolation | None = None
+    for pad in foreign_pads:
+        required = table.required_clearance(moving_name, pad.net_name)
+        if required <= floor + tolerance:
+            continue
+        pad_bounds = pad.polygon.bounds
+        if copper.bounds is not None and _aabb_gap(copper.bounds, pad_bounds) >= required:
+            continue
+        for seg, seg_poly, seg_bounds in copper.segments:
+            if _aabb_gap(seg_bounds, pad_bounds) >= required:
+                continue
+            violation = _copper_vs_pad_violation(
+                seg_poly,
+                moving_name,
+                seg.layer,
+                pad,
+                table,
+                floor=floor,
+                attach_zones=attach_zones,
+                tolerance=tolerance,
+            )
+            if violation is not None:
+                if collect is None:
+                    return violation
+                collect.append(violation)
+                first = first or violation
+        for via_poly, via_bounds in copper.vias:
+            if _aabb_gap(via_bounds, pad_bounds) >= required:
+                continue
+            violation = _copper_vs_pad_violation(
+                via_poly,
+                moving_name,
+                None,
+                pad,
+                table,
+                floor=floor,
+                attach_zones=attach_zones,
+                tolerance=tolerance,
+            )
+            if violation is not None:
+                if collect is None:
+                    return violation
+                collect.append(violation)
+                first = first or violation
+    return first
+
+
 def _copper_pair_violation(
     poly_a: Any,
     net_a: str,
@@ -1366,40 +1517,17 @@ def _segments_pairwise_violation(
                 if violation is not None:
                     return violation
 
-    for pad in foreign_pads:
-        required = table.required_clearance(moving_name, pad.net_name)
-        if required <= floor + tolerance:
-            continue
-        for seg in segments:
-            seg_poly = _segment_copper_polygon(seg)
-            if seg_poly is None:
-                continue
-            violation = _copper_vs_pad_violation(
-                seg_poly,
-                moving_name,
-                seg.layer,
-                pad,
-                table,
-                floor=floor,
-                attach_zones=attach_zones,
-                tolerance=tolerance,
-            )
-            if violation is not None:
-                return violation
-        for via in vias:
-            violation = _copper_vs_pad_violation(
-                _via_copper_polygon(via),
-                moving_name,
-                None,
-                pad,
-                table,
-                floor=floor,
-                attach_zones=attach_zones,
-                tolerance=tolerance,
-            )
-            if violation is not None:
-                return violation
-    return None
+    if not foreign_pads:
+        return None
+    return _copper_vs_pads_violation(
+        _copper_polygons(segments, vias),
+        moving_name,
+        foreign_pads,
+        table,
+        floor=floor,
+        attach_zones=attach_zones,
+        tolerance=tolerance,
+    )
 
 
 def path_pairwise_violation(
@@ -1710,39 +1838,23 @@ def find_pairwise_violations(
     if foreign_pads:
         for route in materialised:
             route_name = _resolve_net_name(id_to_name, route.net, route.net_name)
-            for pad in foreign_pads:
-                required = table.required_clearance(route_name, pad.net_name)
-                if required <= floor + tolerance:
-                    continue
-                for seg in route.segments:
-                    seg_poly = _segment_copper_polygon(seg)
-                    if seg_poly is None:
-                        continue
-                    violation = _copper_vs_pad_violation(
-                        seg_poly,
-                        route_name,
-                        seg.layer,
-                        pad,
-                        table,
-                        floor=floor,
-                        attach_zones=attach_zones,
-                        tolerance=tolerance,
-                    )
-                    if violation is not None:
-                        out.append(violation)
-                for via in route.vias:
-                    violation = _copper_vs_pad_violation(
-                        _via_copper_polygon(via),
-                        route_name,
-                        None,
-                        pad,
-                        table,
-                        floor=floor,
-                        attach_zones=attach_zones,
-                        tolerance=tolerance,
-                    )
-                    if violation is not None:
-                        out.append(violation)
+            # Skip the (expensive) polygon build entirely for a net that needs
+            # no HV widening against ANY pad on the board -- the common case.
+            if not any(
+                table.required_clearance(route_name, pad.net_name) > floor + tolerance
+                for pad in foreign_pads
+            ):
+                continue
+            _copper_vs_pads_violation(
+                _copper_polygons(route.segments, route.vias),
+                route_name,
+                foreign_pads,
+                table,
+                floor=floor,
+                attach_zones=attach_zones,
+                tolerance=tolerance,
+                collect=out,
+            )
     return out
 
 
