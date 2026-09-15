@@ -48,6 +48,7 @@ from kicad_tools.cli.sch_footprint_common import (
 from kicad_tools.cli.sch_set_footprint import run_set_footprint
 from kicad_tools.cli.sch_suggest_footprint import (
     _derive_keyword,
+    _FootprintPadCounts,
     _get_fp_filters,
     _rank_key,
     _resolve_target_pin_count,
@@ -93,6 +94,7 @@ def _classify_symbol(
     limit: int,
     use_project_table: bool,
     use_heuristic: bool = False,
+    pad_counts: _FootprintPadCounts | None = None,
 ) -> dict[str, Any]:
     """Compute the candidate list + auto-assign decision for one symbol.
 
@@ -123,6 +125,7 @@ def _classify_symbol(
         fp_filters=fp_filters,
         schematic_path=schematic_path,
         use_project_table=use_project_table,
+        pad_counts=pad_counts,
     )
 
     record: dict[str, Any] = {
@@ -290,6 +293,7 @@ def run_assign_footprints(
     # iteration to every symbol; without it we only consider truly-empty
     # footprints (so we never silently overwrite a designer's choice).
     records: list[dict[str, Any]] = []
+    pad_counts = _FootprintPadCounts()
     seen_refs: set[str] = set()
     duplicates_skipped = 0
     for _node, sym, sch in iter_missing_footprint_symbols(
@@ -324,6 +328,7 @@ def run_assign_footprints(
             limit=limit,
             use_project_table=not no_project_lib,
             use_heuristic=assign_missing,
+            pad_counts=pad_counts,
         )
         records.append(record)
 
