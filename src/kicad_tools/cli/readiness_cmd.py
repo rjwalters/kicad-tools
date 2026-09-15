@@ -8,23 +8,17 @@ to be assembled by hand, gate by gate, by an agent following the
 ``.claude/commands/kct/tapeout.md`` checklists.  This command scripts those two
 contracts.
 
-Design constraints (from the issue and the two skill contracts):
+Design constraints:
 
-* **Orchestrate, never duplicate.**  Every gate delegates to an engine that
-  already exists — ``kct check`` (:mod:`kicad_tools.cli.check_cmd`),
-  ``kicad-cli pcb drc --refill-zones``
-  (:func:`kicad_tools.drc.geometric.run_geometric_drc`), ``kct export``
-  (:mod:`kicad_tools.cli.export_cmd`) and ``kicad-cli sch|pcb export pdf``.
-  Those engines are reached through an injectable :class:`Engines` bundle so
-  the orchestration itself is testable without KiCad installed.
-* **Parse findings, not exit codes.**  ``kicad-cli pcb drc`` exits 0 even with
-  error-severity violations, and a "ran" flag is not a pass (#4973).  Every
-  gate reads the engine's actual report.
-* **Ordering is load-bearing.**  The canonical PCB is refilled *and saved*
-  before BOTH the final native check AND the export, because a saved-vs-refilled
-  copper divergence can survive two zero-error reports (see the issue's
-  first follow-up comment).  A per-layer fill-equivalence check is retained as
-  evidence.
+* **Preserve the release.** Verification never regenerates shipped files.
+  Generic generation operates on a snapshot and publishes only after success.
+* **Independent measurements.** Retain saved copper and a separately executed
+  native refill with project context. Area agreement alone is not electrical
+  completeness. Check both snapshots with native DRC without another refill.
+* **Orchestrate existing engines.** Use ``kct check``, native KiCad and the
+  manufacturing exporter through the injectable :class:`Engines` bundle.
+* **Parse findings, not just exit codes.** A successful native invocation
+  with error findings or unconnected items is a failed gate.
 * **Never silently ready.**  There is no bypass flag.  A gate that cannot run
   produces ``not_run`` plus a named blocker and a non-zero exit; a gate that
   fails produces ``failed`` plus a named blocker.  ``ready`` requires every
@@ -48,12 +42,15 @@ import hashlib
 import json
 import logging
 import math
+import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -219,47 +216,103 @@ def _run_kct_check(
 
 
 def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
-    """Run the mandatory ``kicad-cli pcb drc --refill-zones`` cross-gate.
+    """Inspect exactly the saved candidate; independent refill has its own gate."""
+    from kicad_tools.drc import DRCReport
 
-    Delegates to :func:`kicad_tools.drc.geometric.run_geometric_drc` — the one
-    in-repo implementation of that invocation — and persists a machine-readable
-    summary so the finding counts (not merely a "ran" flag) become evidence.
-    """
-    from kicad_tools.drc.geometric import run_geometric_drc
-
-    result = run_geometric_drc(pcb, timeout=600)
-    payload = {
-        "ran": result.ran,
-        "error_count": result.error_count if result.ran else None,
-        "by_type": dict(sorted(result.by_type.items())),
-        "all_by_type": dict(sorted(result.all_by_type.items())),
-        "reason": result.reason,
-        "note": result.note,
+    raw = report_path.with_name(report_path.stem + "-raw.json")
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.unlink(missing_ok=True)
+    run = _run_kicad_cli(
+        [
+            "pcb",
+            "drc",
+            "--format",
+            "json",
+            "--severity-all",
+            "--units",
+            "mm",
+            "--output",
+            str(raw),
+            str(pcb),
+        ],
+        raw,
+    )
+    payload: dict[str, Any] = {
+        "ran": False,
+        "pcb_sha256": _sha256_file(pcb),
+        "refill_during_check": False,
     }
-    report_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if not run.ok or run.returncode != 0:
+            raise ValueError(run.detail or f"native DRC exited {run.returncode}")
+        data = json.loads(raw.read_text())
+        if not isinstance(data, dict) or any(
+            not isinstance(data.get(key), list) for key in ("violations", "unconnected_items")
+        ):
+            raise ValueError("native DRC report lacks violation/connectivity arrays")
+        for entry in data["violations"] + data["unconnected_items"]:
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("type"), str)
+                or entry.get("severity") not in {"error", "warning", "ignore", "info"}
+                or not isinstance(entry.get("items"), list)
+            ):
+                raise ValueError("native DRC report contains a malformed finding")
+        report = DRCReport.load(raw)
+        errors = [v for v in report.violations if v.is_error]
+        by_type: dict[str, int] = {}
+        all_by_type: dict[str, int] = {}
+        for violation in report.violations:
+            all_by_type[violation.type_str] = all_by_type.get(violation.type_str, 0) + 1
+        for violation in errors:
+            by_type[violation.type_str] = by_type.get(violation.type_str, 0) + 1
+        opens = report.unconnected_item_count
+        if opens:
+            by_type["unconnected_items"] = opens
+        payload.update(
+            ran=True,
+            error_count=len(errors) + opens,
+            by_type=by_type,
+            all_by_type=all_by_type,
+            unconnected_count=opens,
+            reason="ok",
+            note=None,
+        )
+        result = EngineRun(True)
+    except Exception as exc:
+        payload["note"] = str(exc)
+        result = EngineRun(False, str(exc))
     report_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    if not result.ran:
-        return EngineRun(ok=False, detail=result.note or "native DRC did not run")
-    return EngineRun(ok=True)
+    return result
 
 
 def _run_export(pcb: Path, manufacturer: str, output_dir: Path, assembly: bool) -> EngineRun:
-    """Run ``kct export`` in-process against the already-refilled PCB."""
-    from . import export_cmd
+    """Generate a generic bundle without changing the already-checked project rules."""
+    from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
 
-    argv = [str(pcb), "--mfr", manufacturer, "--output", str(output_dir)]
-    if not assembly:
-        argv.extend(["--no-bom", "--no-cpl"])
     try:
+        config = ManufacturingConfig(
+            output_dir=output_dir,
+            include_bom=assembly,
+            include_pnp=assembly,
+            emit_drc_constraints=False,
+        )
         with stdout_to_stderr_when(True):
-            code = export_cmd.main(argv)
-    except SystemExit as exc:  # pragma: no cover - argparse bail-out
-        code = int(exc.code or 0)
-    except Exception as exc:  # pragma: no cover - defensive
-        return EngineRun(ok=False, detail=f"kct export raised {type(exc).__name__}: {exc}")
-    if code != 0:
-        return EngineRun(ok=False, detail=f"kct export exited {code}", returncode=code)
-    return EngineRun(ok=True)
+            result = ManufacturingPackage(
+                pcb_path=pcb, manufacturer=manufacturer, config=config
+            ).export(output_dir)
+        if not result.success:
+            return EngineRun(False, "Generic manufacturing export failed")
+        archive = output_dir / "kicad_project.zip"
+        with zipfile.ZipFile(archive, "a", zipfile.ZIP_DEFLATED) as zf:
+            present = set(zf.namelist())
+            for source in _project_dependencies(pcb):
+                relative = source.relative_to(pcb.parent).as_posix()
+                if relative not in present:
+                    zf.write(source, relative)
+        return EngineRun(True)
+    except Exception as exc:
+        return EngineRun(False, f"Generic export failed: {exc}")
 
 
 def _refill_and_save(pcb: Path) -> EngineRun:
@@ -552,6 +605,7 @@ class ReadinessOptions:
     fill_tolerance_mm2: float = DEFAULT_FILL_TOLERANCE_MM2
     check_args: tuple[str, ...] = ()
     recipe: str | None = None
+    operation: str = "verify"
 
     @property
     def assembly(self) -> bool:
@@ -678,6 +732,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             hv_net_class=args.hv_net_class,
             hv_requirement=args.hv_requirement,
             fill_tolerance_mm2=float(args.fill_tolerance),
+            operation="generate" if args.generate else "verify",
         ),
         None,
     )
@@ -810,7 +865,12 @@ def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
                 "changed_layer_inventory": missing_layers,
             }
         )
-        divergent = {k: v for k, v in deltas.items() if v > options.fill_tolerance_mm2}
+        divergent = {
+            k: v
+            for k, v in deltas.items()
+            if v > options.fill_tolerance_mm2
+            and not math.isclose(v, options.fill_tolerance_mm2, rel_tol=1e-12, abs_tol=0.0)
+        }
         if divergent or missing_layers:
             detail = ", ".join(f"{k} {v:.6f} mm^2" for k, v in divergent.items())
             if missing_layers:
@@ -942,7 +1002,7 @@ def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckO
 
 
 def _gate_native_drc(options: ReadinessOptions, engines: Engines) -> tuple[CheckOutcome, dict]:
-    """Gate 2 — the mandatory independent ``kicad-cli pcb drc --refill-zones``."""
+    """Gate 2 — the mandatory independent native check of saved candidate copper."""
     report_path = options.evidence_dir / "native-drc.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     run = engines.native_drc(options.pcb, report_path)
@@ -957,7 +1017,7 @@ def _gate_native_drc(options: ReadinessOptions, engines: Engines) -> tuple[Check
                 detail=f"Independent native DRC did not run: {detail}",
                 evidence=evidence_rel if report_path.is_file() else None,
                 blockers=[
-                    "Independent native DRC (kicad-cli pcb drc --refill-zones) "
+                    "Independent native DRC on saved copper "
                     f"could not run ({detail}); this is a hard blocker, not a pass."
                 ],
             ),
@@ -971,7 +1031,7 @@ def _gate_native_drc(options: ReadinessOptions, engines: Engines) -> tuple[Check
             CheckOutcome(
                 name="native_drc",
                 status=FAILED,
-                detail=f"{errors} error-level finding(s) after zone refill: {warn_table}.",
+                detail=f"{errors} error-level finding(s) on saved copper: {warn_table}.",
                 evidence=evidence_rel,
                 blockers=[f"Native DRC reports {errors} error-level finding(s)."],
             ),
@@ -981,7 +1041,7 @@ def _gate_native_drc(options: ReadinessOptions, engines: Engines) -> tuple[Check
         CheckOutcome(
             name="native_drc",
             status=PASSED,
-            detail="0 error-level findings after zone refill.",
+            detail="0 error-level findings on saved copper.",
             evidence=evidence_rel,
         ),
         payload,
@@ -1156,6 +1216,7 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
     manifest.update(
         {
             "version": manifest.get("version", "1.0"),
+            "producer": "kct readiness",
             "generated_at": _iso_now(),
             "manufacturer": options.manufacturer,
             "mode": options.mode,
@@ -1169,33 +1230,67 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
     return manifest_path
 
 
-def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
-    """Confirm the archived project sources ARE the checked sources.
+def _project_dependencies(pcb: Path) -> list[Path]:
+    """Inventory native project dependencies independently of the package manifest."""
+    root = pcb.parent
+    files = {
+        p
+        for p in root.iterdir()
+        if p.is_file()
+        and (
+            p.suffix in {".kicad_pro", ".kicad_dru", ".kicad_sch"}
+            or p.name in {"fp-lib-table", "sym-lib-table"}
+        )
+    }
+    for directory in root.iterdir():
+        if directory.is_dir() and (
+            directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
+        ):
+            files.update(p for p in directory.rglob("*") if p.is_file())
+    for table in (root / "fp-lib-table", root / "sym-lib-table"):
+        if not table.exists():
+            continue
+        for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text()):
+            if "${KIPRJMOD}" in uri:
+                dependency = Path(uri.replace("${KIPRJMOD}", str(root)))
+            elif not Path(uri).is_absolute() and "$" not in uri:
+                dependency = root / uri
+            else:
+                continue  # Installed KiCad libraries are identified by the native engine.
+            if not dependency.resolve().is_relative_to(root.resolve()):
+                raise ValueError(f"Project dependency is outside the package root: {uri}")
+            if not dependency.exists():
+                raise ValueError(f"Project dependency is missing: {uri}")
+            files.update(
+                p for p in dependency.rglob("*") if p.is_file()
+            ) if dependency.is_dir() else files.add(dependency)
+    return sorted(files)
 
-    Manifest integrity alone proves the bundle is internally consistent; it
-    says nothing about whether the PCB inside ``kicad_project.zip`` is the one
-    that was checked.  That is exactly the defect this gate exists to catch.
-    """
+
+def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
+    """Match PCB and native dependencies by relative path, not basename."""
     archive = options.output_dir / "kicad_project.zip"
-    if not archive.is_file():
-        return ["kicad_project.zip is missing from the manufacturing bundle"]
     problems: list[str] = []
     try:
+        sources = set(_project_dependencies(options.pcb)) | {options.pcb}
+        if options.schematic is not None:
+            sources.add(options.schematic)
+        if options.project is not None:
+            sources.add(options.project)
         with zipfile.ZipFile(archive) as zf:
-            members = {Path(name).name: name for name in zf.namelist()}
-            for source in (options.pcb, options.schematic):
-                if source is None or not source.is_file():
-                    continue
-                member = members.get(source.name)
-                if member is None:
-                    problems.append(f"{source.name} is absent from kicad_project.zip")
-                    continue
-                if hashlib.sha256(zf.read(member)).hexdigest() != _sha256_file(source):
+            names = [info.filename for info in zf.infolist() if not info.is_dir()]
+            if len(names) != len(set(names)):
+                problems.append("duplicate file identities in kicad_project.zip")
+            for source in sorted(sources):
+                relative = source.relative_to(options.pcb.parent).as_posix()
+                if relative not in names:
+                    problems.append(f"{relative} is absent from kicad_project.zip")
+                elif zf.read(relative) != source.read_bytes():
                     problems.append(
-                        f"{source.name} inside kicad_project.zip differs from the checked source"
+                        f"{relative} inside kicad_project.zip differs from the checked source"
                     )
-    except (OSError, zipfile.BadZipFile) as exc:
-        return [f"kicad_project.zip could not be read: {exc}"]
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        problems.append(f"Project provenance could not be verified: {exc}")
     return problems
 
 
@@ -1262,6 +1357,77 @@ def _write_readme(
     return readme
 
 
+def _verify_finished_artifacts(options: ReadinessOptions) -> CheckOutcome:
+    """Check retained contents and their identities without regenerating any file."""
+    from kicad_tools.export.manufacturing import verify_manifest
+
+    manifest = options.output_dir / "manifest.json"
+    try:
+        problems = verify_manifest(manifest)
+    except (OSError, ValueError, TypeError) as exc:
+        problems = [f"manifest is unreadable: {exc}"]
+    data = _read_json(manifest)
+    files = data.get("files", {})
+    if not isinstance(files, dict) or not files:
+        problems.append("finished manifest has no file inventory")
+        files = {}
+    actual = {
+        p.relative_to(options.output_dir).as_posix()
+        for p in _bundle_files(options.output_dir, exclude=("manifest.json",))
+    }
+    if set(files) != actual:
+        problems.append("manifest does not cover exactly the finished package")
+    if "README.txt" not in actual:
+        problems.append("finished package has no assembly/fabrication instructions")
+    problems.extend(_verify_project_provenance(options))
+    for name, info in files.items():
+        if (
+            not isinstance(info, dict)
+            or not isinstance(info.get("sha256"), str)
+            or len(info["sha256"]) != 64
+            or not isinstance(info.get("size"), int)
+        ):
+            problems.append(f"{name}: manifest lacks explicit SHA256 and size")
+    try:
+        with zipfile.ZipFile(options.output_dir / "gerbers" / "gerbers.zip") as zf:
+            gerber_names = zf.namelist()
+            if not any(
+                re.search(r"\.(?:gbr|gtl|gbl|g[0-9]+)$", name.lower()) for name in gerber_names
+            ) or not any(name.lower().endswith((".drl", ".xln")) for name in gerber_names):
+                problems.append("fabrication archive lacks Gerber or drill files")
+    except (OSError, zipfile.BadZipFile) as exc:
+        problems.append(f"fabrication archive is unreadable: {exc}")
+    if options.archive:
+        archive = options.output_dir.parent / _ARCHIVE_NAME
+        try:
+            with zipfile.ZipFile(archive) as zf:
+                expected = {
+                    f"{options.output_dir.name}/{p.relative_to(options.output_dir).as_posix()}": p.read_bytes()
+                    for p in _bundle_files(options.output_dir)
+                }
+                members = [info.filename for info in zf.infolist() if not info.is_dir()]
+                flat = {
+                    name.removeprefix(options.output_dir.name + "/"): data
+                    for name, data in expected.items()
+                }
+                if set(members) == set(flat):
+                    expected = flat
+                if len(members) != len(set(members)) or set(members) != set(expected):
+                    problems.append("outer archive inventory differs from finished package")
+                elif any(zf.read(name) != content for name, content in expected.items()):
+                    problems.append("outer archive bytes differ from finished package")
+        except (OSError, zipfile.BadZipFile) as exc:
+            problems.append(f"outer archive is unreadable: {exc}")
+    return CheckOutcome(
+        "artifacts",
+        FAILED if problems else PASSED,
+        "; ".join(problems)
+        if problems
+        else "Retained package manifest, source provenance and archive bytes verified.",
+        blockers=[f"Finished manufacturing package: {problem}" for problem in problems],
+    )
+
+
 def _gate_artifacts(
     options: ReadinessOptions,
     engines: Engines,
@@ -1270,6 +1436,9 @@ def _gate_artifacts(
 ) -> CheckOutcome:
     """Gate 3/5/6/7/8 — export, drawings, README, full manifest, provenance."""
     from kicad_tools.export.manufacturing import verify_manifest
+
+    if options.operation == "verify":
+        return _verify_finished_artifacts(options)
 
     options.output_dir.mkdir(parents=True, exist_ok=True)
     run = engines.export(options.pcb, options.manufacturer, options.output_dir, options.assembly)
@@ -1418,6 +1587,41 @@ def _gate_bom(options: ReadinessOptions, engines: Engines, tht_refs: Sequence[st
             blockers=[f"{len(unresolved)} BOM line(s) require human part selection: {shown}."],
         )
 
+    manual = options.output_dir / "manual-assembly-bom.csv"
+    if manual.is_file():
+        try:
+
+            def references(path: Path) -> set[str]:
+                columns, entries = _read_csv_rows(path)
+                names = [column.strip().lower() for column in columns]
+                index = next(
+                    (
+                        names.index(name)
+                        for name in ("designator", "designators", "reference", "references")
+                        if name in names
+                    ),
+                    None,
+                )
+                if index is None:
+                    raise ValueError(f"{path.name} has no designator column")
+                return {
+                    ref
+                    for row in entries
+                    for ref in re.split(r"[,;\s]+", row[index].strip())
+                    if ref
+                }
+
+            manual_refs = references(manual)
+            overlap = manual_refs & references(bom)
+            for placement in options.output_dir.glob("cpl*.csv"):
+                overlap |= manual_refs & references(placement)
+            if overlap:
+                raise ValueError(
+                    f"manual assembly parts also occur in SMT BOM/CPL: {', '.join(sorted(overlap))}"
+                )
+        except (ValueError, IndexError, OSError) as exc:
+            return CheckOutcome("bom", FAILED, str(exc), blockers=[str(exc)])
+
     cpl = next(iter(sorted(options.output_dir.glob("cpl*.csv"))), None)
     if cpl is None:
         return CheckOutcome(
@@ -1513,7 +1717,11 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     rule files it was computed against.
     """
     root = options.board_dir.resolve()
-    paths: set[Path] = set()
+    paths: set[Path] = (
+        {p.resolve() for p in _project_dependencies(options.pcb)}
+        if options.pcb.is_file()
+        else set()
+    )
 
     for candidate in (options.pcb, options.schematic, options.project, options.net_class_map):
         if candidate is not None and candidate.is_file():
@@ -1600,8 +1808,147 @@ def build_report(
 # ---------------------------------------------------------------------------
 
 
+def _snapshot_inventory(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): _sha256_file(path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+        and not any(
+            part in {".git", ".venv", "readiness-verification", "readiness-attempt"}
+            for part in path.relative_to(root).parts
+        )
+    }
+
+
+def _publish_candidate(candidate: Path, destination: Path, before: dict[str, str]) -> None:
+    """Publish changed files with rollback, after checking for concurrent edits."""
+    if _snapshot_inventory(destination) != before:
+        raise RuntimeError(
+            "Release changed during verification; refusing to overwrite concurrent work"
+        )
+    after = _snapshot_inventory(candidate)
+    changed = sorted(
+        name for name in set(before) | set(after) if before.get(name) != after.get(name)
+    )
+    with tempfile.TemporaryDirectory(prefix="kct-release-backup-") as temporary:
+        backup = Path(temporary)
+        touched: list[str] = []
+        try:
+            for name in changed:
+                target = destination / name
+                if target.exists():
+                    copy = backup / name
+                    copy.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(target, copy)
+                touched.append(name)
+                if name not in after:
+                    target.unlink()
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
+                os.close(fd)
+                try:
+                    shutil.copy2(candidate / name, staged_name)
+                    os.replace(staged_name, target)
+                finally:
+                    Path(staged_name).unlink(missing_ok=True)
+        except Exception:
+            for name in reversed(touched):
+                target = destination / name
+                if name in before:
+                    shutil.copy2(backup / name, target)
+                else:
+                    target.unlink(missing_ok=True)
+            raise
+
+
 def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> ReadinessResult:
-    """Run every applicable gate in contract order and emit the report.
+    """Inspect an isolated candidate; publish generation only after all gates pass.
+
+    Verification writes diagnostics outside the shipped package and preserves its
+    PCB, native context, instructions, manifest, nested ZIP and outer archive.
+    """
+    engines = engines or Engines()
+    original = options.board_dir.resolve()
+    before = _snapshot_inventory(original)
+    diagnostic_name = (
+        "readiness-verification" if options.operation == "verify" else "readiness-attempt"
+    )
+    diagnostics = original / "output" / diagnostic_name
+    with tempfile.TemporaryDirectory(prefix="kct-readiness-candidate-") as temporary:
+        candidate = Path(temporary) / "board"
+        shutil.copytree(
+            original,
+            candidate,
+            ignore=shutil.ignore_patterns(
+                ".git", ".venv", "readiness-verification", "readiness-attempt"
+            ),
+        )
+
+        def remap(path: Path | None) -> Path | None:
+            return candidate / path.resolve().relative_to(original) if path is not None else None
+
+        try:
+            staged = replace(
+                options,
+                board_dir=candidate,
+                pcb=candidate / options.pcb.resolve().relative_to(original),
+                schematic=remap(options.schematic),
+                project=remap(options.project),
+                output_dir=candidate / options.output_dir.resolve().relative_to(original),
+                net_class_map=remap(options.net_class_map),
+                evidence_dir=candidate
+                / "output"
+                / ("readiness" if options.operation == "generate" else diagnostic_name),
+            )
+            if _snapshot_inventory(candidate) != before:
+                raise RuntimeError("Source changed while creating candidate snapshot")
+            if options.operation == "generate" and options.output_dir.exists():
+                manifest = _read_json(options.output_dir / "manifest.json")
+                if manifest.get("producer") != "kct readiness":
+                    raise ValueError(
+                        "Existing package is not a generic readiness package; use --verify and regenerate it with its recipe"
+                    )
+                shutil.rmtree(staged.output_dir)
+            result = _run_readiness_candidate(staged, engines)
+            if _snapshot_inventory(original) != before:
+                raise RuntimeError("Release changed while checks were running")
+            if options.operation == "generate" and result.exit_code == 0:
+                _publish_candidate(candidate, original, before)
+                return replace(
+                    result, report_path=original / result.report_path.relative_to(candidate)
+                )
+            # Preserve diagnostics but never replace the existing release report.
+            if staged.evidence_dir.exists():
+                diagnostics.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(staged.evidence_dir, diagnostics, dirs_exist_ok=True)
+            report = result.report
+            if options.operation == "generate":
+                report["candidate_not_published"] = True
+            report_path = diagnostics / "readiness.json"
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(json.dumps(report, indent=2) + "\n")
+            return replace(result, report_path=report_path)
+        except Exception as exc:
+            if "staged" in locals() and staged.evidence_dir.exists():
+                shutil.copytree(staged.evidence_dir, diagnostics, dirs_exist_ok=True)
+            diagnostics.mkdir(parents=True, exist_ok=True)
+            report = {
+                "schema_version": 1,
+                "status": STATUS_BLOCKED,
+                "mode": options.mode,
+                "blockers": [f"Readiness candidate was not published: {exc}"],
+                "checks": [],
+            }
+            report_path = diagnostics / "readiness.json"
+            report_path.write_text(json.dumps(report, indent=2) + "\n")
+            return ReadinessResult(report, report_path, 1)
+
+
+def _run_readiness_candidate(
+    options: ReadinessOptions, engines: Engines | None = None
+) -> ReadinessResult:
+    """Run every applicable gate on an isolated candidate and emit the report.
 
     The ordering is not cosmetic:
 
@@ -1624,14 +1971,36 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     checks: list[CheckOutcome] = []
     metrics: dict[str, Any] = {}
 
+    if options.operation == "generate":
+        preparation = engines.refill(options.pcb)
+        if not preparation.ok or preparation.returncode != 0:
+            checks.append(
+                CheckOutcome(
+                    "generation", NOT_RUN, preparation.detail, blockers=["Candidate refill failed."]
+                )
+            )
+
     fill = _gate_refill(options, engines)
     checks.append(fill)
 
+    checked_sources = {
+        path: _sha256_file(path) for path in [options.pcb, *_project_dependencies(options.pcb)]
+    }
     kct_check, check_report = _gate_kct_check(options, engines)
     checks.append(kct_check)
 
     native, native_report = _gate_native_drc(options, engines)
     checks.append(native)
+    refilled_pcb = options.evidence_dir / "fill-refilled" / options.pcb.name
+    if refilled_pcb.is_file():
+        refilled_check, _ = _gate_native_drc(
+            replace(
+                options, pcb=refilled_pcb, evidence_dir=options.evidence_dir / "refilled-native"
+            ),
+            engines,
+        )
+        refilled_check.name = "native_refilled_drc"
+        checks.append(refilled_check)
 
     lvs, lvs_metrics = _gate_lvs(check_report)
     checks.append(lvs)
@@ -1652,8 +2021,20 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
 
     checks.append(_gate_artifacts(options, engines, warning_counts, tht_refs))
     checks.append(_gate_bom(options, engines, tht_refs))
+    if any(
+        not path.is_file() or _sha256_file(path) != digest
+        for path, digest in checked_sources.items()
+    ):
+        checks.append(
+            CheckOutcome(
+                "candidate_identity",
+                FAILED,
+                "A checked source changed during checking/export.",
+                blockers=["Checked PCB or native dependencies changed before publication."],
+            )
+        )
 
-    if options.archive:
+    if options.archive and options.operation == "generate":
         _build_archive(options)
 
     summary = (
@@ -1743,6 +2124,17 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         dest="manufacturer",
         default=None,
         help="Fabrication tier (default: discovered from the board's recipe/manifest)",
+    )
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument(
+        "--verify",
+        action="store_true",
+        help="Verify a finished package without changing shipped files (default).",
+    )
+    operation.add_argument(
+        "--generate",
+        action="store_true",
+        help="Generate a generic package transactionally; refuses recipe-finalised packages.",
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(

@@ -34,6 +34,8 @@ def options(tmp_path):
         ({"F.Cu": 2.0}, cmd.FAILED),
         ({"F.Cu": 1.0}, cmd.PASSED),
         ({"F.Cu": 1.005}, cmd.PASSED),
+        ({"F.Cu": 1.01}, cmd.PASSED),
+        ({"F.Cu": 1.0100001}, cmd.FAILED),
         ({"B.Cu": 1.0}, cmd.FAILED),
     ],
 )
