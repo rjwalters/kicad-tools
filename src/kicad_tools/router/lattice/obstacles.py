@@ -71,6 +71,48 @@ def seg_body_crosses_pt(a: Pt, b: Pt, p: Pt, eps: float = _COLOCATION_EPSILON_MM
     return dist(a, p) >= eps and dist(b, p) >= eps
 
 
+def closest_point_on_rect_to_segment(a: Pt, b: Pt, inflated_rect: Rect, agent_radius: float) -> Pt:
+    """Closest point on a pad's RAW copper rect to segment ``a-b`` (issue #4507).
+
+    ``inflated_rect`` is a :attr:`LatticeObstacleModel.pad_rects` entry, i.e. the
+    pad's true half-extents already grown by ``agent_radius``; that inflation is
+    removed here so the probe lands on the pad's own copper boundary -- the same
+    place the #4588 gate's shapely ``shortest_line`` lands.
+
+    Two alternating projections (segment -> rect -> segment) are enough for the
+    axis-aligned case: project the segment's closest point to the rect centre,
+    clamp that onto the rect, then re-project.  When the segment passes through
+    the rect the clamp is a no-op and the result is the entry point, which is
+    also what the gate measures (a zero gap).  Degenerate ``a == b`` (a node
+    probe) collapses to a plain clamp.
+    """
+    x0 = inflated_rect[0] + agent_radius
+    y0 = inflated_rect[1] + agent_radius
+    x1 = inflated_rect[2] - agent_radius
+    y1 = inflated_rect[3] - agent_radius
+    if x1 < x0:
+        x0 = x1 = (x0 + x1) / 2.0
+    if y1 < y0:
+        y0 = y1 = (y0 + y1) / 2.0
+
+    def on_segment(p: Pt) -> Pt:
+        ax, ay = a
+        dx, dy = b[0] - ax, b[1] - ay
+        length2 = dx * dx + dy * dy
+        if length2 <= 1e-18:
+            return (ax, ay)
+        t = ((p[0] - ax) * dx + (p[1] - ay) * dy) / length2
+        t = max(0.0, min(1.0, t))
+        return (ax + t * dx, ay + t * dy)
+
+    def on_rect(p: Pt) -> Pt:
+        return (max(x0, min(x1, p[0])), max(y0, min(y1, p[1])))
+
+    centre = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    point = on_rect(on_segment(centre))
+    return on_rect(on_segment(point))
+
+
 class LatticeObstacleModel:
     """Static per-layer pad masks over a built lattice (built once per board).
 
@@ -226,9 +268,23 @@ class LatticeObstacleModel:
                 continue
             rect = self.pad_rects[idx]
             grown = (rect[0] - extra_pw, rect[1] - extra_pw, rect[2] + extra_pw, rect[3] + extra_pw)
-            if seg_rect_intersect(a, b, grown) and not pairwise.exempt_seg_pt(
-                a, b, (pad.x, pad.y), net, pad.net, layer
-            ):
+            if not seg_rect_intersect(a, b, grown):
+                continue
+            # Issue #4507: probe the #4506 waiver at the pair's CLOSEST-GAP
+            # point on the pad's own copper, never at the pad CENTRE.  The
+            # #4588 gate probes the closest-gap midpoint between the two
+            # copper polygons (``_copper_vs_pad_violation`` ->
+            # ``_shapely_gap_and_midpoint``); a centre-based probe sits up to
+            # half a pad-width further INTO the rated footprint -- i.e.
+            # systematically deeper inside the attach zone -- so the search
+            # waived proximity the gate then reported.  Measured live on the
+            # softstart rev-C T4 fixture: three net pairs, every one of them a
+            # gate finding the search had allowed through this exact
+            # discrepancy.  Probing the pad's closest copper point makes the
+            # two agree by construction, which is the discipline
+            # ``exempt_seg_seg`` already follows for trace-vs-trace.
+            probe = closest_point_on_rect_to_segment(a, b, self.pad_rects[idx], self.agent_radius)
+            if not pairwise.exempt_seg_pt(a, b, probe, net, pad.net, layer):
                 return True
         return False
 
