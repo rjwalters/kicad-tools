@@ -3670,6 +3670,10 @@ class Autorouter:
         # ADDITIVE source of per-net targets (never stored in self.pads).
         pad_objs = [self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing]
         pad_objs.extend(stub_targets)
+        if kelvin is not None and kelvin.root_index < len(pads_for_routing):
+            # An escape endpoint is not the shunt tap. Sharing its stub
+            # would put force-current copper into every sense branch.
+            pad_objs[kelvin.root_index] = self.pads[pads_for_routing[kelvin.root_index]]
 
         # Issue #2336: Try sub-problem pattern cache before A* search.
         # Compute a position/rotation-invariant signature and check for a
@@ -13582,6 +13586,10 @@ class Autorouter:
         # Issue #4170: merge in the route-scoped stub-terminal target pads.
         pad_objs = [self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing]
         pad_objs.extend(stub_targets)
+        if kelvin is not None and kelvin.root_index < len(pads_for_routing):
+            # An escape endpoint is not the shunt tap. Sharing its stub
+            # would put force-current copper into every sense branch.
+            pad_objs[kelvin.root_index] = self.pads[pads_for_routing[kelvin.root_index]]
         neg_router = NegotiatedRouter(
             self.grid,
             self.router,

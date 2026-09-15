@@ -1,5 +1,7 @@
 """Kelvin branches must remain separate in emitted copper, not only in the plan."""
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 from shapely.geometry import LineString, Point, box
@@ -8,14 +10,17 @@ from shapely.ops import unary_union
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.cpp_backend import CppPathfinder, get_backend_info
 from kicad_tools.router.kelvin_obstacles import isolate_kelvin_branch
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.primitives import Route, Segment
 
 
 @pytest.mark.parametrize("sense_positions", [((16, 12), (16, 8)), ((16, 10), (16, 12))])
 @pytest.mark.parametrize("force_python", [True, False])
 @pytest.mark.parametrize("mode", ["mst", "star", "negotiated"])
 @pytest.mark.parametrize("same_ic", [False, True])
+@pytest.mark.parametrize("escaped_root", [False, True])
 def test_kelvin_branches_do_not_share_copper_away_from_shunt(
-    sense_positions, force_python, mode, same_ic
+    sense_positions, force_python, mode, same_ic, escaped_root
 ):
     """The collinear sense terminal must not reconnect through the force pad."""
     if not force_python and not get_backend_info()["available"]:
@@ -46,6 +51,18 @@ def test_kelvin_branches_do_not_share_copper_away_from_shunt(
             ],
         )
 
+    if escaped_root:
+        stub = Route(
+            1,
+            "ISENSE_TEST",
+            [Segment(4, 10, 6, 10, 0.2, Layer.F_CU, 1)],
+            is_escape=True,
+        )
+        router._mark_route(stub)
+        router.routes.append(stub)
+        router._escape_pad_overrides[("R1", "1")] = replace(router.pads[("R1", "1")], x=6)
+        preserved_stub = stub.copy_geometry()
+
     routes = (
         router._route_net_negotiated(1, 1.0)
         if mode == "negotiated"
@@ -54,9 +71,14 @@ def test_kelvin_branches_do_not_share_copper_away_from_shunt(
     if not force_python:
         assert router.router.fallback_stats["fallback_count"] == 0
     assert len(routes) == 3, "All three shunt-to-terminal connections must route"
+    if escaped_root:
+        assert stub == preserved_stub
     shunt_contact = box(3.6, 9.6, 4.4, 10.4)
-    for index, branch in enumerate(routes):
-        for other in routes[index + 1 :]:
+    # The existing shunt escape is preserved copper too; no new branch may
+    # share it outside the real shunt contact.
+    all_routes = routes + ([stub] if escaped_root else [])
+    for index, branch in enumerate(all_routes):
+        for other in all_routes[index + 1 :]:
             for layer in (0, 5):
 
                 def metal(route):
