@@ -3633,23 +3633,30 @@ class Autorouter:
                 for layer, width in layer_widths.items():
                     print(f"    {layer}: {width * 1000:.1f}mil ({width:.3f}mm)")
 
-        # Handle intra-IC connections first
-        intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
-        for route in intra_routes:
-            self._mark_route(route)
-            routes.append(route)
-            self.routes.append(route)
+        # Kelvin terminals must each reach the shunt. An intra-IC shortcut
+        # would join two sense branches before the topology planner sees them.
+        kelvin = detect_kelvin_topology([self.pads[p] for p in pads] + stub_targets)
+        if kelvin is not None:
+            pads_for_routing = pads
+        else:
+            # Handle intra-IC connections first
+            intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
+            for route in intra_routes:
+                self._mark_route(route)
+                routes.append(route)
+                self.routes.append(route)
 
-        # Handle block-internal connections (Issue #1587)
-        block_routes, block_connected = self._create_block_internal_routes(net, pads)
-        for route in block_routes:
-            self._mark_route(route)
-            routes.append(route)
-            self.routes.append(route)
-        connected_indices |= block_connected
+            # Handle block-internal connections (Issue #1587)
+            block_routes, block_connected = self._create_block_internal_routes(net, pads)
+            for route in block_routes:
+                self._mark_route(route)
+                routes.append(route)
+                self.routes.append(route)
+            connected_indices |= block_connected
 
-        # Build reduced pad list for inter-IC routing
-        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices, pad_lookup=self.pads)
+            pads_for_routing = reduce_pads_after_intra_ic(
+                pads, connected_indices, pad_lookup=self.pads
+            )
         # Issue #4170 (Phase 2b-1): bare boundary stub terminals count toward the
         # inter-IC target list, so a single in-region pad plus a stub still has
         # >= 2 targets to connect.
@@ -3668,7 +3675,7 @@ class Autorouter:
         # Compute a position/rotation-invariant signature and check for a
         # cached solution that can be transformed to the current location.
         sub_sig = None
-        if self._sub_problem_cache is not None:
+        if self._sub_problem_cache is not None and kelvin is None:
             cached_routes = self._try_sub_problem_cache(net, pad_objs)
             if cached_routes is not None:
                 for route in cached_routes:
@@ -3858,7 +3865,7 @@ class Autorouter:
             )
             self.routing_failures.append(failure)
 
-        if use_mst and len(pad_objs) > 2:
+        if (use_mst or kelvin is not None) and len(pad_objs) > 2:
             # Issue #2329: Disable Steiner tree decomposition for nets with
             # structurally off-grid pads.  RSMT Steiner points inherit
             # off-grid coordinates (the median of terminal positions),
@@ -13546,19 +13553,25 @@ class Autorouter:
         self._update_router_segment_foreign_context(net)
 
         routes: list[Route] = []
-        intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
-        for route in intra_routes:
-            self._mark_route(route)
-            routes.append(route)
+        kelvin = detect_kelvin_topology([self.pads[p] for p in pads] + stub_targets)
+        if kelvin is not None:
+            pads_for_routing = pads
+        else:
+            intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
+            for route in intra_routes:
+                self._mark_route(route)
+                routes.append(route)
 
-        # Handle block-internal connections (Issue #1587)
-        block_routes, block_connected = self._create_block_internal_routes(net, pads)
-        for route in block_routes:
-            self._mark_route(route)
-            routes.append(route)
-        connected_indices |= block_connected
+            # Handle block-internal connections (Issue #1587)
+            block_routes, block_connected = self._create_block_internal_routes(net, pads)
+            for route in block_routes:
+                self._mark_route(route)
+                routes.append(route)
+            connected_indices |= block_connected
 
-        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices, pad_lookup=self.pads)
+            pads_for_routing = reduce_pads_after_intra_ic(
+                pads, connected_indices, pad_lookup=self.pads
+            )
         # Issue #4170: stub tips count toward the inter-IC target list.
         if len(pads_for_routing) + len(stub_targets) < 2:
             return routes

@@ -12,7 +12,11 @@ from kicad_tools.router.kelvin_obstacles import isolate_kelvin_branch
 
 @pytest.mark.parametrize("sense_positions", [((16, 12), (16, 8)), ((16, 10), (16, 12))])
 @pytest.mark.parametrize("force_python", [True, False])
-def test_kelvin_branches_do_not_share_copper_away_from_shunt(sense_positions, force_python):
+@pytest.mark.parametrize("mode", ["mst", "star", "negotiated"])
+@pytest.mark.parametrize("same_ic", [False, True])
+def test_kelvin_branches_do_not_share_copper_away_from_shunt(
+    sense_positions, force_python, mode, same_ic
+):
     """The collinear sense terminal must not reconnect through the force pad."""
     if not force_python and not get_backend_info()["available"]:
         pytest.skip("C++ extension unavailable")
@@ -21,14 +25,17 @@ def test_kelvin_branches_do_not_share_copper_away_from_shunt(sense_positions, fo
     )
     if not force_python:
         assert isinstance(router.router, CppPathfinder)
-    for ref, (x, y) in zip(
-        ("R1", "Q1", "U1", "U2"), ((4, 10), (12, 10), *sense_positions), strict=True
+    for ref, pin, (x, y) in zip(
+        ("R1", "Q1", "U1", "U1" if same_ic else "U2"),
+        ("1", "1", "1", "2"),
+        ((4, 10), (12, 10), *sense_positions),
+        strict=True,
     ):
         router.add_component(
             ref,
             [
                 {
-                    "number": "1",
+                    "number": pin,
                     "x": x,
                     "y": y,
                     "width": 0.8,
@@ -39,7 +46,11 @@ def test_kelvin_branches_do_not_share_copper_away_from_shunt(sense_positions, fo
             ],
         )
 
-    routes = router.route_net(1)
+    routes = (
+        router._route_net_negotiated(1, 1.0)
+        if mode == "negotiated"
+        else router.route_net(1, use_mst=mode == "mst")
+    )
     if not force_python:
         assert router.router.fallback_stats["fallback_count"] == 0
     assert len(routes) == 3, "All three shunt-to-terminal connections must route"
