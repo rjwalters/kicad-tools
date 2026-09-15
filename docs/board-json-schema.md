@@ -159,39 +159,47 @@ or timestamp-based migration is required.
 
 ### Producing the report: `kct readiness`
 
-`kct readiness <board-dir|board.kicad_pcb>` is the scripted producer for this
-sidecar (issue #4977). It implements the `/kct:manufacturing-readiness` and
-`/kct:tapeout` skill contracts as an orchestrated command over the engines that
-already exist — `kct check`, `kicad-cli pcb drc --refill-zones` and
-`kct export` — and writes `output/readiness.json` only after every hashed
-artifact is final:
+`kct readiness <board-dir|board.kicad_pcb>` verifies a finished package by
+default (`--verify`). It snapshots the release and writes diagnostic evidence
+under `output/readiness-verification/`, including its own `readiness.json`.
+The canonical PCB, project rules, recipe instructions, assembly files, manifest,
+project ZIP, outer archive and existing gallery report remain unchanged.
+Missing, stale or incomplete packages fail verification; this mode does not
+repair or regenerate them.
 
-1. Refill the copper pours and **save the canonical PCB**, then confirm the
-   saved fill still matches a fresh refill per layer (evidence:
-   `output/readiness/fill-consistency.json`). This happens before **both** the
-   native check and the export, because a saved-vs-refilled divergence can
-   survive two zero-error reports.
-2. `kct check --mfr <tier>`, writing the machine-readable report the per-rule
-   warning review reuses (no second check run).
-3. The mandatory independent `kicad-cli pcb drc --refill-zones` cross-gate, on
-   the saved board, judged by its **violation counts** — `kicad-cli` exits 0
-   with errors, and "ran" is not "passed".
-4. LVS evidence (a vacuous comparison is `not_run`, never clean), the per-rule
-   assembly-affecting warning review, and — for boards carrying an `HV` net
-   class — an explicit isolation requirement.
-5. `kct export`, the schematic and assembly-view PDFs, a `README.txt`, and a
-   regenerated `manifest.json` that checksums the **entire** bundle; then
-   manifest integrity **and** archived-source provenance are verified.
-6. `--assembly` additionally requires real procurement identifiers on every BOM
-   line (a wholly empty part-number column is treated as a broken matcher, not
-   exotic parts) and that through-hole parts excluded from the CPL are named as
-   hand-solder items in the README.
-7. `output/manufacturing.zip` is built **outside** the checksummed directory.
+`--generate` explicitly requests generic package generation. It prepares and
+checks an isolated candidate, then publishes only if every gate passes. A
+failed attempt leaves the previous release intact and writes diagnostics under
+`output/readiness-attempt/`. Publication checks for concurrent release edits
+and rolls back replaced files if a write fails. Existing packages without the
+`kct readiness` producer identity are refused: regenerate recipe-finalised
+packages using their own recipe, then verify them. No commands from package
+metadata are executed. Generic generation preserves existing native project
+rules instead of silently replacing them with manufacturer defaults.
 
-`ready` is emitted only when every applicable gate passed; otherwise the report
-is `blocked` (a gate failed) or `unverified` (a gate could not run), always with
-named `blockers`. The command exits non-zero for anything other than `ready`,
-and there is no flag that produces `ready` on a partial run.
+Both modes retain the saved PCB and a separately executed native refill,
+including local project/rule/library context. `fill-consistency.json` records
+engine version, snapshot and context hashes, saved/refilled per-layer areas,
+exact deltas, layer inventory changes and the requested tolerance. Divergence,
+failed engines and malformed measurements block readiness. Area agreement is
+only a refill-stability measurement; it does not prove equal copper topology
+or electrical connectivity. A recipe's post-fill carve that disappears under
+native refill remains a reported incompatibility; verification never deletes
+the carve to obtain READY.
+
+`kct check`, LVS, warning review and any required HV isolation check remain
+mandatory. Native DRC inspects **both saved snapshots**, without another implicit
+refill, and counts error findings and unconnected items. Project ZIP provenance
+matches the checked PCB, schematic, project, rules, local library tables and
+footprint dependencies by relative path. The finished manifest must cover the
+package exactly, and outer archive contents must match those same bytes.
+Assembly verification rejects parts present in both manual and SMT BOM/CPL.
+
+Successful generic generation writes `output/readiness.json` only after the
+package and `output/manufacturing.zip` are final. Verification reports remain
+separate from that gallery report. `ready` requires all applicable gates to
+pass; other results are `blocked` or `unverified` with named blockers and a
+nonzero exit. There is no flag that declares a partial run ready.
 
 ### Engine fingerprint
 

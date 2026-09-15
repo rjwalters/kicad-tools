@@ -194,6 +194,7 @@ class FakeEngines:
             gerbers.mkdir(exist_ok=True)
             with zipfile.ZipFile(gerbers / "gerbers.zip", "w") as zf:
                 zf.writestr("demo-F_Cu.gbr", "G04*\n")
+                zf.writestr("demo.drl", "M48\n")
 
         if assembly:
             with (output_dir / f"bom_{mfr}.csv").open("w", newline="") as handle:
@@ -212,7 +213,8 @@ class FakeEngines:
         zip_pcb = b"(kicad_pcb stale)\n" if self.zip_pcb_stale else pcb.read_bytes()
         with zipfile.ZipFile(output_dir / "kicad_project.zip", "w") as zf:
             zf.writestr(pcb.name, zip_pcb)
-            zf.writestr(SCH_NAME, (self.board / "output" / SCH_NAME).read_bytes())
+            for source in readiness_cmd._project_dependencies(pcb):
+                zf.write(source, source.relative_to(pcb.parent).as_posix())
         (output_dir / "manifest.json").write_text(
             json.dumps({"version": "1.0", "manufacturer": mfr, "files": {}}, indent=2)
         )
@@ -262,8 +264,12 @@ class FakeEngines:
 
 def run(board: Path, fake: FakeEngines, *extra: str) -> tuple[int, dict]:
     """Invoke the command and return ``(exit_code, report)``."""
-    code = readiness_cmd.main([str(board), "--mfr", "jlcpcb", *extra], engines=fake.bundle())
-    report_path = board / "output" / "readiness.json"
+    code = readiness_cmd.main(
+        [str(board), "--mfr", "jlcpcb", "--generate", *extra], engines=fake.bundle()
+    )
+    report_path = (
+        board / "output" / ("readiness-attempt/readiness.json" if code else "readiness.json")
+    )
     report = json.loads(report_path.read_text()) if report_path.is_file() else {}
     return code, report
 
@@ -407,8 +413,10 @@ def test_saved_fill_divergence_blocks_sign_off(tmp_path):
     assert report["status"] == "blocked"
     assert check_status(report, "zone_fill") == "failed"
     assert any("diverges" in blocker for blocker in report["blockers"])
-    evidence = json.loads((board / "output" / "readiness" / "fill-consistency.json").read_text())
-    assert evidence["F.Cu"] == pytest.approx(8.75)
+    evidence = json.loads(
+        (board / "output" / "readiness-attempt" / "fill-consistency.json").read_text()
+    )
+    assert evidence["deltas_mm2"]["F.Cu"] == pytest.approx(8.75)
 
 
 def test_source_zip_provenance_is_verified_not_just_manifest_integrity(tmp_path):
@@ -806,7 +814,7 @@ def test_tier_is_discovered_from_the_board_recipe_when_not_given(tmp_path):
     board = make_board(tmp_path)
     fake = FakeEngines(board)
 
-    code = readiness_cmd.main([str(board)], engines=fake.bundle())
+    code = readiness_cmd.main([str(board), "--generate"], engines=fake.bundle())
 
     assert code == 0
     report = json.loads((board / "output" / "readiness.json").read_text())
@@ -818,7 +826,7 @@ def test_json_output_emits_a_single_envelope(tmp_path, capsys):
     fake = FakeEngines(board)
 
     code = readiness_cmd.main(
-        [str(board), "--mfr", "jlcpcb", "--format", "json"], engines=fake.bundle()
+        [str(board), "--mfr", "jlcpcb", "--generate", "--format", "json"], engines=fake.bundle()
     )
 
     payload = json.loads(capsys.readouterr().out)
