@@ -5303,6 +5303,7 @@ class DiffPairRouter:
         partner_vias: list[Via] | None = None,
         *,
         prefer_shortest: bool = False,
+        rank_pair_coverage: bool = False,
         reserved_routes: tuple[Route, ...] = (),
         preceding_segments: list[Segment] | None = None,
     ) -> Route | None:
@@ -5452,6 +5453,28 @@ class DiffPairRouter:
             candidates = [
                 candidates[i] for i in sorted(range(len(candidates)), key=lambda i: (-scores[i], i))
             ]
+        if rank_pair_coverage and preceding_segments and partner_segments:
+            # Rank the completed legs together, not just the new tail: a tail
+            # with a high local fraction may leave more of its partner uncoupled.
+            def pair_coverage(spans):
+                own = Route(net=head.net, net_name=head.net_name)
+                own.segments = list(preceding_segments) + [
+                    Segment(x1, y1, x2, y2, width, layer, head.net, net_name=head.net_name)
+                    for x1, y1, x2, y2 in spans
+                ]
+                partner = Route(net=-1, net_name="")
+                partner.segments = partner_segments
+                coverage = min(
+                    self._tail_coupled_fraction(own, partner_segments),
+                    self._tail_coupled_fraction(partner, own.segments),
+                )
+                length_gap = abs(
+                    sum(math.dist(s.start, s.end) for s in own.segments)
+                    - sum(math.dist(s.start, s.end) for s in partner_segments)
+                )
+                return (-round(coverage, 12), length_gap)
+
+            candidates.sort(key=pair_coverage)
         if prefer_shortest:
             # A via approach may need a short legal continuation while its
             # pad-side landing retains coupling-first selection. The caller
@@ -6405,6 +6428,7 @@ class DiffPairRouter:
         *,
         deadline: float | None = None,
         prefer_shortest_approach: bool = False,
+        rank_pair_coverage: bool = False,
         allowed_via_sites: frozenset[tuple[int, int]] | None = None,
         reserved_routes: tuple[Route, ...] = (),
     ) -> Iterator[Route]:
@@ -6570,6 +6594,7 @@ class DiffPairRouter:
                     partner_clearance=partner_center_clearance,
                     partner_vias=partner.vias,
                     prefer_shortest=prefer_shortest_approach and li == start_layer,
+                    rank_pair_coverage=rank_pair_coverage,
                     reserved_routes=reserved_routes,
                     preceding_segments=body.segments + [s for p in pieces for s in p.segments],
                 )

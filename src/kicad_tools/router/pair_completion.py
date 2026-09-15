@@ -364,6 +364,7 @@ def complete_pair_body(
         for goal, point, route in zip(goals, (body.p_head, body.n_head), originals, strict=True)
     )
     intra = nc.effective_intra_pair_clearance()
+    qualifications = 0  # Original ceiling: two orders times ten tails per half.
     for first, second in ((0, 1), (1, 0)):
         if time.monotonic() >= deadline:
             return None
@@ -418,6 +419,10 @@ def complete_pair_body(
                         candidate[first] = copy.deepcopy(first_route)
                         candidate[second].segments.extend(other_tail.segments)
                         candidate[second].vias.extend(other_tail.vias)
+                        if qualifications >= 200:
+                            return None
+                        qualifications += 1
+                        quality_failures = reasons["coupling_threshold"] + reasons["skew_tolerance"]
                         qualified = qualify_constructed_pair(
                             router,
                             finder,
@@ -433,6 +438,55 @@ def complete_pair_body(
                         )
                         if qualified is not None:
                             return qualified
+                        # The first terminal was ranked against an unfinished
+                        # partner. Revisit it once the partner has a full tail,
+                        # reusing its already selected barrel rather than widening
+                        # the site search or increasing the pair deadline.
+                        if (
+                            tail.vias
+                            and time.monotonic() < deadline
+                            and reasons["coupling_threshold"] + reasons["skew_tolerance"]
+                            > quality_failures
+                        ):
+                            sites = frozenset(grid.world_to_grid(v.x, v.y) for v in tail.vias)
+                            with router._shadow_foreign_copper(
+                                *reserved_routes, candidate[second], originals[first]
+                            ):
+                                refined_tails = router._layer_return_tails(
+                                    finder,
+                                    heads[first],
+                                    goals[first],
+                                    candidate[second],
+                                    originals[first],
+                                    deadline=deadline,
+                                    prefer_shortest_approach=False,
+                                    rank_pair_coverage=True,
+                                    allowed_via_sites=sites,
+                                    reserved_routes=reserved_routes,
+                                )
+                                for refined in itertools.islice(refined_tails, 1):
+                                    improved = list(copy.deepcopy(candidate))
+                                    improved[first] = copy.deepcopy(originals[first])
+                                    improved[first].segments.extend(refined.segments)
+                                    improved[first].vias.extend(refined.vias)
+                                    if qualifications >= 200:
+                                        return None
+                                    qualifications += 1
+                                    qualified = qualify_constructed_pair(
+                                        router,
+                                        finder,
+                                        pair,
+                                        pads,
+                                        (improved[0], improved[1]),
+                                        intra_pair_clearance=intra,
+                                        board_thickness_mm=board_thickness_mm,
+                                        num_copper_layers=num_copper_layers,
+                                        deadline=deadline,
+                                        reserved_routes=reserved_routes,
+                                        reasons=reasons,
+                                    )
+                                    if qualified is not None:
+                                        return qualified
                         if time.monotonic() >= deadline:
                             return None
                     if not found_other_tail:
