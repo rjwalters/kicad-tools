@@ -59,7 +59,12 @@ BACK_SILK_LAYERS = ("B.SilkS", "B.Silkscreen")
 # field for silk-to-edge; this named constant keeps the intent explicit and
 # distinct from the (stricter) copper-to-edge rule.  0.2 mm matches common
 # fab silk-to-edge specs and kicad-cli's default ``silk_edge_clearance``.
-SILK_EDGE_CLEARANCE_MM = 0.2
+#
+# Issue #5240: the value itself lives in ``kicad_tools.silkscreen._silk_defaults``
+# (a dependency-free leaf module) so ``kicad_tools.cli.parser`` can read it for
+# a ``--help`` default without importing this module's (and this package's)
+# full transitive chain.  Re-exported here unchanged for existing callers.
+from kicad_tools.silkscreen._silk_defaults import SILK_EDGE_CLEARANCE_MM  # noqa: E402
 
 # Per-character width factor used to approximate a stroked-font text bounding
 # box.  KiCad's true glyph metrics are not modeled; a simple per-character box

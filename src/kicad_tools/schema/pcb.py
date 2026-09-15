@@ -1660,6 +1660,43 @@ class Zone:
             return 0.0
         return max(self.min_thickness, 0.0) / 2.0
 
+    @staticmethod
+    def _first_descendant_index(sexp: SExp) -> dict[str, SExp]:
+        """Return a ``name -> first-matching-descendant`` map, one walk only.
+
+        Issue #5240 (CI runtime): ``Zone.from_sexp`` previously issued ~13
+        independent ``sexp.find(name)`` calls against the same zone node.
+        Each ``find()`` call re-walks ``sexp.children`` from scratch --
+        and, for every non-matching sibling along the way, that sibling's
+        *entire* subtree via ``iter_all()`` -- looking for its own single
+        target name.  A zone's ``polygon``/``filled_polygon`` children can
+        carry many thousands of ``(xy ...)`` points, so this is genuinely
+        expensive: profiling ``PCB.load()`` on
+        ``boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb``
+        (85 zones) showed ``Zone.from_sexp`` consuming 3.76s of a 6.3s
+        ``PCB.__init__`` (cProfile, Python 3.12), almost entirely inside
+        these repeated ``find()`` calls and their ``iter_all()`` descent.
+
+        This helper performs the equivalent traversal exactly once and
+        caches the first occurrence of every descendant name in the same
+        order ``SExp.find()`` itself searches (``self.children``, and for
+        each child its full ``iter_all()``) -- so a dict lookup by name
+        returns the identical node ``find(name)`` would have, without
+        re-scanning already-visited siblings for every subsequent field.
+        Only the *direct* zone-level ``find()`` calls below are switched
+        to this index; nested lookups on already-small subtrees
+        (``connect_pads``, ``fill``, ``ZoneKeepout``) and the
+        necessarily-exhaustive ``find_all("filled_polygon")`` are
+        unchanged, since neither is called repeatedly against the same
+        large node.
+        """
+        index: dict[str, SExp] = {}
+        for child in sexp.children:
+            for node in child.iter_all():
+                if node.name is not None and node.name not in index:
+                    index[node.name] = node
+        return index
+
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Zone:
         """Parse zone from S-expression.
@@ -1679,9 +1716,11 @@ class Zone:
             layer="",
         )
 
+        index = cls._first_descendant_index(sexp)
+
         # Basic properties — handles both (net N "name") and (net "name") formats.
         # KiCad 9 may emit (net "name") without a numeric net number.
-        if net := sexp.find("net"):
+        if net := index.get("net"):
             first_int = net.get_int(0)
             if first_int is not None:
                 zone.net_number = first_int
@@ -1689,12 +1728,12 @@ class Zone:
                 zone.net_number = 0
                 # Name-only format: (net "GND") — store name from net node
                 zone.net_name = net.get_string(0) or ""
-        if net_name := sexp.find("net_name"):
+        if net_name := index.get("net_name"):
             zone.net_name = net_name.get_string(0) or ""
-        if layer := sexp.find("layer"):
+        if layer := index.get("layer"):
             zone.layer = layer.get_string(0) or ""
         # Multi-layer form (rule areas): (layers "F.Cu" "B.Cu") / (layers "*.Cu")
-        if layers := sexp.find("layers"):
+        if layers := index.get("layers"):
             zone.layers = [
                 layer_name
                 for i in range(len(layers.values))
@@ -1702,32 +1741,32 @@ class Zone:
             ]
             if not zone.layer and zone.layers:
                 zone.layer = zone.layers[0]
-        if uuid := sexp.find("uuid"):
+        if uuid := index.get("uuid"):
             zone.uuid = uuid.get_string(0) or ""
-        if name := sexp.find("name"):
+        if name := index.get("name"):
             zone.name = name.get_string(0) or ""
 
         # Rule-area keepout flags (issue #4605): (keepout (tracks not_allowed) ...)
-        if keepout := sexp.find("keepout"):
+        if keepout := index.get("keepout"):
             zone.keepout = ZoneKeepout.from_sexp(keepout)
 
         # Priority
-        if priority := sexp.find("priority"):
+        if priority := index.get("priority"):
             zone.priority = priority.get_int(0) or 0
 
         # Minimum thickness
-        if min_thickness := sexp.find("min_thickness"):
+        if min_thickness := index.get("min_thickness"):
             zone.min_thickness = min_thickness.get_float(0) or 0.2
 
         # ``(filled_areas_thickness yes|no)``.  Left as ``None`` when absent:
         # the meaning depends on the file version, which the zone alone does
         # not know -- ``PCB._parse`` supplies it (Issue #5362).
-        if fat := sexp.find("filled_areas_thickness"):
+        if fat := index.get("filled_areas_thickness"):
             zone.filled_areas_thickness = fat.get_string(0) != "no"
 
         # Connect pads - can be (connect_pads yes) or (connect_pads (clearance X))
         # or (connect_pads thru_hole_only (clearance X)) etc.
-        if connect_pads := sexp.find("connect_pads"):
+        if connect_pads := index.get("connect_pads"):
             # Check for connection type keyword
             first_val = connect_pads.get_string(0)
             if first_val == "no":
@@ -1745,7 +1784,7 @@ class Zone:
                 zone.clearance = clearance.get_float(0) or 0.2
 
         # Fill settings - (fill yes/no (thermal_gap X) (thermal_bridge_width X))
-        if fill := sexp.find("fill"):
+        if fill := index.get("fill"):
             first_val = fill.get_string(0)
             zone.is_filled = first_val == "yes"
 
@@ -1759,7 +1798,7 @@ class Zone:
                     zone.fill_type = "hatch"
 
         # Parse boundary polygon - (polygon (pts (xy X Y) ...))
-        if polygon := sexp.find("polygon"):
+        if polygon := index.get("polygon"):
             zone.polygon = cls._parse_polygon_pts(polygon)
 
         # Parse filled polygons - (filled_polygon (layer X) (pts (xy X Y) ...))
