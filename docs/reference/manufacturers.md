@@ -238,11 +238,15 @@ They do not replace the distinct via-hole spacing limits. These constraints do
 not impose a same-net physical clearance on valid copper joins. Other profiles
 can leave the optional object-specific fields unset.
 
-Export and `check --emit-dru` place the explicit constraints in the managed fab
+Export and `check --emit-dru` place the explicit silk/PTH constraints in the managed fab
 rule block while retaining custom rules outside it. The silk rule is not
 restricted to a silk layer: it must compare objects across layers. KiCad also
 checks pad copper when no mask opening is present. The project-wide silk floor
 is unchanged, so the pad-specific limit does not become a silk-to-silk limit.
+
+The manufacturing project ZIP includes the exported PCB's sibling `.kicad_dru`
+with custom rules intact. The manifest hashes that ZIP, binding its board,
+project and rule contents for verification after the package is moved.
 
 Python checks cover SMD pad pairs, round/slotted PTH holes (including drill
 offsets and rotation), inner filled-zone copper, and modeled silk line/rectangle
