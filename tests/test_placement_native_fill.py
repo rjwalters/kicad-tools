@@ -19,7 +19,11 @@ NATIVE_PYTHON = Path(
 
 @pytest.mark.skipif(not NATIVE_PYTHON.exists(), reason="KiCad Python runtime unavailable")
 @pytest.mark.parametrize("project_clearance", [None, 0.8, "custom", "zone_pair"])
-def test_native_eligible_fill_clears_and_preserves_fixed_zone(tmp_path, project_clearance):
+@pytest.mark.parametrize("multilayer", [False, True])
+@pytest.mark.parametrize("name_only", [False, True])
+def test_native_eligible_fill_clears_and_preserves_fixed_zone(
+    tmp_path, project_clearance, multilayer, name_only
+):
     zone = """(zone (net 1) (net_name "BAD") (layer "F.Cu")
       (hatch edge 0.5) (connect_pads yes (clearance 0.3)) (min_thickness 0.2)
       (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
@@ -29,7 +33,19 @@ def test_native_eligible_fill_clears_and_preserves_fixed_zone(tmp_path, project_
       (hatch edge 0.5) (connect_pads yes (clearance 0.3)) (min_thickness 0.2)
       (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
       (polygon (pts (xy 102 101) (xy 118 101) (xy 118 110) (xy 102 110))))"""
-    source = board_text().rstrip()[:-1] + zone + eligible + ")"
+    if multilayer:
+        zone = zone.replace('(layer "F.Cu")', '(layers "F.Cu" "B.Cu")', 1)
+        zone = (
+            zone[:-1]
+            + """(filled_polygon (layer "B.Cu")
+          (pts (xy 111 102) (xy 116 102) (xy 116 104) (xy 111 104))))"""
+        )
+        eligible = eligible.replace('(layer "F.Cu")', '(layers "F.Cu" "B.Cu")', 1)
+        eligible = eligible.replace("(fill yes", "(fill yes (island_removal_mode 0)")
+    if name_only:
+        zone = zone.replace("(net 1)", '(net "BAD")')
+        eligible = eligible.replace("(net 2)", '(net "GOOD")')
+    source = board_text(name_only=name_only).rstrip()[:-1] + zone + eligible + ")"
     board = tmp_path / "mixed.kicad_pcb"
     board.write_text(source)
     if isinstance(project_clearance, str):
@@ -62,12 +78,28 @@ def test_native_eligible_fill_clears_and_preserves_fixed_zone(tmp_path, project_
     assert result.replace(new_eligible, eligible) == source
     after = PCB.load(board)
     fixed = next(z for z in before.zones if z.net_name == "BAD")
-    fixed_shape = unary_union(
-        [Polygon(p).buffer(fixed.fill_inflation()) for p in fixed.filled_polygons]
-    )
     filled = next(z for z in after.zones if z.net_name == "GOOD")
-    shape = unary_union([Polygon(p) for p in filled.filled_polygons])
-    assert shape.area > 100
-    assert shape.intersection(fixed_shape).area == 0
-    assert shape.distance(fixed_shape) >= (0.8 if project_clearance else 0.3) - 0.001
+    for layer in ["F.Cu", "B.Cu"] if multilayer else ["F.Cu"]:
+        fixed_shape = unary_union(
+            [
+                Polygon(p).buffer(fixed.fill_inflation())
+                for p, polygon_layer in zip(
+                    fixed.filled_polygons, fixed.filled_polygon_layers, strict=True
+                )
+                if polygon_layer == layer
+            ]
+        )
+        shape = unary_union(
+            [
+                Polygon(p)
+                for p, polygon_layer in zip(
+                    filled.filled_polygons, filled.filled_polygon_layers, strict=True
+                )
+                if polygon_layer == layer
+            ]
+        )
+        assert not fixed_shape.is_empty
+        assert shape.area > 100
+        assert shape.intersection(fixed_shape).area == 0
+        assert shape.distance(fixed_shape) >= (0.8 if project_clearance else 0.3) - 0.001
     assert filled.fill_inflation() == 0

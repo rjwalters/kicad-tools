@@ -33,7 +33,9 @@ def main():
             # Its temporary outline is the existing copper, not the pour intent.
             # Higher priority makes eligible zones clear this immutable outline.
             fixed = pcbnew.Cast_to_ZONE(zone.Duplicate(False))
-            fixed.SetLayer(layer)
+            layers = pcbnew.LSET()
+            layers.AddLayer(layer)
+            fixed.SetLayerSetAndRemoveUnusedFills(layers)
             outline = pcbnew.SHAPE_POLY_SET(zone.GetFilledPolysList(layer))
             fixed.SetOutline(outline)
             outline.thisown = False
