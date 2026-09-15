@@ -13,6 +13,8 @@
 #include <cmath>
 #include <algorithm>
 #include <map>
+#include <set>
+#include <tuple>
 
 namespace router {
 
@@ -269,6 +271,20 @@ public:
     // Register a completed route's via for clearance validation.
     void add_stored_via(float x, float y, float drill, float diameter, int net);
 
+    // A dynamic mark may be refined only after every active mark has its
+    // physical primitive registered. Counts retain overlapping/repeated marks;
+    // clearing validation geometry invalidates coverage immediately.
+    bool route_geometry_complete() const;
+    bool route_cell_has_geometry(int x, int y, int layer) const;
+    bool route_trace_geometry_clear(const Segment& segment, float clearance,
+                                    int partner_net, float partner_clearance) const;
+    bool route_via_geometry_clear(const Via& via, float clearance,
+                                  float hole_clearance, float same_net_drill_clearance) const;
+    // Broad-phase candidates whose copper bounding boxes share two-mm bins
+    // with the supplied world-coordinate box. Exact geometry remains required.
+    std::pair<std::vector<size_t>, std::vector<size_t>> route_geometry_candidates(
+        float minx, float miny, float maxx, float maxy) const;
+
     // Clear all stored validation data (pads, segments, vias).
     void clear_validation_data();
 
@@ -455,6 +471,23 @@ private:
     std::vector<int> congestion_;
     int congestion_cols_, congestion_rows_;
     int congestion_size_ = 8;  // Cells per congestion region
+
+    using RouteMarkKey = std::tuple<int, int, int, int, int, int, int, int>;
+    static RouteMarkKey segment_mark_key(int x1, int y1, int x2, int y2,
+                                         int layer, int net, int radius = 0);
+    static RouteMarkKey via_mark_key(int x, int y, int net, int radius = 0);
+    std::map<RouteMarkKey, size_t> active_route_marks_;
+    std::set<RouteMarkKey> registered_route_geometry_;
+    mutable bool route_coverage_dirty_ = true;
+    mutable bool route_coverage_complete_ = false;
+    mutable std::vector<int32_t> route_geometry_cells_;
+    void record_route_mark(const RouteMarkKey& key, bool add);
+
+    using GeometryBins = std::map<std::pair<int, int>, std::vector<size_t>>;
+    GeometryBins route_segment_bins_;
+    GeometryBins route_via_bins_;
+    static void index_route_geometry(GeometryBins& bins, size_t index,
+                                     float minx, float miny, float maxx, float maxy);
 
     // Geometric validation storage (Issue #2439)
     std::vector<PadInfo> pads_;

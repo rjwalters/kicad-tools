@@ -487,6 +487,8 @@ class Router:
         # by default -- when unset, the partner branch is dormant and
         # behavior matches pre-#2559 (single-clearance) routing.
         self._net_name_to_id: dict[str, int] = {}
+        self._route_halo_names: dict[int, str] = {}
+        self._route_halo_class: tuple[int, NetClassRouting | None] | None = None
         self._attach_zones = ()
 
         # Issue #4507 / Epic #4431 Phase 2b parity: cached search-time
@@ -1406,6 +1408,8 @@ class Router:
         disables partner detection (everything falls back to ``clearance``).
         """
         self._net_name_to_id = dict(mapping)
+        self._route_halo_names = {net: name for name, net in mapping.items()}
+        self._route_halo_class = None
         # Issue #4507: the search-time pairwise projection is keyed by net id
         # through this map -- rebuild it on the next consult.
         self._pairwise_search_cache = None
@@ -1557,6 +1561,55 @@ class Router:
             clearance,
         )
 
+    def _halo_net_class(self, net: int) -> NetClassRouting | None:
+        if self._route_halo_class is not None and self._route_halo_class[0] == net:
+            return self._route_halo_class[1]
+        return self._get_net_class(self._route_halo_names.get(net, ""))
+
+    def _trace_halo_clear(self, cells, layer, gx, gy, net, from_cell=None):
+        halo = getattr(self.grid, "_route_halo", None)
+        if halo is None:
+            return False
+        if not all(halo.cell_known(x, y, layer) for x, y in cells):
+            return False
+        name = self._route_halo_names.get(net, "")
+        nc = self._halo_net_class(net)
+        x1, y1 = self.grid.grid_to_world(*(from_cell or (gx, gy)))
+        x2, y2 = self.grid.grid_to_world(gx, gy)
+        segment = Segment(
+            x1,
+            y1,
+            x2,
+            y2,
+            nc.trace_width if nc else self.rules.trace_width,
+            self._grid_layer_object(layer),
+            net,
+            name,
+        )
+        partner = self._resolve_partner_net_id(name)
+        gap = nc.effective_intra_pair_clearance() if nc and partner is not None else None
+        return halo.clear(segment, self, partner_net=partner, partner_clearance=gap)
+
+    def _via_halo_clear(self, cells, layer, gx, gy, net):
+        halo = getattr(self.grid, "_route_halo", None)
+        if halo is None:
+            return False
+        if not all(halo.cell_known(x, y, layer) for x, y in cells):
+            return False
+        name = self._route_halo_names.get(net, "")
+        nc = self._halo_net_class(net)
+        x, y = self.grid.grid_to_world(gx, gy)
+        via = Via(
+            x,
+            y,
+            self.rules.via_drill,
+            nc.via_size if nc else self.rules.via_diameter,
+            tuple(self._grid_layer_object(l) for l in range(self.grid.num_layers)),
+            net,
+            name,
+        )
+        return halo.clear(via, self)
+
     def _is_trace_blocked(
         self,
         gx: int,
@@ -1568,6 +1621,7 @@ class Router:
         partner_net: int | None = None,
         partner_radius: int | None = None,
         partner_active: bool | None = None,
+        from_cell: tuple[int, int] | None = None,
     ) -> bool:
         """Check if placing a trace at this position would conflict.
 
@@ -1742,7 +1796,10 @@ class Router:
             # corners of the bounding square do not contribute.
             combined = combined & within_disc
             if bool(np.any(combined)):
-                return True
+                rows, cols = np.nonzero(combined)
+                cells = [(x1 + int(x), y1 + int(y)) for y, x in zip(rows, cols, strict=True)]
+                if not self._trace_halo_clear(cells, layer, gx, gy, net, from_cell):
+                    return True
         else:
             # Standard mode: block if any cell is blocked AND has different net
             # Issue #864: Same-net cells are passable (even overlapping clearance)
@@ -1754,7 +1811,10 @@ class Router:
             # corners of the bounding square do not contribute.
             blocked_different_net = blocked_different_net & within_disc
             if bool(np.any(blocked_different_net)):
-                return True
+                rows, cols = np.nonzero(blocked_different_net)
+                cells = [(x1 + int(x), y1 + int(y)) for y, x in zip(rows, cols, strict=True)]
+                if not self._trace_halo_clear(cells, layer, gx, gy, net, from_cell):
+                    return True
 
         # Issue #4507: the scalar disc is clear -- consult the cross-domain
         # (HV-isolation) annulus, mirroring the C++
@@ -1874,6 +1934,10 @@ class Router:
             # planes directly instead of allocating a _CellView per neighbor.
             if self.grid._blocked[layer, cy, cx]:
                 cell_net = int(self.grid._net[layer, cy, cx])
+                if cell_net != net and self._trace_halo_clear(
+                    [(cx, cy)], layer, gx + dx, gy + dy, net, (gx, gy)
+                ):
+                    continue
                 if allow_sharing and not self.grid._is_obstacle[layer, cy, cx]:
                     # Issue #3566 / #3545: statically blocked foreign
                     # cells (pad clearance halos, keepouts) are
@@ -1939,6 +2003,9 @@ class Router:
             radius: Override the via half-width in grid cells. When None,
                     uses the pre-computed ``_via_half_cells`` (Issue #1692).
         """
+        halo = getattr(self.grid, "_route_halo", None)
+        if halo is not None and halo.complete and not self._via_halo_clear([], layer, gx, gy, net):
+            return True
         if self.grid.fixed_fills:
             name = next(
                 (name for name, number in self._net_name_to_id.items() if number == net), ""
@@ -1996,6 +2063,14 @@ class Router:
             if blocked_grid[layer, cy, cx]:
                 blocked_cells.append((cx, cy))
 
+        blocked_cells = [
+            (cx, cy)
+            for cx, cy in blocked_cells
+            if not (
+                grid._net[layer, cy, cx] != net
+                and self._via_halo_clear([(cx, cy)], layer, gx, gy, net)
+            )
+        ]
         # Fast path: if no cells are blocked, via is not blocked
         if not blocked_cells:
             # Issue #4507: scalar disc clear -- consult the cross-domain
@@ -3415,6 +3490,8 @@ class Router:
         # Get net class if not provided
         if net_class is None:
             net_class = self._get_net_class(start.net_name)
+        self._route_halo_names[start.net] = start.net_name
+        self._route_halo_class = (start.net, net_class)
 
         # Net class cost multiplier (lower = prefer this net's route)
         cost_mult = net_class.cost_multiplier if net_class else 1.0
@@ -3914,7 +3991,18 @@ class Router:
                         pass
                     elif cell.net == 0:
                         # No-net blocked cell - use pre-computed expanded bitmap
-                        if expanded_blocked[nlayer, ny, nx]:
+                        if expanded_blocked[nlayer, ny, nx] and self._is_trace_blocked(
+                            nx,
+                            ny,
+                            nlayer,
+                            start.net,
+                            allow_sharing,
+                            radius=net_trace_half_width_cells,
+                            partner_net=partner_net_id,
+                            partner_radius=net_partner_half_width_cells,
+                            partner_active=partner_active_flag,
+                            from_cell=(current.x, current.y),
+                        ):
                             if _ASTAR_TRACE_ENABLED:
                                 _astar_trace(
                                     f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
@@ -3922,6 +4010,21 @@ class Router:
                                     f"reason=trace_blocked(no_net_blocked_cell)"
                                 )
                             continue
+                    elif self._trace_halo_clear(
+                        [(nx, ny)], nlayer, nx, ny, start.net, (current.x, current.y)
+                    ) and not self._is_trace_blocked(
+                        nx,
+                        ny,
+                        nlayer,
+                        start.net,
+                        allow_sharing,
+                        radius=net_trace_half_width_cells,
+                        partner_net=partner_net_id,
+                        partner_radius=net_partner_half_width_cells,
+                        partner_active=partner_active_flag,
+                        from_cell=(current.x, current.y),
+                    ):
+                        pass
                     else:
                         # Different net's blocked cell
                         # Issue #996: When exiting a pad's metal area, allow entering
@@ -3980,7 +4083,18 @@ class Router:
                     )
                     if not is_pad_exit_or_approach:
                         # Issue #2430: Use pre-computed expanded blocked bitmap
-                        if expanded_blocked[nlayer, ny, nx]:
+                        if expanded_blocked[nlayer, ny, nx] and self._is_trace_blocked(
+                            nx,
+                            ny,
+                            nlayer,
+                            start.net,
+                            allow_sharing,
+                            radius=net_trace_half_width_cells,
+                            partner_net=partner_net_id,
+                            partner_radius=net_partner_half_width_cells,
+                            partner_active=partner_active_flag,
+                            from_cell=(current.x, current.y),
+                        ):
                             if _ASTAR_TRACE_ENABLED:
                                 _astar_trace(
                                     f"[A*/py] cur=({current.x},{current.y},L{current.layer}) "
@@ -5037,6 +5151,8 @@ class Router:
         # Get net class if not provided
         if net_class is None:
             net_class = self._get_net_class(start.net_name)
+        self._route_halo_names[start.net] = start.net_name
+        self._route_halo_class = (start.net, net_class)
 
         cost_mult = net_class.cost_multiplier if net_class else 1.0
         allow_sharing = negotiated_mode
@@ -5536,8 +5652,24 @@ class Router:
                         partner_net=partner_net,
                         partner_radius=partner_radius,
                         partner_active=partner_active,
+                        from_cell=(current.x, current.y),
                     ):
                         continue
+                elif self._trace_halo_clear(
+                    [(nx, ny)], nlayer, nx, ny, source_pad.net, (current.x, current.y)
+                ) and not self._is_trace_blocked(
+                    nx,
+                    ny,
+                    nlayer,
+                    source_pad.net,
+                    allow_sharing,
+                    radius=trace_radius,
+                    partner_net=partner_net,
+                    partner_radius=partner_radius,
+                    partner_active=partner_active,
+                    from_cell=(current.x, current.y),
+                ):
+                    pass
                 else:
                     # Different net's blocked cell
                     # Issue #996: When exiting a pad's metal area, allow entering
@@ -5578,6 +5710,7 @@ class Router:
                         partner_net=partner_net,
                         partner_radius=partner_radius,
                         partner_active=partner_active,
+                        from_cell=(current.x, current.y),
                     ):
                         continue
 

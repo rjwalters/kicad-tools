@@ -1125,6 +1125,9 @@ class RoutingGrid:
         # grid object (a consumer that stamped a cache with the pre-realloc
         # value can never see its stamp again).
         self._occupancy_generation: int = getattr(self, "_occupancy_generation", 0) + 1
+        from .route_halo_geometry import RouteHaloGeometry
+
+        self._route_halo = RouteHaloGeometry(self)
 
     @property
     def occupancy_generation(self) -> int:
@@ -4600,6 +4603,7 @@ class RoutingGrid:
         gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
 
         layer_idx = self.layer_to_index(seg.layer.value)
+        self._route_halo.record(self._route_halo.segment_key(seg), clearance_cells, True)
         marked_cells: set[tuple[int, int]] = set()
 
         # Issue #4079: fast-path when no reservations exist (byte-identical).
@@ -4710,6 +4714,7 @@ class RoutingGrid:
         # clearance violations between traces and vias (mirrors the +1
         # applied in mark_route() for segments, see Issue #1666).
         radius += 1
+        self._route_halo.record(self._route_halo.via_key(via), radius, True)
 
         # Issue #2677: Fast-path when no reservations exist (preserves
         # byte-identical behaviour to pre-fix).
@@ -5037,6 +5042,7 @@ class RoutingGrid:
         gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
 
         layer_idx = self.layer_to_index(seg.layer.value)
+        self._route_halo.record(self._route_halo.segment_key(seg), clearance_cells, False)
         static_blocked = self._static_blocked
 
         def unmark_with_clearance(gx: int, gy: int) -> None:
@@ -5105,6 +5111,7 @@ class RoutingGrid:
         # Issue #1797: Must match _mark_via safety margin so the same
         # cells are cleared during rip-up.
         radius += 1
+        self._route_halo.record(self._route_halo.via_key(via), radius, False)
 
         static_blocked = self._static_blocked
         for layer_idx in range(self.num_layers):

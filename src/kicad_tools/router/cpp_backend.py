@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 26
+_REQUIRED_CPP_BUILD_VERSION = 27
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -1252,6 +1252,8 @@ class CppPathfinder:
         cpp_rules.via_drill = rules.via_drill
         cpp_rules.via_diameter = rules.via_diameter
         cpp_rules.via_clearance = rules.via_clearance
+        cpp_rules.min_drill_clearance = rules.min_drill_clearance
+        cpp_rules.min_hole_to_hole = rules.min_hole_to_hole
         cpp_rules.grid_resolution = rules.grid_resolution
         cpp_rules.cost_straight = rules.cost_straight
         cpp_rules.cost_turn = rules.cost_turn
@@ -2212,6 +2214,15 @@ class CppPathfinder:
             self._impl.set_search_pair_widths(net_trace_width / 2.0, net_via_size / 2.0)
         if hasattr(self._impl, "set_search_fill_clearances"):
             self._impl.set_search_fill_clearances(net_trace_clearance, self._rules.via_clearance)
+
+        if self._grid._py_grid is not None:
+            self._sync_stored_routes(self._grid._py_grid)
+        self._impl.set_search_partner_clearance(
+            partner_net_id,
+            net_class.effective_intra_pair_clearance()
+            if net_class and partner_net_id >= 0
+            else -1.0,
+        )
 
         try:
             result = self._impl.route_resumable(
@@ -3858,6 +3869,8 @@ class CppCoupledPathfinder:
         cpp_rules.via_drill = float(rules.via_drill)
         cpp_rules.via_diameter = float(rules.via_diameter)
         cpp_rules.via_clearance = float(rules.via_clearance)
+        cpp_rules.min_drill_clearance = float(rules.min_drill_clearance)
+        cpp_rules.min_hole_to_hole = float(rules.min_hole_to_hole)
         cpp_rules.grid_resolution = float(rules.grid_resolution)
         cpp_rules.cost_straight = float(rules.cost_straight)
         cpp_rules.cost_turn = float(rules.cost_turn)

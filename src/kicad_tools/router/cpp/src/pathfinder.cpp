@@ -187,9 +187,38 @@ void Pathfinder::ensure_search_arrays_sized() {
     ++search_current_gen_;
 }
 
+bool Pathfinder::trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1,
+                                       int x2, int y2, int net, int partner) const {
+    if (!grid_.route_cell_has_geometry(cx, cy, layer)) return false;
+    if (partner >= 0 && partner != physical_partner_net_) return false;
+    const auto [ax, ay] = grid_.grid_to_world(x1, y1);
+    const auto [bx, by] = grid_.grid_to_world(x2, y2);
+    Segment segment;
+    segment.x1 = ax; segment.y1 = ay; segment.x2 = bx; segment.y2 = by;
+    segment.width = search_trace_half_width_mm_ > 0 ? 2 * search_trace_half_width_mm_ : rules_.trace_width;
+    segment.layer = layer; segment.net = net;
+    const float clearance = search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance;
+    return grid_.route_trace_geometry_clear(segment, clearance,
+                                            physical_partner_net_, physical_partner_clearance_);
+}
+
+bool Pathfinder::via_halo_cell_clear(int cx, int cy, int layer, int x, int y, int net) const {
+    return grid_.route_cell_has_geometry(cx, cy, layer) && via_route_geometry_clear(x, y, net);
+}
+
+bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {
+    const auto [wx, wy] = grid_.grid_to_world(x, y);
+    Via via;
+    via.x = wx; via.y = wy; via.net = net; via.drill = rules_.via_drill;
+    via.diameter = search_via_half_diam_mm_ > 0 ? 2 * search_via_half_diam_mm_ : rules_.via_diameter;
+    via.layer_from = 0; via.layer_to = grid_.layers() - 1;
+    const float clearance = search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance;
+    return grid_.route_via_geometry_clear(via, clearance, rules_.min_hole_to_hole, rules_.min_drill_clearance);
+}
+
 bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                                   bool allow_sharing, int radius_override,
-                                  int partner_net, int partner_radius) const {
+                                  int partner_net, int partner_radius, int from_x, int from_y) const {
     int radius = (radius_override > 0) ? radius_override : trace_half_width_cells_;
 
     // Issue #2559 / Epic #2556 Phase 1C: when the partner branch is active
@@ -249,6 +278,10 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
 
             const auto& cell = grid_.at(cx, cy, layer);
             if (!cell.blocked) {
+                continue;
+            }
+            if (cell.net != net && trace_halo_cell_clear(cx, cy, layer, from_x >= 0 ? from_x : x,
+                                                       from_y >= 0 ? from_y : y, x, y, net, partner_net)) {
                 continue;
             }
 
@@ -333,6 +366,10 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
 
             const auto& cell = grid_.at(cx, cy, layer);
             if (!cell.blocked) {
+                continue;
+            }
+            if (cell.net != net && trace_halo_cell_clear(cx, cy, layer, from_x >= 0 ? from_x : x,
+                                                       from_y >= 0 ? from_y : y, x, y, net, partner_net)) {
                 continue;
             }
 
@@ -464,6 +501,8 @@ bool Pathfinder::is_diagonal_blocked(int x, int y, int dx, int dy, int layer,
 
         const auto& cell = grid_.at(cx, cy, layer);
         if (cell.blocked) {
+            if (cell.net != net && trace_halo_cell_clear(cx, cy, layer, x, y, x + dx, y + dy, net))
+                continue;
             if (allow_sharing) {
                 // Negotiated mode: own-net obstacle cells remain
                 // passable (Issue #2989 sibling fix; see
@@ -752,6 +791,8 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
     out_world_x = 0.0f;
     out_world_y = 0.0f;
 
+    if (grid_.route_geometry_complete() && !via_route_geometry_clear(x, y, net)) return true;
+
     if (grid_.has_fixed_fills()) {
         auto [wx, wy] = grid_.grid_to_world(x, y);
         const double half = search_via_half_diam_mm_ > 0
@@ -818,6 +859,7 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                 if (!cell.blocked) {
                     continue;
                 }
+                if (cell.net != net && via_halo_cell_clear(cx, cy, layer, x, y, net)) continue;
 
                 if (allow_sharing) {
                     // Negotiated mode: mirror Python
@@ -884,6 +926,7 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                     if (!cell.blocked) {
                         continue;
                     }
+                    if (cell.net != net && via_halo_cell_clear(cx, cy, layer, x, y, net)) continue;
 
                     if (allow_sharing) {
                         if (cell.is_obstacle && cell.net != net) {
@@ -1133,7 +1176,8 @@ RouteResult Pathfinder::route(
     float emit_via_drill,
     const std::vector<PadChannelBudget>& pad_channel_budgets
 ) {
-    // Non-resumable route: use local A* state, no member state touched.
+    begin_route_geometry_context(partner_net);
+    // Non-resumable route: use local A* state.
     // This preserves backward compatibility for callers that don't need retry.
     //
     // Issue #2610: silence -Wunused-parameter for the partner_net/intra_pair
@@ -1378,7 +1422,7 @@ RouteResult Pathfinder::route(
                 } else if (cell.net == 0) {
                     if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
                                          trace_radius_cells,
-                                         partner_net, intra_pair_radius_cells)) {
+                                         partner_net, intra_pair_radius_cells, current.x, current.y)) {
                         if (astar_trace_enabled()) {
                             std::fprintf(stderr,
                                 "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
@@ -1387,6 +1431,11 @@ RouteResult Pathfinder::route(
                         }
                         continue;
                     }
+                } else if (trace_halo_cell_clear(nx, ny, nlayer, current.x, current.y,
+                                                   nx, ny, net, partner_net) &&
+                           !is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
+                                             trace_radius_cells, partner_net, intra_pair_radius_cells, current.x, current.y)) {
+                    // Registered dynamic halo; exact swept copper is clear.
                 } else if (relief_mode_ && !cell.is_obstacle &&
                            !cell.pad_blocked) {
                     // Issue #3438: relief probe may step ON foreign
@@ -1442,7 +1491,7 @@ RouteResult Pathfinder::route(
                 if (!is_pad_exit_or_approach) {
                     if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
                                          trace_radius_cells,
-                                         partner_net, intra_pair_radius_cells)) {
+                                         partner_net, intra_pair_radius_cells, current.x, current.y)) {
                         if (astar_trace_enabled()) {
                             std::fprintf(stderr,
                                 "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
@@ -1666,6 +1715,7 @@ RouteResult Pathfinder::route_resumable(
     float emit_via_drill,
     const std::vector<PadChannelBudget>& pad_channel_budgets
 ) {
+    begin_route_geometry_context(partner_net);
     // Clear any previous search state
     clear_search_state();
 
@@ -1984,7 +2034,7 @@ RouteResult Pathfinder::run_astar_loop() {
                                          search_negotiated_mode_,
                                          search_trace_radius_cells_,
                                          search_partner_net_,
-                                         search_intra_pair_radius_cells_)) {
+                                         search_intra_pair_radius_cells_, current.x, current.y)) {
                         if (astar_trace_enabled()) {
                             std::fprintf(stderr,
                                 "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
@@ -1995,6 +2045,12 @@ RouteResult Pathfinder::run_astar_loop() {
                         }
                         continue;
                     }
+                } else if (trace_halo_cell_clear(nx, ny, nlayer, current.x, current.y,
+                                                   nx, ny, search_net_, search_partner_net_) &&
+                           !is_trace_blocked(nx, ny, nlayer, search_net_, search_negotiated_mode_,
+                                             search_trace_radius_cells_, search_partner_net_,
+                                             search_intra_pair_radius_cells_, current.x, current.y)) {
+                    // Same refinement in resumable search.
                 } else if (relief_mode_ && !cell.is_obstacle &&
                            !cell.pad_blocked) {
                     // Issue #3438: relief probe may step ON foreign
@@ -2049,7 +2105,7 @@ RouteResult Pathfinder::run_astar_loop() {
                                          search_negotiated_mode_,
                                          search_trace_radius_cells_,
                                          search_partner_net_,
-                                         search_intra_pair_radius_cells_)) {
+                                         search_intra_pair_radius_cells_, current.x, current.y)) {
                         if (astar_trace_enabled()) {
                             std::fprintf(stderr,
                                 "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "

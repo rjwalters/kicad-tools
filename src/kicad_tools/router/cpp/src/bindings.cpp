@@ -66,6 +66,7 @@ NB_MODULE(router_cpp, m) {
         .def_rw("cost_congestion", &DesignRules::cost_congestion)
         .def_rw("congestion_threshold", &DesignRules::congestion_threshold)
         .def_rw("min_drill_clearance", &DesignRules::min_drill_clearance)
+        .def_rw("min_hole_to_hole", &DesignRules::min_hole_to_hole)
         // Issue #4071: soft corridor-attractor bonus (Python default 3.0).
         .def_rw("cost_corridor_attractor", &DesignRules::cost_corridor_attractor);
 
@@ -211,6 +212,11 @@ NB_MODULE(router_cpp, m) {
         .def("clear_fixed_fills", &Grid3D::clear_fixed_fills)
         .def("add_fixed_fill", &Grid3D::add_fixed_fill)
         .def("fixed_fill_clear", &Grid3D::fixed_fill_clear)
+        .def("route_geometry_complete", &Grid3D::route_geometry_complete)
+        .def("route_cell_has_geometry", &Grid3D::route_cell_has_geometry)
+        .def("route_trace_geometry_clear", &Grid3D::route_trace_geometry_clear)
+        .def("route_via_geometry_clear", &Grid3D::route_via_geometry_clear)
+        .def("route_geometry_candidates", &Grid3D::route_geometry_candidates)
         .def("mark_blocked", &Grid3D::mark_blocked,
              "x"_a, "y"_a, "layer"_a, "net"_a, "is_obstacle"_a = false,
              "pad_blocked"_a = false)
@@ -512,7 +518,7 @@ NB_MODULE(router_cpp, m) {
         .def("is_trace_blocked", &Pathfinder::is_trace_blocked,
              "x"_a, "y"_a, "layer"_a, "net"_a, "allow_sharing"_a,
              "radius_override"_a = 0, "partner_net"_a = -1,
-             "partner_radius"_a = 0,
+             "partner_radius"_a = 0, "from_x"_a = -1, "from_y"_a = -1,
              "Check if a trace placement at (x, y, layer) is blocked, "
              "accounting for trace width.  Exposed for the Issue #3456 "
              "regression tests: same-net cells must be passable in "
@@ -534,6 +540,7 @@ NB_MODULE(router_cpp, m) {
              "path whose crossed owner nets feed the targeted rip-up.")
         .def_prop_ro("relief_mode", &Pathfinder::relief_mode)
         .def("set_search_fill_clearances", &Pathfinder::set_search_fill_clearances)
+        .def("set_search_partner_clearance", &Pathfinder::set_search_partner_clearance)
         .def("set_search_pair_widths", &Pathfinder::set_search_pair_widths,
              "trace_half_width_mm"_a, "via_half_diam_mm"_a,
              "Issue #4511 / Epic #4431 Phase 2b: set the routing net's copper "
