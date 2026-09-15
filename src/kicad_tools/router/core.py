@@ -16574,7 +16574,22 @@ class Autorouter:
                     num_copper_layers=num_layers,
                     blind_buried_supported=blind_buried_supported,
                     fixed_segment_ids=fixed_segment_ids,
-                    preserve_pair_spacing=bool(net_class is not None and net_class.coupled_routing),
+                    # Mixed groups take length policy from their scalar reference,
+                    # but each pair retains its own copper-spacing contract.
+                    coupled_pair_ids={
+                        pair
+                        for pair in group.pair_ids
+                        if any(
+                            (
+                                pair_class := (self.net_class_map or {}).get(
+                                    self.net_names.get(nid, "")
+                                )
+                            )
+                            is not None
+                            and pair_class.coupled_routing
+                            for nid in pair
+                        )
+                    },
                 )
             except ValueError as exc:
                 # Defensive: a malformed group (e.g. mixed pair/scalar

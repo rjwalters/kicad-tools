@@ -270,3 +270,39 @@ def test_coupled_net_class_automatically_selects_coordinated_group_loops():
     assert min(min(s.y1, s.y2) for s in p.segments) < 10
     assert min(min(s.y1, s.y2) for s in n.segments) < 11
     assert physical_length(ar, 1) == pytest.approx(physical_length(ar, 2), abs=1e-7)
+
+
+@pytest.mark.parametrize("coupled_member", ["N1", "N2"])
+def test_mixed_scalar_group_uses_each_pairs_own_coupling_class(coupled_member):
+    from kicad_tools.router.rules import NetClassRouting
+
+    ar, group = setup_pair(reference_length=12, via_counts=(0, 0, 0, 0))
+    reference = route(5, 5, 19, 38)
+    ar.routes.append(reference)
+    group.net_ids = [5]
+    group.reference_net_id = None
+    scalar_class = NetClassRouting(
+        name="DDR_DATA",
+        coupled_routing=False,
+        length_critical=True,
+        length_match_tolerance_mm=0.1,
+        intra_pair_clearance=0.1,
+    )
+    ar.net_class_map = dict.fromkeys(ar.net_names.values(), scalar_class)
+    ar.net_class_map[coupled_member] = NetClassRouting(
+        name="DDR_DQS",
+        coupled_routing=True,
+        length_critical=True,
+        length_match_tolerance_mm=0.1,
+        intra_pair_clearance=0.1,
+    )
+    result = ar.apply_match_group_tuning([group], verbose=False)[group.name]
+    assert all(result[n][1].success for n in (1, 2, 3, 4))
+    # Coupled pair retains its spacing even though the group's scalar class
+    # is uncoupled. Another uncoupled pair keeps the legacy mirrored policy.
+    assert min(s.y1 for s in result[1][0].segments) < 10
+    assert min(s.y1 for s in result[2][0].segments) < 11
+    assert min(s.y1 for s in result[3][0].segments) < 25
+    assert max(s.y1 for s in result[4][0].segments) > 26
+    assert result[5][0] is reference
+    assert all(physical_length(ar, n) == pytest.approx(14, abs=0.02) for n in range(1, 6))

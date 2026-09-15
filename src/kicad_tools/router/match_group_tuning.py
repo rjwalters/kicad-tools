@@ -490,6 +490,7 @@ def tune_match_group_v2(
     blind_buried_supported: bool = True,
     fixed_segment_ids: set[int] | None = None,
     preserve_pair_spacing: bool = False,
+    coupled_pair_ids: set[tuple[int, int]] | None = None,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Tune the lengths of an N-trace match group to within tolerance.
 
@@ -561,6 +562,10 @@ def tune_match_group_v2(
         preserve_pair_spacing: Use a coordinated loop instead of opposite
             mirrored bulges, retaining the host spacing. All candidate
             clearance checks and insertion budgets still apply.
+        coupled_pair_ids: Optional per-pair override of ``preserve_pair_spacing``.
+            Only the listed pairs use coordinated loops; other pairs retain
+            mirrored tuning. This keeps mixed scalar/pair groups from inheriting
+            the scalar reference class's coupling policy.
         grid_resolution_mm: Interior snapping resolution for reflected
             geometry that needs angle correction. Already legal reflected
             geometry stays exact so both halves gain the same length.
@@ -714,6 +719,7 @@ def tune_match_group_v2(
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
             preserve_pair_spacing=preserve_pair_spacing,
+            coupled_pair_ids=coupled_pair_ids,
         )
 
     return _tune_match_group_single_ended(
@@ -2702,6 +2708,7 @@ def _tune_match_group_of_pairs(
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
     preserve_pair_spacing: bool = False,
+    coupled_pair_ids: set[tuple[int, int]] | None = None,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Pair-aware Phase 2F path: mirrored serpentine geometry for pair members.
 
@@ -2835,6 +2842,9 @@ def _tune_match_group_of_pairs(
     total_inserts_committed = 0
 
     for p_id, n_id in group.pair_ids:
+        pair_preserves_spacing = (
+            preserve_pair_spacing if coupled_pair_ids is None else (p_id, n_id) in coupled_pair_ids
+        )
         maybe_p_route = routes_by_net.get(p_id)
         maybe_n_route = routes_by_net.get(n_id)
 
@@ -3005,7 +3015,7 @@ def _tune_match_group_of_pairs(
                 current_n,
                 base_config.min_segment_length,
                 fixed_segment_ids,
-                max_candidates=MAX_SEGMENT_RETRY_CANDIDATES if preserve_pair_spacing else 1,
+                max_candidates=MAX_SEGMENT_RETRY_CANDIDATES if pair_preserves_spacing else 1,
             )
             if not host_candidates:
                 for r in (per_pair_result_p, per_pair_result_n):
@@ -3075,7 +3085,7 @@ def _tune_match_group_of_pairs(
                     ny=hint[1],
                     grid_resolution_mm=grid_resolution_mm,
                 )
-                if preserve_pair_spacing:
+                if pair_preserves_spacing:
                     from dataclasses import replace
 
                     from .coordinated_tuning import coordinated_pair_loop
@@ -3153,7 +3163,7 @@ def _tune_match_group_of_pairs(
                     pads_by_net=pads_by_net,
                     pad_clearance_mm=pad_clearance_mm,
                 )
-                if pair_drc_detail is not None and preserve_pair_spacing:
+                if pair_drc_detail is not None and pair_preserves_spacing:
                     # A coordinated loop can bulge toward either side while
                     # preserving both added lengths and the physical pair gap.
                     # Try the opposite side once before rolling back the pair.
