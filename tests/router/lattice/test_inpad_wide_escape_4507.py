@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 
+import pytest
 from shapely.geometry import box
 
 from kicad_tools.geometry.copper import segment_copper_polygon
@@ -117,13 +118,18 @@ def test_existing_successful_center_escape_is_unchanged():
     assert before and after == before and width == 0.2
 
 
-def test_complete_emitted_route_bonds_pad_without_reintroducing_center_leg():
+@pytest.mark.parametrize(
+    "shape,rotation",
+    [("rect", 0), ("rect", 35), ("rect", 90), ("circle", 35), ("oval", 35), ("roundrect", 35)],
+)
+def test_complete_emitted_route_bonds_pad_without_reintroducing_center_leg(shape, rotation):
     from shapely.geometry import Point
     from shapely.ops import unary_union
 
     from kicad_tools.router.layers import Layer
 
     _, root, sibling, nc = fixture()
+    root = replace(root, shape=shape, rotation=rotation)
     target = Pad(-1, 5, 3, 3, 1, "HV", ref="J1", pin="1")
     pf = LatticePathfinder(
         [(-4, 0), (9, 0), (9, 10), (-4, 10)],
@@ -136,11 +142,19 @@ def test_complete_emitted_route_bonds_pad_without_reintroducing_center_leg():
     assert route.segments and all(s.width >= 2.0 for s in route.segments)
     assert all(s.layer == Layer.F_CU for s in route.segments)
     copper = unary_union([segment_copper_polygon(s.start, s.end, s.width) for s in route.segments])
-    rootpoly = box(
-        root.x - root.width / 2,
-        root.y - root.height / 2,
-        root.x + root.width / 2,
-        root.y + root.height / 2,
+    from types import SimpleNamespace
+
+    from kicad_tools.validate.rules.clearance import _pad_polygon
+
+    rootpoly = _pad_polygon(
+        SimpleNamespace(
+            position=(root.x, root.y),
+            size=(root.width, root.height),
+            shape=shape,
+            rotation=rotation,
+            roundrect_rratio=0.25,
+        ),
+        SimpleNamespace(position=(0, 0), rotation=0),
     )
     targetpoly = box(-2.5, 3.5, 0.5, 6.5)
     foreign = box(
@@ -158,3 +172,13 @@ def test_complete_emitted_route_bonds_pad_without_reintroducing_center_leg():
     assert all(s.start != (root.x, root.y) and s.end != (root.x, root.y) for s in route.segments)
     assert rootpoly.contains(Point(route.segments[0].start))
     assert route.segments[0].to_sexp()
+
+
+@pytest.mark.parametrize("shape", ["custom", "trapezoid", "unknown"])
+def test_unproved_pad_shapes_do_not_get_interior_attachment_fallback(shape):
+    pf, root, _, nc = fixture()
+    # Current Pad construction rejects these; retain a defensive guard for
+    # legacy/mutated carriers whose nominal box does not establish copper.
+    root.shape = shape
+    stubs, width = escape(pf, root, nc)
+    assert not stubs and width == 2.0

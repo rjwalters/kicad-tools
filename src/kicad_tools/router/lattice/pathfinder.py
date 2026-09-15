@@ -864,7 +864,12 @@ class LatticePathfinder:
             layers=layers,
             exempt_pads=exempt_pads,
         )
-        if not neck_stubs and not pad.through_hole and not pad.steiner_point:
+        if (
+            not neck_stubs
+            and not pad.through_hole
+            and not pad.steiner_point
+            and pad.shape in {"rect", "circle", "oval", "roundrect"}
+        ):
             # A wide center-launch cap can approach a sibling pad more closely
             # than the authored pad copper does. Try interior attachment sites
             # without reducing the class neck width or clearance (#4507).
