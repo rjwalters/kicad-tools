@@ -1697,8 +1697,8 @@ def compute_multi_resolution_plan(
         off_grid_refs: dict[str, list] = {}
         offset = uniform_result.origin_offset
         for pad in pad_list:
-            ref = getattr(pad, "ref", None)
-            if not ref:
+            ref = getattr(pad, "component_key", getattr(pad, "ref", None))
+            if ref is None:
                 continue
             x_on = _is_on_grid_with_offset(pad.x, coarse_resolution, offset[0])
             y_on = _is_on_grid_with_offset(pad.y, coarse_resolution, offset[1])
@@ -1763,8 +1763,8 @@ def compute_multi_resolution_plan(
     # Group pads by component reference
     by_ref: dict[str, list] = {}
     for pad in pad_list:
-        ref = getattr(pad, "ref", None)
-        if ref and ref in fine_components:
+        ref = getattr(pad, "component_key", getattr(pad, "ref", None))
+        if ref is not None and ref in fine_components:
             if ref not in by_ref:
                 by_ref[ref] = []
             by_ref[ref].append(pad)
@@ -2169,12 +2169,18 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
     net_name_to_num = _build_net_number_map(pcb_text)
 
     # Split by footprint for easier parsing
-    footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
+    from kicad_tools.schema.pcb import PCB as IdentityPCB
+    from kicad_tools.schema.physical_identity import footprint_keys
+    from kicad_tools.sexp import parse_string as parse_identity_document
 
-    for section in footprint_sections:
-        if not section.startswith("(footprint") and not section.startswith("(module"):
-            continue
-
+    identity_document = IdentityPCB(parse_identity_document(pcb_text))
+    source_keys = footprint_keys(identity_document.footprints)
+    footprint_sections = [
+        section
+        for section in re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
+        if section.startswith("(footprint") or section.startswith("(module")
+    ]
+    for section, component_id in zip(footprint_sections, source_keys, strict=True):
         # Get footprint library name (e.g. "Package_QFP:TQFP-32_7x7mm_P0.8mm")
         footprint_name_match = re.search(r'\(footprint\s+"([^"]*)"', section)
         footprint_name = footprint_name_match.group(1) if footprint_name_match else ""
@@ -2248,6 +2254,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                     net=net_num,
                     net_name=net_name,
                     ref=ref,
+                    component_id=component_id,
                     pin=pin,
                     layer=layer,
                     through_hole=is_thru,
@@ -3341,8 +3348,10 @@ def route_pcb(
         rules=rules,
     )
 
-    # Add all component pads
-    for comp in components:
+    from kicad_tools.schema.physical_identity import component_keys
+
+    # Assign identities from the full population before skipping any net pads.
+    for comp, component_id in zip(components, component_keys(components), strict=True):
         ref = comp["ref"]
         cx, cy = comp["x"], comp["y"]
         rotation = comp.get("rotation", 0)
@@ -3387,7 +3396,7 @@ def route_pcb(
             )
 
         if pads:
-            router.add_component(ref, pads)
+            router.add_component(ref, pads, component_id=component_id)
 
     # Get all nets that need routing (exclude plane nets)
     nets_to_route: list[int] = []
@@ -3633,6 +3642,7 @@ def _install_fine_pitch_regions_from_components(
                         net_name=str(pad_info.get("net_name", "")),
                         layer=pad_info.get("layer", Layer.F_CU),
                         ref=ref,
+                        component_id=comp.get("component_id", ref),
                         pin=str(pad_info.get("number", "")),
                         through_hole=bool(pad_info.get("through_hole", False)),
                         drill=float(pad_info.get("drill", 0.0)),
@@ -3887,12 +3897,19 @@ def load_pcb_for_routing(
     placement_fixed_pads: list[FixedPadCopper] = []
 
     # Split by footprint for easier parsing
-    footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
+    from kicad_tools.schema.pcb import PCB as IdentityPCB
+    from kicad_tools.schema.physical_identity import footprint_keys, validate_netlist_selectors
+    from kicad_tools.sexp import parse_string as parse_identity_document
 
-    for section in footprint_sections:
-        if not section.startswith("(footprint") and not section.startswith("(module"):
-            continue
-
+    identity_document = IdentityPCB(parse_identity_document(pcb_text))
+    source_keys = footprint_keys(identity_document.footprints)
+    validate_netlist_selectors(identity_document.footprints, netlist or {})
+    footprint_sections = [
+        section
+        for section in re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
+        if section.startswith("(footprint") or section.startswith("(module")
+    ]
+    for section, component_id in zip(footprint_sections, source_keys, strict=True):
         # Get footprint position
         # Note: coordinates can be negative (footprints outside board origin)
         at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)", section)
@@ -4062,6 +4079,7 @@ def load_pcb_for_routing(
             components.append(
                 {
                     "ref": ref,
+                    "component_id": component_id,
                     "x": fp_x,
                     "y": fp_y,
                     "rotation": fp_rot,
@@ -4119,6 +4137,25 @@ def load_pcb_for_routing(
             warn=_has_fine_pitch and strategy == "grid",
             strict=strict_drc,
         )
+
+    if placement_disposition is not None and placement_disposition.physical_pad_net_identities:
+        physical_pad_nets = tuple(
+            sorted(
+                (
+                    key,
+                    fp.reference,
+                    pad.number,
+                    pad.net_name,
+                    (netlist or {}).get(f"{fp.reference}.{pad.number}", pad.net_name),
+                )
+                for fp, key in zip(identity_document.footprints, source_keys, strict=True)
+                for pad in fp.pads
+            )
+        )
+        if physical_pad_nets != placement_disposition.physical_pad_net_identities:
+            raise ValueError(
+                "Placement disposition pad/net identities do not match this board (physical terminals)"
+            )
 
     if (
         placement_disposition is not None
@@ -4248,7 +4285,7 @@ def load_pcb_for_routing(
     # Add all components
     for comp in components:
         # Pads already have absolute positions
-        router.add_component(comp["ref"], comp["pads"])
+        router.add_component(comp["ref"], comp["pads"], component_id=comp["component_id"])
 
     # Extract edge segments for board bbox and optional edge clearance
     # (Issue #2039).  The bbox derived from actual edge cuts is more

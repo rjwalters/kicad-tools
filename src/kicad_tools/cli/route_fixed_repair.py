@@ -12,6 +12,7 @@ from kicad_tools.core.atomic_write import atomic_write_text
 from kicad_tools.placement.routing import RoutingPlacementDisposition
 from kicad_tools.router.optimizer.pcb import parse_net_names
 from kicad_tools.schema.pcb import PCB, Footprint
+from kicad_tools.schema.physical_identity import footprint_keys
 from kicad_tools.sexp import parse_string
 
 
@@ -19,6 +20,8 @@ def _fixed_snapshot(path: Path, disposition: RoutingPlacementDisposition) -> tup
     text = path.read_text()
     document = parse_string(text)
     nets = parse_net_names(text)
+    pcb = PCB.load(path)
+    physical_keys = iter(footprint_keys(pcb.footprints))
     fixed_refs = disposition.invalid_references | frozenset(
         ref
         for ref, _pad, authored, effective in disposition.pad_net_identities
@@ -31,7 +34,14 @@ def _fixed_snapshot(path: Path, disposition: RoutingPlacementDisposition) -> tup
         if node.name in {"footprint", "module"}:
             # Match placement analysis, including absent/empty reference text
             # and the schema's precedence between legacy text and properties.
-            protected = Footprint.from_sexp(node).reference in fixed_refs
+            physical_key = next(physical_keys)
+            footprint = Footprint.from_sexp(node)
+            if disposition.physical_pad_net_identities:
+                protected = physical_key in disposition.preserved_footprints or any(
+                    pad.net_name in disposition.preserve_copper_nets for pad in footprint.pads
+                )
+            else:
+                protected = footprint.reference in fixed_refs
         elif node.name in {"segment", "via", "arc", "zone"}:
             net = node.find("net")
             token = net.children[0].value if net is not None and net.children else 0
@@ -39,7 +49,6 @@ def _fixed_snapshot(path: Path, disposition: RoutingPlacementDisposition) -> tup
             protected = name in disposition.preserve_copper_nets
         if protected:
             fixed[(node.name, node.to_string(compact=True, preserve_source=False))] += 1
-    pcb = PCB.load(path)
     identities = Counter(
         (f.reference, p.number, p.net_name) for f in pcb.footprints for p in f.pads
     )

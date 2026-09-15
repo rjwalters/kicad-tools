@@ -3398,13 +3398,16 @@ def _resolve_placement_feedback_anchors(pcb, args, quiet: bool = False) -> set[s
         # Fixed copper cannot follow a placement move. Protect both the
         # invalid footprint and every terminal of its preserved nets, even
         # when the caller removes an ordinary mechanical anchor.
-        anchors |= disposition.invalid_references
-        anchors.update(
-            ref
-            for ref, _pad, authored, effective in disposition.pad_net_identities
-            if authored in disposition.preserve_copper_nets
-            or effective in disposition.preserve_copper_nets
-        )
+        if disposition.physical_pad_net_identities:
+            anchors |= disposition.preserved_footprints
+        else:
+            anchors |= disposition.invalid_references
+            anchors.update(
+                ref
+                for ref, _pad, authored, effective in disposition.pad_net_identities
+                if authored in disposition.preserve_copper_nets
+                or effective in disposition.preserve_copper_nets
+            )
     return anchors
 
 
@@ -11515,7 +11518,9 @@ def _detect_region_stub_terminals(pcb, region_box: tuple[float, float, float, fl
             net_name = getattr(pad, "net_name", "") or ""
             if not net_name:
                 continue
-            pos = pcb.get_pad_position(fp.reference, pad.number)
+            from kicad_tools.schema.physical_identity import physical_pad_position
+
+            pos = physical_pad_position(fp, pad)
             if pos is None:
                 continue
             pad_inputs.append(PadLocation(net_id=pad.net_number, x=pos[0], y=pos[1]))
@@ -11604,12 +11609,13 @@ def _parse_and_apply_region(args, pcb_path: Path, region_arg: str) -> int:
     # Collect board-relative pad positions per net.
     net_pads: dict[str, list[tuple[float, float]]] = {}
     for fp in pcb.footprints:
-        ref = fp.reference
         for pad in fp.pads:
             net_name = getattr(pad, "net_name", "") or ""
             if not net_name or net_name in skip:
                 continue
-            pos = pcb.get_pad_position(ref, pad.number)
+            from kicad_tools.schema.physical_identity import physical_pad_position
+
+            pos = physical_pad_position(fp, pad)
             if pos is None:
                 continue
             net_pads.setdefault(net_name, []).append(pos)
@@ -12278,7 +12284,9 @@ def _apply_complete_localization(args, pcb_path: Path) -> int:
             net_name = getattr(pad, "net_name", "") or ""
             if net_name not in stranded:
                 continue
-            pos = pcb.get_pad_position(fp.reference, pad.number)
+            from kicad_tools.schema.physical_identity import physical_pad_position
+
+            pos = physical_pad_position(fp, pad)
             if pos is None:
                 continue
             pads_by_net.setdefault(net_name, []).append((pos[0], pos[1]))

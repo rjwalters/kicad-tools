@@ -50,10 +50,10 @@ def disposition_from_control(state: dict) -> RoutingPlacementDisposition | None:
         return None
     values = {}
     for field in fields(RoutingPlacementDisposition):
-        value = encoded[field.name]
+        value = encoded.get(field.name, field.default)
         if field.name == "check_available":
             values[field.name] = value
-        elif field.name == "pad_net_identities":
+        elif field.name in {"pad_net_identities", "physical_pad_net_identities"}:
             values[field.name] = tuple(tuple(identity) for identity in value)
         else:
             values[field.name] = frozenset(value)

@@ -92,6 +92,13 @@ class StrategyApplicator:
         Returns:
             ApplicationResult with success status and details.
         """
+        # Resolve every placement selector before any action can mutate the PCB.
+        # In particular, a later ambiguous reference in MOVE_MULTIPLE must not
+        # leave the earlier, uniquely identified footprints partially moved.
+        for action in strategy.actions:
+            if action.type in {"move", "rotate", "mirror"}:
+                self._find_footprint(pcb, action.target)
+
         if strategy.type == StrategyType.MOVE_COMPONENT:
             return self._apply_move_component(pcb, strategy)
         elif strategy.type == StrategyType.MOVE_MULTIPLE:
@@ -689,10 +696,15 @@ class StrategyApplicator:
         return positions
 
     def _find_footprint(self, pcb: PCB, ref: str):
-        """Find a footprint by reference designator."""
-        for fp in pcb.footprints:
-            if fp.reference == ref:
+        """Resolve a physical key or an unambiguous authored reference."""
+        from kicad_tools.schema.physical_identity import footprint_keys
+
+        footprints = list(pcb.footprints)
+        for key, fp in zip(footprint_keys(footprints), footprints, strict=True):
+            if key == ref:
                 return fp
+        if sum(fp.reference == ref for fp in footprints) > 1:
+            raise ValueError(f"Ambiguous footprint reference {ref!r}; use a physical component ID")
         return None
 
     def _get_board_bounds(self, pcb: PCB) -> Rectangle | None:

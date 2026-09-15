@@ -752,21 +752,32 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
             net_name=pad_info["net_name"],
             layer=pad_info["layer"],
             ref=ref,
+            component_id=pad_data.get("component_id", ref),
             pin=pin,
             through_hole=pad_info["through_hole"],
             drill=pad_info["drill"],
+            drill_size=pad_data.get("drill_size"),
+            drill_rotation=pad_data.get("drill_rotation", 0.0),
+            footprint_name=pad_data.get("footprint_name", ""),
+            steiner_point=pad_data.get("steiner_point", False),
             rotation=pad_info["rotation"],
             shape=pad_info["shape"],
         )
-        key = (ref, pin)
+        key = pad.key
+        if key in router.pads and router.pads[key].net != pad.net:
+            raise ValueError(f"Physical terminal {key!r} has conflicting nets")
         router.pads[key] = pad
-        router.grid.add_pad(pad)
+        router.all_pads.append(pad)
+        router.grid.add_pad(pad, pin_pitch=pad_data.get("pin_pitch"))
 
     # A missing legacy payload is unknown, not a verified empty census.
     router._loaded_component_holes = config.get("component_holes")
 
     # Restore nets and net_names
-    router.nets = {int(k): v for k, v in config["nets"].items()}
+    router.nets = {
+        int(k): list(dict.fromkeys((key[0], key[1]) for key in keys))
+        for k, keys in config["nets"].items()
+    }
     router.net_names = {int(k): v for k, v in config["net_names"].items()}
 
     # Restore pour-net overrides so _is_pour_net() returns correct results
@@ -2086,17 +2097,26 @@ class Autorouter:
 
         return layer_widths
 
-    def add_component(self, ref: str, pads: list[dict]):
+    def add_component(self, ref: str, pads: list[dict], *, component_id: str | None = None):
         """Add a component's pads.
 
         Computes the component's minimum pin pitch from pad positions and
         passes it to the grid so fine-pitch pads get reduced clearance
         envelopes (Issue #1778).
         """
+        physical_id = component_id if component_id is not None else ref
+        pin_nets: dict[str, int] = {}
+        for info in pads:
+            pin, net = str(info["number"]), info.get("net", 0)
+            if pin in pin_nets and pin_nets[pin] != net:
+                raise ValueError(f"Physical terminal {ref}.{pin} has conflicting nets")
+            pin_nets[pin] = net
+
         # Pre-compute minimum pin pitch for this component from pad positions
         # so the grid can apply reduced clearance for fine-pitch packages.
         pin_pitch = self._compute_component_pitch(pads)
 
+        prepared: list[Pad] = []
         for pad_info in pads:
             pin = str(pad_info["number"])
             pad = Pad(
@@ -2108,13 +2128,26 @@ class Autorouter:
                 net_name=pad_info.get("net_name", ""),
                 layer=pad_info.get("layer", Layer.F_CU),
                 ref=ref,
+                component_id=physical_id,
                 pin=pin,
                 through_hole=pad_info.get("through_hole", False),
                 drill=pad_info.get("drill", 0.0),
                 rotation=pad_info.get("rotation", 0.0),
                 shape=pad_info.get("shape", "rect"),
             )
-            key = (ref, pin)
+            prepared.append(pad)
+        existing = [p for p in self.all_pads if p.component_key == physical_id]
+        if existing:
+            if existing == prepared:
+                # Existing callers re-register exact components after trial
+                # reset. That is idempotent, not a second physical footprint.
+                return
+            raise ValueError(
+                f"Component identity {physical_id!r} already exists; "
+                "distinct footprints require distinct component_id values"
+            )
+        for pad in prepared:
+            key = pad.key
             # Issue #4271: ``self.pads`` is keyed (ref, pin), so a footprint
             # with DUPLICATE pad numbers (thermal-via arrays / EP paddles --
             # softstart's ESP32-C3 module has 13 pads named "19" and 9 named
@@ -2132,7 +2165,8 @@ class Autorouter:
             if pad.net > 0:
                 if pad.net not in self.nets:
                     self.nets[pad.net] = []
-                self.nets[pad.net].append(key)
+                if key not in self.nets[pad.net]:
+                    self.nets[pad.net].append(key)
                 if pad.net_name:
                     self.net_names[pad.net] = pad.net_name
 
@@ -2333,7 +2367,7 @@ class Autorouter:
                 ref=f"_block_{block.block_id}",
                 pin=port_name,
             )
-            key = (port_pad.ref, port_pad.pin)
+            key = port_pad.key
             self.pads[key] = port_pad
             self.grid.add_pad(port_pad)
 
@@ -4422,8 +4456,8 @@ class Autorouter:
         # For a 2.54mm-pitch THT connector on a 0.1mm coarse grid this
         # yields fine_res = 0.005mm, into which the 0.030mm offset
         # divides exactly (offset/fine_res = 6).
-        if pad.ref:
-            pitch = self.component_pitches.get(pad.ref)
+        if pad.component_key in self.component_pitches:
+            pitch = self.component_pitches.get(pad.component_key)
             if pitch is not None and pitch > 0:
                 fine_res = compute_subgrid_resolution(pitch, self.grid.resolution)
                 if 0 < fine_res < self.grid.resolution:
@@ -4588,8 +4622,7 @@ class Autorouter:
             pad = self.pads.get(pad_key)
             if pad is None:
                 continue
-            if pad.ref:
-                refs.add(pad.ref)
+            refs.add(pad.component_key)
         return refs
 
     def _find_connector_siblings_of_prerouted_nets(
@@ -6703,9 +6736,9 @@ class Autorouter:
                 pad_keys = self.nets.get(nid, [])
                 for key in pad_keys:
                     pad = self.pads.get(key)
-                    if pad is None or not pad.ref:
+                    if pad is None:
                         continue
-                    comp_pad_count.setdefault(pad.ref, []).append((nid, pad.x, pad.y))
+                    comp_pad_count.setdefault(pad.component_key, []).append((nid, pad.x, pad.y))
 
             if not comp_pad_count:
                 continue
@@ -6862,7 +6895,7 @@ class Autorouter:
                 # the primary component's pad table.
                 pad_obj = None
                 for pkey, p in self.pads.items():
-                    if p.ref == primary_ref and p.net is not None and int(p.net) == nid:
+                    if p.component_key == primary_ref and p.net is not None and int(p.net) == nid:
                         pad_obj = p
                         break
                 if pad_obj is None:
@@ -7209,7 +7242,7 @@ class Autorouter:
         for loser in losers:
             pad_obj = None
             for pkey, p in self.pads.items():
-                if p.ref == primary_ref and p.net is not None and int(p.net) == loser:
+                if p.component_key == primary_ref and p.net is not None and int(p.net) == loser:
                     pad_obj = p
                     break
             if pad_obj is None:
@@ -7410,7 +7443,11 @@ class Autorouter:
         for lane in plan.lanes:
             pad_obj = None
             for _pkey, p in self.pads.items():
-                if p.ref == primary_ref and p.net is not None and int(p.net) == lane.net_id:
+                if (
+                    p.component_key == primary_ref
+                    and p.net is not None
+                    and int(p.net) == lane.net_id
+                ):
                     pad_obj = p
                     break
             if pad_obj is None:
@@ -14951,6 +14988,7 @@ class Autorouter:
             nets=self.nets,
             net_names=self.net_names,
             pads=self.pads,
+            all_pads=self.all_pads,
             routes=self.routes,
             routing_failures=self.routing_failures,
             get_net_priority=self._get_net_priority,
@@ -15031,8 +15069,8 @@ class Autorouter:
 
         # Issue #1778: Pass component pitch so fine-pitch pads get reduced clearance
         pitches = self.component_pitches
-        for pad in self.pads.values():
-            self.grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
+        for pad in self.all_pads or self.pads.values():
+            self.grid.add_pad(pad, pin_pitch=pitches.get(pad.component_key))
         if self.placement_disposition is not None:
             for route in self.existing_routes:
                 self.grid.mark_route(route)
@@ -15090,11 +15128,15 @@ class Autorouter:
 
         # Serialize pads data
         pads_data = []
-        for (ref, num), pad in self.pads.items():
+        # Topology collapses equivalent same-number pads; obstacle geometry
+        # must retain every physical shape in a worker. Legacy callers that
+        # populate only the topology dictionary still have a usable payload.
+        for pad in self.all_pads or self.pads.values():
             pads_data.append(
                 {
-                    "ref": ref,
-                    "number": num,
+                    "ref": pad.ref,
+                    "component_id": pad.component_id,
+                    "number": pad.pin,
                     "x": pad.x,
                     "y": pad.y,
                     "width": pad.width,
@@ -15104,8 +15146,13 @@ class Autorouter:
                     "layer": pad.layer.value if hasattr(pad.layer, "value") else str(pad.layer),
                     "through_hole": pad.through_hole,
                     "drill": pad.drill,
+                    "drill_size": pad.drill_size,
+                    "drill_rotation": pad.drill_rotation,
+                    "footprint_name": pad.footprint_name,
+                    "steiner_point": pad.steiner_point,
                     "rotation": pad.rotation,
                     "shape": pad.shape,
+                    "pin_pitch": self.grid._pad_pin_pitch.get(id(pad)),
                 }
             )
 
@@ -15350,7 +15397,9 @@ class Autorouter:
             )
 
             # Feed pads from main router into block router
-            block_router.add_pads_from_autorouter(self.pads, self.nets, self.net_names)
+            block_router.add_pads_from_autorouter(
+                self.pads, self.nets, self.net_names, self.all_pads
+            )
 
             result = block_router.route_block()
             block_results.append(result)
@@ -17561,7 +17610,7 @@ class Autorouter:
             pad = self.pads[key]
             if pad.net == 0:
                 continue
-            net_target_positions.setdefault(pad.net, []).append((pad.x, pad.y, pad.ref))
+            net_target_positions.setdefault(pad.net, []).append((pad.x, pad.y, pad.component_key))
         return net_target_positions
 
     def detect_dense_packages(self) -> list[PackageInfo]:
@@ -17652,7 +17701,7 @@ class Autorouter:
             # so their stub segments are not ripped up.
             for escape in escapes:
                 pad = escape.pad
-                pad_key = (pad.ref, pad.pin)
+                pad_key = pad.key
                 if pad_key in self.pads:
                     ep_x, ep_y = escape.escape_point
                     virtual_pad = Pad(
@@ -17664,6 +17713,7 @@ class Autorouter:
                         net_name=pad.net_name,
                         layer=escape.escape_layer,
                         ref=pad.ref,
+                        component_id=pad.component_id,
                         pin=pad.pin,
                         through_hole=pad.through_hole,
                         drill=pad.drill,
@@ -17739,7 +17789,7 @@ class Autorouter:
             # violation we are trying to prevent.
             for escape in rescues:
                 pad = escape.pad
-                pad_key = (pad.ref, pad.pin)
+                pad_key = pad.key
                 if pad_key in self.pads:
                     ep_x, ep_y = escape.escape_point
                     virtual_pad = Pad(
@@ -17751,6 +17801,7 @@ class Autorouter:
                         net_name=pad.net_name,
                         layer=escape.escape_layer,
                         ref=pad.ref,
+                        component_id=pad.component_id,
                         pin=pad.pin,
                         through_hole=pad.through_hole,
                         drill=pad.drill,
@@ -18064,7 +18115,7 @@ class Autorouter:
         dense_pad_info: dict[tuple[str, str], tuple[PackageInfo, Pad]] = {}
         for package in dense_packages:
             for pad in package.pads:
-                dense_pad_info[(pad.ref, pad.pin)] = (package, pad)
+                dense_pad_info[pad.key] = (package, pad)
 
         budgets: list = []
         for (ref, pin), virtual_pad in self._escape_pad_overrides.items():
@@ -19348,13 +19399,9 @@ class Autorouter:
             self.grid.resolution * 10,
         )
 
-        all_failed_pads: list[Pad] = []
-        for net_id in failed_net_ids:
-            if net_id not in self.nets:
-                continue
-            for pad_key in self.nets[net_id]:
-                if pad_key in self.pads:
-                    all_failed_pads.append(self.pads[pad_key])
+        all_failed_pads = [
+            pad for pad in self.all_pads or self.pads.values() if pad.net in failed_net_ids
+        ]
 
         if not all_failed_pads:
             flush_print("  No pads found for failed nets -- skipping fine-grid pass")
@@ -19437,14 +19484,14 @@ class Autorouter:
         # Issue #1778: Pass component pitch so fine-pitch pads get reduced clearance
         pitches = self.component_pitches
         for pad in all_failed_pads:
-            fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
+            fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.component_key))
 
         # Also add pads from other nets that are in the bounding box region,
         # so the fine grid knows about obstacles from other nets' pads
-        for (ref, pin), pad in self.pads.items():
+        for pad in self.all_pads or self.pads.values():
             if pad.net not in failed_net_ids:
                 if bbox_min_x <= pad.x <= bbox_max_x and bbox_min_y <= pad.y <= bbox_max_y:
-                    fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
+                    fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.component_key))
 
         # Create a fine-grid router
         fine_router = create_hybrid_router(
