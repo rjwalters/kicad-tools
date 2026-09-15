@@ -3956,7 +3956,7 @@ class DiffPairRouter:
             sum_x = sum(pad.x for pad in members)
             sum_y = sum(pad.y for pad in members)
             for pad in members:
-                pitch = pitches.get(pad.ref, 0.0)
+                pitch = pitches.get(pad.component_key, 0.0)
                 if pitch <= 0.0:
                     continue  # no pitch known -> no fine-pitch escape to model
                 dx = (sum_x - pad.x) / others - pad.x
@@ -4534,7 +4534,7 @@ class DiffPairRouter:
     # ------------------------------------------------------------------
 
     def _pad_component_pitches(self) -> dict[str, float] | None:
-        """Ref -> min pin pitch map for the exact pad-clearance primitives.
+        """Physical component key -> min pitch for exact pad-clearance primitives.
 
         Mirrors what ``Autorouter._demote_pad_clearance_violation_nets``
         feeds ``worst_segment_pad_deficit`` so the constructor's gate and
@@ -10980,13 +10980,13 @@ class DiffPairRouter:
         pad_refs_in_pair = {p.key for p in p_pads + n_pads}
         # Add the pair's own pads first so net ownership is correct.
         for pad in p_pads + n_pads:
-            fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
+            fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.component_key))
         # Add foreign pads that fall in the bounding box.
         for (ref, pin), pad in self.autorouter.pads.items():
             if (ref, pin) in pad_refs_in_pair:
                 continue
             if bbox_min_x <= pad.x <= bbox_max_x and bbox_min_y <= pad.y <= bbox_max_y:
-                fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))
+                fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.component_key))
 
         # Re-mark all currently-committed routes (foreign nets) on the
         # fine grid so the coupled search avoids them.  The pair's own
