@@ -343,7 +343,7 @@ class FinePitchRegion:
             ``True`` when the per-net-class escape clearance should be
             considered for this pad.
         """
-        if (pad.ref, pad.pin) in self.pad_refs:
+        if pad.key in self.pad_refs:
             return True
         return self.contains_point(pad.x, pad.y)
 
@@ -536,11 +536,9 @@ def detect_fine_pitch_regions(
     pads_by_ref: dict[str, list[Pad]] = defaultdict(list)
     ref_order: list[str] = []
     for pad in pads:
-        if not pad.ref:
-            continue
-        if pad.ref not in pads_by_ref:
-            ref_order.append(pad.ref)
-        pads_by_ref[pad.ref].append(pad)
+        if pad.component_key not in pads_by_ref:
+            ref_order.append(pad.component_key)
+        pads_by_ref[pad.component_key].append(pad)
 
     regions: list[FinePitchRegion] = []
     for ref in ref_order:
@@ -619,7 +617,7 @@ def detect_fine_pitch_regions(
         bbox_diag = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
         adaptive_radius = max(radius_mm, bbox_diag / 2.0)
 
-        pad_refs = frozenset((p.ref, p.pin) for p in cluster)
+        pad_refs = frozenset(p.key for p in cluster)
 
         regions.append(
             FinePitchRegion(

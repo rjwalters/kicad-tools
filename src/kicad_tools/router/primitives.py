@@ -518,6 +518,17 @@ class Pad:
     # Physical drill metadata, independent of the copper's residual rotation.
     drill_size: tuple[float, float] | None = None
     drill_rotation: float = 0.0
+    component_id: str = ""
+
+    @property
+    def component_key(self) -> str:
+        """Physical component key used for grouping and geometric exemptions."""
+        return self.component_id or self.ref
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """Internal terminal key; ``ref`` remains the authored display label."""
+        return (self.component_key, self.pin)
 
     def __post_init__(self) -> None:
         if self.shape not in {"circle", "rect", "oval", "roundrect"}:

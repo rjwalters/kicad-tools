@@ -724,7 +724,7 @@ def get_package_info(
             is_dense=False,
         )
 
-    ref = pads[0].ref if pads else ""
+    ref = pads[0].component_key if pads else ""
     package_type = detect_package_type(pads)
 
     xs = [p.x for p in pads]
@@ -1644,7 +1644,7 @@ class EscapeRouter:
         # Standard fall-through value -- preserves pre-P_FP4 behaviour
         # for callers without an installed region.
         fallback = self.rules.get_clearance_for_component(
-            ref,
+            pads[0].ref if pads else ref,
             pin_pitch=None,
         )
 
@@ -3631,7 +3631,7 @@ class EscapeRouter:
         # them.
         ref = package.ref
         effective_clearance = self.rules.get_clearance_for_component(
-            ref,
+            package.pads[0].ref if package.pads else ref,
             pin_pitch=package.pin_pitch,
         )
         escape_width = (
@@ -4148,7 +4148,7 @@ class EscapeRouter:
         use_perpendicular_only = package.pin_pitch >= 0.65
 
         effective_clearance = self.rules.get_clearance_for_component(
-            package.ref,
+            package.pads[0].ref if package.pads else package.ref,
             pin_pitch=package.pin_pitch,
         )
         escape_width = (
@@ -4216,10 +4216,10 @@ class EscapeRouter:
                     # Find this pad's position in the edge_with_plane
                     # list so we can identify its IMMEDIATE neighbours
                     # (including plane pads).  Match by ref+pin.
-                    pad_key = (pad.ref, pad.pin)
+                    pad_key = pad.key
                     neighbour_signal = False
                     for idx, p in enumerate(edge_with_plane):
-                        if (p.ref, p.pin) != pad_key:
+                        if p.key != pad_key:
                             continue
                         if idx > 0 and edge_with_plane[idx - 1].net != 0:
                             neighbour_signal = True
@@ -4884,7 +4884,7 @@ class EscapeRouter:
             # B.Cu overlap in U1's east column without flipping the
             # alternation globally (which regressed routing reach 8/10 ->
             # 7/10 per #3235's negative-results note).
-            override_layer = self.escape_pad_layer_overrides.get((pad.ref, str(pad.pin)))
+            override_layer = self.escape_pad_layer_overrides.get(pad.key)
             if override_layer is not None:
                 needs_via = override_layer != pad.layer
                 logger.info(
@@ -6637,7 +6637,7 @@ class EscapeRouter:
 
         # Issue #2756: resolve the effective clearance once per package.
         effective_clearance = self.rules.get_clearance_for_component(
-            package.ref,
+            package.pads[0].ref if package.pads else package.ref,
             pin_pitch=package.pin_pitch,
         )
 
@@ -6655,7 +6655,7 @@ class EscapeRouter:
         board_pads = getattr(self.grid, "_pads", None)
         foreign_pads: list[Pad] | None = None
         if board_pads:
-            foreign_pads = [p for p in board_pads if p.ref != package.ref]
+            foreign_pads = [p for p in board_pads if p.component_key != package.ref]
 
         for pad in package.pads:
             # Issue #2513: Skip plane-net pads (net=0) -- they are stitched
@@ -7434,7 +7434,7 @@ class EscapeRouter:
         for er in escapes:
             if er.via is None or not getattr(er.via, "in_pad", False):
                 continue
-            if er.pad is pad or er.pad.ref != pad.ref:
+            if er.pad is pad or er.pad.component_key != pad.component_key:
                 continue
             if abs(er.pad.x - pad.x) <= limit and abs(er.pad.y - pad.y) <= limit:
                 return True

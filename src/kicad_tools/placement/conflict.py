@@ -181,6 +181,7 @@ class ComponentInfo:
     # Lists of features
     pads: list["PadInfo"] = field(default_factory=list)
     holes: list["HoleInfo"] = field(default_factory=list)
+    physical_id: str = ""
 
     def __repr__(self) -> str:
         return f"ComponentInfo({self.reference}, pos={self.position})"
@@ -237,6 +238,8 @@ class Conflict:
     # Fallback findings approximate; KiCad DRC skips courtyard-less footprints
     # entirely, so the two engines diverge by design here (issue #4227).
     is_bbox_fallback: bool = False
+    component1_id: str = ""
+    component2_id: str = ""
 
     def __str__(self) -> str:
         if self.actual_clearance is not None and self.required_clearance is not None:
@@ -258,6 +261,16 @@ class Conflict:
             "severity": self.severity.value,
             "component1": self.component1,
             "component2": self.component2,
+            **(
+                {"component1_id": self.component1_id}
+                if self.component1_id and self.component1_id != self.component1
+                else {}
+            ),
+            **(
+                {"component2_id": self.component2_id}
+                if self.component2_id and self.component2_id != self.component2
+                else {}
+            ),
             "message": self.message,
             "location": {"x": self.location.x, "y": self.location.y},
             "actual_clearance": self.actual_clearance,

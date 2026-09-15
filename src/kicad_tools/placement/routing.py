@@ -39,6 +39,9 @@ class RoutingPlacementDisposition:
     # (reference, pad number, authored net, effective net), including no-net
     # pads. Loader checks this multiset before constructing any router state.
     pad_net_identities: tuple[tuple[str, str, str, str], ...] = ()
+    invalid_footprints: frozenset[str] = frozenset()
+    preserved_footprints: frozenset[str] = frozenset()
+    physical_pad_net_identities: tuple[tuple[str, str, str, str, str], ...] = ()
 
     @property
     def invalid_nets(self) -> frozenset[str]:
@@ -74,11 +77,14 @@ def analyze_routing_placement(
     """
     from kicad_tools.placement import ConflictSeverity, ConflictType, PlacementAnalyzer
     from kicad_tools.schema.pcb import PCB
+    from kicad_tools.schema.physical_identity import footprint_keys, validate_netlist_selectors
 
     # PCB parsing is separate from the optional geometric check: unavailable
     # geometry must not erase net identities or intentional selection metadata.
     pcb = PCB.load(pcb_path)
+    physical_keys = footprint_keys(pcb.footprints)
     overrides = netlist or {}
+    validate_netlist_selectors(pcb.footprints, overrides)
     identities = tuple(
         sorted(
             (
@@ -91,9 +97,23 @@ def analyze_routing_placement(
             for pad in fp.pads
         )
     )
+    physical_identities = tuple(
+        sorted(
+            (
+                physical_id,
+                fp.reference,
+                pad.number,
+                pad.net_name,
+                overrides.get(f"{fp.reference}.{pad.number}", pad.net_name),
+            )
+            for fp, physical_id in zip(pcb.footprints, physical_keys, strict=True)
+            for pad in fp.pads
+        )
+    )
     pads = [(ref, original, effective) for ref, _, original, effective in identities]
     all_nets = frozenset(name for _, _, name in pads if name)
     refs: frozenset[str] = frozenset()
+    invalid_footprints: frozenset[str] = frozenset()
     available = True
     if not allow_offboard:
         try:
@@ -103,9 +123,20 @@ def analyze_routing_placement(
                 for c in conflicts
                 if c.type == ConflictType.OFF_BOARD and c.severity == ConflictSeverity.ERROR
             )
+            invalid_footprints = frozenset(
+                c.component1_id or c.component1
+                for c in conflicts
+                if c.type == ConflictType.OFF_BOARD and c.severity == ConflictSeverity.ERROR
+            )
         except Exception:
             available = False
-    direct = frozenset(name for ref, _, name in pads if ref in refs and name)
+    direct = frozenset(
+        name
+        for fp, physical_id in zip(pcb.footprints, physical_keys, strict=True)
+        if physical_id in invalid_footprints
+        for pad in fp.pads
+        if (name := overrides.get(f"{fp.reference}.{pad.number}", pad.net_name))
+    )
     invalid = set(direct)
     groups = [set(group) & all_nets for group in coupled_groups]
     while True:
@@ -123,6 +154,13 @@ def analyze_routing_placement(
     return RoutingPlacementDisposition(
         all_nets=all_nets,
         invalid_references=refs,
+        invalid_footprints=invalid_footprints,
+        preserved_footprints=invalid_footprints
+        | frozenset(
+            physical_id
+            for physical_id, _ref, _pin, authored, effective in physical_identities
+            if authored in preserved or effective in preserved
+        ),
         direct_invalid_nets=direct,
         coupled_invalid_nets=frozenset(invalid) - direct,
         requested_nets=requested,
@@ -132,4 +170,5 @@ def analyze_routing_placement(
         preserve_copper_nets=preserved,
         check_available=available,
         pad_net_identities=identities,
+        physical_pad_net_identities=physical_identities,
     )
