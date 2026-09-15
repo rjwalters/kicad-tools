@@ -2201,6 +2201,37 @@ def _try_nudge_via_pad_violation(
     )
 
 
+def _via_edge_sweep_clear(old_x: float, old_y: float, via: Via, router: Autorouter) -> bool:
+    """Prove no new edge violation throughout a proposed via displacement.
+
+    Retain the existing per-chord no-worsening check. A Hausdorff certificate
+    applies to the complete outline, so use global minima for the additional
+    true-boundary proof, never an assumed chord-to-primitive correspondence.
+    The swept lower bound must clear the old upper bound (capped at the
+    required clearance). Uncertain near-boundary moves are refused; subtracting
+    the error from both sides would incorrectly cancel that uncertainty.
+    """
+    clearance: float | None = getattr(router, "_edge_clearance", None)
+    edges = getattr(router, "_edge_segments", None)
+    if clearance is None or clearance <= 0 or not edges:
+        return True
+    error: float = getattr(edges, "max_error_mm", 0.0)
+    if not math.isfinite(error) or error < 0:
+        return False
+    required = via.diameter / 2 + clearance
+    old_min = swept_min = math.inf
+    for (x1, y1), (x2, y2) in edges:
+        old_gap = _point_to_segment_distance(old_x, old_y, x1, y1, x2, y2)
+        swept_gap = _segment_to_segment_distance(old_x, old_y, via.x, via.y, x1, y1, x2, y2)
+        if swept_gap < min(required, old_gap) - 1e-6:
+            return False
+        old_min = min(old_min, old_gap)
+        swept_min = min(swept_min, swept_gap)
+    if error == 0:
+        return True
+    return max(0.0, swept_min - error) >= min(required, old_min + error) - 1e-6
+
+
 def _try_nudge_via_pad_transaction(
     via: Via,
     pad_bbox: tuple[float, float, float, float],
@@ -2244,16 +2275,7 @@ def _try_nudge_via_pad_transaction(
         ):
             return False
         after = Counter(dataclasses.astuple(v) for v in validate_routes(router))
-        edge_clearance = getattr(router, "_edge_clearance", None)
-        edge_blocked = False
-        if edge_clearance is not None and edge_clearance > 0:
-            for (x1, y1), (x2, y2) in getattr(router, "_edge_segments", []) or []:
-                old_gap = _point_to_segment_distance(old_x, old_y, x1, y1, x2, y2)
-                swept_gap = _segment_to_segment_distance(old_x, old_y, via.x, via.y, x1, y1, x2, y2)
-                required = via.diameter / 2 + edge_clearance
-                if swept_gap < min(required, old_gap) - 1e-6:
-                    edge_blocked = True
-                    break
+        edge_blocked = not _via_edge_sweep_clear(old_x, old_y, via, router)
         if (
             after - before
             or _via_pad_process_findings(via, router) - process_before

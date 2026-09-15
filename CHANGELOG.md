@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Correct the historical Board07 HDMI track widths to match their sidecar while preserving measured connectivity, known opens, and angle geometry; add a reproducible native-validated width repair (#5126).
+
 - **Imported copper arcs no longer cause false opens or under-reported
   wirelength** (#4937) — `PCB` parsed `(segment ...)` and `(via ...)` copper
   but had no branch for `(arc ...)`, the curved-track element KiCad 7+ writes

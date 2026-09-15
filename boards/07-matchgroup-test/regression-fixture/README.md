@@ -201,6 +201,105 @@ verifiers agree on this exact set: `kct net-status --why`,
 `kicad-cli pcb drc --refill-zones` (5 unconnected pads at the same five
 pads).
 
+### Decision: correct HDMI widths while preserving the witness (#5126)
+
+**Recommendation:** permit one explicit, reviewed width correction to this
+historical fixture. Retarget existing `TMDS_*` track widths from 0.375 mm to
+`HDMI_TMDS_LANES`' declared 0.225 mm, preserving their centerlines, layers,
+net assignments and vias. The fixture exists to retain match-group skew geometry
+and documented routing defects; a stale width contradicting its own sidecar is
+not an additional defect we need to preserve. This does not make the synthetic
+board a release artifact or remove its known opens.
+
+The September 12 investigation on #5126 reported matching before/after DRC
+error signatures after native refill and an unchanged angle census of 841
+segments, including 12 off-angle segments. It also reported that stripping and
+rerouting all six TMDS nets reduced their connected count from four to one.
+Those are prior experimental results, not acceptance evidence for a future
+commit. **A full strip-and-reroute is not proposed.** The present saved fixture
+has 0.375 mm segments on the four routed TMDS nets; the two documented open
+TMDS nets have no routed segments to retarget.
+
+The alternative is to freeze every byte forever. That preserves the original
+hash but leaves the fixture internally inconsistent and teaches readers the
+wrong relationship between the sidecar and saved copper. A narrowly documented
+exception with measured invariants better preserves the witness's purpose.
+The original bytes remain identifiable by SHA256
+`ab3a2c2d4aea466f828e540189ac851ddb8c41505c8185be65924ec5ff92a9a6`
+and by repository history.
+
+**Implementation gate:** after review of this decision, a separate #5126 PR
+must add the width-retarget path to `repair_hdmi.py` and publish its exact
+before/after evidence. It must preserve non-TMDS track geometry, all pad/net
+identities, vias and authored constraints; `DDR_DQS` is outside this change.
+Before promotion, compare native and analyzer pad components and open identities,
+not just aggregate counts, and compare DRC error signatures with the original
+project/rules and sidecar after native KiCad 10 zone refill. Narrower tracks can
+lose a marginal copper contact even when their centerlines are unchanged, so
+connectivity must be measured rather than assumed. Retain the original input,
+refilled candidate, commands, KiCad identity and hashes for reproduction.
+The known-current four-open set above must not be confused with the five-open
+historical table, which predates the MIPI repair.
+
+Update `HISTORICAL_WITNESS_SHA256` in `tests/test_fleet_45_census.py` only in the
+same implementation commit as the accepted PCB, with a comment citing #5126.
+Keep the exact `(841, 12)` angle-census assertion and exercise the match-group
+skew checks; do not remove the witness pin or relax its regression gates.
+This decision note changes neither PCB bytes nor their hash pin. If independent
+review rejects the exception, retain the frozen witness and close #5126 with
+that recorded rationale.
+
+### HDMI width correction (2026-09-15, #5126)
+
+The reviewed exception above is applied to **35 width atoms** on the four routed
+TMDS nets: `TMDS_D0_P`, `TMDS_D1_P`, `TMDS_D2_N`, and `TMDS_D2_P`, from 0.375 mm
+to the sidecar's 0.225 mm. The two open TMDS nets have no track segments.
+Every other byte of the saved PCB is unchanged, including segment centerlines,
+vias, existing zone fills, and non-TMDS widths. DQS copper is unchanged; this
+correction does not establish its agreement with its authored width.
+
+The old PCB SHA256 is recorded in the decision above; the corrected saved PCB is
+`fb58581eba53bb9f1dfe33a278fb896b2f08b5f4fc2e82211124d8586ba7aaf0`.
+Its hash pin was updated with the PCB, retaining the exact 841-segment,
+12-off-angle census. The change is a regression-fixture correction, not a
+manufacturing release.
+
+Current-source before/after checks retain the same four open nets and exact
+native pad components. Native KiCad 10.0.6 reports four unconnected items,
+zero other errors and 31 warnings on each input with native refill enabled.
+The current Python checker reports **13 errors, 22 warnings and 12 unique
+error rule/net signatures** on both saved inputs, including existing
+via-in-pad findings. These are current measurements; the earlier eight-error
+account above describes the September 9 check. Match-group checks remain
+engaged, and no error severity or allowance was changed.
+
+The [retained component and signature record](hdmi-width-correction-5126.json)
+contains the shared exact pad partitions/open identities and all four measured
+PCB hashes. Saved and separately refilled before/after copies pass the same
+comparisons. Native refills are evidence copies; the committed PCB retains its
+original fill bytes so unrelated serialization and geometry remain untouched.
+
+Reproduce from the original fixture in a fresh directory (use a Python with
+`pcbnew` for `--native-python`, and a KiCad 10 `kicad-cli` on `PATH`):
+
+```sh
+mkdir /tmp/board07-original
+git archive bcaf28ad3399d97df5b0d6cfefe8db7856abc689 \
+  boards/07-matchgroup-test/regression-fixture | tar -x -C /tmp/board07-original
+uv run python boards/07-matchgroup-test/repair_hdmi.py /tmp/board07-hdmi-width \
+  --input /tmp/board07-original/boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb \
+  --native-python python3
+```
+
+A completed preservation check reports `validated historical width correction`
+in `evidence.json` and exits **2**, retaining the board's existing errors.
+Failure raises an error and records `FAILED`; it is not a promotable candidate.
+The script retains the original input, byte-minimal candidate, separate native
+refills, reports and command logs. It also supports an already-correct input
+without further width edits. The current script was verified from the original
+fixture; the contact-loss negative test separately proves that a narrower
+track losing a real connection is rejected.
+
 ### Placement-delta feedback (#4468, epic #3438 Phase 3)
 
 The route step runs `kct route --placement-delta-feedback
