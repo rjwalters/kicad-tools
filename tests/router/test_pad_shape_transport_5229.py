@@ -208,7 +208,7 @@ def test_escape_virtual_pad_sizes_moved_endpoint_to_conductor(monkeypatch, metho
     getattr(router, method)([package])
     copied = router._escape_pad_overrides[("J1", "1")]
     assert (copied.x, copied.y, copied.layer) == (8, 9, Layer.B_CU)
-    assert (copied.shape, copied.rotation) == ("circle", 0.0)
-    assert (copied.width, copied.height) == pytest.approx((0.25, 0.25))
+    assert (copied.shape, copied.rotation) == ("rect", 0.0)
+    assert (copied.width, copied.height) == pytest.approx((0.25 / math.sqrt(2),) * 2)
     # Identity still resolves back to the physical pad.
     assert (copied.ref, copied.pin, copied.net) == ("J1", "1", 1)

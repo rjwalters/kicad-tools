@@ -297,7 +297,8 @@ def escape_endpoint_pad(
     Known conductor geometry bounds the terminal independently of routing
     resolution. Without a conductor, only an unchanged endpoint on the
     physical pad's layer keeps authored geometry. Shifted endpoints use an
-    inscribed disc; endpoints without copper are rejected. Off-grid
+    inscribed disc, represented by its inscribed square for the rectangular
+    pathfinder waiver API; endpoints without copper are rejected. Off-grid
     connectivity belongs to pathfinder waypoints, not a larger metal waiver.
 
     ``fallback_width`` and ``min_extent`` remain accepted for compatibility,
@@ -332,8 +333,12 @@ def escape_endpoint_pad(
             extent = 2 * max(0.0, radius)
         if extent <= 0:
             raise ValueError("Escape endpoint has no committed copper on its routing layer")
-        width = height = extent
-        shape, rotation = "circle", 0.0
+        # Both pathfinders consume rectangular metal bounds, even for a
+        # circle-shaped terminal. The largest axis-aligned square inside
+        # the known copper disc has diagonal equal to its diameter. Using
+        # the diameter as width would waive clearance at bare-board corners.
+        width = height = extent / math.sqrt(2)
+        shape, rotation = "rect", 0.0
 
     return Pad(
         x=ex,
@@ -349,6 +354,7 @@ def escape_endpoint_pad(
         drill=pad.drill if unchanged and extent is None else 0.0,
         rotation=rotation,
         shape=shape,
+        escape_terminal=True,
     )
 
 

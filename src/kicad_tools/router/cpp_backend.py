@@ -1876,10 +1876,14 @@ class CppPathfinder:
         # branch points) lost every Steiner-incident edge this way, on
         # every route of the board.  Clamp empty spans to the nearest
         # grid cell so a degenerate pad always seeds exactly one cell.
-        if gx1 > gx2:
+        # Escape terminals describe actual conductor copper, unlike virtual
+        # Steiner points. Empty bounds must remain empty: the native search
+        # can fail immediately and use the Python off-grid waypoint fallback,
+        # without granting a clearance waiver at a nearby bare-board cell.
+        if gx1 > gx2 and not pad.escape_terminal:
             gc = int(round((pad.x - origin_x) / resolution))
             gx1 = gx2 = max(0, min(self._grid.cols - 1, gc))
-        if gy1 > gy2:
+        if gy1 > gy2 and not pad.escape_terminal:
             gc = int(round((pad.y - origin_y) / resolution))
             gy1 = gy2 = max(0, min(self._grid.rows - 1, gc))
 

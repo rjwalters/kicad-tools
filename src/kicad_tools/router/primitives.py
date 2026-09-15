@@ -518,6 +518,7 @@ class Pad:
     # Physical drill metadata, independent of the copper's residual rotation.
     drill_size: tuple[float, float] | None = None
     drill_rotation: float = 0.0
+    escape_terminal: bool = False  # Metal bounds must stay within committed escape copper
 
     def __post_init__(self) -> None:
         if self.shape not in {"circle", "rect", "oval", "roundrect"}:

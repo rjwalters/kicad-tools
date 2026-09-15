@@ -14,6 +14,9 @@ resume attempt before the slow Python fallback.
 
 from __future__ import annotations
 
+import math
+from dataclasses import replace
+
 import pytest
 from shapely.geometry import LineString, Point
 from shapely.ops import unary_union
@@ -130,13 +133,13 @@ def test_escape_terminal_extent_uses_conductor_not_pad_outline():
 
     terminal = escape_endpoint_pad(pad, escape, fallback_width=0.2)
     assert (terminal.x, terminal.y) == (10.0, 11.475)
-    assert (terminal.width, terminal.height) == pytest.approx((0.2, 0.2))
+    assert (terminal.width, terminal.height) == pytest.approx((0.2 / math.sqrt(2),) * 2)
     # Identity is preserved so (ref, pin) still resolves to the physical pad.
     assert (terminal.ref, terminal.pin, terminal.net) == ("U3", "39", NET)
     # The old behaviour copied the pad outline to the endpoint, claiming metal
     # 1.5 mm beyond it; the conductor-sized terminal reaches only 0.1 mm.
     copied_outline_reach = escape.escape_point[1] + pad.height / 2
-    assert terminal.y + terminal.height / 2 == pytest.approx(11.575)
+    assert terminal.y + terminal.height / 2 == pytest.approx(11.475 + 0.1 / math.sqrt(2))
     assert terminal.y + terminal.height / 2 < copied_outline_reach - 1.0
 
 
@@ -154,7 +157,7 @@ def test_in_pad_rescue_terminal_uses_via_annulus():
     )
     assert escape_endpoint_copper_extent(escape) == pytest.approx(0.3)
     terminal = escape_endpoint_pad(pad, escape, fallback_width=0.2)
-    assert (terminal.width, terminal.height) == pytest.approx((0.3, 0.3))
+    assert (terminal.width, terminal.height) == pytest.approx((0.3 / math.sqrt(2),) * 2)
     assert terminal.layer is Layer.B_CU
 
 
@@ -184,7 +187,7 @@ def test_coarse_grid_does_not_enlarge_terminal_copper():
         segments=[stub],
     )
     terminal = escape_endpoint_pad(pad, escape, fallback_width=0.2, min_extent=0.127)
-    assert (terminal.width, terminal.height) == pytest.approx((0.05, 0.05))
+    assert (terminal.width, terminal.height) == pytest.approx((0.05 / math.sqrt(2),) * 2)
 
 
 @pytest.mark.parametrize("force_python", [True, False])
@@ -289,8 +292,6 @@ def test_escaped_terminal_does_not_waive_foreign_via_clearance(force_python):
 @pytest.mark.parametrize("rotation", [0.0, 45.0, 90.0])
 @pytest.mark.parametrize("local_y", [0.2, 0.75, 0.8])
 def test_shifted_terminal_is_contained_in_authored_rectangle(rotation, local_y):
-    import math
-
     theta = math.radians(rotation)
     pad = Pad(10, 9.5, 0.3, 1.55, NET, NET_NAME, shape="rect", rotation=rotation)
     escape = EscapeRoute(
@@ -312,7 +313,7 @@ def test_shifted_terminal_is_contained_in_authored_rectangle(rotation, local_y):
     else:
         assert terminal.width / 2 <= pad.width / 2 - x
         assert terminal.height / 2 <= pad.height / 2 - y
-        assert terminal.shape == "circle"
+        assert terminal.shape == "rect"
 
 
 @pytest.mark.parametrize("layer", [Layer.F_CU, Layer.B_CU])
@@ -343,7 +344,7 @@ def test_through_via_terminal_on_inner_layer_uses_real_copper():
     via = Via(10, 9.5, 0.2, 0.3, (Layer.F_CU, Layer.B_CU), NET, NET_NAME)
     escape = EscapeRoute(pad, EscapeDirection.VIA_DOWN, (10, 9.5), Layer.IN1_CU, via=via)
     terminal = escape_endpoint_pad(pad, escape, fallback_width=0.2)
-    assert terminal.width == terminal.height == via.diameter
+    assert terminal.width == terminal.height == via.diameter / math.sqrt(2)
     assert terminal.layer is Layer.IN1_CU
 
 
@@ -354,3 +355,99 @@ def test_router_rejects_unbacked_terminal_without_losing_physical_pad():
     terminal = router._build_escape_endpoint_pad(pad, escape)
     assert terminal is pad
     assert (terminal.x, terminal.y) != escape.escape_point
+
+
+@pytest.mark.parametrize("force_python", [True, False])
+@pytest.mark.parametrize("narrow_off_grid", [False, True])
+def test_endpoint_waiver_corner_routes_without_native_retry_fallback(force_python, narrow_off_grid):
+    """A valid foreign via near the cap corner must not poison native seeds.
+
+    The narrow control has no grid center inside the endpoint square. It
+    must connect using off-grid handling, without inventing a larger waiver.
+    """
+    if not force_python and not get_backend_info()["available"]:
+        pytest.skip("C++ extension unavailable")
+    width = 0.05 if narrow_off_grid else 0.2
+    endpoint = 10.085 if narrow_off_grid else 10.025
+    rules = DesignRules(
+        trace_width=width,
+        trace_clearance=0.15,
+        via_diameter=0.6,
+        via_drill=0.3,
+        grid_resolution=0.127 if narrow_off_grid else 0.025,
+    )
+    router = Autorouter(
+        20,
+        20,
+        force_python=force_python,
+        physics_enabled=False,
+        rules=rules,
+        per_net_iterations=20000,
+    )
+    for ref, x, y in [("U1", 8, endpoint), ("R1", 15, 15)]:
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": "1",
+                    "x": x,
+                    "y": y,
+                    "width": 0.8,
+                    "height": 0.8,
+                    "net": 1,
+                    "net_name": "DATA",
+                }
+            ],
+        )
+    pad = router.pads[("U1", "1")]
+    seg = Segment(8, endpoint, endpoint, endpoint, width, Layer.F_CU, 1, "DATA")
+    stub = Route(1, "DATA", [seg], is_escape=True)
+    router._mark_route(stub)
+    router.routes.append(stub)
+    escape = EscapeRoute(
+        pad, EscapeDirection.EAST, (endpoint, endpoint), Layer.F_CU, segments=[seg]
+    )
+    terminal = router._build_escape_endpoint_pad(pad, escape)
+    router._escape_pad_overrides[("U1", "1")] = terminal
+    if force_python:
+        bounds = router.router._get_pad_metal_bounds(terminal, width)
+    else:
+        native_bounds = router.router._compute_pad_bounds(terminal, width)
+        bounds = (
+            native_bounds.metal_gx1,
+            native_bounds.metal_gy1,
+            native_bounds.metal_gx2,
+            native_bounds.metal_gy2,
+        )
+    x1, y1, x2, y2 = bounds
+    if narrow_off_grid:
+        assert x1 > x2 or y1 > y2, "control must have no grid center in the real metal"
+    for gx in range(x1, x2 + 1):
+        for gy in range(y1, y2 + 1):
+            x, y = router.grid.grid_to_world(gx, gy)
+            assert math.hypot(x - terminal.x, y - terminal.y) <= width / 2
+    if narrow_off_grid and not force_python:
+        generic = router.router._compute_pad_bounds(replace(terminal, escape_terminal=False), width)
+        assert generic.metal_gx1 <= generic.metal_gx2
+        assert generic.metal_gy1 <= generic.metal_gy2
+    # All corners of the actual rectangular waiver fit within the cap.
+    assert math.hypot(terminal.width / 2, terminal.height / 2) <= width / 2
+    via = Via(endpoint + 0.4, endpoint + 0.4, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "OTHER")
+    foreign = Route(2, "OTHER", [], [via])
+    router._mark_route(foreign)
+    router.routes.append(foreign)
+    routes = router.route_net(1)
+    assert routes, "the real off-grid terminal must connect to its sink"
+    if not force_python:
+        stats = router.backend_info["fallback_stats"]
+        if narrow_off_grid:
+            assert stats["fallback_count"] == 1
+            assert "exhausted 5 resume attempts" not in str(stats["fallback_reasons"])
+        else:
+            assert stats["fallback_count"] == 0
+    emitted = [s for route in routes for s in route.segments]
+    copper = unary_union([LineString([s.start, s.end]).buffer(s.width / 2) for s in emitted])
+    assert copper.distance(Point(via.x, via.y).buffer(via.diameter / 2)) >= rules.trace_clearance
+    # New route copper contacts both the committed stub and the target pad.
+    assert copper.intersects(LineString([seg.start, seg.end]).buffer(seg.width / 2))
+    assert copper.intersects(Point(15, 15).buffer(0.4))
