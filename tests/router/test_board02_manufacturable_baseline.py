@@ -11,7 +11,7 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 24 vias / 328.71mm total
+- **Deterministic output**: 22 routes / 24 vias / 326.73mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
   has fully converged.  (327.93mm before the 2026-09-10 #5009
   re-baseline: ``jlcpcb-tier1`` 2-layer declares no orderable via-in-pad
@@ -21,7 +21,17 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
   ``test_routing_output_deterministic_across_seeds`` for exactly which
   DRC engine and which manufacturer profile that measurement covers --
   the first revision of this note overstated it and CI refuted it.)
-  The 2026-09-15 physical via-clearance repair (#5410) measures
+  The 2026-09-15 local halo-coverage refinement (#5410, ff96e855)
+  measures 226 segments and 326.73mm across all three macOS seeds.
+  Their emitted copper geometry is identical; all 34 pad occurrences
+  preserve geometry/net membership, and physical copper connectivity
+  matches the input PCB's net assignments. Native KiCad 10.0.6
+  refill/all-track DRC reports zero violations/unconnected items for
+  each retained output. The
+  source-bound pre-refinement 7138c685/native30 control reproduces
+  230/328.71 with the same clean audits; NODE_C is 1.981623mm shorter.
+  Evidence: .loom/sweep-checkpoint/evidence/pr-5425-board02/.
+  The earlier 2026-09-15 physical via-clearance repair (#5410) measured
   230 segments on macOS (228 on Linux CI), 328.71mm, and unchanged
   routes/vias/reach. All three macOS seeds pass native KiCad 10.0.6
   DRC with zero violations and unconnected items. A source-bound
@@ -684,14 +694,15 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     #   either as a blanket "the board is DRC-clean".
     EXPECTED_ROUTES = 22
     EXPECTED_VIAS = 24
-    # Re-measured at 141fa2d7 after the physical via-clearance repair
-    # (#5410): seeds 42/43/44 yield (22, 230, 24, 328.71) on macOS,
-    # with zero native KiCad 10.0.6 violations and unconnected items.
-    # CI merge 23b73fce yields 228 segments and the same exact tuple.
-    # The ccb58825/native26 control reproduces (22, 260, 24, 328.80)
-    # with zero native violations/unconnected items on unchanged input.
+    # Re-measured at ff96e855 after local halo-coverage refinement:
+    # seeds 42/43/44 yield (22, 226, 24, 326.73), identical copper
+    # geometry, 34 preserved/bound pads, and zero native refill/all-track
+    # violations or unconnected items. Pre-refinement 7138c685/native30
+    # reproduces (22, 230, 24, 328.71) with the same clean audits;
+    # the physical delta is a 1.981623mm shorter NODE_C route.
+    # Retained evidence: .loom/sweep-checkpoint/evidence/pr-5425-board02/.
     # Keep exact length and cross-seed guards; no tolerance changes.
-    EXPECTED_LENGTH = 328.71
+    EXPECTED_LENGTH = 326.73
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability
@@ -748,8 +759,8 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # survives.  If CI Linux-x86_64 lands outside it, widen the band --
     # the routes/vias/length pins above are what would signal a real
     # regression, and they are untouched.
-    # #5410: recenter and tighten the band around observed Linux 228 /
-    # macOS 230 segments; exact routes/vias/length remain pinned above.
+    # #5410: retain the existing band. Local halo refinement measures
+    # macOS 226 / Linux CI 224; exact routes/vias/length are pinned above.
     EXPECTED_SEGMENTS_RANGE = (220, 240)
     got_routes, got_segments, got_vias, got_length = ref
     exact = (got_routes, got_vias, got_length)
@@ -767,7 +778,7 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     lo, hi = EXPECTED_SEGMENTS_RANGE
     assert lo <= got_segments <= hi, (
         f"Board 02 segment count {got_segments} outside the documented "
-        f"platform band [{lo}, {hi}] (macOS-arm64: 230 / Linux: 228 post-#5410; "
+        f"platform band [{lo}, {hi}] (macOS-arm64: 226 / Linux: 224 post-#5410; "
         "pre-#4732 it was 476 on macOS-arm64 / ~390-399 on Linux-x86_64 -- "
         "see PLATFORM NOTE above and the #4196 / #4732 re-baselines).  "
         "Routes/vias/length matched the exact pin, so this is a change in "
