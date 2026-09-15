@@ -5315,8 +5315,22 @@ def _add_fix_silkscreen_parser(subparsers) -> None:
 
 
 def _add_place_silk_refs_parser(subparsers) -> None:
-    """Add place-silk-refs subcommand parser (issue #5030)."""
-    from kicad_tools.silkscreen.place_refs import (
+    """Add place-silk-refs subcommand parser (issue #5030).
+
+    Issue #5240: read the argparse defaults from the dependency-free
+    ``kicad_tools.silkscreen._silk_defaults`` leaf module instead of
+    ``kicad_tools.silkscreen.place_refs``.  ``create_parser()`` runs this
+    on *every* CLI invocation (building ``--help`` for every subcommand,
+    not just ``place-silk-refs``), and importing anything from
+    ``place_refs`` forces its ``kicad_tools.validate.rules.silkscreen``
+    import, which -- via ``validate``/``validate.rules``'s eager
+    package-level aggregation of every DRC rule -- transitively imports
+    the whole ``kicad_tools.router`` package.  Measured locally: ~1.6s of
+    CPU time per CLI invocation, regardless of subcommand.  Same values,
+    same defaults -- only the import path used to reach four float
+    literals changes.
+    """
+    from kicad_tools.silkscreen._silk_defaults import (
         DEFAULT_CLEARANCE_MM,
         DEFAULT_MAX_OFFSET_MM,
         DEFAULT_STEP_MM,
