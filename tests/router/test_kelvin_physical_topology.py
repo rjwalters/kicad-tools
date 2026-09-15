@@ -155,3 +155,43 @@ def test_branch_obstacles_restore_state_when_search_raises(force_python):
         np.testing.assert_array_equal(getattr(grid, field), values)
     for field, value in cpp_before.items():
         assert getattr(cell, field) == value
+
+
+@pytest.mark.parametrize("force_python", [True, False])
+def test_branch_avoids_original_metal_of_an_escaped_other_terminal(force_python):
+    if not force_python and not get_backend_info()["available"]:
+        pytest.skip("C++ extension unavailable")
+    router = Autorouter(22, 22, force_python=force_python, physics_enabled=False)
+    for ref, x, y, size in [("R1", 4, 10.3, 0.8), ("Q1", 18, 10.3, 0.8), ("U1", 12, 10, 2.0)]:
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": "1",
+                    "x": x,
+                    "y": y,
+                    "width": size,
+                    "height": size,
+                    "net": 1,
+                    "net_name": "ISENSE_TEST",
+                }
+            ],
+        )
+    root, target, other = (router.pads[ref, "1"] for ref in ("R1", "Q1", "U1"))
+    stub = Route(1, "ISENSE_TEST", [Segment(12, 10, 12, 14, 0.2, Layer.F_CU, 1)], is_escape=True)
+    router._mark_route(stub)
+    virtual_other = replace(other, y=14)
+    with isolate_kelvin_branch(router.grid, [root, target, virtual_other], root, target):
+        route = router.router.route(root, target)
+    assert route is not None
+    metal = unary_union(
+        [
+            LineString([s.start, s.end]).buffer(s.width / 2)
+            for s in route.segments
+            if s.layer == Layer.F_CU
+        ]
+        + [Point(v.x, v.y).buffer(v.diameter / 2) for v in route.vias]
+    )
+    assert metal.intersection(box(11, 9, 13, 11)).area < 1e-9
+    if not force_python:
+        assert router.router.fallback_stats["fallback_count"] == 0

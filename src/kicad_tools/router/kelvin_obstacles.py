@@ -59,9 +59,14 @@ def isolate_kelvin_branch(
             first, last = sorted(grid.layer_to_index(layer.value) for layer in via.layers)
             for layer in range(first, last + 1):
                 objects.append((layer, Point(via.x, via.y).buffer(via.diameter / 2)))
+    # Escape endpoints carry terminal identities but are not the physical
+    # pads. Other branches must avoid the original metal as well as the
+    # escape trace already collected above.
+    physical_pads = {(pad.ref, pad.pin): pad for pad in grid._pads if pad.ref and pad.pin}
     for pad in pads:
         if pad is root or pad is target:
             continue
+        pad = physical_pads.get((pad.ref, pad.pin), pad)
         layers = (
             range(grid.num_layers) if pad.through_hole else [grid.layer_to_index(pad.layer.value)]
         )
