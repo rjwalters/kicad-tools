@@ -7,7 +7,11 @@ by connecting pads in order of shortest Manhattan distance.
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Callable
+
+from ..kelvin import detect_kelvin_topology
+from ..kelvin_obstacles import isolate_kelvin_branch
 
 if TYPE_CHECKING:
     from ..grid import RoutingGrid
@@ -122,9 +126,12 @@ class MSTRouter:
             return []
 
         routes: list[Route] = []
+        kelvin = detect_kelvin_topology(pad_objs)
 
         if len(pad_objs) > 2:
-            if use_steiner:
+            if kelvin is not None:
+                edges = kelvin.edges
+            elif use_steiner:
                 from .steiner import (
                     build_rsmt,
                     make_blocked_cell_predicate,
@@ -193,7 +200,15 @@ class MSTRouter:
                 else:
                     edge_timeout = None
 
-                route = self.router.route(source_pad, target_pad, per_net_timeout=edge_timeout)
+                isolation = (
+                    isolate_kelvin_branch(
+                        self.grid, pad_objs, pad_objs[kelvin.root_index], target_pad
+                    )
+                    if kelvin is not None
+                    else nullcontext()
+                )
+                with isolation:
+                    route = self.router.route(source_pad, target_pad, per_net_timeout=edge_timeout)
 
                 if route:
                     mark_route_callback(route)
