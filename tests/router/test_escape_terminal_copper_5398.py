@@ -279,9 +279,7 @@ def test_escaped_terminal_does_not_waive_foreign_via_clearance(force_python):
     via_copper = Point(foreign_via.x, foreign_via.y).buffer(foreign_via.diameter / 2)
     emitted = [seg for route in routes for seg in route.segments]
     assert emitted, "route must emit copper"
-    metal = unary_union(
-        [LineString([seg.start, seg.end]).buffer(seg.width / 2) for seg in emitted]
-    )
+    metal = unary_union([LineString([seg.start, seg.end]).buffer(seg.width / 2) for seg in emitted])
     assert metal.distance(via_copper) >= rules.trace_clearance - 1e-6, (
         "emitted copper is closer to the foreign via than the authored clearance; "
         "the escaped terminal is still waiving checks over copper that does not exist"
