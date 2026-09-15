@@ -356,7 +356,7 @@ def _run_one_board(
     if route_fn is not None:
         route = route_fn
     else:
-        from kicad_tools.cli.route_cmd import main as _route_main
+        from kicad_tools.cli.route_cmd import main_with_result as _route_main
 
         route = _route_main
 

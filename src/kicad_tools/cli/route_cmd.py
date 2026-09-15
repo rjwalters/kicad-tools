@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.net_names import NetClassMapResolution
     from kicad_tools.router.pairwise_clearance import AttachZone, PadGeometry, PairwiseViolation
     from kicad_tools.router.primitives import Route
+    from kicad_tools.router.reporting import RouteAttemptResult
 
 # Issue #3035: ``_auto_skip_pour_nets`` was promoted to a public helper at
 # ``kicad_tools.router.auto_pour.auto_skip_pour_nets`` so in-process router
@@ -12727,6 +12728,13 @@ def main(argv: list[str] | None = None) -> int:
     from .route_deadline import run
 
     return run(argv)
+
+
+def main_with_result(argv: list[str] | None = None) -> "RouteAttemptResult":
+    """Run the same CLI invocation with additive typed attempt metadata."""
+    from .route_deadline import run_attempt
+
+    return run_attempt(argv)
 
 
 def _in_process_main(argv: list[str] | None = None) -> int:

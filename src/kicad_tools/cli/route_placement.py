@@ -3,10 +3,61 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import fields
 from pathlib import Path
 
-from kicad_tools.placement.routing import analyze_routing_placement
+from kicad_tools.placement.routing import RoutingPlacementDisposition, analyze_routing_placement
 from kicad_tools.router.reporting import RoutingPlacementReport
+
+_attempt_disposition: ContextVar[list[RoutingPlacementDisposition] | None] = ContextVar(
+    "route_attempt_placement", default=None
+)
+
+
+@contextmanager
+def capture_disposition():
+    """A nested or subsequent invocation gets its own result channel."""
+    values: list[RoutingPlacementDisposition] = []
+    token = _attempt_disposition.set(values)
+    try:
+        yield values
+    finally:
+        _attempt_disposition.reset(token)
+
+
+def publish_disposition(disposition: RoutingPlacementDisposition) -> None:
+    from .route_deadline import current_stage, record_stage
+
+    values = _attempt_disposition.get()
+    if values is not None:
+        values[:] = [disposition]
+    encoded = {
+        field.name: (
+            disposition.check_available
+            if field.name == "check_available"
+            else sorted(getattr(disposition, field.name))
+        )
+        for field in fields(disposition)
+    }
+    record_stage(current_stage() or "placement", placement_disposition=encoded)
+
+
+def disposition_from_control(state: dict) -> RoutingPlacementDisposition | None:
+    encoded = state.get("placement_disposition")
+    if encoded is None:
+        return None
+    values = {}
+    for field in fields(RoutingPlacementDisposition):
+        value = encoded[field.name]
+        if field.name == "check_available":
+            values[field.name] = value
+        elif field.name == "pad_net_identities":
+            values[field.name] = tuple(tuple(identity) for identity in value)
+        else:
+            values[field.name] = frozenset(value)
+    return RoutingPlacementDisposition(**values)
 
 
 def prepare(args, source: Path) -> None:
@@ -31,6 +82,7 @@ def prepare(args, source: Path) -> None:
             coupled_groups=[(p.positive.net_name, p.negative.net_name) for p in pairs],
         )
     args._placement_disposition = disposition
+    publish_disposition(disposition)
     output = Path(args.output) if args.output else source.with_stem(source.stem + "_routed")
     args._placement_output = output
     args._placement_output_before = output.stat() if output.exists() else None
