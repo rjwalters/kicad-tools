@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 30
+_REQUIRED_CPP_BUILD_VERSION = 31
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -3525,6 +3525,8 @@ class CppPathfinder:
                     via.diameter,
                     via.net,
                     py_grid.world_to_grid(via.x, via.y),
+                    py_grid.layer_to_index(via.layers[0].value),
+                    py_grid.layer_to_index(via.layers[1].value),
                 )
 
         self._grid._synced_route_count = current_count

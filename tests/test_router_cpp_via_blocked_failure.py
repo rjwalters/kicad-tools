@@ -148,7 +148,10 @@ class TestRouteResultFailureReason:
 
         # Carpet of stored vias on 0.4mm pitch -- well inside the
         # 0.8mm geometric keepout.  We deliberately do NOT mark grid
-        # cells, so any cell-based check passes.
+        # cells, so any cell-based check passes. These stored vias span
+        # In1.Cu through B.Cu: F.Cu trace motion remains possible, so the
+        # search reaches its via-candidate rejection branch. A through-via
+        # carpet would instead reject every initial trace edge (#5435).
         net2 = 2
         for i in range(6):
             for j in range(6):
@@ -160,6 +163,8 @@ class TestRouteResultFailureReason:
                     0.3,
                     rules.via_diameter,
                     net2,
+                    layer_from=1,  # Inner-to-back span leaves F.Cu trace steps legal.
+                    layer_to=3,
                 )
 
         pathfinder = CppPathfinder(cpp_grid, rules, diagonal_routing=True)
