@@ -104,7 +104,7 @@ def _make_grid(rules: DesignRules) -> RoutingGrid:
 
 def _make_router(rules: DesignRules) -> EscapeRouter:
     grid = _make_grid(rules)
-    return EscapeRouter(grid, rules)
+    return EscapeRouter(grid, rules, component_holes=())
 
 
 # ============================================================================

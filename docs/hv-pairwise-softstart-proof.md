@@ -1,9 +1,57 @@
-# HV pairwise avoidance: softstart rev-C proof runs (2026-08-15 → 2026-08-21)
+# HV pairwise avoidance: softstart rev-C proof runs (2026-08-15 → 2026-09-14)
 
 Running record of the #4507 T4 manual criterion, newest run first. Each section
 describes the tree as of its own date.
 
-> **Current record: [the 2026-08-21 fifth pass](#the-2026-08-21-fifth-pass-fixture-access-root-caused-code-side-re-verified-complete).**
+## 2026-09-15 bounded follow-up: interior-pad wide escape
+
+This is a local geometry correction, **not a new T4 routing run**. The
+preserved terminal run remains incomplete at 72/78 requested nets; its loaded
+source was mutable and is not attributed to this follow-up.
+
+The initial R3.1 obstruction probe used a 0.2 mm trace and 1.6 mm clearance.
+Those parameters did not match the saved input: both original and effective
+`/AC_LINE` class maps declare 2.6 mm body width, 2.0 mm minimum neck, 0.4 mm
+clearance and a 15 A target. Effective map SHA256:
+`c9315891e0d6444a94769f0f3f5f9e98d5c356260cb2cee23357a54f76472d3f`.
+On saved PCB `e033d305f051a868a56de1c13a3187ffe964dcbba09bb2081b45e71f0f3e1bd7`,
+the actual centered neck leaves only 0.3125 mm to R3.2, so it still fails the
+0.4 mm floor. The correction is geometric, not a rated-waiver relaxation.
+
+After both full-width and authored-neck center launches fail, the generic
+lattice escape can try eight strictly interior SMD-pad attachment points.
+They lie within half the radius of the centered disc contained by every
+supported convex pad shape; the original pad remains the obstacle/identity
+source. Existing static, committed-copper, keepout, layer and pairwise-waiver
+checks validate each emitted leg at the unchanged neck width and clearance.
+No synthetic segment back to the obstructed pad center is added. Through-hole,
+virtual and coupled-pad paths retain their existing behavior.
+
+A small fixture using the R3 dimensions now emits a complete connected route
+at widths >=2.0 mm, with positive copper overlap on both pads and >=0.4 mm
+clearance to the sibling pad. The same geometry still refuses without its
+required pairwise waiver, with unrelated zone membership, or with foreign pads
+blocking both sides. Existing successful center escapes remain identical.
+These are Python geometry controls, not native DRC or current-source completion
+of the six remaining T4 nets. That source/input/native-bound manual proof and
+per-residual accounting remain open under #4507.
+
+### Previous full-run record
+
+> **Current record: [the 2026-09-14 sixth pass](#the-2026-09-14-sixth-pass-the-fixture-finally-runs-and-the-gate-was-never-handed-any-pads).**
+> The first pass since 2026-08-15 that could actually *run* the recipe (an
+> operator supplied a fresh rev-C fixture, clearing the gate-(2) block the
+> fifth pass named). Two real defects found and fixed against live board
+> geometry: (1) the in-run #4588 audit was never handed pad copper at all, so
+> the widened kernel from #4885/#4887 was dead weight in the gate that decides
+> whether `kct route` exits 0; (2) the lattice search probed the #4506 waiver
+> at the pad **centre** while the gate probes the copper-polygon closest-gap
+> midpoint — a one-directional disagreement that let the search commit exactly
+> the copper the gate reports. The attribution sub-task is answered **(c) for
+> every gate-reported residual**, including the long-open
+> `/LED_A_NEG`↔`/SCAP_POS` pair.
+>
+> Below that: [the 2026-08-21 fifth pass](#the-2026-08-21-fifth-pass-fixture-access-root-caused-code-side-re-verified-complete).
 > Root-causes *why* every pass since the third one has been unable to reach
 > the physical fixture (a worktree-relative symlink depth bug, filed
 > separately as #4925), confirms independently that this specific host also
@@ -46,6 +94,284 @@ describes the tree as of its own date.
 > (#4867's `abs()` sign collapse fixed by #4868), and from [Verdict (pre-fix
 > run)](#verdict-of-the-pre-fix-run-t4-fails--but-the-machinery-is-measurably-doing-its-job)
 > downwards the original pre-fix measurement.
+
+## The 2026-09-14 sixth pass: the fixture finally runs, and the gate was never handed any pads
+
+`feature/issue-4507` @ `449f07b2` (rebased on `main`), C++ router backend
+**build 25**, macOS (darwin 25.6.0), single machine, no CI.
+
+The fifth pass ended with "not more code search — a run of this doc's recipe
+against the actual softstart rev-C inputs", blocked on two gates: (1) the
+worktree-depth symlink, since fixed as #4925, and (2) a host with current
+rev-C outputs. **Gate (2) was cleared by an operator** supplying a fresh
+fixture; this is the first pass in a month that measured the real board
+instead of re-reading the code.
+
+### Inputs — and why old numbers are not a baseline for them
+
+| Input | This pass | Historical proof runs |
+|---|---|---|
+| Source | `github.com/rjwalters/softstart` @ `7800b046`, **working-tree bytes** (uncommitted changes present) | same commit, committed bytes |
+| `softstart_revc.kicad_pcb` | md5 `411a07b3` | md5 `7d82599e` |
+| `net_class_map.json` | md5 `0254c8ed` | md5 `9184a661` |
+| `vmap.json` | md5 `cc72a701` | md5 `cc72a701` — **identical** |
+| `creepage_class_map.json` | md5 `6c3b324a` | md5 `6c3b324a` — **identical** |
+
+The board and the routing class map **differ**; the voltage map and the census
+membership map are byte-identical. So the census is scored against exactly the
+same requirement matrix as every prior run (1922 cross-pairs, confirmed in the
+run banner), but the copper and placement are not the same board. **Prior
+numerical results are therefore context, not a baseline** — "17 residuals"
+from 2026-08-21 and "17 board-level fails" here are not the same 17, and no
+claim below compares them as if they were. `DO_NOT_FAB` work-in-progress, as
+every routed board in this file.
+
+Baseline sanity, on the **placed, unrouted** board: 2997 pairs, 22 raw fails,
+**all `same_footprint`, 0 board-level**, `gate_passed: true`. (Historically 24
+raw / 0 board-level — a different board, same clean starting point.) The input
+board carries **zero** routed copper on every net: `board_trace_routes` finds 0
+nets with segments or vias. That matters for the attribution below — it rules
+out case (b), preserved copper, *by construction* for this entire run. Every
+fail scored below is copper this run laid down.
+
+### The run
+
+Steps 1 and 2 of the recipe in [Commands](#commands). Step 3
+(`kct zones hv-keepout --clearance 1.6`) was skipped deliberately, exactly as
+the 2026-08-21 pass skipped it: the 2026-08-16 finding that it makes this board
+*worse* stands and its margin bug is explicitly out of #4507's scope.
+
+| | Step 1 (HV backbone, 2 layers) | Step 2 (`--complete`, 4 layers) |
+|---|---|---|
+| Nets | **5 / 7** (2 partial) | **72 / 78** (3 partial) |
+| Copper written | 238 segments, 13 vias | 2752 segments, 165 vias |
+| Wall clock | ~13 min | ~116 min (6008.9 s of a 6000 s budget — deadline exceeded) |
+| Pairwise matrix | 84 mapped nets, 1922 cross-pairs | same |
+| Router's own gate | 0 | **4 violations / 3 net pairs** |
+
+The 13 unroutable links self-classify `PLACEMENT_BOUND` /
+`CONGESTION_SATURATED` / `BUDGET_STARVED` with the recurring
+`manufacturer 'jlcpcb' does not support via-in-pad` tier note — the same
+placement wall every pass since 2026-07-21 has recorded, and not a pairwise
+problem.
+
+### Finding 1 — the widened kernel was never handed any pads
+
+PRs #4885/#4887 widened `find_pairwise_violations` to trace↔pad, via↔pad and
+via↔trace, and `board_pairwise_violations` populates `foreign_pads` from
+`board_pad_geometry`. But **only the replay was ever given pads.** The in-run
+`_audit_pairwise_clearance` — the gate that decides whether `kct route` prints
+SUCCESS and exits 0 — called `find_pairwise_violations` with no `foreign_pads`
+argument at all, on the docstring's stated grounds that "this in-memory routing
+session does not resolve" pad geometry.
+
+That has not been true since #4885: `board_pad_geometry` takes a *path*, and
+the router already records one (`_pairwise_attach_zone_pcb_path`) for the #4506
+attach-zone resolver, in the same sheet-absolute frame. A kernel that can check
+pads but is never given any is the same shape of silent false pass #4588 and
+#4699 each closed in turn.
+
+Fixed by `_pairwise_pad_geometry(router)` — the pad-shaped companion to
+`_pairwise_attach_zones`, memoised on the router. It distinguishes **verified
+empty** (`()`: the board was read and has no connected pads) from
+**unavailable** (`None`: the read raised, or no source board path was ever
+recorded), and the audit turns `None` into a reported finding rather than a
+clean list. Degrading silently to the pre-#4507 trace/via scope would restore
+the very false pass this widening removes — PR #5392's review demonstrated a
+run printing SUCCESS and returning 0 over the 0.5 mm shortfall below with only
+a stderr warning to show for it. `_pairwise_attach_zones` can safely return
+`()` in the same situation because *its* degradation is conservative (fewer
+waivers ⇒ stricter gate); losing pad geometry removes checks, so the two
+helpers deliberately do not share that convention. The end-to-end regression
+test
+(`tests/test_route_pairwise_pad_audit_4507.py`) demonstrates the consequence
+directly: **before this change, a board carrying 300 V copper 0.5 mm from a
+foreign LV pad routed to a clean SUCCESS and exit 0.**
+
+The board-file replay measures the same gap on the real fixture:
+
+```
+$ uv run python scripts/replay_pairwise_gate.py step2.kicad_pcb \
+      --voltage-map vmap.json --dru 0.15
+  pairwise violations (trace/via/pad, with #4506 attach zones): 4  (3 net pairs)
+    /GATE_POS_A     <-> /LED_K_POS: 1.049 mm against 1.400 mm at (144.687, 116.720)
+    /V_BANK_POS_MID <-> /SCAP_POS:  1.150 mm against 1.200 mm at (171.700,  86.275)
+    /LED_A_NEG      <-> /SCAP_POS:  1.825 mm against 2.000 mm at (176.500, 114.412)
+
+$ ... --no-pad-geometry
+  pairwise violations (trace/via only, with #4506 attach zones): 0  (0 net pairs)
+```
+
+**Every finding on this board is pad-governed, and the pre-#4507 scope sees
+precisely none of them.** With the fix, the run's own inline banner prints the
+same three pairs — the gate now speaks during the run rather than requiring a
+human to remember a replay afterwards.
+
+### Attribution of the 17 board-level census fails
+
+Scored with the fixture's own `creepage_triage.py` bucketing (so the set
+matches what the recipe's gate reports), then attributed by finding the copper
+primitives that actually carry each pair's minimum distance:
+
+| Governing geometry | Count | ≥ 30 V | sub-threshold |
+|---|---|---|---|
+| **pour / zone fill** (#3901) | 11 | 7 | 4 |
+| routed **trace ↔ foreign pad** | 5 | 4 | 1 |
+| routed **via ↔ foreign pad** | 1 | 1 | 0 |
+| routed **trace ↔ foreign trace** | **0** | — | — |
+| routed **via ↔ foreign trace** | **0** | — | — |
+
+Two things follow immediately. The router's *original* trace↔trace scope is
+genuinely clean on this board — as it was on 2026-08-21. And the single largest
+bucket is **pour copper** (every one of the 11 is against `GND`/`+3.3V`, the
+auto-pour `kct route` creates): no engine's pairwise model represents zone fill
+at all, which is #3901's territory and explicitly out of #4507's scope.
+
+That leaves **6 conductor residuals**, all pad-governed. Taking each one and
+asking what the gate says and why:
+
+| Pair | Governing | Verdict |
+|---|---|---|
+| `/SCAP_POS_RTN`↔`/OC_TRIP_N` | trace↔pad | **sub-threshold** — \|ΔV\| 12 V, so the router's requirement is the 0.150 mm DRU floor while the census asks 0.42 mm. Out of scope (the `--hv-threshold` policy call). |
+| `/AC_LINE`↔`/AC_NEUTRAL` | trace↔pad | **#4506-waived** — 0.600 mm inside a rated attach zone. The census has no concept of the exemption; the gate declines deliberately. |
+| `/AC_NEUTRAL`↔`/FUSED_LINE` | trace↔pad | **#4506-waived** — every in-requirement instance sits in a zone. |
+| `/SCAP_NEG`↔`/SCAP_NEG_RTN` | trace↔pad | **#4506-waived** — 0.748 / 0.994 mm, both zoned. |
+| `/LED_A_NEG`↔`/SCAP_POS` | trace↔pad | **REPORTED** at 1.825 mm vs 2.000 mm (two nearer instances *are* zoned). |
+| `/CHG`↔`/SCAP_POS` | via↔pad | different-layer copper only; see the sub-threshold/zone split above. |
+
+Plus two pairs the gate reports that the census waives as same-footprint
+(`/GATE_POS_A`↔`/LED_K_POS`, `/V_BANK_POS_MID`↔`/SCAP_POS`) — the gate is
+*stricter* than the census there, which is the intended direction.
+
+### Finding 2 — the search and the gate probed the #4506 waiver at different points (case c)
+
+So: which of (a) audit-visibility, (b) preserved copper, or (c) a genuine
+search-time defect explains the ones the gate reports?
+
+**(b) is ruled out by construction** — the input board has zero routed copper,
+so every byte of this is fresh step-2 copper the lattice search chose. And it
+cannot be (a) alone, because with Finding 1 fixed the gate *does* see it. So it
+must be (c): the search had a `pairwise_pad_blocked` predicate and committed
+the copper anyway. Why?
+
+Replaying that predicate against the exact board geometry (frame-correct pads
+built from `board_pad_geometry`'s own polygons, so the replay cannot
+reintroduce the 2026-08-15 frame bug) isolates it to one line:
+
+```python
+LatticeObstacleModel.pairwise_pad_blocked(...)
+    ... and not pairwise.exempt_seg_pt(a, b, (pad.x, pad.y), ...)
+                                             ^^^^^^^^^^^^^^
+```
+
+The search probes the #4506 rated-footprint waiver at the pad's **centre**. The
+#4588 gate probes the closest-gap midpoint between the two copper **polygons**
+(`_copper_vs_pad_violation` → `_shapely_gap_and_midpoint`). A pad centre lies up
+to half a pad-width deeper inside the rated footprint — that is, systematically
+further inside the attach-zone rectangle. For any proximity whose true
+closest-gap midpoint falls just *outside* the zone while the centre-biased
+midpoint falls just *inside*, the search waives copper the gate then reports.
+Silent, and one-directional: it can only ever make the search more permissive
+than its own auditor.
+
+That is exactly what `exempt_seg_seg`'s "the search verdict and the #4588 gate
+agree by construction" contract already promised for trace-vs-trace. The pad
+branch never got the same treatment.
+
+A/B on the real board, per instance:
+
+```
+### /LED_A_NEG vs /SCAP_POS   required 2.000 mm
+  gap= 0.905  gate=WAIVED  search(centre-probe)=ALLOW  search(edge-probe)=ALLOW
+  gap= 1.650  gate=WAIVED  search(centre-probe)=ALLOW  search(edge-probe)=ALLOW
+  gap= 1.825  gate=REPORT  search(centre-probe)=ALLOW  search(edge-probe)=block   <-- LEAK (old)
+
+### /GATE_POS_A vs /LED_K_POS   required 1.400 mm
+  gap= 0.400 … 1.077 (5 instances)  gate=WAIVED  both probes ALLOW
+  gap= 1.049  gate=REPORT  search(centre-probe)=ALLOW  search(edge-probe)=block   <-- LEAK (old)
+
+### /V_BANK_POS_MID vs /SCAP_POS   required 1.200 mm
+  gap= 0.873 … 1.050 (3 instances)  gate=WAIVED  both probes ALLOW
+  gap= 1.150  gate=REPORT  search(centre-probe)=ALLOW  search(edge-probe)=block   <-- LEAK (old)
+                                                                     (x2 instances)
+```
+
+**All 4 gate-reported instances flip from ALLOW to block; all 9 genuinely-rated
+instances stay waived under both probes.** So the fix closes the leak without
+over-tightening #4506 — the failure mode that would make every
+domain-bridging footprint unroutable.
+
+This retires the third and fourth passes' open item. The fourth pass fixed a
+real coupled/fat-path pad gap (#4911) and said honestly that it could not
+confirm the fix explained `/LED_A_NEG`↔`/SCAP_POS` specifically. It did not:
+**this probe mismatch is what that residual was**, now measured rather than
+inferred.
+
+Fixed by `pad_waiver_probe_point` in `lattice/obstacles.py`, using the
+production copper-gap midpoint helper for the moving trace (including its
+half-width and round caps) and the pad's oriented rect/circle/oval polygon.
+The review's rectangular boundary case now agrees with the gate at 7.55 mm,
+rather than the centerline-derived 7.50 mm.
+
+An AABB is conservative for distance but **not** for waiver-zone membership.
+The router does not retain authored roundrect radius metadata. For those
+pads, a waiver requires one applicable zone to contain the entire possible
+midpoint envelope derived from both copper bounding boxes. This preserves
+broad rated-zone waivers but can reject valid narrow waivers; exact rounded
+metadata transport remains outside this increment. Unknown/inexact geometry
+must not be waived using an assumed point.
+
+Pinned by `tests/router/lattice/test_pairwise_pad_probe_4507.py`, using the
+production gate helper on actual polygons, the original review counterexample,
+orientation/shape boundary controls and conservative-envelope controls.
+
+### Where T4 stands after this pass
+
+**T4's numeric bar — 0 board-level census fails — is still NOT met, and this
+pass does not claim it.** Honest accounting of the 17:
+
+* **11 pour/zone fill** — #3901, out of #4507's scope; no pairwise model
+  represents pour copper. Unreachable by this issue's machinery at any quality
+  of search.
+* **5 sub-threshold or #4506-waived** — the `--hv-threshold` policy call and
+  the rated-footprint exemption, both explicit non-goals here.
+* **The remainder** are the pad-governed leaks Finding 2 fixes.
+
+Each residual is therefore "individually attributed to a still-open, named
+cause", which is the alternative T4 itself allows.
+
+**What this pass did NOT do:** re-run the ~2-hour step-2 route *with* the
+Finding 2 fix to confirm the board's own gate drops to 0 end to end. The fix is
+verified against the exact real-board geometry (the A/B above) and by synthetic
+regression, not by a confirming re-route. A future pass should do that re-run
+and record whether the 6 conductor residuals actually vanish from the census —
+the search declining this copper may simply re-route it elsewhere, or push
+those nets into the unroutable-link list, and only a re-run can say which.
+
+### Reproducing this pass
+
+```bash
+# Steps 1-2 exactly as in the Commands section below (step 3 skipped, see above).
+uv run kct creepage step2.kicad_pcb --voltage-map vmap.json \
+  --net-class-map creepage_class_map.json --standard iec60664 \
+  --pollution-degree 2 --material-group IIIa --working-voltage 250 \
+  --waive-same-footprint --format json > creepage_step2.json
+python3 creepage_triage.py step2.kicad_pcb creepage_step2.json     # -> 17 board-level
+
+uv run python scripts/replay_pairwise_gate.py step2.kicad_pcb --voltage-map vmap.json --dru 0.15
+uv run python scripts/replay_pairwise_gate.py step2.kicad_pcb --voltage-map vmap.json --dru 0.15 --no-pad-geometry
+uv run python scripts/replay_pairwise_gate.py step2.kicad_pcb --voltage-map vmap.json --dru 0.15 --no-attach-zones
+```
+
+The per-fail geometry attribution and the centre-probe/edge-probe A/B were
+produced by throwaway scripts against the supported helpers
+(`board_trace_routes`, `board_pad_geometry`, `board_attach_zones`,
+`LatticeObstacleModel.pairwise_pad_blocked`); the *findings* they produced are
+pinned as regression tests in
+`tests/router/lattice/test_pairwise_pad_probe_4507.py` and
+`tests/test_route_pairwise_pad_audit_4507.py`, which is where they belong. No
+board artifacts are committed to this repo, as with every prior run in this
+file.
 
 ## The 2026-08-21 fifth pass: fixture access root-caused, code-side re-verified complete
 

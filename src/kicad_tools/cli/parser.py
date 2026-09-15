@@ -3437,6 +3437,28 @@ def _add_stitch_parser(subparsers) -> None:
         help="Output file (default: modify in place)",
     )
     stitch_parser.add_argument(
+        "--complete",
+        action="store_true",
+        dest="stitch_complete",
+        help="Commit only physically complete power nets after native refill",
+    )
+    stitch_parser.add_argument(
+        "--evidence-dir",
+        dest="stitch_evidence_dir",
+        help="New directory retaining physical candidates and native reports",
+    )
+    stitch_parser.add_argument(
+        "--kicad-cli",
+        dest="stitch_kicad_cli",
+        help="KiCad 10 CLI used by --complete",
+    )
+    stitch_parser.add_argument(
+        "--drc-strict",
+        action="store_true",
+        dest="stitch_drc_strict",
+        help="Require native DRC with zero findings (implies --drc)",
+    )
+    stitch_parser.add_argument(
         "--drc",
         action="store_true",
         dest="stitch_drc",

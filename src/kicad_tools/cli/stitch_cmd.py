@@ -6185,6 +6185,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Output file (default: modify in place)",
     )
     parser.add_argument(
+        "--complete",
+        action="store_true",
+        help="Commit only physically complete power nets after native refill; rejected candidates leave input unchanged",
+    )
+    parser.add_argument(
+        "--evidence-dir",
+        help="New directory retaining physical stitch candidates and native reports",
+    )
+    parser.add_argument("--kicad-cli", default="kicad-cli", help="KiCad 10 CLI used by --complete")
+    parser.add_argument(
         "--drc",
         action="store_true",
         help="Report native DRC after stitching, including unchanged boards (diagnostic only)",
@@ -6268,6 +6278,9 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
     if pcb_path.suffix != ".kicad_pcb":
         return fail(f"Expected .kicad_pcb file, got: {pcb_path.suffix}")
 
+    if getattr(args, "complete", False) and args.output:
+        return fail("--complete runs transactionally in the original project; omit --output")
+
     # If output specified, copy to output first
     if args.output and not args.dry_run:
         output_path = Path(args.output)
@@ -6332,6 +6345,51 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
         print(f"Auto-detected {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
 
     mode = "thermal" if args.thermal else ("blanket" if args.blanket else "stitch")
+
+    if getattr(args, "complete", False):
+        if args.dry_run or args.thermal or args.blanket or args.micro_via:
+            return fail("--complete requires a real standard power-stitch transaction")
+        from kicad_tools.stitching import complete_power_connections
+
+        try:
+            physical = complete_power_connections(
+                pcb_path,
+                net_names,
+                evidence_dir=args.evidence_dir,
+                kicad_cli=args.kicad_cli,
+                via_size=via_size,
+                drill=drill,
+                clearance=args.clearance,
+                trace_width=args.trace_width,
+                avoid_pad_overlap=True,
+                strict_drc=args.drc_strict,
+            )
+        except Exception as error:
+            return fail(str(error))
+        physical_document = {
+            "command": "stitch",
+            "pcb": str(args.pcb),
+            "output": str(pcb_path),
+            "success_scope": "physical_power_connections",
+            "success": True,
+            "exit_code": 0,
+            "target_nets": physical["target_nets"],
+            "vias_added": physical["vias_added"],
+            "output_sha256": physical["output_sha256"],
+            "evidence_dir": physical["evidence_dir"],
+        }
+        for diagnostic in ("evidence_finalization_error", "publisher_lock_cleanup_error"):
+            if physical.get(diagnostic):
+                physical_document[diagnostic] = physical[diagnostic]
+                if not as_json:
+                    print(
+                        f"Committed completion diagnostic ({diagnostic}): {physical[diagnostic]}",
+                        file=sys.stderr,
+                    )
+        if not as_json:
+            print(f"Physically complete power nets: {', '.join(physical['target_nets'])}")
+            print(f"Native refill and candidate evidence: {physical['evidence_dir']}")
+        return 0, physical_document if as_json else None
 
     try:
         if args.thermal:

@@ -592,3 +592,30 @@ class TestAllMethodsUseEpsilon:
 
         src = inspect.getsource(EdgeClearanceRule._check_zones)
         assert "_CLEARANCE_EPSILON_MM" in src
+
+
+@pytest.mark.parametrize("net_number", [0, 2])
+@pytest.mark.parametrize("filled", [False, True])
+def test_rule_area_is_not_edge_copper_but_real_zone_still_is(net_number, filled):
+    from kicad_tools.schema.pcb import Zone, ZoneKeepout
+    from kicad_tools.validate.violations import DRCResults
+
+    polygon = [(0.1, 5.0), (1.0, 5.0), (1.0, 10.0), (0.1, 10.0)]
+    zone = Zone(
+        net_number=net_number,
+        net_name="",
+        layer="F.Cu",
+        polygon=polygon,
+        filled_polygons=[polygon] if filled else [],
+    )
+    rule = EdgeClearanceRule()
+    # Do not exclude real unassigned copper just because its net number is 0.
+    actual = DRCResults()
+    rule._check_zones(_make_pcb(zones=[zone]), _outline_segments(), _design_rules(), actual)
+    assert len(actual.errors) == 2
+    assert all(v.rule_id == "edge_clearance_zone" for v in actual.errors)
+
+    zone.keepout = ZoneKeepout(copperpour_allowed=False)
+    area = DRCResults()
+    rule._check_zones(_make_pcb(zones=[zone]), _outline_segments(), _design_rules(), area)
+    assert not area.errors

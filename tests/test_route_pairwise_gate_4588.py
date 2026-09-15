@@ -850,6 +850,7 @@ class TestAuditHelper:
             routes=[fresh],
             existing_routes=[preserved],
             _pairwise_attach_zone_pcb_path=None,
+            _pairwise_pad_geometry_cache=(),  # This trace-only fixture has verified no pads.
         )
 
         violations = _audit_pairwise_clearance(router, args)

@@ -15,22 +15,26 @@ This module carves that clearance geometrically (Approach A from the issue):
 2. Union each HV net's true copper across the source copper layers, reusing the
    tested shapely primitives in
    :func:`kicad_tools.creepage.engine._net_union_on_layer`.
-3. Buffer that union by the required clearance to obtain the void region.
+3. Buffer that union conservatively, bounding curve and coordinate rounding
+   error so the saved void preserves the requested minimum clearance.
 4. Emit one persistent ``keepout`` rule area
    (:func:`kicad_tools.sexp.builders.keepout_node`, ``copperpour not_allowed``)
    per void region on the target plane layers, so the inner pours void around
    the HV nets and the voids survive future ``kicad-cli`` refills.
 
-Approach B (a custom ``.kicad_dru`` / netclass clearance rule that KiCad's own
-filler honors) is intentionally NOT built here -- there is no in-repo DRU/rule
-writer yet, and the geometric approach is self-verifiable against
-``kct creepage``.  The per-net |ΔV| distance source (#4371) can later feed
+Coverage follows the existing copper collector: segments, supported pad
+polygons, vias and saved fills. This does not add arc or custom-pad primitive
+support; unknown pad shapes retain the collector's rectangular fallback.
+
+Native ``.kicad_dru`` rule export is a separate operation; this geometric
+keepout operation is independently verifiable against ``kct creepage``.  The per-net |ΔV| distance source (#4371) can later feed
 per-net clearances through the ``clearance_mm`` seam; v1 uses one flat/derived
 distance.
 """
 
 from __future__ import annotations
 
+import math
 import uuid as uuid_module
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -228,7 +232,38 @@ def build_hv_keepout_plan(
     if hv_union.is_empty:
         return plan
 
-    void = hv_union.buffer(clearance_mm)
+    # Both the copper primitives and GEOS round buffers approximate circles
+    # with 16 chords per quadrant. An inscribed chord loses r*(1-cos(pi/64))
+    # at its midpoint. Bound the source-copper loss before offsetting it.
+    # keepout_node uses xy()/fmt(): coordinates round to 0.01 mm, so any
+    # serialized edge can move inward by at most sqrt(2)*0.005 mm. Include
+    # one native KiCad integer-coordinate unit (1 nm) per axis as well.
+    # At arbitrary polygon corners GEOS rounds the number of arc segments;
+    # an arc step can approach twice the nominal pi/32 step. Use that wider
+    # angular bound for the offset, independently of the source radius.
+    # This is a geometric enclosure, not a census tolerance.
+    chord_cos = math.cos(math.pi / 64)
+    source_radius = 0.0
+    for segment in pcb.segments:
+        if segment.net_number in hv_numbers and segment.layer in source_layers:
+            source_radius = max(source_radius, segment.width / 2)
+    for via in pcb.vias:
+        if via.net_number in hv_numbers:
+            source_radius = max(source_radius, via.size / 2)
+    for footprint in pcb.footprints:
+        for pad in footprint.pads:
+            if pad.net_number not in hv_numbers:
+                continue
+            if not ("*.Cu" in pad.layers or set(pad.layers).intersection(source_layers)):
+                continue
+            if pad.shape in ("circle", "oval", "obround"):
+                source_radius = max(source_radius, min(pad.size) / 2)
+            elif pad.shape == "roundrect":
+                source_radius = max(source_radius, pad.roundrect_rratio * min(pad.size))
+    source_error = source_radius * (1 - chord_cos)
+    coordinate_error = math.sqrt(2) * (0.005 + 0.000001)
+    buffer_distance = (clearance_mm + source_error + coordinate_error) / math.cos(math.pi / 32)
+    void = hv_union.buffer(buffer_distance, quad_segs=16)
     if void.is_empty:
         return plan
 

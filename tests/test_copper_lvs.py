@@ -1062,9 +1062,29 @@ def test_compare_copper_netlist_on_board06_recovers_verified_contact_paths() -> 
     """Corrected paths appear publicly without a zone-ownership waiver (#5133).
 
     Independent full-partition comparison found exactly the two repaired
-    unions and no other changes. The matching raw-contact witnesses are in
-    test_connectivity_contacts_5133. This is saved-copper checker output,
-    not native DRC or manufacturing qualification.
+    unions: ``U1.15``/``U1.32`` into the main GND component and ``U1.17``
+    into ``J1.A8``'s +3V3 component.  Those two assertions are the #5133
+    contract and are unchanged; the matching raw-contact witnesses are in
+    test_connectivity_contacts_5133.
+
+    The board is **not** copper-clean, and #5362 corrected the expectation
+    that it was.  It declares ``(version 20260206)`` and its zones omit
+    ``filled_areas_thickness``, which from KiCad's ``20250210`` boundary
+    onward means the stored ``filled_polygon`` outlines are already solid
+    copper -- so two fill fragments of one zone are *not* bonded to each
+    other by adjacency.  Native ``kicad-cli pcb drc`` 10.0.5 on these exact
+    bytes (no ``--refill-zones``, hash unchanged) reports::
+
+        Found 2 unconnected items
+          Track [+3V3] on B.Cu, length 3.4400 mm
+            <-> Track [+3V3] on F.Cu, length 0.5500 mm
+          Track [+1V8] on F.Cu, length 0.6500 mm
+            <-> Track [+1V8] on F.Cu, length 0.6500 mm
+
+    one open per net, which is exactly the open set asserted below.  A
+    ``clean`` verdict here would be a false negative against native, not a
+    pass.  This is saved-copper checker output, not manufacturing
+    qualification; live Board 06 regeneration has its own gate.
     """
     repo_root = Path(__file__).resolve().parent.parent
     board_out = repo_root / "boards" / "06-diffpair-test" / "regression-fixture"
@@ -1076,11 +1096,17 @@ def test_compare_copper_netlist_on_board06_recovers_verified_contact_paths() -> 
     assert not result.vacuous
     assert result.bound_pad_count == 198
     partition = ConnectivityValidator(pcb).extract_pad_partition()
+    # The #5133 repairs, unchanged.
     assert any({"U1.15", "U1.32", "J1.A1"} <= group for group in partition)
     assert any({"U1.17", "J1.A8"} <= group for group in partition)
-    assert result.clean
     assert result.shorts == ()
-    assert result.opens == ()
+    assert {(m.net_a, m.pad_a, m.pad_b) for m in result.opens} == {
+        ("+1V8", "U1.16", "U4.6"),
+        ("+3V3", "J1.A8", "J3.3"),
+    }, (
+        "copper-LVS must report one open per net, matching native kicad-cli's "
+        f"two unconnected_items on these bytes; got {list(result.opens)}"
+    )
 
 
 # ---------------------------------------------------------------------------

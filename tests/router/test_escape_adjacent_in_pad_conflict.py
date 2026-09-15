@@ -129,7 +129,7 @@ def _sibling_in_pad_escape(
 class TestAdjacentInPadViaConflictPredicate:
     def test_sub_pitch_pair_conflicts(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         # Sibling 0.6 mm via 0.5 mm away: required spacing
         # 0.3 + 0.3 + 0.127 = 0.727 mm > 0.5 mm -> conflict.
         sibling = _sibling_in_pad_escape(0.0, 0.0, net=99)
@@ -145,7 +145,7 @@ class TestAdjacentInPadViaConflictPredicate:
 
     def test_coarse_pitch_pair_does_not_conflict(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         # 0.8 mm apart >= 0.727 mm required -> no conflict (the guard
         # must NOT fire for coarse-pitch packages).
         sibling = _sibling_in_pad_escape(0.0, 0.0, net=99)
@@ -163,7 +163,7 @@ class TestAdjacentInPadViaConflictPredicate:
 
     def test_same_net_sibling_is_not_a_conflict(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         sibling = _sibling_in_pad_escape(0.0, 0.0, net=1)
         assert (
             er._adjacent_in_pad_via_conflict(
@@ -180,7 +180,7 @@ class TestAdjacentInPadViaConflictPredicate:
     def test_surface_escape_sibling_ignored(self):
         """A sibling escape with no in-pad via is not a barrel conflict."""
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         surface = EscapeRoute(
             pad=_make_pad(0.0, 0.0, net=99, name="NET_99"),
             direction=EscapeDirection.WEST,
@@ -205,7 +205,7 @@ class TestAdjacentInPadViaConflictPredicate:
 
     def test_none_existing_escapes_is_no_op(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         assert (
             er._adjacent_in_pad_via_conflict(
                 x=0.0,
@@ -225,7 +225,7 @@ class TestAdjacentInPadViaConflictPredicate:
         can fit two adjacent in-pad vias where the standard 0.6 mm pair
         cannot."""
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         sibling = _sibling_in_pad_escape(0.0, 0.0, net=99, diameter=0.3)
         assert (
             er._adjacent_in_pad_via_conflict(
@@ -248,7 +248,7 @@ class TestAdjacentInPadViaConflictPredicate:
 class TestTryInPadEscapeRefusal:
     def _router(self) -> EscapeRouter:
         rules = _make_rules()
-        return EscapeRouter(_make_grid(rules), rules)
+        return EscapeRouter(_make_grid(rules), rules, component_holes=())
 
     def test_second_rescue_refused_when_sibling_via_conflicts(self):
         er = self._router()

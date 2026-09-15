@@ -565,11 +565,11 @@ class TestGate3EscapeRouterUsesMap:
 
     def test_ctor_stores_map(self, grid, rules):
         m = {"X": "Y", "Y": "X"}
-        er = EscapeRouter(grid, rules, diff_pair_map=m)
+        er = EscapeRouter(grid, rules, diff_pair_map=m, component_holes=())
         assert er.diff_pair_map == m
 
     def test_default_map_is_empty(self, grid, rules):
-        er = EscapeRouter(grid, rules)
+        er = EscapeRouter(grid, rules, component_holes=())
         assert er.diff_pair_map == {}
 
     def test_generate_escapes_invokes_paired_segment(self, grid, rules):
@@ -579,9 +579,7 @@ class TestGate3EscapeRouterUsesMap:
         pads = make_qfn_with_pair("USB_D+", "USB_D-")
         info = make_package_info(pads, PackageType.QFN, "U2")
         er = EscapeRouter(
-            grid,
-            rules,
-            diff_pair_map={"USB_D+": "USB_D-", "USB_D-": "USB_D+"},
+            grid, rules, diff_pair_map={"USB_D+": "USB_D-", "USB_D-": "USB_D+"}, component_holes=()
         )
         assert er.diff_pair_segment_calls == 0
         er.generate_escapes(info)
@@ -594,7 +592,7 @@ class TestGate3EscapeRouterUsesMap:
         """
         pads = make_qfn_with_pair("USB_D+", "USB_D-")
         info = make_package_info(pads, PackageType.QFN, "U2")
-        er = EscapeRouter(grid, rules)  # empty diff_pair_map
+        er = EscapeRouter(grid, rules, component_holes=())  # empty diff_pair_map
         er.generate_escapes(info)
         assert er.diff_pair_segment_calls == 0
 
@@ -611,9 +609,7 @@ class TestGate4DispatchPerPackageType:
         pads = make_bga_with_pair("TX_P", "TX_N")
         info = make_package_info(pads, PackageType.BGA, "U1")
         er = EscapeRouter(
-            grid,
-            rules,
-            diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
+            grid, rules, diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"}, component_holes=()
         )
         er.generate_escapes(info)
         assert er.diff_pair_segment_calls == 1
@@ -622,9 +618,7 @@ class TestGate4DispatchPerPackageType:
         pads = make_qfn_with_pair("USB_D+", "USB_D-")
         info = make_package_info(pads, PackageType.QFN, "U2")
         er = EscapeRouter(
-            grid,
-            rules,
-            diff_pair_map={"USB_D+": "USB_D-", "USB_D-": "USB_D+"},
+            grid, rules, diff_pair_map={"USB_D+": "USB_D-", "USB_D-": "USB_D+"}, component_holes=()
         )
         er.generate_escapes(info)
         assert er.diff_pair_segment_calls == 1
@@ -633,9 +627,7 @@ class TestGate4DispatchPerPackageType:
         pads = make_usbc_with_pair("USB_D+", "USB_D-")
         info = make_package_info(pads, PackageType.MULTI_ROW_CONNECTOR, "J1")
         er = EscapeRouter(
-            grid,
-            rules,
-            diff_pair_map={"USB_D+": "USB_D-", "USB_D-": "USB_D+"},
+            grid, rules, diff_pair_map={"USB_D+": "USB_D-", "USB_D-": "USB_D+"}, component_holes=()
         )
         er.generate_escapes(info)
         assert er.diff_pair_segment_calls == 1
@@ -654,6 +646,7 @@ class TestGate4DispatchPerPackageType:
             grid,
             rules,
             diff_pair_map={"OTHER_P": "OTHER_N", "OTHER_N": "OTHER_P"},
+            component_holes=(),
         )
         er.generate_escapes(info)
         assert er.diff_pair_segment_calls == 0
@@ -670,9 +663,7 @@ class TestGate4DispatchPerPackageType:
         # The map declares TX_P partners with TX_N, which is NOT on
         # this package.
         er = EscapeRouter(
-            grid,
-            rules,
-            diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
+            grid, rules, diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"}, component_holes=()
         )
         er.generate_escapes(info)
         assert er.diff_pair_segment_calls == 0
@@ -718,6 +709,7 @@ class TestGate5PairedEscapeGeometry:
             rules,
             net_class_map=ncm,
             diff_pair_map={p_net: n_net, n_net: p_net},
+            component_holes=(),
         )
         escapes = er.generate_escapes(info)
         paired = [e for e in escapes if e.pad.net_name in (p_net, n_net)]
@@ -767,6 +759,7 @@ class TestGate5PairedEscapeGeometry:
             rules,
             net_class_map=ncm,
             diff_pair_map={"USB_D+": "USB_D-", "USB_D-": "USB_D+"},
+            component_holes=(),
         )
         escapes = er.generate_escapes(info)
         # Capture the paired escape_points BEFORE apply_escape_routes
@@ -828,7 +821,7 @@ class TestNoRegressionWhenMapEmpty:
             ref = "J1"
         info = make_package_info(pads, pkg_type, ref)
 
-        er_baseline = EscapeRouter(grid, rules)
+        er_baseline = EscapeRouter(grid, rules, component_holes=())
         baseline = er_baseline.generate_escapes(info)
 
         # New router with empty map - must produce identical count.
@@ -836,7 +829,7 @@ class TestNoRegressionWhenMapEmpty:
         # clearance / clamping interactions, but identical counts AND
         # zero pair-segment calls is sufficient to prove the dormant-
         # signal lesson from #2587 is honoured.
-        er_empty = EscapeRouter(grid, rules, diff_pair_map={})
+        er_empty = EscapeRouter(grid, rules, diff_pair_map={}, component_holes=())
         empty_run = er_empty.generate_escapes(info)
         assert len(empty_run) == len(baseline)
         assert er_empty.diff_pair_segment_calls == 0
@@ -890,6 +883,7 @@ class TestCorridorReservation:
             rules_obj,
             net_class_map=ncm,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
+            component_holes=(),
         )
         return er, info
 
@@ -1068,7 +1062,7 @@ class TestCorridorReservation:
         from kicad_tools.router.layers import Layer as _Layer
         from kicad_tools.router.primitives import Pad as _Pad
 
-        er = EscapeRouter(grid_4layer, rules)
+        er = EscapeRouter(grid_4layer, rules, component_holes=())
 
         # Build 3 synthetic EscapeRoute objects launching EAST.
         members = []
@@ -1118,7 +1112,7 @@ class TestCorridorReservation:
         """
         pads = make_bga_with_pair("TX_P", "TX_N")
         info = make_package_info(pads, PackageType.BGA, "U1")
-        er = EscapeRouter(grid_4layer, rules)  # empty map
+        er = EscapeRouter(grid_4layer, rules, component_holes=())  # empty map
         er.generate_escapes(info)
         assert er.pair_corridor_reservations == 0
         assert er.pair_corridor_reserved_cells == 0
@@ -1551,6 +1545,7 @@ class TestCorridorAttractor:
             rules_obj,
             net_class_map=ncm,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
+            component_holes=(),
         )
         return er, info
 
@@ -1669,10 +1664,7 @@ class TestBGA49InnerRingCorridorDriftPrevention:
         ncm = dict.fromkeys(diff_pair_map, NET_CLASS_HIGH_SPEED)
 
         er = EscapeRouter(
-            grid_4layer,
-            rules,
-            net_class_map=ncm,
-            diff_pair_map=diff_pair_map,
+            grid_4layer, rules, net_class_map=ncm, diff_pair_map=diff_pair_map, component_holes=()
         )
 
         assert er.pair_corridor_reservations == 0
@@ -1710,10 +1702,7 @@ class TestBGA49InnerRingCorridorDriftPrevention:
         ncm = dict.fromkeys(diff_pair_map, NET_CLASS_HIGH_SPEED)
 
         er = EscapeRouter(
-            grid_4layer,
-            rules,
-            net_class_map=ncm,
-            diff_pair_map=diff_pair_map,
+            grid_4layer, rules, net_class_map=ncm, diff_pair_map=diff_pair_map, component_holes=()
         )
         escapes = er.generate_escapes(info)
 
@@ -1752,10 +1741,7 @@ class TestBGA49InnerRingCorridorDriftPrevention:
         ncm = dict.fromkeys(diff_pair_map, NET_CLASS_HIGH_SPEED)
 
         er = EscapeRouter(
-            grid_4layer,
-            rules,
-            net_class_map=ncm,
-            diff_pair_map=diff_pair_map,
+            grid_4layer, rules, net_class_map=ncm, diff_pair_map=diff_pair_map, component_holes=()
         )
         er.generate_escapes(info)
 
@@ -1798,7 +1784,9 @@ class TestPairLaunchDirectionHeuristic:
         """No net_pad_positions -> exact pre-#3419 quadrant behaviour."""
         pads = make_bga_with_pair()
         info = make_package_info(pads, PackageType.BGA, "U1")
-        er = EscapeRouter(grid, rules, diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"})
+        er = EscapeRouter(
+            grid, rules, diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"}, component_holes=()
+        )
         pad_p, pad_n, mid_x, mid_y = self._pair_and_mid(pads)
         d = er._select_pair_launch_direction(pad_p, pad_n, mid_x, mid_y, info)
         assert d == er._get_quadrant_direction(mid_x, mid_y, *info.center)
@@ -1817,6 +1805,7 @@ class TestPairLaunchDirectionHeuristic:
             rules,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
             net_pad_positions=positions,
+            component_holes=(),
         )
         d = er._select_pair_launch_direction(pad_p, pad_n, mid_x, mid_y, info)
         assert d == er._get_quadrant_direction(mid_x, mid_y, *info.center)
@@ -1843,6 +1832,7 @@ class TestPairLaunchDirectionHeuristic:
             rules,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
             net_pad_positions=positions,
+            component_holes=(),
         )
         d = er._select_pair_launch_direction(pad_p, pad_n, mid_x, mid_y, info)
         assert d == EscapeDirection.EAST
@@ -1868,6 +1858,7 @@ class TestPairLaunchDirectionHeuristic:
             rules,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
             net_pad_positions=positions,
+            component_holes=(),
         )
         d = er._select_pair_launch_direction(pad_p, pad_n, mid_x, mid_y, info)
         assert d != EscapeDirection.NORTH
@@ -1886,6 +1877,7 @@ class TestPairLaunchDirectionHeuristic:
             rules,
             diff_pair_map={"TX_P": "TX_N", "TX_N": "TX_P"},
             net_pad_positions=positions,
+            component_holes=(),
         )
         escapes = er.generate_escapes(info)
         paired = [e for e in escapes if e.pad.net_name in ("TX_P", "TX_N")]
@@ -1909,7 +1901,7 @@ class TestPairLaunchDirectionHeuristic:
         assert escape.net_pad_positions.get("SIG_A") == [(5.0, 6.0)]
 
     def test_default_positions_map_is_empty(self, grid, rules):
-        er = EscapeRouter(grid, rules)
+        er = EscapeRouter(grid, rules, component_holes=())
         assert er.net_pad_positions == {}
 
 
@@ -1985,6 +1977,7 @@ class TestSlackCorridorWidening:
             net_class_map=ncm,
             net_pad_positions=net_pad_positions,
             enable_slack_corridor_widening=enable,
+            component_holes=(),
         )
         count = er._reserve_pair_continuation_corridor(
             members=members,

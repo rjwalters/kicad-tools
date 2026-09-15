@@ -48,6 +48,9 @@ INSET_ROUTE_MOVES = [
     # The inset pad seeds (#5004) route OSC_OUT beside C11.1: move its
     # ordinary 0.30 mm drill another 0.10 mm east to clear the SMT land.
     ("C11.1", "OSC_OUT", (24.7, 15.75), (24.8, 15.75)),
+    # The ordinary through-via OSC_IN escape needs 0.10 mm drill-to-land
+    # clearance at C10.1; the original 0.075 mm gap is insufficient.
+    ("C10.1", "OSC_IN", (17.95, 15.20), (17.95, 15.15)),
 ]
 
 
@@ -122,6 +125,26 @@ def repair(pcb_path):
             # checks every drill against every SMT land on either variant.
             if move in INSET_ROUTE_MOVES:
                 continue
+            # A fresh route may connect this circuit through a different
+            # outside-pad via (or entirely on the surface). The fingerprint
+            # above pins every pad/net identity. Accept that alternative only
+            # when physical copper joins exactly the complete expected net;
+            # missing pads, opens, and foreign-terminal shorts still fail.
+            # validate_process below checks every resulting drill/SMT gap.
+            from kicad_tools.validate.connectivity import ConnectivityValidator
+
+            expected = frozenset(
+                f"{fp.reference}.{pad.number}"
+                for fp in pcb.footprints
+                for pad in fp.pads
+                if pad.net_name == net
+            )
+            if (
+                ref in expected
+                and len(expected) >= 2
+                and ConnectivityValidator(pcb_path).extract_pad_partition().count(expected) == 1
+            ):
+                continue
             raise ValueError(f"Missing reviewed escape {ref}: cannot apply fixed repair")
         if len(choices) != 1:
             raise ValueError(f"Ambiguous escape {ref}")
@@ -155,11 +178,83 @@ def repair(pcb_path):
         via.add(parse_string("(tenting (front yes) (back yes))"))
     pcb_path.write_text(serialize_sexp(doc))
     trim_obsolete_nrst_tail(pcb_path)
+    trim_redundant_gnd_stitch(pcb_path)
     (pcb_path.parent / "manufacturing-requirements.json").write_text(
         json.dumps(OPTIONS, indent=2) + "\n"
     )
     validate_process(pcb_path, check_native=False)
     return changed
+
+
+def trim_redundant_gnd_stitch(pcb_path):
+    """Remove the reviewed redundant stitch crossing U2's unused bottom pads.
+
+    U2.23 has its own off-pad ground bond after repair. The additional
+    0.60/0.30 mm stitch at (32.01, 26.16) cuts U2.20/U2.21 solder lands;
+    its surface tail also joins unused pins. Remove only this exact pair,
+    and only when all net-assigned pad connectivity survives unchanged.
+    """
+    import tempfile
+
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    pcb_path = Path(pcb_path)
+    pcb = PCB.load(pcb_path)
+    origin, end = (33.25, 26.16), (32.01, 26.16)
+    vias = [
+        v
+        for v in pcb.vias
+        if v.net_name == "GND"
+        and math.dist(v.position, end) < 0.001
+        and abs(v.size - 0.6) < 1e-6
+        and abs(v.drill - 0.3) < 1e-6
+    ]
+    if not vias:
+        return 0
+    tails = [
+        s
+        for s in pcb.segments
+        if s.net_name == "GND"
+        and s.layer == "F.Cu"
+        and abs(s.width - 0.2) < 1e-6
+        and any(
+            math.dist(a, origin) < 0.001 and math.dist(b, end) < 0.001
+            for a, b in ((s.start, s.end), (s.end, s.start))
+        )
+    ]
+    if len(vias) != 1 or len(tails) != 1:
+        raise ValueError("Ambiguous redundant Board04 ground stitch")
+    bound = {
+        f"{fp.reference}.{pad.number}" for fp in pcb.footprints for pad in fp.pads if pad.net_name
+    }
+
+    def partition(path):
+        return {
+            frozenset(component & bound)
+            for component in ConnectivityValidator(path).extract_pad_partition()
+            if component & bound
+        }
+
+    before = partition(pcb_path)
+    remove = {vias[0].uuid, tails[0].uuid}
+    doc = parse_file(pcb_path)
+    doc.children = [
+        node
+        for node in doc.children
+        if not (
+            node.name in ("via", "segment")
+            and node.find_child("uuid")
+            and node.find_child("uuid").get_string(0) in remove
+        )
+    ]
+    candidate_text = serialize_sexp(doc)
+    with tempfile.TemporaryDirectory(prefix="board04-stitch-check-") as directory:
+        candidate = Path(directory) / pcb_path.name
+        candidate.write_text(candidate_text)
+        if partition(candidate) != before:
+            raise ValueError("Board04 ground stitch is required for pad connectivity")
+    pcb_path.write_text(candidate_text)
+    return 1
 
 
 def trim_obsolete_nrst_tail(pcb_path):

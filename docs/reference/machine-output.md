@@ -314,6 +314,46 @@ an improvement or an enforceable rule set from it: `optimize-placement`,
 | `reason` | `{"command": "reason", "pcb", "output", "dry_run", "warnings", "drc": {ran, source, …}, "board": {…}, "mode": "prompt"\|"analyze"\|"export-state"\|"auto-route", …, "success"}` — plus the mode's own payload: `prompt`, `analysis`, `state` + `state_output`, or `auto_route` (`attempted`/`routed`/`nets[]`) with `saved`/`written_to` |
 | `creepage-export-rules` | `{"command": "creepage-export-rules", "project", "pcb", "dru", "voltage_map", "standard", "pollution_degree", "material_group", "hv_threshold_v", "dru_floor_mm", "domains", "net_domains", "nets_assigned", "rules": [{name, condition, min_mm}], "bridging_exemptions", "dru_block", "dry_run", "written", "skipped_reason", "success"}` — `dru_block` is carried only on the `--dry-run` path (mirroring the prose that prints it instead of writing it) |
 
+### Physical power completion
+
+`kct stitch board.kicad_pcb --net GND --complete --via-size 0.6 --drill 0.3 --format json` uses the shared
+`kicad_tools.stitching.complete_power_connections` transaction. Omit `--net` to
+select the board's plane nets. It requires Shapely and native KiCad 10; choose the
+CLI with `--kicad-cli` and a new evidence directory with `--evidence-dir`.
+
+Success has `success_scope: "physical_power_connections"`, `success: true`,
+`exit_code: 0`, `target_nets`, integer `vias_added`, `output_sha256`, and
+`evidence_dir`. Every target pad must belong to one physical component after
+native refill, with no native target-net opens. Existing pad bonds and routed
+copper survive, different-net pad components are rejected, and final native
+violation/open identities may not exceed the saved input's no-refill baseline.
+Existing unrelated findings remain visible; `--drc-strict` requires zero findings.
+This is not complete manufacturing or circuit signoff.
+
+Failure returns nonzero with `success: false` and an error naming the retained
+evidence directory. The input PCB remains unchanged. Evidence includes full
+`saved`, `before` (native refill), `proposed`, and `candidate` (native refill)
+boards, authored constraints, native commands/reports, pad components, hashes,
+and proposal diagnostics. A refill-only success promotes the measured filled
+bytes even if it adds no via. Reusing an evidence directory is refused. Acceptance evidence is persisted before
+PCB promotion. If only the final status update fails after promotion, success
+includes `evidence_finalization_error`; the retained `accepted` record still
+identifies the validated candidate and output hash. Unique staging and a sibling
+commit lock serialize cooperating stitch publishers. Source bytes and context
+are checked again after evidence persistence, immediately before promotion;
+a detected concurrent edit is preserved and causes rejection. KiCad lock
+checks are advisory, so this is not an atomic comparison against arbitrary
+noncooperating editors. A retained `.stitch.lock` requires inspection before
+manual removal; lock-cleanup failures after a successful commit are reported
+as `publisher_lock_cleanup_error`.
+
+Run completion in the original project directory: `--output`, dry runs, blanket,
+thermal and micro-via modes are not supported by this transaction. Native
+project/rules and project-local footprint libraries are preserved; unresolved
+or escaping relative library paths are refused with evidence. Installed library
+availability findings remain part of the native report. Ordinary stitching keeps
+its documented `geometry` scope and does not claim physical power completion.
+
 Three conventions this batch adds or reinforces:
 
 - **A mode with no single-document form is refused, not half-emitted.**

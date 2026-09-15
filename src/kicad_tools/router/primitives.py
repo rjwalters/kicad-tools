@@ -515,6 +515,10 @@ class Pad:
     nominal dimensions do not bound their copper and are rejected explicitly.
     """
 
+    # Physical drill metadata, independent of the copper's residual rotation.
+    drill_size: tuple[float, float] | None = None
+    drill_rotation: float = 0.0
+
     def __post_init__(self) -> None:
         if self.shape not in {"circle", "rect", "oval", "roundrect"}:
             raise ValueError(

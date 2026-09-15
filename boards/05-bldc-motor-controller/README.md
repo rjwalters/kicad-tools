@@ -26,6 +26,20 @@ component/pad/placement/net geometry. It combines automatic routing with manual
 physical corrections; changing circuit geometry requires a new route and fresh
 gates. No synthetic routing pads are present in the generated board.
 
+The active revision-B recipe calls the generic physical power-stitch transaction
+before its final native and manufacturing gates. It accepts existing complete
+power copper or a safely completed candidate after real refill, preserving all
+previous pad bonds and rejecting new native findings. Its retained `readiness/stitch`
+ledger contains saved, refilled-before, proposed and refilled-candidate bytes,
+native reports and physical pad components. Failed stage evidence is retained in
+the `bldc-power-stitch-*` temporary directory named by the error.
+
+Fresh reconstruction at main `7368bf597eaefb2dbe171f79db3c3216843a2ae6` already had
+zero native opens/errors and clean copper LVS (149 bound pads); the historical
+57-open legacy audit does not describe this active recipe. The generic split-plane
+regression in `tests/fixtures/stitch-5388` demonstrates why added vias alone cannot
+prove completion. Issue #4410 remains open for its later routing/Kelvin/QFN phases.
+
 The manufacturing bundle has 36 SMT placements; hand-solder J1–J5 and RV1.
 Solder both driver/regulator exposed pads. Use the included local symbol and
 footprint libraries, native drawings, BOM/CPL and firmware. Fresh reconstruction

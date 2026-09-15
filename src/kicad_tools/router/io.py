@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from .stub_terminals import StubTerminal
 
 from .core import Autorouter
+from .fixed_copper import FixedPadCopper, custom_pad_copper
 from .geometry import (
     point_to_segment_distance as _geom_point_to_seg_dist,
 )
@@ -3852,6 +3853,9 @@ def load_pcb_for_routing(
     # Parse footprints and their pads
     components: list[dict] = []
     placement_pad_nets: list[tuple[str, str, str, str]] = []
+    # Actual copper of placement-excluded pads the router cannot carry as a
+    # Pad (issue #5357). Converted to physical obstacles once the grid exists.
+    placement_fixed_pads: list[FixedPadCopper] = []
 
     # Split by footprint for easier parsing
     footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
@@ -3903,11 +3907,22 @@ def load_pcb_for_routing(
             # missing capture. Preserve the schema's empty-string identity.
             pad_num = pad_start.group(1) if pad_start.group(1) is not None else pad_start.group(2)
             pad_type = pad_start.group(3)  # smd or thru_hole
-            pad_shape = _pad_shape_from_block(pad_block, ref, pad_num)
+            # Issue #5357: a routable pad still must reduce to supported router
+            # geometry, but placement-excluded copper is only ever an obstacle.
+            # Defer the refusal until the pad's EFFECTIVE net is known, so the
+            # exclusion decision -- not the shape alone -- selects the path.
+            pad_shape = ""
+            pad_shape_error: ValueError | None = None
+            try:
+                pad_shape = _pad_shape_from_block(pad_block, ref, pad_num)
+            except ValueError as exc:
+                pad_shape_error = exc
 
             # Extract at position (now searches entire multi-line block)
             at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", pad_block)
             if not at_match:
+                if pad_shape_error is not None:
+                    raise pad_shape_error
                 continue
             pad_x = float(at_match.group(1))
             pad_y = float(at_match.group(2))
@@ -3915,12 +3930,15 @@ def load_pcb_for_routing(
             # Extract size
             size_match = re.search(r"\(size\s+([\d.]+)\s+([\d.]+)\)", pad_block)
             if not size_match:
+                if pad_shape_error is not None:
+                    raise pad_shape_error
                 continue
             pad_w = float(size_match.group(1))
             pad_h = float(size_match.group(2))
 
             net_num, net_name = _resolve_pad_net(pad_block, net_map)
             authored_net_name = net_name
+            authored_net_num = net_num
 
             # Extract drill size if present
             drill_match = re.search(r"\(drill\s+([\d.]+)", pad_block)
@@ -3974,6 +3992,28 @@ def load_pcb_for_routing(
             # Also extract per-pad rotation if present
             pad_rot_match = re.search(r"\(at\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)\)", pad_block)
             pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
+
+            if pad_shape_error is not None:
+                # Issue #5357: only a pad whose EFFECTIVE net is placement-
+                # invalid may bypass the routable-geometry guard, and only as
+                # physical copper: it becomes no Pad, no target and no pour
+                # intent. Unsupported primitives still refuse here rather than
+                # degrade to the nominal box, which would drop real copper.
+                if net_name not in placement_invalid:
+                    raise pad_shape_error
+                placement_fixed_pads.append(
+                    custom_pad_copper(
+                        pad_block,
+                        reference=ref,
+                        pad_number=pad_num,
+                        x=abs_x,
+                        y=abs_y,
+                        rotation=pad_rot,
+                        source_net=authored_net_name,
+                        source_net_id=authored_net_num,
+                    )
+                )
+                continue
 
             # Rotate pad dimensions to PCB space. The pad's angle is stored
             # ABSOLUTE in the file (KiCad already folds the footprint rotation
@@ -4177,6 +4217,17 @@ def load_pcb_for_routing(
     # phase closes.
     _install_fine_pitch_regions_from_components(router, components)
 
+    # Preserve physical drills before routing-reference/type filters. Hole
+    # records are separate from grid copper, especially for unplated holes.
+    from kicad_tools.schema.pcb import PCB as DocumentPCB
+    from kicad_tools.sexp import parse_string
+
+    from .via_in_pad_eligibility import component_holes_from_document
+
+    router._loaded_component_holes = component_holes_from_document(
+        DocumentPCB(parse_string(pcb_text)), world_coordinates=True
+    )
+
     # Add all components
     for comp in components:
         # Pads already have absolute positions
@@ -4233,7 +4284,7 @@ def load_pcb_for_routing(
                 print(f"  Edge clearance: {edge_clearance}mm, {blocked_cells} cells blocked")
 
     # Load existing routes as obstacles for multi-pass routing
-    if load_existing_routes or preserve_placement:
+    if load_existing_routes or preserve_placement or placement_fixed_pads:
         from .optimizer.pcb import (
             _extract_balanced_blocks,
             parse_segments,
@@ -4257,10 +4308,18 @@ def load_pcb_for_routing(
         # consumers which exact blocks must survive refills/checkpoints; never
         # append them again alongside placement_preserved_copper.
         router.placement_preserved_zones = tuple(preserved_zones)
-        from .fixed_copper import load_fixed_fills
+        from .fixed_copper import FixedFillObstacles, load_fixed_fills, pad_fixed_fills
 
+        zone_fills = load_fixed_fills(
+            pcb_path, preserve_placement, router.grid, router.net_class_map
+        )
+        # Excluded custom-pad copper joins the same immutable collection every
+        # engine already consults; no parallel collision representation.
         router.grid.install_fixed_fills(
-            load_fixed_fills(pcb_path, preserve_placement, router.grid, router.net_class_map)
+            FixedFillObstacles(
+                zone_fills.fills
+                + pad_fixed_fills(placement_fixed_pads, router.grid, router.net_class_map)
+            )
         )
         for kind in ("segment", "via", "arc") if preserve_placement else ():
             for start, _end, block in _extract_balanced_blocks(pcb_text, kind):
