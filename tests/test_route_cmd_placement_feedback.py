@@ -531,6 +531,38 @@ class TestAutoDetectAnchoredRefs:
 
 
 class TestResolvePlacementFeedbackAnchors:
+    def test_fixed_copper_terminals_cannot_be_selected_for_feedback(self, tmp_path):
+        from kicad_tools.cli.route_cmd import _resolve_placement_feedback_anchors
+        from kicad_tools.placement.routing import analyze_routing_placement
+        from kicad_tools.router.placement_delta import PlacementDelta
+        from kicad_tools.router.placement_feedback import PlacementDeltaFeedbackLoop
+        from kicad_tools.schema.pcb import PCB
+        from tests.test_routing_placement_disposition import board_text
+
+        path = tmp_path / "mixed.kicad_pcb"
+        path.write_text(board_text())
+        disposition = analyze_routing_placement(path, coupled_groups=[("BAD", "PARTNER")])
+        args = SimpleNamespace(
+            placement_feedback_anchor=None,
+            placement_feedback_no_anchor="X1,X2,X3,P1,P2",
+            _placement_disposition=disposition,
+        )
+        pcb = PCB.load(path)
+        anchors = _resolve_placement_feedback_anchors(pcb, args)
+        loop = PlacementDeltaFeedbackLoop(
+            router=SimpleNamespace(), pcb=pcb, fixed_refs=anchors, verbose=False
+        )
+        deltas = [
+            PlacementDelta(kind="rotate_align", target_ref=ref, net_name="GOOD", rotation_delta=90)
+            for ref in ("X1", "X2", "X3", "P1", "P2", "R1")
+        ]
+        skipped, reasons = [], []
+        selected = loop._select_delta(deltas, skipped, reasons)
+        assert selected is not None and selected[0].target_ref == "R1"
+        assert {delta.target_ref for delta in skipped} == {"X1", "X2", "X3", "P1", "P2"}
+        assert all("anchored" in reason for reason in reasons)
+        assert path.read_text() == board_text()
+
     def test_combines_auto_and_user(self):
         from kicad_tools.cli.route_cmd import (
             _resolve_placement_feedback_anchors,
@@ -1025,6 +1057,7 @@ class TestInnerParserPlacementFeedbackFlags:
         stub_pcb.footprints = []
 
         router = MagicMock()
+        router.placement_disposition = None
         router.get_failed_nets.return_value = []
         router.route_with_placement_feedback.return_value = MagicMock(
             iterations=0,
@@ -1103,6 +1136,7 @@ class TestPlacementFeedbackEscalationHook:
         from unittest.mock import MagicMock
 
         router = MagicMock()
+        router.placement_disposition = None
         router.routes = object() if routes == "__default__" else routes
         router.get_failed_nets.return_value = list(failed_nets)
         router.nets = {1: [object(), object()], 2: [object(), object()]}
@@ -1314,6 +1348,7 @@ class TestPlacementFeedbackVerboseGating:
 
         args = _pf_args(verbose=verbose)
         router = MagicMock()
+        router.placement_disposition = None
         router.get_failed_nets.return_value = [1]
         router.route_with_placement_feedback.return_value = MagicMock(
             iterations=1,
@@ -1372,6 +1407,7 @@ class TestDeterministicBudgetSentinelNormalization:
 
         args = _pf_args(per_net_timeout=0.0)
         router = MagicMock()
+        router.placement_disposition = None
         router.get_failed_nets.return_value = [1]
         router.route_with_placement_feedback.return_value = MagicMock(
             iterations=1,
@@ -1405,6 +1441,7 @@ class TestDeterministicBudgetSentinelNormalization:
 
         args = _pf_args(per_net_timeout=4.0)
         router = MagicMock()
+        router.placement_disposition = None
         router.get_failed_nets.return_value = [1]
         router.route_with_placement_feedback.return_value = MagicMock(
             iterations=1,
@@ -1441,6 +1478,7 @@ class TestDeterministicBudgetSentinelNormalization:
             skip_nets=None,
         )
         router = MagicMock()
+        router.placement_disposition = None
         router.route_with_placement_delta_feedback.return_value = MagicMock(
             iterations=1,
             exit_reason="pdf_converged",
@@ -1465,3 +1503,22 @@ class TestDeterministicBudgetSentinelNormalization:
 
     def test_run_placement_delta_feedback_keeps_a_real_per_net_timeout(self):
         assert self._run_delta(4.0)["per_net_timeout"] == 4.0
+
+
+def test_delta_feedback_classifier_excludes_invalid_and_user_skipped_nets(tmp_path):
+    from unittest.mock import MagicMock
+
+    from kicad_tools.cli.route_cmd import _run_placement_delta_feedback
+    from kicad_tools.placement.routing import analyze_routing_placement
+    from tests.test_routing_placement_disposition import board_text
+
+    path = tmp_path / "mixed.kicad_pcb"
+    path.write_text(board_text())
+    disposition = analyze_routing_placement(path, coupled_groups=[("BAD", "PARTNER")])
+    args = _pf_args(skip_nets="PLANE", _placement_disposition=disposition)
+    router = MagicMock()
+    router.route_with_placement_delta_feedback.return_value = SimpleNamespace(applied_deltas=[])
+    _run_placement_delta_feedback(router, path, tmp_path / "out.kicad_pcb", args, quiet=True)
+    kwargs = router.route_with_placement_delta_feedback.call_args.kwargs
+    assert kwargs["excluded_nets"] == {"BAD", "PARTNER", "PLANE"}
+    assert kwargs["fixed_refs"] >= {"X1", "X2", "X3", "P1", "P2"}

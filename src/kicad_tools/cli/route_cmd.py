@@ -72,6 +72,7 @@ from typing import TYPE_CHECKING, Any, cast
 from kicad_tools.core.kicad_lock import check_kicad_lock
 
 from .route_deadline import record_stage, restore_stage
+from .route_placement import for_attempt, select_result
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.net_names import NetClassMapResolution
     from kicad_tools.router.pairwise_clearance import AttachZone, PadGeometry, PairwiseViolation
     from kicad_tools.router.primitives import Route
+    from kicad_tools.router.reporting import RouteAttemptResult
 
 # Issue #3035: ``_auto_skip_pour_nets`` was promoted to a public helper at
 # ``kicad_tools.router.auto_pour.auto_skip_pour_nets`` so in-process router
@@ -1596,6 +1598,37 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
     return routes
 
 
+def _capture_attempt_preserved_copper(pcb_path: Path, args) -> tuple[list["Route"], str]:
+    """Capture fixed source copper once, before checkpoint writes can replace it."""
+    preserve = bool(getattr(args, "preserve_existing", False))
+    routes = _capture_preserved_routes(pcb_path) if preserve else []
+    disposition = getattr(args, "_placement_disposition", None)
+    names = disposition.preserve_copper_nets if disposition is not None else frozenset()
+    name_only = _board_uses_name_only_dialect(pcb_path)
+    ordinary = _serialize_preserved_routes(
+        [route for route in routes if route.net_name not in names], name_only=name_only
+    )
+    if not names:
+        return routes, ordinary
+    from kicad_tools.router.optimizer.pcb import (
+        _extract_balanced_blocks,
+        parse_net_names,
+        resolve_block_net,
+    )
+
+    text = pcb_path.read_text()
+    net_names = parse_net_names(text)
+    by_name = {name: number for number, name in net_names.items()}
+    blocks = []
+    for kind in ("segment", "via"):
+        for offset, _, block in _extract_balanced_blocks(text, kind):
+            identity = resolve_block_net(block, net_names, by_name)
+            if identity is not None and identity[1] in names:
+                blocks.append((offset, block))
+    raw = "\n".join(block for _, block in sorted(blocks))
+    return routes, "\n\t".join(part for part in (ordinary, raw) if part)
+
+
 def _serialize_preserved_routes(
     preserved_routes: list["Route"],
     exclude_net_ids: set[int] | None = None,
@@ -1857,6 +1890,15 @@ def _finalize_routes(
     _emitted_preserved: list[Route] = []
     if preserve_existing:
         source_routes = preserved_routes if preserved_routes is not None else router.existing_routes
+        disposition = getattr(router, "placement_disposition", None)
+        if disposition is not None:
+            neutral_routes = getattr(router, "placement_neutral_routes", ())
+            source_routes = [
+                route
+                for route in source_routes
+                if route.net_name not in disposition.preserve_copper_nets
+                and route not in neutral_routes
+            ]
         if source_routes:
             routed_net_ids = {r.net for r in router.routes}
             # Issue #4170 (Phase 2b-1): a stub net IS routed (the in-region
@@ -1882,6 +1924,11 @@ def _finalize_routes(
                         f"  Preserved existing: {preserved_segments} segments, "
                         f"{preserved_vias} vias ({len(emitted)} routes)"
                     )
+
+    placement_copper = getattr(router, "placement_preserved_copper", "")
+    if placement_copper:
+        route_sexp = f"{route_sexp}\n\t{placement_copper}" if route_sexp else placement_copper
+        _emitted_preserved.extend(getattr(router, "placement_preserved_routes", ()))
 
     # Issue #4699: hand the gate the exact preserved set that was written.
     with contextlib.suppress(AttributeError):  # exotic router stand-ins
@@ -2179,8 +2226,12 @@ def _export_failed_nets(
       are included so callers get a machine-readable handle on exactly which
       pads remain — the actionable output for finishing a near-complete route.
     - any other extension — the legacy plain-text format: one net name per
-      line (unrouted nets first, then partial nets), preserved for
-      back-compatibility.
+      line (unrouted nets first, then partial nets).
+
+    CLI finalization adds requested placement-blocked nets even when no router
+    ran. JSON uses status ``"placement-invalid, not attempted"`` and
+    ``attempted: false``; text introduces those names with a ``#`` status
+    comment. Intentionally unrequested placement-invalid nets are omitted.
 
     The file is always written when this function is called (routing is
     incomplete), even when there is nothing to report — a well-formed empty
@@ -2870,6 +2921,7 @@ def run_post_route_drc(
     source_pcb_path: Path | None = None,
     current_path_specs: "Sequence[CurrentPathSpec] | None" = None,
     current_paths_input_path: Path | None = None,
+    preserve_filled_copper: bool = False,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -2918,6 +2970,8 @@ def run_post_route_drc(
             later ``kct check`` audits against identical declarations.
             ``None``/empty leaves ``path_ampacity`` inactive exactly as
             before.
+        preserve_filled_copper: Judge saved fills without refilling fixed
+            placement-excluded copper in memory before checking it.
         current_paths_input_path: The resolved ``--current-paths`` INPUT
             path.  Threaded to the sidecar writer so the derived sidecar
             never overwrites the user's authored file (Issue #4428's
@@ -3009,7 +3063,10 @@ def run_post_route_drc(
         # via the shared run_geometric_drc helper (issue #3803).
         from kicad_tools.drc import run_geometric_drc
 
-        geo = run_geometric_drc(output_path)
+        if preserve_filled_copper:
+            geo = run_geometric_drc(output_path, refill_zones=False)
+        else:
+            geo = run_geometric_drc(output_path)
 
         if geo.ran and geo.error_count > 0:
             # Native DRC found blocking geometric violations -- fold them into
@@ -3109,6 +3166,8 @@ def _run_auto_fix(
     max_passes: int = 1,
     quiet: bool = False,
     args=None,
+    *,
+    layers: int | None = None,
 ) -> int:
     """Run fix-drc on the routed PCB to auto-repair DRC violations.
 
@@ -3116,6 +3175,7 @@ def _run_auto_fix(
         output_path: Path to the routed PCB file to repair.
         max_passes: Number of iterative repair passes.
         quiet: If True, suppress output.
+        layers: Layer count of the selected routing result, including escalation.
         args: Parsed ``route`` CLI args.  When provided, the function
             honors ``args._wall_clock_deadline`` (issue #2802) and skips
             the auto-fix invocation entirely if the total budget has been
@@ -3183,10 +3243,29 @@ def _run_auto_fix(
         "2.0",
         "--local-reroute",
     ]
+    manufacturer = getattr(args, "manufacturer", None)
+    if manufacturer is not None:
+        fix_argv.extend(["--mfr", manufacturer])
+    if layers is not None:
+        fix_argv.extend(["--layers", str(layers)])
     if quiet:
         fix_argv.append("--quiet")
 
-    result = fix_drc_main(fix_argv)
+    disposition = getattr(args, "_placement_disposition", None)
+    if disposition is not None and disposition.preserve_copper_nets:
+        from .route_fixed_repair import repair_fixed_copper
+
+        result, error = repair_fixed_copper(
+            output_path,
+            disposition,
+            lambda candidate: fix_drc_main([str(candidate), *fix_argv[1:]]),
+        )
+        args._placement_repair_error = error
+        if error:
+            print(f"  Auto-fix not published; saved partial retained: {error}", file=sys.stderr)
+            return result
+    else:
+        result = fix_drc_main(fix_argv)
 
     if not quiet:
         # Exit-code contract from fix_drc_cmd.main (see fix_drc_cmd.py:375-390):
@@ -3323,6 +3402,21 @@ def _resolve_placement_feedback_anchors(pcb, args, quiet: bool = False) -> set[s
     anchors = _auto_detect_anchored_refs(pcb)
     anchors |= requested_anchor
     anchors -= requested_no_anchor
+    disposition = getattr(args, "_placement_disposition", None)
+    if disposition is not None:
+        # Fixed copper cannot follow a placement move. Protect both the
+        # invalid footprint and every terminal of its preserved nets, even
+        # when the caller removes an ordinary mechanical anchor.
+        if disposition.physical_pad_net_identities:
+            anchors |= disposition.preserved_footprints
+        else:
+            anchors |= disposition.invalid_references
+            anchors.update(
+                ref
+                for ref, _pad, authored, effective in disposition.pad_net_identities
+                if authored in disposition.preserve_copper_nets
+                or effective in disposition.preserve_copper_nets
+            )
     return anchors
 
 
@@ -3667,6 +3761,9 @@ def _run_placement_delta_feedback(
     excluded_nets = frozenset(
         n.strip() for n in (getattr(args, "skip_nets", None) or "").split(",") if n.strip()
     )
+    disposition = getattr(args, "_placement_disposition", None)
+    if disposition is not None:
+        excluded_nets |= disposition.invalid_nets
 
     delta_path = _placement_delta_path(args, pcb_path)
     with contextlib.suppress(OSError):
@@ -3836,7 +3933,9 @@ def _maybe_run_placement_feedback_escalation(
         )
 
 
-def _fill_zones_after_route(output_path: Path, quiet: bool = False) -> None:
+def _fill_zones_after_route(
+    output_path: Path, quiet: bool = False, *, router=None, args=None
+) -> None:
     """Fill copper-pour zones after routing completes.
 
     Routing produces traces; copper pour zones must be filled *after* the
@@ -3864,6 +3963,36 @@ def _fill_zones_after_route(output_path: Path, quiet: bool = False) -> None:
         quiet: Suppress informational output.
     """
     record_stage("native-zone-fill")
+    if args is not None:
+        args._placement_repair_error = None
+    disposition = getattr(router, "placement_disposition", None)
+    if disposition is not None and disposition.preserve_copper_nets:
+        from kicad_tools.zones.placement_fill import fill_around_fixed_copper
+
+        args._placement_fill_error = None
+        try:
+            text = output_path.read_text()
+            if not re.search(r"\(zone\s", text):
+                return
+            # Use the same propagated source/fabrication constraints as DRC,
+            # before native filling can bake a weaker default into the output.
+            _write_drc_constraint_sidecars(
+                output_path,
+                args.manufacturer,
+                router.layer_stack.num_layers,
+                copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+                quiet=quiet,
+                source_pcb_path=Path(args.pcb),
+            )
+            fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
+            if not quiet:
+                print("  Zone fill: complete; placement-excluded copper preserved")
+        except Exception as exc:
+            # The selective helper stages all native mutations. Preserve the
+            # saved routing result and report failure instead of filling all zones.
+            args._placement_fill_error = str(exc)
+            print(f"  Zone fill failed; saved partial copper retained: {exc}", file=sys.stderr)
+        return
     from kicad_tools.cli.runner import (
         find_kicad_cli,
         run_fill_zones,
@@ -4619,6 +4748,11 @@ def _resolve_net_class_map_domains(
     resolution = resolve_net_class_map_keys(user_keys, routable_names)
 
     preserved_names = _preserved_net_names(router, set(routable_names))
+    disposition = getattr(router, "placement_disposition", None)
+    if disposition is not None:
+        preserved_names = sorted(
+            (set(preserved_names) | disposition.preserve_copper_nets) - set(routable_names)
+        )
     if preserved_names and resolution.unmatched:
         secondary = resolve_net_class_map_keys(resolution.unmatched, preserved_names)
         resolution = NetClassMapResolution(
@@ -4709,6 +4843,31 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
         # ``self.net_class_map.get(net_name)`` finds them at routing time.
         for board_net, user_key in resolution.resolved.items():
             router.net_class_map[board_net] = loaded[user_key]
+
+        if getattr(router, "placement_disposition", None) is not None:
+            from dataclasses import replace
+
+            from kicad_tools.router.fixed_copper import FixedFillObstacles
+
+            # Neutral obstacle ownership must not erase the authored class.
+            # Reinstall so native grid and exact-geometry engines see the same
+            # gap after this post-load sidecar merge, including on trial reset.
+            router.grid.install_fixed_fills(
+                FixedFillObstacles(
+                    tuple(
+                        replace(
+                            fill,
+                            clearance=max(
+                                fill.clearance,
+                                router.net_class_map[fill.source_net].clearance,
+                            ),
+                        )
+                        if fill.source_net in router.net_class_map
+                        else fill
+                        for fill in router.grid.fixed_fills.fills
+                    )
+                )
+            )
 
         _warn_unresolved_net_class_map(resolution, diagnostic_net_names, nearest_net_names)
 
@@ -6742,6 +6901,11 @@ def route_with_layer_escalation(
             # must NOT be forwarded as pour intent, or auto-pour would try to
             # zone ~every net.  Keep the user's explicit pour intent empty.
             force_pour_nets=([] if getattr(args, "_route_only_nets", None) else skip_nets),
+            protected_nets=(
+                args._placement_disposition.preserve_copper_nets
+                if getattr(args, "_placement_disposition", None) is not None
+                else frozenset()
+            ),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -6758,8 +6922,7 @@ def route_with_layer_escalation(
     # per-attempt ``router.existing_routes`` cannot be trusted to retain the
     # original copper.  Capturing here keeps it stable across all attempts.
     _preserve = bool(getattr(args, "preserve_existing", False))
-    _preserved_routes = _capture_preserved_routes(pcb_path) if _preserve else []
-    _preserved_sexp = _serialize_preserved_routes(_preserved_routes) if _preserve else ""
+    _preserved_routes, _preserved_sexp = _capture_attempt_preserved_copper(pcb_path, args)
 
     # Layer stacks to try (in escalation order)
     layer_configs = [
@@ -7014,6 +7177,7 @@ def route_with_layer_escalation(
             with spinner(f"Loading PCB ({layer_count} layers)...", quiet=quiet):
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
+                    placement_disposition=for_attempt(args, attempt_skip_nets),
                     skip_nets=attempt_skip_nets,
                     rules=rules,
                     edge_clearance=args.edge_clearance,
@@ -7483,7 +7647,11 @@ def route_with_layer_escalation(
             last_power_stall_nets = []
 
         # Report attempt result
-        status = "SUCCESS" if result.success else "INSUFFICIENT - escalating"
+        status = (
+            ("ELIGIBLE ROUTING COMPLETE" if _placement_blocked(args) else "SUCCESS")
+            if result.success
+            else "INSUFFICIENT - escalating"
+        )
         if not quiet:
             flush_print(f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)")
             flush_print(f"  Status: {status}")
@@ -7505,13 +7673,16 @@ def route_with_layer_escalation(
 
     if successful_result:
         final_result = successful_result
+        select_result(args, final_result.router)
         if not quiet:
             print(
-                f"Result: Design routed successfully on {final_result.layer_count} layers "
+                f"Result: {'Eligible routing completed' if _placement_blocked(args) else 'Design routed successfully'} "
+                f"on {final_result.layer_count} layers "
                 f"({final_result.completion * 100:.0f}% completion)"
             )
     elif best_result:
         final_result = best_result
+        select_result(args, final_result.router)
         if not quiet:
             print(
                 f"Result: Best result on {final_result.layer_count} layers "
@@ -7735,13 +7906,17 @@ def route_with_layer_escalation(
     # zone outlines and does not flag zone-to-trace clearance against
     # unfilled polygons.
     if final_result.nets_routed > 0:
-        _fill_zones_after_route(output_path, quiet=quiet)
+        _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            preserve_filled_copper=bool(
+                getattr(args, "_placement_disposition", None)
+                and args._placement_disposition.preserve_copper_nets
+            ),
             source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
@@ -7779,6 +7954,7 @@ def route_with_layer_escalation(
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
                 args=args,  # Issue #2802: honor total wall-clock deadline
+                layers=final_result.layer_count,
             )
 
     # Issue #4588: board-level HV pairwise clearance gate.  A no-op without
@@ -7805,6 +7981,12 @@ def route_with_layer_escalation(
             # Issue #4588: this run would have printed a SUCCESS banner while
             # its own copper violates the --voltage-map creepage requirement.
             _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif getattr(args, "_placement_fill_error", None):
+            print("PARTIAL: zone fill failed; saved routing copper retained")
+        elif getattr(args, "_placement_repair_error", None):
+            print("PARTIAL: staged auto-fix was not published")
+        elif _placement_blocked(args):
+            print("PARTIAL: requested placement-invalid nets were not attempted")
         elif final_result.success:
             print(f"SUCCESS: Design requires minimum {final_result.layer_count} layers")
         else:
@@ -7933,6 +8115,11 @@ def route_with_rule_relaxation(
             # must NOT be forwarded as pour intent, or auto-pour would try to
             # zone ~every net.  Keep the user's explicit pour intent empty.
             force_pour_nets=([] if getattr(args, "_route_only_nets", None) else skip_nets),
+            protected_nets=(
+                args._placement_disposition.preserve_copper_nets
+                if getattr(args, "_placement_disposition", None) is not None
+                else frozenset()
+            ),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -7955,8 +8142,7 @@ def route_with_rule_relaxation(
 
     # Issue #3155: capture preserved copper once before routing/checkpoints.
     _preserve = bool(getattr(args, "preserve_existing", False))
-    _preserved_routes = _capture_preserved_routes(pcb_path) if _preserve else []
-    _preserved_sexp = _serialize_preserved_routes(_preserved_routes) if _preserve else ""
+    _preserved_routes, _preserved_sexp = _capture_attempt_preserved_copper(pcb_path, args)
 
     # Determine layer stack
     if args.layers == "auto":
@@ -8094,6 +8280,7 @@ def route_with_rule_relaxation(
             with spinner(f"Loading PCB (tier {tier.tier})...", quiet=quiet):
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
+                    placement_disposition=for_attempt(args, skip_nets),
                     skip_nets=skip_nets,
                     rules=rules,
                     edge_clearance=args.edge_clearance,
@@ -8321,7 +8508,11 @@ def route_with_rule_relaxation(
             _interrupt_state["best_completed_attempt"] = True
 
         # Report attempt result
-        status = "SUCCESS" if result.success else "INSUFFICIENT - relaxing rules"
+        status = (
+            ("ELIGIBLE ROUTING COMPLETE" if _placement_blocked(args) else "SUCCESS")
+            if result.success
+            else "INSUFFICIENT - relaxing rules"
+        )
         if not quiet:
             flush_print(f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)")
             flush_print(f"  Status: {status}")
@@ -8356,9 +8547,11 @@ def route_with_rule_relaxation(
 
     if successful_result:
         final_result = successful_result
+        select_result(args, final_result.router)
         if not quiet:
             print(
-                f"Result: Design routed successfully with relaxed rules "
+                f"Result: {'Eligible routing completed' if _placement_blocked(args) else 'Design routed successfully'} "
+                f"with relaxed rules "
                 f"({final_result.completion * 100:.0f}% completion)"
             )
             print("\nFinal design rules:")
@@ -8371,6 +8564,7 @@ def route_with_rule_relaxation(
                 print(f"\n  Note: Rules were relaxed ({final_result.tier_description})")
     elif best_result:
         final_result = best_result
+        select_result(args, final_result.router)
         if not quiet:
             print(
                 f"Result: Best result at tier {final_result.tier} "
@@ -8577,13 +8771,17 @@ def route_with_rule_relaxation(
 
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
-        _fill_zones_after_route(output_path, quiet=quiet)
+        _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            preserve_filled_copper=bool(
+                getattr(args, "_placement_disposition", None)
+                and args._placement_disposition.preserve_copper_nets
+            ),
             source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
@@ -8621,6 +8819,7 @@ def route_with_rule_relaxation(
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
                 args=args,  # Issue #2802: honor total wall-clock deadline
+                layers=final_result.layer_count,
             )
 
     # Issue #4588: board-level HV pairwise clearance gate (see the
@@ -8645,6 +8844,12 @@ def route_with_rule_relaxation(
                 _print_pairwise_addendum(_pairwise)
         elif final_result.success and _pairwise:
             _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif getattr(args, "_placement_fill_error", None):
+            print("PARTIAL: zone fill failed; saved routing copper retained")
+        elif getattr(args, "_placement_repair_error", None):
+            print("PARTIAL: staged auto-fix was not published")
+        elif _placement_blocked(args):
+            print("PARTIAL: requested placement-invalid nets were not attempted")
         elif final_result.success:
             print("SUCCESS: Routing complete with adaptive rules")
             if final_result.tier > 0:
@@ -10189,6 +10394,11 @@ def route_with_combined_escalation(
             # must NOT be forwarded as pour intent, or auto-pour would try to
             # zone ~every net.  Keep the user's explicit pour intent empty.
             force_pour_nets=([] if getattr(args, "_route_only_nets", None) else skip_nets),
+            protected_nets=(
+                args._placement_disposition.preserve_copper_nets
+                if getattr(args, "_placement_disposition", None) is not None
+                else frozenset()
+            ),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -10211,8 +10421,7 @@ def route_with_combined_escalation(
 
     # Issue #3155: capture preserved copper once before routing/checkpoints.
     _preserve = bool(getattr(args, "preserve_existing", False))
-    _preserved_routes = _capture_preserved_routes(pcb_path) if _preserve else []
-    _preserved_sexp = _serialize_preserved_routes(_preserved_routes) if _preserve else ""
+    _preserved_routes, _preserved_sexp = _capture_attempt_preserved_copper(pcb_path, args)
 
     # Layer stacks to try (in escalation order)
     layer_configs = [
@@ -10399,6 +10608,7 @@ def route_with_combined_escalation(
                 with spinner(f"Loading PCB ({layer_count}L, tier {tier.tier})...", quiet=quiet):
                     router, net_map = load_pcb_for_routing(
                         str(pcb_path),
+                        placement_disposition=for_attempt(args, skip_nets),
                         skip_nets=skip_nets,
                         rules=rules,
                         edge_clearance=args.edge_clearance,
@@ -10705,10 +10915,16 @@ def route_with_combined_escalation(
 
     if successful_result:
         final_result = successful_result
+        select_result(args, final_result.router)
         if not quiet:
             print(
-                f"Result: Minimum viable configuration found\n"
-                f"  Layers: {final_result.layer_count}\n"
+                "Result: "
+                + (
+                    "Configuration meets eligible routing threshold; requested nets remain placement-invalid\n"
+                    if _placement_blocked(args)
+                    else "Minimum viable configuration found\n"
+                )
+                + f"  Layers: {final_result.layer_count}\n"
                 f"  Tier: {final_result.tier} ({final_result.tier_description})\n"
                 f"  Completion: {final_result.completion * 100:.0f}%"
             )
@@ -10717,6 +10933,7 @@ def route_with_combined_escalation(
             print(f"  Clearance:   {final_result.clearance:.3f}mm")
     elif best_result:
         final_result = best_result
+        select_result(args, final_result.router)
         if not quiet:
             print(
                 f"Result: Best result at {final_result.layer_count} layers, "
@@ -10923,13 +11140,17 @@ def route_with_combined_escalation(
 
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
-        _fill_zones_after_route(output_path, quiet=quiet)
+        _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            preserve_filled_copper=bool(
+                getattr(args, "_placement_disposition", None)
+                and args._placement_disposition.preserve_copper_nets
+            ),
             source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
@@ -10967,6 +11188,7 @@ def route_with_combined_escalation(
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
                 args=args,  # Issue #2802: honor total wall-clock deadline
+                layers=final_result.layer_count,
             )
 
     # Issue #4588: board-level HV pairwise clearance gate (see the
@@ -10991,6 +11213,12 @@ def route_with_combined_escalation(
                 _print_pairwise_addendum(_pairwise)
         elif final_result.success and _pairwise:
             _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif getattr(args, "_placement_fill_error", None):
+            print("PARTIAL: zone fill failed; saved routing copper retained")
+        elif getattr(args, "_placement_repair_error", None):
+            print("PARTIAL: staged auto-fix was not published")
+        elif _placement_blocked(args):
+            print("PARTIAL: requested placement-invalid nets were not attempted")
         elif final_result.success:
             print(
                 f"SUCCESS: Minimum viable config = {final_result.layer_count} layers + "
@@ -11299,7 +11527,9 @@ def _detect_region_stub_terminals(pcb, region_box: tuple[float, float, float, fl
             net_name = getattr(pad, "net_name", "") or ""
             if not net_name:
                 continue
-            pos = pcb.get_pad_position(fp.reference, pad.number)
+            from kicad_tools.schema.physical_identity import physical_pad_position
+
+            pos = physical_pad_position(fp, pad)
             if pos is None:
                 continue
             pad_inputs.append(PadLocation(net_id=pad.net_number, x=pos[0], y=pos[1]))
@@ -11379,16 +11609,22 @@ def _parse_and_apply_region(args, pcb_path: Path, region_arg: str) -> int:
     skip = set()
     if getattr(args, "skip_nets", None):
         skip = {n.strip() for n in args.skip_nets.split(",")}
+    # Placement-invalid nets are already excluded net-wide. Their outside
+    # terminals must not abort useful work on independent in-region nets.
+    disposition = getattr(args, "_placement_disposition", None)
+    if disposition is not None:
+        skip.update(disposition.invalid_nets)
 
     # Collect board-relative pad positions per net.
     net_pads: dict[str, list[tuple[float, float]]] = {}
     for fp in pcb.footprints:
-        ref = fp.reference
         for pad in fp.pads:
             net_name = getattr(pad, "net_name", "") or ""
             if not net_name or net_name in skip:
                 continue
-            pos = pcb.get_pad_position(ref, pad.number)
+            from kicad_tools.schema.physical_identity import physical_pad_position
+
+            pos = physical_pad_position(fp, pad)
             if pos is None:
                 continue
             net_pads.setdefault(net_name, []).append(pos)
@@ -11491,6 +11727,11 @@ def _parse_and_apply_region(args, pcb_path: Path, region_arg: str) -> int:
             "inside (implies --preserve-existing)."
         )
     return 0
+
+
+def _placement_blocked(args) -> bool:
+    disposition = getattr(args, "_placement_disposition", None)
+    return bool(disposition is not None and disposition.requested_invalid_nets)
 
 
 def _offboard_preflight(pcb_path: Path) -> int:
@@ -12052,7 +12293,9 @@ def _apply_complete_localization(args, pcb_path: Path) -> int:
             net_name = getattr(pad, "net_name", "") or ""
             if net_name not in stranded:
                 continue
-            pos = pcb.get_pad_position(fp.reference, pad.number)
+            from kicad_tools.schema.physical_identity import physical_pad_position
+
+            pos = physical_pad_position(fp, pad)
             if pos is None:
                 continue
             pads_by_net.setdefault(net_name, []).append((pos[0], pos[1]))
@@ -12682,6 +12925,13 @@ def main(argv: list[str] | None = None) -> int:
     return run(argv)
 
 
+def main_with_result(argv: list[str] | None = None) -> "RouteAttemptResult":
+    """Run the same CLI invocation with additive typed attempt metadata."""
+    from .route_deadline import run_attempt
+
+    return run_attempt(argv)
+
+
 def _in_process_main(argv: list[str] | None = None) -> int:
     from .route_receipt import run
 
@@ -12733,10 +12983,12 @@ def _route_parser() -> argparse.ArgumentParser:
             exit codes:
               0  all nets routed (or meets --min-completion), DRC clean
               1  fatal failure -- no nets routed
-              2  partial routing -- below --min-completion threshold
-              3  routing meets threshold but the copper is clearance-dirty:
+              2  partial routing -- below threshold or requested placement-blocked nets
+              3  post-route validation or processing failed:
                  DRC violations remain, --auto-fix rolled back (issue #2852),
-                 or the --voltage-map HV pairwise audit failed (issue #4588)
+                 the --voltage-map HV pairwise audit failed (issue #4588),
+                 selective zone filling failed, or staged repair could not
+                 preserve fixed copper and net membership
               4  partial routing AND segment-segment or HV pairwise
                  clearance violations (issues #1666, #4588)
               5  interrupted by SIGINT with partial results saved
@@ -13729,21 +13981,16 @@ def _route_parser() -> argparse.ArgumentParser:
             "(default: auto-discover from project.kct or sibling file)."
         ),
     )
-    # Issue #4156: hard off-board preflight.  Unlike the advisory drift banner,
-    # a footprint placed outside the Edge.Cuts outline makes routing pointless
-    # (its nets can never complete), so kct route aborts by default before any
-    # router work.  --allow-offboard is the explicit escape hatch for boards
-    # that intentionally stage footprints outside the outline.
+    # Explicit override for the default whole-net placement exclusion policy.
     parser.add_argument(
         "--allow-offboard",
         action="store_true",
         default=False,
         help=(
-            "Skip the off-board placement preflight. By default kct route "
-            "aborts (exit 2) when any footprint's courtyard falls outside the "
-            "Edge.Cuts outline, since routing an off-board net always fails. "
-            "Use this to proceed anyway (e.g. intentional staging/reference "
-            "footprints)."
+            "Route placement-invalid nets too. By default their whole nets "
+            "are excluded while independent valid nets are routed; their "
+            "existing copper remains an obstacle. Requested blocked nets "
+            "cause a nonzero exit even when useful partial copper is saved."
         ),
     )
     # Issue #4799: replay a previous run's crossing-tail census as a pre-route
@@ -14541,6 +14788,27 @@ def _route_parser() -> argparse.ArgumentParser:
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
+    from .route_deadline import CONTROL_ENV, TIMEOUT_EXIT, RouteDeadlineExpired
+    from .route_placement import finish
+
+    try:
+        result = _run_main_impl(args, parser, argv)
+    except DRCConstraintPropagationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return finish(args, 1)
+    except RouteDeadlineExpired:
+        # Supervised timeouts are finalized after the parent retires output.
+        # In-process timeouts must not count an unchecked checkpoint as complete.
+        if not os.environ.get(CONTROL_ENV):
+            output = getattr(args, "_placement_output", None)
+            if output is not None:
+                args._placement_output_before = output.stat() if output.exists() else None
+            finish(args, TIMEOUT_EXIT)
+        raise
+    return finish(args, result)
+
+
+def _run_main_impl(args, parser, argv) -> int:
     from .route_deadline import configure_output
     from .route_receipt import configure as configure_receipt
 
@@ -14636,6 +14904,102 @@ def _main_impl(argv: list[str] | None = None) -> int:
     if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
 
+    # Issue #2996: Validate and load the optional --net-class-map sidecar
+    # early -- before dispatching to any of the route_with_* sub-flows --
+    # so the error paths (missing file / malformed JSON / invalid structure)
+    # short-circuit with exit 1 and a clear message regardless of which
+    # routing path the args select.  The loaded map is stashed on
+    # ``args._loaded_net_class_map`` for downstream consumers (each
+    # ``load_pcb_for_routing`` site merges it into ``router.net_class_map``).
+    args._loaded_net_class_map = None
+    args._spatial_keepouts = None
+    if getattr(args, "net_class_map", None) is not None:
+        import json as _ncm_json
+
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        ncm_path = Path(args.net_class_map).resolve()
+        if not ncm_path.exists():
+            print(f"Error: net-class-map file not found: {ncm_path}", file=sys.stderr)
+            return 1
+        try:
+            _ncm_data = _ncm_json.loads(ncm_path.read_text())
+        except _ncm_json.JSONDecodeError as e:
+            print(f"Error parsing net-class-map JSON: {e}", file=sys.stderr)
+            return 1
+        # Issue #4587: resolve the board's layer stack HERE so a sidecar that
+        # spells ``preferred_layers`` / ``avoid_layers`` as KiCad layer names
+        # ("In1.Cu") is normalized to grid indices at preload -- before any
+        # engine touches the map.  Without this, an ampacity-bearing class
+        # crashed detailed routing with int('In1.Cu') after the escape/global
+        # phases had already burned minutes, and the soft layer-preference
+        # bias silently never matched.  Stack selection mirrors the
+        # ``--layers`` handling used by the routing sub-flows; ``B.Cu`` is only
+        # resolvable against the actual copper layer count (index 3 on a
+        # 4-layer board, NOT CopperLayer.B_CU == 5).
+        from kicad_tools.router import LayerStack as _NcmLayerStack
+        from kicad_tools.router.io import detect_layer_stack as _ncm_detect_layer_stack
+
+        _ncm_layers_arg = getattr(args, "layers", "auto")
+        _ncm_layer_stack = None
+        try:
+            if _ncm_layers_arg == "auto":
+                _ncm_layer_stack = _ncm_detect_layer_stack(pcb_path.read_text())
+            else:
+                _ncm_layer_stack = {
+                    "2": _NcmLayerStack.two_layer,
+                    "4": _NcmLayerStack.four_layer_sig_gnd_pwr_sig,
+                    "4-sig": _NcmLayerStack.four_layer_sig_sig_gnd_pwr,
+                    "4-all": _NcmLayerStack.four_layer_all_signal,
+                    "6": _NcmLayerStack.six_layer_sig_gnd_sig_sig_pwr_sig,
+                }[_ncm_layers_arg]()
+        except (KeyError, OSError, ValueError):
+            # Stack detection is best-effort: without it the stack-independent
+            # names ("F.Cu", "In<k>.Cu") still resolve and "B.Cu" fails loud
+            # below with an actionable message rather than a silent wrong index.
+            _ncm_layer_stack = None
+        try:
+            # Canonical loader (issue #4683): shared with kct check / creepage /
+            # zones / audit so one sidecar is valid for every consumer.  The
+            # stack resolved from --layers above wins; JSON validity was
+            # already established by the _ncm_data parse.
+            args._loaded_net_class_map = net_class_map_from_path(
+                ncm_path, layer_stack=_ncm_layer_stack
+            )
+        except (TypeError, ValueError) as e:
+            print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
+            return 1
+        # Issue #4605: the optional ``spatial_keepouts`` block -- per-rule-area
+        # net-class filters for KiCad keepout rule areas (lattice engine).
+        # Structure is validated HERE so a malformed block short-circuits with
+        # exit 1 before any routing work; the class NAMES are validated later,
+        # once the router's merged net-class map exists
+        # (``_apply_net_class_map_sidecar``).
+        _sk_err = _validate_spatial_keepouts_block(_ncm_data.get("spatial_keepouts"))
+        if _sk_err is not None:
+            print(f"Error: invalid spatial_keepouts block: {_sk_err}", file=sys.stderr)
+            return 1
+        args._spatial_keepouts = _ncm_data.get("spatial_keepouts")
+
+    from .route_placement import prepare
+
+    prepare(args, pcb_path)
+    if (
+        args._placement_disposition.requested_invalid_nets
+        and not args._placement_disposition.eligible_nets
+    ):
+        refs = sorted(args._placement_disposition.invalid_references)
+        print(
+            f"ERROR: {len(refs)} footprint(s) outside Edge.Cuts — placement invalid",
+            file=sys.stderr,
+        )
+        print(f"       Off-board: {', '.join(refs)}", file=sys.stderr)
+        print(
+            "       Run `kct placement check` for details, or `--allow-offboard` to route anyway.",
+            file=sys.stderr,
+        )
+        return 2
+
     # Issue #4471 (epic #4465): resolve --complete BEFORE --nets.  Auto-detects
     # the currently-unconnected signal nets and stamps ``args.nets`` with
     # exactly those, so the #4322 route-only machinery below inverts them into
@@ -14716,18 +15080,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             # Drift detection is advisory; never let it block routing.
             pass
 
-    # Issue #4156: hard off-board placement preflight.  A footprint whose
-    # courtyard falls outside the Edge.Cuts outline can never route (its nets
-    # fail outright), and the failure signature is indistinguishable from
-    # congestion — which is exactly what cost multiple wasted routing passes in
-    # the field.  Abort before any router/component loading unless the user
-    # opted out with --allow-offboard.  The check is O(footprints), computed
-    # once, and reuses the same get_board_outline()-based analysis as
-    # 'kct placement check'.
-    if not getattr(args, "allow_offboard", False):
-        rc = _offboard_preflight(pcb_path)
-        if rc != 0:
-            return rc
+    # Net-wide placement exclusions were resolved before complete/region selection.
 
     # Issue #4799: crossing-tail census replay.  Runs after the hard gates
     # (there is no point predicting congestion for a board that is not going to
@@ -14744,83 +15097,6 @@ def _main_impl(argv: list[str] | None = None) -> int:
     # first route of a new board.  Runs in the same pre-router window and is
     # advisory in every case (no return value is consulted).
     _capacity_forecast_preflight(pcb_path, args)
-
-    # Issue #2996: Validate and load the optional --net-class-map sidecar
-    # early -- before dispatching to any of the route_with_* sub-flows --
-    # so the error paths (missing file / malformed JSON / invalid structure)
-    # short-circuit with exit 1 and a clear message regardless of which
-    # routing path the args select.  The loaded map is stashed on
-    # ``args._loaded_net_class_map`` for downstream consumers (each
-    # ``load_pcb_for_routing`` site merges it into ``router.net_class_map``).
-    args._loaded_net_class_map = None
-    args._spatial_keepouts = None
-    if getattr(args, "net_class_map", None) is not None:
-        import json as _ncm_json
-
-        from kicad_tools.router.rules import net_class_map_from_path
-
-        ncm_path = Path(args.net_class_map).resolve()
-        if not ncm_path.exists():
-            print(f"Error: net-class-map file not found: {ncm_path}", file=sys.stderr)
-            return 1
-        try:
-            _ncm_data = _ncm_json.loads(ncm_path.read_text())
-        except _ncm_json.JSONDecodeError as e:
-            print(f"Error parsing net-class-map JSON: {e}", file=sys.stderr)
-            return 1
-        # Issue #4587: resolve the board's layer stack HERE so a sidecar that
-        # spells ``preferred_layers`` / ``avoid_layers`` as KiCad layer names
-        # ("In1.Cu") is normalized to grid indices at preload -- before any
-        # engine touches the map.  Without this, an ampacity-bearing class
-        # crashed detailed routing with int('In1.Cu') after the escape/global
-        # phases had already burned minutes, and the soft layer-preference
-        # bias silently never matched.  Stack selection mirrors the
-        # ``--layers`` handling used by the routing sub-flows; ``B.Cu`` is only
-        # resolvable against the actual copper layer count (index 3 on a
-        # 4-layer board, NOT CopperLayer.B_CU == 5).
-        from kicad_tools.router import LayerStack as _NcmLayerStack
-        from kicad_tools.router.io import detect_layer_stack as _ncm_detect_layer_stack
-
-        _ncm_layers_arg = getattr(args, "layers", "auto")
-        _ncm_layer_stack = None
-        try:
-            if _ncm_layers_arg == "auto":
-                _ncm_layer_stack = _ncm_detect_layer_stack(pcb_path.read_text())
-            else:
-                _ncm_layer_stack = {
-                    "2": _NcmLayerStack.two_layer,
-                    "4": _NcmLayerStack.four_layer_sig_gnd_pwr_sig,
-                    "4-sig": _NcmLayerStack.four_layer_sig_sig_gnd_pwr,
-                    "4-all": _NcmLayerStack.four_layer_all_signal,
-                    "6": _NcmLayerStack.six_layer_sig_gnd_sig_sig_pwr_sig,
-                }[_ncm_layers_arg]()
-        except (KeyError, OSError, ValueError):
-            # Stack detection is best-effort: without it the stack-independent
-            # names ("F.Cu", "In<k>.Cu") still resolve and "B.Cu" fails loud
-            # below with an actionable message rather than a silent wrong index.
-            _ncm_layer_stack = None
-        try:
-            # Canonical loader (issue #4683): shared with kct check / creepage /
-            # zones / audit so one sidecar is valid for every consumer.  The
-            # stack resolved from --layers above wins; JSON validity was
-            # already established by the _ncm_data parse.
-            args._loaded_net_class_map = net_class_map_from_path(
-                ncm_path, layer_stack=_ncm_layer_stack
-            )
-        except (TypeError, ValueError) as e:
-            print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
-            return 1
-        # Issue #4605: the optional ``spatial_keepouts`` block -- per-rule-area
-        # net-class filters for KiCad keepout rule areas (lattice engine).
-        # Structure is validated HERE so a malformed block short-circuits with
-        # exit 1 before any routing work; the class NAMES are validated later,
-        # once the router's merged net-class map exists
-        # (``_apply_net_class_map_sidecar``).
-        _sk_err = _validate_spatial_keepouts_block(_ncm_data.get("spatial_keepouts"))
-        if _sk_err is not None:
-            print(f"Error: invalid spatial_keepouts block: {_sk_err}", file=sys.stderr)
-            return 1
-        args._spatial_keepouts = _ncm_data.get("spatial_keepouts")
 
     # Issue #4980: validate and load the optional --current-paths sidecar in
     # the same pre-dispatch window as --net-class-map above, so every routing
@@ -15320,6 +15596,11 @@ def _main_impl(argv: list[str] | None = None) -> int:
             # must NOT be forwarded as pour intent, or auto-pour would try to
             # zone ~every net.  Keep the user's explicit pour intent empty.
             force_pour_nets=([] if getattr(args, "_route_only_nets", None) else skip_nets),
+            protected_nets=(
+                args._placement_disposition.preserve_copper_nets
+                if getattr(args, "_placement_disposition", None) is not None
+                else frozenset()
+            ),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -15331,8 +15612,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     # Issue #3155: capture preserved copper once before routing/checkpoints.
     _preserve = bool(getattr(args, "preserve_existing", False))
-    _preserved_routes = _capture_preserved_routes(pcb_path) if _preserve else []
-    _preserved_sexp = _serialize_preserved_routes(_preserved_routes) if _preserve else ""
+    _preserved_routes, _preserved_sexp = _capture_attempt_preserved_copper(pcb_path, args)
 
     # Import router modules
     from kicad_tools.analysis import ComplexityAnalyzer, ComplexityRating
@@ -15524,6 +15804,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         with spinner("Loading PCB...", quiet=quiet):
             router, net_map = load_pcb_for_routing(
                 str(pcb_path),
+                placement_disposition=for_attempt(args, skip_nets),
                 skip_nets=skip_nets,
                 rules=rules,
                 edge_clearance=args.edge_clearance,
@@ -15598,6 +15879,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         def _order_router_factory() -> "Autorouter":
             fresh, _ = load_pcb_for_routing(
                 str(pcb_path),
+                placement_disposition=for_attempt(args, skip_nets),
                 skip_nets=skip_nets,
                 rules=rules,
                 edge_clearance=args.edge_clearance,
@@ -17260,7 +17542,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     # are in place (issue #2516).  Must run BEFORE DRC so the DRC sees
     # filled zones rather than bare zone outlines.
     if not args.dry_run and stats["nets_routed"] > 0:
-        _fill_zones_after_route(output_path, quiet=quiet)
+        _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
 
     _rss.mark("post-fill-zones")
 
@@ -17274,6 +17556,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
         drc_ran = True
         drc_errors, drc_warnings = run_post_route_drc(
             output_path=output_path,
+            preserve_filled_copper=bool(
+                getattr(args, "_placement_disposition", None)
+                and args._placement_disposition.preserve_copper_nets
+            ),
             source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=layer_stack.num_layers,
@@ -17307,6 +17593,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
                 args=args,  # Issue #2802: honor total wall-clock deadline
+                layers=layer_stack.num_layers,
             )
             if fix_result == 0:
                 drc_errors = 0
@@ -17395,6 +17682,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
             # pass, so the pairwise failure banner replaces it outright --
             # SUCCESS must be unreachable while non-exempt violations exist.
             _print_pairwise_failure_banner(pairwise_violations, args, output_path)
+        elif getattr(args, "_placement_fill_error", None):
+            print("PARTIAL: zone fill failed; saved routing copper retained")
+        elif getattr(args, "_placement_repair_error", None):
+            print("PARTIAL: staged auto-fix was not published")
+        elif _placement_blocked(args):
+            print("PARTIAL: requested placement-invalid nets were not attempted")
         elif all_nets_routed and drc_passed:
             if drc_ran and drc_errors == 0:
                 print(f"SUCCESS: All signal nets routed, DRC passed!{summary_suffix}")

@@ -1,8 +1,10 @@
 # Placement-excluded fixed copper
 
 `load_pcb_for_routing(..., placement_disposition=...)` retains the copper of
-placement-excluded source nets independently of routing selection. This loader
-API does not activate the default CLI policy; issues #5347 and #5348 consume it.
+placement-excluded source nets independently of routing selection. The route CLI applies this
+policy by default: independent requested nets route normally, while requested
+placement-blocked nets retain a distinct diagnostic and force a nonzero exit.
+`--allow-offboard` bypasses these exclusions.
 
 `router.grid.fixed_fills` is an immutable `FixedFillObstacles` collection.
 Each entry carries the authored net name/number, physical grid layer index,
@@ -38,9 +40,19 @@ The export handoffs have distinct ownership:
 - `placement_preserved_routes` carries source segment/via identities; neutral
   obstacle copies remain in `existing_routes` even without load-existing mode.
 
-Consumers that refill zones must freeze the preserved source blocks or restore
-and verify their exact contents after refill. This prerequisite provides the
-handoff; default CLI activation and refill orchestration remain #5348 work.
+The CLI fills eligible zones around immutable protected copper using KiCad's
+native Python API. It preserves protected zone definitions/fills and authored
+zone identities, including group-dependent clearance rules. Linux filling runs
+headlessly; other supported platforms retain native GUI initialization. If the
+required native capability is unavailable, the partial board is retained and
+the failure is reported rather than silently changing fixed copper.
+
+Automatic repairs run on a staged copy and publish only after protected
+footprints, copper and net membership match. Placement feedback anchors every
+terminal attached to protected copper. Tracks and vias retain separate authored
+class clearances even though their obstacle ownership is neutral; later sidecar
+rules update those clearances. A via's physical span intersects the selected
+routing layers without requiring both endpoint layers to be selected.
 
 ## Placement-excluded custom pads
 

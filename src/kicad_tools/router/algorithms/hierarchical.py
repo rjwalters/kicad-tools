@@ -50,6 +50,7 @@ class HierarchicalRouter:
         route_net_with_corridor: callable,
         mark_route: callable,
         pour_nets_without_zones: set[str] | None = None,
+        all_pads: list[Pad] | None = None,
     ):
         self.grid = grid
         self.router = router
@@ -58,6 +59,7 @@ class HierarchicalRouter:
         self.nets = nets
         self.net_names = net_names
         self.pads = pads
+        self.all_pads = all_pads if all_pads is not None else list(pads.values())
         self.routes = routes
         self.routing_failures = routing_failures
         self._get_net_priority = get_net_priority
@@ -159,7 +161,7 @@ class HierarchicalRouter:
         )
 
         # Register obstacles (pads reduce region capacity)
-        all_pads = list(self.pads.values())
+        all_pads = list(self.all_pads or self.pads.values())
         region_graph.register_obstacles(all_pads)
 
         rg_stats = region_graph.get_statistics()

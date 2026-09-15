@@ -1000,6 +1000,8 @@ def run_route_command(args) -> int:
             sub_argv.extend(["--material-group", args.material_group])
         if getattr(args, "hv_threshold", 30.0) != 30.0:
             sub_argv.extend(["--hv-threshold", str(args.hv_threshold)])
+    if getattr(args, "format", "text") != "text":
+        sub_argv.extend(["--format", args.format])
     return route_main(sub_argv)
 
 

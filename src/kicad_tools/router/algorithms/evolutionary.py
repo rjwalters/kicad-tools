@@ -264,9 +264,14 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
             net_name=pad_data["net_name"],
             layer=pad_layer,
             ref=ref,
+            component_id=pad_data.get("component_id", ref),
             pin=pin,
             through_hole=pad_data.get("through_hole", False),
             drill=pad_data.get("drill", 0.0),
+            drill_size=pad_data.get("drill_size"),
+            drill_rotation=pad_data.get("drill_rotation", 0.0),
+            footprint_name=pad_data.get("footprint_name", ""),
+            steiner_point=pad_data.get("steiner_point", False),
             # Issue #4910: ``pads_data`` is produced by ``Autorouter``'s
             # worker-config serializer, which carries the pad's residual
             # board rotation; dropping it here would silently rebuild every
@@ -274,11 +279,18 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
             rotation=pad_data.get("rotation", 0.0),
             shape=pad_data.get("shape", "rect"),
         )
-        router.pads[(ref, pin)] = pad
-        router.grid.add_pad(pad)
+        key = pad.key
+        if key in router.pads and router.pads[key].net != pad.net:
+            raise ValueError(f"Physical terminal {key!r} has conflicting nets")
+        router.pads[key] = pad
+        router.all_pads.append(pad)
+        router.grid.add_pad(pad, pin_pitch=pad_data.get("pin_pitch"))
 
     # Restore nets and net_names
-    router.nets = {int(k): v for k, v in config["nets"].items()}
+    router.nets = {
+        int(k): list(dict.fromkeys((key[0], key[1]) for key in keys))
+        for k, keys in config["nets"].items()
+    }
     router.net_names = {int(k): v for k, v in config["net_names"].items()}
 
     # Restore pour-net overrides so _is_pour_net() returns correct results

@@ -90,9 +90,10 @@ The sixth batch swept the board-improvement / rule-derivation drivers --
 `creepage-export-rules` (5).
 
 The seventh and final batch swept the multi-stage orchestrators -- `build`,
-`pipeline`, `stitch` (3). **The #4674 backlog is now empty**: the 5 leaves
-still in the audit's `prose-only` bucket are the 4 documented exemptions plus
-the deferred `route`, both listed below.
+`pipeline`, `stitch` (3). **The #4674 backlog is now empty**: the 4 leaves
+still in the audit's `prose-only` bucket are the 4 documented exemptions.
+The route workstream has since exposed its existing `--format` through the outer
+parser; its staged output still has the qualification described below.
 `tests/test_format_json_sweep_orchestrators.py` pins that bucket against
 exactly that list, so a new prose-only leaf fails a test rather than silently
 re-opening the backlog.
@@ -126,9 +127,9 @@ reachable through `kct`:
   machine-output flag. `kct mfr rules --format json` is now wired end-to-end
   (outer parser → shim → inner parser) and the inner `--json` boolean was
   removed rather than aliased — it never shipped on any reachable surface.
-- `route_cmd.py` inner `--format` — deliberately allowlisted as inner-only
-  (`tests/test_cli_parser_drift.py`, `INNER_ONLY_ALLOWLIST`), so `kct route`
-  is prose-only at the user-facing surface today. See "Deferred" below.
+- `route_cmd.py` `--format` — now forwarded by `kct route` as part of #5348.
+  The parser drift guard covers both entry points. See "Routing output" below
+  for the scope of its structured diagnostics.
 
 ## Classification of the 72 prose-only subcommands
 
@@ -144,11 +145,15 @@ is the separate mechanical sweep **#4674**.
 | `run` | Executes a user-supplied Python script with kct's interpreter; stdout belongs to the script — the wrapper must not impose a format. |
 | `footprint generate` (outer stub) | Argv passthrough; the real machine surface lives on the passthrough shape subparsers, which have `--format json` as of #4543. |
 
-### Deferred — owned by another workstream (1)
+### Routing output — structured diagnostics with staged progress
 
-| Command | Why deferred |
-|---|---|
-| `route` | Inner `route_cmd.py` already has `--format`, but it is intentionally allowlisted as inner-only. Promoting it to the outer parser requires removing the `INNER_ONLY_ALLOWLIST` entry and adding shim forwarding under the route drift guard — owned by the route workstream, not the mechanical sweep. |
+`kct route --format json` now reaches the existing routing-diagnostics formatter.
+For boards with placement-invalid nets, the final attempt summary also contains
+`placement_disposition`, including early outcomes. This flag controls diagnostic
+payloads; routing progress and all strategy paths are not yet normalized to the
+general single-document stdout contract. Callers must not treat parser flag
+coverage alone as proof that the entire stream is one JSON document. See the
+[route reference](cli.md#routing-around-invalid-placement) for disposition scope.
 
 ### Sweep backlog for #4674 — should gain `--format {text,json}`
 
@@ -458,9 +463,10 @@ agents (e.g. copperhead) delegating routing/DRC/LVS/tapeout to `kct`: with
 `--format json` canonical, an orchestrator can invoke any covered subcommand
 and parse a predictable payload instead of scraping prose. As of #4674's
 seventh batch the prose-only backlog is closed, so the contract now holds:
-**every non-exempt `kct` subcommand accepts `--format json` and emits a single
-JSON document on stdout** (the exceptions are the 4 exemptions and the
-deferred `route`, tabulated above). No separate issue tracks idea 7; it rode
+**covered commands emit a single JSON document on stdout**, with the four
+exemptions and the staged `route` diagnostics qualification above. `route` now
+accepts the flag through both entry points, but its parser coverage does not
+establish that stronger whole-stream contract. No separate issue tracks idea 7; it rode
 on this note plus #4674.
 
 ## Rules for new commands

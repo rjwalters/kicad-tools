@@ -189,10 +189,7 @@ def _compute_component_pitches(
 
     by_ref: dict[str, list[Pad]] = {}
     for pad in pad_list:
-        if pad.ref:
-            if pad.ref not in by_ref:
-                by_ref[pad.ref] = []
-            by_ref[pad.ref].append(pad)
+        by_ref.setdefault(pad.component_key, []).append(pad)
 
     pitches: dict[str, float] = {}
     for ref, comp_pads in by_ref.items():
@@ -366,7 +363,7 @@ class AdaptiveGridRouter:
         )
 
         # Filter to only pads from fine-pitch components
-        fine_pads = [pad for pad in pads.values() if pad.ref in fine_components]
+        fine_pads = [pad for pad in pads.values() if pad.component_key in fine_components]
 
         if not fine_pads:
             return SubGridResult(), [], {}
@@ -413,13 +410,13 @@ class AdaptiveGridRouter:
         # Count pads attempted per component (off-grid pads from analysis)
         attempted_by_ref: dict[str, int] = {}
         for sgp in subgrid_result.analysis.off_grid_pads:
-            ref = sgp.pad.ref or "<unknown>"
+            ref = sgp.pad.component_key
             attempted_by_ref[ref] = attempted_by_ref.get(ref, 0) + 1
 
         # Count pads that failed per component
         failed_by_ref: dict[str, int] = {}
         for pad in subgrid_result.failed_pads:
-            ref = pad.ref or "<unknown>"
+            ref = pad.component_key
             failed_by_ref[ref] = failed_by_ref.get(ref, 0) + 1
 
         for ref, attempted in attempted_by_ref.items():
@@ -432,7 +429,11 @@ class AdaptiveGridRouter:
             pitch = self._component_pitch_for(ref, subgrid_result)
             suggested = self._suggested_grid_for_pitch(pitch)
             raise FinePitchEscapeFailure(
-                component_ref=ref,
+                component_ref=next(
+                    sgp.pad.ref
+                    for sgp in subgrid_result.analysis.off_grid_pads
+                    if sgp.pad.component_key == ref
+                ),
                 attempted_pads=attempted,
                 suggested_grid=suggested,
                 pitch=pitch,
@@ -446,7 +447,9 @@ class AdaptiveGridRouter:
         """Recover the minimum pad pitch for a component from the analysis."""
         if subgrid_result.analysis is None:
             return None
-        comp_pads = [sgp.pad for sgp in subgrid_result.analysis.off_grid_pads if sgp.pad.ref == ref]
+        comp_pads = [
+            sgp.pad for sgp in subgrid_result.analysis.off_grid_pads if sgp.pad.component_key == ref
+        ]
         if len(comp_pads) < 2:
             return None
         min_pitch = float("inf")

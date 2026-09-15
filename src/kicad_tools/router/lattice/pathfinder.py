@@ -1857,6 +1857,7 @@ class LatticePathfinder:
             net_name=pc.pad_p_a.net_name,
             layer=pc.pad_p_a.layer,
             ref=pc.pad_p_a.ref,
+            component_id=pc.pad_p_a.component_id,
             pin=pc.pad_p_a.pin,
         )
         v_b = Pad(
@@ -1868,6 +1869,7 @@ class LatticePathfinder:
             net_name=pc.pad_p_b.net_name,
             layer=pc.pad_p_b.layer,
             ref=pc.pad_p_b.ref,
+            component_id=pc.pad_p_b.component_id,
             pin=pc.pad_p_b.pin,
         )
 

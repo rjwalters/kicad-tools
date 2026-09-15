@@ -81,6 +81,7 @@ def _make_args(**overrides):
 def _make_mock_router(nets_routed: int, nets_to_route: int, overflow: int):
     """Mock Autorouter sufficient for the escalation loops to traverse."""
     router = MagicMock()
+    router.placement_disposition = None
     router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
     router.grid.width = 50.0
     router.grid.height = 40.0

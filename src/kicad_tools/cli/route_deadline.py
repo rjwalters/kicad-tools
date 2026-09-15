@@ -19,6 +19,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from kicad_tools.router.reporting import RouteAttemptResult
+
 DEADLINE_ENV = "KCT_ROUTE_INVOCATION_DEADLINE"
 CONTROL_ENV = "KCT_ROUTE_DEADLINE_CONTROL"
 SAVE_SECONDS = 5.0
@@ -255,8 +257,14 @@ def _supervise(
 
 
 def run(argv: list[str] | None = None) -> int:
-    """Keep unbounded in-process behavior; supervise every finite CLI invocation."""
+    """Preserve the public CLI integer exit contract."""
+    return run_attempt(argv).exit_code
+
+
+def run_attempt(argv: list[str] | None = None) -> RouteAttemptResult:
+    """Return metadata from this invocation, including a supervised worker."""
     from .route_cmd import _in_process_main, _route_parser
+    from .route_placement import capture_disposition, disposition_from_control, finish
 
     argv = list(sys.argv[1:] if argv is None else argv)
     probe = argparse.ArgumentParser(add_help=False)
@@ -264,22 +272,41 @@ def run(argv: list[str] | None = None) -> int:
     timeout_args, _ = probe.parse_known_args(argv)
     budget = timeout_args.timeout
     if budget is None or budget <= 0 or "--help" in argv or "-h" in argv:
-        return _in_process_main(argv)
+        with capture_disposition() as values:
+            code = _in_process_main(argv)
+            return RouteAttemptResult(code, values[-1] if values else None)
     if not math.isfinite(budget):
         print("Error: --timeout must be finite", file=sys.stderr)
-        return 1
+        return RouteAttemptResult(1)
     parsed = _route_parser().parse_args(argv)
     try:
         state = _output_identity(parsed)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
-        return 1
+        return RouteAttemptResult(1)
     with tempfile.TemporaryDirectory(prefix="kct-route-deadline-") as directory:
         control = Path(directory) / "control.json"
         # Bind output before launching: even startup timeout cannot leave a
         # previous canonical result masquerading as this invocation's output.
         control.write_text(json.dumps(dict(state, stage="startup")))
-        return _supervise([sys.executable, "-m", __name__, *argv], budget, control)
+        # Capture report identities before the worker can replace stale files.
+        for option, attribute in (
+            ("complete_report", "_placement_report_before"),
+            ("export_failed_nets", "_placement_failed_before"),
+        ):
+            value = getattr(parsed, option, None)
+            path = Path(value) if value else None
+            setattr(parsed, attribute, path.stat() if path and path.exists() else None)
+        code = _supervise([sys.executable, "-m", __name__, *argv], budget, control)
+        disposition = disposition_from_control(_read_control(control))
+        if code == TIMEOUT_EXIT and disposition is not None:
+            parsed._placement_disposition = disposition
+            parsed._placement_output = Path(state["output"])
+            output = parsed._placement_output
+            # Even a checkpoint written before unwinding is unverified.
+            parsed._placement_output_before = output.stat() if output.exists() else None
+            finish(parsed, code)
+        return RouteAttemptResult(code, disposition)
 
 
 def _worker() -> int:
