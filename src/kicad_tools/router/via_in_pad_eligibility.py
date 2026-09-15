@@ -410,12 +410,14 @@ def component_holes_from_document(
                         # closed -- correct, not a silent skip.
                         drill = 0.0
                     pad_angle = float(getattr(pad, "rotation", 0.0))
-                    angle = math.radians(-pad_angle)
                     offset_x, offset_y = getattr(pad, "drill_offset", (0.0, 0.0))
                     hole_x = fp_x + px * cos_r - py * sin_r
                     hole_y = fp_y + px * sin_r + py * cos_r
-                    hole_x += offset_x * math.cos(angle) - offset_y * math.sin(angle)
-                    hole_y += offset_x * math.sin(angle) + offset_y * math.cos(angle)
+                    # KiCad drill offset translates copper (ShapePos), not
+                    # the physical hole (GetEffectiveHoleShape/GetPosition).
+                    # Retain malformed-metadata refusal without moving the hole.
+                    if not all(math.isfinite(float(v)) for v in (offset_x, offset_y)):
+                        return None
                     census.append(
                         RouterPad(
                             x=hole_x,

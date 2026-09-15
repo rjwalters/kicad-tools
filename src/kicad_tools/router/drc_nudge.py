@@ -1369,14 +1369,16 @@ class _ViaDestContext:
     #: drill can still be dropped straight onto a foreign trace -- that
     #: is a cross-net short, the worst outcome of all.
     foreign_segments: tuple[Segment, ...]
-    #: ``(x, y, drill_diameter)`` of every OTHER drill on the board --
-    #: vias of any net plus through-hole pad drills.  Hole-to-hole is
+    #: ``(x, y, drill_diameter)`` of every OTHER via drill on the board.
+    #: Component holes retain full geometry separately. Hole-to-hole is
     #: net-agnostic in DRC, so same-net drills belong here too.
     drills: tuple[tuple[float, float, float], ...]
     #: Fab drill-pitch floor (mm) from ``rules.min_hole_to_hole``.
     min_hole_to_hole: float
     #: False when a safe drill clearance cannot be established.
     component_holes_known: bool = True
+    #: Complete physical objects retain slot dimensions, axis and offset.
+    component_holes: tuple[Pad, ...] = ()
 
 
 def _build_via_dest_context(
@@ -1408,15 +1410,8 @@ def _build_via_dest_context(
 
     physical_holes = component_holes_for_router(router)
     hole_context = resolve_component_hole_context(via.x, via.y, via.drill, all_pads=physical_holes)
-    if hole_context.known:
-        for hole in physical_holes or []:
-            if hole.through_hole:
-                drills.append((hole.x, hole.y, hole.drill))
 
     for pad in (getattr(router, "pads", None) or {}).values():
-        pad_drill = float(getattr(pad, "drill", 0.0) or 0.0)
-        if getattr(pad, "through_hole", False) and pad_drill > 0.0:
-            drills.append((pad.x, pad.y, pad_drill))
         bbox = _router_pad_bbox(pad)
         if bbox == own_pad_bbox:
             continue
@@ -1450,6 +1445,7 @@ def _build_via_dest_context(
         drills=tuple(drills),
         min_hole_to_hole=min_hole_to_hole,
         component_holes_known=hole_context.known,
+        component_holes=tuple(physical_holes or ()),
     )
 
 
@@ -1514,6 +1510,14 @@ def _via_destination_blocked(
     """
     if not context.component_holes_known:
         return "via_pad_dest_unknown_holes"
+    physical_context = resolve_component_hole_context(
+        new_x, new_y, via.drill, all_pads=context.component_holes
+    )
+    if not physical_context.known:
+        return "via_pad_dest_unknown_holes"
+    assert physical_context.nearest_distance_mm is not None
+    if physical_context.nearest_distance_mm < context.min_hole_to_hole - 1e-6:
+        return "via_pad_dest_hole_to_hole"
     copper_r = via.diameter / 2.0
     drill_r = via.drill / 2.0
 
@@ -2069,15 +2073,13 @@ def _via_pad_process_findings(via: Via, router: Autorouter) -> set[tuple[str, in
     else:
         for hole in hole_census or []:
             if hole.through_hole:
-                gap = math.hypot(via.x - hole.x, via.y - hole.y) - (via.drill + hole.drill) / 2
+                context = resolve_component_hole_context(via.x, via.y, via.drill, all_pads=[hole])
+                gap = context.nearest_distance_mm
+                assert gap is not None  # The complete census was validated above.
                 if gap < drill_clearance - 1e-6:
                     findings.add(("hole", id(hole), gap))
     for pad in (getattr(router, "pads", None) or {}).values():
-        if pad.through_hole and pad.drill > 0:
-            gap = math.hypot(via.x - pad.x, via.y - pad.y) - (via.drill + pad.drill) / 2
-            if gap < drill_clearance - 1e-6:
-                findings.add(("hole", id(pad), gap))
-        elif not pad.through_hole and _via_drill_overlaps_bbox(via, _router_pad_bbox(pad)):
+        if not pad.through_hole and _via_drill_overlaps_bbox(via, _router_pad_bbox(pad)):
             hole_context = resolve_component_hole_context(
                 via.x, via.y, via.drill, all_pads=hole_census, exclude=pad
             )
