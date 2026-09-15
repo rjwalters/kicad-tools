@@ -1,9 +1,14 @@
 """Negotiation must learn from geometric contention beyond shared edge keys."""
 
+import time
+
+import pytest
 from shapely.geometry import LineString, Point
 
+from kicad_tools.router.lattice.escape_plan import foreign_reservations, plan_tapered_escapes
 from kicad_tools.router.lattice.geometry import seg_seg_dist
 from kicad_tools.router.lattice.history import PhysicalHistory
+from kicad_tools.router.lattice.kelvin import KelvinBranchGuard
 from kicad_tools.router.lattice.pairwise import LatticePairwise
 from kicad_tools.router.lattice.pathfinder import LatticePathfinder
 from kicad_tools.router.layers import Layer, LayerStack
@@ -46,7 +51,7 @@ def test_history_respects_pairwise_radius_and_layer_scoped_attach_zone():
     assert history.cost((2, 2.5), (8, 2.5), 1, 2, 0.1, 0.2, exempt) > 0
 
 
-def test_escape_conflict_negotiates_all_three_nets():
+def _escape_fixture():
     pads = [
         Pad(
             110,
@@ -151,6 +156,15 @@ def test_escape_conflict_negotiates_all_three_nets():
         (1, pads[1], pads[4], power),
         (2, pads[0], pads[2], wide),
     ]
+    return pf, connections
+
+
+@pytest.mark.parametrize("footprint", ["U1", "renamed_component"])
+def test_escape_conflict_negotiates_all_three_nets(footprint):
+    pf, connections = _escape_fixture()
+    for pad in pf.pads:
+        if pad.ref == "U1":
+            pad.ref = footprint
     routes, stats = pf.route_netset(connections, max_iterations=8)
     assert stats.converged and stats.routed == stats.total == 3
     assert set(routes) == {0, 1, 2}
@@ -204,3 +218,70 @@ def test_escape_conflict_negotiates_all_three_nets():
                             - (a.width + b.width) / 2
                         )
                         assert gap >= max(cls_a.clearance, cls_b.clearance) - 1e-6
+
+
+def test_escape_planning_respects_deadline_and_returns_real_local_choices():
+    pf, connections = _escape_fixture()
+    assert not plan_tapered_escapes(pf, connections, time.monotonic() - 1)
+    plan = plan_tapered_escapes(pf, connections, None)
+    assert len(plan) == 2
+    assert {choice.net for choice in plan.values()} == {1, 2}
+    assert all(choice.neck_half < choice.half for choice in plan.values())
+    # The non-tapered reference connection does not acquire ghost occupancy.
+    assert all(id(pad) not in plan for pad in pf.pads if pad.net == 3)
+
+
+def test_reservations_preserve_prepared_kelvin_guard_and_original_copper():
+    pf, connections = _escape_fixture()
+    plan = plan_tapered_escapes(pf, connections, None)
+    original = pf._fresh_committed()
+    pads = [pad for pad in pf.pads if pad.net == 1]
+    original.kelvin_guard = KelvinBranchGuard(
+        original, pads, pads[0], pads[1], pf._pad_layer_indices
+    )
+    original.kelvin_guard.clear((90, 100), (91, 100), 0, 0.1)
+    reserved = foreign_reservations(original, plan, 1)
+    assert reserved.kelvin_guard is original.kelvin_guard
+    assert not original.vias and not original.via_copper
+    assert all(not copper.buckets for copper in original.copper)
+    assert any(copper.buckets for copper in reserved.copper)
+    assert all(
+        item[2] == 2
+        for copper in reserved.copper
+        for bucket in copper.buckets.values()
+        for item in bucket
+    )
+
+
+def test_local_plan_cannot_cross_fixed_wall_and_is_released_without_progress(monkeypatch):
+    from kicad_tools.router.primitives import Route, Segment
+
+    pf, connections = _escape_fixture()
+    fixed = [
+        Route(
+            99,
+            "wall",
+            segments=[
+                Segment(
+                    100, 83.4, 100, 144, 0.2, pf.layer_stack.index_to_layer_enum(layer), 99, "wall"
+                )
+                for layer in range(pf.num_layers)
+            ],
+        )
+    ]
+    before = repr(fixed)
+    original = pf._route_impl
+    planned_calls = []
+
+    def observe(*args, **kwargs):
+        planned_calls.append(bool(kwargs.get("escape_plan")))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pf, "_route_impl", observe)
+    routes, stats = pf.route_netset(connections, fixed_copper=fixed, max_iterations=3)
+    assert not stats.converged and not stats.deadline_hit
+    assert stats.routed == 2 and stats.total == 3
+    assert set(routes) == {0, 1}
+    assert repr(fixed) == before
+    assert any(planned_calls)
+    assert not planned_calls[-1]

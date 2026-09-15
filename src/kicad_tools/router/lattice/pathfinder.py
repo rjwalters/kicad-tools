@@ -52,6 +52,7 @@ from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
 from ..rules import DesignRules
 from .coupled import CoupledConnection
+from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
 from .history import PhysicalHistory
 from .obstacles import (
@@ -1167,6 +1168,7 @@ class LatticePathfinder:
         stub_layers: tuple[int, ...] | None = None,
         stubs_override: tuple[list, list] | None = None,
         exempt_pads: frozenset[int] | None = None,
+        escape_plan: dict[int, EscapeChoice] | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Apply physical Kelvin isolation throughout every search stage."""
         from ..kelvin import detect_kelvin_topology
@@ -1199,6 +1201,7 @@ class LatticePathfinder:
                 stub_layers=stub_layers,
                 stubs_override=stubs_override,
                 exempt_pads=exempt_pads,
+                escape_plan=escape_plan,
             )
         finally:
             committed.kelvin_guard = previous
@@ -1218,6 +1221,7 @@ class LatticePathfinder:
         stub_layers: tuple[int, ...] | None = None,
         stubs_override: tuple[list, list] | None = None,
         exempt_pads: frozenset[int] | None = None,
+        escape_plan: dict[int, EscapeChoice] | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Route one connection, staging via-in-pad as a last resort (#4475).
 
@@ -1251,6 +1255,8 @@ class LatticePathfinder:
             failure -- is returned as-is.
         """
         fat = extra_clearance > 0.0 or partner_net is not None
+        if escape_plan and not fat:
+            committed = foreign_reservations(committed, escape_plan, start.net)
         last_resort = (
             self.rules.via_in_pad_last_resort and allow_vias and not fat and self.num_layers > 1
         )
@@ -1265,6 +1271,8 @@ class LatticePathfinder:
             "stubs_override": stubs_override,
             "exempt_pads": exempt_pads,
         }
+        if escape_plan and not fat:
+            search_kwargs["escape_plan"] = escape_plan
         if not last_resort:
             return self._route_search(start, end, net_class, **search_kwargs)
 
@@ -1307,6 +1315,7 @@ class LatticePathfinder:
         stubs_override: tuple[list, list] | None = None,
         exempt_pads: frozenset[int] | None = None,
         via_in_pad_override: bool | None = None,
+        escape_plan: dict[int, EscapeChoice] | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """A* over the (node, layer) graph; returns ``(result, reason)``.
 
@@ -1409,28 +1418,24 @@ class LatticePathfinder:
             width_a = width_b = body_w
         else:
             stub_kmax = 24 if fat else 4
-            stubs_a, width_a = self._escape_stubs(
-                start,
-                net,
-                committed,
-                kmax=stub_kmax,
-                extra_clearance=extra_clearance,
-                partner_net=partner_net,
-                layers=stub_layers,
-                exempt_pads=exempt_pads,
-                net_class=net_class,
-            )
-            stubs_b, width_b = self._escape_stubs(
-                end,
-                net,
-                committed,
-                kmax=stub_kmax,
-                extra_clearance=extra_clearance,
-                partner_net=partner_net,
-                layers=stub_layers,
-                exempt_pads=exempt_pads,
-                net_class=net_class,
-            )
+
+            def escape(pad: Pad) -> tuple[list, float]:
+                if escape_plan and id(pad) in escape_plan:
+                    return chosen_stub(escape_plan[id(pad)], committed)
+                return self._escape_stubs(
+                    pad,
+                    net,
+                    committed,
+                    kmax=stub_kmax,
+                    extra_clearance=extra_clearance,
+                    partner_net=partner_net,
+                    layers=stub_layers,
+                    exempt_pads=exempt_pads,
+                    net_class=net_class,
+                )
+
+            stubs_a, width_a = escape(start)
+            stubs_b, width_b = escape(end)
         # Issue #4979: drop any escape stub that lands on a hard-avoided
         # layer BEFORE the empty-stub decline check, so a pad whose only
         # legal escape is on a forbidden inner plane declines honestly
@@ -2377,6 +2382,7 @@ class LatticePathfinder:
         items.sort(key=lambda t: (-t[1], t[0]))
 
         history = PhysicalHistory()
+        escape_plan: dict[int, EscapeChoice] = {}
         best_routes: dict[object, Route] = {}
         best_reasons: dict[object, str] = {}
         best_pair_outcomes: dict[object, str] = {}
@@ -2449,8 +2455,15 @@ class LatticePathfinder:
                         committed.add_run(layer_idx, points, leg_net, half, clr)
                     continue
                 key, start, end, net_class = item
+                plan_options: dict[str, Any] = {"escape_plan": escape_plan} if escape_plan else {}
                 result, reason = self._route_impl(
-                    start, end, net_class, committed=committed, history=history, present=present
+                    start,
+                    end,
+                    net_class,
+                    committed=committed,
+                    history=history,
+                    present=present,
+                    **plan_options,
                 )
                 if result is None:
                     reasons[key] = reason
@@ -2480,6 +2493,11 @@ class LatticePathfinder:
                 for via_pt in result.via_points:
                     committed.add_via(via_pt, start.net, clr)
 
+            if escape_plan and routed_items <= best_count:
+                # A local reservation is a proposal, not a permanent lock.
+                # Release it when its full pass fails to improve completion.
+                escape_plan = {}
+
             if routed_items > best_count:
                 best_count = routed_items
                 best_routes = routes
@@ -2497,6 +2515,9 @@ class LatticePathfinder:
                 break
             if it == max_iterations - 1:
                 break
+
+            if it == 0:
+                escape_plan = plan_tapered_escapes(self, connections, deadline)
 
             # Failed-net demand: bump history on the resources each blocked
             # net WANTS (its corridor with no committed copper in the way) so
