@@ -247,9 +247,10 @@ def apply_impedance_driven_sizing(
     - The per-class literals (``trace_width``, ``effective_intra_pair_clearance``)
       when no impedance targets are set, when the stackup is unavailable, or
       when the physics module fails.
-    - The impedance-driven values from
+    - For differential targets with an explicit gap, width is solved at
+      that gap (subject to the manufacturer floor). Without an explicit gap,
       :func:`kicad_tools.physics.CoupledLines.gap_for_differential_impedance`
-      (for diff-pair targets) or
+      solves the unconstrained geometry. Single-ended targets use
       :func:`kicad_tools.physics.TransmissionLine.width_for_impedance` (for
       single-ended targets), rounded to ``min_grid_mm`` and clamped to the
       manufacturer minimums.
@@ -327,41 +328,24 @@ def apply_impedance_driven_sizing(
     min_width = design_rules.min_trace_width_mm
     min_clearance = design_rules.min_clearance_mm
 
-    # Differential target dominates: when set, compute (width, gap) from the
-    # coupled-lines model.  Width is taken from the single-ended Z0/2 estimate
-    # so the function is deterministic; gap is the bisection result.
+    # An explicit intra-pair gap constrains the impedance solution. The
+    # unconstrained single-ended-width heuristic can replace a compact,
+    # already valid pair with an ~8mm gap and make its second net unroutable.
     if target_diff is not None:
         try:
-            tl = TransmissionLine(stackup)
-            # Heuristic: use width that achieves target_diff/2 single-ended Z0
-            # as a reasonable starting point.  CoupledLines.gap_for_differential
-            # then solves for the gap given this width.
-            target_z0_single = target_diff / 2.0
-            raw_width = tl.width_for_impedance(target_z0_single, layer)
-        except (ValueError, AttributeError) as exc:
-            log.warning(
-                "impedance-driven sizing: width solver failed for diff target "
-                "%.1fΩ on layer %r: %s",
-                target_diff,
-                layer,
-                exc,
-            )
-            return ImpedanceSizingResult(
-                width_mm=fallback_width,
-                gap_mm=fallback_gap,
-                used_target=False,
-            )
-
-        try:
             cl = CoupledLines(stackup)
-            raw_gap = cl.gap_for_differential_impedance(
-                target_diff,
-                raw_width,
-                layer,
-            )
+            if net_class.intra_pair_clearance is not None:
+                raw_gap = net_class.intra_pair_clearance
+                raw_width = cl.width_for_differential_impedance(
+                    target_diff, max(raw_gap, min_clearance), layer
+                )
+            else:
+                tl = TransmissionLine(stackup)
+                raw_width = tl.width_for_impedance(target_diff / 2.0, layer)
+                raw_gap = cl.gap_for_differential_impedance(target_diff, raw_width, layer)
         except (ValueError, AttributeError) as exc:
             log.warning(
-                "impedance-driven sizing: gap solver failed for diff target %.1fΩ on layer %r: %s",
+                "impedance-driven sizing: solver failed for diff target %.1fΩ on layer %r: %s",
                 target_diff,
                 layer,
                 exc,
@@ -373,7 +357,13 @@ def apply_impedance_driven_sizing(
             )
 
         rounded_width = _round_to_grid(raw_width, min_grid_mm)
-        rounded_gap = _round_to_grid(raw_gap, min_grid_mm)
+        # Only computed gaps are grid-rounded. Preserve authored dimensions;
+        # the manufacturer floor below still clamps undersized declarations.
+        rounded_gap = (
+            raw_gap
+            if net_class.intra_pair_clearance is not None
+            else _round_to_grid(raw_gap, min_grid_mm)
+        )
 
         final_width = rounded_width
         if final_width < min_width:
@@ -401,9 +391,13 @@ def apply_impedance_driven_sizing(
                     minimum_mm=min_clearance,
                     target_impedance_ohms=target_diff,
                     message=(
-                        f"target impedance unachievable at this stackup: "
-                        f"requires gap {rounded_gap:.3f}mm but manufacturer "
-                        f"minimum is {min_clearance:.3f}mm"
+                        (
+                            "authored fixed-gap request unachievable: "
+                            if net_class.intra_pair_clearance is not None
+                            else "target impedance unachievable at this stackup: "
+                        )
+                        + f"requires gap {rounded_gap:.4f}mm but manufacturer "
+                        f"minimum is {min_clearance:.4f}mm"
                     ),
                 )
             )

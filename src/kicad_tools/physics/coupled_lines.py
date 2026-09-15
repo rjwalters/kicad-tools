@@ -494,6 +494,42 @@ class CoupledLines:
             epsilon_eff_odd=eps_eff,
         )
 
+    def width_for_differential_impedance(
+        self,
+        zdiff_target: float,
+        gap_mm: float,
+        layer: str,
+        tolerance: float = 0.001,
+        max_iterations: int = 60,
+    ) -> float:
+        """Solve trace width at a fixed authored edge-to-edge pair gap.
+
+        Unlike sizing a single-ended line at half the differential target,
+        this preserves the specified coupling geometry. Layer position selects
+        microstrip or stripline. Bounds scale with the reference-plane height.
+        """
+        if zdiff_target <= 0 or gap_mm <= 0:
+            raise ValueError("Differential target and pair gap must be positive")
+        calc = (
+            self.edge_coupled_microstrip
+            if self.stackup.is_outer_layer(layer)
+            else self.edge_coupled_stripline
+        )
+        height = self.stackup.get_reference_plane_distance(layer)
+        lo, hi = height * 0.001, height * 50
+        if not calc(hi, gap_mm, layer).zdiff <= zdiff_target <= calc(lo, gap_mm, layer).zdiff:
+            raise ValueError("Differential target is outside fixed-gap width bounds")
+        for _ in range(max_iterations):
+            mid = (lo + hi) / 2
+            actual = calc(mid, gap_mm, layer).zdiff
+            if abs(actual - zdiff_target) <= tolerance * zdiff_target:
+                return mid
+            if actual > zdiff_target:
+                lo = mid
+            else:
+                hi = mid
+        raise ValueError("Fixed-gap differential width solver did not converge")
+
     def gap_for_differential_impedance(
         self,
         zdiff_target: float,
