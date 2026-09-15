@@ -366,9 +366,10 @@ def compare_copper_netlist(sch_path: str | Path, pcb_path: str | Path) -> Copper
     validator = ConnectivityValidator(pcb_path)
     copper_partition, pad_bindings = validator.extract_pad_occurrences()
 
-    # Compare actual copper components, without exemptions based on net
-    # names or zone ownership. Disconnected pad-bearing islands must remain
-    # visible even when their net owns a pour elsewhere on the board (#4982).
+    # Compare actual copper components without exemptions based on net names
+    # or zone ownership (#4982). The #5133 extractor traces separate fill
+    # solids and physical contacts; disconnected pad-bearing islands
+    # must remain visible, including for legacy advisory callers.
     return compare_partitions(schematic_net_of_pad, copper_partition, pad_bindings=pad_bindings)
 
 

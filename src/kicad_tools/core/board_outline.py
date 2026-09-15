@@ -5,6 +5,11 @@ from __future__ import annotations
 import math
 from collections.abc import Iterator
 
+from kicad_tools.core.outline_tessellation import (
+    DEFAULT_MAX_ERROR_MM,
+    tessellate_arc,
+    tessellate_cubic,
+)
 from kicad_tools.sexp import SExp
 
 Point = tuple[float, float]
@@ -310,24 +315,44 @@ class OutlineSegments(list[tuple[Point, Point]]):
         self.max_error_mm = max_error_mm
 
 
+def _routing_curved_chain(node: SExp) -> list[Point]:
+    """Preserve an authored cubic/arc path; never close unrelated graphics.
+
+    Legacy arcs use the same signed-angle normalization as bounds. Zero or
+    full/multiple turns cannot be represented by three distinct arc points,
+    so routing explicitly refuses these rather than guessing their topology.
+    Bounds behavior remains unchanged.
+    """
+    if node.tag == "gr_curve":
+        pts = node.find_child("pts")
+        chain = [_coordinate(xy, "gr_curve xy") for xy in pts.find_children("xy")] if pts else []
+        return tessellate_cubic(chain)
+    if node.tag != "gr_arc":
+        raise ValueError(f"Unsupported curved routing Edge.Cuts geometry: {node.tag}")
+    start, end = _point(node, "start"), _point(node, "end")
+    if node.find_child("mid") is not None:
+        mid = _point(node, "mid")
+    else:
+        angle = node.find_child("angle")
+        sweep = angle.get_float(0) if angle is not None else None
+        if angle is None or len(angle.children) != 1 or sweep is None or not math.isfinite(sweep):
+            raise ValueError("Malformed Edge.Cuts gr_arc: missing mid or invalid legacy angle")
+        if not 0 < abs(sweep) < 360:
+            raise ValueError(
+                "Unsupported routing Edge.Cuts legacy arc: require 0 < abs(sweep) < 360"
+            )
+        start, mid, end = legacy_arc_points(end, start, sweep)
+    return tessellate_arc(start, mid, end)
+
+
 def board_outline_segments(root: SExp) -> OutlineSegments:
-    """Exact straight edges for routing; reject unsupported curved boundaries.
+    """Endpoint-preserving outline chains with a certified Hausdorff allowance.
 
-    ``gr_circle`` is the one curved exception: it is tessellated into a
-    closed chain of chords bounded by ``_CIRCLE_TESSELLATION_MAX_ERROR_MM``
-    (see ``circle_segment_count``), rather than rejected outright. This
-    covers both circular outer boundaries and circular interior cutouts
-    (e.g. round mounting holes drawn on Edge.Cuts) -- the function has no
-    notion of outline topology, so every ``gr_circle`` element is
-    tessellated the same way regardless of its role. Other curved
-    geometry (``gr_arc``, ``gr_curve``) has no such treatment here and
-    remains rejected.
-
-    Because the tessellation is topology-blind it cannot be conservative
-    for outer boundaries and cutouts at the same time, so the actual
-    worst-case sagitta of the returned chain is certified on the result as
-    ``OutlineSegments.max_error_mm`` (``0.0`` for all-straight outlines) for
-    consumers to fold into their own comparisons.
+    Straight elements remain exact. Cubic Beziers and modern/legacy arcs use
+    certified adaptive geometry; circles use their independently bounded ring.
+    Every authored graphic remains a separate component, with no guessed
+    closure or replacement by bounds. Consumers must retain max_error_mm and
+    account for it conservatively in distance checks and grid keepouts.
     """
     segments = OutlineSegments()
     for node in outline_graphics(root):
@@ -343,6 +368,10 @@ def board_outline_segments(root: SExp) -> OutlineSegments:
             if len(chain) < 3:
                 raise ValueError("Malformed Edge.Cuts gr_poly: missing points")
             segments.extend(zip(chain, chain[1:] + chain[:1], strict=True))
+        elif node.tag in ("gr_curve", "gr_arc"):
+            chain = _routing_curved_chain(node)
+            segments.extend(zip(chain[:-1], chain[1:], strict=True))
+            segments.max_error_mm = max(segments.max_error_mm, DEFAULT_MAX_ERROR_MM)
         elif node.tag == "gr_circle":
             center, end = _point(node, "center"), _point(node, "end")
             radius = math.dist(center, end)

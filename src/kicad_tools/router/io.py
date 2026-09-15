@@ -3896,10 +3896,12 @@ def load_pcb_for_routing(
             # Extract pad number and type
             # Handle both quoted ("A1") and unquoted (1) pad numbers
             # KiCad uses unquoted numbers for numeric pads, quoted for alphanumeric (BGA)
-            pad_start = re.match(r'\(pad\s+(?:"([^"]+)"|(\S+))\s+(\w+)', pad_block)
+            pad_start = re.match(r'\(pad\s+(?:"([^"]*)"|(\S+))\s+(\w+)', pad_block)
             if not pad_start:
                 continue
-            pad_num = pad_start.group(1) or pad_start.group(2)
+            # A matched empty quoted number is a mechanical pad, not a
+            # missing capture. Preserve the schema's empty-string identity.
+            pad_num = pad_start.group(1) if pad_start.group(1) is not None else pad_start.group(2)
             pad_type = pad_start.group(3)  # smd or thru_hole
             pad_shape = _pad_shape_from_block(pad_block, ref, pad_num)
 
