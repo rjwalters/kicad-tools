@@ -40,3 +40,41 @@ def test_startup_timeout_does_not_invent_placement_analysis(tmp_path):
     assert result.exit_code == 124
     assert result.placement_disposition is None
     assert isinstance(route_cmd.main([str(tmp_path / "missing.kicad_pcb")]), int)
+
+
+def test_supervised_timeout_retains_published_placement_without_output(tmp_path):
+    import json
+    import sys
+
+    from kicad_tools.cli import route_deadline, route_placement
+
+    source = tmp_path / "mixed.kicad_pcb"
+    source.write_text(board_text())
+    output = tmp_path / "out.kicad_pcb"
+    control = tmp_path / "control.json"
+    control.write_text(json.dumps({"output": str(output), "stage": "startup"}))
+    # Real process supervision, board analysis and control transport. The wait
+    # stands in for work after analysis; no routing/completion is fabricated.
+    code = f"""
+from pathlib import Path
+import time
+from kicad_tools.cli.route_cmd import _route_parser
+from kicad_tools.cli.route_placement import prepare
+from kicad_tools.cli.route_deadline import record_stage
+args = _route_parser().parse_args([{str(source)!r}, '-o', {str(output)!r}])
+prepare(args, Path({str(source)!r}))
+record_stage('after-placement-test-wait')
+while True:
+    time.sleep(0.1)
+"""
+    rc = route_deadline._supervise([sys.executable, "-c", code], 3, control, save_seconds=0.2)
+    assert rc == 124
+    state = json.loads(control.read_text())
+    assert state["stage"] == "after-placement-test-wait"
+    disposition = route_placement.disposition_from_control(state)
+    assert disposition.requested_invalid_nets == frozenset({"BAD"})
+    assert disposition.eligible_nets == frozenset({"GOOD", "PARTNER", "PLANE"})
+    assert not output.exists()
+    timeout = json.loads(output.with_suffix(".timeout.json").read_text())
+    assert timeout["manufacturing_ready"] is False
+    assert timeout["placement_disposition"] == state["placement_disposition"]
