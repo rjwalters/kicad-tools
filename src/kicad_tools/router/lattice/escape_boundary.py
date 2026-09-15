@@ -1,4 +1,4 @@
-"""Physical board-boundary checks for copper-overlap pad attachments."""
+"""Physical board-boundary checks for routed copper."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from .geometry import Pt, seg_seg_dist
 class EscapeBoundary:
     """Closed edge contours with even/odd material and certified curve error.
 
-    This guard only admits the new attachment fallback. Invalid/open outlines
-    leave it disabled; they never become a permissive bounding-box substitute.
+    Invalid/open outlines reject copper; they never become a permissive
+    bounding-box substitute.
     """
 
     def __init__(self, edges: list[tuple[Pt, Pt]], clearance: float) -> None:
