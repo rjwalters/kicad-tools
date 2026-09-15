@@ -41,6 +41,34 @@ def _context():
     return grid, native, pathfinder
 
 
+@pytest.mark.parametrize("method", ["route", "route_resumable"])
+@pytest.mark.parametrize("drill", [0.0, 0.3, 0.6])
+@pytest.mark.parametrize("partial", [False, True])
+def test_route_halo_uses_emitted_via_drill(method, drill, partial):
+    grid, native, pathfinder = _context()
+    if partial:
+        native._impl.mark_via(10, 10, 9, 6)
+        assert not native._impl.route_geometry_complete()
+    point = grid.grid_to_world(55, 56)
+    existing = grid.grid_to_world(60, 60)
+    result = getattr(pathfinder._impl, method)(
+        *point,
+        2,
+        *point,
+        3,
+        1,
+        emit_via_diameter=0.6,
+        emit_via_drill=drill,
+        max_search_iterations=2000,
+    )
+    assert result.success
+    assert result.vias
+    for via in result.vias:
+        assert via.drill == pytest.approx(drill or 0.3)
+        gap = math.hypot(via.x - existing[0], via.y - existing[1]) - (via.drill + 0.3) / 2
+        assert gap >= 0.5 - 1e-4
+
+
 @pytest.mark.parametrize("sharing", [False, True])
 @pytest.mark.parametrize("offset,legal", [((-5, -4), True), ((-4, -4), False)])
 def test_via_search_matches_physical_clearance_inside_dynamic_halo(sharing, offset, legal):

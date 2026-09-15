@@ -206,7 +206,8 @@ bool Pathfinder::trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1
 bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {
     const auto [wx, wy] = grid_.grid_to_world(x, y);
     Via via;
-    via.x = wx; via.y = wy; via.net = net; via.drill = rules_.via_drill;
+    via.x = wx; via.y = wy; via.net = net;
+    via.drill = search_emit_via_drill_ > 0 ? search_emit_via_drill_ : rules_.via_drill;
     via.diameter = search_via_half_diam_mm_ > 0 ? 2 * search_via_half_diam_mm_ : rules_.via_diameter;
     via.layer_from = 0; via.layer_to = grid_.layers() - 1;
     const float clearance = search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance;
