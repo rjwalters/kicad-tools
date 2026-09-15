@@ -314,7 +314,7 @@ def fill_zones_in_routed_pcb(routed_path: Path) -> int:
         return 0
 
     print(f"\n1. Filling zones in: {routed_path}")
-    result = run_fill_zones(routed_path, kicad_cli=kicad_cli)
+    result = run_fill_zones(routed_path, kicad_cli=kicad_cli, native_clearance=True)
 
     if not result.success:
         print(f"\n   WARNING: Zone fill failed: {result.stderr or '(no stderr)'}")

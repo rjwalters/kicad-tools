@@ -428,6 +428,8 @@ def run_fill_zones(
     pcb_path: Path,
     output_path: Path | None = None,
     kicad_cli: Path | None = None,
+    *,
+    native_clearance: bool = False,
 ) -> KiCadCLIResult:
     """Fill all copper zones in a PCB using kicad-cli.
 
@@ -443,10 +445,21 @@ def run_fill_zones(
         pcb_path: Path to .kicad_pcb file
         output_path: Where to save the filled PCB (default: overwrites input)
         kicad_cli: Path to kicad-cli (auto-detected if not provided)
+        native_clearance: Persist the existing conservative post-fill
+            clearance target in native DRU rules before filling, and let
+            KiCad handle the resulting geometry instead of carving saved
+            polygons. Opt-in, in-place only; preserves other callers' policy.
 
     Returns:
         KiCadCLIResult with success status and output path
     """
+    if native_clearance:
+        if output_path is not None:
+            raise ValueError("Native clearance currently requires an in-place fill")
+        from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
+
+        write_native_zone_clearance_rules(pcb_path)
+
     if kicad_cli is None:
         kicad_cli = find_kicad_cli()
         if kicad_cli is None:
@@ -509,7 +522,7 @@ def run_fill_zones(
         _remediate_starved_thermal(
             result.output_path,
             kicad_cli,
-            settle=_apply_foreign_pad_clearance,
+            settle=None if native_clearance else _apply_foreign_pad_clearance,
         )
 
     return result

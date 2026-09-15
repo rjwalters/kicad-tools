@@ -2,7 +2,7 @@
 title: "usb_joystick_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.20.0"
-date: "Rev 1 | 2026-09-14 | jlcpcb-tier1"
+date: "Rev 1 | 2026-09-15 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -13,11 +13,11 @@ header-includes:
   - \usepackage{float}
 ---
 
-## Release Status: BLOCKED
+## Candidate Qualification
 
-This candidate is not qualified for manufacture. The saved copper has 12 native copper-sliver warnings and does not match independent bare native refill. The passing recipe replay and factory checks below do not clear these release blockers. See Manufacturing Readiness and the bundled `native-refill-comparison.json` for the measured discrepancy.
+The native-consumed clearance repair removes the prior saved/refilled copper divergence and 12 native sliver warnings. Exact recipe source: `bd992dc7572cf7af93be092ded9e259c721ab3e9`, based on factory-rule parent `581087a5`. Saved PCB SHA256: `17d3fc83cb535fcd0ccac2e7b1a6036e272ec5d15a7936400217900b84e20a53`.
 
-This report's release evidence was corrected against PR #5386 source `aa1fa691f545866a7754e28e1baf773e8cae31a8`. Measurements are retained KiCad 10.0.5 observations, not a new physical run. Board imagery, geometry and recipe remain unchanged.
+This is digital candidate evidence, not supplier approval or physical bring-up. Independent combined-head review and main-target CI remain required before parent integration. Bundled `native-clearance-qualification/provenance.json` identifies the separate recipe, factory checker and corrected readiness verifier.
 
 ## Board Summary
 
@@ -75,8 +75,7 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 ## ERC Status
 
-Retained native KiCad 10.0.5 report dated 2026-09-15T00:37:00 on the shipped schematic: **0 errors, 0 warnings**. Evidence: `native-erc.json`; schematic UUID `/546c89fe-5075-48a6-a97e-bef2a1207261`. This supersedes the earlier export-stage ERC-skipped summary. No new ERC run was performed for this report correction.
-
+Fresh exact-source recipe native ERC: **0 errors, 0 warnings**. Retained evidence: `native-erc.json`. Exact-source board manufacturing checker independently reports ERC PASSED.
 
 \newpage
 
@@ -152,51 +151,25 @@ Retained native KiCad 10.0.5 report dated 2026-09-15T00:37:00 on the shipped sch
 
 \newpage
 
-## DRC Status: Saved Copper
+## DRC Status
 
-| Metric | Count |
-|--------|-------|
-| Native errors | 0 |
-| Native warnings | 12 |
-| Unconnected items | 0 |
-| Copper-sliver warnings | 12 |
+Pinned native KiCad 10.0.5: **0 errors, 0 warnings, 0 unconnected items**, both on saved copper without refill and on a separate independent native-refilled copy. Exact recipe-source Python factory check: **54 rules, 0 errors, 0 warnings, 0 waived findings**. Strict connectivity covers 27 complete nets; copper LVS is clean over 129 bound pads. Evidence is in `native-clearance-qualification/`.
 
-**Native release gate: FAILED**. The zero-error/zero-warning gate is not satisfied. Evidence: bundled `native-drc.json`, measured on the canonical saved board with full project, rules and custom footprint context, without refill.
-
-The separately scoped retained Python factory check in `check-report.json` passed (0 errors/warnings, 54 checked rules). Its pass does not replace native readiness checks. The former 14 hole-to-hole warning summary was an earlier export-stage diagnostic; it is superseded here and is not the current native warning census.
-
-Native version: KiCad 10.0.5. Container image ID: `sha256:182c8005cb775a2c448a4c18681d489f1ff472a761885eba3e08b07e3c0564de`.
-
+The earlier export collector reported 14 hole-spacing warnings and optional fill suggestions. Those diagnostics omitted the final scoped factory context; they are superseded by the retained exact-source factory receipt and independent native receipts. No severity, tolerance or allowance was changed. The existing fabrication sidecar and explicit tier remain binding. Optional path-ampacity analysis has no declared current-path sidecar and is not a claimed qualification.
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict: BLOCKED**
+**Physical candidate gates: PASSED. Release review: PENDING.**
 
-### Required Actions
+- Saved versus independently refilled copper has **0 mm² symmetric difference on all four layers** (full polygon comparison, not area equality alone).
+- Native saved and refilled DRC: **0 findings and 0 opens**. The previous 12 copper slivers are absent.
+- The conservative zone-to-foreign-copper target is an explicit native `0.3mm` rule, preserving stronger authored rules by refusal. A valid `2.0mm` negative rule on unchanged `0.3mm`-filled saved copper produces 506 clearance errors; false-condition controls demonstrate rule reachability.
+- Factory/process constraints, circuit connectivity, and the immutable historical witness remain preserved. Use the exact four-layer Epoxy-filled & Capped POFV/VIPPO process in the supplied manufacturing requirements.
+- Independent exact combined-head review and main-target CI remain required. Supplier approval, assembly inspection, and physical USB qualification remain outstanding.
 
-- **[REQUIRED]** Resolve the same-copper compatibility failure between the preserved recipe-filled release and bare native refill. Do not discard the clearance carve or substitute different refilled copper to claim success.
-- **[REQUIRED]** Resolve the 12 native copper-sliver warnings on the actual shipped geometry and rerun the required zero-error/zero-warning gates.
-- **[REQUIRED]** Verify the final candidate and its release bindings after repair. The generic producer correction in #5391 alone does not resolve this physical qualification gap; #5380 remains incomplete.
-
-### Independent Native-Fill Comparison
-
-| Layer | Refilled minus saved copper area (mm²) |
-|-------|---------------------------------------|
-| F.Cu | 947.873802 |
-| B.Cu | 406.966144 |
-| In1.Cu | 217.304656 |
-| In2.Cu | 463.102399 |
-
-Saved PCB SHA256: `e7bdf5b80a3685f4ebd7e380fdade7d9e6218168a15f0cfecea6166b69645270`.
-
-Separate native-refilled PCB SHA256: `81de0e491ad82a68cfe375737dbf898969d45e35febb5a2737649e2378bd8e5a`.
-
-The refilled measurement has zero native violations/opens but describes different copper and is not the shipped board. Evidence: `native-refill-comparison.json` and `native-refilled-drc.json`.
-
-The retained recipe-fill replay reports zero area delta for its own native-fill/remediation/carve engine. That passing recipe-stability result is distinct from bare-native equivalence. Neither it nor passing factory/connectivity checks establishes overall release readiness.
-
+The readiness verifier's final machine-readable receipt is authoritative for its package checks. It is identified separately from the exact recipe-source factory checker; passing generic main checks cannot substitute for the stronger factory-rule parent.
 
 \newpage
 

@@ -1,0 +1,10 @@
+[INFO] auto-loaded net-class-map sidecar: /tmp/5380-native-rule/final-bd992dc-recipe/net_class_map.json
+WARNING: path_ampacity is INACTIVE without --current-paths and will silently pass. No sidecar was found at any of:
+  /tmp/5380-native-rule/final-bd992dc-recipe/usb_joystick_routed.current_paths.json
+  /tmp/5380-native-rule/final-bd992dc-recipe/current_paths.json
+  /tmp/5380-native-rule/final-bd992dc-recipe/output/usb_joystick_routed.current_paths.json
+  /tmp/5380-native-rule/final-bd992dc-recipe/output/current_paths.json
+  /tmp/5380-native-rule/output/usb_joystick_routed.current_paths.json
+  /tmp/5380-native-rule/output/current_paths.json
+Pass one explicitly with --current-paths, or place it at one of the paths above, to validate declared branch current paths.
+[INFO] applied fabrication-overrides sidecar /tmp/5380-native-rule/final-bd992dc-recipe/fabrication_overrides.json (min_hole_to_hole_mm)
