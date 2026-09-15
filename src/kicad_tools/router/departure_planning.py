@@ -168,6 +168,7 @@ class ValidatedDeparture:
     p_route: Route
     n_route: Route
     iterations: int
+    native_validated: bool = True
 
 
 def departure_proposals(

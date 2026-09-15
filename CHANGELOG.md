@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resolve conservative differential-pair departure halos against exact live copper geometry, preserving unknown-obstacle rejection and final skew/coupling gates (#5333).
+
 - **Imported copper arcs no longer cause false opens or under-reported
   wirelength** (#4937) — `PCB` parsed `(segment ...)` and `(via ...)` copper
   but had no branch for `(arc ...)`, the curved-track element KiCad 7+ writes

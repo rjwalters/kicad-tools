@@ -48,6 +48,9 @@ def _stub(monkeypatch, *, departures, landings, result=None, clock=None, qualify
     def fake_qualify(router, finder, pair, pads, candidate, **kwargs):
         return candidate
 
+    from kicad_tools.router import geometric_departure
+
+    monkeypatch.setattr(geometric_departure, "geometric_departures", lambda *a, **kw: iter(()))
     monkeypatch.setattr(pair_construction, "validated_departures", fake_validated)
     monkeypatch.setattr(pair_construction, "landing_proposals", fake_landings)
     monkeypatch.setattr(pair_construction, "complete_departures", fake_complete)
@@ -167,6 +170,9 @@ def test_direction_tallies_propagate_from_the_departure_stage(monkeypatch):
         portion.iterations_used = 40
         yield from [_departure((1, 0), 3)] * 6
 
+    from kicad_tools.router import geometric_departure
+
+    monkeypatch.setattr(geometric_departure, "geometric_departures", lambda *a, **kw: iter(()))
     monkeypatch.setattr(pair_construction, "validated_departures", fake_validated)
     budget = ConstructionBudget(deadline=1, iterations_remaining=64, bodies_remaining=16)
     result = pair_construction._validated_departures(None, None, budget, limit=6)
@@ -233,6 +239,9 @@ def test_departure_reasons_propagate_from_the_native_stage(monkeypatch):
         budget.native_rejections.update({"sym_blocked_p": 60})
         return iter(())
 
+    from kicad_tools.router import geometric_departure
+
+    monkeypatch.setattr(geometric_departure, "geometric_departures", lambda *a, **kw: iter(()))
     monkeypatch.setattr(pair_construction, "validated_departures", fake_validated)
     monkeypatch.setattr(pair_construction, "time", SimpleNamespace(monotonic=lambda: 0))
     budget = ConstructionBudget(deadline=1, iterations_remaining=64, bodies_remaining=16)

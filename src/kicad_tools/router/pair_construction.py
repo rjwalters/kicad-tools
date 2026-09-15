@@ -240,6 +240,27 @@ def construct_pair_routes(
     ):
         return None
     departures = _validated_departures(finder, pads, budget, max_departures)
+    if not departures and time.monotonic() < budget.deadline:
+        from .geometric_departure import geometric_departures
+
+        departures = list(
+            itertools.islice(
+                geometric_departures(
+                    router,
+                    finder,
+                    pads,
+                    deadline=budget.deadline,
+                    reserved_routes=reserved_routes,
+                ),
+                max_departures,
+            )
+        )
+        # These proposals have exact physical validation, not a validated
+        # native prefix. Their bodies use the existing geometric constructor.
+        # The native corridor would reject the same conservative halo again.
+        if departures:
+            corridor = None
+            budget.departure_reasons["exact_geometry_departure"] += len(departures)
     budget.departures_found = len(departures)
     if not departures:
         return None
@@ -461,6 +482,7 @@ def _corridor_guided_departures(
     # with no configured net class or invalid board thickness is rejected
     # there -- this function does not need its own copy of that check.
     reserved_routes = tuple(r for r in reserved_routes if r.net not in (pads[0].net, pads[2].net))
+    departures = [d for d in departures if getattr(d, "native_validated", True)]
     departures_remaining = len(departures)
     for departure in departures:
         if time.monotonic() >= budget.deadline or budget.corridor_iterations_remaining <= 0:

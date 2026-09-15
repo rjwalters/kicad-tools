@@ -102,15 +102,16 @@ _NON_DIFFPAIR_NETS = [
 # geometric lattice or an already-working corridor path, and DQS resolves
 # through native partial-recovery.  A regression in any of these is a
 # DIFFERENT defect than the one this module targets.
-_EXPECTED_QUALIFIED_PAIRS = ("DQS", "MIPI_CLK", "MIPI_DAT0", "TMDS_D0")
+_EXPECTED_QUALIFIED_PAIRS = ("DQS", "MIPI_CLK", "MIPI_DAT0", "MIPI_DAT1", "TMDS_D0")
 
-# TMDS_D1/TMDS_D2/MIPI_DAT1 are the three pairs #5333 has not yet resolved
-# (see pair_construction.py's ``_corridor_guided_departures`` docstring for
+# TMDS_D1/TMDS_D2 are the two pairs #5333 has not yet resolved
+# MIPI_DAT1 now qualifies through exact departure geometry after a native
+# conservative-halo rejection. See ``_corridor_guided_departures`` for
 # the current, still-accurate diagnosis of each).  This module does not
 # require them to stay unresolved forever -- a future fix legitimately
 # qualifying one is a welcome change to this list -- it only pins that they
 # are not SILENTLY reported qualified by a quality-gate bypass.
-_EXPECTED_STILL_OPEN_PAIRS = ("MIPI_DAT1", "TMDS_D1", "TMDS_D2")
+_EXPECTED_STILL_OPEN_PAIRS = ("TMDS_D1", "TMDS_D2")
 
 
 @pytest.fixture(scope="module")
