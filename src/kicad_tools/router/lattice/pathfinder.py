@@ -1026,6 +1026,7 @@ class LatticePathfinder:
         committed: CommittedCopper,
         *,
         via_in_pad_override: bool | None = None,
+        clearance: float | None = None,
     ) -> bool:
         """Through-via legality at a lattice node.
 
@@ -1040,6 +1041,10 @@ class LatticePathfinder:
         only when the fab tier supports it (:attr:`_via_in_pad_allowed`).
         Dynamic part: committed copper on all layers + committed vias
         (:meth:`CommittedCopper.via_clear`).
+
+        ``clearance`` carries the effective net-class gap through the entire
+        barrel span, including layers the trace search skips. ``None`` keeps
+        the board-global trace and separate fixed-fill via defaults.
 
         ``via_in_pad_override`` (issue #4475, epic #4465 Phase 3) lets a
         caller bypass the tier gate for the SAME-net window hit: ``None``
@@ -1056,7 +1061,12 @@ class LatticePathfinder:
         obstacles = self.obstacles
         point = lattice.node_point(key)
         via_radius = self.rules.via_diameter / 2.0
-        grow = max(self._via_pad_grow, 0.0)
+        own_clr = (
+            self.rules.trace_clearance
+            if clearance is None
+            else max(self.rules.trace_clearance, clearance)
+        )
+        grow = max(via_radius + own_clr - self._agent_radius, 0.0)
         # The query window must cover the farthest centre distance any check
         # below can reject at.  The hole-to-hole floor against the board's
         # largest drill needs via_drill/2 + max_drill/2 + min_hole_to_hole
@@ -1110,7 +1120,7 @@ class LatticePathfinder:
             None,
             net,
             self.rules.via_diameter / 2.0,
-            max(self._via_pad_grow, 0.0),
+            grow,
             self._pairwise,
         ):
             return False
@@ -1119,7 +1129,7 @@ class LatticePathfinder:
         # of the area's layers (the barrel spans the whole stack).
         if self._keepouts is not None and self._keepouts.via_blocked(point, net, via_radius):
             return False
-        return committed.via_clear(point, net)
+        return committed.via_clear(point, net, clearance)
 
     # -- the route contract ------------------------------------------------------
 
@@ -1585,7 +1595,13 @@ class LatticePathfinder:
             if allow_vias and self.num_layers > 1:
                 vok = via_ok.get(key)
                 if vok is None:
-                    vok = self._via_ok(key, net, committed, via_in_pad_override=via_in_pad_override)
+                    vok = self._via_ok(
+                        key,
+                        net,
+                        committed,
+                        via_in_pad_override=via_in_pad_override,
+                        clearance=clr if net_class is not None else None,
+                    )
                     via_ok[key] = vok
                 if vok:
                     # Via edges join matching nodes on ADJACENT layers only
@@ -2432,7 +2448,7 @@ class LatticePathfinder:
                         layer_idx, points, start.net, [w / 2.0 for w in widths], clr
                     )
                 for via_pt in result.via_points:
-                    committed.add_via(via_pt, start.net)
+                    committed.add_via(via_pt, start.net, clr)
 
             if routed_items > best_count:
                 best_count = routed_items
