@@ -314,7 +314,7 @@ class LatticePathfinder:
         self.set_escape_boundary(None, 0.0)
 
     def set_escape_boundary(self, edges: list[tuple[Pt, Pt]] | None, clearance: float) -> None:
-        """Install actual Edge.Cuts and its floor for copper-overlap attachments."""
+        """Install actual Edge.Cuts and its clearance floor for all routed copper."""
         from .escape_boundary import EscapeBoundary
 
         if edges is None:
@@ -1061,6 +1061,8 @@ class LatticePathfinder:
         obstacles = self.obstacles
         point = lattice.node_point(key)
         via_radius = self.rules.via_diameter / 2.0
+        if not self._escape_boundary.segment_clear(point, point, via_radius):
+            return False
         own_clr = (
             self.rules.trace_clearance
             if clearance is None
@@ -1443,6 +1445,29 @@ class LatticePathfinder:
             stubs_a, stubs_b = kept_a, kept_b
         else:
             had_stubs_a = had_stubs_b = False
+        # The substrate is built at global width. Check the actual emitted
+        # neck and body radii against Edge.Cuts before admitting any state.
+        boundary = self._escape_boundary
+        if not boundary.valid:
+            return None, "invalid-board-outline"
+
+        def boundary_stubs(stubs: list, width: float) -> list:
+            return [
+                stub
+                for stub in stubs
+                if boundary.segment_clear(
+                    lattice.node_point(stub[0]),
+                    lattice.node_point(stub[0]),
+                    half + extra_clearance,
+                )
+                and all(
+                    boundary.segment_clear(a, b, width / 2 + extra_clearance)
+                    for a, b in zip(stub[2], stub[2][1:], strict=False)
+                )
+            ]
+
+        stubs_a = boundary_stubs(stubs_a, width_a)
+        stubs_b = boundary_stubs(stubs_b, width_b)
         if not stubs_a:
             if hard_avoided and had_stubs_a:
                 return None, "layer-constrained-start"
@@ -1548,6 +1573,11 @@ class LatticePathfinder:
                             )
                             and committed.seg_clear(ea, eb, layer, net, half, clr)
                         )
+                    ok = ok and boundary.segment_clear(
+                        lattice.node_point(edge[0]),
+                        lattice.node_point(edge[1]),
+                        half + extra_clearance,
+                    )
                     edge_ok[ek] = ok
                 if not ok:
                     continue
