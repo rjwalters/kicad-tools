@@ -42,6 +42,7 @@ from .geometry import (
 from .quadtree import EdgeKey, NodeKey, OctilinearLattice
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .kelvin import KelvinBranchGuard
     from .pairwise import LatticePairwise
 
 _BUCKET = 4.0  # mm; pad-lookup acceleration grid
@@ -484,6 +485,7 @@ class CommittedCopper:
         same_net_via_gap: float,
         pairwise: LatticePairwise | None = None,
     ) -> None:
+        self.kelvin_guard: KelvinBranchGuard | None = None
         self.num_layers = num_layers
         self.trace_half = trace_half  # global default copper half-width
         self.clearance = clearance  # global default (floor) clearance
@@ -502,6 +504,7 @@ class CommittedCopper:
         # way a stored SEGMENT's clearance does, so a preserved HV via keeps
         # its class gap instead of collapsing to the global via gap.
         self.vias: list[tuple[Pt, int, float]] = []
+        self.via_copper: list[tuple[Pt, int, float, tuple[int, ...]]] = []
 
     # -- mutation --------------------------------------------------------
 
@@ -542,7 +545,15 @@ class CommittedCopper:
             if dist(a, b) > 1e-9:
                 self.copper[layer].add(a, b, net, hw, clr)
 
-    def add_via(self, point: Pt, net: int, clearance: float | None = None) -> None:
+    def add_via(
+        self,
+        point: Pt,
+        net: int,
+        clearance: float | None = None,
+        *,
+        radius: float | None = None,
+        layers: tuple[int, ...] | None = None,
+    ) -> None:
         """Commit a through-via (blocks the site on ALL layers).
 
         ``clearance`` is the via's own net-class clearance (issue #4597);
@@ -550,6 +561,16 @@ class CommittedCopper:
         behavior for every caller that does not pass one.
         """
         self.vias.append((point, net, self.clearance if clearance is None else clearance))
+        # Preserve physical bodies for Kelvin branch isolation. Generated
+        # lattice vias default to through-vias; imported copper may differ.
+        self.via_copper.append(
+            (
+                point,
+                net,
+                self.via_radius if radius is None else radius,
+                tuple(range(self.num_layers)) if layers is None else layers,
+            )
+        )
 
     # -- predicates --------------------------------------------------------
 
@@ -570,6 +591,8 @@ class CommittedCopper:
     ) -> bool:
         """True if segment ``a-b`` on ``layer`` clears other-net copper + vias."""
         own_half, own_clr = self._own(half, clearance)
+        if self.kelvin_guard is not None and not self.kelvin_guard.clear(a, b, layer, own_half):
+            return False
         if not self.fixed_fills.segment_clear(a, b, layer, own_half, own_clr):
             return False
         # Issue #4602: an active pairwise projection inflates the spatial query
@@ -640,6 +663,10 @@ class CommittedCopper:
     ) -> bool:
         """True if a node site on ``layer`` clears other-net copper + vias."""
         own_half, own_clr = self._own(half, clearance)
+        if self.kelvin_guard is not None and not self.kelvin_guard.clear(
+            point, point, layer, own_half
+        ):
+            return False
         if not self.fixed_fills.segment_clear(point, point, layer, own_half, own_clr):
             return False
         # Issue #4602: inflate the query window to the pairwise reach (see
@@ -696,6 +723,11 @@ class CommittedCopper:
         # Issue #4602: a through-via is copper on EVERY layer, so its pair
         # requirement against foreign copper applies on all of them.  The
         # query window inflates by the net's pairwise reach (see ``seg_clear``).
+        if self.kelvin_guard is not None and any(
+            not self.kelvin_guard.clear(point, point, layer, self.via_radius)
+            for layer in range(self.num_layers)
+        ):
+            return False
         if not self.fixed_fills.via_clear(
             point,
             tuple(range(self.num_layers)),
