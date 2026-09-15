@@ -113,3 +113,18 @@ def test_python_refinement_checks_swept_step():
     assert not router._is_trace_blocked(55, 56, 2, 1, False, radius=2)
     assert not router._is_trace_blocked(56, 56, 2, 1, False, radius=2)
     assert router._is_trace_blocked(56, 56, 2, 1, False, radius=2, from_cell=(55, 56))
+
+
+def test_python_overlap_checks_hidden_owner_and_ripup_removes_only_its_geometry():
+    grid, router = _context()
+    assert not router._is_via_blocked(55, 56, 2, 1, False, radius=4)
+    x, y = grid.grid_to_world(59, 58)
+    overlapping = Route(net=3, net_name="N3")
+    overlapping.vias.append(Via(x, y, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 3, "N3"))
+    grid.mark_route(overlapping)
+    # First-touch ownership hides N3 beneath N2's conservative halo.
+    assert grid.cell_at(2, 58, 59).net == 2
+    assert router._is_via_blocked(55, 56, 2, 1, False, radius=4)
+    grid.unmark_route(overlapping)
+    assert grid._route_halo.complete
+    assert not router._is_via_blocked(55, 56, 2, 1, False, radius=4)

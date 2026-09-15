@@ -338,3 +338,19 @@ def test_captured_board07_dq3_via_with_original_pad_geometry(backend):
         assert grid._route_halo.cell_known(gx, gy, 2)
         assert not router._is_via_blocked(gx, gy, 2, 7, False, radius=4)
         assert router._is_via_blocked(gx + 1, gy, 2, 7, False, radius=4)
+
+
+def test_native_overlap_checks_hidden_owner_and_rebuild_drops_ripped_geometry():
+    grid, native, router = _context()
+    assert not router._impl.is_via_blocked(55, 56, 1, False, 4)
+    x, y = grid.grid_to_world(59, 58)
+    native._impl.mark_via(59, 58, 3, 6)
+    native._impl.add_stored_via(x, y, 0.3, 0.6, 3)
+    assert native._impl.at(59, 58, 2).net == 2
+    assert router._impl.is_via_blocked(55, 56, 1, False, 4)
+    native._impl.unmark_via(59, 58, 3, 6)
+    native._impl.clear_stored_routes()
+    x, y = grid.grid_to_world(60, 60)
+    native._impl.add_stored_via(x, y, 0.3, 0.6, 2)
+    assert native._impl.route_geometry_complete()
+    assert not router._impl.is_via_blocked(55, 56, 1, False, 4)

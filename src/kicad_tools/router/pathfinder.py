@@ -1576,13 +1576,16 @@ class Router:
         nc = self._halo_net_class(net)
         x1, y1 = self.grid.grid_to_world(*(from_cell or (gx, gy)))
         x2, y2 = self.grid.grid_to_world(gx, gy)
+        copper_layer = self._grid_layer_object(layer)
+        if copper_layer is None:
+            return False
         segment = Segment(
             x1,
             y1,
             x2,
             y2,
             nc.trace_width if nc else self.rules.trace_width,
-            self._grid_layer_object(layer),
+            copper_layer,
             net,
             name,
         )
@@ -1599,12 +1602,16 @@ class Router:
         name = self._route_halo_names.get(net, "")
         nc = self._halo_net_class(net)
         x, y = self.grid.grid_to_world(gx, gy)
+        first_layer = self._grid_layer_object(0)
+        last_layer = self._grid_layer_object(self.grid.num_layers - 1)
+        if first_layer is None or last_layer is None:
+            return False
         via = Via(
             x,
             y,
             self.rules.via_drill,
             nc.via_size if nc else self.rules.via_diameter,
-            tuple(self._grid_layer_object(l) for l in range(self.grid.num_layers)),
+            (first_layer, last_layer),
             net,
             name,
         )
@@ -2069,6 +2076,7 @@ class Router:
             for cx, cy in blocked_cells
             if not (
                 geometry_complete
+                and halo is not None
                 and grid._net[layer, cy, cx] != net
                 and halo.cell_known(cx, cy, layer)
             )
