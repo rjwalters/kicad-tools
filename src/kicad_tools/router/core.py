@@ -73,7 +73,13 @@ from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWa
 from .diffpair_length import DiffPairLengthTracker
 from .diffpair_length_tuning import DiffPairTuneResult
 from .diffpair_routing import DiffPairRouter, IntraPairClearanceViolation
-from .escape import EscapeRouter, PackageInfo, is_dense_package
+from .escape import (
+    EscapeRoute,
+    EscapeRouter,
+    PackageInfo,
+    escape_endpoint_pad,
+    is_dense_package,
+)
 from .failure_analysis import (
     CongestionMap,
     FailureAnalysis,
@@ -17622,6 +17628,39 @@ class Autorouter:
 
         return dense_packages
 
+    def _build_escape_endpoint_pad(self, pad: Pad, escape: EscapeRoute) -> Pad:
+        """Build the virtual routing terminal for one committed escape.
+
+        Issue #5398: delegates to
+        :func:`kicad_tools.router.escape.escape_endpoint_pad` so both
+        override sites (:meth:`generate_escape_routes` and
+        :meth:`_apply_in_pad_escape_rescues`) size the terminal to the
+        copper that actually exists at the escape endpoint instead of
+        copying the escaped pad's full metal outline to a location where
+        only a trace end (or a rescue via) exists.
+
+        Args:
+            pad: The escaped physical pad.
+            escape: The committed escape route for that pad.
+
+        Returns:
+            The virtual pad to store in ``_escape_pad_overrides``.
+        """
+        try:
+            fallback_width = float(self._escape._get_trace_width_for_net(pad.net_name or ""))
+        except Exception:  # pragma: no cover - defensive, net class lookup is total
+            fallback_width = float(self.rules.trace_width)
+        # Never let the derived metal bounds degenerate below one grid cell:
+        # an interval at least one resolution wide always contains a cell
+        # center, so the A* keeps a seed/goal cell at the endpoint.
+        min_extent = float(getattr(self.grid, "resolution", 0.0) or 0.0)
+        return escape_endpoint_pad(
+            pad,
+            escape,
+            fallback_width=fallback_width,
+            min_extent=min_extent,
+        )
+
     def generate_escape_routes(
         self,
         packages: list[PackageInfo] | None = None,
@@ -17670,23 +17709,9 @@ class Autorouter:
                 pad = escape.pad
                 pad_key = (pad.ref, pad.pin)
                 if pad_key in self.pads:
-                    ep_x, ep_y = escape.escape_point
-                    virtual_pad = Pad(
-                        x=ep_x,
-                        y=ep_y,
-                        width=pad.width,
-                        height=pad.height,
-                        net=pad.net,
-                        net_name=pad.net_name,
-                        layer=escape.escape_layer,
-                        ref=pad.ref,
-                        pin=pad.pin,
-                        through_hole=pad.through_hole,
-                        drill=pad.drill,
-                        rotation=pad.rotation,
-                        shape=pad.shape,
+                    self._escape_pad_overrides[pad_key] = self._build_escape_endpoint_pad(
+                        pad, escape
                     )
-                    self._escape_pad_overrides[pad_key] = virtual_pad
 
             print(
                 f"  Escape routes: {package.ref} ({package.package_type.name})"
@@ -17757,23 +17782,9 @@ class Autorouter:
                 pad = escape.pad
                 pad_key = (pad.ref, pad.pin)
                 if pad_key in self.pads:
-                    ep_x, ep_y = escape.escape_point
-                    virtual_pad = Pad(
-                        x=ep_x,
-                        y=ep_y,
-                        width=pad.width,
-                        height=pad.height,
-                        net=pad.net,
-                        net_name=pad.net_name,
-                        layer=escape.escape_layer,
-                        ref=pad.ref,
-                        pin=pad.pin,
-                        through_hole=pad.through_hole,
-                        drill=pad.drill,
-                        rotation=pad.rotation,
-                        shape=pad.shape,
+                    self._escape_pad_overrides[pad_key] = self._build_escape_endpoint_pad(
+                        pad, escape
                     )
-                    self._escape_pad_overrides[pad_key] = virtual_pad
 
                 # Issue #3183: protect this net's rescue from the
                 # sibling rip-up cascade that fires when a HIGHER-

@@ -232,6 +232,139 @@ class EscapeRoute:
     ring_index: int = 0
 
 
+# Tolerance (mm) for deciding that an escape conductor terminates AT the
+# escape endpoint.  Escape geometry is emitted from the same float
+# coordinates as ``escape_point`` (and optionally clamped by
+# ``_clamp_to_edge_clearance``), so an exact match is the normal case;
+# the tolerance only absorbs float round-trips through the grid.
+ESCAPE_ENDPOINT_TOLERANCE_MM = 1e-3
+
+
+def escape_endpoint_copper_extent(escape: EscapeRoute) -> float | None:
+    """Width (mm) of the copper that actually exists at an escape endpoint.
+
+    Issue #5398: an escape endpoint is the open end of the escape
+    conductor -- a trace of ``Segment.width`` (KiCad renders a track with
+    round end caps, so the copper at the very end is a disc of that
+    diameter) and, for a via-in-pad rescue, the via's annular ring.  It is
+    NOT a copy of the escaped pad's metal: the pad sits at the *other* end
+    of the escape stub.
+
+    Returns:
+        The largest conductor width/diameter incident on
+        :attr:`EscapeRoute.escape_point`, or ``None`` when the escape
+        carries no committed geometry there (the caller then has to fall
+        back to the net's trace width or the pad's own copper).
+    """
+    ex, ey = escape.escape_point
+    extent = 0.0
+    tol = ESCAPE_ENDPOINT_TOLERANCE_MM
+    for seg in getattr(escape, "segments", None) or ():
+        for sx, sy in ((seg.x1, seg.y1), (seg.x2, seg.y2)):
+            if math.hypot(sx - ex, sy - ey) <= tol:
+                extent = max(extent, float(seg.width))
+                break
+    via = getattr(escape, "via", None)
+    if via is not None and math.hypot(via.x - ex, via.y - ey) <= tol:
+        extent = max(extent, float(via.diameter))
+    return extent if extent > 0.0 else None
+
+
+def escape_endpoint_pad(
+    pad: Pad,
+    escape: EscapeRoute,
+    *,
+    fallback_width: float,
+    min_extent: float = 0.0,
+) -> Pad:
+    """Build the virtual routing terminal that stands in for an escaped pad.
+
+    The main router routes to/from an escape endpoint instead of the
+    original pad center (Issue #2401 / #3183).  The virtual pad therefore
+    has to describe *the copper at that endpoint*, because both pathfinder
+    backends derive their pad-metal and pad-approach regions straight from
+    ``width``/``height`` around ``x``/``y``
+    (:meth:`~kicad_tools.router.pathfinder.AStarPathfinder._get_pad_metal_bounds`,
+    :meth:`~kicad_tools.router.cpp_backend.CppPathfinder._compute_pad_bounds`),
+    and inside those regions the A* search waives the blocked-cell and
+    clearance-only checks ("allow entry into own pad's metal area").
+
+    Issue #5398: copying the escaped pad's full ``width``/``height`` to the
+    shifted endpoint synthesized a pad-sized slab of metal where only a
+    trace end exists -- on board 05's DRV8301 sense cluster a 0.3 x 1.55 mm
+    pad copied to an endpoint 0.7 mm away claimed 0.7 mm of phantom copper,
+    and the A* used that waiver to place ISENSE_B- copper 0.1 mm from a
+    foreign GATE_BL via against a 0.15 mm rule.  The exact post-route
+    validator then rejected the candidate, the net burned all five resume
+    attempts and fell back to the (much slower) Python search.
+
+    The virtual terminal is therefore sized to the escape conductor:
+
+    * conductor extent known -> a disc of that diameter at the endpoint
+      (trace width, or via diameter for a via-in-pad rescue), never larger
+      than the escaped pad's own largest dimension;
+    * conductor extent unknown but the endpoint still lies on the pad's own
+      copper -> keep the pad's authored geometry (shape/rotation/size), which
+      is real metal (this also preserves the Issue #5229 shape transport for
+      an unmoved endpoint);
+    * otherwise -> fall back to ``fallback_width`` (the net's trace width),
+      since any committed escape is at least that wide.
+
+    Args:
+        pad: The escaped physical pad (retains its authored geometry).
+        escape: The committed escape route for that pad.
+        fallback_width: Net trace width used when the escape carries no
+            geometry at its endpoint.
+        min_extent: Lower bound for the synthesized extent, e.g. the grid
+            resolution, so the derived metal bounds never degenerate to an
+            empty cell span.
+
+    Returns:
+        A new :class:`~kicad_tools.router.primitives.Pad` at the escape
+        endpoint.  ``ref``/``pin``/``net``/``net_name``/``through_hole``/
+        ``drill`` are preserved so the terminal still resolves back to its
+        physical pad (e.g. Kelvin branch isolation's ``(ref, pin)`` lookup).
+    """
+    ex, ey = escape.escape_point
+    extent = escape_endpoint_copper_extent(escape)
+
+    if extent is None:
+        half_w, half_h = pad.width / 2.0, pad.height / 2.0
+        on_pad_copper = (
+            abs(ex - pad.x) <= half_w + ESCAPE_ENDPOINT_TOLERANCE_MM
+            and abs(ey - pad.y) <= half_h + ESCAPE_ENDPOINT_TOLERANCE_MM
+        )
+        if on_pad_copper:
+            width, height = pad.width, pad.height
+            shape, rotation = pad.shape, pad.rotation
+        else:
+            extent = fallback_width
+            width = height = max(extent, min_extent)
+            shape, rotation = "circle", 0.0
+    else:
+        largest = max(pad.width, pad.height)
+        if largest > 0.0:
+            extent = min(extent, largest)
+        width = height = max(extent, min_extent)
+        shape, rotation = "circle", 0.0
+
+    return Pad(
+        x=ex,
+        y=ey,
+        width=width,
+        height=height,
+        net=pad.net,
+        net_name=pad.net_name,
+        layer=escape.escape_layer,
+        ref=pad.ref,
+        pin=pad.pin,
+        through_hole=pad.through_hole,
+        drill=pad.drill,
+        rotation=rotation,
+        shape=shape,
+    )
+
+
 @dataclass
 class PackageInfo:
     """Information about a detected package.
