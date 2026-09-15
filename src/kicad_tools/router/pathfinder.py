@@ -352,6 +352,17 @@ class Router:
         ]
         self._via_offset_dx = np.array([dx for dx, _ in via_offsets], dtype=np.int32)
         self._via_offset_dy = np.array([dy for _, dy in via_offsets], dtype=np.int32)
+        # Issue #5240: plain-Python mirror of the two arrays above.
+        # ``_is_via_blocked`` is one of the hottest functions in the pure-
+        # Python A* fallback (profiled via
+        # TestStagnationRecovery::test_stagnation_recovery_fires_on_oscillating_cohort,
+        # 124,953 calls / 4.9s self time on a 3-net board) and the kernel is
+        # always small (13-49 offsets for realistic via clearances) -- the
+        # same "NumPy per-call dispatch overhead dwarfs a plain loop over a
+        # tiny fixed-size sequence" pattern PR #5269 fixed for the neighbor
+        # batch costs.  A plain list of tuples lets the hot loop below avoid
+        # allocating ~7 temporary NumPy arrays per call.
+        self._via_offsets: list[tuple[int, int]] = via_offsets
 
         # Layer priority cache for via checks: check most-congested layers first
         # This enables faster rejection when via is blocked on congested layer
@@ -1962,28 +1973,30 @@ class Router:
                 for dx in range(-via_r, via_r + 1)
                 if dx * dx + dy * dy <= via_r_sq
             ]
-            via_offset_dx = np.array([dx for dx, _ in via_offsets], dtype=np.int32)
-            via_offset_dy = np.array([dy for _, dy in via_offsets], dtype=np.int32)
         else:
-            via_offset_dx = self._via_offset_dx
-            via_offset_dy = self._via_offset_dy
+            via_offsets = self._via_offsets
 
-        # Compute all cell coordinates within via radius using offsets
-        cx_arr = gx + via_offset_dx
-        cy_arr = gy + via_offset_dy
-
-        # Check bounds - if any cell is out of bounds, via is blocked
-        in_bounds = (
-            (cx_arr >= 0) & (cx_arr < self.grid.cols) & (cy_arr >= 0) & (cy_arr < self.grid.rows)
-        )
-        if not np.all(in_bounds):
-            return True  # Some cells out of bounds
-
-        # Batch lookup cell attributes using fancy indexing
-        blocked_arr = self.grid._blocked[layer, cy_arr, cx_arr]
+        # Issue #5240: walk the (small, fixed-size) via kernel as a plain
+        # Python loop instead of building NumPy coordinate/bounds/blocked
+        # arrays every call.  Semantically identical to the prior vectorized
+        # form (same bounds check, same "any blocked cell" short circuit,
+        # same per-cell rules below) -- see the profiling note on
+        # ``_via_offsets`` above for why this is a net win at this size.
+        grid = self.grid
+        cols = grid.cols
+        rows = grid.rows
+        blocked_grid = grid._blocked
+        blocked_cells: list[tuple[int, int]] = []
+        for dx, dy in via_offsets:
+            cx = gx + dx
+            cy = gy + dy
+            if cx < 0 or cx >= cols or cy < 0 or cy >= rows:
+                return True  # Some cells out of bounds
+            if blocked_grid[layer, cy, cx]:
+                blocked_cells.append((cx, cy))
 
         # Fast path: if no cells are blocked, via is not blocked
-        if not np.any(blocked_arr):
+        if not blocked_cells:
             # Issue #4507: scalar disc clear -- consult the cross-domain
             # (HV-isolation) annulus (C++ ``cross_domain_via_blocked`` mirror).
             return self._cross_domain_via_blocked(
@@ -1991,73 +2004,58 @@ class Router:
             )
 
         # Some cells are blocked - need detailed checking
-        # Get indices of blocked cells only
-        blocked_indices = np.where(blocked_arr)[0]
-
-        # Batch lookup additional attributes for blocked cells
-        blocked_cx = cx_arr[blocked_indices]
-        blocked_cy = cy_arr[blocked_indices]
-        net_arr = self.grid._net[layer, blocked_cy, blocked_cx]
+        net_grid = grid._net
 
         if allow_sharing:
             # Negotiated mode: allow sharing non-obstacle cells
-            is_obstacle_arr = self.grid._is_obstacle[layer, blocked_cy, blocked_cx]
-            usage_arr = self.grid._usage_count[layer, blocked_cy, blocked_cx]
+            is_obstacle_grid = grid._is_obstacle
+            usage_grid = grid._usage_count
 
             # Issue #3566 (Python parity for #3545): consult the static
             # blockage snapshot so foreign static cells (pad clearance
             # halos, keepouts) stay non-negotiable even at usage > 0.
-            grid_static = getattr(self.grid, "_static_blocked", None)
-            static_arr = (
-                grid_static[layer, blocked_cy, blocked_cx] if grid_static is not None else None
-            )
+            static_grid = getattr(grid, "_static_blocked", None)
+            relief_mode = self.relief_mode
 
-            for i in range(len(blocked_indices)):
-                cell_net = net_arr[i]
-                is_obstacle = is_obstacle_arr[i]
-                usage = usage_arr[i]
+            for cx, cy in blocked_cells:
+                cell_net = net_grid[layer, cy, cx]
 
                 # Issue #2963: own-net obstacle cells (destination pad
                 # metal post-PR #2928 first-touch marking) must remain
                 # passable for the routing net's own via.  Foreign-net
                 # obstacles still hard-reject.
-                if is_obstacle and cell_net != net:
-                    return True  # Obstacles always block (foreign net)
+                if cell_net != net:
+                    if is_obstacle_grid[layer, cy, cx]:
+                        return True  # Obstacles always block (foreign net)
 
-                # Issue #3566 / #3545: statically blocked foreign cells
-                # (pad clearance halos, keepouts) are non-negotiable
-                # regardless of usage_count -- a pad cannot "negotiate
-                # away", so sharing a halo cell only produces
-                # unresolvable overflow.  Relief probes keep their #3438
-                # soft-crossing semantics for foreign-net cells.  Mirrors
-                # the ``cell.static_blocked && cell.net != net &&
-                # !relief_mode_`` gate in ``Pathfinder::is_via_blocked``.
-                if (
-                    static_arr is not None
-                    and static_arr[i]
-                    and cell_net != net
-                    and not self.relief_mode
-                ):
-                    return True
+                    # Issue #3566 / #3545: statically blocked foreign cells
+                    # (pad clearance halos, keepouts) are non-negotiable
+                    # regardless of usage_count -- a pad cannot "negotiate
+                    # away", so sharing a halo cell only produces
+                    # unresolvable overflow.  Relief probes keep their #3438
+                    # soft-crossing semantics for foreign-net cells.  Mirrors
+                    # the ``cell.static_blocked && cell.net != net &&
+                    # !relief_mode_`` gate in ``Pathfinder::is_via_blocked``.
+                    if static_grid is not None and static_grid[layer, cy, cx] and not relief_mode:
+                        return True
 
                 # No-net pads must always block
                 if cell_net == 0:
-                    if usage == 0:
+                    if usage_grid[layer, cy, cx] == 0:
                         return True  # Static no-net obstacle
                 elif cell_net != net:
                     # Different net - only allow if cell was used by routes
                     # Issue #3438: in relief-probe mode foreign usage-0
                     # cells are passable (penalised per step) so the probe
                     # can place vias inside sealed escape corridors.
-                    if usage == 0 and not self.relief_mode:
+                    if usage_grid[layer, cy, cx] == 0 and not relief_mode:
                         return True  # Static obstacle (pad)
                 # else: same net or routed cell - allow with cost
         else:
             # Standard mode: same-net passable, different nets block
-            # Check if any blocked cell has different net
-            different_net = net_arr != net
-            if np.any(different_net):
-                return True
+            for cx, cy in blocked_cells:
+                if net_grid[layer, cy, cx] != net:
+                    return True
 
         # Issue #4507: every scalar-disc cell is passable -- consult the
         # cross-domain (HV-isolation) annulus (C++ ``cross_domain_via_blocked``
