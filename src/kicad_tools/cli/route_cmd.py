@@ -6844,6 +6844,11 @@ def route_with_layer_escalation(
             # must NOT be forwarded as pour intent, or auto-pour would try to
             # zone ~every net.  Keep the user's explicit pour intent empty.
             force_pour_nets=([] if getattr(args, "_route_only_nets", None) else skip_nets),
+            protected_nets=(
+                args._placement_disposition.preserve_copper_nets
+                if getattr(args, "_placement_disposition", None) is not None
+                else frozenset()
+            ),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -8049,6 +8054,11 @@ def route_with_rule_relaxation(
             # must NOT be forwarded as pour intent, or auto-pour would try to
             # zone ~every net.  Keep the user's explicit pour intent empty.
             force_pour_nets=([] if getattr(args, "_route_only_nets", None) else skip_nets),
+            protected_nets=(
+                args._placement_disposition.preserve_copper_nets
+                if getattr(args, "_placement_disposition", None) is not None
+                else frozenset()
+            ),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -10319,6 +10329,11 @@ def route_with_combined_escalation(
             # must NOT be forwarded as pour intent, or auto-pour would try to
             # zone ~every net.  Keep the user's explicit pour intent empty.
             force_pour_nets=([] if getattr(args, "_route_only_nets", None) else skip_nets),
+            protected_nets=(
+                args._placement_disposition.preserve_copper_nets
+                if getattr(args, "_placement_disposition", None) is not None
+                else frozenset()
+            ),
         )
 
     # Auto-classify pour nets and extend skip_nets
@@ -15500,6 +15515,11 @@ def _run_main_impl(args, parser, argv) -> int:
             # must NOT be forwarded as pour intent, or auto-pour would try to
             # zone ~every net.  Keep the user's explicit pour intent empty.
             force_pour_nets=([] if getattr(args, "_route_only_nets", None) else skip_nets),
+            protected_nets=(
+                args._placement_disposition.preserve_copper_nets
+                if getattr(args, "_placement_disposition", None) is not None
+                else frozenset()
+            ),
         )
 
     # Auto-classify pour nets and extend skip_nets

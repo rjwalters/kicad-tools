@@ -127,7 +127,10 @@ def test_unavailable_native_runtime_preserves_partial_board(tmp_path, monkeypatc
 
 @pytest.mark.skipif(NATIVE_PYTHON is None, reason="KiCad Python runtime unavailable")
 @pytest.mark.parametrize("auto_fix", [False, True])
-def test_real_cli_routes_and_fills_without_changing_excluded_zone(tmp_path, auto_fix, capsys):
+@pytest.mark.parametrize("invalid_net", ["BAD", "GND"])
+def test_real_cli_routes_and_fills_without_changing_excluded_zone(
+    tmp_path, auto_fix, invalid_net, capsys
+):
     from kicad_tools.cli.route_cmd import main
 
     fixed = """(zone (net 1) (net_name "BAD") (layer "F.Cu")
@@ -140,7 +143,14 @@ def test_real_cli_routes_and_fills_without_changing_excluded_zone(tmp_path, auto
       (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
       (polygon (pts (xy 102 101) (xy 118 101) (xy 118 110) (xy 102 110))))"""
     source = tmp_path / "source.kicad_pcb"
-    original = board_text()[:-1] + fixed + plane + ")"
+    if invalid_net == "GND":
+        # An uninset power zone used to be replaced by auto-pour before the
+        # preservation-aware loader could capture its original geometry.
+        fixed = fixed.replace('"BAD"', '"GND"').replace(
+            "(xy 102 101) (xy 118 101) (xy 118 110) (xy 102 110)",
+            "(xy 100 100) (xy 120 100) (xy 120 112) (xy 100 112)",
+        )
+    original = board_text().replace('"BAD"', f'"{invalid_net}"')[:-1] + fixed + plane + ")"
     source.write_text(original)
     output = tmp_path / "routed.kicad_pcb"
     report = tmp_path / "report.json"
@@ -155,7 +165,7 @@ def test_real_cli_routes_and_fills_without_changing_excluded_zone(tmp_path, auto
     assert any(s.net_name == "GOOD" for s in pcb.segments)
     assert any(z.net_name == "PLANE" and z.filled_polygons for z in pcb.zones)
     disposition = json.loads(report.read_text())["placement_disposition"]
-    assert disposition["requested_blocked_nets"] == ["BAD"]
+    assert disposition["requested_blocked_nets"] == [invalid_net]
     assert disposition.get("zone_fill_status") != "failed"
 
 
