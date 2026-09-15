@@ -46,6 +46,39 @@ _DRU_RULE_RE = re.compile(
 )
 
 
+def bridge_endpoint_candidates(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    *,
+    overshoot: float = 0.35,
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Propose nonzero bridges through nearest copper points.
+
+    Distinct points retain the straight bridge with overshoot into each island.
+    Coincident points need a direction: try four undirected compass axes rather
+    than emitting a zero-length track. Callers must validate every candidate
+    against their unchanged physical clearance and connectivity predicates.
+    """
+    if not all(math.isfinite(v) for v in (*start, *end, overshoot)) or overshoot <= 0:
+        return []
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    distance = math.hypot(dx, dy)
+    if not math.isfinite(distance):
+        return []
+    directions = (
+        [(dx / distance, dy / distance)]
+        if distance > 0
+        else [(math.cos(i * math.pi / 4), math.sin(i * math.pi / 4)) for i in range(4)]
+    )
+    return [
+        (
+            (start[0] - ux * overshoot, start[1] - uy * overshoot),
+            (end[0] + ux * overshoot, end[1] + uy * overshoot),
+        )
+        for ux, uy in directions
+    ]
+
+
 def _kct_managed_floor_minima(dru_text: str) -> dict[str, float] | None:
     """Extract escape minima from a *pure* kct fab-floors ``.kicad_dru``.
 

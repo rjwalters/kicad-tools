@@ -1115,23 +1115,23 @@ def _repair_pour_connectivity(
                     pa, pb = nearest_points(gi, gj)
                     # Overshoot 0.35 mm into each geometry so the bridge
                     # endpoint survives fill re-quantisation.
-                    vec = (pb.x - pa.x, pb.y - pa.y)
-                    norm = math.hypot(*vec) or 1.0
-                    ux, uy = vec[0] / norm, vec[1] / norm
-                    p0 = (pa.x - ux * 0.35, pa.y - uy * 0.35)
-                    p1 = (pb.x + ux * 0.35, pb.y + uy * 0.35)
-                    if not _emit_seg_45(net, p0, p1, lay, BRIDGE_W):
-                        continue
-                    _append_own(
-                        (
-                            LineString([p0, p1]).buffer(BRIDGE_W / 2.0),
-                            frozenset({lay}),
-                            "seg",
+                    from kicad_tools.zones.pour_escape import bridge_endpoint_candidates
+
+                    for p0, p1 in bridge_endpoint_candidates((pa.x, pa.y), (pb.x, pb.y)):
+                        if not _emit_seg_45(net, p0, p1, lay, BRIDGE_W):
+                            continue
+                        _append_own(
+                            (
+                                LineString([p0, p1]).buffer(BRIDGE_W / 2.0),
+                                frozenset({lay}),
+                                "seg",
+                            )
                         )
-                    )
-                    bridges_placed += 1
-                    merged = True
-                    break
+                        bridges_placed += 1
+                        merged = True
+                        break
+                    if merged:
+                        break
 
             # Sub-stage C: ray-cast bridges.  The nearest-pair line is
             # often blocked by a pad row (e.g. a +3V3 BGA-corner exit must
