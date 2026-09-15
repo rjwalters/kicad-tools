@@ -85,10 +85,20 @@ from kicad_tools.router.core import Autorouter
 
 router = Autorouter(22, 22, force_python=True, physics_enabled=False)
 for ref, x, y in [("R1", 4, 10), ("Q1", 12, 10), ("U1", 16, 10), ("U2", 16, 12)]:
-    router.add_component(ref, [{
-        "number": "1", "x": x, "y": y, "width": 0.8, "height": 0.8,
-        "net": 1, "net_name": "ISENSE_TEST",
-    }])
+    router.add_component(
+        ref,
+        [
+            {
+                "number": "1",
+                "x": x,
+                "y": y,
+                "width": 0.8,
+                "height": 0.8,
+                "net": 1,
+                "net_name": "ISENSE_TEST",
+            }
+        ],
+    )
 branches = router.route_net(1)
 assert len(branches) == 3
 ```

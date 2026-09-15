@@ -19,8 +19,9 @@ from kicad_tools.router.primitives import Route, Segment
 @pytest.mark.parametrize("mode", ["mst", "star", "negotiated"])
 @pytest.mark.parametrize("same_ic", [False, True])
 @pytest.mark.parametrize("escaped_root", [False, True])
+@pytest.mark.parametrize("foreign_pad", [False, True])
 def test_kelvin_branches_do_not_share_copper_away_from_shunt(
-    sense_positions, force_python, mode, same_ic, escaped_root
+    sense_positions, force_python, mode, same_ic, escaped_root, foreign_pad
 ):
     """The collinear sense terminal must not reconnect through the force pad."""
     if not force_python and not get_backend_info()["available"]:
@@ -51,6 +52,22 @@ def test_kelvin_branches_do_not_share_copper_away_from_shunt(
             ],
         )
 
+    if foreign_pad:
+        router.add_component(
+            "C1",
+            [
+                {
+                    "number": "1",
+                    "x": 8,
+                    "y": 10,
+                    "width": 1.2,
+                    "height": 1.2,
+                    "net": 2,
+                    "net_name": "FOREIGN",
+                }
+            ],
+        )
+
     if escaped_root:
         stub = Route(
             1,
@@ -73,6 +90,19 @@ def test_kelvin_branches_do_not_share_copper_away_from_shunt(
     assert len(routes) == 3, "All three shunt-to-terminal connections must route"
     if escaped_root:
         assert stub == preserved_stub
+    if foreign_pad:
+        obstacle = box(7.4, 9.4, 8.6, 10.6)
+        for route in routes:
+            metal = unary_union(
+                [
+                    LineString([s.start, s.end]).buffer(s.width / 2)
+                    for s in route.segments
+                    if s.layer == Layer.F_CU
+                ]
+                + [Point(v.x, v.y).buffer(v.diameter / 2) for v in route.vias]
+            )
+            if not metal.is_empty:
+                assert metal.distance(obstacle) >= router.rules.trace_clearance - 1e-5
     shunt_contact = box(3.6, 9.6, 4.4, 10.4)
     # The existing shunt escape is preserved copper too; no new branch may
     # share it outside the real shunt contact.
