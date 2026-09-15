@@ -53,6 +53,7 @@ from ..quantize import dogleg_points
 from ..rules import DesignRules
 from .coupled import CoupledConnection
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
+from .history import PhysicalHistory
 from .obstacles import (
     CommittedCopper,
     LatticeKeepoutMask,
@@ -1381,8 +1382,18 @@ class LatticePathfinder:
                 reason = self._keepout_escape_reason(end, net, stub_layers, half, reason)
             return None, reason
 
+        def copper_cost(a: Pt, b: Pt, layer: int, width: float) -> float:
+            if isinstance(history, PhysicalHistory):
+                return present * history.cost(
+                    a, b, layer, net, width / 2 + extra_clearance, clr, pw, partner_net
+                )
+            return 0.0
+
         goal: dict[_State, tuple[float, list[Pt]]] = {}
         for key, layer, poly, length in stubs_b:
+            length += sum(
+                copper_cost(a, b, layer, width_b) for a, b in zip(poly, poly[1:], strict=False)
+            )
             state = (key, layer)
             if state not in goal or length < goal[state][0]:
                 goal[state] = (length, poly)
@@ -1397,6 +1408,9 @@ class LatticePathfinder:
         heap: list[tuple[float, int, _State]] = []
         counter = 0
         for key, layer, poly, length in stubs_a:
+            length += sum(
+                copper_cost(a, b, layer, width_a) for a, b in zip(poly, poly[1:], strict=False)
+            )
             state = (key, layer)
             if state not in g_score or length < g_score[state]:
                 g_score[state] = length
@@ -1495,6 +1509,7 @@ class LatticePathfinder:
                 if not nok:
                     continue
                 step = elen + present * history.get(("e", edge, layer), 0.0)
+                step += copper_cost(lattice.node_point(key), lattice.node_point(nbr), layer, body_w)
                 tentative = g + step
                 if tentative < g_score.get(nstate, math.inf) - 1e-12:
                     g_score[nstate] = tentative
@@ -1577,6 +1592,15 @@ class LatticePathfinder:
                         if not nok:
                             continue
                         step = self.via_cost + present * history.get(("v", key), 0.0)
+                        step += sum(
+                            copper_cost(
+                                lattice.node_point(key),
+                                lattice.node_point(key),
+                                li,
+                                self.rules.via_diameter,
+                            )
+                            for li in range(self.num_layers)
+                        )
                         tentative = g + step
                         if tentative < g_score.get(nstate, math.inf) - 1e-12:
                             g_score[nstate] = tentative
@@ -2240,7 +2264,7 @@ class LatticePathfinder:
         # pairs this is exactly the pre-#4270 shortest-first ordering.
         items.sort(key=lambda t: (-t[1], t[0]))
 
-        history: dict[Resource, float] = {}
+        history = PhysicalHistory()
         best_routes: dict[object, Route] = {}
         best_reasons: dict[object, str] = {}
         best_pair_outcomes: dict[object, str] = {}
@@ -2372,6 +2396,13 @@ class LatticePathfinder:
                         item, committed=self._fresh_committed(), history=history, present=present
                     )
                     desired_resources = desired_pair.resources if desired_pair is not None else None
+                    if desired_pair is not None:
+                        half, clearance = self._conn_geometry(item.net_class)
+                        for leg_net, layer, points in desired_pair.runs:
+                            for a, b in zip(points, points[1:], strict=False):
+                                history.add_segment(
+                                    a, b, layer, leg_net, half, clearance, increment
+                                )
                 else:
                     key, start, end, net_class = item
                     desired, _reason = self._route_impl(
@@ -2383,6 +2414,24 @@ class LatticePathfinder:
                         present=present,
                     )
                     desired_resources = desired.resources if desired is not None else None
+                    if desired is not None:
+                        _half, clearance = self._conn_geometry(net_class)
+                        for layer, points, widths in desired.runs:
+                            for a, b, width in zip(points[:-1], points[1:], widths, strict=True):
+                                history.add_segment(
+                                    a, b, layer, start.net, width / 2, clearance, increment
+                                )
+                        for point in desired.via_points:
+                            for layer in range(self.num_layers):
+                                history.add_segment(
+                                    point,
+                                    point,
+                                    layer,
+                                    start.net,
+                                    self.rules.via_diameter / 2,
+                                    clearance,
+                                    increment,
+                                )
                 if desired_resources is None:
                     continue
                 for resource in desired_resources:
