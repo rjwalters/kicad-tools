@@ -3157,6 +3157,8 @@ def _run_auto_fix(
     max_passes: int = 1,
     quiet: bool = False,
     args=None,
+    *,
+    layers: int | None = None,
 ) -> int:
     """Run fix-drc on the routed PCB to auto-repair DRC violations.
 
@@ -3164,6 +3166,7 @@ def _run_auto_fix(
         output_path: Path to the routed PCB file to repair.
         max_passes: Number of iterative repair passes.
         quiet: If True, suppress output.
+        layers: Layer count of the selected routing result, including escalation.
         args: Parsed ``route`` CLI args.  When provided, the function
             honors ``args._wall_clock_deadline`` (issue #2802) and skips
             the auto-fix invocation entirely if the total budget has been
@@ -3231,6 +3234,11 @@ def _run_auto_fix(
         "2.0",
         "--local-reroute",
     ]
+    manufacturer = getattr(args, "manufacturer", None)
+    if manufacturer is not None:
+        fix_argv.extend(["--mfr", manufacturer])
+    if layers is not None:
+        fix_argv.extend(["--layers", str(layers)])
     if quiet:
         fix_argv.append("--quiet")
 
@@ -7879,6 +7887,7 @@ def route_with_layer_escalation(
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
                 args=args,  # Issue #2802: honor total wall-clock deadline
+                layers=final_result.layer_count,
             )
 
     # Issue #4588: board-level HV pairwise clearance gate.  A no-op without
@@ -8733,6 +8742,7 @@ def route_with_rule_relaxation(
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
                 args=args,  # Issue #2802: honor total wall-clock deadline
+                layers=final_result.layer_count,
             )
 
     # Issue #4588: board-level HV pairwise clearance gate (see the
@@ -11091,6 +11101,7 @@ def route_with_combined_escalation(
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
                 args=args,  # Issue #2802: honor total wall-clock deadline
+                layers=final_result.layer_count,
             )
 
     # Issue #4588: board-level HV pairwise clearance gate (see the
@@ -17469,6 +17480,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 max_passes=getattr(args, "auto_fix_passes", 1),
                 quiet=quiet,
                 args=args,  # Issue #2802: honor total wall-clock deadline
+                layers=layer_stack.num_layers,
             )
             if fix_result == 0:
                 drc_errors = 0
