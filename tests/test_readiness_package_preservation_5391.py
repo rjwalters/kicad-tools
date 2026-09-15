@@ -162,3 +162,22 @@ def test_flat_recipe_archive_is_verified_with_exact_bytes(tmp_path):
             if path.is_file():
                 zf.write(path, path.relative_to(bundle).as_posix())
     assert cmd.main([str(board), "--mfr", "jlcpcb"], engines=FakeEngines(board).bundle()) == 0
+
+
+def test_manual_and_smt_bom_overlap_is_rejected(tmp_path):
+    board = make_board(tmp_path)
+    assert (
+        cmd.main([str(board), "--mfr", "jlcpcb", "--generate"], engines=FakeEngines(board).bundle())
+        == 0
+    )
+    args = cmd.build_parser().parse_args([str(board), "--mfr", "jlcpcb"])
+    opts, _ = cmd.resolve_options(args)
+    (opts.output_dir / "manual-assembly-bom.csv").write_text("Designator,LCSC Part #\nD1,C87271\n")
+    cmd._write_full_manifest(opts, {})
+    cmd._build_archive(opts)
+    before = inventory(board)
+    assert cmd.main([str(board), "--mfr", "jlcpcb"], engines=FakeEngines(board).bundle()) != 0
+    report = json.loads((board / "output/readiness-verification/readiness.json").read_text())
+    assert any("manual assembly parts also occur" in message for message in report["blockers"])
+    for name, data in before.items():
+        assert (board / name).read_bytes() == data
