@@ -2,8 +2,8 @@
 """Re-derive the native fill-fragment bonding table behind Issue #5362.
 
 Emits the same board bytes as ``tests/test_fill_fragment_bonding_5362.py``,
-runs native ``kicad-cli pcb drc`` on each inside the pinned ``kicad/kicad:10.0``
-image, and prints native ``unconnected_items`` beside this repo's
+runs native ``kicad-cli pcb drc`` on each inside the pinned KiCad 10.0.5
+image (digest below), and prints native ``unconnected_items`` beside this repo's
 :class:`NetStatusAnalyzer` / :meth:`ConnectivityValidator.extract_pad_partition`
 verdicts.  This is the measurement the #5362 fix is derived from, kept runnable
 so a reviewer can reproduce it rather than take the table on trust.
@@ -31,10 +31,10 @@ Usage
 -----
     uv run python scripts/check_fill_fragment_bonding_vs_native.py
 
-Requires ``docker`` (directly or via passwordless ``sudo``) with
-``kicad/kicad:10.0`` available — digest ``sha256:182c8005cb77...``, KiCad
-10.0.5, the image recorded in #5358/#5362.  Exits non-zero if any row
-disagrees with native.
+Requires ``docker`` (directly or via passwordless ``sudo``) with the pinned
+image below available — KiCad 10.0.5, the exact digest recorded in
+#5358/#5362.  Exits non-zero if any row disagrees with native, including a
+row whose native invocation itself failed or produced a malformed report.
 """
 
 from __future__ import annotations
@@ -49,25 +49,33 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-KICAD_IMAGE = "kicad/kicad:10.0"
+KICAD_IMAGE = "kicad/kicad@sha256:182c8005cb775a2c448a4c18681d489f1ff472a761885eba3e08b07e3c0564de"
 
 VERIFY_IN_CONTAINER = r"""
 import hashlib, json, pathlib, subprocess, sys
 out = {}
 for pcb in sorted(pathlib.Path("/w").glob("*.kicad_pcb")):
     before = hashlib.sha256(pcb.read_bytes()).hexdigest()
-    subprocess.run(
-        ["kicad-cli", "pcb", "drc", "--format", "json", "--output", "/tmp/o.json", str(pcb)],
+    report_path = pcb.with_suffix(".drc.json")
+    report_path.unlink(missing_ok=True)
+    proc = subprocess.run(
+        ["kicad-cli", "pcb", "drc", "--format", "json", "--output", str(report_path), str(pcb)],
         capture_output=True,
     )
+    after = hashlib.sha256(pcb.read_bytes()).hexdigest()
+    if proc.returncode != 0:
+        out[pcb.stem] = {"error": f"kicad-cli exited {proc.returncode}: {proc.stderr.decode(errors='replace')}"}
+        continue
     try:
-        report = json.load(open("/tmp/o.json"))
+        report = json.loads(report_path.read_text())
+        unconnected_items = report["unconnected_items"]
+        if not isinstance(unconnected_items, list):
+            raise TypeError(f"unconnected_items is {type(unconnected_items).__name__}, not list")
     except Exception as exc:  # pragma: no cover - surfaced in the printed table
         out[pcb.stem] = {"error": str(exc)}
         continue
-    after = hashlib.sha256(pcb.read_bytes()).hexdigest()
     out[pcb.stem] = {
-        "unconnected": len(report.get("unconnected_items", [])),
+        "unconnected": len(unconnected_items),
         "sha256": before,
         "hash_stable": before == after,
     }
@@ -150,8 +158,7 @@ def main() -> int:
     failures = 0
     for case in CASES:
         pcb = board_dir / f"{case.name}.kicad_pcb"
-        entry = native.get(case.name, {})
-        measured = entry.get("unconnected")
+        entry = native.get(case.name)
         sha = hashlib.sha256(pcb.read_bytes()).hexdigest()
 
         status = NetStatusAnalyzer(pcb, strict=True).analyze().get_net("GND")
@@ -160,6 +167,16 @@ def main() -> int:
         component = next((c for c in partition if "R13.1" in c), frozenset())
         together = "R14.1" in component
 
+        if entry is None or "error" in entry:
+            failures += 1
+            reason = entry["error"] if entry else "no native result reported"
+            print(
+                f"{case.name:24s} {'ERR':>7s} {case.native_unconnected:>9d} "
+                f"{islands:>8d} {str(together):>6s}  MISMATCH (native invocation failed: {reason})"
+            )
+            continue
+
+        measured = entry["unconnected"]
         native_connected = measured == 0
         ok = (
             measured == case.native_unconnected

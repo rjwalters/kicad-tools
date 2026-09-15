@@ -2156,8 +2156,8 @@ class ConnectivityValidator:
         # below needs: each zone's own fill item indices and its inflation
         # (Issue #5362).
         zone_fill_items: list[tuple[float, list[int], list[str]]] = []
-        same_zone_fill_pairs: set[tuple[int, int]] = set()
-        for zone in self.pcb.zones:
+        fill_zone_id: dict[int, int] = {}
+        for zone_id, zone in enumerate(self.pcb.zones):
             zone_items: list[int] = []
             zone_item_layers: list[str] = []
             for index, points in enumerate(zone.filled_polygons):
@@ -2168,15 +2168,13 @@ class ConnectivityValidator:
                 # A repaired flat contour can itself contain separate solids.
                 solids = region.geoms if region.geom_type == "MultiPolygon" else [region]
                 for solid in solids:
-                    zone_items.append(len(items))
+                    item_index = len(items)
+                    zone_items.append(item_index)
                     zone_item_layers.append(layer)
+                    fill_zone_id[item_index] = zone_id
                     items.append((None, "fill", frozenset({layer}), solid))
             if zone_items:
                 zone_fill_items.append((zone.fill_inflation(), zone_items, zone_item_layers))
-        for _inflation, zone_items, _layers in zone_fill_items:
-            for a_pos, a_item in enumerate(zone_items):
-                for b_item in zone_items[a_pos + 1 :]:
-                    same_zone_fill_pairs.add((min(a_item, b_item), max(a_item, b_item)))
         if not items:
             return
         parent = list(range(len(items)))
@@ -2228,7 +2226,7 @@ class ConnectivityValidator:
                 if (
                     kind == "fill"
                     and other_kind == "fill"
-                    and (left, right) in same_zone_fill_pairs
+                    and fill_zone_id[left] == fill_zone_id[right]
                 ):
                     # Two fill fragments of ONE zone are not bonded by their
                     # stored outlines touching -- that is an artefact of the
