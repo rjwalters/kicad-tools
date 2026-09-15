@@ -7,9 +7,12 @@ qualify Board07 or restore its CI gates.
 ## Result and next investigation
 
 DQ3 first fails during initial negotiated search, before later recipe
-postprocessing. Its first recorded search exhausts 1,000,000 expansions
-in approximately 3.73 seconds. The unchanged initial routing completes
-30/31 signal nets. DDR-only routing independently completes 10/11, with
+postprocessing. The corrected `probe-none-v3/probe.json` capture retains all
+120 fixed escape routes and records 1,000,000 expansions in approximately
+4.00 seconds (`3.998611378017813`), with zero returned routes. The earlier
+3.73-second v2 capture omitted those escape routes and is invalid for copper
+comparison, as recorded in `INVALID-CAPTURES.md`. The unchanged initial
+routing completes 30/31 signal nets. DDR-only routing independently completes 10/11, with
 DQ3 open in both saved and independently refilled native connectivity.
 
 Removing only the already-routed DM0 or DQS_N channel from the initial
