@@ -225,10 +225,29 @@ def test_independent_valid_net_still_produces_real_copper(board):
     assert {route.net for route in routes} == {nets["GOOD"]}
 
 
-def test_excluded_custom_pad_is_not_silently_dropped(board):
+def test_excluded_custom_pad_is_preserved_as_actual_copper(board):
+    # Issue #5357 supersedes the blanket refusal: an excluded custom pad whose
+    # real copper IS representable becomes a fixed obstacle, never a target.
     board.write_text(board.read_text().replace("smd rect", "smd custom", 1))
     result = analyze_routing_placement(board)
-    with pytest.raises(ValueError, match="custom"):
+    router, _ = load_pcb_for_routing(str(board), placement_disposition=result, force_python=True)
+    assert ("X1", "1") not in router.pads
+    fills = [f for f in router.grid.fixed_fills.fills if f.source_kind == "pad"]
+    assert [(f.source_object_id, f.source_net) for f in fills] == [("X1.1", "BAD")]
+    assert not router.grid.fixed_fills.segment_clear((125, 105), (125, 105), 0, 0, 0)
+
+
+def test_excluded_custom_pad_with_unsupported_primitive_still_refuses(board):
+    board.write_text(
+        board.read_text().replace(
+            '(pad "1" smd rect (at 0 0) (size 0.6 0.6)',
+            '(pad "1" smd custom (at 0 0) (size 0.6 0.6) '
+            "(primitives (gr_circle (center 0 0) (end 0.3 0) (width 0) (fill yes)))",
+            1,
+        )
+    )
+    result = analyze_routing_placement(board)
+    with pytest.raises(ValueError, match="gr_circle"):
         load_pcb_for_routing(str(board), placement_disposition=result, force_python=True)
 
 
