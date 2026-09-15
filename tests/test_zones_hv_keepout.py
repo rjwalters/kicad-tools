@@ -152,7 +152,7 @@ def _write(tmp_path: Path, source: str, name: str = "board.kicad_pcb") -> Path:
 
 
 def test_keepout_buffers_hv_copper_by_clearance(tmp_path: Path) -> None:
-    """A GND-plane keepout buffers the HV trace by exactly ``--clearance``."""
+    """A GND-plane keepout conservatively encloses the requested offset."""
     from shapely.geometry import Polygon
 
     from kicad_tools.geometry.copper import segment_copper_polygon
@@ -180,8 +180,9 @@ def test_keepout_buffers_hv_copper_by_clearance(tmp_path: Path) -> None:
     hv_geom = segment_copper_polygon((10.0, 10.0), (50.0, 10.0), 0.5)
     expected = hv_geom.buffer(clearance)
 
-    # The emitted void polygon should match buffer(HV, clearance) closely.
-    assert void_poly.symmetric_difference(expected).area < 1e-3
+    # The offset must enclose the old inscribed buffer, including its chords.
+    assert void_poly.covers(expected)
+    assert void_poly.boundary.distance(hv_geom) >= clearance
     # And its boundary sits at least ``clearance`` from the HV copper.
     assert void_poly.contains(hv_geom)
 
@@ -411,3 +412,136 @@ def test_missing_net_class_map_errors(tmp_path: Path) -> None:
         ]
     )
     assert rc == 1
+
+
+@pytest.mark.parametrize("kind", ["circle", "oval", "via", "trace", "rect", "roundrect"])
+@pytest.mark.parametrize("clearance", [0.45, 1.6, 3.2])
+@pytest.mark.parametrize("shift,angle", [(0.0, 0.0), (0.0037, 37.0)])
+def test_serialized_keepout_preserves_physical_gap(tmp_path, kind, clearance, shift, angle):
+    """Measure against analytic circular/capsule copper, including rounding phases."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    board, core, radius = _curved_board(tmp_path, kind, shift, angle)
+    pcb = PCB.load(board)
+    plan = build_hv_keepout_plan(pcb, {1: "AC_LINE"}, clearance)
+    # Test the actual serialized vertices, not just the in-memory buffer.
+    polygons = []
+    for node in plan.zone_nodes():
+        points = node.find("polygon").find("pts")
+        polygons.append(Polygon([(p.get_float(0), p.get_float(1)) for p in points.children[1:]]))
+    void = unary_union(polygons)
+    assert void.contains(core)
+    assert void.boundary.distance(core) - radius >= clearance
+
+
+def _curved_board(tmp_path, kind, shift=0.0037, angle=37.0):
+    from math import cos, radians, sin
+
+    from shapely.geometry import LineString, Point
+
+    x, y = 125 + shift, 120 + shift
+    radius = 1.0
+    dx, dy = cos(radians(angle)), -sin(radians(angle))
+    core = Point(x, y)
+    if kind == "via":
+        copper = f'(via (at {x} {y}) (size 2) (drill 0.6) (layers "F.Cu" "B.Cu") (net 1))'
+    elif kind == "trace":
+        core = LineString([(x - dx, y - dy), (x + dx, y + dy)])
+        copper = f'(segment (start {x - dx} {y - dy}) (end {x + dx} {y + dy}) (width 2) (layer "F.Cu") (net 1))'
+    else:
+        width = 4 if kind == "oval" else 2
+        if kind in ("rect", "roundrect"):
+            from shapely.affinity import rotate, translate
+            from shapely.geometry import box
+
+            radius = 0.5 if kind == "roundrect" else 0.0
+            h = 1 - radius
+            core = translate(rotate(box(-h, -h, h, h), -angle), x, y)
+        if kind == "oval":
+            core = LineString([(x - dx, y - dy), (x + dx, y + dy)])
+        copper = f'(footprint "test" (layer "F.Cu") (at {x} {y}) (pad "1" thru_hole {kind} (at 0 0 {angle}) (size {width} 2) (drill 0.6) (roundrect_rratio 0.25) (layers "*.Cu" "*.Mask") (net 1 "AC_LINE")))'
+    source = _BOARD.replace('(1 "In1.Cu" signal)', "").replace("In1.Cu", "B.Cu")
+    source = source.replace("gnd-plane-uuid", "9a347a26-a984-45ca-b927-9fa431ceebac")
+    source = source.replace(
+        '(segment (start 110 110) (end 150 110) (width 0.5) (layer "F.Cu") (net 1))', copper
+    )
+    # Native filler must retain the isolated test pour to permit measurement.
+    source = source.replace(
+        "(fill yes (thermal_gap", "(fill yes (island_removal_mode 0) (thermal_gap"
+    )
+    return _write(tmp_path, source), core, radius
+
+
+@pytest.mark.skipif(KICAD_CLI is None, reason="kicad-cli not installed")
+@pytest.mark.parametrize(
+    "kind,clearance",
+    [
+        ("circle", 1.6),
+        ("oval", 0.45),
+        ("via", 0.8),
+        ("trace", 3.2),
+        ("rect", 1.6),
+        ("roundrect", 1.6),
+    ],
+)
+def test_native_refill_preserves_physical_gap(tmp_path, kind, clearance):
+    """Actual native-filled copper must clear an analytic rotated pad/via/trace."""
+    from shapely.ops import unary_union
+
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    board, core, radius = _curved_board(tmp_path, kind)
+    assert zones_main(["hv-keepout", str(board), "--clearance", str(clearance), "-q"]) == 0
+    result = subprocess.run(
+        [
+            KICAD_CLI,
+            "pcb",
+            "drc",
+            str(board),
+            "--output",
+            str(tmp_path / "drc.json"),
+            "--format",
+            "json",
+            "--refill-zones",
+            "--save-board",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stderr
+    pcb = PCB.load(board)
+    ox, oy = pcb.board_origin
+    from shapely.affinity import translate
+
+    fills = [
+        ConnectivityValidator._fill_solid_region(pts)
+        for zone in pcb.zones
+        if zone.net_name == "GND"
+        for pts in zone.filled_polygons
+    ]
+    assert fills, "Native refill must produce real copper, not vacuous clearance"
+    fill = translate(unary_union(fills), ox, oy)
+    assert fill.area > 100, "The surrounding pour must survive"
+    assert fill.distance(core) - radius >= clearance
+
+
+def test_rounding_and_inscribed_buffer_are_distinct_error_sources(tmp_path):
+    """A straight boundary loses precision; an unrounded curved buffer loses sagitta."""
+    from shapely.geometry import Point, Polygon
+
+    from kicad_tools.sexp.builders import keepout_node
+
+    # A straight-sided exact offset at a non-centimal phase: no curved
+    # approximation is involved, yet the shared serializer moves it inward.
+    node = keepout_node([(0, 0), (2.0037, 0), (2.0037, 2), (0, 2)], ["F.Cu"])
+    pts = node.find("polygon").find("pts")
+    saved = Polygon([(p.get_float(0), p.get_float(1)) for p in pts.children[1:]])
+    assert saved.bounds[2] == 2.0
+    assert saved.bounds[2] < 2.0037
+
+    # Even before serialization, a point's buffer is inscribed in the true
+    # circle. This separately witnesses the curvature term of the bound.
+    disc = Point(0, 0).buffer(1.6, quad_segs=16)
+    assert disc.boundary.distance(Point(0, 0)) < 1.6
