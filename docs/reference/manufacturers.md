@@ -229,7 +229,7 @@ on 2026-09-10:
 | Constraint | Minimum | Applicability |
 | --- | --- | --- |
 | Pad to silkscreen | 0.15 mm | Same board side, explicit cross-layer `silk_clearance` |
-| SMD pad to pad | 0.15 mm | Python-only, different nets on different footprints; never weaker than general copper clearance |
+| SMD pad to pad | 0.15 mm | Different nets; never weaker than general copper clearance |
 | PTH to track | 0.28 mm | Plated component-hole edge to different-net track copper; 0.35 mm is a recommendation |
 | Inner PTH hole to copper | 0.30 mm | Inner copper layers, different nets |
 
