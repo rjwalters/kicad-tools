@@ -7005,6 +7005,7 @@ def route_with_layer_escalation(
             with spinner(f"Loading PCB ({layer_count} layers)...", quiet=quiet):
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
+                    placement_disposition=getattr(args, "_placement_disposition", None),
                     skip_nets=attempt_skip_nets,
                     rules=rules,
                     edge_clearance=args.edge_clearance,
@@ -8085,6 +8086,7 @@ def route_with_rule_relaxation(
             with spinner(f"Loading PCB (tier {tier.tier})...", quiet=quiet):
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
+                    placement_disposition=getattr(args, "_placement_disposition", None),
                     skip_nets=skip_nets,
                     rules=rules,
                     edge_clearance=args.edge_clearance,
@@ -10390,6 +10392,7 @@ def route_with_combined_escalation(
                 with spinner(f"Loading PCB ({layer_count}L, tier {tier.tier})...", quiet=quiet):
                     router, net_map = load_pcb_for_routing(
                         str(pcb_path),
+                        placement_disposition=getattr(args, "_placement_disposition", None),
                         skip_nets=skip_nets,
                         rules=rules,
                         edge_clearance=args.edge_clearance,
@@ -15507,6 +15510,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         with spinner("Loading PCB...", quiet=quiet):
             router, net_map = load_pcb_for_routing(
                 str(pcb_path),
+                placement_disposition=getattr(args, "_placement_disposition", None),
                 skip_nets=skip_nets,
                 rules=rules,
                 edge_clearance=args.edge_clearance,
@@ -15581,6 +15585,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
         def _order_router_factory() -> "Autorouter":
             fresh, _ = load_pcb_for_routing(
                 str(pcb_path),
+                placement_disposition=getattr(args, "_placement_disposition", None),
                 skip_nets=skip_nets,
                 rules=rules,
                 edge_clearance=args.edge_clearance,
