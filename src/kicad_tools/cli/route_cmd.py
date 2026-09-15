@@ -1593,6 +1593,37 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
     return routes
 
 
+def _capture_attempt_preserved_copper(pcb_path: Path, args) -> tuple[list["Route"], str]:
+    """Capture fixed source copper once, before checkpoint writes can replace it."""
+    preserve = bool(getattr(args, "preserve_existing", False))
+    routes = _capture_preserved_routes(pcb_path) if preserve else []
+    disposition = getattr(args, "_placement_disposition", None)
+    names = disposition.preserve_copper_nets if disposition is not None else frozenset()
+    name_only = _board_uses_name_only_dialect(pcb_path)
+    ordinary = _serialize_preserved_routes(
+        [route for route in routes if route.net_name not in names], name_only=name_only
+    )
+    if not names:
+        return routes, ordinary
+    from kicad_tools.router.optimizer.pcb import (
+        _extract_balanced_blocks,
+        parse_net_names,
+        resolve_block_net,
+    )
+
+    text = pcb_path.read_text()
+    net_names = parse_net_names(text)
+    by_name = {name: number for number, name in net_names.items()}
+    blocks = []
+    for kind in ("segment", "via"):
+        for offset, _, block in _extract_balanced_blocks(text, kind):
+            identity = resolve_block_net(block, net_names, by_name)
+            if identity is not None and identity[1] in names:
+                blocks.append((offset, block))
+    raw = "\n".join(block for _, block in sorted(blocks))
+    return routes, "\n\t".join(part for part in (ordinary, raw) if part)
+
+
 def _serialize_preserved_routes(
     preserved_routes: list["Route"],
     exclude_net_ids: set[int] | None = None,
@@ -1854,6 +1885,15 @@ def _finalize_routes(
     _emitted_preserved: list[Route] = []
     if preserve_existing:
         source_routes = preserved_routes if preserved_routes is not None else router.existing_routes
+        disposition = getattr(router, "placement_disposition", None)
+        if disposition is not None:
+            neutral_routes = getattr(router, "placement_neutral_routes", ())
+            source_routes = [
+                route
+                for route in source_routes
+                if route.net_name not in disposition.preserve_copper_nets
+                and route not in neutral_routes
+            ]
         if source_routes:
             routed_net_ids = {r.net for r in router.routes}
             # Issue #4170 (Phase 2b-1): a stub net IS routed (the in-region
@@ -1881,7 +1921,7 @@ def _finalize_routes(
                     )
 
     placement_copper = getattr(router, "placement_preserved_copper", "")
-    if placement_copper and not preserve_existing:
+    if placement_copper:
         route_sexp = f"{route_sexp}\n\t{placement_copper}" if route_sexp else placement_copper
         _emitted_preserved.extend(getattr(router, "placement_preserved_routes", ()))
 
@@ -6754,8 +6794,7 @@ def route_with_layer_escalation(
     # per-attempt ``router.existing_routes`` cannot be trusted to retain the
     # original copper.  Capturing here keeps it stable across all attempts.
     _preserve = bool(getattr(args, "preserve_existing", False))
-    _preserved_routes = _capture_preserved_routes(pcb_path) if _preserve else []
-    _preserved_sexp = _serialize_preserved_routes(_preserved_routes) if _preserve else ""
+    _preserved_routes, _preserved_sexp = _capture_attempt_preserved_copper(pcb_path, args)
 
     # Layer stacks to try (in escalation order)
     layer_configs = [
@@ -7954,8 +7993,7 @@ def route_with_rule_relaxation(
 
     # Issue #3155: capture preserved copper once before routing/checkpoints.
     _preserve = bool(getattr(args, "preserve_existing", False))
-    _preserved_routes = _capture_preserved_routes(pcb_path) if _preserve else []
-    _preserved_sexp = _serialize_preserved_routes(_preserved_routes) if _preserve else ""
+    _preserved_routes, _preserved_sexp = _capture_attempt_preserved_copper(pcb_path, args)
 
     # Determine layer stack
     if args.layers == "auto":
@@ -10213,8 +10251,7 @@ def route_with_combined_escalation(
 
     # Issue #3155: capture preserved copper once before routing/checkpoints.
     _preserve = bool(getattr(args, "preserve_existing", False))
-    _preserved_routes = _capture_preserved_routes(pcb_path) if _preserve else []
-    _preserved_sexp = _serialize_preserved_routes(_preserved_routes) if _preserve else ""
+    _preserved_routes, _preserved_sexp = _capture_attempt_preserved_copper(pcb_path, args)
 
     # Layer stacks to try (in escalation order)
     layer_configs = [
@@ -15346,8 +15383,7 @@ def _run_main_impl(args, parser, argv) -> int:
 
     # Issue #3155: capture preserved copper once before routing/checkpoints.
     _preserve = bool(getattr(args, "preserve_existing", False))
-    _preserved_routes = _capture_preserved_routes(pcb_path) if _preserve else []
-    _preserved_sexp = _serialize_preserved_routes(_preserved_routes) if _preserve else ""
+    _preserved_routes, _preserved_sexp = _capture_attempt_preserved_copper(pcb_path, args)
 
     # Import router modules
     from kicad_tools.analysis import ComplexityAnalyzer, ComplexityRating

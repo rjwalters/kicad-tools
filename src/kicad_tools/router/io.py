@@ -4354,6 +4354,7 @@ def load_pcb_for_routing(
         # Collect all net names across segments and vias
         all_net_names = set(existing_segments.keys()) | set(existing_vias.keys())
 
+        router.placement_neutral_routes = ()
         route_count = 0
         for net_name in sorted(all_net_names) if preserve_placement else all_net_names:
             if not load_existing_routes and net_name not in preserve_placement:
@@ -4397,6 +4398,8 @@ def load_pcb_for_routing(
                     segments=[replace(seg, net=0, net_name="") for seg in route.segments],
                     vias=[replace(via, net=0, net_name="") for via in route.vias],
                 )
+            if net_name in preserve_placement:
+                router.placement_neutral_routes += (route,)
             router.grid.mark_route(route)
             router.existing_routes.append(route)
             route_count += 1

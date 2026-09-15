@@ -1495,6 +1495,8 @@ class Autorouter:
         self.existing_routes: list[Route] = []
         self.placement_disposition: RoutingPlacementDisposition | None = None
         self.placement_preserved_routes: tuple[Route, ...] = ()
+        # Neutral obstacle copies must never be serialized as authored copper.
+        self.placement_neutral_routes: tuple[Route, ...] = ()
         self.placement_preserved_copper: str = ""
         self.placement_preserved_zones: tuple[str, ...] = ()
         self.placement_preserved_arcs: tuple[str, ...] = ()
