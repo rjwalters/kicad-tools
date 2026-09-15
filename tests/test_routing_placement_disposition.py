@@ -366,3 +366,39 @@ def test_empty_number_fix_keeps_identity_mismatch_rejection(board, mismatch):
         load_pcb_for_routing(
             str(board), netlist=mapping, placement_disposition=disposition, force_python=True
         )
+
+
+@pytest.mark.parametrize(
+    "reference_fields",
+    [
+        "",
+        '(property "Reference" "")',
+        '(fp_text reference "" (at 0 0) (layer "F.SilkS"))',
+        '(fp_text reference "STALE" (at 0 0) (layer "F.SilkS")) (property "Reference" "")',
+        '(property "Reference" "STALE") (property "Reference" "")',
+        r'(property "Reference" "X\"\\1")',
+    ],
+)
+def test_loaders_match_schema_reference_identity(tmp_path, reference_fields):
+    from collections import Counter
+
+    from kicad_tools.router.io import load_pads_for_analysis
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "references.kicad_pcb"
+    original = board_text().replace(
+        '(property "Reference" "X1" (at 0 0) (layer "F.SilkS"))', reference_fields
+    )
+    board.write_text(original)
+    schema = PCB.load(board)
+    expected = Counter((f.reference, p.number) for f in schema.footprints for p in f.pads)
+    disposition = analyze_routing_placement(board)
+    assert disposition.invalid_references == frozenset({schema.footprints[0].reference})
+    assert Counter((p.ref, p.pin) for p in load_pads_for_analysis(board)) == expected
+    router, nets = load_pcb_for_routing(
+        str(board), placement_disposition=disposition, force_python=True
+    )
+    assert Counter(router.pads.keys()) == expected
+    assert nets["BAD"] not in router.nets
+    assert nets["GOOD"] in router.nets
+    assert board.read_text() == original

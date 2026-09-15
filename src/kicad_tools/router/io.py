@@ -2019,6 +2019,42 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
 _NET_TOKEN = re.compile(r'(?P<comment>[#;][^\n]*)|"(?:\\.|[^"\\])*"|[()]|[^\s()]+')
 
 
+def _footprint_reference(section: str) -> str:
+    """Read direct reference fields with the same precedence as PCB.load.
+
+    Modern properties override legacy text even when empty; the last field
+    of each kind wins. Token boundaries preserve escaped names and prevent
+    text contents or nested fields from masquerading as reference properties.
+    """
+    from kicad_tools.sexp import parse_string
+
+    depth = 0
+    field: list[str] = []
+    modern: str | None = None
+    legacy = ""
+    for match in _NET_TOKEN.finditer(section):
+        if match.group("comment"):
+            continue
+        token = match.group()
+        if token == "(":
+            if depth == 1:
+                field = []
+            depth += 1
+        elif token == ")":
+            if depth == 2 and len(field) >= 3 and field[0] in {"property", "fp_text"}:
+                node = parse_string(f"({field[0]} {field[1]} {field[2]})")
+                if field[0] == "property" and node.get_string(0) == "Reference":
+                    modern = node.get_string(1) or ""
+                elif field[0] == "fp_text" and node.get_string(0) == "reference":
+                    legacy = node.get_string(1) or ""
+            depth -= 1
+            if depth == 0:
+                break
+        elif depth == 2:
+            field.append(token)
+    return modern if modern is not None else legacy
+
+
 def _iter_net_references(text: str) -> Iterator[tuple[int | None, str]]:
     """Read numeric/name, name-only and numeric-only references consistently."""
     from kicad_tools.sexp import parse_string
@@ -2143,14 +2179,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
         footprint_name_match = re.search(r'\(footprint\s+"([^"]*)"', section)
         footprint_name = footprint_name_match.group(1) if footprint_name_match else ""
 
-        # Get footprint reference. KiCad 7+ writes it as
-        # (property "Reference" "U1" ...); the (fp_text reference U1 ...)
-        # spelling is legacy (pre-KiCad-7). Try the modern property form
-        # first, then fall back -- same precedence load_pcb_for_routing uses.
-        ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', section)
-        if not ref_match:
-            ref_match = re.search(r'\(fp_text\s+reference\s+"?([^"\s)]+)"?', section)
-        ref = ref_match.group(1) if ref_match else ""
+        ref = _footprint_reference(section)
 
         # Get footprint position and rotation
         at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)", section)
@@ -3874,19 +3903,7 @@ def load_pcb_for_routing(
         fp_y = float(at_match.group(2))
         fp_rot = float(at_match.group(3)) if at_match.group(3) else 0
 
-        # Get reference - try KiCad 9 property format first, then old fp_text format.
-        # The fp_text fallback accepts an optional quote (same pattern as
-        # load_pads_for_analysis above): pre-KiCad-6 (module ...) boards write
-        # this value unquoted (e.g. "(fp_text reference R1 ...)"), and a
-        # quote-only regex would silently drop the whole footprint here,
-        # leaving load_pcb_for_routing with zero pads on a legacy board even
-        # after the (module ...) container itself is recognized (issue #4891).
-        ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', section)
-        if not ref_match:
-            ref_match = re.search(r'\(fp_text\s+reference\s+"?([^"\s)]+)"?', section)
-        # Reference text is optional in a footprint. Keep its pads and their
-        # authored empty reference, matching PCB.load and placement analysis.
-        ref = ref_match.group(1) if ref_match else ""
+        ref = _footprint_reference(section)
 
         # Parse pads - extract complete (pad ...) blocks
         # KiCad 7+ uses multi-line pad definitions, so we need to extract
