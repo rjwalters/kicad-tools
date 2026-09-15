@@ -229,7 +229,7 @@ on 2026-09-10:
 | Constraint | Minimum | Applicability |
 | --- | --- | --- |
 | Pad to silkscreen | 0.15 mm | Same board side, explicit cross-layer `silk_clearance` |
-| SMD pad to pad | 0.15 mm | Different nets; never weaker than general copper clearance |
+| SMD pad to pad | 0.15 mm | Different nets, including pads within one footprint; never weaker than general copper clearance |
 | PTH to track | 0.28 mm | Plated component-hole edge to different-net track copper; 0.35 mm is a recommendation |
 | Inner PTH hole to copper | 0.30 mm | Inner copper layers, different nets |
 
@@ -258,3 +258,8 @@ when both objects have net code zero, so Python deliberately retains that
 otherwise unchecked physical spacing case. A hole is never checked against
 its own pad copper. Outer-layer filled zones are outside the PTH-to-track
 rule; inner fills participate in the separate hole-to-copper rule.
+
+The SMD pad floor is enforced by both the Python checker and explicit native
+DRU rules. Footprint membership, including stock library membership, is not a
+blanket exemption: a below-limit package-internal gap remains a finding. This
+copper-spacing rule is separate from component-to-component assembly spacing.

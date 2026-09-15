@@ -268,16 +268,16 @@ def generate_dru(
             "  (condition \"A.Type == 'Pad' || B.Type == 'Pad'\")\n"
             f"  (constraint silk_clearance (min {rules.min_silk_to_pad_clearance_mm}mm)))"
         )
-    # The different-net SMD pad floor is deliberately NOT emitted as a native
-    # rule.  It is a placement limit on copper the designer positions, and
-    # KiCad's rule language has no predicate for "these two pads belong to
-    # the same footprint" -- so a native rule would also police package
-    # geometry the designer cannot change.  Stock library packages sit under
-    # the floor (the diagonal corner gap between adjacent pad rows of
-    # ``Package_QFP:LQFP-48_7x7mm_P0.5mm`` is 0.1414 mm), so emitting it
-    # would report every fine-pitch QFP/QFN as a hard clearance error.
-    # ``kct check`` enforces this floor instead, where the different-footprint
-    # scope is expressible (``validate.rules.clearance._check_layer``).
+    # Include package-internal pads: footprint ownership does not change
+    # different-net copper spacing. Native electrical clearance preserves
+    # valid same-net joins; the general floor must never be weakened.
+    if rules.min_smd_pad_clearance_mm is not None:
+        minimum = max(rules.min_clearance_mm, rules.min_smd_pad_clearance_mm)
+        lines.append(
+            f'(rule "SMD Pad Clearance{label_suffix}"\n'
+            "  (condition \"A.Pad_Type == 'SMD' && B.Pad_Type == 'SMD'\")\n"
+            f"  (constraint clearance (min {minimum}mm)))"
+        )
     if rules.min_pth_hole_to_track_mm is not None:
         lines.append(
             f'(rule "PTH Hole to Track{label_suffix}"\n'
