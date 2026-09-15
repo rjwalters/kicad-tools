@@ -317,13 +317,13 @@ def test_seed_tuples_carry_the_resolved_clearance() -> None:
     pf = LatticePathfinder(_OUTLINE, pads, rules, layer_stack=stack)
     pf._set_fixed_copper(fixed, {2: _HV_CLEARANCE})
     assert [r[-1] for r in pf._fixed_runs] == [_HV_CLEARANCE, _HV_CLEARANCE]
-    assert pf._fixed_vias == [((10.0, 14.0), 2, _HV_CLEARANCE)]
+    assert pf._fixed_vias == [((10.0, 14.0), 2, _HV_CLEARANCE, 0.3, (0, 1))]
 
     # Unmapped / below-floor / absent all resolve to the DRU floor.
     for clearances in (None, {}, {2: 0.05}, {7: 3.0}):
         pf._set_fixed_copper(fixed, clearances)
         assert [r[-1] for r in pf._fixed_runs] == [rules.trace_clearance] * 2
-        assert pf._fixed_vias == [((10.0, 14.0), 2, rules.trace_clearance)]
+        assert pf._fixed_vias == [((10.0, 14.0), 2, rules.trace_clearance, 0.3, (0, 1))]
 
     # ``None`` routes still reset the seed set (no stale fixed copper).
     pf._set_fixed_copper(None, {2: _HV_CLEARANCE})

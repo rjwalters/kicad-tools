@@ -289,7 +289,7 @@ class LatticePathfinder:
         # composition silently spaced new copper at the DRU floor from an HV
         # net the net-class map put at 2.0-3.2 mm.
         self._fixed_runs: list[tuple[int, Pt, Pt, int, float, float]] = []
-        self._fixed_vias: list[tuple[Pt, int, float]] = []
+        self._fixed_vias: list[tuple[Pt, int, float, float, tuple[int, ...]]] = []
         # Issue #4602: optional net-id-space HV pairwise projection
         # (:class:`.pairwise.LatticePairwise`), resolved by the CALLER from
         # ``rules.pairwise_clearance`` + the #4506 attach zones -- the
@@ -491,8 +491,8 @@ class LatticePathfinder:
         """
         for layer_idx, a, b, net, half, clr in self._fixed_runs:
             committed.add_run(layer_idx, [a, b], net, half, clr)
-        for point, net, clr in self._fixed_vias:
-            committed.add_via(point, net, clr)
+        for point, net, clr, radius, layers in self._fixed_vias:
+            committed.add_via(point, net, clr, radius=radius, layers=layers)
 
     def _fixed_clearance_for(self, net: int, clearances: dict[int, float] | None) -> float:
         """Seed clearance for preserved net ``net`` (issue #4597).
@@ -523,7 +523,7 @@ class LatticePathfinder:
         geometry-only and never sees net names or net classes.
         """
         runs: list[tuple[int, Pt, Pt, int, float, float]] = []
-        vias: list[tuple[Pt, int, float]] = []
+        vias: list[tuple[Pt, int, float, float, tuple[int, ...]]] = []
         for route in routes or []:
             for seg in getattr(route, "segments", []):
                 try:
@@ -543,8 +543,17 @@ class LatticePathfinder:
                     (layer_idx, a, b, seg.net, half, self._fixed_clearance_for(seg.net, clearances))
                 )
             for via in getattr(route, "vias", []):
+                first, last = sorted(
+                    self.layer_stack.layer_enum_to_index(layer) for layer in via.layers
+                )
                 vias.append(
-                    ((via.x, via.y), via.net, self._fixed_clearance_for(via.net, clearances))
+                    (
+                        (via.x, via.y),
+                        via.net,
+                        self._fixed_clearance_for(via.net, clearances),
+                        via.diameter / 2,
+                        tuple(range(first, last + 1)),
+                    )
                 )
         self._fixed_runs = runs
         self._fixed_vias = vias
@@ -1125,6 +1134,57 @@ class LatticePathfinder:
         return result.route if result is not None else None
 
     def _route_impl(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: object | None,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        allow_vias: bool = True,
+        extra_clearance: float = 0.0,
+        partner_net: int | None = None,
+        stub_layers: tuple[int, ...] | None = None,
+        stubs_override: tuple[list, list] | None = None,
+        exempt_pads: frozenset[int] | None = None,
+    ) -> tuple[_RouteResult | None, str]:
+        """Apply physical Kelvin isolation throughout every search stage."""
+        from ..kelvin import detect_kelvin_topology
+
+        pads = [pad for pad in self.pads if pad.net == start.net]
+        # Topology operates on electrical terminals, while obstacle geometry
+        # keeps every physical pad occurrence (including same-number arrays).
+        terminals = list({pad.key: pad for pad in pads}.values())
+        topology = detect_kelvin_topology(terminals)
+        previous = committed.kelvin_guard
+        if topology is not None:
+            from .kelvin import KelvinBranchGuard
+
+            root = terminals[topology.root_index]
+            target = end if start.key == root.key else start
+            committed.kelvin_guard = KelvinBranchGuard(
+                committed, pads, root, target, self._pad_layer_indices
+            )
+        try:
+            return self._route_staged(
+                start,
+                end,
+                net_class,
+                committed=committed,
+                history=history,
+                present=present,
+                allow_vias=allow_vias,
+                extra_clearance=extra_clearance,
+                partner_net=partner_net,
+                stub_layers=stub_layers,
+                stubs_override=stubs_override,
+                exempt_pads=exempt_pads,
+            )
+        finally:
+            committed.kelvin_guard = previous
+
+    def _route_staged(
         self,
         start: Pad,
         end: Pad,
