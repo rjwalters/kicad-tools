@@ -37,6 +37,7 @@ This file covers two layers:
 from __future__ import annotations
 
 import math
+from dataclasses import asdict
 
 import pytest
 
@@ -101,11 +102,12 @@ def test_skip_nets_empty_when_no_pairs_detected():
     assert _diffpair_optimizer_skip_nets(_FakeNoPairsRouter()) == set()
 
 
-def test_skip_nets_empty_on_detection_failure():
-    """A partner-map build failure forfeits protection, it must not crash
-    the optimize stage (mirrors ``apply_match_group_tuning``'s own
-    try/except around the same call)."""
-    assert _diffpair_optimizer_skip_nets(_FakeRaisingRouter()) == set()
+def test_skip_nets_preserve_all_routes_on_detection_failure(caplog):
+    router = _FakeRaisingRouter()
+    router.routes = [Route(net=9, net_name="UNMAPPED")]
+    router.existing_routes = [Route(net=10, net_name="PRESERVED")]
+    assert _diffpair_optimizer_skip_nets(router) == {1, 2, 9, 10}
+    assert "detection blew up" in caplog.text
 
 
 def test_skip_nets_covers_both_pair_halves_and_excludes_others():
@@ -305,3 +307,19 @@ def test_diffpair_skip_nets_preserves_the_pair_length_match():
     assert _route_len(n_after) == pytest.approx(n_before, abs=1e-9)
     assert _route_len(p_after) == pytest.approx(p_before, abs=1e-9)
     assert abs(_route_len(n_after) - _route_len(p_after) - delta_before) < 1e-9
+
+
+def test_detection_failure_preserves_actual_pair_geometry(monkeypatch):
+    router = _staircase_optin_router()
+    for route in (_build_p_route(router), _build_n_staircase_route(router)):
+        router._mark_route(route)
+        router.routes.append(route)
+    before = [asdict(route) for route in router.routes]
+
+    def failed_detection():
+        raise RuntimeError("pair detection unavailable")
+
+    monkeypatch.setattr(router, "get_diff_pair_map", failed_detection)
+    optimizer, _ = _optimizer_and_checker(router)
+    optimize_routes_grid_synced(router, optimizer, skip_nets=_diffpair_optimizer_skip_nets(router))
+    assert [asdict(route) for route in router.routes] == before

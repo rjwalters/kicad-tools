@@ -1346,18 +1346,24 @@ def _diffpair_optimizer_skip_nets(router: Any) -> set[int]:
     exactly as vulnerable to this optimizer stage silently undoing it.
     Returns an empty set (no-op skip list, behaviourally identical to the
     pre-fix call) when the router has no ``net_names`` populated or no
-    pairs are detected.
+    pairs are detected. If pair detection fails, preserve every routed net
+    instead of allowing an optional optimizer to destroy unrecognized pairs.
     """
     net_names = getattr(router, "net_names", None)
     if not net_names:
         return set()
     try:
         partner_by_name = router.get_diff_pair_map()
-    except Exception:
-        # Defensive, mirroring ``apply_match_group_tuning``'s own
-        # partner-map try/except: a detection failure must not block the
-        # optimize stage, only forfeit its diff-pair protection.
-        return set()
+    except Exception as exc:
+        # Unknown pair membership cannot license a length-changing pass.
+        # Preserve every routed net, including IDs missing from net_names;
+        # a verified empty partner map below still permits normal optimization.
+        logger.warning("Preserving route geometry: differential-pair detection failed: %s", exc)
+        return set(net_names) | {
+            route.net
+            for source in ("routes", "existing_routes")
+            for route in getattr(router, source, ()) or ()
+        }
     if not partner_by_name:
         return set()
     name_to_id = {name: net_id for net_id, name in net_names.items()}
