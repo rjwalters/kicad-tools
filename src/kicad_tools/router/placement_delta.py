@@ -63,7 +63,7 @@ diagnosis, not just board-07.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from kicad_tools.router.stuck_classifier import (
@@ -72,7 +72,6 @@ from kicad_tools.router.stuck_classifier import (
     RecommendedAction,
     StuckNetDiagnosis,
     _foreign_obstructions,
-    _iter_board_pads,
     _resolve_match_groups,
 )
 
@@ -177,6 +176,12 @@ class PlacementDelta:
     source_action: str = ""
     rationale: str = ""
     confidence: str = ""
+    component_id: str = ""
+
+    @property
+    def target_key(self) -> str:
+        """Physical target identity; target_ref remains authored metadata."""
+        return self.component_id or self.target_ref
 
     def to_dict(self) -> dict:
         return {
@@ -189,6 +194,7 @@ class PlacementDelta:
             "source_action": self.source_action,
             "rationale": self.rationale,
             "confidence": self.confidence,
+            **({"component_id": self.component_id} if self.component_id else {}),
         }
 
     @classmethod
@@ -212,6 +218,7 @@ class PlacementDelta:
             source_action=data.get("source_action", ""),
             rationale=data.get("rationale", ""),
             confidence=data.get("confidence", ""),
+            component_id=data.get("component_id", ""),
         )
 
 
@@ -364,14 +371,19 @@ def _translate_delta(
         return None
 
     target_ref = _nearest_foreign_component(pcb, diag.net_number, best_point)
-    if not target_ref:
+    if target_ref is None:
+        return None
+
+    target = _find_footprint(pcb, target_ref)
+    if target is None:
         return None
 
     dx = MAX_TRANSLATE_MM * math.cos(direction)
     dy = MAX_TRANSLATE_MM * math.sin(direction)
     return PlacementDelta(
         net_name=diag.net_name,
-        target_ref=target_ref,
+        target_ref=target.reference,
+        component_id=target_ref if target_ref != target.reference else "",
         kind="translate",
         dx=dx,
         dy=dy,
@@ -447,7 +459,7 @@ def endpoint_align_deltas(
     all_pads: dict[str, list[tuple[float, float]]] = {}
     bundle_pads: dict[str, list[tuple[float, float]]] = {}
     net_pads: dict[str, list[tuple[float, float]]] = {}
-    for ref, net_number, point, _size in _iter_board_pads(pcb):
+    for ref, net_number, point, _size in _iter_physical_board_pads(pcb):
         all_pads.setdefault(ref, []).append(point)
         if net_number in group_ids:
             bundle_pads.setdefault(ref, []).append(point)
@@ -500,14 +512,27 @@ def endpoint_align_deltas(
         if choice is None:
             continue
         rotation, reach = choice
+        footprint = _find_footprint(pcb, target.ref)
+        if footprint is None:
+            continue
+        partner_footprint = _find_footprint(pcb, partner.ref)
         out.append(
             PlacementDelta(
                 net_name=diag.net_name,
-                target_ref=target.ref,
+                target_ref=footprint.reference,
+                component_id=target.ref if target.ref != footprint.reference else "",
                 kind="rotate_align",
                 rotation_delta=rotation,
                 source_action=ENDPOINT_ALIGN_SOURCE,
-                rationale=_align_rationale(target, partner, separation, rotation, reach),
+                rationale=_align_rationale(
+                    replace(target, ref=footprint.reference),
+                    replace(partner, ref=partner_footprint.reference)
+                    if partner_footprint is not None
+                    else partner,
+                    separation,
+                    rotation,
+                    reach,
+                ),
                 confidence=confidence,
             )
         )
@@ -698,10 +723,34 @@ def _board_bounds(pcb: PCB) -> tuple[float, float, float, float] | None:
 
 
 def _find_footprint(pcb: PCB, ref: str):
-    for fp in pcb.footprints:
-        if getattr(fp, "reference", "") == ref:
+    from kicad_tools.schema.physical_identity import footprint_keys
+
+    footprints = list(getattr(pcb, "footprints", []))
+    for key, fp in zip(footprint_keys(footprints), footprints, strict=True):
+        if key == ref:
             return fp
+    if sum(fp.reference == ref for fp in footprints) > 1:
+        raise ValueError(f"Ambiguous footprint reference {ref!r}; use a physical component ID")
     return None
+
+
+def _iter_physical_board_pads(pcb: PCB):
+    """Complete physical-footprint grouping, including anonymous pads."""
+    from kicad_tools.schema.physical_identity import footprint_keys
+
+    footprints = list(pcb.footprints)
+    for key, fp in zip(footprint_keys(footprints), footprints, strict=True):
+        if fp.reference.startswith("#"):
+            continue
+        angle = math.radians(-fp.rotation)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        for pad in fp.pads:
+            px, py = pad.position
+            point = (
+                fp.position[0] + px * cos_a - py * sin_a,
+                fp.position[1] + px * sin_a + py * cos_a,
+            )
+            yield key, pad.net_number, point, pad.size
 
 
 def _rotation_blocked_reason(
@@ -728,6 +777,8 @@ def _rotation_blocked_reason(
     fp = _find_footprint(pcb, ref)
     if fp is None:
         return f"{ref} has no footprint on the board"
+    if fp.reference in anchored:
+        return f"{fp.reference} is anchored by the caller"
     if getattr(fp, "locked", False):
         return f"{ref} is locked on the board"
     if bounds is not None and pad_points:
@@ -810,17 +861,17 @@ def _stranded_pad_positions(pcb: PCB, net_name: str) -> list[tuple[float, float]
     return [p.position for p in status.unconnected_pads]
 
 
-def _nearest_foreign_component(pcb: PCB, target_net: int, point: tuple[float, float]) -> str:
+def _nearest_foreign_component(pcb: PCB, target_net: int, point: tuple[float, float]) -> str | None:
     """Reference of the foreign component whose pad is nearest ``point``.
 
     "Foreign" == any net other than ``target_net``.  Ties break on the smaller
-    distance; the scan is deterministic in footprint order.  Returns ``""`` when
+    distance; the scan is deterministic in footprint order. Returns None when
     the board has no foreign pad at all.
     """
     px, py = point
-    best_ref = ""
+    best_ref = None
     best_dist = math.inf
-    for ref, net_number, (bx, by), _size in _iter_board_pads(pcb):
+    for ref, net_number, (bx, by), _size in _iter_physical_board_pads(pcb):
         if net_number == target_net:
             continue
         d = math.hypot(bx - px, by - py)

@@ -7,6 +7,7 @@ be described as laser microvias or use an unselected via-in-pad process.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -99,7 +100,166 @@ def physical_fingerprint(path):
     return hashlib.sha256(json.dumps(rounded(data), sort_keys=True).encode()).hexdigest()
 
 
+def select_offpad_position(pcb, via, ref, preferred, layers):
+    """Screen the complete bond; reuse the generic off-pad candidate ladder."""
+    from shapely.geometry import LineString, Point, Polygon
+
+    from kicad_tools.cli import relocate_in_pad_vias as relocation
+
+    rules = process_rules()
+    pads = relocation._collect_smd_pads_by_net(pcb)
+    holes = relocation._collect_tht_pads(pcb)
+    region = relocation._alternative_board_region(pcb)
+
+    def safe(target):
+        if not relocation._alternative_contained(region, via, target, 0.15):
+            return False
+        path, center = LineString([via.position, target]), Point(target)
+        if region is None:
+            return False  # This board's pinned design always has a closed outline.
+        if path.distance(region.boundary) < 0.075 + rules.min_copper_to_edge_mm or center.distance(
+            region.boundary
+        ) < max(
+            via.size / 2 + rules.min_copper_to_edge_mm, via.drill / 2 + rules.min_hole_to_edge_mm
+        ):
+            return False
+        for zone in pcb.zones:
+            if zone.keepout is None:
+                continue
+            area = Polygon(zone.polygon)
+            if not area.is_valid or area.is_empty:
+                return False
+            zone_layers = set(zone.layers or [zone.layer])
+            through_layers = {layer.name for layer in pcb.copper_layers}
+            if zone_layers & {"*.Cu", "F&B.Cu"}:
+                zone_layers |= through_layers
+            if (
+                not zone.keepout.vias_allowed
+                and zone_layers & through_layers
+                and center.distance(area) <= via.size / 2
+            ):
+                return False
+            if (
+                not zone.keepout.tracks_allowed
+                and zone_layers & set(layers)
+                and path.distance(area) <= 0.075
+            ):
+                return False
+        if any(
+            relocation._dist_point_to_aabb(*target, pad_absolute_bbox(pad, fp))
+            < via.drill / 2 + 0.10 - 1e-6
+            for fp in pcb.footprints
+            for pad in fp.pads
+            if is_smd_pad(pad)
+        ):
+            return False
+        return (
+            relocation._check_clearance(
+                pcb,
+                via,
+                *target,
+                pads,
+                holes,
+                rules.min_clearance_mm,
+                rules.min_hole_to_hole_mm,
+                0.10,
+            )
+            is None
+            and relocation._check_stub_clearance(
+                pcb,
+                via,
+                target,
+                layers,
+                0.15,
+                rules.min_clearance_mm,
+                0.10,
+            )
+            is None
+        )
+
+    if safe(preferred):
+        return preferred
+    reference, number = ref.rsplit(".", 1)
+    footprint = next(fp for fp in pcb.footprints if fp.reference == reference)
+    pad = next(pad for pad in footprint.pads if pad.number == number)
+    target = relocation._first_offpad_signal_candidate(
+        pcb,
+        via,
+        pad_absolute_bbox(pad, footprint),
+        pads,
+        holes,
+        rules.min_clearance_mm,
+        rules.min_hole_to_hole_mm,
+        layers,
+        0.15,
+        0.10,
+        search_alternatives=True,
+        candidate_predicate=safe,
+    )
+    if target is None or not safe(target):
+        raise ValueError(f"No clearance-safe off-pad bond for {ref}")
+    return target
+
+
+def has_verified_offpad_bond(pcb, ref, net, old):
+    """Recognize this repair's complete, still-clear bond before zone refill."""
+    for via in pcb.vias:
+        if pcb.nets[via.net_number].name != net:
+            continue
+        target = tuple(round(value, 6) for value in via.position)
+        required_layers = {"F.Cu"}
+        bonded_layers = set()
+        for segment in pcb.segments:
+            if segment.net_number != via.net_number:
+                continue
+            if any(math.dist(endpoint, old) < 0.001 for endpoint in (segment.start, segment.end)):
+                required_layers.add(segment.layer)
+            expected_id = str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"board04-offpad:{ref}:{target}:{segment.layer}")
+            )
+            if (
+                segment.uuid == expected_id
+                and math.dist(segment.start, old) < 0.001
+                and math.dist(segment.end, target) < 0.001
+                and segment.width == 0.15
+            ):
+                bonded_layers.add(segment.layer)
+        if not required_layers <= bonded_layers:
+            continue
+        position = via.position
+        try:
+            via.position = old
+            checked = select_offpad_position(pcb, via, ref, target, sorted(required_layers))
+            if math.dist(checked, target) < 1e-6:
+                return True
+        except ValueError:
+            continue
+        finally:
+            via.position = position
+    return False
+
+
 def repair(pcb_path):
+    """Validate all staged repairs before publishing the board and options."""
+    import os
+    import shutil
+    import tempfile
+
+    pcb_path = Path(pcb_path)
+    with tempfile.TemporaryDirectory(prefix=".board04-repair-", dir=pcb_path.parent) as tmp:
+        staged = Path(tmp) / pcb_path.name
+        shutil.copy2(pcb_path, staged)
+        changed = _repair_staged(staged)
+        # Both artifacts have passed process validation before either write.
+        os.replace(staged, pcb_path)
+        os.replace(
+            Path(tmp) / "manufacturing-requirements.json",
+            pcb_path.parent / "manufacturing-requirements.json",
+        )
+    return changed
+
+
+def _repair_staged(pcb_path):
     """Move reviewed escapes/route vias and add a tail on every used layer."""
     pcb_path = Path(pcb_path)
     if physical_fingerprint(pcb_path) != PHYSICAL_SHA256:
@@ -108,6 +268,12 @@ def repair(pcb_path):
     ox, oy = pcb.board_origin
     changed = 0
     for move in MOVES + INSET_ROUTE_MOVES:
+        # The recipe refills after repair. Screen fixed copper against the
+        # current staged moves, without treating obsolete fill as an obstacle.
+        # Keep zone boundaries and keepouts in the geometry model.
+        pcb = PCB(copy.deepcopy(doc))
+        for zone in pcb.zones:
+            zone.filled_polygons.clear()
         ref, net, old, new = move
         choices = [
             (i, v)
@@ -115,6 +281,8 @@ def repair(pcb_path):
             if pcb.nets[v.net_number].name == net and math.dist(v.position, old) < 0.001
         ]
         if not choices:
+            if has_verified_offpad_bond(pcb, ref, net, old):
+                continue
             if any(
                 pcb.nets[v.net_number].name == net and math.dist(v.position, new) < 0.001
                 for v in pcb.vias
@@ -149,6 +317,13 @@ def repair(pcb_path):
         if len(choices) != 1:
             raise ValueError(f"Ambiguous escape {ref}")
         i, v = choices[0]
+        layers = {"F.Cu"}
+        for segment in pcb.segments:
+            if segment.net_number == v.net_number and any(
+                math.dist(p, v.position) < 0.001 for p in [segment.start, segment.end]
+            ):
+                layers.add(segment.layer)
+        new = select_offpad_position(pcb, v, ref, new, sorted(layers))
         node = doc.find_children("via")[i]
         at = node.find_child("at")
         at.set_atom(0, new[0] + ox)
@@ -156,12 +331,6 @@ def repair(pcb_path):
         node.children = [c for c in node.children if not (c.is_atom and c.value == "micro")]
         node.remove_child("tenting")
         node.add(parse_string("(tenting (front yes) (back yes))"))
-        layers = {"F.Cu"}
-        for segment in pcb.segments:
-            if segment.net_number == v.net_number and any(
-                math.dist(p, v.position) < 0.001 for p in [segment.start, segment.end]
-            ):
-                layers.add(segment.layer)
         for layer in sorted(layers):
             net_expr = serialize_sexp(node.find_child("net"))
             uid = uuid.uuid5(uuid.NAMESPACE_URL, f"board04-offpad:{ref}:{new}:{layer}")

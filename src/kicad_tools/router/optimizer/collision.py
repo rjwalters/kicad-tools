@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ..geometry import point_to_segment_distance, segment_to_segment_distance
@@ -10,6 +11,94 @@ from ..primitives import Segment
 
 if TYPE_CHECKING:
     from ..grid import RoutingGrid
+
+
+def _iter_dilated_line_cells(
+    gx1: int, gy1: int, gx2: int, gy2: int, clearance: int
+) -> Iterator[tuple[int, int]]:
+    """Yield grid cells within ``clearance`` cells (Chebyshev/square) of the
+    Bresenham rasterization of the line from ``(gx1, gy1)`` to ``(gx2, gy2)``.
+
+    Issue #5240: this is an exact, much cheaper replacement for the
+    "recompute the full ``(2*clearance+1)^2`` window at every rasterized
+    point, union the results" pattern that both ``GridCollisionChecker``
+    and ``VectorCollisionChecker`` used (independently) for their
+    trace-vs-obstacle clearance sweeps.  Profiling a board-06 re-route
+    (``kct``-native backend, rtree installed) showed
+    ``GridCollisionChecker._get_path_cells`` as the single hottest leaf
+    frame in the post-route trace-optimization pass -- board 06's 0.05 mm
+    grid resolution and ~0.325 mm trace half-width + clearance envelope
+    give ``clearance_cells`` ~= 7, so the naive per-step window is a
+    (2*7+1)^2 = 225-cell Python-level ``set`` insertion burst for EVERY
+    single rasterized point along every optimized segment.
+
+    Because consecutive Bresenham points move by at most one cell in x
+    and/or y, step *i*'s window and step *i+1*'s window overlap in all but
+    a thin strip: for a step whose center moves by ``(dx, dy)`` with
+    ``dx, dy in {-1, 0, 1}`` (not both zero), the set difference
+    ``new_window \\ old_window`` is *exactly*:
+
+    * the full-height column at the new leading x edge (``new_cx + dx *
+      clearance``), when ``dx != 0``; and/or
+    * the full-width row at the new leading y edge (``new_cy + dy *
+      clearance``), when ``dy != 0``.
+
+    (Proof: a point ``(x, y)`` in the new window is also in the old
+    window iff ``x`` and ``y`` are both within the old window's bounds;
+    substituting the old window's bounds in terms of the new center and
+    step shows this holds iff ``x != new_cx + dx * clearance`` AND
+    ``y != new_cy + dy * clearance`` -- i.e. the complement, the new
+    window minus the old one, is exactly the union of that column and
+    that row.)  This drops the per-step cost from O(clearance^2) to
+    O(clearance), independent of how the caller consumes the cells.
+
+    The first point has no predecessor, so its full window is emitted
+    unconditionally.  A diagonal step's column and row share one corner
+    cell, which this generator yields twice -- harmless for a ``set``-
+    deduplicating consumer, and a single redundant recheck (not a
+    redundant O(clearance^2) rescan) for an early-exit consumer.  No
+    bounds clipping against the grid is performed here (callers already
+    clip, matching the pre-existing contract of both call sites).
+    """
+    dx = abs(gx2 - gx1)
+    dy = abs(gy2 - gy1)
+    sx = 1 if gx1 < gx2 else -1
+    sy = 1 if gy1 < gy2 else -1
+    err = dx - dy
+
+    gx, gy = gx1, gy1
+    c = clearance
+
+    # First point: emit the full (2c+1) x (2c+1) window -- there is no
+    # predecessor window to diff against.
+    for cy in range(-c, c + 1):
+        for cx in range(-c, c + 1):
+            yield (gx + cx, gy + cy)
+
+    while not (gx == gx2 and gy == gy2):
+        e2 = 2 * err
+        step_x = 0
+        step_y = 0
+        if e2 > -dy:
+            err -= dy
+            gx += sx
+            step_x = sx
+        if e2 < dx:
+            err += dx
+            gy += sy
+            step_y = sy
+
+        # Emitted using the ALREADY-UPDATED (gx, gy) -- see the proof
+        # above: the leading edge is expressed in terms of the new
+        # center.
+        if step_x:
+            lead_x = gx + step_x * c
+            for cy in range(-c, c + 1):
+                yield (lead_x, gy + cy)
+        if step_y:
+            lead_y = gy + step_y * c
+            for cx in range(-c, c + 1):
+                yield (gx + cx, lead_y)
 
 
 class CollisionChecker(Protocol):
@@ -197,34 +286,12 @@ class GridCollisionChecker:
         Returns:
             List of (gx, gy) grid coordinates to check.
         """
-        cells: set[tuple[int, int]] = set()
-
-        # Bresenham's line algorithm
-        dx = abs(gx2 - gx1)
-        dy = abs(gy2 - gy1)
-        sx = 1 if gx1 < gx2 else -1
-        sy = 1 if gy1 < gy2 else -1
-        err = dx - dy
-
-        gx, gy = gx1, gy1
-        while True:
-            # Add cell and clearance buffer
-            for cy in range(-clearance, clearance + 1):
-                for cx in range(-clearance, clearance + 1):
-                    cells.add((gx + cx, gy + cy))
-
-            if gx == gx2 and gy == gy2:
-                break
-
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                gx += sx
-            if e2 < dx:
-                err += dx
-                gy += sy
-
-        return list(cells)
+        # Issue #5240: delegate to the shared incremental dilation helper
+        # (see its docstring for the exact-equivalence proof) instead of
+        # recomputing the full clearance window at every rasterized point.
+        # Same final cell SET as the prior per-point ``set.add`` loop --
+        # only the amount of redundant work to reach it changed.
+        return list({*_iter_dilated_line_cells(gx1, gy1, gx2, gy2, clearance)})
 
 
 class VectorCollisionChecker:
@@ -506,52 +573,33 @@ class VectorCollisionChecker:
         total_clearance = width / 2 + self.grid.rules.trace_clearance
         clearance_cells = int(total_clearance / self.grid.resolution) + 1
 
-        # Bresenham walk -- only check hard obstacles
-        dx = abs(gx2 - gx1)
-        dy = abs(gy2 - gy1)
-        sx = 1 if gx1 < gx2 else -1
-        sy = 1 if gy1 < gy2 else -1
-        err = dx - dy
-
-        gx, gy = gx1, gy1
-        while True:
-            for cy in range(-clearance_cells, clearance_cells + 1):
-                for cx in range(-clearance_cells, clearance_cells + 1):
-                    check_x = gx + cx
-                    check_y = gy + cy
-                    if not (0 <= check_x < self.grid.cols and 0 <= check_y < self.grid.rows):
-                        continue
-                    # Issue #5240: ``cell_at`` replaces the legacy
-                    # ``grid.grid[layer][y][x]`` chain (three allocations
-                    # per lookup) with a single ``_CellView`` allocation;
-                    # this nested clearance-cell loop is the hottest call
-                    # site of the pattern in ``validate_routes`` (Issue
-                    # #5240 profiling of a full board re-route).
-                    cell = self.grid.cell_at(layer_idx, check_y, check_x)
-                    if cell.blocked and (cell.is_obstacle or cell.pad_blocked):
-                        # Hard obstacle (cross-net pad) OR pad-copper cell
-                        # (Issue #2757: pads on skipped pour nets have
-                        # pad_blocked=True but is_obstacle=False because
-                        # their net was rewritten to 0 by
-                        # load_pcb_for_routing; treat them as obstacles
-                        # too so the optimizer doesn't chamfer through
-                        # BGA GND / power pads).
-                        if cell.net != 0 and cell.net == exclude_net:
-                            continue  # Own-net pad is OK
-                        if cell.pad_blocked and cell.net == exclude_net:
-                            continue  # Own-net pad-metal cell (net match)
-                        return False
-
-            if gx == gx2 and gy == gy2:
-                break
-
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                gx += sx
-            if e2 < dx:
-                err += dx
-                gy += sy
+        # Issue #5240: walk only the cells the incremental dilation helper
+        # emits (see its docstring for the exact-equivalence proof) instead
+        # of recomputing the full clearance window at every rasterized
+        # point.  This is the same traversal -- with a possible duplicate
+        # revisit of one corner cell per diagonal step, which is harmless
+        # here (an early-exit obstacle scan, not a set builder) -- as the
+        # prior nested-range loop, just without the O(clearance) *redundant*
+        # cells per step that were already covered by the previous step's
+        # window.  ``cell_at`` (also #5240) keeps the per-cell lookup itself
+        # a single ``_CellView`` allocation.
+        for check_x, check_y in _iter_dilated_line_cells(gx1, gy1, gx2, gy2, clearance_cells):
+            if not (0 <= check_x < self.grid.cols and 0 <= check_y < self.grid.rows):
+                continue
+            cell = self.grid.cell_at(layer_idx, check_y, check_x)
+            if cell.blocked and (cell.is_obstacle or cell.pad_blocked):
+                # Hard obstacle (cross-net pad) OR pad-copper cell
+                # (Issue #2757: pads on skipped pour nets have
+                # pad_blocked=True but is_obstacle=False because
+                # their net was rewritten to 0 by
+                # load_pcb_for_routing; treat them as obstacles
+                # too so the optimizer doesn't chamfer through
+                # BGA GND / power pads).
+                if cell.net != 0 and cell.net == exclude_net:
+                    continue  # Own-net pad is OK
+                if cell.pad_blocked and cell.net == exclude_net:
+                    continue  # Own-net pad-metal cell (net match)
+                return False
 
         return True
 

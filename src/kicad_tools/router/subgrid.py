@@ -219,7 +219,7 @@ class SubGridResult:
         for pad in self.failed_pads:
             ref = pad.ref or "<unknown>"
             reason = self.failure_reasons.get(
-                (pad.ref, pad.pin),
+                pad.key,
                 "unknown",
             )
             if ref not in by_ref:
@@ -330,11 +330,10 @@ class SubGridRouter:
         # Compute component centers for escape direction calculation
         pads_by_ref: dict[str, list[Pad]] = {}
         for pad in pad_list:
-            ref = pad.ref
-            if ref:
-                if ref not in pads_by_ref:
-                    pads_by_ref[ref] = []
-                pads_by_ref[ref].append(pad)
+            ref = pad.component_key
+            if ref not in pads_by_ref:
+                pads_by_ref[ref] = []
+            pads_by_ref[ref].append(pad)
 
         for ref, comp_pads in pads_by_ref.items():
             if comp_pads:
@@ -354,8 +353,8 @@ class SubGridRouter:
             if max_offset > self.grid_tolerance:
                 # Calculate escape direction (outward from component center)
                 escape_dir = (0.0, 0.0)
-                ref = pad.ref
-                if ref and ref in analysis.component_centers:
+                ref = pad.component_key
+                if ref in analysis.component_centers:
                     cx, cy = analysis.component_centers[ref]
                     dx = pad.x - cx
                     dy = pad.y - cy
@@ -409,7 +408,7 @@ class SubGridRouter:
                 result.escapes.append(escape)
             else:
                 result.failed_pads.append(sgp.pad)
-                result.failure_reasons[(sgp.pad.ref, sgp.pad.pin)] = reason
+                result.failure_reasons[sgp.pad.key] = reason
                 logger.debug(
                     "Sub-grid escape failed for %s.%s at (%.3f, %.3f): %s",
                     sgp.pad.ref,
@@ -677,7 +676,7 @@ class SubGridRouter:
         )
         required_clearance = self.rules.trace_clearance * min_clearance_factor
         pitches = self.grid.compute_component_pitches()
-        pad_pitch = pitches.get(pad.ref)
+        pad_pitch = pitches.get(pad.component_key)
         if pad_pitch is not None:
             pad_half = max(pad.width, pad.height) / 2
             min_channel = pad_pitch - 2 * pad_half
@@ -1166,10 +1165,8 @@ class SubGridRouter:
         # Apply neck-down if configured for fine-pitch
         if self.rules.min_trace_width is not None:
             ref = pad.ref
-            pin_pitch = None
-            if ref:
-                pitches = self.grid.compute_component_pitches()
-                pin_pitch = pitches.get(ref)
+            pitches = self.grid.compute_component_pitches()
+            pin_pitch = pitches.get(pad.component_key)
             if self.rules.should_apply_neck_down(ref, pin_pitch):
                 width = self.rules.min_trace_width
 

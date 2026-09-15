@@ -837,7 +837,7 @@ class _GraphEdge:
 @dataclass
 class _CopperGraph:
     adjacency: dict[_Node, list[tuple[_Node, _GraphEdge]]] = field(default_factory=dict)
-    pads: dict[tuple[str, str], _Node] = field(default_factory=dict)
+    pads: dict[tuple[str, str, int], _Node] = field(default_factory=dict)
     internal: dict[_Node, list[Segment]] = field(default_factory=dict)
 
 
@@ -922,18 +922,23 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
             node = parents[node]
         return node
 
-    pad_contacts: dict[tuple[str, str], list[_Node]] = {}
+    from kicad_tools.schema.physical_identity import footprint_keys
+
+    pad_contacts: dict[tuple[str, str, int], list[_Node]] = {}
     internal_edges: set[_GraphEdge] = set()
     wholly_internal_ids: set[int] = set()
-    for fp in pcb.footprints:
+    for component_id, fp in zip(footprint_keys(pcb.footprints), pcb.footprints, strict=True):
+        occurrences: dict[str, int] = {}
         for pad in fp.pads:
+            occurrence = occurrences.get(pad.number, 0)
+            occurrences[pad.number] = occurrence + 1
             if pad.net_name != net_name or pad.type == "np_thru_hole":
                 continue
             nodes = [
                 node
                 for node in parents
                 if (node[2] in pad.layers or "*.Cu" in pad.layers)
-                and _pad_covers(pcb, fp.reference, pad.number, node[:2])
+                and _physical_pad_covers(fp, pad, node[:2])
             ]
             # Only a plated through-hole pad establishes interlayer copper.
             groups = (
@@ -956,7 +961,7 @@ def _build_graph(segments: list[Segment], pcb: PCB, net_name: str) -> _CopperGra
                     hub = root(group[0])
                     for node in group[1:]:
                         parents[root(node)] = hub
-            pad_contacts[(fp.reference, pad.number)] = nodes
+            pad_contacts[(component_id, pad.number, occurrence)] = nodes
 
     graph = _CopperGraph()
     for key, nodes in pad_contacts.items():
@@ -1188,14 +1193,16 @@ def _endpoint_via_array(
     Stub length and via span are bounded by the endpoint pad diagonal. This is
     an explicit supported-subset limit, never a current-sharing assumption.
     """
-    hub = graph.pads.get((endpoint.ref, endpoint.pad))
+    hub = graph.pads.get((endpoint.ref, endpoint.pad, 0))
     fp = pcb.get_footprint(endpoint.ref)
     if hub is None or fp is None:
         return None
     pad = next((p for p in fp.pads if p.number == endpoint.pad), None)
     if pad is None or pad.type != "smd" or hub[2] not in {"F.Cu", "B.Cu"}:
         return None
-    if any(node == hub and key != (endpoint.ref, endpoint.pad) for key, node in graph.pads.items()):
+    if any(
+        node == hub and key != (endpoint.ref, endpoint.pad, 0) for key, node in graph.pads.items()
+    ):
         return None
     far_layer = "B.Cu" if hub[2] == "F.Cu" else "F.Cu"
     arms = graph.adjacency.get(hub, [])
@@ -1357,6 +1364,16 @@ def _component_has_cycle(
 
 
 def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
+    """Test a uniquely authored endpoint; ambiguous selectors cannot pick a pad."""
+    footprints = [fp for fp in pcb.footprints if fp.reference == ref]
+    if len(footprints) != 1:
+        return False
+    fp = footprints[0]
+    pads = [pad for pad in fp.pads if pad.number == pad_number]
+    return len(pads) == 1 and _physical_pad_covers(fp, pads[0], point)
+
+
+def _physical_pad_covers(fp: Footprint, pad: Pad, point: tuple[float, float]) -> bool:
     """True if ``point`` lies on the named pad's copper.
 
     Exact extent test in the pad's own rotated frame rather than a fixed
@@ -1370,15 +1387,10 @@ def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float])
     rotation -- see :class:`~kicad_tools.schema.pcb.Pad`), so the point is
     un-rotated by that angle alone.
     """
-    fp = pcb.get_footprint(ref)
-    if fp is None:
-        return False
-    pad = next((p for p in fp.pads if p.number == pad_number), None)
-    if pad is None:
-        return False
-    center = pcb.get_pad_position(ref, pad_number)
-    if center is None:
-        return False
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    offset = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+    center = (fp.position[0] + offset[0], fp.position[1] + offset[1])
     try:
         half_w = float(pad.size[0]) / 2.0
         half_h = float(pad.size[1]) / 2.0
@@ -1420,7 +1432,10 @@ def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float])
 def _resolve_endpoint(
     pcb: PCB, endpoint: PathEndpoint, expected_net: str
 ) -> tuple[ResolvedEndpoint | None, str | None]:
-    fp = pcb.get_footprint(endpoint.ref)
+    footprints = [fp for fp in pcb.footprints if fp.reference == endpoint.ref]
+    if len(footprints) > 1:
+        return None, f"component {endpoint.ref!r} is ambiguous: multiple physical footprints"
+    fp = footprints[0] if footprints else None
     if fp is None:
         return None, f"component {endpoint.ref!r} not found on board"
     matches = [p for p in fp.pads if p.number == endpoint.pad]
@@ -1545,8 +1560,8 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
     # path as "unresolved" -- a FALSE fail-closed, which teaches users to
     # delete declarations and is every bit as unsafe as the silent pass this
     # rule exists to prevent.
-    start = adjacency.pads.get((source.ref, source.pad))
-    goal = adjacency.pads.get((sink.ref, sink.pad))
+    start = adjacency.pads.get((source.ref, source.pad, 0))
+    goal = adjacency.pads.get((sink.ref, sink.pad, 0))
 
     if start is None:
         return PathResolution(
@@ -1581,7 +1596,7 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
         if array is not None and not any(array.nodes & previous.nodes for previous in arrays):
             arrays.append(array)
         elif array is None:
-            hub = adjacency.pads.get((endpoint.ref, endpoint.pad))
+            hub = adjacency.pads.get((endpoint.ref, endpoint.pad, 0))
             endpoint_fp = pcb.get_footprint(endpoint.ref)
             endpoint_pad = (
                 next((p for p in endpoint_fp.pads if p.number == endpoint.pad), None)

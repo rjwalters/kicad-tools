@@ -61,7 +61,12 @@ _CPP_IMPORT_ERROR: str | None = None
 _CPP_BUILD_VERSION: int | None = None
 _CPP_EXTENSION_PATH: str | None = None
 try:
-    from . import router_cpp
+    if TYPE_CHECKING:
+        import kicad_tools.router.router_cpp as router_cpp  # type: ignore[import-not-found]
+    else:
+        # Preserve the package-cached native module during backend reloads.
+        # Reinitializing nanobind after sys.modules eviction loses its types.
+        from . import router_cpp
 
     _CPP_AVAILABLE = True
     _CPP_BUILD_VERSION = getattr(router_cpp, "BUILD_VERSION", None)
@@ -1033,7 +1038,7 @@ class CppGrid:
             # When ``regions`` is empty (the default) this call delegates to
             # the standard :meth:`DesignRules.get_clearance_for_component`
             # path -- byte-for-byte identical to the pre-#3371 line.
-            pin_pitch = component_pitches.get(pad.ref) if pad.ref else None
+            pin_pitch = component_pitches.get(pad.component_key) if pad.component_key else None
             clearance_override = resolve_clearance_with_escape_region(
                 grid.rules,
                 pad,
@@ -1043,7 +1048,7 @@ class CppGrid:
             )
 
             # Deterministic FNV-1a hash of component reference
-            ref_hash = router_cpp.fnv1a_hash(pad.ref) if pad.ref else 0
+            ref_hash = router_cpp.fnv1a_hash(pad.component_key) if pad.component_key else 0
 
             # Issue #2908: Pre-compute plane-net classification on the Python
             # side (the C++ Pad struct has no net-name string table).  Used
@@ -1845,7 +1850,7 @@ class CppPathfinder:
         # Standard-pitch seeds retain their search freedom; the exact foreign-
         # pad validator still enforces their authored clearance.
         py_grid = getattr(self._grid, "_py_grid", None)
-        pitch = self._get_component_pitches().get(pad.ref)
+        pitch = self._get_component_pitches().get(pad.component_key)
         threshold = self._rules.fine_pitch_threshold
         if (
             trace_width is not None
@@ -1853,7 +1858,7 @@ class CppPathfinder:
                 self._rules.strict_pad_clearance
                 or (pitch is not None and threshold is not None and pitch < threshold)
             )
-            and not self._same_component_carveout_eligible(py_grid, pad.ref)
+            and not self._same_component_carveout_eligible(py_grid, pad.component_key)
         ):
             # Pad-center tails emit the configured local neck-down width.
             # Eroding by the wider trunk can erase every legal narrow-pad seed.
@@ -2850,7 +2855,8 @@ class CppPathfinder:
         if relaxed_refs and ref in relaxed_refs:
             return "skip"
         pitch = self._get_component_pitches().get(ref)
-        required = self._rules.get_clearance_for_component(ref, pitch)
+        authored_ref = py_grid._authored_component_ref(ref) if py_grid is not None else ref
+        required = self._rules.get_clearance_for_component(authored_ref, pitch)
         if required < self._rules.trace_clearance:
             return "clamp"
         if not self._rules.legacy_fine_pitch_carveout:
@@ -2930,13 +2936,13 @@ class CppPathfinder:
         exclude_ref_hashes: list[int] = []
         clamp_ref_hashes: list[int] = []
         for pad in (start, end):
-            if not pad.ref:
+            if not pad.component_key:
                 continue
-            mode = self._same_component_carveout_mode(py_grid, pad.ref)
+            mode = self._same_component_carveout_mode(py_grid, pad.component_key)
             if mode == "skip":
-                exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.ref))
+                exclude_ref_hashes.append(router_cpp.fnv1a_hash(pad.component_key))
             elif mode == "clamp":
-                clamp_ref_hashes.append(router_cpp.fnv1a_hash(pad.ref))
+                clamp_ref_hashes.append(router_cpp.fnv1a_hash(pad.component_key))
 
         # Build C++ segment/via lists from route
         cpp_segs: list[router_cpp.Segment] = []

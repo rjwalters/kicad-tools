@@ -461,6 +461,7 @@ def auto_pour_if_missing(
     quiet: bool = False,
     edge_clearance: float | None = None,
     force_pour_nets: list[str] | tuple[str, ...] | set[str] | None = None,
+    protected_nets: frozenset[str] = frozenset(),
 ) -> tuple[int, list[str]]:
     """Auto-create copper pours for power-classified nets that lack zones.
 
@@ -472,6 +473,8 @@ def auto_pour_if_missing(
     Args:
         pcb_path: Path to .kicad_pcb file (modified **in place**).
         quiet: Suppress informational output.
+        protected_nets: Nets whose existing zones must remain untouched and
+            which must not receive new zones, even when explicitly forced.
         edge_clearance: Optional edge clearance in mm.  When set, zone
             boundaries are inset from the board edge by this distance
             to avoid copper-to-edge DRC violations.
@@ -519,6 +522,7 @@ def auto_pour_if_missing(
     # net, ``nets_to_route`` became 0, the router reported 100%
     # completion trivially, and the build silently shipped an empty PCB.
     pour_nets, _signal_net_count, is_all_power_board = classify_pour_candidates(net_names)
+    pour_nets = [(name, cls) for name, cls in pour_nets if name not in protected_nets]
 
     if not pour_nets:
         return 0, []
@@ -571,7 +575,7 @@ def auto_pour_if_missing(
     # If so, remove those zones so they are regenerated with inset.
     nets_needing_reinset: set[str] = set()
     if edge_clearance and edge_clearance > 0 and nets_with_zones:
-        nets_needing_reinset = _detect_uninset_zones(pcb_path, edge_clearance)
+        nets_needing_reinset = _detect_uninset_zones(pcb_path, edge_clearance) - protected_nets
         if nets_needing_reinset:
             _remove_zones_for_nets(pcb_path, nets_needing_reinset)
             # Re-read the file after removal

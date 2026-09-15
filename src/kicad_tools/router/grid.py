@@ -210,9 +210,11 @@ def _sync_pad_via_policies(py_grid: RoutingGrid, cpp_grid: Any) -> None:
     if getattr(cpp_grid, "_pad_via_policy_key", None) == policy_key:
         return
     for index, pad in enumerate(py_grid._pads):
-        clearance = py_grid.rules.get_clearance_for_component(pad.ref, pitches.get(pad.ref))
+        clearance = py_grid.rules.get_clearance_for_component(
+            pad.ref, pitches.get(pad.component_key)
+        )
         eligible = py_grid._same_component_carveout_active(
-            pad.ref, clearance, py_grid.rules.trace_clearance, pitches
+            pad.component_key, clearance, py_grid.rules.trace_clearance, pitches
         )
         cpp_grid._impl.set_pad_via_policy(index, clearance, eligible)
     cpp_grid._pad_via_policy_key = policy_key
@@ -271,7 +273,7 @@ def _sync_pad_to_cpp_grid(
         regions=py_grid.get_fine_pitch_regions(),
         pin_pitch=pin_pitch,
     )
-    ref_hash = router_cpp.fnv1a_hash(pad.ref) if pad.ref else 0
+    ref_hash = router_cpp.fnv1a_hash(pad.component_key) if pad.component_key else 0
     is_plane_net = _is_plane_net_pad(pad)
 
     try:
@@ -1827,8 +1829,8 @@ class RoutingGrid:
 
         # Issue #2452: Track pads by component reference for same-component
         # clearance relaxation.
-        if pad.ref:
-            self._component_pads.setdefault(pad.ref, []).append(pad)
+        if pad.component_key:
+            self._component_pads.setdefault(pad.component_key, []).append(pad)
             # Issue #3545: pitch cache is stale once a new pad lands.
             self._component_pitch_cache = None
 
@@ -2144,7 +2146,7 @@ class RoutingGrid:
         # clearance-only cells (not metal cells) in that overlap region, using
         # a reduced clearance of trace_width/2 (just enough to prevent copper
         # overlap from the trace edge).
-        if pad.ref and pad.net > 0:
+        if pad.component_key and pad.net > 0:
             self._relax_same_component_clearance(
                 pad, effective_width, effective_height, clearance, layers_to_block
             )
@@ -2204,7 +2206,7 @@ class RoutingGrid:
         # same-component pads regardless of whether either is plane or
         # signal.  The helper itself decides which neighbour pairs trip
         # the guard.
-        if pad.ref and pin_pitch is not None:
+        if pad.component_key and pin_pitch is not None:
             self._apply_narrow_channel_halo(
                 pad,
                 effective_width=effective_width,
@@ -2391,8 +2393,8 @@ class RoutingGrid:
         # the cell-by-cell test below can compare against the cell's
         # current net assignment.
         same_component_envelopes: list[tuple[float, float, float, float, int]] = []
-        if pad.ref:
-            for other in self._component_pads.get(pad.ref, []):
+        if pad.component_key:
+            for other in self._component_pads.get(pad.component_key, []):
                 if other is pad or other.net == 0:
                     continue
                 # Compute the other pad's effective rectangle + base
@@ -2597,7 +2599,7 @@ class RoutingGrid:
         # net.  This mirrors the iteration shape of
         # ``_relax_same_component_clearance`` (line 1289) -- the
         # symmetry guarantees both helpers see the same neighbour set.
-        component_pads = self._component_pads.get(pad.ref, [])
+        component_pads = self._component_pads.get(pad.component_key, [])
         if len(component_pads) < 2:
             # Only this pad exists for the component; no neighbour to
             # form a channel with.  Defensive guard against the
@@ -2804,7 +2806,7 @@ class RoutingGrid:
         """
         if self.rules.strict_pad_clearance:
             return
-        component_pads = self._component_pads.get(pad.ref, [])
+        component_pads = self._component_pads.get(pad.component_key, [])
         reduced_clearance = self.rules.trace_width / 2
 
         for other_pad in component_pads:
@@ -2918,7 +2920,7 @@ class RoutingGrid:
                         # corridor was relaxed so the same-component
                         # validator carve-out stays available for it
                         # (see ``validate_segment_clearance``).
-                        self._relaxed_clearance_refs.add(pad.ref)
+                        self._relaxed_clearance_refs.add(pad.component_key)
 
     def add_keepout(
         self,
@@ -3149,6 +3151,11 @@ class RoutingGrid:
         threshold = getattr(self.rules, "fine_pitch_threshold", None)
         return pitch is not None and threshold is not None and pitch < threshold
 
+    def _authored_component_ref(self, component_id: str) -> str:
+        """Resolve physical grouping identity to the authored rule selector."""
+        pads = self._component_pads.get(component_id, [])
+        return pads[0].ref if pads else component_id
+
     def _same_component_carveout_mode(
         self,
         ref: str,
@@ -3305,18 +3312,22 @@ class RoutingGrid:
                 if pad_layer_idx != seg_layer_idx:
                     continue
 
-            pad_ref = pad.ref
+            pad_ref = pad.component_key
             pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
-            required_clearance = self.rules.get_clearance_for_component(pad_ref, pin_pitch)
+            required_clearance = self.rules.get_clearance_for_component(pad.ref, pin_pitch)
 
             # Issue #3545 net-aware carve-out (see validate_segment_clearance)
             # Issue #5166: mode-aware -- "clamp" enforces the configured
             # override as a floor instead of skipping outright.
             carveout_mode: CarveoutMode = (
                 self._same_component_carveout_mode(
-                    pad.ref, required_clearance, min_clearance, component_pitches
+                    pad.component_key, required_clearance, min_clearance, component_pitches
                 )
-                if (exclude_refs and pad.ref in exclude_refs and not _is_plane_net_pad(pad))
+                if (
+                    exclude_refs
+                    and pad.component_key in exclude_refs
+                    and not _is_plane_net_pad(pad)
+                )
                 else "none"
             )
 
@@ -3413,17 +3424,21 @@ class RoutingGrid:
                 if not (via_lo <= pad_layer_idx <= via_hi):
                     continue
 
-            pad_ref = pad.ref
+            pad_ref = pad.component_key
             pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
-            required_clearance = self.rules.get_clearance_for_component(pad_ref, pin_pitch)
+            required_clearance = self.rules.get_clearance_for_component(pad.ref, pin_pitch)
 
             # Issue #3545 net-aware carve-out (see validate_segment_clearance)
             # Issue #5166: mode-aware -- see the segment sibling.
             carveout_mode: CarveoutMode = (
                 self._same_component_carveout_mode(
-                    pad.ref, required_clearance, min_clearance, component_pitches
+                    pad.component_key, required_clearance, min_clearance, component_pitches
                 )
-                if (exclude_refs and pad.ref in exclude_refs and not _is_plane_net_pad(pad))
+                if (
+                    exclude_refs
+                    and pad.component_key in exclude_refs
+                    and not _is_plane_net_pad(pad)
+                )
                 else "none"
             )
 
@@ -3693,9 +3708,9 @@ class RoutingGrid:
 
             # Issue #1016: Get per-component clearance if available
             # When validating against a pad, use the clearance for that component
-            pad_ref = pad.ref
+            pad_ref = pad.component_key
             pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
-            required_clearance = self.rules.get_clearance_for_component(pad_ref, pin_pitch)
+            required_clearance = self.rules.get_clearance_for_component(pad.ref, pin_pitch)
 
             # Issue #3545: NET-AWARE tightening of the same-component
             # carve-out.  Same-net pads are already skipped at the top of
@@ -3728,9 +3743,13 @@ class RoutingGrid:
             # ``_same_component_carveout_mode``.
             carveout_mode: CarveoutMode = (
                 self._same_component_carveout_mode(
-                    pad.ref, required_clearance, min_clearance, component_pitches
+                    pad.component_key, required_clearance, min_clearance, component_pitches
                 )
-                if (exclude_refs and pad.ref in exclude_refs and not _is_plane_net_pad(pad))
+                if (
+                    exclude_refs
+                    and pad.component_key in exclude_refs
+                    and not _is_plane_net_pad(pad)
+                )
                 else "none"
             )
 
@@ -4284,11 +4303,8 @@ class RoutingGrid:
         # Group pads by component reference
         pads_by_ref: dict[str, list[Pad]] = {}
         for pad in self._pads:
-            ref = pad.ref
-            if ref:
-                if ref not in pads_by_ref:
-                    pads_by_ref[ref] = []
-                pads_by_ref[ref].append(pad)
+            ref = pad.component_key
+            pads_by_ref.setdefault(ref, []).append(pad)
 
         # Calculate minimum pitch for each component
         pitches: dict[str, float] = {}
@@ -5759,7 +5775,7 @@ class RoutingGrid:
         best_dist = float("inf")
 
         for pad in self._pads:
-            if not pad.ref:
+            if not pad.component_key:
                 continue
 
             # Layer filter: PTH pads block all layers, SMD pads only their own.
@@ -5815,7 +5831,7 @@ class RoutingGrid:
                 d2 = cdx * cdx + cdy * cdy
                 if d2 < best_dist:
                     best_dist = d2
-                    best_ref = pad.ref
+                    best_ref = pad.component_key
 
         return best_ref
 

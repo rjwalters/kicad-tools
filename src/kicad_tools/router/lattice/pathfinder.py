@@ -289,7 +289,7 @@ class LatticePathfinder:
         # composition silently spaced new copper at the DRU floor from an HV
         # net the net-class map put at 2.0-3.2 mm.
         self._fixed_runs: list[tuple[int, Pt, Pt, int, float, float]] = []
-        self._fixed_vias: list[tuple[Pt, int, float]] = []
+        self._fixed_vias: list[tuple[Pt, int, float, float, tuple[int, ...]]] = []
         # Issue #4602: optional net-id-space HV pairwise projection
         # (:class:`.pairwise.LatticePairwise`), resolved by the CALLER from
         # ``rules.pairwise_clearance`` + the #4506 attach zones -- the
@@ -491,8 +491,8 @@ class LatticePathfinder:
         """
         for layer_idx, a, b, net, half, clr in self._fixed_runs:
             committed.add_run(layer_idx, [a, b], net, half, clr)
-        for point, net, clr in self._fixed_vias:
-            committed.add_via(point, net, clr)
+        for point, net, clr, radius, layers in self._fixed_vias:
+            committed.add_via(point, net, clr, radius=radius, layers=layers)
 
     def _fixed_clearance_for(self, net: int, clearances: dict[int, float] | None) -> float:
         """Seed clearance for preserved net ``net`` (issue #4597).
@@ -523,7 +523,7 @@ class LatticePathfinder:
         geometry-only and never sees net names or net classes.
         """
         runs: list[tuple[int, Pt, Pt, int, float, float]] = []
-        vias: list[tuple[Pt, int, float]] = []
+        vias: list[tuple[Pt, int, float, float, tuple[int, ...]]] = []
         for route in routes or []:
             for seg in getattr(route, "segments", []):
                 try:
@@ -543,8 +543,23 @@ class LatticePathfinder:
                     (layer_idx, a, b, seg.net, half, self._fixed_clearance_for(seg.net, clearances))
                 )
             for via in getattr(route, "vias", []):
+                # A routing stack may select only part of the physical board
+                # (for example F.Cu only). Imported through-via endpoints need
+                # not themselves be present in that selected stack.
+                first, last = sorted(layer.value for layer in via.layers)
+                occupied_layers = tuple(
+                    layer.index
+                    for layer in self.layer_stack.layers
+                    if first <= layer.layer_enum.value <= last
+                )
                 vias.append(
-                    ((via.x, via.y), via.net, self._fixed_clearance_for(via.net, clearances))
+                    (
+                        (via.x, via.y),
+                        via.net,
+                        self._fixed_clearance_for(via.net, clearances),
+                        via.diameter / 2,
+                        occupied_layers,
+                    )
                 )
         self._fixed_runs = runs
         self._fixed_vias = vias
@@ -1140,6 +1155,57 @@ class LatticePathfinder:
         stubs_override: tuple[list, list] | None = None,
         exempt_pads: frozenset[int] | None = None,
     ) -> tuple[_RouteResult | None, str]:
+        """Apply physical Kelvin isolation throughout every search stage."""
+        from ..kelvin import detect_kelvin_topology
+
+        pads = [pad for pad in self.pads if pad.net == start.net]
+        # Topology operates on electrical terminals, while obstacle geometry
+        # keeps every physical pad occurrence (including same-number arrays).
+        terminals = list({pad.key: pad for pad in pads}.values())
+        topology = detect_kelvin_topology(terminals)
+        previous = committed.kelvin_guard
+        if topology is not None:
+            from .kelvin import KelvinBranchGuard
+
+            root = terminals[topology.root_index]
+            target = end if start.key == root.key else start
+            committed.kelvin_guard = KelvinBranchGuard(
+                committed, pads, root, target, self._pad_layer_indices
+            )
+        try:
+            return self._route_staged(
+                start,
+                end,
+                net_class,
+                committed=committed,
+                history=history,
+                present=present,
+                allow_vias=allow_vias,
+                extra_clearance=extra_clearance,
+                partner_net=partner_net,
+                stub_layers=stub_layers,
+                stubs_override=stubs_override,
+                exempt_pads=exempt_pads,
+            )
+        finally:
+            committed.kelvin_guard = previous
+
+    def _route_staged(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: object | None,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        allow_vias: bool = True,
+        extra_clearance: float = 0.0,
+        partner_net: int | None = None,
+        stub_layers: tuple[int, ...] | None = None,
+        stubs_override: tuple[list, list] | None = None,
+        exempt_pads: frozenset[int] | None = None,
+    ) -> tuple[_RouteResult | None, str]:
         """Route one connection, staging via-in-pad as a last resort (#4475).
 
         Thin orchestrator around :meth:`_route_search` (the actual A*
@@ -1540,28 +1606,40 @@ class LatticePathfinder:
                             # through forbidden layers.
                             continue
                         nstate = (key, nl)
-                        nok = node_ok.get(nstate)
+                        # A tapered goal reached by a via emits only its neck
+                        # and the via on this layer, not a body-width segment.
+                        # Keep this legality separate from the body-node cache:
+                        # any later planar expansion must still clear at half.
+                        tapered_goal = nstate in goal and width_b < body_w
+                        landing_half = (
+                            max(width_b, self.rules.via_diameter) / 2.0 if tapered_goal else half
+                        )
+                        landing_extra = max(0.0, landing_half + clr - self._agent_radius)
+                        nok = None if tapered_goal else node_ok.get(nstate)
                         if nok is None:
                             kpt = lattice.node_point(key)
-                            ko_hit = ko is not None and ko.segment_blocked(kpt, kpt, nl, net, half)
+                            ko_hit = ko is not None and ko.segment_blocked(
+                                kpt, kpt, nl, net, landing_half
+                            )
                             if ko_hit:
                                 ko_pruned = True
                             nok = (
                                 not ko_hit
                                 and not obstacles.node_blocked(key, nl, net)
                                 and not (
-                                    extra > 0.0
-                                    and obstacles.segment_blocked(kpt, kpt, nl, net, extra)
+                                    landing_extra > 0.0
+                                    and obstacles.segment_blocked(kpt, kpt, nl, net, landing_extra)
                                 )
                                 and not (
                                     pw is not None
                                     and obstacles.pairwise_pad_blocked(
-                                        kpt, kpt, nl, net, half, extra, pw
+                                        kpt, kpt, nl, net, landing_half, landing_extra, pw
                                     )
                                 )
-                                and committed.node_clear(kpt, nl, net, half, clr)
+                                and committed.node_clear(kpt, nl, net, landing_half, clr)
                             )
-                            node_ok[nstate] = nok
+                            if not tapered_goal:
+                                node_ok[nstate] = nok
                         if not nok:
                             continue
                         step = self.via_cost + present * history.get(("v", key), 0.0)
@@ -1845,6 +1923,7 @@ class LatticePathfinder:
             net_name=pc.pad_p_a.net_name,
             layer=pc.pad_p_a.layer,
             ref=pc.pad_p_a.ref,
+            component_id=pc.pad_p_a.component_id,
             pin=pc.pad_p_a.pin,
         )
         v_b = Pad(
@@ -1856,6 +1935,7 @@ class LatticePathfinder:
             net_name=pc.pad_p_b.net_name,
             layer=pc.pad_p_b.layer,
             ref=pc.pad_p_b.ref,
+            component_id=pc.pad_p_b.component_id,
             pin=pc.pad_p_b.pin,
         )
 

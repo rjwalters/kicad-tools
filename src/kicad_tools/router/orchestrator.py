@@ -724,7 +724,7 @@ class RoutingOrchestrator:
         # Group pads by component reference
         by_ref: dict[str, list[Pad]] = {}
         for pad in pads:
-            ref = pad.ref or ""
+            ref = pad.component_key
             if ref:
                 by_ref.setdefault(ref, []).append(pad)
 

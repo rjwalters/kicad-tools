@@ -139,12 +139,8 @@ the same `--output-dir`: `<slug>.<protocol>.json` and
 `results/` holds the committed JSON + markdown output of zero-touch runs
 against `pocketbeagle` and `beagleconnect_freedom` (see `results/README.md`
 for what's tracked there and why the `normalized/`/`routed/` board-copy
-subdirectories `--output-dir` also produces are never committed). Both
-boards currently refuse to route zero-touch -- the router's own pre-route
-safety gates abort before placing any copper, rather than producing an
-unsafe or silently-partial result. Filed as generic router-capability
-issues (no board-specific patching): #4945 (auto-grid cell-budget refusal
-on a large coarse-pitch header) and #4946 (`--allow-offboard`'s whole-board
-scope). STRF has not yet been run through this exact combined-report
-command in this repo (#4941's own verification used a synthetic fixture,
-not the pinned STRF commit) -- see Epic #4932 for that board's status.
+subdirectories `--output-dir` also produces are never committed). The original committed snapshot records both boards refusing zero-touch routing
+before producing copper. Those historical outcomes motivated #4945 and #4946.
+Subsequent measurements are recorded separately; see the
+[2026-09-15 follow-up](results/2026-09-15/) for its exact source, inputs and
+observed partial-routing outcome.

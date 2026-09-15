@@ -107,6 +107,7 @@ class BlockRouter:
 
         # Pad tracking for the sub-grid
         self._pads: dict[tuple[str, str], Pad] = {}
+        self._all_pads: list[Pad] = []
         self._nets: dict[int, list[tuple[str, str]]] = {}
         self._net_names: dict[int, str] = {}
 
@@ -161,13 +162,15 @@ class BlockRouter:
         ):
             return
 
-        key = (pad.ref, pad.pin)
+        key = pad.key
         self._pads[key] = pad
+        self._all_pads.append(pad)
 
         # Track nets
         if pad.net not in self._nets:
             self._nets[pad.net] = []
-        self._nets[pad.net].append(key)
+        if key not in self._nets[pad.net]:
+            self._nets[pad.net].append(key)
 
         if pad.net_name and pad.net not in self._net_names:
             self._net_names[pad.net] = pad.net_name
@@ -177,6 +180,7 @@ class BlockRouter:
         pads: dict[tuple[str, str], Pad],
         nets: dict[int, list[tuple[str, str]]],
         net_names: dict[int, str],
+        all_pads: list[Pad] | None = None,
     ) -> None:
         """Bulk-register pads from the main Autorouter that fall within this block.
 
@@ -187,7 +191,7 @@ class BlockRouter:
         """
         self._autorouter_nets = nets
         self._net_names.update(net_names)
-        for key, pad in pads.items():
+        for pad in all_pads if all_pads is not None else pads.values():
             self.add_pad(pad)
 
     def _classify_nets(self) -> tuple[list[int], list[int]]:
@@ -283,7 +287,7 @@ class BlockRouter:
         assert self._grid is not None
         assert self._router is not None
 
-        for pad in self._pads.values():
+        for pad in self._all_pads:
             self._grid.add_pad(pad)
 
         # Enforce boundary constraints

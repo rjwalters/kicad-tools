@@ -133,6 +133,7 @@ class PlacementDiffEntry:
     # board doubles carry no layer attribute.
     old_layer: str | None = None
     new_layer: str | None = None
+    component_id: str = ""
 
     @property
     def distance_mm(self) -> float:
@@ -150,6 +151,7 @@ class PlacementDiffEntry:
             "distance_mm": self.distance_mm,
             "old_layer": self.old_layer,
             "new_layer": self.new_layer,
+            **({"component_id": self.component_id} if self.component_id else {}),
         }
 
 
@@ -915,14 +917,20 @@ class PlacementFeedbackLoop:
         if not self.fixed_refs:
             return False
         for ref in strategy.affected_components:
-            if ref in self.fixed_refs:
+            if self._target_is_fixed(ref):
                 return True
         # Defensive: also check action targets in case affected_components
         # was not populated by a custom generator.
         for action in strategy.actions:
-            if action.type == "move" and action.target in self.fixed_refs:
+            if action.type in {"move", "rotate", "mirror"} and self._target_is_fixed(action.target):
                 return True
         return False
+
+    def _target_is_fixed(self, target: str) -> bool:
+        if target in self.fixed_refs:
+            return True
+        fp = self._find_footprint(target)
+        return fp is not None and fp.reference in self.fixed_refs
 
     def _strategy_within_movement_budget(self, strategy: ResolutionStrategy) -> bool:
         """Return True if every move action stays within ``max_movement``.
@@ -953,13 +961,12 @@ class PlacementFeedbackLoop:
         return True
 
     def _find_footprint(self, ref: str) -> Any | None:
-        """Locate a footprint by reference on the PCB."""
+        """Resolve a physical key or an unambiguous authored reference."""
+        from kicad_tools.router.placement_delta import _find_footprint
+
         if self.pcb is None:
             return None
-        for fp in getattr(self.pcb, "footprints", []):
-            if getattr(fp, "reference", None) == ref:
-                return fp
-        return None
+        return _find_footprint(self.pcb, ref)
 
     def _snapshot_positions(self, refs: list[str]) -> None:
         """Record the original (x, y, rotation, layer) for each ref, once."""
@@ -1008,10 +1015,10 @@ class PlacementFeedbackLoop:
         snapshot: dict[str, _FootprintState] = {}
         if self.pcb is None:
             return snapshot
-        for fp in getattr(self.pcb, "footprints", []):
-            ref = getattr(fp, "reference", None)
-            if ref is None:
-                continue
+        from kicad_tools.schema.physical_identity import footprint_keys
+
+        footprints = list(getattr(self.pcb, "footprints", []))
+        for ref, fp in zip(footprint_keys(footprints), footprints, strict=True):
             pos = fp.position
             rotation = float(getattr(fp, "rotation", 0.0))
             layer = getattr(fp, "layer", None)
@@ -1052,9 +1059,11 @@ class PlacementFeedbackLoop:
         """
         if self.pcb is None or not snapshot:
             return
-        for fp in getattr(self.pcb, "footprints", []):
-            ref = getattr(fp, "reference", None)
-            if ref is None or ref not in snapshot:
+        from kicad_tools.schema.physical_identity import footprint_keys
+
+        footprints = list(getattr(self.pcb, "footprints", []))
+        for ref, fp in zip(footprint_keys(footprints), footprints, strict=True):
+            if ref not in snapshot:
                 continue
             (x, y), rotation, layer, pad_states = snapshot[ref]
             fp.position = (x, y)
@@ -1110,7 +1119,8 @@ class PlacementFeedbackLoop:
                 continue
             diff.append(
                 PlacementDiffEntry(
-                    ref=ref,
+                    ref=fp.reference,
+                    component_id=ref if ref != fp.reference else "",
                     old_xy=old_xy,
                     new_xy=new_xy,
                     rotation_delta=rotation_delta,
@@ -1261,7 +1271,7 @@ def _delta_key(delta: PlacementDelta) -> tuple[str, str, float, float, float]:
     same part remain two distinct probes.
     """
     return (
-        delta.target_ref,
+        delta.target_key,
         delta.kind,
         round(delta.dx, 4),
         round(delta.dy, 4),
@@ -1446,7 +1456,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         Returns ``None`` for kinds with no Phase-2 applicator (``reorder_pins``)
         or when the target footprint is missing.
         """
-        fp = self._find_footprint(delta.target_ref)
+        fp = self._find_footprint(delta.target_key)
         if fp is None:
             return None
         if delta.kind == "translate":
@@ -1458,11 +1468,11 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 actions=[
                     Action(
                         type="move",
-                        target=delta.target_ref,
+                        target=delta.target_key,
                         params={"x": old_x + delta.dx, "y": old_y + delta.dy},
                     )
                 ],
-                affected_components=[delta.target_ref],
+                affected_components=[delta.target_key],
                 affected_nets=[delta.net_name],
             )
         if delta.kind in ("rotate_180", "rotate_align"):
@@ -1480,11 +1490,11 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 actions=[
                     Action(
                         type="rotate",
-                        target=delta.target_ref,
+                        target=delta.target_key,
                         params={"rotation_delta": delta.rotation_delta},
                     )
                 ],
-                affected_components=[delta.target_ref],
+                affected_components=[delta.target_key],
                 affected_nets=[delta.net_name],
             )
         if delta.kind == "mirror":
@@ -1492,8 +1502,8 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 type=StrategyType.MIRROR_COMPONENT,
                 difficulty=Difficulty.MEDIUM,
                 confidence=1.0,
-                actions=[Action(type="mirror", target=delta.target_ref, params={})],
-                affected_components=[delta.target_ref],
+                actions=[Action(type="mirror", target=delta.target_key, params={})],
+                affected_components=[delta.target_key],
                 affected_nets=[delta.net_name],
             )
         # reorder_pins (rationale-only in Phase 1) and any unknown kind.
@@ -1524,10 +1534,10 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             if delta.kind == "reorder_pins":
                 _skip(delta, "reorder_pins has no Phase-2 applicator (pad-remap not implemented)")
                 continue
-            if delta.target_ref in self.fixed_refs:
+            if self._target_is_fixed(delta.target_key):
                 _skip(delta, f"target {delta.target_ref} is anchored (fixed_refs)")
                 continue
-            if delta.kind == "rotate_align" and self._target_is_locked(delta.target_ref):
+            if delta.kind == "rotate_align" and self._target_is_locked(delta.target_key):
                 # Defence in depth (#4968): the proposer already declines
                 # locked parts, but a ``rotate_align`` delta replayed from a
                 # committed ``*_placement_delta.json`` artifact carries no such
@@ -1739,23 +1749,30 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         review).
         """
         pads = self._router_pads()
+        # Validate authored selectors before mutating any pad. An internal
+        # key may share a displayed reference with other physical footprints.
+        self._find_footprint(delta.target_key)
+
+        def is_target(pad: Any) -> bool:
+            return (getattr(pad, "component_id", "") or getattr(pad, "ref", "")) == delta.target_key
+
         try:
             if delta.kind == "translate":
                 for pad in pads:
-                    if getattr(pad, "ref", "") == delta.target_ref:
+                    if is_target(pad):
                         pad.x += delta.dx
                         pad.y += delta.dy
             elif delta.kind == "rotate_180":
-                fp = self._find_footprint(delta.target_ref)
+                fp = self._find_footprint(delta.target_key)
                 if fp is None:
                     return
                 cx, cy = fp.position[0], fp.position[1]
                 for pad in pads:
-                    if getattr(pad, "ref", "") == delta.target_ref:
+                    if is_target(pad):
                         pad.x = 2.0 * cx - pad.x
                         pad.y = 2.0 * cy - pad.y
             elif delta.kind == "rotate_align":
-                fp = self._find_footprint(delta.target_ref)
+                fp = self._find_footprint(delta.target_key)
                 if fp is None:
                     return
                 cx, cy = fp.position[0], fp.position[1]
@@ -1768,7 +1785,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 ang = math.radians(-delta.rotation_delta)
                 cos_a, sin_a = math.cos(ang), math.sin(ang)
                 for pad in pads:
-                    if getattr(pad, "ref", "") != delta.target_ref:
+                    if not is_target(pad):
                         continue
                     dx, dy = pad.x - cx, pad.y - cy
                     pad.x = cx + dx * cos_a - dy * sin_a
@@ -1776,12 +1793,12 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             elif delta.kind == "mirror":
                 from kicad_tools.router.layers import Layer
 
-                fp = self._find_footprint(delta.target_ref)
+                fp = self._find_footprint(delta.target_key)
                 if fp is None:
                     return
                 cx = fp.position[0]
                 for pad in pads:
-                    if getattr(pad, "ref", "") != delta.target_ref:
+                    if not is_target(pad):
                         continue
                     pad.x = 2.0 * cx - pad.x
                     if getattr(pad, "through_hole", False):
@@ -1933,13 +1950,13 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             # rotation kinds -- a translate is already bounded to ~2 mm and
             # the other kinds keep pad geometry inside the same pour.
             pre_zone_pads = (
-                self._zone_connected_pad_count(delta.target_ref)
+                self._zone_connected_pad_count(delta.target_key)
                 if delta.kind in ("rotate_180", "rotate_align")
                 else None
             )
 
             # Record the pre-move position (once) for the placement diff.
-            self._snapshot_positions([delta.target_ref])
+            self._snapshot_positions([delta.target_key])
 
             if self.verbose:
                 print(
@@ -1967,7 +1984,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 and post_violations > pre_violations
             )
             post_zone_pads = (
-                self._zone_connected_pad_count(delta.target_ref)
+                self._zone_connected_pad_count(delta.target_key)
                 if pre_zone_pads is not None
                 else None
             )

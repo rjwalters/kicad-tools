@@ -113,7 +113,10 @@ def test_same_net_zones_keep_local_clearance(tmp_path):
     fills = router.grid.fixed_fills
     assert fills.segment_clear((104.4, 102), (104.4, 103), 0, 0.1, 0.2)
     assert not fills.segment_clear((117.4, 102), (117.4, 103), 0, 0.1, 0.2)
-    assert {fill.source_zone_id for fill in fills.fills} == {"low", "high"}
+    assert {fill.source_zone_id for fill in fills.fills if fill.source_kind == "zone"} == {
+        "low",
+        "high",
+    }
 
 
 @pytest.mark.parametrize(
@@ -230,7 +233,13 @@ def test_export_reload_and_presave_validation(tmp_path, checkpoint):
     text = output.read_text()
     assert text.count(raw_zone) == text.count(arc) == 1
     reloaded, _ = load_board(output)
-    assert len(reloaded.grid.fixed_fills.fills) == 2
+    assert sorted(fill.source_kind for fill in reloaded.grid.fixed_fills.fills) == [
+        "arc",
+        "segment",
+        "via",
+        "via",
+        "zone",
+    ]
     assert reloaded.placement_preserved_zones == (raw_zone,)
     assert reloaded.placement_preserved_arcs == (arc,)
 
@@ -376,7 +385,16 @@ def test_mixed_zone_layers_and_four_layer_via_span(tmp_path, native):
     path.write_text(text)
     router, nets = load_board(path, native=native)
     assert router.grid.num_layers == 4
-    assert {fill.layer for fill in router.grid.fixed_fills.fills} == {1, 2}
+    assert {fill.layer for fill in router.grid.fixed_fills.fills if fill.source_kind == "zone"} == {
+        1,
+        2,
+    }
+    assert {fill.layer for fill in router.grid.fixed_fills.fills if fill.source_kind == "via"} == {
+        0,
+        1,
+        2,
+        3,
+    }
     for x in (108, 115):
         through = Via(
             x=x, y=107, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=nets["GOOD"]

@@ -288,17 +288,11 @@ class TestCLIFlag:
     """The --auto-pcb-size flag is registered and parses cleanly."""
 
     def test_flag_default_false(self):
-        import inspect
+        from kicad_tools.cli.route_cmd import _route_parser
 
-        from kicad_tools.cli.route_cmd import _main_impl as _route_main_impl
-
-        # The flag is wired into the argparser built inside the route
-        # entry point; verify the option string appears in the source
-        # (parser construction lives inside the function rather than at
-        # module scope).  Issue #4559: ``main`` is now a thin
-        # process-state-guard wrapper, so introspect ``_main_impl``.
-        src = inspect.getsource(_route_main_impl)
-        assert "--auto-pcb-size" in src
+        parser = _route_parser()
+        assert parser.parse_args(["board.kicad_pcb"]).auto_pcb_size is False
+        assert parser.parse_args(["board.kicad_pcb", "--auto-pcb-size"]).auto_pcb_size is True
 
     def test_flag_help_mentions_envelope(self):
         """Help text mentions the cost-vs-area tradeoff + Q5 layers-first policy."""
