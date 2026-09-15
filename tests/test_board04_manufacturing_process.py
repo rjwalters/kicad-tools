@@ -310,3 +310,162 @@ def test_paid_route_gate_checks_actual_copper_and_process(repaired, fault):
         doc.find_children("via")[0].find_child("drill").set_atom(0, 0.10)
     repaired.write_text(serialize_sexp(doc))
     assert recipe.paid_process_route_is_complete(repaired) is (fault is None)
+
+
+def test_offpad_repair_rejects_blocked_bond_without_writing(process, repaired):
+    """A reviewed destination is unsafe when a fresh route occupies it (#5439)."""
+    import math
+
+    from kicad_tools.sexp import parse_string
+
+    doc = parse_file(repaired)
+    old = (153.663, 87.25)
+    preferred = (155.05, 87.25)
+    via = next(
+        v
+        for v in doc.find_children("via")
+        if math.dist(
+            (v.find_child("at").get_float(0), v.find_child("at").get_float(1)),
+            preferred,
+        )
+        < 1e-6
+    )
+    via.find_child("at").set_atom(0, old[0])
+    via.find_child("at").set_atom(1, old[1])
+    # Remove the previous repair's tail to reconstruct its source escape.
+    for segment in list(doc.find_children("segment")):
+        start, end = segment.find_child("start"), segment.find_child("end")
+        if (
+            math.dist((start.get_float(0), start.get_float(1)), old) < 1e-6
+            and math.dist((end.get_float(0), end.get_float(1)), preferred) < 1e-6
+        ):
+            doc.children.remove(segment)
+    doc.add(
+        parse_string(
+            "(segment (start 154.65 87.05) (end 155.45 87.05) "
+            '(width 0.2) (layer "B.Cu") (net "SWCLK") '
+            '(uuid "00000000-0000-4000-8000-000000005439"))'
+        )
+    )
+    repaired.write_text(serialize_sexp(doc))
+    original = repaired.read_bytes()
+    with pytest.raises(ValueError, match="No clearance-safe off-pad bond for U2.35"):
+        process.repair(repaired)
+    assert repaired.read_bytes() == original
+
+
+@pytest.mark.parametrize("existing_options", [False, True])
+def test_late_process_failure_does_not_publish_board_or_options(
+    process, repaired, existing_options
+):
+    """Invalid drill dimensions are detected after all repair/trim work."""
+    doc = parse_file(repaired)
+    doc.find_children("via")[0].find_child("size").set_atom(0, 0.29)
+    repaired.write_text(serialize_sexp(doc))
+    options = repaired.parent / "manufacturing-requirements.json"
+    if existing_options:
+        options.write_text('{"preserve": "original options"}\n')
+    else:
+        options.unlink()
+    original = repaired.read_bytes()
+    previous = options.read_bytes() if options.exists() else None
+    with pytest.raises(ValueError, match="Via violates reviewed drilling dimensions"):
+        process.repair(repaired)
+    assert repaired.read_bytes() == original
+    assert (options.read_bytes() if options.exists() else None) == previous
+
+
+@pytest.fixture
+def isolated_offpad_geometry(repaired):
+    """Keep real Board04 pads/outline, with only the source GND escape."""
+    from kicad_tools.schema.pcb import PCB
+
+    doc = parse_file(repaired)
+    source = next(
+        node
+        for node in doc.find_children("via")
+        if abs(node.find_child("at").get_float(0) - 155.05) < 1e-6
+        and abs(node.find_child("at").get_float(1) - 87.25) < 1e-6
+    )
+    source.find_child("at").set_atom(0, 153.663)
+    doc.children = [
+        node
+        for node in doc.children
+        if node.name not in {"segment", "arc", "via"} or node is source
+    ]
+    pcb = PCB(doc)
+    for zone in pcb.zones:
+        zone.filled_polygons.clear()
+    return pcb, pcb.vias[0]
+
+
+@pytest.mark.parametrize("layers", [["F.Cu"], ["F.Cu", "B.Cu"]])
+def test_offpad_search_finds_legal_alternative(process, isolated_offpad_geometry, layers):
+    from kicad_tools.cli import relocate_in_pad_vias as relocation
+    from kicad_tools.schema.pcb import Segment
+
+    pcb, via = isolated_offpad_geometry
+    preferred = (36.55, 19.75)
+    assert process.select_offpad_position(pcb, via, "U2.35", preferred, layers) == preferred
+    foreign = next(number for number, net in pcb.nets.items() if net.name == "SWCLK")
+    pcb.segments.append(
+        Segment(
+            start=(36.15, 19.55), end=(36.95, 19.55), width=0.2, layer="B.Cu", net_number=foreign
+        )
+    )
+    target = process.select_offpad_position(pcb, via, "U2.35", preferred, layers)
+    assert target != preferred
+    assert relocation._check_stub_clearance(pcb, via, target, layers, 0.15, 0.127, 0.10) is None
+    assert (
+        relocation._check_clearance(
+            pcb,
+            via,
+            *target,
+            relocation._collect_smd_pads_by_net(pcb),
+            relocation._collect_tht_pads(pcb),
+            0.127,
+            0.5,
+            0.10,
+        )
+        is None
+    )
+
+
+def test_offpad_search_respects_via_keepout(process, isolated_offpad_geometry):
+    from kicad_tools.schema.pcb import Zone, ZoneKeepout
+
+    pcb, via = isolated_offpad_geometry
+    pcb.zones.append(
+        Zone(
+            net_number=0,
+            net_name="",
+            layer="B.Cu",
+            polygon=[(0, 0), (60, 0), (60, 50), (0, 50)],
+            keepout=ZoneKeepout(vias_allowed=False),
+        )
+    )
+    with pytest.raises(ValueError, match="No clearance-safe off-pad bond"):
+        process.select_offpad_position(pcb, via, "U2.35", (36.55, 19.75), ["F.Cu"])
+
+
+def test_alternative_repair_is_idempotent_before_refill(
+    process, isolated_offpad_geometry, repaired, monkeypatch
+):
+    from kicad_tools.sexp import parse_string
+
+    pcb, _ = isolated_offpad_geometry
+    monkeypatch.setattr(process, "MOVES", [move for move in process.MOVES if move[0] == "U2.35"])
+    monkeypatch.setattr(process, "INSET_ROUTE_MOVES", [])
+    # This isolated source contains no NRST escape or its independent cleanup.
+    monkeypatch.setattr(process, "trim_obsolete_nrst_tail", lambda _: 0)
+    pcb._sexp.add(
+        parse_string(
+            "(segment (start 154.65 87.05) (end 155.45 87.05) "
+            '(width 0.2) (layer "B.Cu") (net "SWCLK"))'
+        )
+    )
+    repaired.write_text(serialize_sexp(pcb._sexp))
+    assert process.repair(repaired) == 1
+    first = repaired.read_bytes()
+    assert process.repair(repaired) == 0
+    assert repaired.read_bytes() == first
