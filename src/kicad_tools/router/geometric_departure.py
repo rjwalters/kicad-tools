@@ -56,11 +56,14 @@ def geometric_departures(router, finder, pads, *, deadline, reserved_routes=()):
         issue = constructed_pair_geometry_issue(
             router,
             finder,
-            *routes,
+            routes[0],
+            routes[1],
             (pads[0], endpoints[0], pads[2], endpoints[1]),
             intra_pair_clearance=nc.effective_intra_pair_clearance(),
             deadline=deadline,
             reserved_routes=reserved_routes,
         )
         if issue is None:
-            yield ValidatedDeparture(proposal, *routes, iterations=0, native_validated=False)
+            yield ValidatedDeparture(
+                proposal, routes[0], routes[1], iterations=0, native_validated=False
+            )

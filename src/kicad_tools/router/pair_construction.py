@@ -574,7 +574,7 @@ def _complete_corridor_partial(
     board_thickness_mm,
     num_copper_layers,
     reserved_routes=(),
-):
+) -> tuple[Route, Route] | None:
     """Complete only this attempt's saved native body, charging shared ledgers."""
     deadline = min(deadline, budget.deadline)
     path = getattr(finder, "last_best_cpp_path", ())
@@ -610,7 +610,7 @@ def _complete_corridor_partial(
         finder,
         pair,
         pads,
-        PairBody(*routes, tuple(end[:2]), tuple(end[3:5])),
+        PairBody(routes[0], routes[1], tuple(end[:2]), tuple(end[3:5])),
         deadline=min(deadline, budget.deadline),
         board_thickness_mm=board_thickness_mm,
         num_copper_layers=num_copper_layers,
