@@ -47,10 +47,10 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import shutil
 import subprocess
 import sys
-import tempfile
 import zipfile
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -714,81 +714,131 @@ def _find_net_class_map(pcb: Path) -> Path | None:
 # ---------------------------------------------------------------------------
 
 
-def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
-    """Refill the pours and commit them to the canonical PCB, transactionally.
+def _fill_measurements(pcb: Path, engines: Engines) -> dict[str, float]:
+    """Reject malformed measurements instead of treating unknown copper as equal."""
+    areas = engines.fill_areas(pcb)
+    if not isinstance(areas, dict):
+        raise ValueError("fill areas must be a layer-to-area object")
+    for layer, area in areas.items():
+        if (
+            not isinstance(layer, str)
+            or not layer.endswith(".Cu")
+            or isinstance(area, bool)
+            or not isinstance(area, (int, float))
+            or not math.isfinite(area)
+            or area < 0
+        ):
+            raise ValueError(f"invalid filled-copper measurement for {layer!r}")
+    return areas
 
-    The refill runs on a **copy**; only a refill that actually produced a
-    parseable board is promoted over the canonical source.  Then a second,
-    independent refill of the saved board is compared per layer: equal copper
-    is the only proof that the bytes the export reads are the bytes the
-    checkers judged.
+
+def _copy_fill_context(pcb: Path, destination: Path) -> Path:
+    """Retain saved copper and its local native project/rule/library context."""
+    destination.mkdir(parents=True, exist_ok=True)
+    for source in pcb.parent.iterdir():
+        if source.is_file() and (
+            source == pcb
+            or source.suffix in {".kicad_pro", ".kicad_dru"}
+            or source.name in {"fp-lib-table", "sym-lib-table"}
+        ):
+            shutil.copy2(source, destination / source.name)
+        elif source.is_dir() and (source.name == "footprints" or source.suffix == ".pretty"):
+            shutil.copytree(source, destination / source.name, dirs_exist_ok=True)
+    return destination / pcb.name
+
+
+def _gate_refill(options: ReadinessOptions, engines: Engines) -> CheckOutcome:
+    """Measure saved copper against an independent native refill without publishing it.
+
+    Both snapshots and their native context remain available as evidence. Area
+    agreement is only a refill-stability measurement, never connectivity proof.
+    Generation must prepare its candidate before invoking this verification gate.
     """
-    evidence_rel = _rel(options, options.evidence_dir / "fill-consistency.json")
-    with tempfile.TemporaryDirectory(prefix="kct-readiness-") as tmp:
-        staged = Path(tmp) / options.pcb.name
-        shutil.copy2(options.pcb, staged)
-        run = engines.refill(staged)
-        if not run.ok:
+    evidence_path = options.evidence_dir / "fill-consistency.json"
+    evidence_rel = _rel(options, evidence_path)
+    options.evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence: dict[str, Any] = {
+        "engine": engines.kicad_cli_version(),
+        "tolerance_mm2": options.fill_tolerance_mm2,
+    }
+    try:
+        if not math.isfinite(options.fill_tolerance_mm2) or options.fill_tolerance_mm2 < 0:
+            raise ValueError("fill tolerance must be finite and nonnegative")
+        # Clear only this gate's diagnostic snapshots, never release content.
+        for name in ("fill-saved", "fill-refilled"):
+            directory = options.evidence_dir / name
+            if directory.exists():
+                shutil.rmtree(directory)
+        saved = _copy_fill_context(options.pcb, options.evidence_dir / "fill-saved")
+        refilled = _copy_fill_context(saved, options.evidence_dir / "fill-refilled")
+        saved_areas = _fill_measurements(saved, engines)
+        evidence.update(
+            {
+                "saved_sha256": _sha256_file(saved),
+                "saved_areas_mm2": saved_areas,
+                "saved_pcb": _rel(options, saved),
+                "refilled_pcb": _rel(options, refilled),
+                "context_sha256": {
+                    path.relative_to(saved.parent).as_posix(): _sha256_file(path)
+                    for path in sorted(saved.parent.rglob("*"))
+                    if path.is_file()
+                },
+            }
+        )
+        run = engines.refill(refilled)
+        evidence["refill_returncode"] = run.returncode
+        if not run.ok or run.returncode != 0:
+            evidence["error"] = run.detail
             return CheckOutcome(
                 name="zone_fill",
                 status=NOT_RUN,
-                detail=f"Zone refill did not run: {run.detail}",
-                blockers=[
-                    "Zone refill unavailable; copper could not be synchronized "
-                    f"before checking ({run.detail})."
-                ],
+                evidence=evidence_rel,
+                detail=f"Independent zone refill did not run: {run.detail}",
+                blockers=[f"Independent zone refill unavailable ({run.detail})."],
             )
-        try:
-            refilled_areas = engines.fill_areas(staged)
-        except Exception as exc:
+        refilled_areas = _fill_measurements(refilled, engines)
+        deltas = {
+            layer: abs(saved_areas.get(layer, 0.0) - refilled_areas.get(layer, 0.0))
+            for layer in sorted(set(saved_areas) | set(refilled_areas))
+        }
+        missing_layers = sorted(set(saved_areas) ^ set(refilled_areas))
+        evidence.update(
+            {
+                "refilled_sha256": _sha256_file(refilled),
+                "refilled_areas_mm2": refilled_areas,
+                "deltas_mm2": deltas,
+                "changed_layer_inventory": missing_layers,
+            }
+        )
+        divergent = {k: v for k, v in deltas.items() if v > options.fill_tolerance_mm2}
+        if divergent or missing_layers:
+            detail = ", ".join(f"{k} {v:.6f} mm^2" for k, v in divergent.items())
+            if missing_layers:
+                detail += f"; changed layer inventory: {', '.join(missing_layers)}"
             return CheckOutcome(
                 name="zone_fill",
                 status=FAILED,
-                detail=f"Refilled board could not be parsed: {exc}",
-                blockers=[f"Refilled board is unreadable: {exc}"],
+                evidence=evidence_rel,
+                detail=f"Saved copper differs from an independent refill: {detail}",
+                blockers=[f"Saved-vs-refilled copper diverges ({detail})."],
             )
-        # Commit the refill to the canonical source deliberately, before both
-        # the final native check and the export read it.
-        shutil.copy2(staged, options.pcb)
-
-    try:
-        saved_areas = engines.fill_areas(options.pcb)
-    except Exception as exc:  # pragma: no cover - defensive
         return CheckOutcome(
             name="zone_fill",
-            status=FAILED,
-            detail=f"Saved board could not be parsed: {exc}",
-            blockers=[f"Saved board is unreadable: {exc}"],
-        )
-
-    deltas = {
-        layer: round(abs(saved_areas.get(layer, 0.0) - refilled_areas.get(layer, 0.0)), 6)
-        for layer in sorted(set(saved_areas) | set(refilled_areas))
-    }
-    options.evidence_dir.mkdir(parents=True, exist_ok=True)
-    (options.evidence_dir / "fill-consistency.json").write_text(
-        json.dumps(deltas, indent=2, sort_keys=True) + "\n"
-    )
-
-    divergent = {k: v for k, v in deltas.items() if v > options.fill_tolerance_mm2}
-    if divergent:
-        detail = ", ".join(f"{layer} {delta:.4f} mm^2" for layer, delta in divergent.items())
-        return CheckOutcome(
-            name="zone_fill",
-            status=FAILED,
-            detail=f"Saved copper differs from a fresh refill: {detail}",
+            status=PASSED,
             evidence=evidence_rel,
-            blockers=[f"Saved-vs-refilled copper diverges ({detail})."],
+            detail=f"Saved copper area agrees with an independent refill on {len(deltas)} layer(s).",
         )
-    return CheckOutcome(
-        name="zone_fill",
-        status=PASSED,
-        detail=(
-            f"Pours refilled and saved to {options.pcb.name}; "
-            f"saved copper matches a fresh refill on {len(deltas)} layer(s)."
-        ),
-        evidence=evidence_rel,
-    )
+    except Exception as exc:
+        evidence["error"] = str(exc)
+        return CheckOutcome(
+            name="zone_fill",
+            status=FAILED,
+            evidence=evidence_rel,
+            detail=f"Independent fill comparison failed: {exc}",
+            blockers=[f"Saved/refilled copper could not be measured: {exc}"],
+        )
+    finally:
+        evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
 
 
 def _warning_counts(report: dict) -> dict[str, int]:
