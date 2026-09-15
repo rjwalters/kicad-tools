@@ -128,3 +128,13 @@ review of the capture coverage and the bounded grid/cost replay above.
 No production fix is included. #3438 retains 31/31 production, 11/11 DDR
 and full physical/routing-quality qualification. #5286, #5333 and #5164
 retain their integration and staged-refill requirements.
+
+## Stage-boundary supplement (2026-09-15)
+
+The [stage-boundary report](stage-capture/README.md) adds the missing exact
+postprocessing and file-finishing captures, checks capture neutrality against
+this retained control, and incorporates the newer real-geometry predicate
+evidence. It supersedes the unresolved next-investigation recommendation
+above with the single demonstrated #5410 mechanism; this original report and
+archive remain unchanged historical measurements. Parent #3438 retains its
+full production and DDR qualification requirements.
