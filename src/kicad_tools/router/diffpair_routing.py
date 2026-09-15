@@ -10461,6 +10461,21 @@ class DiffPairRouter:
             # the open fallback gets the REMAINDER (not a fresh full
             # budget -- the 4000+4000 double-spend on board 06).
             corridor_iterations_used = 0
+            # Issue #5333 (2026-09-15 session): per-stage WALL-CLOCK spend,
+            # diagnostic only -- no budget, deadline or routing decision
+            # reads these.  The prior sessions' TMDS_D1 finding (construction
+            # entered with "almost no window left") was inferred from
+            # secondary signals (``widen_spent``, ``landings``,
+            # ``completion_reasons``); this records the actual seconds each
+            # of the three sequential ``per_pair_timeout`` consumers spent,
+            # so the next full-recipe budget-reallocation session (needs the
+            # pinned Linux worker per #5333's own item 4) has exact
+            # stage-by-stage numbers instead of re-deriving them from
+            # iteration counters. ``None`` means the stage never ran for
+            # this pair.
+            corridor_search_elapsed: float | None = None
+            open_fallback_elapsed: float | None = None
+            construction_entry_window_s: float | None = None
 
             # Issue #3473: bound the probe.  It is only a guide route;
             # give it a small slice of the corridor half-budget (an
@@ -10741,6 +10756,7 @@ class DiffPairRouter:
                 corridor_iteration_budget: int | None = None
                 if per_pair_max_iterations is not None and per_pair_max_iterations > 0:
                     corridor_iteration_budget = max(1, per_pair_max_iterations // 2)
+                _corridor_call_t0 = time.monotonic()
                 result = pathfinder.route_coupled(
                     spec.p_start,
                     spec.p_end,
@@ -10750,6 +10766,7 @@ class DiffPairRouter:
                     max_iterations_budget=corridor_iteration_budget,
                     corridor=corridor,
                 )
+                corridor_search_elapsed = time.monotonic() - _corridor_call_t0
                 corridor_iterations_used = pathfinder.last_iterations
                 if result is not None:
                     coupled_phase = "corridor"
@@ -10773,6 +10790,7 @@ class DiffPairRouter:
                     remaining_iterations = max(
                         1, per_pair_max_iterations - corridor_iterations_used
                     )
+                _open_call_t0 = time.monotonic()
                 result = pathfinder.route_coupled(
                     spec.p_start,
                     spec.p_end,
@@ -10781,6 +10799,7 @@ class DiffPairRouter:
                     timeout_seconds=remaining_budget,
                     max_iterations_budget=remaining_iterations,
                 )
+                open_fallback_elapsed = time.monotonic() - _open_call_t0
 
             if (
                 result is None
@@ -10841,6 +10860,14 @@ class DiffPairRouter:
                 # exemption.  It runs INSIDE the pair's existing wall-clock
                 # window and spends its own small, explicit ledgers.
                 construction_deadline = spec_t0 + per_pair_timeout + self._census_elapsed_s
+                # Issue #5333 (2026-09-15 session): record the WALL-CLOCK
+                # window actually left for construction at the moment it is
+                # entered -- this is the number the prior session's finding
+                # ("construction inherits whatever sliver is left") was
+                # stated qualitatively about; diagnostic only, feeds the
+                # ``[coupled-timing]`` line below, does not affect
+                # ``construction_deadline`` itself.
+                construction_entry_window_s = construction_deadline - time.monotonic()
                 thickness = self._through_via_board_thickness()
                 if thickness is not None and time.monotonic() < construction_deadline:
                     from .pair_construction import ConstructionBudget, construct_pair_routes
@@ -10916,6 +10943,15 @@ class DiffPairRouter:
             else:
                 best_state_repr = str(best_state)
             dominant = dominant_rejection(pathfinder.last_rejections)
+
+            def _fmt_stage_s(value: float | None) -> str:
+                # Issue #5333: "n/a" means the stage never ran for this pair
+                # (e.g. a pair that qualified via ``shadow`` or ``corridor``
+                # never reaches the open fallback or construction), not zero
+                # cost -- distinguish the two so a reader cannot mistake a
+                # skipped stage for a free one.
+                return "n/a" if value is None else f"{value:.2f}s"
+
             print(
                 f"    [coupled-timing] phase={coupled_phase} "
                 f"backend={backend} "
@@ -10926,7 +10962,10 @@ class DiffPairRouter:
                 f"best_state={best_state_repr} "
                 f"dominant_rejection={dominant} "
                 f"rejections={dict(pathfinder.last_rejections)} "
-                f"success={result is not None}"
+                f"success={result is not None} "
+                f"corridor_search_s={_fmt_stage_s(corridor_search_elapsed)} "
+                f"open_fallback_s={_fmt_stage_s(open_fallback_elapsed)} "
+                f"construction_entry_window_s={_fmt_stage_s(construction_entry_window_s)}"
             )
 
             # Issue #4459: structured per-pair ground-truth report.  Classify

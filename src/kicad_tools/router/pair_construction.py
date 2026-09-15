@@ -123,6 +123,51 @@ if not math.isfinite(CORRIDOR_WALL_RESERVE_FRACTION):
 # THIRD, currently sequential ("whatever's left") consumer of the same
 # ``per_pair_timeout``, so any up-front reallocation across those three
 # needs to preserve their combined total the way #5333's own scope requires.
+#
+# Issue #5333 follow-up (2026-09-15, second same-day session): the note
+# above was written from SECONDARY signals (``widen_spent``, ``landings``,
+# ``completion_reasons``) because ``diffpair_routing.py`` did not record the
+# corridor-probe / open-fallback / construction split's actual wall-clock
+# spend, only the pair's TOTAL elapsed time.  This session added that
+# missing per-stage instrumentation (``corridor_search_s`` / ``open_
+# fallback_s`` / ``construction_entry_window_s`` on the ``[coupled-timing]``
+# line, plus regression coverage in
+# ``test_coupled_timing_reports_per_stage_wall_clock`` /
+# ``test_coupled_timing_reports_na_for_a_stage_that_never_ran`` in
+# ``tests/test_diffpair_coupled_instrumentation_4459.py``) and re-ran the
+# SAME committed fixture (seed 42, native ABI 31, full recipe search/timeout
+# values, macOS/arm64, idle host) that produced the note above. Direct
+# measurement now CONTRADICTS the window-starvation theory as TMDS_D1's
+# universal cause -- on this run construction was NOT starved:
+#
+#   [coupled-construction] success=False native_iters=220 proposals=15
+#   departures=6 landings=1 bodies=19 built=19 geom_rejected=7 completions=18
+#   completion_reasons={'no_tail': 24, 'coupling_threshold': 15,
+#   'self_overlap': 10, 'deadline': 2}
+#   corridor_attempts=6 corridor_iters=529184 widen_spent=25
+#   [coupled-timing] ... corridor_search_s=0.43s open_fallback_s=0.29s
+#   construction_entry_window_s=51.89s
+#
+# Construction was handed 51.89 of the pair's ~53.5s total window (the
+# corridor probe and open fallback together spent only 0.72s) -- the
+# opposite of the "one landing exhausts a sliver" shape quoted above -- and
+# still failed: 19 candidate bodies built, 18 terminal completions
+# attempted, EVERY one rejected on a geometry/quality gate (``no_tail``,
+# ``coupling_threshold``, ``self_overlap``), only exhausting the ample
+# window after that (``deadline: 2``). So TMDS_D1 has (at least) TWO
+# distinct failure shapes depending on host speed/load, not one:
+# window-starved construction (prior note, this session's other measurement
+# reproduced it too on a busier moment) AND ample-window construction that
+# still cannot pass its own completion gates. A full-recipe budget
+# reallocation (the lever named above) can only ever address the FIRST
+# shape; it would not by itself fix TMDS_D1 on a host exhibiting the
+# second. The next session should treat these as two separate defects: (1)
+# the already-diagnosed upstream window-entry starvation, gated on the
+# full-recipe budget study #5333 requires, and (2) why 18/18 completion
+# attempts fail ``no_tail``/``coupling_threshold``/``self_overlap`` even with
+# an ample window -- likely a ``pair_construction.py`` body/tail-generation
+# quality question, unexplored this session. No budget, deadline, allowance
+# or construction/completion logic was changed to record this measurement.
 
 
 @dataclass
