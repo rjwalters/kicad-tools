@@ -17650,16 +17650,18 @@ class Autorouter:
             fallback_width = float(self._escape._get_trace_width_for_net(pad.net_name or ""))
         except Exception:  # pragma: no cover - defensive, net class lookup is total
             fallback_width = float(self.rules.trace_width)
-        # Never let the derived metal bounds degenerate below one grid cell:
-        # an interval at least one resolution wide always contains a cell
-        # center, so the A* keeps a seed/goal cell at the endpoint.
-        min_extent = float(getattr(self.grid, "resolution", 0.0) or 0.0)
-        return escape_endpoint_pad(
-            pad,
-            escape,
-            fallback_width=fallback_width,
-            min_extent=min_extent,
-        )
+        try:
+            return escape_endpoint_pad(pad, escape, fallback_width=fallback_width)
+        except ValueError:
+            # Reject an unbacked terminal, not the entire board. Routing can
+            # still start from the actual pad through the normal validators.
+            logger.warning(
+                "Ignoring escape endpoint without committed copper for %s.%s; "
+                "routing from the physical pad",
+                pad.ref,
+                pad.pin,
+            )
+            return pad
 
     def generate_escape_routes(
         self,

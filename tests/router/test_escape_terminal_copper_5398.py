@@ -164,7 +164,7 @@ def test_terminal_without_committed_conductor_keeps_pad_copper():
     escape = EscapeRoute(
         pad=pad,
         direction=EscapeDirection.NORTH,
-        escape_point=(10.0, 9.7),
+        escape_point=(10.0, 9.5),
         escape_layer=Layer.F_CU,
     )
     assert escape_endpoint_copper_extent(escape) is None
@@ -172,8 +172,8 @@ def test_terminal_without_committed_conductor_keeps_pad_copper():
     assert (terminal.width, terminal.height, terminal.shape) == (0.3, 1.55, "roundrect")
 
 
-def test_terminal_respects_minimum_extent():
-    """``min_extent`` keeps derived metal bounds from degenerating."""
+def test_coarse_grid_does_not_enlarge_terminal_copper():
+    """Grid resolution cannot enlarge a clearance waiver beyond metal."""
     pad = Pad(10.0, 9.5, 0.3, 3.0, NET, NET_NAME, ref="U3", pin="39")
     stub = Segment(10.0, 10.5, 10.0, 11.475, 0.05, Layer.F_CU, NET, NET_NAME)
     escape = EscapeRoute(
@@ -184,7 +184,7 @@ def test_terminal_respects_minimum_extent():
         segments=[stub],
     )
     terminal = escape_endpoint_pad(pad, escape, fallback_width=0.2, min_extent=0.127)
-    assert (terminal.width, terminal.height) == pytest.approx((0.127, 0.127))
+    assert (terminal.width, terminal.height) == pytest.approx((0.05, 0.05))
 
 
 @pytest.mark.parametrize("force_python", [True, False])
@@ -284,3 +284,73 @@ def test_escaped_terminal_does_not_waive_foreign_via_clearance(force_python):
         "emitted copper is closer to the foreign via than the authored clearance; "
         "the escaped terminal is still waiving checks over copper that does not exist"
     )
+
+
+@pytest.mark.parametrize("rotation", [0.0, 45.0, 90.0])
+@pytest.mark.parametrize("local_y", [0.2, 0.75, 0.8])
+def test_shifted_terminal_is_contained_in_authored_rectangle(rotation, local_y):
+    import math
+
+    theta = math.radians(rotation)
+    pad = Pad(10, 9.5, 0.3, 1.55, NET, NET_NAME, shape="rect", rotation=rotation)
+    escape = EscapeRoute(
+        pad=pad,
+        direction=EscapeDirection.NORTH,
+        escape_point=(pad.x + local_y * math.sin(theta), pad.y + local_y * math.cos(theta)),
+        escape_layer=pad.layer,
+    )
+    if local_y > pad.height / 2:
+        with pytest.raises(ValueError, match="no committed copper"):
+            escape_endpoint_pad(pad, escape, fallback_width=0.2, min_extent=0.127)
+        return
+    terminal = escape_endpoint_pad(pad, escape, fallback_width=0.2, min_extent=0.127)
+    dx, dy = terminal.x - pad.x, terminal.y - pad.y
+    x = abs(dx * math.cos(theta) - dy * math.sin(theta))
+    y = abs(dx * math.sin(theta) + dy * math.cos(theta))
+    if y > pad.height / 2:
+        assert terminal.width == terminal.height == 0
+    else:
+        assert terminal.width / 2 <= pad.width / 2 - x
+        assert terminal.height / 2 <= pad.height / 2 - y
+        assert terminal.shape == "circle"
+
+
+@pytest.mark.parametrize("layer", [Layer.F_CU, Layer.B_CU])
+def test_missing_conductor_never_invents_copper(layer):
+    pad = Pad(10, 9.5, 0.3, 1.55, NET, NET_NAME, shape="rect")
+    escape = EscapeRoute(pad, EscapeDirection.NORTH, (10, 11), layer)
+    with pytest.raises(ValueError, match="no committed copper"):
+        escape_endpoint_pad(pad, escape, fallback_width=0.2, min_extent=0.127)
+
+
+def test_endpoint_on_other_layer_cannot_copy_surface_pad():
+    pad = Pad(10, 9.5, 0.3, 1.55, NET, NET_NAME, shape="rect")
+    escape = EscapeRoute(pad, EscapeDirection.VIA_DOWN, (10, 9.5), Layer.B_CU)
+    with pytest.raises(ValueError, match="no committed copper"):
+        escape_endpoint_pad(pad, escape, fallback_width=0.2)
+
+
+def test_offset_conductor_cap_is_not_translated():
+    pad = Pad(10, 9.5, 0.3, 1.55, NET, NET_NAME)
+    stub = Segment(10, 10.5, 10, 11.5, 0.05, Layer.F_CU, NET, NET_NAME)
+    escape = EscapeRoute(pad, EscapeDirection.NORTH, (10, 11.5005), Layer.F_CU, segments=[stub])
+    terminal = escape_endpoint_pad(pad, escape, fallback_width=0.2)
+    assert terminal.width / 2 + abs(terminal.y - stub.y2) <= stub.width / 2
+
+
+def test_through_via_terminal_on_inner_layer_uses_real_copper():
+    pad = Pad(10, 9.5, 0.3, 1.55, NET, NET_NAME)
+    via = Via(10, 9.5, 0.2, 0.3, (Layer.F_CU, Layer.B_CU), NET, NET_NAME)
+    escape = EscapeRoute(pad, EscapeDirection.VIA_DOWN, (10, 9.5), Layer.IN1_CU, via=via)
+    terminal = escape_endpoint_pad(pad, escape, fallback_width=0.2)
+    assert terminal.width == terminal.height == via.diameter
+    assert terminal.layer is Layer.IN1_CU
+
+
+def test_router_rejects_unbacked_terminal_without_losing_physical_pad():
+    router = Autorouter(20, 20, force_python=True)
+    pad = Pad(10, 9.5, 0.3, 1.55, NET, NET_NAME, ref="U3", pin="39")
+    escape = EscapeRoute(pad, EscapeDirection.NORTH, (10, 11), Layer.F_CU)
+    terminal = router._build_escape_endpoint_pad(pad, escape)
+    assert terminal is pad
+    assert (terminal.x, terminal.y) != escape.escape_point

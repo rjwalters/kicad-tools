@@ -232,14 +232,6 @@ class EscapeRoute:
     ring_index: int = 0
 
 
-# Tolerance (mm) for deciding that an escape conductor terminates AT the
-# escape endpoint.  Escape geometry is emitted from the same float
-# coordinates as ``escape_point`` (and optionally clamped by
-# ``_clamp_to_edge_clearance``), so an exact match is the normal case;
-# the tolerance only absorbs float round-trips through the grid.
-ESCAPE_ENDPOINT_TOLERANCE_MM = 1e-3
-
-
 def escape_endpoint_copper_extent(escape: EscapeRoute) -> float | None:
     """Width (mm) of the copper that actually exists at an escape endpoint.
 
@@ -254,19 +246,23 @@ def escape_endpoint_copper_extent(escape: EscapeRoute) -> float | None:
         The largest conductor width/diameter incident on
         :attr:`EscapeRoute.escape_point`, or ``None`` when the escape
         carries no committed geometry there (the caller then has to fall
-        back to the net's trace width or the pad's own copper).
+        back to the pad's own copper).
     """
     ex, ey = escape.escape_point
     extent = 0.0
-    tol = ESCAPE_ENDPOINT_TOLERANCE_MM
     for seg in getattr(escape, "segments", None) or ():
+        if seg.layer != escape.escape_layer:
+            continue
         for sx, sy in ((seg.x1, seg.y1), (seg.x2, seg.y2)):
-            if math.hypot(sx - ex, sy - ey) <= tol:
-                extent = max(extent, float(seg.width))
-                break
+            # Only the disc contained in the real round end cap is metal.
+            extent = max(extent, float(seg.width) - 2 * math.hypot(sx - ex, sy - ey))
     via = getattr(escape, "via", None)
-    if via is not None and math.hypot(via.x - ex, via.y - ey) <= tol:
-        extent = max(extent, float(via.diameter))
+    if via is not None and (
+        min(layer.value for layer in via.layers)
+        <= escape.escape_layer.value
+        <= max(layer.value for layer in via.layers)
+    ):
+        extent = max(extent, float(via.diameter) - 2 * math.hypot(via.x - ex, via.y - ey))
     return extent if extent > 0.0 else None
 
 
@@ -298,54 +294,45 @@ def escape_endpoint_pad(
     validator then rejected the candidate, the net burned all five resume
     attempts and fell back to the (much slower) Python search.
 
-    The virtual terminal is therefore sized to the escape conductor:
+    Known conductor geometry bounds the terminal independently of routing
+    resolution. Without a conductor, only an unchanged endpoint on the
+    physical pad's layer keeps authored geometry. Shifted endpoints use an
+    inscribed disc; endpoints without copper are rejected. Off-grid
+    connectivity belongs to pathfinder waypoints, not a larger metal waiver.
 
-    * conductor extent known -> a disc of that diameter at the endpoint
-      (trace width, or via diameter for a via-in-pad rescue), never larger
-      than the escaped pad's own largest dimension;
-    * conductor extent unknown but the endpoint still lies on the pad's own
-      copper -> keep the pad's authored geometry (shape/rotation/size), which
-      is real metal (this also preserves the Issue #5229 shape transport for
-      an unmoved endpoint);
-    * otherwise -> fall back to ``fallback_width`` (the net's trace width),
-      since any committed escape is at least that wide.
-
-    Args:
-        pad: The escaped physical pad (retains its authored geometry).
-        escape: The committed escape route for that pad.
-        fallback_width: Net trace width used when the escape carries no
-            geometry at its endpoint.
-        min_extent: Lower bound for the synthesized extent, e.g. the grid
-            resolution, so the derived metal bounds never degenerate to an
-            empty cell span.
-
-    Returns:
-        A new :class:`~kicad_tools.router.primitives.Pad` at the escape
-        endpoint.  ``ref``/``pin``/``net``/``net_name``/``through_hole``/
-        ``drill`` are preserved so the terminal still resolves back to its
-        physical pad (e.g. Kelvin branch isolation's ``(ref, pin)`` lookup).
+    ``fallback_width`` and ``min_extent`` remain accepted for compatibility,
+    but neither proves committed copper and neither enlarges metal.
     """
     ex, ey = escape.escape_point
     extent = escape_endpoint_copper_extent(escape)
-
-    if extent is None:
-        half_w, half_h = pad.width / 2.0, pad.height / 2.0
-        on_pad_copper = (
-            abs(ex - pad.x) <= half_w + ESCAPE_ENDPOINT_TOLERANCE_MM
-            and abs(ey - pad.y) <= half_h + ESCAPE_ENDPOINT_TOLERANCE_MM
-        )
-        if on_pad_copper:
-            width, height = pad.width, pad.height
-            shape, rotation = pad.shape, pad.rotation
-        else:
-            extent = fallback_width
-            width = height = max(extent, min_extent)
-            shape, rotation = "circle", 0.0
+    on_layer = pad.through_hole or escape.escape_layer == pad.layer
+    unchanged = ex == pad.x and ey == pad.y and on_layer
+    if extent is None and unchanged:
+        width, height = pad.width, pad.height
+        shape, rotation = pad.shape, pad.rotation
     else:
-        largest = max(pad.width, pad.height)
-        if largest > 0.0:
-            extent = min(extent, largest)
-        width = height = max(extent, min_extent)
+        if extent is None:
+            radius = 0.0
+            if on_layer:
+                # Transform clockwise board rotation into pad-local coordinates.
+                theta = math.radians(pad.rotation)
+                dx, dy = ex - pad.x, ey - pad.y
+                x = abs(dx * math.cos(theta) - dy * math.sin(theta))
+                y = abs(dx * math.sin(theta) + dy * math.cos(theta))
+                hw, hh = pad.width / 2, pad.height / 2
+                if pad.shape == "rect":
+                    radius = min(hw - x, hh - y)
+                elif pad.shape == "circle":
+                    radius = min(hw, hh) - math.hypot(x, y)
+                elif pad.shape in ("oval", "roundrect"):
+                    # This capsule is contained in every rounded rectangle
+                    # with these dimensions, even with unknown corner radii.
+                    r = min(hw, hh)
+                    radius = r - math.hypot(max(0.0, x - (hw - r)), max(0.0, y - (hh - r)))
+            extent = 2 * max(0.0, radius)
+        if extent <= 0:
+            raise ValueError("Escape endpoint has no committed copper on its routing layer")
+        width = height = extent
         shape, rotation = "circle", 0.0
 
     return Pad(
@@ -358,8 +345,8 @@ def escape_endpoint_pad(
         layer=escape.escape_layer,
         ref=pad.ref,
         pin=pad.pin,
-        through_hole=pad.through_hole,
-        drill=pad.drill,
+        through_hole=pad.through_hole if unchanged and extent is None else False,
+        drill=pad.drill if unchanged and extent is None else 0.0,
         rotation=rotation,
         shape=shape,
     )

@@ -176,11 +176,11 @@ def test_escape_virtual_pad_keeps_authored_shape_on_pad_copper(monkeypatch, meth
     router = Autorouter(20, 20, force_python=True)
     pad = Pad(5, 5, 2, 2, 1, "SIGNAL", ref="J1", pin="1", rotation=45, shape=shape)
     router.pads[("J1", "1")] = pad
-    escape = SimpleNamespace(pad=pad, escape_point=(5.4, 5.2), escape_layer=Layer.B_CU)
+    escape = SimpleNamespace(pad=pad, escape_point=(5, 5), escape_layer=Layer.F_CU)
     package = _install_escape(monkeypatch, router, escape)
     getattr(router, method)([package])
     copied = router._escape_pad_overrides[("J1", "1")]
-    assert (copied.x, copied.y, copied.layer) == (5.4, 5.2, Layer.B_CU)
+    assert (copied.x, copied.y, copied.layer) == (5, 5, Layer.F_CU)
     assert (copied.shape, copied.rotation, copied.width, copied.height) == (shape, 45, 2, 2)
 
 
