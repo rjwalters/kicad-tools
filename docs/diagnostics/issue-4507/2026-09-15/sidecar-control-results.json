@@ -1,0 +1,39 @@
+{
+  "preseeded_original": {
+    "error": "cannot preserve source DRC constraints: DRC sidecar conflict: /tmp/4507-sidecar-controls/preseeded_original/out.kicad_pro differs from source /tmp/4507-af6b-terminal-evidence/stage1/step1.kicad_pro and its merged rules",
+    "before": {
+      "out.kicad_pro": "090d61a8a680bd216d49499b2b803b2b9cb4214655044abaf0edf3b4ffd16fd9",
+      "out.kicad_dru": "162eaea4032b6957dffa04b0e87d17cb8ae6ae1e61b47c02772c99775c910464",
+      "out.kicad_pcb": "45ff4cd1c9e58c95a599e14f0124d00d53fa7e1551c8b50225a9b6979541f5d8"
+    },
+    "after": {
+      "out.kicad_pro": "090d61a8a680bd216d49499b2b803b2b9cb4214655044abaf0edf3b4ffd16fd9",
+      "out.kicad_dru": "162eaea4032b6957dffa04b0e87d17cb8ae6ae1e61b47c02772c99775c910464",
+      "out.kicad_pcb": "45ff4cd1c9e58c95a599e14f0124d00d53fa7e1551c8b50225a9b6979541f5d8"
+    }
+  },
+  "predecessor_sidecars": {
+    "error": null,
+    "before": {
+      "out.kicad_pro": "9e6a988f50f02f53d7d16455c8afe198c9573d057ba545a039696ed54187ac38",
+      "out.kicad_dru": "a46505750538f97018e8bc9e370cf2f805786ee460f9cf42f4762f8c3e6b0e6b",
+      "out.kicad_pcb": "45ff4cd1c9e58c95a599e14f0124d00d53fa7e1551c8b50225a9b6979541f5d8"
+    },
+    "after": {
+      "out.kicad_pro": "0c01aee0b1b030f220a1767423dabe8f369ac2dd86aa7a0cf398c0aa2fcfc706",
+      "out.kicad_dru": "1fd865ea488db4c3404485966ae66648afe413df1721c40554b9f076bc7f4659",
+      "out.kicad_pcb": "45ff4cd1c9e58c95a599e14f0124d00d53fa7e1551c8b50225a9b6979541f5d8"
+    }
+  },
+  "no_destination_sidecars": {
+    "error": null,
+    "before": {
+      "out.kicad_pcb": "45ff4cd1c9e58c95a599e14f0124d00d53fa7e1551c8b50225a9b6979541f5d8"
+    },
+    "after": {
+      "out.kicad_pro": "0c01aee0b1b030f220a1767423dabe8f369ac2dd86aa7a0cf398c0aa2fcfc706",
+      "out.kicad_dru": "1fd865ea488db4c3404485966ae66648afe413df1721c40554b9f076bc7f4659",
+      "out.kicad_pcb": "45ff4cd1c9e58c95a599e14f0124d00d53fa7e1551c8b50225a9b6979541f5d8"
+    }
+  }
+}

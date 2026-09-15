@@ -234,7 +234,9 @@ namespace router {
 // construction); refs in the new set reach the carve-out only because a
 // CONFIGURED override resolved smaller than the default clearance, and
 // enforce that resolved value as a hard floor instead of skipping.
-constexpr int ROUTER_CPP_BUILD_VERSION = 25;
+// v26: reject foreign physical copper when seeding source-pad cells in
+// both one-shot and resumable A*. Clearance halos remain valid exits.
+constexpr int ROUTER_CPP_BUILD_VERSION = 26;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the

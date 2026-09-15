@@ -781,10 +781,11 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     # still flag edge violations, matching parent-process behaviour.
     edge_segments = config.get("edge_segments")
     edge_clearance = config.get("edge_clearance")
-    if edge_segments and edge_clearance:
+    if edge_segments is not None:
         router._edge_segments = edge_segments
         router._edge_clearance = edge_clearance
-        router.grid.add_edge_keepout(edge_segments, edge_clearance)
+        if edge_segments and edge_clearance:
+            router.grid.add_edge_keepout(edge_segments, edge_clearance)
 
     # Shuffle net order (first trial uses base order)
     if trial_num == 0:
@@ -2915,6 +2916,10 @@ class Autorouter:
                 layer_stack=self.layer_stack,
             )
         self._lattice_pathfinder.fixed_fills = self.grid.fixed_fills
+        if hasattr(self._lattice_pathfinder, "set_escape_boundary"):
+            self._lattice_pathfinder.set_escape_boundary(
+                self._edge_segments, self._edge_clearance or 0.0
+            )
         return self._lattice_pathfinder
 
     def _lattice_pairwise_projection(self) -> Any:
@@ -3633,23 +3638,30 @@ class Autorouter:
                 for layer, width in layer_widths.items():
                     print(f"    {layer}: {width * 1000:.1f}mil ({width:.3f}mm)")
 
-        # Handle intra-IC connections first
-        intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
-        for route in intra_routes:
-            self._mark_route(route)
-            routes.append(route)
-            self.routes.append(route)
+        # Kelvin terminals must each reach the shunt. An intra-IC shortcut
+        # would join two sense branches before the topology planner sees them.
+        kelvin = detect_kelvin_topology([self.pads[p] for p in pads] + stub_targets)
+        if kelvin is not None:
+            pads_for_routing = pads
+        else:
+            # Handle intra-IC connections first
+            intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
+            for route in intra_routes:
+                self._mark_route(route)
+                routes.append(route)
+                self.routes.append(route)
 
-        # Handle block-internal connections (Issue #1587)
-        block_routes, block_connected = self._create_block_internal_routes(net, pads)
-        for route in block_routes:
-            self._mark_route(route)
-            routes.append(route)
-            self.routes.append(route)
-        connected_indices |= block_connected
+            # Handle block-internal connections (Issue #1587)
+            block_routes, block_connected = self._create_block_internal_routes(net, pads)
+            for route in block_routes:
+                self._mark_route(route)
+                routes.append(route)
+                self.routes.append(route)
+            connected_indices |= block_connected
 
-        # Build reduced pad list for inter-IC routing
-        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices, pad_lookup=self.pads)
+            pads_for_routing = reduce_pads_after_intra_ic(
+                pads, connected_indices, pad_lookup=self.pads
+            )
         # Issue #4170 (Phase 2b-1): bare boundary stub terminals count toward the
         # inter-IC target list, so a single in-region pad plus a stub still has
         # >= 2 targets to connect.
@@ -3663,12 +3675,16 @@ class Autorouter:
         # ADDITIVE source of per-net targets (never stored in self.pads).
         pad_objs = [self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing]
         pad_objs.extend(stub_targets)
+        if kelvin is not None and kelvin.root_index < len(pads_for_routing):
+            # An escape endpoint is not the shunt tap. Sharing its stub
+            # would put force-current copper into every sense branch.
+            pad_objs[kelvin.root_index] = self.pads[pads_for_routing[kelvin.root_index]]
 
         # Issue #2336: Try sub-problem pattern cache before A* search.
         # Compute a position/rotation-invariant signature and check for a
         # cached solution that can be transformed to the current location.
         sub_sig = None
-        if self._sub_problem_cache is not None:
+        if self._sub_problem_cache is not None and kelvin is None:
             cached_routes = self._try_sub_problem_cache(net, pad_objs)
             if cached_routes is not None:
                 for route in cached_routes:
@@ -3858,7 +3874,7 @@ class Autorouter:
             )
             self.routing_failures.append(failure)
 
-        if use_mst and len(pad_objs) > 2:
+        if (use_mst or kelvin is not None) and len(pad_objs) > 2:
             # Issue #2329: Disable Steiner tree decomposition for nets with
             # structurally off-grid pads.  RSMT Steiner points inherit
             # off-grid coordinates (the median of terminal positions),
@@ -5154,8 +5170,6 @@ class Autorouter:
         if not specs:
             return False
 
-        import re
-
         for _nid, net_name in self.net_names.items():
             if not net_name:
                 continue
@@ -5168,7 +5182,7 @@ class Autorouter:
                 continue
 
             for spec in specs:
-                if not re.match(spec.net_pattern, net_name, re.IGNORECASE):
+                if not spec.matches(net_name):
                     continue
                 if spec.target_z0 is not None or spec.target_zdiff is not None:
                     return True
@@ -5250,7 +5264,6 @@ class Autorouter:
             return
 
         import dataclasses
-        import re
 
         synthesized_count = 0
         for nid, net_name in self.net_names.items():
@@ -5270,7 +5283,7 @@ class Autorouter:
             # Find the first regex default that matches this net name.
             matched_spec = None
             for spec in specs:
-                if re.match(spec.net_pattern, net_name, re.IGNORECASE):
+                if spec.matches(net_name):
                     matched_spec = spec
                     break
 
@@ -13546,19 +13559,25 @@ class Autorouter:
         self._update_router_segment_foreign_context(net)
 
         routes: list[Route] = []
-        intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
-        for route in intra_routes:
-            self._mark_route(route)
-            routes.append(route)
+        kelvin = detect_kelvin_topology([self.pads[p] for p in pads] + stub_targets)
+        if kelvin is not None:
+            pads_for_routing = pads
+        else:
+            intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
+            for route in intra_routes:
+                self._mark_route(route)
+                routes.append(route)
 
-        # Handle block-internal connections (Issue #1587)
-        block_routes, block_connected = self._create_block_internal_routes(net, pads)
-        for route in block_routes:
-            self._mark_route(route)
-            routes.append(route)
-        connected_indices |= block_connected
+            # Handle block-internal connections (Issue #1587)
+            block_routes, block_connected = self._create_block_internal_routes(net, pads)
+            for route in block_routes:
+                self._mark_route(route)
+                routes.append(route)
+            connected_indices |= block_connected
 
-        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices, pad_lookup=self.pads)
+            pads_for_routing = reduce_pads_after_intra_ic(
+                pads, connected_indices, pad_lookup=self.pads
+            )
         # Issue #4170: stub tips count toward the inter-IC target list.
         if len(pads_for_routing) + len(stub_targets) < 2:
             return routes
@@ -13569,6 +13588,10 @@ class Autorouter:
         # Issue #4170: merge in the route-scoped stub-terminal target pads.
         pad_objs = [self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing]
         pad_objs.extend(stub_targets)
+        if kelvin is not None and kelvin.root_index < len(pads_for_routing):
+            # An escape endpoint is not the shunt tap. Sharing its stub
+            # would put force-current copper into every sense branch.
+            pad_objs[kelvin.root_index] = self.pads[pads_for_routing[kelvin.root_index]]
         neg_router = NegotiatedRouter(
             self.grid,
             self.router,

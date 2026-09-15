@@ -19,6 +19,10 @@ lattice node -- standard heavy-copper practice.  These tests pin:
 
 from __future__ import annotations
 
+import pytest
+from shapely.geometry import LineString, box
+from shapely.ops import unary_union
+
 from kicad_tools.router.lattice.obstacles import CommittedCopper
 from kicad_tools.router.lattice.pathfinder import LatticePathfinder
 from kicad_tools.router.layers import Layer, LayerStack
@@ -26,6 +30,89 @@ from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
 _HV = NetClassRouting(name="HV_HICUR", trace_width=2.6, clearance=0.3)
+
+
+@pytest.mark.parametrize("vertical", [False, True])
+@pytest.mark.parametrize("blocked", [False, True])
+def test_wide_neck_uses_more_than_central_half_of_pad(vertical, blocked) -> None:
+    """R58-derived geometry: a legal 2mm neck needs an outer interior anchor."""
+    pads = [
+        Pad(
+            x=8,
+            y=6,
+            width=0.8,
+            height=0.95,
+            net=1,
+            net_name="AC",
+            layer=Layer.F_CU,
+            ref="R58",
+            pin="1",
+        ),
+        Pad(
+            x=9.65,
+            y=6,
+            width=0.8,
+            height=0.95,
+            net=2,
+            net_name="GND",
+            layer=Layer.F_CU,
+            ref="R58",
+            pin="2",
+        ),
+        Pad(
+            x=2,
+            y=6,
+            width=0.8,
+            height=0.95,
+            net=1,
+            net_name="AC",
+            layer=Layer.F_CU,
+            ref="J1",
+            pin="1",
+        ),
+    ]
+    if blocked:
+        pads[1].x = 8.65
+    if vertical:
+        for pad in pads:
+            pad.x, pad.y = 8 - (pad.y - 6), 6 + (pad.x - 8)
+            pad.width, pad.height = pad.height, pad.width
+        pads[2].y = 2
+    for pad in pads:
+        pad.shape = "roundrect"
+    nc = NetClassRouting(name="AC", trace_width=2.6, neck_trace_width=2.0, clearance=0.5)
+    pf = LatticePathfinder(
+        [(0, 0), (16, 0), (16, 12), (0, 12)],
+        pads,
+        DesignRules(trace_width=0.2, trace_clearance=0.15),
+        layer_stack=LayerStack.two_layer(),
+    )
+    route = pf.route(pads[0], pads[2], net_class=nc)
+    if blocked:
+        assert route is None, "wider attachment fan must not waive an actual pad obstruction"
+        return
+    assert route is not None, "valid off-center pad attachment must escape at the authored width"
+    assert {round(s.width, 4) for s in route.segments} == {2.0, 2.6}
+
+    def pad_box(pad):
+        return box(
+            pad.x - pad.width / 2,
+            pad.y - pad.height / 2,
+            pad.x + pad.width / 2,
+            pad.y + pad.height / 2,
+        )
+
+    # Bounding boxes conservatively contain the rounded foreign pad's copper.
+    foreign = pad_box(pads[1])
+    copper = unary_union(
+        [
+            LineString([(s.x1, s.y1), (s.x2, s.y2)]).buffer(s.width / 2, quad_segs=128)
+            for s in route.segments
+        ]
+    )
+    assert copper.distance(foreign) >= 0.5 - 1e-9
+    assert copper.intersection(pad_box(pads[0]).buffer(-0.2)).area > 0
+    assert copper.intersection(pad_box(pads[2]).buffer(-0.2)).area > 0
 
 
 def _pad(x: float, y: float, net: int, ref: str, *, w: float = 0.6, h: float = 0.6) -> Pad:
