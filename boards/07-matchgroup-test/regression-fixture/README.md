@@ -249,6 +249,57 @@ This decision note changes neither PCB bytes nor their hash pin. If independent
 review rejects the exception, retain the frozen witness and close #5126 with
 that recorded rationale.
 
+### HDMI width correction (2026-09-15, #5126)
+
+The reviewed exception above is applied to **35 width atoms** on the four routed
+TMDS nets: `TMDS_D0_P`, `TMDS_D1_P`, `TMDS_D2_N`, and `TMDS_D2_P`, from 0.375 mm
+to the sidecar's 0.225 mm. The two open TMDS nets have no track segments.
+Every other byte of the saved PCB is unchanged, including segment centerlines,
+vias, existing zone fills, and non-TMDS widths. DQS copper is unchanged; this
+correction does not establish its agreement with its authored width.
+
+The old PCB SHA256 is recorded in the decision above; the corrected saved PCB is
+`fb58581eba53bb9f1dfe33a278fb896b2f08b5f4fc2e82211124d8586ba7aaf0`.
+Its hash pin was updated with the PCB, retaining the exact 841-segment,
+12-off-angle census. The change is a regression-fixture correction, not a
+manufacturing release.
+
+Current-source before/after checks retain the same four open nets and exact
+native pad components. Native KiCad 10.0.6 reports four unconnected items,
+zero other errors and 31 warnings on each input with native refill enabled.
+The current Python checker reports **13 errors, 22 warnings and 12 unique
+error rule/net signatures** on both saved inputs, including existing
+via-in-pad findings. These are current measurements; the earlier eight-error
+account above describes the September 9 check. Match-group checks remain
+engaged, and no error severity or allowance was changed.
+
+The [retained component and signature record](hdmi-width-correction-5126.json)
+contains the shared exact pad partitions/open identities and all four measured
+PCB hashes. Saved and separately refilled before/after copies pass the same
+comparisons. Native refills are evidence copies; the committed PCB retains its
+original fill bytes so unrelated serialization and geometry remain untouched.
+
+Reproduce from the original fixture in a fresh directory (use a Python with
+`pcbnew` for `--native-python`, and a KiCad 10 `kicad-cli` on `PATH`):
+
+```sh
+mkdir /tmp/board07-original
+git archive bcaf28ad3399d97df5b0d6cfefe8db7856abc689 \
+  boards/07-matchgroup-test/regression-fixture | tar -x -C /tmp/board07-original
+uv run python boards/07-matchgroup-test/repair_hdmi.py /tmp/board07-hdmi-width \
+  --input /tmp/board07-original/boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb \
+  --native-python python3
+```
+
+A completed preservation check reports `validated historical width correction`
+in `evidence.json` and exits **2**, retaining the board's existing errors.
+Failure raises an error and records `FAILED`; it is not a promotable candidate.
+The script retains the original input, byte-minimal candidate, separate native
+refills, reports and command logs. It also supports an already-correct input
+without further width edits. The current script was verified from the original
+fixture; the contact-loss negative test separately proves that a narrower
+track losing a real connection is rejected.
+
 ### Placement-delta feedback (#4468, epic #3438 Phase 3)
 
 The route step runs `kct route --placement-delta-feedback
