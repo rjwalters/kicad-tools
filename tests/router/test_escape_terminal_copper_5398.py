@@ -432,7 +432,14 @@ def test_endpoint_waiver_corner_routes_without_native_retry_fallback(force_pytho
         assert generic.metal_gy1 <= generic.metal_gy2
     # All corners of the actual rectangular waiver fit within the cap.
     assert math.hypot(terminal.width / 2, terminal.height / 2) <= width / 2
-    via = Via(endpoint + 0.4, endpoint + 0.4, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "OTHER")
+    # Keep the foreign via near the cap, clear of the committed stub and
+    # away from the sink direction: this tests terminal seeds, not detour budgets.
+    via = Via(endpoint + 0.425, endpoint - 0.425, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "OTHER")
+    required_gap = max(rules.trace_clearance, rules.via_clearance)
+    via_copper = Point(via.x, via.y).buffer(via.diameter / 2)
+    assert (
+        LineString([seg.start, seg.end]).buffer(seg.width / 2).distance(via_copper) >= required_gap
+    )
     foreign = Route(2, "OTHER", [], [via])
     router._mark_route(foreign)
     router.routes.append(foreign)
@@ -447,7 +454,7 @@ def test_endpoint_waiver_corner_routes_without_native_retry_fallback(force_pytho
             assert stats["fallback_count"] == 0
     emitted = [s for route in routes for s in route.segments]
     copper = unary_union([LineString([s.start, s.end]).buffer(s.width / 2) for s in emitted])
-    assert copper.distance(Point(via.x, via.y).buffer(via.diameter / 2)) >= rules.trace_clearance
+    assert copper.distance(via_copper) >= required_gap
     # New route copper contacts both the committed stub and the target pad.
     assert copper.intersects(LineString([seg.start, seg.end]).buffer(seg.width / 2))
     assert copper.intersects(Point(15, 15).buffer(0.4))
