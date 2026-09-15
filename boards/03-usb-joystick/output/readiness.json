@@ -1,9 +1,12 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-09-15T00:57:15.856211+00:00",
+  "checked_at": "2026-09-15T02:06:10.390817+00:00",
   "mode": "assembly",
-  "status": "ready",
-  "blockers": [],
+  "status": "blocked",
+  "blockers": [
+    "zone_fill: the required same-copper native-refill gate is unresolved. A bare `kicad-cli pcb drc --refill-zones` on the shipped board adds copper on all four poured layers (F.Cu +947.873802, B.Cu +406.966144, In1.Cu +217.304656, In2.Cu +463.102399 mm^2), so the recipe-filled copper that was checked is not the copper native refill produces. Physical compatibility remains unresolved in #5380; the #5391 producer correction alone cannot clear this gate. See output/readiness/native-refill-comparison.json.",
+    "native_drc: the shipped saved copper carries 12 native copper_sliver warnings (0 errors, 0 unconnected items). The separately refilled board reports zero violations, but it is different copper and does not certify the shipped geometry."
+  ],
   "checks": [
     {
       "name": "kct_check",
@@ -11,27 +14,33 @@
       "detail": "Fresh reviewed factory checker on the regenerated board: 54 rules, 0 errors, 0 warnings, 0 waived, unchanged explicit 0.45 mm pad-hole floor from https://jlcpcb.com/capabilities/pcb-capabilities/, 0 suppressed findings; ERC, 129-bound-pad copper LVS and manifest meta-checks pass."
     },
     {
-      "name": "zone_fill",
+      "name": "recipe_fill",
       "status": "passed",
-      "detail": "Saved copper reproduces exactly under a fresh full fill pass (kicad-cli fill + starved-thermal remediation + the #3711 foreign-pad clearance carve): 0 mm^2 area delta on all 4 pours.",
+      "detail": "Retained recipe-engine result from a766fbf4: a fresh full recipe fill pass (native fill + starved-thermal remediation + the #3711 foreign-pad clearance carve) reproduces the saved copper with 0 mm^2 area delta on all 4 pours. This establishes recipe-fill stability only; it is a different engine from bare native refill and does not establish same-copper equivalence with it.",
       "evidence": "output/readiness/fill-consistency.json"
     },
     {
+      "name": "zone_fill",
+      "status": "failed",
+      "detail": "Same-copper equivalence with bare native refill is NOT established. Independent KiCad 10.0.5 `pcb drc --refill-zones --save-board` on a separate full-context copy of the shipped board increases filled copper by F.Cu 947.873802, B.Cu 406.966144, In1.Cu 217.304656 and In2.Cu 463.102399 mm^2 and collapses the carved F.Cu pour from 50 filled polygons to 1; refilled SHA256 81de0e491ad82a68cfe375737dbf898969d45e35febb5a2737649e2378bd8e5a vs shipped e7bdf5b80a3685f4ebd7e380fdade7d9e6218168a15f0cfecea6166b69645270. The recipe carve is preserved and the release is not rebound to the refilled bytes. Physical compatibility remains unresolved in #5380; the #5391 producer correction alone cannot clear this gate.",
+      "evidence": "output/readiness/native-refill-comparison.json"
+    },
+    {
       "name": "native_drc",
-      "status": "passed",
-      "detail": "Independent native KiCad 10.0.5 `pcb drc --refill-zones` on the saved board: zero error- and warning-severity violations and zero unconnected items.",
-      "evidence": "output/native-drc.json"
+      "status": "failed",
+      "detail": "Measured on the shipped saved copper (no refill), KiCad 10.0.5 with the committed project, DRU, fp-lib-table and custom footprint present: 0 error-severity violations, 0 unconnected items, 12 copper_sliver warning-severity violations. The gate requires zero error- AND warning-severity findings, so it does not pass. The separately refilled board reports zero violations, but that is different copper (see zone_fill) and cannot stand in for the shipped geometry. The previous `--refill-zones` report recorded here described that refilled candidate, not the bytes in this release.",
+      "evidence": "output/readiness/native-drc.json"
     },
     {
       "name": "native_erc",
       "status": "passed",
-      "detail": "Independent native KiCad 10.0.5 `sch erc`: zero error- and warning-severity violations.",
+      "detail": "Retained native KiCad 10.0.5 sch erc report on the shipped schematic with its project present: zero error- and warning-severity violations (uuid_path /546c89fe-5075-48a6-a97e-bef2a1207261; report timestamp 2026-09-15T00:37:00). The bundle copy now matches this canonical report; the previous bundle report identified an older schematic UUID and KiCad 10.0.6 run. No new ERC execution is claimed by the recovery.",
       "evidence": "output/native-erc.json"
     },
     {
       "name": "artifacts",
       "status": "passed",
-      "detail": "61 bundle file(s) SHA256-verified against manifest.json; output/manufacturing.zip rebuilt from that finished bundle and verified member-for-member (62 members, no duplicates). kicad_project.zip carries the checked usb_joystick.kicad_pro, usb_joystick.kicad_sch, usb_joystick_routed.kicad_dru, usb_joystick_routed.kicad_pcb, usb_joystick_routed.kicad_pro byte-for-byte. Drawings (report.pdf, assembly-front.pdf, assembly-back.pdf) present, shipped manufacturing-requirements.json matches the reviewed routing plan, and README.txt still states the mandatory Epoxy-filled & Capped (POFV) via process."
+      "detail": "63 bundle file(s) SHA256-verified against manifest.json; output/manufacturing.zip rebuilt from that finished bundle and verified member-for-member (64 members, no duplicates). kicad_project.zip carries the checked usb_joystick.kicad_pro, usb_joystick.kicad_sch, usb_joystick_routed.kicad_dru, usb_joystick_routed.kicad_pcb, usb_joystick_routed.kicad_pro byte-for-byte. Drawings (report.pdf, assembly-front.pdf, assembly-back.pdf) present, shipped manufacturing-requirements.json matches the reviewed routing plan, and README.txt still states the mandatory Epoxy-filled & Capped (POFV) via process. The bundle now also ships native-drc.json (saved copper), native-refilled-drc.json and native-refill-comparison.json, so a downloader sees the unresolved native-refill compatibility finding. This is a binding/packaging check, not physical readiness."
     },
     {
       "name": "bom",
@@ -88,7 +97,7 @@
     "output/fp-lib-table": "d5eea395214efa8406e88c8e54435a0cbf9cf83b69ee3ed4d2519e109ce76c02",
     "output/lvs.json": "7cee6716abcfaeb2b7dea58039e3329471c32e70d19e0025660757c09ff57a41",
     "output/manufacturing-requirements.json": "48470a554e39b289ba0c079833a439c65dbc3611b505f7dd978552d25d13d37b",
-    "output/manufacturing.zip": "db1a376c87e5c20f616a9b22f8f47a9b847c833b7236d335c139136d0d86948b",
+    "output/manufacturing.zip": "929cf2228996f2040dac848192fc1b9689a750c3c23ad04fc3e20a9df97e814e",
     "output/manufacturing/DESIGN_REVIEW.md": "2d571857bdd8edcc223c93e8ba8ae5dfd50553599a85ce65fbbdf59e9b7e48c4",
     "output/manufacturing/README.txt": "648aa702974f1ff596afc1ac627d351365a57db675323bfe7ef60c86aa99efd3",
     "output/manufacturing/assembly-back.pdf": "5ae31f3a0e5f3d63ddbba30d616df3dd993aa171f4a484cd961c9c46a05fea38",
@@ -143,21 +152,27 @@
     "output/manufacturing/images/pcb_front.png": "02c3e4ed86b1a3583be4d324afedaa1ee95c73a96cb70c1b4a102cbfd848b1ee",
     "output/manufacturing/images/schematic_usb_joystick.png": "280cd14f3e38b8ee0d7494113bdd72bae08e75561aa78723bf7c44f65c26f9d3",
     "output/manufacturing/kicad_project.zip": "fc94250cdacf2d07c1793954a9b72a4ae33834c526eaf57f1137978faaad39f0",
-    "output/manufacturing/manifest.json": "2fc2c9896c4502a2d3e249e4492438a4829a1e08a95993604ec41444aaa5ee88",
+    "output/manufacturing/manifest.json": "5e47fe3ef0b150eb8aaa7339a3e2f209c1615e90486c5aa9b7263af8baeb7bbb",
     "output/manufacturing/manual-assembly-bom.csv": "f51fef1b581623d69c00b1b3604f0a1b193c29e29134a3931e0853ab13030ef7",
     "output/manufacturing/manufacturing-requirements.json": "48470a554e39b289ba0c079833a439c65dbc3611b505f7dd978552d25d13d37b",
-    "output/manufacturing/native-drc.json": "f9e0764073b0624fdc534f6b7a7b277dd8f7a83a46387325c86e3a8ff57b99ec",
-    "output/manufacturing/native-erc.json": "7d56da9eb0713ad6b70f4339d30a06680147894a0110b7323f5b6c2194ddcbd2",
+    "output/manufacturing/native-drc.json": "f7699733666cadc57b9f038032e86d1170b65f7892aad32f7b468b6020c564ba",
+    "output/manufacturing/native-erc.json": "d2f5cb1d8eacad4c095fefb1fe616c10ddbc8ad424a456b31935ed2a9168b016",
+    "output/manufacturing/native-refill-comparison.json": "4f0dc75ffefbe7cd89d6a5afeae8b48eda06534e9ea699d7ebe3e8e309f2ff99",
+    "output/manufacturing/native-refilled-drc.json": "6a407985eb526f9431dbdbe4582af211725b2ccc7bfd91a2e8602bf263a73620",
     "output/manufacturing/procurement-review.json": "ce1a26cb68840b996fe8284f30fec65345ce993c5a2561591be5956c06c6f48c",
     "output/manufacturing/report.md": "0b4ba87e5e91ee22a2b992d6a42639b9638bbe45c5f957d85a9630864a889a59",
     "output/manufacturing/report.pdf": "376127b107c302ac789a843621d72271d42f923d32d09f26cb2e574f3f384a1d",
-    "output/native-drc.json": "b5a95094ceddd8db9d2acc8728eb8210461c86e5bdd90f5f65cd7ee6bcd1fa6e",
+    "output/native-drc.json": "f7699733666cadc57b9f038032e86d1170b65f7892aad32f7b468b6020c564ba",
     "output/native-erc.json": "d2f5cb1d8eacad4c095fefb1fe616c10ddbc8ad424a456b31935ed2a9168b016",
+    "output/native-refill-comparison.json": "4f0dc75ffefbe7cd89d6a5afeae8b48eda06534e9ea699d7ebe3e8e309f2ff99",
+    "output/native-refilled-drc.json": "6a407985eb526f9431dbdbe4582af211725b2ccc7bfd91a2e8602bf263a73620",
     "output/net_class_map.json": "ba6c1ca4f5ddd13312a569e2f7c1ba93a0d21ba24ac34f3b4712895352f391fd",
     "output/readiness/fill-consistency.json": "71a730e0730b763b6f35db119ee9ff5b58e60f2f174febe55da67957d6acb2d4",
     "output/readiness/kct-check.json": "b4d8fee57e135489ca5b3531dc97b003dbbc98900cf93d22fe00ca093c733f0d",
-    "output/readiness/native-drc.json": "b5a95094ceddd8db9d2acc8728eb8210461c86e5bdd90f5f65cd7ee6bcd1fa6e",
+    "output/readiness/native-drc.json": "f7699733666cadc57b9f038032e86d1170b65f7892aad32f7b468b6020c564ba",
     "output/readiness/native-erc.json": "d2f5cb1d8eacad4c095fefb1fe616c10ddbc8ad424a456b31935ed2a9168b016",
+    "output/readiness/native-refill-comparison.json": "4f0dc75ffefbe7cd89d6a5afeae8b48eda06534e9ea699d7ebe3e8e309f2ff99",
+    "output/readiness/native-refilled-drc.json": "6a407985eb526f9431dbdbe4582af211725b2ccc7bfd91a2e8602bf263a73620",
     "output/usb_joystick.kicad_pcb": "f30c2301e6a1cfb95a874b3acd385f780d2fa906dd708f532fe6077ff0359434",
     "output/usb_joystick.kicad_pro": "910b31f68fb80f376e0725b6ecf41963431dd2091a27625790e0bd39f606839c",
     "output/usb_joystick.kicad_sch": "107942b9d65f762add10ae2d20c4076a8350a82081e0bd9274216875a8c0cba9",

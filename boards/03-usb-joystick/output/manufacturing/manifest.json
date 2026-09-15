@@ -229,12 +229,20 @@
       "size": 196
     },
     "native-drc.json": {
-      "sha256": "f9e0764073b0624fdc534f6b7a7b277dd8f7a83a46387325c86e3a8ff57b99ec",
-      "size": 1211
+      "sha256": "f7699733666cadc57b9f038032e86d1170b65f7892aad32f7b468b6020c564ba",
+      "size": 3235
     },
     "native-erc.json": {
-      "sha256": "7d56da9eb0713ad6b70f4339d30a06680147894a0110b7323f5b6c2194ddcbd2",
+      "sha256": "d2f5cb1d8eacad4c095fefb1fe616c10ddbc8ad424a456b31935ed2a9168b016",
       "size": 985
+    },
+    "native-refill-comparison.json": {
+      "sha256": "4f0dc75ffefbe7cd89d6a5afeae8b48eda06534e9ea699d7ebe3e8e309f2ff99",
+      "size": 5543
+    },
+    "native-refilled-drc.json": {
+      "sha256": "6a407985eb526f9431dbdbe4582af211725b2ccc7bfd91a2e8602bf263a73620",
+      "size": 1211
     },
     "procurement-review.json": {
       "sha256": "ce1a26cb68840b996fe8284f30fec65345ce993c5a2561591be5956c06c6f48c",
