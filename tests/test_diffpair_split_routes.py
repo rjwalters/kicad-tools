@@ -155,10 +155,12 @@ def test_fragment_order_and_vias_are_preserved_once(reverse):
     ar.restore_route_snapshot(ar.routes)
     original = list(ar.routes)
     ar.apply_diffpair_length_tuning(pairs, verbose=False)
-    assert abs(length(ar, 1) - length(ar, 2)) <= 0.5
+    thickness = ar._build_manufacturer_design_rules().board_thickness_mm
+    # Two ordinary barrels belong to net 1, each spanning the full board.
+    assert abs(length(ar, 1) + 2 * thickness - length(ar, 2)) <= 0.5
     assert sorted(id(v) for r in ar.routes for v in r.vias) == sorted(map(id, vias))
     assert any(r is old for r in ar.routes for old in original if old.is_escape and old.net == 1)
-    assert ar.diffpair_length_tracker.lengths[1] == pytest.approx(length(ar, 1))
+    assert ar.diffpair_length_tracker.lengths[1] == pytest.approx(length(ar, 1) + 2 * thickness)
     assert ar.diffpair_length_tracker.lengths[2] == pytest.approx(length(ar, 2))
 
 
@@ -179,3 +181,32 @@ def test_untuned_fragments_keep_identity_and_complete_tracker(disabled):
     assert all(a is b for a, b in zip(original, ar.routes, strict=True))
     assert ar.diffpair_length_tracker.lengths[1] == pytest.approx(length(ar, 1))
     assert ar.diffpair_length_tracker.lengths[2] == pytest.approx(length(ar, 2))
+
+
+def test_via_aware_tuning_and_refresh_measure_all_escape_and_body_fragments():
+    from kicad_tools.router.match_group_length import MatchGroupTracker
+
+    ar, pairs = setup()
+    escape = next(r for r in ar.routes if r.net == 1 and r.is_escape)
+    escape.vias = [
+        Via(x=x, y=10, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        for x in (5, 6)
+    ]
+    thickness = ar._build_manufacturer_design_rules().board_thickness_mm
+    result = ar.apply_diffpair_length_tuning(pairs, verbose=False)[("USB_D+", "USB_D-")]
+    assert result.success
+    assert any(r is escape for r in ar.routes)
+    measured = {
+        net: sum(
+            MatchGroupTracker._measure_route_total(r, thickness, 2, False)
+            for r in ar.routes
+            if r.net == net
+        )
+        for net in (1, 2)
+    }
+    skew = abs(measured[1] - measured[2])
+    assert result.skew_after_mm == pytest.approx(skew)
+    assert ar.diffpair_length_tracker.get_skew(pairs[0]) == pytest.approx(skew)
+    ar._finalize_routing()
+    assert ar.diffpair_length_tracker.get_skew(pairs[0]) == pytest.approx(skew)
+    assert ar.diffpair_length_tracker.lengths == pytest.approx(measured)

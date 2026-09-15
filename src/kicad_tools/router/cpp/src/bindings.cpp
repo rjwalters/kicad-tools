@@ -10,6 +10,7 @@
 #include "types.hpp"
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/vector.h>
+#include <nanobind/stl/array.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/optional.h>
@@ -600,6 +601,10 @@ NB_MODULE(router_cpp, m) {
     nb::class_<CoupledRouteResult>(m, "CoupledRouteResult")
         .def(nb::init<>())
         .def_ro("path", &CoupledRouteResult::path)
+        .def_ro("best_path", &CoupledRouteResult::best_path)
+        .def_ro("validated_departure_path", &CoupledRouteResult::validated_departure_path)
+        // Issue #5333: deepest required departure step expanded (0..prefix len).
+        .def_ro("departure_prefix_progress", &CoupledRouteResult::departure_prefix_progress)
         .def_ro("success", &CoupledRouteResult::success)
         .def_ro("iterations", &CoupledRouteResult::iterations)
         .def_ro("best_progress", &CoupledRouteResult::best_progress)
@@ -621,10 +626,11 @@ NB_MODULE(router_cpp, m) {
         // 2) to the constructed CoupledPathfinder (nurse, index 1) to prevent
         // the same dangling-reference use-after-free.
         .def(nb::init<Grid3D&, const DesignRules&, int, int, int, int, int,
-                      double, double>(),
+                      double, double, double, double, double>(),
              "grid"_a, "rules"_a, "target_spacing_cells"_a, "min_spacing_cells"_a,
              "trace_half_width_cells"_a, "via_extra_cells"_a, "via_drill_cells"_a,
-             "spacing_penalty_factor"_a, "heuristic_weight"_a,
+             "spacing_penalty_factor"_a, "heuristic_weight"_a, "min_via_pitch_cells"_a,
+             "p_via_trace_clearance_cells"_a, "n_via_trace_clearance_cells"_a,
              nb::keep_alive<1, 2>())
         .def("route", &CoupledPathfinder::route,
              "p_start_x"_a, "p_start_y"_a, "n_start_x"_a, "n_start_y"_a,
@@ -635,7 +641,8 @@ NB_MODULE(router_cpp, m) {
              "effective_target_spacing"_a, "effective_approach_radius"_a,
              "effective_departure_radius"_a,
              "routable_layers"_a, "corridor_bitset"_a,
-             "max_iterations_budget"_a, "timeout_seconds"_a);
+             "max_iterations_budget"_a, "timeout_seconds"_a,
+             "departure_prefix"_a = std::vector<std::array<int, 6>>{});
 
     // Geometry functions (Issue #2439)
     m.def("fnv1a_hash", [](const std::string& s) -> uint32_t {

@@ -234,7 +234,11 @@ namespace router {
 // construction); refs in the new set reach the carve-out only because a
 // CONFIGURED override resolved smaller than the default clearance, and
 // enforce that resolved value as a hard floor instead of skipping.
-constexpr int ROUTER_CPP_BUILD_VERSION = 25;
+// v29: coupled departure-prefix expansion constraints (#5333).
+// v31: ``CoupledRouteResult::departure_prefix_progress`` -- how far a required
+// departure prefix was actually expanded, so a rejected proposal names the
+// step that blocked it instead of only reporting "incomplete" (#5333).
+constexpr int ROUTER_CPP_BUILD_VERSION = 31;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -463,6 +467,21 @@ struct CoupledPathNode {
 //                           categorically-empty dict on the C++ path.
 struct CoupledRouteResult {
     std::vector<CoupledPathNode> path;  // root->goal; empty when !success.
+    // Diagnostic root->best-progress path on failure; never a routed result.
+    // Empty on success or when no state was expanded before termination.
+    std::vector<CoupledPathNode> best_path;
+    // Root through the last required departure step, once expanded legally.
+    // Independent of goal progress; empty for absent or incomplete prefixes.
+    std::vector<CoupledPathNode> validated_departure_path;
+    // Issue #5333: how many required departure steps the search actually
+    // expanded -- the largest ``prefix_step`` over every POPPED node, so a
+    // rejected proposal reports WHERE its chain stopped instead of only
+    // "incomplete".  ``validated_departure_path`` is non-empty exactly when
+    // this equals the requested prefix length; below that the next required
+    // step is the one no legal candidate could satisfy.  0 with a non-empty
+    // prefix means even the first step was refused.  Always 0 when no prefix
+    // was requested; diagnostic only, never consulted by the search.
+    int departure_prefix_progress = 0;
     bool success = false;
     // Diagnostics (always populated, success or not).
     int iterations = 0;

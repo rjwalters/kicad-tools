@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 25
+_REQUIRED_CPP_BUILD_VERSION = 31
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -956,6 +956,17 @@ class CppGrid:
                         pad_blocked,
                         (layer, y, x) in grid._pad_halo_cells,
                     )
+
+            # Escape carve-outs can clear a routing block while retaining
+            # pad-metal occupancy. Via drill checks and pad-exit guards need
+            # that metadata independently of the blocked bit. Copy these
+            # sparse cells without mark_blocked, which would close the escape.
+            pad_layers, pad_ys, pad_xs = np.nonzero(pad_blocked_np & ~blocked_np)
+            for pad_layer, pad_y, pad_x in zip(pad_layers, pad_ys, pad_xs, strict=True):
+                cell = cpp_grid._impl.at(int(pad_x), int(pad_y), int(pad_layer))
+                cell.net = int(net_np[pad_layer, pad_y, pad_x])
+                cell.is_obstacle = bool(obstacle_np[pad_layer, pad_y, pad_x])
+                cell.pad_blocked = True
 
         # Issue #4071: marshal corridor reservations into the C++ grid.
         # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner
@@ -3811,6 +3822,9 @@ class CppCoupledPathfinder:
         via_drill_cells: int,
         spacing_penalty_factor: float,
         heuristic_weight: float,
+        min_via_pitch_cells: float | None = None,
+        p_via_trace_clearance_cells: float | None = None,
+        n_via_trace_clearance_cells: float | None = None,
     ):
         if not _CPP_AVAILABLE:
             raise RuntimeError("C++ router backend not available")
@@ -3818,6 +3832,14 @@ class CppCoupledPathfinder:
         # Marshal the DesignRules scalars into the C++ struct (mirrors the
         # single-ended CppPathfinder rules marshalling).
         cpp_rules = router_cpp.DesignRules()
+        from .mfr_limits import get_mfr_limits
+
+        cpp_rules.allow_smd_vias = True
+        if rules.manufacturer:
+            with contextlib.suppress(ValueError):
+                cpp_rules.allow_smd_vias = bool(
+                    get_mfr_limits(rules.manufacturer).via_in_pad_supported
+                )
         cpp_rules.trace_width = float(rules.trace_width)
         cpp_rules.trace_clearance = float(rules.trace_clearance)
         cpp_rules.via_drill = float(rules.via_drill)
@@ -3834,6 +3856,21 @@ class CppCoupledPathfinder:
         # this issue wires up).  Marshalled here so a future coupled-attractor
         # port needs no additional plumbing.
         cpp_rules.cost_corridor_attractor = float(rules.cost_corridor_attractor)
+        if min_via_pitch_cells is None:
+            min_via_pitch_cells = (
+                max(
+                    rules.via_diameter + rules.via_clearance,
+                    rules.via_drill + rules.min_hole_to_hole,
+                )
+                / cpp_grid.resolution
+            )
+        default_via_trace_clearance = (
+            rules.via_diameter / 2 + rules.via_clearance + rules.trace_width / 2
+        ) / cpp_grid.resolution
+        if p_via_trace_clearance_cells is None:
+            p_via_trace_clearance_cells = default_via_trace_clearance
+        if n_via_trace_clearance_cells is None:
+            n_via_trace_clearance_cells = default_via_trace_clearance
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
             cpp_rules,
@@ -3844,6 +3881,9 @@ class CppCoupledPathfinder:
             int(via_drill_cells),
             float(spacing_penalty_factor),
             float(heuristic_weight),
+            float(min_via_pitch_cells),
+            float(p_via_trace_clearance_cells),
+            float(n_via_trace_clearance_cells),
         )
 
     def route(
@@ -3864,8 +3904,15 @@ class CppCoupledPathfinder:
         corridor_bitset: list[int],
         max_iterations_budget: int,
         timeout_seconds: float,
+        departure_prefix: list[tuple[int, int, int, int, int, int]] | None = None,
     ) -> tuple[list[tuple[int, int, int, int, int, int, bool]] | None, dict]:
         """Run the coupled C++ search.
+
+        ``departure_prefix`` lists required successive joint grid states
+        after the original start, excluding the root. Every step must pass
+        normal neighbor, spacing, copper/history and corridor checks. The
+        original endpoints and parent history remain intact; prefix steps
+        consume the ordinary iteration/time budgets. Empty means no constraint.
 
         Returns ``(path, diagnostics)`` where ``path`` is a list of
         ``(p_x, p_y, p_layer, n_x, n_y, n_layer, via_from_parent)`` tuples in
@@ -3873,7 +3920,16 @@ class CppCoupledPathfinder:
         ``diagnostics`` carries ``iterations`` / ``best_progress`` /
         ``timeout_exceeded`` / ``iteration_limited`` and (Issue #4459) the
         per-reason ``rejections`` histogram for the caller's ``last_*``
-        bookkeeping.
+        bookkeeping. On failure, ``best_path`` retains the root-to-best
+        partial geometry in the same tuple format; it is diagnostic evidence,
+        not a successful route. It is empty on success or before any expansion.
+        ``validated_departure_path`` separately retains root through the last
+        required prefix step once legally expanded, even when that departure
+        moves away from the goal. It is empty for absent/incomplete prefixes
+        and never changes search success or its budget.
+        ``departure_prefix_progress`` counts how many of those required steps
+        were expanded (0..len(prefix)), so an incomplete prefix names the step
+        that blocked instead of only reporting emptiness.
         """
         res = self._impl.route(
             int(p_start_xy[0]),
@@ -3895,6 +3951,7 @@ class CppCoupledPathfinder:
             corridor_bitset,
             int(max_iterations_budget),
             float(timeout_seconds),
+            departure_prefix or [],
         )
         diagnostics = {
             "iterations": int(res.iterations),
@@ -3907,6 +3964,21 @@ class CppCoupledPathfinder:
             # forcing the caller's ``last_rejections`` to a categorically-empty
             # dict).  ``res.rejections`` is a ``dict[str, int]`` from nanobind.
             "rejections": {str(k): int(v) for k, v in dict(res.rejections).items()},
+            # A failed search remains failed; retain its best geometry only
+            # for replay/landing diagnosis, separately from the result path.
+            "validated_departure_path": [
+                (n.p_x, n.p_y, n.p_layer, n.n_x, n.n_y, n.n_layer, n.via_from_parent)
+                for n in res.validated_departure_path
+            ],
+            # Issue #5333: how many required departure steps were expanded.
+            # ``validated_departure_path`` is non-empty exactly when this
+            # equals the requested prefix length; a smaller value names the
+            # step no legal candidate could satisfy.
+            "departure_prefix_progress": int(res.departure_prefix_progress),
+            "best_path": [
+                (n.p_x, n.p_y, n.p_layer, n.n_x, n.n_y, n.n_layer, n.via_from_parent)
+                for n in res.best_path
+            ],
         }
         if not res.success:
             return None, diagnostics

@@ -48,7 +48,10 @@ CoupledPathfinder::CoupledPathfinder(Grid3D& grid,
                                      int via_extra_cells,
                                      int via_drill_cells,
                                      double spacing_penalty_factor,
-                                     double heuristic_weight)
+                                     double heuristic_weight,
+                                     double min_via_pitch_cells,
+                                     double p_via_trace_clearance_cells,
+                                     double n_via_trace_clearance_cells)
     : grid_(grid),
       rules_(rules),
       target_spacing_cells_(target_spacing_cells),
@@ -58,24 +61,29 @@ CoupledPathfinder::CoupledPathfinder(Grid3D& grid,
       via_drill_cells_(std::max(0, via_drill_cells)),
       spacing_penalty_factor_(std::clamp(spacing_penalty_factor, 0.0, 1.0)),
       heuristic_weight_(std::max(1.0, heuristic_weight)),
+      min_via_pitch_cells_(std::max(0.0, min_via_pitch_cells)),
+      p_via_trace_clearance_cells_(std::max(0.0, p_via_trace_clearance_cells)),
+      n_via_trace_clearance_cells_(std::max(0.0, n_via_trace_clearance_cells)),
       cols_(grid.cols()),
       rows_(grid.rows()),
       num_layers_(grid.layers()) {}
 
 // Mirror of Python ``_is_via_blocked`` (diffpair_routing.py:793-832).
-bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net) const {
+bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net, bool allow_own_pad) const {
+    allow_own_pad = allow_own_pad && rules_.allow_smd_vias;
     for (int layer = 0; layer < num_layers_; ++layer) {
         for (int dy = -via_extra_cells_; dy <= via_extra_cells_; ++dy) {
             for (int dx = -via_extra_cells_; dx <= via_extra_cells_; ++dx) {
                 if (is_cell_blocked(gx + dx, gy + dy, layer, net)) return true;
             }
         }
-        // Issue #3508: no via-in-pad regardless of net ownership.
+        // Endpoint exception applies only to pad copper belonging to this net.
         for (int dy = -via_drill_cells_; dy <= via_drill_cells_; ++dy) {
             for (int dx = -via_drill_cells_; dx <= via_drill_cells_; ++dx) {
                 int cgx = gx + dx, cgy = gy + dy;
                 if (cgx < 0 || cgx >= cols_ || cgy < 0 || cgy >= rows_) return true;
-                if (grid_.at(cgx, cgy, layer).pad_blocked) return true;
+                const auto& cell = grid_.at(cgx, cgy, layer);
+                if (cell.pad_blocked && !(allow_own_pad && cell.net == net)) return true;
             }
         }
     }
@@ -119,7 +127,8 @@ CoupledRouteResult CoupledPathfinder::route(
     const std::vector<int>& routable_layers,
     const std::vector<uint8_t>& corridor_bitset,
     int max_iterations_budget,
-    double timeout_seconds) {
+    double timeout_seconds,
+    const std::vector<std::array<int, 6>>& departure_prefix) {
 
     CoupledRouteResult result;
 
@@ -213,6 +222,27 @@ CoupledRouteResult CoupledPathfinder::route(
     const bool have_iter_budget = max_iterations_budget > 0;
 
     double best_progress = -1.0;  // -1 sentinel = "nothing popped yet".
+    int best_node_idx = -1;
+    // Preserve geometry for failed-search diagnosis without returning it as
+    // a successful route. Pool indices remain valid across reallocations.
+    auto partial_path = [&pool](int idx) {
+        std::vector<CoupledPathNode> path;
+        while (idx >= 0) {
+            const CoupledAStarNode& nd = pool[static_cast<size_t>(idx)];
+            CoupledPathNode pn;
+            pn.p_x = nd.p_x; pn.p_y = nd.p_y; pn.p_layer = nd.p_layer;
+            pn.n_x = nd.n_x; pn.n_y = nd.n_y; pn.n_layer = nd.n_layer;
+            pn.via_from_parent = nd.via_from_parent;
+            path.push_back(pn);
+            idx = nd.parent_idx;
+        }
+        std::reverse(path.begin(), path.end());
+        return path;
+    };
+
+    auto best_partial_path = [&partial_path, &best_node_idx]() {
+        return partial_path(best_node_idx);
+    };
 
     // Issue #4459: per-reason move-rejection histogram.  Counts which guard
     // pruned each candidate so a 0/9 budget-exit can be triaged (which
@@ -250,6 +280,7 @@ CoupledRouteResult CoupledPathfinder::route(
         // Iteration-budget classifier (diffpair_routing.py:1707-1721).
         if (have_iter_budget && iterations >= max_iterations_budget) {
             result.success = false;
+            result.best_path = best_partial_path();
             result.iterations = static_cast<int>(iterations);
             result.best_progress = best_progress;
             result.timeout_exceeded = true;
@@ -260,6 +291,7 @@ CoupledRouteResult CoupledPathfinder::route(
         // Wall-clock check every 64 iters (diffpair_routing.py:1728-1743).
         if (have_deadline && (iterations & 63) == 0 && clock::now() >= deadline) {
             result.success = false;
+            result.best_path = best_partial_path();
             result.iterations = static_cast<int>(iterations);
             result.best_progress = best_progress;
             result.timeout_exceeded = true;
@@ -280,10 +312,24 @@ CoupledRouteResult CoupledPathfinder::route(
         int current_idx = static_cast<int>(pool.size());
         pool.push_back(current);
 
+        // Issue #5333: deepest required departure step actually expanded.
+        // Recorded on the POP (not the push) so it counts steps that survived
+        // the closed-set/goal checks, and carried on every return path below
+        // because it lives on ``result``.  Diagnostic only.
+        result.departure_prefix_progress = std::max(
+            result.departure_prefix_progress, static_cast<int>(current.prefix_step));
+
+        if (!departure_prefix.empty() && result.validated_departure_path.empty() &&
+            current.prefix_step == departure_prefix.size()) {
+            result.validated_departure_path = partial_path(current_idx);
+        }
+
         // Goal check (diffpair_routing.py:1762-1771).
-        bool p_at_goal = (current.p_x == p_goal_x && current.p_y == p_goal_y);
-        bool n_at_goal = (current.n_x == n_goal_x && current.n_y == n_goal_y);
-        if (p_at_goal && n_at_goal) {
+        bool p_at_goal = (current.p_x == p_goal_x && current.p_y == p_goal_y &&
+                          current.p_layer == end_layer);
+        bool n_at_goal = (current.n_x == n_goal_x && current.n_y == n_goal_y &&
+                          current.n_layer == end_layer);
+        if (p_at_goal && n_at_goal && current.prefix_step == departure_prefix.size()) {
             // Reconstruct root->goal path from the pool parent chain.
             std::vector<CoupledPathNode> rev;
             int idx = current_idx;
@@ -311,6 +357,7 @@ CoupledRouteResult CoupledPathfinder::route(
             std::abs(current.n_x - n_goal_x) + std::abs(current.n_y - n_goal_y));
         if (best_progress < 0.0 || progress < best_progress) {
             best_progress = progress;
+            best_node_idx = current_idx;
         }
 
         // ------------------------------------------------------------------
@@ -334,6 +381,7 @@ CoupledRouteResult CoupledPathfinder::route(
         // longer chain does not leak into this one.
         for (auto& kv : p_prox) kv.second.clear();
         for (auto& kv : n_prox) kv.second.clear();
+        std::vector<std::pair<int, int>> p_via_sites, n_via_sites;
         {
             int walk = current_idx;
             while (walk >= 0) {
@@ -342,6 +390,10 @@ CoupledRouteResult CoupledPathfinder::route(
                 uint64_t nc = xyl_key(nd.n_x, nd.n_y, nd.n_layer);
                 p_visited.insert(pc);
                 n_visited.insert(nc);
+                if (nd.via_from_parent) {
+                    p_via_sites.emplace_back(nd.p_x, nd.p_y);
+                    n_via_sites.emplace_back(nd.n_x, nd.n_y);
+                }
                 if (prox_r > 1) {
                     p_prox[xy_key(nd.p_x / prox_bucket, nd.p_y / prox_bucket)].push_back(pc);
                     n_prox[xy_key(nd.n_x / prox_bucket, nd.n_y / prox_bucket)].push_back(nc);
@@ -388,6 +440,16 @@ CoupledRouteResult CoupledPathfinder::route(
                                    int nn_x, int nn_y, int nn_l,
                                    bool p_adv, bool n_adv,
                                    bool p_ep, bool n_ep) -> bool {
+            // Regular vias span the board: a different trace layer or an
+            // endpoint exemption cannot make crossing a partner barrel legal.
+            if (p_adv) for (const auto& site : n_via_sites) {
+                if (std::hypot(np_x - site.first, np_y - site.second) + 1e-9 <
+                    p_via_trace_clearance_cells_) return true;
+            }
+            if (n_adv) for (const auto& site : p_via_sites) {
+                if (std::hypot(nn_x - site.first, nn_y - site.second) + 1e-9 <
+                    n_via_trace_clearance_cells_) return true;
+            }
             if (p_visited.empty() && n_visited.empty()) return false;
             uint64_t pk = xyl_key(np_x, np_y, np_l);
             uint64_t nk = xyl_key(nn_x, nn_y, nn_l);
@@ -596,12 +658,44 @@ CoupledRouteResult CoupledPathfinder::route(
                            at_goal(current.p_x, current.p_y, p_start_x, p_start_y);
             bool n_at_ep = at_goal(current.n_x, current.n_y, n_goal_x, n_goal_y) ||
                            at_goal(current.n_x, current.n_y, n_start_x, n_start_y);
+            double via_dx = current.p_x - current.n_x;
+            double via_dy = current.p_y - current.n_y;
+            bool pair_vias_clear = std::hypot(via_dx, via_dy) + 1e-9 >= min_via_pitch_cells_;
+            // The candidate pair has not been published to grid_. Check
+            // the complete parent chain, including endpoints and all layers.
+            const char* history_rejection = nullptr;
+            if (pair_vias_clear) {
+                for (const auto& site : n_via_sites) {
+                    if (std::hypot(current.p_x - site.first, current.p_y - site.second) + 1e-9 <
+                        min_via_pitch_cells_) history_rejection = "via_partner_barrel";
+                }
+                for (const auto& site : p_via_sites) {
+                    if (std::hypot(current.n_x - site.first, current.n_y - site.second) + 1e-9 <
+                        min_via_pitch_cells_) history_rejection = "via_partner_barrel";
+                }
+                int walk = current_idx;
+                while (!history_rejection && walk >= 0) {
+                    const CoupledAStarNode& nd = pool[static_cast<size_t>(walk)];
+                    double p_to_n = std::hypot(current.p_x - nd.n_x, current.p_y - nd.n_y);
+                    double n_to_p = std::hypot(current.n_x - nd.p_x, current.n_y - nd.p_y);
+                    if (p_to_n + 1e-9 < n_via_trace_clearance_cells_ ||
+                        n_to_p + 1e-9 < p_via_trace_clearance_cells_) {
+                        history_rejection = "via_partner_trail";
+                        break;
+                    }
+                    walk = nd.parent_idx;
+                }
+            }
             for (int new_layer : routable_layers) {
                 if (new_layer == current.p_layer) continue;
-                if (!p_at_ep && is_via_blocked(current.p_x, current.p_y, p_net)) { rej("via_blocked_p"); continue; }
-                if (!n_at_ep && is_via_blocked(current.n_x, current.n_y, n_net)) { rej("via_blocked_n"); continue; }
-                if (!p_at_ep && is_trace_blocked(current.p_x, current.p_y, new_layer, p_net)) { rej("via_trace_blocked_p"); continue; }
-                if (!n_at_ep && is_trace_blocked(current.n_x, current.n_y, new_layer, n_net)) { rej("via_trace_blocked_n"); continue; }
+                if (history_rejection) { rej(history_rejection); continue; }
+                // Candidate pair copper is not in grid_: enforce the mutual
+                // copper and drill pitch even at endpoint cells.
+                if (!pair_vias_clear) { rej("via_pair_pitch"); continue; }
+                if (is_via_blocked(current.p_x, current.p_y, p_net, p_at_ep)) { rej("via_blocked_p"); continue; }
+                if (is_via_blocked(current.n_x, current.n_y, n_net, n_at_ep)) { rej("via_blocked_n"); continue; }
+                if (is_trace_blocked(current.p_x, current.p_y, new_layer, p_net)) { rej("via_trace_blocked_p"); continue; }
+                if (is_trace_blocked(current.n_x, current.n_y, new_layer, n_net)) { rej("via_trace_blocked_n"); continue; }
                 double cost = rules_.cost_via * 2.0;
                 // Issue #4080: corridor attractor on the via-drop
                 // destination cells -- the reservation is what makes the
@@ -623,6 +717,17 @@ CoupledRouteResult CoupledPathfinder::route(
 
         // Expand neighbors into the open set (diffpair_routing.py:1842-1890).
         for (const Cand& c : neighbors) {
+            // Constrain initial expansion, never inject a pre-built path.
+            // Every requested step has passed the ordinary physical/history
+            // guards above and consumes the same search budget as any move.
+            if (current.prefix_step < departure_prefix.size()) {
+                const auto& next = departure_prefix[current.prefix_step];
+                if (c.px != next[0] || c.py != next[1] || c.pl != next[2] ||
+                    c.nx != next[3] || c.ny != next[4] || c.nl != next[5]) {
+                    rej("departure_prefix");
+                    continue;
+                }
+            }
             // Corridor pruning (diffpair_routing.py:1864-1871).
             if (have_corridor) {
                 if (!in_corridor(c.px, c.py) || !in_corridor(c.nx, c.ny)) {
@@ -649,6 +754,7 @@ CoupledRouteResult CoupledPathfinder::route(
                 node.g_score = new_g;
                 node.parent_idx = current_idx;
                 node.via_from_parent = c.is_via;
+                node.prefix_step = std::min(current.prefix_step + 1, departure_prefix.size());
                 node.seq = seq_counter++;
                 open_set.push(node);
             }
@@ -657,6 +763,7 @@ CoupledRouteResult CoupledPathfinder::route(
 
     // No path found (open set exhausted or memory backstop hit).
     result.success = false;
+    result.best_path = best_partial_path();
     result.iterations = static_cast<int>(iterations);
     result.best_progress = best_progress;
     result.rejections = std::move(rejections);  // #4459

@@ -218,3 +218,91 @@ def test_sqlite_cache_hit_preserves_pre_tuning_fragments_and_physical_result(tmp
     assert (physical_length(warm, 1) + physical_length(warm, 2)) / 2 == pytest.approx(
         11.6, abs=0.02
     )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_pair_meanders_outward_despite_neighbor_on_p_side(reverse):
+    from kicad_tools.router.match_group_tuning import tune_match_group_v2
+
+    # The reference pair is on P's outer side. Its position must not push
+    # the short pair's reflected meanders inward toward each other.
+    p, n = route(1, 5, 15, 10), route(2, 5, 15, 10.4)
+    if reverse:
+        for r in (p, n):
+            seg = r.segments[0]
+            seg.x1, seg.x2 = seg.x2, seg.x1
+    corpus = {1: p, 2: n, 3: route(3, 5, 16.13, 5), 4: route(4, 5, 16.13, 5.4)}
+    group = MatchGroup(name="outward", net_ids=[], pair_ids=[(1, 2), (3, 4)], tolerance=0.05)
+    results = tune_match_group_v2(
+        group,
+        corpus,
+        intra_group_clearance_mm=0.15,
+        intra_pair_clearance_mm=0.1,
+        grid_resolution_mm=0.127,
+    )
+    assert results[1][1].success and results[2][1].success
+    tuned_p, tuned_n = results[1][0], results[2][0]
+    assert LengthTracker.calculate_route_length(tuned_p) == pytest.approx(11.13, abs=1e-7)
+    assert LengthTracker.calculate_route_length(tuned_n) == pytest.approx(11.13, abs=1e-7)
+    assert max(max(s.y1, s.y2) for s in tuned_p.segments) <= 10 + 1e-9
+    assert min(min(s.y1, s.y2) for s in tuned_n.segments) >= 10.4 - 1e-9
+
+
+def test_coupled_net_class_automatically_selects_coordinated_group_loops():
+    from kicad_tools.router.rules import NetClassRouting
+
+    ar, group = setup_pair()
+    ar.net_class_map = {
+        name: NetClassRouting(
+            name="coupled",
+            coupled_routing=True,
+            length_critical=True,
+            length_match_tolerance_mm=0.05,
+            intra_pair_clearance=0.1,
+        )
+        for name in ar.net_names.values()
+    }
+    result = ar.apply_match_group_tuning([group], verbose=False)[group.name]
+    assert result[1][1].success and result[2][1].success
+    p, n = result[1][0], result[2][0]
+    # Both move toward P's outer side. An independently reflected bulge
+    # would move N in the opposite direction and lose pair spacing.
+    assert min(min(s.y1, s.y2) for s in p.segments) < 10
+    assert min(min(s.y1, s.y2) for s in n.segments) < 11
+    assert physical_length(ar, 1) == pytest.approx(physical_length(ar, 2), abs=1e-7)
+
+
+@pytest.mark.parametrize("coupled_member", ["N1", "N2"])
+def test_mixed_scalar_group_uses_each_pairs_own_coupling_class(coupled_member):
+    from kicad_tools.router.rules import NetClassRouting
+
+    ar, group = setup_pair(reference_length=12, via_counts=(0, 0, 0, 0))
+    reference = route(5, 5, 19, 38)
+    ar.routes.append(reference)
+    group.net_ids = [5]
+    group.reference_net_id = None
+    scalar_class = NetClassRouting(
+        name="DDR_DATA",
+        coupled_routing=False,
+        length_critical=True,
+        length_match_tolerance_mm=0.1,
+        intra_pair_clearance=0.1,
+    )
+    ar.net_class_map = dict.fromkeys(ar.net_names.values(), scalar_class)
+    ar.net_class_map[coupled_member] = NetClassRouting(
+        name="DDR_DQS",
+        coupled_routing=True,
+        length_critical=True,
+        length_match_tolerance_mm=0.1,
+        intra_pair_clearance=0.1,
+    )
+    result = ar.apply_match_group_tuning([group], verbose=False)[group.name]
+    assert all(result[n][1].success for n in (1, 2, 3, 4))
+    # Coupled pair retains its spacing even though the group's scalar class
+    # is uncoupled. Another uncoupled pair keeps the legacy mirrored policy.
+    assert min(s.y1 for s in result[1][0].segments) < 10
+    assert min(s.y1 for s in result[2][0].segments) < 11
+    assert min(s.y1 for s in result[3][0].segments) < 25
+    assert max(s.y1 for s in result[4][0].segments) > 26
+    assert result[5][0] is reference
+    assert all(physical_length(ar, n) == pytest.approx(14, abs=0.02) for n in range(1, 6))

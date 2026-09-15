@@ -388,9 +388,9 @@ class VectorCollisionChecker:
         # path's query envelope; the narrow phase keeps the existing
         # ``_via_on_layer`` + point-to-segment distance contract.
         #
-        # Through-hole vias span ``layers[0]`` -> ``layers[1]`` inclusive
-        # of everything in between (KiCad does not enumerate inner
-        # layers in the S-expression).  ``validate_segment_clearance``
+        # Ordinary vias physically span all copper layers even when their
+        # search transition endpoints name only an inner layer.
+        # ``validate_segment_clearance``
         # (grid.py) uses the same "check every via on every layer"
         # simplification -- it's conservative-safe (at most a handful
         # of false-positive rejections on multi-layer boards with
@@ -453,17 +453,21 @@ class VectorCollisionChecker:
     def _via_on_layer(self, via: Any, layer_idx: int) -> bool:
         """Return True if ``via`` blocks copper on ``layer_idx``.
 
-        Through-hole vias (the common case in kicad-tools today) declare
-        ``layers=(F.Cu, B.Cu)`` and physically block every layer in between
-        as well.  Blind / buried vias declare a sub-range.  This helper maps
-        the start / end layer enum values to grid layer indices and returns
-        ``True`` iff ``layer_idx`` falls in the inclusive range.
+        Ordinary vias block all layers. Only explicitly typed microvias
+        restrict their physical span to the declared endpoints; search
+        endpoints alone do not imply a blind or buried barrel.
 
         When the layer mapping cannot be resolved (unexpected Layer enum
         value, etc.) the helper returns ``True`` to preserve the conservative
         "assume blocking" behaviour of ``grid.validate_segment_clearance``
         which iterates every via without layer filtering.
         """
+        # Router layer endpoints describe the search transition. Ordinary
+        # vias still serialize as through-hole barrels, including when a
+        # transition stops on an inner layer. Only explicitly typed micro
+        # vias have a restricted physical span.
+        if not getattr(via, "is_micro", False):
+            return True
         try:
             start_idx = self.grid.layer_to_index(via.layers[0].value)
             end_idx = self.grid.layer_to_index(via.layers[1].value)

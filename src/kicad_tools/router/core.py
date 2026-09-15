@@ -5651,15 +5651,9 @@ class Autorouter:
         callers add components between passes and is consistent with
         PR #2653's "consume on demand" approach for engaged_pairs.
 
-        ``board_thickness_mm`` is left as ``None`` -- the
-        ``DiffPairLengthTracker.record_routes`` and
-        ``MatchGroupTracker.record_routes`` contracts both document
-        this as the zero-via-length default (vias contribute 0.0 mm).
-        See the curator note on issue #2657 and the docstring at
-        ``diffpair_length.py:172``: ``router.rules.DesignRules`` has no
-        ``board_thickness_mm`` field (only ``manufacturers.base.DesignRules``
-        does), so threading real thickness through is deferred to a
-        follow-up.
+        Differential-pair measurements use manufacturer thickness and the
+        router's drilled-via policy, matching the skew tuner. Match-group
+        bookkeeping retains its zero-via-length default here.
 
         Safe to call when there are no diff pairs / match groups (no-op
         via ``record_routes`` early-exit on empty detection results).
@@ -5716,14 +5710,18 @@ class Autorouter:
                 detected_pairs = []
 
             if detected_pairs:
-                # board_thickness_mm=None: zero-via-length default (see docstring).
-                # num_copper_layers=None: update_diffpair_skew defaults to
-                # len(self.layer_stack.layers) or 2 -- matches the per-call branch
-                # at the original ``update_diffpair_skew`` definition.
+                # Keep final bookkeeping in the same drilled-length model as
+                # the tuner and checker; do not overwrite it with planar skew.
+                manufacturer_rules = self._build_manufacturer_design_rules()
+                via_rules = getattr(self, "via_rules", None)
                 self.update_diffpair_skew(
                     detected_pairs,
-                    board_thickness_mm=None,
+                    board_thickness_mm=getattr(manufacturer_rules, "board_thickness_mm", None),
                     num_copper_layers=None,
+                    blind_buried_supported=bool(
+                        getattr(via_rules, "allow_blind", False)
+                        or getattr(via_rules, "allow_buried", False)
+                    ),
                 )
         except ImportError:
             # diffpair_detection module unavailable -- silently skip the
@@ -9634,8 +9632,8 @@ class Autorouter:
                     width=old_grid.width,
                     height=old_grid.height,
                     rules=old_grid.rules,
-                    origin_x=old_grid.origin_x,
-                    origin_y=old_grid.origin_y,
+                    origin_x=old_grid.origin_x - old_grid.grid_origin_offset[0],
+                    origin_y=old_grid.origin_y - old_grid.grid_origin_offset[1],
                     layer_stack=old_grid.layer_stack,
                     expanded_obstacles=old_grid.expanded_obstacles,
                     resolution_override=old_grid.resolution,
@@ -14961,7 +14959,8 @@ class Autorouter:
     def _reset_for_new_trial(self):
         """Reset the router to initial state for a new trial."""
         width, height = self.grid.width, self.grid.height
-        origin_x, origin_y = self.grid.origin_x, self.grid.origin_y
+        origin_x = self.grid.origin_x - self.grid.grid_origin_offset[0]
+        origin_y = self.grid.origin_y - self.grid.grid_origin_offset[1]
 
         # Recreate grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
@@ -15058,8 +15057,8 @@ class Autorouter:
         return {
             "width": self.grid.width,
             "height": self.grid.height,
-            "origin_x": self.grid.origin_x,
-            "origin_y": self.grid.origin_y,
+            "origin_x": self.grid.origin_x - self.grid.grid_origin_offset[0],
+            "origin_y": self.grid.origin_y - self.grid.grid_origin_offset[1],
             "rules_dict": rules_dict,
             "net_class_map": self.net_class_map,
             "pads_data": pads_data,
@@ -16051,6 +16050,7 @@ class Autorouter:
         detected_pairs: list,
         board_thickness_mm: float | None = None,
         num_copper_layers: int | None = None,
+        blind_buried_supported: bool = True,
     ) -> DiffPairLengthTracker:
         """Populate the diff-pair length tracker with current route skews.
 
@@ -16070,6 +16070,8 @@ class Autorouter:
             num_copper_layers: Number of copper layers in the stack.
                 Defaults to the layer-stack count when ``None`` (or 2
                 when no stack has been configured).
+            blind_buried_supported: When false, ordinary vias contribute full
+                board thickness even when their route endpoints span fewer layers.
 
         Returns:
             The internal :class:`DiffPairLengthTracker` instance (also
@@ -16088,6 +16090,7 @@ class Autorouter:
             detected_pairs=detected_pairs,
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
+            blind_buried_supported=blind_buried_supported,
         )
         return self._diffpair_length_tracker
 
@@ -16260,10 +16263,18 @@ class Autorouter:
             num_layers = len(self.layer_stack.layers)
         else:
             num_layers = 2
+        manufacturer_rules = self._build_manufacturer_design_rules()
+        board_thickness_mm = getattr(manufacturer_rules, "board_thickness_mm", None)
+        via_rules = getattr(self, "via_rules", None)
+        blind_buried_supported = bool(
+            getattr(via_rules, "allow_blind", False) or getattr(via_rules, "allow_buried", False)
+        )
         self._diffpair_length_tracker.record_routes(
             routes=list(routes_by_net.values()),
             detected_pairs=detected_pairs,
             num_copper_layers=num_layers,
+            board_thickness_mm=board_thickness_mm,
+            blind_buried_supported=blind_buried_supported,
         )
 
         for dp in detected_pairs:
@@ -16292,12 +16303,14 @@ class Autorouter:
                 length_critical=length_critical,
                 # Issue #4085 (Phase 1): when the slack-corridor gate is on,
                 # let the tuner prefer segments inside the pair's own
-                # reserved slack corridor.  Grid is passed unconditionally
-                # (cheap) but only consulted when prefer_reserved_slack is
-                # True; flag-off keeps the pre-#4085 geometric selection.
+                # reserved slack corridor. The grid also supplies pad geometry
+                # for the tuning self-check, independently of that preference.
                 grid=self.grid,
                 prefer_reserved_slack=self.enable_slack_corridor_widening,
                 fixed_segment_ids=fixed_segment_ids,
+                board_thickness_mm=board_thickness_mm,
+                num_copper_layers=num_layers,
+                blind_buried_supported=blind_buried_supported,
             )
 
             changed = {
@@ -16351,6 +16364,8 @@ class Autorouter:
             routes=list(routes_by_net.values()),
             detected_pairs=detected_pairs,
             num_copper_layers=num_layers,
+            board_thickness_mm=board_thickness_mm,
+            blind_buried_supported=blind_buried_supported,
         )
         return results
 
@@ -16560,6 +16575,22 @@ class Autorouter:
                     num_copper_layers=num_layers,
                     blind_buried_supported=blind_buried_supported,
                     fixed_segment_ids=fixed_segment_ids,
+                    # Mixed groups take length policy from their scalar reference,
+                    # but each pair retains its own copper-spacing contract.
+                    coupled_pair_ids={
+                        pair
+                        for pair in group.pair_ids
+                        if any(
+                            (
+                                pair_class := (self.net_class_map or {}).get(
+                                    self.net_names.get(nid, "")
+                                )
+                            )
+                            is not None
+                            and pair_class.coupled_routing
+                            for nid in pair
+                        )
+                    },
                 )
             except ValueError as exc:
                 # Defensive: a malformed group (e.g. mixed pair/scalar

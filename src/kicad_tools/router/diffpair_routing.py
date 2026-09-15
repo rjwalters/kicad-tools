@@ -18,7 +18,7 @@ import logging
 import math
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
@@ -117,6 +117,117 @@ COUPLED_FLAGOFF_MAX_ITERATIONS: int = int(os.environ.get("KCT_COUPLED_FLAGOFF_MA
 # the measured 5-21-cell stalls, small against the 30-50 mm pair routes
 # so the coupled-length fraction stays >> every continuity threshold.
 NEAR_MISS_RESCUE_CELLS: int = int(os.environ.get("KCT_COUPLED_RESCUE_CELLS", "60"))
+
+# Issue #5333: ledger for the geometric pair construction that runs after a
+# joint search has already exited, INSIDE the same per-pair wall-clock window
+# (no budget is renewed or widened).  The native allowance pays only for
+# validating departure prefixes -- a measured ~15 iterations per proposal, at
+# most a dozen proposals -- so 256 bounds it with room to spare while staying
+# ~1% of the 20,000-iteration phase budget the searches themselves spend.
+# Body attempts are geometric, not native: 400 covers the shape lattice
+# (escape depth x retreat x goal offset x coupled loop) across every validated
+# layer, measured at ~0.05 s per attempt including terminal synthesis.
+CONSTRUCTION_DEPARTURE_ITERATIONS: int = int(
+    os.environ.get("KCT_CONSTRUCTION_DEPARTURE_ITERS", "256")
+)
+CONSTRUCTION_BODY_ATTEMPTS: int = int(os.environ.get("KCT_CONSTRUCTION_BODY_ATTEMPTS", "400"))
+
+# Issue #5333 (MIPI_DAT0/TMDS_D2): a SEPARATE native allowance for
+# ``pair_construction._corridor_guided_departures`` -- a corridor-bounded
+# joint search seeded past each validated departure escape, tried only once
+# the fixed geometric shape lattice above has been exhausted for every
+# escape direction and still found nothing.  Charged from its own ledger
+# field so it can never starve ``CONSTRUCTION_DEPARTURE_ITERATIONS`` or
+# ``CONSTRUCTION_BODY_ATTEMPTS``.
+#
+# Measured on real Board07 (seed 42, native ABI 31, ``--diffpair-per-pair-
+# timeout 120``): at the first value tried (8000, matched to the top-level
+# corridor attempt's own half-budget) the search plateaued far from the goal
+# for every affected pair -- MIPI_DAT0 stalled at best_progress=133 cells,
+# TMDS_D1/D2 similarly far out -- with ``corridor`` rejections a negligible
+# ~0.2% of the histogram (dominated instead by ``via_blocked_p``/``sym_trail``,
+# the SAME guards that dominate the unconstrained top-level "open" search).
+# That ruled out 8000 as merely too small a taste of the same wall, not
+# evidence the corridor-guided search itself was hopeless: widening the
+# budget alone (no other change) tracked best_progress steadily toward the
+# goal -- 133 at 8000, 1 at 20000, 0 (XY-aligned, blocked only on the final
+# via-drop layer transition) at 100000 -- and, before ``qualify_constructed_
+# pair`` existed, a raw MIPI_DAT0 native result reached the goal at 116,027
+# iterations (~10s; reproduced at both 150000 and 800000).  TMDS_D1/D2 do
+# NOT converge even at 800,000 iterations per departure (both exhaust their
+# own frontier, ``exhausted_progress_170`` / ``_168``, not merely the
+# budget).
+#
+# That raw MIPI_DAT0 result turned out NOT to be a resolved pair: it was
+# 1.75mm out of skew against a 0.05mm authored tolerance, caught only after
+# adding ``qualify_constructed_pair`` (the same authored skew/coupling gate
+# ``complete_pair_body`` already applied to the geometric lattice, but the
+# corridor path had been skipping).  Re-measured with that gate in place,
+# MIPI_DAT0's first departure's corridor result is found but reproducibly
+# rejected on the authored coupled-continuity threshold at 150000 -- but
+# unlike the earlier ``exhausted_progress`` verdicts for TMDS_D1/D2 (a
+# search that has explored its ENTIRE frontier and found nothing), MIPI_DAT0's
+# SECOND validated departure was landing on ``iteration_limited_progress_0``:
+# a search that was STILL MAKING PROGRESS -- effectively at the goal -- when
+# its share of the allowance ran out.  That is a budget-too-small verdict,
+# not a hopeless-search one, and #5333's own "spend enough corridor-iteration
+# budget across enough departures to raise the odds of landing on one that
+# also happens to qualify" note (``_corridor_guided_departures``'s docstring)
+# named exactly this as the next lever to try.
+#
+# Re-measured on real Board07 (seed 42, native ABI 31) at 600000 (4x): with
+# ``pair_construction._corridor_guided_departures``'s fair (max-min) per-
+# departure share, MIPI_DAT0's second departure now converges and QUALIFIES
+# -- ``corridor_attempts=2 corridor_iters=181755 corridor_reasons={
+# 'iteration_limited_progress_0': 1}`` -- moving board-07's diffpair-pre-pass
+# reach from 3/7 to 4/7 for the first time in this issue's history.
+# Independently reproduced WITHOUT the fair-share change too (the greedy
+# "give every attempt the full remaining allowance" policy also resolves
+# MIPI_DAT0 at 600000, ``corridor_iters=197782``), confirming the fix is the
+# larger total allowance, not merely how it is split -- the fair-share
+# change (kept for its own, separately measured starvation fix: MIPI_DAT0's
+# other 4 validated departures, and TMDS_D1/TMDS_D2's other 5, were
+# PREVIOUSLY never tried at all) is additive, not load-bearing, for this
+# particular win.  250000 (a more conservative 1.67x) was tried and does NOT
+# resolve MIPI_DAT0 under fair-share -- every one of its 6 shares lands at
+# ``iteration_limited_progress_0``/``_1``, never finishing -- so 600000 is
+# the smallest of the three measured values that actually converges.
+#
+# TMDS_D1/TMDS_D2 remain unresolved at 600000 (``exhausted_progress_170``/
+# ``_168``-class verdicts, now confirmed across MULTIPLE validated
+# departures rather than just one -- a genuinely stronger signal that their
+# gap is real congestion, not an unlucky escape choice).  MIPI_DAT1 is
+# NEGATIVELY affected as a side effect: MIPI_DAT0 committing real copper for
+# the first time removes via sites MIPI_DAT1's own (already congested)
+# departure stage was relying on, reproducibly dropping it from 3 validated
+# departures to 0 -- the SAME order-dependent congestion mechanism a prior
+# session already identified for MIPI_CLK's effect on MIPI_DAT1, now also
+# triggered by MIPI_DAT0.  Net Board07 diffpair reach is still a genuine
+# improvement (+1 pair, 3/7 -> 4/7) and every existing skew/coupling/
+# clearance gate still applies unchanged to whichever route ships; the
+# MIPI_DAT1 regression is a pre-existing order-dependency, not a new
+# defect this change introduces, but it is real and not yet fixed.
+CONSTRUCTION_CORRIDOR_ITERATIONS: int = int(
+    os.environ.get("KCT_CONSTRUCTION_CORRIDOR_ITERS", "600000")
+)
+
+# Issue #5333 (TMDS_D1): radii (mm, from each of the goal/head anchors)
+# ``_layer_return_tails`` samples when building its candidate via-site
+# lattice.  The historical set (0/0.6/1.2/1.8/2.4mm) was sized for the
+# ordinary pitch-transition search (#2490/#3508), not for finding a site
+# close enough to a partner's committed copper to clear the authored
+# ``effective_coupled_continuity_threshold`` under real BGA-field congestion
+# -- measured on Board07 (seed 42): TMDS_D1's widened (full-lattice) retry
+# still returns ``no_tail`` for the overwhelming majority of attempts
+# (828/894 completion attempts), meaning too few LEGAL sites exist within
+# 2.4mm at all, not merely too few well-coupled ones. Overridable for
+# controlled A/B measurement; every site this lattice yields still passes
+# every existing clearance/hole-spacing/occupancy check unchanged.
+LAYER_RETURN_SEARCH_RADII_MM: tuple[float, ...] = tuple(
+    float(r)
+    for r in os.environ.get("KCT_LAYER_RETURN_RADII_MM", "0.0,0.6,1.2,1.8,2.4").split(",")
+    if r.strip()
+)
 
 # Issue #3508: maximum length (mm) the shadow constructor may trim from
 # EACH end of the offset polyline before tail-connecting to the pads.
@@ -347,20 +458,13 @@ _SHADOW_PAD_PROBE_STEP_MM: float = 0.2
 # the generic clearance check ONLY when both elements are SEGMENTS
 # (``validate/rules/clearance.py`` -- the #2560 scoping).  A segment-vs-via or
 # via-vs-via pair between P and N is therefore checked at the full board
-# minimum.  This gate must use ``rules.trace_clearance`` /
-# ``rules.via_clearance``, NOT ``_pair_seg_clearance``'s intra-pair relaxation:
+# minimum.  This gate must use ``rules.via_clearance``, NOT ``_pair_seg_clearance``'s intra-pair relaxation:
 # the relaxed bound is deliberately tighter than the manufacturer clearance, so
 # a gate built on it could never fire on the very finding it exists to close.
 #
 # Same noise floor as the pad quadrant (one serialization quantum, and the same
 # value as ``DRC_TOLERANCE``) so the gate and the checker agree at the boundary.
 _SHADOW_VIA_DEFICIT_EPS: float = _SHADOW_PAD_DEFICIT_EPS
-# Mirrors ``validate.rules.clearance._COLOCATION_EPSILON_MM`` (#2706): the
-# in-pad-escape router places segment endpoints EXACTLY at via centres, and the
-# DRC skips such pairs.  A gate without the same carve-out would be stricter
-# than the checker and decline sides over geometry that is never reported --
-# pure reach loss for zero DRC gain.
-_SHADOW_VIA_COLOCATION_EPS: float = 1e-4
 
 # Issue #4574: the constructed crossover's via sites are chosen FIRST-LEGAL out
 # of a fixed 3x5 lattice, so the winning site carries no information about what
@@ -1669,6 +1773,13 @@ class CoupledPathfinder:
         self.last_best_progress: float = float("inf")
         self.last_best_state: CoupledState | None = None
         self.last_best_node: CoupledNode | None = None
+        # Native diagnostic geometry is a partial path, never a completed route.
+        self.last_best_cpp_path: list[tuple[int, int, int, int, int, int, bool]] = []
+        # Issue #5333: how many required departure-prefix steps the most recent
+        # search actually expanded.  0 for an unprefixed request; equal to the
+        # requested prefix length exactly when the departure validated, and
+        # below it when a guard refused the next required step.
+        self.last_departure_prefix_progress: int = 0
         # Issue #4459: backend that served the most-recent coupled search
         # ("python" or "cpp").  Lets the ``[coupled-timing]`` diagnostic report
         # ``best_state=n/a (cpp)`` instead of a misleading ``best_state=None``
@@ -1793,7 +1904,34 @@ class CoupledPathfinder:
         """
         return self._is_cell_blocked(gx, gy, layer, net)
 
-    def _is_via_blocked(self, gx: int, gy: int, net: int) -> bool:
+    def _minimum_via_pitch_cells(self) -> float:
+        """Mutual via copper and hole clearance, without raster rounding."""
+        return (
+            max(
+                self.rules.via_diameter + self.rules.via_clearance,
+                self.rules.via_drill + self.rules.min_hole_to_hole,
+            )
+            / self.grid.resolution
+        )
+
+    def _via_trace_clearance_cells(self, net_name: str | None = None) -> float:
+        """Ordinary barrel clearance to the specified trace's copper."""
+        width = self._get_trace_width_for_net(net_name) if net_name else self.rules.trace_width
+        return (
+            self.rules.via_diameter / 2 + self.rules.via_clearance + width / 2
+        ) / self.grid.resolution
+
+    def _endpoint_via_in_pad_supported(self) -> bool:
+        """Use the same manufacturer capability policy as the per-net router."""
+        from .mfr_limits import get_mfr_limits
+
+        if self.rules.manufacturer:
+            with contextlib.suppress(ValueError):
+                return bool(get_mfr_limits(self.rules.manufacturer).via_in_pad_supported)
+        # Preserve the per-net router's unspecified/unknown-process behavior.
+        return True
+
+    def _is_via_blocked(self, gx: int, gy: int, net: int, *, allow_own_pad: bool = False) -> bool:
         """Check if placing a via at this position would conflict on any layer.
 
         Issue #3508: the swept radius is now the DIFFERENCE between the
@@ -1817,7 +1955,10 @@ class CoupledPathfinder:
         via-in-pad).  ``cell.pad_blocked`` marks cells whose extent
         overlaps continuous pad metal (#3233), so reject the via when
         any cell under its DRILL footprint is pad metal on any layer.
+        The legacy endpoint exception may allow its own pad metal via
+        ``allow_own_pad``; foreign copper and pads remain obstacles.
         """
+        allow_own_pad = allow_own_pad and self._endpoint_via_in_pad_supported()
         drill_cells = max(0, int(math.ceil((self.rules.via_drill / 2) / self.grid.resolution)))
         for layer in range(self.grid.num_layers):
             for dy in range(-self._via_extra_cells, self._via_extra_cells + 1):
@@ -1830,7 +1971,8 @@ class CoupledPathfinder:
                     cgx, cgy = gx + dx, gy + dy
                     if not (0 <= cgx < self.grid.cols and 0 <= cgy < self.grid.rows):
                         return True
-                    if self.grid.cell_at(layer, cgy, cgx).pad_blocked:
+                    cell = self.grid.cell_at(layer, cgy, cgx)
+                    if cell.pad_blocked and not (allow_own_pad and cell.net == net):
                         return True
         return False
 
@@ -1856,6 +1998,10 @@ class CoupledPathfinder:
         n_visited: frozenset[tuple[int, int, int]] | None = None,
         p_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
         n_trail_buckets: dict[tuple[int, int], list[tuple[int, int, int]]] | None = None,
+        p_via_sites: frozenset[tuple[int, int]] | None = None,
+        n_via_sites: frozenset[tuple[int, int]] | None = None,
+        p_copper_cells: frozenset[tuple[int, int, int]] | None = None,
+        n_copper_cells: frozenset[tuple[int, int, int]] | None = None,
     ) -> list[tuple[CoupledState, float, bool]]:
         """Generate valid coupled moves maintaining spacing.
 
@@ -1906,6 +2052,13 @@ class CoupledPathfinder:
                 permissive behaviour).
             n_visited: Issue #3078: companion to ``p_visited`` for the
                 negative trace.  Same encoding and semantics.
+            p_via_sites: Positive trace's earlier ordinary barrel centers,
+                in grid XY coordinates. Barrels protect every copper layer.
+            n_via_sites: Corresponding negative-trace barrel centers.
+            p_copper_cells: Complete positive trail before endpoint stripping;
+                new partner vias must clear endpoint copper too. Defaults to
+                ``p_visited`` plus the current positive head for direct callers.
+            n_copper_cells: Corresponding complete negative copper trail.
 
         Returns list of (new_state, cost, is_via) tuples.
         """
@@ -1919,6 +2072,26 @@ class CoupledPathfinder:
         # callers that did not opt in.
         p_visited_set = p_visited if p_visited else frozenset()
         n_visited_set = n_visited if n_visited else frozenset()
+
+        p_barrels = p_via_sites or frozenset()
+        n_barrels = n_via_sites or frozenset()
+        p_copper = p_copper_cells if p_copper_cells is not None else p_visited_set
+        n_copper = n_copper_cells if n_copper_cells is not None else n_visited_set
+        p_copper = p_copper | {(state.p_pos.x, state.p_pos.y, state.p_pos.layer)}
+        n_copper = n_copper | {(state.n_pos.x, state.n_pos.y, state.n_pos.layer)}
+        pads = getattr(self, "_cpp_reconstruct_pads", None)
+        p_barrel_clearance = self._via_trace_clearance_cells(pads[0].net_name if pads else None)
+        n_barrel_clearance = self._via_trace_clearance_cells(pads[2].net_name if pads else None)
+
+        def near_barrel(pos: GridPos, sites: frozenset[tuple[int, int]], radius: float) -> bool:
+            # Ordinary vias span every copper layer, regardless of the
+            # layer on which the path first recorded the transition.
+            return any(math.hypot(pos.x - x, pos.y - y) + 1e-9 < radius for x, y in sites)
+
+        def near_copper(
+            pos: GridPos, cells: frozenset[tuple[int, int, int]], radius: float
+        ) -> bool:
+            return any(math.hypot(pos.x - x, pos.y - y) + 1e-9 < radius for x, y, _ in cells)
 
         # Issue #3508: trail PROXIMITY guard.  The exact-cell guard
         # below only rejects landing ON the partner's trail; a landing
@@ -1972,6 +2145,12 @@ class CoupledPathfinder:
             sits on those cells regardless of routing history.  The
             self-loop check still fires at non-endpoint cells.
             """
+            # Endpoint exemptions cannot permit contact with a partner's
+            # earlier barrel, even when ordinary visited sets are empty.
+            if (p_advances and near_barrel(new_p_pos, n_barrels, p_barrel_clearance)) or (
+                n_advances and near_barrel(new_n_pos, p_barrels, n_barrel_clearance)
+            ):
+                return True
             if not p_visited_set and not n_visited_set:
                 return False
             p_key = (new_p_pos.x, new_p_pos.y, new_p_pos.layer)
@@ -2356,16 +2535,8 @@ class CoupledPathfinder:
                 new_state = CoupledState(cand_p2, cand_n2, (dx, dy))
                 neighbors.append((new_state, cost, False))
 
-        # Issue #2490: Endpoint via exception.  When the current state
-        # sits exactly on a start or goal pad, the pad's footprint is
-        # already part of the board geometry — the same cells that
-        # ``_is_via_blocked`` would inspect are occupied by the pad
-        # whose net we are trying to drop a via for.  Without this
-        # exception, ``_is_via_blocked`` rejects via placement at the
-        # source pad of the coupled run on dense pad fields (e.g.,
-        # USB-C 0.5mm pitch), trapping the search on layer 0 even when
-        # an inner/back layer is wide open.  We mirror the existing
-        # trace-blocked exception at endpoints (lines 311-316).
+        # Endpoint pads retain the legacy own-pad exception, but it must
+        # never exempt foreign copper in the via's all-layer envelope.
         p_at_endpoint = self._is_at_goal(state.p_pos, p_goal) or self._is_at_goal(
             state.p_pos, p_start
         )
@@ -2375,24 +2546,48 @@ class CoupledPathfinder:
 
         # Try layer change (via) - both traces must change layer together
         routable_layers = self.grid.get_routable_indices()
+        # The grid contains neither candidate barrel. Trace spacing alone
+        # cannot protect these two vias, including at endpoint pads.
+        via_pair_pitch_ok = state.spacing + 1e-9 >= self._minimum_via_pitch_cells()
+        via_partner_trail_clear = not (
+            near_copper(state.p_pos, n_copper, n_barrel_clearance)
+            or near_copper(state.n_pos, p_copper, p_barrel_clearance)
+        )
+        via_partner_barrel_clear = not (
+            near_barrel(state.p_pos, n_barrels, self._minimum_via_pitch_cells())
+            or near_barrel(state.n_pos, p_barrels, self._minimum_via_pitch_cells())
+        )
         for new_layer in routable_layers:
             if new_layer == state.p_pos.layer:
                 continue
-
-            # Check if vias can be placed at both positions.  Skip the
-            # via-blocked check at endpoint pads — see comment above.
-            if not p_at_endpoint and self._is_via_blocked(state.p_pos.x, state.p_pos.y, p_net):
+            if not via_pair_pitch_ok:
+                self.last_rejections["via_pair_pitch"] += 1
                 continue
-            if not n_at_endpoint and self._is_via_blocked(state.n_pos.x, state.n_pos.y, n_net):
+            if not via_partner_barrel_clear:
+                self.last_rejections["via_partner_barrel"] += 1
+                continue
+            if not via_partner_trail_clear:
+                self.last_rejections["via_partner_trail"] += 1
+                continue
+
+            if self._is_via_blocked(
+                state.p_pos.x, state.p_pos.y, p_net, allow_own_pad=p_at_endpoint
+            ):
+                self.last_rejections["via_blocked_p"] += 1
+                continue
+            if self._is_via_blocked(
+                state.n_pos.x, state.n_pos.y, n_net, allow_own_pad=n_at_endpoint
+            ):
+                self.last_rejections["via_blocked_n"] += 1
                 continue
 
             new_p = GridPos(state.p_pos.x, state.p_pos.y, new_layer)
             new_n = GridPos(state.n_pos.x, state.n_pos.y, new_layer)
 
             # Check if new layer positions are valid
-            if not p_at_endpoint and self._is_trace_blocked(new_p.x, new_p.y, new_p.layer, p_net):
+            if self._is_trace_blocked(new_p.x, new_p.y, new_p.layer, p_net):
                 continue
-            if not n_at_endpoint and self._is_trace_blocked(new_n.x, new_n.y, new_n.layer, n_net):
+            if self._is_trace_blocked(new_n.x, new_n.y, new_n.layer, n_net):
                 continue
 
             # Via cost for both traces
@@ -2423,15 +2618,24 @@ class CoupledPathfinder:
             for new_layer in routable_layers:
                 if new_layer == state.p_pos.layer:
                     continue
-
-                # Both pads must be able to host a via at their current
-                # position on every layer (the via spans through-hole).
-                # Issue #2490: Endpoint pads are exempt — the pad
-                # footprint already occupies the cells the via would
-                # span.
-                if not p_at_endpoint and self._is_via_blocked(state.p_pos.x, state.p_pos.y, p_net):
+                if not via_pair_pitch_ok:
+                    self.last_rejections["via_pair_pitch"] += 1
                     continue
-                if not n_at_endpoint and self._is_via_blocked(state.n_pos.x, state.n_pos.y, n_net):
+                if not via_partner_barrel_clear:
+                    self.last_rejections["via_partner_barrel"] += 1
+                    continue
+                if not via_partner_trail_clear:
+                    self.last_rejections["via_partner_trail"] += 1
+                    continue
+
+                # Preserve only the same-net pad exception at endpoints.
+                if self._is_via_blocked(
+                    state.p_pos.x, state.p_pos.y, p_net, allow_own_pad=p_at_endpoint
+                ):
+                    continue
+                if self._is_via_blocked(
+                    state.n_pos.x, state.n_pos.y, n_net, allow_own_pad=n_at_endpoint
+                ):
                     continue
 
                 # After the swap, the P-trace continues from where N was,
@@ -2549,7 +2753,19 @@ class CoupledPathfinder:
         Returns ``None`` when the backend is unavailable or construction
         raises (the caller then falls back to pure Python).
         """
-        if self._cpp_coupled_impl is not None and self._cpp_coupled_grid is self.grid:
+        pads = getattr(self, "_cpp_reconstruct_pads", None)
+        allow_smd_vias = self._endpoint_via_in_pad_supported()
+        via_thresholds = (
+            self._minimum_via_pitch_cells(),
+            self._via_trace_clearance_cells(pads[0].net_name if pads else None),
+            self._via_trace_clearance_cells(pads[2].net_name if pads else None),
+        )
+        if (
+            self._cpp_coupled_impl is not None
+            and self._cpp_coupled_grid is self.grid
+            and getattr(self, "_cpp_coupled_via_thresholds", None) == via_thresholds
+            and getattr(self, "_cpp_coupled_allow_smd_vias", None) == allow_smd_vias
+        ):
             return self._cpp_coupled_impl
         try:
             from .cpp_backend import CppCoupledPathfinder, CppGrid
@@ -2594,6 +2810,9 @@ class CoupledPathfinder:
                 min_spacing_cells=self.min_spacing_cells,
                 trace_half_width_cells=self._trace_half_width_cells,
                 via_extra_cells=self._via_extra_cells,
+                min_via_pitch_cells=via_thresholds[0],
+                p_via_trace_clearance_cells=via_thresholds[1],
+                n_via_trace_clearance_cells=via_thresholds[2],
                 via_drill_cells=max(
                     0, int(math.ceil((self.rules.via_drill / 2) / self.grid.resolution))
                 ),
@@ -2605,6 +2824,8 @@ class CoupledPathfinder:
             self._use_cpp_coupled = False
             return None
         self._cpp_coupled_impl = impl
+        self._cpp_coupled_via_thresholds = via_thresholds
+        self._cpp_coupled_allow_smd_vias = allow_smd_vias
         self._cpp_coupled_grid = self.grid
         return impl
 
@@ -2625,6 +2846,7 @@ class CoupledPathfinder:
         corridor: frozenset[tuple[int, int]] | None,
         timeout_seconds: float | None,
         max_iterations_budget: int | None,
+        departure_prefix: list[tuple[int, int, int, int, int, int]] | None = None,
     ) -> tuple[bool, tuple[Route, Route] | None] | None:
         """Attempt the coupled search via the C++ backend (Issue #4065).
 
@@ -2674,6 +2896,7 @@ class CoupledPathfinder:
                 if max_iterations_budget is not None and max_iterations_budget > 0
                 else 0
             ),
+            **({"departure_prefix": departure_prefix} if departure_prefix is not None else {}),
             timeout_seconds=(
                 float(timeout_seconds)
                 if timeout_seconds is not None and timeout_seconds > 0
@@ -2696,6 +2919,12 @@ class CoupledPathfinder:
         # ``best_progress`` / ``rejections`` instead of the None red herring.
         self.last_best_state = None
         self.last_best_node = None
+        self.last_best_cpp_path = list(diagnostics.get("best_path", []))
+        self.last_validated_departure_path = list(diagnostics.get("validated_departure_path", []))
+        # Issue #5333: deepest required departure step the native search
+        # expanded.  Equals the requested prefix length exactly when the
+        # departure validated; below that it names the step that blocked.
+        self.last_departure_prefix_progress = int(diagnostics.get("departure_prefix_progress", 0))
         self.last_coupled_backend = "cpp"
         self.last_timeout_exceeded = bool(diagnostics["timeout_exceeded"])
         self.last_iteration_limited = bool(diagnostics["iteration_limited"])
@@ -2712,18 +2941,31 @@ class CoupledPathfinder:
     def _reconstruct_coupled_routes_from_cpp_path(
         self,
         path: list[tuple[int, int, int, int, int, int, bool]],
+        *,
+        partial: bool = False,
     ) -> tuple[Route, Route]:
         """Build (p_route, n_route) from a C++ joint grid-cell path.
 
         Produces the exact same ``p_path`` / ``n_path`` world-coordinate
         lists that ``_reconstruct_coupled_routes`` builds from the Python
-        parent chain, then feeds them to the UNCHANGED
+        parent chain, then feeds them to the shared
         ``_build_route_from_path`` -- so C++ and Python routes are
         byte-identical for the same joint path (Issue #4065).  The Pad
         identity for width/net/name is recovered from the endpoint cells
         via the stored ``_cpp_reconstruct_pads`` set by the caller.
+
+        ``partial=True`` stops at the saved search heads. It must not append
+        unchecked segments to the destination pads or mutate the endpoints
+        used by a later complete reconstruction. This only reconstructs
+        diagnostic geometry; callers must validate any proposed completion.
         """
         p_start, p_end, n_start, n_end = self._cpp_reconstruct_pads
+        if partial and path:
+            px, py, pl, nx, ny, nl, _ = path[-1]
+            p_wx, p_wy = self.grid.grid_to_world(px, py)
+            n_wx, n_wy = self.grid.grid_to_world(nx, ny)
+            p_end = replace(p_end, x=p_wx, y=p_wy, layer=Layer(self.grid.index_to_layer(pl)))
+            n_end = replace(n_end, x=n_wx, y=n_wy, layer=Layer(self.grid.index_to_layer(nl)))
         p_route = Route(net=p_start.net, net_name=p_start.net_name)
         n_route = Route(net=n_start.net, net_name=n_start.net_name)
 
@@ -2748,6 +2990,7 @@ class CoupledPathfinder:
         timeout_seconds: float | None = None,
         max_iterations_budget: int | None = None,
         corridor: frozenset[tuple[int, int]] | None = None,
+        departure_prefix: list[tuple[int, int, int, int, int, int]] | None = None,
     ) -> tuple[Route, Route] | None:
         """Route a differential pair with coupled pathfinding.
 
@@ -2805,6 +3048,14 @@ class CoupledPathfinder:
                 landing cells.  ``None`` (default) preserves the
                 unconstrained legacy search.
 
+            departure_prefix: Required native joint steps, excluding the root,
+                as (p_x, p_y, p_layer, n_x, n_y, n_layer) grid tuples. Every
+                step uses the ordinary native clearance/history predicates.
+                A completed prefix is exposed in last_validated_departure_path
+                even when the full route fails. This request fails closed if
+                native validation is unavailable; it never falls back to an
+                unconstrained Python search. Existing search budgets apply.
+
         Returns:
             Tuple of (p_route, n_route) or None if routing failed (no
             path found, ``max_iterations`` exhausted,
@@ -2827,6 +3078,13 @@ class CoupledPathfinder:
         self.last_best_progress: float = float("inf")
         self.last_best_state: CoupledState | None = None
         self.last_best_node: CoupledNode | None = None
+        # Native diagnostic geometry is a partial path, never a completed route.
+        self.last_best_cpp_path = []
+        self.last_validated_departure_path = []
+        # Issue #5333: no required departure step has been expanded yet.  The
+        # pure-Python loop never serves a prefixed request (it fails closed),
+        # so this stays 0 unless the native search reports otherwise.
+        self.last_departure_prefix_progress = 0
         # Issue #4459: which backend served the most-recent search.  Defaults
         # to ``"python"`` here; ``_try_cpp_route_coupled`` overrides it to
         # ``"cpp"`` when the C++ joint-state search handles the pair.  The
@@ -2903,8 +3161,33 @@ class CoupledPathfinder:
         # radius with the absolute spacing difference plus a small
         # buffer so each cell of the approach can change spacing by
         # at most one cell.
+        # Issue #5333: the endpoint phases must also absorb the pair's LAYER
+        # transition, not only its pitch transition.  A coupled via move
+        # places BOTH barrels at the pair's CURRENT separation, so it is legal
+        # only once that separation has reached the mutual barrel pitch
+        # (``_minimum_via_pitch_cells``: via copper or drill hole-to-hole,
+        # whichever dominates).  Every planar move -- symmetric and
+        # asymmetric alike -- pins the separation to the coupled target +-1
+        # OUTSIDE these radii, so a pair whose coupled target is narrower
+        # than that barrel pitch could not reach a via anywhere on the board
+        # and stayed confined to its start layer for the whole search.
+        # Measured on an empty four-layer board (0.4 mm coupled target,
+        # 0.8 mm mutual barrel pitch): 20,000 iterations, ``via_pair_pitch``
+        # dominant at 54,222 rejections, every state on the start layer, and
+        # the same landing stall the board-07 pairs report -- unchanged at
+        # 10x the budget, because the reachable state space, not the budget,
+        # is what excludes the layer change.  Size both radii so the fan-out
+        # to the barrel pitch fits at one cell of spacing change per step,
+        # exactly like the pitch transitions above.  This widens only the
+        # SPACING band near the endpoints: every copper, clearance, trail,
+        # barrel-history and mutual-pitch guard still applies to each step.
+        via_spread_delta = max(
+            0, math.ceil(self._minimum_via_pitch_cells() - effective_target_spacing)
+        )
         end_spacing_delta = int(round(abs(actual_end_spacing - effective_target_spacing)))
-        effective_approach_radius = max(effective_target_spacing, 6, end_spacing_delta * 2 + 4)
+        effective_approach_radius = max(
+            effective_target_spacing, 6, end_spacing_delta * 2 + 4, via_spread_delta * 2 + 4
+        )
 
         # Issue #3508: departure radius -- the mirror of the approach
         # radius, sized by the start-pitch transition.  Within this
@@ -2912,7 +3195,9 @@ class CoupledPathfinder:
         # the pair can converge from the physical pad pitch down to
         # the coupled target one cell per step.
         start_spacing_delta = int(round(abs(actual_start_spacing - effective_target_spacing)))
-        effective_departure_radius = max(effective_target_spacing, 6, start_spacing_delta * 2 + 4)
+        effective_departure_radius = max(
+            effective_target_spacing, 6, start_spacing_delta * 2 + 4, via_spread_delta * 2 + 4
+        )
 
         # Issue #4065: try the C++ coupled joint-state A* first.  The C++
         # search consumes the SAME Grid3D the single-ended C++ pathfinder
@@ -2938,6 +3223,7 @@ class CoupledPathfinder:
             corridor=corridor,
             timeout_seconds=timeout_seconds,
             max_iterations_budget=max_iterations_budget,
+            **({"departure_prefix": departure_prefix} if departure_prefix is not None else {}),
         )
         if cpp_path is not None:
             handled, cpp_result = cpp_path
@@ -2948,6 +3234,13 @@ class CoupledPathfinder:
                 # exit); either way we do NOT run the Python A* -- the
                 # diagnostics on ``self`` were set by the wrapper.
                 return cpp_result
+
+        if departure_prefix is not None:
+            # A proposal must never silently degrade into an unconstrained
+            # Python search. Native validation is the proof consumed by the
+            # geometric constructor, and its iterations count normally.
+            self.last_rejections["departure_backend_unavailable"] += 1
+            return None
 
         start_state = CoupledState(p_start_pos, n_start_pos, (0, 0))
 
@@ -3088,12 +3381,9 @@ class CoupledPathfinder:
                 )
 
             # Goal check - both traces must reach their goals
-            p_at_goal = (
-                current.state.p_pos.x == p_goal_pos.x and current.state.p_pos.y == p_goal_pos.y
-            )
-            n_at_goal = (
-                current.state.n_pos.x == n_goal_pos.x and current.state.n_pos.y == n_goal_pos.y
-            )
+            # XY coincidence on another layer does not connect an SMD pad.
+            p_at_goal = current.state.p_pos == p_goal_pos
+            n_at_goal = current.state.n_pos == n_goal_pos
 
             if p_at_goal and n_at_goal:
                 return self._reconstruct_coupled_routes(current, p_start, p_end, n_start, n_end)
@@ -3125,6 +3415,8 @@ class CoupledPathfinder:
             # moves let one trace loop around its partner.
             p_visited_cells: set[tuple[int, int, int]] = set()
             n_visited_cells: set[tuple[int, int, int]] = set()
+            p_via_sites: set[tuple[int, int]] = set()
+            n_via_sites: set[tuple[int, int]] = set()
             # Issue #3508: spatial buckets over the SAME trail cells for
             # the proximity guard (see ``_too_close_to_trail``).  Bucket
             # size = the proximity radius so any cell within the radius
@@ -3140,6 +3432,9 @@ class CoupledPathfinder:
                 n_cell = (walker.state.n_pos.x, walker.state.n_pos.y, walker.state.n_pos.layer)
                 p_visited_cells.add(p_cell)
                 n_visited_cells.add(n_cell)
+                if walker.via_from_parent:
+                    p_via_sites.add((p_cell[0], p_cell[1]))
+                    n_via_sites.add((n_cell[0], n_cell[1]))
                 if prox_radius > 1:
                     p_trail_buckets.setdefault(
                         (p_cell[0] // bucket, p_cell[1] // bucket), []
@@ -3148,6 +3443,8 @@ class CoupledPathfinder:
                         (n_cell[0] // bucket, n_cell[1] // bucket), []
                     ).append(n_cell)
                 walker = walker.parent
+            p_copper_cells = frozenset(p_visited_cells)
+            n_copper_cells = frozenset(n_visited_cells)
             # Endpoint pads are legitimate landing cells regardless of
             # history -- strip them so the check doesn't disqualify a
             # via at the source pad or a same-cell re-entry into the
@@ -3183,6 +3480,10 @@ class CoupledPathfinder:
                 n_visited=n_visited_frozen,
                 p_trail_buckets=p_trail_buckets,
                 n_trail_buckets=n_trail_buckets,
+                p_via_sites=frozenset(p_via_sites),
+                n_via_sites=frozenset(n_via_sites),
+                p_copper_cells=p_copper_cells,
+                n_copper_cells=n_copper_cells,
             ):
                 # Issue #3439: corridor-bounded search.  Prune any
                 # state whose P or N head leaves the corridor mask
@@ -3310,6 +3611,8 @@ class CoupledPathfinder:
         if len(path) < 2:
             return
 
+        segment_start = len(route.segments)
+
         # Issue #1543: Use net-class-aware trace width
         trace_width = self._get_trace_width_for_net(start_pad.net_name)
         current_x, current_y = start_pad.x, start_pad.y
@@ -3334,7 +3637,7 @@ class CoupledPathfinder:
                 current_layer_idx = layer_idx
             else:
                 # Add segment if we've moved
-                if abs(wx - current_x) > 0.01 or abs(wy - current_y) > 0.01:
+                if abs(wx - current_x) > 1e-9 or abs(wy - current_y) > 1e-9:
                     seg = Segment(
                         x1=current_x,
                         y1=current_y,
@@ -3350,7 +3653,7 @@ class CoupledPathfinder:
                     current_layer_idx = layer_idx
 
         # Final segment to end pad
-        if abs(end_pad.x - current_x) > 0.01 or abs(end_pad.y - current_y) > 0.01:
+        if abs(end_pad.x - current_x) > 1e-9 or abs(end_pad.y - current_y) > 1e-9:
             seg = Segment(
                 x1=current_x,
                 y1=current_y,
@@ -3362,6 +3665,41 @@ class CoupledPathfinder:
                 net_name=start_pad.net_name,
             )
             route.segments.append(seg)
+
+        # Native and Python search paths share this reconstruction. Align
+        # pad/grid attachments before length tuning and route validation,
+        # rather than letting serialization change their geometry later.
+        from .quantize import dogleg_points
+
+        protected = {(v.x, v.y) for v in route.vias}
+        protected.update(((start_pad.x, start_pad.y), (end_pad.x, end_pad.y)))
+        aligned: list[Segment] = []
+        for segment in route.segments[segment_start:]:
+            points = dogleg_points(segment.x1, segment.y1, segment.x2, segment.y2)
+            for start, end in zip(points[:-1], points[1:], strict=True):
+                leg = replace(segment, x1=start[0], y1=start[1], x2=end[0], y2=end[1])
+                # A rounded root can lie just beyond the first departure
+                # step. Remove only consecutive collinear backtracking in
+                # this newly constructed chain; via and pad vertices stay.
+                while aligned:
+                    previous = aligned[-1]
+                    if (
+                        previous.end != leg.start
+                        or previous.layer != leg.layer
+                        or previous.width != leg.width
+                        or previous.end in protected
+                    ):
+                        break
+                    ux, uy = previous.x2 - previous.x1, previous.y2 - previous.y1
+                    vx, vy = leg.x2 - leg.x1, leg.y2 - leg.y1
+                    scale = math.hypot(ux, uy) * math.hypot(vx, vy)
+                    if ux * vx + uy * vy >= 0 or abs(ux * vy - uy * vx) > 1e-12 * scale:
+                        break
+                    aligned.pop()
+                    leg = replace(leg, x1=previous.x1, y1=previous.y1)
+                if math.hypot(leg.x2 - leg.x1, leg.y2 - leg.y1) > 1e-9:
+                    aligned.append(leg)
+        route.segments[segment_start:] = aligned
 
 
 def create_serpentine(
@@ -4029,6 +4367,26 @@ class DiffPairRouter:
         """Analyze net names for differential pairs."""
         return analyze_differential_pairs(self.autorouter.net_names)
 
+    def _apply_authored_skew_limit(self, pair: DifferentialPair) -> None:
+        """Keep routing and length correction within both nets' authored limits."""
+        if pair.rules is None:
+            return
+        classes, membership, _ = self._resolve_detection_inputs()
+        if not classes:
+            return
+        limit = pair.rules.max_length_delta
+        for signal in (pair.positive, pair.negative):
+            net_class = classes.get(signal.net_name)
+            if net_class is None and membership:
+                net_class = classes.get(membership.get(signal.net_name))
+            authored = getattr(net_class, "skew_tolerance_mm", None)
+            if authored is not None:
+                limit = min(limit, authored)
+        if limit != pair.rules.max_length_delta:
+            # Pair-type/config rules can be shared by multiple pairs. Tighten
+            # this pair without changing unrelated pairs or caller defaults.
+            pair.rules = replace(pair.rules, max_length_delta=limit)
+
     def _resolve_engagement(self, pair: DifferentialPair) -> tuple[bool, str]:
         """Resolve whether ``pair`` should engage CoupledPathfinder.
 
@@ -4432,6 +4790,25 @@ class DiffPairRouter:
             grid._mark_segment(seg, clearance_cells=clearance_cells)
         self.autorouter._mark_route_on_cpp_grid(route)
 
+    def _through_via_board_thickness(self) -> float | None:
+        """Board thickness when ordinary through vias are the only via kind.
+
+        Issue #5333: geometric construction measures physical route length
+        including the drilled barrel, which is only well defined for the
+        ordinary through-via policy the length tuner and the match-group
+        checker already assume.  Return ``None`` when the manufacturer
+        publishes no thickness, or when blind/buried vias are enabled, so the
+        caller declines to construct rather than measuring the wrong span.
+        """
+        manufacturer = self.autorouter._build_manufacturer_design_rules()
+        thickness = getattr(manufacturer, "board_thickness_mm", None)
+        via_rules = getattr(self.autorouter, "via_rules", None)
+        if getattr(via_rules, "allow_blind", False) or getattr(via_rules, "allow_buried", False):
+            return None
+        if thickness is None or not math.isfinite(thickness) or thickness <= 0:
+            return None
+        return float(thickness)
+
     def _virtual_pad_at(self, template: Pad, wx: float, wy: float, layer_idx: int) -> Pad:
         """Virtual pad at an arbitrary board position (issue #3508).
 
@@ -4714,21 +5091,6 @@ class DiffPairRouter:
         finally:
             self._shadow_foreign_universe = prev
 
-    @staticmethod
-    def _seg_via_colocated(seg: Segment, via: Via) -> bool:
-        """#2706 co-location carve-out, matching ``ClearanceRule`` (#4575).
-
-        The in-pad-escape router places segment endpoints EXACTLY at via
-        centres, and the DRC skips any segment/via pair whose segment
-        endpoint is within ``_COLOCATION_EPSILON_MM`` of the via centre.
-        Without the same carve-out this gate would be STRICTER than the
-        checker and decline sides over geometry the checker never reports.
-        """
-        return (
-            math.hypot(seg.x1 - via.x, seg.y1 - via.y) < _SHADOW_VIA_COLOCATION_EPS
-            or math.hypot(seg.x2 - via.x, seg.y2 - via.y) < _SHADOW_VIA_COLOCATION_EPS
-        )
-
     def _segment_via_deficit(self, seg: Segment) -> tuple[float, tuple[float, float] | None]:
         """Worst exact clearance deficit of a segment vs FOREIGN vias (#4575).
 
@@ -4738,20 +5100,23 @@ class DiffPairRouter:
         DRC checks at the full board minimum because its diff-pair exemption
         covers segment-to-SEGMENT edges only.
 
+        Ordinary vias span the full stack even when their routing endpoints
+        name a shorter transition. Only microvias use a restricted span.
+        Foreign-net endpoint contact is a short and is never exempted.
+
         Returns ``(0.0, None)`` when the gate is disarmed.
         """
         universe = self._shadow_foreign_universe
         if universe is None:
             return 0.0, None
-        clearance = self.autorouter.rules.trace_clearance
+        clearance = self.autorouter.rules.via_clearance
         worst = 0.0
         worst_loc: tuple[float, float] | None = None
         for via in universe.vias:
             if via.net == seg.net:
                 continue  # own-net copper may touch (a tail lands on it)
-            if self._seg_via_colocated(seg, via):
-                continue
-            deficit = segment_via_deficit(seg, via, clearance)
+            physical_via = via if via.is_micro else replace(via, layers=(Layer.F_CU, Layer.B_CU))
+            deficit = segment_via_deficit(seg, physical_via, clearance)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
         return worst, worst_loc
@@ -4818,9 +5183,8 @@ class DiffPairRouter:
         for seg in universe.segments:
             if seg.net == via.net:
                 continue
-            if self._seg_via_colocated(seg, via):
-                continue
-            deficit = segment_via_deficit(seg, via, clearance)
+            physical_via = via if via.is_micro else replace(via, layers=(Layer.F_CU, Layer.B_CU))
+            deficit = segment_via_deficit(seg, physical_via, clearance)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
         v_lo = min(via.layers[0].value, via.layers[1].value)
@@ -4830,7 +5194,7 @@ class DiffPairRouter:
                 continue
             o_lo = min(other.layers[0].value, other.layers[1].value)
             o_hi = max(other.layers[0].value, other.layers[1].value)
-            if o_hi < v_lo or o_lo > v_hi:
+            if via.is_micro and other.is_micro and (o_hi < v_lo or o_lo > v_hi):
                 continue  # barrels never share a layer
             dist = math.hypot(via.x - other.x, via.y - other.y)
             deficit = via.diameter / 2 + other.diameter / 2 + clearance - dist
@@ -4936,15 +5300,25 @@ class DiffPairRouter:
         layer_idx: int,
         partner_segments: list[Segment] | None = None,
         partner_clearance: float = 0.0,
+        partner_vias: list[Via] | None = None,
+        *,
+        prefer_shortest: bool = False,
+        rank_pair_coverage: bool = False,
+        reserved_routes: tuple[Route, ...] = (),
+        preceding_segments: list[Segment] | None = None,
     ) -> Route | None:
         """Geometric head->pad tail on the head's layer (issue #3508).
 
         The per-net ``route()`` machinery declines sub-millimetre hops
         whose endpoints sit inside pad clearance halos (measured: every
         board 06 rescue tail it was offered), so we draw the tail
-        directly -- a straight segment, or an axis-aligned dogleg --
+        directly with horizontal, vertical, and 45-degree legs,
         and validate every covered grid cell with
         :meth:`_segment_cells_clear`.
+
+        ``reserved_routes`` screens future foreign traces before candidate
+        selection. ``preceding_segments`` rejects intersections and cycles
+        with the existing body while alternative tails are still available.
 
         Issue #4460: when ``partner_segments`` is supplied the partner
         (diff-pair guide) copper is part of the CANDIDATE FILTER, not a
@@ -4971,7 +5345,10 @@ class DiffPairRouter:
         fraction ``diffpair_routing_continuity`` would score.  The sort is
         STABLE and the legality gates below are untouched, so a tail region
         with no partner copper to follow (every score 0) keeps the historical
-        shape order byte-for-byte.
+        shape order for already-aligned candidates. Off-angle candidates
+        expand into two bounded dogleg orientations before scoring and
+        clearance validation, so later angle repair does not move an
+        accepted chord into foreign copper.
         """
         grid = self.autorouter.grid
         goal_layer_idx = grid.layer_to_index(goal.layer.value)
@@ -5050,10 +5427,61 @@ class DiffPairRouter:
                     head, goal, near_partner, width, partner_clearance
                 )
             )
+        # Validate the geometry that serialization will retain, rather than
+        # a chord that a later 45-degree repair may move into foreign copper.
+        # The two global dogleg orientations keep this expansion bounded.
+        from .quantize import dogleg_points
+
+        aligned_candidates = []
+        seen_candidates = set()
+        for candidate in candidates:
+            for axis_first in (False, True):
+                aligned: list[tuple[float, float, float, float]] = []
+                for x1, y1, x2, y2 in candidate:
+                    points = dogleg_points(x1, y1, x2, y2, axis_first=axis_first)
+                    aligned.extend(
+                        (a[0], a[1], b[0], b[1])
+                        for a, b in zip(points[:-1], points[1:], strict=True)
+                    )
+                key = tuple(aligned)
+                if key not in seen_candidates:
+                    seen_candidates.add(key)
+                    aligned_candidates.append(aligned)
+        candidates = aligned_candidates
+        if near_partner:
             scores = [_spans_coupled_fraction(c, width, layer, near_partner) for c in candidates]
             candidates = [
                 candidates[i] for i in sorted(range(len(candidates)), key=lambda i: (-scores[i], i))
             ]
+        if rank_pair_coverage and preceding_segments and partner_segments:
+            # Rank the completed legs together, not just the new tail: a tail
+            # with a high local fraction may leave more of its partner uncoupled.
+            def pair_coverage(spans):
+                own = Route(net=head.net, net_name=head.net_name)
+                own.segments = list(preceding_segments) + [
+                    Segment(x1, y1, x2, y2, width, layer, head.net, net_name=head.net_name)
+                    for x1, y1, x2, y2 in spans
+                ]
+                partner = Route(net=-1, net_name="")
+                partner.segments = partner_segments
+                coverage = min(
+                    self._tail_coupled_fraction(own, partner_segments),
+                    self._tail_coupled_fraction(partner, own.segments),
+                )
+                length_gap = abs(
+                    sum(math.dist(s.start, s.end) for s in own.segments)
+                    - sum(math.dist(s.start, s.end) for s in partner_segments)
+                )
+                return (-round(coverage, 12), length_gap)
+
+            candidates.sort(key=pair_coverage)
+        if prefer_shortest:
+            # A via approach may need a short legal continuation while its
+            # pad-side landing retains coupling-first selection. The caller
+            # must still validate quality on the assembled pair.
+            candidates.sort(
+                key=lambda spans: sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in spans)
+            )
         for segs in candidates:
             if all(
                 self._segment_cells_clear(pathfinder, x1, y1, x2, y2, layer_idx, head.net)
@@ -5091,9 +5519,52 @@ class DiffPairRouter:
                     for x1, y1, x2, y2 in segs
                 ):
                     continue
+                # The paired tail may have been constructed but not committed
+                # to the grid or foreign-copper cache yet. Filter its barrels
+                # here, while alternative planar candidates remain available.
+                if partner_vias:
+                    from kicad_tools.core.geometry import point_to_segment_distance
+
+                    if any(
+                        point_to_segment_distance(v.x, v.y, x1, y1, x2, y2)
+                        < (width + v.diameter) / 2 + self.autorouter.rules.via_clearance - 1e-9
+                        for v in partner_vias
+                        if not v.is_micro
+                        or min(l.value for l in v.layers)
+                        <= layer.value
+                        <= max(l.value for l in v.layers)
+                        for x1, y1, x2, y2 in segs
+                    ):
+                        continue
+                # Planned foreign traces are not raster-marked. Screen each
+                # geometric candidate before selection so a blocked winner
+                # cannot hide a legal later detour.
+                if reserved_routes and any(
+                    _segment_to_segment_distance(x1, y1, x2, y2, *s.start, *s.end)
+                    < (width + s.width) / 2 + self.autorouter.rules.trace_clearance - 1e-9
+                    for r in reserved_routes
+                    if r.net != head.net
+                    for s in r.segments
+                    if s.layer == layer
+                    for x1, y1, x2, y2 in segs
+                ):
+                    continue
+                if preceding_segments:
+                    from shapely.geometry import MultiLineString  # type: ignore[import-untyped]
+                    from shapely.ops import polygonize  # type: ignore[import-untyped]
+
+                    lines = [[s.start, s.end] for s in preceding_segments if s.layer == layer] + [
+                        [(x1, y1), (x2, y2)]
+                        for x1, y1, x2, y2 in segs
+                        if math.hypot(x2 - x1, y2 - y1) > 1e-9
+                    ]
+                    if not MultiLineString(lines).is_simple or any(
+                        p.area > 1e-9 for p in polygonize(lines)
+                    ):
+                        continue
                 route = Route(net=head.net, net_name=head.net_name)
                 for x1, y1, x2, y2 in segs:
-                    if abs(x2 - x1) < 0.01 and abs(y2 - y1) < 0.01:
+                    if abs(x2 - x1) < 1e-9 and abs(y2 - y1) < 1e-9:
                         continue
                     route.segments.append(
                         Segment(
@@ -5107,14 +5578,17 @@ class DiffPairRouter:
                             net_name=head.net_name,
                         )
                     )
-                # Issue #4572: the sub-0.01 mm drop above is harmless at a PAD
-                # landing (the pad's own copper absorbs it) but leaves a real
-                # hole when the dropped span sat BETWEEN two kept ones -- and
-                # the follow path splices this route between a lead-in and an
-                # offset run, where such a hole strands the net outright.  The
-                # coupling-preference order makes more of these candidates
-                # reachable, so reject a broken one and let the next candidate
-                # compete instead of shipping a break.
+                if preceding_segments:
+                    from .construction_validation import parallel_copper_overlap_issue
+
+                    # Centerline simplicity alone permits close parallel runs
+                    # whose copper folds back onto the body. Reject that losing
+                    # candidate here, while later legal tails are still available.
+                    if parallel_copper_overlap_issue(preceding_segments + route.segments):
+                        continue
+                # Preserve even tiny endpoint legs: virtual tail heads may
+                # be via centers, not pads whose copper covers a dropped span.
+                # Reject a broken candidate rather than shipping a gap.
                 if len(route.segments) > 1 and not self._route_is_chained(route):
                     continue
                 if route.segments:
@@ -5900,6 +6374,269 @@ class DiffPairRouter:
                     return True
         return False
 
+    def _via_has_only_pad_blockers(self, pathfinder: CoupledPathfinder, gx: int, gy: int) -> bool:
+        return self._via_has_only_geometry_blockers(pathfinder, gx, gy, include_routes=False)
+
+    def _via_has_only_geometry_blockers(
+        self, pathfinder: CoupledPathfinder, gx: int, gy: int, *, include_routes: bool = True
+    ) -> bool:
+        """Allow exact adjudication only with recorded blocker provenance.
+
+        A recreated pad grid cannot prove that a keepout was not superimposed
+        on a halo. Missing provenance therefore fails closed. The caller must
+        still check actual pad geometry, route copper and drilled holes.
+        """
+        grid = self.autorouter.grid
+        proven = getattr(grid, "_pad_geometry_cells", ())
+        routed = getattr(grid, "_route_geometry_cells", {}) if include_routes else {}
+        live_routes = {id(route) for route in grid.routes} if include_routes else set()
+        available = (
+            {
+                token
+                for token, reference in getattr(grid, "_route_geometry_sources", {}).items()
+                if (route := reference()) is not None and id(route) in live_routes
+            }
+            if include_routes
+            else set()
+        )
+        if not proven and not routed:
+            return False
+        radius = max(
+            pathfinder._via_extra_cells,
+            math.ceil(pathfinder.rules.via_drill / (2 * grid.resolution)),
+        )
+        for layer in range(grid.num_layers):
+            for y in range(gy - radius, gy + radius + 1):
+                for x in range(gx - radius, gx + radius + 1):
+                    if not (0 <= x < grid.cols and 0 <= y < grid.rows):
+                        return False
+                    cell = grid.cell_at(layer, y, x)
+                    key = (layer, y, x)
+                    if (cell.blocked or cell.pad_blocked) and key not in proven:
+                        sources = routed.get(key)
+                        if not sources or not sources <= available:
+                            return False
+        return True
+
+    def _layer_return_tails(
+        self,
+        pathfinder: CoupledPathfinder,
+        head: Pad,
+        goal: Pad,
+        partner: Route,
+        body: Route,
+        *,
+        deadline: float | None = None,
+        prefer_shortest_approach: bool = False,
+        rank_pair_coverage: bool = False,
+        allowed_via_sites: frozenset[tuple[int, int]] | None = None,
+        reserved_routes: tuple[Route, ...] = (),
+    ) -> Iterator[Route]:
+        """Yield bounded, uncommitted one-through-via layer-return candidates.
+
+        Both planar portions use the existing pad/partner-aware synthesizer.
+        Exact final checks include every committed route and the uncommitted
+        partner, including barrel copper on every layer and drilled holes.
+        The caller must still validate the assembled pair and its quality.
+        ``prefer_shortest_approach`` changes only the approach-side candidate
+        ordering; the pad-side tail keeps its coupling preference.
+        ``allowed_via_sites`` restricts the existing bounded search to planned
+        grid sites. It never bypasses geometry, hole or occupancy checks.
+        ``reserved_routes`` adds future copper to exact trace, barrel and
+        drill checks without changing the grid or committed route lists.
+        """
+        from .via_clearance import drill_hole_to_hole_clear
+
+        grid, rules = self.autorouter.grid, self.autorouter.rules
+        start_layer = grid.layer_to_index(head.layer.value)
+        end_layer = grid.layer_to_index(goal.layer.value)
+        if start_layer == end_layer or any(
+            li not in grid.get_routable_indices() for li in (start_layer, end_layer)
+        ):
+            return
+        foreign = [
+            r
+            for r in [*self.autorouter.routes, *grid.routes, *reserved_routes, partner]
+            if r.net != head.net
+        ]
+        drills = self._collect_existing_drills() + [
+            (v.x, v.y, v.drill)
+            for r in (*grid.routes, *reserved_routes, partner, body)
+            for v in r.vias
+        ]
+        pair_edge_clearance = self._pair_seg_clearance(
+            pathfinder, head.net_name
+        ) - pathfinder._get_trace_width_for_net(head.net_name)
+        partner_center_clearance = max(
+            (
+                (pathfinder._get_trace_width_for_net(head.net_name) + s.width) / 2
+                + pair_edge_clearance
+                for s in partner.segments
+            ),
+            default=0.0,
+        )
+        # Issue #5333 (TMDS_D1): sites used to be visited in a fixed
+        # anchor/radius/direction raster order, so the caller's
+        # ``itertools.islice(tails, 10)`` stopped at the first ten LEGAL
+        # candidates in THAT order regardless of how well any of them
+        # actually couples to the partner. Meeting the authored
+        # ``effective_coupled_continuity_threshold`` needs the tail to run
+        # close to the partner's own committed copper for most of its
+        # length, so candidate grid sites are visited in order of ascending
+        # distance from the site to the partner's nearest existing segment
+        # or via instead. This only reorders WHICH legal site is tried
+        # first -- every legality/clearance/hole-spacing/occupancy check
+        # below, and "a failed check just moves on to the next site", are
+        # unchanged. When the partner has no committed copper yet (empty
+        # ``partner.segments``/``partner.vias``, e.g. the very first leg of
+        # a pair), every site scores ``inf`` and the stable sort leaves the
+        # original raster order intact.
+        candidate_sites: list[tuple[float, int, int, int]] = []
+        seen_sites: set[tuple[int, int]] = set()
+        # Grid-aligned sites avoid placing a barrel between checked cells.
+        for anchor in (goal, head):
+            for radius in LAYER_RETURN_SEARCH_RADII_MM:
+                for dx, dy in (
+                    (1, 0),
+                    (-1, 0),
+                    (0, 1),
+                    (0, -1),
+                    (1, 1),
+                    (1, -1),
+                    (-1, 1),
+                    (-1, -1),
+                ):
+                    gx, gy = grid.world_to_grid(anchor.x + dx * radius, anchor.y + dy * radius)
+                    if allowed_via_sites is not None and (gx, gy) not in allowed_via_sites:
+                        continue
+                    if (gx, gy) in seen_sites:
+                        continue
+                    seen_sites.add((gx, gy))
+                    site_x, site_y = grid.grid_to_world(gx, gy)
+                    score = min(
+                        (
+                            self._point_segment_distance(site_x, site_y, seg)
+                            for seg in partner.segments
+                        ),
+                        default=math.inf,
+                    )
+                    if partner.vias:
+                        score = min(
+                            score,
+                            min(math.hypot(site_x - v.x, site_y - v.y) for v in partner.vias),
+                        )
+                    candidate_sites.append((score, len(candidate_sites), gx, gy))
+        candidate_sites.sort(key=lambda c: (c[0], c[1]))
+
+        for _score, _order, gx, gy in candidate_sites:
+            if deadline is not None and time.monotonic() >= deadline:
+                return
+            raster_blocked = pathfinder._is_via_blocked(gx, gy, head.net)
+            if raster_blocked and not self._via_has_only_geometry_blockers(pathfinder, gx, gy):
+                continue
+            x, y = grid.grid_to_world(gx, gy)
+            via = Via(
+                x=x,
+                y=y,
+                drill=rules.via_drill,
+                diameter=rules.via_diameter,
+                layers=(
+                    Layer(grid.index_to_layer(0)),
+                    Layer(grid.index_to_layer(grid.num_layers - 1)),
+                ),
+                net=head.net,
+                net_name=head.net_name,
+            )
+            if (
+                raster_blocked
+                and grid.worst_via_pad_deficit(
+                    via, exclude_net=-1, clearance_floor=rules.via_clearance
+                )[0]
+                > 1e-9
+            ):
+                # The exact fallback exempts no pad, including own-net
+                # metal. Thus it cannot introduce a via-in-pad escape.
+                continue
+            if (
+                grid.worst_via_pad_deficit(
+                    via, exclude_net=head.net, clearance_floor=rules.via_clearance
+                )[0]
+                > 1e-9
+            ):
+                continue
+            if not drill_hole_to_hole_clear(x, y, via.drill, drills, rules.min_hole_to_hole):
+                continue
+            if any(
+                self._point_segment_distance(x, y, seg)
+                < (via.diameter + seg.width) / 2 + rules.via_clearance - 1e-9
+                for r in foreign
+                for seg in r.segments
+            ) or any(
+                math.hypot(x - v.x, y - v.y)
+                < (via.diameter + v.diameter) / 2 + rules.via_clearance - 1e-9
+                for r in foreign
+                for v in r.vias
+            ):
+                continue
+            before = self._virtual_pad_at(head, x, y, start_layer)
+            after = self._virtual_pad_at(goal, x, y, end_layer)
+            pieces = []
+            for a, b, li in ((head, before, start_layer), (after, goal, end_layer)):
+                if math.hypot(a.x - b.x, a.y - b.y) < 1e-9:
+                    pieces.append(Route(net=head.net, net_name=head.net_name))
+                    continue
+                part = self._synthesize_tail(
+                    pathfinder,
+                    a,
+                    b,
+                    li,
+                    partner_segments=partner.segments,
+                    partner_clearance=partner_center_clearance,
+                    partner_vias=partner.vias,
+                    prefer_shortest=prefer_shortest_approach and li == start_layer,
+                    rank_pair_coverage=rank_pair_coverage,
+                    reserved_routes=reserved_routes,
+                    preceding_segments=body.segments + [s for p in pieces for s in p.segments],
+                )
+                if part is None:
+                    break
+                pieces.append(part)
+            if len(pieces) != 2:
+                continue
+            segments = [seg for part in pieces for seg in part.segments]
+            if any(
+                self._point_segment_distance(v.x, v.y, seg)
+                < (seg.width + v.diameter) / 2 + rules.via_clearance - 1e-9
+                for seg in segments
+                for r in foreign
+                for v in r.vias
+            ) or any(
+                _segment_to_segment_distance(
+                    seg.x1,
+                    seg.y1,
+                    seg.x2,
+                    seg.y2,
+                    other.x1,
+                    other.y1,
+                    other.x2,
+                    other.y2,
+                )
+                < (
+                    (seg.width + other.width) / 2 + rules.trace_clearance
+                    if r.net != partner.net
+                    else (seg.width + other.width) / 2 + pair_edge_clearance
+                )
+                - 1e-9
+                for seg in segments
+                for r in foreign
+                for other in r.segments
+                if seg.layer == other.layer
+            ):
+                continue
+            if deadline is not None and time.monotonic() >= deadline:
+                return
+            yield Route(net=head.net, net_name=head.net_name, segments=segments, vias=[via])
+
     def _synthesize_crossing_tail(
         self,
         pathfinder: CoupledPathfinder,
@@ -5907,6 +6644,9 @@ class DiffPairRouter:
         goal: Pad,
         layer_idx: int,
         partner_segments: list[Segment],
+        *,
+        body_segments: list[Segment] | None = None,
+        deadline: float | None = None,
     ) -> Route | None:
         """Two-via layer-change tail that may cross the partner guide.
 
@@ -5918,9 +6658,21 @@ class DiffPairRouter:
         pathfinder's via predicate, and -- because the partner guide is
         NOT in the grid -- explicit geometric clearance against the
         partner segments is enforced: same-layer segment portions and
-        via barrels keep ``via_diameter/2 + trace_clearance +
+        via barrels keep ``via_diameter/2 + via_clearance +
         partner_width/2`` of centerline distance.
+
+        Supplying ``body_segments`` compares legal candidates by the minimum
+        coupling fraction of the assembled route and its partner. Ties retain
+        enumeration order. ``deadline`` is an absolute monotonic deadline;
+        expiry returns the best fully validated candidate seen so far. The
+        caller must still validate the assembled pair and its length limits.
         """
+        # Ranking is useful work, not observational census overhead: never
+        # credit it back to the caller's wall-clock budget.
+        best_route = None
+        best_score = -1.0
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
         grid = self.autorouter.grid
         rules = self.autorouter.rules
         goal_layer_idx = grid.layer_to_index(goal.layer.value)
@@ -5930,7 +6682,7 @@ class DiffPairRouter:
         partner_width = max((ps.width for ps in partner_segments), default=width)
         # Via barrel vs partner trace clearance bound (vias are not
         # pair members; the standard manufacturer clearance applies).
-        via_clear = rules.via_diameter / 2 + rules.trace_clearance + partner_width / 2
+        via_clear = rules.via_diameter / 2 + rules.via_clearance + partner_width / 2
         # Same-layer trace vs partner trace: the intra-pair bound.
         seg_clear = self._pair_seg_clearance(pathfinder, head.net_name)
 
@@ -5961,6 +6713,7 @@ class DiffPairRouter:
         # committed vias, any net) so each fan-out via candidate can be
         # rejected when its drill would sit within ``min_hole_to_hole``
         # edge-to-edge of an existing drill.  Assembled once per crossover.
+        from .quantize import dogleg_points
         from .via_clearance import drill_hole_to_hole_clear
 
         existing_drills = self._collect_existing_drills()
@@ -6003,7 +6756,7 @@ class DiffPairRouter:
         # one in sorted order, i.e. exactly what the un-instrumented loop
         # returns -- and it costs a full 225-candidate sweep per crossover, so
         # it is opt-in and off in every normal run.
-        census_on = _CROSSTAIL_CENSUS
+        census_on = _CROSSTAIL_CENSUS and body_segments is None
         census_enum = {id(pair): i for i, pair in enumerate(candidate_pairs)}
         census_legal: list[tuple[int, int, float, _XY, _XY]] = []
         census_key: Callable[[tuple[_XY, _XY]], float] | None = None
@@ -6040,7 +6793,23 @@ class DiffPairRouter:
                 candidate_pairs.sort(key=_pair_penalty)
                 census_key = _pair_penalty
 
+        def coupling_score(candidate: Route) -> float:
+            assembled = [*(body_segments or []), *candidate.segments]
+            fractions = []
+            for segments, partner in ((assembled, partner_segments), (partner_segments, assembled)):
+                total = coupled = 0.0
+                for seg in segments:
+                    length = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
+                    total += length
+                    coupled += length * _spans_coupled_fraction(
+                        [(seg.x1, seg.y1, seg.x2, seg.y2)], seg.width, seg.layer, partner
+                    )
+                fractions.append(coupled / total if total else 0.0)
+            return min(fractions)
+
         for rank, (v1, v2) in enumerate(candidate_pairs):
+            if deadline is not None and time.monotonic() >= deadline:
+                return best_route
             # Issue #3855: replace the hardcoded 0.6mm center-to-center
             # via-to-via check with an edge-to-edge ``min_hole_to_hole``
             # check.  This single crossover's two vias must clear each
@@ -6076,126 +6845,80 @@ class DiffPairRouter:
                 < via_clear
             ):
                 continue
-            # Surface stubs must stay clear of same-layer partner copper.
-            if (
-                self._min_distance_to_partner(
-                    head.x, head.y, v1[0], v1[1], partner_segments, surface
-                )
-                < seg_clear
-            ):
-                continue
-            if (
-                self._min_distance_to_partner(
-                    v2[0], v2[1], goal.x, goal.y, partner_segments, surface
-                )
-                < seg_clear
-            ):
-                continue
-            if not self._segment_cells_clear(
-                pathfinder, head.x, head.y, v1[0], v1[1], layer_idx, head.net
-            ):
-                continue
-            if not self._segment_cells_clear(
-                pathfinder, v2[0], v2[1], goal.x, goal.y, layer_idx, head.net
-            ):
-                continue
             for alt in routable:
-                if not self._segment_cells_clear(
-                    pathfinder, v1[0], v1[1], v2[0], v2[1], alt, head.net
-                ):
-                    continue
                 alt_layer = Layer(grid.index_to_layer(alt))
-                # Issue #3508 (second pass): the partner guide is
-                # NOT in the grid, so the alt-layer crossover must
-                # also be checked geometrically against partner
-                # copper ON THAT LAYER -- a via-bearing partner
-                # guide has inner-layer segments the cell check
-                # cannot see (measured: USB3_RX1/RX2 "physically
-                # overlapping copper" rips in the recipe's 6b
-                # repair even with nudge protection).
-                if (
-                    self._min_distance_to_partner(
-                        v1[0], v1[1], v2[0], v2[1], partner_segments, alt_layer
-                    )
-                    < seg_clear
-                ):
-                    continue
-                route = Route(net=head.net, net_name=head.net_name)
-                if math.hypot(v1[0] - head.x, v1[1] - head.y) > 0.01:
-                    route.segments.append(
-                        Segment(
-                            x1=head.x,
-                            y1=head.y,
-                            x2=v1[0],
-                            y2=v1[1],
-                            width=width,
-                            layer=surface,
+                route = None
+                # Check the actual emitted legs, including the inner-layer
+                # crossing, before accepting either bounded orientation.
+                for axis_first in (False, True):
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return best_route
+                    candidate = Route(net=head.net, net_name=head.net_name)
+                    for start, end, layer in (
+                        ((head.x, head.y), v1, surface),
+                        (v1, v2, alt_layer),
+                        (v2, (goal.x, goal.y), surface),
+                    ):
+                        points = dogleg_points(*start, *end, axis_first=axis_first)
+                        for a, b in zip(points[:-1], points[1:], strict=True):
+                            if math.dist(a, b) <= 1e-9:
+                                continue
+                            candidate.segments.append(
+                                Segment(
+                                    x1=a[0],
+                                    y1=a[1],
+                                    x2=b[0],
+                                    y2=b[1],
+                                    width=width,
+                                    layer=layer,
+                                    net=head.net,
+                                    net_name=head.net_name,
+                                )
+                            )
+                    if any(
+                        not self._segment_cells_clear(
+                            pathfinder,
+                            seg.x1,
+                            seg.y1,
+                            seg.x2,
+                            seg.y2,
+                            grid.layer_to_index(seg.layer.value),
+                            head.net,
+                        )
+                        or self._min_distance_to_partner(
+                            seg.x1, seg.y1, seg.x2, seg.y2, partner_segments, seg.layer
+                        )
+                        < seg_clear
+                        for seg in candidate.segments
+                    ):
+                        continue
+                    candidate.vias = [
+                        Via(
+                            x=site[0],
+                            y=site[1],
+                            drill=rules.via_drill,
+                            diameter=rules.via_diameter,
+                            layers=layers,
                             net=head.net,
                             net_name=head.net_name,
                         )
-                    )
-                route.vias.append(
-                    Via(
-                        x=v1[0],
-                        y=v1[1],
-                        drill=rules.via_drill,
-                        diameter=rules.via_diameter,
-                        layers=(surface, alt_layer),
-                        net=head.net,
-                        net_name=head.net_name,
-                    )
-                )
-                route.segments.append(
-                    Segment(
-                        x1=v1[0],
-                        y1=v1[1],
-                        x2=v2[0],
-                        y2=v2[1],
-                        width=width,
-                        layer=alt_layer,
-                        net=head.net,
-                        net_name=head.net_name,
-                    )
-                )
-                route.vias.append(
-                    Via(
-                        x=v2[0],
-                        y=v2[1],
-                        drill=rules.via_drill,
-                        diameter=rules.via_diameter,
-                        layers=(alt_layer, surface),
-                        net=head.net,
-                        net_name=head.net_name,
-                    )
-                )
-                if math.hypot(goal.x - v2[0], goal.y - v2[1]) > 0.01:
-                    route.segments.append(
-                        Segment(
-                            x1=v2[0],
-                            y1=v2[1],
-                            x2=goal.x,
-                            y2=goal.y,
-                            width=width,
-                            layer=surface,
-                            net=head.net,
-                            net_name=head.net_name,
-                        )
-                    )
-                # Issue #4571: the crossover's stubs, its alt-layer
-                # crossing and BOTH via barrels are only raster-validated
-                # above, and the raster's pad halo is shrunk in fine-pitch
-                # corridors.  Screen the assembled candidate with the exact
-                # DRC-equivalent pad predicate so a violating crossover
-                # loses to a later via-site candidate instead of shipping.
-                if self._route_pad_violation(route)[0] > _SHADOW_PAD_DEFICIT_EPS:
-                    continue
-                # Issue #4575: the barrel screens above measure this crossover
-                # against the partner's SEGMENTS only, and the raster cannot
-                # see the partner at all.  Hold the assembled crossover to the
-                # exact ``clearance_segment_via`` / via-vs-via predicates too,
-                # so a via site that grazes the partner's barrel loses to the
-                # next candidate pair rather than shipping.
-                if not self._route_via_clear(route):
+                        for site, layers in ((v1, (surface, alt_layer)), (v2, (alt_layer, surface)))
+                    ]
+                    # Exact pad and barrel checks must see the doglegs too.
+                    if self._route_pad_violation(candidate)[0] > _SHADOW_PAD_DEFICIT_EPS:
+                        continue
+                    if not self._route_via_clear(candidate):
+                        continue
+                    if body_segments is not None:
+                        if deadline is not None and time.monotonic() >= deadline:
+                            return best_route
+                        score = coupling_score(candidate)
+                        if score > best_score:
+                            best_score, best_route = score, candidate
+                        continue
+                    route = candidate
+                    break
+                if route is None:
                     continue
                 if census_on:
                     census_legal.append(
@@ -6235,7 +6958,7 @@ class DiffPairRouter:
                 head, goal, census_legal, len(candidate_pairs), census_extra_s
             )
             return census_first  # observation only: the first legal candidate
-        return None
+        return best_route
 
     def _collect_crossing_tail_census(
         self,
@@ -9494,6 +10217,8 @@ class DiffPairRouter:
         if pair.rules is None:
             return [], None
 
+        self._apply_authored_skew_limit(pair)
+
         if spacing is None:
             spacing = pair.rules.spacing
 
@@ -9769,6 +10494,21 @@ class DiffPairRouter:
             # the open fallback gets the REMAINDER (not a fresh full
             # budget -- the 4000+4000 double-spend on board 06).
             corridor_iterations_used = 0
+            # Issue #5333 (2026-09-15 session): per-stage WALL-CLOCK spend,
+            # diagnostic only -- no budget, deadline or routing decision
+            # reads these.  The prior sessions' TMDS_D1 finding (construction
+            # entered with "almost no window left") was inferred from
+            # secondary signals (``widen_spent``, ``landings``,
+            # ``completion_reasons``); this records the actual seconds each
+            # of the three sequential ``per_pair_timeout`` consumers spent,
+            # so the next full-recipe budget-reallocation session (needs the
+            # pinned Linux worker per #5333's own item 4) has exact
+            # stage-by-stage numbers instead of re-deriving them from
+            # iteration counters. ``None`` means the stage never ran for
+            # this pair.
+            corridor_search_elapsed: float | None = None
+            open_fallback_elapsed: float | None = None
+            construction_entry_window_s: float | None = None
 
             # Issue #3473: bound the probe.  It is only a guide route;
             # give it a small slice of the corridor half-budget (an
@@ -9838,6 +10578,13 @@ class DiffPairRouter:
             # both normal attempts fail) without displacing a working attempt
             # or spending its per-pair budget.
             n_guide: Route | None = None
+            # Issue #5333: layer-agnostic corridor mask around the P guide,
+            # built below only when the corridor-search branch runs.  Kept
+            # in scope (rather than a local of that branch) so the
+            # construction stage further down can hand it to
+            # ``pair_construction``'s corridor-guided fallback (#5333,
+            # MIPI_DAT0/TMDS_D2) without rebuilding it.
+            corridor: frozenset[tuple[int, int]] | None = None
             p_overlap_sites: list[tuple[float, float]] = []
             n_overlap_sites: list[tuple[float, float]] = []
             if self.enable_shadow_construction and guide_route is not None and guide_route.segments:
@@ -10042,6 +10789,7 @@ class DiffPairRouter:
                 corridor_iteration_budget: int | None = None
                 if per_pair_max_iterations is not None and per_pair_max_iterations > 0:
                     corridor_iteration_budget = max(1, per_pair_max_iterations // 2)
+                _corridor_call_t0 = time.monotonic()
                 result = pathfinder.route_coupled(
                     spec.p_start,
                     spec.p_end,
@@ -10051,6 +10799,7 @@ class DiffPairRouter:
                     max_iterations_budget=corridor_iteration_budget,
                     corridor=corridor,
                 )
+                corridor_search_elapsed = time.monotonic() - _corridor_call_t0
                 corridor_iterations_used = pathfinder.last_iterations
                 if result is not None:
                     coupled_phase = "corridor"
@@ -10074,6 +10823,7 @@ class DiffPairRouter:
                     remaining_iterations = max(
                         1, per_pair_max_iterations - corridor_iterations_used
                     )
+                _open_call_t0 = time.monotonic()
                 result = pathfinder.route_coupled(
                     spec.p_start,
                     spec.p_end,
@@ -10082,6 +10832,113 @@ class DiffPairRouter:
                     timeout_seconds=remaining_budget,
                     max_iterations_budget=remaining_iterations,
                 )
+                open_fallback_elapsed = time.monotonic() - _open_call_t0
+
+            if (
+                result is None
+                and not shadow_fail_fast
+                and spec.polarity_swap
+                and per_pair_timeout is not None
+                and getattr(pathfinder, "last_coupled_backend", None) == "cpp"
+                and getattr(pathfinder, "last_best_cpp_path", None)
+            ):
+                # Complete the saved native geometry without another search.
+                # This deadline shares the original pair window; recovery
+                # cannot renew either the time or native iteration budget.
+                recovery_deadline = spec_t0 + per_pair_timeout + self._census_elapsed_s
+                if time.monotonic() < recovery_deadline:
+                    from .partial_recovery import recover_partial_pair
+
+                    manufacturer = self.autorouter._build_manufacturer_design_rules()
+                    thickness = getattr(manufacturer, "board_thickness_mm", None)
+                    via_rules = getattr(self.autorouter, "via_rules", None)
+                    partial_vias = bool(
+                        getattr(via_rules, "allow_blind", False)
+                        or getattr(via_rules, "allow_buried", False)
+                    )
+                    if thickness is not None and not partial_vias:
+                        result = recover_partial_pair(
+                            self,
+                            pathfinder,
+                            pair,
+                            (spec.p_start, spec.p_end, spec.n_start, spec.n_end),
+                            deadline=recovery_deadline,
+                            board_thickness_mm=thickness,
+                            num_copper_layers=self.autorouter.grid.num_layers,
+                        )
+                        if result is not None:
+                            coupled_phase = "partial-recovery"
+
+            if (
+                result is None
+                and not shadow_fail_fast
+                and per_pair_timeout is not None
+                and getattr(pathfinder, "last_coupled_backend", None) == "cpp"
+            ):
+                # Issue #5333: the joint search cannot change layers while the
+                # pair is narrower than the mutual barrel pitch -- a via move
+                # places BOTH barrels at the pair's current separation, and
+                # planar moves pin that separation to the coupled target +-1
+                # outside the endpoint relaxation radii.  Measured on an empty
+                # four-layer board with a single F.Cu barrier that makes a
+                # layer change mandatory: 20,000 iterations, every explored
+                # state on the start layer, ``via_pair_pitch`` dominant, no
+                # route -- unchanged at 10x the budget.  So when the searches
+                # have exited, construct the pair from pad geometry instead:
+                # a natively validated fan-out + paired via escape, a coupled
+                # body, and guarded terminal returns onto mutually clear
+                # barrels.  Every step passes the ordinary native guards and
+                # the assembled pair must still satisfy the authored skew and
+                # coupling gates, so this adds a construction path, not an
+                # exemption.  It runs INSIDE the pair's existing wall-clock
+                # window and spends its own small, explicit ledgers.
+                construction_deadline = spec_t0 + per_pair_timeout + self._census_elapsed_s
+                # Issue #5333 (2026-09-15 session): record the WALL-CLOCK
+                # window actually left for construction at the moment it is
+                # entered -- this is the number the prior session's finding
+                # ("construction inherits whatever sliver is left") was
+                # stated qualitatively about; diagnostic only, feeds the
+                # ``[coupled-timing]`` line below, does not affect
+                # ``construction_deadline`` itself.
+                construction_entry_window_s = construction_deadline - time.monotonic()
+                thickness = self._through_via_board_thickness()
+                if thickness is not None and time.monotonic() < construction_deadline:
+                    from .pair_construction import ConstructionBudget, construct_pair_routes
+
+                    budget = ConstructionBudget(
+                        construction_deadline,
+                        CONSTRUCTION_DEPARTURE_ITERATIONS,
+                        CONSTRUCTION_BODY_ATTEMPTS,
+                        corridor_iterations_remaining=(
+                            CONSTRUCTION_CORRIDOR_ITERATIONS if corridor is not None else 0
+                        ),
+                    )
+                    result = construct_pair_routes(
+                        self,
+                        pathfinder,
+                        pair,
+                        (spec.p_start, spec.p_end, spec.n_start, spec.n_end),
+                        budget,
+                        board_thickness_mm=thickness,
+                        num_copper_layers=self.autorouter.grid.num_layers,
+                        corridor=corridor,
+                    )
+                    # Issue #5333: report the STAGE tally, not just the total
+                    # spend.  ``bodies=0`` alone cannot distinguish "no escape
+                    # validated natively" from "no mutually clear landing",
+                    # and an exhausted ledger cannot distinguish "the shape
+                    # lattice ran out" from "every body collided with copper
+                    # committed by an earlier pair".  Those are different
+                    # defects with different fixes, so the per-pair line has to
+                    # name which one fired.
+                    print(
+                        "    [coupled-construction] "
+                        f"success={result is not None} "
+                        f"native_iters={budget.iterations_used} "
+                        f"{budget.stage_summary()}"
+                    )
+                    if result is not None:
+                        coupled_phase = "construction"
 
             # Issue #4635: deliberately NOT census-adjusted.  The deadlines
             # above credit the census's cost back so census-on and census-off
@@ -10119,6 +10976,15 @@ class DiffPairRouter:
             else:
                 best_state_repr = str(best_state)
             dominant = dominant_rejection(pathfinder.last_rejections)
+
+            def _fmt_stage_s(value: float | None) -> str:
+                # Issue #5333: "n/a" means the stage never ran for this pair
+                # (e.g. a pair that qualified via ``shadow`` or ``corridor``
+                # never reaches the open fallback or construction), not zero
+                # cost -- distinguish the two so a reader cannot mistake a
+                # skipped stage for a free one.
+                return "n/a" if value is None else f"{value:.2f}s"
+
             print(
                 f"    [coupled-timing] phase={coupled_phase} "
                 f"backend={backend} "
@@ -10129,7 +10995,10 @@ class DiffPairRouter:
                 f"best_state={best_state_repr} "
                 f"dominant_rejection={dominant} "
                 f"rejections={dict(pathfinder.last_rejections)} "
-                f"success={result is not None}"
+                f"success={result is not None} "
+                f"corridor_search_s={_fmt_stage_s(corridor_search_elapsed)} "
+                f"open_fallback_s={_fmt_stage_s(open_fallback_elapsed)} "
+                f"construction_entry_window_s={_fmt_stage_s(construction_entry_window_s)}"
             )
 
             # Issue #4459: structured per-pair ground-truth report.  Classify
@@ -10685,6 +11554,8 @@ class DiffPairRouter:
         """
         if pair.rules is None:
             return [], None
+
+        self._apply_authored_skew_limit(pair)
 
         if spacing is None:
             spacing = pair.rules.spacing
@@ -12052,6 +12923,46 @@ class DiffPairRouter:
         coupled_phase_deadline: float | None = None
         if effective_aggregate_timeout is not None and effective_aggregate_timeout > 0:
             coupled_phase_deadline = time.monotonic() + float(effective_aggregate_timeout)
+        # Issue #5333: ``--deterministic-budget`` prints "per-net wall-clock
+        # cutoff DISABLED ... routed output is reproducible across machines"
+        # (issue #3538/#3881) -- but that contract was only ever implemented
+        # for the SINGLE-ENDED per-net A*.  This phase's two wall-clock
+        # cutoffs are untouched by the flag, so under it the set of pairs
+        # that qualify as coupled remains a function of machine speed and
+        # load while the banner says otherwise.  Measured on Board07's
+        # committed regression fixture (seed 42, native ABI 31, identical
+        # source and argv, one loaded host): the derived 60 s per-pair wall
+        # qualified 3/7 pairs on one run and 4/7 on the very next, while
+        # ``--diffpair-per-pair-timeout 300`` qualified 6/7.  Only the wall
+        # allowance differed -- those were budget exits, not physical
+        # rejections -- so a "7/7 qualified" measurement taken on a fast idle
+        # host does not transfer to a busy one, and a qualification claim
+        # that does not mention the wall budget it ran under is unfalsifiable.
+        #
+        # This is instrumentation ONLY: no budget, iteration ledger or
+        # routing decision changes here.  Retiring the cutoffs in favour of
+        # the phase's existing deterministic ledgers needs a measured
+        # full-recipe cost comparison first, because the hard total the
+        # recipe grants the whole board is shared with the single-ended
+        # remainder.
+        _wall_governed = (
+            effective_per_pair_timeout is not None and effective_per_pair_timeout > 0
+        ) or coupled_phase_deadline is not None
+        if getattr(diffpair_config, "deterministic_budget", False) and _wall_governed:
+            logger.warning(
+                "DIFFPAIR_NONDETERMINISTIC_BUDGET: --deterministic-budget is "
+                "set, but the coupled diff-pair phase still applies wall-clock "
+                "cutoffs (per-pair %s; aggregate %s). Which pairs qualify as "
+                "coupled therefore depends on machine speed and load -- treat "
+                "any pair-qualification count from this run as valid only for "
+                "these wall budgets on this host (issue #5333).",
+                f"{float(effective_per_pair_timeout):.1f}s"
+                if effective_per_pair_timeout
+                else "none",
+                f"{float(effective_aggregate_timeout):.1f}s"
+                if effective_aggregate_timeout
+                else "none",
+            )
         aggregate_deferred_pairs = 0
         for pair in diff_pairs:
             p_id, n_id = pair.get_net_ids()

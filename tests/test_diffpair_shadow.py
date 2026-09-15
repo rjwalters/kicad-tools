@@ -2876,14 +2876,8 @@ def test_partner_via_on_a_shared_connector_ref_is_still_measured():
         assert dpr._route_via_violation(shadow)[0] == pytest.approx(_BARREL_DEFICIT, abs=1e-9)
 
 
-def test_segment_endpoint_colocated_with_a_foreign_via_is_not_flagged():
-    """AC-7: mirror ``ClearanceRule``'s #2706 in-pad-escape carve-out.
-
-    The router's in-pad escape places segment endpoints EXACTLY at via
-    centres, and the DRC skips such pairs.  A gate without the carve-out
-    would be STRICTER than the checker and decline sides over geometry that
-    is never reported -- pure reach loss for zero DRC gain.
-    """
+def test_segment_endpoint_colocated_with_a_foreign_via_is_rejected():
+    """Foreign copper at a shared endpoint is a short, even in a pad escape."""
     dpr = _pad_gate_router()
 
     foreign = Route(net=99, net_name="OTHER")
@@ -2892,16 +2886,16 @@ def test_segment_endpoint_colocated_with_a_foreign_via_is_not_flagged():
     shadow.segments.append(_via_gate_seg(5.0, 5.0, 8.0, 5.0))  # endpoint ON the via centre
 
     with dpr._shadow_foreign_copper(foreign):
-        assert dpr._route_via_violation(shadow)[0] == 0.0
+        assert dpr._route_via_violation(shadow)[0] > 0.0
 
-    # One quantum away from the carve-out epsilon the copper IS measured.
+    # Moving the endpoint slightly must still report the short.
     moved = Route(net=7, net_name="USB3_TX1+")
     moved.segments.append(_via_gate_seg(5.01, 5.0, 8.0, 5.0))
     with dpr._shadow_foreign_copper(foreign):
         assert dpr._route_via_violation(moved)[0] > 0.0
 
 
-def test_blind_via_that_does_not_span_the_segments_layer_is_not_flagged():
+def test_microvia_that_does_not_span_the_segments_layer_is_not_flagged():
     """Layer-span awareness: a barrel is only copper where it actually runs."""
     dpr = _pad_gate_router()
 
@@ -2914,6 +2908,7 @@ def test_blind_via_that_does_not_span_the_segments_layer_is_not_flagged():
     blind.vias.append(
         _via_gate_via(5.0, 5.0, net=99, name="OTHER", layers=(Layer.B_CU, Layer.B_CU))
     )
+    blind.vias[0].is_micro = True
     with dpr._shadow_foreign_copper(blind):
         assert dpr._route_via_violation(shadow)[0] == 0.0
 
@@ -4847,3 +4842,212 @@ def test_crossing_tail_census_announces_truncation_instead_of_hiding_it(capsys):
     assert f"legal={_CROSSTAIL_CENSUS_LIST + 5}/225" in lines[0]
     assert sum(1 for line in lines if "rank=" in line) == _CROSSTAIL_CENSUS_LIST
     assert any("5 further legal candidate(s) not listed" in line for line in lines)
+
+
+def test_shortest_tail_policy_preserves_partner_clearance():
+    dpr = _diffpair_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    direct = dpr._synthesize_tail(
+        _AllClearPathfinder(),
+        head,
+        goal,
+        0,
+        partner_segments=_horizontal_partner(6.0),
+        partner_clearance=0.4,
+        prefer_shortest=True,
+    )
+    assert direct is not None and len(direct.segments) == 1
+    assert direct.segments[0].start == (5.0, 5.0)
+    assert direct.segments[0].end == (8.0, 5.0)
+    partner = _crossing_partner()
+    detour = dpr._synthesize_tail(
+        _AllClearPathfinder(),
+        head,
+        goal,
+        0,
+        partner_segments=partner,
+        partner_clearance=0.5,
+        prefer_shortest=True,
+    )
+    assert detour is not None and len(detour.segments) > 1
+    for seg in detour.segments:
+        assert (
+            dpr._min_distance_to_partner(seg.x1, seg.y1, seg.x2, seg.y2, partner, seg.layer)
+            >= 0.5 - 1e-9
+        )
+
+
+def test_crossing_tail_checks_aligned_inner_legs_against_partner():
+    from kicad_tools.router.quantize import is_45_aligned
+
+    dpr = _crossing_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 6.0))
+    grid = dpr.autorouter.grid
+    inner = Layer(grid.index_to_layer(next(li for li in grid.get_routable_indices() if li != 0)))
+    partner = Segment(
+        x1=6.0,
+        y1=5.9,
+        x2=6.0,
+        y2=6.1,
+        width=0.2,
+        layer=inner,
+        net=2,
+        net_name="N",
+    )
+    tail = dpr._synthesize_crossing_tail(_CrossingPathfinder(), head, goal, 0, [partner])
+    assert tail is not None
+    # Endpoint barrels clear the partner, but the diagonal-first crossing
+    # hits it. The alternate orientation must be checked and selected.
+    assert [(v.x, v.y) for v in tail.vias] == [(5.0, 5.0), (8.0, 6.0)]
+    assert tail.segments[0].end == (7.0, 5.0)
+    for seg in tail.segments:
+        assert is_45_aligned(seg.x2 - seg.x1, seg.y2 - seg.y1)
+        assert dpr._min_distance_to_partner(
+            seg.x1, seg.y1, seg.x2, seg.y2, [partner], seg.layer
+        ) >= dpr._pair_seg_clearance(_CrossingPathfinder(), head.net_name)
+
+
+def test_crossing_barrels_use_via_clearance_for_uncommitted_partner():
+    dpr = _crossing_router()
+    rules = dpr.autorouter.rules
+    rules.trace_clearance = 0.1
+    rules.via_clearance = 0.25
+    rules.via_diameter = 0.6
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = Segment(
+        x1=4.9,
+        y1=5.6,
+        x2=5.1,
+        y2=5.6,
+        width=0.2,
+        layer=Layer.F_CU,
+        net=2,
+        net_name="N",
+    )
+    tail = dpr._synthesize_crossing_tail(_CrossingPathfinder(), head, goal, 0, [partner])
+    assert tail is not None
+    assert (tail.vias[0].x, tail.vias[0].y) != (5.0, 5.0)
+    for via in tail.vias:
+        gap = dpr._min_distance_to_partner(via.x, via.y, via.x, via.y, [partner], None)
+        assert gap - (via.diameter + partner.width) / 2 >= rules.via_clearance - 1e-9
+
+
+def test_crossing_ranking_improves_assembled_coupling():
+    import time
+
+    from kicad_tools.router.diffpair_routing import _spans_coupled_fraction
+
+    dpr = _crossing_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    partner = Segment(x1=5, y1=5.6, x2=8, y2=5.6, width=0.2, layer=Layer.F_CU, net=2)
+    baseline = dpr._synthesize_crossing_tail(_CrossingPathfinder(), head, goal, 0, [partner])
+    ranked = dpr._synthesize_crossing_tail(
+        _CrossingPathfinder(),
+        head,
+        goal,
+        0,
+        [partner],
+        body_segments=[],
+        deadline=time.monotonic() + 5,
+    )
+    assert baseline is not None and ranked is not None
+
+    def score(route):
+        fractions = []
+        for segments, other in ((route.segments, [partner]), ([partner], route.segments)):
+            lengths = [math.hypot(s.x2 - s.x1, s.y2 - s.y1) for s in segments]
+            fractions.append(
+                sum(
+                    length
+                    * _spans_coupled_fraction([(s.x1, s.y1, s.x2, s.y2)], s.width, s.layer, other)
+                    for s, length in zip(segments, lengths, strict=True)
+                )
+                / sum(lengths)
+            )
+        return min(fractions)
+
+    assert score(ranked) > score(baseline)
+    assert dpr._route_pad_violation(ranked)[0] <= 1e-9
+    assert dpr._route_via_clear(ranked)
+
+
+def test_crossing_ranking_deadline_returns_validated_best_without_census_credit(monkeypatch):
+    import kicad_tools.router.diffpair_routing as module
+
+    dpr = _crossing_router()
+    head, goal = _tail_pads((5.0, 5.0), (8.0, 5.0))
+    now = [0.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(module, "_CROSSTAIL_CENSUS", True)
+    original = module._spans_coupled_fraction
+
+    def score(*args, **kwargs):
+        now[0] = 2.0
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_spans_coupled_fraction", score)
+    before = dpr._census_elapsed_s
+    tail = dpr._synthesize_crossing_tail(
+        _CrossingPathfinder(),
+        head,
+        goal,
+        0,
+        [],
+        body_segments=[],
+        deadline=1.0,
+    )
+    assert tail is not None and len(tail.vias) == 2
+    assert dpr._census_elapsed_s == before
+    assert (
+        dpr._synthesize_crossing_tail(
+            _CrossingPathfinder(),
+            head,
+            goal,
+            0,
+            [],
+            body_segments=[],
+            deadline=1.0,
+        )
+        is None
+    )
+
+
+def test_construction_via_gate_uses_via_clearance_in_both_directions():
+    dpr = _pad_gate_router()
+    dpr.autorouter.rules.trace_clearance = 0.1
+    dpr.autorouter.rules.via_clearance = 0.25
+    trace = Route(net=7, net_name="P", segments=[_via_gate_seg(3, 5.6, 7, 5.6)])
+    barrel = Route(net=8, net_name="N", vias=[_via_gate_via(5, 5, net=8, name="N")])
+    # Actual edge gap is .15 mm: ordinary trace clearance would accept it.
+    with dpr._shadow_foreign_copper(barrel):
+        forward = dpr._route_via_violation(trace)[0]
+    with dpr._shadow_foreign_copper(trace):
+        reverse = dpr._route_via_violation(barrel)[0]
+    assert forward == pytest.approx(0.1)
+    assert reverse == pytest.approx(forward)
+
+
+def test_ordinary_construction_vias_span_layers_beyond_routing_endpoints():
+    dpr = _pad_gate_router()
+    trace = Route(net=7, net_name="P", segments=[_via_gate_seg(3, 5.55, 7, 5.55, layer=Layer.F_CU)])
+    barrel = Route(
+        net=8,
+        net_name="N",
+        vias=[_via_gate_via(5, 5, net=8, name="N", layers=(Layer.B_CU, Layer.B_CU))],
+    )
+    with dpr._shadow_foreign_copper(barrel):
+        assert dpr._route_via_violation(trace)[0] > 0
+    with dpr._shadow_foreign_copper(trace):
+        assert dpr._route_via_violation(barrel)[0] > 0
+    other = Route(
+        net=7,
+        net_name="P",
+        vias=[_via_gate_via(5.6, 5, net=7, name="P", layers=(Layer.F_CU, Layer.F_CU))],
+    )
+    with dpr._shadow_foreign_copper(other):
+        assert dpr._route_via_violation(barrel)[0] > 0
+    assert barrel.vias[0].layers == (Layer.B_CU, Layer.B_CU)
+    barrel.vias[0].is_micro = True
+    other.vias[0].is_micro = True
+    with dpr._shadow_foreign_copper(other):
+        assert dpr._route_via_violation(barrel)[0] == 0

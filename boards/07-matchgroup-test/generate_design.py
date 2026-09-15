@@ -722,6 +722,8 @@ def _repair_pour_connectivity(
     from shapely.ops import nearest_points
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.zones.pour_escape import edge_clear_centerline_bounds
 
     text = pcb_path.read_text()
     net_id_by_name = {name: int(num) for num, name in re.findall(r'\(net (\d+) "([^"]*)"\)', text)}
@@ -818,10 +820,18 @@ def _repair_pour_connectivity(
             fills_by_net[m.group(1)].append((poly, lay))
 
     # Board outline (inset 0.5 mm) from generate_pcb constants.
-    min_x = generate_pcb.BOARD_ORIGIN_X + 0.5
-    min_y = generate_pcb.BOARD_ORIGIN_Y + 0.5
-    max_x = generate_pcb.BOARD_ORIGIN_X + generate_pcb.BOARD_WIDTH - 0.5
-    max_y = generate_pcb.BOARD_ORIGIN_Y + generate_pcb.BOARD_HEIGHT - 0.5
+    outline = (
+        generate_pcb.BOARD_ORIGIN_X,
+        generate_pcb.BOARD_ORIGIN_Y,
+        generate_pcb.BOARD_ORIGIN_X + generate_pcb.BOARD_WIDTH,
+        generate_pcb.BOARD_ORIGIN_Y + generate_pcb.BOARD_HEIGHT,
+    )
+    min_x = outline[0] + 0.5
+    min_y = outline[1] + 0.5
+    max_x = outline[2] - 0.5
+    max_y = outline[3] - 0.5
+    # Copper-to-edge floor for the jlcpcb 4-layer tier this recipe targets.
+    EDGE_CLEAR = get_profile("jlcpcb").get_design_rules(layers=4).min_copper_to_edge_mm
 
     VIA_R = 0.225  # 0.45 mm via
     VIA_DRILL_R = 0.125  # 0.25 mm drill on every repair via
@@ -868,8 +878,19 @@ def _repair_pour_connectivity(
         layer: str,
         width: float,
     ) -> bool:
+        # Issue #5333: the old window was ``inset -+ 0.35`` -- a fixed slack
+        # that let a bridge overshoot 0.2 mm past the 0.5 mm zone inset toward
+        # the board edge.  With the 0.2 mm bridge width that is 0.1 mm of
+        # copper-to-edge, and two ``+1V2`` In2.Cu bridges shipped at 0.153 mm
+        # against the 0.3 mm jlcpcb floor on the ``2c9bcb95`` artifact.  The
+        # legal centerline window is derived from the REAL outline, the REAL
+        # copper width and the REAL fab floor instead.  The window is convex,
+        # so testing both endpoints covers the whole chord.
+        lo_x, lo_y, hi_x, hi_y = edge_clear_centerline_bounds(
+            outline, width=width, edge_clearance=EDGE_CLEAR
+        )
         for x, y in (p0, p1):
-            if not (min_x - 0.3 <= x <= max_x + 0.3 and min_y - 0.3 <= y <= max_y + 0.3):
+            if not (lo_x <= x <= hi_x and lo_y <= y <= hi_y):
                 return False
         path = LineString([p0, p1]).buffer(width / 2.0)
         for entry in pad_index:
@@ -1115,23 +1136,23 @@ def _repair_pour_connectivity(
                     pa, pb = nearest_points(gi, gj)
                     # Overshoot 0.35 mm into each geometry so the bridge
                     # endpoint survives fill re-quantisation.
-                    vec = (pb.x - pa.x, pb.y - pa.y)
-                    norm = math.hypot(*vec) or 1.0
-                    ux, uy = vec[0] / norm, vec[1] / norm
-                    p0 = (pa.x - ux * 0.35, pa.y - uy * 0.35)
-                    p1 = (pb.x + ux * 0.35, pb.y + uy * 0.35)
-                    if not _emit_seg_45(net, p0, p1, lay, BRIDGE_W):
-                        continue
-                    _append_own(
-                        (
-                            LineString([p0, p1]).buffer(BRIDGE_W / 2.0),
-                            frozenset({lay}),
-                            "seg",
+                    from kicad_tools.zones.pour_escape import bridge_endpoint_candidates
+
+                    for p0, p1 in bridge_endpoint_candidates((pa.x, pa.y), (pb.x, pb.y)):
+                        if not _emit_seg_45(net, p0, p1, lay, BRIDGE_W):
+                            continue
+                        _append_own(
+                            (
+                                LineString([p0, p1]).buffer(BRIDGE_W / 2.0),
+                                frozenset({lay}),
+                                "seg",
+                            )
                         )
-                    )
-                    bridges_placed += 1
-                    merged = True
-                    break
+                        bridges_placed += 1
+                        merged = True
+                        break
+                    if merged:
+                        break
 
             # Sub-stage C: ray-cast bridges.  The nearest-pair line is
             # often blocked by a pad row (e.g. a +3V3 BGA-corner exit must
@@ -1611,7 +1632,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
       test on the same date showed the ``CoupledPathfinder`` pre-pass
       hangs CPU-bound for >40 minutes on this board (well past the
       ``--timeout 600`` budget, which the pre-pass does not honour).
-      This recipe therefore continues to omit ``--differential-pairs``.
+      The recipe omitted ``--differential-pairs`` at that revision;
+      the #5333 construction update below supersedes this decision.
       Net yield is 28/31 (matching the PR #3276 baseline: DQ3,
       MIPI_CLK_N, MIPI_DAT0_N remain stranded per #3275) and routed-DRC
       stays under the per-board allowlist (currently 25; measured 23
@@ -1952,7 +1974,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # ``--differential-pairs`` is now SAFE to enable (bounded, reach-
     # preserving) but is not yet a quality win: no pair survives to a
     # committed coupled route until #3438 (MIPI reach) and #3320
-    # (DQS swap overlap) land.  The recipe therefore still omits it.
+    # (DQS swap overlap) land. That historical omission is superseded
+    # by the bounded #5333 construction update below.
     #
     # Issue #3441 addendum (2026-06-10): the "--grid 0.1: WORSE"
     # entry above was a router bug, not a grid property.  Waypoint
@@ -2018,6 +2041,10 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--net-class-map",
         str(sidecar_path),
         "--length-match-groups",
+        # #5333: native departures plus exact halo resolution and guarded
+        # completion of saved corridor bodies qualify all seven pairs.
+        # Keep the authored pair/group gates and all existing budgets.
+        "--differential-pairs",
     ]
 
     # Issue #4468 (epic #3438 Phase 3): classifier-driven placement-delta
@@ -2361,15 +2388,39 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # shared #3532 machinery (kicad_tools.router.quantize.quantize_pcb_file),
     # which replaces each off-angle segment with an EXACT two-leg dogleg
     # (45-degree leg + axis-aligned leg) that preserves the original
-    # endpoints bit-for-bit -- so pour connectivity is unchanged.  Mirror the
-    # softstart recipe's quantize -> re-fill fixpoint: a dogleg's small
-    # perpendicular bulge can graze a foreign via barrel, so re-fill carves
-    # clearance around the converged geometry before the final audit.
+    # endpoints bit-for-bit -- so pour connectivity is unchanged.
+    #
+    # Issue #5333: the dogleg's perpendicular bulge is copper the chord never
+    # occupied, and a re-fill cannot rescue it -- zone fills carve around
+    # foreign copper, but a trace-to-VIA clearance is fixed geometry.  The
+    # ``2c9bcb95`` full-recipe artifact shipped exactly that: a GND escape
+    # chord clearing the TMDS_D2_P via by 0.2075 mm became a diagonal-first
+    # dogleg 0.0822 mm from it, under the 0.1016 mm jlcpcb floor, and KiCad's
+    # native refill reported it as blocking.  ``plan_quantization`` measures
+    # both dogleg variants against the real foreign copper and the board
+    # outline first and hands back the ``axis_first_uuids`` / ``skip_uuids``
+    # sets ``quantize_pcb_file`` has always accepted but no caller supplied.
+    # The re-fill below still runs -- it settles pour geometry around the
+    # converged copper -- it just is no longer the clearance argument.
     print("\n8. 45-degree quantization of pour-repair copper (#3532 / #3617)...")
     try:
+        from kicad_tools.manufacturers import get_profile
         from kicad_tools.router.quantize import quantize_pcb_file
+        from kicad_tools.router.quantize_planning import plan_quantization
 
-        quantized = quantize_pcb_file(output_path)
+        fab_rules = get_profile("jlcpcb").get_design_rules(layers=4)
+        plan = plan_quantization(
+            output_path,
+            clearance_mm=fab_rules.min_clearance_mm,
+            edge_clearance_mm=fab_rules.min_copper_to_edge_mm,
+        )
+        for note in plan.notes:
+            print(f"   [quantize-plan] {note}")
+        quantized = quantize_pcb_file(
+            output_path,
+            axis_first_uuids=plan.axis_first_uuids,
+            skip_uuids=plan.skip_uuids,
+        )
         if quantized:
             print(f"   Quantized {len(quantized)} off-angle repair segment(s)")
             print("8b. Re-filling zones after quantization...")

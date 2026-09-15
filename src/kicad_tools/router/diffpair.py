@@ -618,6 +618,22 @@ class DifferentialPairConfig:
     per_pair_timeout: float | None = None
     per_pair_max_iterations: int | None = None
     aggregate_timeout: float | None = None
+    #: Issue #5333: mirrors the run's ``--deterministic-budget`` setting so the
+    #: coupled pre-phase can tell whether the caller asked for a
+    #: machine-independent route.  It does NOT change any budget -- the two
+    #: wall-clock cutoffs above still govern -- it only lets
+    #: :meth:`Autorouter.route_all_with_diffpairs` warn that, under a flag
+    #: whose own banner promises "routed output is reproducible across
+    #: machines", the set of pairs that qualify as coupled is still a function
+    #: of machine speed and load.  Measured on Board07's committed regression
+    #: fixture (seed 42, native ABI 31, identical source and arguments, one
+    #: loaded host): ``--diffpair-per-pair-timeout 60`` -- the recipe default
+    #: derived from ``--timeout`` -- qualified 3/7 pairs on one run and 4/7 on
+    #: the next, while ``300`` qualified 6/7.  Only the wall allowance
+    #: differed, so those pairs were budget exits, not physical rejections,
+    #: and a "7/7 qualified" measurement taken on a fast idle host does not
+    #: transfer to a busy one.
+    deterministic_budget: bool = False
     # Issue #3508: opt-in gate for the geometric shadow constructor
     # (``DiffPairRouter._shadow_route_pair``: single-ended guide route
     # + validated parallel offset, tried before the joint-state

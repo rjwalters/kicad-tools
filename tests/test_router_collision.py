@@ -522,13 +522,8 @@ class TestVectorCollisionCheckerForeignVia:
         )
         assert result is False
 
-    def test_via_on_different_layer_does_not_block_blind_via(self):
-        """A blind via that does not touch the trace's layer must NOT block.
-
-        Synthetic blind via case: via spans (F.Cu, F.Cu) -- only F.Cu.
-        Trace on B.Cu (layer index 1) must not be rejected.  This guards
-        the layer-aware ``_via_on_layer`` helper.
-        """
+    def test_via_on_different_layer_does_not_block_micro_via(self):
+        """An explicitly typed F.Cu-to-In1 microvia does not block B.Cu."""
         from kicad_tools.router.primitives import Via
 
         via = Via(
@@ -536,24 +531,24 @@ class TestVectorCollisionCheckerForeignVia:
             y=0.0,
             drill=0.3,
             diameter=0.6,
-            layers=(Layer.F_CU, Layer.F_CU),  # F.Cu-only "blind" via
+            layers=(Layer.F_CU, Layer.IN1_CU),
             net=2,
+            is_micro=True,
         )
         route = _make_route_with_via(net=2, via=via)
         grid = _make_mock_grid(routes=[route])
 
-        # Override layer_to_index so F.Cu=0, B.Cu=1
-        def _layer_to_index(name: str) -> int:
-            return {"F.Cu": 0, "B.Cu": 1}.get(name, 0)
+        def _layer_to_index(value: int) -> int:
+            return {Layer.F_CU.value: 0, Layer.IN1_CU.value: 1, Layer.B_CU.value: 3}[value]
 
         grid.layer_to_index = MagicMock(side_effect=_layer_to_index)
         mock_rtree = MagicMock()
         mock_rtree.intersection = MagicMock(return_value=[])
-        grid._seg_rtree = {1: mock_rtree}  # B.Cu R-tree
-        grid._seg_rtree_items = {1: {}}
+        grid._seg_rtree = {3: mock_rtree}  # B.Cu R-tree
+        grid._seg_rtree_items = {3: {}}
 
         checker = VectorCollisionChecker(grid)
-        # Trace on B.Cu, the F.Cu-only via should be ignored on B.Cu.
+        # Trace on B.Cu, outside the microvia's physical span.
         result = checker.path_is_clear(
             0.0,
             0.0,

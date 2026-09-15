@@ -1113,24 +1113,18 @@ def _via_drill_inside_pad_bbox(
     bbox: tuple[float, float, float, float],
     tolerance: float = 1e-6,
 ) -> bool:
-    """Return True iff the via's drill circle is fully inside ``bbox``.
+    """Reject any drill-circle overlap with a pad, including partial edge cuts.
 
-    Issue #3271: mirrors
-    ``kicad_tools.validate.rules.via_in_pad._via_inside_pad`` so the
-    stitch post-filter classifies vias identically to the DRC rule it is
-    pre-empting.  ``bbox`` is ``(min_x, min_y, max_x, max_y)``.  The
-    drill circle is "fully inside" when every point on it lies on or
-    inside the bbox edge, i.e. the drill's bounding box fits inside
-    ``bbox`` (minus a tolerance so edge-touching drills are not flagged).
+    The legacy helper name is retained for callers. Full containment misses
+    drills crossing a land's edge, which the staged relocation detector also
+    rejects. AABB distance gives a conservative test for rounded pad corners;
+    tangency within ``tolerance`` does not remove a placement.
     """
-    radius = drill / 2.0
+    radius = max(0.0, drill / 2.0 - tolerance)
     min_x, min_y, max_x, max_y = bbox
-    return (
-        via_x - radius >= min_x - tolerance
-        and via_x + radius <= max_x + tolerance
-        and via_y - radius >= min_y - tolerance
-        and via_y + radius <= max_y + tolerance
-    )
+    dx = max(min_x - via_x, 0.0, via_x - max_x)
+    dy = max(min_y - via_y, 0.0, via_y - max_y)
+    return dx * dx + dy * dy < radius * radius
 
 
 def find_existing_vias(sexp: SExp, net_numbers: set[int]) -> list[tuple[float, float, int]]:
@@ -5396,9 +5390,9 @@ def run_stitch(
     # via-in-pad processing is not supported.  See ``ViaInPadRule`` and
     # issue #3271 for the pre-emption rationale.
     #
-    # We use the same SMD-pad-bbox containment geometry the DRC rule
-    # uses, so this filter drops exactly the placements the rule would
-    # later flag.  Through-hole pads are intentionally excluded: they
+    # Reject partial drill cuts as well as fully contained drills. The
+    # staged native relocation path also rejects these overlaps; emitting
+    # them here can strand a later repair before power fanout is attempted.  Through-hole pads are intentionally excluded: they
     # already have a plated hole, so a via inside them is not a
     # manufacturability concern.
     if avoid_pad_overlap and result.vias_added:

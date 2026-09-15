@@ -1,0 +1,632 @@
+"""One-via landings retain pad, partner-barrel and hole clearances."""
+
+import os
+import time
+from types import SimpleNamespace
+
+import pytest
+from shapely.geometry import LineString
+
+from kicad_tools.router.diffpair_routing import CoupledPathfinder, DiffPairRouter
+from kicad_tools.router.grid import RoutingGrid
+from kicad_tools.router.layers import Layer, LayerStack
+from kicad_tools.router.primitives import Pad, Route, Segment, Via
+from kicad_tools.router.rules import DesignRules
+
+
+def _case():
+    rules = DesignRules(grid_resolution=0.1, manufacturer="jlcpcb")
+    grid = RoutingGrid(
+        width=8, height=6, rules=rules, layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig()
+    )
+    head = Pad(x=2, y=3, width=0.3, height=0.3, net=1, net_name="P", layer=Layer.IN1_CU)
+    goal = Pad(x=5, y=3, width=0.3, height=0.3, net=1, net_name="P", layer=Layer.F_CU)
+    grid.add_pad(head)
+    grid.add_pad(goal)
+    router = DiffPairRouter.__new__(DiffPairRouter)
+    router.autorouter = SimpleNamespace(
+        grid=grid, rules=rules, pads={}, routes=[], net_class_map={}
+    )
+    router._shadow_foreign_universe = None
+    router._shadow_via_gate_rejections = 0
+    finder = CoupledPathfinder(grid, rules, target_spacing_cells=3, min_spacing_cells=2)
+    return router, finder, head, goal, Route(net=2, net_name="N"), Route(net=1, net_name="P")
+
+
+def test_one_via_landing_connects_both_layers_with_a_through_barrel():
+    router, finder, head, goal, partner, body = _case()
+    tail = next(router._layer_return_tails(finder, head, goal, partner, body))
+    assert len(tail.vias) == 1
+    assert set(tail.vias[0].layers) == {Layer.F_CU, Layer.B_CU}
+    assert (tail.segments[0].x1, tail.segments[0].y1) == pytest.approx((head.x, head.y))
+    assert (tail.segments[-1].x2, tail.segments[-1].y2) == pytest.approx((goal.x, goal.y))
+    assert {s.layer for s in tail.segments} == {head.layer, goal.layer}
+    assert router.autorouter.routes == []
+
+
+def test_uncommitted_partner_barrel_at_goal_prevents_landing():
+    router, finder, head, goal, partner, body = _case()
+    assert next(router._layer_return_tails(finder, head, goal, partner, body), None) is not None
+    partner.vias.append(
+        Via(
+            x=goal.x,
+            y=goal.y,
+            diameter=0.6,
+            drill=0.3,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="N",
+        )
+    )
+    assert list(router._layer_return_tails(finder, head, goal, partner, body)) == []
+
+
+def test_expired_deadline_produces_no_candidate():
+    router, finder, head, goal, partner, body = _case()
+    assert (
+        list(
+            router._layer_return_tails(
+                finder, head, goal, partner, body, deadline=time.monotonic() - 1
+            )
+        )
+        == []
+    )
+
+
+def test_uncommitted_own_body_drill_is_not_reused():
+    router, finder, head, goal, partner, body = _case()
+    first = next(router._layer_return_tails(finder, head, goal, partner, body)).vias[0]
+    body.vias.append(first)
+    candidates = list(router._layer_return_tails(finder, head, goal, partner, body))
+    assert candidates
+    for candidate in candidates:
+        via = candidate.vias[0]
+        gap = ((via.x - first.x) ** 2 + (via.y - first.y) ** 2) ** 0.5 - (
+            via.drill + first.drill
+        ) / 2
+        assert gap >= finder.rules.min_hole_to_hole - 1e-9
+
+
+def test_return_barrel_clears_foreign_copper_on_unused_bottom_layer():
+    router, finder, head, goal, partner, body = _case()
+    first = next(router._layer_return_tails(finder, head, goal, partner, body)).vias[0]
+    obstacle = Segment(
+        x1=first.x - 0.1,
+        y1=first.y,
+        x2=first.x + 0.1,
+        y2=first.y,
+        width=0.2,
+        layer=Layer.B_CU,
+        net=3,
+        net_name="foreign",
+    )
+    router.autorouter.routes.append(Route(net=3, net_name="foreign", segments=[obstacle]))
+    candidates = list(router._layer_return_tails(finder, head, goal, partner, body))
+    assert candidates
+    for candidate in candidates:
+        via = candidate.vias[0]
+        clearance = (
+            router._point_segment_distance(via.x, via.y, obstacle)
+            - (via.diameter + obstacle.width) / 2
+        )
+        assert clearance >= finder.rules.via_clearance - 1e-9
+
+
+@pytest.mark.parametrize("pad_gap,allowed", [(0.175, False), (0.225, True)])
+def test_return_barrel_uses_via_clearance_for_foreign_pad(monkeypatch, pad_gap, allowed):
+    router, finder, head, goal, partner, body = _case()
+    finder.rules.trace_clearance = 0.15
+    finder.rules.via_clearance = 0.2
+    grid = router.autorouter.grid
+    first = next(router._layer_return_tails(finder, head, goal, partner, body)).vias[0]
+    site = grid.world_to_grid(first.x, first.y)
+    foreign_width = 0.2
+    grid.add_pad(
+        Pad(
+            x=first.x + first.diameter / 2 + pad_gap + foreign_width / 2,
+            y=first.y,
+            width=foreign_width,
+            height=0.2,
+            net=3,
+            net_name="foreign",
+            layer=Layer.B_CU,
+        )
+    )
+    # Isolate the exact numerical gate from raster rounding/carve-outs.
+    # Only this known off-pad via site is offered; the foreign pad occupies
+    # the unused bottom layer, so it affects the barrel, not either tail.
+    monkeypatch.setattr(finder, "_is_via_blocked", lambda x, y, net: (x, y) != site)
+    monkeypatch.setattr(router, "_via_has_only_pad_blockers", lambda *args: False)
+    monkeypatch.setattr(router, "_via_has_only_geometry_blockers", lambda *args: False)
+
+    candidates = list(router._layer_return_tails(finder, head, goal, partner, body))
+
+    assert bool(candidates) is allowed
+    for candidate in candidates:
+        assert (candidate.vias[0].x, candidate.vias[0].y) == pytest.approx((first.x, first.y))
+
+
+def test_return_tail_checks_exact_clearance_between_sampling_points():
+    router, finder, head, goal, partner, body = _case()
+    required = router._pair_seg_clearance(finder, head.net_name)
+    assert required == pytest.approx(0.4)
+    stub = Segment(
+        x1=2.025,
+        y1=3.3999,
+        x2=2.025,
+        y2=3.4009,
+        width=0.2,
+        layer=head.layer,
+        net=partner.net,
+        net_name=partner.net_name,
+    )
+    partner.segments.append(stub)
+    # A 0.05mm sampler measures 0.400532mm against the old candidate's
+    # (2,3)->(2.475,3) segment, but its true distance is only 0.3999mm.
+    obstacle = LineString([(stub.x1, stub.y1), (stub.x2, stub.y2)])
+
+    candidates = list(router._layer_return_tails(finder, head, goal, partner, body))
+
+    assert candidates
+    for candidate in candidates:
+        for segment in candidate.segments:
+            if segment.layer == stub.layer:
+                copper = LineString([(segment.x1, segment.y1), (segment.x2, segment.y2)])
+                assert copper.distance(obstacle) >= required - 1e-9
+
+
+def _interpad_case(keepout_order=None):
+    router, finder, head, goal, partner, body = _case()
+    grid = router.autorouter.grid
+    if keepout_order == "before":
+        grid.add_keepout(3.5, 2.7, 3.5, 2.7)
+    for x in (3.15, 4.45):
+        for y in (2.35, 3.65):
+            grid.add_pad(
+                Pad(x=x, y=y, width=0.45, height=0.45, net=3, net_name="foreign", layer=Layer.F_CU)
+            )
+    if keepout_order == "after":
+        grid.add_keepout(3.5, 2.7, 3.5, 2.7)
+    return router, finder, head, goal, partner, body
+
+
+def test_exact_pad_landing_recovers_clear_interpad_site():
+    router, finder, head, goal, partner, body = _interpad_case()
+    grid = router.autorouter.grid
+    gx, gy = grid.world_to_grid(3.8, 3)
+    assert finder._is_via_blocked(gx, gy, head.net)
+    assert router._via_has_only_pad_blockers(finder, gx, gy)
+    candidates = list(router._layer_return_tails(finder, head, goal, partner, body))
+    assert any((t.vias[0].x, t.vias[0].y) == pytest.approx((3.8, 3)) for t in candidates)
+
+
+@pytest.mark.parametrize("order", ["before", "after"])
+def test_keepout_overlapping_pad_halo_never_acquires_pad_provenance(order):
+    router, finder, head, goal, partner, body = _interpad_case(order)
+    grid = router.autorouter.grid
+    gx, gy = grid.world_to_grid(3.8, 3)
+    assert not router._via_has_only_pad_blockers(finder, gx, gy)
+    candidates = list(router._layer_return_tails(finder, head, goal, partner, body))
+    assert not any((t.vias[0].x, t.vias[0].y) == pytest.approx((3.8, 3)) for t in candidates)
+
+
+def test_old_grid_without_pad_provenance_cannot_use_exact_exception():
+    router, finder, head, goal, partner, body = _interpad_case()
+    grid = router.autorouter.grid
+    del grid._pad_geometry_cells
+    assert not router._via_has_only_pad_blockers(finder, *grid.world_to_grid(3.8, 3))
+
+
+@pytest.mark.parametrize("blocker", ["route", "region", "obstacle", "unknown"])
+def test_other_blocking_writes_revoke_pad_geometry_provenance(blocker):
+    from kicad_tools.router.primitives import Obstacle
+
+    router, finder, head, goal, partner, body = _interpad_case()
+    grid = router.autorouter.grid
+    site = grid.world_to_grid(3.8, 3)
+    assert router._via_has_only_pad_blockers(finder, *site)
+    if blocker == "route":
+        grid.mark_route(
+            Route(
+                net=4,
+                net_name="other",
+                segments=[
+                    Segment(x1=3.5, y1=2.7, x2=3.6, y2=2.7, width=0.2, layer=Layer.F_CU, net=4)
+                ],
+            )
+        )
+    elif blocker == "region":
+        grid.mark_region_bound(0, 0, 3.4, 6)
+    elif blocker == "obstacle":
+        grid.add_obstacle(Obstacle(x=3.5, y=2.7, width=0.1, height=0.1, layer=Layer.F_CU))
+    else:
+        x, y = grid.world_to_grid(3.5, 2.7)
+        grid.cell_at(0, y, x).blocked = True
+    assert not router._via_has_only_pad_blockers(finder, *site)
+
+
+def test_stitch_reservation_does_not_acquire_geometry_only_provenance():
+    router, finder, head, goal, partner, body = _case()
+    grid = router.autorouter.grid
+    grid.rules.stitch_via_halo = False
+    pad = Pad(x=4, y=3, width=0.1, height=0.1, net=0, net_name="GND", layer=Layer.F_CU)
+    grid.add_pad(pad)
+    before = grid._blocked.copy()
+    grid.rules.stitch_via_halo = True
+    grid.add_pad(pad)
+    added = grid._blocked & ~before
+    assert added.any()
+    assert not any(added[layer, y, x] for layer, y, x in grid._pad_geometry_cells)
+
+
+@pytest.mark.parametrize("layer_idx", [1, 3])
+def test_uncommitted_partner_via_selects_alternative_planar_tail(layer_idx):
+    router, finder, head, goal, partner, body = _case()
+    head = router._virtual_pad_at(head, head.x, head.y, layer_idx)
+    goal = router._virtual_pad_at(goal, goal.x, goal.y, layer_idx)
+    via = Via(x=3.5, y=3, diameter=0.6, drill=0.3, layers=(Layer.F_CU, Layer.IN1_CU), net=2)
+    original = router._synthesize_tail(finder, head, goal, layer_idx)
+    assert original and len(original.segments) == 1
+    tail = router._synthesize_tail(finder, head, goal, layer_idx, partner_vias=[via])
+    assert tail and len(tail.segments) > 1
+    from shapely.geometry import Point
+
+    assert all(
+        Point(via.x, via.y).distance(LineString([s.start, s.end])) - (via.diameter + s.width) / 2
+        >= finder.rules.via_clearance - 1e-9
+        for s in tail.segments
+    )
+    assert router.autorouter.routes == []
+
+
+def _routed_halo_case(order=None):
+    router, finder, head, goal, partner, body = _case()
+    grid = router.autorouter.grid
+    # A via at (3.8,3) clears this trace by .3 mm, but the padded grid
+    # envelope and square via sweep touch. The route is grid-only on purpose.
+    route = Route(
+        net=4,
+        net_name="other",
+        segments=[Segment(x1=3, y1=2.3, x2=4.5, y2=2.3, width=0.2, layer=Layer.B_CU, net=4)],
+    )
+    if order == "before":
+        grid.add_keepout(3.8, 2.7, 3.8, 2.7, layers=[Layer.B_CU])
+    grid.mark_route(route)
+    if order == "after":
+        grid.add_keepout(3.8, 2.7, 3.8, 2.7, layers=[Layer.B_CU])
+    return router, finder, head, goal, partner, body, route
+
+
+def test_exact_landing_checks_live_grid_route_geometry():
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    grid = router.autorouter.grid
+    gx, gy = grid.world_to_grid(3.8, 3)
+    assert finder._is_via_blocked(gx, gy, head.net)
+    assert not router._via_has_only_pad_blockers(finder, gx, gy)
+    assert router._via_has_only_geometry_blockers(finder, gx, gy)
+    tails = list(router._layer_return_tails(finder, head, goal, partner, body))
+    assert any((t.vias[0].x, t.vias[0].y) == pytest.approx((3.8, 3)) for t in tails)
+    assert router.autorouter.routes == []
+
+
+@pytest.mark.parametrize("order", ["before", "after"])
+def test_keepout_over_route_halo_is_never_exact_geometry(order):
+    router, finder, head, goal, partner, body, route = _routed_halo_case(order)
+    grid = router.autorouter.grid
+    assert not router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))
+
+
+def test_missing_route_source_refuses_exact_exception():
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    grid = router.autorouter.grid
+    grid.routes.remove(route)
+    assert not router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))
+
+
+def test_known_route_still_rejects_actual_via_clearance_violation():
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    # Update the actual copper without changing its identity. Exact geometry
+    # must be consulted, even when recorded ownership remains available.
+    route.segments[0].y1 = route.segments[0].y2 = 2.5
+    tails = list(router._layer_return_tails(finder, head, goal, partner, body))
+    assert not any((t.vias[0].x, t.vias[0].y) == pytest.approx((3.8, 3)) for t in tails)
+
+
+def test_every_overlapping_route_source_must_still_be_available():
+    from dataclasses import replace
+
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    grid = router.autorouter.grid
+    other = Route(net=5, net_name="second", segments=[replace(route.segments[0], net=5)])
+    grid.mark_route(other)
+    assert router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))
+    grid.routes.remove(route)
+    assert not router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))
+
+
+def test_deserialized_route_metadata_without_live_sources_fails_closed():
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    grid = router.autorouter.grid
+    del grid._route_geometry_sources
+    assert not router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))
+
+
+def test_region_bound_revokes_existing_route_geometry():
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    grid = router.autorouter.grid
+    grid.mark_region_bound(0, 0, 3.4, 6)
+    assert not router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))
+
+
+def test_raw_occupancy_write_loses_geometry_provenance_on_generation_bump():
+    router, finder, head, goal, partner, body, route = _routed_halo_case()
+    grid = router.autorouter.grid
+    gx, gy = grid.world_to_grid(3.8, 3)
+    assert router._via_has_only_geometry_blockers(finder, gx, gy)
+    grid._blocked[0, gy, gx] = True
+    grid.bump_occupancy_generation()
+    assert not router._via_has_only_geometry_blockers(finder, gx, gy)
+
+
+@pytest.mark.parametrize("prefer_shortest", [False, True])
+def test_return_approach_policy_keeps_surface_coupling_policy(monkeypatch, prefer_shortest):
+    router, finder, head, goal, partner, body = _case()
+    seen = []
+    original = router._synthesize_tail
+
+    def record(*args, **kwargs):
+        seen.append((args[3], kwargs["prefer_shortest"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(router, "_synthesize_tail", record)
+    tail = next(
+        router._layer_return_tails(
+            finder, head, goal, partner, body, prefer_shortest_approach=prefer_shortest
+        )
+    )
+    assert tail.segments
+    assert (finder.grid.layer_to_index(head.layer.value), prefer_shortest) in seen
+    assert (finder.grid.layer_to_index(goal.layer.value), False) in seen
+
+
+def test_off_angle_tail_checks_doglegs_against_uncommitted_barrel():
+    from kicad_tools.router.quantize import is_45_aligned
+
+    router, finder, head, goal, partner, body = _case()
+    li = finder.grid.layer_to_index(head.layer.value)
+    head = router._virtual_pad_at(head, 2, 2, li)
+    goal = router._virtual_pad_at(goal, 5, 3, li)
+    barrel = Via(
+        x=3, y=3, diameter=0.6, drill=0.3, layers=(Layer.F_CU, Layer.B_CU), net=2, net_name="N"
+    )
+    # The straight chord clears this barrel, but its diagonal-first dogleg
+    # runs directly through the center. The other orientation is legal.
+    tail = router._synthesize_tail(finder, head, goal, li, partner_vias=[barrel])
+    assert tail is not None and len(tail.segments) >= 2
+    assert tail.segments[0].start == (2, 2) and tail.segments[-1].end == (5, 3)
+    from shapely.geometry import Point
+
+    for seg in tail.segments:
+        assert is_45_aligned(seg.x2 - seg.x1, seg.y2 - seg.y1)
+        gap = LineString([seg.start, seg.end]).distance(Point(3, 3)) - (seg.width + 0.6) / 2
+        assert gap >= finder.rules.via_clearance - 1e-9
+
+
+def test_tiny_tail_preserves_virtual_head_and_goal():
+    router, finder, head, goal, _, _ = _case()
+    li = finder.grid.layer_to_index(head.layer.value)
+    head = router._virtual_pad_at(head, 2.0, 2.0, li)
+    goal = router._virtual_pad_at(goal, 2.004, 2.007, li)
+    tail = router._synthesize_tail(finder, head, goal, li)
+    assert tail is not None
+    assert tail.segments[0].start == (head.x, head.y)
+    assert tail.segments[-1].end == (goal.x, goal.y)
+    assert all(a.end == b.start for a, b in zip(tail.segments[:-1], tail.segments[1:], strict=True))
+
+
+def test_planned_return_site_restricts_candidates_without_waiving_barrel_clearance():
+    router, finder, head, goal, partner, body = _case()
+    grid = finder.grid
+    first = next(router._layer_return_tails(finder, head, goal, partner, body)).vias[0]
+    site = grid.world_to_grid(first.x, first.y)
+    options = {"allowed_via_sites": frozenset({site})}
+    candidates = list(router._layer_return_tails(finder, head, goal, partner, body, **options))
+    assert len(candidates) == 1
+    assert grid.world_to_grid(candidates[0].vias[0].x, candidates[0].vias[0].y) == site
+    assert not list(
+        router._layer_return_tails(finder, head, goal, partner, body, allowed_via_sites=frozenset())
+    )
+    partner.vias.append(
+        Via(
+            x=first.x,
+            y=first.y,
+            diameter=0.6,
+            drill=0.3,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=2,
+            net_name="N",
+        )
+    )
+    assert not list(router._layer_return_tails(finder, head, goal, partner, body, **options))
+
+
+def test_return_sites_are_visited_by_proximity_to_partner_copper_not_raster_order():
+    """Issue #5333 (TMDS_D1): prefer landings near the partner's own copper.
+
+    With an empty partner, the very first candidate the fixed anchor/radius/
+    direction raster enumerates is ``(5.6, 3.0)`` (asserted below as a
+    control). Giving the partner a short committed segment well off that
+    raster-first site but near a DIFFERENT, also-legal site must reorder
+    the candidates: the near-partner site should now come first, even
+    though it is later in the raw raster sequence. This is exactly the
+    defect measured on TMDS_D1 -- a blind raster-first search finds legal
+    sites that are geometrically clear but too far from the partner's path
+    to meet the authored coupled-continuity threshold.
+    """
+    router, finder, head, goal, empty_partner, body = _case()
+    raster_first = next(router._layer_return_tails(finder, head, goal, empty_partner, body)).vias[0]
+    assert (raster_first.x, raster_first.y) == pytest.approx((5.6, 3.0))
+
+    partner = Route(
+        net=2,
+        net_name="N",
+        segments=[
+            Segment(
+                x1=5.0, y1=1.8, x2=5.0, y2=2.1, width=0.2, layer=Layer.F_CU, net=2, net_name="N"
+            )
+        ],
+    )
+    candidates = list(router._layer_return_tails(finder, head, goal, partner, body))
+    assert candidates
+    first_via = candidates[0].vias[0]
+    # Closer to the partner's committed copper than the raster-first site,
+    # and NOT the site a pure raster scan would still try first.
+    assert (first_via.x, first_via.y) == pytest.approx((5.6, 2.4))
+    assert (first_via.x, first_via.y) != pytest.approx((raster_first.x, raster_first.y))
+
+    def score(via):
+        return min(router._point_segment_distance(via.x, via.y, seg) for seg in partner.segments)
+
+    scores = [score(c.vias[0]) for c in candidates]
+    assert scores == sorted(scores)
+
+
+def test_reserved_trace_filters_planar_candidates_before_selecting_a_tail():
+    from dataclasses import replace
+
+    router, finder, head, goal, _, _ = _case()
+    goal = replace(goal, layer=head.layer)
+    obstacle = Segment(x1=3.5, y1=2.8, x2=3.5, y2=3.2, width=0.2, layer=head.layer, net=3)
+    reservation = Route(net=3, net_name="future", segments=[obstacle])
+    tail = router._synthesize_tail(
+        finder,
+        head,
+        goal,
+        finder.grid.layer_to_index(head.layer.value),
+        reserved_routes=(reservation,),
+    )
+    assert tail is not None
+    barrier = LineString([obstacle.start, obstacle.end])
+    for segment in tail.segments:
+        assert (
+            LineString([segment.start, segment.end]).distance(barrier)
+            >= (segment.width + obstacle.width) / 2 + finder.rules.trace_clearance - 1e-9
+        )
+    assert not router.autorouter.routes and not finder.grid.routes
+
+
+def test_layer_return_search_radii_default_matches_historical_lattice():
+    """Issue #5333 (TMDS_D1): the radii list is now a tunable, not a literal.
+
+    Refactoring the hard-coded ``(0.0, 0.6, 1.2, 1.8, 2.4)`` tuple inline in
+    ``_layer_return_tails`` into ``LAYER_RETURN_SEARCH_RADII_MM`` must not by
+    itself change any pair's routed outcome -- pin the untouched default here
+    so a future edit to the env-var default is a deliberate, reviewed change.
+    """
+    from kicad_tools.router.diffpair_routing import LAYER_RETURN_SEARCH_RADII_MM
+
+    assert LAYER_RETURN_SEARCH_RADII_MM == (0.0, 0.6, 1.2, 1.8, 2.4)
+
+
+def test_layer_return_search_radii_env_override_is_read_at_import():
+    """``KCT_LAYER_RETURN_RADII_MM`` overrides the default radii lattice.
+
+    Issue #5333: TMDS_D1's terminal-completion stage stays scarce
+    (``no_tail``-dominated) even after the full-lattice widen fallback
+    (#5333, ``5488958b``) -- this env var exists so a future session can A/B
+    a wider candidate-site lattice without a code edit. Verified via
+    subprocess (not ``importlib.reload``) so this test cannot leak a mutated
+    module-global into any other test in the session.
+    """
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from kicad_tools.router.diffpair_routing import LAYER_RETURN_SEARCH_RADII_MM as r; "
+            "print(','.join(str(v) for v in r))",
+        ],
+        env={**os.environ, "KCT_LAYER_RETURN_RADII_MM": "0.0,1.5,3.0"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout.strip() == "0.0,1.5,3.0"
+
+
+def test_layer_return_search_radii_widening_reaches_farther_sites(monkeypatch):
+    """A widened radii lattice yields legal sites the default cannot reach.
+
+    Issue #5333: on Board07 (seed 42, real congestion near U4's BGA-49
+    field), widening ``LAYER_RETURN_SEARCH_RADII_MM`` from the default max
+    2.4mm to 4.8mm left TMDS_D1's ``no_tail`` count UNCHANGED (828/828) but
+    raised ``coupling_threshold`` misses (66 -> 122) -- the wider lattice
+    genuinely reaches new copper, it just doesn't clear the authored
+    coupled-continuity threshold there. This synthetic control isolates
+    just the mechanism (more sites reachable, gated by the SAME clearance
+    checks) on an open grid large enough that the default lattice's 2.4mm
+    radius is not the board edge -- the small ``_case()`` grid (8x6mm) is
+    too tight for this: the default and widened lattices both clip to the
+    same on-grid subset there, which would make this control degenerate.
+    """
+    import math
+
+    rules = DesignRules(grid_resolution=0.1, manufacturer="jlcpcb")
+    grid = RoutingGrid(
+        width=20, height=20, rules=rules, layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig()
+    )
+    head = Pad(x=5, y=10, width=0.3, height=0.3, net=1, net_name="P", layer=Layer.IN1_CU)
+    goal = Pad(x=12, y=10, width=0.3, height=0.3, net=1, net_name="P", layer=Layer.F_CU)
+    grid.add_pad(head)
+    grid.add_pad(goal)
+    router = DiffPairRouter.__new__(DiffPairRouter)
+    router.autorouter = SimpleNamespace(
+        grid=grid, rules=rules, pads={}, routes=[], net_class_map={}
+    )
+    router._shadow_foreign_universe = None
+    router._shadow_via_gate_rejections = 0
+    finder = CoupledPathfinder(grid, rules, target_spacing_cells=3, min_spacing_cells=2)
+    partner = Route(net=2, net_name="N")
+    body = Route(net=1, net_name="P")
+
+    def farthest(radii):
+        import kicad_tools.router.diffpair_routing as dpr
+
+        monkeypatch.setattr(dpr, "LAYER_RETURN_SEARCH_RADII_MM", radii)
+        sites = {
+            (round(c.vias[0].x, 2), round(c.vias[0].y, 2))
+            for c in router._layer_return_tails(finder, head, goal, partner, body)
+        }
+        return sites, max(
+            min(math.hypot(x - head.x, y - head.y), math.hypot(x - goal.x, y - goal.y))
+            for x, y in sites
+        )
+
+    default_sites, default_max = farthest((0.0, 0.6, 1.2, 1.8, 2.4))
+    wide_sites, wide_max = farthest((0.0, 0.6, 1.2, 1.8, 2.4, 3.6, 4.8))
+    assert wide_max > default_max
+    assert wide_sites - default_sites
+
+
+def test_planar_tail_avoids_backtracking_through_its_preceding_body():
+    from dataclasses import replace
+
+    from shapely.geometry import MultiLineString
+
+    router, finder, head, goal, _, _ = _case()
+    goal = replace(goal, layer=head.layer)
+    body = Segment(x1=3, y1=3, x2=2, y2=3, width=0.2, layer=head.layer, net=head.net)
+    layer = finder.grid.layer_to_index(head.layer.value)
+    first = router._synthesize_tail(finder, head, goal, layer)
+    assert first is not None
+    assert not MultiLineString(
+        [[body.start, body.end]] + [[s.start, s.end] for s in first.segments]
+    ).is_simple
+    tail = router._synthesize_tail(finder, head, goal, layer, preceding_segments=[body])
+    assert tail is not None
+    assert MultiLineString(
+        [[body.start, body.end]] + [[s.start, s.end] for s in tail.segments]
+    ).is_simple
+    assert tail.segments[0].start == (head.x, head.y)

@@ -5654,13 +5654,27 @@ class TestViaDrillInsidePadBbox:
         # (110.9, 109.9)..(111.1, 110.1), wholly inside.
         assert _via_drill_inside_pad_bbox(111.0, 110.0, 0.2, bbox) is True
 
-    def test_drill_partially_outside_bbox_returns_false(self):
-        """Drill spills past the bbox edge -> False (not classified via-in-pad)."""
+    def test_drill_partially_outside_bbox_returns_true(self):
+        """A partial drill cut is still a physical pad overlap."""
         from kicad_tools.cli.stitch_cmd import _via_drill_inside_pad_bbox
 
         bbox = (110.7, 109.7, 111.3, 110.3)
         # Centre at (111.25, 110) with 0.2mm drill -> spills past the right edge.
-        assert _via_drill_inside_pad_bbox(111.25, 110.0, 0.2, bbox) is False
+        assert _via_drill_inside_pad_bbox(111.25, 110.0, 0.2, bbox) is True
+
+    @pytest.mark.parametrize(
+        "x,y,expected",
+        [
+            (111.35, 110.0, True),
+            (111.36, 110.36, True),
+            (111.39, 110.39, False),
+            (111.4, 110.0, False),
+        ],
+    )
+    def test_partial_edge_corner_and_tangent_controls(self, x, y, expected):
+        from kicad_tools.cli.stitch_cmd import _via_drill_inside_pad_bbox
+
+        assert _via_drill_inside_pad_bbox(x, y, 0.2, (110.7, 109.7, 111.3, 110.3)) is expected
 
     def test_drill_centre_outside_bbox_returns_false(self):
         """Drill centred far from bbox -> False."""

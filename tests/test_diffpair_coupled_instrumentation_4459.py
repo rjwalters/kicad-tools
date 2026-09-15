@@ -19,6 +19,8 @@ the diagnostics, never a different route.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from kicad_tools.router.cpp_backend import is_cpp_available
@@ -56,6 +58,9 @@ _KNOWN_REJECTION_KEYS = {
     "asym_spacing_n",
     "asym_floor_n",
     "asym_trail_n",
+    "via_pair_pitch",
+    "via_partner_barrel",
+    "via_partner_trail",
     "via_blocked_p",
     "via_blocked_n",
     "via_trace_blocked_p",
@@ -516,3 +521,67 @@ def test_coupled_pair_report_classifies_guide_missing(monkeypatch, capsys):
     assert f"class={COUPLED_OUTCOME_GUIDE_MISSING}" in out
     assert dpr._last_coupled_pair_report is not None
     assert dpr._last_coupled_pair_report.classification == COUPLED_OUTCOME_GUIDE_MISSING
+
+
+# ---------------------------------------------------------------------------
+# Per-stage wall-clock instrumentation (issue #5333, 2026-09-15 session).
+#
+# The prior sessions' TMDS_D1 finding -- "construction inherits whatever
+# sliver of the per-pair window the corridor-probe and open-fallback stages
+# left behind" -- was stated qualitatively, inferred from secondary signals
+# (``widen_spent``, ``landings``, ``completion_reasons``) rather than a
+# direct measurement of each stage's own wall-clock spend. These tests pin
+# three new ``[coupled-timing]`` fields (``corridor_search_s``,
+# ``open_fallback_s``, ``construction_entry_window_s``) that record exactly
+# that, diagnostic-only, so a future full-recipe budget-reallocation session
+# (needs the pinned Linux/KiCad10.0.5 worker per #5333's own item 4) has
+# hard per-stage numbers instead of re-deriving them by hand each time.
+# ---------------------------------------------------------------------------
+
+
+def test_coupled_timing_reports_per_stage_wall_clock(monkeypatch, capsys):
+    """Both search stages ran (the stub fails both) and construction was
+    entered (backend=cpp, ``per_pair_timeout`` set), so all three new fields
+    report a real elapsed/remaining number, never the sentinel ``n/a``."""
+    router, pair = _two_pad_router_and_pair()
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = False
+    guide = Route(net=1, net_name="USB_D+")
+    guide.segments.append(
+        Segment(x1=5.0, y1=5.0, x2=25.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+    )
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: guide)
+    # Decline the actual pad-geometry construction call (irrelevant to this
+    # test) while still exercising the entry guard that records the window.
+    monkeypatch.setattr(dpr, "_through_via_board_thickness", lambda: None)
+    _install_stub(monkeypatch)
+
+    dpr.route_differential_pair_coupled(pair, coupled_only=True, per_pair_timeout=5.0)
+    out = capsys.readouterr().out
+
+    assert "[coupled-timing]" in out
+    line = next(entry for entry in out.splitlines() if "[coupled-timing]" in entry)
+    assert re.search(r"corridor_search_s=\d+\.\d\ds", line), line
+    assert re.search(r"open_fallback_s=\d+\.\d\ds", line), line
+    assert re.search(r"construction_entry_window_s=\d+\.\d\ds", line), line
+
+
+def test_coupled_timing_reports_na_for_a_stage_that_never_ran(monkeypatch, capsys):
+    """Without ``per_pair_timeout`` the construction entry guard never fires,
+    so its window must read the ``n/a`` sentinel, not a misleading
+    ``0.00s`` -- a reader must be able to tell "skipped" from "free"."""
+    router, pair = _two_pad_router_and_pair()
+    dpr = router._diffpair
+    dpr.enable_shadow_construction = False
+    guide = Route(net=1, net_name="USB_D+")
+    guide.segments.append(
+        Segment(x1=5.0, y1=5.0, x2=25.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1)
+    )
+    monkeypatch.setattr(dpr, "_single_ended_guide_route", lambda *a, **k: guide)
+    _install_stub(monkeypatch)
+
+    dpr.route_differential_pair_coupled(pair, coupled_only=True)
+    out = capsys.readouterr().out
+
+    line = next(entry for entry in out.splitlines() if "[coupled-timing]" in entry)
+    assert "construction_entry_window_s=n/a" in line, line
