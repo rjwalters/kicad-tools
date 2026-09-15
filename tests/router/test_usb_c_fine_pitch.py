@@ -293,7 +293,7 @@ class TestUsbCEscapeTier1:
     def escape_router(self):
         rules = _make_rules(manufacturer="jlcpcb")
         grid = _make_grid(rules)
-        return EscapeRouter(grid, rules)
+        return EscapeRouter(grid, rules, component_holes=())
 
     def test_smt_pads_get_alternating_layers(self, escape_router):
         """Adjacent SMT pads in each row must escape on different layers.
@@ -394,7 +394,7 @@ class TestUsbCEscapeTier2:
         alternating-layer escape and are what unblocks the channel."""
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
 
         pads = _make_usb_c_pads()
         package_info = escape_router.analyze_package(pads)
@@ -414,7 +414,7 @@ class TestUsbCEscapeTier2:
         rules = _make_rules(manufacturer="jlcpcb")
         rules.component_clearances["J1"] = 0.4
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
 
         pads = _make_usb_c_pads()
         package_info = escape_router.analyze_package(pads)
@@ -484,7 +484,7 @@ class TestUsbCEscapeTier2:
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         rules.component_clearances["J1"] = 0.4  # Force surface deferrals.
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
 
         package_info = escape_router.analyze_package(pads)
         assert package_info.package_type == PackageType.USB_C_CONNECTOR
@@ -533,7 +533,7 @@ class TestUsbCFixture:
 
         rules = _make_rules(manufacturer="jlcpcb")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
 
         package_info = escape_router.analyze_package(j1_pads)
         assert package_info.package_type == PackageType.USB_C_CONNECTOR
@@ -604,7 +604,7 @@ class TestUsbCColumnAlignedDefer:
         pads = _make_respun_usb_c_pads()
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
 
         package_info = escape_router.analyze_package(pads)
         assert package_info.package_type == PackageType.USB_C_CONNECTOR
@@ -620,7 +620,7 @@ class TestUsbCColumnAlignedDefer:
         pads = _make_usb_c_pads()
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
 
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)

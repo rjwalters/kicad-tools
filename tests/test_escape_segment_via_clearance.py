@@ -57,7 +57,7 @@ def _make_router() -> tuple[EscapeRouter, RoutingGrid, DesignRules]:
         origin_y=0.0,
         layer_stack=LayerStack.two_layer(),
     )
-    return EscapeRouter(grid, rules), grid, rules
+    return EscapeRouter(grid, rules, component_holes=()), grid, rules
 
 
 class TestSegmentClearsForeignVia:
@@ -468,7 +468,7 @@ class TestApplyEscapeRoutesGate:
             origin_y=0.0,
             layer_stack=LayerStack.four_layer_all_signal(),
         )
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         blind_via = Via(
             x=5.0,

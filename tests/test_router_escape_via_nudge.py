@@ -98,7 +98,7 @@ class TestSelectInPadViaPositionDeadCentrePasses:
         """A pad with no foreign neighbors keeps the dead-centre via."""
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         target = Pad(
             x=ANCHOR_X,
@@ -129,7 +129,7 @@ class TestSelectInPadViaPositionDeadCentrePasses:
         envelope, dead-centre is accepted without a nudge."""
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         target = Pad(
             x=ANCHOR_X,
@@ -172,7 +172,7 @@ class TestSelectInPadViaPositionDeadCentrePasses:
         """``package=None`` disables the nudge rescue (no neighbor context)."""
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         target = Pad(
             x=ANCHOR_X,
@@ -224,7 +224,7 @@ class TestSelectInPadViaPositionNudgeSucceeds:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         target = Pad(
             x=ANCHOR_X,
@@ -307,7 +307,7 @@ class TestSelectInPadViaPositionNudgeSucceeds:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         target = Pad(
             x=ANCHOR_X,
@@ -356,7 +356,7 @@ class TestSelectInPadViaPositionNudgeSucceeds:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Tall pad: long axis = Y.
         target = Pad(
@@ -412,7 +412,7 @@ class TestSelectInPadViaPositionFallback:
         """
         rules = _make_rules()
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # Pad just barely larger than via_diameter on the long axis so
         # max_offset = (0.65 - 0.6)/2 - 0.05 = -0.025 (no room).  We

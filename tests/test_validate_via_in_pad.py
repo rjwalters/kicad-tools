@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pytest
+
 from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
 
 # ---------------------------------------------------------------------------
@@ -29,6 +31,7 @@ class _StubPad:
     size: tuple[float, float] = (1.0, 0.5)
     net_number: int = 1
     net_name: str = "DATA"
+    drill: float = 0.0
 
 
 @dataclass
@@ -43,6 +46,7 @@ class _StubFootprint:
 class _StubVia:
     position: tuple[float, float] = (10.0, 10.0)
     drill: float = 0.3
+    size: float = 0.6
     net_number: int = 1
     net_name: str = "DATA"
     uuid: str = "abcdef12"
@@ -52,11 +56,13 @@ class _StubVia:
 class _StubPCB:
     footprints: list[_StubFootprint] = field(default_factory=list)
     vias: list[_StubVia] = field(default_factory=list)
+    copper_layers: list = field(default_factory=lambda: ["F.Cu", "B.Cu"])
 
 
 @dataclass
 class _StubDesignRules:
     via_in_pad_supported: bool = False
+    via_in_pad_process_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +215,135 @@ class TestViaInPadRule:
         assert results.rules_checked == 1
 
 
+class TestViaInPadProcessEligibility:
+    """Issue #5009: via_in_pad_supported=True alone must not suppress a
+    via-in-pad finding -- a real, eligible FabricationProcess must be
+    declared and satisfied.
+    """
+
+    def test_missing_process_selection_fails_distinctly(self):
+        """Synthetic two-layer 0.15mm via-in-SMT-land, supported=True, no process.
+
+        Reproduces the original board04-style scenario (now fixed on
+        board04 itself; this is the synthetic fixture the issue's own
+        Verified Corrections note says is required) as a distinct
+        ``via_in_pad_process_missing`` finding, NOT the base
+        ``via_in_pad`` capability-absent finding.
+        """
+        pad = _StubPad(net_number=1, net_name="DATA", position=(0.0, 0.0), size=(1.0, 0.5))
+        fp = _StubFootprint(pads=[pad])
+        via = _StubVia(position=(10.0, 10.0), drill=0.15, size=0.30, net_number=1)
+        # Two-layer board (matches the default _StubPCB.copper_layers).
+        pcb = _StubPCB(footprints=[fp], vias=[via])
+
+        design_rules = _StubDesignRules(via_in_pad_supported=True, via_in_pad_process_id=None)
+        results = ViaInPadRule().check(pcb, design_rules)
+
+        assert len([v for v in results.violations if v.rule_id == "via_in_pad"]) == 0
+        missing = [v for v in results.violations if v.rule_id == "via_in_pad_process_missing"]
+        assert len(missing) == 1, results.violations
+        assert "via_in_pad_process_id" in missing[0].message
+        assert results.rules_checked == 1
+
+    def test_unrecognized_process_id_treated_as_missing(self):
+        """An unrecognized ``via_in_pad_process_id`` behaves like "unset"."""
+        pad = _StubPad(net_number=1, net_name="DATA", position=(0.0, 0.0), size=(1.0, 0.5))
+        fp = _StubFootprint(pads=[pad])
+        via = _StubVia(position=(10.0, 10.0), drill=0.15, size=0.30, net_number=1)
+        pcb = _StubPCB(footprints=[fp], vias=[via])
+
+        design_rules = _StubDesignRules(
+            via_in_pad_supported=True, via_in_pad_process_id="not-a-real-process"
+        )
+        results = ViaInPadRule().check(pcb, design_rules)
+
+        missing = [v for v in results.violations if v.rule_id == "via_in_pad_process_missing"]
+        assert len(missing) == 1
+        assert "not-a-real-process" in missing[0].message
+
+    def test_declared_process_ineligible_geometry_fails_distinctly(self):
+        """A declared process that the via's real geometry does not satisfy.
+
+        The board only has 2 copper layers and a 0.15mm drill, both below
+        the jlcpcb-tier1-pofv-4l process's floor (4 layers, 0.2mm min
+        drill) -- this must fail as ``via_in_pad_process_ineligible``,
+        distinct from "no process was declared at all".
+        """
+        pad = _StubPad(net_number=1, net_name="DATA", position=(0.0, 0.0), size=(1.0, 0.5))
+        fp = _StubFootprint(pads=[pad])
+        via = _StubVia(position=(10.0, 10.0), drill=0.15, size=0.30, net_number=1)
+        pcb = _StubPCB(footprints=[fp], vias=[via])  # default 2-layer copper_layers
+
+        design_rules = _StubDesignRules(
+            via_in_pad_supported=True, via_in_pad_process_id="jlcpcb-tier1-pofv-4l"
+        )
+        results = ViaInPadRule().check(pcb, design_rules)
+
+        assert len([v for v in results.violations if v.rule_id == "via_in_pad"]) == 0
+        assert (
+            len([v for v in results.violations if v.rule_id == "via_in_pad_process_missing"]) == 0
+        )
+        ineligible = [v for v in results.violations if v.rule_id == "via_in_pad_process_ineligible"]
+        assert len(ineligible) == 1, results.violations
+        assert "jlcpcb-tier1-pofv-4l" in ineligible[0].message
+        assert "0.15" in ineligible[0].message or "layer" in ineligible[0].message
+
+    def test_valid_four_layer_pofv_construction_passes(self):
+        """Positive control: a documented, eligible 4-layer POFV via.
+
+        Mirrors boards/03-usb-joystick's reviewed four-layer
+        filled-and-capped POFV contract: 4 copper layers, 0.2mm drill,
+        0.45mm diameter (0.125mm ring), no nearby component holes.
+        """
+        pad = _StubPad(net_number=1, net_name="DATA", position=(0.0, 0.0), size=(1.0, 0.5))
+        fp = _StubFootprint(pads=[pad])
+        via = _StubVia(position=(10.0, 10.0), drill=0.2, size=0.45, net_number=1)
+        pcb = _StubPCB(
+            footprints=[fp],
+            vias=[via],
+            copper_layers=["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"],
+        )
+
+        design_rules = _StubDesignRules(
+            via_in_pad_supported=True, via_in_pad_process_id="jlcpcb-tier1-pofv-4l"
+        )
+        results = ViaInPadRule().check(pcb, design_rules)
+
+        assert results.violations == []
+        assert results.rules_checked == 1
+
+    def test_component_hole_too_close_fails_ineligible(self):
+        """A nearby PTH hole closer than the process's floor is flagged."""
+        pad = _StubPad(net_number=1, net_name="DATA", position=(0.0, 0.0), size=(1.0, 0.5))
+        # A through-hole pad on a DIFFERENT footprint, very close to the via.
+        pth_pad = _StubPad(
+            number="1",
+            type="thru_hole",
+            net_number=2,
+            net_name="GND",
+            position=(0.0, 0.0),
+            size=(1.0, 1.0),
+            drill=0.3,
+        )
+        fp = _StubFootprint(pads=[pad])
+        pth_fp = _StubFootprint(reference="J1", position=(10.2, 10.0), pads=[pth_pad])
+        via = _StubVia(position=(10.0, 10.0), drill=0.2, size=0.45, net_number=1)
+        pcb = _StubPCB(
+            footprints=[fp, pth_fp],
+            vias=[via],
+            copper_layers=["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"],
+        )
+
+        design_rules = _StubDesignRules(
+            via_in_pad_supported=True, via_in_pad_process_id="jlcpcb-tier1-pofv-4l"
+        )
+        results = ViaInPadRule().check(pcb, design_rules)
+
+        ineligible = [v for v in results.violations if v.rule_id == "via_in_pad_process_ineligible"]
+        assert len(ineligible) == 1, results.violations
+        assert "component hole" in ineligible[0].message
+
+
 class TestViaInPadIntegration:
     """Integration tests via DRCChecker.check_via_in_pad()."""
 
@@ -321,3 +456,94 @@ def test_drill_overlap_uses_absolute_pad_angle():
     )
     result = ViaInPadRule().check(pcb, _StubDesignRules())
     assert [v.items[0] for v in result.violations] == ["Via-overlap"]
+
+
+class TestPhysicalHoleCensus:
+    """Final manufacturing eligibility must agree with the router's census."""
+
+    @staticmethod
+    def board(hole_type="np_thru_hole", drill=0.3, position=(10.65, 10.0)):
+        from kicad_tools.schema.pcb import Footprint, Pad
+
+        land = Pad("1", "smd", "rect", (0, 0), (1, 0.5), ["F.Cu"], net_number=1)
+        hole = Pad("", hole_type, "circle", (0, 0), (0.3, 0.3), ["*.Cu"], drill=drill)
+        return _StubPCB(
+            footprints=[
+                Footprint("test", "F.Cu", (10, 10), 0, "U1", "test", pads=[land]),
+                Footprint("hole", "F.Cu", position, 0, "", "hole", pads=[hole]),
+            ],
+            vias=[_StubVia(drill=0.2, size=0.45)],
+            copper_layers=["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"],
+        )
+
+    @staticmethod
+    def check(pcb):
+        return ViaInPadRule().check(
+            pcb,
+            _StubDesignRules(
+                via_in_pad_supported=True, via_in_pad_process_id="jlcpcb-tier1-pofv-4l"
+            ),
+        )
+
+    def test_anonymous_npth_with_insufficient_process_gap_is_rejected(self):
+        result = self.check(self.board())
+        assert [v.rule_id for v in result.violations] == ["via_in_pad_process_ineligible"]
+        assert "0.400mm" in result.violations[0].message
+
+    def test_unknown_drilled_geometry_fails_closed(self):
+        for kind in ("thru_hole", "np_thru_hole"):
+            for drill in (None, 0, -0.3, float("nan"), float("inf"), "bad"):
+                result = self.check(self.board(hole_type=kind, drill=drill))
+                assert [v.rule_id for v in result.violations] == [
+                    "via_in_pad_process_ineligible"
+                ], (kind, drill)
+                assert "unknown" in result.violations[0].message
+
+    def test_unknown_hole_position_fails_closed(self):
+        for coordinate in (float("nan"), float("inf")):
+            result = self.check(self.board(position=(coordinate, 10)))
+            assert [v.rule_id for v in result.violations] == ["via_in_pad_process_ineligible"]
+            assert "unknown" in result.violations[0].message
+
+    def test_distant_and_empty_censuses_remain_eligible(self):
+        for kind in ("thru_hole", "np_thru_hole"):
+            assert not self.check(self.board(hole_type=kind, position=(12, 10))).violations
+        pcb = self.board()
+        pcb.footprints.pop()
+        assert not self.check(pcb).violations
+
+
+@pytest.mark.parametrize("kind", ["thru_hole", "np_thru_hole"])
+@pytest.mark.parametrize(
+    "drill,offset,eligible",
+    [
+        (0.3, 0.65, False),
+        (0.3, 2.0, True),
+        (0.0, 2.0, False),
+        (float("nan"), 2.0, False),
+        (float("inf"), 2.0, False),
+        (-0.3, 2.0, False),
+        ("invalid", 2.0, False),
+    ],
+)
+def test_final_rule_uses_complete_physical_hole_census(kind, drill, offset, eligible):
+    """Imported anonymous holes must obey the same contract as routed holes."""
+    from types import SimpleNamespace
+
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import Footprint, Pad
+
+    land = Pad("1", "smd", "rect", (0, 0), (1, 0.5), ["F.Cu"], net_number=1)
+    hole = Pad("", kind, "circle", (0, 0), (0.3, 0.3), ["*.Cu"], drill=drill)
+    pcb = SimpleNamespace(
+        footprints=[
+            Footprint("test", "F.Cu", (10, 10), 0, "U1", "test", pads=[land]),
+            Footprint("hole", "F.Cu", (10 + offset, 10), 0, "", "hole", pads=[hole]),
+        ],
+        vias=[_StubVia(position=(10, 10), size=0.45, drill=0.2, net_number=1)],
+        copper_layers=["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"],
+    )
+    findings = (
+        ViaInPadRule().check(pcb, get_profile("jlcpcb-tier1").get_design_rules(layers=4)).violations
+    )
+    assert [v.rule_id for v in findings] == ([] if eligible else ["via_in_pad_process_ineligible"])

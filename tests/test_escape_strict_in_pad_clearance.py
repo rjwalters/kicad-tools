@@ -54,7 +54,7 @@ def _build_router(manufacturer: str | None = "jlcpcb-tier1") -> EscapeRouter:
     """Build an EscapeRouter pinned to the violating-pair geometry."""
     rules = make_rules(manufacturer=manufacturer)
     grid = make_grid(rules)
-    return EscapeRouter(grid, rules)
+    return EscapeRouter(grid, rules, component_holes=())
 
 
 @pytest.fixture(autouse=True)

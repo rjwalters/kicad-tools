@@ -185,3 +185,76 @@ def test_same_net_exit_can_use_preserved_via_to_reach_front_pad():
     assert (bridge.x, bridge.y, bridge.layers) == before
     assert result.vias_nudged == 1
     assert validate_routes(router) == []
+
+
+def test_same_net_exit_rejects_foreign_back_layer_snapped_trace():
+    """The #5189 contained-drill witness must not gain a foreign-pad short."""
+    router = Autorouter(
+        width=12,
+        height=12,
+        rules=DesignRules(trace_clearance=0.2, manufacturer="jlcpcb"),
+        force_python=True,
+    )
+    for ref, x, y, size, net, layer in (
+        ("A", 5, 5, 1, 1, Layer.F_CU),
+        ("B", 4.05, 4, 0.2, 3, Layer.B_CU),
+    ):
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": "1",
+                    "x": x,
+                    "y": y,
+                    "width": size,
+                    "height": size,
+                    "net": net,
+                    "net_name": ref,
+                    "layer": layer,
+                }
+            ],
+        )
+    via = Via(x=4.7, y=5, diameter=0.6, drill=0.3, layers=(Layer.F_CU, Layer.B_CU), net=1)
+    segment = Segment(x1=4.7, y1=5, x2=4.7, y2=2, width=0.2, layer=Layer.B_CU, net=1)
+    router.routes = [Route(net=1, net_name="A", vias=[via], segments=[segment])]
+    before = (via.x, via.y, segment.x1, segment.y1, segment.x2, segment.y2)
+    assert validate_routes(router) == []
+    result = drc_verify_and_nudge(router, max_passes=1)
+    assert (via.x, via.y, segment.x1, segment.y1, segment.x2, segment.y2) == before
+    assert validate_routes(router) == []
+    assert result.skipped.get("via_pad_destination_blocked") == 1
+
+
+@pytest.mark.parametrize(
+    "layers,census,eligible", [(2, [], False), (4, None, False), (4, [], True)]
+)
+def test_transaction_process_findings_require_candidate_eligibility(layers, census, eligible):
+    from kicad_tools.router.drc_nudge import _via_pad_process_findings
+    from tests.test_drc_nudge import TestViaInPadComponentHoleCensus, _StubLayerStack
+
+    pad, via, router = TestViaInPadComponentHoleCensus()._make_fixture(all_pads=census)
+    router.layer_stack = _StubLayerStack(num_layers=layers)
+    via.x = 10.3
+    findings = _via_pad_process_findings(via, router)
+    assert bool(findings) is not eligible
+
+
+@pytest.mark.parametrize("hole_x", [11.3, 15.0])
+def test_repair_destination_respects_loaded_anonymous_npth(tmp_path, hole_x):
+    import math
+
+    from kicad_tools.router.drc_nudge import DRCNudgeResult, _scan_and_repair_via_in_pad
+    from tests.router.test_via_in_pad_component_hole_census import _loaded_holes
+    from tests.test_drc_nudge import TestViaInPadComponentHoleCensus, _StubLayerStack
+
+    loaded = _loaded_holes(tmp_path, "np_thru_hole", "", x=hole_x, y=9.7)
+    _, via, router = TestViaInPadComponentHoleCensus()._make_fixture(all_pads=[])
+    router.layer_stack = _StubLayerStack(num_layers=2)
+    router._loaded_component_holes = loaded._loaded_component_holes
+    before = math.hypot(via.x - hole_x, via.y - 9.7) - (via.drill + 0.3) / 2
+    floor = max(router.rules.min_drill_clearance, router.rules.min_hole_to_hole)
+    assert before >= floor
+    _scan_and_repair_via_in_pad(router, 2, DRCNudgeResult())
+    gap = math.hypot(via.x - hole_x, via.y - 9.7) - (via.drill + 0.3) / 2
+    assert gap >= floor
+    assert validate_routes(router) == []

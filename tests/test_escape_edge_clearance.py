@@ -121,7 +121,7 @@ class TestClampToEdgeClearance:
         """Points pass through unchanged when edge clearance is not set."""
         grid = make_grid()
         rules = make_rules()
-        router = EscapeRouter(grid, rules)  # No edge_clearance or board_bounds
+        router = EscapeRouter(grid, rules, component_holes=())  # No edge_clearance or board_bounds
 
         assert router._clamp_to_edge_clearance(5.0, 5.0) == (5.0, 5.0)
         assert router._clamp_to_edge_clearance(100.0, 100.0) == (100.0, 100.0)
@@ -130,7 +130,7 @@ class TestClampToEdgeClearance:
         """Points pass through when edge_clearance is set but board_bounds is None."""
         grid = make_grid()
         rules = make_rules()
-        router = EscapeRouter(grid, rules, edge_clearance=0.3)
+        router = EscapeRouter(grid, rules, edge_clearance=0.3, component_holes=())
 
         assert router._clamp_to_edge_clearance(0.0, 0.0) == (0.0, 0.0)
 
@@ -138,7 +138,7 @@ class TestClampToEdgeClearance:
         """Points pass through when board_bounds is set but edge_clearance is None."""
         grid = make_grid()
         rules = make_rules()
-        router = EscapeRouter(grid, rules, board_bounds=(0.0, 0.0, 30.0, 30.0))
+        router = EscapeRouter(grid, rules, board_bounds=(0.0, 0.0, 30.0, 30.0), component_holes=())
 
         assert router._clamp_to_edge_clearance(-1.0, -1.0) == (-1.0, -1.0)
 
@@ -147,10 +147,7 @@ class TestClampToEdgeClearance:
         grid = make_grid()
         rules = make_rules()
         router = EscapeRouter(
-            grid,
-            rules,
-            edge_clearance=0.5,
-            board_bounds=(0.0, 0.0, 30.0, 30.0),
+            grid, rules, edge_clearance=0.5, board_bounds=(0.0, 0.0, 30.0, 30.0), component_holes=()
         )
 
         # Well inside the board
@@ -164,10 +161,7 @@ class TestClampToEdgeClearance:
         grid = make_grid()
         rules = make_rules()
         router = EscapeRouter(
-            grid,
-            rules,
-            edge_clearance=0.5,
-            board_bounds=(0.0, 0.0, 30.0, 30.0),
+            grid, rules, edge_clearance=0.5, board_bounds=(0.0, 0.0, 30.0, 30.0), component_holes=()
         )
 
         # On the left edge -> clamped to 0.5
@@ -192,10 +186,7 @@ class TestClampToEdgeClearance:
         grid = make_grid()
         rules = make_rules()
         router = EscapeRouter(
-            grid,
-            rules,
-            edge_clearance=0.3,
-            board_bounds=(0.0, 0.0, 20.0, 20.0),
+            grid, rules, edge_clearance=0.3, board_bounds=(0.0, 0.0, 20.0, 20.0), component_holes=()
         )
 
         x, y = router._clamp_to_edge_clearance(-5.0, -5.0)
@@ -215,6 +206,7 @@ class TestClampToEdgeClearance:
             rules,
             edge_clearance=1.0,
             board_bounds=(10.0, 10.0, 50.0, 40.0),
+            component_holes=(),
         )
 
         # Near left edge of board
@@ -247,6 +239,7 @@ class TestGenerateEscapesEdgeClearance:
             rules,
             edge_clearance=edge_clearance,
             board_bounds=board_bounds,
+            component_holes=(),
         )
 
         # Place a QFP near the board edge
@@ -295,13 +288,10 @@ class TestGenerateEscapesEdgeClearance:
         board_bounds = (0.0, 0.0, 40.0, 40.0)
 
         # Without edge clearance
-        router_no_ec = EscapeRouter(grid, rules)
+        router_no_ec = EscapeRouter(grid, rules, component_holes=())
         # With edge clearance
         router_with_ec = EscapeRouter(
-            grid,
-            rules,
-            edge_clearance=0.3,
-            board_bounds=board_bounds,
+            grid, rules, edge_clearance=0.3, board_bounds=board_bounds, component_holes=()
         )
 
         # Place QFP in the center (well away from edges)
@@ -342,6 +332,7 @@ class TestGenerateEscapesEdgeClearance:
             rules,
             edge_clearance=edge_clearance,
             board_bounds=board_bounds,
+            component_holes=(),
         )
 
         # Place pads near the edge
@@ -383,6 +374,7 @@ class TestGenerateEscapesEdgeClearance:
             rules,
             edge_clearance=edge_clearance,
             board_bounds=board_bounds,
+            component_holes=(),
         )
 
         # Place near edge

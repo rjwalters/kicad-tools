@@ -35,6 +35,8 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from .grid import RoutingGrid
     from .rules import DesignRules, NetClassRouting
 
@@ -43,6 +45,12 @@ from kicad_tools.core.geometry import point_to_segment_distance
 from .layers import Layer, LayerType
 from .primitives import Pad, Route, Segment, Via
 from .via_clearance import point_clear_of_copper, segment_clears_foreign_via
+from .via_in_pad_eligibility import (
+    resolve_component_hole_context,
+    resolve_process,
+    via_geometry_eligible,
+    via_in_pad_candidate_eligible,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1101,6 +1109,7 @@ class EscapeRouter:
         enable_slack_corridor_widening: bool = False,
         enable_escape_corridor_reservation: bool = False,
         escape_corridor_plans: list | None = None,
+        component_holes: Sequence[Pad] | None = None,
     ):
         """Initialize the escape router.
 
@@ -1189,6 +1198,29 @@ class EscapeRouter:
                 width is byte-identical to today (the fixed
                 ``intra_pair_clearance + trace_width`` padding), so all
                 board 00-07 fixtures are unchanged.
+            component_holes: The COMPLETE physical hole census (Issue
+                #5201, reopened) -- normally ``Autorouter.all_pads``,
+                which preserves duplicate ``(ref, pin)`` holes the lossy
+                ``Autorouter.pads`` dict drops.  When supplied, the in-pad
+                rescue (``_try_in_pad_escape``) resolves the FINAL
+                candidate via's distance to the nearest other component's
+                drilled hole against the resolved via-in-pad process's
+                ``min_component_hole_distance_mm`` floor, distinguishing a
+                verified-empty census (eligible-if-otherwise-qualifying)
+                from an unknown/incomplete one (refused, fail closed --
+                see ``ComponentHoleContext`` /
+                ``via_in_pad_candidate_eligible`` in
+                :mod:`kicad_tools.router.via_in_pad_eligibility`).
+                Callers should pass the SAME list object the router
+                mutates in place (rather than a snapshot copy) so pads
+                added after construction are visible here too.  Defaults
+                to ``None`` (an explicitly UNKNOWN census) per Issue
+                #5201's acceptance criterion -- missing caller context
+                must never silently grant eligibility.  A caller that
+                has established the board genuinely has no other
+                through-hole pads in scope (e.g. a standalone/synthetic
+                fixture) must say so explicitly with
+                ``component_holes=()``.
         """
         self.grid = grid
         self.rules = rules
@@ -1320,9 +1352,37 @@ class EscapeRouter:
                 self._mfr_limits = get_mfr_limits(self.manufacturer)
             except (ValueError, ImportError):
                 self._mfr_limits = None
-        self.via_in_pad_supported: bool = bool(
-            self._mfr_limits is not None and self._mfr_limits.via_in_pad_supported
+        # Issue #5201: a bare ``MfrLimits.via_in_pad_supported`` capability
+        # boolean is NOT sufficient to legalize opportunistic in-pad via
+        # placement -- the manufacturer must also declare a real, orderable
+        # :class:`~kicad_tools.manufacturers.fabrication_process.FabricationProcess`
+        # whose layer-count floor THIS board's actual copper-layer count
+        # (``grid.num_layers``, the router's real board context -- never a
+        # new hand-maintained manufacturer/layer table) satisfies.  The
+        # canonical example is JLCPCB Capability Plus (``jlcpcb-tier1``):
+        # every layer configuration sets ``via_in_pad_supported: true``,
+        # but its via-in-pad-specific POFV process requires 4+ layers, so a
+        # 2-layer board at that tier has no eligible process and must fall
+        # back to the existing non-in-pad escape strategy instead of
+        # placing (and later stranding) an in-pad via.  Resolution fails
+        # closed -- an unresolvable manufacturer/profile/process never
+        # grants eligibility -- and mirrors the identical resolution the
+        # post-route auto-fix repair sweep uses
+        # (``kicad_tools.router.drc_nudge._resolve_router_via_in_pad_process``)
+        # so escape placement and repair never disagree.
+        self._via_in_pad_process = resolve_process(
+            self.manufacturer, getattr(grid, "num_layers", None)
         )
+        self.via_in_pad_supported: bool = self._via_in_pad_process is not None
+        # Issue #5201 (reopened): the COMPLETE physical hole census used to
+        # resolve a specific candidate via's distance to the nearest OTHER
+        # component's drilled hole (see ``component_holes`` docstring
+        # above).  Stored as the caller's own reference (not copied) so a
+        # live, growing list (``Autorouter.all_pads``) is observed
+        # correctly.  ``None`` (the default) is the explicit "unknown
+        # census" sentinel -- distinct from an explicitly-passed ``()``
+        # "verified empty" census.
+        self._component_holes: Sequence[Pad] | None = component_holes
 
         # Issue #3033 / #3062: When True, the in-pad rescue path
         # (``_try_in_pad_escape``) returns None instead of placing a
@@ -3540,10 +3600,9 @@ class EscapeRouter:
         # clearance -- a footprint-pitch geometric ceiling that no router
         # tuning can resolve.  Default off so all existing callers see
         # the original gate exactly.
-        try_in_pad_fallback = (
-            (package.pin_pitch <= 0.55)
-            or (self.extended_pitch_in_pad_fallback and package.pin_pitch <= 0.8)
-        ) and self.via_in_pad_supported
+        try_in_pad_fallback = (package.pin_pitch <= 0.55) or (
+            self.extended_pitch_in_pad_fallback and package.pin_pitch <= 0.8
+        )
 
         # Issue #2881: Track whether this package is a "would-have-rescued"
         # candidate -- fine-pitch enough to need via-in-pad rescue, but the
@@ -7663,6 +7722,26 @@ class EscapeRouter:
             via_diameter = self.rules.via_diameter
             min_annular = (via_diameter - via_drill) / 2
 
+        # Issue #5201: ``self.via_in_pad_supported`` already proved a real
+        # process is attached for this board's layer count -- but that is
+        # a BOARD-level fact, not proof this specific candidate's drill /
+        # annular-ring geometry falls inside the declared process's
+        # published envelope.  Check it here too so the escape router
+        # never places a via the downstream ``via_in_pad`` DRC rule would
+        # reject as ``via_in_pad_process_ineligible``.  Component-hole
+        # distance is intentionally not checked here (the escape router
+        # does not carry a board-wide PTH registry at this decision
+        # point) -- DRC remains the authoritative check for that
+        # dimension; the geometric envelope checked here (drill range,
+        # annular ring) is the one the router's own via construction
+        # controls directly.
+        if self._via_in_pad_process is not None and not via_geometry_eligible(
+            self._via_in_pad_process,
+            drill_mm=via_drill,
+            annular_ring_mm=min_annular,
+        ):
+            return None
+
         # Geometry check: the drill must fit inside the pad with an
         # annular ring of pad copper around it.  Typical fine-pitch SSOP
         # pads are oblong (e.g. 0.35x1.45mm); the long axis nearly always
@@ -7872,6 +7951,81 @@ class EscapeRouter:
                 sibling_via.y,
             )
             return None
+
+        # Issue #5201 (reopened): re-check process eligibility against the
+        # FINAL candidate geometry -- the early check above (right after
+        # the ``via_in_pad_supported`` gate) only proved the STANDARD
+        # via's drill/annular ring satisfy the envelope; the nudge rescue
+        # (Issue #2946) can move ``via_x``/``via_y`` off dead-centre and
+        # the micro-via fallback (Issue #3118) can swap ``via_drill`` /
+        # ``via_diameter`` entirely.  A centre-only or pre-rescue check is
+        # insufficient to catch either.  This also folds in the
+        # component-hole-distance check the early gate deliberately
+        # omitted (it runs before ``self._component_holes`` is
+        # consulted): resolve the FINAL candidate's distance to the
+        # nearest OTHER component's drilled hole from the complete
+        # physical census and REFUSE (fail closed) when that census is
+        # unknown/incomplete, exactly mirroring the downstream
+        # ``via_in_pad_process_ineligible`` DRC rule so the router never
+        # places a via DRC then rejects.
+        if self._via_in_pad_process is not None:
+            final_annular_ring = (via_diameter - via_drill) / 2.0
+            hole_context = resolve_component_hole_context(
+                via_x,
+                via_y,
+                via_drill,
+                all_pads=self._component_holes,
+                exclude=pad,
+            )
+            if not via_in_pad_candidate_eligible(
+                self._via_in_pad_process,
+                drill_mm=via_drill,
+                annular_ring_mm=final_annular_ring,
+                hole_context=hole_context,
+            ):
+                if hole_context.known:
+                    logger.info(
+                        "In-pad rescue REFUSED for pad %s (ref=%s pin=%s) at "
+                        "(%.3f, %.3f): final candidate geometry (drill=%.3fmm, "
+                        "annular=%.3fmm, nearest other hole=%.3fmm%s) does not "
+                        "satisfy process %r's published envelope (Issue "
+                        "#5201).  Returning None so the dispatcher takes the "
+                        "lateral / surface escape path instead of committing "
+                        "a via DRC would then reject.",
+                        pad.net_name,
+                        pad.ref,
+                        pad.pin,
+                        via_x,
+                        via_y,
+                        via_drill,
+                        final_annular_ring,
+                        hole_context.nearest_distance_mm,
+                        " (micro-via)" if is_micro_via_used else "",
+                        self._via_in_pad_process.process_id,
+                    )
+                else:
+                    logger.info(
+                        "In-pad rescue REFUSED for pad %s (ref=%s pin=%s) at "
+                        "(%.3f, %.3f): the board's component-hole census is "
+                        "unknown/incomplete (no live ``all_pads`` registry "
+                        "was threaded to this EscapeRouter, or it contains a "
+                        "through-hole pad with a missing/zero/unparseable "
+                        "drill diameter) -- process %r requires >= %.3fmm "
+                        "clearance from any other component's drilled hole "
+                        "and this cannot be proven, so eligibility fails "
+                        "closed (Issue #5201).  Returning None so the "
+                        "dispatcher takes the lateral / surface escape path "
+                        "instead of committing a via that might violate the "
+                        "process's component-hole-distance floor.",
+                        pad.net_name,
+                        pad.ref,
+                        pad.pin,
+                        via_x,
+                        via_y,
+                        self._via_in_pad_process.process_id,
+                        self._via_in_pad_process.min_component_hole_distance_mm,
+                    )
+                return None
 
         # Select inner escape layer (In1.Cu on 4-layer, B.Cu on 2-layer).
         escape_layer = self._select_inner_escape_layer(pad.layer)
@@ -8127,16 +8281,8 @@ class EscapeRouter:
             or ``None`` when every candidate inside the search budget
             is rejected.
         """
-        if not self.via_in_pad_supported:
-            # Mirror ``_try_in_pad_escape`` -- without a via-in-pad-capable
-            # manufacturer the lateral re-attempt cannot ship either
-            # (the resulting via would land on a fine-pitch pad neighbour
-            # without filled/plated processing).  Returning None here
-            # preserves the existing "defer to main router" behaviour
-            # for manufacturers that never supported the in-pad path
-            # to begin with.
-            return None
-
+        # A lateral escape uses an ordinary via outside SMT copper. It
+        # does not require a filled-and-capped via-in-pad process.
         # Pull manufacturer-effective via geometry, mirroring the
         # in-pad helper above so the lateral and in-pad rescues use
         # geometrically-consistent vias.
@@ -8203,6 +8349,29 @@ class EscapeRouter:
             offset = i * step_mm
             cand_x = pad.x + dx * offset
             cand_y = pad.y + dy * offset
+
+            from .pad_geometry import pad_point_distance
+
+            # Do not merely mark the via off-pad: prove its copper is clear
+            # of every SMT land in the package, including its own net.
+            pads = package.pads if package is not None else [pad]
+            if any(
+                not p.through_hole
+                and pad_point_distance(p, cand_x, cand_y)
+                < via_diameter / 2 + effective_clearance - 1e-6
+                for p in pads
+            ):
+                continue
+            holes = resolve_component_hole_context(
+                cand_x, cand_y, via_drill, all_pads=self._component_holes
+            )
+            if (
+                not holes.known
+                or holes.nearest_distance_mm is None
+                or holes.nearest_distance_mm
+                < max(self.rules.min_hole_to_hole, self.rules.min_drill_clearance)
+            ):
+                continue
 
             if self._can_place_via(
                 x=cand_x,

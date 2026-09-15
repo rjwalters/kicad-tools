@@ -215,3 +215,63 @@ class TestFixOscEscapeStep:
         pcb.write_text("(kicad_pcb\n\t(version 20240108)\n)\n")
         with pytest.raises(AssertionError, match="OSC_OUT escape"):
             recipe.fix_osc_escape(pcb)
+
+
+class TestAlreadyConnectedOscEscape:
+    """A missing historical hop is safe only with complete isolated circuits."""
+
+    @staticmethod
+    def _board(tmp_path, fault=None):
+        # Two independent three-terminal circuits. Declared net labels stay
+        # correct even when physical copper is broken or bridges the nets.
+        pads = [
+            ("U2", "5", 0, 0, 4),
+            ("Y1", "1", 2, 0, 4),
+            ("C10", "1", 4, 0, 4),
+            ("U2", "6", 0, 2, 5),
+            ("Y1", "2", 2, 2, 5),
+            ("C11", "1", 4, 2, 5),
+            ("R1", "1", 4, 4, 6),
+        ]
+        text = '(kicad_pcb (version 20240108) (generator "test")'
+        text += ' (layers (0 "F.Cu" signal) (31 "B.Cu" signal))'
+        text += ' (net 0 "") (net 4 "OSC_IN") (net 5 "OSC_OUT") (net 6 "FOREIGN")'
+        for ref, pin, x, y, net in pads:
+            if fault == "missing_pad" and ref == "C11":
+                continue
+            text += (
+                f' (footprint "test" (layer "F.Cu") (at {x} {y})'
+                f' (property "Reference" "{ref}")'
+                f' (pad "{pin}" smd circle (at 0 0) (size 0.5 0.5)'
+                f' (layers "F.Cu") (net {net})))'
+            )
+        for y, net in [(0, 4), (2, 5)]:
+            end = 1 if fault == "open" and net == 5 else 4
+            layer = "B.Cu" if fault == "wrong_layer" and net == 5 else "F.Cu"
+            text += (
+                f" (segment (start 0 {y}) (end {end} {y})"
+                f' (width 0.2) (layer "{layer}") (net {net}))'
+            )
+        if fault in ("short", "foreign"):
+            start, end = ((2, 0), (2, 2)) if fault == "short" else ((4, 2), (4, 4))
+            text += (
+                f" (segment (start {start[0]} {start[1]})"
+                f' (end {end[0]} {end[1]}) (width 0.2) (layer "F.Cu") (net 5))'
+            )
+        path = tmp_path / "lateral.kicad_pcb"
+        path.write_text(text + ")")
+        return path
+
+    def test_connected_circuits_are_unchanged(self, tmp_path):
+        pcb = self._board(tmp_path)
+        original = pcb.read_bytes()
+        assert _load_recipe().fix_osc_escape(pcb)
+        assert pcb.read_bytes() == original
+
+    @pytest.mark.parametrize("fault", ["open", "wrong_layer", "short", "foreign", "missing_pad"])
+    def test_incomplete_or_shorted_circuits_fail_without_mutation(self, tmp_path, fault):
+        pcb = self._board(tmp_path, fault)
+        original = pcb.read_bytes()
+        with pytest.raises(AssertionError, match="OSC_OUT escape"):
+            _load_recipe().fix_osc_escape(pcb)
+        assert pcb.read_bytes() == original

@@ -149,13 +149,18 @@ def _make_rules(manufacturer: str | None) -> DesignRules:
 
 
 def _make_grid(rules: DesignRules) -> RoutingGrid:
+    # Issue #5201: this fixture models board-03's U1 TQFP-32 (a REAL
+    # 4-layer board in production), and ``jlcpcb-tier1``'s via-in-pad
+    # POFV process requires >= 4 copper layers -- a 2-layer stack here
+    # would make every ``jlcpcb-tier1`` fixture in this file ineligible
+    # for via-in-pad, which does not match the board this suite models.
     return RoutingGrid(
         width=20.0,
         height=20.0,
         rules=rules,
         origin_x=-10.0,
         origin_y=-10.0,
-        layer_stack=LayerStack.two_layer(),
+        layer_stack=LayerStack.four_layer_sig_sig_gnd_pwr(),
     )
 
 
@@ -172,7 +177,7 @@ class TestExtendedPitchInPadGate:
         monkeypatch.delenv("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", raising=False)
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        er = EscapeRouter(grid, rules)
+        er = EscapeRouter(grid, rules, component_holes=())
         assert er.via_in_pad_supported is True
         assert er.extended_pitch_in_pad_fallback is False
 
@@ -191,7 +196,7 @@ class TestExtendedPitchInPadGate:
         monkeypatch.setenv("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", "1")
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        er = EscapeRouter(grid, rules)
+        er = EscapeRouter(grid, rules, component_holes=())
         assert er.extended_pitch_in_pad_fallback is True
         assert er.via_in_pad_supported is True
 
@@ -218,7 +223,7 @@ class TestExtendedPitchInPadGate:
         monkeypatch.setenv("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", "1")
         rules = _make_rules(manufacturer="jlcpcb")
         grid = _make_grid(rules)
-        er = EscapeRouter(grid, rules)
+        er = EscapeRouter(grid, rules, component_holes=())
         # Capability gate: tier-0 has via_in_pad_supported = False.
         assert er.via_in_pad_supported is False
         assert er.extended_pitch_in_pad_fallback is True
@@ -241,7 +246,7 @@ class TestPinFilter:
         monkeypatch.setenv("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", "1")
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        er = EscapeRouter(grid, rules)
+        er = EscapeRouter(grid, rules, component_holes=())
 
         pads = _make_tqfp32_pads()
         pkg = er.analyze_package(pads)
@@ -258,7 +263,7 @@ class TestPinFilter:
         monkeypatch.setenv("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", "1")
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        er = EscapeRouter(grid, rules)
+        er = EscapeRouter(grid, rules, component_holes=())
 
         pads = _make_tqfp32_pads()
         pkg = er.analyze_package(pads)
@@ -281,7 +286,7 @@ class TestMissedRescueCounterWidening:
         monkeypatch.setenv("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", "1")
         rules = _make_rules(manufacturer="jlcpcb")  # tier-0, no in-pad
         grid = _make_grid(rules)
-        er = EscapeRouter(grid, rules)
+        er = EscapeRouter(grid, rules, component_holes=())
         assert er.extended_pitch_in_pad_fallback is True
         assert er.via_in_pad_supported is False
 
@@ -294,7 +299,7 @@ class TestRescueGeometryShape:
         monkeypatch.setenv("KICAD_TOOLS_EXTENDED_PITCH_IN_PAD_FALLBACK", "1")
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        er = EscapeRouter(grid, rules)
+        er = EscapeRouter(grid, rules, component_holes=())
 
         pads = _make_tqfp32_pads()
         pkg = er.analyze_package(pads)

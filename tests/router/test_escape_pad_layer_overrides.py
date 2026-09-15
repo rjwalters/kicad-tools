@@ -49,7 +49,7 @@ def _make_escape_router():
         via_diameter=0.6,
     )
     grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
-    return EscapeRouter(grid, rules)
+    return EscapeRouter(grid, rules, component_holes=())
 
 
 def test_escape_pad_layer_overrides_default_empty(monkeypatch):
