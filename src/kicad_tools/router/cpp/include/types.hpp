@@ -247,7 +247,7 @@ namespace router {
 // v28: trace-halo refinement preserves the separate via clearance floor.
 // v29: indexed physical component-hole clearance during via search.
 // v30: final route validation accepts the separate physical component-hole floor.
-constexpr int ROUTER_CPP_BUILD_VERSION = 30;
+constexpr int ROUTER_CPP_BUILD_VERSION = 31;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -635,6 +635,8 @@ struct StoredVia {
     float drill;
     float diameter;
     int net;
+    int layer_from = 0;
+    int layer_to = std::numeric_limits<int>::max();
 };
 
 // Rated-footprint attach zone for pairwise clearance (Issue #4510 / #4506).
