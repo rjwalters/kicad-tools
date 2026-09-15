@@ -797,6 +797,11 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
     out_world_x = 0.0f;
     out_world_y = 0.0f;
 
+    const auto [hole_x, hole_y] = grid_.grid_to_world(x, y);
+    if (!grid_.component_holes_clear(hole_x, hole_y,
+                                    search_emit_via_drill_ > 0 ? search_emit_via_drill_ : rules_.via_drill,
+                                    rules_.min_hole_to_hole)) return true;
+
     const bool geometry_complete = grid_.route_geometry_complete();
     if (geometry_complete && !via_route_geometry_clear(x, y, net)) return true;
 
@@ -1184,6 +1189,7 @@ RouteResult Pathfinder::route(
     const std::vector<PadChannelBudget>& pad_channel_budgets
 ) {
     begin_route_geometry_context(partner_net);
+    search_emit_via_drill_ = emit_via_drill;
     // Non-resumable route: use local A* state.
     // This preserves backward compatibility for callers that don't need retry.
     //

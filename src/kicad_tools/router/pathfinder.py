@@ -2010,6 +2010,11 @@ class Router:
             radius: Override the via half-width in grid cells. When None,
                     uses the pre-computed ``_via_half_cells`` (Issue #1692).
         """
+        wx, wy = self.grid.grid_to_world(gx, gy)
+        if not self.grid._component_hole_index.clear(
+            wx, wy, self.rules.via_drill, self.rules.min_hole_to_hole
+        ):
+            return True
         halo = getattr(self.grid, "_route_halo", None)
         geometry_complete = halo is not None and halo.complete
         if geometry_complete and not self._via_halo_clear([], layer, gx, gy, net):
@@ -2948,6 +2953,12 @@ class Router:
         Returns:
             True if via CAN be placed (all layers clear), False if blocked.
         """
+        wx, wy = self.grid.grid_to_world(gx, gy)
+        if not self.grid._component_hole_index.clear(
+            wx, wy, self.rules.via_drill, self.rules.min_hole_to_hole
+        ):
+            return False
+
         # Try cache first (only in non-sharing mode since sharing state can change)
         # Issue #1692: Include radius in cache key so different net classes
         # don't collide in the cache.
@@ -3068,6 +3079,7 @@ class Router:
         ``_restore_router_pads``.
         """
         self._non_th_pad_cache = None
+        self.grid.refresh_component_holes()
 
     def set_via_cache_enabled(self, enabled: bool) -> None:
         """Enable or disable via caching.

@@ -764,6 +764,7 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
 
     # A missing legacy payload is unknown, not a verified empty census.
     router._loaded_component_holes = config.get("component_holes")
+    router.grid.install_component_hole_census(router._loaded_component_holes)
 
     # Restore nets and net_names
     router.nets = {int(k): v for k, v in config["nets"].items()}
@@ -9700,6 +9701,7 @@ class Autorouter:
                 self.grid._pad_blocked = old_grid._pad_blocked.copy()
                 self.grid._original_net = old_grid._original_net.copy()
                 self.grid._pads = old_grid._pads.copy()
+                self.grid._component_hole_index = old_grid._component_hole_index.refreshed()
                 # Issue #4794: the occupancy planes were replaced wholesale
                 # after construction -- bump so occupancy-derived caches
                 # (e.g. the pairwise widening bitmaps) recompute.

@@ -4228,6 +4228,8 @@ def load_pcb_for_routing(
         DocumentPCB(parse_string(pcb_text)), world_coordinates=True
     )
 
+    router.grid.install_component_hole_census(router._loaded_component_holes)
+
     # Add all components
     for comp in components:
         # Pads already have absolute positions

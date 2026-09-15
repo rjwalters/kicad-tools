@@ -263,6 +263,11 @@ public:
                  bool is_plane_net = false, float rotation = 0.0f,
                  bool is_circular = false);
 
+    void set_component_holes_known(bool known) { component_holes_known_ = known; }
+    void clear_component_holes();
+    void add_component_hole(float x1, float y1, float x2, float y2, float radius);
+    bool component_holes_clear(float x, float y, float drill, float clearance) const;
+
     void set_pad_via_policy(size_t index, float clearance, bool carveout_eligible);
 
     // Register a completed route's segments for clearance validation.
@@ -487,6 +492,9 @@ private:
     void record_route_mark(const RouteMarkKey& key, bool add);
 
     using GeometryBins = std::map<std::pair<int, int>, std::vector<size_t>>;
+    bool component_holes_known_ = true;
+    GeometryBins component_hole_bins_;
+    std::vector<std::array<float, 5>> component_holes_;
     GeometryBins route_segment_bins_;
     GeometryBins route_via_bins_;
     static void index_route_geometry(GeometryBins& bins, size_t index,

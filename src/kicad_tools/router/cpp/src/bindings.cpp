@@ -209,6 +209,10 @@ NB_MODULE(router_cpp, m) {
         // foreign pad copper.  Defaults to ``false`` so existing callers
         // that mark obstacle cells (board outline, copper-pour clearance
         // halos) preserve their pre-#3224 behavior.
+        .def("set_component_holes_known", &Grid3D::set_component_holes_known)
+        .def("clear_component_holes", &Grid3D::clear_component_holes)
+        .def("add_component_hole", &Grid3D::add_component_hole)
+        .def("component_holes_clear", &Grid3D::component_holes_clear)
         .def("clear_fixed_fills", &Grid3D::clear_fixed_fills)
         .def("add_fixed_fill", &Grid3D::add_fixed_fill)
         .def("fixed_fill_clear", &Grid3D::fixed_fill_clear)

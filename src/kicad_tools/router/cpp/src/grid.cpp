@@ -666,6 +666,7 @@ void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int n
 
 void Grid3D::clear_validation_data() {
     pads_.clear();
+    clear_component_holes();
     stored_segments_.clear();
     stored_vias_.clear();
     registered_route_geometry_.clear();
@@ -905,6 +906,39 @@ bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
             - (s.width + other.diameter) / 2;
         if (gap < std::max(via_clearance, required(other.net, {(other.x + cp.first) / 2, (other.y + cp.second) / 2}))
                   - CLEARANCE_EPSILON_MM) return false;
+    }
+    return true;
+}
+
+void Grid3D::clear_component_holes() {
+    component_holes_known_ = true;
+    component_holes_.clear();
+    component_hole_bins_.clear();
+}
+
+void Grid3D::add_component_hole(float x1, float y1, float x2, float y2, float radius) {
+    index_route_geometry(component_hole_bins_, component_holes_.size(),
+        std::min(x1, x2)-radius, std::min(y1, y2)-radius,
+        std::max(x1, x2)+radius, std::max(y1, y2)+radius);
+    component_holes_.push_back({x1, y1, x2, y2, radius});
+}
+
+bool Grid3D::component_holes_clear(float x, float y, float drill, float clearance) const {
+    if (!component_holes_known_) return false;
+    const float reach = drill / 2 + clearance;
+    std::set<size_t> seen;
+    for (int bx = std::floor((x-reach)/2); bx <= std::floor((x+reach)/2); ++bx) {
+        for (int by = std::floor((y-reach)/2); by <= std::floor((y+reach)/2); ++by) {
+            auto bin = component_hole_bins_.find({bx, by});
+            if (bin == component_hole_bins_.end()) continue;
+            for (size_t i : bin->second) {
+                if (!seen.insert(i).second) continue;
+                const auto& h = component_holes_[i];
+                const auto cp = closest_point_on_segment(x, y, h[0], h[1], h[2], h[3]);
+                if (std::hypot(x-cp.first, y-cp.second) - h[4] - drill/2
+                    < clearance - CLEARANCE_EPSILON_MM) return false;
+            }
+        }
     }
     return true;
 }

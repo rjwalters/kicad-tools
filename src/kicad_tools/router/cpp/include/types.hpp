@@ -245,7 +245,8 @@ namespace router {
 // ``kct build-native`` to discard a stale ``.so`` compiled from either prior
 // v26 state (main's source-pad seeding build, or the branch's own).
 // v28: trace-halo refinement preserves the separate via clearance floor.
-constexpr int ROUTER_CPP_BUILD_VERSION = 28;
+// v29: indexed physical component-hole clearance during via search.
+constexpr int ROUTER_CPP_BUILD_VERSION = 29;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the

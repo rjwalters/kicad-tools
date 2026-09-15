@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 28
+_REQUIRED_CPP_BUILD_VERSION = 29
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -1067,6 +1067,10 @@ class CppGrid:
                 pad.shape == "circle",
             )
 
+        cpp_grid._impl.set_component_holes_known(grid._component_hole_index.known)
+        for hole in grid._component_hole_index.holes:
+            cpp_grid._impl.add_component_hole(*hole)
+
         from .grid import _sync_pad_via_policies
 
         _sync_pad_via_policies(grid, cpp_grid)
@@ -1510,6 +1514,14 @@ class CppPathfinder:
                 Pass ``None`` or ``[]`` to clear.
         """
         self._pad_channel_budgets = list(budgets) if budgets else []
+
+    def invalidate_pad_geometry_cache(self) -> None:
+        """Mirror changed physical drills before the next native via query."""
+        py_grid = getattr(self._grid, "_py_grid", None)
+        if py_grid is not None:
+            py_grid.refresh_component_holes()
+        if self._py_router is not None:
+            self._py_router.clear_via_cache()
 
     def enable_per_call_timing(self, enabled: bool = True) -> None:
         """Enable or disable per-A*-call wall-clock instrumentation.
