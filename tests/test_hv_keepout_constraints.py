@@ -84,3 +84,23 @@ def test_existing_identical_constraints_and_source_alias(tmp_path, alias):
     assert output.exists() != alias
     assert authored.read_text() == "{}"
     assert source.read_text() == _BOARD
+
+
+def test_renamed_board_alias_rejected_before_refill(tmp_path, monkeypatch):
+    source, output = tmp_path / "source.kicad_pcb", tmp_path / "renamed.kicad_pcb"
+    source.write_text(_BOARD)
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        source.with_suffix(suffix).write_bytes(b"authored bytes\r\n")
+    output.symlink_to(source)
+    monkeypatch.setattr(zones_cmd, "_refill_after_keepout", lambda *_: pytest.fail("refill ran"))
+    assert (
+        zones_cmd.main(
+            ["hv-keepout", str(source), "-o", str(output), "--clearance", "1.6", "--refill", "-q"]
+        )
+        != 0
+    )
+    assert output.is_symlink()
+    assert source.read_text() == _BOARD
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        assert source.with_suffix(suffix).read_bytes() == b"authored bytes\r\n"
+        assert not output.with_suffix(suffix).exists()

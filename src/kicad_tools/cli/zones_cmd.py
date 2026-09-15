@@ -749,8 +749,10 @@ def _copy_keepout_constraints(source: Path, output: Path) -> None:
     """
     from kicad_tools.core.atomic_write import atomic_write_text
 
-    if source.resolve() == output.resolve():
+    if source.parent.resolve() == output.parent.resolve() and source.name == output.name:
         return
+    if source.resolve() == output.resolve():
+        raise ValueError(f"DRC sidecar conflict: output board {output} aliases source {source}")
     pending = []
     for suffix in (".kicad_pro", ".kicad_dru"):
         authored, destination = source.with_suffix(suffix), output.with_suffix(suffix)
