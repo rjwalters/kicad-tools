@@ -245,18 +245,9 @@ def resolve_component_hole_context(
             continue
         if exclude is not None and other is exclude:
             continue
-        ox, oy, drill = _coerce_finite_hole_geometry(other)
-        if ox is None:
-            # Unparseable/non-finite/non-positive geometry on a real
-            # through-hole pad: its true position or hole radius cannot
-            # be computed, so we cannot prove it is far enough away.
-            # Fail closed for the WHOLE census rather than silently skip
-            # this one hole -- Issue #5201's acceptance criterion treats
-            # this the same as a wholly-unknown census.
+        distance = _component_hole_gap(other, via_x, via_y, via_r)
+        if distance is None:
             return ComponentHoleContext(known=False, nearest_distance_mm=None)
-        assert oy is not None and drill is not None
-        hole_r = drill / 2.0
-        distance = math.hypot(ox - via_x, oy - via_y) - via_r - hole_r
         if not math.isfinite(distance):
             return ComponentHoleContext(known=False, nearest_distance_mm=None)
         if nearest is None or distance < nearest:
@@ -268,6 +259,36 @@ def resolve_component_hole_context(
         # qualifying, not "unknown".
         return ComponentHoleContext(known=True, nearest_distance_mm=math.inf)
     return ComponentHoleContext(known=True, nearest_distance_mm=nearest)
+
+
+def _component_hole_gap(pad: object, vx: float, vy: float, via_r: float) -> float | None:
+    """Exact circle-to-capsule gap; unknown slot metadata fails closed."""
+    dimensions = getattr(pad, "drill_size", None)
+    if dimensions is None:
+        x, y, drill = _coerce_finite_hole_geometry(pad)
+        if x is None or y is None or drill is None:
+            return None
+        return math.hypot(x - vx, y - vy) - via_r - drill / 2
+    try:
+        width, height = (float(v) for v in dimensions)
+        x, y = float(getattr(pad, "x", float("nan"))), float(getattr(pad, "y", float("nan")))
+        angle = math.radians(float(getattr(pad, "drill_rotation", 0.0)))
+        if not all(math.isfinite(v) for v in (width, height, x, y, angle)):
+            return None
+        if min(width, height) <= 0:
+            return None
+        # Invert KiCad's clockwise board-space rotation into the slot frame.
+        dx, dy = vx - x, vy - y
+        local_x = dx * math.cos(angle) - dy * math.sin(angle)
+        local_y = dx * math.sin(angle) + dy * math.cos(angle)
+        half_axis = abs(width - height) / 2
+        if width >= height:
+            local_x -= max(-half_axis, min(half_axis, local_x))
+        else:
+            local_y -= max(-half_axis, min(half_axis, local_y))
+        return math.hypot(local_x, local_y) - min(width, height) / 2 - via_r
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        return None
 
 
 def _coerce_finite_hole_geometry(
@@ -388,10 +409,17 @@ def component_holes_from_document(
                         # unknown geometry and fails the WHOLE census
                         # closed -- correct, not a silent skip.
                         drill = 0.0
+                    pad_angle = float(getattr(pad, "rotation", 0.0))
+                    angle = math.radians(-pad_angle)
+                    offset_x, offset_y = getattr(pad, "drill_offset", (0.0, 0.0))
+                    hole_x = fp_x + px * cos_r - py * sin_r
+                    hole_y = fp_y + px * sin_r + py * cos_r
+                    hole_x += offset_x * math.cos(angle) - offset_y * math.sin(angle)
+                    hole_y += offset_x * math.sin(angle) + offset_y * math.cos(angle)
                     census.append(
                         RouterPad(
-                            x=fp_x + px * cos_r - py * sin_r,
-                            y=fp_y + px * sin_r + py * cos_r,
+                            x=hole_x,
+                            y=hole_y,
                             width=getattr(pad, "size", (0.0, 0.0))[0],
                             height=getattr(pad, "size", (0.0, 0.0))[1],
                             net=getattr(pad, "net_number", 0) or 0,
@@ -400,6 +428,8 @@ def component_holes_from_document(
                             pin=str(getattr(pad, "number", "")),
                             through_hole=True,
                             drill=drill,
+                            drill_size=getattr(pad, "drill_size", None),
+                            drill_rotation=pad_angle,
                         )
                     )
             return census
