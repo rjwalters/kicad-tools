@@ -90,12 +90,9 @@ class TestBoard04PartialRouteFastFail:
 
         assert rc == 1, "partial route must make main() exit non-zero"
         err = capsys.readouterr().err
-        assert "partial route" in err.lower(), (
-            "partial-route failure must be reported with a distinct 'partial "
-            f"route' message, got stderr:\n{err}"
-        )
-        assert "does not establish a timeout" in err.lower()
-        assert "failed-net" in err.lower()
+        assert "route step did not pass" in err.lower(), err
+        assert "summary if reported" in err.lower()
+        assert "does not establish incomplete connectivity or a timeout" in err.lower()
         assert "safety backstop fired" not in err.lower()
         assert "BoardNetlistMismatch" not in err, (
             "a partial route must NOT surface as an LVS BoardNetlistMismatch"
