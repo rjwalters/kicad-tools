@@ -201,6 +201,54 @@ verifiers agree on this exact set: `kct net-status --why`,
 `kicad-cli pcb drc --refill-zones` (5 unconnected pads at the same five
 pads).
 
+### Decision: correct HDMI widths while preserving the witness (#5126)
+
+**Recommendation:** permit one explicit, reviewed width correction to this
+historical fixture. Retarget existing `TMDS_*` track widths from 0.375 mm to
+`HDMI_TMDS_LANES`' declared 0.225 mm, preserving their centerlines, layers,
+net assignments and vias. The fixture exists to retain match-group skew geometry
+and documented routing defects; a stale width contradicting its own sidecar is
+not an additional defect we need to preserve. This does not make the synthetic
+board a release artifact or remove its known opens.
+
+The September 12 investigation on #5126 reported matching before/after DRC
+error signatures after native refill and an unchanged angle census of 841
+segments, including 12 off-angle segments. It also reported that stripping and
+rerouting all six TMDS nets reduced their connected count from four to one.
+Those are prior experimental results, not acceptance evidence for a future
+commit. **A full strip-and-reroute is not proposed.** The present saved fixture
+has 0.375 mm segments on the four routed TMDS nets; the two documented open
+TMDS nets have no routed segments to retarget.
+
+The alternative is to freeze every byte forever. That preserves the original
+hash but leaves the fixture internally inconsistent and teaches readers the
+wrong relationship between the sidecar and saved copper. A narrowly documented
+exception with measured invariants better preserves the witness's purpose.
+The original bytes remain identifiable by SHA256
+`ab3a2c2d4aea466f828e540189ac851ddb8c41505c8185be65924ec5ff92a9a6`
+and by repository history.
+
+**Implementation gate:** after review of this decision, a separate #5126 PR
+must add the width-retarget path to `repair_hdmi.py` and publish its exact
+before/after evidence. It must preserve non-TMDS track geometry, all pad/net
+identities, vias and authored constraints; `DDR_DQS` is outside this change.
+Before promotion, compare native and analyzer pad components and open identities,
+not just aggregate counts, and compare DRC error signatures with the original
+project/rules and sidecar after native KiCad 10 zone refill. Narrower tracks can
+lose a marginal copper contact even when their centerlines are unchanged, so
+connectivity must be measured rather than assumed. Retain the original input,
+refilled candidate, commands, KiCad identity and hashes for reproduction.
+The known-current four-open set above must not be confused with the five-open
+historical table, which predates the MIPI repair.
+
+Update `HISTORICAL_WITNESS_SHA256` in `tests/test_fleet_45_census.py` only in the
+same implementation commit as the accepted PCB, with a comment citing #5126.
+Keep the exact `(841, 12)` angle-census assertion and exercise the match-group
+skew checks; do not remove the witness pin or relax its regression gates.
+This decision note changes neither PCB bytes nor their hash pin. If independent
+review rejects the exception, retain the frozen witness and close #5126 with
+that recorded rationale.
+
 ### Placement-delta feedback (#4468, epic #3438 Phase 3)
 
 The route step runs `kct route --placement-delta-feedback
