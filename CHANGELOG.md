@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve narrow via-annulus contacts between copper-fill fragments in net-status analysis without bridging drill holes or unrelated layers (#5382).
+
 - **Imported copper arcs no longer cause false opens or under-reported
   wirelength** (#4937) — `PCB` parsed `(segment ...)` and `(via ...)` copper
   but had no branch for `(arc ...)`, the curved-track element KiCad 7+ writes

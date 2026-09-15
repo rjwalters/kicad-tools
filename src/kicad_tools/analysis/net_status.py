@@ -1191,19 +1191,11 @@ class NetStatusAnalyzer:
                 if poly is not None:
                     pad_polys[pad_id] = poly
 
-        # Copper-circle geometry per via.  Two variants:
-        #  * ``via_geom`` (eroded, ``POUR_PAD_ERODE`` inset) is used for the
-        #    fill-*penetration* test so a via merely grazing the pour edge does
-        #    not spuriously bond -- matching ``ConnectivityValidator``.
-        #  * ``via_raw`` (un-eroded, real copper radius) is used only to bond a
-        #    *same-net* pad to a via that already penetrates the pour.  The
-        #    erosion inset on both the pad box and the via disc otherwise opens
-        #    a sub-``2*POUR_PAD_ERODE`` false gap between a stitching via and an
-        #    adjacent same-net pad whose copper genuinely overlaps it (the
-        #    board-06 U1.32 case, Issue #4229).  Using the raw radius here is
-        #    safe: the group is single-net, so a looser pad<->via bond can only
-        #    unify pads that are already the same net -- it can never manufacture
-        #    a cross-net short (that is what the eroded penetration test guards).
+        # Fill contact uses the physical annulus, matching ConnectivityValidator.
+        # Eroding the outer radius loses real narrow contacts; a solid disc
+        # would instead invent contact through the drill hole (Issue #5382).
+        # Keep the existing eroded geometry for via/trace contact guards and
+        # the raw disc for the existing same-net pad/via overlap policy.
         from shapely.geometry import Point as _ShapelyPoint  # type: ignore[import-untyped]
 
         via_geoms = []
@@ -1211,7 +1203,8 @@ class NetStatusAnalyzer:
             radius = max(getattr(via, "size", 0.0) or 0.0, 0.0) / 2.0
             eroded = cv._via_copper_geom(via.position, radius)
             raw = _ShapelyPoint(*via.position).buffer(radius) if radius > 0 else None
-            via_geoms.append((via, eroded, raw))
+            annulus = cv._physical_via_annulus(via)
+            via_geoms.append((via, eroded, raw, annulus))
 
         # Unify segment components that share a via into "extended chains"
         # (Issue #4229).  ``_build_segment_components`` chains segments only
@@ -1315,14 +1308,14 @@ class NetStatusAnalyzer:
             #    merge those fragments too.  This is what keeps a clean,
             #    fully-stitched board reading connected once the blanket
             #    same-zone union above is removed.
-            for via, via_geom, _via_raw in via_geoms:
+            for via, _via_geom, _via_raw, annulus in via_geoms:
                 touched: list[int] = []
                 for i in range(n_fragments):
                     region_i = regions[i]
                     if (
                         region_i is not None
                         and self._via_spans_layer(via.layers, fill_layers[i])
-                        and region_i.intersects(via_geom)
+                        and region_i.intersects(annulus)
                     ):
                         touched.append(i)
                 for other in touched[1:]:
@@ -1334,8 +1327,8 @@ class NetStatusAnalyzer:
             #    real connection between islands on the opposite layer.
             for chain in chain_seg_indices:
                 chain_vias = [
-                    (via, via_geom)
-                    for via, via_geom, _via_raw in via_geoms
+                    (via, annulus)
+                    for via, via_geom, _via_raw, annulus in via_geoms
                     if any(
                         self._via_spans_layer(via.layers, segments[s].layer)
                         and self._segment_touches_via(segments[s], via, via_geom)
@@ -1353,8 +1346,8 @@ class NetStatusAnalyzer:
                         for s in chain
                     ) or any(
                         self._via_spans_layer(via.layers, fill_layers[i])
-                        and region_i.intersects(via_geom)
-                        for via, via_geom in chain_vias
+                        and region_i.intersects(annulus)
+                        for via, annulus in chain_vias
                     ):
                         touched.append(i)
                 for other in touched[1:]:
@@ -1384,10 +1377,10 @@ class NetStatusAnalyzer:
                 # the pads reached through it (directly, through a same-net pad
                 # whose copper overlaps the via, or via a segment chain ending
                 # at the via) into the same island.
-                for via, via_geom, via_raw in via_geoms:
+                for via, via_geom, via_raw, annulus in via_geoms:
                     if not self._via_spans_layer(via.layers, fill_layer):
                         continue
-                    if not region.intersects(via_geom):
+                    if not region.intersects(annulus):
                         continue
                     bonded.update(self._find_pads_at_point(via.position, pad_positions))
                     # Same-net pad whose real copper overlaps this pour-bonded

@@ -368,6 +368,72 @@ CASES: list[Case] = [
 ]
 
 
+# Native 10.0.5: a 2.2 mm via at (19, 25) bridges the two fills across
+# their 2 mm gap. The former radius erosion lost this real contact.
+VIA_ANNULUS_CASES = [
+    Case(
+        f"via_annulus_v{version}_{encoding}",
+        _fill(_rect(10, 18)) + _fill(_rect(20, 30)),
+        0,
+        p1=(14, 25),
+        p2=(26, 25),
+        version=version,
+        stroke_encoded=encoding == "absent",
+        explicit_yes=encoding == "yes",
+        extra=(
+            '(via (at 19 25) (size 2.2) (drill 0.4) (layers "F.Cu" "B.Cu") '
+            '(net 1) (uuid "40000000-0000-0000-0000-000000000002"))'
+        ),
+    )
+    for version in (20240108, 20250209, 20250210, 20260206)
+    for encoding in ("absent", "yes", "no")
+]
+CASES.extend(VIA_ANNULUS_CASES)
+
+
+@pytest.mark.parametrize("control", ["no_via", "far_via", "wrong_layer"])
+def test_via_fill_contact_controls(tmp_path: Path, control: str) -> None:
+    """Native 10.0.5 leaves R13/R14 separate for all three controls."""
+    text = VIA_ANNULUS_CASES[-1].board()
+    if control == "no_via":
+        text = text.replace(VIA_ANNULUS_CASES[-1].extra, "")
+    elif control == "far_via":
+        text = text.replace("(via (at 19 25)", "(via (at 19 35)")
+    else:
+        text = (
+            text.replace(
+                '(0 "F.Cu" signal) (31 "B.Cu" signal)',
+                '(0 "F.Cu" signal) (1 "In1.Cu" power) (2 "In2.Cu" power) (31 "B.Cu" signal)',
+            )
+            .replace("(via (at 19 25)", "(via blind (at 19 25)")
+            .replace('(layers "F.Cu" "B.Cu")', '(layers "In1.Cu" "B.Cu")')
+        )
+    path = tmp_path / f"{control}.kicad_pcb"
+    path.write_text(text)
+    status = NetStatusAnalyzer(path, strict=True).analyze().get_net("GND")
+    assert status is not None
+    assert status.island_count == 2
+    partition = ConnectivityValidator(path).extract_pad_partition()
+    assert next(c for c in partition if "R13.1" in c) == {"R13.1"}
+
+
+def test_via_fill_annulus_excludes_drill(tmp_path: Path) -> None:
+    """Physical fill-contact geometry excludes the drill, without a new tolerance.
+
+    This is a geometry guard, not a native-parity claim for an invalid board
+    that places a pad or poured copper entirely inside the drilled hole.
+    """
+    from shapely.geometry import Point
+
+    path = tmp_path / "via.kicad_pcb"
+    path.write_text(VIA_ANNULUS_CASES[-1].board())
+    validator = ConnectivityValidator(path)
+    via = validator.pcb.vias[0]
+    annulus = validator._physical_via_annulus(via)
+    assert not annulus.intersects(Point(via.position).buffer(via.drill / 4))
+    assert annulus.intersects(Point(via.position[0] - 1, via.position[1]).buffer(0.05))
+
+
 @pytest.fixture(params=CASES, ids=lambda case: case.name)
 def case(request: pytest.FixtureRequest, tmp_path: Path) -> tuple[Case, Path]:
     board_case: Case = request.param
