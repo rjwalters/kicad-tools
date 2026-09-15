@@ -44,26 +44,60 @@ Difference from ``kicad_tools.drc``:
     - ``kicad_tools.validate``: Performs DRC checks in pure Python (no kicad-cli)
 """
 
-from .checker import DRCChecker
-from .connectivity import ConnectivityIssue, ConnectivityResult, ConnectivityValidator
-from .consistency import (
-    ConsistencyIssue,
-    ConsistencyResult,
-    LVSMatch,
-    LVSResult,
-    SchematicPCBChecker,
-)
-from .models import (
-    BaseViolation,
-    DRCResult,
-    Location,
-    Severity,
-    ValidationResult,
-    ViolationCategory,
-)
-from .netlist import NetlistValidator, SyncIssue, SyncResult
-from .placement import BOMPlacementVerifier, PlacementResult, PlacementStatus
-from .violations import DRCResults, DRCViolation
+from __future__ import annotations
+
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .checker import DRCChecker
+    from .connectivity import ConnectivityIssue, ConnectivityResult, ConnectivityValidator
+    from .consistency import (
+        ConsistencyIssue,
+        ConsistencyResult,
+        LVSMatch,
+        LVSResult,
+        SchematicPCBChecker,
+    )
+    from .models import (
+        BaseViolation,
+        DRCResult,
+        Location,
+        Severity,
+        ValidationResult,
+        ViolationCategory,
+    )
+    from .netlist import NetlistValidator, SyncIssue, SyncResult
+    from .placement import BOMPlacementVerifier, PlacementResult, PlacementStatus
+    from .violations import DRCResults, DRCViolation
+
+# Resolve only the requested public export. DRCChecker still imports and runs
+# its full set of rules when a caller requests a real DRC pass.
+_EXPORT_MODULES: dict[str, str] = {
+    "DRCChecker": ".checker",
+    "ConnectivityIssue": ".connectivity",
+    "ConnectivityResult": ".connectivity",
+    "ConnectivityValidator": ".connectivity",
+    "ConsistencyIssue": ".consistency",
+    "ConsistencyResult": ".consistency",
+    "LVSMatch": ".consistency",
+    "LVSResult": ".consistency",
+    "SchematicPCBChecker": ".consistency",
+    "BaseViolation": ".models",
+    "DRCResult": ".models",
+    "Location": ".models",
+    "Severity": ".models",
+    "ValidationResult": ".models",
+    "ViolationCategory": ".models",
+    "NetlistValidator": ".netlist",
+    "SyncIssue": ".netlist",
+    "SyncResult": ".netlist",
+    "BOMPlacementVerifier": ".placement",
+    "PlacementResult": ".placement",
+    "PlacementStatus": ".placement",
+    "DRCResults": ".violations",
+    "DRCViolation": ".violations",
+}
 
 __all__ = [
     # New unified models (Pydantic-based)
@@ -97,3 +131,18 @@ __all__ = [
     "PlacementStatus",
     "PlacementResult",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Load a public export on first access, preserving its original identity."""
+    try:
+        module_name = _EXPORT_MODULES[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+    value = getattr(import_module(module_name, __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
