@@ -131,6 +131,10 @@ def prepare(args, source: Path) -> None:
     args._placement_report_before = (
         report.stat() if report is not None and report.exists() else None
     )
+    failed = Path(args.export_failed_nets) if getattr(args, "export_failed_nets", None) else None
+    args._placement_failed_before = (
+        failed.stat() if failed is not None and failed.exists() else None
+    )
     if disposition.invalid_nets and not args.quiet:
         print("Placement-invalid, not attempted: " + ", ".join(sorted(disposition.invalid_nets)))
 
@@ -171,11 +175,50 @@ def select_result(args, router) -> None:
         publish_disposition(disposition)
 
 
+def _finish_failed_export(args, disposition: RoutingPlacementDisposition) -> None:
+    """Add blocked requests even when no router was needed or eligible nets completed."""
+    target = getattr(args, "export_failed_nets", None)
+    if not target:
+        return
+    from kicad_tools.core.atomic_write import atomic_write_text
+
+    path = Path(target)
+    fresh = path.exists() and path.stat() != args._placement_failed_before
+    if path.suffix.lower() == ".json":
+        entries = json.loads(path.read_text()) if fresh else []
+        # The legacy exporter may have considered excluded IDs unrouted.
+        # Placement is authoritative for those nets, including unrequested ones.
+        entries = [entry for entry in entries if entry["net"] not in disposition.invalid_nets]
+        entries.extend(
+            {
+                "net": name,
+                "status": "placement-invalid, not attempted",
+                "attempted": False,
+                "pads": [
+                    f"{ref}.{pad}"
+                    for ref, pad, _authored, effective in disposition.pad_net_identities
+                    if effective == name
+                ],
+            }
+            for name in sorted(disposition.requested_invalid_nets)
+        )
+        content = json.dumps(entries, indent=2) + "\n"
+    else:
+        names = path.read_text().splitlines() if fresh else []
+        names = [name for name in names if name not in disposition.invalid_nets]
+        if disposition.requested_invalid_nets:
+            names.append("# placement-invalid, not attempted")
+            names.extend(sorted(disposition.requested_invalid_nets))
+        content = "\n".join(names) + ("\n" if names else "")
+    atomic_write_text(path, content)
+
+
 def finish(args, exit_code: int) -> int:
     """Report physically observed completion without counting blocked nets as attempts."""
     disposition = getattr(args, "_placement_disposition", None)
     if disposition is None or not disposition.invalid_nets:
         return exit_code
+    _finish_failed_export(args, disposition)
     completed: frozenset[str] = frozenset()
     output = args._placement_output
     fresh = output.exists() and output.stat() != args._placement_output_before

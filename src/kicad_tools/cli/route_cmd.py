@@ -2220,8 +2220,12 @@ def _export_failed_nets(
       are included so callers get a machine-readable handle on exactly which
       pads remain — the actionable output for finishing a near-complete route.
     - any other extension — the legacy plain-text format: one net name per
-      line (unrouted nets first, then partial nets), preserved for
-      back-compatibility.
+      line (unrouted nets first, then partial nets).
+
+    CLI finalization adds requested placement-blocked nets even when no router
+    ran. JSON uses status ``"placement-invalid, not attempted"`` and
+    ``attempted: false``; text introduces those names with a ``#`` status
+    comment. Intentionally unrequested placement-invalid nets are omitted.
 
     The file is always written when this function is called (routing is
     incomplete), even when there is nothing to report — a well-formed empty

@@ -46,6 +46,7 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
     original = board.read_bytes()
     output = tmp_path / "routed.kicad_pcb"
     report = tmp_path / "complete.json"
+    failed = tmp_path / "failed.json"
     sidecar = tmp_path / "classes.json"
     sidecar.write_text(
         json.dumps(
@@ -61,7 +62,16 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
         "complete_partial": ["--complete"],
         "complete_excluded_noop": ["--complete", "--complete-exclude-nets", "BAD,PLANE"],
     }[selection]
-    argv = [str(board), "-o", str(output), "--complete-report", str(report), *options]
+    argv = [
+        str(board),
+        "-o",
+        str(output),
+        "--complete-report",
+        str(report),
+        "--export-failed-nets",
+        str(failed),
+        *options,
+    ]
     if finite:
         argv += ["--timeout", "30"]
     code = (
@@ -122,3 +132,38 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
     if selection == "coupled":
         assert disposition["coupled_invalid_nets"] == ["PARTNER"]
         assert not any(s.net_name == "PARTNER" for s in parsed.segments)
+
+    if disposition["requested_blocked_nets"]:
+        entries = json.loads(failed.read_text())
+        blocked = [
+            entry for entry in entries if entry["status"] == "placement-invalid, not attempted"
+        ]
+        assert sorted(entry["net"] for entry in blocked) == disposition["requested_blocked_nets"]
+        assert all(entry["attempted"] is False for entry in blocked)
+        assert all(entry["status"] != "unrouted" for entry in entries if entry["net"] == "BAD")
+
+
+@pytest.mark.parametrize("suffix", [".json", ".txt"])
+def test_all_invalid_export_replaces_stale_attempt(tmp_path, suffix):
+    from kicad_tools.cli.route_cmd import main
+
+    source = tmp_path / "mixed.kicad_pcb"
+    source.write_text(board_text())
+    target = tmp_path / ("failed" + suffix)
+    target.write_text(
+        '[{"net": "STALE", "status": "unrouted"}]' if suffix == ".json" else "STALE\n"
+    )
+    assert main([str(source), "--nets", "BAD", "--export-failed-nets", str(target)]) == 2
+    assert "STALE" not in target.read_text()
+    if suffix == ".json":
+        entries = json.loads(target.read_text())
+        assert entries == [
+            {
+                "net": "BAD",
+                "status": "placement-invalid, not attempted",
+                "attempted": False,
+                "pads": ["X1.1", "X2.1", "X3.1"],
+            }
+        ]
+    else:
+        assert target.read_text() == "# placement-invalid, not attempted\nBAD\n"
